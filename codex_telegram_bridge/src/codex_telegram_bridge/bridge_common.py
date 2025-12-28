@@ -26,16 +26,8 @@ def _now_unix() -> int:
 def _load_toml(path: Path) -> Dict[str, Any]:
     if not path.exists():
         return {}
-    try:
-        import tomllib  # type: ignore[attr-defined]
-    except ModuleNotFoundError:
-        try:
-            import tomli as tomllib  # type: ignore[import-not-found]
-        except ModuleNotFoundError as e:
-            raise RuntimeError(
-                f"TOML config found at {path} but tomllib/tomli is unavailable. "
-                "Use Python 3.11+ or install tomli."
-            ) from e
+    import tomllib
+
     return tomllib.loads(path.read_text(encoding="utf-8"))
 
 

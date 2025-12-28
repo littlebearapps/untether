@@ -21,8 +21,7 @@ bot_token = "123:abc"
 chat_id = 123456789
 ```
 
-For Python < 3.11, install `tomli` to read TOML. `chat_id` is used both for allowed messages
-and startup notifications.
+`chat_id` is used both for allowed messages and startup notifications.
 
 Optional keys (by mode):
 
