@@ -121,6 +121,42 @@ def _truncate_output(text: str, max_lines: int = 20, max_chars: int = 4000) -> s
     return "\n".join(lines)
 
 
+def _format_item_action_line(etype: str, item_id: Optional[int], item: dict[str, Any]) -> str | None:
+    itype = item["type"]
+    if itype == "command_execution":
+        command = _format_command(item["command"])
+        if etype == "item.started":
+            return _with_id(item_id, f"{STATUS_RUNNING} running: {command}")
+        if etype == "item.completed":
+            exit_code = item["exit_code"]
+            exit_part = f" (exit {exit_code})" if exit_code is not None else ""
+            return _with_id(item_id, f"{STATUS_DONE} ran: {command}{exit_part}")
+        return None
+
+    if itype == "mcp_tool_call":
+        name = _format_tool_call(item["server"], item["tool"])
+        if etype == "item.started":
+            return _with_id(item_id, f"{STATUS_RUNNING} tool: {name}")
+        if etype == "item.completed":
+            return _with_id(item_id, f"{STATUS_DONE} tool: {name}")
+        return None
+
+    return None
+
+
+def _format_item_completed_line(item_id: Optional[int], item: dict[str, Any]) -> str | None:
+    itype = item["type"]
+    if itype == "web_search":
+        query = _format_query(item["query"])
+        return _with_id(item_id, f"{STATUS_DONE} searched: {query}")
+    if itype == "file_change":
+        return _with_id(item_id, f"{STATUS_DONE} {_format_file_change(item['changes'])}")
+    if itype == "error":
+        warning = _truncate(item["message"], 120)
+        return _with_id(item_id, f"{STATUS_DONE} warning: {warning}")
+    return None
+
+
 @dataclass
 class ExecRenderState:
     recent_actions: deque[str] = field(default_factory=lambda: deque(maxlen=5))
@@ -204,37 +240,18 @@ def render_event_cli(
             lines.append("assistant:")
             lines.extend(indent(item["text"], "  ").splitlines())
 
-        elif itype == "command_execution":
-            command = _format_command(item["command"])
-            if etype == "item.started":
-                lines.append(_with_id(item_num, f"{STATUS_RUNNING} running: {command}"))
-            elif etype == "item.completed":
-                exit_code = item["exit_code"]
-                exit_part = f" (exit {exit_code})" if exit_code is not None else ""
-                lines.append(_with_id(item_num, f"{STATUS_DONE} ran: {command}{exit_part}"))
-                if show_output:
+        else:
+            action_line = _format_item_action_line(etype, item_num, item)
+            if action_line is not None:
+                lines.append(action_line)
+                if show_output and itype == "command_execution" and etype == "item.completed":
                     output = _truncate_output(item["aggregated_output"])
                     if output:
                         lines.extend(indent(output, "  ").splitlines())
-
-        elif itype == "file_change" and etype == "item.completed":
-            line = _format_file_change(item["changes"])
-            lines.append(_with_id(item_num, f"{STATUS_DONE} {line}"))
-
-        elif itype == "mcp_tool_call":
-            name = _format_tool_call(item["server"], item["tool"])
-            if etype == "item.started":
-                lines.append(_with_id(item_num, f"{STATUS_RUNNING} tool: {name}"))
             elif etype == "item.completed":
-                lines.append(_with_id(item_num, f"{STATUS_DONE} tool: {name}"))
-
-        elif itype == "web_search" and etype == "item.completed":
-            query = _format_query(item["query"])
-            lines.append(_with_id(item_num, f"{STATUS_DONE} searched: {query}"))
-
-        elif itype == "error" and etype == "item.completed":
-            warning = _truncate(item["message"], 120)
-            lines.append(_with_id(item_num, f"{STATUS_DONE} warning: {warning}"))
+                completed_line = _format_item_completed_line(item_num, item)
+                if completed_line is not None:
+                    lines.append(completed_line)
 
     return lines
 
@@ -269,41 +286,18 @@ class ExecProgressRenderer:
                         self.state.pending_reasoning = reasoning_line
                 return changed
 
-            if itype == "command_execution":
-                command = _format_command(item["command"])
+            action_line = _format_item_action_line(etype, item_id, item)
+            if action_line is not None:
                 if etype == "item.started":
-                    line = _with_id(item_id, f"{STATUS_RUNNING} running: {command}")
-                    changed = _set_current_action(self.state, item_id, line) or changed
-                elif etype == "item.completed":
-                    exit_code = item["exit_code"]
-                    exit_part = f" (exit {exit_code})" if exit_code is not None else ""
-                    line = _with_id(item_id, f"{STATUS_DONE} ran: {command}{exit_part}")
-                    changed = _complete_action(self.state, item_id, line) or changed
+                    return _set_current_action(self.state, item_id, action_line) or changed
+                if etype == "item.completed":
+                    return _complete_action(self.state, item_id, action_line) or changed
                 return changed
 
-            if itype == "mcp_tool_call":
-                name = _format_tool_call(item["server"], item["tool"])
-                if etype == "item.started":
-                    line = _with_id(item_id, f"{STATUS_RUNNING} tool: {name}")
-                    changed = _set_current_action(self.state, item_id, line) or changed
-                elif etype == "item.completed":
-                    line = _with_id(item_id, f"{STATUS_DONE} tool: {name}")
-                    changed = _complete_action(self.state, item_id, line) or changed
-                return changed
-
-            if itype == "web_search" and etype == "item.completed":
-                query = _format_query(item["query"])
-                line = _with_id(item_id, f"{STATUS_DONE} searched: {query}")
-                return _complete_action(self.state, item_id, line) or changed
-
-            if itype == "file_change" and etype == "item.completed":
-                line = _with_id(item_id, f"{STATUS_DONE} {_format_file_change(item['changes'])}")
-                return _complete_action(self.state, item_id, line) or changed
-
-            if itype == "error" and etype == "item.completed":
-                warning = _truncate(item["message"], 120)
-                line = _with_id(item_id, f"{STATUS_DONE} warning: {warning}")
-                return _complete_action(self.state, item_id, line) or changed
+            if etype == "item.completed":
+                completed_line = _format_item_completed_line(item_id, item)
+                if completed_line is not None:
+                    return _complete_action(self.state, item_id, completed_line) or changed
 
         return changed
 
