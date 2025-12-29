@@ -55,34 +55,17 @@ Transforms Codex JSONL events into human-readable text:
 | `render_event_cli()` | Simplified wrapper for console logging |
 | `ExecProgressRenderer` | Stateful renderer tracking recent actions for progress display |
 | `format_elapsed()` | Formats seconds as `Xh Ym`, `Xm Ys`, or `Xs` |
+| `render_markdown()` | Markdown → Telegram text + entities (markdown-it-py + sulguk) |
 
 **Supported event types:**
 - `thread.started`, `turn.started/completed/failed`
 - `item.started/completed` for: `agent_message`, `reasoning`, `command_execution`, `mcp_tool_call`, `web_search`, `file_change`, `error`
-
-### `rendering.py` — Markdown to Telegram
-
-Converts Markdown to Telegram-compatible text with entities:
-
-```python
-def render_markdown(md: str) -> tuple[str, list[dict[str, Any]]]:
-    # Uses markdown-it-py + sulguk for entity extraction
-    # Fixes: replaces bullets, removes invalid language fields
-```
 
 ### `config.py` — Configuration Loading
 
 ```python
 def load_telegram_config(path=None) -> tuple[dict, Path]:
     # Loads ./.codex/takopi.toml, then ~/.codex/takopi.toml
-```
-
-### `constants.py` — Shared Constants
-
-```python
-TELEGRAM_HARD_LIMIT = 4096  # Max message length
-LOCAL_CONFIG_NAME = .codex/takopi.toml
-HOME_CONFIG_PATH = ~/.codex/takopi.toml
 ```
 
 ### `logging.py` — Secure Logging Setup

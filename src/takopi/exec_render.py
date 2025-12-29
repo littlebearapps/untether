@@ -6,6 +6,9 @@ from collections import deque
 from textwrap import indent
 from typing import Any
 
+from markdown_it import MarkdownIt
+from sulguk import transform_html
+
 STATUS_RUNNING = "▸"
 STATUS_DONE = "✓"
 STATUS_FAIL = "✗"
@@ -15,6 +18,24 @@ HARD_BREAK = "  \n"
 MAX_PROGRESS_CMD_LEN = 300
 MAX_QUERY_LEN = 60
 MAX_PATH_LEN = 40
+
+_md = MarkdownIt("commonmark", {"html": False})
+
+
+def render_markdown(md: str) -> tuple[str, list[dict[str, Any]]]:
+    html = _md.render(md or "")
+    rendered = transform_html(html)
+
+    text = re.sub(r"(?m)^(\s*)•", r"\1-", rendered.text)
+
+    # FIX: Telegram requires MessageEntity.language (if present) to be a String.
+    entities: list[dict[str, Any]] = []
+    for e in rendered.entities:
+        d = dict(e)
+        if "language" in d and not isinstance(d["language"], str):
+            d.pop("language", None)
+        entities.append(d)
+    return text, entities
 
 
 def format_elapsed(elapsed_s: float) -> str:

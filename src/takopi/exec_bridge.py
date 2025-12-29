@@ -17,10 +17,10 @@ from weakref import WeakValueDictionary
 
 import typer
 
+from . import __version__
 from .config import ConfigError, load_telegram_config
-from .exec_render import ExecProgressRenderer, render_event_cli
+from .exec_render import ExecProgressRenderer, render_event_cli, render_markdown
 from .logging import setup_logging
-from .rendering import render_markdown
 from .onboarding import check_setup, render_setup_guide
 from .telegram_client import TelegramClient
 
@@ -31,6 +31,16 @@ RESUME_LINE = re.compile(
     rf"^\s*resume\s*:\s*`?(?P<id>{UUID_PATTERN_TEXT})`?\s*$",
     re.IGNORECASE | re.MULTILINE,
 )
+
+
+def _print_version_and_exit() -> None:
+    typer.echo(__version__)
+    raise typer.Exit()
+
+
+def _version_callback(value: bool) -> None:
+    if value:
+        _print_version_and_exit()
 
 
 def extract_session_id(text: str | None) -> str | None:
@@ -663,6 +673,13 @@ async def _run_main_loop(cfg: BridgeConfig) -> None:
 
 
 def run(
+    version: bool = typer.Option(
+        False,
+        "--version",
+        help="Show the version and exit.",
+        callback=_version_callback,
+        is_eager=True,
+    ),
     final_notify: bool = typer.Option(
         True,
         "--final-notify/--no-final-notify",

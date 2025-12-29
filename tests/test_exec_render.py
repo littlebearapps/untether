@@ -1,8 +1,7 @@
 import json
 from pathlib import Path
 
-from takopi.exec_render import ExecProgressRenderer, render_event_cli
-from takopi.rendering import render_markdown
+from takopi.exec_render import ExecProgressRenderer, render_event_cli, render_markdown
 
 
 def _loads(lines: str) -> list[dict]:

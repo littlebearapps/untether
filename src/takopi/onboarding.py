@@ -9,8 +9,7 @@ from pathlib import Path
 from rich.console import Console
 from rich.panel import Panel
 
-from .config import ConfigError, load_telegram_config
-from .constants import HOME_CONFIG_PATH
+from .config import ConfigError, HOME_CONFIG_PATH, load_telegram_config
 
 _OCTOPUS = "\N{OCTOPUS}"
 
@@ -100,7 +99,7 @@ def render_setup_guide(result: SetupResult) -> None:
             "[bold]Getting your Telegram credentials:[/]",
             "",
             "   [cyan]bot_token[/]  create a bot with [link=https://t.me/BotFather]@BotFather[/]",
-            "   [cyan]chat_id[/]    get from [link=https://t.me/myidbot]@myidbot[/]",
+            "   [cyan]chat_id[/]    message [link=https://t.me/myidbot]@myidbot[/] to get your id",
         )
 
     panel = Panel(
