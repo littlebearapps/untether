@@ -3,8 +3,9 @@
 Route Telegram replies back into Codex sessions using non-interactive
 `codex exec` + `codex exec resume`.
 
-The bridge stores a mapping from `(chat_id, bot_message_id)` to a route so
-replies can be routed correctly.
+The bridge does not persist routes. It resumes only when the incoming
+message (or the replied-to bot message) contains an explicit `resume: <uuid>`
+line.
 
 ## Install
 

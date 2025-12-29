@@ -201,7 +201,7 @@ class CodexExecRunner:
         found_session: str | None = session_id
         last_agent_text: str | None = None
         saw_agent_message = False
-        cli_last_turn: int | None = None
+        cli_last_item: int | None = None
 
         cancelled = False
         rc: int | None = None
@@ -223,7 +223,7 @@ class CodexExecRunner:
                     logger.debug("[codex][jsonl] invalid line: %r", line)
                     continue
 
-                cli_last_turn, out_lines = render_event_cli(evt, cli_last_turn)
+                cli_last_item, out_lines = render_event_cli(evt, cli_last_item)
                 for out in out_lines:
                     logger.info("[codex] %s", out)
 

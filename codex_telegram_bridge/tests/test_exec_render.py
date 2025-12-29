@@ -62,7 +62,7 @@ def test_render_event_cli_real_run_fixture() -> None:
 
 
 def test_progress_renderer_renders_progress_and_final() -> None:
-    r = ExecProgressRenderer(max_actions=5, max_chars=10_000)
+    r = ExecProgressRenderer(max_actions=5)
     for evt in _loads(SAMPLE_STREAM):
         r.note_event(evt)
 

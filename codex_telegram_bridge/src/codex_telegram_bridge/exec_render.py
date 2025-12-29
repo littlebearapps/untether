@@ -15,7 +15,6 @@ HARD_BREAK = "  \n"
 MAX_PROGRESS_CMD_LEN = 300
 MAX_QUERY_LEN = 60
 MAX_PATH_LEN = 40
-MAX_PROGRESS_CHARS = 300
 
 
 def format_elapsed(elapsed_s: float) -> str:
@@ -169,11 +168,9 @@ class ExecProgressRenderer:
     def __init__(
         self,
         max_actions: int = 5,
-        max_chars: int = MAX_PROGRESS_CHARS,
         command_width: int | None = MAX_PROGRESS_CMD_LEN,
     ) -> None:
         self.max_actions = max_actions
-        self.max_chars = max_chars
         self.command_width = command_width
         self.recent_actions: deque[str] = deque(maxlen=max_actions)
         self.last_item: int | None = None
