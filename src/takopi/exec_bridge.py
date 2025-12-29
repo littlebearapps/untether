@@ -131,7 +131,7 @@ def prepare_telegram(
     if len(rendered) > limit:
         rendered = truncate_for_telegram(rendered, limit)
         return rendered, None
-    return rendered, entities or None
+    return rendered, entities
 
 
 async def _send_or_edit_markdown(
