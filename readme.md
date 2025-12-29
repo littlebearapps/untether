@@ -32,7 +32,7 @@ uv run takopi --help
 
 ### Configuration
 
-Create `~/.codex/telegram.toml`:
+Create `~/.codex/takopi.toml` (or `./codex/takopi.toml` for a repo-local config):
 
 ```toml
 bot_token = "123456789:ABCdefGHIjklMNOpqrsTUVwxyz"

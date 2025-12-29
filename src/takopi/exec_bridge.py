@@ -18,7 +18,7 @@ from weakref import WeakValueDictionary
 
 import typer
 
-from .config import load_telegram_config
+from .config import ConfigError, load_telegram_config
 from .exec_render import ExecProgressRenderer, render_event_cli
 from .logging import setup_logging
 from .rendering import render_markdown
@@ -358,20 +358,35 @@ def _parse_bridge_config(
     cd: str | None,
     model: str | None,
 ) -> BridgeConfig:
-    config = load_telegram_config()
-    token = config["bot_token"]
-    chat_id = int(config["chat_id"])
+    config, config_path = load_telegram_config()
+    try:
+        token = config["bot_token"]
+    except KeyError:
+        raise ConfigError(f"Missing key `bot_token` in {config_path}.") from None
+    try:
+        chat_id = int(config["chat_id"])
+    except KeyError:
+        raise ConfigError(f"Missing key `chat_id` in {config_path}.") from None
+    except (TypeError, ValueError):
+        raise ConfigError(
+            f"Invalid `chat_id` in {config_path}; expected an integer."
+        ) from None
 
     codex_cmd = shutil.which("codex")
     if not codex_cmd:
-        raise RuntimeError("codex not found on PATH")
+        raise ConfigError(
+            "codex not found on PATH. Install the Codex CLI with:\n"
+            "  npm install -g @openai/codex\n"
+            "  # or on macOS\n"
+            "  brew install codex"
+        )
 
     startup_pwd = os.getcwd()
     workspace = None
     if cd is not None:
         expanded_cd = os.path.expanduser(cd)
         if not os.path.isdir(expanded_cd):
-            raise RuntimeError(f"--cd must be an existing directory: {expanded_cd}")
+            raise ConfigError(f"--cd must be an existing directory: {expanded_cd}")
         workspace = expanded_cd
         startup_pwd = expanded_cd
 
@@ -425,18 +440,22 @@ async def _send_startup(cfg: BridgeConfig) -> None:
 
 
 async def _drain_backlog(cfg: BridgeConfig, offset: int | None) -> int | None:
-    try:
-        updates = await cfg.bot.get_updates(
-            offset=offset, timeout_s=0, allowed_updates=["message"]
-        )
-    except Exception as e:
-        logger.info("[startup] backlog drain failed: %s", e)
-        return offset
-    logger.debug("[startup] backlog updates: %s", updates)
-    if updates:
+    drained = 0
+    while True:
+        try:
+            updates = await cfg.bot.get_updates(
+                offset=offset, timeout_s=0, allowed_updates=["message"]
+            )
+        except Exception as e:
+            logger.info("[startup] backlog drain failed: %s", e)
+            return offset
+        logger.debug("[startup] backlog updates: %s", updates)
+        if not updates:
+            if drained:
+                logger.info("[startup] drained %s pending update(s)", drained)
+            return offset
         offset = updates[-1]["update_id"] + 1
-        logger.info("[startup] drained %s pending update(s)", len(updates))
-    return offset
+        drained += len(updates)
 
 
 async def _handle_message(
@@ -463,11 +482,15 @@ async def _handle_message(
 
     last_edit_at = 0.0
     edit_task: asyncio.Task[None] | None = None
+    last_rendered: str | None = None
+    pending_rendered: str | None = None
 
-    async def _edit_progress(md: str) -> None:
+    async def _edit_progress(
+        md: str, rendered: str, entities: list[dict[str, Any]] | None
+    ) -> None:
+        nonlocal last_rendered, pending_rendered
         if progress_id is None:
             return
-        rendered, entities = prepare_telegram(md, limit=TELEGRAM_MARKDOWN_LIMIT)
         logger.debug(
             "[progress] edit message_id=%s md=%s rendered=%s entities=%s",
             progress_id,
@@ -482,6 +505,7 @@ async def _handle_message(
                 text=rendered,
                 entities=entities,
             )
+            last_rendered = rendered
         except Exception as e:
             logger.info(
                 "[progress] edit failed chat_id=%s message_id=%s: %s",
@@ -489,6 +513,9 @@ async def _handle_message(
                 progress_id,
                 e,
             )
+        finally:
+            if pending_rendered == rendered:
+                pending_rendered = None
 
     try:
         initial_md = progress_renderer.render_progress(0.0)
@@ -511,6 +538,7 @@ async def _handle_message(
         )
         progress_id = int(progress_msg["message_id"])
         last_edit_at = clock()
+        last_rendered = initial_rendered
         logger.debug("[progress] sent chat_id=%s message_id=%s", chat_id, progress_id)
     except Exception as e:
         logger.info(
@@ -518,7 +546,7 @@ async def _handle_message(
         )
 
     async def on_event(evt: dict[str, Any]) -> None:
-        nonlocal last_edit_at, edit_task
+        nonlocal last_edit_at, edit_task, pending_rendered
         if progress_id is None:
             return
         if not progress_renderer.note_event(evt):
@@ -528,11 +556,14 @@ async def _handle_message(
             return
         if edit_task is not None and not edit_task.done():
             return
-        last_edit_at = now
         elapsed = now - started_at
-        edit_task = asyncio.create_task(
-            _edit_progress(progress_renderer.render_progress(elapsed))
-        )
+        md = progress_renderer.render_progress(elapsed)
+        rendered, entities = prepare_telegram(md, limit=TELEGRAM_MARKDOWN_LIMIT)
+        if rendered == last_rendered or rendered == pending_rendered:
+            return
+        last_edit_at = now
+        pending_rendered = rendered
+        edit_task = asyncio.create_task(_edit_progress(md, rendered, entities))
 
     try:
         session_id, answer, saw_agent_message = await cfg.runner.run_serialized(
@@ -692,11 +723,15 @@ def run(
     ),
 ) -> None:
     setup_logging(debug=debug)
-    cfg = _parse_bridge_config(
-        final_notify=final_notify,
-        cd=cd,
-        model=model,
-    )
+    try:
+        cfg = _parse_bridge_config(
+            final_notify=final_notify,
+            cd=cd,
+            model=model,
+        )
+    except ConfigError as e:
+        typer.echo(str(e), err=True)
+        raise typer.Exit(code=1)
     asyncio.run(_run_main_loop(cfg))
 
 

@@ -3,6 +3,7 @@ name = "takopi"
 version = "0.1.0"
 description = "Telegram bridge tools for Codex."
 readme = "readme.md"
+license = { file = "LICENSE" }
 requires-python = ">=3.12"
 dependencies = [
   "httpx>=0.28.1",
@@ -10,10 +11,22 @@ dependencies = [
   "sulguk>=0.11.0",
   "typer",
 ]
+classifiers = [
+  "License :: OSI Approved :: MIT License",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Programming Language :: Python :: 3 :: Only",
+  "Operating System :: OS Independent",
+]
+
+[project.urls]
+Homepage = "https://github.com/banteg/takopi"
+Repository = "https://github.com/banteg/takopi"
+Issues = "https://github.com/banteg/takopi/issues"
 
 [project.scripts]
 takopi = "takopi.exec_bridge:main"
-exec-bridge = "takopi.exec_bridge:main"
 
 [build-system]
 requires = ["hatchling"]
@@ -23,7 +36,7 @@ build-backend = "hatchling.build"
 packages = ["src/takopi"]
 
 [tool.hatch.build.targets.sdist]
-include = ["src/takopi", "readme.md"]
+include = ["src/takopi", "readme.md", "LICENSE"]
 
 [dependency-groups]
 dev = [
