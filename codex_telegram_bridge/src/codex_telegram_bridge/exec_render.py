@@ -29,7 +29,7 @@ def format_elapsed(elapsed_s: float) -> str:
     return f"{seconds}s"
 
 
-def format_header(elapsed_s: float, turn: int | None, item: int | None, label: str) -> str:
+def format_header(elapsed_s: float, item: int | None, label: str) -> str:
     elapsed = format_elapsed(elapsed_s)
     parts = [label, elapsed]
     if item is not None:
@@ -176,14 +176,10 @@ class ExecProgressRenderer:
         self.max_chars = max_chars
         self.command_width = command_width
         self.recent_actions: deque[str] = deque(maxlen=max_actions)
-        self.turn_count: int | None = None
         self.last_item: int | None = None
 
     def note_event(self, event: dict[str, Any]) -> bool:
         if event["type"] == "thread.started":
-            return True
-        if event["type"] == "turn.started":
-            self.turn_count = 1 if self.turn_count is None else self.turn_count + 1
             return True
 
         self.last_item, _, progress_line, progress_prefix = format_event(
@@ -202,11 +198,11 @@ class ExecProgressRenderer:
         return True
 
     def render_progress(self, elapsed_s: float) -> str:
-        header = format_header(elapsed_s, self.turn_count, self.last_item, label="working")
+        header = format_header(elapsed_s, self.last_item, label="working")
         return self._assemble(header, list(self.recent_actions))
 
     def render_final(self, elapsed_s: float, answer: str, status: str = "done") -> str:
-        header = format_header(elapsed_s, self.turn_count, self.last_item, label=status)
+        header = format_header(elapsed_s, self.last_item, label=status)
         answer = (answer or "").strip()
         return header + ("\n\n" + answer if answer else "")
 
