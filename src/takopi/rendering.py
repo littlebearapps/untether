@@ -10,7 +10,7 @@ _md = MarkdownIt("commonmark", {"html": False})
 
 
 def render_markdown(md: str) -> tuple[str, list[dict[str, Any]]]:
-    html = _md.render(md or "")
+    html = _md.render(md)
     rendered = transform_html(html)
 
     text = re.sub(r"(?m)^(\s*)•", r"\1-", rendered.text)
@@ -23,4 +23,3 @@ def render_markdown(md: str) -> tuple[str, list[dict[str, Any]]]:
             d.pop("language", None)
         entities.append(d)
     return text, entities
-

@@ -12,7 +12,7 @@ from collections import deque
 from collections.abc import Awaitable, Callable
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, cast
 from weakref import WeakValueDictionary
 
 import typer
@@ -49,9 +49,7 @@ def resolve_resume_session(
     return extract_session_id(text) or extract_session_id(reply_text)
 
 
-async def _drain_stderr(stderr: asyncio.StreamReader | None, tail: deque[str]) -> None:
-    if stderr is None:
-        return
+async def _drain_stderr(stderr: asyncio.StreamReader, tail: deque[str]) -> None:
     try:
         while True:
             line = await stderr.readline()
@@ -235,11 +233,13 @@ class CodexExecRunner:
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         ) as proc:
-            assert proc.stdin and proc.stdout and proc.stderr
+            proc_stdin = cast(asyncio.StreamWriter, proc.stdin)
+            proc_stdout = cast(asyncio.StreamReader, proc.stdout)
+            proc_stderr = cast(asyncio.StreamReader, proc.stderr)
             logger.debug("[codex] spawn pid=%s args=%r", proc.pid, args)
 
             stderr_tail: deque[str] = deque(maxlen=200)
-            stderr_task = asyncio.create_task(_drain_stderr(proc.stderr, stderr_tail))
+            stderr_task = asyncio.create_task(_drain_stderr(proc_stderr, stderr_tail))
 
             found_session: str | None = session_id
             last_agent_text: str | None = None
@@ -250,11 +250,11 @@ class CodexExecRunner:
             rc: int | None = None
 
             try:
-                proc.stdin.write(prompt.encode())
-                await proc.stdin.drain()
-                proc.stdin.close()
+                proc_stdin.write(prompt.encode())
+                await proc_stdin.drain()
+                proc_stdin.close()
 
-                async for raw_line in proc.stdout:
+                async for raw_line in proc_stdout:
                     raw = raw_line.decode(errors="replace")
                     logger.debug("[codex][jsonl] %s", raw.rstrip("\n"))
                     line = raw.strip()
@@ -292,10 +292,9 @@ class CodexExecRunner:
                 cancelled = True
             finally:
                 if cancelled:
-                    task = asyncio.current_task()
-                    if task is not None:
-                        while task.cancelling():
-                            task.uncancel()
+                    task = cast(asyncio.Task, asyncio.current_task())
+                    while task.cancelling():
+                        task.uncancel()
                 if not cancelled:
                     rc = await proc.wait()
                 await asyncio.gather(stderr_task, return_exceptions=True)
@@ -555,7 +554,6 @@ async def _handle_message(
     if edit_task is not None:
         await asyncio.gather(edit_task, return_exceptions=True)
 
-    answer = answer or "(No agent_message captured from JSON stream.)"
     elapsed = clock() - started_at
     status = "done" if saw_agent_message else "error"
     final_md = (
