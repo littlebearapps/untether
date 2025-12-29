@@ -1,6 +1,6 @@
 import asyncio
 
-from codex_telegram_bridge.exec_bridge import (
+from takopi.exec_bridge import (
     extract_session_id,
     prepare_telegram,
     resolve_resume_session,
@@ -184,7 +184,7 @@ class _FakeRunnerWithEvents:
 
 
 def test_final_notify_sends_loud_final_message() -> None:
-    from codex_telegram_bridge.exec_bridge import BridgeConfig, _handle_message
+    from takopi.exec_bridge import BridgeConfig, _handle_message
 
     bot = _FakeBot()
     runner = _FakeRunner(answer="ok")
@@ -213,7 +213,7 @@ def test_final_notify_sends_loud_final_message() -> None:
 
 
 def test_new_final_message_forces_notification_when_too_long_to_edit() -> None:
-    from codex_telegram_bridge.exec_bridge import BridgeConfig, _handle_message
+    from takopi.exec_bridge import BridgeConfig, _handle_message
 
     bot = _FakeBot()
     runner = _FakeRunner(answer="x" * 10_000)
@@ -242,7 +242,7 @@ def test_new_final_message_forces_notification_when_too_long_to_edit() -> None:
 
 
 def test_progress_edits_are_rate_limited() -> None:
-    from codex_telegram_bridge.exec_bridge import BridgeConfig, _handle_message
+    from takopi.exec_bridge import BridgeConfig, _handle_message
 
     bot = _FakeBot()
     clock = _FakeClock()
@@ -306,7 +306,7 @@ def test_progress_edits_are_rate_limited() -> None:
 
 
 def test_bridge_flow_sends_progress_edits_and_final_resume() -> None:
-    from codex_telegram_bridge.exec_bridge import BridgeConfig, _handle_message
+    from takopi.exec_bridge import BridgeConfig, _handle_message
 
     bot = _FakeBot()
     clock = _FakeClock()

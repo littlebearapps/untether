@@ -1,7 +1,7 @@
 import json
 from pathlib import Path
 
-from codex_telegram_bridge.exec_render import ExecProgressRenderer, render_event_cli
+from takopi.exec_render import ExecProgressRenderer, render_event_cli
 
 
 def _loads(lines: str) -> list[dict]:
@@ -57,7 +57,7 @@ def test_render_event_cli_real_run_fixture() -> None:
     assert any(line.startswith("0. ▸ `") for line in out)
     assert any(line.startswith("0. ✓ `") for line in out)
     assert "assistant:" in out
-    assert any("exec-bridge" in line for line in out)
+    assert any("takopi" in line for line in out)
     assert out[-1] == "turn completed"
 
 

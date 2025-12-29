@@ -1,5 +1,5 @@
 [project]
-name = "codex-telegram-bridge"
+name = "takopi"
 version = "0.1.0"
 description = "Telegram bridge tools for Codex."
 readme = "readme.md"
@@ -12,17 +12,18 @@ dependencies = [
 ]
 
 [project.scripts]
-exec-bridge = "codex_telegram_bridge.exec_bridge:main"
+takopi = "takopi.exec_bridge:main"
+exec-bridge = "takopi.exec_bridge:main"
 
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/codex_telegram_bridge"]
+packages = ["src/takopi"]
 
 [tool.hatch.build.targets.sdist]
-include = ["src/codex_telegram_bridge", "readme.md"]
+include = ["src/takopi", "readme.md"]
 
 [dependency-groups]
 dev = [

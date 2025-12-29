@@ -1,4 +1,4 @@
-# codex_telegram_bridge — Developer Guide
+# takopi — Developer Guide
 
 This document describes the internal architecture and module responsibilities.
 

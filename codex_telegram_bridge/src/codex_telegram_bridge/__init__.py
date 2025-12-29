@@ -1,2 +1,0 @@
-"""Telegram Codex bridge package."""
-

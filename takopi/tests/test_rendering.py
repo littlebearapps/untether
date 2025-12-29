@@ -1,4 +1,4 @@
-from codex_telegram_bridge.rendering import render_markdown
+from takopi.rendering import render_markdown
 
 
 def test_render_markdown_basic_entities() -> None:

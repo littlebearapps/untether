@@ -1,4 +1,6 @@
-# Codex Telegram Bridge
+# Takopi
+
+> 🐙 A little helper from Happy Planet, here to make your Codex sessions happier-pi!
 
 A Telegram bot that bridges messages to [Codex](https://github.com/openai/codex) sessions using non-interactive `codex exec` and `codex exec resume`.
 
@@ -22,10 +24,10 @@ A Telegram bot that bridges messages to [Codex](https://github.com/openai/codex)
 
 ```bash
 # Clone and enter the directory
-cd codex-telegram-bridge
+cd takopi
 
 # Run directly with uv (installs deps automatically)
-uv run exec-bridge --help
+uv run takopi --help
 ```
 
 ### Configuration
@@ -47,7 +49,7 @@ The bridge only accepts messages where the chat ID equals the sender ID and both
 ### Running
 
 ```bash
-uv run exec-bridge
+uv run takopi
 ```
 
 #### Options
@@ -94,7 +96,7 @@ See [`developing.md`](developing.md) for architecture details.
 uv run pytest
 
 # Run with debug logging
-uv run exec-bridge --debug 2>&1 | tee debug.log
+uv run takopi --debug 2>&1 | tee debug.log
 ```
 
 ## License

@@ -1,7 +1,7 @@
 import asyncio
 import sys
 
-from codex_telegram_bridge import exec_bridge
+from takopi import exec_bridge
 
 
 def test_manage_subprocess_kills_when_terminate_times_out(monkeypatch) -> None:

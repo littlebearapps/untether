@@ -1,6 +1,6 @@
 import asyncio
 
-from codex_telegram_bridge.exec_bridge import CodexExecRunner
+from takopi.exec_bridge import CodexExecRunner
 
 
 def test_run_serialized_serializes_same_session() -> None:
