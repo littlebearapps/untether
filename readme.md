@@ -1,6 +1,6 @@
 # takopi
 
-> 🐙 A little helper from Happy Planet, here to make your Codex sessions happier-pi!
+🐙 *A little helper from Happy Planet, here to make your Codex sessions happier-pi!*
 
 A Telegram bot that bridges messages to [Codex](https://github.com/openai/codex) sessions using non-interactive `codex exec --json`.
 
