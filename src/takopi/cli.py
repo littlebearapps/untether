@@ -105,11 +105,7 @@ def _default_engine_for_setup(
     if settings is None or config_path is None:
         return "codex"
     value = settings.default_engine
-    if not isinstance(value, str) or not value.strip():
-        raise ConfigError(
-            f"Invalid `default_engine` in {config_path}; expected a non-empty string."
-        )
-    return value.strip()
+    return value
 
 
 def _config_path_display(path: Path) -> str:
@@ -235,9 +231,12 @@ def _run_auto_router(
             default_engine_override=default_engine_override,
             reserved=("cancel",),
         )
-        transport_config = settings.transport_config(
-            settings.transport, config_path=config_path
-        )
+        if settings.transport == "telegram":
+            transport_config = settings.transports.telegram
+        else:
+            transport_config = settings.transport_config(
+                settings.transport, config_path=config_path
+            )
         lock_token = transport_backend.lock_token(
             transport_config=transport_config,
             config_path=config_path,

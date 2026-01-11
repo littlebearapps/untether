@@ -12,13 +12,16 @@ from typing import (
     Iterable,
     Protocol,
     TYPE_CHECKING,
+    TypeVar,
 )
 
+import msgspec
 import httpx
 
 import anyio
 
 from ..logging import get_logger
+from .api_models import Chat, ChatMember, File, ForumTopic, Message, Update, User
 from .types import (
     TelegramCallbackQuery,
     TelegramDocument,
@@ -28,6 +31,8 @@ from .types import (
 )
 
 logger = get_logger(__name__)
+
+T = TypeVar("T")
 
 
 SEND_PRIORITY = 0
@@ -51,15 +56,20 @@ def is_group_chat_id(chat_id: int) -> bool:
 
 
 def parse_incoming_update(
-    update: dict[str, Any],
+    update: Update | dict[str, Any],
     *,
     chat_id: int | None = None,
     chat_ids: set[int] | None = None,
 ) -> TelegramIncomingUpdate | None:
-    msg = update.get("message")
+    if isinstance(update, Update):
+        msg = update.message
+        callback_query = update.callback_query
+    else:
+        msg = update.get("message")
+        callback_query = update.get("callback_query")
+
     if isinstance(msg, dict):
         return _parse_incoming_message(msg, chat_id=chat_id, chat_ids=chat_ids)
-    callback_query = update.get("callback_query")
     if isinstance(callback_query, dict):
         return _parse_callback_query(
             callback_query,
@@ -303,7 +313,7 @@ async def poll_incoming(
         if allowed is None and chat_id is not None:
             allowed = {chat_id}
         for upd in updates:
-            offset = upd["update_id"] + 1
+            offset = upd.update_id + 1
             msg = parse_incoming_update(upd, chat_ids=allowed)
             if msg is not None:
                 yield msg
@@ -317,9 +327,9 @@ class BotClient(Protocol):
         offset: int | None,
         timeout_s: int = 50,
         allowed_updates: list[str] | None = None,
-    ) -> list[dict] | None: ...
+    ) -> list[Update] | None: ...
 
-    async def get_file(self, file_id: str) -> dict | None: ...
+    async def get_file(self, file_id: str) -> File | None: ...
 
     async def download_file(self, file_path: str) -> bytes | None: ...
 
@@ -335,7 +345,7 @@ class BotClient(Protocol):
         reply_markup: dict[str, Any] | None = None,
         *,
         replace_message_id: int | None = None,
-    ) -> dict | None: ...
+    ) -> Message | None: ...
 
     async def send_document(
         self,
@@ -346,7 +356,7 @@ class BotClient(Protocol):
         message_thread_id: int | None = None,
         disable_notification: bool | None = False,
         caption: str | None = None,
-    ) -> dict | None: ...
+    ) -> Message | None: ...
 
     async def edit_message_text(
         self,
@@ -358,7 +368,7 @@ class BotClient(Protocol):
         reply_markup: dict[str, Any] | None = None,
         *,
         wait: bool = True,
-    ) -> dict | None: ...
+    ) -> Message | None: ...
 
     async def delete_message(
         self,
@@ -374,7 +384,7 @@ class BotClient(Protocol):
         language_code: str | None = None,
     ) -> bool: ...
 
-    async def get_me(self) -> dict | None: ...
+    async def get_me(self) -> User | None: ...
 
     async def answer_callback_query(
         self,
@@ -383,15 +393,17 @@ class BotClient(Protocol):
         show_alert: bool | None = None,
     ) -> bool: ...
 
-    async def get_chat(self, chat_id: int) -> dict | None: ...
+    async def get_chat(self, chat_id: int) -> Chat | None: ...
 
-    async def get_chat_member(self, chat_id: int, user_id: int) -> dict | None: ...
+    async def get_chat_member(
+        self, chat_id: int, user_id: int
+    ) -> ChatMember | None: ...
 
     async def create_forum_topic(
         self,
         chat_id: int,
         name: str,
-    ) -> dict | None: ...
+    ) -> ForumTopic | None: ...
 
     async def edit_forum_topic(
         self,
@@ -672,71 +684,13 @@ class TelegramClient:
         if self._owns_http_client and self._http_client is not None:
             await self._http_client.aclose()
 
-    async def _post(self, method: str, json_data: dict[str, Any]) -> Any | None:
-        if self._http_client is None or self._base is None:
-            raise RuntimeError("TelegramClient is configured without an HTTP client.")
-        logger.debug("telegram.request", method=method, payload=json_data)
-        try:
-            resp = await self._http_client.post(
-                f"{self._base}/{method}", json=json_data
-            )
-        except httpx.HTTPError as e:
-            url = getattr(e.request, "url", None)
-            logger.error(
-                "telegram.network_error",
-                method=method,
-                url=str(url) if url is not None else None,
-                error=str(e),
-                error_type=e.__class__.__name__,
-            )
-            return None
-
-        try:
-            resp.raise_for_status()
-        except httpx.HTTPStatusError as e:
-            if resp.status_code == 429:
-                retry_after: float | None = None
-                try:
-                    payload = resp.json()
-                except Exception:
-                    payload = None
-                if isinstance(payload, dict):
-                    retry_after = retry_after_from_payload(payload)
-                retry_after = 5.0 if retry_after is None else retry_after
-                logger.warning(
-                    "telegram.rate_limited",
-                    method=method,
-                    status=resp.status_code,
-                    url=str(resp.request.url),
-                    retry_after=retry_after,
-                )
-                raise TelegramRetryAfter(retry_after) from e
-            body = resp.text
-            logger.error(
-                "telegram.http_error",
-                method=method,
-                status=resp.status_code,
-                url=str(resp.request.url),
-                error=str(e),
-                body=body,
-            )
-            return None
-
-        try:
-            payload = resp.json()
-        except Exception as e:
-            body = resp.text
-            logger.error(
-                "telegram.bad_response",
-                method=method,
-                status=resp.status_code,
-                url=str(resp.request.url),
-                error=str(e),
-                error_type=e.__class__.__name__,
-                body=body,
-            )
-            return None
-
+    def _parse_telegram_envelope(
+        self,
+        *,
+        method: str,
+        resp: httpx.Response,
+        payload: Any,
+    ) -> Any | None:
         if not isinstance(payload, dict):
             logger.error(
                 "telegram.invalid_payload",
@@ -767,6 +721,121 @@ class TelegramClient:
 
         logger.debug("telegram.response", method=method, payload=payload)
         return payload.get("result")
+
+    async def _request(
+        self,
+        method: str,
+        *,
+        json: dict[str, Any] | None = None,
+        data: dict[str, Any] | None = None,
+        files: dict[str, Any] | None = None,
+    ) -> Any | None:
+        if self._http_client is None or self._base is None:
+            raise RuntimeError("TelegramClient is configured without an HTTP client.")
+        request_payload = json if json is not None else data
+        logger.debug("telegram.request", method=method, payload=request_payload)
+        try:
+            if json is not None:
+                resp = await self._http_client.post(f"{self._base}/{method}", json=json)
+            else:
+                resp = await self._http_client.post(
+                    f"{self._base}/{method}", data=data, files=files
+                )
+        except httpx.HTTPError as exc:
+            url = getattr(exc.request, "url", None)
+            logger.error(
+                "telegram.network_error",
+                method=method,
+                url=str(url) if url is not None else None,
+                error=str(exc),
+                error_type=exc.__class__.__name__,
+            )
+            return None
+
+        try:
+            resp.raise_for_status()
+        except httpx.HTTPStatusError as exc:
+            if resp.status_code == 429:
+                retry_after: float | None = None
+                try:
+                    response_payload = resp.json()
+                except Exception:
+                    response_payload = None
+                if isinstance(response_payload, dict):
+                    retry_after = retry_after_from_payload(response_payload)
+                retry_after = 5.0 if retry_after is None else retry_after
+                logger.warning(
+                    "telegram.rate_limited",
+                    method=method,
+                    status=resp.status_code,
+                    url=str(resp.request.url),
+                    retry_after=retry_after,
+                )
+                raise TelegramRetryAfter(retry_after) from exc
+            body = resp.text
+            logger.error(
+                "telegram.http_error",
+                method=method,
+                status=resp.status_code,
+                url=str(resp.request.url),
+                error=str(exc),
+                body=body,
+            )
+            return None
+
+        try:
+            response_payload = resp.json()
+        except Exception as exc:
+            body = resp.text
+            logger.error(
+                "telegram.bad_response",
+                method=method,
+                status=resp.status_code,
+                url=str(resp.request.url),
+                error=str(exc),
+                error_type=exc.__class__.__name__,
+                body=body,
+            )
+            return None
+
+        return self._parse_telegram_envelope(
+            method=method,
+            resp=resp,
+            payload=response_payload,
+        )
+
+    def _decode_result(
+        self,
+        *,
+        method: str,
+        payload: Any,
+        model: type[T],
+    ) -> T | None:
+        if payload is None:
+            return None
+        try:
+            return msgspec.convert(payload, type=model)
+        except Exception as exc:
+            logger.error(
+                "telegram.decode_error",
+                method=method,
+                error=str(exc),
+                error_type=exc.__class__.__name__,
+            )
+            return None
+
+    async def _call_with_retry_after(
+        self,
+        fn: Callable[[], Awaitable[T]],
+    ) -> T:
+        while True:
+            try:
+                return await fn()
+            except TelegramRetryAfter as exc:
+                await self._sleep(exc.retry_after)
+
+    async def _post(self, method: str, json_data: dict[str, Any]) -> Any | None:
+        return await self._request(method, json=json_data)
 
     async def _post_form(
         self,
@@ -774,163 +843,116 @@ class TelegramClient:
         data: dict[str, Any],
         files: dict[str, Any],
     ) -> Any | None:
-        if self._http_client is None or self._base is None:
-            raise RuntimeError("TelegramClient is configured without an HTTP client.")
-        logger.debug("telegram.request", method=method, payload=data)
-        try:
-            resp = await self._http_client.post(
-                f"{self._base}/{method}", data=data, files=files
-            )
-        except httpx.HTTPError as e:
-            url = getattr(e.request, "url", None)
-            logger.error(
-                "telegram.network_error",
-                method=method,
-                url=str(url) if url is not None else None,
-                error=str(e),
-                error_type=e.__class__.__name__,
-            )
-            return None
-
-        try:
-            resp.raise_for_status()
-        except httpx.HTTPStatusError as e:
-            if resp.status_code == 429:
-                retry_after: float | None = None
-                try:
-                    payload = resp.json()
-                except Exception:
-                    payload = None
-                if isinstance(payload, dict):
-                    retry_after = retry_after_from_payload(payload)
-                retry_after = 5.0 if retry_after is None else retry_after
-                logger.warning(
-                    "telegram.rate_limited",
-                    method=method,
-                    status=resp.status_code,
-                    url=str(resp.request.url),
-                    retry_after=retry_after,
-                )
-                raise TelegramRetryAfter(retry_after) from e
-            body = resp.text
-            logger.error(
-                "telegram.http_error",
-                method=method,
-                status=resp.status_code,
-                url=str(resp.request.url),
-                error=str(e),
-                body=body,
-            )
-            return None
-
-        try:
-            payload = resp.json()
-        except Exception as e:
-            body = resp.text
-            logger.error(
-                "telegram.bad_response",
-                method=method,
-                status=resp.status_code,
-                error=str(e),
-                error_type=e.__class__.__name__,
-                body=body,
-            )
-            return None
-
-        if not isinstance(payload, dict):
-            logger.error(
-                "telegram.invalid_payload",
-                method=method,
-                url=str(resp.request.url),
-                payload=payload,
-            )
-            return None
-
-        if not payload.get("ok"):
-            if payload.get("error_code") == 429:
-                retry_after = retry_after_from_payload(payload)
-                retry_after = 5.0 if retry_after is None else retry_after
-                logger.warning(
-                    "telegram.rate_limited",
-                    method=method,
-                    url=str(resp.request.url),
-                    retry_after=retry_after,
-                )
-                raise TelegramRetryAfter(retry_after)
-            logger.error(
-                "telegram.api_error",
-                method=method,
-                url=str(resp.request.url),
-                payload=payload,
-            )
-            return None
-
-        logger.debug("telegram.response", method=method, payload=payload)
-        return payload.get("result")
+        return await self._request(method, data=data, files=files)
 
     async def get_updates(
         self,
         offset: int | None,
         timeout_s: int = 50,
         allowed_updates: list[str] | None = None,
-    ) -> list[dict] | None:
-        while True:
-            try:
-                if self._client_override is not None:
-                    return await self._client_override.get_updates(
-                        offset=offset,
-                        timeout_s=timeout_s,
-                        allowed_updates=allowed_updates,
+    ) -> list[Update] | None:
+        async def execute() -> list[Update] | None:
+            if self._client_override is not None:
+                raw = await self._client_override.get_updates(
+                    offset=offset,
+                    timeout_s=timeout_s,
+                    allowed_updates=allowed_updates,
+                )
+                if raw is None:
+                    return None
+                try:
+                    return msgspec.convert(raw, type=list[Update])
+                except Exception as exc:
+                    logger.error(
+                        "telegram.decode_error",
+                        method="getUpdates",
+                        error=str(exc),
+                        error_type=exc.__class__.__name__,
                     )
-                params: dict[str, Any] = {"timeout": timeout_s}
-                if offset is not None:
-                    params["offset"] = offset
-                if allowed_updates is not None:
-                    params["allowed_updates"] = allowed_updates
-                result = await self._post("getUpdates", params)
-                return result if isinstance(result, list) else None
-            except TelegramRetryAfter as exc:
-                await self._sleep(exc.retry_after)
+                    return None
 
-    async def get_file(self, file_id: str) -> dict | None:
-        while True:
+            params: dict[str, Any] = {"timeout": timeout_s}
+            if offset is not None:
+                params["offset"] = offset
+            if allowed_updates is not None:
+                params["allowed_updates"] = allowed_updates
+            result = await self._post("getUpdates", params)
+            if result is None or not isinstance(result, list):
+                return None
             try:
-                if self._client_override is not None:
-                    return await self._client_override.get_file(file_id)
-                result = await self._post("getFile", {"file_id": file_id})
-                return result if isinstance(result, dict) else None
-            except TelegramRetryAfter as exc:
-                await self._sleep(exc.retry_after)
+                return msgspec.convert(result, type=list[Update])
+            except Exception as exc:
+                logger.error(
+                    "telegram.decode_error",
+                    method="getUpdates",
+                    error=str(exc),
+                    error_type=exc.__class__.__name__,
+                )
+                return None
+
+        return await self._call_with_retry_after(execute)
+
+    async def get_file(self, file_id: str) -> File | None:
+        async def execute() -> File | None:
+            if self._client_override is not None:
+                return await self._client_override.get_file(file_id)
+            result = await self._post("getFile", {"file_id": file_id})
+            return self._decode_result(method="getFile", payload=result, model=File)
+
+        return await self._call_with_retry_after(execute)
 
     async def download_file(self, file_path: str) -> bytes | None:
-        if self._client_override is not None:
-            return await self._client_override.download_file(file_path)
-        if self._http_client is None or self._file_base is None:
-            raise RuntimeError("TelegramClient is configured without an HTTP client.")
-        url = f"{self._file_base}/{file_path}"
-        try:
-            resp = await self._http_client.get(url)
-        except httpx.HTTPError as exc:
-            request_url = getattr(exc.request, "url", None)
-            logger.error(
-                "telegram.file_network_error",
-                url=str(request_url) if request_url is not None else None,
-                error=str(exc),
-                error_type=exc.__class__.__name__,
-            )
-            return None
-        try:
-            resp.raise_for_status()
-        except httpx.HTTPStatusError as exc:
-            logger.error(
-                "telegram.file_http_error",
-                status=resp.status_code,
-                url=str(resp.request.url),
-                error=str(exc),
-                body=resp.text,
-            )
-            return None
-        return resp.content
+        async def execute() -> bytes | None:
+            if self._client_override is not None:
+                return await self._client_override.download_file(file_path)
+            if self._http_client is None or self._file_base is None:
+                raise RuntimeError(
+                    "TelegramClient is configured without an HTTP client."
+                )
+            url = f"{self._file_base}/{file_path}"
+            try:
+                resp = await self._http_client.get(url)
+            except httpx.HTTPError as exc:
+                request_url = getattr(exc.request, "url", None)
+                logger.error(
+                    "telegram.file_network_error",
+                    url=str(request_url) if request_url is not None else None,
+                    error=str(exc),
+                    error_type=exc.__class__.__name__,
+                )
+                return None
+            try:
+                resp.raise_for_status()
+            except httpx.HTTPStatusError as exc:
+                if resp.status_code == 429:
+                    retry_after: float | None = None
+                    try:
+                        response_payload = resp.json()
+                    except Exception:
+                        response_payload = None
+                    if isinstance(response_payload, dict):
+                        retry_after = retry_after_from_payload(response_payload)
+                    retry_after = 5.0 if retry_after is None else retry_after
+                    logger.warning(
+                        "telegram.rate_limited",
+                        method="download_file",
+                        status=resp.status_code,
+                        url=str(resp.request.url),
+                        retry_after=retry_after,
+                    )
+                    raise TelegramRetryAfter(retry_after) from exc
+
+                logger.error(
+                    "telegram.file_http_error",
+                    status=resp.status_code,
+                    url=str(resp.request.url),
+                    error=str(exc),
+                    body=resp.text,
+                )
+                return None
+            return resp.content
+
+        return await self._call_with_retry_after(execute)
 
     async def send_message(
         self,
@@ -944,8 +966,8 @@ class TelegramClient:
         reply_markup: dict[str, Any] | None = None,
         *,
         replace_message_id: int | None = None,
-    ) -> dict | None:
-        async def execute() -> dict | None:
+    ) -> Message | None:
+        async def execute() -> Message | None:
             if self._client_override is not None:
                 return await self._client_override.send_message(
                     chat_id=chat_id,
@@ -972,7 +994,11 @@ class TelegramClient:
             if reply_markup is not None:
                 params["reply_markup"] = reply_markup
             result = await self._post("sendMessage", params)
-            return result if isinstance(result, dict) else None
+            return self._decode_result(
+                method="sendMessage",
+                payload=result,
+                model=Message,
+            )
 
         if replace_message_id is not None:
             await self._outbox.drop_pending(key=("edit", chat_id, replace_message_id))
@@ -1000,8 +1026,8 @@ class TelegramClient:
         message_thread_id: int | None = None,
         disable_notification: bool | None = False,
         caption: str | None = None,
-    ) -> dict | None:
-        async def execute() -> dict | None:
+    ) -> Message | None:
+        async def execute() -> Message | None:
             if self._client_override is not None:
                 return await self._client_override.send_document(
                     chat_id=chat_id,
@@ -1026,7 +1052,11 @@ class TelegramClient:
                 params,
                 files={"document": (filename, content)},
             )
-            return result if isinstance(result, dict) else None
+            return self._decode_result(
+                method="sendDocument",
+                payload=result,
+                model=Message,
+            )
 
         return await self.enqueue_op(
             key=self.unique_key("send_document"),
@@ -1046,8 +1076,8 @@ class TelegramClient:
         reply_markup: dict[str, Any] | None = None,
         *,
         wait: bool = True,
-    ) -> dict | None:
-        async def execute() -> dict | None:
+    ) -> Message | None:
+        async def execute() -> Message | None:
             if self._client_override is not None:
                 return await self._client_override.edit_message_text(
                     chat_id=chat_id,
@@ -1070,7 +1100,11 @@ class TelegramClient:
             if reply_markup is not None:
                 params["reply_markup"] = reply_markup
             result = await self._post("editMessageText", params)
-            return result if isinstance(result, dict) else None
+            return self._decode_result(
+                method="editMessageText",
+                payload=result,
+                model=Message,
+            )
 
         return await self.enqueue_op(
             key=("edit", chat_id, message_id),
@@ -1142,12 +1176,12 @@ class TelegramClient:
             )
         )
 
-    async def get_me(self) -> dict | None:
-        async def execute() -> dict | None:
+    async def get_me(self) -> User | None:
+        async def execute() -> User | None:
             if self._client_override is not None:
                 return await self._client_override.get_me()
             result = await self._post("getMe", {})
-            return result if isinstance(result, dict) else None
+            return self._decode_result(method="getMe", payload=result, model=User)
 
         return await self.enqueue_op(
             key=self.unique_key("get_me"),
@@ -1188,12 +1222,12 @@ class TelegramClient:
             )
         )
 
-    async def get_chat(self, chat_id: int) -> dict | None:
-        async def execute() -> dict | None:
+    async def get_chat(self, chat_id: int) -> Chat | None:
+        async def execute() -> Chat | None:
             if self._client_override is not None:
                 return await self._client_override.get_chat(chat_id)
             result = await self._post("getChat", {"chat_id": chat_id})
-            return result if isinstance(result, dict) else None
+            return self._decode_result(method="getChat", payload=result, model=Chat)
 
         return await self.enqueue_op(
             key=self.unique_key("get_chat"),
@@ -1203,14 +1237,18 @@ class TelegramClient:
             chat_id=chat_id,
         )
 
-    async def get_chat_member(self, chat_id: int, user_id: int) -> dict | None:
-        async def execute() -> dict | None:
+    async def get_chat_member(self, chat_id: int, user_id: int) -> ChatMember | None:
+        async def execute() -> ChatMember | None:
             if self._client_override is not None:
                 return await self._client_override.get_chat_member(chat_id, user_id)
             result = await self._post(
                 "getChatMember", {"chat_id": chat_id, "user_id": user_id}
             )
-            return result if isinstance(result, dict) else None
+            return self._decode_result(
+                method="getChatMember",
+                payload=result,
+                model=ChatMember,
+            )
 
         return await self.enqueue_op(
             key=self.unique_key("get_chat_member"),
@@ -1220,14 +1258,18 @@ class TelegramClient:
             chat_id=chat_id,
         )
 
-    async def create_forum_topic(self, chat_id: int, name: str) -> dict | None:
-        async def execute() -> dict | None:
+    async def create_forum_topic(self, chat_id: int, name: str) -> ForumTopic | None:
+        async def execute() -> ForumTopic | None:
             if self._client_override is not None:
                 return await self._client_override.create_forum_topic(chat_id, name)
             result = await self._post(
                 "createForumTopic", {"chat_id": chat_id, "name": name}
             )
-            return result if isinstance(result, dict) else None
+            return self._decode_result(
+                method="createForumTopic",
+                payload=result,
+                model=ForumTopic,
+            )
 
         return await self.enqueue_op(
             key=self.unique_key("create_forum_topic"),

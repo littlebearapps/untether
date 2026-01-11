@@ -83,6 +83,14 @@ class TelegramFilesSettings(BaseModel):
             raise ValueError("files.uploads_dir must be a relative path")
         return value
 
+    @property
+    def max_upload_bytes(self) -> int:
+        return 20 * 1024 * 1024
+
+    @property
+    def max_download_bytes(self) -> int:
+        return 50 * 1024 * 1024
+
 
 class TelegramTransportSettings(BaseModel):
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
@@ -90,14 +98,13 @@ class TelegramTransportSettings(BaseModel):
     bot_token: NonEmptyStr
     chat_id: StrictInt
     voice_transcription: bool = False
+    voice_max_bytes: StrictInt = 10 * 1024 * 1024
     topics: TelegramTopicsSettings = Field(default_factory=TelegramTopicsSettings)
     files: TelegramFilesSettings = Field(default_factory=TelegramFilesSettings)
 
 
 class TransportsSettings(BaseModel):
-    telegram: TelegramTransportSettings = Field(
-        default_factory=TelegramTransportSettings
-    )
+    telegram: TelegramTransportSettings
 
     model_config = ConfigDict(extra="allow")
 
@@ -132,7 +139,7 @@ class TakopiSettings(BaseSettings):
     projects: dict[str, ProjectSettings] = Field(default_factory=dict)
 
     transport: NonEmptyStr = "telegram"
-    transports: TransportsSettings = Field(default_factory=TransportsSettings)
+    transports: TransportsSettings
 
     plugins: PluginsSettings = Field(default_factory=PluginsSettings)
 
@@ -310,8 +317,6 @@ def require_telegram(settings: TakopiSettings, config_path: Path) -> tuple[str, 
             "(telegram only for now)."
         )
     tg = settings.transports.telegram
-    if not tg.bot_token:
-        raise ConfigError(f"Missing bot token in {config_path}.")
     return tg.bot_token, tg.chat_id
 
 

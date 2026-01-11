@@ -14,6 +14,7 @@ from ..directives import DirectiveError
 from ..logging import get_logger
 from ..model import EngineId, ResumeToken
 from ..scheduler import ThreadJob, ThreadScheduler
+from ..settings import TelegramTransportSettings
 from ..transport import MessageRef
 from ..context import RunContext
 from .bridge import CANCEL_CALLBACK_DATA, TelegramBridgeConfig, send_plain
@@ -169,7 +170,7 @@ async def _drain_backlog(cfg: TelegramBridgeConfig, offset: int | None) -> int |
             if drained:
                 logger.info("startup.backlog.drained", count=drained)
             return offset
-        offset = updates[-1]["update_id"] + 1
+        offset = updates[-1].update_id + 1
         drained += len(updates)
 
 
@@ -266,7 +267,7 @@ async def run_main_loop(
     watch_config: bool | None = None,
     default_engine_override: str | None = None,
     transport_id: str | None = None,
-    transport_config: dict[str, object] | None = None,
+    transport_config: TelegramTransportSettings | None = None,
 ) -> None:
     from ..runner_bridge import RunningTasks
 
@@ -277,7 +278,7 @@ async def run_main_loop(
     }
     reserved_commands = _reserved_commands(cfg.runtime)
     transport_snapshot = (
-        dict(transport_config) if transport_config is not None else None
+        transport_config.model_dump() if transport_config is not None else None
     )
     topic_store: TopicStateStore | None = None
     media_groups: dict[tuple[int, str], _MediaGroupState] = {}
@@ -476,6 +477,7 @@ async def run_main_loop(
                         bot=cfg.bot,
                         msg=msg,
                         enabled=cfg.voice_transcription,
+                        max_bytes=cfg.voice_max_bytes,
                         reply=reply,
                     )
                     if text is None:

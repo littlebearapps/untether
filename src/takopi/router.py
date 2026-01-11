@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Iterable
+from typing import Iterable, Literal, TypeAlias
 
 from .model import EngineId, ResumeToken
 from .runner import Runner
@@ -17,12 +17,21 @@ class RunnerUnavailableError(RuntimeError):
         self.issue = issue
 
 
+EngineStatus: TypeAlias = Literal["ok", "missing_cli", "bad_config", "load_error"]
+
+
 @dataclass(frozen=True, slots=True)
 class RunnerEntry:
     engine: EngineId
     runner: Runner
-    available: bool = True
+    status: EngineStatus = "ok"
     issue: str | None = None
+
+    @property
+    def available(self) -> bool:
+        # "bad_config" means we ignored user config and built the runner with defaults.
+        # The engine is still runnable, but a warning should be surfaced to the user.
+        return self.status in {"ok", "bad_config"}
 
 
 class AutoRouter:

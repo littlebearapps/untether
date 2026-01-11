@@ -33,6 +33,7 @@ from ..engines import list_backends
 from ..logging import suppress_logs
 from ..settings import HOME_CONFIG_PATH, load_settings, require_telegram
 from ..transports import SetupResult
+from .api_models import User
 from .client import TelegramClient, TelegramRetryAfter
 
 __all__ = [
@@ -131,7 +132,7 @@ def mask_token(token: str) -> str:
     return f"{token[:9]}...{token[-5:]}"
 
 
-async def get_bot_info(token: str) -> dict[str, Any] | None:
+async def get_bot_info(token: str) -> User | None:
     bot = TelegramClient(token)
     try:
         for _ in range(3):
@@ -153,23 +154,19 @@ async def wait_for_chat(token: str) -> ChatInfo:
             offset=None, timeout_s=0, allowed_updates=allowed_updates
         )
         if drained:
-            offset = drained[-1]["update_id"] + 1
+            offset = drained[-1].update_id + 1
         while True:
-            try:
-                updates = await bot.get_updates(
-                    offset=offset, timeout_s=50, allowed_updates=allowed_updates
-                )
-            except TelegramRetryAfter as exc:
-                await anyio.sleep(exc.retry_after)
-                continue
+            updates = await bot.get_updates(
+                offset=offset, timeout_s=50, allowed_updates=allowed_updates
+            )
             if updates is None:
                 await anyio.sleep(1)
                 continue
             if not updates:
                 continue
-            offset = updates[-1]["update_id"] + 1
+            offset = updates[-1].update_id + 1
             update = updates[-1]
-            msg = update.get("message")
+            msg = update.message
             if not isinstance(msg, dict):
                 continue
             sender = msg.get("from")
@@ -298,7 +295,7 @@ def _confirm(message: str, *, default: bool = True) -> bool | None:
     return question.ask()
 
 
-def _prompt_token(console: Console) -> tuple[str, dict[str, Any]] | None:
+def _prompt_token(console: Console) -> tuple[str, User] | None:
     while True:
         token = questionary.password("paste your bot token:").ask()
         if token is None:
@@ -310,11 +307,10 @@ def _prompt_token(console: Console) -> tuple[str, dict[str, Any]] | None:
         console.print("  validating...")
         info = anyio.run(get_bot_info, token)
         if info:
-            username = info.get("username")
-            if isinstance(username, str) and username:
-                console.print(f"  connected to @{username}")
+            if info.username:
+                console.print(f"  connected to @{info.username}")
             else:
-                name = info.get("first_name") or "your bot"
+                name = info.first_name or "your bot"
                 console.print(f"  connected to {name}")
             return token, info
         console.print("  failed to connect, check the token and try again")
@@ -342,7 +338,7 @@ def capture_chat_id(*, token: str | None = None) -> ChatInfo | None:
                 return None
             token, info = token_info
 
-        bot_ref = f"@{info['username']}"
+        bot_ref = f"@{info.username}"
         console.print("")
         console.print(f"  send /start to {bot_ref} (works in groups too)")
         console.print("  waiting...")
@@ -401,7 +397,7 @@ def interactive_setup(*, force: bool) -> bool:
         if token_info is None:
             return False
         token, info = token_info
-        bot_ref = f"@{info['username']}"
+        bot_ref = f"@{info.username}"
 
         console.print("")
         console.print(f"  send /start to {bot_ref} (works in groups too)")

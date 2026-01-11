@@ -6,22 +6,30 @@ import anyio
 import pytest
 
 from takopi import commands, plugins
-import takopi.telegram.bridge as bridge
 import takopi.telegram.loop as telegram_loop
 import takopi.telegram.commands as telegram_commands
 import takopi.telegram.topics as telegram_topics
 from takopi.directives import parse_directives
+from takopi.telegram.api_models import (
+    Chat,
+    ChatMember,
+    File,
+    ForumTopic,
+    Message,
+    Update,
+    User,
+)
+from takopi.settings import TelegramFilesSettings, TelegramTopicsSettings
 from takopi.telegram.bridge import (
     TelegramBridgeConfig,
-    TelegramFilesConfig,
     TelegramPresenter,
     TelegramTransport,
     build_bot_commands,
     handle_callback_cancel,
     handle_cancel,
     is_cancel_command,
-    send_with_resume,
     run_main_loop,
+    send_with_resume,
 )
 from takopi.telegram.client import BotClient
 from takopi.telegram.topic_state import TopicStateStore, resolve_state_path
@@ -122,13 +130,13 @@ class _FakeBot(BotClient):
         offset: int | None,
         timeout_s: int = 50,
         allowed_updates: list[str] | None = None,
-    ) -> list[dict[str, Any]] | None:
+    ) -> list[Update] | None:
         _ = offset
         _ = timeout_s
         _ = allowed_updates
         return []
 
-    async def get_file(self, file_id: str) -> dict[str, Any] | None:
+    async def get_file(self, file_id: str) -> File | None:
         _ = file_id
         return None
 
@@ -148,7 +156,7 @@ class _FakeBot(BotClient):
         reply_markup: dict | None = None,
         *,
         replace_message_id: int | None = None,
-    ) -> dict[str, Any]:
+    ) -> Message:
         self.send_calls.append(
             {
                 "chat_id": chat_id,
@@ -162,7 +170,7 @@ class _FakeBot(BotClient):
                 "replace_message_id": replace_message_id,
             }
         )
-        return {"message_id": 1}
+        return Message(message_id=1)
 
     async def send_document(
         self,
@@ -173,7 +181,7 @@ class _FakeBot(BotClient):
         message_thread_id: int | None = None,
         disable_notification: bool | None = False,
         caption: str | None = None,
-    ) -> dict[str, Any]:
+    ) -> Message:
         self.document_calls.append(
             {
                 "chat_id": chat_id,
@@ -185,7 +193,7 @@ class _FakeBot(BotClient):
                 "caption": caption,
             }
         )
-        return {"message_id": 2}
+        return Message(message_id=2)
 
     async def edit_message_text(
         self,
@@ -197,7 +205,7 @@ class _FakeBot(BotClient):
         reply_markup: dict | None = None,
         *,
         wait: bool = True,
-    ) -> dict[str, Any]:
+    ) -> Message:
         self.edit_calls.append(
             {
                 "chat_id": chat_id,
@@ -209,7 +217,7 @@ class _FakeBot(BotClient):
                 "wait": wait,
             }
         )
-        return {"message_id": message_id}
+        return Message(message_id=message_id)
 
     async def delete_message(self, chat_id: int, message_id: int) -> bool:
         self.delete_calls.append({"chat_id": chat_id, "message_id": message_id})
@@ -231,26 +239,22 @@ class _FakeBot(BotClient):
         )
         return True
 
-    async def get_me(self) -> dict[str, Any] | None:
-        return {"id": 1}
+    async def get_me(self) -> User | None:
+        return User(id=1, username="bot")
 
-    async def get_chat(self, chat_id: int) -> dict[str, Any] | None:
+    async def get_chat(self, chat_id: int) -> Chat | None:
         _ = chat_id
-        return {"id": chat_id, "type": "supergroup", "is_forum": True}
+        return Chat(id=chat_id, type="supergroup", is_forum=True)
 
-    async def get_chat_member(
-        self, chat_id: int, user_id: int
-    ) -> dict[str, Any] | None:
+    async def get_chat_member(self, chat_id: int, user_id: int) -> ChatMember | None:
         _ = chat_id
         _ = user_id
-        return {"status": "administrator", "can_manage_topics": True}
+        return ChatMember(status="administrator", can_manage_topics=True)
 
-    async def create_forum_topic(
-        self, chat_id: int, name: str
-    ) -> dict[str, Any] | None:
+    async def create_forum_topic(self, chat_id: int, name: str) -> ForumTopic | None:
         _ = chat_id
         _ = name
-        return {"message_thread_id": 1}
+        return ForumTopic(message_thread_id=1)
 
     async def edit_forum_topic(
         self, chat_id: int, message_thread_id: int, name: str
@@ -539,10 +543,10 @@ async def test_telegram_transport_edit_wait_false_returns_ref() -> None:
             offset: int | None,
             timeout_s: int = 50,
             allowed_updates: list[str] | None = None,
-        ) -> list[dict[str, Any]] | None:
+        ) -> list[Update] | None:
             return None
 
-        async def get_file(self, file_id: str) -> dict[str, Any] | None:
+        async def get_file(self, file_id: str) -> File | None:
             _ = file_id
             return None
 
@@ -562,7 +566,7 @@ async def test_telegram_transport_edit_wait_false_returns_ref() -> None:
             reply_markup: dict | None = None,
             *,
             replace_message_id: int | None = None,
-        ) -> dict | None:
+        ) -> Message | None:
             _ = reply_markup
             return None
 
@@ -575,7 +579,7 @@ async def test_telegram_transport_edit_wait_false_returns_ref() -> None:
             message_thread_id: int | None = None,
             disable_notification: bool | None = False,
             caption: str | None = None,
-        ) -> dict | None:
+        ) -> Message | None:
             _ = (
                 chat_id,
                 filename,
@@ -597,7 +601,7 @@ async def test_telegram_transport_edit_wait_false_returns_ref() -> None:
             reply_markup: dict | None = None,
             *,
             wait: bool = True,
-        ) -> dict | None:
+        ) -> Message | None:
             self.edit_calls.append(
                 {
                     "chat_id": chat_id,
@@ -611,7 +615,7 @@ async def test_telegram_transport_edit_wait_false_returns_ref() -> None:
             )
             if not wait:
                 return None
-            return {"message_id": message_id}
+            return Message(message_id=message_id)
 
         async def delete_message(
             self,
@@ -629,7 +633,7 @@ async def test_telegram_transport_edit_wait_false_returns_ref() -> None:
         ) -> bool:
             return False
 
-        async def get_me(self) -> dict[str, Any] | None:
+        async def get_me(self) -> User | None:
             return None
 
         async def close(self) -> None:
@@ -778,9 +782,9 @@ async def test_handle_file_put_writes_file(tmp_path: Path) -> None:
     payload = b"hello"
 
     class _FileBot(_FakeBot):
-        async def get_file(self, file_id: str) -> dict[str, Any] | None:
+        async def get_file(self, file_id: str) -> File | None:
             _ = file_id
-            return {"file_path": "files/hello.txt"}
+            return File(file_path="files/hello.txt")
 
         async def download_file(self, file_path: str) -> bytes | None:
             _ = file_path
@@ -811,7 +815,7 @@ async def test_handle_file_put_writes_file(tmp_path: Path) -> None:
         chat_id=123,
         startup_msg="",
         exec_cfg=exec_cfg,
-        files=TelegramFilesConfig(enabled=True),
+        files=TelegramFilesSettings(enabled=True),
     )
     msg = TelegramIncomingMessage(
         transport="telegram",
@@ -876,9 +880,9 @@ async def test_handle_file_get_sends_document_for_allowed_user(
         chat_id=123,
         startup_msg="",
         exec_cfg=exec_cfg,
-        files=TelegramFilesConfig(
+        files=TelegramFilesSettings(
             enabled=True,
-            allowed_user_ids=frozenset({42}),
+            allowed_user_ids=[42],
         ),
     )
     msg = TelegramIncomingMessage(
@@ -1006,7 +1010,7 @@ def test_topic_title_projects_scope_includes_project() -> None:
     transport = _FakeTransport()
     cfg = replace(
         _make_cfg(transport),
-        topics=bridge.TelegramTopicsConfig(
+        topics=TelegramTopicsSettings(
             enabled=True,
             scope="projects",
         ),
@@ -1277,7 +1281,7 @@ async def test_run_main_loop_persists_topic_sessions_in_project_scope(
         chat_id=123,
         startup_msg="",
         exec_cfg=exec_cfg,
-        topics=bridge.TelegramTopicsConfig(
+        topics=TelegramTopicsSettings(
             enabled=True,
             scope="projects",
         ),
@@ -1363,11 +1367,11 @@ async def test_run_main_loop_batches_media_group_upload(
     }
 
     class _MediaBot(_FakeBot):
-        async def get_file(self, file_id: str) -> dict[str, Any] | None:
+        async def get_file(self, file_id: str) -> File | None:
             file_path = file_map.get(file_id)
             if file_path is None:
                 return None
-            return {"file_path": file_path}
+            return File(file_path=file_path)
 
         async def download_file(self, file_path: str) -> bytes | None:
             return payloads.get(file_path)
@@ -1397,7 +1401,7 @@ async def test_run_main_loop_batches_media_group_upload(
         chat_id=123,
         startup_msg="",
         exec_cfg=exec_cfg,
-        files=TelegramFilesConfig(enabled=True, auto_put=True),
+        files=TelegramFilesSettings(enabled=True, auto_put=True),
     )
     msg1 = TelegramIncomingMessage(
         transport="telegram",

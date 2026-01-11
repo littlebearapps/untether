@@ -2,28 +2,31 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
-from typing import cast
 
 import anyio
 
 from ..backends import EngineBackend
-from ..runner_bridge import ExecBridgeConfig
 from ..logging import get_logger
-
-from ..transports import SetupResult, TransportBackend
+from ..runner_bridge import ExecBridgeConfig
+from ..settings import TelegramTransportSettings
 from ..transport_runtime import TransportRuntime
+from ..transports import SetupResult, TransportBackend
 from .bridge import (
     TelegramBridgeConfig,
     TelegramPresenter,
     TelegramTransport,
-    TelegramFilesConfig,
-    TelegramTopicsConfig,
     run_main_loop,
 )
 from .client import TelegramClient
 from .onboarding import check_setup, interactive_setup
 
 logger = get_logger(__name__)
+
+
+def _expect_transport_settings(transport_config: object) -> TelegramTransportSettings:
+    if isinstance(transport_config, TelegramTransportSettings):
+        return transport_config
+    raise TypeError("transport_config must be TelegramTransportSettings")
 
 
 def _build_startup_message(
@@ -33,9 +36,20 @@ def _build_startup_message(
 ) -> str:
     available_engines = list(runtime.available_engine_ids())
     missing_engines = list(runtime.missing_engine_ids())
+    misconfigured_engines = list(runtime.engine_ids_with_status("bad_config"))
+    failed_engines = list(runtime.engine_ids_with_status("load_error"))
+
     engine_list = ", ".join(available_engines) if available_engines else "none"
+
+    notes: list[str] = []
     if missing_engines:
-        engine_list = f"{engine_list} (not installed: {', '.join(missing_engines)})"
+        notes.append(f"not installed: {', '.join(missing_engines)}")
+    if misconfigured_engines:
+        notes.append(f"misconfigured: {', '.join(misconfigured_engines)}")
+    if failed_engines:
+        notes.append(f"failed to load: {', '.join(failed_engines)}")
+    if notes:
+        engine_list = f"{engine_list} ({'; '.join(notes)})"
     project_aliases = sorted(
         {alias for alias in runtime.project_aliases()}, key=str.lower
     )
@@ -46,34 +60,6 @@ def _build_startup_message(
         f"agents: `{engine_list}`  \n"
         f"projects: `{project_list}`  \n"
         f"working in: `{startup_pwd}`"
-    )
-
-
-def _build_topics_config(transport_config: dict[str, object]) -> TelegramTopicsConfig:
-    raw = cast(dict[str, object], transport_config.get("topics", {}))
-    return TelegramTopicsConfig(
-        enabled=cast(bool, raw.get("enabled", False)),
-        scope=cast(str, raw.get("scope", "auto")),
-    )
-
-
-def _build_files_config(transport_config: dict[str, object]) -> TelegramFilesConfig:
-    defaults = TelegramFilesConfig()
-    raw = cast(dict[str, object], transport_config.get("files", {}))
-    return TelegramFilesConfig(
-        enabled=cast(bool, raw.get("enabled", defaults.enabled)),
-        auto_put=cast(bool, raw.get("auto_put", defaults.auto_put)),
-        uploads_dir=cast(str, raw.get("uploads_dir", defaults.uploads_dir)),
-        max_upload_bytes=defaults.max_upload_bytes,
-        max_download_bytes=defaults.max_download_bytes,
-        allowed_user_ids=frozenset(
-            cast(
-                list[int], raw.get("allowed_user_ids", list(defaults.allowed_user_ids))
-            )
-        ),
-        deny_globs=tuple(
-            cast(list[str], raw.get("deny_globs", list(defaults.deny_globs)))
-        ),
     )
 
 
@@ -92,23 +78,23 @@ class TelegramBackend(TransportBackend):
     def interactive_setup(self, *, force: bool) -> bool:
         return interactive_setup(force=force)
 
-    def lock_token(
-        self, *, transport_config: dict[str, object], config_path: Path
-    ) -> str | None:
+    def lock_token(self, *, transport_config: object, config_path: Path) -> str | None:
         _ = config_path
-        return cast(str, transport_config.get("bot_token"))
+        settings = _expect_transport_settings(transport_config)
+        return settings.bot_token
 
     def build_and_run(
         self,
         *,
-        transport_config: dict[str, object],
+        transport_config: object,
         config_path: Path,
         runtime: TransportRuntime,
         final_notify: bool,
         default_engine_override: str | None,
     ) -> None:
-        token = cast(str, transport_config.get("bot_token"))
-        chat_id = cast(int, transport_config.get("chat_id"))
+        settings = _expect_transport_settings(transport_config)
+        token = settings.bot_token
+        chat_id = settings.chat_id
         startup_msg = _build_startup_message(
             runtime,
             startup_pwd=os.getcwd(),
@@ -121,19 +107,16 @@ class TelegramBackend(TransportBackend):
             presenter=presenter,
             final_notify=final_notify,
         )
-        topics = _build_topics_config(transport_config)
-        files = _build_files_config(transport_config)
         cfg = TelegramBridgeConfig(
             bot=bot,
             runtime=runtime,
             chat_id=chat_id,
             startup_msg=startup_msg,
             exec_cfg=exec_cfg,
-            voice_transcription=cast(
-                bool, transport_config.get("voice_transcription", False)
-            ),
-            topics=topics,
-            files=files,
+            voice_transcription=settings.voice_transcription,
+            voice_max_bytes=int(settings.voice_max_bytes),
+            topics=settings.topics,
+            files=settings.files,
         )
 
         async def run_loop() -> None:
@@ -142,7 +125,7 @@ class TelegramBackend(TransportBackend):
                 watch_config=runtime.watch_config,
                 default_engine_override=default_engine_override,
                 transport_id=self.id,
-                transport_config=transport_config,
+                transport_config=settings,
             )
 
         anyio.run(run_loop)

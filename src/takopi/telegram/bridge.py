@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import cast
 
 from ..logging import get_logger
@@ -12,6 +12,11 @@ from ..transport import MessageRef, RenderedMessage, SendOptions, Transport
 from ..transport_runtime import TransportRuntime
 from ..context import RunContext
 from ..model import ResumeToken
+from ..settings import (
+    TelegramFilesSettings,
+    TelegramTopicsSettings,
+    TelegramTransportSettings,
+)
 from .client import BotClient
 from .render import prepare_telegram
 from .types import TelegramCallbackQuery, TelegramIncomingMessage
@@ -20,8 +25,6 @@ logger = get_logger(__name__)
 
 __all__ = [
     "TelegramBridgeConfig",
-    "TelegramFilesConfig",
-    "TelegramTopicsConfig",
     "TelegramPresenter",
     "TelegramTransport",
     "build_bot_commands",
@@ -86,29 +89,6 @@ def _is_cancelled_label(label: str) -> bool:
 
 
 @dataclass(frozen=True)
-class TelegramFilesConfig:
-    enabled: bool = False
-    auto_put: bool = True
-    uploads_dir: str = "incoming"
-    max_upload_bytes: int = 20 * 1024 * 1024
-    max_download_bytes: int = 50 * 1024 * 1024
-    allowed_user_ids: frozenset[int] = frozenset()
-    deny_globs: tuple[str, ...] = (
-        ".git/**",
-        ".env",
-        ".envrc",
-        "**/*.pem",
-        "**/.ssh/**",
-    )
-
-
-@dataclass(frozen=True)
-class TelegramTopicsConfig:
-    enabled: bool = False
-    scope: str = "auto"
-
-
-@dataclass(frozen=True)
 class TelegramBridgeConfig:
     bot: BotClient
     runtime: TransportRuntime
@@ -116,9 +96,10 @@ class TelegramBridgeConfig:
     startup_msg: str
     exec_cfg: ExecBridgeConfig
     voice_transcription: bool = False
-    files: TelegramFilesConfig = TelegramFilesConfig()
+    voice_max_bytes: int = 10 * 1024 * 1024
+    files: TelegramFilesSettings = field(default_factory=TelegramFilesSettings)
     chat_ids: tuple[int, ...] | None = None
-    topics: TelegramTopicsConfig = TelegramTopicsConfig()
+    topics: TelegramTopicsSettings = field(default_factory=TelegramTopicsSettings)
 
 
 class TelegramTransport:
@@ -166,7 +147,7 @@ class TelegramTransport:
         )
         if sent is None:
             return None
-        message_id = cast(int, sent["message_id"])
+        message_id = sent.message_id
         return MessageRef(
             channel_id=chat_id,
             message_id=message_id,
@@ -192,7 +173,7 @@ class TelegramTransport:
         )
         if edited is None:
             return ref if not wait else None
-        message_id = cast(int, edited.get("message_id", message_id))
+        message_id = edited.message_id
         return MessageRef(
             channel_id=chat_id,
             message_id=message_id,
@@ -287,7 +268,7 @@ async def run_main_loop(
     watch_config: bool | None = None,
     default_engine_override: str | None = None,
     transport_id: str | None = None,
-    transport_config: dict[str, object] | None = None,
+    transport_config: TelegramTransportSettings | None = None,
 ) -> None:
     from .loop import run_main_loop as _run_main_loop
 
