@@ -5,6 +5,7 @@ Community and third-party plugins that extend takopi.
 | Plugin | Type | Description |
 |--------|------|-------------|
 | [takopi-matrix](https://github.com/Zorro909/takopi-matrix) | Transport | Matrix protocol backend with E2EE, voice transcription, and multi-room support |
+| [takopi-scripts](https://github.com/asianviking/takopi-scripts) | Command | Dynamic script runner for executing Python scripts via `/run` command |
 
 ## See also
 
