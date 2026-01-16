@@ -131,6 +131,15 @@ class JsonlRunState:
     note_seq: int = 0
 
 
+@dataclass(slots=True)
+class JsonlStreamState:
+    expected_session: ResumeToken | None
+    found_session: ResumeToken | None = None
+    did_emit_completed: bool = False
+    ignored_after_completed: bool = False
+    jsonl_seq: int = 0
+
+
 class JsonlSubprocessRunner(BaseRunner):
     def get_logger(self) -> Any:
         return getattr(self, "logger", get_logger(__name__))
@@ -340,6 +349,250 @@ class JsonlSubprocessRunner(BaseRunner):
             raise RuntimeError(message)
         return found_session, False
 
+    async def _send_payload(
+        self,
+        proc: Any,
+        payload: bytes | None,
+        *,
+        logger: Any,
+        resume: ResumeToken | None,
+    ) -> None:
+        if payload is not None:
+            assert proc.stdin is not None
+            await proc.stdin.send(payload)
+            await proc.stdin.aclose()
+            logger.info(
+                "subprocess.stdin.send",
+                pid=proc.pid,
+                resume=resume.value if resume else None,
+                bytes=len(payload),
+            )
+        elif proc.stdin is not None:
+            await proc.stdin.aclose()
+
+    def _decode_jsonl_events(
+        self,
+        *,
+        raw_line: bytes,
+        line: bytes,
+        jsonl_seq: int,
+        state: Any,
+        resume: ResumeToken | None,
+        found_session: ResumeToken | None,
+        logger: Any,
+        pid: int,
+    ) -> list[TakopiEvent]:
+        raw_text = raw_line.decode("utf-8", errors="replace")
+        line_text = line.decode("utf-8", errors="replace")
+        try:
+            decoded = self.decode_jsonl(line=line)
+        except Exception as exc:  # noqa: BLE001
+            log_pipeline(
+                logger,
+                "jsonl.parse.error",
+                pid=pid,
+                jsonl_seq=jsonl_seq,
+                line=line_text,
+                error=str(exc),
+            )
+            return self.decode_error_events(
+                raw=raw_text,
+                line=line_text,
+                error=exc,
+                state=state,
+            )
+        if decoded is None:
+            log_pipeline(
+                logger,
+                "jsonl.parse.invalid",
+                pid=pid,
+                jsonl_seq=jsonl_seq,
+                line=line_text,
+            )
+            logger.info(
+                "runner.jsonl.invalid",
+                pid=pid,
+                jsonl_seq=jsonl_seq,
+                line=line_text,
+            )
+            return self.invalid_json_events(
+                raw=raw_text,
+                line=line_text,
+                state=state,
+            )
+        try:
+            return self.translate(
+                decoded,
+                state=state,
+                resume=resume,
+                found_session=found_session,
+            )
+        except Exception as exc:  # noqa: BLE001
+            log_pipeline(
+                logger,
+                "runner.translate.error",
+                pid=pid,
+                jsonl_seq=jsonl_seq,
+                error=str(exc),
+            )
+            return self.translate_error_events(
+                data=decoded,
+                error=exc,
+                state=state,
+            )
+
+    def _process_started_event(
+        self,
+        event: StartedEvent,
+        *,
+        expected_session: ResumeToken | None,
+        found_session: ResumeToken | None,
+        logger: Any,
+        pid: int,
+        jsonl_seq: int,
+    ) -> tuple[ResumeToken | None, bool]:
+        prior_found = found_session
+        try:
+            found_session, emit = self.handle_started_event(
+                event,
+                expected_session=expected_session,
+                found_session=found_session,
+            )
+        except Exception as exc:
+            log_pipeline(
+                logger,
+                "runner.started.error",
+                pid=pid,
+                jsonl_seq=jsonl_seq,
+                resume=event.resume.value,
+                expected_session=expected_session.value if expected_session else None,
+                found_session=prior_found.value if prior_found else None,
+                error=str(exc),
+            )
+            raise
+        if prior_found is None and emit:
+            reason = (
+                "matched_expected" if expected_session is not None else "first_seen"
+            )
+        elif prior_found is not None and not emit:
+            reason = "duplicate"
+        else:
+            reason = "unknown"
+        log_pipeline(
+            logger,
+            "runner.started.seen",
+            pid=pid,
+            jsonl_seq=jsonl_seq,
+            resume=event.resume.value,
+            expected_session=expected_session.value if expected_session else None,
+            found_session=found_session.value if found_session else None,
+            emit=emit,
+            reason=reason,
+        )
+        return found_session, emit
+
+    def _log_completed_event(
+        self,
+        *,
+        logger: Any,
+        pid: int,
+        event: CompletedEvent,
+        jsonl_seq: int | None = None,
+        source: str | None = None,
+    ) -> None:
+        payload: dict[str, Any] = {
+            "pid": pid,
+            "ok": event.ok,
+            "has_answer": bool(event.answer.strip()),
+            "emit": True,
+        }
+        if jsonl_seq is not None:
+            payload["jsonl_seq"] = jsonl_seq
+        if source is not None:
+            payload["source"] = source
+        log_pipeline(logger, "runner.completed.seen", **payload)
+
+    def _handle_jsonl_line(
+        self,
+        *,
+        raw_line: bytes,
+        stream: JsonlStreamState,
+        state: Any,
+        resume: ResumeToken | None,
+        logger: Any,
+        pid: int,
+    ) -> list[TakopiEvent]:
+        if stream.did_emit_completed:
+            if not stream.ignored_after_completed:
+                log_pipeline(
+                    logger,
+                    "runner.drop.jsonl_after_completed",
+                    pid=pid,
+                )
+                stream.ignored_after_completed = True
+            return []
+        line = raw_line.strip()
+        if not line:
+            return []
+        stream.jsonl_seq += 1
+        seq = stream.jsonl_seq
+        events = self._decode_jsonl_events(
+            raw_line=raw_line,
+            line=line,
+            jsonl_seq=seq,
+            state=state,
+            resume=resume,
+            found_session=stream.found_session,
+            logger=logger,
+            pid=pid,
+        )
+        output: list[TakopiEvent] = []
+        for evt in events:
+            if isinstance(evt, StartedEvent):
+                stream.found_session, emit = self._process_started_event(
+                    evt,
+                    expected_session=stream.expected_session,
+                    found_session=stream.found_session,
+                    logger=logger,
+                    pid=pid,
+                    jsonl_seq=seq,
+                )
+                if not emit:
+                    continue
+            if isinstance(evt, CompletedEvent):
+                stream.did_emit_completed = True
+                self._log_completed_event(
+                    logger=logger,
+                    pid=pid,
+                    event=evt,
+                    jsonl_seq=seq,
+                )
+                output.append(evt)
+                break
+            output.append(evt)
+        return output
+
+    async def _iter_jsonl_events(
+        self,
+        *,
+        stdout: Any,
+        stream: JsonlStreamState,
+        state: Any,
+        resume: ResumeToken | None,
+        logger: Any,
+        pid: int,
+    ) -> AsyncIterator[TakopiEvent]:
+        async for raw_line in self.iter_json_lines(stdout):
+            for evt in self._handle_jsonl_line(
+                raw_line=raw_line,
+                stream=stream,
+                state=state,
+                resume=resume,
+                logger=logger,
+                pid=pid,
+            ):
+                yield evt
+
     async def run_impl(
         self, prompt: str, resume: ResumeToken | None
     ) -> AsyncIterator[TakopiEvent]:
@@ -381,25 +634,10 @@ class JsonlSubprocessRunner(BaseRunner):
                 pid=proc.pid,
             )
 
-            if payload is not None:
-                assert proc.stdin is not None
-                await proc.stdin.send(payload)
-                await proc.stdin.aclose()
-                logger.info(
-                    "subprocess.stdin.send",
-                    pid=proc.pid,
-                    resume=resume.value if resume else None,
-                    bytes=len(payload),
-                )
-            elif proc.stdin is not None:
-                await proc.stdin.aclose()
+            await self._send_payload(proc, payload, logger=logger, resume=resume)
 
             rc: int | None = None
-            expected_session: ResumeToken | None = resume
-            found_session: ResumeToken | None = None
-            did_emit_completed = False
-            ignored_after_completed = False
-            jsonl_seq = 0
+            stream = JsonlStreamState(expected_session=resume)
 
             async with anyio.create_task_group() as tg:
                 tg.start_soon(
@@ -408,154 +646,22 @@ class JsonlSubprocessRunner(BaseRunner):
                     logger,
                     tag,
                 )
-                async for raw_line in self.iter_json_lines(proc.stdout):
-                    if did_emit_completed:
-                        if not ignored_after_completed:
-                            log_pipeline(
-                                logger,
-                                "runner.drop.jsonl_after_completed",
-                                pid=proc.pid,
-                            )
-                            ignored_after_completed = True
-                        continue
-                    line = raw_line.strip()
-                    if not line:
-                        continue
-                    jsonl_seq += 1
-                    seq = jsonl_seq
-                    raw_text = raw_line.decode("utf-8", errors="replace")
-                    line_text = line.decode("utf-8", errors="replace")
-                    try:
-                        decoded = self.decode_jsonl(line=line)
-                    except Exception as exc:  # noqa: BLE001
-                        log_pipeline(
-                            logger,
-                            "jsonl.parse.error",
-                            pid=proc.pid,
-                            jsonl_seq=seq,
-                            line=line_text,
-                            error=str(exc),
-                        )
-                        events = self.decode_error_events(
-                            raw=raw_text,
-                            line=line_text,
-                            error=exc,
-                            state=state,
-                        )
-                    else:
-                        if decoded is None:
-                            log_pipeline(
-                                logger,
-                                "jsonl.parse.invalid",
-                                pid=proc.pid,
-                                jsonl_seq=seq,
-                                line=line_text,
-                            )
-                            logger.info(
-                                "runner.jsonl.invalid",
-                                pid=proc.pid,
-                                jsonl_seq=seq,
-                                line=line_text,
-                            )
-                            events = self.invalid_json_events(
-                                raw=raw_text,
-                                line=line_text,
-                                state=state,
-                            )
-                        else:
-                            try:
-                                events = self.translate(
-                                    decoded,
-                                    state=state,
-                                    resume=resume,
-                                    found_session=found_session,
-                                )
-                            except Exception as exc:  # noqa: BLE001
-                                log_pipeline(
-                                    logger,
-                                    "runner.translate.error",
-                                    pid=proc.pid,
-                                    jsonl_seq=seq,
-                                    error=str(exc),
-                                )
-                                events = self.translate_error_events(
-                                    data=decoded,
-                                    error=exc,
-                                    state=state,
-                                )
-
-                    for evt in events:
-                        if isinstance(evt, StartedEvent):
-                            prior_found = found_session
-                            try:
-                                found_session, emit = self.handle_started_event(
-                                    evt,
-                                    expected_session=expected_session,
-                                    found_session=found_session,
-                                )
-                            except Exception as exc:
-                                log_pipeline(
-                                    logger,
-                                    "runner.started.error",
-                                    pid=proc.pid,
-                                    jsonl_seq=seq,
-                                    resume=evt.resume.value,
-                                    expected_session=expected_session.value
-                                    if expected_session
-                                    else None,
-                                    found_session=prior_found.value
-                                    if prior_found
-                                    else None,
-                                    error=str(exc),
-                                )
-                                raise
-                            if prior_found is None and emit:
-                                reason = (
-                                    "matched_expected"
-                                    if expected_session is not None
-                                    else "first_seen"
-                                )
-                            elif prior_found is not None and not emit:
-                                reason = "duplicate"
-                            else:
-                                reason = "unknown"
-                            log_pipeline(
-                                logger,
-                                "runner.started.seen",
-                                pid=proc.pid,
-                                jsonl_seq=seq,
-                                resume=evt.resume.value,
-                                expected_session=expected_session.value
-                                if expected_session
-                                else None,
-                                found_session=found_session.value
-                                if found_session
-                                else None,
-                                emit=emit,
-                                reason=reason,
-                            )
-                            if not emit:
-                                continue
-                        if isinstance(evt, CompletedEvent):
-                            did_emit_completed = True
-                            log_pipeline(
-                                logger,
-                                "runner.completed.seen",
-                                pid=proc.pid,
-                                jsonl_seq=seq,
-                                ok=evt.ok,
-                                has_answer=bool(evt.answer.strip()),
-                                emit=True,
-                            )
-                            yield evt
-                            break
-                        yield evt
+                async for evt in self._iter_jsonl_events(
+                    stdout=proc.stdout,
+                    stream=stream,
+                    state=state,
+                    resume=resume,
+                    logger=logger,
+                    pid=proc.pid,
+                ):
+                    yield evt
 
                 rc = await proc.wait()
 
             logger.info("subprocess.exit", pid=proc.pid, rc=rc)
-            if did_emit_completed:
+            if stream.did_emit_completed:
                 return
+            found_session = stream.found_session
             if rc is not None and rc != 0:
                 events = self.process_error_events(
                     rc,
@@ -565,13 +671,10 @@ class JsonlSubprocessRunner(BaseRunner):
                 )
                 for evt in events:
                     if isinstance(evt, CompletedEvent):
-                        log_pipeline(
-                            logger,
-                            "runner.completed.seen",
+                        self._log_completed_event(
+                            logger=logger,
                             pid=proc.pid,
-                            ok=evt.ok,
-                            has_answer=bool(evt.answer.strip()),
-                            emit=True,
+                            event=evt,
                             source="process_error",
                         )
                     yield evt
@@ -584,13 +687,10 @@ class JsonlSubprocessRunner(BaseRunner):
             )
             for evt in events:
                 if isinstance(evt, CompletedEvent):
-                    log_pipeline(
-                        logger,
-                        "runner.completed.seen",
+                    self._log_completed_event(
+                        logger=logger,
                         pid=proc.pid,
-                        ok=evt.ok,
-                        has_answer=bool(evt.answer.strip()),
-                        emit=True,
+                        event=evt,
                         source="stream_end",
                     )
                 yield evt
