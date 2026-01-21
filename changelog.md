@@ -1,5 +1,14 @@
 # changelog
 
+## unreleased
+
+### changes
+
+- route telegram callback queries to command backends [#116](https://github.com/banteg/takopi/issues/116)
+  - callback data format: `command_id:args...` routes to registered command plugins
+  - extracts `message_thread_id` from callback for proper topic context
+  - enables plugins to build interactive UX with inline keyboards
+
 ## v0.22.1 (2026-02-10)
 
 ### fixes
