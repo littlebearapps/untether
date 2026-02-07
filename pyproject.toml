@@ -48,6 +48,9 @@ pi = "takopi.runners.pi:BACKEND"
 [project.entry-points."takopi.transport_backends"]
 telegram = "takopi.telegram.backend:BACKEND"
 
+[project.entry-points."takopi.command_backends"]
+claude_control = "takopi.telegram.commands.claude_control:BACKEND"
+
 [build-system]
 requires = ["uv_build>=0.9.18,<0.10.0"]
 build-backend = "uv_build"

@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import asyncio
+import json
 import os
 import re
 import shutil
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -12,7 +15,7 @@ import msgspec
 from ..backends import EngineBackend, EngineConfig
 from ..events import EventFactory
 from ..logging import get_logger
-from ..model import Action, ActionKind, EngineId, ResumeToken, TakopiEvent
+from ..model import Action, ActionKind, EngineId, ResumeToken, StartedEvent, TakopiEvent
 from ..runner import JsonlSubprocessRunner, ResumeTokenMixin, Runner
 from .run_options import get_run_options
 from ..schemas import claude as claude_schema
@@ -27,6 +30,14 @@ _RESUME_RE = re.compile(
     r"(?im)^\s*`?claude\s+(?:--resume|-r)\s+(?P<token>[^`\s]+)`?\s*$"
 )
 
+# Phase 2: Global registry for active ClaudeRunner instances
+# Keyed by session_id, stores (runner_instance, timestamp)
+_ACTIVE_RUNNERS: dict[str, tuple["ClaudeRunner", float]] = {}
+
+# Phase 2: Global registry mapping request_id -> session_id
+# This allows callbacks to find the right runner instance
+_REQUEST_TO_SESSION: dict[str, str] = {}
+
 
 @dataclass(slots=True)
 class ClaudeStreamState:
@@ -34,6 +45,8 @@ class ClaudeStreamState:
     pending_actions: dict[str, Action] = field(default_factory=dict)
     last_assistant_text: str | None = None
     note_seq: int = 0
+    # Phase 2: Control request tracking
+    pending_control_requests: dict[str, tuple[claude_schema.StreamControlRequest, float]] = field(default_factory=dict)
 
 
 def _normalize_tool_result(content: Any) -> str:
@@ -274,6 +287,101 @@ def translate_claude_event(
                     usage=usage or None,
                 )
             ]
+        case claude_schema.StreamControlRequest(request_id=request_id, request=request):
+            # Phase 2: Interactive control request with inline keyboard
+            request_type = type(request).__name__.replace("Control", "").replace("Request", "")
+
+            # Extract details based on request type
+            details = ""
+            if isinstance(request, claude_schema.ControlCanUseToolRequest):
+                tool_name = getattr(request, "tool_name", "unknown")
+                tool_input = getattr(request, "input", {})
+                details = f"tool: {tool_name}"
+                # Include key input parameters if available
+                if tool_input:
+                    key_params = []
+                    for key in ["file_path", "path", "command", "pattern"]:
+                        if key in tool_input:
+                            value = str(tool_input[key])
+                            if len(value) > 50:
+                                value = value[:47] + "..."
+                            key_params.append(f"{key}={value}")
+                    if key_params:
+                        details += f" ({', '.join(key_params)})"
+            elif isinstance(request, claude_schema.ControlSetPermissionModeRequest):
+                mode = getattr(request, "mode", "unknown")
+                details = f"mode: {mode}"
+            elif isinstance(request, claude_schema.ControlHookCallbackRequest):
+                callback_id = getattr(request, "callback_id", "unknown")
+                details = f"callback: {callback_id}"
+
+            warning_text = f"⚠️ Permission Request [{request_type}]"
+            if details:
+                warning_text += f" - {details}"
+
+            # Store in pending requests with timestamp
+            state.pending_control_requests[request_id] = (event, time.time())
+
+            # Phase 2: Register request_id -> session_id mapping for callback routing
+            if factory.resume:
+                session_id = factory.resume.value
+                _REQUEST_TO_SESSION[request_id] = session_id
+                logger.debug(
+                    "control_request.registered",
+                    request_id=request_id,
+                    session_id=session_id,
+                )
+
+            # Clean up expired requests (older than timeout)
+            current_time = time.time()
+            expired = [
+                rid
+                for rid, (_, timestamp) in state.pending_control_requests.items()
+                if current_time - timestamp > 300.0  # 5 minutes
+            ]
+            for rid in expired:
+                del state.pending_control_requests[rid]
+                logger.warning("control_request.expired", request_id=rid)
+
+            # Check max pending limit
+            if len(state.pending_control_requests) > 100:
+                logger.warning(
+                    "control_request.max_pending",
+                    count=len(state.pending_control_requests),
+                )
+
+            state.note_seq += 1
+            action_id = f"claude.control.{state.note_seq}"
+
+            # Include inline keyboard data in detail
+            detail: dict[str, Any] = {
+                "request_id": request_id,
+                "request_type": request_type,
+                "inline_keyboard": {
+                    "buttons": [
+                        [
+                            {
+                                "text": "✅ Approve",
+                                "callback_data": f"claude_control:approve:{request_id}",
+                            },
+                            {
+                                "text": "❌ Deny",
+                                "callback_data": f"claude_control:deny:{request_id}",
+                            },
+                        ]
+                    ]
+                },
+            }
+
+            return [
+                factory.action_completed(
+                    action_id=action_id,
+                    kind="warning",  # Use warning kind for visibility
+                    title=warning_text,
+                    ok=True,
+                    detail=detail,
+                )
+            ]
         case _:
             return []
 
@@ -291,10 +399,89 @@ class ClaudeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
     session_title: str = "claude"
     logger = logger
 
+    # Phase 2: Control channel support
+    supports_control_channel: bool = True
+    _proc_stdin: Any = None
+    _control_timeout_seconds: float = 300.0  # 5 minutes
+    _max_pending_control_requests: int = 100
+
     def format_resume(self, token: ResumeToken) -> str:
         if token.engine != ENGINE:
             raise RuntimeError(f"resume token is for engine {token.engine!r}")
         return f"`claude --resume {token.value}`"
+
+    async def _send_payload(
+        self,
+        proc: Any,
+        payload: bytes | None,
+        *,
+        logger: Any,
+        resume: ResumeToken | None,
+    ) -> None:
+        """Override to keep stdin open for control responses."""
+        if payload is not None:
+            assert proc.stdin is not None
+            await proc.stdin.send(payload)
+            # Phase 2: Store stdin reference and DON'T close it
+            if self.supports_control_channel:
+                self._proc_stdin = proc.stdin
+                logger.info(
+                    "subprocess.stdin.kept_open",
+                    pid=proc.pid,
+                    resume=resume.value if resume else None,
+                    payload_len=len(payload),
+                )
+            else:
+                await proc.stdin.aclose()
+                logger.info(
+                    "subprocess.stdin.send",
+                    pid=proc.pid,
+                    resume=resume.value if resume else None,
+                    payload_len=len(payload),
+                )
+        else:
+            # No payload, but still keep stdin open for control channel
+            if self.supports_control_channel:
+                self._proc_stdin = proc.stdin
+
+    async def write_control_response(
+        self, request_id: str, approved: bool
+    ) -> None:
+        """Write a control response to the Claude Code process stdin."""
+        if self._proc_stdin is None:
+            logger.warning(
+                "control_response.no_stdin",
+                request_id=request_id,
+                approved=approved,
+            )
+            return
+
+        response = {
+            "type": "control_response",
+            "response": {
+                "subtype": "success",
+                "request_id": request_id,
+                "response": {"approved": approved},
+            },
+        }
+
+        jsonl_line = json.dumps(response) + "\n"
+        try:
+            await self._proc_stdin.send(jsonl_line.encode())
+            # Note: No flush method on AnyIO send stream
+            logger.info(
+                "control_response.sent",
+                request_id=request_id,
+                approved=approved,
+            )
+        except Exception as e:
+            logger.error(
+                "control_response.failed",
+                request_id=request_id,
+                approved=approved,
+                error=str(e),
+                error_type=e.__class__.__name__,
+            )
 
     def _build_args(self, prompt: str, resume: ResumeToken | None) -> list[str]:
         run_options = get_run_options()
@@ -353,7 +540,13 @@ class ClaudeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
         *,
         state: ClaudeStreamState,
     ) -> None:
-        pass
+        # Phase 2: Register this runner for control responses
+        if resume is not None and self.supports_control_channel:
+            _ACTIVE_RUNNERS[resume.value] = (self, time.time())
+            logger.debug(
+                "claude_runner.registered",
+                session_id=resume.value,
+            )
 
     def decode_jsonl(
         self,
@@ -402,12 +595,25 @@ class ClaudeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
         resume: ResumeToken | None,
         found_session: ResumeToken | None,
     ) -> list[TakopiEvent]:
-        return translate_claude_event(
+        events = translate_claude_event(
             data,
             title=self.session_title,
             state=state,
             factory=state.factory,
         )
+
+        # Phase 2: Register runner when we get a session_id
+        if self.supports_control_channel:
+            for evt in events:
+                if isinstance(evt, StartedEvent) and evt.resume:
+                    session_id = evt.resume.value
+                    _ACTIVE_RUNNERS[session_id] = (self, time.time())
+                    logger.debug(
+                        "claude_runner.registered",
+                        session_id=session_id,
+                    )
+
+        return events
 
     def process_error_events(
         self,
@@ -417,6 +623,12 @@ class ClaudeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
         found_session: ResumeToken | None,
         state: ClaudeStreamState,
     ) -> list[TakopiEvent]:
+        # Phase 2: Cleanup runner registration on error
+        session_id = found_session.value if found_session else (resume.value if resume else None)
+        if session_id and session_id in _ACTIVE_RUNNERS:
+            del _ACTIVE_RUNNERS[session_id]
+            logger.debug("claude_runner.unregistered", session_id=session_id)
+
         message = f"claude failed (rc={rc})."
         resume_for_completed = found_session or resume
         return [
@@ -434,6 +646,12 @@ class ClaudeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
         found_session: ResumeToken | None,
         state: ClaudeStreamState,
     ) -> list[TakopiEvent]:
+        # Phase 2: Cleanup runner registration
+        session_id = found_session.value if found_session else (resume.value if resume else None)
+        if session_id and session_id in _ACTIVE_RUNNERS:
+            del _ACTIVE_RUNNERS[session_id]
+            logger.debug("claude_runner.unregistered", session_id=session_id)
+
         if not found_session:
             message = "claude finished but no session_id was captured"
             resume_for_completed = resume
@@ -481,3 +699,69 @@ BACKEND = EngineBackend(
     build_runner=build_runner,
     install_cmd="npm install -g @anthropic-ai/claude-code",
 )
+
+
+# Phase 2: Public API for sending control responses
+async def send_claude_control_response(request_id: str, approved: bool) -> bool:
+    """Send a control response to an active Claude Code session.
+
+    Args:
+        request_id: The control request ID
+        approved: Whether to approve (True) or deny (False) the request
+
+    Returns:
+        True if the response was sent successfully, False if the request is not found
+    """
+    # Look up session_id from request_id
+    if request_id not in _REQUEST_TO_SESSION:
+        logger.warning(
+            "control_response.request_not_found",
+            request_id=request_id,
+        )
+        return False
+
+    session_id = _REQUEST_TO_SESSION[request_id]
+
+    if session_id not in _ACTIVE_RUNNERS:
+        logger.warning(
+            "control_response.no_active_session",
+            session_id=session_id,
+            request_id=request_id,
+        )
+        # Clean up stale mapping
+        del _REQUEST_TO_SESSION[request_id]
+        return False
+
+    runner, _ = _ACTIVE_RUNNERS[session_id]
+    await runner.write_control_response(request_id, approved)
+
+    # Clean up the mapping after use
+    del _REQUEST_TO_SESSION[request_id]
+
+    return True
+
+
+def get_active_claude_sessions() -> list[str]:
+    """Get list of active Claude Code session IDs."""
+    return list(_ACTIVE_RUNNERS.keys())
+
+
+def cleanup_expired_sessions(max_age_seconds: float = 3600.0) -> int:
+    """Clean up stale session registrations.
+
+    Args:
+        max_age_seconds: Maximum age of a session before cleanup (default: 1 hour)
+
+    Returns:
+        Number of sessions cleaned up
+    """
+    current_time = time.time()
+    expired = [
+        session_id
+        for session_id, (_, timestamp) in _ACTIVE_RUNNERS.items()
+        if current_time - timestamp > max_age_seconds
+    ]
+    for session_id in expired:
+        del _ACTIVE_RUNNERS[session_id]
+        logger.info("claude_runner.expired_cleanup", session_id=session_id)
+    return len(expired)
