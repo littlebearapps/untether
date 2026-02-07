@@ -174,6 +174,15 @@ def translate_claude_event(
     state: ClaudeStreamState,
     factory: EventFactory,
 ) -> list[TakopiEvent]:
+    # DEBUG: Log all incoming events to track flow
+    import structlog
+    logger = structlog.get_logger()
+    logger.info(
+        "translate_claude_event.received",
+        event_type=type(event).__name__,
+        event_dict=event.__dict__ if hasattr(event, "__dict__") else str(event)[:200],
+    )
+
     match event:
         case claude_schema.StreamSystemMessage(subtype=subtype):
             if subtype != "init":
