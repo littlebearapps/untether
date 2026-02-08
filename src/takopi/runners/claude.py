@@ -409,7 +409,7 @@ class ClaudeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
     logger = logger
 
     # Phase 2: Control channel support
-    supports_control_channel: bool = False
+    supports_control_channel: bool = True
     _proc_stdin: Any = None
     _control_timeout_seconds: float = 300.0  # 5 minutes
     _max_pending_control_requests: int = 100
