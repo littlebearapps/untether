@@ -452,6 +452,10 @@ class ClaudeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
             # No payload, but still keep stdin open for control channel
             if self.supports_control_channel:
                 self._proc_stdin = proc.stdin
+            else:
+                # Close stdin when not using control channel (match base class behavior)
+                if proc.stdin is not None:
+                    await proc.stdin.aclose()
 
     async def write_control_response(
         self, request_id: str, approved: bool
