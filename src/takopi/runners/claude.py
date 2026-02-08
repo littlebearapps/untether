@@ -1,25 +1,39 @@
+"""
+Updated ClaudeRunner with PTY support for control channel.
+
+This replaces the existing claude.py with PTY-based stdin handling
+to prevent deadlock when keeping stdin open for control responses.
+"""
+
 from __future__ import annotations
 
-import asyncio
 import json
 import os
+import pty
 import re
 import shutil
 import time
+import tty
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+import anyio
 import msgspec
 
 from ..backends import EngineBackend, EngineConfig
 from ..events import EventFactory
 from ..logging import get_logger
-from ..model import Action, ActionKind, EngineId, ResumeToken, StartedEvent, TakopiEvent
-from ..runner import JsonlSubprocessRunner, ResumeTokenMixin, Runner
+from ..model import Action, ActionKind, EngineId, ResumeToken, StartedEvent, TakopiEvent, CompletedEvent
+from ..runner import JsonlSubprocessRunner, ResumeTokenMixin, Runner, JsonlStreamState
 from .run_options import get_run_options
 from ..schemas import claude as claude_schema
 from .tool_actions import tool_input_path, tool_kind_and_title
+from ..utils.paths import get_run_base_dir
+from ..utils.streams import drain_stderr
+from ..utils.subprocess import manage_subprocess, terminate_process, wait_for_process, kill_process
+
+import subprocess as subprocess_module
 
 logger = get_logger(__name__)
 
@@ -176,8 +190,8 @@ def translate_claude_event(
 ) -> list[TakopiEvent]:
     # DEBUG: Log all incoming events to track flow
     import structlog
-    logger = structlog.get_logger()
-    logger.info(
+    debug_logger = structlog.get_logger()
+    debug_logger.info(
         "translate_claude_event.received",
         event_type=type(event).__name__,
         event_dict=event.__dict__ if hasattr(event, "__dict__") else str(event)[:200],
@@ -324,7 +338,7 @@ def translate_claude_event(
                 callback_id = getattr(request, "callback_id", "unknown")
                 details = f"callback: {callback_id}"
 
-            warning_text = f"⚠️ Permission Request [{request_type}]"
+            warning_text = f"Permission Request [{request_type}]"
             if details:
                 warning_text += f" - {details}"
 
@@ -370,11 +384,11 @@ def translate_claude_event(
                     "buttons": [
                         [
                             {
-                                "text": "✅ Approve",
+                                "text": "Approve",
                                 "callback_data": f"claude_control:approve:{request_id}",
                             },
                             {
-                                "text": "❌ Deny",
+                                "text": "Deny",
                                 "callback_data": f"claude_control:deny:{request_id}",
                             },
                         ]
@@ -408,9 +422,9 @@ class ClaudeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
     session_title: str = "claude"
     logger = logger
 
-    # Phase 2: Control channel support
+    # Phase 2: Control channel support via PTY
     supports_control_channel: bool = True
-    _proc_stdin: Any = None
+    _pty_master_fd: int | None = None
     _control_timeout_seconds: float = 300.0  # 5 minutes
     _max_pending_control_requests: int = 100
 
@@ -419,51 +433,13 @@ class ClaudeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
             raise RuntimeError(f"resume token is for engine {token.engine!r}")
         return f"`claude --resume {token.value}`"
 
-    async def _send_payload(
-        self,
-        proc: Any,
-        payload: bytes | None,
-        *,
-        logger: Any,
-        resume: ResumeToken | None,
-    ) -> None:
-        """Override to keep stdin open for control responses."""
-        if payload is not None:
-            assert proc.stdin is not None
-            await proc.stdin.send(payload)
-            # Phase 2: Store stdin reference and DON'T close it
-            if self.supports_control_channel:
-                self._proc_stdin = proc.stdin
-                logger.info(
-                    "subprocess.stdin.kept_open",
-                    pid=proc.pid,
-                    resume=resume.value if resume else None,
-                    payload_len=len(payload),
-                )
-            else:
-                await proc.stdin.aclose()
-                logger.info(
-                    "subprocess.stdin.send",
-                    pid=proc.pid,
-                    resume=resume.value if resume else None,
-                    payload_len=len(payload),
-                )
-        else:
-            # No payload, but still keep stdin open for control channel
-            if self.supports_control_channel:
-                self._proc_stdin = proc.stdin
-            else:
-                # Close stdin when not using control channel (match base class behavior)
-                if proc.stdin is not None:
-                    await proc.stdin.aclose()
-
     async def write_control_response(
         self, request_id: str, approved: bool
     ) -> None:
-        """Write a control response to the Claude Code process stdin."""
-        if self._proc_stdin is None:
+        """Write a control response to the Claude Code process via PTY."""
+        if self._pty_master_fd is None:
             logger.warning(
-                "control_response.no_stdin",
+                "control_response.no_pty",
                 request_id=request_id,
                 approved=approved,
             )
@@ -480,12 +456,13 @@ class ClaudeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
 
         jsonl_line = json.dumps(response) + "\n"
         try:
-            await self._proc_stdin.send(jsonl_line.encode())
-            # Note: No flush method on AnyIO send stream
+            # Use os.write for PTY (synchronous but fast for small writes)
+            os.write(self._pty_master_fd, jsonl_line.encode())
             logger.info(
                 "control_response.sent",
                 request_id=request_id,
                 approved=approved,
+                fd=self._pty_master_fd,
             )
         except Exception as e:
             logger.error(
@@ -683,6 +660,179 @@ class ClaudeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
                 resume=found_session,
             )
         ]
+
+    async def run_impl(
+        self, prompt: str, resume: ResumeToken | None
+    ) -> anyio.abc.AsyncIterator[TakopiEvent]:
+        """
+        Override run_impl to use PTY for stdin when control channel is enabled.
+
+        This prevents the deadlock where Claude Code waits for stdin EOF
+        before producing output. PTY forces line-buffered mode.
+        """
+        state = self.new_state(prompt, resume)
+        self.start_run(prompt, resume, state=state)
+
+        tag = self.tag()
+        run_logger = self.get_logger()
+        cmd = [self.command(), *self.build_args(prompt, resume, state=state)]
+        payload = self.stdin_payload(prompt, resume, state=state)
+        env = self.env(state=state)
+        run_logger.info(
+            "runner.start",
+            engine=self.engine,
+            resume=resume.value if resume else None,
+            prompt=prompt,
+            prompt_len=len(prompt),
+        )
+
+        cwd = get_run_base_dir()
+
+        # PTY setup for control channel
+        pty_master_fd: int | None = None
+        pty_slave_fd: int | None = None
+
+        try:
+            if self.supports_control_channel and os.name == "posix":
+                # Create PTY pair
+                pty_master_fd, pty_slave_fd = pty.openpty()
+
+                # Configure PTY for raw mode (no echo, no line discipline)
+                try:
+                    tty.setraw(pty_master_fd)
+                except Exception:
+                    # Some systems may not support this, continue anyway
+                    pass
+
+                run_logger.debug(
+                    "subprocess.pty.created",
+                    master_fd=pty_master_fd,
+                    slave_fd=pty_slave_fd,
+                    cmd=cmd[0] if cmd else None,
+                )
+
+                # Store master fd for control responses
+                self._pty_master_fd = pty_master_fd
+
+                # Use PTY slave for stdin
+                stdin_arg = pty_slave_fd
+            else:
+                stdin_arg = subprocess_module.PIPE
+
+            async with manage_subprocess(
+                cmd,
+                stdin=stdin_arg,
+                stdout=subprocess_module.PIPE,
+                stderr=subprocess_module.PIPE,
+                env=env,
+                cwd=cwd,
+            ) as proc:
+                # Close slave fd in parent after subprocess starts
+                if pty_slave_fd is not None:
+                    os.close(pty_slave_fd)
+                    pty_slave_fd = None
+                    run_logger.debug(
+                        "subprocess.pty.slave_closed",
+                        master_fd=pty_master_fd,
+                        pid=proc.pid,
+                    )
+
+                if proc.stdout is None or proc.stderr is None:
+                    raise RuntimeError(self.pipes_error_message())
+
+                run_logger.info(
+                    "subprocess.spawn",
+                    cmd=cmd[0] if cmd else None,
+                    args=cmd[1:],
+                    pid=proc.pid,
+                    use_pty=self.supports_control_channel,
+                )
+
+                # Send initial payload via PTY if needed
+                if payload is not None and self._pty_master_fd is not None:
+                    os.write(self._pty_master_fd, payload)
+                    run_logger.info(
+                        "subprocess.pty.payload_sent",
+                        pid=proc.pid,
+                        payload_len=len(payload),
+                    )
+                elif payload is not None and proc.stdin is not None:
+                    # Fallback for non-PTY mode
+                    await proc.stdin.send(payload)
+                    await proc.stdin.aclose()
+
+                rc: int | None = None
+                stream = JsonlStreamState(expected_session=resume)
+
+                async with anyio.create_task_group() as tg:
+                    tg.start_soon(
+                        drain_stderr,
+                        proc.stderr,
+                        run_logger,
+                        tag,
+                    )
+                    async for evt in self._iter_jsonl_events(
+                        stdout=proc.stdout,
+                        stream=stream,
+                        state=state,
+                        resume=resume,
+                        logger=run_logger,
+                        pid=proc.pid,
+                    ):
+                        yield evt
+
+                    rc = await proc.wait()
+
+                run_logger.info("subprocess.exit", pid=proc.pid, rc=rc)
+                if stream.did_emit_completed:
+                    return
+                found_session = stream.found_session
+                if rc is not None and rc != 0:
+                    events = self.process_error_events(
+                        rc,
+                        resume=resume,
+                        found_session=found_session,
+                        state=state,
+                    )
+                    for evt in events:
+                        if isinstance(evt, CompletedEvent):
+                            self._log_completed_event(
+                                logger=run_logger,
+                                pid=proc.pid,
+                                event=evt,
+                                source="process_error",
+                            )
+                        yield evt
+                    return
+
+                events = self.stream_end_events(
+                    resume=resume,
+                    found_session=found_session,
+                    state=state,
+                )
+                for evt in events:
+                    if isinstance(evt, CompletedEvent):
+                        self._log_completed_event(
+                            logger=run_logger,
+                            pid=proc.pid,
+                            event=evt,
+                            source="stream_end",
+                        )
+                    yield evt
+
+        finally:
+            # Cleanup PTY fds
+            if pty_slave_fd is not None:
+                try:
+                    os.close(pty_slave_fd)
+                except OSError:
+                    pass
+            if pty_master_fd is not None:
+                try:
+                    os.close(pty_master_fd)
+                except OSError:
+                    pass
+            self._pty_master_fd = None
 
 
 def build_runner(config: EngineConfig, _config_path: Path) -> Runner:
