@@ -1,10 +1,10 @@
-# Takopi Specification v0.21.5 [2026-02-08]
+# Takopi Specification v0.22.0 [2026-02-10]
 
 This document is **normative**. The words **MUST**, **SHOULD**, and **MAY** express requirements.
 
 ## 1. Scope
 
-Takopi v0.21.5 specifies:
+Takopi v0.22.0 specifies:
 
 - A **Telegram** bot bridge that runs an agent **Runner** and posts:
   - a throttled, edited **progress message**
@@ -15,7 +15,7 @@ Takopi v0.21.5 specifies:
 - **Automatic runner selection** among multiple engines based on ResumeLine (with a configurable default for new threads)
 - A Takopi-owned **normalized event model** produced by runners and consumed by renderers/bridge
 
-Out of scope for v0.21.5:
+Out of scope for v0.22.0:
 
 - Non-Telegram clients (Slack/Discord/etc.)
 - Token-by-token streaming of the assistant’s final answer
@@ -443,6 +443,10 @@ The lock file MUST contain JSON with:
 The lock file SHOULD be removed on clean shutdown. Stale locks from crashed processes are handled by the acquisition rules above.
 
 ## 11. Changelog
+
+### v0.22.0 (2026-02-10)
+
+- No normative changes; align spec version with the v0.22.0 release.
 
 ### v0.21.5 (2026-02-08)
 

@@ -1,5 +1,11 @@
 # changelog
 
+## v0.22.0 (2026-02-10)
+
+### changes
+
+- support Codex `phase` values and unknown action kinds in commentary rendering [#201](https://github.com/banteg/takopi/pull/201)
+
 ## v0.21.5 (2026-02-08)
 
 ### fixes
