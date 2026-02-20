@@ -549,6 +549,17 @@ class ClaudeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
         *,
         state: Any,
     ) -> bytes | None:
+        # When using --permission-prompt-tool stdio, the CLI waits for an
+        # initialization handshake before producing any output.
+        if self.permission_mode is not None or (
+            get_run_options() and get_run_options().permission_mode
+        ):
+            init_request = {
+                "type": "control_request",
+                "request_id": f"init_{id(self)}",
+                "request": {"subtype": "initialize"},
+            }
+            return (json.dumps(init_request) + "\n").encode()
         return None
 
     def env(self, *, state: Any) -> dict[str, str] | None:
@@ -641,7 +652,8 @@ class ClaudeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
                         session_id=session_id,
                     )
 
-        # Send control channel initialization handshake after CLI emits init
+        # Send control channel init handshake if not yet sent (fallback for
+        # cases where stdin_payload arrived before CLI was ready)
         if (
             not state.control_init_sent
             and self._pty_master_fd is not None
@@ -651,7 +663,7 @@ class ClaudeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
                 if isinstance(evt, StartedEvent):
                     init_request = {
                         "type": "control_request",
-                        "request_id": f"init_{id(self)}",
+                        "request_id": f"reinit_{id(self)}",
                         "request": {"subtype": "initialize"},
                     }
                     try:
@@ -661,12 +673,12 @@ class ClaudeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
                         )
                         state.control_init_sent = True
                         logger.info(
-                            "control_channel.init_sent",
+                            "control_channel.reinit_sent",
                             fd=self._pty_master_fd,
                         )
                     except OSError as e:
                         logger.error(
-                            "control_channel.init_failed",
+                            "control_channel.reinit_failed",
                             error=str(e),
                         )
                     break
