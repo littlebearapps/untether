@@ -467,12 +467,16 @@ class ClaudeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
             )
             return
 
+        if approved:
+            inner = {"behavior": "allow"}
+        else:
+            inner = {"behavior": "deny", "message": "User denied"}
         response = {
             "type": "control_response",
             "response": {
                 "subtype": "success",
                 "request_id": request_id,
-                "response": {"approved": approved},
+                "response": inner,
             },
         }
 
@@ -517,6 +521,9 @@ class ClaudeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
         )
         if effective_mode is not None:
             args.extend(["--permission-mode", effective_mode])
+            # Route permission prompts through the control channel
+            # so ExitPlanMode approval appears as StreamControlRequest
+            args.extend(["--permission-prompt-tool", "stdio"])
         args.append("--")
         args.append(prompt)
         return args
@@ -640,7 +647,7 @@ class ClaudeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
                     "response": {
                         "subtype": "success",
                         "request_id": req_id,
-                        "response": {"approved": True},
+                        "response": {"behavior": "allow"},
                     },
                 }
                 try:
