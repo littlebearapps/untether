@@ -25,6 +25,41 @@ from .transport import (
 
 logger = get_logger(__name__)
 
+# Usage alert thresholds (percentage of 5h window)
+_USAGE_WARN_PCT = 70
+_USAGE_CRITICAL_PCT = 90
+
+
+async def _maybe_append_usage_footer(msg: RenderedMessage) -> RenderedMessage:
+    """Fetch Claude Code usage and append a footer if above thresholds."""
+    try:
+        from .telegram.commands.usage import fetch_claude_usage, _time_until
+
+        data = await fetch_claude_usage()
+        five_hour = data.get("five_hour")
+        seven_day = data.get("seven_day")
+        if not five_hour:
+            return msg
+
+        pct_5h = five_hour["utilization"]
+        if pct_5h < _USAGE_WARN_PCT:
+            return msg
+
+        pct_7d = seven_day["utilization"] if seven_day else 0
+        reset = _time_until(five_hour["resets_at"])
+
+        if pct_5h >= 100:
+            footer = f"\n\n🛑 5h limit hit — resets in {reset}"
+        elif pct_5h >= _USAGE_CRITICAL_PCT:
+            footer = f"\n\n⚠️ 5h: {pct_5h:.0f}% | Weekly: {pct_7d:.0f}% — approaching limit (resets in {reset})"
+        else:
+            footer = f"\n\n⚡ 5h: {pct_5h:.0f}% | Weekly: {pct_7d:.0f}% (resets in {reset})"
+
+        return RenderedMessage(text=msg.text + footer, extra=msg.extra)
+    except Exception:
+        logger.debug("usage_footer.failed", exc_info=True)
+        return msg
+
 
 def _log_runner_event(evt: TakopiEvent) -> None:
     for line in render_event_cli(evt):
@@ -506,6 +541,11 @@ async def handle_message(
             status="error",
             answer=err_body,
         )
+
+        # Append usage alert footer for Claude engine runs (even on error)
+        if runner.engine == "claude":
+            final_rendered = await _maybe_append_usage_footer(final_rendered)
+
         logger.debug(
             "handle.error.rendered",
             error=err_body,
@@ -596,6 +636,11 @@ async def handle_message(
         status=status,
         answer=final_answer,
     )
+
+    # Append usage alert footer for Claude engine runs
+    if runner.engine == "claude":
+        final_rendered = await _maybe_append_usage_footer(final_rendered)
+
     logger.debug(
         "handle.final.rendered",
         rendered=final_rendered.text,
