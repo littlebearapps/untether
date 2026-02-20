@@ -446,9 +446,10 @@ class ClaudeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
     session_title: str = "claude"
     logger = logger
 
-    # Phase 2: Control channel support via PTY
+    # Phase 2: Control channel support
     supports_control_channel: bool = True
-    _pty_master_fd: int | None = None
+    _pty_master_fd: int | None = None  # legacy PTY approach (non-permission mode)
+    _proc_stdin: Any | None = None  # PIPE stdin for control channel (permission mode)
     _control_timeout_seconds: float = 300.0  # 5 minutes
     _max_pending_control_requests: int = 100
 
@@ -457,18 +458,18 @@ class ClaudeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
             raise RuntimeError(f"resume token is for engine {token.engine!r}")
         return f"`claude --resume {token.value}`"
 
+    def _effective_permission_mode(self) -> str | None:
+        """Resolve effective permission mode from per-chat override or engine config."""
+        run_options = get_run_options()
+        return (
+            (run_options.permission_mode if run_options else None)
+            or self.permission_mode
+        )
+
     async def write_control_response(
         self, request_id: str, approved: bool
     ) -> None:
-        """Write a control response to the Claude Code process via PTY."""
-        if self._pty_master_fd is None:
-            logger.warning(
-                "control_response.no_pty",
-                request_id=request_id,
-                approved=approved,
-            )
-            return
-
+        """Write a control response to the Claude Code process via PIPE or PTY."""
         if approved:
             inner = {"behavior": "allow"}
         else:
@@ -483,27 +484,72 @@ class ClaudeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
         }
 
         jsonl_line = json.dumps(response) + "\n"
-        try:
-            # Use os.write for PTY (synchronous but fast for small writes)
-            os.write(self._pty_master_fd, jsonl_line.encode())
-            logger.info(
-                "control_response.sent",
+
+        # Prefer PIPE stdin (permission mode), fall back to PTY master
+        if self._proc_stdin is not None:
+            try:
+                await self._proc_stdin.send(jsonl_line.encode())
+                logger.info(
+                    "control_response.sent",
+                    request_id=request_id,
+                    approved=approved,
+                    channel="pipe",
+                )
+            except Exception as e:
+                logger.error(
+                    "control_response.failed",
+                    request_id=request_id,
+                    approved=approved,
+                    error=str(e),
+                    error_type=e.__class__.__name__,
+                    channel="pipe",
+                )
+        elif self._pty_master_fd is not None:
+            try:
+                os.write(self._pty_master_fd, jsonl_line.encode())
+                logger.info(
+                    "control_response.sent",
+                    request_id=request_id,
+                    approved=approved,
+                    channel="pty",
+                )
+            except OSError as e:
+                logger.error(
+                    "control_response.failed",
+                    request_id=request_id,
+                    approved=approved,
+                    error=str(e),
+                    error_type=e.__class__.__name__,
+                    channel="pty",
+                )
+        else:
+            logger.warning(
+                "control_response.no_channel",
                 request_id=request_id,
                 approved=approved,
-                fd=self._pty_master_fd,
-            )
-        except OSError as e:
-            logger.error(
-                "control_response.failed",
-                request_id=request_id,
-                approved=approved,
-                error=str(e),
-                error_type=e.__class__.__name__,
             )
 
     def _build_args(self, prompt: str, resume: ResumeToken | None) -> list[str]:
         run_options = get_run_options()
-        args: list[str] = ["-p", "--output-format", "stream-json", "--input-format", "stream-json", "--verbose"]
+        effective_mode = self._effective_permission_mode()
+
+        # When using permission mode with control channel, don't use -p mode.
+        # The SDK-style streaming protocol requires bidirectional stdin/stdout
+        # without -p. The prompt is sent as a JSON user message on stdin.
+        if effective_mode is not None:
+            args: list[str] = [
+                "--output-format", "stream-json",
+                "--input-format", "stream-json",
+                "--verbose",
+            ]
+        else:
+            args = [
+                "-p",
+                "--output-format", "stream-json",
+                "--input-format", "stream-json",
+                "--verbose",
+            ]
+
         if resume is not None:
             args.extend(["--resume", resume.value])
         model = self.model
@@ -516,18 +562,15 @@ class ClaudeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
             args.extend(["--allowedTools", allowed_tools])
         if self.dangerously_skip_permissions is True:
             args.append("--dangerously-skip-permissions")
-        # Resolve permission mode: per-chat override > engine config
-        effective_mode = (
-            (run_options.permission_mode if run_options else None)
-            or self.permission_mode
-        )
+
         if effective_mode is not None:
             args.extend(["--permission-mode", effective_mode])
-            # Route permission prompts through the control channel
-            # so ExitPlanMode approval appears as StreamControlRequest
             args.extend(["--permission-prompt-tool", "stdio"])
-        args.append("--")
-        args.append(prompt)
+            # Prompt sent via stdin as JSON, not as CLI arg
+        else:
+            args.append("--")
+            args.append(prompt)
+
         return args
 
     def command(self) -> str:
@@ -549,17 +592,26 @@ class ClaudeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
         *,
         state: Any,
     ) -> bytes | None:
-        # When using --permission-prompt-tool stdio, the CLI waits for an
-        # initialization handshake before producing any output.
-        if self.permission_mode is not None or (
-            get_run_options() and get_run_options().permission_mode
-        ):
+        effective_mode = self._effective_permission_mode()
+        if effective_mode is not None:
+            # SDK-style control channel: send init handshake + user message.
+            # The CLI reads both from stdin (no -p mode).
             init_request = {
                 "type": "control_request",
                 "request_id": f"init_{id(self)}",
-                "request": {"subtype": "initialize"},
+                "request": {"subtype": "initialize", "hooks": None},
             }
-            return (json.dumps(init_request) + "\n").encode()
+            user_message = {
+                "type": "user",
+                "session_id": resume.value if resume else "",
+                "message": {
+                    "role": "user",
+                    "content": prompt,
+                },
+                "parent_tool_use_id": None,
+            }
+            payload = json.dumps(init_request) + "\n" + json.dumps(user_message) + "\n"
+            return payload.encode()
         return None
 
     def env(self, *, state: Any) -> dict[str, str] | None:
@@ -626,6 +678,38 @@ class ClaudeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
     ) -> list[TakopiEvent]:
         return []
 
+    async def _drain_auto_approve(self, state: ClaudeStreamState) -> None:
+        """Drain the auto-approve queue, writing responses to the control channel."""
+        if not state.auto_approve_queue:
+            return
+
+        for req_id in state.auto_approve_queue:
+            response = {
+                "type": "control_response",
+                "response": {
+                    "subtype": "success",
+                    "request_id": req_id,
+                    "response": {"behavior": "allow"},
+                },
+            }
+            payload = (json.dumps(response) + "\n").encode()
+            try:
+                if self._proc_stdin is not None:
+                    await self._proc_stdin.send(payload)
+                    logger.info("control_response.auto_approved", request_id=req_id, channel="pipe")
+                elif self._pty_master_fd is not None:
+                    os.write(self._pty_master_fd, payload)
+                    logger.info("control_response.auto_approved", request_id=req_id, channel="pty")
+                else:
+                    logger.error("control_response.auto_approve_failed", request_id=req_id)
+            except Exception as e:
+                logger.error(
+                    "control_response.auto_approve_failed",
+                    request_id=req_id,
+                    error=str(e),
+                )
+        state.auto_approve_queue.clear()
+
     def translate(
         self,
         data: claude_schema.StreamJsonMessage,
@@ -652,58 +736,8 @@ class ClaudeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
                         session_id=session_id,
                     )
 
-        # Send control channel init handshake if not yet sent (fallback for
-        # cases where stdin_payload arrived before CLI was ready)
-        if (
-            not state.control_init_sent
-            and self._pty_master_fd is not None
-            and self.permission_mode is not None
-        ):
-            for evt in events:
-                if isinstance(evt, StartedEvent):
-                    init_request = {
-                        "type": "control_request",
-                        "request_id": f"reinit_{id(self)}",
-                        "request": {"subtype": "initialize"},
-                    }
-                    try:
-                        os.write(
-                            self._pty_master_fd,
-                            (json.dumps(init_request) + "\n").encode(),
-                        )
-                        state.control_init_sent = True
-                        logger.info(
-                            "control_channel.reinit_sent",
-                            fd=self._pty_master_fd,
-                        )
-                    except OSError as e:
-                        logger.error(
-                            "control_channel.reinit_failed",
-                            error=str(e),
-                        )
-                    break
-
-        # Drain auto-approve queue (non-user-facing control requests)
-        if state.auto_approve_queue and self._pty_master_fd is not None:
-            for req_id in state.auto_approve_queue:
-                response = {
-                    "type": "control_response",
-                    "response": {
-                        "subtype": "success",
-                        "request_id": req_id,
-                        "response": {"behavior": "allow"},
-                    },
-                }
-                try:
-                    os.write(self._pty_master_fd, (json.dumps(response) + "\n").encode())
-                    logger.info("control_response.auto_approved", request_id=req_id)
-                except OSError as e:
-                    logger.error(
-                        "control_response.auto_approve_failed",
-                        request_id=req_id,
-                        error=str(e),
-                    )
-            state.auto_approve_queue.clear()
+        # Auto-approve queue is drained asynchronously in run_impl
+        # after events are yielded (see _drain_auto_approve)
 
         return events
 
@@ -767,10 +801,14 @@ class ClaudeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
         self, prompt: str, resume: ResumeToken | None
     ) -> anyio.abc.AsyncIterator[TakopiEvent]:
         """
-        Override run_impl to use PTY for stdin when control channel is enabled.
+        Override run_impl to support two modes:
 
-        This prevents the deadlock where Claude Code waits for stdin EOF
-        before producing output. PTY forces line-buffered mode.
+        1. Permission mode (SDK-style): No -p flag. Stdin stays open for
+           bidirectional control protocol. Init handshake + user message
+           sent on stdin; control_request/response flow over stdin/stdout.
+
+        2. Legacy mode: -p flag with PTY stdin. Prompt passed as CLI arg.
+           Stdin used only for initial payload, then kept open via PTY.
         """
         state = self.new_state(prompt, resume)
         self.start_run(prompt, resume, state=state)
@@ -789,31 +827,23 @@ class ClaudeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
         )
 
         cwd = get_run_base_dir()
+        effective_mode = self._effective_permission_mode()
+        use_control_channel = effective_mode is not None
 
-        # PTY setup for control channel
+        # PTY setup only for legacy (non-permission) mode
         pty_master_fd: int | None = None
         pty_slave_fd: int | None = None
 
         try:
-            if self.supports_control_channel and os.name == "posix":
-                # Create PTY pair
+            if use_control_channel:
+                # SDK-style: use PIPE stdin, keep it open for control responses
+                stdin_arg = subprocess_module.PIPE
+            elif self.supports_control_channel and os.name == "posix":
+                # Legacy: use PTY for stdin
                 pty_master_fd, pty_slave_fd = pty.openpty()
-
-                # Configure PTY for raw mode (no echo, no line discipline)
                 with contextlib.suppress(OSError):
                     tty.setraw(pty_master_fd)
-
-                run_logger.debug(
-                    "subprocess.pty.created",
-                    master_fd=pty_master_fd,
-                    slave_fd=pty_slave_fd,
-                    cmd=cmd[0] if cmd else None,
-                )
-
-                # Store master fd for control responses
                 self._pty_master_fd = pty_master_fd
-
-                # Use PTY slave for stdin
                 stdin_arg = pty_slave_fd
             else:
                 stdin_arg = subprocess_module.PIPE
@@ -826,15 +856,10 @@ class ClaudeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
                 env=env,
                 cwd=cwd,
             ) as proc:
-                # Close slave fd in parent after subprocess starts
+                # Close slave fd in parent after subprocess starts (PTY mode)
                 if pty_slave_fd is not None:
                     os.close(pty_slave_fd)
                     pty_slave_fd = None
-                    run_logger.debug(
-                        "subprocess.pty.slave_closed",
-                        master_fd=pty_master_fd,
-                        pid=proc.pid,
-                    )
 
                 if proc.stdout is None or proc.stderr is None:
                     raise RuntimeError(self.pipes_error_message())
@@ -844,11 +869,22 @@ class ClaudeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
                     cmd=cmd[0] if cmd else None,
                     args=cmd[1:],
                     pid=proc.pid,
-                    use_pty=self.supports_control_channel,
+                    use_control_channel=use_control_channel,
                 )
 
-                # Send initial payload via PTY if needed
-                if payload is not None and self._pty_master_fd is not None:
+                if use_control_channel and proc.stdin is not None:
+                    # SDK-style: send payload but keep stdin open
+                    if payload is not None:
+                        await proc.stdin.send(payload)
+                        run_logger.info(
+                            "subprocess.stdin.payload_sent",
+                            pid=proc.pid,
+                            payload_len=len(payload),
+                        )
+                    # Store stdin for writing control responses later
+                    self._proc_stdin = proc.stdin
+                elif payload is not None and self._pty_master_fd is not None:
+                    # Legacy PTY: write to master
                     os.write(self._pty_master_fd, payload)
                     run_logger.info(
                         "subprocess.pty.payload_sent",
@@ -856,7 +892,7 @@ class ClaudeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
                         payload_len=len(payload),
                     )
                 elif payload is not None and proc.stdin is not None:
-                    # Fallback for non-PTY mode
+                    # Legacy PIPE fallback: send and close
                     await proc.stdin.send(payload)
                     await proc.stdin.aclose()
 
@@ -879,6 +915,14 @@ class ClaudeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
                         pid=proc.pid,
                     ):
                         yield evt
+                        # Drain auto-approve queue after yielding events
+                        await self._drain_auto_approve(state)
+
+                    # Close stdin after all events to let CLI exit
+                    if use_control_channel and self._proc_stdin is not None:
+                        with contextlib.suppress(Exception):
+                            await self._proc_stdin.aclose()
+                        self._proc_stdin = None
 
                     rc = await proc.wait()
 
@@ -920,7 +964,8 @@ class ClaudeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
                     yield evt
 
         finally:
-            # Cleanup PTY fds
+            # Cleanup
+            self._proc_stdin = None
             if pty_slave_fd is not None:
                 with contextlib.suppress(OSError):
                     os.close(pty_slave_fd)
