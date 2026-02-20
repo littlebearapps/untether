@@ -77,6 +77,11 @@ class TelegramPresenter:
                         reply_markup = {
                             "inline_keyboard": kb["buttons"] + CANCEL_MARKUP["inline_keyboard"]
                         }
+                        logger.info(
+                            "render_progress.inline_keyboard_found",
+                            action_id=action_state.action.id,
+                            buttons=len(kb["buttons"]),
+                        )
                         break
         return RenderedMessage(
             text=text,

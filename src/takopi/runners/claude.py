@@ -49,9 +49,21 @@ _RESUME_RE = re.compile(
 # Keyed by session_id, stores (runner_instance, timestamp)
 _ACTIVE_RUNNERS: dict[str, tuple[ClaudeRunner, float]] = {}
 
+# Phase 2: Global registry mapping session_id -> process stdin
+# Stored separately from _ACTIVE_RUNNERS to support concurrent sessions
+# on the same runner instance (runner._proc_stdin would be overwritten).
+_SESSION_STDIN: dict[str, Any] = {}
+
 # Phase 2: Global registry mapping request_id -> session_id
 # This allows callbacks to find the right runner instance
 _REQUEST_TO_SESSION: dict[str, str] = {}
+
+# Phase 2: Global registry mapping request_id -> original tool input
+# Claude Code CLI requires updatedInput in can_use_tool responses
+_REQUEST_TO_INPUT: dict[str, dict[str, Any]] = {}
+
+# Recently handled request_ids (prevents duplicate callback warnings)
+_HANDLED_REQUESTS: set[str] = set()
 
 
 @dataclass(slots=True)
@@ -66,6 +78,10 @@ class ClaudeStreamState:
     auto_approve_queue: list[str] = field(default_factory=list)
     # Whether the control channel initialization handshake has been sent
     control_init_sent: bool = False
+    # Track last tool_use_id for mapping control requests to tool actions
+    last_tool_use_id: str | None = None
+    # Map tool_use_id -> control action_id for completing control actions on tool result
+    control_action_for_tool: dict[str, str] = field(default_factory=dict)
 
 
 def _normalize_tool_result(content: Any) -> str:
@@ -237,6 +253,7 @@ def translate_claude_event(
                             parent_tool_use_id=parent_tool_use_id,
                         )
                         state.pending_actions[action.id] = action
+                        state.last_tool_use_id = content.id
                         out.append(
                             factory.action_started(
                                 action_id=action.id,
@@ -295,6 +312,17 @@ def translate_claude_event(
                         factory=factory,
                     )
                 )
+                # Complete any associated control action (e.g. permission approval)
+                control_action_id = state.control_action_for_tool.pop(tool_use_id, None)
+                if control_action_id:
+                    out.append(
+                        factory.action_completed(
+                            action_id=control_action_id,
+                            kind="warning",
+                            title="Permission resolved",
+                            ok=True,
+                        )
+                    )
             return out
         case claude_schema.StreamResultMessage():
             ok = not event.is_error
@@ -372,6 +400,9 @@ def translate_claude_event(
             if factory.resume:
                 session_id = factory.resume.value
                 _REQUEST_TO_SESSION[request_id] = session_id
+                # Store original tool input for updatedInput in response
+                if isinstance(request, claude_schema.ControlCanUseToolRequest):
+                    _REQUEST_TO_INPUT[request_id] = getattr(request, "input", {})
                 logger.debug(
                     "control_request.registered",
                     request_id=request_id,
@@ -387,6 +418,7 @@ def translate_claude_event(
             ]
             for rid in expired:
                 del state.pending_control_requests[rid]
+                _REQUEST_TO_INPUT.pop(rid, None)
                 logger.warning("control_request.expired", request_id=rid)
 
             # Check max pending limit
@@ -398,6 +430,10 @@ def translate_claude_event(
 
             state.note_seq += 1
             action_id = f"claude.control.{state.note_seq}"
+
+            # Map the preceding tool_use_id to this control action for cleanup
+            if state.last_tool_use_id:
+                state.control_action_for_tool[state.last_tool_use_id] = action_id
 
             # Include inline keyboard data in detail
             detail: dict[str, Any] = {
@@ -468,11 +504,20 @@ class ClaudeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
     async def write_control_response(
         self, request_id: str, approved: bool
     ) -> None:
-        """Write a control response to the Claude Code process via PIPE or PTY."""
+        """Write a control response to the Claude Code process via PIPE or PTY.
+
+        Uses _SESSION_STDIN to find the correct stdin for the session,
+        supporting concurrent sessions on the same runner instance.
+        """
         if approved:
-            inner = {"behavior": "allow"}
+            inner: dict[str, Any] = {"behavior": "allow"}
+            # Claude Code CLI requires updatedInput for can_use_tool responses
+            if request_id in _REQUEST_TO_INPUT:
+                inner["updatedInput"] = _REQUEST_TO_INPUT.pop(request_id)
         else:
             inner = {"behavior": "deny", "message": "User denied"}
+            # Clean up stored input on denial too
+            _REQUEST_TO_INPUT.pop(request_id, None)
         response = {
             "type": "control_response",
             "response": {
@@ -484,14 +529,20 @@ class ClaudeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
 
         jsonl_line = json.dumps(response) + "\n"
 
-        # Prefer PIPE stdin (permission mode), fall back to PTY master
-        if self._proc_stdin is not None:
+        # Look up the session-specific stdin from _SESSION_STDIN
+        session_id = _REQUEST_TO_SESSION.get(request_id)
+        session_stdin = _SESSION_STDIN.get(session_id) if session_id else None
+
+        # Prefer session-specific stdin, fall back to instance stdin, then PTY
+        stdin_to_use = session_stdin or self._proc_stdin
+        if stdin_to_use is not None:
             try:
-                await self._proc_stdin.send(jsonl_line.encode())
+                await stdin_to_use.send(jsonl_line.encode())
                 logger.info(
                     "control_response.sent",
                     request_id=request_id,
                     approved=approved,
+                    session_id=session_id,
                     channel="pipe",
                 )
             except Exception as e:
@@ -499,6 +550,7 @@ class ClaudeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
                     "control_response.failed",
                     request_id=request_id,
                     approved=approved,
+                    session_id=session_id,
                     error=str(e),
                     error_type=e.__class__.__name__,
                     channel="pipe",
@@ -510,6 +562,7 @@ class ClaudeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
                     "control_response.sent",
                     request_id=request_id,
                     approved=approved,
+                    session_id=session_id,
                     channel="pty",
                 )
             except OSError as e:
@@ -517,6 +570,7 @@ class ClaudeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
                     "control_response.failed",
                     request_id=request_id,
                     approved=approved,
+                    session_id=session_id,
                     error=str(e),
                     error_type=e.__class__.__name__,
                     channel="pty",
@@ -526,6 +580,7 @@ class ClaudeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
                 "control_response.no_channel",
                 request_id=request_id,
                 approved=approved,
+                session_id=session_id,
             )
 
     def _build_args(self, prompt: str, resume: ResumeToken | None) -> list[str]:
@@ -677,11 +732,72 @@ class ClaudeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
     ) -> list[TakopiEvent]:
         return []
 
-    async def _drain_auto_approve(self, state: ClaudeStreamState) -> None:
+    async def _iter_jsonl_events(
+        self,
+        *,
+        stdout: Any,
+        stream: JsonlStreamState,
+        state: ClaudeStreamState,
+        resume: ResumeToken | None,
+        logger: Any,
+        pid: int,
+        session_stdin: Any = None,
+    ) -> anyio.abc.AsyncIterator[TakopiEvent]:
+        """Override to drain auto-approve queue after every line, not just after yielded events.
+
+        The base class only drains auto-approves in run_impl after `yield evt`.
+        If a line produces no events (e.g. auto-approved control requests), the drain
+        never runs, causing a deadlock when Claude Code blocks waiting for the response.
+
+        session_stdin is passed from run_impl to avoid using self._proc_stdin
+        which may be overwritten by a concurrent session on the same runner.
+        """
+        registered_session_id: str | None = None
+        async for raw_line in self.iter_json_lines(stdout):
+            for evt in self._handle_jsonl_line(
+                raw_line=raw_line,
+                stream=stream,
+                state=state,
+                resume=resume,
+                logger=logger,
+                pid=pid,
+            ):
+                # Register _SESSION_STDIN here (not in translate) because we
+                # have the correct captured stdin.  translate() would use the
+                # stale self._proc_stdin which may have been overwritten by a
+                # concurrent session on the same runner.
+                if (
+                    not registered_session_id
+                    and isinstance(evt, StartedEvent)
+                    and evt.resume
+                ):
+                    registered_session_id = evt.resume.value
+                    _SESSION_STDIN[registered_session_id] = session_stdin
+                    logger.debug(
+                        "session_stdin.registered",
+                        session_id=registered_session_id,
+                        pid=pid,
+                    )
+                yield evt
+            # Drain auto-approve queue after EVERY line, even if no events were yielded.
+            # This prevents deadlock when auto-approved requests produce no events.
+            await self._drain_auto_approve(state, stdin=session_stdin)
+            # After CompletedEvent, stop reading stdout immediately.
+            # Claude Code's MCP server child processes may inherit the stdout pipe FD,
+            # keeping it open even after Claude Code exits. Without this break,
+            # we'd block forever waiting for EOF that never comes.
+            if stream.did_emit_completed:
+                break
+
+    async def _drain_auto_approve(
+        self, state: ClaudeStreamState, *, stdin: Any = None
+    ) -> None:
         """Drain the auto-approve queue, writing responses to the control channel."""
         if not state.auto_approve_queue:
             return
 
+        # Use provided stdin (session-specific) or fall back to instance
+        pipe = stdin or self._proc_stdin
         for req_id in state.auto_approve_queue:
             response = {
                 "type": "control_response",
@@ -693,8 +809,8 @@ class ClaudeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
             }
             payload = (json.dumps(response) + "\n").encode()
             try:
-                if self._proc_stdin is not None:
-                    await self._proc_stdin.send(payload)
+                if pipe is not None:
+                    await pipe.send(payload)
                     logger.info("control_response.auto_approved", request_id=req_id, channel="pipe")
                 elif self._pty_master_fd is not None:
                     os.write(self._pty_master_fd, payload)
@@ -725,6 +841,9 @@ class ClaudeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
         )
 
         # Phase 2: Register runner when we get a session_id
+        # NOTE: _SESSION_STDIN is registered in _iter_jsonl_events (not here)
+        # because self._proc_stdin may be stale if another session has started
+        # concurrently on the same runner instance.
         if self.supports_control_channel:
             for evt in events:
                 if isinstance(evt, StartedEvent) and evt.resume:
@@ -750,8 +869,9 @@ class ClaudeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
     ) -> list[TakopiEvent]:
         # Phase 2: Cleanup runner registration on error
         session_id = found_session.value if found_session else (resume.value if resume else None)
-        if session_id and session_id in _ACTIVE_RUNNERS:
-            del _ACTIVE_RUNNERS[session_id]
+        if session_id:
+            _ACTIVE_RUNNERS.pop(session_id, None)
+            _SESSION_STDIN.pop(session_id, None)
             logger.debug("claude_runner.unregistered", session_id=session_id)
 
         message = f"claude failed (rc={rc})."
@@ -773,8 +893,9 @@ class ClaudeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
     ) -> list[TakopiEvent]:
         # Phase 2: Cleanup runner registration
         session_id = found_session.value if found_session else (resume.value if resume else None)
-        if session_id and session_id in _ACTIVE_RUNNERS:
-            del _ACTIVE_RUNNERS[session_id]
+        if session_id:
+            _ACTIVE_RUNNERS.pop(session_id, None)
+            _SESSION_STDIN.pop(session_id, None)
             logger.debug("claude_runner.unregistered", session_id=session_id)
 
         if not found_session:
@@ -871,6 +992,7 @@ class ClaudeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
                     use_control_channel=use_control_channel,
                 )
 
+                this_proc_stdin: Any = None
                 if use_control_channel and proc.stdin is not None:
                     # SDK-style: send payload but keep stdin open
                     if payload is not None:
@@ -880,8 +1002,11 @@ class ClaudeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
                             pid=proc.pid,
                             payload_len=len(payload),
                         )
-                    # Store stdin for writing control responses later
+                    # Store stdin for writing control responses later.
+                    # Keep a local copy too - self._proc_stdin may be
+                    # overwritten by a concurrent session on the same runner.
                     self._proc_stdin = proc.stdin
+                    this_proc_stdin = proc.stdin
                 elif payload is not None and self._pty_master_fd is not None:
                     # Legacy PTY: write to master
                     os.write(self._pty_master_fd, payload)
@@ -912,16 +1037,16 @@ class ClaudeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
                         resume=resume,
                         logger=run_logger,
                         pid=proc.pid,
+                        session_stdin=this_proc_stdin if use_control_channel else None,
                     ):
                         yield evt
-                        # Drain auto-approve queue after yielding events
-                        await self._drain_auto_approve(state)
 
-                    # Close stdin after all events to let CLI exit
-                    if use_control_channel and self._proc_stdin is not None:
+                    # Close stdin after all events to let CLI exit.
+                    # Use this_proc_stdin (local) not self._proc_stdin (may
+                    # have been overwritten by a concurrent session).
+                    if use_control_channel and this_proc_stdin is not None:
                         with contextlib.suppress(Exception):
-                            await self._proc_stdin.aclose()
-                        self._proc_stdin = None
+                            await this_proc_stdin.aclose()
 
                     rc = await proc.wait()
 
@@ -963,8 +1088,10 @@ class ClaudeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
                     yield evt
 
         finally:
-            # Cleanup
-            self._proc_stdin = None
+            # Cleanup - close the local stdin if it wasn't already closed
+            if this_proc_stdin is not None:
+                with contextlib.suppress(Exception):
+                    await this_proc_stdin.aclose()
             if pty_slave_fd is not None:
                 with contextlib.suppress(OSError):
                     os.close(pty_slave_fd)
@@ -1018,6 +1145,10 @@ async def send_claude_control_response(request_id: str, approved: bool) -> bool:
     """
     # Look up session_id from request_id
     if request_id not in _REQUEST_TO_SESSION:
+        # Duplicate callback (Telegram long-polling can deliver the same update twice)
+        if request_id in _HANDLED_REQUESTS:
+            logger.debug("control_response.duplicate", request_id=request_id)
+            return True
         logger.warning(
             "control_response.request_not_found",
             request_id=request_id,
@@ -1032,8 +1163,9 @@ async def send_claude_control_response(request_id: str, approved: bool) -> bool:
             session_id=session_id,
             request_id=request_id,
         )
-        # Clean up stale mapping
+        # Clean up stale mappings
         del _REQUEST_TO_SESSION[request_id]
+        _REQUEST_TO_INPUT.pop(request_id, None)
         return False
 
     runner, _ = _ACTIVE_RUNNERS[session_id]
@@ -1041,6 +1173,11 @@ async def send_claude_control_response(request_id: str, approved: bool) -> bool:
 
     # Clean up the mapping after use
     del _REQUEST_TO_SESSION[request_id]
+    _HANDLED_REQUESTS.add(request_id)
+
+    # Cap the set size to prevent unbounded growth
+    if len(_HANDLED_REQUESTS) > 100:
+        _HANDLED_REQUESTS.clear()
 
     return True
 

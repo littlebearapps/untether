@@ -200,6 +200,7 @@ class ProgressEdits:
         resume_formatter: Callable[[ResumeToken], str] | None = None,
         label: str = "working",
         context_line: str | None = None,
+        thread_id: ThreadId | None = None,
     ) -> None:
         self.transport = transport
         self.presenter = presenter
@@ -212,6 +213,8 @@ class ProgressEdits:
         self.resume_formatter = resume_formatter
         self.label = label
         self.context_line = context_line
+        self.thread_id = thread_id
+        self._approval_notified: bool = False
         self.event_seq = 0
         self.rendered_seq = 0
         self.signal_send, self.signal_recv = anyio.create_memory_object_stream(1)
@@ -235,6 +238,36 @@ class ProgressEdits:
             rendered = self.presenter.render_progress(
                 state, elapsed_s=now - self.started_at, label=self.label
             )
+            # Detect approval button transitions for push notification
+            new_kb = rendered.extra.get("reply_markup", {}).get(
+                "inline_keyboard", []
+            )
+            old_kb = (
+                self.last_rendered.extra.get("reply_markup", {}).get(
+                    "inline_keyboard", []
+                )
+                if self.last_rendered
+                else []
+            )
+            has_approval = len(new_kb) > 1
+            had_approval = len(old_kb) > 1
+
+            if has_approval and not had_approval and not self._approval_notified:
+                self._approval_notified = True
+                await self.transport.send(
+                    channel_id=self.channel_id,
+                    message=RenderedMessage(
+                        text="Action required \u2014 approval needed"
+                    ),
+                    options=SendOptions(
+                        notify=True,
+                        reply_to=self.progress_ref,
+                        thread_id=self.thread_id,
+                    ),
+                )
+            elif had_approval and not has_approval:
+                self._approval_notified = False
+
             if rendered != self.last_rendered:
                 logger.debug(
                     "transport.edit_message",
@@ -475,6 +508,7 @@ async def handle_message(
         last_rendered=progress_state.last_rendered,
         resume_formatter=runner.format_resume,
         context_line=context_line,
+        thread_id=incoming.thread_id,
     )
 
     running_task: RunningTask | None = None
