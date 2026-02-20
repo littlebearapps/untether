@@ -64,7 +64,20 @@ class TelegramPresenter:
             state, elapsed_s=elapsed_s, label=label
         )
         text, entities = prepare_telegram(parts)
-        reply_markup = CLEAR_MARKUP if _is_cancelled_label(label) else CANCEL_MARKUP
+        if _is_cancelled_label(label):
+            reply_markup = CLEAR_MARKUP
+        else:
+            # Check if any active action has inline keyboard buttons (e.g. permission approval)
+            reply_markup = CANCEL_MARKUP
+            for action_state in state.actions:
+                if not action_state.completed:
+                    kb = action_state.action.detail.get("inline_keyboard")
+                    if kb and isinstance(kb, dict) and "buttons" in kb:
+                        # Merge permission buttons with cancel button
+                        reply_markup = {
+                            "inline_keyboard": kb["buttons"] + CANCEL_MARKUP["inline_keyboard"]
+                        }
+                        break
         return RenderedMessage(
             text=text,
             extra={"entities": entities, "reply_markup": reply_markup},

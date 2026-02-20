@@ -420,11 +420,10 @@ def translate_claude_event(
             }
 
             return [
-                factory.action_completed(
+                factory.action_started(
                     action_id=action_id,
                     kind="warning",  # Use warning kind for visibility
                     title=warning_text,
-                    ok=True,
                     detail=detail,
                 )
             ]
