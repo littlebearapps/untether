@@ -497,7 +497,7 @@ class ClaudeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
 
     def _build_args(self, prompt: str, resume: ResumeToken | None) -> list[str]:
         run_options = get_run_options()
-        args: list[str] = ["-p", "--output-format", "stream-json", "--verbose"]
+        args: list[str] = ["-p", "--output-format", "stream-json", "--input-format", "stream-json", "--verbose"]
         if resume is not None:
             args.extend(["--resume", resume.value])
         model = self.model
