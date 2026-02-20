@@ -547,6 +547,17 @@ class ClaudeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
         *,
         state: Any,
     ) -> bytes | None:
+        # When using --permission-prompt-tool stdio, send the initialization
+        # handshake so the CLI knows we're ready to handle control requests.
+        if self.permission_mode is not None or (
+            get_run_options() and get_run_options().permission_mode
+        ):
+            init_request = {
+                "type": "control_request",
+                "request_id": f"init_{id(self)}",
+                "request": {"subtype": "initialize"},
+            }
+            return (json.dumps(init_request) + "\n").encode()
         return None
 
     def env(self, *, state: Any) -> dict[str, str] | None:
