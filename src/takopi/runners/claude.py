@@ -64,6 +64,8 @@ class ClaudeStreamState:
     pending_control_requests: dict[str, tuple[claude_schema.StreamControlRequest, float]] = field(default_factory=dict)
     # Auto-approve queue: request IDs that should be approved without user interaction
     auto_approve_queue: list[str] = field(default_factory=list)
+    # Whether the control channel initialization handshake has been sent
+    control_init_sent: bool = False
 
 
 def _normalize_tool_result(content: Any) -> str:
@@ -547,17 +549,6 @@ class ClaudeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
         *,
         state: Any,
     ) -> bytes | None:
-        # When using --permission-prompt-tool stdio, send the initialization
-        # handshake so the CLI knows we're ready to handle control requests.
-        if self.permission_mode is not None or (
-            get_run_options() and get_run_options().permission_mode
-        ):
-            init_request = {
-                "type": "control_request",
-                "request_id": f"init_{id(self)}",
-                "request": {"subtype": "initialize"},
-            }
-            return (json.dumps(init_request) + "\n").encode()
         return None
 
     def env(self, *, state: Any) -> dict[str, str] | None:
@@ -649,6 +640,36 @@ class ClaudeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
                         "claude_runner.registered",
                         session_id=session_id,
                     )
+
+        # Send control channel initialization handshake after CLI emits init
+        if (
+            not state.control_init_sent
+            and self._pty_master_fd is not None
+            and self.permission_mode is not None
+        ):
+            for evt in events:
+                if isinstance(evt, StartedEvent):
+                    init_request = {
+                        "type": "control_request",
+                        "request_id": f"init_{id(self)}",
+                        "request": {"subtype": "initialize"},
+                    }
+                    try:
+                        os.write(
+                            self._pty_master_fd,
+                            (json.dumps(init_request) + "\n").encode(),
+                        )
+                        state.control_init_sent = True
+                        logger.info(
+                            "control_channel.init_sent",
+                            fd=self._pty_master_fd,
+                        )
+                    except OSError as e:
+                        logger.error(
+                            "control_channel.init_failed",
+                            error=str(e),
+                        )
+                    break
 
         # Drain auto-approve queue (non-user-facing control requests)
         if state.auto_approve_queue and self._pty_master_fd is not None:
