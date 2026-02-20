@@ -117,7 +117,7 @@ async def _resolve_engine_run_options(
     merged = merge_overrides(topic_override, chat_override)
     if merged is None:
         return None
-    return EngineRunOptions(model=merged.model, reasoning=merged.reasoning)
+    return EngineRunOptions(model=merged.model, reasoning=merged.reasoning, permission_mode=merged.permission_mode)
 
 
 def _allowed_chat_ids(cfg: TelegramBridgeConfig) -> set[int]:

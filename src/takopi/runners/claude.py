@@ -7,6 +7,7 @@ to prevent deadlock when keeping stdin open for control responses.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import pty
@@ -31,7 +32,7 @@ from ..schemas import claude as claude_schema
 from .tool_actions import tool_input_path, tool_kind_and_title
 from ..utils.paths import get_run_base_dir
 from ..utils.streams import drain_stderr
-from ..utils.subprocess import manage_subprocess, terminate_process, wait_for_process, kill_process
+from ..utils.subprocess import manage_subprocess
 
 import subprocess as subprocess_module
 
@@ -46,7 +47,7 @@ _RESUME_RE = re.compile(
 
 # Phase 2: Global registry for active ClaudeRunner instances
 # Keyed by session_id, stores (runner_instance, timestamp)
-_ACTIVE_RUNNERS: dict[str, tuple["ClaudeRunner", float]] = {}
+_ACTIVE_RUNNERS: dict[str, tuple[ClaudeRunner, float]] = {}
 
 # Phase 2: Global registry mapping request_id -> session_id
 # This allows callbacks to find the right runner instance
@@ -61,6 +62,8 @@ class ClaudeStreamState:
     note_seq: int = 0
     # Phase 2: Control request tracking
     pending_control_requests: dict[str, tuple[claude_schema.StreamControlRequest, float]] = field(default_factory=dict)
+    # Auto-approve queue: request IDs that should be approved without user interaction
+    auto_approve_queue: list[str] = field(default_factory=list)
 
 
 def _normalize_tool_result(content: Any) -> str:
@@ -311,6 +314,24 @@ def translate_claude_event(
                 )
             ]
         case claude_schema.StreamControlRequest(request_id=request_id, request=request):
+            # Auto-approve non-user-facing control requests
+            _AUTO_APPROVE_TYPES = (
+                claude_schema.ControlInitializeRequest,
+                claude_schema.ControlHookCallbackRequest,
+                claude_schema.ControlMcpMessageRequest,
+                claude_schema.ControlRewindFilesRequest,
+                claude_schema.ControlInterruptRequest,
+            )
+            if isinstance(request, _AUTO_APPROVE_TYPES):
+                request_type = type(request).__name__.replace("Control", "").replace("Request", "")
+                logger.debug(
+                    "control_request.auto_approve",
+                    request_id=request_id,
+                    request_type=request_type,
+                )
+                state.auto_approve_queue.append(request_id)
+                return []
+
             # Phase 2: Interactive control request with inline keyboard
             request_type = type(request).__name__.replace("Control", "").replace("Request", "")
 
@@ -416,6 +437,7 @@ class ClaudeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
 
     claude_cmd: str = "claude"
     model: str | None = None
+    permission_mode: str | None = None
     allowed_tools: list[str] | None = None
     dangerously_skip_permissions: bool = False
     use_api_billing: bool = False
@@ -464,7 +486,7 @@ class ClaudeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
                 approved=approved,
                 fd=self._pty_master_fd,
             )
-        except Exception as e:
+        except OSError as e:
             logger.error(
                 "control_response.failed",
                 request_id=request_id,
@@ -488,6 +510,13 @@ class ClaudeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
             args.extend(["--allowedTools", allowed_tools])
         if self.dangerously_skip_permissions is True:
             args.append("--dangerously-skip-permissions")
+        # Resolve permission mode: per-chat override > engine config
+        effective_mode = (
+            (run_options.permission_mode if run_options else None)
+            or self.permission_mode
+        )
+        if effective_mode is not None:
+            args.extend(["--permission-mode", effective_mode])
         args.append("--")
         args.append(prompt)
         return args
@@ -603,6 +632,28 @@ class ClaudeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
                         session_id=session_id,
                     )
 
+        # Drain auto-approve queue (non-user-facing control requests)
+        if state.auto_approve_queue and self._pty_master_fd is not None:
+            for req_id in state.auto_approve_queue:
+                response = {
+                    "type": "control_response",
+                    "response": {
+                        "subtype": "success",
+                        "request_id": req_id,
+                        "response": {"approved": True},
+                    },
+                }
+                try:
+                    os.write(self._pty_master_fd, (json.dumps(response) + "\n").encode())
+                    logger.info("control_response.auto_approved", request_id=req_id)
+                except OSError as e:
+                    logger.error(
+                        "control_response.auto_approve_failed",
+                        request_id=req_id,
+                        error=str(e),
+                    )
+            state.auto_approve_queue.clear()
+
         return events
 
     def process_error_events(
@@ -698,11 +749,8 @@ class ClaudeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
                 pty_master_fd, pty_slave_fd = pty.openpty()
 
                 # Configure PTY for raw mode (no echo, no line discipline)
-                try:
+                with contextlib.suppress(OSError):
                     tty.setraw(pty_master_fd)
-                except Exception:
-                    # Some systems may not support this, continue anyway
-                    pass
 
                 run_logger.debug(
                     "subprocess.pty.created",
@@ -823,15 +871,11 @@ class ClaudeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
         finally:
             # Cleanup PTY fds
             if pty_slave_fd is not None:
-                try:
+                with contextlib.suppress(OSError):
                     os.close(pty_slave_fd)
-                except OSError:
-                    pass
             if pty_master_fd is not None:
-                try:
+                with contextlib.suppress(OSError):
                     os.close(pty_master_fd)
-                except OSError:
-                    pass
             self._pty_master_fd = None
 
 
@@ -845,11 +889,13 @@ def build_runner(config: EngineConfig, _config_path: Path) -> Runner:
         allowed_tools = DEFAULT_ALLOWED_TOOLS
     dangerously_skip_permissions = config.get("dangerously_skip_permissions") is True
     use_api_billing = config.get("use_api_billing") is True
+    permission_mode = config.get("permission_mode")
     title = str(model) if model is not None else "claude"
 
     return ClaudeRunner(
         claude_cmd=claude_cmd,
         model=model,
+        permission_mode=permission_mode,
         allowed_tools=allowed_tools,
         dangerously_skip_permissions=dangerously_skip_permissions,
         use_api_billing=use_api_billing,

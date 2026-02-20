@@ -14,6 +14,7 @@ REASONING_SUPPORTED_ENGINES = frozenset({"codex"})
 class EngineOverrides(msgspec.Struct, forbid_unknown_fields=False):
     model: str | None = None
     reasoning: str | None = None
+    permission_mode: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -36,9 +37,10 @@ def normalize_overrides(overrides: EngineOverrides | None) -> EngineOverrides | 
         return None
     model = normalize_override_value(overrides.model)
     reasoning = normalize_override_value(overrides.reasoning)
-    if model is None and reasoning is None:
+    permission_mode = normalize_override_value(overrides.permission_mode)
+    if model is None and reasoning is None and permission_mode is None:
         return None
-    return EngineOverrides(model=model, reasoning=reasoning)
+    return EngineOverrides(model=model, reasoning=reasoning, permission_mode=permission_mode)
 
 
 def merge_overrides(
@@ -51,6 +53,7 @@ def merge_overrides(
         return None
     model = None
     reasoning = None
+    permission_mode = None
     if topic is not None and topic.model is not None:
         model = topic.model
     elif chat is not None:
@@ -59,7 +62,11 @@ def merge_overrides(
         reasoning = topic.reasoning
     elif chat is not None:
         reasoning = chat.reasoning
-    return normalize_overrides(EngineOverrides(model=model, reasoning=reasoning))
+    if topic is not None and topic.permission_mode is not None:
+        permission_mode = topic.permission_mode
+    elif chat is not None:
+        permission_mode = chat.permission_mode
+    return normalize_overrides(EngineOverrides(model=model, reasoning=reasoning, permission_mode=permission_mode))
 
 
 def resolve_override_value(
