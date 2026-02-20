@@ -178,7 +178,12 @@ class TakopiSettings(BaseSettings):
 
     def engine_config(self, engine_id: str, *, config_path: Path) -> dict[str, Any]:
         extra = self.model_extra or {}
-        raw = extra.get(engine_id)
+        # Support both [engines.claude] (nested) and [claude] (flat) TOML layouts
+        engines = extra.get("engines")
+        if isinstance(engines, dict):
+            raw = engines.get(engine_id)
+        else:
+            raw = extra.get(engine_id)
         if raw is None:
             return {}
         if not isinstance(raw, dict):
