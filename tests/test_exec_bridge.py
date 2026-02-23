@@ -3,7 +3,15 @@ import uuid
 import anyio
 import pytest
 
-from takopi.runner_bridge import ExecBridgeConfig, IncomingMessage, handle_message
+from takopi.progress import ProgressTracker
+from takopi.runner_bridge import (
+    ExecBridgeConfig,
+    IncomingMessage,
+    ProgressEdits,
+    _EPHEMERAL_MSGS,
+    handle_message,
+    register_ephemeral_message,
+)
 from takopi.markdown import MarkdownParts, MarkdownPresenter
 from takopi.model import ResumeToken, TakopiEvent
 from takopi.telegram.render import prepare_telegram
@@ -439,3 +447,153 @@ async def test_handle_message_error_preserves_resume_token() -> None:
     assert "error" in last_edit.lower()
     assert session_id in last_edit
     assert "codex resume" in last_edit.lower()
+
+
+# ---------------------------------------------------------------------------
+# ProgressEdits ephemeral notification cleanup tests
+# ---------------------------------------------------------------------------
+
+
+class _KeyboardPresenter:
+    """Presenter that returns RenderedMessages with controllable inline keyboards."""
+
+    def __init__(self) -> None:
+        self.keyboard: list[list[dict]] = [[{"text": "Cancel"}]]
+
+    def set_approval_buttons(self) -> None:
+        self.keyboard = [
+            [{"text": "Approve"}, {"text": "Deny"}],
+            [{"text": "Cancel"}],
+        ]
+
+    def set_no_approval(self) -> None:
+        self.keyboard = [[{"text": "Cancel"}]]
+
+    def render_progress(self, state, *, elapsed_s, label="working"):
+        return RenderedMessage(
+            text=f"{label} {elapsed_s:.0f}s",
+            extra={"reply_markup": {"inline_keyboard": self.keyboard}},
+        )
+
+    def render_final(self, state, *, elapsed_s, status, answer):
+        return RenderedMessage(text=f"{status}: {answer}")
+
+
+def _make_edits(
+    transport: FakeTransport,
+    presenter: _KeyboardPresenter,
+    clock: _FakeClock | None = None,
+) -> ProgressEdits:
+    if clock is None:
+        clock = _FakeClock()
+    tracker = ProgressTracker(engine="codex")
+    progress_ref = MessageRef(channel_id=123, message_id=1)
+    return ProgressEdits(
+        transport=transport,
+        presenter=presenter,
+        channel_id=123,
+        progress_ref=progress_ref,
+        tracker=tracker,
+        started_at=0.0,
+        clock=clock,
+        last_rendered=None,
+    )
+
+
+@pytest.mark.anyio
+async def test_progress_edits_deletes_approval_notification_on_button_disappear() -> (
+    None
+):
+    """When approval buttons disappear, the 'Action required' notification is deleted."""
+    transport = FakeTransport()
+    presenter = _KeyboardPresenter()
+    edits = _make_edits(transport, presenter)
+
+    # Simulate event that triggers an edit with approval buttons
+    presenter.set_approval_buttons()
+    edits.event_seq = 1
+    try:
+        edits.signal_send.send_nowait(None)
+    except anyio.WouldBlock:
+        pass
+
+    async with anyio.create_task_group() as tg:
+
+        async def run_one_cycle() -> None:
+            # Let the edit loop run one iteration
+            await anyio.sleep(0)
+            await anyio.sleep(0)
+            # Now remove approval buttons and trigger another iteration
+            presenter.set_no_approval()
+            edits.event_seq = 2
+            try:
+                edits.signal_send.send_nowait(None)
+            except anyio.WouldBlock:
+                pass
+            await anyio.sleep(0)
+            await anyio.sleep(0)
+            # Close the signal to end the loop
+            edits.signal_send.close()
+
+        tg.start_soon(edits.run)
+        tg.start_soon(run_one_cycle)
+
+    # The notification send + its deletion should have happened
+    notification_sends = [
+        s for s in transport.send_calls if "approval" in s["message"].text.lower()
+    ]
+    assert len(notification_sends) == 1
+    assert len(transport.delete_calls) == 1
+    assert transport.delete_calls[0] == notification_sends[0]["ref"]
+
+
+@pytest.mark.anyio
+async def test_progress_edits_delete_ephemeral_cleans_pending_notification() -> None:
+    """delete_ephemeral() cleans up a pending approval notification."""
+    transport = FakeTransport()
+    presenter = _KeyboardPresenter()
+    edits = _make_edits(transport, presenter)
+
+    # Manually set a pending notification ref
+    notify_ref = MessageRef(channel_id=123, message_id=99)
+    edits._approval_notify_ref = notify_ref
+
+    await edits.delete_ephemeral()
+
+    assert len(transport.delete_calls) == 1
+    assert transport.delete_calls[0] == notify_ref
+    assert edits._approval_notify_ref is None
+
+
+@pytest.mark.anyio
+async def test_progress_edits_delete_ephemeral_noop_when_no_notification() -> None:
+    """delete_ephemeral() does nothing when no notification is pending."""
+    transport = FakeTransport()
+    presenter = _KeyboardPresenter()
+    edits = _make_edits(transport, presenter)
+
+    await edits.delete_ephemeral()
+
+    assert len(transport.delete_calls) == 0
+
+
+@pytest.mark.anyio
+async def test_progress_edits_delete_ephemeral_drains_registry() -> None:
+    """delete_ephemeral() deletes messages registered via the ephemeral registry."""
+    transport = FakeTransport()
+    presenter = _KeyboardPresenter()
+    edits = _make_edits(transport, presenter)
+
+    # Register two ephemeral messages for this progress_ref
+    feedback_ref_1 = MessageRef(channel_id=123, message_id=50)
+    feedback_ref_2 = MessageRef(channel_id=123, message_id=51)
+    register_ephemeral_message(123, 1, feedback_ref_1)  # anchor = progress msg id 1
+    register_ephemeral_message(123, 1, feedback_ref_2)
+
+    await edits.delete_ephemeral()
+
+    assert len(transport.delete_calls) == 2
+    assert feedback_ref_1 in transport.delete_calls
+    assert feedback_ref_2 in transport.delete_calls
+    # Registry should be drained
+    assert (123, 1) not in _EPHEMERAL_MSGS

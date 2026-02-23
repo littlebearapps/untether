@@ -25,6 +25,26 @@ from .transport import (
 
 logger = get_logger(__name__)
 
+# ---------------------------------------------------------------------------
+# Ephemeral message registry
+# ---------------------------------------------------------------------------
+# Callback handlers (e.g. approve/deny) can register messages here so that
+# ProgressEdits.delete_ephemeral() cleans them up when the run finishes.
+# Keyed by (channel_id, progress_message_id).
+
+_EPHEMERAL_MSGS: dict[tuple[ChannelId, MessageId], list[MessageRef]] = {}
+
+
+def register_ephemeral_message(
+    channel_id: ChannelId,
+    anchor_message_id: MessageId,
+    ref: MessageRef,
+) -> None:
+    """Register a message for deletion when the anchored run finishes."""
+    key = (channel_id, anchor_message_id)
+    _EPHEMERAL_MSGS.setdefault(key, []).append(ref)
+
+
 # Usage alert thresholds (percentage of 5h window)
 _USAGE_WARN_PCT = 70
 _USAGE_CRITICAL_PCT = 90
@@ -215,6 +235,7 @@ class ProgressEdits:
         self.context_line = context_line
         self.thread_id = thread_id
         self._approval_notified: bool = False
+        self._approval_notify_ref: MessageRef | None = None
         self.event_seq = 0
         self.rendered_seq = 0
         self.signal_send, self.signal_recv = anyio.create_memory_object_stream(1)
@@ -254,7 +275,7 @@ class ProgressEdits:
 
             if has_approval and not had_approval and not self._approval_notified:
                 self._approval_notified = True
-                await self.transport.send(
+                self._approval_notify_ref = await self.transport.send(
                     channel_id=self.channel_id,
                     message=RenderedMessage(
                         text="Action required \u2014 approval needed"
@@ -266,6 +287,9 @@ class ProgressEdits:
                     ),
                 )
             elif had_approval and not has_approval:
+                if self._approval_notify_ref is not None:
+                    await self.transport.delete(ref=self._approval_notify_ref)
+                    self._approval_notify_ref = None
                 self._approval_notified = False
 
             if rendered != self.last_rendered:
@@ -297,6 +321,18 @@ class ProgressEdits:
             pass
         except (anyio.BrokenResourceError, anyio.ClosedResourceError):
             pass
+
+    async def delete_ephemeral(self) -> None:
+        """Delete any tracked ephemeral notification messages."""
+        if self._approval_notify_ref is not None:
+            await self.transport.delete(ref=self._approval_notify_ref)
+            self._approval_notify_ref = None
+        # Drain messages registered by callback handlers (e.g. approve/deny feedback).
+        if self.progress_ref is not None:
+            key = (self.channel_id, self.progress_ref.message_id)
+            refs = _EPHEMERAL_MSGS.pop(key, [])
+            for ref in refs:
+                await self.transport.delete(ref=ref)
 
 
 @dataclass(frozen=True, slots=True)
@@ -558,6 +594,8 @@ async def handle_message(
             if not outcome.cancelled and error is None:
                 # Give pending progress edits a chance to flush if they're ready.
                 await anyio.sleep(0)
+            # Clean up any remaining ephemeral notification messages.
+            await edits.delete_ephemeral()
             edits_scope.cancel()
 
     elapsed = clock() - started_at

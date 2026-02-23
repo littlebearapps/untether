@@ -10,7 +10,7 @@ from ...config import ConfigError
 from ...logging import get_logger
 from ...model import EngineId, ResumeToken
 from ...runners.run_options import EngineRunOptions
-from ...runner_bridge import RunningTasks
+from ...runner_bridge import RunningTasks, register_ephemeral_message
 from ...scheduler import ThreadScheduler
 from ...transport import MessageRef
 from ..files import split_command_args
@@ -133,6 +133,7 @@ async def _dispatch_callback(
     on_thread_known: Callable[[ResumeToken, anyio.Event], Awaitable[None]] | None,
     stateful_mode: bool,
     default_engine_override: EngineId | None,
+    callback_query_id: str | None = None,
 ) -> None:
     """Dispatch a callback query to a command backend."""
     allowlist = cfg.runtime.allowlist
@@ -159,44 +160,62 @@ async def _dispatch_callback(
         sender_id=msg.sender_id,
         raw=msg.raw,
     )
+    _answered = False
+
+    async def _answer_callback(text: str | None = None) -> None:
+        nonlocal _answered
+        if callback_query_id is not None and not _answered:
+            await cfg.bot.answer_callback_query(callback_query_id, text=text)
+            _answered = True
+
     try:
-        backend = get_command(command_id, allowlist=allowlist, required=False)
-    except ConfigError as exc:
-        await executor.send(f"error:\n{exc}", reply_to=message_ref, notify=True)
-        return
-    if backend is None:
-        return
-    try:
-        plugin_config = cfg.runtime.plugin_config(command_id)
-    except ConfigError as exc:
-        await executor.send(f"error:\n{exc}", reply_to=message_ref, notify=True)
-        return
-    # For callbacks, text is the full callback data and args come from parsing
-    text = msg.data or ""
-    ctx = CommandContext(
-        command=command_id,
-        text=text,
-        args_text=args_text,
-        args=split_command_args(args_text),
-        message=message_ref,
-        reply_to=None,  # Callback queries don't have reply context
-        reply_text=None,
-        config_path=cfg.runtime.config_path,
-        plugin_config=plugin_config,
-        runtime=cfg.runtime,
-        executor=executor,
-    )
-    try:
-        result = await backend.handle(ctx)
-    except Exception as exc:
-        logger.exception(
-            "callback.failed",
+        try:
+            backend = get_command(command_id, allowlist=allowlist, required=False)
+        except ConfigError as exc:
+            await _answer_callback(str(exc)[:200])
+            return
+        if backend is None:
+            return
+        try:
+            plugin_config = cfg.runtime.plugin_config(command_id)
+        except ConfigError as exc:
+            await _answer_callback(str(exc)[:200])
+            return
+        # For callbacks, text is the full callback data and args come from parsing
+        text = msg.data or ""
+        ctx = CommandContext(
             command=command_id,
-            error=str(exc),
-            error_type=exc.__class__.__name__,
+            text=text,
+            args_text=args_text,
+            args=split_command_args(args_text),
+            message=message_ref,
+            reply_to=None,  # Callback queries don't have reply context
+            reply_text=None,
+            config_path=cfg.runtime.config_path,
+            plugin_config=plugin_config,
+            runtime=cfg.runtime,
+            executor=executor,
         )
-        await executor.send(f"error:\n{exc}", reply_to=message_ref, notify=True)
-        return
-    if result is not None:
-        reply_to = message_ref if result.reply_to is None else result.reply_to
-        await executor.send(result.text, reply_to=reply_to, notify=result.notify)
+        try:
+            result = await backend.handle(ctx)
+        except Exception as exc:
+            logger.exception(
+                "callback.failed",
+                command=command_id,
+                error=str(exc),
+                error_type=exc.__class__.__name__,
+            )
+            await _answer_callback(str(exc)[:200])
+            return
+        if result is not None:
+            reply_to = message_ref if result.reply_to is None else result.reply_to
+            sent_ref = await executor.send(
+                result.text, reply_to=reply_to, notify=result.notify
+            )
+            # Register feedback message for cleanup when the run finishes.
+            if sent_ref is not None and callback_query_id is not None:
+                register_ephemeral_message(
+                    chat_id, user_msg_id, sent_ref
+                )
+    finally:
+        await _answer_callback()

@@ -1847,10 +1847,6 @@ async def run_main_loop(
                         if cb_command_id not in state.command_ids:
                             refresh_commands()
                         if cb_command_id in state.command_ids:
-                            # Answer callback immediately to clear loading state
-                            tg.start_soon(
-                                cfg.bot.answer_callback_query, update.callback_query_id
-                            )
                             # Extract thread_id from raw callback data
                             cb_thread_id: int | None = None
                             if update.raw and isinstance(
@@ -1883,6 +1879,7 @@ async def run_main_loop(
                                 ),
                                 cb_stateful_mode,
                                 None,  # No engine override for callbacks
+                                update.callback_query_id,
                             )
                         else:
                             tg.start_soon(

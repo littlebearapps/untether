@@ -2,7 +2,16 @@
 
 from __future__ import annotations
 
-from takopi.telegram.commands.dispatch import _parse_callback_data
+from unittest.mock import AsyncMock
+
+import pytest
+
+from takopi.commands import CommandBackend, CommandContext, CommandResult
+from takopi.runner_bridge import _EPHEMERAL_MSGS
+from takopi.telegram.commands import dispatch as dispatch_mod
+from takopi.telegram.commands.dispatch import _dispatch_callback, _parse_callback_data
+from takopi.telegram.types import TelegramCallbackQuery
+from tests.telegram_fakes import FakeBot, FakeTransport, make_cfg
 
 
 class TestParseCallbackData:
@@ -121,3 +130,166 @@ class TestParseCallbackDataEdgeCases:
         command_id, args_text = _parse_callback_data("cmd:a:b:c:d")
         assert command_id == "cmd"
         assert args_text == "a:b:c:d"
+
+
+# ---------------------------------------------------------------------------
+# _dispatch_callback toast tests
+# ---------------------------------------------------------------------------
+
+
+class _StubBackend:
+    """Minimal command backend for dispatch tests."""
+
+    id = "test_cmd"
+    description = "stub"
+
+    def __init__(self, result: CommandResult | None = None, *, raise_exc: Exception | None = None):
+        self._result = result
+        self._raise_exc = raise_exc
+
+    async def handle(self, ctx: CommandContext) -> CommandResult | None:
+        if self._raise_exc is not None:
+            raise self._raise_exc
+        return self._result
+
+
+def _make_callback_query(data: str = "test_cmd:args") -> TelegramCallbackQuery:
+    return TelegramCallbackQuery(
+        transport="telegram",
+        chat_id=123,
+        message_id=42,
+        callback_query_id="cb-123",
+        data=data,
+        sender_id=1,
+    )
+
+
+@pytest.mark.anyio
+async def test_dispatch_callback_registers_ephemeral_with_callback_query_id(
+    monkeypatch,
+) -> None:
+    """With callback_query_id, result is sent as persistent message AND registered for cleanup."""
+    transport = FakeTransport()
+    cfg = make_cfg(transport)
+    bot: FakeBot = cfg.bot  # type: ignore[assignment]
+    backend = _StubBackend(CommandResult(text="Approved permission request"))
+    monkeypatch.setattr(dispatch_mod, "get_command", lambda *a, **kw: backend)
+
+    # Clean registry before test
+    _EPHEMERAL_MSGS.clear()
+
+    await _dispatch_callback(
+        cfg,
+        _make_callback_query(),
+        "test_cmd",
+        "args",
+        None,  # thread_id
+        {},  # running_tasks
+        AsyncMock(),  # scheduler
+        None,  # on_thread_known
+        False,  # stateful_mode
+        None,  # default_engine_override
+        "cb-123",  # callback_query_id
+    )
+
+    # Persistent message sent
+    assert any("Approved" in s["message"].text for s in transport.send_calls)
+    # Callback answered to clear spinner
+    assert len(bot.callback_calls) == 1
+    # Feedback message registered as ephemeral (keyed by chat_id, progress_message_id)
+    assert (123, 42) in _EPHEMERAL_MSGS
+    assert len(_EPHEMERAL_MSGS[(123, 42)]) == 1
+
+    _EPHEMERAL_MSGS.clear()
+
+
+@pytest.mark.anyio
+async def test_dispatch_callback_no_ephemeral_without_callback_query_id(
+    monkeypatch,
+) -> None:
+    """Without callback_query_id, result is sent as persistent message, NOT registered."""
+    transport = FakeTransport()
+    cfg = make_cfg(transport)
+    bot: FakeBot = cfg.bot  # type: ignore[assignment]
+    backend = _StubBackend(CommandResult(text="Approved permission request"))
+    monkeypatch.setattr(dispatch_mod, "get_command", lambda *a, **kw: backend)
+
+    _EPHEMERAL_MSGS.clear()
+
+    await _dispatch_callback(
+        cfg,
+        _make_callback_query(),
+        "test_cmd",
+        "args",
+        None,
+        {},
+        AsyncMock(),
+        None,
+        False,
+        None,
+        # No callback_query_id
+    )
+
+    # Persistent message sent
+    assert any("Approved" in s["message"].text for s in transport.send_calls)
+    # No callback answer
+    assert len(bot.callback_calls) == 0
+    # NOT registered as ephemeral
+    assert (123, 42) not in _EPHEMERAL_MSGS
+
+
+@pytest.mark.anyio
+async def test_dispatch_callback_answers_on_error(monkeypatch) -> None:
+    """On command error, callback is still answered to clear loading spinner."""
+    transport = FakeTransport()
+    cfg = make_cfg(transport)
+    bot: FakeBot = cfg.bot  # type: ignore[assignment]
+    backend = _StubBackend(raise_exc=RuntimeError("boom"))
+    monkeypatch.setattr(dispatch_mod, "get_command", lambda *a, **kw: backend)
+
+    await _dispatch_callback(
+        cfg,
+        _make_callback_query(),
+        "test_cmd",
+        "args",
+        None,
+        {},
+        AsyncMock(),
+        None,
+        False,
+        None,
+        "cb-123",
+    )
+
+    # Callback should be answered even on error
+    assert len(bot.callback_calls) >= 1
+    assert bot.callback_calls[0]["text"] is not None
+    assert "boom" in bot.callback_calls[0]["text"]
+
+
+@pytest.mark.anyio
+async def test_dispatch_callback_answers_when_result_is_none(monkeypatch) -> None:
+    """When command returns None, callback is still answered (via finally)."""
+    transport = FakeTransport()
+    cfg = make_cfg(transport)
+    bot: FakeBot = cfg.bot  # type: ignore[assignment]
+    backend = _StubBackend(result=None)
+    monkeypatch.setattr(dispatch_mod, "get_command", lambda *a, **kw: backend)
+
+    await _dispatch_callback(
+        cfg,
+        _make_callback_query(),
+        "test_cmd",
+        "args",
+        None,
+        {},
+        AsyncMock(),
+        None,
+        False,
+        None,
+        "cb-123",
+    )
+
+    # Callback should be answered via finally block (no text, just clear spinner)
+    assert len(bot.callback_calls) == 1
+    assert bot.callback_calls[0]["text"] is None

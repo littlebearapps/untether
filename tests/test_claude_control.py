@@ -79,7 +79,7 @@ def _clear_registries():
 # ===========================================================================
 
 def test_can_use_tool_produces_warning_with_inline_keyboard() -> None:
-    """ExitPlanMode / CanUseTool request -> ActionEvent with kind='warning'
+    """ExitPlanMode CanUseTool request -> ActionEvent with kind='warning'
     and inline_keyboard containing Approve/Deny buttons with request_id."""
     state, factory = _make_state_with_session()
     event = _decode_event({
@@ -87,8 +87,8 @@ def test_can_use_tool_produces_warning_with_inline_keyboard() -> None:
         "request_id": "req-1",
         "request": {
             "subtype": "can_use_tool",
-            "tool_name": "Bash",
-            "input": {"command": "echo hello"},
+            "tool_name": "ExitPlanMode",
+            "input": {},
         },
     })
     events = translate_claude_event(event, title="claude", state=state, factory=factory)
@@ -135,16 +135,57 @@ def test_auto_approve_types_add_to_queue(subtype: str, extra_fields: dict) -> No
     assert f"req-{subtype}" in state.auto_approve_queue
 
 
+@pytest.mark.parametrize(
+    "tool_name",
+    ["Bash", "Read", "Edit", "Write", "Glob", "Grep", "WebFetch", "WebSearch", "Task", "Skill", "ToolSearch"],
+)
+def test_non_exit_plan_mode_tools_auto_approved(tool_name: str) -> None:
+    """CanUseTool requests for tools other than ExitPlanMode are auto-approved."""
+    state, factory = _make_state_with_session()
+    event = _decode_event({
+        "type": "control_request",
+        "request_id": f"req-auto-{tool_name}",
+        "request": {
+            "subtype": "can_use_tool",
+            "tool_name": tool_name,
+            "input": {},
+        },
+    })
+    events = translate_claude_event(event, title="claude", state=state, factory=factory)
+
+    assert events == []
+    assert f"req-auto-{tool_name}" in state.auto_approve_queue
+
+
+def test_exit_plan_mode_not_auto_approved() -> None:
+    """ExitPlanMode CanUseTool requests are NOT auto-approved (require user interaction)."""
+    state, factory = _make_state_with_session()
+    event = _decode_event({
+        "type": "control_request",
+        "request_id": "req-epm",
+        "request": {
+            "subtype": "can_use_tool",
+            "tool_name": "ExitPlanMode",
+            "input": {},
+        },
+    })
+    events = translate_claude_event(event, title="claude", state=state, factory=factory)
+
+    assert len(events) == 1
+    assert events[0].action.kind == "warning"
+    assert "req-epm" not in state.auto_approve_queue
+
+
 def test_request_to_session_populated() -> None:
-    """A CanUseTool control request populates _REQUEST_TO_SESSION."""
+    """A CanUseTool control request (requiring approval) populates _REQUEST_TO_SESSION."""
     state, factory = _make_state_with_session("sess-abc")
     event = _decode_event({
         "type": "control_request",
         "request_id": "req-map",
         "request": {
             "subtype": "can_use_tool",
-            "tool_name": "Read",
-            "input": {"file_path": "/tmp/x"},
+            "tool_name": "ExitPlanMode",
+            "input": {},
         },
     })
     translate_claude_event(event, title="claude", state=state, factory=factory)
@@ -153,15 +194,15 @@ def test_request_to_session_populated() -> None:
 
 
 def test_request_to_input_populated() -> None:
-    """A CanUseTool control request stores original tool input."""
+    """A CanUseTool control request (requiring approval) stores original tool input."""
     state, factory = _make_state_with_session()
-    tool_input = {"file_path": "/tmp/y", "limit": 100}
+    tool_input: dict[str, Any] = {}
     event = _decode_event({
         "type": "control_request",
         "request_id": "req-inp",
         "request": {
             "subtype": "can_use_tool",
-            "tool_name": "Read",
+            "tool_name": "ExitPlanMode",
             "input": tool_input,
         },
     })
@@ -340,7 +381,8 @@ async def test_drain_auto_approve_falls_back_to_proc_stdin() -> None:
 
 def test_control_action_lifecycle_tool_use_to_result() -> None:
     """tool_use -> control_request -> tool_result: verifies last_tool_use_id,
-    control_action_for_tool mapping, and completion of both actions."""
+    control_action_for_tool mapping, and completion of both actions.
+    Uses ExitPlanMode since it's the only tool requiring interactive approval."""
     state, factory = _make_state_with_session()
 
     # Step 1: assistant message with tool_use
@@ -351,8 +393,8 @@ def test_control_action_lifecycle_tool_use_to_result() -> None:
             "content": [{
                 "type": "tool_use",
                 "id": "toolu_lifecycle",
-                "name": "Bash",
-                "input": {"command": "echo test"},
+                "name": "ExitPlanMode",
+                "input": {},
             }],
         },
     })
@@ -363,14 +405,14 @@ def test_control_action_lifecycle_tool_use_to_result() -> None:
     assert events_1[0].phase == "started"
     assert state.last_tool_use_id == "toolu_lifecycle"
 
-    # Step 2: control request (can_use_tool)
+    # Step 2: control request (can_use_tool) — ExitPlanMode requires approval
     control_evt = _decode_event({
         "type": "control_request",
         "request_id": "req-lifecycle",
         "request": {
             "subtype": "can_use_tool",
-            "tool_name": "Bash",
-            "input": {"command": "echo test"},
+            "tool_name": "ExitPlanMode",
+            "input": {},
         },
     })
     events_2 = translate_claude_event(
@@ -391,7 +433,7 @@ def test_control_action_lifecycle_tool_use_to_result() -> None:
             "content": [{
                 "type": "tool_result",
                 "tool_use_id": "toolu_lifecycle",
-                "content": "test output",
+                "content": "plan approved",
                 "is_error": False,
             }],
         },

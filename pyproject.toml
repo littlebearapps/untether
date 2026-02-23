@@ -52,6 +52,7 @@ telegram = "takopi.telegram.backend:BACKEND"
 claude_control = "takopi.telegram.commands.claude_control:BACKEND"
 usage = "takopi.telegram.commands.usage:BACKEND"
 planmode = "takopi.telegram.commands.planmode:BACKEND"
+ping = "takopi.telegram.commands.ping:BACKEND"
 
 [build-system]
 requires = ["uv_build>=0.9.18,<0.10.0"]

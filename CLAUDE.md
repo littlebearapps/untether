@@ -37,20 +37,32 @@ The `interactive-features` branch adds bidirectional control channel support for
 3. **`_REQUEST_TO_SESSION` registry** - Maps `request_id -> session_id` so Telegram callbacks can route to the correct runner/stdin.
 4. **Stdout pipe FD inheritance** - Claude Code's MCP servers inherit the stdout pipe. After `CompletedEvent`, break immediately instead of waiting for EOF.
 5. **Auto-approve drain** - `ControlInitializeRequest` and other auto-approved requests must be drained after every JSONL line, not just after yielded events.
+6. **Tool auto-approve** - `ControlCanUseToolRequest` is auto-approved for all tools except those in `_TOOLS_REQUIRING_APPROVAL` (currently only `ExitPlanMode`). This prevents noisy approval prompts in Telegram for routine tools like Grep, Glob, WebFetch, Task, etc.
 
-### Approval push notifications
+### Approval notifications and ephemeral message cleanup
 
 Telegram's `edit_message_text` does not trigger push notifications. `ProgressEdits.run()` detects when `reply_markup.inline_keyboard` transitions from 1 row (cancel only) to 2+ rows (approve/deny buttons) and sends a separate `transport.send()` with `notify=True` so the user gets a push notification on their phone. The `_approval_notified` flag resets when approval buttons disappear, allowing subsequent approvals in the same run to also notify.
+
+Approval-related messages are **ephemeral** -- they auto-delete to keep the chat clean:
+
+- **"Action required — approval needed"** notification: deleted immediately when the user clicks Approve/Deny (tracked via `_approval_notify_ref` in `ProgressEdits`)
+- **"Approved/Denied permission request"** feedback: deleted when the run finishes and the final summary is sent (tracked via `_EPHEMERAL_MSGS` registry in `runner_bridge.py`, registered by `_dispatch_callback` in `dispatch.py`)
+
+Both are cleaned up by `ProgressEdits.delete_ephemeral()`, called in the `handle_message` finally block.
 
 ### Files modified from upstream
 
 - `src/takopi/runners/claude.py` - Control channel, `_iter_jsonl_events` override, `_SESSION_STDIN`/`_REQUEST_TO_SESSION` registries, `write_control_response`, `send_claude_control_response`
-- `src/takopi/runner_bridge.py` - `ProgressEdits` approval push notifications (thread_id, keyboard transition detection)
+- `src/takopi/runner_bridge.py` - `ProgressEdits` approval push notifications, ephemeral message tracking/cleanup, `_EPHEMERAL_MSGS` registry
 - `src/takopi/telegram/commands/claude_control.py` - Approve/Deny callback handler
+- `src/takopi/telegram/commands/dispatch.py` - Callback dispatch with `callback_query_id` passthrough and ephemeral message registration
 - `src/takopi/telegram/commands/planmode.py` - `/planmode` toggle command
 - `src/takopi/telegram/commands/usage.py` - `/usage` command
 - `src/takopi/telegram/bridge.py` - Inline keyboard rendering for control requests
-- `tests/test_claude_control.py` - 18 tests covering control request translation, response routing, registry lifecycle, auto-approve drain, and full tool-use lifecycle
+- `src/takopi/telegram/loop.py` - Passes `callback_query_id` to dispatch for deferred callback answering
+- `tests/test_claude_control.py` - 30 tests covering control request translation, response routing, registry lifecycle, auto-approve drain, tool auto-approve, and full tool-use lifecycle
+- `tests/test_exec_bridge.py` - 4 tests for ephemeral notification cleanup
+- `tests/test_callback_dispatch.py` - 4 tests for callback dispatch toast/ephemeral behaviour
 
 ## Development
 

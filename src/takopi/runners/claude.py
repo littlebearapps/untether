@@ -362,6 +362,19 @@ def translate_claude_event(
                 state.auto_approve_queue.append(request_id)
                 return []
 
+            # Auto-approve tool requests that don't need user interaction
+            _TOOLS_REQUIRING_APPROVAL = {"ExitPlanMode"}
+            if isinstance(request, claude_schema.ControlCanUseToolRequest):
+                tool_name = getattr(request, "tool_name", "unknown")
+                if tool_name not in _TOOLS_REQUIRING_APPROVAL:
+                    logger.debug(
+                        "control_request.auto_approve_tool",
+                        request_id=request_id,
+                        tool_name=tool_name,
+                    )
+                    state.auto_approve_queue.append(request_id)
+                    return []
+
             # Phase 2: Interactive control request with inline keyboard
             request_type = type(request).__name__.replace("Control", "").replace("Request", "")
 
