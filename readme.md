@@ -4,6 +4,15 @@
 
 telegram bridge for codex, claude code, opencode, pi. manage multiple projects and worktrees, stream progress, and resume sessions anywhere.
 
+## quick start
+
+```sh
+uv tool install untether    # install
+untether                     # run setup wizard (creates bot, picks engine)
+```
+
+then send a message to your bot on telegram.
+
 ## features
 
 - projects and worktrees: work on multiple repos/branches simultaneously, branches are git worktrees
