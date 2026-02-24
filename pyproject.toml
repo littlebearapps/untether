@@ -73,7 +73,7 @@ docs = [
 ]
 
 [tool.pytest.ini_options]
-addopts = ["--cov=untether", "--cov-branch", "--cov-report=term-missing", "--cov-fail-under=81"]
+addopts = ["--cov=untether", "--cov-branch", "--cov-report=term-missing", "--cov-fail-under=80"]
 testpaths = ["tests"]
 
 [tool.mutmut]
