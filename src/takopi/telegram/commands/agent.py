@@ -86,7 +86,7 @@ async def _handle_agent_command(
             "project_default": "project default",
             "global_default": "global default",
         }
-        agent_line = f"engine: {selection.engine} ({source_labels[selection.source]})"
+        agent_line = f"engine: **{selection.engine}** ({source_labels[selection.source]})"
         topic_override = None
         if tkey is not None and topic_store is not None:
             topic_override = await topic_store.get_engine_override(
@@ -114,12 +114,12 @@ async def _handle_agent_command(
         )
         model_value = model_resolution.value or "default"
         model_line = (
-            f"model: {model_value} ({override_labels[model_resolution.source]})"
+            f"model: **{model_value}** ({override_labels[model_resolution.source]})"
         )
         reasoning_value = reasoning_resolution.value or "default"
         reasoning_line = (
             "reasoning: "
-            f"{reasoning_value} ({override_labels[reasoning_resolution.source]})"
+            f"**{reasoning_value}** ({override_labels[reasoning_resolution.source]})"
         )
         topic_default = selection.topic_default or "none"
         if tkey is None:
@@ -167,13 +167,13 @@ async def _handle_agent_command(
                 await reply(text="topic defaults are unavailable.")
                 return
             await topic_store.set_default_engine(tkey[0], tkey[1], engine)
-            await reply(text=f"topic default engine set to `{engine}`")
+            await reply(text=f"topic default engine **set to** `{engine}`")
             return
         if chat_prefs is None:
             await reply(text="chat defaults are unavailable (no config path).")
             return
         await chat_prefs.set_default_engine(msg.chat_id, engine)
-        await reply(text=f"chat default engine set to `{engine}`")
+        await reply(text=f"chat default engine **set to** `{engine}`")
         return
 
     if action == "clear":
@@ -184,13 +184,13 @@ async def _handle_agent_command(
                 await reply(text="topic defaults are unavailable.")
                 return
             await topic_store.clear_default_engine(tkey[0], tkey[1])
-            await reply(text="topic default engine cleared.")
+            await reply(text="topic default engine **cleared**.")
             return
         if chat_prefs is None:
             await reply(text="chat defaults are unavailable (no config path).")
             return
         await chat_prefs.clear_default_engine(msg.chat_id)
-        await reply(text="chat default engine cleared.")
+        await reply(text="chat default engine **cleared**.")
         return
 
     await reply(text=AGENT_USAGE)

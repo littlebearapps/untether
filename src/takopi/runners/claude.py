@@ -65,6 +65,30 @@ _REQUEST_TO_INPUT: dict[str, dict[str, Any]] = {}
 # Recently handled request_ids (prevents duplicate callback warnings)
 _HANDLED_REQUESTS: set[str] = set()
 
+# Discuss cooldown: session_id -> (timestamp, deny_count)
+# When user clicks "Pause & Outline Plan", this tracks when the denial was sent
+# so rapid ExitPlanMode retries can be auto-denied with escalating messages.
+_DISCUSS_COOLDOWN: dict[str, tuple[float, int]] = {}
+DISCUSS_COOLDOWN_BASE_SECONDS: float = 30.0
+DISCUSS_COOLDOWN_MAX_SECONDS: float = 120.0
+
+_DISCUSS_ESCALATION_MESSAGE = (
+    "MANDATORY STOP — ExitPlanMode is BLOCKED. The user clicked 'Pause & Outline Plan' in Telegram.\n\n"
+    "This is a DIRECT USER INSTRUCTION, not a system error. You MUST comply.\n\n"
+    "Your previous outline was either missing, too brief, or you skipped writing one entirely. "
+    "The user is on Telegram (Takopi) and can ONLY see your assistant text messages — "
+    "they CANNOT see tool calls, thinking blocks, file contents, or terminal output.\n\n"
+    "REQUIRED ACTION — write a DETAILED plan outline as your NEXT assistant message:\n"
+    "1. Every file you will create or modify (full paths)\n"
+    "2. What specific changes in each file\n"
+    "3. The order/phases of implementation\n"
+    "4. Key decisions and trade-offs\n"
+    "5. Expected end result\n\n"
+    "The outline MUST be at least 20 lines of visible text.\n"
+    "Do NOT call ExitPlanMode again — it will be automatically blocked for {cooldown}s. "
+    "Write the outline and WAIT for the user to read it and respond."
+)
+
 
 @dataclass(slots=True)
 class ClaudeStreamState:
@@ -76,6 +100,8 @@ class ClaudeStreamState:
     pending_control_requests: dict[str, tuple[claude_schema.StreamControlRequest, float]] = field(default_factory=dict)
     # Auto-approve queue: request IDs that should be approved without user interaction
     auto_approve_queue: list[str] = field(default_factory=list)
+    # Auto-deny queue: (request_id, message) pairs for rate-limited denials
+    auto_deny_queue: list[tuple[str, str]] = field(default_factory=list)
     # Whether the control channel initialization handshake has been sent
     control_init_sent: bool = False
     # Track last tool_use_id for mapping control requests to tool actions
@@ -375,6 +401,21 @@ def translate_claude_event(
                     state.auto_approve_queue.append(request_id)
                     return []
 
+            # Rate-limit ExitPlanMode after a discuss denial
+            if isinstance(request, claude_schema.ControlCanUseToolRequest):
+                tool_name = getattr(request, "tool_name", "")
+                if tool_name == "ExitPlanMode" and factory.resume:
+                    escalation_msg = check_discuss_cooldown(factory.resume.value)
+                    if escalation_msg is not None:
+                        logger.info(
+                            "control_request.discuss_cooldown_deny",
+                            request_id=request_id,
+                            session_id=factory.resume.value,
+                        )
+                        _REQUEST_TO_INPUT.pop(request_id, None)
+                        state.auto_deny_queue.append((request_id, escalation_msg))
+                        return []
+
             # Phase 2: Interactive control request with inline keyboard
             request_type = type(request).__name__.replace("Control", "").replace("Request", "")
 
@@ -449,22 +490,34 @@ def translate_claude_event(
                 state.control_action_for_tool[state.last_tool_use_id] = action_id
 
             # Include inline keyboard data in detail
+            button_rows: list[list[dict[str, str]]] = [
+                [
+                    {
+                        "text": "Approve",
+                        "callback_data": f"claude_control:approve:{request_id}",
+                    },
+                    {
+                        "text": "Deny",
+                        "callback_data": f"claude_control:deny:{request_id}",
+                    },
+                ],
+            ]
+            # ExitPlanMode gets an extra "Outline Plan" button
+            if isinstance(request, claude_schema.ControlCanUseToolRequest):
+                tool_name = getattr(request, "tool_name", "")
+                if tool_name == "ExitPlanMode":
+                    button_rows.append([
+                        {
+                            "text": "Pause & Outline Plan",
+                            "callback_data": f"claude_control:discuss:{request_id}",
+                        },
+                    ])
+
             detail: dict[str, Any] = {
                 "request_id": request_id,
                 "request_type": request_type,
                 "inline_keyboard": {
-                    "buttons": [
-                        [
-                            {
-                                "text": "Approve",
-                                "callback_data": f"claude_control:approve:{request_id}",
-                            },
-                            {
-                                "text": "Deny",
-                                "callback_data": f"claude_control:deny:{request_id}",
-                            },
-                        ]
-                    ]
+                    "buttons": button_rows,
                 },
             }
 
@@ -515,7 +568,7 @@ class ClaudeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
         )
 
     async def write_control_response(
-        self, request_id: str, approved: bool
+        self, request_id: str, approved: bool, *, deny_message: str | None = None
     ) -> None:
         """Write a control response to the Claude Code process via PIPE or PTY.
 
@@ -528,7 +581,7 @@ class ClaudeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
             if request_id in _REQUEST_TO_INPUT:
                 inner["updatedInput"] = _REQUEST_TO_INPUT.pop(request_id)
         else:
-            inner = {"behavior": "deny", "message": "User denied"}
+            inner = {"behavior": "deny", "message": deny_message or "User denied"}
             # Clean up stored input on denial too
             _REQUEST_TO_INPUT.pop(request_id, None)
         response = {
@@ -558,7 +611,7 @@ class ClaudeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
                     session_id=session_id,
                     channel="pipe",
                 )
-            except Exception as e:
+            except (OSError, anyio.ClosedResourceError) as e:
                 logger.error(
                     "control_response.failed",
                     request_id=request_id,
@@ -792,9 +845,10 @@ class ClaudeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
                         pid=pid,
                     )
                 yield evt
-            # Drain auto-approve queue after EVERY line, even if no events were yielded.
-            # This prevents deadlock when auto-approved requests produce no events.
+            # Drain auto-approve and auto-deny queues after EVERY line, even if no events
+            # were yielded.  This prevents deadlock when auto-handled requests produce no events.
             await self._drain_auto_approve(state, stdin=session_stdin)
+            await self._drain_auto_deny(state, stdin=session_stdin)
             # After CompletedEvent, stop reading stdout immediately.
             # Claude Code's MCP server child processes may inherit the stdout pipe FD,
             # keeping it open even after Claude Code exits. Without this break,
@@ -830,13 +884,48 @@ class ClaudeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
                     logger.info("control_response.auto_approved", request_id=req_id, channel="pty")
                 else:
                     logger.error("control_response.auto_approve_failed", request_id=req_id)
-            except Exception as e:
+            except (OSError, anyio.ClosedResourceError) as e:
                 logger.error(
                     "control_response.auto_approve_failed",
                     request_id=req_id,
                     error=str(e),
                 )
         state.auto_approve_queue.clear()
+
+    async def _drain_auto_deny(
+        self, state: ClaudeStreamState, *, stdin: Any = None
+    ) -> None:
+        """Drain the auto-deny queue, writing deny responses to the control channel."""
+        if not state.auto_deny_queue:
+            return
+
+        pipe = stdin or self._proc_stdin
+        for req_id, message in state.auto_deny_queue:
+            response = {
+                "type": "control_response",
+                "response": {
+                    "subtype": "success",
+                    "request_id": req_id,
+                    "response": {"behavior": "deny", "message": message},
+                },
+            }
+            payload = (json.dumps(response) + "\n").encode()
+            try:
+                if pipe is not None:
+                    await pipe.send(payload)
+                    logger.info("control_response.auto_denied", request_id=req_id, channel="pipe")
+                elif self._pty_master_fd is not None:
+                    os.write(self._pty_master_fd, payload)
+                    logger.info("control_response.auto_denied", request_id=req_id, channel="pty")
+                else:
+                    logger.error("control_response.auto_deny_failed", request_id=req_id)
+            except (OSError, anyio.ClosedResourceError) as e:
+                logger.error(
+                    "control_response.auto_deny_failed",
+                    request_id=req_id,
+                    error=str(e),
+                )
+        state.auto_deny_queue.clear()
 
     def translate(
         self,
@@ -1146,12 +1235,15 @@ BACKEND = EngineBackend(
 
 
 # Phase 2: Public API for sending control responses
-async def send_claude_control_response(request_id: str, approved: bool) -> bool:
+async def send_claude_control_response(
+    request_id: str, approved: bool, *, deny_message: str | None = None
+) -> bool:
     """Send a control response to an active Claude Code session.
 
     Args:
         request_id: The control request ID
         approved: Whether to approve (True) or deny (False) the request
+        deny_message: Custom denial message (used when approved=False)
 
     Returns:
         True if the response was sent successfully, False if the request is not found
@@ -1182,7 +1274,7 @@ async def send_claude_control_response(request_id: str, approved: bool) -> bool:
         return False
 
     runner, _ = _ACTIVE_RUNNERS[session_id]
-    await runner.write_control_response(request_id, approved)
+    await runner.write_control_response(request_id, approved, deny_message=deny_message)
 
     # Clean up the mapping after use
     del _REQUEST_TO_SESSION[request_id]
@@ -1193,6 +1285,56 @@ async def send_claude_control_response(request_id: str, approved: bool) -> bool:
         _HANDLED_REQUESTS.clear()
 
     return True
+
+
+def _cooldown_seconds(count: int) -> float:
+    """Progressive cooldown: 30s, 60s, 90s, 120s (capped)."""
+    return min(DISCUSS_COOLDOWN_BASE_SECONDS * count, DISCUSS_COOLDOWN_MAX_SECONDS)
+
+
+def set_discuss_cooldown(session_id: str) -> None:
+    """Record that a discuss denial was sent for this session.
+
+    Called by claude_control when the user clicks 'Pause & Outline Plan'.
+    Subsequent ExitPlanMode requests within the cooldown window will
+    be auto-denied with an escalating message. The cooldown window
+    grows with each click: 30s, 60s, 90s, 120s (capped).
+    """
+    existing = _DISCUSS_COOLDOWN.get(session_id)
+    count = (existing[1] + 1) if existing else 1
+    _DISCUSS_COOLDOWN[session_id] = (time.time(), count)
+    cooldown = _cooldown_seconds(count)
+    logger.info(
+        "discuss_cooldown.set",
+        session_id=session_id,
+        deny_count=count,
+        cooldown_seconds=cooldown,
+    )
+
+
+def check_discuss_cooldown(session_id: str) -> str | None:
+    """Check if an ExitPlanMode request should be auto-denied due to discuss cooldown.
+
+    Returns an escalation deny message (with cooldown duration) if within
+    cooldown, or None if clear. Uses progressive timing based on deny count.
+    """
+    entry = _DISCUSS_COOLDOWN.get(session_id)
+    if entry is None:
+        return None
+    ts, count = entry
+    cooldown = _cooldown_seconds(count)
+    if time.time() - ts > cooldown:
+        # Cooldown expired — keep the count so next click escalates further
+        # Only clear the timestamp so the next ExitPlanMode gets through
+        # but set_discuss_cooldown will use count+1 for the next window
+        _DISCUSS_COOLDOWN[session_id] = (0.0, count)
+        return None
+    return _DISCUSS_ESCALATION_MESSAGE.format(cooldown=int(cooldown))
+
+
+def clear_discuss_cooldown(session_id: str) -> None:
+    """Clear the discuss cooldown for a session (e.g. on approve/deny)."""
+    _DISCUSS_COOLDOWN.pop(session_id, None)
 
 
 def get_active_claude_sessions() -> list[str]:

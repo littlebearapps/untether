@@ -39,16 +39,24 @@ class PlanModeCommand:
         engine = "claude"
         args = ctx.args_text.strip().lower()
 
-        if args in {"", "show"}:
+        if args == "show":
             current = await chat_prefs.get_engine_override(chat_id, engine)
             mode = current.permission_mode if current else None
             if mode == "plan":
-                label = "on (plan mode)"
+                label = "<b>on</b> (plan mode)"
             elif mode is not None:
-                label = f"off ({mode})"
+                label = f"<b>off</b> ({mode})"
             else:
                 label = "default (uses engine config)"
-            return CommandResult(text=f"plan mode: {label}", notify=True)
+            return CommandResult(
+                text=f"plan mode: {label}", notify=True, parse_mode="HTML"
+            )
+
+        if args == "":
+            # Toggle: if currently plan mode, turn off; otherwise turn on
+            current = await chat_prefs.get_engine_override(chat_id, engine)
+            current_mode = current.permission_mode if current else None
+            args = "off" if current_mode == "plan" else "on"
 
         if args in PERMISSION_MODES:
             mode = PERMISSION_MODES[args]
@@ -61,8 +69,12 @@ class PlanModeCommand:
             await chat_prefs.set_engine_override(chat_id, engine, updated)
             label = "on" if args == "on" else "off"
             return CommandResult(
-                text=f"plan mode {label} for this chat.\nnew sessions will use `--permission-mode {mode}`.",
+                text=(
+                    f"plan mode <b>{label}</b> for this chat.\n"
+                    f"new sessions will use <code>--permission-mode {mode}</code>."
+                ),
                 notify=True,
+                parse_mode="HTML",
             )
 
         if args == "clear":
@@ -74,8 +86,9 @@ class PlanModeCommand:
             )
             await chat_prefs.set_engine_override(chat_id, engine, updated)
             return CommandResult(
-                text="plan mode override cleared (using engine config default).",
+                text="plan mode <b>override cleared</b> (using engine config default).",
                 notify=True,
+                parse_mode="HTML",
             )
 
         return CommandResult(text=PLANMODE_USAGE, notify=True)

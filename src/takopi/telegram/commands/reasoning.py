@@ -81,7 +81,7 @@ async def _handle_reasoning_command(
         engine_line = f"engine: {engine} ({ENGINE_SOURCE_LABELS[engine_source]})"
         reasoning_value = resolution.value or "default"
         reasoning_line = (
-            f"reasoning: {reasoning_value} "
+            f"reasoning: **{reasoning_value}** "
             f"({OVERRIDE_SOURCE_LABELS[resolution.source]})"
         )
         topic_label = resolution.topic_value or "none"
@@ -162,7 +162,7 @@ async def _handle_reasoning_command(
         if scope == "topic":
             await reply(
                 text=(
-                    f"topic reasoning override set to `{normalized_level}` "
+                    f"topic reasoning override **set to** `{normalized_level}` "
                     f"for `{engine}`.\n"
                     "If you want a clean start on the new setting, run `/new`."
                 )
@@ -170,7 +170,7 @@ async def _handle_reasoning_command(
             return
         await reply(
             text=(
-                f"chat reasoning override set to `{normalized_level}` for `{engine}`.\n"
+                f"chat reasoning override **set to** `{normalized_level}` for `{engine}`.\n"
                 "If you want a clean start on the new setting, run `/new`."
             )
         )
@@ -226,9 +226,9 @@ async def _handle_reasoning_command(
         if scope is None:
             return
         if scope == "topic":
-            await reply(text="topic reasoning override cleared (using chat default).")
+            await reply(text="topic reasoning override **cleared** (using chat default).")
             return
-        await reply(text="chat reasoning override cleared.")
+        await reply(text="chat reasoning override **cleared**.")
         return
 
     await reply(text=REASONING_USAGE)

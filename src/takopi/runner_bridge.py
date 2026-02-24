@@ -76,7 +76,7 @@ async def _maybe_append_usage_footer(msg: RenderedMessage) -> RenderedMessage:
             footer = f"\n\n⚡ 5h: {pct_5h:.0f}% | Weekly: {pct_7d:.0f}% (resets in {reset})"
 
         return RenderedMessage(text=msg.text + footer, extra=msg.extra)
-    except Exception:
+    except (ValueError, KeyError, TypeError):
         logger.debug("usage_footer.failed", exc_info=True)
         return msg
 

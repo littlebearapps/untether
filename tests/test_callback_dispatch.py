@@ -293,3 +293,110 @@ async def test_dispatch_callback_answers_when_result_is_none(monkeypatch) -> Non
     # Callback should be answered via finally block (no text, just clear spinner)
     assert len(bot.callback_calls) == 1
     assert bot.callback_calls[0]["text"] is None
+
+
+# ---------------------------------------------------------------------------
+# Early callback answering tests
+# ---------------------------------------------------------------------------
+
+
+class _EarlyAnswerBackend:
+    """Backend that supports early callback answering."""
+
+    id = "early_cmd"
+    description = "early answer stub"
+    answer_early = True
+
+    def __init__(self, toast: str | None, result: CommandResult | None = None):
+        self._toast = toast
+        self._result = result
+
+    def early_answer_toast(self, args_text: str) -> str | None:
+        return self._toast
+
+    async def handle(self, ctx: CommandContext) -> CommandResult | None:
+        return self._result
+
+
+@pytest.mark.anyio
+async def test_early_answer_clears_spinner_before_handle(monkeypatch) -> None:
+    """When answer_early=True and toast is returned, callback is answered before handle()."""
+    transport = FakeTransport()
+    cfg = make_cfg(transport)
+    bot: FakeBot = cfg.bot  # type: ignore[assignment]
+    backend = _EarlyAnswerBackend(toast="Approved", result=CommandResult(text="Done"))
+    monkeypatch.setattr(dispatch_mod, "get_command", lambda *a, **kw: backend)
+
+    await _dispatch_callback(
+        cfg,
+        _make_callback_query(),
+        "early_cmd",
+        "args",
+        None,
+        {},
+        AsyncMock(),
+        None,
+        False,
+        None,
+        "cb-123",
+    )
+
+    # Should be answered exactly once (early answer, not double-answered in finally)
+    assert len(bot.callback_calls) == 1
+    assert bot.callback_calls[0]["text"] == "Approved"
+
+
+@pytest.mark.anyio
+async def test_early_answer_none_toast_falls_through(monkeypatch) -> None:
+    """When early_answer_toast returns None, callback is answered in finally (no toast)."""
+    transport = FakeTransport()
+    cfg = make_cfg(transport)
+    bot: FakeBot = cfg.bot  # type: ignore[assignment]
+    backend = _EarlyAnswerBackend(toast=None, result=None)
+    monkeypatch.setattr(dispatch_mod, "get_command", lambda *a, **kw: backend)
+
+    await _dispatch_callback(
+        cfg,
+        _make_callback_query(),
+        "early_cmd",
+        "args",
+        None,
+        {},
+        AsyncMock(),
+        None,
+        False,
+        None,
+        "cb-123",
+    )
+
+    # Answered once in finally, no toast text
+    assert len(bot.callback_calls) == 1
+    assert bot.callback_calls[0]["text"] is None
+
+
+@pytest.mark.anyio
+async def test_no_early_answer_without_attribute(monkeypatch) -> None:
+    """Backends without answer_early don't get early answering."""
+    transport = FakeTransport()
+    cfg = make_cfg(transport)
+    bot: FakeBot = cfg.bot  # type: ignore[assignment]
+    backend = _StubBackend(result=None)
+    monkeypatch.setattr(dispatch_mod, "get_command", lambda *a, **kw: backend)
+
+    await _dispatch_callback(
+        cfg,
+        _make_callback_query(),
+        "test_cmd",
+        "args",
+        None,
+        {},
+        AsyncMock(),
+        None,
+        False,
+        None,
+        "cb-123",
+    )
+
+    # Only finally-block answer, no early toast
+    assert len(bot.callback_calls) == 1
+    assert bot.callback_calls[0]["text"] is None

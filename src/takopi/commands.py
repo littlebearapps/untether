@@ -71,6 +71,7 @@ class CommandResult:
     text: str
     notify: bool = True
     reply_to: MessageRef | None = None
+    parse_mode: str | None = None
 
 
 @runtime_checkable

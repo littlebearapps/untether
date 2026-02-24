@@ -77,7 +77,7 @@ async def _handle_model_command(
         engine_line = f"engine: {engine} ({ENGINE_SOURCE_LABELS[engine_source]})"
         model_value = resolution.value or "default"
         model_line = (
-            f"model: {model_value} ({OVERRIDE_SOURCE_LABELS[resolution.source]})"
+            f"model: **{model_value}** ({OVERRIDE_SOURCE_LABELS[resolution.source]})"
         )
         topic_label = resolution.topic_value or "none"
         if tkey is None:
@@ -144,14 +144,14 @@ async def _handle_model_command(
         if scope == "topic":
             await reply(
                 text=(
-                    f"topic model override set to `{model}` for `{engine}`.\n"
+                    f"topic model override **set to** `{model}` for `{engine}`.\n"
                     "If you want a clean start on the new model, run `/new`."
                 )
             )
             return
         await reply(
             text=(
-                f"chat model override set to `{model}` for `{engine}`.\n"
+                f"chat model override **set to** `{model}` for `{engine}`.\n"
                 "If you want a clean start on the new model, run `/new`."
             )
         )
@@ -207,9 +207,9 @@ async def _handle_model_command(
         if scope is None:
             return
         if scope == "topic":
-            await reply(text="topic model override cleared (using chat default).")
+            await reply(text="topic model override **cleared** (using chat default).")
             return
-        await reply(text="chat model override cleared.")
+        await reply(text="chat model override **cleared**.")
         return
 
     await reply(text=MODEL_USAGE)

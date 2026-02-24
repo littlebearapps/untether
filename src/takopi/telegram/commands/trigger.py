@@ -75,7 +75,7 @@ async def _plan_trigger_command(
             source = "chat default"
         else:
             source = "default"
-        trigger_line = f"trigger: {resolved} ({source})"
+        trigger_line = f"trigger: **{resolved}** ({source})"
         topic_label = topic_mode or "none"
         if tkey is None:
             topic_label = "none"
@@ -100,7 +100,7 @@ async def _plan_trigger_command(
             if topic_store is None:
                 return ActionPlan(reply_text="topic trigger settings are unavailable.")
             return ActionPlan(
-                reply_text=f"topic trigger mode set to `{action}`",
+                reply_text=f"topic trigger mode **set to** `{action}`",
                 actions=(
                     lambda: topic_store.set_trigger_mode(tkey[0], tkey[1], action),
                 ),
@@ -110,7 +110,7 @@ async def _plan_trigger_command(
                 reply_text="chat trigger settings are unavailable (no config path)."
             )
         return ActionPlan(
-            reply_text=f"chat trigger mode set to `{action}`",
+            reply_text=f"chat trigger mode **set to** `{action}`",
             actions=(lambda: chat_prefs.set_trigger_mode(msg.chat_id, action),),
         )
 
@@ -128,7 +128,7 @@ async def _plan_trigger_command(
             if topic_store is None:
                 return ActionPlan(reply_text="topic trigger settings are unavailable.")
             return ActionPlan(
-                reply_text="topic trigger mode cleared (using chat default).",
+                reply_text="topic trigger mode **cleared** (using chat default).",
                 actions=(lambda: topic_store.clear_trigger_mode(tkey[0], tkey[1]),),
             )
         if chat_prefs is None:
@@ -136,7 +136,7 @@ async def _plan_trigger_command(
                 reply_text="chat trigger settings are unavailable (no config path)."
             )
         return ActionPlan(
-            reply_text="chat trigger mode reset to `all`.",
+            reply_text="chat trigger mode **reset** to `all`.",
             actions=(lambda: chat_prefs.clear_trigger_mode(msg.chat_id),),
         )
 

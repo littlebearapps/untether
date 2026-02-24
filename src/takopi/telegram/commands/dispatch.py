@@ -12,7 +12,7 @@ from ...model import EngineId, ResumeToken
 from ...runners.run_options import EngineRunOptions
 from ...runner_bridge import RunningTasks, register_ephemeral_message
 from ...scheduler import ThreadScheduler
-from ...transport import MessageRef
+from ...transport import MessageRef, RenderedMessage
 from ..files import split_command_args
 from ..types import TelegramCallbackQuery, TelegramIncomingMessage
 from .executor import _TelegramCommandExecutor
@@ -119,7 +119,12 @@ async def _dispatch_command(
         return
     if result is not None:
         reply_to = message_ref if result.reply_to is None else result.reply_to
-        await executor.send(result.text, reply_to=reply_to, notify=result.notify)
+        msg: RenderedMessage | str = result.text
+        if result.parse_mode is not None:
+            msg = RenderedMessage(
+                text=result.text, extra={"parse_mode": result.parse_mode}
+            )
+        await executor.send(msg, reply_to=reply_to, notify=result.notify)
 
 
 async def _dispatch_callback(
@@ -181,6 +186,12 @@ async def _dispatch_callback(
         except ConfigError as exc:
             await _answer_callback(str(exc)[:200])
             return
+        # Early callback answering: clear the Telegram spinner immediately
+        if getattr(backend, "answer_early", False):
+            toast = backend.early_answer_toast(args_text)
+            if toast is not None:
+                await _answer_callback(toast)
+
         # For callbacks, text is the full callback data and args come from parsing
         text = msg.data or ""
         ctx = CommandContext(
@@ -209,8 +220,13 @@ async def _dispatch_callback(
             return
         if result is not None:
             reply_to = message_ref if result.reply_to is None else result.reply_to
+            cb_msg: RenderedMessage | str = result.text
+            if result.parse_mode is not None:
+                cb_msg = RenderedMessage(
+                    text=result.text, extra={"parse_mode": result.parse_mode}
+                )
             sent_ref = await executor.send(
-                result.text, reply_to=reply_to, notify=result.notify
+                cb_msg, reply_to=reply_to, notify=result.notify
             )
             # Register feedback message for cleanup when the run finishes.
             if sent_ref is not None and callback_query_id is not None:

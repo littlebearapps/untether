@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 import time
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 import httpx
@@ -30,7 +30,7 @@ def _time_until(iso_ts: str) -> str:
     """Format a reset timestamp as 'Xh Ym' from now."""
     try:
         reset = datetime.fromisoformat(iso_ts)
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         delta = reset - now
         total_seconds = max(0, int(delta.total_seconds()))
         hours, remainder = divmod(total_seconds, 3600)
