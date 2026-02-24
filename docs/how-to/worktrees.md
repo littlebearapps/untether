@@ -6,12 +6,12 @@ Use `@branch` to run tasks in a dedicated git worktree for that branch.
 
 Add a `worktrees_dir` (and optionally a base branch) to the project:
 
-=== "takopi config"
+=== "untether config"
 
     ```sh
-    takopi config set projects.happy-gadgets.path "~/dev/happy-gadgets"
-    takopi config set projects.happy-gadgets.worktrees_dir ".worktrees"
-    takopi config set projects.happy-gadgets.worktree_base "master"
+    untether config set projects.happy-gadgets.path "~/dev/happy-gadgets"
+    untether config set projects.happy-gadgets.worktrees_dir ".worktrees"
+    untether config set projects.happy-gadgets.worktree_base "master"
     ```
 
 === "toml"
@@ -43,7 +43,7 @@ echo ".worktrees/" >> ~/.config/git/ignore
 
 ## Context persistence
 
-When project/worktree context is active, Takopi includes a `ctx:` footer in messages.
+When project/worktree context is active, Untether includes a `ctx:` footer in messages.
 When you reply, this context carries forward (you usually don’t need to repeat `/<project-alias> @branch`).
 
 ## Related

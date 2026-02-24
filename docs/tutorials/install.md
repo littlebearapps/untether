@@ -1,8 +1,8 @@
 # Install and onboard
 
-This tutorial walks you through installing Takopi, creating a Telegram bot, and generating your config file.
+This tutorial walks you through installing Untether, creating a Telegram bot, and generating your config file.
 
-**What you'll have at the end:** A working `~/.takopi/takopi.toml` with your bot token, chat ID, workflow settings, and default engine.
+**What you'll have at the end:** A working `~/.untether/untether.toml` with your bot token, chat ID, workflow settings, and default engine.
 
 ## 1. Install Python 3.14 and uv
 
@@ -18,23 +18,23 @@ Install Python 3.14 with uv:
 uv python install 3.14
 ```
 
-## 2. Install Takopi
+## 2. Install Untether
 
 ```sh
-uv tool install -U takopi
+uv tool install -U untether
 ```
 
 Verify it's installed:
 
 ```sh
-takopi --version
+untether --version
 ```
 
 You should see something like `0.19.0`.
 
 ## 3. Install agent CLIs
 
-Takopi shells out to agent CLIs. Install the ones you plan to use (or install them all now):
+Untether shells out to agent CLIs. Install the ones you plan to use (or install them all now):
 
 ### Codex
 
@@ -42,7 +42,7 @@ Takopi shells out to agent CLIs. Install the ones you plan to use (or install th
 npm install -g @openai/codex
 ```
 
-Takopi uses the official Codex CLI, so your existing ChatGPT subscription applies. Run `codex` and sign in with your ChatGPT account.
+Untether uses the official Codex CLI, so your existing ChatGPT subscription applies. Run `codex` and sign in with your ChatGPT account.
 
 ### Claude Code
 
@@ -50,7 +50,7 @@ Takopi uses the official Codex CLI, so your existing ChatGPT subscription applie
 npm install -g @anthropic-ai/claude-code
 ```
 
-Takopi uses the official Claude CLI, so your existing Claude subscription applies. Run `claude` and log in with your Claude account. Takopi defaults to subscription billing unless you opt into API billing in config.
+Untether uses the official Claude CLI, so your existing Claude subscription applies. Run `claude` and log in with your Claude account. Untether defaults to subscription billing unless you opt into API billing in config.
 
 ### OpenCode
 
@@ -70,10 +70,10 @@ Pi can authenticate via a provider login or use API billing. You can log in with
 
 ## 4. Run onboarding
 
-Start Takopi without a config file. It will detect this and launch the setup wizard:
+Start Untether without a config file. It will detect this and launch the setup wizard:
 
 ```sh
-takopi
+untether
 ```
 
 You'll see:
@@ -84,7 +84,7 @@ step 1: bot token
 ? do you already have a bot token from @BotFather? (yes/no)
 ```
 
-If you don't have a bot token yet, answer **n** and Takopi will show you the steps.
+If you don't have a bot token yet, answer **n** and Untether will show you the steps.
 
 ## 5. Create a Telegram bot
 
@@ -92,14 +92,14 @@ If you answered **n**, follow these steps (or skip to step 6 if you already have
 
 1. Open Telegram and message [@BotFather](https://t.me/BotFather)
 2. Send `/newbot` or use the mini app
-3. Choose a display name (the obvious choice is "takopi")
-4. Choose a username ending in `bot` (e.g., `my_takopi_bot`)
+3. Choose a display name (the obvious choice is "untether")
+4. Choose a username ending in `bot` (e.g., `my_untether_bot`)
 
 BotFather will congratulate you on your new bot and will reply with your token:
 
 ```
 Done! Congratulations on your new bot. You will find it at
-t.me/my_takopi_bot. You can now add a description, about
+t.me/my_untether_bot. You can now add a description, about
 section and profile picture for your bot, see /help for a
 list of commands.
 
@@ -122,14 +122,14 @@ Paste your token when prompted:
 ```
 ? paste your bot token: ****
   validating...
-  connected to @my_takopi_bot
+  connected to @my_untether_bot
 ```
 
-Takopi validates the token by calling the Telegram API. If it fails, double-check you copied the full token.
+Untether validates the token by calling the Telegram API. If it fails, double-check you copied the full token.
 
 ## 7. Pick your workflow
 
-Takopi shows three workflow previews:
+Untether shows three workflow previews:
 
 === "assistant"
 
@@ -150,7 +150,7 @@ Takopi shows three workflow previews:
     topics per branch
 
     <div class="workflow-preview">
-    <div class="topic-bar"><span class="topic-active">happian @memory-box</span><span class="topic">takopi @master</span></div>
+    <div class="topic-bar"><span class="topic-active">happian @memory-box</span><span class="topic">untether @master</span></div>
     <div class="msg msg-you">store artifacts forever</div><div class="clearfix"></div>
     <div class="msg msg-bot">done · codex · 10s · step 4</div><div class="clearfix"></div>
     <div class="msg msg-you">also freeze them</div><div class="clearfix"></div>
@@ -171,7 +171,7 @@ Takopi shows three workflow previews:
     </div>
 
 ```
-? how will you use takopi?
+? how will you use untether?
  ❯ assistant (ongoing chat, /new to reset)
    workspace (projects + branches, i'll set those up)
    handoff (reply to continue, terminal resume)
@@ -190,14 +190,14 @@ Each choice automatically configures conversation mode, topics, and resume lines
 
 ## 8. Connect your chat
 
-Depending on your workflow choice, Takopi shows different instructions:
+Depending on your workflow choice, Untether shows different instructions:
 
 **For assistant or handoff:**
 
 ```
 step 3: connect chat
 
-  1. open a chat with @my_takopi_bot
+  1. open a chat with @my_untether_bot
   2. send /start
   waiting for message...
 ```
@@ -209,28 +209,28 @@ step 3: connect chat
 
   set up a topics group:
   1. create a group and enable topics (settings → topics)
-  2. add @my_takopi_bot as admin with "manage topics"
+  2. add @my_untether_bot as admin with "manage topics"
   3. send any message in the group
   waiting for message...
 ```
 
-Once Takopi receives your message:
+Once Untether receives your message:
 
 ```
   got chat_id 123456789 for @yourusername (private chat)
 ```
 
 !!! warning "Workspace requires a forum group"
-    If you chose workspace and the chat isn't a forum-enabled supergroup with proper bot permissions, Takopi will warn you and offer to switch to assistant mode instead.
+    If you chose workspace and the chat isn't a forum-enabled supergroup with proper bot permissions, Untether will warn you and offer to switch to assistant mode instead.
 
 ## 9. Choose your default engine
 
-Takopi scans your PATH for installed agent CLIs:
+Untether scans your PATH for installed agent CLIs:
 
 ```
 step 4: default engine
 
-takopi runs these engines on your computer. switch anytime with /agent.
+untether runs these engines on your computer. switch anytime with /agent.
 
   engine    status         install command
   ───────────────────────────────────────────
@@ -251,39 +251,39 @@ Pick whichever you prefer. You can always switch engines per-message with `/code
 ```
 step 5: save config
 
-? save config to ~/.takopi/takopi.toml? (yes/no)
+? save config to ~/.untether/untether.toml? (yes/no)
 ```
 
 Press **y** or **Enter** to save. You'll see:
 
 ```
-✓ setup complete. starting takopi...
+✓ setup complete. starting untether...
 ```
 
-Takopi is now running and listening for messages!
+Untether is now running and listening for messages!
 
 ## What just happened
 
-Your config file lives at `~/.takopi/takopi.toml`. The exact contents depend on your workflow choice:
+Your config file lives at `~/.untether/untether.toml`. The exact contents depend on your workflow choice:
 
 === "assistant"
 
-    === "takopi config"
+    === "untether config"
 
         ```sh
-        takopi config set default_engine "codex"
-        takopi config set transport "telegram"
-        takopi config set transports.telegram.bot_token "..."
-        takopi config set transports.telegram.chat_id 123456789
-        takopi config set transports.telegram.session_mode "chat"
-        takopi config set transports.telegram.show_resume_line false
-        takopi config set transports.telegram.topics.enabled false
-        takopi config set transports.telegram.topics.scope "auto"
+        untether config set default_engine "codex"
+        untether config set transport "telegram"
+        untether config set transports.telegram.bot_token "..."
+        untether config set transports.telegram.chat_id 123456789
+        untether config set transports.telegram.session_mode "chat"
+        untether config set transports.telegram.show_resume_line false
+        untether config set transports.telegram.topics.enabled false
+        untether config set transports.telegram.topics.scope "auto"
         ```
 
     === "toml"
 
-        ```toml title="~/.takopi/takopi.toml"
+        ```toml title="~/.untether/untether.toml"
         default_engine = "codex"
         transport = "telegram"
 
@@ -300,22 +300,22 @@ Your config file lives at `~/.takopi/takopi.toml`. The exact contents depend on 
 
 === "workspace"
 
-    === "takopi config"
+    === "untether config"
 
         ```sh
-        takopi config set default_engine "codex"
-        takopi config set transport "telegram"
-        takopi config set transports.telegram.bot_token "..."
-        takopi config set transports.telegram.chat_id -1001234567890
-        takopi config set transports.telegram.session_mode "chat"
-        takopi config set transports.telegram.show_resume_line false
-        takopi config set transports.telegram.topics.enabled true
-        takopi config set transports.telegram.topics.scope "auto"
+        untether config set default_engine "codex"
+        untether config set transport "telegram"
+        untether config set transports.telegram.bot_token "..."
+        untether config set transports.telegram.chat_id -1001234567890
+        untether config set transports.telegram.session_mode "chat"
+        untether config set transports.telegram.show_resume_line false
+        untether config set transports.telegram.topics.enabled true
+        untether config set transports.telegram.topics.scope "auto"
         ```
 
     === "toml"
 
-        ```toml title="~/.takopi/takopi.toml"
+        ```toml title="~/.untether/untether.toml"
         default_engine = "codex"
         transport = "telegram"
 
@@ -332,22 +332,22 @@ Your config file lives at `~/.takopi/takopi.toml`. The exact contents depend on 
 
 === "handoff"
 
-    === "takopi config"
+    === "untether config"
 
         ```sh
-        takopi config set default_engine "codex"
-        takopi config set transport "telegram"
-        takopi config set transports.telegram.bot_token "..."
-        takopi config set transports.telegram.chat_id 123456789
-        takopi config set transports.telegram.session_mode "stateless"
-        takopi config set transports.telegram.show_resume_line true
-        takopi config set transports.telegram.topics.enabled false
-        takopi config set transports.telegram.topics.scope "auto"
+        untether config set default_engine "codex"
+        untether config set transport "telegram"
+        untether config set transports.telegram.bot_token "..."
+        untether config set transports.telegram.chat_id 123456789
+        untether config set transports.telegram.session_mode "stateless"
+        untether config set transports.telegram.show_resume_line true
+        untether config set transports.telegram.topics.enabled false
+        untether config set transports.telegram.topics.scope "auto"
         ```
 
     === "toml"
 
-        ```toml title="~/.takopi/takopi.toml"
+        ```toml title="~/.untether/untether.toml"
         default_engine = "codex"
         transport = "telegram"
 
@@ -362,7 +362,7 @@ Your config file lives at `~/.takopi/takopi.toml`. The exact contents depend on 
         scope = "auto"
         ```
 
-This config file controls all of Takopi's behavior. You can edit it directly to change settings or add advanced features.
+This config file controls all of Untether's behavior. You can edit it directly to change settings or add advanced features.
 
 [Full config reference →](../reference/config.md)
 
@@ -371,16 +371,16 @@ This config file controls all of Takopi's behavior. You can edit it directly to 
 If you ever need to reconfigure:
 
 ```sh
-takopi --onboard
+untether --onboard
 ```
 
 This will prompt you to update your existing config (it won't overwrite without asking).
 
 ## Troubleshooting
 
-**"error: missing takopi config"**
+**"error: missing untether config"**
 
-Run `takopi` in a terminal with a TTY. The setup wizard only runs interactively.
+Run `untether` in a terminal with a TTY. The setup wizard only runs interactively.
 
 **"failed to connect, check the token and try again"**
 
@@ -388,11 +388,11 @@ Make sure you copied the full token from BotFather, including the numbers before
 
 **Bot doesn't respond to /start**
 
-If you're still in onboarding, your terminal should show "waiting...". If you accidentally closed it, run `takopi` again and restart the setup.
+If you're still in onboarding, your terminal should show "waiting...". If you accidentally closed it, run `untether` again and restart the setup.
 
 **"error: already running"**
 
-You can only run one Takopi instance per bot token. Find and stop the other process, or remove the stale lock file at `~/.takopi/takopi.lock`.
+You can only run one Untether instance per bot token. Find and stop the other process, or remove the stale lock file at `~/.untether/untether.lock`.
 
 ## Next
 

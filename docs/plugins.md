@@ -16,5 +16,5 @@ This page was split into smaller Diátaxis pages.
 
 ## Diagnostics
 
-- `takopi plugins` lists discovered entrypoints without loading them.
-- `takopi plugins --load` loads each plugin to surface import errors.
+- `untether plugins` lists discovered entrypoints without loading them.
+- `untether plugins --load` loads each plugin to surface import errors.

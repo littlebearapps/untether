@@ -5,7 +5,7 @@ Explanation docs answer **“how does this work?”** and **“why is it designe
 If you want step-by-step instructions, go to **[Tutorials](../tutorials/index.md)**.  
 If you want exact options and contracts, go to **[Reference](../reference/index.md)**.
 
-## How Takopi works end-to-end
+## How Untether works end-to-end
 
 - Incoming Telegram message → resolve context (project/branch) → resolve resume token → select runner → stream events → render progress → send final + resume line.
 
@@ -15,7 +15,7 @@ Start here:
 
 ## Routing, sessions, and continuation
 
-Takopi is stateless by default, but can provide “continuation” in multiple ways:
+Untether is stateless by default, but can provide “continuation” in multiple ways:
 
 - reply-to-continue (always available)
 - per-topic resume (Telegram forum topics)
@@ -25,7 +25,7 @@ Takopi is stateless by default, but can provide “continuation” in multiple w
 
 ## Plugins and extensibility
 
-Takopi uses entrypoint-based plugins with lazy discovery so broken plugins don’t brick the CLI.
+Untether uses entrypoint-based plugins with lazy discovery so broken plugins don’t brick the CLI.
 
 - [Plugin system](plugin-system.md)
 

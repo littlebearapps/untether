@@ -2,14 +2,14 @@ from pathlib import Path
 
 import pytest
 
-from takopi.config import ProjectConfig, ProjectsConfig
-from takopi.context import RunContext
-from takopi.router import AutoRouter, RunnerEntry
-from takopi.runners.mock import Return, ScriptRunner
-from takopi.telegram.chat_prefs import ChatPrefsStore
-from takopi.telegram.engine_defaults import resolve_engine_for_message
-from takopi.telegram.topic_state import TopicStateStore
-from takopi.transport_runtime import TransportRuntime
+from untether.config import ProjectConfig, ProjectsConfig
+from untether.context import RunContext
+from untether.router import AutoRouter, RunnerEntry
+from untether.runners.mock import Return, ScriptRunner
+from untether.telegram.chat_prefs import ChatPrefsStore
+from untether.telegram.engine_defaults import resolve_engine_for_message
+from untether.telegram.topic_state import TopicStateStore
+from untether.transport_runtime import TransportRuntime
 
 
 @pytest.mark.anyio

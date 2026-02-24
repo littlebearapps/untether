@@ -1,6 +1,6 @@
 # Module map
 
-This page is a high-level map of Takopi’s internal modules: what they do and how they fit together.
+This page is a high-level map of Untether’s internal modules: what they do and how they fit together.
 
 ## Entry points
 
@@ -24,13 +24,13 @@ This page is a high-level map of Takopi’s internal modules: what they do and h
 |--------|----------------|
 | `model.py` | Domain types: resume tokens, events, actions, run results. |
 | `runner.py` | Runner protocol and event queue utilities. |
-| `events.py` | Event factory helpers for building Takopi events consistently. |
+| `events.py` | Event factory helpers for building Untether events consistently. |
 
 ## Rendering and progress
 
 | Module | Responsibility |
 |--------|----------------|
-| `progress.py` | Progress tracking: reduces takopi events into progress snapshots. |
+| `progress.py` | Progress tracking: reduces untether events into progress snapshots. |
 | `markdown.py` | Markdown formatting for progress/final messages; includes helpers like elapsed formatting. |
 | `presenter.py` | Presenter protocol: converts `ProgressState` into transport-specific messages. |
 | `transport.py` | Transport protocol: send/edit/delete abstractions and message reference types. |
@@ -54,7 +54,7 @@ This page is a high-level map of Takopi’s internal modules: what they do and h
 | `transports.py` | Transport backend discovery and loading via entrypoints. |
 | `commands.py` | Command backend discovery and loading via entrypoints; command execution helpers. |
 | `ids.py` | Shared ID regex and collision checks for plugin ids and Telegram command names. |
-| `api.py` | Public plugin API boundary (`takopi.api` re-exports). |
+| `api.py` | Public plugin API boundary (`untether.api` re-exports). |
 
 ## Runners and schemas
 
@@ -67,7 +67,7 @@ This page is a high-level map of Takopi’s internal modules: what they do and h
 
 | Module | Responsibility |
 |--------|----------------|
-| `settings.py` | Loads `takopi.toml` (TOML + env), validates with pydantic-settings. |
+| `settings.py` | Loads `untether.toml` (TOML + env), validates with pydantic-settings. |
 | `config_store.py` | Raw TOML read/write (merge/update without clobbering extra sections). |
 | `config_migrations.py` | One-time edits to on-disk config (e.g. legacy Telegram key migration). |
 

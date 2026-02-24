@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 
-from takopi.schemas import claude as claude_schema
+from untether.schemas import claude as claude_schema
 
 
 def _fixture_path(name: str) -> Path:

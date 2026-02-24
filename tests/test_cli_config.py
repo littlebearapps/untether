@@ -3,7 +3,7 @@ import tomllib
 
 from typer.testing import CliRunner
 
-from takopi import cli
+from untether import cli
 
 
 def _write_min_config(path: Path) -> None:
@@ -18,7 +18,7 @@ def _write_min_config(path: Path) -> None:
 
 
 def test_config_list_outputs_flattened(tmp_path: Path) -> None:
-    config_path = tmp_path / "takopi.toml"
+    config_path = tmp_path / "untether.toml"
     config_path.write_text(
         'transport = "telegram"\n'
         "watch_config = true\n"
@@ -45,7 +45,7 @@ def test_config_list_outputs_flattened(tmp_path: Path) -> None:
 
 
 def test_config_get_outputs_literal_and_table_error(tmp_path: Path) -> None:
-    config_path = tmp_path / "takopi.toml"
+    config_path = tmp_path / "untether.toml"
     _write_min_config(config_path)
 
     runner = CliRunner()
@@ -79,7 +79,7 @@ def test_config_get_outputs_literal_and_table_error(tmp_path: Path) -> None:
 
 
 def test_config_get_missing_key(tmp_path: Path) -> None:
-    config_path = tmp_path / "takopi.toml"
+    config_path = tmp_path / "untether.toml"
     _write_min_config(config_path)
 
     runner = CliRunner()
@@ -93,7 +93,7 @@ def test_config_get_missing_key(tmp_path: Path) -> None:
 
 
 def test_config_set_parses_and_writes(tmp_path: Path) -> None:
-    config_path = tmp_path / "takopi.toml"
+    config_path = tmp_path / "untether.toml"
     _write_min_config(config_path)
 
     runner = CliRunner()
@@ -149,7 +149,7 @@ def test_config_set_parses_and_writes(tmp_path: Path) -> None:
 
 
 def test_config_unset_prunes_tables(tmp_path: Path) -> None:
-    config_path = tmp_path / "takopi.toml"
+    config_path = tmp_path / "untether.toml"
     config_path.write_text(
         'transport = "telegram"\n'
         "\n"
@@ -174,7 +174,7 @@ def test_config_unset_prunes_tables(tmp_path: Path) -> None:
 
 
 def test_config_set_schema_validation_error(tmp_path: Path) -> None:
-    config_path = tmp_path / "takopi.toml"
+    config_path = tmp_path / "untether.toml"
     config_path.write_text(
         'transport = "telegram"\n'
         "\n"

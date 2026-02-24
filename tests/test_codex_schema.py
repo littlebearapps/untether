@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from takopi.schemas import codex as codex_schema
+from untether.schemas import codex as codex_schema
 
 
 def _fixture_path(name: str) -> Path:

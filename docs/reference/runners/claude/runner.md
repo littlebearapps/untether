@@ -1,4 +1,4 @@
-Below is a concrete implementation spec for the **Anthropic Claude Code (“claude” CLI / Agent SDK runtime)** runner shipped in Takopi (v0.3.0).
+Below is a concrete implementation spec for the **Anthropic Claude Code (“claude” CLI / Agent SDK runtime)** runner shipped in Untether (v0.3.0).
 
 ---
 
@@ -6,11 +6,11 @@ Below is a concrete implementation spec for the **Anthropic Claude Code (“clau
 
 ### Goal
 
-Provide the **`claude`** engine backend so Takopi can:
+Provide the **`claude`** engine backend so Untether can:
 
 * Run Claude Code non-interactively via the **Agent SDK CLI** (`claude -p`). ([Claude Code][1])
 * Stream progress in Telegram by parsing **`--output-format stream-json --verbose`** (newline-delimited JSON). Note: `--output-format` only works with `-p/--print`. ([Claude Code][1])
-* Support resumable sessions via **`--resume <session_id>`** (Takopi emits a canonical resume line the user can reply with). ([Claude Code][1])
+* Support resumable sessions via **`--resume <session_id>`** (Untether emits a canonical resume line the user can reply with). ([Claude Code][1])
 
 ### Non-goals (v1)
 
@@ -24,15 +24,15 @@ Provide the **`claude`** engine backend so Takopi can:
 
 ### Engine selection
 
-* Default: `takopi` (auto-router uses `default_engine` from config)
-* Override: `takopi claude`
+* Default: `untether` (auto-router uses `default_engine` from config)
+* Override: `untether claude`
 
-Takopi runs in auto-router mode by default; `takopi claude` or `/claude` selects
+Untether runs in auto-router mode by default; `untether claude` or `/claude` selects
 Claude for new threads.
 
 ### Resume UX (canonical line)
 
-Takopi appends a **single backticked** resume line at the end of the message, like:
+Untether appends a **single backticked** resume line at the end of the message, like:
 
 ```text
 `claude --resume 8b2d2b30-...`
@@ -43,7 +43,7 @@ Rationale:
 * Claude Code supports resuming a specific conversation by session ID with `--resume`. ([Claude Code][1])
 * The CLI reference also documents `--resume/-r` as the resume mechanism.
 
-Takopi should parse either:
+Untether should parse either:
 
 * `claude --resume <id>`
 * `claude -r <id>` (short form from docs)
@@ -52,36 +52,36 @@ Takopi should parse either:
 
 ### Permissions / non-interactive runs
 
-In `-p` mode, Claude Code can require tool approvals. Takopi cannot click/answer interactive prompts, so **users must preconfigure permissions** (via Claude Code settings or `--allowedTools`). Claude’s settings system supports allow/deny tool rules. ([Claude Code][2])
+In `-p` mode, Claude Code can require tool approvals. Untether cannot click/answer interactive prompts, so **users must preconfigure permissions** (via Claude Code settings or `--allowedTools`). Claude’s settings system supports allow/deny tool rules. ([Claude Code][2])
 
 **Safety note:** `-p/--print` skips the workspace trust dialog; only use this flag in trusted directories.
 
-Takopi should document this clearly: if permissions aren’t configured and Claude tries to use a gated tool, the run may block or fail.
+Untether should document this clearly: if permissions aren’t configured and Claude tries to use a gated tool, the run may block or fail.
 
 ---
 
 ## Config additions
 
-Takopi config lives at `~/.takopi/takopi.toml`.
+Untether config lives at `~/.untether/untether.toml`.
 
 Add a new optional `[claude]` section.
 
 Recommended v1 schema:
 
-=== "takopi config"
+=== "untether config"
 
     ```sh
-    takopi config set default_engine "claude"
-    takopi config set claude.model "claude-sonnet-4-5-20250929"
-    takopi config set claude.allowed_tools '["Bash", "Read", "Edit", "Write"]'
-    takopi config set claude.dangerously_skip_permissions false
-    takopi config set claude.use_api_billing false
+    untether config set default_engine "claude"
+    untether config set claude.model "claude-sonnet-4-5-20250929"
+    untether config set claude.allowed_tools '["Bash", "Read", "Edit", "Write"]'
+    untether config set claude.dangerously_skip_permissions false
+    untether config set claude.use_api_billing false
     ```
 
 === "toml"
 
     ```toml
-    # ~/.takopi/takopi.toml
+    # ~/.untether/untether.toml
 
     default_engine = "claude"
 
@@ -96,20 +96,20 @@ Notes:
 
 * `--allowedTools` exists specifically to auto-approve tools in programmatic runs. ([Claude Code][1])
 * Claude Code tools (Bash/Edit/Write/WebSearch/etc.) and whether permission is required are documented. ([Claude Code][2])
-* If `allowed_tools` is omitted, Takopi defaults to `["Bash", "Read", "Edit", "Write"]`.
-* Takopi only reads `model`, `allowed_tools`, `dangerously_skip_permissions`, and `use_api_billing` from `[claude]`.
-* By default Takopi strips `ANTHROPIC_API_KEY` from the subprocess environment so Claude uses subscription billing. Set `use_api_billing = true` to keep the key.
+* If `allowed_tools` is omitted, Untether defaults to `["Bash", "Read", "Edit", "Write"]`.
+* Untether only reads `model`, `allowed_tools`, `dangerously_skip_permissions`, and `use_api_billing` from `[claude]`.
+* By default Untether strips `ANTHROPIC_API_KEY` from the subprocess environment so Claude uses subscription billing. Set `use_api_billing = true` to keep the key.
 
 ---
 
 ## Code changes (by file)
 
-### 1) New file: `src/takopi/runners/claude.py`
+### 1) New file: `src/untether/runners/claude.py`
 
 #### Backend export
 
-Expose a module-level `BACKEND = EngineBackend(...)` (from `takopi.backends`).
-Takopi auto-discovers runners by importing `takopi.runners.*` and looking for
+Expose a module-level `BACKEND = EngineBackend(...)` (from `untether.backends`).
+Untether auto-discovers runners by importing `untether.runners.*` and looking for
 `BACKEND`.
 
 `BACKEND` should provide:
@@ -134,7 +134,7 @@ Implement a new `Runner`:
 * `format_resume(token) -> str`: returns `` `claude --resume {token}` ``
 * `extract_resume(text) -> ResumeToken | None`: parse last match of `--resume/-r`
 * `is_resume_line(line) -> bool`: matches the above patterns
-* `run(prompt, resume)` async generator of `TakopiEvent`
+* `run(prompt, resume)` async generator of `UntetherEvent`
 
 #### Subprocess invocation
 
@@ -164,7 +164,7 @@ Prompt passing:
 
 Other flags:
 
-* Claude exposes more CLI flags, but Takopi does not surface them in config.
+* Claude exposes more CLI flags, but Untether does not surface them in config.
 
 #### Stream parsing
 
@@ -183,13 +183,13 @@ Per the official Agent SDK TypeScript reference, message types include:
   * `errors` list on failures,
   * `permission_denials`. ([Claude Code][3])
 
-Takopi should:
+Untether should:
 
 * Parse each line as JSON; on decode error emit a warning ActionEvent (like CodexRunner does) and continue.
 * Prefer stdout for JSON; log stderr separately (do not merge).
 * Treat unknown top-level fields (e.g., `parent_tool_use_id`) as optional metadata and ignore them unless needed.
 
-#### Mapping to Takopi events
+#### Mapping to Untether events
 
 **StartedEvent**
 
@@ -243,7 +243,7 @@ Strategy:
   * `content` may be a string or an array of content blocks; normalize to a string for summaries
   * `detail` includes a small summary (char count / first line / “(truncated)”)
 
-This mirrors CodexRunner’s “started → completed” item tracking and renders well in existing `TakopiProgressRenderer`.
+This mirrors CodexRunner’s “started → completed” item tracking and renders well in existing `UntetherProgressRenderer`.
 
 **CompletedEvent**
 
@@ -265,11 +265,11 @@ Because result includes `permission_denials`, optionally emit warning ActionEven
 
 * kind: `warning`
 * title: “permission denied: <tool_name>”
-  This preserves the “warnings before started/completed” ordering principle Takopi already tests for CodexRunner.
+  This preserves the “warnings before started/completed” ordering principle Untether already tests for CodexRunner.
 
 #### Session serialization / locks
 
-Must match Takopi runner contract:
+Must match Untether runner contract:
 
 * Lock key: `claude:<session_id>` (string) in a `WeakValueDictionary` of `anyio.Lock`.
 * When resuming:
@@ -353,7 +353,7 @@ Mirror the existing `CodexRunner` tests patterns.
   * assistant tool_use (Bash)
   * user tool_result
   * result success with `result: "ok"`
-* Assert Takopi yields:
+* Assert Untether yields:
 
   * StartedEvent
   * ActionEvent started
@@ -377,8 +377,8 @@ Mirror the existing `CodexRunner` tests patterns.
 
 ## Implementation checklist (v0.3.0)
 
-* [x] Export `BACKEND = EngineBackend(...)` from `src/takopi/runners/claude.py`.
-* [x] Add `src/takopi/runners/claude.py` implementing the `Runner` protocol.
+* [x] Export `BACKEND = EngineBackend(...)` from `src/untether/runners/claude.py`.
+* [x] Add `src/untether/runners/claude.py` implementing the `Runner` protocol.
 * [x] Add tests + stub executable fixtures.
 * [x] Update README and developing docs.
 * [ ] Run full test suite before release.

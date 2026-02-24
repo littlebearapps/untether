@@ -4,14 +4,14 @@ from pathlib import Path
 import anyio
 import pytest
 
-from takopi.model import ActionEvent, CompletedEvent, ResumeToken, StartedEvent
-from takopi.runners.opencode import (
+from untether.model import ActionEvent, CompletedEvent, ResumeToken, StartedEvent
+from untether.runners.opencode import (
     OpenCodeRunner,
     OpenCodeStreamState,
     ENGINE,
     translate_opencode_event,
 )
-from takopi.schemas import opencode as opencode_schema
+from untether.schemas import opencode as opencode_schema
 
 
 def _load_fixture(name: str) -> list[opencode_schema.OpenCodeEvent]:
@@ -226,7 +226,7 @@ def test_translate_tool_use_read_title_wraps_path() -> None:
     state = OpenCodeStreamState()
     state.session_id = "ses_test123"
     state.emitted_started = True
-    path = Path.cwd() / "src" / "takopi" / "runners" / "opencode.py"
+    path = Path.cwd() / "src" / "untether" / "runners" / "opencode.py"
 
     events = translate_opencode_event(
         _decode_event(
@@ -241,7 +241,7 @@ def test_translate_tool_use_read_title_wraps_path() -> None:
                         "status": "completed",
                         "input": {"filePath": str(path)},
                         "output": "file contents",
-                        "title": "src/takopi/runners/opencode.py",
+                        "title": "src/untether/runners/opencode.py",
                     },
                 },
             }
@@ -254,7 +254,7 @@ def test_translate_tool_use_read_title_wraps_path() -> None:
     action_event = events[0]
     assert isinstance(action_event, ActionEvent)
     assert action_event.action.kind == "tool"
-    assert action_event.action.title == "`src/takopi/runners/opencode.py`"
+    assert action_event.action.title == "`src/untether/runners/opencode.py`"
 
 
 def test_translate_error_fixture() -> None:

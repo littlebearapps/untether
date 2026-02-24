@@ -1,13 +1,13 @@
 # Plugins
 
-Community and third-party plugins that extend takopi.
+Community and third-party plugins that extend untether.
 
 | Plugin | Type | Description |
 |--------|------|-------------|
-| [takopi-matrix](https://github.com/Zorro909/takopi-matrix) | Transport | Matrix protocol backend with E2EE, voice transcription, and multi-room support |
-| [takopi-scripts](https://github.com/asianviking/takopi-scripts) | Command | Dynamic script runner for executing Python scripts via `/run` command |
-| [takopi-discord](https://github.com/asianviking/takopi-discord) | Transport | Discord bot backend for interacting with takopi via Discord |
-| [takopi-slack](https://github.com/richardliang/takopi-slack-plugin) | Transport | Slack bot backend for interacting with takopi via Slack |
+| [untether-matrix](https://github.com/Zorro909/untether-matrix) | Transport | Matrix protocol backend with E2EE, voice transcription, and multi-room support |
+| [untether-scripts](https://github.com/asianviking/untether-scripts) | Command | Dynamic script runner for executing Python scripts via `/run` command |
+| [untether-discord](https://github.com/asianviking/untether-discord) | Transport | Discord bot backend for interacting with untether via Discord |
+| [untether-slack](https://github.com/richardliang/untether-slack-plugin) | Transport | Slack bot backend for interacting with untether via Slack |
 
 ## See also
 

@@ -1,6 +1,6 @@
 # Environment variables
 
-Takopi supports a small set of environment variables for logging and runtime behavior.
+Untether supports a small set of environment variables for logging and runtime behavior.
 
 ## Logging
 

@@ -3,10 +3,10 @@ from __future__ import annotations
 import anyio
 from functools import partial
 
-from takopi.backends import EngineBackend
-from takopi.config import dump_toml
-from takopi.telegram import onboarding
-from takopi.telegram.api_models import User
+from untether.backends import EngineBackend
+from untether.config import dump_toml
+from untether.telegram import onboarding
+from untether.telegram.api_models import User
 
 
 def test_mask_token_short() -> None:
@@ -93,7 +93,7 @@ def patch_live_services(
 
 
 def test_interactive_setup_skips_when_config_exists(monkeypatch, tmp_path) -> None:
-    config_path = tmp_path / "takopi.toml"
+    config_path = tmp_path / "untether.toml"
     config_path.write_text(
         'transport = "telegram"\n\n[transports.telegram]\n'
         'bot_token = "token"\nchat_id = 123\n',
@@ -104,7 +104,7 @@ def test_interactive_setup_skips_when_config_exists(monkeypatch, tmp_path) -> No
 
 
 def test_interactive_setup_writes_config(monkeypatch, tmp_path) -> None:
-    config_path = tmp_path / "takopi.toml"
+    config_path = tmp_path / "untether.toml"
     monkeypatch.setattr(onboarding, "HOME_CONFIG_PATH", config_path)
 
     backend = EngineBackend(id="codex", build_runner=lambda _cfg, _path: None)
@@ -147,7 +147,7 @@ def test_interactive_setup_writes_config(monkeypatch, tmp_path) -> None:
 
 
 def test_interactive_setup_preserves_projects(monkeypatch, tmp_path) -> None:
-    config_path = tmp_path / "takopi.toml"
+    config_path = tmp_path / "untether.toml"
     config_path.write_text(
         'default_project = "z80"\n\n[projects.z80]\npath = "/tmp/repo"\n',
         encoding="utf-8",
@@ -187,7 +187,7 @@ def test_interactive_setup_preserves_projects(monkeypatch, tmp_path) -> None:
 
 
 def test_interactive_setup_no_agents_aborts(monkeypatch, tmp_path) -> None:
-    config_path = tmp_path / "takopi.toml"
+    config_path = tmp_path / "untether.toml"
     monkeypatch.setattr(onboarding, "HOME_CONFIG_PATH", config_path)
 
     backend = EngineBackend(id="codex", build_runner=lambda _cfg, _path: None)
@@ -221,7 +221,7 @@ def test_interactive_setup_no_agents_aborts(monkeypatch, tmp_path) -> None:
 
 
 def test_interactive_setup_recovers_from_malformed_toml(monkeypatch, tmp_path) -> None:
-    config_path = tmp_path / "takopi.toml"
+    config_path = tmp_path / "untether.toml"
     bad_toml = 'transport = "telegram"\n[transports\n'
     config_path.write_text(bad_toml, encoding="utf-8")
     monkeypatch.setattr(onboarding, "HOME_CONFIG_PATH", config_path)
@@ -268,7 +268,7 @@ def test_capture_chat_id_with_token(monkeypatch) -> None:
         chat=onboarding.ChatInfo(
             chat_id=456,
             username=None,
-            title="takopi",
+            title="untether",
             first_name=None,
             last_name=None,
             chat_type="supergroup",

@@ -5,18 +5,18 @@ from typing import Any, cast
 import anyio
 import pytest
 
-from takopi import commands, plugins
-from takopi.telegram.commands.executor import _CaptureTransport, _run_engine
-from takopi.telegram.commands.file_transfer import _handle_file_get, _handle_file_put
-from takopi.telegram.commands.model import _handle_model_command
-from takopi.telegram.commands.reasoning import _handle_reasoning_command
-from takopi.telegram.commands.topics import _handle_topic_command
-import takopi.telegram.loop as telegram_loop
-import takopi.telegram.topics as telegram_topics
-from takopi.directives import parse_directives
-from takopi.telegram.api_models import Chat, File, ForumTopic, Message, Update, User
-from takopi.settings import TelegramFilesSettings, TelegramTopicsSettings
-from takopi.telegram.bridge import (
+from untether import commands, plugins
+from untether.telegram.commands.executor import _CaptureTransport, _run_engine
+from untether.telegram.commands.file_transfer import _handle_file_get, _handle_file_put
+from untether.telegram.commands.model import _handle_model_command
+from untether.telegram.commands.reasoning import _handle_reasoning_command
+from untether.telegram.commands.topics import _handle_topic_command
+import untether.telegram.loop as telegram_loop
+import untether.telegram.topics as telegram_topics
+from untether.directives import parse_directives
+from untether.telegram.api_models import Chat, File, ForumTopic, Message, Update, User
+from untether.settings import TelegramFilesSettings, TelegramTopicsSettings
+from untether.telegram.bridge import (
     TelegramBridgeConfig,
     TelegramPresenter,
     TelegramTransport,
@@ -27,29 +27,29 @@ from takopi.telegram.bridge import (
     run_main_loop,
     send_with_resume,
 )
-from takopi.telegram.client import BotClient
-from takopi.telegram.render import MAX_BODY_CHARS
-from takopi.telegram.topic_state import TopicStateStore, resolve_state_path
-from takopi.telegram.chat_sessions import ChatSessionStore, resolve_sessions_path
-from takopi.telegram.chat_prefs import ChatPrefsStore, resolve_prefs_path
-from takopi.telegram.engine_overrides import EngineOverrides
-from takopi.context import RunContext
-from takopi.config import ProjectConfig, ProjectsConfig
-from takopi.runner_bridge import ExecBridgeConfig, RunningTask
-from takopi.markdown import MarkdownPresenter
-from takopi.model import ResumeToken
-from takopi.progress import ProgressTracker
-from takopi.router import AutoRouter, RunnerEntry
-from takopi.scheduler import ThreadScheduler
-from takopi.transport_runtime import TransportRuntime
-from takopi.runners.mock import Return, ScriptRunner, Sleep, Wait
-from takopi.telegram.types import (
+from untether.telegram.client import BotClient
+from untether.telegram.render import MAX_BODY_CHARS
+from untether.telegram.topic_state import TopicStateStore, resolve_state_path
+from untether.telegram.chat_sessions import ChatSessionStore, resolve_sessions_path
+from untether.telegram.chat_prefs import ChatPrefsStore, resolve_prefs_path
+from untether.telegram.engine_overrides import EngineOverrides
+from untether.context import RunContext
+from untether.config import ProjectConfig, ProjectsConfig
+from untether.runner_bridge import ExecBridgeConfig, RunningTask
+from untether.markdown import MarkdownPresenter
+from untether.model import ResumeToken
+from untether.progress import ProgressTracker
+from untether.router import AutoRouter, RunnerEntry
+from untether.scheduler import ThreadScheduler
+from untether.transport_runtime import TransportRuntime
+from untether.runners.mock import Return, ScriptRunner, Sleep, Wait
+from untether.telegram.types import (
     TelegramCallbackQuery,
     TelegramDocument,
     TelegramIncomingMessage,
     TelegramVoice,
 )
-from takopi.transport import MessageRef, RenderedMessage, SendOptions
+from untether.transport import MessageRef, RenderedMessage, SendOptions
 from tests.plugin_fixtures import FakeEntryPoint, install_entrypoints
 from tests.telegram_fakes import (
     FakeBot,
@@ -195,7 +195,7 @@ def test_build_bot_commands_includes_command_plugins(monkeypatch) -> None:
     entrypoints = [
         FakeEntryPoint(
             "pingcmd",
-            "takopi.commands.ping:BACKEND",
+            "untether.commands.ping:BACKEND",
             plugins.COMMAND_GROUP,
             loader=_Command,
         )
@@ -245,7 +245,7 @@ def test_telegram_presenter_progress_shows_cancel_button() -> None:
 
     reply_markup = rendered.extra["reply_markup"]
     assert reply_markup["inline_keyboard"][0][0]["text"] == "cancel"
-    assert reply_markup["inline_keyboard"][0][0]["callback_data"] == "takopi:cancel"
+    assert reply_markup["inline_keyboard"][0][0]["callback_data"] == "untether:cancel"
 
 
 def test_telegram_presenter_clears_button_on_cancelled() -> None:
@@ -801,7 +801,7 @@ async def test_handle_callback_cancel_cancels_running_task() -> None:
         chat_id=123,
         message_id=progress_id,
         callback_query_id="cbq-1",
-        data="takopi:cancel",
+        data="untether:cancel",
         sender_id=123,
     )
 
@@ -838,7 +838,7 @@ async def test_handle_callback_cancel_cancels_queued_job() -> None:
         chat_id=123,
         message_id=progress_id,
         callback_query_id="cbq-queued",
-        data="takopi:cancel",
+        data="untether:cancel",
         sender_id=123,
     )
 
@@ -860,7 +860,7 @@ async def test_handle_callback_cancel_without_task_acknowledges() -> None:
         chat_id=123,
         message_id=99,
         callback_query_id="cbq-2",
-        data="takopi:cancel",
+        data="untether:cancel",
         sender_id=123,
     )
 
@@ -911,7 +911,7 @@ async def test_run_main_loop_ignores_disallowed_callback() -> None:
             chat_id=123,
             message_id=42,
             callback_query_id="cbq-ignored",
-            data="takopi:cancel",
+            data="untether:cancel",
             sender_id=123,
         )
 
@@ -944,7 +944,7 @@ async def test_run_main_loop_allows_allowed_sender() -> None:
 
 def test_cancel_command_accepts_extra_text() -> None:
     assert is_cancel_command("/cancel now") is True
-    assert is_cancel_command("/cancel@takopi please") is True
+    assert is_cancel_command("/cancel@untether please") is True
     assert is_cancel_command("/cancelled") is False
 
 
@@ -953,8 +953,8 @@ def test_resolve_message_accepts_backticked_ctx_line() -> None:
         router=_make_router(ScriptRunner([Return(answer="ok")], engine=CODEX_ENGINE)),
         projects=ProjectsConfig(
             projects={
-                "takopi": ProjectConfig(
-                    alias="takopi",
+                "untether": ProjectConfig(
+                    alias="untether",
                     path=Path("."),
                     worktrees_dir=Path(".worktrees"),
                 )
@@ -964,13 +964,13 @@ def test_resolve_message_accepts_backticked_ctx_line() -> None:
     )
     resolved = runtime.resolve_message(
         text="do it",
-        reply_text="`ctx: takopi @feat/api`",
+        reply_text="`ctx: untether @feat/api`",
     )
 
     assert resolved.prompt == "do it"
     assert resolved.resume_token is None
     assert resolved.engine_override is None
-    assert resolved.context == RunContext(project="takopi", branch="feat/api")
+    assert resolved.context == RunContext(project="untether", branch="feat/api")
 
 
 def test_is_forwarded_detects_forward_fields() -> None:
@@ -992,17 +992,17 @@ def test_topic_title_matches_command_syntax() -> None:
 
     title = telegram_topics._topic_title(
         runtime=cfg.runtime,
-        context=RunContext(project="takopi", branch="master"),
+        context=RunContext(project="untether", branch="master"),
     )
 
-    assert title == "takopi @master"
+    assert title == "untether @master"
 
     title = telegram_topics._topic_title(
         runtime=cfg.runtime,
-        context=RunContext(project="takopi", branch=None),
+        context=RunContext(project="untether", branch=None),
     )
 
-    assert title == "takopi"
+    assert title == "untether"
 
     title = telegram_topics._topic_title(
         runtime=cfg.runtime,
@@ -1024,10 +1024,10 @@ def test_topic_title_projects_scope_includes_project() -> None:
 
     title = telegram_topics._topic_title(
         runtime=cfg.runtime,
-        context=RunContext(project="takopi", branch="master"),
+        context=RunContext(project="untether", branch="master"),
     )
 
-    assert title == "takopi @master"
+    assert title == "untether @master"
 
 
 @pytest.mark.anyio
@@ -1039,8 +1039,8 @@ async def test_maybe_rename_topic_updates_title(tmp_path: Path) -> None:
     await store.set_context(
         123,
         77,
-        RunContext(project="takopi", branch="old"),
-        topic_title="takopi @old",
+        RunContext(project="untether", branch="old"),
+        topic_title="untether @old",
     )
 
     await telegram_topics._maybe_rename_topic(
@@ -1048,15 +1048,15 @@ async def test_maybe_rename_topic_updates_title(tmp_path: Path) -> None:
         store,
         chat_id=123,
         thread_id=77,
-        context=RunContext(project="takopi", branch="new"),
+        context=RunContext(project="untether", branch="new"),
     )
 
     bot = cast(FakeBot, cfg.bot)
     assert bot.edit_topic_calls
-    assert bot.edit_topic_calls[-1]["name"] == "takopi @new"
+    assert bot.edit_topic_calls[-1]["name"] == "untether @new"
     snapshot = await store.get_thread(123, 77)
     assert snapshot is not None
-    assert snapshot.topic_title == "takopi @new"
+    assert snapshot.topic_title == "untether @new"
 
 
 @pytest.mark.anyio
@@ -1068,8 +1068,8 @@ async def test_maybe_rename_topic_skips_when_title_matches(tmp_path: Path) -> No
     await store.set_context(
         123,
         77,
-        RunContext(project="takopi", branch="main"),
-        topic_title="takopi @main",
+        RunContext(project="untether", branch="main"),
+        topic_title="untether @main",
     )
     snapshot = await store.get_thread(123, 77)
 
@@ -1078,7 +1078,7 @@ async def test_maybe_rename_topic_skips_when_title_matches(tmp_path: Path) -> No
         store,
         chat_id=123,
         thread_id=77,
-        context=RunContext(project="takopi", branch="main"),
+        context=RunContext(project="untether", branch="main"),
         snapshot=snapshot,
     )
 
@@ -1116,8 +1116,8 @@ async def test_topic_command_recreates_stale_topic(tmp_path: Path) -> None:
     runner = ScriptRunner([Return(answer="ok")], engine=CODEX_ENGINE)
     projects = ProjectsConfig(
         projects={
-            "takopi": ProjectConfig(
-                alias="takopi",
+            "untether": ProjectConfig(
+                alias="untether",
                 path=tmp_path,
                 worktrees_dir=Path(".worktrees"),
             )
@@ -1144,14 +1144,14 @@ async def test_topic_command_recreates_stale_topic(tmp_path: Path) -> None:
     await store.set_context(
         123,
         77,
-        RunContext(project="takopi", branch="master"),
-        topic_title="takopi @master",
+        RunContext(project="untether", branch="master"),
+        topic_title="untether @master",
     )
     msg = TelegramIncomingMessage(
         transport="telegram",
         chat_id=123,
         message_id=10,
-        text="/topic takopi @master",
+        text="/topic untether @master",
         reply_to_message_id=None,
         reply_to_text=None,
         sender_id=123,
@@ -1160,7 +1160,7 @@ async def test_topic_command_recreates_stale_topic(tmp_path: Path) -> None:
     await _handle_topic_command(
         cfg,
         msg,
-        "takopi @master",
+        "untether @master",
         store,
         resolved_scope="main",
         scope_chat_ids=frozenset({123}),
@@ -1171,7 +1171,7 @@ async def test_topic_command_recreates_stale_topic(tmp_path: Path) -> None:
     assert await store.get_thread(123, 77) is None
     snapshot = await store.get_thread(123, 55)
     assert snapshot is not None
-    assert snapshot.context == RunContext(project="takopi", branch="master")
+    assert snapshot.context == RunContext(project="untether", branch="master")
 
 
 @pytest.mark.anyio
@@ -1779,20 +1779,20 @@ async def test_run_main_loop_persists_topic_sessions_in_project_scope(
     )
     projects = ProjectsConfig(
         projects={
-            "takopi": ProjectConfig(
-                alias="takopi",
+            "untether": ProjectConfig(
+                alias="untether",
                 path=Path("."),
                 worktrees_dir=Path(".worktrees"),
                 chat_id=project_chat_id,
             )
         },
         default_project=None,
-        chat_map={project_chat_id: "takopi"},
+        chat_map={project_chat_id: "untether"},
     )
     runtime = TransportRuntime(
         router=_make_router(runner),
         projects=projects,
-        config_path=tmp_path / "takopi.toml",
+        config_path=tmp_path / "untether.toml",
     )
     cfg = TelegramBridgeConfig(
         bot=bot,
@@ -1823,7 +1823,7 @@ async def test_run_main_loop_persists_topic_sessions_in_project_scope(
     with anyio.fail_after(2):
         await run_main_loop(cfg, poller)
 
-    state_path = resolve_state_path(runtime.config_path or tmp_path / "takopi.toml")
+    state_path = resolve_state_path(runtime.config_path or tmp_path / "untether.toml")
     store = TopicStateStore(state_path)
     stored = await store.get_session_resume(project_chat_id, 77, CODEX_ENGINE)
     assert stored == ResumeToken(engine=CODEX_ENGINE, value=resume_value)
@@ -1833,7 +1833,7 @@ async def test_run_main_loop_persists_topic_sessions_in_project_scope(
 async def test_run_main_loop_auto_resumes_topic_default_engine(
     tmp_path: Path,
 ) -> None:
-    state_path = tmp_path / "takopi.toml"
+    state_path = tmp_path / "untether.toml"
     topic_path = resolve_state_path(state_path)
     store = TopicStateStore(topic_path)
     await store.set_session_resume(
@@ -1914,7 +1914,7 @@ async def test_run_main_loop_auto_resumes_topic_default_engine(
 @pytest.mark.anyio
 async def test_run_main_loop_auto_resumes_chat_sessions(tmp_path: Path) -> None:
     resume_value = "resume-123"
-    state_path = tmp_path / "takopi.toml"
+    state_path = tmp_path / "untether.toml"
 
     transport = FakeTransport()
     bot = FakeBot()
@@ -2378,7 +2378,7 @@ async def test_run_main_loop_prompt_upload_auto_resumes_chat_sessions(
 ) -> None:
     payload = b"hello"
     resume_value = "resume-123"
-    state_path = tmp_path / "takopi.toml"
+    state_path = tmp_path / "untether.toml"
     project_dir = tmp_path / "proj"
     project_dir.mkdir()
 
@@ -2531,7 +2531,7 @@ async def test_run_main_loop_command_updates_chat_session_resume(
     entrypoints = [
         FakeEntryPoint(
             "run_cmd",
-            "takopi.commands.run_cmd:BACKEND",
+            "untether.commands.run_cmd:BACKEND",
             plugins.COMMAND_GROUP,
             loader=_Command,
         )
@@ -2539,7 +2539,7 @@ async def test_run_main_loop_command_updates_chat_session_resume(
     install_entrypoints(monkeypatch, entrypoints)
 
     resume_value = "resume-123"
-    state_path = tmp_path / "takopi.toml"
+    state_path = tmp_path / "untether.toml"
 
     transport = FakeTransport()
     bot = FakeBot()
@@ -2637,7 +2637,7 @@ async def test_run_main_loop_hides_resume_line_when_disabled(
     tmp_path: Path,
 ) -> None:
     resume_value = "resume-123"
-    state_path = tmp_path / "takopi.toml"
+    state_path = tmp_path / "untether.toml"
 
     transport = FakeTransport()
     bot = FakeBot()
@@ -2702,7 +2702,7 @@ async def test_run_main_loop_hides_resume_line_without_context(
     tmp_path: Path,
 ) -> None:
     resume_value = "resume-ctxless"
-    state_path = tmp_path / "takopi.toml"
+    state_path = tmp_path / "untether.toml"
 
     transport = FakeTransport()
     bot = FakeBot()
@@ -2756,7 +2756,7 @@ async def test_run_main_loop_hides_resume_line_without_context(
 async def test_run_main_loop_applies_chat_bound_context(
     tmp_path: Path,
 ) -> None:
-    state_path = tmp_path / "takopi.toml"
+    state_path = tmp_path / "untether.toml"
 
     transport = FakeTransport()
     bot = FakeBot()
@@ -2825,7 +2825,7 @@ async def test_run_main_loop_chat_sessions_isolate_group_senders(
     tmp_path: Path,
 ) -> None:
     resume_value = "resume-group"
-    state_path = tmp_path / "takopi.toml"
+    state_path = tmp_path / "untether.toml"
 
     transport = FakeTransport()
     bot = FakeBot()
@@ -2905,7 +2905,7 @@ async def test_run_main_loop_chat_sessions_isolate_group_senders(
 
 @pytest.mark.anyio
 async def test_run_main_loop_new_clears_chat_sessions(tmp_path: Path) -> None:
-    state_path = tmp_path / "takopi.toml"
+    state_path = tmp_path / "untether.toml"
     store = ChatSessionStore(resolve_sessions_path(state_path))
     await store.set_session_resume(
         123, None, ResumeToken(engine=CODEX_ENGINE, value="resume-1")
@@ -2955,7 +2955,7 @@ async def test_run_main_loop_new_clears_chat_sessions(tmp_path: Path) -> None:
 
 @pytest.mark.anyio
 async def test_run_main_loop_new_clears_topic_sessions(tmp_path: Path) -> None:
-    state_path = tmp_path / "takopi.toml"
+    state_path = tmp_path / "untether.toml"
     store = TopicStateStore(resolve_state_path(state_path))
     await store.set_session_resume(
         123, 77, ResumeToken(engine=CODEX_ENGINE, value="resume-1")
@@ -3182,7 +3182,7 @@ async def test_run_main_loop_handles_command_plugins(monkeypatch) -> None:
     entrypoints = [
         FakeEntryPoint(
             "echo_cmd",
-            "takopi.commands.echo:BACKEND",
+            "untether.commands.echo:BACKEND",
             plugins.COMMAND_GROUP,
             loader=_Command,
         )
@@ -3250,7 +3250,7 @@ async def test_run_main_loop_command_uses_project_default_engine(
     entrypoints = [
         FakeEntryPoint(
             "use_project",
-            "takopi.commands.use_project:BACKEND",
+            "untether.commands.use_project:BACKEND",
             plugins.COMMAND_GROUP,
             loader=_Command,
         )
@@ -3334,7 +3334,7 @@ async def test_run_main_loop_command_defaults_to_chat_project(
     entrypoints = [
         FakeEntryPoint(
             "auto_ctx",
-            "takopi.commands.auto_ctx:BACKEND",
+            "untether.commands.auto_ctx:BACKEND",
             plugins.COMMAND_GROUP,
             loader=_Command,
         )
@@ -3414,7 +3414,7 @@ async def test_run_main_loop_refreshes_command_ids(monkeypatch) -> None:
     entrypoints = [
         FakeEntryPoint(
             "late_cmd",
-            "takopi.commands.late:BACKEND",
+            "untether.commands.late:BACKEND",
             plugins.COMMAND_GROUP,
             loader=_Command,
         )
@@ -3500,7 +3500,7 @@ async def test_run_main_loop_mentions_only_skips_voice_and_files(
         presenter=MarkdownPresenter(),
         final_notify=True,
     )
-    config_path = tmp_path / "takopi.toml"
+    config_path = tmp_path / "untether.toml"
     runtime = TransportRuntime(
         router=_make_router(runner),
         projects=_empty_projects(),

@@ -1,17 +1,17 @@
 # Adding a Runner
 
-This guide explains how to add a **new engine runner** to Takopi.
+This guide explains how to add a **new engine runner** to Untether.
 
-A *runner* is the adapter between an engine-specific CLI (Codex, Claude Code, …) and Takopi’s
+A *runner* is the adapter between an engine-specific CLI (Codex, Claude Code, …) and Untether’s
 **normalized event model** (`StartedEvent`, `ActionEvent`, `CompletedEvent`).
 
 If you are building an external plugin package, read `docs/plugins.md` first.
 
-Takopi is designed so that adding a runner usually means **adding one new module** under
-`src/takopi/runners/` plus a small **msgspec schema** module under `src/takopi/schemas/`—
+Untether is designed so that adding a runner usually means **adding one new module** under
+`src/untether/runners/` plus a small **msgspec schema** module under `src/untether/schemas/`—
 no changes to the bridge, renderer, or CLI.
 
-When writing code intended for plugins, prefer importing from `takopi.api`
+When writing code intended for plugins, prefer importing from `untether.api`
 instead of internal modules.
 
 The walkthrough below uses an **imaginary engine** named **Acme** (`acme`) and intentionally mirrors
@@ -23,7 +23,7 @@ the patterns used in `runners/claude.py`.
 
 After you add a runner, you should be able to:
 
-- Run `takopi acme` (CLI subcommand is auto-registered).
+- Run `untether acme` (CLI subcommand is auto-registered).
 - Start a new session and get a resume line like `` `acme --resume <token>` ``.
 - Reply to any bot message containing that resume line and continue the same session.
 - See progress updates (optional) and always get a final completion event.
@@ -32,9 +32,9 @@ After you add a runner, you should be able to:
 
 ## Mental model
 
-### 1) Takopi owns the domain model
+### 1) Untether owns the domain model
 
-Takopi’s core types live in `takopi.model`:
+Untether’s core types live in `untether.model`:
 
 - `ResumeToken(engine, value)`
 - `StartedEvent(engine, resume, title?, meta?)`
@@ -59,13 +59,13 @@ Action events are optional (minimal runner mode):
 
 ### 3) Resume lines are runner-owned
 
-Takopi deliberately treats the runner as the authority for:
+Untether deliberately treats the runner as the authority for:
 
 - How a resume line looks in chat (`format_resume()`)
 - How to parse a resume token out of text (`extract_resume()`)
 - How to detect a resume line reliably (`is_resume_line()`)
 
-This matters because Takopi’s Telegram truncation logic preserves resume lines.
+This matters because Untether’s Telegram truncation logic preserves resume lines.
 
 ---
 
@@ -75,8 +75,8 @@ This matters because Takopi’s Telegram truncation logic preserves resume lines
 
 Choose a stable engine id string. This string becomes:
 
-- The config table name (`[acme]` in `takopi.toml`)
-- The CLI subcommand (`takopi acme`)
+- The config table name (`[acme]` in `untether.toml`)
+- The CLI subcommand (`untether acme`)
 - The `ResumeToken.engine`
 
 Engine ids must match the plugin ID regex:
@@ -109,47 +109,47 @@ Why this shape?
 
 ---
 
-### Step 2 — Create `src/takopi/schemas/acme.py` + `src/takopi/runners/acme.py`
+### Step 2 — Create `src/untether/schemas/acme.py` + `src/untether/runners/acme.py`
 
 Create a new schema module and a runner module:
 
 ```
-src/takopi/schemas/
+src/untether/schemas/
   codex.py
   acme.py    # ← new
 
-src/takopi/runners/
+src/untether/runners/
   codex.py
   claude.py
   mock.py
   acme.py    # ← new
 ```
 
-Takopi discovers engines via **entrypoints**. Every engine backend must be exposed
-as an entrypoint under `takopi.engine_backends`, and the entrypoint name must match
+Untether discovers engines via **entrypoints**. Every engine backend must be exposed
+as an entrypoint under `untether.engine_backends`, and the entrypoint name must match
 the backend id.
 
 For in-repo engines, add an entrypoint in `pyproject.toml`:
 
 ```toml
-[project.entry-points."takopi.engine_backends"]
-acme = "takopi.runners.acme:BACKEND"
+[project.entry-points."untether.engine_backends"]
+acme = "untether.runners.acme:BACKEND"
 ```
 
 For external plugins, use your package’s `pyproject.toml` with the same group.
 
 ---
 
-### Step 3 — Translate Acme JSONL into Takopi events
+### Step 3 — Translate Acme JSONL into Untether events
 
 Most CLIs we integrate are JSONL-streaming processes.
 
-Takopi provides `JsonlSubprocessRunner`, which:
+Untether provides `JsonlSubprocessRunner`, which:
 
 - spawns the CLI
 - drains stderr and logs it
 - reads stdout line-by-line as JSONL bytes
-- calls your `decode_jsonl(...)` and then `translate(...)` to convert each event into Takopi events
+- calls your `decode_jsonl(...)` and then `translate(...)` to convert each event into Untether events
 - guarantees “exactly one CompletedEvent” behavior
 - provides safe fallbacks for rc != 0 or stream ending without a completion event
 
@@ -159,7 +159,7 @@ Copy the Claude pattern: create a small dataclass to hold streaming state.
 
 Common things to track:
 
-- `factory`: `EventFactory` instance for creating Takopi events and tracking resume
+- `factory`: `EventFactory` instance for creating Untether events and tracking resume
 - `pending_actions`: map tool_use_id → `Action` so tool results can complete them
 - `last_assistant_text`: fallback for final answer if the engine omits it
 - `note_seq`: counter used by `JsonlSubprocessRunner.note_event(...)`
@@ -180,7 +180,7 @@ class AcmeStreamState:
 #### Define a msgspec schema (recommended path)
 
 Codex now decodes JSONL with **msgspec**, and new runners should follow that pattern.
-Create a small schema module under `src/takopi/schemas/` and expose a `decode_event(...)`
+Create a small schema module under `src/untether/schemas/` and expose a `decode_event(...)`
 function. Only include the event shapes your CLI actually emits.
 
 Minimal example:
@@ -237,7 +237,7 @@ For this guide, assume Acme outputs events like:
 {"type":"final","session_id":"acme_01","ok":true,"answer":"Done."}
 ```
 
-#### Map them to Takopi events
+#### Map them to Untether events
 
 Use this mapping (mirrors Claude’s approach):
 
@@ -263,7 +263,7 @@ def translate_acme_event(
     title: str,
     state: AcmeStreamState,
     factory: EventFactory,
-) -> list[TakopiEvent]:
+) -> list[UntetherEvent]:
     match event:
         case acme_schema.SessionStart(session_id=session_id, model=model):
             if not session_id:
@@ -279,7 +279,7 @@ def translate_acme_event(
             name = str(name or "tool")
 
             # Keep titles short and friendly.
-            # (Claude uses takopi.utils.paths.relativize_command / relativize_path)
+            # (Claude uses untether.utils.paths.relativize_command / relativize_path)
             kind: ActionKind = "tool"
             title = name
             if name in {"Bash", "Shell"}:
@@ -400,7 +400,7 @@ from ..backends import EngineBackend, EngineConfig
 from ..model import (
     EngineId,
     ResumeToken,
-    TakopiEvent,
+    UntetherEvent,
 )
 
 from ..runner import JsonlSubprocessRunner, ResumeTokenMixin, Runner
@@ -483,7 +483,7 @@ class AcmeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
         state: AcmeStreamState,
         resume: ResumeToken | None,
         found_session: ResumeToken | None,
-    ) -> list[TakopiEvent]:
+    ) -> list[UntetherEvent]:
         _ = resume, found_session
         return translate_acme_event(
             data,
@@ -496,7 +496,7 @@ class AcmeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
 Notes:
 
 - `JsonlSubprocessRunner` already enforces the “exactly one completed event” rule.
-- When `resume=None`, Takopi will acquire a per-session lock after it sees the first
+- When `resume=None`, Untether will acquire a per-session lock after it sees the first
   `StartedEvent`. This is why emitting `StartedEvent` early is important.
 
 #### Optional but recommended overrides (Claude-inspired)
@@ -516,7 +516,7 @@ Claude uses these to produce better failures instead of silent hangs.
 
 ### Step 5 — Add `build_runner(...)` and `BACKEND`
 
-Takopi needs a way to build your runner from config.
+Untether needs a way to build your runner from config.
 
 Follow the pattern in `runners/claude.py`:
 
@@ -546,7 +546,7 @@ BACKEND = EngineBackend(
 
 That’s it for wiring.
 
-Because engine backends are auto-discovered (`takopi.engines`), you do **not** need
+Because engine backends are auto-discovered (`untether.engines`), you do **not** need
 to register the runner elsewhere.
 
 If the binary name differs from the engine id, set:
@@ -589,7 +589,7 @@ Then assert:
 
 If you use msgspec, also add a tiny schema sanity test (pattern from
 `tests/test_codex_schema.py`) that decodes your fixture with
-`takopi.schemas.<engine>.decode_event`.
+`untether.schemas.<engine>.decode_event`.
 
 #### 3) Lock/serialization tests (optional, but great)
 
@@ -606,12 +606,12 @@ one targeted test catches regressions.
 ## Common pitfalls (and how Claude avoided them)
 
 - **StartedEvent arrives too late**
-  - If you wait until the end to emit `StartedEvent`, Takopi can’t acquire the per-session lock
+  - If you wait until the end to emit `StartedEvent`, Untether can’t acquire the per-session lock
     early and another task might resume the same session concurrently.
   - Emit `StartedEvent` immediately when you learn the session id.
 
 - **Multiple completion events**
-  - Some CLIs emit multiple “final-ish” events. Decide which one becomes Takopi’s `CompletedEvent`.
+  - Some CLIs emit multiple “final-ish” events. Decide which one becomes Untether’s `CompletedEvent`.
   - `JsonlSubprocessRunner` will stop reading after the first `CompletedEvent` it sees.
 
 - **Missing completion event**
@@ -622,7 +622,7 @@ one targeted test catches regressions.
   - Include stderr tail in a warning action (Claude includes `stderr_tail` in `detail`).
 
 - **Resume line gets truncated**
-  - Ensure `is_resume_line()` matches your `format_resume()` output. Takopi tries to preserve
+  - Ensure `is_resume_line()` matches your `format_resume()` output. Untether tries to preserve
     resume lines during truncation.
 
 - **Leaking secrets**
@@ -635,7 +635,7 @@ one targeted test catches regressions.
 
 Before you call the runner “done”:
 
-- [ ] `takopi acme` appears automatically (module exports `BACKEND`).
+- [ ] `untether acme` appears automatically (module exports `BACKEND`).
 - [ ] `format_resume()` matches `extract_resume()` + `is_resume_line()`.
 - [ ] Translation emits exactly one `StartedEvent` and one `CompletedEvent`.
 - [ ] `CompletedEvent.resume` matches `StartedEvent.resume`.

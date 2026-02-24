@@ -6,8 +6,8 @@ from pathlib import Path
 
 import pytest
 
-from takopi.telegram import files as tg_files
-from takopi.telegram.files import ZipTooLargeError, zip_directory
+from untether.telegram import files as tg_files
+from untether.telegram.files import ZipTooLargeError, zip_directory
 
 
 def test_zip_directory_skips_symlinks(tmp_path: Path) -> None:

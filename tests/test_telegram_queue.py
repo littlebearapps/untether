@@ -3,7 +3,7 @@ from typing import Any
 import anyio
 import pytest
 
-from takopi.telegram.api_models import (
+from untether.telegram.api_models import (
     Chat,
     ChatMember,
     File,
@@ -12,7 +12,7 @@ from takopi.telegram.api_models import (
     Update,
     User,
 )
-from takopi.telegram.client import BotClient, TelegramClient, TelegramRetryAfter
+from untether.telegram.client import BotClient, TelegramClient, TelegramRetryAfter
 
 
 class FakeBot(BotClient):
@@ -196,12 +196,12 @@ async def test_edit_forum_topic_uses_outbox() -> None:
     client = TelegramClient(client=bot, private_chat_rps=0.0, group_chat_rps=0.0)
 
     result = await client.edit_forum_topic(
-        chat_id=7, message_thread_id=42, name="takopi @main"
+        chat_id=7, message_thread_id=42, name="untether @main"
     )
 
     assert result is True
     assert bot.calls == ["edit_forum_topic"]
-    assert bot.topic_calls == [(7, 42, "takopi @main")]
+    assert bot.topic_calls == [(7, 42, "untether @main")]
 
 
 @pytest.mark.anyio

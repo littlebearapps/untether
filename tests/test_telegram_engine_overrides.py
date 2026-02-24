@@ -1,12 +1,12 @@
 import pytest
 
-from takopi.telegram.chat_prefs import ChatPrefsStore
-from takopi.telegram.engine_overrides import (
+from untether.telegram.chat_prefs import ChatPrefsStore
+from untether.telegram.engine_overrides import (
     EngineOverrides,
     merge_overrides,
     resolve_override_value,
 )
-from takopi.telegram.topic_state import TopicStateStore
+from untether.telegram.topic_state import TopicStateStore
 
 
 def test_merge_overrides_prefers_topic_values() -> None:

@@ -1,10 +1,10 @@
 # Commands & directives
 
-This page documents Takopi’s user-visible command surface: message directives, in-chat commands, and the CLI.
+This page documents Untether’s user-visible command surface: message directives, in-chat commands, and the CLI.
 
 ## Message directives
 
-Takopi parses the first non-empty line of a message for a directive prefix.
+Untether parses the first non-empty line of a message for a directive prefix.
 
 | Directive | Example | Effect |
 |----------|---------|--------|
@@ -17,13 +17,13 @@ Notes:
 
 - Directives are only parsed at the start of the first non-empty line.
 - Parsing stops at the first non-directive token.
-- If a reply contains a `ctx:` line, Takopi ignores new directives and uses the reply context.
+- If a reply contains a `ctx:` line, Untether ignores new directives and uses the reply context.
 
 See [Context resolution](context-resolution.md) for the full rules.
 
 ## Context footer (`ctx:`)
 
-When a run has project context, Takopi appends a footer line rendered as inline code:
+When a run has project context, Untether appends a footer line rendered as inline code:
 
 - With branch: `` `ctx: <project> @<branch>` ``
 - Without branch: `` `ctx: <project>` ``
@@ -55,20 +55,20 @@ Notes:
 
 ## CLI
 
-Takopi’s CLI is an auto-router by default; engine subcommands override the default engine.
+Untether’s CLI is an auto-router by default; engine subcommands override the default engine.
 
 ### Commands
 
 | Command | Description |
 |---------|-------------|
-| `takopi` | Start Takopi (runs onboarding if setup/config is missing and you’re in a TTY). |
-| `takopi <engine>` | Run with a specific engine (e.g. `takopi codex`). |
-| `takopi init <alias>` | Register the current repo as a project. |
-| `takopi chat-id` | Capture the current chat id. |
-| `takopi chat-id --project <alias>` | Save the captured chat id to a project. |
-| `takopi doctor` | Validate Telegram connectivity and related config. |
-| `takopi plugins` | List discovered plugins without loading them. |
-| `takopi plugins --load` | Load each plugin to validate types and surface import errors. |
+| `untether` | Start Untether (runs onboarding if setup/config is missing and you’re in a TTY). |
+| `untether <engine>` | Run with a specific engine (e.g. `untether codex`). |
+| `untether init <alias>` | Register the current repo as a project. |
+| `untether chat-id` | Capture the current chat id. |
+| `untether chat-id --project <alias>` | Save the captured chat id to a project. |
+| `untether doctor` | Validate Telegram connectivity and related config. |
+| `untether plugins` | List discovered plugins without loading them. |
+| `untether plugins --load` | Load each plugin to validate types and surface import errors. |
 
 ### Common flags
 

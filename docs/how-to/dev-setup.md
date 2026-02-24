@@ -1,22 +1,22 @@
 # Dev setup
 
-Set up Takopi for local development and run the checks.
+Set up Untether for local development and run the checks.
 
 ## Clone and run
 
 ```bash
-git clone https://github.com/banteg/takopi
-cd takopi
+git clone https://github.com/banteg/untether
+cd untether
 
 # Run directly with uv (installs deps automatically)
-uv run takopi --help
+uv run untether --help
 ```
 
 ## Install locally (optional)
 
 ```bash
 uv tool install .
-takopi --help
+untether --help
 ```
 
 ## Run checks

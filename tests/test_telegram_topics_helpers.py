@@ -1,7 +1,7 @@
 from dataclasses import replace
 
-from takopi.settings import TelegramTopicsSettings
-from takopi.telegram.topics import _resolve_topics_scope_raw, _topics_command_error
+from untether.settings import TelegramTopicsSettings
+from untether.telegram.topics import _resolve_topics_scope_raw, _topics_command_error
 from tests.telegram_fakes import FakeTransport, make_cfg
 
 

@@ -3,8 +3,8 @@ import uuid
 import anyio
 import pytest
 
-from takopi.progress import ProgressTracker
-from takopi.runner_bridge import (
+from untether.progress import ProgressTracker
+from untether.runner_bridge import (
     ExecBridgeConfig,
     IncomingMessage,
     ProgressEdits,
@@ -12,13 +12,13 @@ from takopi.runner_bridge import (
     handle_message,
     register_ephemeral_message,
 )
-from takopi.markdown import MarkdownParts, MarkdownPresenter
-from takopi.model import ResumeToken, TakopiEvent
-from takopi.telegram.render import prepare_telegram
-from takopi.runners.codex import CodexRunner
-from takopi.runners.mock import Advance, Emit, Raise, Return, ScriptRunner, Wait
-from takopi.settings import load_settings, require_telegram
-from takopi.transport import MessageRef, RenderedMessage, SendOptions
+from untether.markdown import MarkdownParts, MarkdownPresenter
+from untether.model import ResumeToken, UntetherEvent
+from untether.telegram.render import prepare_telegram
+from untether.runners.codex import CodexRunner
+from untether.runners.mock import Advance, Emit, Raise, Return, ScriptRunner, Wait
+from untether.settings import load_settings, require_telegram
+from untether.transport import MessageRef, RenderedMessage, SendOptions
 from tests.factories import action_completed, action_started
 
 CODEX_ENGINE = "codex"
@@ -86,9 +86,9 @@ def _return_runner(
 
 
 def test_require_telegram_rejects_empty_token(tmp_path) -> None:
-    from takopi.config import ConfigError
+    from untether.config import ConfigError
 
-    config_path = tmp_path / "takopi.toml"
+    config_path = tmp_path / "untether.toml"
     config_path.write_text(
         'transport = "telegram"\n\n[transports.telegram]\n'
         'bot_token = "   "\nchat_id = 123\n',
@@ -101,9 +101,9 @@ def test_require_telegram_rejects_empty_token(tmp_path) -> None:
 
 
 def test_load_settings_rejects_string_chat_id(tmp_path) -> None:
-    from takopi.config import ConfigError
+    from untether.config import ConfigError
 
-    config_path = tmp_path / "takopi.toml"
+    config_path = tmp_path / "untether.toml"
     config_path.write_text(
         'transport = "telegram"\n\n[transports.telegram]\n'
         'bot_token = "token"\nchat_id = "123"\n',
@@ -261,7 +261,7 @@ async def test_long_final_message_edits_progress_message() -> None:
 async def test_progress_edits_are_best_effort() -> None:
     transport = FakeTransport()
     clock = _FakeClock()
-    events: list[TakopiEvent] = [
+    events: list[UntetherEvent] = [
         action_started("item_0", "command", "echo 1"),
         action_started("item_1", "command", "echo 2"),
     ]
@@ -298,7 +298,7 @@ async def test_progress_edits_are_best_effort() -> None:
 async def test_bridge_flow_sends_progress_edits_and_final_resume() -> None:
     transport = FakeTransport()
     clock = _FakeClock()
-    events: list[TakopiEvent] = [
+    events: list[UntetherEvent] = [
         action_started("item_0", "command", "echo ok"),
         action_completed(
             "item_0",
@@ -363,13 +363,13 @@ async def test_final_message_includes_ctx_line() -> None:
         runner=runner,
         incoming=IncomingMessage(channel_id=123, message_id=42, text="do it"),
         resume_token=None,
-        context_line="`ctx: takopi @feat/api`",
+        context_line="`ctx: untether @feat/api`",
         clock=clock,
     )
 
     assert transport.send_calls
     final_text = transport.send_calls[-1]["message"].text
-    assert "`ctx: takopi @feat/api`" in final_text
+    assert "`ctx: untether @feat/api`" in final_text
     assert "codex resume" in final_text.lower()
 
 

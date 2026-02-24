@@ -2,23 +2,23 @@ from pathlib import Path
 
 import pytest
 
-import takopi.runtime_loader as runtime_loader
-from takopi.config import ConfigError
-from takopi.settings import TakopiSettings
+import untether.runtime_loader as runtime_loader
+from untether.config import ConfigError
+from untether.settings import UntetherSettings
 
 
 def test_build_runtime_spec_minimal(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     monkeypatch.setattr(runtime_loader.shutil, "which", lambda _cmd: "/bin/echo")
-    settings = TakopiSettings.model_validate(
+    settings = UntetherSettings.model_validate(
         {
             "transport": "telegram",
             "watch_config": True,
             "transports": {"telegram": {"bot_token": "token", "chat_id": 123}},
         }
     )
-    config_path = tmp_path / "takopi.toml"
+    config_path = tmp_path / "untether.toml"
     config_path.write_text(
         'transport = "telegram"\n\n[transports.telegram]\n'
         'bot_token = "token"\nchat_id = 123\n',
@@ -37,7 +37,7 @@ def test_build_runtime_spec_minimal(
 
 
 def test_resolve_default_engine_unknown(tmp_path: Path) -> None:
-    settings = TakopiSettings.model_validate(
+    settings = UntetherSettings.model_validate(
         {
             "transport": "telegram",
             "transports": {"telegram": {"bot_token": "token", "chat_id": 123}},
@@ -47,6 +47,6 @@ def test_resolve_default_engine_unknown(tmp_path: Path) -> None:
         runtime_loader.resolve_default_engine(
             override="unknown",
             settings=settings,
-            config_path=tmp_path / "takopi.toml",
+            config_path=tmp_path / "untether.toml",
             engine_ids=["codex"],
         )

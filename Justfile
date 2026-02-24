@@ -18,6 +18,6 @@ docs-build:
 bundle:
     #!/usr/bin/env bash
     set -euo pipefail
-    bundle="takopi.git.bundle"
+    bundle="untether.git.bundle"
     git bundle create "$bundle" --all
     open -R "$bundle"

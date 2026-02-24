@@ -4,15 +4,15 @@ Upload files into the active repo/worktree or fetch files back into Telegram.
 
 ## Enable file transfer
 
-=== "takopi config"
+=== "untether config"
 
     ```sh
-    takopi config set transports.telegram.files.enabled true
-    takopi config set transports.telegram.files.auto_put true
-    takopi config set transports.telegram.files.auto_put_mode "upload"
-    takopi config set transports.telegram.files.uploads_dir "incoming"
-    takopi config set transports.telegram.files.allowed_user_ids "[123456789]"
-    takopi config set transports.telegram.files.deny_globs '[".git/**", ".env", ".envrc", "**/*.pem", "**/.ssh/**"]'
+    untether config set transports.telegram.files.enabled true
+    untether config set transports.telegram.files.auto_put true
+    untether config set transports.telegram.files.auto_put_mode "upload"
+    untether config set transports.telegram.files.uploads_dir "incoming"
+    untether config set transports.telegram.files.allowed_user_ids "[123456789]"
+    untether config set transports.telegram.files.deny_globs '[".git/**", ".env", ".envrc", "**/*.pem", "**/.ssh/**"]'
     ```
 
 === "toml"
@@ -47,7 +47,7 @@ Examples:
 /file put /happy-gadgets @feat/camera assets/logo.png
 ```
 
-If you send a file **without a caption**, Takopi saves it to `incoming/<original_filename>`.
+If you send a file **without a caption**, Untether saves it to `incoming/<original_filename>`.
 
 Use `--force` to overwrite:
 

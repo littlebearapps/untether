@@ -3,15 +3,15 @@ from pathlib import Path
 import pytest
 from typer.testing import CliRunner
 
-from takopi import cli
-from takopi.config import ConfigError
-from takopi.settings import TakopiSettings
-from takopi.settings import TelegramTopicsSettings
-from takopi.telegram.api_models import Chat, User
+from untether import cli
+from untether.config import ConfigError
+from untether.settings import UntetherSettings
+from untether.settings import TelegramTopicsSettings
+from untether.telegram.api_models import Chat, User
 
 
-def _settings() -> TakopiSettings:
-    return TakopiSettings.model_validate(
+def _settings() -> UntetherSettings:
+    return UntetherSettings.model_validate(
         {
             "transport": "telegram",
             "transports": {"telegram": {"bot_token": "token", "chat_id": 123}},
@@ -34,7 +34,7 @@ def test_doctor_ok(monkeypatch) -> None:
     result = runner.invoke(cli.create_app(), ["doctor"])
 
     assert result.exit_code == 0
-    assert "takopi doctor" in result.output
+    assert "untether doctor" in result.output
     assert "telegram token: ok" in result.output
 
 

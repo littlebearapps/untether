@@ -5,7 +5,7 @@ import pytest
 import click
 import typer
 
-from takopi import cli, engines, plugins
+from untether import cli, engines, plugins
 from tests.plugin_fixtures import FakeEntryPoint, install_entrypoints
 
 
@@ -14,17 +14,17 @@ def engine_entrypoints(monkeypatch):
     entrypoints = [
         FakeEntryPoint(
             "codex",
-            "takopi.runners.codex:BACKEND",
+            "untether.runners.codex:BACKEND",
             plugins.ENGINE_GROUP,
         ),
         FakeEntryPoint(
             "claude",
-            "takopi.runners.claude:BACKEND",
+            "untether.runners.claude:BACKEND",
             plugins.ENGINE_GROUP,
         ),
         FakeEntryPoint(
             "bad-id",
-            "takopi.runners.bad:BACKEND",
+            "untether.runners.bad:BACKEND",
             plugins.ENGINE_GROUP,
         ),
     ]
@@ -54,7 +54,7 @@ def test_engine_commands_do_not_expose_engine_id_option(
     group = cast(click.Group, typer.main.get_command(app))
     engine_ids = engines.list_backend_ids()
 
-    ctx = group.make_context("takopi", [])
+    ctx = group.make_context("untether", [])
 
     for engine_id in engine_ids:
         command = group.get_command(ctx, engine_id)

@@ -33,7 +33,7 @@ Selection precedence (highest to lowest): resume token → `/<engine-id>` direct
 
 ## Engine installation
 
-Takopi shells out to engine CLIs. Install them and make sure they’re on your `PATH`
+Untether shells out to engine CLIs. Install them and make sure they’re on your `PATH`
 (`codex`, `claude`, `opencode`, `pi`). Authentication is handled by each CLI.
 
 ## Related

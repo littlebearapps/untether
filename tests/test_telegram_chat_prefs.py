@@ -1,6 +1,6 @@
 import pytest
 
-from takopi.telegram.chat_prefs import ChatPrefsStore
+from untether.telegram.chat_prefs import ChatPrefsStore
 
 
 @pytest.mark.anyio

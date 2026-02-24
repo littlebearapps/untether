@@ -1,10 +1,10 @@
-# Takopi Specification v0.22.1 [2026-02-10]
+# Untether Specification v0.22.1 [2026-02-10]
 
 This document is **normative**. The words **MUST**, **SHOULD**, and **MAY** express requirements.
 
 ## 1. Scope
 
-Takopi v0.22.1 specifies:
+Untether v0.22.1 specifies:
 
 - A **Telegram** bot bridge that runs an agent **Runner** and posts:
   - a throttled, edited **progress message**
@@ -13,7 +13,7 @@ Takopi v0.22.1 specifies:
 - **Parallel runs across different threads**
 - **Serialization within a thread** (no concurrent runs on the same thread)
 - **Automatic runner selection** among multiple engines based on ResumeLine (with a configurable default for new threads)
-- A Takopi-owned **normalized event model** produced by runners and consumed by renderers/bridge
+- A Untether-owned **normalized event model** produced by runners and consumed by renderers/bridge
 
 Out of scope for v0.22.1:
 
@@ -24,12 +24,12 @@ Out of scope for v0.22.1:
 ## 2. Terminology
 
 - **EngineId**: string identifier of an engine (e.g., `"codex"`, `"claude"`, `"pi"`).
-- **Runner**: Takopi adapter that executes an engine process and yields **Takopi events**.
-- **Thread**: a single engine-side conversation, identified in Takopi by a **ResumeToken**.
-- **ResumeToken**: Takopi-owned thread identifier `{ engine: EngineId, value: str }`.
+- **Runner**: Untether adapter that executes an engine process and yields **Untether events**.
+- **Thread**: a single engine-side conversation, identified in Untether by a **ResumeToken**.
+- **ResumeToken**: Untether-owned thread identifier `{ engine: EngineId, value: str }`.
 - **ResumeLine**: a runner-owned string embedded in chat that represents a ResumeToken.
 - **Run**: a single invocation of `Runner.run(prompt, resume)`.
-- **TakopiEvent**: a normalized event emitted by a runner and consumed by renderers/bridge.
+- **UntetherEvent**: a normalized event emitted by a runner and consumed by renderers/bridge.
 - **Progress message**: a Telegram message that is periodically edited during a run.
 - **Final message**: a Telegram message that includes run status, final answer, and resume line.
 
@@ -45,12 +45,12 @@ The canonical ResumeLine embedded in chat MUST be the engine’s CLI resume comm
 
 ResumeLine MUST resume the interactive session when the engine offers both interactive and headless modes. It MUST NOT point to a headless/batch command that requires a new prompt (e.g., a `run` subcommand that errors without a message).
 
-Takopi MUST treat the runner as authoritative for:
+Untether MUST treat the runner as authoritative for:
 
 - formatting a ResumeToken into a ResumeLine
 - extracting a ResumeToken from message text
 
-### 3.2 ResumeToken schema (Takopi-owned)
+### 3.2 ResumeToken schema (Untether-owned)
 
 ```python
 @dataclass(frozen=True, slots=True)
@@ -86,11 +86,11 @@ Given `text` (user message), optional `reply_text` (the message being replied to
 
 ### 4.1 Decision: events are trusted after normalization
 
-Runners are responsible for emitting well-formed Takopi events. Consumers (renderer/bridge) SHOULD assume validity and MAY fail fast on invariant violations.
+Runners are responsible for emitting well-formed Untether events. Consumers (renderer/bridge) SHOULD assume validity and MAY fail fast on invariant violations.
 
 ### 4.2 Supported event types (minimum set)
 
-Takopi MUST support:
+Untether MUST support:
 
 * `started`
 * `action`
@@ -195,7 +195,7 @@ class Runner(Protocol):
         self,
         prompt: str,
         resume: ResumeToken | None,
-    ) -> AsyncIterator[TakopiEvent]: ...
+    ) -> AsyncIterator[UntetherEvent]: ...
 ```
 
 ### 5.2 Per-thread serialization (MUST; core invariant)
@@ -324,7 +324,7 @@ If the runner crashes or exits uncleanly:
 
 Renderers MUST:
 
-* be deterministic functions/state machines over Takopi events + internal renderer state
+* be deterministic functions/state machines over Untether events + internal renderer state
 * produce Telegram-ready markdown (or markdown + entities)
 * tolerate `action` events that are “completed-only” (no prior `started`/`updated`)
 
@@ -342,12 +342,12 @@ Action update collapsing:
 
 Decision (v0.4.0):
 
-* Takopi MUST support configuring a **default engine** used to start new threads (`resume=None`).
+* Untether MUST support configuring a **default engine** used to start new threads (`resume=None`).
   * If not configured, the default engine is implementation-defined (non-normative: the reference implementation defaults to `codex`).
-* If no engine subcommand is provided, Takopi MUST run in **auto-router** mode:
+* If no engine subcommand is provided, Untether MUST run in **auto-router** mode:
   * new threads use the configured default engine
   * resumed threads are routed based on ResumeLine extraction (per §3.4)
-* If an engine subcommand is provided, Takopi MUST still use the auto-router, but it overrides the configured default engine for new threads.
+* If an engine subcommand is provided, Untether MUST still use the auto-router, but it overrides the configured default engine for new threads.
 * Resume extraction MUST poll **all** available runners (per §3.4) and route to the first matching runner.
 * New thread engine override (chat-level):
 * Users MAY prefix the first non-empty line with `/{engine}` (e.g. `/claude`, `/codex`, or `/pi`) to select the engine for a **new** thread.
@@ -365,7 +365,7 @@ Decision (v0.4.0):
 
 ### 8.1 Command menu (Telegram)
 
-Takopi SHOULD keep the bot’s slash-command menu in sync at startup by calling
+Untether SHOULD keep the bot’s slash-command menu in sync at startup by calling
 `setMyCommands` with the canonical list of supported commands.
 
 * The command list MUST include:
@@ -418,11 +418,11 @@ Test tooling SHOULD include event factories, deterministic/fake time, and a scri
 
 ## 10. Lockfile (single-instance enforcement)
 
-Takopi MUST prevent multiple instances from racing `getUpdates` offsets for the same bot token.
+Untether MUST prevent multiple instances from racing `getUpdates` offsets for the same bot token.
 
 ### 10.1 Lock file location
 
-The lock file MUST be stored at `<config_path>.lock`. For the default config path, this resolves to `~/.takopi/takopi.lock`.
+The lock file MUST be stored at `<config_path>.lock`. For the default config path, this resolves to `~/.untether/untether.lock`.
 
 ### 10.2 Lock file format
 
@@ -559,4 +559,4 @@ The lock file SHOULD be removed on clean shutdown. Stale locks from crashed proc
 
 ### v0.2.0 (2025-12-31)
 
-- Initial minimal Takopi specification (Telegram bridge + runner protocol + normalized events + resume support).
+- Initial minimal Untether specification (Telegram bridge + runner protocol + normalized events + resume support).

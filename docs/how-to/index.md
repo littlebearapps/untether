@@ -20,7 +20,7 @@ If you need exact options and defaults, use **[Reference](../reference/index.md)
 - [File transfer](file-transfer.md) (`/file put` and `/file get`)
 - [Schedule tasks](schedule-tasks.md) (Telegram scheduled messages)
 
-## Extending Takopi
+## Extending Untether
 
 - [Write a plugin](write-a-plugin.md) (engines, transports, commands)
 - [Add a runner](add-a-runner.md) (implement a new engine backend)

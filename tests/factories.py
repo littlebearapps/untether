@@ -2,18 +2,18 @@ from __future__ import annotations
 
 from typing import Any
 
-from takopi.model import (
+from untether.model import (
     Action,
     ActionEvent,
     ActionKind,
     EngineId,
     ResumeToken,
     StartedEvent,
-    TakopiEvent,
+    UntetherEvent,
 )
 
 
-def session_started(engine: str, value: str, title: str = "Codex") -> TakopiEvent:
+def session_started(engine: str, value: str, title: str = "Codex") -> UntetherEvent:
     engine_id: EngineId = engine
     return StartedEvent(
         engine=engine_id,
@@ -28,7 +28,7 @@ def action_started(
     title: str,
     detail: dict[str, Any] | None = None,
     engine: str = "codex",
-) -> TakopiEvent:
+) -> UntetherEvent:
     engine_id: EngineId = engine
     return ActionEvent(
         engine=engine_id,
@@ -49,7 +49,7 @@ def action_completed(
     ok: bool,
     detail: dict[str, Any] | None = None,
     engine: str = "codex",
-) -> TakopiEvent:
+) -> UntetherEvent:
     engine_id: EngineId = engine
     return ActionEvent(
         engine=engine_id,

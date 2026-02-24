@@ -2,8 +2,8 @@ from pathlib import Path
 
 import pytest
 
-from takopi.model import ResumeToken
-from takopi.telegram.chat_sessions import ChatSessionStore
+from untether.model import ResumeToken
+from untether.telegram.chat_sessions import ChatSessionStore
 
 
 @pytest.mark.anyio

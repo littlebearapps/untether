@@ -8,10 +8,10 @@ from rich.console import Console
 from rich.table import Table
 from rich.text import Text
 
-from takopi.config import ConfigError
-from takopi.telegram import onboarding
-from takopi.telegram.api_models import Chat, Message, Update, User
-from takopi.telegram.client import TelegramRetryAfter
+from untether.config import ConfigError
+from untether.telegram import onboarding
+from untether.telegram.api_models import Chat, Message, Update, User
+from untether.telegram.client import TelegramRetryAfter
 
 
 class DummyUI:
@@ -149,14 +149,14 @@ def test_onboarding_state_helpers(tmp_path: Path) -> None:
     state.topics_enabled = True
     assert state.is_stateful is True
 
-    state.bot_name = "Takopi"
-    assert state.bot_ref == "Takopi"
-    state.bot_username = "takopi_bot"
-    assert state.bot_ref == "@takopi_bot"
+    state.bot_name = "Untether"
+    assert state.bot_ref == "Untether"
+    state.bot_username = "untether_bot"
+    assert state.bot_ref == "@untether_bot"
 
 
 def test_display_path(tmp_path: Path) -> None:
-    home_path = Path.home() / "takopi" / "cfg.toml"
+    home_path = Path.home() / "untether" / "cfg.toml"
     assert onboarding.display_path(home_path).startswith("~/")
     assert onboarding.display_path(tmp_path / "cfg.toml") == str(tmp_path / "cfg.toml")
 
@@ -515,7 +515,7 @@ async def test_step_capture_chat_workspace_switches_to_assistant(
     svc = DummyServices(chat=chat, topics_issue=ConfigError("nope"))
     state = onboarding.OnboardingState(config_path=tmp_path / "cfg", force=False)
     state.token = "token"
-    state.bot_name = "Takopi"
+    state.bot_name = "Untether"
     state.persona = "workspace"
     state.topics_scope = "auto"
     state.topics_enabled = True

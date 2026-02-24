@@ -1,9 +1,9 @@
-from takopi.telegram import (
+from untether.telegram import (
     TelegramCallbackQuery,
     TelegramIncomingMessage,
     parse_incoming_update,
 )
-from takopi.telegram.api_models import (
+from untether.telegram.api_models import (
     CallbackQuery,
     CallbackQueryMessage,
     Chat,
@@ -70,7 +70,7 @@ def test_parse_incoming_update_ignores_implicit_topic_reply() -> None:
             from_=User(id=99),
             reply_to_message=MessageReply(
                 message_id=163,
-                from_=User(id=77, is_bot=True, username="TakopiBot"),
+                from_=User(id=77, is_bot=True, username="UntetherBot"),
             ),
         ),
     )
@@ -280,7 +280,7 @@ def test_parse_incoming_update_callback_query() -> None:
         update_id=1,
         callback_query=CallbackQuery(
             id="cbq-1",
-            data="takopi:cancel",
+            data="untether:cancel",
             from_=User(id=321),
             message=CallbackQueryMessage(
                 message_id=55,
@@ -295,7 +295,7 @@ def test_parse_incoming_update_callback_query() -> None:
     assert msg.chat_id == 123
     assert msg.message_id == 55
     assert msg.callback_query_id == "cbq-1"
-    assert msg.data == "takopi:cancel"
+    assert msg.data == "untether:cancel"
     assert msg.sender_id == 321
     assert msg.update_id == 1
 

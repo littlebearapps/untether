@@ -1,9 +1,9 @@
 import json
 
-from takopi.events import EventFactory
-from takopi.model import ActionEvent
-from takopi.runners.codex import translate_codex_event
-from takopi.schemas import codex as codex_schema
+from untether.events import EventFactory
+from untether.model import ActionEvent
+from untether.runners.codex import translate_codex_event
+from untether.schemas import codex as codex_schema
 
 
 def _decode_event(payload: dict) -> codex_schema.ThreadEvent:

@@ -1,14 +1,13 @@
-# Takopi (LBA Fork)
+# Untether
 
-Telegram bridge for Claude Code, Codex, OpenCode, and other agent CLIs.
+Telegram bridge for Claude Code, Codex, OpenCode, and other agent CLIs. Control your coding agents from anywhere — walking the dog, watching footy, at a friend's place.
 
-**Upstream**: [banteg/takopi](https://github.com/banteg/takopi)
-**Fork**: [littlebearapps/takopi](https://github.com/littlebearapps/takopi)
-**Branch**: `interactive-features`
+**Repo**: [littlebearapps/untether](https://github.com/littlebearapps/untether)
+**Based on**: [banteg/takopi](https://github.com/banteg/takopi) (upstream)
 
-This fork adds interactive permission control, plan mode support, and several UX improvements on top of upstream takopi. All fork-specific features are Claude Code-specific; Codex, OpenCode, and other engines use takopi's standard non-interactive mode.
+Untether adds interactive permission control, plan mode support, and several UX improvements on top of upstream takopi. All interactive features are Claude Code-specific; Codex, OpenCode, and other engines use standard non-interactive mode.
 
-## Fork features (vs upstream)
+## Features (vs upstream takopi)
 
 ### Interactive permission control
 
@@ -41,11 +40,11 @@ Persisted via `ChatPrefsStore` as an `EngineOverrides.permission_mode` field.
 
 ### Early callback answering
 
-Telegram inline buttons show a spinner until `answerCallbackQuery` is called. Upstream defers this to the `finally` block (~150-300ms delay). Fork backends can set `answer_early = True` and provide `early_answer_toast()` to clear the spinner immediately with a toast ("Approved", "Denied", "Outlining plan...").
+Telegram inline buttons show a spinner until `answerCallbackQuery` is called. Upstream defers this to the `finally` block (~150-300ms delay). Backends can set `answer_early = True` and provide `early_answer_toast()` to clear the spinner immediately with a toast ("Approved", "Denied", "Outlining plan...").
 
 ### Approval push notifications
 
-`edit_message_text` doesn't trigger phone push notifications. Fork detects when approval buttons appear and sends a separate `notify=True` message ("Action required — approval needed"). The `_approval_notified` flag resets when buttons disappear, so subsequent approvals in the same run also notify.
+`edit_message_text` doesn't trigger phone push notifications. Untether detects when approval buttons appear and sends a separate `notify=True` message ("Action required — approval needed"). The `_approval_notified` flag resets when buttons disappear, so subsequent approvals in the same run also notify.
 
 ### Ephemeral message cleanup
 
@@ -72,12 +71,12 @@ Telegram <-> TelegramPresenter <-> RunnerBridge <-> Runner (claude/codex/opencod
                                   ProgressTracker
 ```
 
-- **Runners** (`src/takopi/runners/`) — engine-specific subprocess managers
-- **RunnerBridge** (`src/takopi/runner_bridge.py`) — connects runners to Telegram presenter, manages `ProgressEdits`
-- **TelegramPresenter** (`src/takopi/telegram/bridge.py`) — renders progress, inline keyboards, and answers
-- **Commands** (`src/takopi/telegram/commands/`) — command/callback handlers
+- **Runners** (`src/untether/runners/`) — engine-specific subprocess managers
+- **RunnerBridge** (`src/untether/runner_bridge.py`) — connects runners to Telegram presenter, manages `ProgressEdits`
+- **TelegramPresenter** (`src/untether/telegram/bridge.py`) — renders progress, inline keyboards, and answers
+- **Commands** (`src/untether/telegram/commands/`) — command/callback handlers
 
-### Concurrency design (fork-specific)
+### Concurrency design
 
 `ClaudeRunner` is a singleton per engine, shared across all chats:
 
@@ -87,9 +86,9 @@ Telegram <-> TelegramPresenter <-> RunnerBridge <-> Runner (claude/codex/opencod
 4. Stdout pipe breaks immediately after `CompletedEvent` (MCP servers inherit the FD)
 5. `ControlInitializeRequest` and auto-approved requests drained after every JSONL line
 
-## Files modified from upstream
+## Key files
 
-| File | Changes |
+| File | Purpose |
 |------|---------|
 | `runners/claude.py` | Control channel, stdin/session registries, `write_control_response` (with `deny_message`), Outline Plan button, progressive discuss cooldown |
 | `runner_bridge.py` | Approval push notifications, ephemeral message tracking/cleanup |
@@ -105,7 +104,7 @@ Telegram <-> TelegramPresenter <-> RunnerBridge <-> Runner (claude/codex/opencod
 | `telegram/loop.py` | `callback_query_id` passthrough |
 | `commands.py` | `parse_mode` field on `CommandResult` |
 
-## Tests (fork-added)
+## Tests
 
 - `test_claude_control.py` — 50 tests: control requests, response routing, registry lifecycle, auto-approve/auto-deny, tool auto-approve, custom deny messages, discuss action, early toast, progressive cooldown
 - `test_callback_dispatch.py` — 25 tests: callback parsing, dispatch toast/ephemeral behaviour, early answering
@@ -115,20 +114,20 @@ Telegram <-> TelegramPresenter <-> RunnerBridge <-> Runner (claude/codex/opencod
 
 ```bash
 # Install (editable)
-pipx install -e /home/nathan/takopi-fork
+pipx install -e /home/nathan/untether
 
 # Run as systemd service
-systemctl --user restart takopi
-journalctl --user -u takopi -f
+systemctl --user restart untether
+journalctl --user -u untether -f
 
 # Config
-~/.takopi/takopi.toml
+~/.untether/untether.toml
 
 # Tests
-cd /home/nathan/takopi-fork && uv run pytest
+cd /home/nathan/untether && uv run pytest
 
 # Lint
-cd /home/nathan/takopi-fork && uv run ruff check src/
+cd /home/nathan/untether && uv run ruff check src/
 ```
 
 ## Conventions

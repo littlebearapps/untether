@@ -4,15 +4,15 @@ Enable transcription so voice notes become normal text runs.
 
 ## Enable transcription
 
-=== "takopi config"
+=== "untether config"
 
     ```sh
-    takopi config set transports.telegram.voice_transcription true
-    takopi config set transports.telegram.voice_transcription_model "gpt-4o-mini-transcribe"
+    untether config set transports.telegram.voice_transcription true
+    untether config set transports.telegram.voice_transcription_model "gpt-4o-mini-transcribe"
 
     # local OpenAI-compatible transcription server (optional)
-    takopi config set transports.telegram.voice_transcription_base_url "http://localhost:8000/v1"
-    takopi config set transports.telegram.voice_transcription_api_key "local"
+    untether config set transports.telegram.voice_transcription_base_url "http://localhost:8000/v1"
+    untether config set transports.telegram.voice_transcription_api_key "local"
     ```
 
 === "toml"
@@ -35,7 +35,7 @@ requires a specific model name, set `voice_transcription_model` (for example,
 
 ## Behavior
 
-When you send a voice note, Takopi transcribes it and runs the result as a normal text message.
+When you send a voice note, Untether transcribes it and runs the result as a normal text message.
 If transcription fails, you’ll get an error message and the run is skipped.
 
 ## Related

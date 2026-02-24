@@ -1,12 +1,12 @@
 from pathlib import Path
 
-from takopi.config import ProjectConfig, ProjectsConfig
-from takopi.ids import RESERVED_CHAT_COMMANDS
-from takopi.router import AutoRouter, RunnerEntry
-from takopi.runners.mock import Return, ScriptRunner
-from takopi.telegram.trigger_mode import should_trigger_run
-from takopi.telegram.types import TelegramIncomingMessage
-from takopi.transport_runtime import TransportRuntime
+from untether.config import ProjectConfig, ProjectsConfig
+from untether.ids import RESERVED_CHAT_COMMANDS
+from untether.router import AutoRouter, RunnerEntry
+from untether.runners.mock import Return, ScriptRunner
+from untether.telegram.trigger_mode import should_trigger_run
+from untether.telegram.types import TelegramIncomingMessage
+from untether.transport_runtime import TransportRuntime
 
 
 def _runtime() -> TransportRuntime:
@@ -93,7 +93,7 @@ def test_should_trigger_run_ignores_implicit_topic_reply_to_root() -> None:
         reply_to_message_id=163,
         reply_to_text=None,
         reply_to_is_bot=True,
-        reply_to_username="TakopiBot",
+        reply_to_username="UntetherBot",
         sender_id=1,
         thread_id=163,
         is_topic_message=True,

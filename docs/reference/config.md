@@ -1,13 +1,13 @@
 # Configuration
 
-Takopi reads configuration from `~/.takopi/takopi.toml`.
+Untether reads configuration from `~/.untether/untether.toml`.
 
-If you expect to edit config while Takopi is running, set:
+If you expect to edit config while Untether is running, set:
 
-=== "takopi config"
+=== "untether config"
 
     ```sh
-    takopi config set watch_config true
+    untether config set watch_config true
     ```
 
 === "toml"
@@ -27,11 +27,11 @@ If you expect to edit config while Takopi is running, set:
 
 ## `transports.telegram`
 
-=== "takopi config"
+=== "untether config"
 
     ```sh
-    takopi config set transports.telegram.bot_token "..."
-    takopi config set transports.telegram.chat_id 123
+    untether config set transports.telegram.bot_token "..."
+    untether config set transports.telegram.chat_id 123
     ```
 
 === "toml"
@@ -84,14 +84,14 @@ File size limits (not configurable):
 
 ## `projects.<alias>`
 
-=== "takopi config"
+=== "untether config"
 
     ```sh
-    takopi config set projects.happy-gadgets.path "~/dev/happy-gadgets"
-    takopi config set projects.happy-gadgets.worktrees_dir ".worktrees"
-    takopi config set projects.happy-gadgets.default_engine "claude"
-    takopi config set projects.happy-gadgets.worktree_base "master"
-    takopi config set projects.happy-gadgets.chat_id -1001234567890
+    untether config set projects.happy-gadgets.path "~/dev/happy-gadgets"
+    untether config set projects.happy-gadgets.worktrees_dir ".worktrees"
+    untether config set projects.happy-gadgets.default_engine "claude"
+    untether config set projects.happy-gadgets.worktree_base "master"
+    untether config set projects.happy-gadgets.chat_id -1001234567890
     ```
 
 === "toml"
@@ -119,17 +119,17 @@ Legacy config note: top-level `bot_token` / `chat_id` are auto-migrated into `[t
 
 ### `plugins.enabled`
 
-=== "takopi config"
+=== "untether config"
 
     ```sh
-    takopi config set plugins.enabled '["takopi-transport-slack", "takopi-engine-acme"]'
+    untether config set plugins.enabled '["untether-transport-slack", "untether-engine-acme"]'
     ```
 
 === "toml"
 
     ```toml
     [plugins]
-    enabled = ["takopi-transport-slack", "takopi-engine-acme"]
+    enabled = ["untether-transport-slack", "untether-engine-acme"]
     ```
 
 - `enabled = []` (default) means “load all installed plugins”.
@@ -151,11 +151,11 @@ here; plugin engines should document their own keys.
 | `extra_args` | string[] | `["-c", "notify=[]"]` | Extra CLI args for `codex` (exec-only flags are rejected). |
 | `profile` | string | (unset) | Passed as `--profile <name>` and used as the session title. |
 
-=== "takopi config"
+=== "untether config"
 
     ```sh
-    takopi config set codex.extra_args '["-c", "notify=[]"]'
-    takopi config set codex.profile "work"
+    untether config set codex.extra_args '["-c", "notify=[]"]'
+    untether config set codex.profile "work"
     ```
 
 === "toml"
@@ -175,13 +175,13 @@ here; plugin engines should document their own keys.
 | `dangerously_skip_permissions` | bool | `false` | Skip Claude permissions prompts. |
 | `use_api_billing` | bool | `false` | Keep `ANTHROPIC_API_KEY` for API billing. |
 
-=== "takopi config"
+=== "untether config"
 
     ```sh
-    takopi config set claude.model "claude-sonnet-4-5-20250929"
-    takopi config set claude.allowed_tools '["Bash", "Read", "Edit", "Write"]'
-    takopi config set claude.dangerously_skip_permissions false
-    takopi config set claude.use_api_billing false
+    untether config set claude.model "claude-sonnet-4-5-20250929"
+    untether config set claude.allowed_tools '["Bash", "Read", "Edit", "Write"]'
+    untether config set claude.dangerously_skip_permissions false
+    untether config set claude.use_api_billing false
     ```
 
 === "toml"
@@ -202,12 +202,12 @@ here; plugin engines should document their own keys.
 | `provider` | string | (unset) | Passed as `--provider`. |
 | `extra_args` | string[] | `[]` | Extra CLI args for `pi`. |
 
-=== "takopi config"
+=== "untether config"
 
     ```sh
-    takopi config set pi.model "..."
-    takopi config set pi.provider "..."
-    takopi config set pi.extra_args "[]"
+    untether config set pi.model "..."
+    untether config set pi.provider "..."
+    untether config set pi.extra_args "[]"
     ```
 
 === "toml"
@@ -225,10 +225,10 @@ here; plugin engines should document their own keys.
 |-----|------|---------|-------|
 | `model` | string | (unset) | Optional model override. |
 
-=== "takopi config"
+=== "untether config"
 
     ```sh
-    takopi config set opencode.model "claude-sonnet"
+    untether config set opencode.model "claude-sonnet"
     ```
 
 === "toml"

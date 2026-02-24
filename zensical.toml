@@ -1,8 +1,8 @@
 [project]
-site_name = "takopi"
+site_name = "untether"
 site_description = "Run coding agents on your computer, control them via Telegram. Send tasks from anywhere, stream progress live, pick up where you left off at the terminal."
 site_author = "banteg"
-site_url = "https://takopi.dev/"
+site_url = "https://untether.dev/"
 repo_url = "https://github.com/banteg/takopi"
 repo_name = "banteg/takopi"
 edit_uri = "edit/master/docs/"
@@ -51,21 +51,21 @@ nav = [
       { "Claude" = [
         { "Runner" = "reference/runners/claude/runner.md" },
         { "Stream JSON cheatsheet" = "reference/runners/claude/stream-json-cheatsheet.md" },
-        { "Takopi events" = "reference/runners/claude/takopi-events.md" },
+        { "Untether events" = "reference/runners/claude/untether-events.md" },
       ] },
       { "Codex" = [
         { "Exec JSON cheatsheet" = "reference/runners/codex/exec-json-cheatsheet.md" },
-        { "Takopi events" = "reference/runners/codex/takopi-events.md" },
+        { "Untether events" = "reference/runners/codex/untether-events.md" },
       ] },
       { "OpenCode" = [
         { "Runner" = "reference/runners/opencode/runner.md" },
         { "Stream JSON cheatsheet" = "reference/runners/opencode/stream-json-cheatsheet.md" },
-        { "Takopi events" = "reference/runners/opencode/takopi-events.md" },
+        { "Untether events" = "reference/runners/opencode/untether-events.md" },
       ] },
       { "Pi" = [
         { "Runner" = "reference/runners/pi/runner.md" },
         { "Stream JSON cheatsheet" = "reference/runners/pi/stream-json-cheatsheet.md" },
-        { "Takopi events" = "reference/runners/pi/takopi-events.md" },
+        { "Untether events" = "reference/runners/pi/untether-events.md" },
       ] },
     ] },
     { "For agents" = [
@@ -121,9 +121,9 @@ repo = "fontawesome/brands/github"
 
 [project.theme.icon.admonition]
 question = "fontawesome/solid/paper-plane"
-info = "takopi/takopi"
+info = "untether/untether"
 user = "lucide/user-round"
-takopi = "takopi/takopi"
+untether = "untether/untether"
 
 [[project.theme.palette]]
 media = "(prefers-color-scheme)"

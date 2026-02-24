@@ -1,4 +1,4 @@
-Below is a concrete implementation spec for the **Pi (pi-coding-agent CLI)** runner shipped in Takopi (v0.5.0).
+Below is a concrete implementation spec for the **Pi (pi-coding-agent CLI)** runner shipped in Untether (v0.5.0).
 
 ---
 
@@ -6,11 +6,11 @@ Below is a concrete implementation spec for the **Pi (pi-coding-agent CLI)** run
 
 ### Goal
 
-Provide the **`pi`** engine backend so Takopi can:
+Provide the **`pi`** engine backend so Untether can:
 
 * Run Pi non-interactively via the **pi CLI** (`pi --print`).
 * Stream progress by parsing **`--mode json`** (newline-delimited JSON). Each line is a JSON object.
-* Support resumable sessions via **`--session <token>`** (Takopi emits a canonical resume line the user can reply with).
+* Support resumable sessions via **`--session <token>`** (Untether emits a canonical resume line the user can reply with).
 
 ### Non-goals (v1)
 
@@ -23,12 +23,12 @@ Provide the **`pi`** engine backend so Takopi can:
 
 ### Engine selection
 
-* Default: `takopi` (auto-router uses `default_engine` from config)
-* Override: `takopi pi`
+* Default: `untether` (auto-router uses `default_engine` from config)
+* Override: `untether pi`
 
 ### Resume UX (canonical line)
 
-Takopi appends a **single backticked** resume line at the end of the message, like:
+Untether appends a **single backticked** resume line at the end of the message, like:
 
 ```text
 `pi --session ccd569e0`
@@ -36,7 +36,7 @@ Takopi appends a **single backticked** resume line at the end of the message, li
 
 Notes:
 
-* `pi --resume/-r` opens an interactive session picker, so Takopi uses `--session <token>` instead.
+* `pi --resume/-r` opens an interactive session picker, so Untether uses `--session <token>` instead.
 * The resume token is the **session id** (short prefix), derived from the session
   header line (`{"type":"session", ...}`) emitted to stdout in `--mode json`.
   This requires **pi-coding-agent >= 0.45.1**.
@@ -46,31 +46,31 @@ Notes:
 
 Use `--print` and `--mode json` for headless JSONL output.
 
-Pi does not accept `-- <prompt>` to protect prompts starting with `-`. Takopi prefixes a leading space if the prompt begins with `-` so it is not parsed as a flag.
+Pi does not accept `-- <prompt>` to protect prompts starting with `-`. Untether prefixes a leading space if the prompt begins with `-` so it is not parsed as a flag.
 
 ---
 
 ## Config additions
 
-Takopi config lives at `~/.takopi/takopi.toml`.
+Untether config lives at `~/.untether/untether.toml`.
 
 Add a new optional `[pi]` section.
 
 Recommended schema:
 
-=== "takopi config"
+=== "untether config"
 
     ```sh
-    takopi config set default_engine "pi"
-    takopi config set pi.model "..."
-    takopi config set pi.provider "..."
-    takopi config set pi.extra_args "[]"
+    untether config set default_engine "pi"
+    untether config set pi.model "..."
+    untether config set pi.provider "..."
+    untether config set pi.extra_args "[]"
     ```
 
 === "toml"
 
     ```toml
-    # ~/.takopi/takopi.toml
+    # ~/.untether/untether.toml
 
     default_engine = "pi"
 
@@ -82,7 +82,7 @@ Recommended schema:
 
 Notes:
 
-* `extra_args` lets you pass new Pi flags without changing Takopi.
+* `extra_args` lets you pass new Pi flags without changing Untether.
 * Session files are stored under Pi's default session dir:
   `~/.pi/agent/sessions/--<cwd>--` (with path separators replaced by `-`).
 
@@ -90,7 +90,7 @@ Notes:
 
 ## Code changes (by file)
 
-### 1) New file: `src/takopi/runners/pi.py`
+### 1) New file: `src/untether/runners/pi.py`
 
 Expose a module-level `BACKEND = EngineBackend(...)`.
 
@@ -130,17 +130,17 @@ npm install -g @mariozechner/pi-coding-agent
 Minimum supported pi version: **0.45.1**.
 
 Auth is stored under `~/.pi/agent/auth.json`. Run `pi` once interactively to
-set up credentials before using Takopi.
+set up credentials before using Untether.
 
 ---
 
 ## Known pitfalls
 
-* `--resume` is interactive; Takopi uses `--session <path>` instead.
-* Prompts that start with `-` are interpreted as flags by the CLI. Takopi
+* `--resume` is interactive; Untether uses `--session <path>` instead.
+* Prompts that start with `-` are interpreted as flags by the CLI. Untether
   prefixes a space to make them safe.
 
 ---
 
-If you want, I can also add a sample `takopi.toml` snippet to the README or
+If you want, I can also add a sample `untether.toml` snippet to the README or
 include a small quickstart section for Pi in the onboarding panel.

@@ -3,14 +3,14 @@ from pathlib import Path
 import anyio
 import pytest
 
-import takopi.config_watch as config_watch
-from takopi.config_watch import ConfigReload, config_status, watch_config
-from takopi.config import ProjectsConfig
-from takopi.router import AutoRouter, RunnerEntry
-from takopi.runtime_loader import RuntimeSpec
-from takopi.runners.mock import Return, ScriptRunner
-from takopi.settings import TakopiSettings
-from takopi.transport_runtime import TransportRuntime
+import untether.config_watch as config_watch
+from untether.config_watch import ConfigReload, config_status, watch_config
+from untether.config import ProjectsConfig
+from untether.router import AutoRouter, RunnerEntry
+from untether.runtime_loader import RuntimeSpec
+from untether.runners.mock import Return, ScriptRunner
+from untether.settings import UntetherSettings
+from untether.transport_runtime import TransportRuntime
 
 
 def test_config_status_variants(tmp_path: Path) -> None:
@@ -25,7 +25,7 @@ def test_config_status_variants(tmp_path: Path) -> None:
     assert status == "invalid"
     assert signature is None
 
-    config_file = tmp_path / "takopi.toml"
+    config_file = tmp_path / "untether.toml"
     config_file.write_text(
         'transport = "telegram"\n\n[transports.telegram]\n'
         'bot_token = "token"\nchat_id = 123\n',
@@ -40,7 +40,7 @@ def test_config_status_variants(tmp_path: Path) -> None:
 async def test_watch_config_applies_runtime(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    config_path = tmp_path / "takopi.toml"
+    config_path = tmp_path / "untether.toml"
     config_path.write_text('default_engine = "codex"\n', encoding="utf-8")
     resolved_path = config_path.resolve()
 
@@ -67,7 +67,7 @@ async def test_watch_config_applies_runtime(
         plugin_configs=None,
     )
     reload = ConfigReload(
-        settings=TakopiSettings.model_validate(
+        settings=UntetherSettings.model_validate(
             {
                 "transport": "telegram",
                 "transports": {"telegram": {"bot_token": "token", "chat_id": 123}},

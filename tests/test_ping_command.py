@@ -6,9 +6,9 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from takopi.commands import CommandContext, CommandResult
-from takopi.telegram.commands.ping import BACKEND, _format_uptime
-from takopi.transport import MessageRef
+from untether.commands import CommandContext, CommandResult
+from untether.telegram.commands.ping import BACKEND, _format_uptime
+from untether.transport import MessageRef
 
 
 # ---------------------------------------------------------------------------

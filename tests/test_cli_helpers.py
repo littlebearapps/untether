@@ -2,20 +2,20 @@ from __future__ import annotations
 
 import pytest
 
-from takopi import cli
-from takopi.config import ConfigError
-from takopi.lockfile import LockError
-from takopi.settings import TakopiSettings
+from untether import cli
+from untether.config import ConfigError
+from untether.lockfile import LockError
+from untether.settings import UntetherSettings
 
 
-def _settings(overrides: dict | None = None) -> TakopiSettings:
+def _settings(overrides: dict | None = None) -> UntetherSettings:
     payload = {
         "transport": "telegram",
         "transports": {"telegram": {"bot_token": "token", "chat_id": 123}},
     }
     if overrides:
         payload.update(overrides)
-    return TakopiSettings.model_validate(payload)
+    return UntetherSettings.model_validate(payload)
 
 
 def test_parse_key_path_valid() -> None:
@@ -169,13 +169,13 @@ def test_load_settings_optional(monkeypatch, tmp_path) -> None:
     assert cli._load_settings_optional() == (None, None)
 
     settings = _settings()
-    config_path = tmp_path / "takopi.toml"
+    config_path = tmp_path / "untether.toml"
     monkeypatch.setattr(cli, "load_settings_if_exists", lambda: (settings, config_path))
     assert cli._load_settings_optional() == (settings, config_path)
 
 
 def test_acquire_config_lock_reports_error(monkeypatch, tmp_path) -> None:
-    config_path = tmp_path / "takopi.toml"
+    config_path = tmp_path / "untether.toml"
     error = LockError(path=config_path, state="running")
 
     def _raise(*_args, **_kwargs):

@@ -1,40 +1,40 @@
 # Plugin system
 
-Takopi uses Python entrypoints to extend engines, transports, and commands.
+Untether uses Python entrypoints to extend engines, transports, and commands.
 
 ## Why entrypoints
 
-Entrypoints let Takopi discover plugins without hard dependencies on plugin packages.
-Installed distributions declare what they provide, and Takopi can list and load them at runtime.
+Entrypoints let Untether discover plugins without hard dependencies on plugin packages.
+Installed distributions declare what they provide, and Untether can list and load them at runtime.
 
 This makes it possible to:
 
-- Add new engines/transports/commands without changing Takopi itself.
+- Add new engines/transports/commands without changing Untether itself.
 - Ship plugins independently.
 - Keep the core CLI small.
 
 ## Why discovery is lazy
 
-Takopi lists plugin IDs **without importing plugin code**, then imports a plugin only when:
+Untether lists plugin IDs **without importing plugin code**, then imports a plugin only when:
 
 - it is selected by routing (engine/transport), or
 - it is invoked as a command, or
-- you explicitly request loading via `takopi plugins --load`.
+- you explicitly request loading via `untether plugins --load`.
 
-This keeps `takopi --help` fast and prevents a broken third-party plugin from bricking the CLI.
+This keeps `untether --help` fast and prevents a broken third-party plugin from bricking the CLI.
 
-## Entrypoint rules (what Takopi expects)
+## Entrypoint rules (what Untether expects)
 
-Takopi uses three entrypoint groups:
+Untether uses three entrypoint groups:
 
 ```toml
-[project.entry-points."takopi.engine_backends"]
+[project.entry-points."untether.engine_backends"]
 myengine = "myengine.backend:BACKEND"
 
-[project.entry-points."takopi.transport_backends"]
+[project.entry-points."untether.transport_backends"]
 mytransport = "mytransport.backend:BACKEND"
 
-[project.entry-points."takopi.command_backends"]
+[project.entry-points."untether.command_backends"]
 mycommand = "mycommand.backend:BACKEND"
 ```
 
@@ -51,20 +51,20 @@ Rules:
 
 Plugin visibility can be restricted via:
 
-=== "takopi config"
+=== "untether config"
 
     ```sh
-    takopi config set plugins.enabled '["takopi-engine-acme", "takopi-transport-slack"]'
+    untether config set plugins.enabled '["untether-engine-acme", "untether-transport-slack"]'
     ```
 
 === "toml"
 
     ```toml
     [plugins]
-    enabled = ["takopi-engine-acme", "takopi-transport-slack"]
+    enabled = ["untether-engine-acme", "untether-transport-slack"]
     ```
 
-When set, Takopi filters by **distribution name** (package metadata), not by entrypoint name.
+When set, Untether filters by **distribution name** (package metadata), not by entrypoint name.
 This lets you:
 
 - ship multiple entrypoints from one distribution, and
@@ -73,7 +73,7 @@ This lets you:
 ## IDs and collisions
 
 Entrypoint names become plugin IDs and appear in user-facing surfaces (CLI subcommands, Telegram commands, `/<engine-id>` directives).
-Takopi validates IDs and rejects collisions with reserved names.
+Untether validates IDs and rejects collisions with reserved names.
 
 Plugin IDs must match:
 
@@ -86,8 +86,8 @@ Reserved IDs include core chat and CLI command names such as `cancel`, `init`, a
 ## How to debug discovery and loading
 
 ```sh
-takopi plugins
-takopi plugins --load
+untether plugins
+untether plugins --load
 ```
 
 ## Related

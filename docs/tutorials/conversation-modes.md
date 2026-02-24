@@ -1,6 +1,6 @@
 # Conversation modes
 
-Takopi can handle follow-up messages in two ways: **chat mode** (auto-resume) or **stateless** (reply-to-continue).
+Untether can handle follow-up messages in two ways: **chat mode** (auto-resume) or **stateless** (reply-to-continue).
 
 During [onboarding](install.md), you chose a **workflow** (assistant, workspace, or handoff) that automatically configured this for you:
 
@@ -19,14 +19,14 @@ This page explains what those settings mean and how to change them.
 !!! user "You"
     explain what this repo does
 
-!!! takopi "Takopi"
+!!! untether "Untether"
     done · codex · 8s
     ...
 
 !!! user "You"
     now add tests
 
-Takopi treats the second message as a continuation. If you want a clean slate, use:
+Untether treats the second message as a continuation. If you want a clean slate, use:
 
 !!! user "You"
     /new
@@ -47,14 +47,14 @@ Tip: set a default engine for this chat with `/agent set claude`.
 !!! user "You"
     explain what this repo does
 
-!!! takopi "Takopi"
+!!! untether "Untether"
     done · codex · 8s
     ...
     codex resume abc123
 
 To continue the same session, **reply** to a message with a resume line:
 
-!!! takopi "Takopi"
+!!! untether "Untether"
     done · codex · 8s
 
     !!! user "You"
@@ -64,11 +64,11 @@ To continue the same session, **reply** to a message with a resume line:
 
 You can manually change these settings in your config file:
 
-=== "takopi config"
+=== "untether config"
 
     ```sh
-    takopi config set transports.telegram.session_mode "chat"
-    takopi config set transports.telegram.show_resume_line false
+    untether config set transports.telegram.session_mode "chat"
+    untether config set transports.telegram.show_resume_line false
     ```
 
 === "toml"
@@ -82,20 +82,20 @@ You can manually change these settings in your config file:
 Or re-run onboarding to pick a different workflow:
 
 ```sh
-takopi --onboard
+untether --onboard
 ```
 
 ## Resume lines in chat mode
 
-If you enable chat mode (or topics), Takopi can auto-resume, so you can hide resume lines for a cleaner chat.
+If you enable chat mode (or topics), Untether can auto-resume, so you can hide resume lines for a cleaner chat.
 Disable them if you want a fully clean footer, or enable `show_resume_line` to keep reply-branching visible.
 
 If you prefer always-visible resume lines, set:
 
-=== "takopi config"
+=== "untether config"
 
     ```sh
-    takopi config set transports.telegram.show_resume_line true
+    untether config set transports.telegram.show_resume_line true
     ```
 
 === "toml"

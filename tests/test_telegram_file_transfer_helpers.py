@@ -3,15 +3,15 @@ from pathlib import Path
 
 import pytest
 
-from takopi.config import ProjectConfig, ProjectsConfig
-from takopi.context import RunContext
-from takopi.router import AutoRouter, RunnerEntry
-from takopi.runners.mock import Return, ScriptRunner
-from takopi.telegram.api_models import ChatMember, File
-from takopi.settings import TelegramFilesSettings
-from takopi.telegram.commands import file_transfer as transfer
-from takopi.telegram.types import TelegramDocument, TelegramIncomingMessage
-from takopi.transport_runtime import ResolvedMessage, TransportRuntime
+from untether.config import ProjectConfig, ProjectsConfig
+from untether.context import RunContext
+from untether.router import AutoRouter, RunnerEntry
+from untether.runners.mock import Return, ScriptRunner
+from untether.telegram.api_models import ChatMember, File
+from untether.settings import TelegramFilesSettings
+from untether.telegram.commands import file_transfer as transfer
+from untether.telegram.types import TelegramDocument, TelegramIncomingMessage
+from untether.transport_runtime import ResolvedMessage, TransportRuntime
 from tests.telegram_fakes import DEFAULT_ENGINE_ID, FakeBot, FakeTransport, make_cfg
 
 

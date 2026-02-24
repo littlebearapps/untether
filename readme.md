@@ -1,4 +1,4 @@
-# takopi
+# untether
 
 🐙 *he just wants to help-pi*
 
@@ -26,12 +26,12 @@ at least one engine on PATH: `codex`, `claude`, `opencode`, or `pi`
 ## install
 
 ```sh
-uv tool install -U takopi
+uv tool install -U untether
 ```
 
 ## setup
 
-run `takopi` and follow the setup wizard. it will help you:
+run `untether` and follow the setup wizard. it will help you:
 
 1. create a bot token via @BotFather
 2. pick a workflow (assistant, workspace, or handoff)
@@ -48,22 +48,22 @@ workflows configure conversation mode, topics, and resume lines automatically:
 
 ```sh
 cd ~/dev/happy-gadgets
-takopi
+untether
 ```
 
 send a message to your bot. prefix with `/codex`, `/claude`, `/opencode`, or `/pi` to pick an engine. reply to continue a thread.
 
-register a project with `takopi init happy-gadgets`, then target it from anywhere with `/happy-gadgets hard reset the timeline`.
+register a project with `untether init happy-gadgets`, then target it from anywhere with `/happy-gadgets hard reset the timeline`.
 
 mention a branch to run an agent in a dedicated worktree `/happy-gadgets @feat/memory-box freeze artifacts forever`.
 
-inspect or update settings with `takopi config list`, `takopi config get`, and `takopi config set`.
+inspect or update settings with `untether config list`, `untether config get`, and `untether config set`.
 
-see [takopi.dev](https://takopi.dev/) for configuration, worktrees, topics, file transfer, and more.
+see [untether.dev](https://untether.dev/) for configuration, worktrees, topics, file transfer, and more.
 
 ## plugins
 
-takopi supports entrypoint-based plugins for engines, transports, and commands.
+untether supports entrypoint-based plugins for engines, transports, and commands.
 
 see [`docs/how-to/write-a-plugin.md`](docs/how-to/write-a-plugin.md) and [`docs/reference/plugin-api.md`](docs/reference/plugin-api.md).
 

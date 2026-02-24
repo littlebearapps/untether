@@ -4,14 +4,14 @@ import pytest
 
 from collections.abc import AsyncIterator
 
-from takopi.model import (
+from untether.model import (
     ActionEvent,
     CompletedEvent,
     ResumeToken,
     StartedEvent,
-    TakopiEvent,
+    UntetherEvent,
 )
-from takopi.runners.codex import CodexRunner, find_exec_only_flag
+from untether.runners.codex import CodexRunner, find_exec_only_flag
 
 CODEX_ENGINE = "codex"
 
@@ -23,7 +23,7 @@ async def test_run_serializes_same_session() -> None:
     in_flight = 0
     max_in_flight = 0
 
-    async def run_stub(*_args, **_kwargs) -> AsyncIterator[TakopiEvent]:
+    async def run_stub(*_args, **_kwargs) -> AsyncIterator[UntetherEvent]:
         nonlocal in_flight, max_in_flight
         in_flight += 1
         max_in_flight = max(max_in_flight, in_flight)
@@ -60,7 +60,7 @@ async def test_run_allows_parallel_new_sessions() -> None:
     in_flight = 0
     max_in_flight = 0
 
-    async def run_stub(*_args, **_kwargs) -> AsyncIterator[TakopiEvent]:
+    async def run_stub(*_args, **_kwargs) -> AsyncIterator[UntetherEvent]:
         nonlocal in_flight, max_in_flight
         in_flight += 1
         max_in_flight = max(max_in_flight, in_flight)
@@ -96,7 +96,7 @@ async def test_run_allows_parallel_different_sessions() -> None:
     in_flight = 0
     max_in_flight = 0
 
-    async def run_stub(*_args, **_kwargs) -> AsyncIterator[TakopiEvent]:
+    async def run_stub(*_args, **_kwargs) -> AsyncIterator[UntetherEvent]:
         nonlocal in_flight, max_in_flight
         in_flight += 1
         max_in_flight = max(max_in_flight, in_flight)

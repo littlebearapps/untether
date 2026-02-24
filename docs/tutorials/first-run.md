@@ -2,21 +2,21 @@
 
 This tutorial walks you through sending your first task, watching it execute, and learning the core interaction patterns.
 
-**What you'll learn:** How Takopi streams progress, how to continue conversations, and how to cancel a run.
+**What you'll learn:** How Untether streams progress, how to continue conversations, and how to cancel a run.
 
-## 1. Start Takopi in a repo
+## 1. Start Untether in a repo
 
-Takopi runs agent CLIs in your current directory. Navigate to a repo you want to work in:
+Untether runs agent CLIs in your current directory. Navigate to a repo you want to work in:
 
 ```sh
 cd ~/dev/your-project
-takopi
+untether
 ```
 
-Takopi keeps running in your terminal. In Telegram, your bot will post a startup message like:
+Untether keeps running in your terminal. In Telegram, your bot will post a startup message like:
 
-!!! takopi "Takopi"
-    🐙 takopi is ready
+!!! untether "Untether"
+    🐙 untether is ready
 
     default: codex<br>
     engines: codex, claude<br>
@@ -31,10 +31,10 @@ The engines/projects list reflects your setup. This tells you:
 - Which engine is the default
 - Which engines are available (and any missing ones)
 - Which projects are registered
-- Which directory Takopi will run in
+- Which directory Untether will run in
 
-!!! note "Takopi runs where you start it"
-    The agent will see files in your current directory. If you want to work on a different repo, stop Takopi (`Ctrl+C`) and restart it in that directory—or set up [projects](projects-and-branches.md) to switch repos from chat.
+!!! note "Untether runs where you start it"
+    The agent will see files in your current directory. If you want to work on a different repo, stop Untether (`Ctrl+C`) and restart it in that directory—or set up [projects](projects-and-branches.md) to switch repos from chat.
 
 ## 2. Send a task
 
@@ -46,36 +46,36 @@ Open Telegram and send a message to your bot:
 
 ## 3. Watch progress stream
 
-Takopi immediately posts a progress message and updates it as the agent works:
+Untether immediately posts a progress message and updates it as the agent works:
 
-!!! takopi "Takopi"
+!!! untether "Untether"
     starting · codex · 0s
 
 As the agent calls tools and makes progress, you'll see updates like:
 
-!!! takopi "Takopi"
+!!! untether "Untether"
     working · codex · 12s · step 3
 
     ✓ tool: read: readme.md<br>
     ✓ tool: read: docs/index.md<br>
-    ✓ tool: read: src/takopi/runner.py
+    ✓ tool: read: src/untether/runner.py
 
 The progress message is edited in-place.
 
 ## 4. See the final answer
 
-When the agent finishes, Takopi sends a new message and replaces the progress message, so you get a notification.
+When the agent finishes, Untether sends a new message and replaces the progress message, so you get a notification.
 
 
-!!! takopi "Takopi"
+!!! untether "Untether"
     done · codex · 11s · step 5
     
-    Takopi is a Telegram bridge for AI coding agents (Codex, Claude Code, OpenCode, Pi). It lets you run agents from chat, manage multiple projects and git worktrees, stream progress (commands, file changes, elapsed time), and resume sessions from either chat or terminal. It also supports file transfer, group topics mapped to repo/branch contexts, and multiple engines via chat commands, with a plugin system for engines/transports/commands.
+    Untether is a Telegram bridge for AI coding agents (Codex, Claude Code, OpenCode, Pi). It lets you run agents from chat, manage multiple projects and git worktrees, stream progress (commands, file changes, elapsed time), and resume sessions from either chat or terminal. It also supports file transfer, group topics mapped to repo/branch contexts, and multiple engines via chat commands, with a plugin system for engines/transports/commands.
 
     codex resume 019bb89b-1b0b-7e90-96e4-c33181b49714
 
 
-That last line is the **resume line**—it's how Takopi knows which conversation to continue.
+That last line is the **resume line**—it's how Untether knows which conversation to continue.
 
 ## 5. Continue the conversation
 
@@ -90,13 +90,13 @@ Use `/new` any time you want a fresh thread.
 
 **If you're in stateless mode:** **reply** to a message that has a resume line.
 
-!!! takopi "Takopi"
+!!! untether "Untether"
     done · codex · 11s · step 5
 
     !!! user "You"
         what command line arguments does it support?
 
-Takopi extracts the resume token from the message you replied to and continues the same agent session.
+Untether extracts the resume token from the message you replied to and continues the same agent session.
 
 !!! tip "Reply-to-continue still works in chat mode"
     If resume lines are visible, replying to any older message branches the conversation from that point.
@@ -111,13 +111,13 @@ Sometimes you want to stop a run in progress—maybe you realize you asked the w
 
 While the progress message is showing, tap the **cancel** button or reply to it with:
 
-!!! takopi "Takopi"
+!!! untether "Untether"
     working · codex · 12s · step 3
 
     !!! user "You"
         /cancel
 
-Takopi sends `SIGTERM` to the agent process and posts a cancelled status:
+Untether sends `SIGTERM` to the agent process and posts a cancelled status:
 
 !!! failure ""
     cancelled · codex · 12s
@@ -147,9 +147,9 @@ Available prefixes depend on what you have installed: `/codex`, `/claude`, `/ope
 
 Key points:
 
-- Takopi spawns the agent CLI as a subprocess
+- Untether spawns the agent CLI as a subprocess
 - The agent streams JSONL events (tool calls, progress, answer)
-- Takopi renders these as an editable progress message
+- Untether renders these as an editable progress message
 - When done, the progress message is replaced with the final answer
 - Chat mode auto-resumes; resume lines let you reply to branch
 
@@ -165,7 +165,7 @@ The agent CLI isn't on your PATH. Install the CLI for the engine you're using (e
 
 **Bot doesn't respond at all**
 
-Check that Takopi is still running in your terminal. You should also see a startup message ("takopi is ready") from the bot in Telegram. If not, restart it.
+Check that Untether is still running in your terminal. You should also see a startup message ("untether is ready") from the bot in Telegram. If not, restart it.
 
 **Resume doesn't work (starts a new conversation)**
 

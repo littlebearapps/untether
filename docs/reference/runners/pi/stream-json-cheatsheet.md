@@ -70,4 +70,4 @@ required `type` field. These are `AgentSessionEvent` objects from
 
 * `message_end` with `role = "assistant"` contains the final assistant text.
 * `assistantMessageEvent` in `message_update` provides streaming deltas.
-* `tool_execution_*` events map cleanly to Takopi `action` events.
+* `tool_execution_*` events map cleanly to Untether `action` events.

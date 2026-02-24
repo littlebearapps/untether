@@ -6,35 +6,35 @@ This tutorial shows you how to register repos as projects and run tasks on featu
 
 ## The problem
 
-So far, Takopi runs in whatever directory you started it. If you want to work on a different repo, you have to:
+So far, Untether runs in whatever directory you started it. If you want to work on a different repo, you have to:
 
-1. Stop Takopi
+1. Stop Untether
 2. `cd` to the other repo
-3. Restart Takopi
+3. Restart Untether
 
-Projects fix this. Once you register a repo, you can target it from chat—even while Takopi is running elsewhere.
+Projects fix this. Once you register a repo, you can target it from chat—even while Untether is running elsewhere.
 
 ## 1. Register a project
 
-Navigate to the repo and run `takopi init`:
+Navigate to the repo and run `untether init`:
 
 ```sh
 cd ~/dev/happy-gadgets
-takopi init happy-gadgets
+untether init happy-gadgets
 ```
 
 Output:
 
 ```
-saved project 'happy-gadgets' to ~/.takopi/takopi.toml
+saved project 'happy-gadgets' to ~/.untether/untether.toml
 ```
 
-This adds an entry to your config (Takopi also fills in defaults like `worktrees_dir`, `default_engine`, and sometimes `worktree_base`):
+This adds an entry to your config (Untether also fills in defaults like `worktrees_dir`, `default_engine`, and sometimes `worktree_base`):
 
-=== "takopi config"
+=== "untether config"
 
     ```sh
-    takopi config set projects.happy-gadgets.path "~/dev/happy-gadgets"
+    untether config set projects.happy-gadgets.path "~/dev/happy-gadgets"
     ```
 
 === "toml"
@@ -49,11 +49,11 @@ This adds an entry to your config (Takopi also fills in defaults like `worktrees
 
 ## 2. Target a project from chat
 
-Now you can start Takopi from another repo. If you don't specify a project, Takopi runs in the directory where you launched it.
+Now you can start Untether from another repo. If you don't specify a project, Untether runs in the directory where you launched it.
 
 ```sh
 cd ~/dev/your-project
-takopi
+untether
 ```
 
 And target the project by prefixing your message:
@@ -61,28 +61,28 @@ And target the project by prefixing your message:
 !!! user "You"
     /happy-gadgets explain the authentication flow
 
-Takopi runs the agent in `~/dev/happy-gadgets`, not your current directory.
+Untether runs the agent in `~/dev/happy-gadgets`, not your current directory.
 
 The response includes a context footer:
 
-!!! takopi "Takopi"
+!!! untether "Untether"
     ctx: happy-gadgets<br>
     codex resume abc123
 
-That `ctx:` line tells you which project is active. When you reply, Takopi automatically uses the same project—you don't need to repeat `/happy-gadgets`.
+That `ctx:` line tells you which project is active. When you reply, Untether automatically uses the same project—you don't need to repeat `/happy-gadgets`.
 
 ## 3. Set up worktrees
 
-Worktrees let you run tasks on feature branches without touching your main checkout. Instead of `git checkout`, Takopi creates a separate directory for each branch.
+Worktrees let you run tasks on feature branches without touching your main checkout. Instead of `git checkout`, Untether creates a separate directory for each branch.
 
 Add worktree config to your project:
 
-=== "takopi config"
+=== "untether config"
 
     ```sh
-    takopi config set projects.happy-gadgets.path "~/dev/happy-gadgets"
-    takopi config set projects.happy-gadgets.worktrees_dir ".worktrees"
-    takopi config set projects.happy-gadgets.worktree_base "main"
+    untether config set projects.happy-gadgets.path "~/dev/happy-gadgets"
+    untether config set projects.happy-gadgets.worktrees_dir ".worktrees"
+    untether config set projects.happy-gadgets.worktree_base "main"
     ```
 
 === "toml"
@@ -107,7 +107,7 @@ Use `@branch` after the project:
 !!! user "You"
     /happy-gadgets @feat/new-login add rate limiting to the login endpoint
 
-Takopi:
+Untether:
 1. Checks if `.worktrees/feat/new-login` exists (and is a worktree)
 2. If the branch exists locally, it adds a worktree for it
 3. If the branch doesn't exist, it creates it from `worktree_base` (or the repo default) and adds the worktree
@@ -115,7 +115,7 @@ Takopi:
 
 The response shows both project and branch:
 
-!!! takopi "Takopi"
+!!! untether "Untether"
     ctx: happy-gadgets @feat/new-login<br>
     codex resume xyz789
 
@@ -128,13 +128,13 @@ Once you've set a context (via `/<project-alias> @branch` or by replying), it st
 !!! user "You"
     /happy-gadgets @feat/new-login add tests
 
-!!! takopi "Takopi"
+!!! untether "Untether"
     ctx: happy-gadgets @feat/new-login
 
 !!! user "reply to the bot's answer"
     also add integration tests
 
-!!! takopi "Takopi"
+!!! untether "Untether"
     ctx: happy-gadgets @feat/new-login
 
 The `ctx:` line in each message carries the context forward.
@@ -143,10 +143,10 @@ The `ctx:` line in each message carries the context forward.
 
 If you mostly work in one repo, set it as the default:
 
-=== "takopi config"
+=== "untether config"
 
     ```sh
-    takopi config set default_project "happy-gadgets"
+    untether config set default_project "happy-gadgets"
     ```
 
 === "toml"
@@ -167,7 +167,7 @@ Goes to `happy-gadgets` automatically.
 Here's a typical workflow:
 
 ```sh
-takopi
+untether
 ```
 
 !!! user "You"
@@ -176,7 +176,7 @@ takopi
 !!! user "You"
     /happy-gadgets @feat/caching implement caching
 
-!!! takopi "Takopi"
+!!! untether "Untether"
     ctx: happy-gadgets @feat/caching
 
     !!! user "You"
@@ -188,7 +188,7 @@ takopi
 !!! user "You"
     /happy-gadgets bump the version number
 
-All from the same Telegram chat, without restarting Takopi or changing directories.
+All from the same Telegram chat, without restarting Untether or changing directories.
 
 ## Project config reference
 
@@ -198,7 +198,7 @@ Full options for `[projects.<alias>]`:
 |-----|---------|-------------|
 | `path` | (required) | Repo root. Expands `~`. |
 | `worktrees_dir` | `.worktrees` | Where branch worktrees are created (relative to the project path). |
-| `worktree_base` | `null` | Base branch for new worktrees. If unset, Takopi uses `origin/HEAD`, the current branch, or `master`/`main` (in that order). |
+| `worktree_base` | `null` | Base branch for new worktrees. If unset, Untether uses `origin/HEAD`, the current branch, or `master`/`main` (in that order). |
 | `default_engine` | `null` | Engine to use for this project (overrides global default). |
 | `chat_id` | `null` | Bind a Telegram chat/group to this project. |
 
@@ -206,7 +206,7 @@ Full options for `[projects.<alias>]`:
 
 **"unknown project"**
 
-Run `takopi init <alias>` in the repo first.
+Run `untether init <alias>` in the repo first.
 
 **Branch worktree not created**
 
@@ -218,7 +218,7 @@ Make sure you're **replying** to a message with a `ctx:` line. If you send a new
 
 **Worktree conflicts with existing branch**
 
-If the branch already exists locally, Takopi uses it. For a fresh start, delete the worktree **and** the branch, or pick a new branch name.
+If the branch already exists locally, Untether uses it. For a fresh start, delete the worktree **and** the branch, or pick a new branch name.
 
 ## Next
 

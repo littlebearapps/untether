@@ -1,4 +1,4 @@
-# Takopi User Guide (moved)
+# Untether User Guide (moved)
 
 This guide has been reorganized into smaller Diátaxis pages.
 

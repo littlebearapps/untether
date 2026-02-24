@@ -4,11 +4,11 @@ from pathlib import Path
 
 import pytest
 
-from takopi.config import ConfigError, read_config, write_config
+from untether.config import ConfigError, read_config, write_config
 
 
 def test_read_write_config_round_trip(tmp_path: Path) -> None:
-    config_path = tmp_path / "takopi.toml"
+    config_path = tmp_path / "untether.toml"
     payload = {
         "default_engine": "codex",
         "projects": {"z80": {"path": "/tmp/repo"}},
@@ -27,7 +27,7 @@ def test_read_config_missing_file(tmp_path: Path) -> None:
 
 
 def test_read_config_invalid_toml(tmp_path: Path) -> None:
-    config_path = tmp_path / "takopi.toml"
+    config_path = tmp_path / "untether.toml"
     config_path.write_text("nope = [", encoding="utf-8")
     with pytest.raises(ConfigError, match="Malformed TOML"):
         read_config(config_path)

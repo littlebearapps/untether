@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from takopi.utils.paths import (
+from untether.utils.paths import (
     relativize_command,
     relativize_path,
     reset_run_base_dir,

@@ -6,11 +6,11 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from takopi.commands import CommandBackend, CommandContext, CommandResult
-from takopi.runner_bridge import _EPHEMERAL_MSGS
-from takopi.telegram.commands import dispatch as dispatch_mod
-from takopi.telegram.commands.dispatch import _dispatch_callback, _parse_callback_data
-from takopi.telegram.types import TelegramCallbackQuery
+from untether.commands import CommandBackend, CommandContext, CommandResult
+from untether.runner_bridge import _EPHEMERAL_MSGS
+from untether.telegram.commands import dispatch as dispatch_mod
+from untether.telegram.commands.dispatch import _dispatch_callback, _parse_callback_data
+from untether.telegram.types import TelegramCallbackQuery
 from tests.telegram_fakes import FakeBot, FakeTransport, make_cfg
 
 

@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 
-from takopi.schemas import opencode as opencode_schema
+from untether.schemas import opencode as opencode_schema
 
 
 def _fixture_path(name: str) -> Path:

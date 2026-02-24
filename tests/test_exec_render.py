@@ -2,7 +2,7 @@ from typing import cast
 from types import SimpleNamespace
 from pathlib import Path
 
-from takopi.markdown import (
+from untether.markdown import (
     HARD_BREAK,
     MarkdownFormatter,
     STATUS,
@@ -13,10 +13,10 @@ from takopi.markdown import (
     render_event_cli,
     shorten,
 )
-from takopi.model import Action, ActionEvent, ResumeToken, StartedEvent, TakopiEvent
-from takopi.progress import ProgressTracker
-from takopi.telegram.render import render_markdown
-from takopi.utils.paths import reset_run_base_dir, set_run_base_dir
+from untether.model import Action, ActionEvent, ResumeToken, StartedEvent, UntetherEvent
+from untether.progress import ProgressTracker
+from untether.telegram.render import render_markdown
+from untether.utils.paths import reset_run_base_dir, set_run_base_dir
 from tests.factories import (
     action_completed,
     action_started,
@@ -28,7 +28,7 @@ def _format_resume(token) -> str:
     return f"`codex resume {token.value}`"
 
 
-SAMPLE_EVENTS: list[TakopiEvent] = [
+SAMPLE_EVENTS: list[UntetherEvent] = [
     session_started("codex", "0199a213-81c0-7800-8aa1-bbab2a035a53", title="Codex"),
     action_started("a-1", "command", "bash -lc ls"),
     action_completed(
@@ -56,7 +56,7 @@ def test_render_event_cli_sample_events() -> None:
 
 
 def test_render_event_cli_handles_action_kinds() -> None:
-    events: list[TakopiEvent] = [
+    events: list[UntetherEvent] = [
         action_completed(
             "c-1", "command", "pytest -q", ok=False, detail={"exit_code": 1}
         ),
@@ -221,7 +221,7 @@ def test_progress_renderer_clamps_actions_and_ignores_unknown() -> None:
     assert "echo 3" in lines[0]
     assert "echo 5" in lines[-1]
     mystery = SimpleNamespace(type="mystery")
-    assert tracker.note_event(cast(TakopiEvent, mystery)) is False
+    assert tracker.note_event(cast(UntetherEvent, mystery)) is False
 
 
 def test_progress_renderer_renders_commands_in_markdown() -> None:

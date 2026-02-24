@@ -5,15 +5,15 @@ import tomllib
 
 from typer.testing import CliRunner
 
-from takopi import cli
-from takopi.config import ConfigError
-from takopi.plugins import (
+from untether import cli
+from untether.config import ConfigError
+from untether.plugins import (
     COMMAND_GROUP,
     ENGINE_GROUP,
     TRANSPORT_GROUP,
     PluginLoadError,
 )
-from takopi.settings import TakopiSettings
+from untether.settings import UntetherSettings
 from tests.plugin_fixtures import FakeEntryPoint
 
 
@@ -26,7 +26,7 @@ def _min_config() -> dict:
 
 def test_init_registers_project(monkeypatch, tmp_path: Path) -> None:
     config = _min_config()
-    config_path = tmp_path / "takopi.toml"
+    config_path = tmp_path / "untether.toml"
     repo_path = tmp_path / "repo"
     repo_path.mkdir()
     monkeypatch.chdir(repo_path)
@@ -56,7 +56,7 @@ def test_init_registers_project(monkeypatch, tmp_path: Path) -> None:
 def test_init_declines_overwrite(monkeypatch, tmp_path: Path) -> None:
     config = _min_config()
     config["projects"] = {"demo": {"path": "/tmp/repo"}}
-    config_path = tmp_path / "takopi.toml"
+    config_path = tmp_path / "untether.toml"
     repo_path = tmp_path / "repo"
     repo_path.mkdir()
     monkeypatch.chdir(repo_path)
@@ -79,29 +79,29 @@ def test_plugins_cmd_loads_and_reports_errors(monkeypatch) -> None:
         ENGINE_GROUP: [
             FakeEntryPoint(
                 "codex",
-                "takopi.runners.codex:BACKEND",
+                "untether.runners.codex:BACKEND",
                 ENGINE_GROUP,
-                dist_name="takopi",
+                dist_name="untether",
             ),
             FakeEntryPoint(
                 "broken",
-                "takopi.runners.broken:BACKEND",
+                "untether.runners.broken:BACKEND",
                 ENGINE_GROUP,
-                dist_name="takopi",
+                dist_name="untether",
             ),
         ],
         TRANSPORT_GROUP: [
             FakeEntryPoint(
                 "telegram",
-                "takopi.transports.telegram:BACKEND",
+                "untether.transports.telegram:BACKEND",
                 TRANSPORT_GROUP,
-                dist_name="takopi",
+                dist_name="untether",
             )
         ],
         COMMAND_GROUP: [
             FakeEntryPoint(
                 "hello",
-                "takopi.commands.hello:BACKEND",
+                "untether.commands.hello:BACKEND",
                 COMMAND_GROUP,
                 dist_name="thirdparty",
             )
@@ -132,7 +132,7 @@ def test_plugins_cmd_loads_and_reports_errors(monkeypatch) -> None:
         return object()
 
     monkeypatch.setattr(cli, "_load_settings_optional", lambda: (None, None))
-    monkeypatch.setattr(cli, "resolve_plugins_allowlist", lambda _settings: ["takopi"])
+    monkeypatch.setattr(cli, "resolve_plugins_allowlist", lambda _settings: ["untether"])
     monkeypatch.setattr(cli, "list_entrypoints", _list_entrypoints)
     monkeypatch.setattr(cli, "get_backend", _get_backend)
     monkeypatch.setattr(cli, "get_transport", _get_transport)
@@ -144,21 +144,21 @@ def test_plugins_cmd_loads_and_reports_errors(monkeypatch) -> None:
             PluginLoadError(
                 ENGINE_GROUP,
                 "broken",
-                "takopi.runners.broken:BACKEND",
-                "takopi",
+                "untether.runners.broken:BACKEND",
+                "untether",
                 "boom",
             ),
             PluginLoadError(
                 TRANSPORT_GROUP,
                 "wire",
-                "takopi.transports.wire:BACKEND",
-                "takopi",
+                "untether.transports.wire:BACKEND",
+                "untether",
                 "missing",
             ),
             PluginLoadError(
                 COMMAND_GROUP,
                 "hello",
-                "takopi.commands.hello:BACKEND",
+                "untether.commands.hello:BACKEND",
                 "thirdparty",
                 "oops",
             ),
@@ -172,11 +172,11 @@ def test_plugins_cmd_loads_and_reports_errors(monkeypatch) -> None:
     assert "engine backends:" in result.output
     assert "transport backends:" in result.output
     assert "command backends:" in result.output
-    assert "codex (takopi) enabled" in result.output
+    assert "codex (untether) enabled" in result.output
     assert "hello (thirdparty) disabled" in result.output
     assert "errors:" in result.output
-    assert "engine broken (takopi): boom" in result.output
-    assert "transport wire (takopi): missing" in result.output
+    assert "engine broken (untether): boom" in result.output
+    assert "transport wire (untether): missing" in result.output
     assert "command hello (thirdparty): oops" in result.output
 
     assert ("engine", "codex") in calls
@@ -201,7 +201,7 @@ def test_onboarding_paths_calls_debug(monkeypatch) -> None:
 
 
 def test_config_path_cmd_outputs_override(tmp_path: Path) -> None:
-    config_path = tmp_path / "takopi.toml"
+    config_path = tmp_path / "untether.toml"
     runner = CliRunner()
     result = runner.invoke(
         cli.create_app(),
@@ -214,18 +214,18 @@ def test_config_path_cmd_outputs_override(tmp_path: Path) -> None:
 
 def test_config_path_cmd_defaults_to_home(monkeypatch, tmp_path: Path) -> None:
     monkeypatch.setenv("HOME", str(tmp_path))
-    config_path = tmp_path / ".takopi" / "takopi.toml"
+    config_path = tmp_path / ".untether" / "untether.toml"
     monkeypatch.setattr(cli, "HOME_CONFIG_PATH", config_path)
 
     runner = CliRunner()
     result = runner.invoke(cli.create_app(), ["config", "path"])
 
     assert result.exit_code == 0
-    assert result.output.strip() == "~/.takopi/takopi.toml"
+    assert result.output.strip() == "~/.untether/untether.toml"
 
 
 def test_doctor_rejects_non_telegram_transport(monkeypatch) -> None:
-    settings = TakopiSettings.model_validate(
+    settings = UntetherSettings.model_validate(
         {
             "transport": "local",
             "transports": {"telegram": {"bot_token": "token", "chat_id": 123}},

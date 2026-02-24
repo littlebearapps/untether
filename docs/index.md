@@ -1,10 +1,10 @@
 ---
-title: takopi
+title: untether
 ---
 
-# Takopi documentation
+# Untether documentation
 
-Takopi runs coding agents on your computer and bridges them to Telegram. Send tasks from anywhere, watch progress stream live, pick up when back at the terminal. Scale from quick one-offs to multi-project workflows with topics and parallel worktrees.
+Untether runs coding agents on your computer and bridges them to Telegram. Send tasks from anywhere, watch progress stream live, pick up when back at the terminal. Scale from quick one-offs to multi-project workflows with topics and parallel worktrees.
 
 <div class="hero-demo">
 <div class="hero-chat">
@@ -18,8 +18,8 @@ Takopi runs coding agents on your computer and bridges them to Telegram. Send ta
 ## Quick start
 
 ```bash
-uv tool install -U takopi
-takopi --onboard
+uv tool install -U untether
+untether --onboard
 ```
 
 Onboarding walks you through bot setup and asks how you want to work. [Full install guide →](tutorials/install.md)
@@ -59,13 +59,13 @@ Onboarding walks you through bot setup and asks how you want to work. [Full inst
 
 </div>
 
-You can change workflows later by editing `~/.takopi/takopi.toml`.
+You can change workflows later by editing `~/.untether/untether.toml`.
 
 ## Tutorials
 
 Step-by-step guides for new users:
 
-1. [Install & onboard](tutorials/install.md) — set up Takopi and your bot
+1. [Install & onboard](tutorials/install.md) — set up Untether and your bot
 2. [First run](tutorials/first-run.md) — send a task, watch it stream, continue the conversation
 3. [Projects & branches](tutorials/projects-and-branches.md) — target repos from anywhere, run on feature branches
 4. [Multi-engine](tutorials/multi-engine.md) — use different engines for different tasks

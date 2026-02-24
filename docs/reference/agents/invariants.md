@@ -1,6 +1,6 @@
 # Invariants
 
-These are the “don’t break this” rules that keep Takopi reliable.
+These are the “don’t break this” rules that keep Untether reliable.
 
 ## Runner contract
 

@@ -5,16 +5,16 @@ from typing import Any
 
 import pytest
 
-from takopi.config import ProjectsConfig
-from takopi.router import AutoRouter, RunnerEntry
-from takopi.runners.mock import Return, ScriptRunner
-from takopi.settings import (
+from untether.config import ProjectsConfig
+from untether.router import AutoRouter, RunnerEntry
+from untether.runners.mock import Return, ScriptRunner
+from untether.settings import (
     TelegramFilesSettings,
     TelegramTopicsSettings,
     TelegramTransportSettings,
 )
-from takopi.telegram import backend as telegram_backend
-from takopi.transport_runtime import TransportRuntime
+from untether.telegram import backend as telegram_backend
+from untether.transport_runtime import TransportRuntime
 
 
 def test_build_startup_message_includes_missing_engines(tmp_path: Path) -> None:
@@ -49,7 +49,7 @@ def test_build_startup_message_includes_missing_engines(tmp_path: Path) -> None:
         topics=TelegramTopicsSettings(),
     )
 
-    assert "takopi is ready" in message
+    assert "untether is ready" in message
     assert "engines: `codex (not installed: pi)`" in message
     assert "projects: `none`" in message
 
@@ -100,7 +100,7 @@ def test_build_startup_message_surfaces_unavailable_engine_reasons(
 def test_telegram_backend_build_and_run_wires_config(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    config_path = tmp_path / "takopi.toml"
+    config_path = tmp_path / "untether.toml"
     config_path.write_text(
         'watch_config = true\ntransport = "telegram"\n\n'
         "[transports.telegram]\n"

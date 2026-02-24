@@ -4,15 +4,15 @@ from typing import Any
 
 import pytest
 
-import takopi.runner as runner_module
-from takopi.model import (
+import untether.runner as runner_module
+from untether.model import (
     ActionEvent,
     CompletedEvent,
     ResumeToken,
     StartedEvent,
-    TakopiEvent,
+    UntetherEvent,
 )
-from takopi.runner import (
+from untether.runner import (
     BaseRunner,
     JsonlRunState,
     JsonlSubprocessRunner,
@@ -60,7 +60,7 @@ class _DummyJsonlRunner(JsonlSubprocessRunner):
         state: Any,
         resume: ResumeToken | None,
         found_session: ResumeToken | None,
-    ) -> list[TakopiEvent]:
+    ) -> list[UntetherEvent]:
         _ = data, state, resume, found_session
         return []
 
@@ -92,7 +92,7 @@ class _RunJsonlRunner(_DummyJsonlRunner):
         state: Any,
         resume: ResumeToken | None,
         found_session: ResumeToken | None,
-    ) -> list[TakopiEvent]:
+    ) -> list[UntetherEvent]:
         _ = state, resume, found_session
         token_value = "sid"
         if isinstance(data, dict) and isinstance(data.get("resume"), str):
@@ -143,7 +143,7 @@ class _BranchingJsonlRunner(_DummyJsonlRunner):
         state: Any,
         resume: ResumeToken | None,
         found_session: ResumeToken | None,
-    ) -> list[TakopiEvent]:
+    ) -> list[UntetherEvent]:
         _ = state, resume, found_session
         if isinstance(data, dict) and data.get("type") == "translate_error":
             raise RuntimeError("nope")

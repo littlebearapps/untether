@@ -3,11 +3,11 @@ import os
 
 import pytest
 
-import takopi.lockfile as lockfile
+import untether.lockfile as lockfile
 
 
 def test_lockfile_creates_and_cleans_up(tmp_path) -> None:
-    config_path = tmp_path / "takopi.toml"
+    config_path = tmp_path / "untether.toml"
     config_path.write_text("ok", encoding="utf-8")
 
     handle = lockfile.acquire_lock(
@@ -23,7 +23,7 @@ def test_lockfile_creates_and_cleans_up(tmp_path) -> None:
 
 
 def test_lockfile_refuses_running_pid(tmp_path) -> None:
-    config_path = tmp_path / "takopi.toml"
+    config_path = tmp_path / "untether.toml"
     config_path.write_text("ok", encoding="utf-8")
 
     handle = lockfile.acquire_lock(
@@ -44,7 +44,7 @@ def test_lockfile_refuses_running_pid(tmp_path) -> None:
 
 
 def test_lockfile_replaces_dead_pid(tmp_path, monkeypatch) -> None:
-    config_path = tmp_path / "takopi.toml"
+    config_path = tmp_path / "untether.toml"
     config_path.write_text("ok", encoding="utf-8")
     lock_path = lockfile.lock_path_for_config(config_path)
     payload = {"pid": 424242, "token_fingerprint": "deadbeef"}
@@ -65,7 +65,7 @@ def test_lockfile_replaces_dead_pid(tmp_path, monkeypatch) -> None:
 
 
 def test_lockfile_replaces_token_mismatch(tmp_path) -> None:
-    config_path = tmp_path / "takopi.toml"
+    config_path = tmp_path / "untether.toml"
     config_path.write_text("ok", encoding="utf-8")
     lock_path = lockfile.lock_path_for_config(config_path)
     payload = {"pid": os.getpid(), "token_fingerprint": "other"}

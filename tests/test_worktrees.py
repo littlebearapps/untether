@@ -3,9 +3,9 @@ from types import SimpleNamespace
 
 import pytest
 
-from takopi.config import ProjectConfig, ProjectsConfig
-from takopi.context import RunContext
-from takopi.worktrees import WorktreeError, ensure_worktree, resolve_run_cwd
+from untether.config import ProjectConfig, ProjectsConfig
+from untether.context import RunContext
+from untether.worktrees import WorktreeError, ensure_worktree, resolve_run_cwd
 
 
 def _projects_config(path: Path) -> ProjectsConfig:
@@ -47,9 +47,9 @@ def test_resolve_run_cwd_uses_root_when_branch_matches(
     def _unexpected(*_args, **_kwargs):
         raise AssertionError("unexpected")
 
-    monkeypatch.setattr("takopi.worktrees.git_stdout", _fake_stdout)
+    monkeypatch.setattr("untether.worktrees.git_stdout", _fake_stdout)
     monkeypatch.setattr(
-        "takopi.worktrees.ensure_worktree",
+        "untether.worktrees.ensure_worktree",
         _unexpected,
     )
 
@@ -65,14 +65,14 @@ def test_ensure_worktree_creates_from_base(monkeypatch, tmp_path: Path) -> None:
     )
     calls: list[list[str]] = []
 
-    monkeypatch.setattr("takopi.worktrees.git_ok", lambda *args, **kwargs: False)
-    monkeypatch.setattr("takopi.worktrees.resolve_default_base", lambda *_: "main")
+    monkeypatch.setattr("untether.worktrees.git_ok", lambda *args, **kwargs: False)
+    monkeypatch.setattr("untether.worktrees.resolve_default_base", lambda *_: "main")
 
     def _fake_git_run(args, cwd):
         calls.append(list(args))
         return SimpleNamespace(returncode=0, stdout="", stderr="")
 
-    monkeypatch.setattr("takopi.worktrees.git_run", _fake_git_run)
+    monkeypatch.setattr("untether.worktrees.git_run", _fake_git_run)
 
     worktree_path = ensure_worktree(project, "feat/name")
     assert worktree_path == tmp_path / ".worktrees" / "feat" / "name"
@@ -97,7 +97,7 @@ def test_ensure_worktree_rejects_existing_non_worktree(
             return str(tmp_path)
         return None
 
-    monkeypatch.setattr("takopi.utils.git.git_stdout", _fake_stdout)
+    monkeypatch.setattr("untether.utils.git.git_stdout", _fake_stdout)
 
     with pytest.raises(WorktreeError, match="exists but is not a git worktree"):
         ensure_worktree(project, "foo")

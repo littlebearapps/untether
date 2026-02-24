@@ -1,13 +1,13 @@
 from dataclasses import replace
 from pathlib import Path
 
-from takopi.config import ProjectConfig, ProjectsConfig
-from takopi.context import RunContext
-from takopi.router import AutoRouter, RunnerEntry
-from takopi.runners.mock import Return, ScriptRunner
-from takopi.telegram import context as tg_context
-from takopi.telegram.topic_state import TopicThreadSnapshot
-from takopi.transport_runtime import TransportRuntime
+from untether.config import ProjectConfig, ProjectsConfig
+from untether.context import RunContext
+from untether.router import AutoRouter, RunnerEntry
+from untether.runners.mock import Return, ScriptRunner
+from untether.telegram import context as tg_context
+from untether.telegram.topic_state import TopicThreadSnapshot
+from untether.transport_runtime import TransportRuntime
 from tests.telegram_fakes import DEFAULT_ENGINE_ID, FakeTransport, make_cfg
 
 

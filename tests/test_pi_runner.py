@@ -4,15 +4,15 @@ from unittest.mock import patch
 import anyio
 import pytest
 
-from takopi.model import ActionEvent, CompletedEvent, ResumeToken, StartedEvent
-from takopi.runners.pi import (
+from untether.model import ActionEvent, CompletedEvent, ResumeToken, StartedEvent
+from untether.runners.pi import (
     ENGINE,
     PiRunner,
     PiStreamState,
     _default_session_dir,
     translate_pi_event,
 )
-from takopi.schemas import pi as pi_schema
+from untether.schemas import pi as pi_schema
 
 
 def _load_fixture(name: str) -> list[pi_schema.PiEvent]:
@@ -210,9 +210,9 @@ def test_session_path_prefers_run_base_dir(tmp_path: Path) -> None:
     session_root = tmp_path / "sessions"
 
     with (
-        patch("takopi.runners.pi.get_run_base_dir", return_value=project_cwd),
+        patch("untether.runners.pi.get_run_base_dir", return_value=project_cwd),
         patch(
-            "takopi.runners.pi._default_session_dir",
+            "untether.runners.pi._default_session_dir",
             return_value=session_root,
         ) as default_session_dir,
     ):

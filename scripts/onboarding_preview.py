@@ -8,9 +8,9 @@ from rich.console import Console
 from rich.panel import Panel
 from rich.text import Text
 
-from takopi.config import ConfigError
-from takopi.telegram import onboarding as ob
-from takopi.telegram.api_models import User
+from untether.config import ConfigError
+from untether.telegram import onboarding as ob
+from untether.telegram.api_models import User
 
 
 def section(console: Console, title: str) -> None:
@@ -142,7 +142,7 @@ def main() -> None:
     group_chat = ob.ChatInfo(
         chat_id=-1001234567890,
         username=None,
-        title="takopi devs",
+        title="untether devs",
         first_name=None,
         last_name=None,
         chat_type="supergroup",

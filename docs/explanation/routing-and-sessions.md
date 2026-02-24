@@ -1,14 +1,14 @@
 # Routing & sessions
 
-Takopi supports both **stateless** and **chat** modes for session handling. In stateless mode, each message starts a new session unless you reply to continue. In chat mode, new messages auto-resume the previous session.
+Untether supports both **stateless** and **chat** modes for session handling. In stateless mode, each message starts a new session unless you reply to continue. In chat mode, new messages auto-resume the previous session.
 
 ## Continuation (how threads persist)
 
-Takopi supports three ways to continue a thread:
+Untether supports three ways to continue a thread:
 
 1. **Reply-to-continue** (always available)
    - Reply to any bot message that contains a resume line in the footer.
-   - Takopi extracts the resume token and resumes that engine thread.
+   - Untether extracts the resume token and resumes that engine thread.
    - Reply resume lines always take precedence over chat sessions or topic storage.
    - The resumed run updates the stored session for that engine when the token is known.
 2. **Forum topics** (optional)
@@ -23,9 +23,9 @@ Takopi supports three ways to continue a thread:
 
 Reply-to-continue works even if topics or chat sessions are enabled.
 
-## Routing (how Takopi picks a runner)
+## Routing (how Untether picks a runner)
 
-For each message, Takopi:
+For each message, Untether:
 
 - parses directive prefixes (`/<engine-id>`, `/<project-alias>`, `@branch`) from the first non-empty line
 - attempts to extract a resume token by polling available runners
@@ -33,7 +33,7 @@ For each message, Takopi:
 
 ## Serialization (why you don’t get overlapping runs)
 
-Takopi allows parallel runs across **different threads**, but enforces serialization within a thread:
+Untether allows parallel runs across **different threads**, but enforces serialization within a thread:
 
 - Telegram side: jobs are queued FIFO per thread.
 - Runner side: runners enforce per-resume-token locks (so the same session can’t be resumed concurrently).

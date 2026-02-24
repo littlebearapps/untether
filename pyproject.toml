@@ -1,8 +1,8 @@
 [project]
-name = "takopi"
-authors = [{name = "banteg"}]
-version = "0.22.1"
-description = "Telegram bridge for Codex, Claude Code, and other agent CLIs."
+name = "untether"
+authors = [{name = "Nathan Schram"}, {name = "banteg (upstream takopi)"}]
+version = "0.1.0"
+description = "Telegram bridge for Claude Code, Codex, and other agent CLIs. Fork of takopi with interactive permission control."
 readme = "readme.md"
 license = { file = "LICENSE" }
 requires-python = ">=3.12"
@@ -31,28 +31,28 @@ classifiers = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/banteg/takopi"
-Documentation = "https://takopi.dev/"
-Repository = "https://github.com/banteg/takopi"
-Issues = "https://github.com/banteg/takopi/issues"
+Homepage = "https://github.com/littlebearapps/untether"
+Repository = "https://github.com/littlebearapps/untether"
+Issues = "https://github.com/littlebearapps/untether/issues"
+Upstream = "https://github.com/banteg/takopi"
 
 [project.scripts]
-takopi = "takopi.cli:main"
+untether = "untether.cli:main"
 
-[project.entry-points."takopi.engine_backends"]
-codex = "takopi.runners.codex:BACKEND"
-claude = "takopi.runners.claude:BACKEND"
-opencode = "takopi.runners.opencode:BACKEND"
-pi = "takopi.runners.pi:BACKEND"
+[project.entry-points."untether.engine_backends"]
+codex = "untether.runners.codex:BACKEND"
+claude = "untether.runners.claude:BACKEND"
+opencode = "untether.runners.opencode:BACKEND"
+pi = "untether.runners.pi:BACKEND"
 
-[project.entry-points."takopi.transport_backends"]
-telegram = "takopi.telegram.backend:BACKEND"
+[project.entry-points."untether.transport_backends"]
+telegram = "untether.telegram.backend:BACKEND"
 
-[project.entry-points."takopi.command_backends"]
-claude_control = "takopi.telegram.commands.claude_control:BACKEND"
-usage = "takopi.telegram.commands.usage:BACKEND"
-planmode = "takopi.telegram.commands.planmode:BACKEND"
-ping = "takopi.telegram.commands.ping:BACKEND"
+[project.entry-points."untether.command_backends"]
+claude_control = "untether.telegram.commands.claude_control:BACKEND"
+usage = "untether.telegram.commands.usage:BACKEND"
+planmode = "untether.telegram.commands.planmode:BACKEND"
+ping = "untether.telegram.commands.ping:BACKEND"
 
 [build-system]
 requires = ["uv_build>=0.9.18,<0.10.0"]
@@ -73,14 +73,14 @@ docs = [
 ]
 
 [tool.pytest.ini_options]
-addopts = ["--cov=takopi", "--cov-branch", "--cov-report=term-missing", "--cov-fail-under=81"]
+addopts = ["--cov=untether", "--cov-branch", "--cov-report=term-missing", "--cov-fail-under=81"]
 testpaths = ["tests"]
 
 [tool.mutmut]
-paths_to_mutate = ["src/takopi"]
+paths_to_mutate = ["src/untether"]
 tests_dir = ["tests"]
 pytest_add_cli_args = ["-q", "--no-cov"]
-do_not_mutate = ["src/takopi/cli/*"]
+do_not_mutate = ["src/untether/cli/*"]
 
 [tool.ruff.lint]
 extend-select = ["B", "BLE001", "C4", "PERF", "RUF043", "S110", "SIM", "UP"]

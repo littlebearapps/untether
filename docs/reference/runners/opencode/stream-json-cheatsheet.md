@@ -112,9 +112,9 @@ Example:
 {"type":"error","timestamp":1767036065000,"sessionID":"ses_494719016ffe85dkDMj0FPRbHK","error":{"name":"APIError","data":{"message":"Rate limit exceeded","statusCode":429,"isRetryable":true}}}
 ```
 
-## Mapping to Takopi Events
+## Mapping to Untether Events
 
-| OpenCode Event | Takopi Event | Condition |
+| OpenCode Event | Untether Event | Condition |
 |----------------|--------------|-----------|
 | `step_start` | `StartedEvent` | First occurrence |
 | `tool_use` | `ActionEvent(phase="completed")` | `status == "completed"` |
@@ -123,7 +123,7 @@ Example:
 | `step_finish` | (ignored) | `reason == "tool-calls"` |
 | `error` | `CompletedEvent(ok=False)` | - |
 
-If `step_finish` omits `reason`, Takopi treats a clean process exit as successful completion and emits `CompletedEvent(ok=True)` with accumulated usage.
+If `step_finish` omits `reason`, Untether treats a clean process exit as successful completion and emits `CompletedEvent(ok=True)` with accumulated usage.
 
 ## Session ID Format
 

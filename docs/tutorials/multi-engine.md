@@ -32,11 +32,11 @@ Prefix any message with `/<engine>`:
 
 The engine only applies to that message. The response will have a resume line for that engine:
 
-!!! takopi "Takopi"
+!!! untether "Untether"
     done · claude · 8s<br>
     claude --resume abc123
 
-When you reply, Takopi sees `claude --resume` and automatically uses Claude—you don't need to repeat `/claude`.
+When you reply, Untether sees `claude --resume` and automatically uses Claude—you don't need to repeat `/claude`.
 
 ## 2. Engine + project + branch
 
@@ -64,7 +64,7 @@ Use `/agent set` to change the default for the current scope:
 
 Response:
 
-!!! takopi "Takopi"
+!!! untether "Untether"
     chat default engine set to claude
 
 Now all new conversations in this chat use Claude (unless you explicitly override with `/codex`).
@@ -76,7 +76,7 @@ Check the current default:
 
 Example response:
 
-!!! takopi "Takopi"
+!!! untether "Untether"
     engine: claude (chat default)<br>
     defaults: topic: none, chat: claude, project: none, global: codex<br>
     available: codex, claude, opencode, pi
@@ -88,7 +88,7 @@ Clear it:
 
 Response:
 
-!!! takopi "Takopi"
+!!! untether "Untether"
     chat default engine cleared.
 
 ## 4. Defaults in topics
@@ -109,11 +109,11 @@ Each topic remembers its own default.
 
 Set a default engine in your project config:
 
-=== "takopi config"
+=== "untether config"
 
     ```sh
-    takopi config set projects.happy-gadgets.path "~/dev/happy-gadgets"
-    takopi config set projects.happy-gadgets.default_engine "claude"
+    untether config set projects.happy-gadgets.path "~/dev/happy-gadgets"
+    untether config set projects.happy-gadgets.default_engine "claude"
     ```
 
 === "toml"
@@ -128,14 +128,14 @@ Now `/happy-gadgets` tasks default to Claude, even if your global default is Cod
 
 ## 6. Selection precedence
 
-When Takopi picks an engine, it checks (highest to lowest):
+When Untether picks an engine, it checks (highest to lowest):
 
 1. **Resume line** — replying to `claude --resume ...` uses Claude
 2. **Explicit directive** — `/codex ...` uses Codex
 3. **Topic default** — `/agent set` in this forum topic
 4. **Chat default** — `/agent set` in this chat
 5. **Project default** — `default_engine` in project config
-6. **Global default** — `default_engine` at the top of `takopi.toml`
+6. **Global default** — `default_engine` at the top of `untether.toml`
 
 This means: resume lines always win, then explicit directives, then the most specific default applies.
 
@@ -153,15 +153,15 @@ This means: resume lines always win, then explicit directives, then the most spe
 
 **Pattern: Quick questions vs. deep work**
 
-=== "takopi config"
+=== "untether config"
 
     ```sh
     # Global default for quick stuff
-    takopi config set default_engine "codex"
+    untether config set default_engine "codex"
 
     # Project default for complex codebase
-    takopi config set projects.backend.path "~/dev/backend"
-    takopi config set projects.backend.default_engine "claude"
+    untether config set projects.backend.path "~/dev/backend"
+    untether config set projects.backend.default_engine "claude"
     ```
 
 === "toml"
@@ -217,7 +217,7 @@ Works regardless of what the default is.
 
 That's the end of the tutorials. You now know how to:
 
-- ✅ Install and configure Takopi
+- ✅ Install and configure Untether
 - ✅ Send tasks and continue conversations
 - ✅ Cancel runs mid-flight
 - ✅ Target repos and branches from chat

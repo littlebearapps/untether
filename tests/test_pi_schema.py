@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 
-from takopi.schemas import pi as pi_schema
+from untether.schemas import pi as pi_schema
 
 
 def _fixture_path(name: str) -> Path:

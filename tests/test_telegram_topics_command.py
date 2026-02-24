@@ -3,27 +3,27 @@ from pathlib import Path
 
 import pytest
 
-from takopi.settings import TelegramTopicsSettings
-from takopi.config import ProjectConfig, ProjectsConfig
-from takopi.runners.mock import Return, ScriptRunner
-from takopi.telegram.chat_sessions import ChatSessionStore
-from takopi.telegram.chat_prefs import ChatPrefsStore, resolve_prefs_path
-from takopi.telegram.commands.topics import (
+from untether.settings import TelegramTopicsSettings
+from untether.config import ProjectConfig, ProjectsConfig
+from untether.runners.mock import Return, ScriptRunner
+from untether.telegram.chat_sessions import ChatSessionStore
+from untether.telegram.chat_prefs import ChatPrefsStore, resolve_prefs_path
+from untether.telegram.commands.topics import (
     _handle_chat_ctx_command,
     _handle_chat_new_command,
     _handle_ctx_command,
     _handle_new_command,
     _handle_topic_command,
 )
-from takopi.telegram.topic_state import TopicStateStore
-from takopi.telegram.types import TelegramIncomingMessage
+from untether.telegram.topic_state import TopicStateStore
+from untether.telegram.types import TelegramIncomingMessage
 from tests.telegram_fakes import (
     DEFAULT_ENGINE_ID,
     FakeTransport,
     _make_router,
     make_cfg,
 )
-from takopi.transport_runtime import TransportRuntime
+from untether.transport_runtime import TransportRuntime
 
 
 def _msg(
@@ -59,7 +59,7 @@ def _runtime(tmp_path: Path) -> tuple[TransportRuntime, Path]:
         },
         default_project="alpha",
     )
-    state_path = tmp_path / "takopi.toml"
+    state_path = tmp_path / "untether.toml"
     runtime = TransportRuntime(
         router=_make_router(runner),
         projects=projects,

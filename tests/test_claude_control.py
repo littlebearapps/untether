@@ -9,9 +9,9 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from takopi.events import EventFactory
-from takopi.model import ActionEvent, ResumeToken
-from takopi.runners.claude import (
+from untether.events import EventFactory
+from untether.model import ActionEvent, ResumeToken
+from untether.runners.claude import (
     DISCUSS_COOLDOWN_BASE_SECONDS,
     ClaudeRunner,
     ClaudeStreamState,
@@ -28,7 +28,7 @@ from takopi.runners.claude import (
     set_discuss_cooldown,
     translate_claude_event,
 )
-from takopi.schemas import claude as claude_schema
+from untether.schemas import claude as claude_schema
 
 
 # ---------------------------------------------------------------------------
@@ -520,7 +520,7 @@ async def test_send_control_response_default_deny_message() -> None:
 
 def test_early_answer_toast_values() -> None:
     """early_answer_toast returns correct toast for each action."""
-    from takopi.telegram.commands.claude_control import ClaudeControlCommand
+    from untether.telegram.commands.claude_control import ClaudeControlCommand
 
     cmd = ClaudeControlCommand()
     assert cmd.early_answer_toast("approve:req-1") == "Approved"
@@ -533,7 +533,7 @@ def test_early_answer_toast_values() -> None:
 @pytest.mark.anyio
 async def test_discuss_action_sends_deny_with_custom_message() -> None:
     """Discuss action sends a deny with the outline-plan deny message."""
-    from takopi.telegram.commands.claude_control import ClaudeControlCommand, _DISCUSS_DENY_MESSAGE
+    from untether.telegram.commands.claude_control import ClaudeControlCommand, _DISCUSS_DENY_MESSAGE
 
     runner = ClaudeRunner(claude_cmd="claude")
     session_id = "sess-discuss"
@@ -545,8 +545,8 @@ async def test_discuss_action_sends_deny_with_custom_message() -> None:
     _REQUEST_TO_INPUT["req-discuss"] = {}
 
     # Build a minimal CommandContext
-    from takopi.commands import CommandContext
-    from takopi.transport import MessageRef
+    from untether.commands import CommandContext
+    from untether.transport import MessageRef
 
     ctx = CommandContext(
         command="claude_control",
@@ -731,7 +731,7 @@ async def test_drain_auto_deny_multiple_items() -> None:
 @pytest.mark.anyio
 async def test_discuss_handler_sets_cooldown() -> None:
     """Discuss action sets the discuss cooldown for the session."""
-    from takopi.telegram.commands.claude_control import ClaudeControlCommand
+    from untether.telegram.commands.claude_control import ClaudeControlCommand
 
     runner = ClaudeRunner(claude_cmd="claude")
     session_id = "sess-discuss-cd"
@@ -742,8 +742,8 @@ async def test_discuss_handler_sets_cooldown() -> None:
     _REQUEST_TO_SESSION["req-discuss-cd"] = session_id
     _REQUEST_TO_INPUT["req-discuss-cd"] = {}
 
-    from takopi.commands import CommandContext
-    from takopi.transport import MessageRef
+    from untether.commands import CommandContext
+    from untether.transport import MessageRef
 
     ctx = CommandContext(
         command="claude_control",
@@ -769,7 +769,7 @@ async def test_discuss_handler_sets_cooldown() -> None:
 @pytest.mark.anyio
 async def test_approve_handler_clears_cooldown() -> None:
     """Approve action clears any discuss cooldown for the session."""
-    from takopi.telegram.commands.claude_control import ClaudeControlCommand
+    from untether.telegram.commands.claude_control import ClaudeControlCommand
 
     runner = ClaudeRunner(claude_cmd="claude")
     session_id = "sess-approve-cd"
@@ -784,8 +784,8 @@ async def test_approve_handler_clears_cooldown() -> None:
     set_discuss_cooldown(session_id)
     assert session_id in _DISCUSS_COOLDOWN
 
-    from takopi.commands import CommandContext
-    from takopi.transport import MessageRef
+    from untether.commands import CommandContext
+    from untether.transport import MessageRef
 
     ctx = CommandContext(
         command="claude_control",
@@ -814,7 +814,7 @@ async def test_approve_handler_clears_cooldown() -> None:
 
 def test_progressive_cooldown_increases_with_count() -> None:
     """Cooldown duration increases with each discuss click: 30s, 60s, 90s, 120s."""
-    from takopi.runners.claude import _cooldown_seconds
+    from untether.runners.claude import _cooldown_seconds
 
     assert _cooldown_seconds(1) == 30.0
     assert _cooldown_seconds(2) == 60.0
