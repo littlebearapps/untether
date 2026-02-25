@@ -190,7 +190,7 @@ max_cost_per_run = 2.00
 max_cost_per_day = 10.00
 ```
 
-See the [full configuration reference](https://untether.cc/reference/config/) for all options.
+See the [full configuration reference](docs/reference/config.md) for all options.
 
 > [!WARNING]
 > Never commit your `untether.toml` — it contains your bot token. The default location (`~/.untether/`) keeps it outside your repos.
@@ -209,24 +209,24 @@ See the [full configuration reference](https://untether.cc/reference/config/) fo
 
 Detailed setup and usage for each engine:
 
-- [Claude Code guide](https://untether.cc/reference/runners/claude/runner/) — permission modes, plan mode, cost tracking, interactive approvals
-- [Codex guide](https://untether.cc/reference/runners/codex/exec-json-cheatsheet/) — profiles, extra args, exec mode
-- [OpenCode guide](https://untether.cc/reference/runners/opencode/runner/) — model selection, 75+ providers, local models
-- [Pi guide](https://untether.cc/reference/runners/pi/runner/) — multi-provider auth, model and provider selection
-- [Configuration reference](https://untether.cc/reference/config/) — full walkthrough of `untether.toml`
-- [Troubleshooting guide](https://untether.cc/how-to/troubleshooting/) — common issues and solutions
+- [Claude Code guide](docs/reference/runners/claude/runner.md) — permission modes, plan mode, cost tracking, interactive approvals
+- [Codex guide](docs/reference/runners/codex/exec-json-cheatsheet.md) — profiles, extra args, exec mode
+- [OpenCode guide](docs/reference/runners/opencode/runner.md) — model selection, 75+ providers, local models
+- [Pi guide](docs/reference/runners/pi/runner.md) — multi-provider auth, model and provider selection
+- [Configuration reference](docs/reference/config.md) — full walkthrough of `untether.toml`
+- [Troubleshooting guide](docs/how-to/troubleshooting.md) — common issues and solutions
 
 ---
 
 ## 📚 Documentation
 
-Full documentation is available at **[untether.cc](https://untether.cc/)**.
+Full documentation is available in the [`docs/`](docs/) directory.
 
-- [Install and onboard](https://untether.cc/tutorials/install/) — setup wizard walkthrough
-- [First run](https://untether.cc/tutorials/first-run/) — send your first task
-- [Projects and branches](https://untether.cc/tutorials/projects-and-branches/) — multi-repo workflows
-- [Multi-engine workflows](https://untether.cc/tutorials/multi-engine/) — switching between agents
-- [Architecture](https://untether.cc/explanation/architecture/) — how the pieces fit together
+- [Install and onboard](docs/tutorials/install.md) — setup wizard walkthrough
+- [First run](docs/tutorials/first-run.md) — send your first task
+- [Projects and branches](docs/tutorials/projects-and-branches.md) — multi-repo workflows
+- [Multi-engine workflows](docs/tutorials/multi-engine.md) — switching between agents
+- [Architecture](docs/explanation/architecture.md) — how the pieces fit together
 
 ---
 
