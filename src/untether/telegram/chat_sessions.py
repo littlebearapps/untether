@@ -59,10 +59,15 @@ class ChatSessionStore(JsonStateStore[_ChatSessionsState]):
             self._reload_locked_if_needed()
             chat = self._get_chat_locked(chat_id, owner_id)
             if chat is None:
+                logger.debug("session.get.no_chat", chat_id=chat_id, engine=engine)
                 return None
             entry = chat.sessions.get(engine)
             if entry is None or not entry.resume:
+                logger.debug("session.get.no_resume", chat_id=chat_id, engine=engine)
                 return None
+            logger.debug(
+                "session.get.found", chat_id=chat_id, engine=engine, resume=entry.resume
+            )
             return ResumeToken(engine=engine, value=entry.resume)
 
     async def sync_startup_cwd(self, cwd: Path) -> bool:
@@ -72,11 +77,19 @@ class ChatSessionStore(JsonStateStore[_ChatSessionsState]):
             previous = self._state.cwd
             cleared = False
             if previous is not None and previous != normalized:
+                chat_count = len(self._state.chats)
+                logger.warning(
+                    "session.cwd_changed.clearing",
+                    previous=previous,
+                    new=normalized,
+                    cleared_chats=chat_count,
+                )
                 self._state.chats = {}
                 cleared = True
             if previous != normalized:
                 self._state.cwd = normalized
                 self._save_locked()
+                logger.info("session.cwd_synced", cwd=normalized, cleared=cleared)
             return cleared
 
     async def set_session_resume(
@@ -89,6 +102,12 @@ class ChatSessionStore(JsonStateStore[_ChatSessionsState]):
             chat = self._ensure_chat_locked(chat_id, owner_id)
             chat.sessions[token.engine] = _SessionState(resume=token.value)
             self._save_locked()
+            logger.info(
+                "session.resume.saved",
+                chat_id=chat_id,
+                engine=token.engine,
+                resume=token.value,
+            )
 
     async def clear_sessions(self, chat_id: int, owner_id: int | None) -> None:
         async with self._lock:
@@ -96,8 +115,10 @@ class ChatSessionStore(JsonStateStore[_ChatSessionsState]):
             chat = self._get_chat_locked(chat_id, owner_id)
             if chat is None:
                 return
+            session_count = len(chat.sessions)
             chat.sessions = {}
             self._save_locked()
+            logger.info("session.cleared", chat_id=chat_id, cleared_count=session_count)
 
     def _get_chat_locked(self, chat_id: int, owner_id: int | None) -> _ChatState | None:
         return self._state.chats.get(_chat_key(chat_id, owner_id))

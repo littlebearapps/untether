@@ -143,7 +143,9 @@ class _StubBackend:
     id = "test_cmd"
     description = "stub"
 
-    def __init__(self, result: CommandResult | None = None, *, raise_exc: Exception | None = None):
+    def __init__(
+        self, result: CommandResult | None = None, *, raise_exc: Exception | None = None
+    ):
         self._result = result
         self._raise_exc = raise_exc
 

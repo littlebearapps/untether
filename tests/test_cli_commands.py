@@ -132,7 +132,9 @@ def test_plugins_cmd_loads_and_reports_errors(monkeypatch) -> None:
         return object()
 
     monkeypatch.setattr(cli, "_load_settings_optional", lambda: (None, None))
-    monkeypatch.setattr(cli, "resolve_plugins_allowlist", lambda _settings: ["untether"])
+    monkeypatch.setattr(
+        cli, "resolve_plugins_allowlist", lambda _settings: ["untether"]
+    )
     monkeypatch.setattr(cli, "list_entrypoints", _list_entrypoints)
     monkeypatch.setattr(cli, "get_backend", _get_backend)
     monkeypatch.setattr(cli, "get_transport", _get_transport)

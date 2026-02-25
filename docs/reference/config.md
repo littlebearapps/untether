@@ -139,6 +139,48 @@ Legacy config note: top-level `bot_token` / `chat_id` are auto-migrated into `[t
 
 Plugin-specific configuration lives under `[plugins.<id>]` and is passed to command plugins as `ctx.plugin_config`.
 
+## `footer`
+
+Controls what appears in the message footer after a run completes.
+
+=== "toml"
+
+    ```toml
+    [footer]
+    show_api_cost = false
+    show_subscription_usage = true
+    ```
+
+| Key | Type | Default | Notes |
+|-----|------|---------|-------|
+| `show_api_cost` | bool | `true` | Show the API cost/tokens line (💰). |
+| `show_subscription_usage` | bool | `false` | Show 5h/weekly subscription usage (⚡). Claude engine only. |
+
+When `show_subscription_usage` is enabled, a compact line like `⚡ 5h: 45% (2h 15m) | 7d: 30% (4d 3h)` appears after every Claude run. Threshold-based warnings (≥70%) appear regardless of this setting.
+
+## `cost_budget`
+
+=== "toml"
+
+    ```toml
+    [cost_budget]
+    enabled = true
+    max_cost_per_run = 2.00
+    max_cost_per_day = 10.00
+    warn_at_pct = 70
+    auto_cancel = false
+    ```
+
+| Key | Type | Default | Notes |
+|-----|------|---------|-------|
+| `enabled` | bool | `false` | Enable cost budget tracking. |
+| `max_cost_per_run` | float\|null | `null` | Per-run cost limit (USD). |
+| `max_cost_per_day` | float\|null | `null` | Daily cost limit (USD). |
+| `warn_at_pct` | int | `70` | Warning threshold (0–100). |
+| `auto_cancel` | bool | `false` | Auto-cancel runs that exceed the per-run limit. |
+
+Budget alerts always appear regardless of `[footer]` settings.
+
 ## Engine-specific config tables
 
 Engines use **top-level tables** keyed by engine id. Built-in engines are listed

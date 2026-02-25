@@ -5,7 +5,7 @@ from pathlib import Path
 import shutil
 
 ROOT = Path(__file__).resolve().parents[1]
-SRC = ROOT / "changelog.md"
+SRC = ROOT / "CHANGELOG.md"
 DEST = ROOT / "docs" / "reference" / "changelog.md"
 
 

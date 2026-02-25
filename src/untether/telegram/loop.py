@@ -117,7 +117,11 @@ async def _resolve_engine_run_options(
     merged = merge_overrides(topic_override, chat_override)
     if merged is None:
         return None
-    return EngineRunOptions(model=merged.model, reasoning=merged.reasoning, permission_mode=merged.permission_mode)
+    return EngineRunOptions(
+        model=merged.model,
+        reasoning=merged.reasoning,
+        permission_mode=merged.permission_mode,
+    )
 
 
 def _allowed_chat_ids(cfg: TelegramBridgeConfig) -> set[int]:
@@ -1054,6 +1058,25 @@ async def run_main_loop(
             state.bot_username = me.username.lower()
         else:
             logger.info("trigger_mode.bot_username.unavailable")
+        # Install graceful shutdown signal handlers
+        import signal as _signal
+
+        from ..shutdown import (
+            DRAIN_TIMEOUT_S,
+            is_shutting_down,
+            request_shutdown,
+            reset_shutdown,
+        )
+
+        _prev_sigterm = _signal.getsignal(_signal.SIGTERM)
+        _prev_sigint = _signal.getsignal(_signal.SIGINT)
+
+        def _shutdown_handler(signum: int, frame: object) -> None:
+            request_shutdown()
+
+        _signal.signal(_signal.SIGTERM, _shutdown_handler)
+        _signal.signal(_signal.SIGINT, _shutdown_handler)
+
         async with anyio.create_task_group() as tg:
             poller_fn: Callable[
                 [TelegramBridgeConfig], AsyncIterator[TelegramIncomingUpdate]
@@ -1108,6 +1131,46 @@ async def run_main_loop(
                     )
 
                 tg.start_soon(run_config_watch)
+
+            # Graceful drain-then-exit task
+            async def _drain_and_exit() -> None:
+                """Wait for shutdown signal, drain active runs, then exit."""
+                # Poll the threading.Event since signal handlers can't use anyio
+                while not is_shutting_down():
+                    await sleep(0.5)
+
+                active = len(state.running_tasks)
+                logger.info("shutdown.draining", active_runs=active)
+
+                if active > 0:
+                    # Send a draining notice to the default chat
+                    from ..transport import RenderedMessage
+
+                    draining_msg = RenderedMessage(
+                        text=f"\U0001f504 Restarting — waiting for {active} active run(s) to finish…",
+                        extra={},
+                    )
+                    await cfg.exec_cfg.transport.send(
+                        channel_id=cfg.chat_id, message=draining_msg
+                    )
+
+                    # Wait for all runs to complete (up to drain timeout)
+                    with anyio.move_on_after(DRAIN_TIMEOUT_S):
+                        while state.running_tasks:
+                            await sleep(1.0)
+
+                    remaining = len(state.running_tasks)
+                    if remaining > 0:
+                        logger.warning(
+                            "shutdown.drain_timeout",
+                            remaining=remaining,
+                            timeout_s=DRAIN_TIMEOUT_S,
+                        )
+
+                logger.info("shutdown.exiting")
+                tg.cancel_scope.cancel()
+
+            tg.start_soon(_drain_and_exit)
 
             def wrap_on_thread_known(
                 base_cb: Callable[[ResumeToken, anyio.Event], Awaitable[None]] | None,
@@ -1805,6 +1868,7 @@ async def run_main_loop(
                         get_pending_ask_request,
                         answer_ask_question,
                     )
+
                     pending_ask = get_pending_ask_request()
                     if pending_ask is not None:
                         ask_req_id, ask_question = pending_ask
@@ -1953,5 +2017,19 @@ async def run_main_loop(
 
             async for update in poller_fn(cfg):
                 await route_update(update)
+
+            # Poller exhausted (tests / finite pollers) — yield
+            # several times so pending start_soon chains (forward
+            # dispatch → resolve → run_engine) register in
+            # running_tasks, then wait for them to complete before
+            # triggering shutdown so _drain_and_exit() can exit.
+            for _ in range(10):
+                await anyio.sleep(0)
+            while state.running_tasks:
+                await sleep(0.1)
+            request_shutdown()
     finally:
+        _signal.signal(_signal.SIGTERM, _prev_sigterm)
+        _signal.signal(_signal.SIGINT, _prev_sigint)
+        reset_shutdown()
         await cfg.exec_cfg.transport.close()

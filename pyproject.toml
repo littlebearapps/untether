@@ -1,10 +1,13 @@
 [project]
 name = "untether"
-authors = [{name = "Nathan Schram"}, {name = "banteg (upstream takopi)"}]
-version = "0.1.0"
+authors = [{name = "Little Bear Apps", email = "hello@littlebearapps.com"}]
+maintainers = [{name = "Little Bear Apps", email = "hello@littlebearapps.com"}]
+version = "0.22.2"
+keywords = ["telegram", "claude-code", "codex", "opencode", "ai-agents", "coding-assistant", "remote-control", "cli-bridge"]
 description = "Telegram bridge for Claude Code, Codex, and other agent CLIs. Fork of takopi with interactive permission control."
-readme = "readme.md"
-license = { file = "LICENSE" }
+readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
 requires-python = ">=3.12"
 dependencies = [
   "aiohttp>=3.9.0",
@@ -24,17 +27,27 @@ dependencies = [
   "watchfiles>=0.21.0",
 ]
 classifiers = [
-  "License :: OSI Approved :: MIT License",
-  "Programming Language :: Python :: 3",
-  "Programming Language :: Python :: 3.14",
-  "Programming Language :: Python :: 3 :: Only",
+  "Development Status :: 4 - Beta",
+  "Environment :: Console",
+  "Framework :: AsyncIO",
+  "Intended Audience :: Developers",
   "Operating System :: OS Independent",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3 :: Only",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Programming Language :: Python :: 3.14",
+  "Topic :: Communications :: Chat",
+  "Topic :: Software Development :: Build Tools",
+  "Typing :: Typed",
 ]
 
 [project.urls]
 Homepage = "https://github.com/littlebearapps/untether"
-Repository = "https://github.com/littlebearapps/untether"
+Repository = "https://github.com/littlebearapps/untether.git"
 Issues = "https://github.com/littlebearapps/untether/issues"
+Documentation = "https://github.com/littlebearapps/untether/tree/master/docs"
+Changelog = "https://github.com/littlebearapps/untether/blob/master/CHANGELOG.md"
 Upstream = "https://github.com/banteg/takopi"
 
 [project.scripts]
@@ -56,6 +69,7 @@ planmode = "untether.telegram.commands.planmode:BACKEND"
 ping = "untether.telegram.commands.ping:BACKEND"
 export = "untether.telegram.commands.export:BACKEND"
 browse = "untether.telegram.commands.browse:BACKEND"
+restart = "untether.telegram.commands.restart:BACKEND"
 
 [build-system]
 requires = ["uv_build>=0.9.18,<0.10.0"]
@@ -63,7 +77,9 @@ build-backend = "uv_build"
 
 [dependency-groups]
 dev = [
+    "bandit>=1.8.0",
     "mutmut>=3.4.0",
+    "pip-audit>=2.7.0",
     "pytest>=9.0.2",
     "pytest-anyio>=0.0.0",
     "pytest-cov>=7.0.0",
@@ -87,6 +103,10 @@ do_not_mutate = ["src/untether/cli/*"]
 
 [tool.ruff.lint]
 extend-select = ["B", "BLE001", "C4", "PERF", "RUF043", "S110", "SIM", "UP"]
+
+[tool.bandit]
+# Untether is a subprocess manager — these are expected patterns
+skips = ["B101", "B105", "B404", "B603", "B607"]
 
 [tool.ty.src]
 include = ["src", "tests"]

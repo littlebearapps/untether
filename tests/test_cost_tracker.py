@@ -16,6 +16,7 @@ from untether.cost_tracker import (
 def _reset_daily():
     """Reset the global daily cost tracker."""
     import untether.cost_tracker as mod
+
     mod._daily_cost = ("", 0.0)
 
 
@@ -34,6 +35,7 @@ class TestRecordRunCost:
 
     def test_resets_on_new_day(self):
         import untether.cost_tracker as mod
+
         mod._daily_cost = ("1999-01-01", 99.0)
         record_run_cost(0.10)
         assert get_daily_cost() == 0.10

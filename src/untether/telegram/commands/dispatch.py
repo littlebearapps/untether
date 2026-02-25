@@ -230,8 +230,6 @@ async def _dispatch_callback(
             )
             # Register feedback message for cleanup when the run finishes.
             if sent_ref is not None and callback_query_id is not None:
-                register_ephemeral_message(
-                    chat_id, user_msg_id, sent_ref
-                )
+                register_ephemeral_message(chat_id, user_msg_id, sent_ref)
     finally:
         await _answer_callback()

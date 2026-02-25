@@ -5,7 +5,14 @@ from __future__ import annotations
 import re
 from typing import Annotated, Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, StringConstraints, field_validator, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    StringConstraints,
+    field_validator,
+    model_validator,
+)
 from pydantic.types import StrictInt
 
 _SAFE_PATH_RE = re.compile(r"^/[a-zA-Z0-9/_.-]+$")
@@ -46,6 +53,7 @@ class WebhookConfig(BaseModel):
                 "slashes, underscores, dots, and hyphens"
             )
         return v
+
     engine: NonEmptyStr | None = None
     chat_id: StrictInt | None = None
     auth: Literal["bearer", "hmac-sha256", "hmac-sha1", "none"] = "bearer"

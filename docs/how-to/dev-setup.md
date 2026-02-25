@@ -5,7 +5,7 @@ Set up Untether for local development and run the checks.
 ## Clone and run
 
 ```bash
-git clone https://github.com/banteg/untether
+git clone https://github.com/littlebearapps/untether
 cd untether
 
 # Run directly with uv (installs deps automatically)

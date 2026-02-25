@@ -21,6 +21,7 @@ def record_session_event(session_id: str, event: dict) -> None:
     """Record an event for later export."""
     entry = _SESSION_HISTORY.get(session_id)
     if entry is None:
+        logger.debug("export.session.new", session_id=session_id)
         _SESSION_HISTORY[session_id] = (time.time(), [event], None)
     else:
         ts, events, usage = entry
@@ -30,6 +31,7 @@ def record_session_event(session_id: str, event: dict) -> None:
     if len(_SESSION_HISTORY) > _MAX_SESSIONS:
         oldest_key = min(_SESSION_HISTORY, key=lambda k: _SESSION_HISTORY[k][0])
         _SESSION_HISTORY.pop(oldest_key, None)
+        logger.debug("export.session.trimmed", removed=oldest_key)
 
 
 def record_session_usage(session_id: str, usage: dict) -> None:
@@ -150,9 +152,7 @@ class ExportCommand:
             )
 
         # Get the most recent session
-        session_id = max(
-            _SESSION_HISTORY, key=lambda k: _SESSION_HISTORY[k][0]
-        )
+        session_id = max(_SESSION_HISTORY, key=lambda k: _SESSION_HISTORY[k][0])
         ts, events, usage = _SESSION_HISTORY[session_id]
 
         if not events:

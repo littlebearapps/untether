@@ -159,7 +159,7 @@ def create_app() -> typer.Typer:
     app = typer.Typer(
         add_completion=False,
         invoke_without_command=True,
-        help="Telegram bridge for coding agents. Docs: https://untether.dev/",
+        help="Telegram bridge for coding agents. Docs: https://github.com/littlebearapps/untether",
     )
     config_app = typer.Typer(help="Read and modify untether config.")
     config_app.command(name="path")(config_path_cmd)

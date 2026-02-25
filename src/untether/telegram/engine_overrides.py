@@ -40,7 +40,9 @@ def normalize_overrides(overrides: EngineOverrides | None) -> EngineOverrides | 
     permission_mode = normalize_override_value(overrides.permission_mode)
     if model is None and reasoning is None and permission_mode is None:
         return None
-    return EngineOverrides(model=model, reasoning=reasoning, permission_mode=permission_mode)
+    return EngineOverrides(
+        model=model, reasoning=reasoning, permission_mode=permission_mode
+    )
 
 
 def merge_overrides(
@@ -66,7 +68,11 @@ def merge_overrides(
         permission_mode = topic.permission_mode
     elif chat is not None:
         permission_mode = chat.permission_mode
-    return normalize_overrides(EngineOverrides(model=model, reasoning=reasoning, permission_mode=permission_mode))
+    return normalize_overrides(
+        EngineOverrides(
+            model=model, reasoning=reasoning, permission_mode=permission_mode
+        )
+    )
 
 
 def resolve_override_value(

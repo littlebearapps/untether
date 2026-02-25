@@ -9,6 +9,10 @@ from typing import Any
 
 import tomli_w
 
+from .logging import get_logger
+
+logger = get_logger(__name__)
+
 HOME_CONFIG_PATH = Path.home() / ".untether" / "untether.toml"
 
 
@@ -36,16 +40,20 @@ def ensure_table(
 
 def read_config(cfg_path: Path) -> dict:
     if cfg_path.exists() and not cfg_path.is_file():
+        logger.error("config.read.not_file", path=str(cfg_path))
         raise ConfigError(f"Config path {cfg_path} exists but is not a file.") from None
     try:
         raw = cfg_path.read_text(encoding="utf-8")
     except FileNotFoundError:
+        logger.warning("config.read.missing", path=str(cfg_path))
         raise ConfigError(f"Missing config file {cfg_path}.") from None
     except OSError as e:
+        logger.error("config.read.os_error", path=str(cfg_path), error=str(e))
         raise ConfigError(f"Failed to read config file {cfg_path}: {e}") from e
     try:
         return tomllib.loads(raw)
     except tomllib.TOMLDecodeError as e:
+        logger.error("config.read.toml_error", path=str(cfg_path), error=str(e))
         raise ConfigError(f"Malformed TOML in {cfg_path}: {e}") from None
 
 
@@ -122,7 +130,9 @@ def write_config(config: dict[str, Any], path: Path) -> None:
             os.fsync(tmp.fileno())
             tmp_path = Path(tmp.name)
         os.replace(tmp_path, path)
+        logger.debug("config.written", path=str(path))
     except OSError as e:
+        logger.error("config.write.failed", path=str(path), error=str(e))
         raise ConfigError(f"Failed to write config file {path}: {e}") from e
     finally:
         if tmp_path is not None:

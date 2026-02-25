@@ -5,7 +5,9 @@ from contextvars import ContextVar, Token
 from pathlib import Path
 
 
-_run_base_dir: ContextVar[Path | None] = ContextVar("untether_run_base_dir", default=None)
+_run_base_dir: ContextVar[Path | None] = ContextVar(
+    "untether_run_base_dir", default=None
+)
 
 
 def get_run_base_dir() -> Path | None:

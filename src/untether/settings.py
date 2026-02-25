@@ -24,26 +24,12 @@ from .config import (
     ProjectsConfig,
 )
 from .config_migrations import migrate_config_file
+from .logging import get_logger
+
+logger = get_logger(__name__)
 
 
 NonEmptyStr = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1)]
-
-
-def _normalize_engine_id(
-    value: str,
-    *,
-    engine_ids: Iterable[str],
-    config_path: Path,
-    label: str,
-) -> str:
-    engine_map = {engine.lower(): engine for engine in engine_ids}
-    engine = engine_map.get(value.lower())
-    if engine is None:
-        available = ", ".join(sorted(engine_map.values()))
-        raise ConfigError(
-            f"Unknown `{label}` {value!r} in {config_path}. Available: {available}."
-        )
-    return engine
 
 
 def _normalize_project_path(value: str, *, config_path: Path) -> Path:
@@ -141,6 +127,13 @@ class CostBudgetSettings(BaseModel):
     auto_cancel: bool = False
 
 
+class FooterSettings(BaseModel):
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    show_api_cost: bool = True
+    show_subscription_usage: bool = False
+
+
 class UntetherSettings(BaseSettings):
     model_config = SettingsConfigDict(
         extra="allow",
@@ -159,6 +152,7 @@ class UntetherSettings(BaseSettings):
 
     plugins: PluginsSettings = Field(default_factory=PluginsSettings)
     cost_budget: CostBudgetSettings = Field(default_factory=CostBudgetSettings)
+    footer: FooterSettings = Field(default_factory=FooterSettings)
 
     @model_validator(mode="before")
     @classmethod
@@ -234,18 +228,27 @@ class UntetherSettings(BaseSettings):
         projects: dict[str, ProjectConfig] = {}
         chat_map: dict[int, str] = {}
 
+        skipped: list[str] = []
         for raw_alias, entry in self.projects.items():
             alias = raw_alias
             alias_key = alias.lower()
             if alias_key in engine_map or alias_key in reserved_lower:
-                raise ConfigError(
-                    f"Invalid project alias {alias!r} in {config_path}; "
-                    "aliases must not match engine ids or reserved commands."
+                logger.error(
+                    "project.skipped.reserved_alias",
+                    alias=alias,
+                    config_path=str(config_path),
+                    reason="aliases must not match engine ids or reserved commands",
                 )
+                skipped.append(alias)
+                continue
             if alias_key in projects:
-                raise ConfigError(
-                    f"Duplicate project alias {alias!r} in {config_path}."
+                logger.error(
+                    "project.skipped.duplicate_alias",
+                    alias=alias,
+                    config_path=str(config_path),
                 )
+                skipped.append(alias)
+                continue
 
             path = _normalize_project_path(entry.path, config_path=config_path)
 
@@ -253,28 +256,46 @@ class UntetherSettings(BaseSettings):
 
             default_engine = None
             if entry.default_engine is not None:
-                default_engine = _normalize_engine_id(
-                    entry.default_engine,
-                    engine_ids=engine_ids,
-                    config_path=config_path,
-                    label=f"projects.{alias}.default_engine",
-                )
+                engine_map_lower = {e.lower(): e for e in engine_ids}
+                resolved = engine_map_lower.get(entry.default_engine.lower())
+                if resolved is None:
+                    available = ", ".join(sorted(engine_map_lower.values()))
+                    logger.error(
+                        "project.skipped.unknown_engine",
+                        alias=alias,
+                        engine=entry.default_engine,
+                        available=available,
+                        config_path=str(config_path),
+                    )
+                    skipped.append(alias)
+                    continue
+                default_engine = resolved
 
             worktree_base = entry.worktree_base
 
             chat_id = entry.chat_id
             if chat_id is not None:
                 if chat_id == default_chat_id:
-                    raise ConfigError(
-                        f"Invalid `projects.{alias}.chat_id` in {config_path}; "
-                        "must not match transports.telegram.chat_id."
+                    logger.error(
+                        "project.skipped.chat_id_matches_transport",
+                        alias=alias,
+                        chat_id=chat_id,
+                        config_path=str(config_path),
+                        reason="must not match transports.telegram.chat_id",
                     )
+                    skipped.append(alias)
+                    continue
                 if chat_id in chat_map:
                     existing = chat_map[chat_id]
-                    raise ConfigError(
-                        f"Duplicate `projects.*.chat_id` {chat_id} in {config_path}; "
-                        f"already used by {existing!r}."
+                    logger.error(
+                        "project.skipped.duplicate_chat_id",
+                        alias=alias,
+                        chat_id=chat_id,
+                        existing_alias=existing,
+                        config_path=str(config_path),
                     )
+                    skipped.append(alias)
+                    continue
                 chat_map[chat_id] = alias_key
 
             projects[alias_key] = ProjectConfig(
@@ -286,14 +307,26 @@ class UntetherSettings(BaseSettings):
                 chat_id=chat_id,
             )
 
+        if skipped:
+            logger.warning(
+                "projects.config.skipped_projects",
+                skipped=skipped,
+                loaded=len(projects),
+                config_path=str(config_path),
+            )
+
         if default_project is not None:
             default_key = default_project.lower()
             if default_key not in projects:
-                raise ConfigError(
-                    f"Invalid `default_project` {default_project!r} in {config_path}; "
-                    "no matching project alias found."
+                logger.error(
+                    "projects.config.invalid_default_project",
+                    default_project=default_project,
+                    config_path=str(config_path),
+                    reason="no matching project alias found (may have been skipped)",
                 )
-            default_project = default_key
+                default_project = None
+            else:
+                default_project = default_key
 
         return ProjectsConfig(
             projects=projects,

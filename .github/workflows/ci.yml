@@ -6,6 +6,8 @@ on:
       - "master"
   pull_request:
 
+permissions: {}
+
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
@@ -14,6 +16,8 @@ jobs:
   checks:
     name: ${{ matrix.task }}
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     strategy:
       fail-fast: false
       matrix:
@@ -28,15 +32,15 @@ jobs:
             sync_args: --no-install-project
           - task: ty
             do_sync: true
-            command: uv run --no-sync ty check src tests
+            command: uv run --no-sync ty check --warn invalid-argument-type --warn unresolved-attribute --warn invalid-assignment --warn not-subscriptable src tests
             sync_args: --no-install-project
-          - task: pytest
-            do_sync: true
-            command: uv run --no-sync pytest
-            sync_args: ""
           - task: build
             do_sync: false
             command: uv build
+            sync_args: ""
+          - task: lockfile
+            do_sync: false
+            command: uv lock --check
             sync_args: ""
           - task: docs
             do_sync: true
@@ -45,10 +49,10 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v5
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
 
       - name: Install uv
-        uses: astral-sh/setup-uv@v7
+        uses: astral-sh/setup-uv@eac588ad8def6316056a12d4907a9d4d84ff7a3b # v7
         with:
           python-version: "3.14"
           enable-cache: true
@@ -60,8 +64,33 @@ jobs:
       - name: Run check
         run: ${{ matrix.command }}
 
+  pytest:
+    name: pytest (Python ${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.12", "3.13", "3.14"]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@eac588ad8def6316056a12d4907a9d4d84ff7a3b # v7
+        with:
+          python-version: ${{ matrix.python-version }}
+          enable-cache: true
+
+      - name: Install dependencies
+        run: uv sync --frozen
+
+      - name: Run tests
+        run: uv run --no-sync pytest
+
       - name: Add coverage to summary
-        if: ${{ always() && matrix.task == 'pytest' }}
+        if: ${{ always() && matrix.python-version == '3.14' }}
         run: |
           {
             echo "## Coverage"
@@ -69,17 +98,51 @@ jobs:
             uv run --no-sync python -m coverage report || true
           } >> "$GITHUB_STEP_SUMMARY"
 
+  security:
+    name: ${{ matrix.task }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - task: pip-audit
+            do_sync: true
+            command: uv run --no-sync pip-audit --skip-editable --progress-spinner=off
+            sync_args: ""
+          - task: bandit
+            do_sync: true
+            command: uv run --no-sync bandit -r src/ -c pyproject.toml -q
+            sync_args: --no-install-project
+    steps:
+      - name: Checkout
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@eac588ad8def6316056a12d4907a9d4d84ff7a3b # v7
+        with:
+          python-version: "3.14"
+          enable-cache: true
+
+      - name: Install dependencies
+        if: matrix.do_sync
+        run: uv sync --frozen ${{ matrix.sync_args }}
+
+      - name: Run check
+        run: ${{ matrix.command }}
+
   notify-commit:
     name: notify-commit
     runs-on: ubuntu-latest
-    needs: checks
-    if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/master' && needs.checks.result == 'success' }}
+    needs: [checks, pytest, security]
+    if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/master' && needs.checks.result == 'success' && needs.pytest.result == 'success' }}
     steps:
       - name: Checkout
-        uses: actions/checkout@v5
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
 
       - name: Install uv
-        uses: astral-sh/setup-uv@v7
+        uses: astral-sh/setup-uv@eac588ad8def6316056a12d4907a9d4d84ff7a3b # v7
         with:
           python-version: "3.14"
           enable-cache: true

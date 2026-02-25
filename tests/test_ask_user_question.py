@@ -30,6 +30,7 @@ from untether.schemas import claude as claude_schema
 # Helpers
 # ---------------------------------------------------------------------------
 
+
 def _decode_event(payload: dict) -> claude_schema.StreamJsonMessage:
     """Build a StreamJsonMessage from a minimal dict, filling in defaults."""
     data = dict(payload)
@@ -50,7 +51,9 @@ def _decode_event(payload: dict) -> claude_schema.StreamJsonMessage:
     return claude_schema.decode_stream_json_line(json.dumps(data).encode())
 
 
-def _make_state_with_session(session_id: str = "sess-1") -> tuple[ClaudeStreamState, EventFactory]:
+def _make_state_with_session(
+    session_id: str = "sess-1",
+) -> tuple[ClaudeStreamState, EventFactory]:
     state = ClaudeStreamState()
     token = ResumeToken(engine=ENGINE, value=session_id)
     state.factory.started(token, title="claude")
@@ -73,18 +76,21 @@ def _clear_registries():
 # AskUserQuestion is NOT auto-approved
 # ===========================================================================
 
+
 def test_ask_user_question_not_auto_approved() -> None:
     """AskUserQuestion should produce a warning event (not be auto-approved)."""
     state, factory = _make_state_with_session()
-    event = _decode_event({
-        "type": "control_request",
-        "request_id": "req-ask-1",
-        "request": {
-            "subtype": "can_use_tool",
-            "tool_name": "AskUserQuestion",
-            "input": {"question": "What colour should the button be?"},
-        },
-    })
+    event = _decode_event(
+        {
+            "type": "control_request",
+            "request_id": "req-ask-1",
+            "request": {
+                "subtype": "can_use_tool",
+                "tool_name": "AskUserQuestion",
+                "input": {"question": "What colour should the button be?"},
+            },
+        }
+    )
     events = translate_claude_event(event, title="claude", state=state, factory=factory)
 
     # Should produce a warning event (not be silently auto-approved)
@@ -97,15 +103,17 @@ def test_ask_user_question_not_auto_approved() -> None:
 def test_ask_user_question_shows_question_text() -> None:
     """The question text should appear in the warning title."""
     state, factory = _make_state_with_session()
-    event = _decode_event({
-        "type": "control_request",
-        "request_id": "req-ask-2",
-        "request": {
-            "subtype": "can_use_tool",
-            "tool_name": "AskUserQuestion",
-            "input": {"question": "Should I add tests?"},
-        },
-    })
+    event = _decode_event(
+        {
+            "type": "control_request",
+            "request_id": "req-ask-2",
+            "request": {
+                "subtype": "can_use_tool",
+                "tool_name": "AskUserQuestion",
+                "input": {"question": "Should I add tests?"},
+            },
+        }
+    )
     events = translate_claude_event(event, title="claude", state=state, factory=factory)
     assert len(events) == 1
     assert "Should I add tests?" in events[0].action.title
@@ -114,15 +122,17 @@ def test_ask_user_question_shows_question_text() -> None:
 def test_ask_user_question_registered_pending() -> None:
     """AskUserQuestion should be registered in _PENDING_ASK_REQUESTS."""
     state, factory = _make_state_with_session()
-    event = _decode_event({
-        "type": "control_request",
-        "request_id": "req-ask-3",
-        "request": {
-            "subtype": "can_use_tool",
-            "tool_name": "AskUserQuestion",
-            "input": {"question": "Which database?"},
-        },
-    })
+    event = _decode_event(
+        {
+            "type": "control_request",
+            "request_id": "req-ask-3",
+            "request": {
+                "subtype": "can_use_tool",
+                "tool_name": "AskUserQuestion",
+                "input": {"question": "Which database?"},
+            },
+        }
+    )
     translate_claude_event(event, title="claude", state=state, factory=factory)
     assert "req-ask-3" in _PENDING_ASK_REQUESTS
     assert _PENDING_ASK_REQUESTS["req-ask-3"] == "Which database?"
@@ -131,15 +141,17 @@ def test_ask_user_question_registered_pending() -> None:
 def test_ask_user_question_has_inline_keyboard() -> None:
     """AskUserQuestion events should have approve/deny buttons."""
     state, factory = _make_state_with_session()
-    event = _decode_event({
-        "type": "control_request",
-        "request_id": "req-ask-4",
-        "request": {
-            "subtype": "can_use_tool",
-            "tool_name": "AskUserQuestion",
-            "input": {"question": "Continue?"},
-        },
-    })
+    event = _decode_event(
+        {
+            "type": "control_request",
+            "request_id": "req-ask-4",
+            "request": {
+                "subtype": "can_use_tool",
+                "tool_name": "AskUserQuestion",
+                "input": {"question": "Continue?"},
+            },
+        }
+    )
     events = translate_claude_event(event, title="claude", state=state, factory=factory)
     detail = events[0].action.detail
     kb = detail["inline_keyboard"]
@@ -153,6 +165,7 @@ def test_ask_user_question_has_inline_keyboard() -> None:
 # ===========================================================================
 # get_pending_ask_request / answer_ask_question
 # ===========================================================================
+
 
 def test_get_pending_ask_request_empty() -> None:
     assert get_pending_ask_request() is None
@@ -205,18 +218,23 @@ async def test_answer_ask_question_sends_deny_with_answer() -> None:
 # Nested questions array format (real Claude AskUserQuestion input)
 # ===========================================================================
 
+
 def test_ask_question_nested_questions_array() -> None:
     """Claude sends AskUserQuestion with {"questions": [{"question": "..."}]}."""
     state, factory = _make_state_with_session()
-    event = _decode_event({
-        "type": "control_request",
-        "request_id": "req-nested-1",
-        "request": {
-            "subtype": "can_use_tool",
-            "tool_name": "AskUserQuestion",
-            "input": {"questions": [{"question": "What is your favourite colour?"}]},
-        },
-    })
+    event = _decode_event(
+        {
+            "type": "control_request",
+            "request_id": "req-nested-1",
+            "request": {
+                "subtype": "can_use_tool",
+                "tool_name": "AskUserQuestion",
+                "input": {
+                    "questions": [{"question": "What is your favourite colour?"}]
+                },
+            },
+        }
+    )
     events = translate_claude_event(event, title="claude", state=state, factory=factory)
     assert len(events) == 1
     # Question text should be extracted and shown
@@ -229,15 +247,17 @@ def test_ask_question_nested_questions_array() -> None:
 def test_ask_question_nested_empty_questions() -> None:
     """Empty questions array should not crash."""
     state, factory = _make_state_with_session()
-    event = _decode_event({
-        "type": "control_request",
-        "request_id": "req-nested-2",
-        "request": {
-            "subtype": "can_use_tool",
-            "tool_name": "AskUserQuestion",
-            "input": {"questions": []},
-        },
-    })
+    event = _decode_event(
+        {
+            "type": "control_request",
+            "request_id": "req-nested-2",
+            "request": {
+                "subtype": "can_use_tool",
+                "tool_name": "AskUserQuestion",
+                "input": {"questions": []},
+            },
+        }
+    )
     events = translate_claude_event(event, title="claude", state=state, factory=factory)
     assert len(events) == 1
     # Should still register (empty question)

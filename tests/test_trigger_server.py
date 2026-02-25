@@ -185,16 +185,20 @@ async def test_non_dict_json_wrapped():
 
 @pytest.mark.anyio
 async def test_event_filter_skips_non_matching():
-    settings = parse_trigger_config({
-        "enabled": True,
-        "webhooks": [{
-            "id": "gh",
-            "path": "/hooks/gh",
-            "auth": "none",
-            "event_filter": "push",
-            "prompt_template": "{{action}}",
-        }],
-    })
+    settings = parse_trigger_config(
+        {
+            "enabled": True,
+            "webhooks": [
+                {
+                    "id": "gh",
+                    "path": "/hooks/gh",
+                    "auth": "none",
+                    "event_filter": "push",
+                    "prompt_template": "{{action}}",
+                }
+            ],
+        }
+    )
     dispatcher, _, _ = _make_dispatcher()
     app = build_webhook_app(settings, dispatcher)
     async with TestClient(TestServer(app)) as cl:
@@ -211,16 +215,20 @@ async def test_event_filter_skips_non_matching():
 @pytest.mark.anyio
 async def test_event_filter_blocks_when_header_missing():
     """Security fix: missing event header must not bypass the filter."""
-    settings = parse_trigger_config({
-        "enabled": True,
-        "webhooks": [{
-            "id": "gh",
-            "path": "/hooks/gh",
-            "auth": "none",
-            "event_filter": "push",
-            "prompt_template": "{{action}}",
-        }],
-    })
+    settings = parse_trigger_config(
+        {
+            "enabled": True,
+            "webhooks": [
+                {
+                    "id": "gh",
+                    "path": "/hooks/gh",
+                    "auth": "none",
+                    "event_filter": "push",
+                    "prompt_template": "{{action}}",
+                }
+            ],
+        }
+    )
     dispatcher, transport, _ = _make_dispatcher()
     app = build_webhook_app(settings, dispatcher)
     async with TestClient(TestServer(app)) as cl:
@@ -259,16 +267,20 @@ async def test_internal_error_returns_500():
 
 @pytest.mark.anyio
 async def test_event_filter_allows_matching():
-    settings = parse_trigger_config({
-        "enabled": True,
-        "webhooks": [{
-            "id": "gh",
-            "path": "/hooks/gh",
-            "auth": "none",
-            "event_filter": "push",
-            "prompt_template": "{{ref}}",
-        }],
-    })
+    settings = parse_trigger_config(
+        {
+            "enabled": True,
+            "webhooks": [
+                {
+                    "id": "gh",
+                    "path": "/hooks/gh",
+                    "auth": "none",
+                    "event_filter": "push",
+                    "prompt_template": "{{ref}}",
+                }
+            ],
+        }
+    )
     transport = FakeTransport()
     dispatcher, _, _ = _make_dispatcher(transport=transport)
     app = build_webhook_app(settings, dispatcher)

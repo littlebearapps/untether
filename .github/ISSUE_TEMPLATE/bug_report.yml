@@ -1,0 +1,72 @@
+name: Bug report
+description: Report a bug or unexpected behaviour
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting! Please fill in as much detail as you can.
+
+  - type: textarea
+    id: description
+    attributes:
+      label: Description
+      description: What happened? What did you expect to happen?
+    validations:
+      required: true
+
+  - type: input
+    id: version
+    attributes:
+      label: Untether version
+      description: Run `untether --version` or `pip show untether`
+      placeholder: "0.22.1"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: engine
+    attributes:
+      label: Engine
+      description: Which agent engine were you using?
+      options:
+        - Claude Code
+        - Codex
+        - OpenCode
+        - Pi
+        - Multiple / N/A
+    validations:
+      required: true
+
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      description: Minimal steps to trigger the bug
+      placeholder: |
+        1. Send message to bot: "..."
+        2. Observe error in ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: config
+    attributes:
+      label: Configuration
+      description: Relevant sections of your `untether.toml` (redact bot tokens)
+      render: toml
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs
+      description: Relevant log output (redact any tokens or secrets)
+      render: text
+
+  - type: input
+    id: os
+    attributes:
+      label: OS and Python version
+      placeholder: "Ubuntu 24.04, Python 3.13.2"
+    validations:
+      required: true

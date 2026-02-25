@@ -27,9 +27,7 @@ class TriggerDispatcher:
     default_chat_id: int
     task_group: TaskGroup
 
-    async def dispatch_webhook(
-        self, webhook: WebhookConfig, prompt: str
-    ) -> None:
+    async def dispatch_webhook(self, webhook: WebhookConfig, prompt: str) -> None:
         chat_id = webhook.chat_id or self.default_chat_id
         context = RunContext(project=webhook.project) if webhook.project else None
         engine_override = webhook.engine

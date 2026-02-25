@@ -51,12 +51,50 @@ _USAGE_WARN_PCT = 70
 _USAGE_CRITICAL_PCT = 90
 
 
-async def _maybe_append_usage_footer(msg: RenderedMessage) -> RenderedMessage:
-    """Fetch Claude Code usage and append a footer if above thresholds."""
+def _load_footer_settings():
+    """Load footer settings from config, returning defaults if unavailable."""
     try:
-        from .telegram.commands.usage import fetch_claude_usage, _time_until
+        from .settings import FooterSettings, load_settings_if_exists
+
+        result = load_settings_if_exists()
+        if result is None:
+            return FooterSettings()
+        settings, _ = result
+        return settings.footer
+    except Exception:  # noqa: BLE001
+        logger.debug("footer_settings.load_failed", exc_info=True)
+        from .settings import FooterSettings
+
+        return FooterSettings()
+
+
+async def _maybe_append_usage_footer(
+    msg: RenderedMessage,
+    *,
+    always_show: bool = False,
+) -> RenderedMessage:
+    """Fetch Claude Code usage and append a footer.
+
+    When *always_show* is True, always appends a compact usage line.
+    When False (default), only appends warnings at >=70% threshold.
+    """
+    try:
+        from .telegram.commands.usage import (
+            _time_until,
+            fetch_claude_usage,
+            format_usage_compact,
+        )
 
         data = await fetch_claude_usage()
+
+        if always_show:
+            compact = format_usage_compact(data)
+            if compact:
+                footer = f"\n\n\u26a1 {compact}"
+                return RenderedMessage(text=msg.text + footer, extra=msg.extra)
+            return msg
+
+        # Threshold-based warning (existing behaviour)
         five_hour = data.get("five_hour")
         seven_day = data.get("seven_day")
         if not five_hour:
@@ -70,11 +108,11 @@ async def _maybe_append_usage_footer(msg: RenderedMessage) -> RenderedMessage:
         reset = _time_until(five_hour["resets_at"])
 
         if pct_5h >= 100:
-            footer = f"\n\n🛑 5h limit hit — resets in {reset}"
+            footer = f"\n\n\U0001f6d1 5h limit hit \u2014 resets in {reset}"
         elif pct_5h >= _USAGE_CRITICAL_PCT:
-            footer = f"\n\n⚠️ 5h: {pct_5h:.0f}% | Weekly: {pct_7d:.0f}% — approaching limit (resets in {reset})"
+            footer = f"\n\n\u26a0\ufe0f 5h: {pct_5h:.0f}% | Weekly: {pct_7d:.0f}% \u2014 approaching limit (resets in {reset})"
         else:
-            footer = f"\n\n⚡ 5h: {pct_5h:.0f}% | Weekly: {pct_7d:.0f}% (resets in {reset})"
+            footer = f"\n\n\u26a1 5h: {pct_5h:.0f}% | Weekly: {pct_7d:.0f}% (resets in {reset})"
 
         return RenderedMessage(text=msg.text + footer, extra=msg.extra)
     except (ValueError, KeyError, TypeError):
@@ -111,13 +149,17 @@ def _format_run_cost(usage: dict[str, Any] | None) -> str | None:
         input_tokens = token_usage.get("input_tokens", 0)
         output_tokens = token_usage.get("output_tokens", 0)
         if input_tokens or output_tokens:
+
             def _fmt_tokens(n: int) -> str:
                 if n >= 1_000_000:
                     return f"{n / 1_000_000:.1f}M"
                 if n >= 1_000:
                     return f"{n / 1_000:.1f}k"
                 return str(n)
-            parts.append(f"{_fmt_tokens(input_tokens)} in / {_fmt_tokens(output_tokens)} out")
+
+            parts.append(
+                f"{_fmt_tokens(input_tokens)} in / {_fmt_tokens(output_tokens)} out"
+            )
     return " · ".join(parts)
 
 
@@ -189,8 +231,12 @@ def _record_export_event(evt: UntetherEvent, resume: ResumeToken | None) -> None
             if evt.usage:
                 record_session_usage(session_id, evt.usage)
         record_session_event(session_id, event_dict)
-    except Exception:  # noqa: BLE001, S110
-        pass  # Export recording is best-effort
+    except Exception as exc:  # noqa: BLE001
+        logger.debug(
+            "export_event.record_failed",
+            error=str(exc),
+            error_type=exc.__class__.__name__,
+        )
 
 
 def _log_runner_event(evt: UntetherEvent) -> None:
@@ -372,9 +418,7 @@ class ProgressEdits:
                 state, elapsed_s=now - self.started_at, label=self.label
             )
             # Detect approval button transitions for push notification
-            new_kb = rendered.extra.get("reply_markup", {}).get(
-                "inline_keyboard", []
-            )
+            new_kb = rendered.extra.get("reply_markup", {}).get("inline_keyboard", [])
             old_kb = (
                 self.last_rendered.extra.get("reply_markup", {}).get(
                     "inline_keyboard", []
@@ -728,9 +772,12 @@ async def handle_message(
             answer=err_body,
         )
 
-        # Append usage alert footer for Claude engine runs (even on error)
+        # Append usage footer for Claude engine runs (even on error)
         if runner.engine == "claude":
-            final_rendered = await _maybe_append_usage_footer(final_rendered)
+            footer_cfg = _load_footer_settings()
+            final_rendered = await _maybe_append_usage_footer(
+                final_rendered, always_show=footer_cfg.show_subscription_usage
+            )
 
         logger.debug(
             "handle.error.rendered",
@@ -823,15 +870,19 @@ async def handle_message(
         answer=final_answer,
     )
 
-    # Append run cost footer (from CompletedEvent.usage)
-    cost_line = _format_run_cost(completed.usage)
-    if cost_line:
-        final_rendered = RenderedMessage(
-            text=final_rendered.text + f"\n\n\U0001f4b0 {cost_line}",
-            extra=final_rendered.extra,
-        )
+    # Load footer display config
+    footer_cfg = _load_footer_settings()
 
-    # A4: Cost budget tracking and alerts
+    # Append run cost footer (from CompletedEvent.usage)
+    if footer_cfg.show_api_cost:
+        cost_line = _format_run_cost(completed.usage)
+        if cost_line:
+            final_rendered = RenderedMessage(
+                text=final_rendered.text + f"\n\n\U0001f4b0 {cost_line}",
+                extra=final_rendered.extra,
+            )
+
+    # A4: Cost budget tracking and alerts (always, regardless of footer config)
     _cost_alert_text = _check_cost_budget(completed.usage)
     if _cost_alert_text:
         final_rendered = RenderedMessage(
@@ -839,9 +890,11 @@ async def handle_message(
             extra=final_rendered.extra,
         )
 
-    # Append usage alert footer for Claude engine runs
+    # Append usage footer for Claude engine runs
     if runner.engine == "claude":
-        final_rendered = await _maybe_append_usage_footer(final_rendered)
+        final_rendered = await _maybe_append_usage_footer(
+            final_rendered, always_show=footer_cfg.show_subscription_usage
+        )
 
     logger.debug(
         "handle.final.rendered",

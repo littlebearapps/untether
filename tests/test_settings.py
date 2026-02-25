@@ -235,3 +235,45 @@ def test_load_settings_rejects_non_file(tmp_path: Path) -> None:
     config_path.mkdir()
     with pytest.raises(ConfigError, match="exists but is not a file"):
         load_settings(config_path)
+
+
+# ---------------------------------------------------------------------------
+# FooterSettings tests
+# ---------------------------------------------------------------------------
+
+
+def test_footer_defaults() -> None:
+    from untether.settings import FooterSettings
+
+    footer = FooterSettings()
+    assert footer.show_api_cost is True
+    assert footer.show_subscription_usage is False
+
+
+def test_footer_from_toml(tmp_path: Path) -> None:
+    config_path = tmp_path / "untether.toml"
+    config_path.write_text(
+        'transport = "telegram"\n\n'
+        "[transports.telegram]\n"
+        'bot_token = "token"\n'
+        "chat_id = 123\n\n"
+        "[footer]\n"
+        "show_api_cost = false\n"
+        "show_subscription_usage = true\n",
+        encoding="utf-8",
+    )
+
+    settings, _ = load_settings(config_path)
+    assert settings.footer.show_api_cost is False
+    assert settings.footer.show_subscription_usage is True
+
+
+def test_footer_rejects_extra_keys(tmp_path: Path) -> None:
+    config_path = tmp_path / "untether.toml"
+    data = {
+        "transport": "telegram",
+        "transports": {"telegram": {"bot_token": "token", "chat_id": 123}},
+        "footer": {"show_api_cost": True, "bogus_key": True},
+    }
+    with pytest.raises(ConfigError, match="bogus_key"):
+        validate_settings_data(data, config_path=config_path)

@@ -65,8 +65,12 @@ def _get_project_root(ctx: CommandContext | None = None) -> Path | None:
                 cwd = ctx.runtime.resolve_run_cwd(run_context)
                 if cwd is not None and cwd.is_dir():
                     return cwd
-        except Exception:  # noqa: BLE001, S110
-            pass  # Fall through to CWD
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "browse.project_root.error",
+                error=str(exc),
+                error_type=exc.__class__.__name__,
+            )
     return Path.cwd()
 
 
@@ -87,7 +91,7 @@ def _list_directory(dirpath: Path) -> tuple[list[Path], list[Path]]:
             elif entry.is_file():
                 files.append(entry)
     except PermissionError:
-        pass
+        logger.warning("browse.list_dir.permission_denied", path=str(dirpath))
     return dirs, files
 
 
@@ -133,7 +137,9 @@ def _format_listing(
             truncated_dirs += 1
             continue
         pid = _register_path(str(d))
-        dir_buttons.append({"text": f"📂 {d.name}/", "callback_data": f"browse:d:{pid}"})
+        dir_buttons.append(
+            {"text": f"📂 {d.name}/", "callback_data": f"browse:d:{pid}"}
+        )
         shown += 1
     # Pack dir buttons 2 per row
     buttons.extend(dir_buttons[i : i + 2] for i in range(0, len(dir_buttons), 2))
@@ -149,7 +155,9 @@ def _format_listing(
         except OSError:
             size_str = "?"
         pid = _register_path(str(f))
-        file_buttons.append({"text": f"📄 {f.name} ({size_str})", "callback_data": f"browse:f:{pid}"})
+        file_buttons.append(
+            {"text": f"📄 {f.name} ({size_str})", "callback_data": f"browse:f:{pid}"}
+        )
         shown += 1
     # Pack file buttons 2 per row
     buttons.extend(file_buttons[i : i + 2] for i in range(0, len(file_buttons), 2))
@@ -256,7 +264,10 @@ class BrowseCommand:
         return CommandResult(text=f"Not found: {args}", notify=True)
 
     async def _browse_dir(
-        self, dirpath: Path, root: Path, ctx: CommandContext,
+        self,
+        dirpath: Path,
+        root: Path,
+        ctx: CommandContext,
     ) -> CommandResult | None:
         if not dirpath.is_dir():
             return CommandResult(text="Directory not found.", notify=True)

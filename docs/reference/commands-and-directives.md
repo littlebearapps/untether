@@ -45,6 +45,12 @@ This line is parsed from replies and takes precedence over new directives.
 | `/ctx` | Show context binding (chat or topic). |
 | `/ctx set <project> @branch` | Update context binding. |
 | `/ctx clear` | Remove context binding. |
+| `/planmode` | Toggle Claude Code plan mode (on/auto/off/show/clear). |
+| `/usage` | Show Claude Code subscription usage (5h window, weekly, per-model). |
+| `/export` | Export last session transcript as Markdown or JSON. |
+| `/browse` | Browse project files with inline keyboard navigation. |
+| `/ping` | Health check — replies with uptime. |
+| `/restart` | Gracefully drain active runs and restart Untether. |
 | `/new` | Clear stored sessions for the current scope (topic/chat). |
 
 Notes:
@@ -63,6 +69,7 @@ Untether’s CLI is an auto-router by default; engine subcommands override the d
 |---------|-------------|
 | `untether` | Start Untether (runs onboarding if setup/config is missing and you’re in a TTY). |
 | `untether <engine>` | Run with a specific engine (e.g. `untether codex`). |
+| `untether config` | Show config file path and content. |
 | `untether init <alias>` | Register the current repo as a project. |
 | `untether chat-id` | Capture the current chat id. |
 | `untether chat-id --project <alias>` | Save the captured chat id to a project. |

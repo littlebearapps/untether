@@ -82,8 +82,10 @@ def _maybe_promote_session_id(state: PiStreamState, session_id: str | None) -> N
         return
     if not _looks_like_session_path(state.resume.value):
         return
+    old_value = state.resume.value
     state.resume = ResumeToken(engine=ENGINE, value=_short_session_id(session_id))
     state.allow_id_promotion = False
+    logger.info("pi.session.promoted", old=old_value, new=state.resume.value)
 
 
 def _action_event(
@@ -158,6 +160,7 @@ def translate_pi_event(
     if isinstance(event, pi_schema.SessionHeader):
         _maybe_promote_session_id(state, event.id)
         if not state.started:
+            logger.info("pi.session.started", resume=state.resume.value, title=title)
             out.append(
                 StartedEvent(
                     engine=ENGINE,
@@ -170,6 +173,11 @@ def translate_pi_event(
         return out
 
     if not state.started:
+        logger.info(
+            "pi.session.started.implicit",
+            resume=state.resume.value,
+            event_type=type(event).__name__,
+        )
         out.append(
             StartedEvent(
                 engine=ENGINE,
@@ -254,6 +262,13 @@ def translate_pi_event(
             error = state.last_assistant_error
             answer = state.last_assistant_text or ""
 
+            logger.info(
+                "pi.completed",
+                ok=ok,
+                error=error,
+                resume=state.resume.value,
+                answer_len=len(answer),
+            )
             out.append(
                 CompletedEvent(
                     engine=ENGINE,
@@ -420,6 +435,7 @@ class PiRunner(ResumeTokenMixin, JsonlSubprocessRunner):
         state: PiStreamState,
     ) -> list[UntetherEvent]:
         message = f"pi failed (rc={rc})."
+        logger.error("pi.process.failed", rc=rc, resume=state.resume.value)
         resume_for_completed = found_session or resume or state.resume
         return [
             self.note_event(message, state=state),
@@ -442,6 +458,7 @@ class PiRunner(ResumeTokenMixin, JsonlSubprocessRunner):
     ) -> list[UntetherEvent]:
         resume_for_completed = found_session or resume or state.resume
         message = "pi finished without an agent_end event"
+        logger.warning("pi.stream.no_agent_end", resume=state.resume.value)
         return [
             CompletedEvent(
                 engine=ENGINE,
