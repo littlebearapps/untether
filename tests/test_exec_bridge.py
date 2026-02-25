@@ -151,7 +151,9 @@ def test_codex_extract_resume_accepts_plain_line() -> None:
     assert runner.extract_resume(text) == ResumeToken(engine=CODEX_ENGINE, value=uuid)
 
 
-@pytest.mark.skipif(sys.version_info < (3, 14), reason="uuid.uuid7 requires Python 3.14+")
+@pytest.mark.skipif(
+    sys.version_info < (3, 14), reason="uuid.uuid7 requires Python 3.14+"
+)
 def test_codex_extract_resume_accepts_uuid7() -> None:
     uuid7 = uuid.uuid7
     token = str(uuid7())
