@@ -20,20 +20,22 @@ Walk the dog, watch the footy, sit at a friend's place. Your agents keep working
 
 ## Table of contents
 
-- [Quick start](#quick-start)
-- [Why Untether?](#why-untether)
-- [Supported engines](#supported-engines)
-- [Features](#features)
-- [Commands](#commands)
-- [Configuration](#configuration)
-- [Requirements](#requirements)
-- [Engine guides](#engine-guides)
-- [Documentation](#documentation)
-- [Contributing](#contributing)
-- [Acknowledgements](#acknowledgements)
-- [Licence](#licence)
+- [Quick start](#-quick-start)
+- [Why Untether?](#-why-untether)
+- [Supported engines](#-supported-engines)
+- [Features](#-features)
+- [Commands](#-commands)
+- [Configuration](#%EF%B8%8F-configuration)
+- [Requirements](#-requirements)
+- [Engine guides](#-engine-guides)
+- [Documentation](#-documentation)
+- [Contributing](#-contributing)
+- [Acknowledgements](#-acknowledgements)
+- [Licence](#-licence)
 
-## Quick start
+---
+
+## ⚡ Quick start
 
 ```sh
 uv tool install untether        # recommended
@@ -51,7 +53,12 @@ The wizard creates a Telegram bot, picks your workflow, and connects your chat. 
 
 That's it. Your agent runs on your machine, streams progress to Telegram, and you can reply to continue the conversation.
 
-## Why Untether?
+> [!TIP]
+> Already have a bot token? Pass it directly: `untether --bot-token YOUR_TOKEN`
+
+---
+
+## 💡 Why Untether?
 
 | Problem | Untether's solution |
 |---------|-------------------|
@@ -62,7 +69,9 @@ That's it. Your agent runs on your machine, streams progress to Telegram, and yo
 | No cost visibility | Per-run and daily cost tracking with configurable budgets |
 | Can't continue terminal sessions remotely | Stateless resume — pick up any session in chat or terminal |
 
-## Supported engines
+---
+
+## 🔌 Supported engines
 
 | Engine | Install | What it's good at |
 |--------|---------|-------------------|
@@ -71,19 +80,22 @@ That's it. Your agent runs on your machine, streams progress to Telegram, and yo
 | [OpenCode](https://github.com/opencode-ai/opencode) | `npm i -g opencode-ai@latest` | 75+ providers via Models.dev, local models |
 | [Pi](https://github.com/mariozechner/pi-coding-agent) | `npm i -g @mariozechner/pi-coding-agent` | Multi-provider auth, conversational |
 
-Use your existing Claude or ChatGPT subscription — no extra API keys needed (unless you want API billing).
+> [!NOTE]
+> Use your existing Claude or ChatGPT subscription — no extra API keys needed (unless you want API billing).
 
-## Features
+---
 
-### Progress streaming
+## 🎯 Features
+
+### 📡 Progress streaming
 
 Watch your agent work in real time. See tool calls, file changes, and elapsed time as they happen.
 
-### Interactive permissions (Claude Code)
+### 🔐 Interactive permissions (Claude Code)
 
 When Claude Code needs to run a tool, Untether shows **Approve / Deny / Pause & Outline Plan** buttons in Telegram. Routine tools (Read, Grep, Glob) are auto-approved. Dangerous operations require your explicit approval with a diff preview.
 
-### Plan mode
+### 📋 Plan mode
 
 Toggle plan mode per chat with `/planmode`. Claude outlines its approach before making changes. Choose between:
 
@@ -91,7 +103,7 @@ Toggle plan mode per chat with `/planmode`. Claude outlines its approach before 
 - **auto** — plan mode with auto-approved transitions
 - **off** — no plan phase
 
-### Projects and worktrees
+### 📁 Projects and worktrees
 
 Register repos with `untether init myproject`, then target them from chat:
 
@@ -99,7 +111,7 @@ Register repos with `untether init myproject`, then target them from chat:
 
 Each branch runs in an isolated git worktree. Multiple projects and branches can run in parallel.
 
-### Cost and usage tracking
+### 💰 Cost and usage tracking
 
 ```toml
 [footer]
@@ -114,7 +126,7 @@ max_cost_per_day = 10.00
 
 See subscription usage or API costs in the progress footer. Use `/usage` for a detailed breakdown. Budget alerts fire at configurable thresholds, and can optionally auto-cancel runs.
 
-### Conversation modes
+### 💬 Conversation modes
 
 | Mode | Best for | How it works |
 |------|----------|-------------|
@@ -122,17 +134,19 @@ See subscription usage or API costs in the progress footer. Use `/usage` for a d
 | **Workspace** | Teams and multi-project | Forum topics bound to repos and branches. |
 | **Handoff** | Terminal-first workflow | Reply-to-continue with resume lines you can paste into terminal. |
 
-### More features
+### ✨ More features
 
-- **Voice notes** — dictate tasks, Untether transcribes and sends to the agent
-- **File transfer** — upload files to your repo or download results back
-- **Scheduled tasks** — cron expressions and webhook triggers
-- **Forum topics** — map Telegram topics to projects and branches
-- **Session export** — `/export` for markdown or JSON transcripts
-- **File browser** — `/browse` to navigate project files with inline buttons
-- **Plugin system** — extend with custom engines, transports, and commands
+- 🎙️ **Voice notes** — dictate tasks, Untether transcribes and sends to the agent
+- 📎 **File transfer** — upload files to your repo or download results back
+- ⏰ **Scheduled tasks** — cron expressions and webhook triggers
+- 💬 **Forum topics** — map Telegram topics to projects and branches
+- 📤 **Session export** — `/export` for markdown or JSON transcripts
+- 🗂️ **File browser** — `/browse` to navigate project files with inline buttons
+- 🧩 **Plugin system** — extend with custom engines, transports, and commands
 
-## Commands
+---
+
+## 🤖 Commands
 
 | Command | What it does |
 |---------|-------------|
@@ -152,7 +166,9 @@ Prefix any message with `/<engine>` to pick an engine for that task, or `/<proje
 
 > /claude /myproject @feat/auth implement OAuth2
 
-## Configuration
+---
+
+## ⚙️ Configuration
 
 Untether reads `~/.untether/untether.toml`. The setup wizard creates this for you, or configure manually:
 
@@ -176,13 +192,20 @@ max_cost_per_day = 10.00
 
 See the [full configuration reference](https://untether.cc/reference/config/) for all options.
 
-## Requirements
+> [!WARNING]
+> Never commit your `untether.toml` — it contains your bot token. The default location (`~/.untether/`) keeps it outside your repos.
+
+---
+
+## 📦 Requirements
 
 - **Python 3.12+** — `uv python install 3.14`
 - **uv** — `curl -LsSf https://astral.sh/uv/install.sh | sh`
 - At least one agent CLI on PATH: `codex`, `claude`, `opencode`, or `pi`
 
-## Engine guides
+---
+
+## 📖 Engine guides
 
 Detailed setup and usage for each engine:
 
@@ -193,7 +216,9 @@ Detailed setup and usage for each engine:
 - [Configuration reference](https://untether.cc/reference/config/) — full walkthrough of `untether.toml`
 - [Troubleshooting guide](https://untether.cc/how-to/troubleshooting/) — common issues and solutions
 
-## Documentation
+---
+
+## 📚 Documentation
 
 Full documentation is available at **[untether.cc](https://untether.cc/)**.
 
@@ -203,14 +228,20 @@ Full documentation is available at **[untether.cc](https://untether.cc/)**.
 - [Multi-engine workflows](https://untether.cc/tutorials/multi-engine/) — switching between agents
 - [Architecture](https://untether.cc/explanation/architecture/) — how the pieces fit together
 
-## Contributing
+---
+
+## 🤝 Contributing
 
 Contributions are welcome! See [CONTRIBUTING.md](CONTRIBUTING.md) for development setup, testing, and guidelines.
 
-## Acknowledgements
+---
+
+## 🙏 Acknowledgements
 
 Untether is a fork of [takopi](https://github.com/banteg/takopi) by [@banteg](https://github.com/banteg), which provided the original Telegram-to-Codex bridge. Untether extends it with interactive permission control, multi-engine support, plan mode, cost tracking, and many other features.
 
-## Licence
+---
+
+## 📄 Licence
 
 [MIT](LICENSE)
