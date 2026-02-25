@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from ...context import RunContext
+from ...logging import get_logger
 from ..chat_prefs import ChatPrefsStore
 from ..engine_overrides import (
     EngineOverrides,
@@ -25,6 +26,8 @@ from .reply import make_reply
 
 if TYPE_CHECKING:
     from ..bridge import TelegramBridgeConfig
+
+logger = get_logger(__name__)
 
 REASONING_USAGE = (
     "usage: `/reasoning`, `/reasoning set <level>`, "
@@ -159,6 +162,7 @@ async def _handle_reasoning_command(
         )
         if scope is None:
             return
+        logger.info("reasoning.set", chat_id=msg.chat_id, engine=engine, level=normalized_level, scope=scope)
         if scope == "topic":
             await reply(
                 text=(
@@ -225,6 +229,7 @@ async def _handle_reasoning_command(
         )
         if scope is None:
             return
+        logger.info("reasoning.cleared", chat_id=msg.chat_id, engine=engine, scope=scope)
         if scope == "topic":
             await reply(text="topic reasoning override **cleared** (using chat default).")
             return

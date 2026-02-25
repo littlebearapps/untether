@@ -3,7 +3,7 @@ name = "untether"
 authors = [{name = "Nathan Schram"}, {name = "banteg (upstream takopi)"}]
 version = "0.1.0"
 description = "Telegram bridge for Claude Code, Codex, and other agent CLIs. Fork of takopi with interactive permission control."
-readme = "readme.md"
+readme = "README.md"
 license = { file = "LICENSE" }
 requires-python = ">=3.12"
 dependencies = [
@@ -56,6 +56,7 @@ planmode = "untether.telegram.commands.planmode:BACKEND"
 ping = "untether.telegram.commands.ping:BACKEND"
 export = "untether.telegram.commands.export:BACKEND"
 browse = "untether.telegram.commands.browse:BACKEND"
+restart = "untether.telegram.commands.restart:BACKEND"
 
 [build-system]
 requires = ["uv_build>=0.9.18,<0.10.0"]
@@ -63,7 +64,9 @@ build-backend = "uv_build"
 
 [dependency-groups]
 dev = [
+    "bandit>=1.8.0",
     "mutmut>=3.4.0",
+    "pip-audit>=2.7.0",
     "pytest>=9.0.2",
     "pytest-anyio>=0.0.0",
     "pytest-cov>=7.0.0",
@@ -87,6 +90,10 @@ do_not_mutate = ["src/untether/cli/*"]
 
 [tool.ruff.lint]
 extend-select = ["B", "BLE001", "C4", "PERF", "RUF043", "S110", "SIM", "UP"]
+
+[tool.bandit]
+# Untether is a subprocess manager — these are expected patterns
+skips = ["B101", "B105", "B404", "B603", "B607"]
 
 [tool.ty.src]
 include = ["src", "tests"]

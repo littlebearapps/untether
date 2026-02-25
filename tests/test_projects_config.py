@@ -1,10 +1,9 @@
 from pathlib import Path
 
-import pytest
 from typer.testing import CliRunner
 
 from untether import cli
-from untether.config import ConfigError, read_config
+from untether.config import read_config
 from untether.ids import RESERVED_CHAT_COMMANDS
 from untether.settings import UntetherSettings
 
@@ -13,26 +12,26 @@ def _base_config() -> dict:
     return {"transports": {"telegram": {"bot_token": "token", "chat_id": 123}}}
 
 
-def test_parse_projects_rejects_engine_alias() -> None:
+def test_parse_projects_skips_engine_alias() -> None:
     config = {**_base_config(), "projects": {"codex": {"path": "/tmp/repo"}}}
-    with pytest.raises(ConfigError, match="aliases must not match engine ids"):
-        settings = UntetherSettings.model_validate(config)
-        settings.to_projects_config(
-            config_path=Path("untether.toml"),
-            engine_ids=["codex"],
-            reserved=RESERVED_CHAT_COMMANDS,
-        )
+    settings = UntetherSettings.model_validate(config)
+    result = settings.to_projects_config(
+        config_path=Path("untether.toml"),
+        engine_ids=["codex"],
+        reserved=RESERVED_CHAT_COMMANDS,
+    )
+    assert "codex" not in result.projects
 
 
-def test_parse_projects_default_project_must_exist() -> None:
+def test_parse_projects_default_project_cleared_when_missing() -> None:
     config = {**_base_config(), "default_project": "z80", "projects": {}}
-    with pytest.raises(ConfigError, match="default_project"):
-        settings = UntetherSettings.model_validate(config)
-        settings.to_projects_config(
-            config_path=Path("untether.toml"),
-            engine_ids=["codex"],
-            reserved=RESERVED_CHAT_COMMANDS,
-        )
+    settings = UntetherSettings.model_validate(config)
+    result = settings.to_projects_config(
+        config_path=Path("untether.toml"),
+        engine_ids=["codex"],
+        reserved=RESERVED_CHAT_COMMANDS,
+    )
+    assert result.default_project is None
 
 
 def test_init_writes_project(monkeypatch, tmp_path) -> None:
@@ -85,35 +84,35 @@ def test_init_migrates_legacy_config(monkeypatch, tmp_path) -> None:
     assert "z80" in raw.get("projects", {})
 
 
-def test_projects_default_engine_unknown() -> None:
+def test_projects_skips_unknown_engine() -> None:
     config = {
         **_base_config(),
         "projects": {"z80": {"path": "/tmp/repo", "default_engine": "nope"}},
     }
     settings = UntetherSettings.model_validate(config)
-    with pytest.raises(ConfigError, match=r"projects\.z80\.default_engine"):
-        settings.to_projects_config(
-            config_path=Path("untether.toml"),
-            engine_ids=["codex"],
-            reserved=RESERVED_CHAT_COMMANDS,
-        )
+    result = settings.to_projects_config(
+        config_path=Path("untether.toml"),
+        engine_ids=["codex"],
+        reserved=RESERVED_CHAT_COMMANDS,
+    )
+    assert "z80" not in result.projects
 
 
-def test_projects_chat_id_cannot_match_transport_chat_id() -> None:
+def test_projects_skips_chat_id_matching_transport() -> None:
     config = {
         "transports": {"telegram": {"bot_token": "token", "chat_id": 123}},
         "projects": {"z80": {"path": "/tmp/repo", "chat_id": 123}},
     }
     settings = UntetherSettings.model_validate(config)
-    with pytest.raises(ConfigError, match="chat_id"):
-        settings.to_projects_config(
-            config_path=Path("untether.toml"),
-            engine_ids=["codex"],
-            reserved=RESERVED_CHAT_COMMANDS,
-        )
+    result = settings.to_projects_config(
+        config_path=Path("untether.toml"),
+        engine_ids=["codex"],
+        reserved=RESERVED_CHAT_COMMANDS,
+    )
+    assert "z80" not in result.projects
 
 
-def test_projects_chat_id_must_be_unique() -> None:
+def test_projects_skips_duplicate_chat_id() -> None:
     config = {
         "transports": {"telegram": {"bot_token": "token", "chat_id": 123}},
         "projects": {
@@ -122,12 +121,14 @@ def test_projects_chat_id_must_be_unique() -> None:
         },
     }
     settings = UntetherSettings.model_validate(config)
-    with pytest.raises(ConfigError, match="chat_id"):
-        settings.to_projects_config(
-            config_path=Path("untether.toml"),
-            engine_ids=["codex"],
-            reserved=RESERVED_CHAT_COMMANDS,
-        )
+    result = settings.to_projects_config(
+        config_path=Path("untether.toml"),
+        engine_ids=["codex"],
+        reserved=RESERVED_CHAT_COMMANDS,
+    )
+    # First project loads, second is skipped
+    assert "a" in result.projects
+    assert "b" not in result.projects
 
 
 def test_projects_relative_path_resolves(tmp_path: Path) -> None:

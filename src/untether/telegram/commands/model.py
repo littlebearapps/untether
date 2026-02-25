@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from ...context import RunContext
+from ...logging import get_logger
 from ..chat_prefs import ChatPrefsStore
 from ..engine_overrides import EngineOverrides, resolve_override_value
 from ..files import split_command_args
@@ -21,6 +22,8 @@ from .reply import make_reply
 
 if TYPE_CHECKING:
     from ..bridge import TelegramBridgeConfig
+
+logger = get_logger(__name__)
 
 MODEL_USAGE = (
     "usage: `/model`, `/model set <model>`, "
@@ -141,6 +144,7 @@ async def _handle_model_command(
         )
         if scope is None:
             return
+        logger.info("model.set", chat_id=msg.chat_id, engine=engine, model=model, scope=scope)
         if scope == "topic":
             await reply(
                 text=(
@@ -206,6 +210,7 @@ async def _handle_model_command(
         )
         if scope is None:
             return
+        logger.info("model.cleared", chat_id=msg.chat_id, engine=engine, scope=scope)
         if scope == "topic":
             await reply(text="topic model override **cleared** (using chat default).")
             return

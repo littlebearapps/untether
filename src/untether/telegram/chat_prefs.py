@@ -96,10 +96,12 @@ class ChatPrefsStore(JsonStateStore[_ChatPrefsState]):
                 if self._chat_is_empty(chat):
                     self._remove_chat_locked(chat_id)
                 self._save_locked()
+                logger.info("prefs.engine.cleared", chat_id=chat_id)
                 return
             chat = self._ensure_chat_locked(chat_id)
             chat.default_engine = normalized
             self._save_locked()
+            logger.info("prefs.engine.set", chat_id=chat_id, engine=normalized)
 
     async def clear_default_engine(self, chat_id: int) -> None:
         await self.set_default_engine(chat_id, None)
@@ -124,10 +126,12 @@ class ChatPrefsStore(JsonStateStore[_ChatPrefsState]):
                 if self._chat_is_empty(chat):
                     self._remove_chat_locked(chat_id)
                 self._save_locked()
+                logger.info("prefs.trigger.cleared", chat_id=chat_id)
                 return
             chat = self._ensure_chat_locked(chat_id)
             chat.trigger_mode = normalized
             self._save_locked()
+            logger.info("prefs.trigger.set", chat_id=chat_id, mode=normalized)
 
     async def clear_trigger_mode(self, chat_id: int) -> None:
         await self.set_trigger_mode(chat_id, None)
@@ -198,10 +202,19 @@ class ChatPrefsStore(JsonStateStore[_ChatPrefsState]):
                 if self._chat_is_empty(chat):
                     self._remove_chat_locked(chat_id)
                 self._save_locked()
+                logger.info("prefs.override.cleared", chat_id=chat_id, engine=engine_key)
                 return
             chat = self._ensure_chat_locked(chat_id)
             chat.engine_overrides[engine_key] = normalized
             self._save_locked()
+            logger.info(
+                "prefs.override.set",
+                chat_id=chat_id,
+                engine=engine_key,
+                model=normalized.model,
+                reasoning=normalized.reasoning,
+                permission_mode=normalized.permission_mode,
+            )
 
     async def clear_engine_override(self, chat_id: int, engine: str) -> None:
         await self.set_engine_override(chat_id, engine, None)

@@ -1054,6 +1054,20 @@ async def run_main_loop(
             state.bot_username = me.username.lower()
         else:
             logger.info("trigger_mode.bot_username.unavailable")
+        # Install graceful shutdown signal handlers
+        import signal as _signal
+
+        from ..shutdown import DRAIN_TIMEOUT_S, is_shutting_down, request_shutdown
+
+        _prev_sigterm = _signal.getsignal(_signal.SIGTERM)
+        _prev_sigint = _signal.getsignal(_signal.SIGINT)
+
+        def _shutdown_handler(signum: int, frame: object) -> None:
+            request_shutdown()
+
+        _signal.signal(_signal.SIGTERM, _shutdown_handler)
+        _signal.signal(_signal.SIGINT, _shutdown_handler)
+
         async with anyio.create_task_group() as tg:
             poller_fn: Callable[
                 [TelegramBridgeConfig], AsyncIterator[TelegramIncomingUpdate]
@@ -1108,6 +1122,46 @@ async def run_main_loop(
                     )
 
                 tg.start_soon(run_config_watch)
+
+            # Graceful drain-then-exit task
+            async def _drain_and_exit() -> None:
+                """Wait for shutdown signal, drain active runs, then exit."""
+                # Poll the threading.Event since signal handlers can't use anyio
+                while not is_shutting_down():
+                    await sleep(0.5)
+
+                active = len(state.running_tasks)
+                logger.info("shutdown.draining", active_runs=active)
+
+                if active > 0:
+                    # Send a draining notice to the default chat
+                    from ..transport import RenderedMessage
+
+                    draining_msg = RenderedMessage(
+                        text=f"\U0001f504 Restarting — waiting for {active} active run(s) to finish…",
+                        extra={},
+                    )
+                    await cfg.exec_cfg.transport.send(
+                        channel_id=cfg.chat_id, message=draining_msg
+                    )
+
+                    # Wait for all runs to complete (up to drain timeout)
+                    with anyio.move_on_after(DRAIN_TIMEOUT_S):
+                        while state.running_tasks:
+                            await sleep(1.0)
+
+                    remaining = len(state.running_tasks)
+                    if remaining > 0:
+                        logger.warning(
+                            "shutdown.drain_timeout",
+                            remaining=remaining,
+                            timeout_s=DRAIN_TIMEOUT_S,
+                        )
+
+                logger.info("shutdown.exiting")
+                tg.cancel_scope.cancel()
+
+            tg.start_soon(_drain_and_exit)
 
             def wrap_on_thread_known(
                 base_cb: Callable[[ResumeToken, anyio.Event], Awaitable[None]] | None,
@@ -1954,4 +2008,6 @@ async def run_main_loop(
             async for update in poller_fn(cfg):
                 await route_update(update)
     finally:
+        _signal.signal(_signal.SIGTERM, _prev_sigterm)
+        _signal.signal(_signal.SIGINT, _prev_sigint)
         await cfg.exec_cfg.transport.close()

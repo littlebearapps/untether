@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+from ...logging import get_logger
 from ..chat_prefs import ChatPrefsStore
 from ..files import split_command_args
 from ..topic_state import TopicStateStore
@@ -14,6 +15,8 @@ from .reply import make_reply
 
 if TYPE_CHECKING:
     from ..bridge import TelegramBridgeConfig
+
+logger = get_logger(__name__)
 
 TRIGGER_USAGE = (
     "usage: `/trigger`, `/trigger all`, `/trigger mentions`, or `/trigger clear`"
@@ -87,6 +90,7 @@ async def _plan_trigger_command(
         )
 
     if action in {"all", "mentions"}:
+        logger.info("trigger.set", chat_id=msg.chat_id, mode=action)
         decision = await check_admin_or_private(
             cfg,
             msg,
@@ -115,6 +119,7 @@ async def _plan_trigger_command(
         )
 
     if action == "clear":
+        logger.info("trigger.clear", chat_id=msg.chat_id)
         decision = await check_admin_or_private(
             cfg,
             msg,

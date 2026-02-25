@@ -167,6 +167,14 @@ async def _run_engine(
         user_msg_id=user_msg_id,
         thread_id=thread_id,
     )
+
+    # Reject new runs while draining for restart
+    from ...shutdown import is_shutting_down
+
+    if is_shutting_down():
+        await reply(text="Untether is restarting — try again shortly.")
+        return
+
     try:
         try:
             entry = runtime.resolve_runner(

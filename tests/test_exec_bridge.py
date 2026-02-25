@@ -649,3 +649,114 @@ class TestFormatRunCost:
         })
         assert result is not None
         assert "2m 5s API" in result
+
+
+# ---------------------------------------------------------------------------
+# format_usage_compact tests
+# ---------------------------------------------------------------------------
+
+
+class TestFormatUsageCompact:
+    def test_both_windows(self):
+        from untether.telegram.commands.usage import format_usage_compact
+
+        data = {
+            "five_hour": {"utilization": 45.0, "resets_at": "2026-02-25T20:00:00+00:00"},
+            "seven_day": {"utilization": 30.0, "resets_at": "2026-03-01T00:00:00+00:00"},
+        }
+        result = format_usage_compact(data)
+        assert result is not None
+        assert "5h: 45%" in result
+        assert "7d: 30%" in result
+        assert "|" in result
+
+    def test_five_hour_only(self):
+        from untether.telegram.commands.usage import format_usage_compact
+
+        data = {
+            "five_hour": {"utilization": 60.0, "resets_at": "2026-02-25T20:00:00+00:00"},
+        }
+        result = format_usage_compact(data)
+        assert result is not None
+        assert "5h: 60%" in result
+        assert "|" not in result
+
+    def test_no_data(self):
+        from untether.telegram.commands.usage import format_usage_compact
+
+        assert format_usage_compact({}) is None
+
+    def test_at_limit(self):
+        from untether.telegram.commands.usage import format_usage_compact
+
+        data = {
+            "five_hour": {"utilization": 100.0, "resets_at": "2026-02-25T20:00:00+00:00"},
+            "seven_day": {"utilization": 80.0, "resets_at": "2026-03-01T00:00:00+00:00"},
+        }
+        result = format_usage_compact(data)
+        assert result is not None
+        assert "5h: 100%" in result
+        assert "7d: 80%" in result
+
+
+# ---------------------------------------------------------------------------
+# _maybe_append_usage_footer always_show tests
+# ---------------------------------------------------------------------------
+
+
+class TestMaybeAppendUsageFooterAlwaysShow:
+    @pytest.mark.anyio
+    async def test_always_show_appends_compact(self, monkeypatch):
+        from untether.runner_bridge import _maybe_append_usage_footer
+
+        async def _fake_fetch():
+            return {
+                "five_hour": {"utilization": 25.0, "resets_at": "2026-02-25T20:00:00+00:00"},
+                "seven_day": {"utilization": 10.0, "resets_at": "2026-03-01T00:00:00+00:00"},
+            }
+
+        monkeypatch.setattr(
+            "untether.telegram.commands.usage.fetch_claude_usage", _fake_fetch
+        )
+
+        msg = RenderedMessage(text="Done.", extra={})
+        result = await _maybe_append_usage_footer(msg, always_show=True)
+        assert "5h: 25%" in result.text
+        assert "7d: 10%" in result.text
+        assert "\u26a1" in result.text
+
+    @pytest.mark.anyio
+    async def test_always_show_false_hides_below_threshold(self, monkeypatch):
+        from untether.runner_bridge import _maybe_append_usage_footer
+
+        async def _fake_fetch():
+            return {
+                "five_hour": {"utilization": 25.0, "resets_at": "2026-02-25T20:00:00+00:00"},
+                "seven_day": {"utilization": 10.0, "resets_at": "2026-03-01T00:00:00+00:00"},
+            }
+
+        monkeypatch.setattr(
+            "untether.telegram.commands.usage.fetch_claude_usage", _fake_fetch
+        )
+
+        msg = RenderedMessage(text="Done.", extra={})
+        result = await _maybe_append_usage_footer(msg, always_show=False)
+        assert result.text == "Done."
+
+    @pytest.mark.anyio
+    async def test_always_show_false_shows_above_threshold(self, monkeypatch):
+        from untether.runner_bridge import _maybe_append_usage_footer
+
+        async def _fake_fetch():
+            return {
+                "five_hour": {"utilization": 85.0, "resets_at": "2026-02-25T20:00:00+00:00"},
+                "seven_day": {"utilization": 40.0, "resets_at": "2026-03-01T00:00:00+00:00"},
+            }
+
+        monkeypatch.setattr(
+            "untether.telegram.commands.usage.fetch_claude_usage", _fake_fetch
+        )
+
+        msg = RenderedMessage(text="Done.", extra={})
+        result = await _maybe_append_usage_footer(msg, always_show=False)
+        assert "5h: 85%" in result.text

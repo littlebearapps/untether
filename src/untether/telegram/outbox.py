@@ -7,7 +7,10 @@ from collections.abc import Awaitable, Callable, Hashable
 
 import anyio
 
+from ..logging import get_logger
 from .client_api import RetryAfter
+
+logger = get_logger(__name__)
 
 SEND_PRIORITY = 0
 DELETE_PRIORITY = 1
@@ -65,10 +68,17 @@ class TelegramOutbox:
         await self.ensure_worker()
         async with self._cond:
             if self._closed:
+                logger.warning("outbox.enqueue.closed", label=op.label, chat_id=op.chat_id)
                 op.set_result(None)
                 return op.result
             previous = self._pending.get(key)
             if previous is not None:
+                logger.debug(
+                    "outbox.enqueue.superseded",
+                    label=op.label,
+                    chat_id=op.chat_id,
+                    prev_label=previous.label,
+                )
                 op.queued_at = previous.queued_at
                 previous.set_result(None)
             self._pending[key] = op
@@ -86,6 +96,8 @@ class TelegramOutbox:
             self._cond.notify()
 
     async def close(self) -> None:
+        pending_count = len(self._pending)
+        logger.info("outbox.closing", pending_count=pending_count)
         async with self._cond:
             self._closed = True
             self.fail_pending()
@@ -93,8 +105,12 @@ class TelegramOutbox:
         if self._tg is not None:
             await self._tg.__aexit__(None, None, None)
             self._tg = None
+        logger.info("outbox.closed")
 
     def fail_pending(self) -> None:
+        count = len(self._pending)
+        if count > 0:
+            logger.warning("outbox.fail_pending", count=count)
         for pending in list(self._pending.values()):
             pending.set_result(None)
         self._pending.clear()
@@ -112,7 +128,20 @@ class TelegramOutbox:
             return await op.execute()
         except Exception as exc:  # noqa: BLE001
             if isinstance(exc, RetryAfter):
+                logger.info(
+                    "outbox.op.retry_after",
+                    label=op.label,
+                    chat_id=op.chat_id,
+                    retry_after=exc.retry_after,
+                )
                 raise
+            logger.error(
+                "outbox.op.failed",
+                label=op.label,
+                chat_id=op.chat_id,
+                error=str(exc),
+                error_type=exc.__class__.__name__,
+            )
             if self._on_error is not None:
                 self._on_error(op, exc)
             return None
@@ -150,18 +179,35 @@ class TelegramOutbox:
                     self.retry_at = max(self.retry_at, self._clock() + exc.retry_after)
                     async with self._cond:
                         if self._closed:
+                            logger.warning(
+                                "outbox.retry_after.closed",
+                                label=op.label,
+                                chat_id=op.chat_id,
+                            )
                             op.set_result(None)
                         elif key not in self._pending:
                             self._pending[key] = op
                             self._cond.notify()
                         else:
+                            logger.debug(
+                                "outbox.retry_after.superseded",
+                                label=op.label,
+                                chat_id=op.chat_id,
+                            )
                             op.set_result(None)
                     continue
                 self.next_at = started_at + self._interval_for_chat(op.chat_id)
                 op.set_result(result)
         except cancel_exc:
+            logger.debug("outbox.worker.cancelled")
             return
         except Exception as exc:  # noqa: BLE001
+            logger.error(
+                "outbox.worker.fatal",
+                error=str(exc),
+                error_type=exc.__class__.__name__,
+                pending_count=len(self._pending),
+            )
             async with self._cond:
                 self._closed = True
                 self.fail_pending()

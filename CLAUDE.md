@@ -9,104 +9,21 @@ Untether adds interactive permission control, plan mode support, and several UX 
 
 ## Features (vs upstream takopi)
 
-### Interactive permission control
+- **Interactive permission control** — bidirectional Telegram buttons for tool approval, plan mode, and clarifying questions
+- **Pause & Outline Plan** — third button on plan approval to request a written plan before proceeding, with progressive cooldown
+- **`/planmode`** — toggle permission mode per chat (on/off/auto)
+- **Early callback answering** — clears button spinners immediately instead of waiting for processing
+- **Approval push notifications** — separate notify message when approval buttons appear
+- **Ephemeral message cleanup** — approval-related messages auto-delete when run finishes
+- **Bold formatting** — command responses use HTML bold for key values
+- **`/usage`** — shows API usage and cost for the current session
+- **`/export`** — exports session transcript as markdown or JSON
+- **`/browse`** — navigate project files via inline keyboard buttons
+- **Cost tracking and budget** — per-run and daily cost limits with configurable alerts
+- **Subscription usage footer** — configurable `[footer]` to show 5h/weekly subscription usage instead of/alongside API costs
+- **Graceful restart** — `/restart` command drains active runs before restarting; SIGTERM also triggers graceful drain
 
-Bidirectional control channel for Claude Code's `--permission-mode plan --permission-prompt-tool stdio` protocol:
-
-- **ExitPlanMode approval** — Claude enters plan mode, Telegram shows **Approve / Deny / Pause & Outline Plan** buttons
-- **Tool permission requests** — any tool requiring approval shows inline keyboard buttons
-- **Tool auto-approve** — routine tools (Grep, Glob, Read, Bash, etc.) are auto-approved silently; only `ExitPlanMode` and `AskUserQuestion` prompt the user
-- **AskUserQuestion support** — Claude's clarifying questions are shown in Telegram; user replies with text, which is routed back as the answer via `_PENDING_ASK_REQUESTS` registry
-- **Diff preview in approvals** — Edit/Write/Bash tool approval messages include a compact diff preview (`_format_diff_preview`)
-- **Concurrent sessions** — multiple chats can run Claude Code simultaneously via `_SESSION_STDIN` and `_REQUEST_TO_SESSION` registries
-
-### "Pause & Outline Plan" button
-
-When Claude requests ExitPlanMode, a third button lets the user ask Claude to write a step-by-step plan outline in the chat before proceeding:
-
-- Sends a detailed deny message instructing Claude to list every file, change, and phase as visible text
-- **Progressive cooldown** — auto-denies rapid ExitPlanMode retries: 30s → 60s → 90s → 120s (capped), escalating with clear BLOCKED messages
-- Cooldown count is preserved across expiry so repeated discuss clicks keep escalating
-- Deny count resets on explicit Approve or Deny
-
-### `/planmode` command
-
-Toggle Claude Code's `--permission-mode` per chat:
-
-- `/planmode` — toggle on/off (treats `auto` as "on" for toggle)
-- `/planmode on` — full plan mode with manual ExitPlanMode approval
-- `/planmode auto` — plan mode with auto-approved ExitPlanMode (no buttons shown)
-- `/planmode off` — acceptEdits mode, no plan phase
-- `/planmode show` — show current state
-- `/planmode clear` — remove override, use engine config default
-
-`auto` mode stores `permission_mode = "auto"` in overrides but passes `--permission-mode plan` to the CLI. The `auto_approve_exit_plan_mode` flag on `ClaudeStreamState` causes ExitPlanMode requests to be silently auto-approved. Also works from `untether.toml`: `permission_mode = "auto"` in `[claude]`.
-
-Persisted via `ChatPrefsStore` as an `EngineOverrides.permission_mode` field.
-
-### Early callback answering
-
-Telegram inline buttons show a spinner until `answerCallbackQuery` is called. Upstream defers this to the `finally` block (~150-300ms delay). Backends can set `answer_early = True` and provide `early_answer_toast()` to clear the spinner immediately with a toast ("Approved", "Denied", "Outlining plan...").
-
-### Approval push notifications
-
-`edit_message_text` doesn't trigger phone push notifications. Untether detects when approval buttons appear and sends a separate `notify=True` message ("Action required — approval needed"). The `_approval_notified` flag resets when buttons disappear, so subsequent approvals in the same run also notify.
-
-### Ephemeral message cleanup
-
-Approval-related messages auto-delete to keep the chat clean:
-
-- "Action required" notification — deleted when the user clicks a button
-- "Approved/Denied" feedback — deleted when the run finishes
-
-Tracked via `_approval_notify_ref` (in `ProgressEdits`) and `_EPHEMERAL_MSGS` (in `runner_bridge.py`).
-
-### Bold formatting in command responses
-
-`/planmode`, `/agent`, `/model`, `/reasoning`, and `/trigger` commands return responses with key state values bolded. `CommandResult` supports a `parse_mode` field for HTML formatting through the command dispatch path.
-
-### `/usage` command
-
-Shows Claude Code API usage and cost for the current session.
-
-### `/export` command
-
-Exports the last session transcript as markdown or JSON:
-
-- `/export` — markdown format with event timeline, usage stats, and summary
-- `/export json` — structured JSON with all events and metadata
-
-Session history is recorded automatically during runs (up to 20 sessions). Tracked in `_SESSION_HISTORY` within `commands/export.py`.
-
-### `/browse` command
-
-Navigate project files via inline keyboard buttons:
-
-- `/browse` — list project root directory
-- `/browse src` — browse a subdirectory by path
-- Button navigation: tap directories to descend, `..` to go up, files to preview
-
-**Project-aware**: resolves the project root from the chat's configured project route via `TransportRuntime.default_context_for_chat()`. Falls back to `get_run_base_dir()` or CWD. Path registry maps short numeric IDs to paths (avoids 64-byte callback_data limit).
-
-### Cost tracking and budget
-
-Per-run and daily cost tracking with configurable budgets:
-
-```toml
-[cost_budget]
-enabled = true
-max_cost_per_run = 2.00
-max_cost_per_day = 10.00
-warn_at_pct = 70
-auto_cancel = false
-```
-
-- Cost displayed in progress footer: `💰 $0.37 · 9 turns · 1m 47s API · 11 in / 1.2k out`
-- Budget alerts at warning threshold (70% by default) and exceeded
-- Optional `auto_cancel` to stop runs that exceed the per-run budget
-- Daily cost accumulates across runs, resets at midnight
-
-Implemented in `cost_tracker.py` with budget checking in `runner_bridge.py`.
+See `.claude/skills/claude-stream-json/` and `.claude/rules/control-channel.md` for implementation details.
 
 ## Architecture
 
@@ -121,36 +38,24 @@ Telegram <-> TelegramPresenter <-> RunnerBridge <-> Runner (claude/codex/opencod
 - **TelegramPresenter** (`src/untether/telegram/bridge.py`) — renders progress, inline keyboards, and answers
 - **Commands** (`src/untether/telegram/commands/`) — command/callback handlers
 
-### Concurrency design
-
-`ClaudeRunner` is a singleton per engine, shared across all chats:
-
-1. `self._proc_stdin` is unreliable (overwritten by last subprocess) — all stdin refs captured locally at spawn time
-2. `_SESSION_STDIN` maps `session_id -> stdin pipe` (registered in `_iter_jsonl_events`)
-3. `_REQUEST_TO_SESSION` maps `request_id -> session_id` for callback routing
-4. Stdout pipe breaks immediately after `CompletedEvent` (MCP servers inherit the FD)
-5. `ControlInitializeRequest` and auto-approved requests drained after every JSONL line
-
 ## Key files
 
 | File | Purpose |
 |------|---------|
-| `runners/claude.py` | Control channel, stdin/session registries, `write_control_response` (with `deny_message`), Outline Plan button, progressive discuss cooldown, `auto` permission mode, AskUserQuestion handling, diff preview |
-| `runner_bridge.py` | Approval push notifications, ephemeral message tracking/cleanup, cost budget checking, session export recording |
-| `cost_tracker.py` | Per-run/daily cost accumulation, budget alerts (`CostBudget`, `CostAlert`) |
-| `commands/claude_control.py` | Approve/Deny/Discuss handler, early answer toast, cooldown wiring |
-| `commands/dispatch.py` | Callback dispatch, `callback_query_id` passthrough, ephemeral registration, early answering, `parse_mode` support |
+| `runners/claude.py` | Claude Code runner, interactive features |
+| `runner_bridge.py` | Connects runners to Telegram presenter |
+| `cost_tracker.py` | Per-run/daily cost tracking and budget alerts |
+| `commands/claude_control.py` | Approve/Deny/Discuss callback handler |
+| `commands/dispatch.py` | Callback dispatch and command routing |
 | `commands/planmode.py` | `/planmode` toggle command |
 | `commands/usage.py` | `/usage` command |
-| `commands/export.py` | `/export` command, session history recording |
-| `commands/browse.py` | `/browse` file browser with inline keyboard navigation |
-| `commands/model.py` | Bold formatting for model override responses |
-| `commands/reasoning.py` | Bold formatting for reasoning override responses |
-| `commands/trigger.py` | Bold formatting for trigger mode responses |
-| `commands/agent.py` | Bold formatting for engine selection responses |
-| `telegram/bridge.py` | Inline keyboard rendering for control requests |
-| `telegram/loop.py` | `callback_query_id` passthrough, AskUserQuestion text interception |
-| `commands.py` | `parse_mode` field on `CommandResult` |
+| `commands/export.py` | `/export` command |
+| `commands/browse.py` | `/browse` file browser |
+| `commands/restart.py` | `/restart` graceful restart command |
+| `shutdown.py` | Graceful shutdown state and drain logic |
+| `telegram/bridge.py` | Telegram message rendering |
+| `telegram/loop.py` | Telegram update loop, signal handlers, drain-then-exit |
+| `commands.py` | Command result types |
 
 ## Reference docs
 
@@ -215,6 +120,8 @@ Rules in `.claude/rules/` auto-load when editing matching files:
 - `test_cost_tracker.py` — 56 tests: cost accumulation, per-run/daily budget thresholds, warning levels, daily reset, auto-cancel flag
 - `test_export_command.py` — 28 tests: session event recording, markdown/JSON export formatting, usage integration, session trimming
 - `test_browse_command.py` — 36 tests: path registry, directory listing, file preview, inline keyboard buttons, project-aware root resolution, security (path traversal)
+- `test_shutdown.py` — 4 tests: shutdown state transitions, idempotency, reset
+- `test_restart_command.py` — 3 tests: command triggers shutdown, idempotent response, command id
 
 ## Development
 
@@ -235,6 +142,26 @@ cd /home/nathan/untether && uv run pytest
 # Lint
 cd /home/nathan/untether && uv run ruff check src/
 ```
+
+## CI Pipeline
+
+GitHub Actions CI runs on push to master and on PRs:
+
+| Job | What it checks |
+|-----|---------------|
+| format | `ruff format --check --diff` |
+| ruff | `ruff check` with GitHub annotations |
+| ty | Type checking (Astral's ty) |
+| pytest | Tests on Python 3.12, 3.13, 3.14 with 80% coverage threshold |
+| build | `uv build` wheel + sdist validation |
+| lockfile | `uv lock --check` ensures lockfile is in sync |
+| pip-audit | Dependency vulnerability scanning (PyPA advisory DB) |
+| bandit | Python SAST (security static analysis) |
+| docs | Zensical docs build |
+
+All third-party actions are pinned to commit SHAs (supply chain protection). Top-level `permissions: {}` restricts to least-privilege.
+
+Release pipeline (`release.yml`) uses PyPI trusted publishing with OIDC.
 
 ## Conventions
 

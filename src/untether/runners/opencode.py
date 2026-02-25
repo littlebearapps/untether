@@ -157,6 +157,7 @@ def translate_opencode_event(
         case opencode_schema.StepStart():
             if not state.emitted_started and state.session_id:
                 state.emitted_started = True
+                logger.info("opencode.session.started", session_id=state.session_id, title=title)
                 return [
                     StartedEvent(
                         engine=ENGINE,
@@ -254,6 +255,11 @@ def translate_opencode_event(
                 if state.session_id:
                     resume = ResumeToken(engine=ENGINE, value=state.session_id)
 
+                logger.info(
+                    "opencode.completed",
+                    session_id=state.session_id,
+                    answer_len=len(state.last_text or ""),
+                )
                 return [
                     CompletedEvent(
                         engine=ENGINE,
@@ -285,6 +291,11 @@ def translate_opencode_event(
             if state.session_id:
                 resume = ResumeToken(engine=ENGINE, value=state.session_id)
 
+            logger.error(
+                "opencode.error",
+                session_id=state.session_id,
+                error=str(message),
+            )
             return [
                 CompletedEvent(
                     engine=ENGINE,
@@ -418,6 +429,7 @@ class OpenCodeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
         state: OpenCodeStreamState,
     ) -> list[UntetherEvent]:
         message = f"opencode failed (rc={rc})."
+        logger.error("opencode.process.failed", rc=rc, session_id=state.session_id)
         resume_for_completed = found_session or resume
         return [
             self.note_event(
@@ -443,6 +455,7 @@ class OpenCodeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
     ) -> list[UntetherEvent]:
         if not found_session:
             message = "opencode finished but no session_id was captured"
+            logger.warning("opencode.stream.no_session")
             resume_for_completed = resume
             return [
                 CompletedEvent(
