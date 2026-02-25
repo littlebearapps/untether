@@ -173,7 +173,11 @@ def translate_pi_event(
         return out
 
     if not state.started:
-        logger.info("pi.session.started.implicit", resume=state.resume.value, event_type=type(event).__name__)
+        logger.info(
+            "pi.session.started.implicit",
+            resume=state.resume.value,
+            event_type=type(event).__name__,
+        )
         out.append(
             StartedEvent(
                 engine=ENGINE,

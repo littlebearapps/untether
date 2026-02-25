@@ -25,7 +25,15 @@ import msgspec
 from ..backends import EngineBackend, EngineConfig
 from ..events import EventFactory
 from ..logging import get_logger
-from ..model import Action, ActionKind, EngineId, ResumeToken, StartedEvent, UntetherEvent, CompletedEvent
+from ..model import (
+    Action,
+    ActionKind,
+    EngineId,
+    ResumeToken,
+    StartedEvent,
+    UntetherEvent,
+    CompletedEvent,
+)
 from ..runner import JsonlSubprocessRunner, ResumeTokenMixin, Runner, JsonlStreamState
 from .run_options import get_run_options
 from ..schemas import claude as claude_schema
@@ -101,7 +109,9 @@ class ClaudeStreamState:
     last_assistant_text: str | None = None
     note_seq: int = 0
     # Phase 2: Control request tracking
-    pending_control_requests: dict[str, tuple[claude_schema.StreamControlRequest, float]] = field(default_factory=dict)
+    pending_control_requests: dict[
+        str, tuple[claude_schema.StreamControlRequest, float]
+    ] = field(default_factory=dict)
     # Auto-approve queue: request IDs that should be approved without user interaction
     auto_approve_queue: list[str] = field(default_factory=list)
     # Auto-deny queue: (request_id, message) pairs for rate-limited denials
@@ -214,7 +224,7 @@ def _format_diff_preview(tool_name: str, tool_input: dict[str, Any]) -> str:
 
     def _truncate(text: str, max_len: int) -> str:
         if len(text) > max_len:
-            return text[:max_len - 1] + "…"
+            return text[: max_len - 1] + "…"
         return text
 
     if tool_name == "Edit":
@@ -226,6 +236,7 @@ def _format_diff_preview(tool_name: str, tool_input: dict[str, Any]) -> str:
         lines: list[str] = []
         if file_path:
             from ..utils.paths import relativize_path
+
             lines.append(f"📝 {relativize_path(file_path)}")
         old_lines = old_string.splitlines()
         new_lines = new_string.splitlines()
@@ -247,6 +258,7 @@ def _format_diff_preview(tool_name: str, tool_input: dict[str, Any]) -> str:
         lines = []
         if file_path:
             from ..utils.paths import relativize_path
+
             lines.append(f"📝 {relativize_path(file_path)}")
         content_lines = content.splitlines()
         line_count = len(content_lines)
@@ -301,6 +313,7 @@ def translate_claude_event(
 ) -> list[UntetherEvent]:
     # DEBUG: Log all incoming events to track flow
     import structlog
+
     debug_logger = structlog.get_logger()
     debug_logger.info(
         "translate_claude_event.received",
@@ -443,7 +456,9 @@ def translate_claude_event(
                 claude_schema.ControlInterruptRequest,
             )
             if isinstance(request, _AUTO_APPROVE_TYPES):
-                request_type = type(request).__name__.replace("Control", "").replace("Request", "")
+                request_type = (
+                    type(request).__name__.replace("Control", "").replace("Request", "")
+                )
                 logger.debug(
                     "control_request.auto_approve",
                     request_id=request_id,
@@ -492,7 +507,9 @@ def translate_claude_event(
                         return []
 
             # Phase 2: Interactive control request with inline keyboard
-            request_type = type(request).__name__.replace("Control", "").replace("Request", "")
+            request_type = (
+                type(request).__name__.replace("Control", "").replace("Request", "")
+            )
 
             # Extract details based on request type
             details = ""
@@ -586,12 +603,14 @@ def translate_claude_event(
             if isinstance(request, claude_schema.ControlCanUseToolRequest):
                 tool_name = getattr(request, "tool_name", "")
                 if tool_name == "ExitPlanMode":
-                    button_rows.append([
-                        {
-                            "text": "Pause & Outline Plan",
-                            "callback_data": f"claude_control:discuss:{request_id}",
-                        },
-                    ])
+                    button_rows.append(
+                        [
+                            {
+                                "text": "Pause & Outline Plan",
+                                "callback_data": f"claude_control:discuss:{request_id}",
+                            },
+                        ]
+                    )
 
             # A1: AskUserQuestion — extract the question for display
             ask_question: str | None = None
@@ -606,7 +625,11 @@ def translate_claude_event(
                         if not ask_question:
                             questions = tool_input.get("questions", [])
                             if questions and isinstance(questions, list):
-                                ask_question = questions[0].get("question", "") if isinstance(questions[0], dict) else ""
+                                ask_question = (
+                                    questions[0].get("question", "")
+                                    if isinstance(questions[0], dict)
+                                    else ""
+                                )
                     if ask_question:
                         warning_text = f"❓ {ask_question}"
                     # Register this request for reply handling
@@ -664,9 +687,8 @@ class ClaudeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
         """Resolve effective permission mode from per-chat override or engine config."""
         run_options = get_run_options()
         return (
-            (run_options.permission_mode if run_options else None)
-            or self.permission_mode
-        )
+            run_options.permission_mode if run_options else None
+        ) or self.permission_mode
 
     async def write_control_response(
         self, request_id: str, approved: bool, *, deny_message: str | None = None
@@ -759,15 +781,19 @@ class ClaudeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
         # without -p. The prompt is sent as a JSON user message on stdin.
         if effective_mode is not None:
             args: list[str] = [
-                "--output-format", "stream-json",
-                "--input-format", "stream-json",
+                "--output-format",
+                "stream-json",
+                "--input-format",
+                "stream-json",
                 "--verbose",
             ]
         else:
             args = [
                 "-p",
-                "--output-format", "stream-json",
-                "--input-format", "stream-json",
+                "--output-format",
+                "stream-json",
+                "--input-format",
+                "stream-json",
                 "--verbose",
             ]
 
@@ -845,9 +871,7 @@ class ClaudeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
 
     def new_state(self, prompt: str, resume: ResumeToken | None) -> ClaudeStreamState:
         state = ClaudeStreamState()
-        state.auto_approve_exit_plan_mode = (
-            self._effective_permission_mode() == "auto"
-        )
+        state.auto_approve_exit_plan_mode = self._effective_permission_mode() == "auto"
         return state
 
     def start_run(
@@ -984,12 +1008,22 @@ class ClaudeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
             try:
                 if pipe is not None:
                     await pipe.send(payload)
-                    logger.info("control_response.auto_approved", request_id=req_id, channel="pipe")
+                    logger.info(
+                        "control_response.auto_approved",
+                        request_id=req_id,
+                        channel="pipe",
+                    )
                 elif self._pty_master_fd is not None:
                     os.write(self._pty_master_fd, payload)
-                    logger.info("control_response.auto_approved", request_id=req_id, channel="pty")
+                    logger.info(
+                        "control_response.auto_approved",
+                        request_id=req_id,
+                        channel="pty",
+                    )
                 else:
-                    logger.error("control_response.auto_approve_failed", request_id=req_id)
+                    logger.error(
+                        "control_response.auto_approve_failed", request_id=req_id
+                    )
             except (OSError, anyio.ClosedResourceError) as e:
                 logger.error(
                     "control_response.auto_approve_failed",
@@ -1019,10 +1053,16 @@ class ClaudeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
             try:
                 if pipe is not None:
                     await pipe.send(payload)
-                    logger.info("control_response.auto_denied", request_id=req_id, channel="pipe")
+                    logger.info(
+                        "control_response.auto_denied",
+                        request_id=req_id,
+                        channel="pipe",
+                    )
                 elif self._pty_master_fd is not None:
                     os.write(self._pty_master_fd, payload)
-                    logger.info("control_response.auto_denied", request_id=req_id, channel="pty")
+                    logger.info(
+                        "control_response.auto_denied", request_id=req_id, channel="pty"
+                    )
                 else:
                     logger.error("control_response.auto_deny_failed", request_id=req_id)
             except (OSError, anyio.ClosedResourceError) as e:
@@ -1076,7 +1116,9 @@ class ClaudeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
         state: ClaudeStreamState,
     ) -> list[UntetherEvent]:
         # Phase 2: Cleanup runner registration on error
-        session_id = found_session.value if found_session else (resume.value if resume else None)
+        session_id = (
+            found_session.value if found_session else (resume.value if resume else None)
+        )
         if session_id:
             _ACTIVE_RUNNERS.pop(session_id, None)
             _SESSION_STDIN.pop(session_id, None)
@@ -1100,7 +1142,9 @@ class ClaudeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
         state: ClaudeStreamState,
     ) -> list[UntetherEvent]:
         # Phase 2: Cleanup runner registration
-        session_id = found_session.value if found_session else (resume.value if resume else None)
+        session_id = (
+            found_session.value if found_session else (resume.value if resume else None)
+        )
         if session_id:
             _ACTIVE_RUNNERS.pop(session_id, None)
             _SESSION_STDIN.pop(session_id, None)

@@ -157,7 +157,9 @@ def translate_opencode_event(
         case opencode_schema.StepStart():
             if not state.emitted_started and state.session_id:
                 state.emitted_started = True
-                logger.info("opencode.session.started", session_id=state.session_id, title=title)
+                logger.info(
+                    "opencode.session.started", session_id=state.session_id, title=title
+                )
                 return [
                     StartedEvent(
                         engine=ENGINE,

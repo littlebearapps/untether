@@ -137,7 +137,9 @@ def _format_listing(
             truncated_dirs += 1
             continue
         pid = _register_path(str(d))
-        dir_buttons.append({"text": f"📂 {d.name}/", "callback_data": f"browse:d:{pid}"})
+        dir_buttons.append(
+            {"text": f"📂 {d.name}/", "callback_data": f"browse:d:{pid}"}
+        )
         shown += 1
     # Pack dir buttons 2 per row
     buttons.extend(dir_buttons[i : i + 2] for i in range(0, len(dir_buttons), 2))
@@ -153,7 +155,9 @@ def _format_listing(
         except OSError:
             size_str = "?"
         pid = _register_path(str(f))
-        file_buttons.append({"text": f"📄 {f.name} ({size_str})", "callback_data": f"browse:f:{pid}"})
+        file_buttons.append(
+            {"text": f"📄 {f.name} ({size_str})", "callback_data": f"browse:f:{pid}"}
+        )
         shown += 1
     # Pack file buttons 2 per row
     buttons.extend(file_buttons[i : i + 2] for i in range(0, len(file_buttons), 2))
@@ -260,7 +264,10 @@ class BrowseCommand:
         return CommandResult(text=f"Not found: {args}", notify=True)
 
     async def _browse_dir(
-        self, dirpath: Path, root: Path, ctx: CommandContext,
+        self,
+        dirpath: Path,
+        root: Path,
+        ctx: CommandContext,
     ) -> CommandResult | None:
         if not dirpath.is_dir():
             return CommandResult(text="Directory not found.", notify=True)

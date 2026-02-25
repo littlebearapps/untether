@@ -35,6 +35,7 @@ from untether.schemas import claude as claude_schema
 # Helpers
 # ---------------------------------------------------------------------------
 
+
 def _decode_event(payload: dict) -> claude_schema.StreamJsonMessage:
     """Build a StreamJsonMessage from a minimal dict, filling in defaults."""
     data = dict(payload)
@@ -55,7 +56,9 @@ def _decode_event(payload: dict) -> claude_schema.StreamJsonMessage:
     return claude_schema.decode_stream_json_line(json.dumps(data).encode())
 
 
-def _make_state_with_session(session_id: str = "sess-1") -> tuple[ClaudeStreamState, EventFactory]:
+def _make_state_with_session(
+    session_id: str = "sess-1",
+) -> tuple[ClaudeStreamState, EventFactory]:
     """Return a state whose factory already has a resume token set."""
     state = ClaudeStreamState()
     token = ResumeToken(engine=ENGINE, value=session_id)
@@ -66,6 +69,7 @@ def _make_state_with_session(session_id: str = "sess-1") -> tuple[ClaudeStreamSt
 # ---------------------------------------------------------------------------
 # Autouse fixture: clear global registries between tests
 # ---------------------------------------------------------------------------
+
 
 @pytest.fixture(autouse=True)
 def _clear_registries():
@@ -82,19 +86,22 @@ def _clear_registries():
 # A. Control Request Translation
 # ===========================================================================
 
+
 def test_can_use_tool_produces_warning_with_inline_keyboard() -> None:
     """ExitPlanMode CanUseTool request -> ActionEvent with kind='warning'
     and inline_keyboard containing Approve/Deny buttons with request_id."""
     state, factory = _make_state_with_session()
-    event = _decode_event({
-        "type": "control_request",
-        "request_id": "req-1",
-        "request": {
-            "subtype": "can_use_tool",
-            "tool_name": "ExitPlanMode",
-            "input": {},
-        },
-    })
+    event = _decode_event(
+        {
+            "type": "control_request",
+            "request_id": "req-1",
+            "request": {
+                "subtype": "can_use_tool",
+                "tool_name": "ExitPlanMode",
+                "input": {},
+            },
+        }
+    )
     events = translate_claude_event(event, title="claude", state=state, factory=factory)
 
     assert len(events) == 1
@@ -133,11 +140,13 @@ def test_auto_approve_types_add_to_queue(subtype: str, extra_fields: dict) -> No
     """Auto-approve request types produce no events and queue the request_id."""
     state, factory = _make_state_with_session()
     request = {"subtype": subtype, **extra_fields}
-    event = _decode_event({
-        "type": "control_request",
-        "request_id": f"req-{subtype}",
-        "request": request,
-    })
+    event = _decode_event(
+        {
+            "type": "control_request",
+            "request_id": f"req-{subtype}",
+            "request": request,
+        }
+    )
     events = translate_claude_event(event, title="claude", state=state, factory=factory)
 
     assert events == []
@@ -146,20 +155,34 @@ def test_auto_approve_types_add_to_queue(subtype: str, extra_fields: dict) -> No
 
 @pytest.mark.parametrize(
     "tool_name",
-    ["Bash", "Read", "Edit", "Write", "Glob", "Grep", "WebFetch", "WebSearch", "Task", "Skill", "ToolSearch"],
+    [
+        "Bash",
+        "Read",
+        "Edit",
+        "Write",
+        "Glob",
+        "Grep",
+        "WebFetch",
+        "WebSearch",
+        "Task",
+        "Skill",
+        "ToolSearch",
+    ],
 )
 def test_non_exit_plan_mode_tools_auto_approved(tool_name: str) -> None:
     """CanUseTool requests for tools other than ExitPlanMode are auto-approved."""
     state, factory = _make_state_with_session()
-    event = _decode_event({
-        "type": "control_request",
-        "request_id": f"req-auto-{tool_name}",
-        "request": {
-            "subtype": "can_use_tool",
-            "tool_name": tool_name,
-            "input": {},
-        },
-    })
+    event = _decode_event(
+        {
+            "type": "control_request",
+            "request_id": f"req-auto-{tool_name}",
+            "request": {
+                "subtype": "can_use_tool",
+                "tool_name": tool_name,
+                "input": {},
+            },
+        }
+    )
     events = translate_claude_event(event, title="claude", state=state, factory=factory)
 
     assert events == []
@@ -169,15 +192,17 @@ def test_non_exit_plan_mode_tools_auto_approved(tool_name: str) -> None:
 def test_exit_plan_mode_not_auto_approved() -> None:
     """ExitPlanMode CanUseTool requests are NOT auto-approved (require user interaction)."""
     state, factory = _make_state_with_session()
-    event = _decode_event({
-        "type": "control_request",
-        "request_id": "req-epm",
-        "request": {
-            "subtype": "can_use_tool",
-            "tool_name": "ExitPlanMode",
-            "input": {},
-        },
-    })
+    event = _decode_event(
+        {
+            "type": "control_request",
+            "request_id": "req-epm",
+            "request": {
+                "subtype": "can_use_tool",
+                "tool_name": "ExitPlanMode",
+                "input": {},
+            },
+        }
+    )
     events = translate_claude_event(event, title="claude", state=state, factory=factory)
 
     assert len(events) == 1
@@ -188,15 +213,17 @@ def test_exit_plan_mode_not_auto_approved() -> None:
 def test_request_to_session_populated() -> None:
     """A CanUseTool control request (requiring approval) populates _REQUEST_TO_SESSION."""
     state, factory = _make_state_with_session("sess-abc")
-    event = _decode_event({
-        "type": "control_request",
-        "request_id": "req-map",
-        "request": {
-            "subtype": "can_use_tool",
-            "tool_name": "ExitPlanMode",
-            "input": {},
-        },
-    })
+    event = _decode_event(
+        {
+            "type": "control_request",
+            "request_id": "req-map",
+            "request": {
+                "subtype": "can_use_tool",
+                "tool_name": "ExitPlanMode",
+                "input": {},
+            },
+        }
+    )
     translate_claude_event(event, title="claude", state=state, factory=factory)
 
     assert _REQUEST_TO_SESSION["req-map"] == "sess-abc"
@@ -206,15 +233,17 @@ def test_request_to_input_populated() -> None:
     """A CanUseTool control request (requiring approval) stores original tool input."""
     state, factory = _make_state_with_session()
     tool_input: dict[str, Any] = {}
-    event = _decode_event({
-        "type": "control_request",
-        "request_id": "req-inp",
-        "request": {
-            "subtype": "can_use_tool",
-            "tool_name": "ExitPlanMode",
-            "input": tool_input,
-        },
-    })
+    event = _decode_event(
+        {
+            "type": "control_request",
+            "request_id": "req-inp",
+            "request": {
+                "subtype": "can_use_tool",
+                "tool_name": "ExitPlanMode",
+                "input": tool_input,
+            },
+        }
+    )
     translate_claude_event(event, title="claude", state=state, factory=factory)
 
     assert _REQUEST_TO_INPUT["req-inp"] == tool_input
@@ -223,6 +252,7 @@ def test_request_to_input_populated() -> None:
 # ===========================================================================
 # B. Control Response Routing
 # ===========================================================================
+
 
 @pytest.mark.anyio
 async def test_send_control_response_success() -> None:
@@ -295,6 +325,7 @@ async def test_write_control_response_deny_format() -> None:
 # C. Registry Lifecycle
 # ===========================================================================
 
+
 def test_session_stdin_different_entries() -> None:
     """Two sessions get distinct stdin entries."""
     fake_a = AsyncMock()
@@ -352,6 +383,7 @@ def test_stream_end_events_cleans_registries() -> None:
 # D. Auto-approve Drain
 # ===========================================================================
 
+
 @pytest.mark.anyio
 async def test_drain_auto_approve_uses_provided_stdin() -> None:
     """Drain writes to the provided stdin, not self._proc_stdin."""
@@ -388,6 +420,7 @@ async def test_drain_auto_approve_falls_back_to_proc_stdin() -> None:
 # E. Full Lifecycle
 # ===========================================================================
 
+
 def test_control_action_lifecycle_tool_use_to_result() -> None:
     """tool_use -> control_request -> tool_result: verifies last_tool_use_id,
     control_action_for_tool mapping, and completion of both actions.
@@ -395,18 +428,22 @@ def test_control_action_lifecycle_tool_use_to_result() -> None:
     state, factory = _make_state_with_session()
 
     # Step 1: assistant message with tool_use
-    tool_use_evt = _decode_event({
-        "type": "assistant",
-        "message": {
-            "id": "msg-1",
-            "content": [{
-                "type": "tool_use",
-                "id": "toolu_lifecycle",
-                "name": "ExitPlanMode",
-                "input": {},
-            }],
-        },
-    })
+    tool_use_evt = _decode_event(
+        {
+            "type": "assistant",
+            "message": {
+                "id": "msg-1",
+                "content": [
+                    {
+                        "type": "tool_use",
+                        "id": "toolu_lifecycle",
+                        "name": "ExitPlanMode",
+                        "input": {},
+                    }
+                ],
+            },
+        }
+    )
     events_1 = translate_claude_event(
         tool_use_evt, title="claude", state=state, factory=factory
     )
@@ -415,15 +452,17 @@ def test_control_action_lifecycle_tool_use_to_result() -> None:
     assert state.last_tool_use_id == "toolu_lifecycle"
 
     # Step 2: control request (can_use_tool) — ExitPlanMode requires approval
-    control_evt = _decode_event({
-        "type": "control_request",
-        "request_id": "req-lifecycle",
-        "request": {
-            "subtype": "can_use_tool",
-            "tool_name": "ExitPlanMode",
-            "input": {},
-        },
-    })
+    control_evt = _decode_event(
+        {
+            "type": "control_request",
+            "request_id": "req-lifecycle",
+            "request": {
+                "subtype": "can_use_tool",
+                "tool_name": "ExitPlanMode",
+                "input": {},
+            },
+        }
+    )
     events_2 = translate_claude_event(
         control_evt, title="claude", state=state, factory=factory
     )
@@ -435,18 +474,22 @@ def test_control_action_lifecycle_tool_use_to_result() -> None:
     control_action_id = state.control_action_for_tool["toolu_lifecycle"]
 
     # Step 3: tool result
-    result_evt = _decode_event({
-        "type": "user",
-        "message": {
-            "id": "msg-2",
-            "content": [{
-                "type": "tool_result",
-                "tool_use_id": "toolu_lifecycle",
-                "content": "plan approved",
-                "is_error": False,
-            }],
-        },
-    })
+    result_evt = _decode_event(
+        {
+            "type": "user",
+            "message": {
+                "id": "msg-2",
+                "content": [
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": "toolu_lifecycle",
+                        "content": "plan approved",
+                        "is_error": False,
+                    }
+                ],
+            },
+        }
+    )
     events_3 = translate_claude_event(
         result_evt, title="claude", state=state, factory=factory
     )
@@ -471,6 +514,7 @@ def test_control_action_lifecycle_tool_use_to_result() -> None:
 # ===========================================================================
 # F. Discuss Action & Custom Deny Message
 # ===========================================================================
+
 
 @pytest.mark.anyio
 async def test_send_control_response_custom_deny_message() -> None:
@@ -518,6 +562,7 @@ async def test_send_control_response_default_deny_message() -> None:
 # G. ClaudeControlCommand: early_answer_toast & discuss handler
 # ===========================================================================
 
+
 def test_early_answer_toast_values() -> None:
     """early_answer_toast returns correct toast for each action."""
     from untether.telegram.commands.claude_control import ClaudeControlCommand
@@ -533,7 +578,10 @@ def test_early_answer_toast_values() -> None:
 @pytest.mark.anyio
 async def test_discuss_action_sends_deny_with_custom_message() -> None:
     """Discuss action sends a deny with the outline-plan deny message."""
-    from untether.telegram.commands.claude_control import ClaudeControlCommand, _DISCUSS_DENY_MESSAGE
+    from untether.telegram.commands.claude_control import (
+        ClaudeControlCommand,
+        _DISCUSS_DENY_MESSAGE,
+    )
 
     runner = ClaudeRunner(claude_cmd="claude")
     session_id = "sess-discuss"
@@ -579,6 +627,7 @@ async def test_discuss_action_sends_deny_with_custom_message() -> None:
 # H. Discuss Cooldown / Rate-Limiting
 # ===========================================================================
 
+
 def test_set_discuss_cooldown_creates_entry() -> None:
     """set_discuss_cooldown creates a cooldown entry with count=1."""
     set_discuss_cooldown("sess-cd-1")
@@ -619,7 +668,10 @@ def test_check_discuss_cooldown_returns_none_after_expiry() -> None:
     set_discuss_cooldown("sess-cd-4")
     # Manually backdate the timestamp
     _, count = _DISCUSS_COOLDOWN["sess-cd-4"]
-    _DISCUSS_COOLDOWN["sess-cd-4"] = (_time.time() - DISCUSS_COOLDOWN_BASE_SECONDS - 1, count)
+    _DISCUSS_COOLDOWN["sess-cd-4"] = (
+        _time.time() - DISCUSS_COOLDOWN_BASE_SECONDS - 1,
+        count,
+    )
 
     result = check_discuss_cooldown("sess-cd-4")
     assert result is None
@@ -649,15 +701,17 @@ def test_exit_plan_mode_auto_denied_during_cooldown() -> None:
     state, factory = _make_state_with_session("sess-cooldown")
     set_discuss_cooldown("sess-cooldown")
 
-    event = _decode_event({
-        "type": "control_request",
-        "request_id": "req-cd-deny",
-        "request": {
-            "subtype": "can_use_tool",
-            "tool_name": "ExitPlanMode",
-            "input": {},
-        },
-    })
+    event = _decode_event(
+        {
+            "type": "control_request",
+            "request_id": "req-cd-deny",
+            "request": {
+                "subtype": "can_use_tool",
+                "tool_name": "ExitPlanMode",
+                "input": {},
+            },
+        }
+    )
     events = translate_claude_event(event, title="claude", state=state, factory=factory)
 
     assert events == []
@@ -673,17 +727,22 @@ def test_exit_plan_mode_not_auto_denied_after_cooldown_expires() -> None:
     set_discuss_cooldown("sess-cd-expired")
     # Backdate to expire
     _, count = _DISCUSS_COOLDOWN["sess-cd-expired"]
-    _DISCUSS_COOLDOWN["sess-cd-expired"] = (_time.time() - DISCUSS_COOLDOWN_BASE_SECONDS - 1, count)
+    _DISCUSS_COOLDOWN["sess-cd-expired"] = (
+        _time.time() - DISCUSS_COOLDOWN_BASE_SECONDS - 1,
+        count,
+    )
 
-    event = _decode_event({
-        "type": "control_request",
-        "request_id": "req-cd-ok",
-        "request": {
-            "subtype": "can_use_tool",
-            "tool_name": "ExitPlanMode",
-            "input": {},
-        },
-    })
+    event = _decode_event(
+        {
+            "type": "control_request",
+            "request_id": "req-cd-ok",
+            "request": {
+                "subtype": "can_use_tool",
+                "tool_name": "ExitPlanMode",
+                "input": {},
+            },
+        }
+    )
     events = translate_claude_event(event, title="claude", state=state, factory=factory)
 
     # Should produce a normal approval-required event (not auto-denied)
@@ -812,6 +871,7 @@ async def test_approve_handler_clears_cooldown() -> None:
 # I. Progressive Cooldown Timing
 # ===========================================================================
 
+
 def test_progressive_cooldown_increases_with_count() -> None:
     """Cooldown duration increases with each discuss click: 30s, 60s, 90s, 120s."""
     from untether.runners.claude import _cooldown_seconds
@@ -842,7 +902,10 @@ def test_progressive_cooldown_count_preserved_after_expiry() -> None:
     set_discuss_cooldown("sess-prog-2")  # count=1
     # Expire the cooldown
     _, count = _DISCUSS_COOLDOWN["sess-prog-2"]
-    _DISCUSS_COOLDOWN["sess-prog-2"] = (_time.time() - DISCUSS_COOLDOWN_BASE_SECONDS - 1, count)
+    _DISCUSS_COOLDOWN["sess-prog-2"] = (
+        _time.time() - DISCUSS_COOLDOWN_BASE_SECONDS - 1,
+        count,
+    )
     check_discuss_cooldown("sess-prog-2")  # returns None, preserves count
 
     # Next click should be count=2 (60s cooldown)
@@ -859,20 +922,23 @@ def test_progressive_cooldown_count_preserved_after_expiry() -> None:
 # J. Auto-approve ExitPlanMode in "auto" permission mode
 # ===========================================================================
 
+
 def test_exit_plan_mode_auto_approved_in_auto_mode() -> None:
     """ExitPlanMode is auto-approved when auto_approve_exit_plan_mode is True."""
     state, factory = _make_state_with_session()
     state.auto_approve_exit_plan_mode = True
 
-    event = _decode_event({
-        "type": "control_request",
-        "request_id": "req-auto-epm",
-        "request": {
-            "subtype": "can_use_tool",
-            "tool_name": "ExitPlanMode",
-            "input": {},
-        },
-    })
+    event = _decode_event(
+        {
+            "type": "control_request",
+            "request_id": "req-auto-epm",
+            "request": {
+                "subtype": "can_use_tool",
+                "tool_name": "ExitPlanMode",
+                "input": {},
+            },
+        }
+    )
     events = translate_claude_event(event, title="claude", state=state, factory=factory)
 
     assert events == []
@@ -884,15 +950,17 @@ def test_exit_plan_mode_not_auto_approved_in_plan_mode() -> None:
     state, factory = _make_state_with_session()
     state.auto_approve_exit_plan_mode = False
 
-    event = _decode_event({
-        "type": "control_request",
-        "request_id": "req-plan-epm",
-        "request": {
-            "subtype": "can_use_tool",
-            "tool_name": "ExitPlanMode",
-            "input": {},
-        },
-    })
+    event = _decode_event(
+        {
+            "type": "control_request",
+            "request_id": "req-plan-epm",
+            "request": {
+                "subtype": "can_use_tool",
+                "tool_name": "ExitPlanMode",
+                "input": {},
+            },
+        }
+    )
     events = translate_claude_event(event, title="claude", state=state, factory=factory)
 
     assert len(events) == 1
@@ -908,15 +976,17 @@ def test_exit_plan_mode_auto_mode_skips_cooldown() -> None:
     # Set a discuss cooldown for this session
     set_discuss_cooldown("sess-auto-cd")
 
-    event = _decode_event({
-        "type": "control_request",
-        "request_id": "req-auto-cd",
-        "request": {
-            "subtype": "can_use_tool",
-            "tool_name": "ExitPlanMode",
-            "input": {},
-        },
-    })
+    event = _decode_event(
+        {
+            "type": "control_request",
+            "request_id": "req-auto-cd",
+            "request": {
+                "subtype": "can_use_tool",
+                "tool_name": "ExitPlanMode",
+                "input": {},
+            },
+        }
+    )
     events = translate_claude_event(event, title="claude", state=state, factory=factory)
 
     # Should be auto-approved, not auto-denied by cooldown

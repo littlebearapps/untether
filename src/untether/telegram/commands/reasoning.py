@@ -162,7 +162,13 @@ async def _handle_reasoning_command(
         )
         if scope is None:
             return
-        logger.info("reasoning.set", chat_id=msg.chat_id, engine=engine, level=normalized_level, scope=scope)
+        logger.info(
+            "reasoning.set",
+            chat_id=msg.chat_id,
+            engine=engine,
+            level=normalized_level,
+            scope=scope,
+        )
         if scope == "topic":
             await reply(
                 text=(
@@ -229,9 +235,13 @@ async def _handle_reasoning_command(
         )
         if scope is None:
             return
-        logger.info("reasoning.cleared", chat_id=msg.chat_id, engine=engine, scope=scope)
+        logger.info(
+            "reasoning.cleared", chat_id=msg.chat_id, engine=engine, scope=scope
+        )
         if scope == "topic":
-            await reply(text="topic reasoning override **cleared** (using chat default).")
+            await reply(
+                text="topic reasoning override **cleared** (using chat default)."
+            )
             return
         await reply(text="chat reasoning override **cleared**.")
         return

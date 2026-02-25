@@ -77,9 +77,7 @@ async def run_cron_scheduler(
             try:
                 matched = cron_matches(cron.schedule, now)
             except Exception:
-                logger.exception(
-                    "triggers.cron.match_failed", cron_id=cron.id
-                )
+                logger.exception("triggers.cron.match_failed", cron_id=cron.id)
                 continue
             if matched:
                 key = (now.hour, now.minute)

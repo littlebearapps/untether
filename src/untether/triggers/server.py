@@ -22,9 +22,7 @@ def build_webhook_app(
     dispatcher: TriggerDispatcher,
 ) -> web.Application:
     """Build the aiohttp application for webhook handling."""
-    routes_by_path: dict[str, WebhookConfig] = {
-        wh.path: wh for wh in settings.webhooks
-    }
+    routes_by_path: dict[str, WebhookConfig] = {wh.path: wh for wh in settings.webhooks}
     rate_limiter = TokenBucketLimiter(
         rate=settings.server.rate_limit,
         window=60.0,
@@ -99,10 +97,9 @@ def build_webhook_app(
 
         # Event filter (e.g. GitHub X-GitHub-Event header)
         if webhook.event_filter:
-            event_type = (
-                request.headers.get("X-GitHub-Event", "")
-                or request.headers.get("X-Event-Type", "")
-            )
+            event_type = request.headers.get(
+                "X-GitHub-Event", ""
+            ) or request.headers.get("X-Event-Type", "")
             if event_type != webhook.event_filter:
                 return web.Response(status=200, text="filtered")
 

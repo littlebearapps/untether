@@ -152,9 +152,7 @@ class ExportCommand:
             )
 
         # Get the most recent session
-        session_id = max(
-            _SESSION_HISTORY, key=lambda k: _SESSION_HISTORY[k][0]
-        )
+        session_id = max(_SESSION_HISTORY, key=lambda k: _SESSION_HISTORY[k][0])
         ts, events, usage = _SESSION_HISTORY[session_id]
 
         if not events:

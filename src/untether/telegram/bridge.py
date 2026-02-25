@@ -75,7 +75,8 @@ class TelegramPresenter:
                     if kb and isinstance(kb, dict) and "buttons" in kb:
                         # Merge permission buttons with cancel button
                         reply_markup = {
-                            "inline_keyboard": kb["buttons"] + CANCEL_MARKUP["inline_keyboard"]
+                            "inline_keyboard": kb["buttons"]
+                            + CANCEL_MARKUP["inline_keyboard"]
                         }
                         logger.info(
                             "render_progress.inline_keyboard_found",

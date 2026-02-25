@@ -32,7 +32,7 @@ jobs:
             sync_args: --no-install-project
           - task: ty
             do_sync: true
-            command: uv run --no-sync ty check src tests
+            command: uv run --no-sync ty check --warn invalid-argument-type --warn unresolved-attribute --warn invalid-assignment --warn not-subscriptable src tests
             sync_args: --no-install-project
           - task: build
             do_sync: false

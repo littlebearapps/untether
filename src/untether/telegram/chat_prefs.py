@@ -202,7 +202,9 @@ class ChatPrefsStore(JsonStateStore[_ChatPrefsState]):
                 if self._chat_is_empty(chat):
                     self._remove_chat_locked(chat_id)
                 self._save_locked()
-                logger.info("prefs.override.cleared", chat_id=chat_id, engine=engine_key)
+                logger.info(
+                    "prefs.override.cleared", chat_id=chat_id, engine=engine_key
+                )
                 return
             chat = self._ensure_chat_locked(chat_id)
             chat.engine_overrides[engine_key] = normalized

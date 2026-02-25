@@ -620,12 +620,14 @@ class TestFormatRunCost:
         assert "$0.0030" in result
 
     def test_full_usage(self):
-        result = _format_run_cost({
-            "total_cost_usd": 1.23,
-            "num_turns": 8,
-            "duration_ms": 45000,
-            "usage": {"input_tokens": 15000, "output_tokens": 3200},
-        })
+        result = _format_run_cost(
+            {
+                "total_cost_usd": 1.23,
+                "num_turns": 8,
+                "duration_ms": 45000,
+                "usage": {"input_tokens": 15000, "output_tokens": 3200},
+            }
+        )
         assert result is not None
         assert "$1.23" in result
         assert "8 turns" in result
@@ -634,19 +636,23 @@ class TestFormatRunCost:
         assert "3.2k out" in result
 
     def test_large_token_counts(self):
-        result = _format_run_cost({
-            "total_cost_usd": 5.00,
-            "usage": {"input_tokens": 1500000, "output_tokens": 250000},
-        })
+        result = _format_run_cost(
+            {
+                "total_cost_usd": 5.00,
+                "usage": {"input_tokens": 1500000, "output_tokens": 250000},
+            }
+        )
         assert result is not None
         assert "1.5M in" in result
         assert "250.0k out" in result
 
     def test_long_duration(self):
-        result = _format_run_cost({
-            "total_cost_usd": 0.50,
-            "duration_ms": 125000,
-        })
+        result = _format_run_cost(
+            {
+                "total_cost_usd": 0.50,
+                "duration_ms": 125000,
+            }
+        )
         assert result is not None
         assert "2m 5s API" in result
 
@@ -661,8 +667,14 @@ class TestFormatUsageCompact:
         from untether.telegram.commands.usage import format_usage_compact
 
         data = {
-            "five_hour": {"utilization": 45.0, "resets_at": "2026-02-25T20:00:00+00:00"},
-            "seven_day": {"utilization": 30.0, "resets_at": "2026-03-01T00:00:00+00:00"},
+            "five_hour": {
+                "utilization": 45.0,
+                "resets_at": "2026-02-25T20:00:00+00:00",
+            },
+            "seven_day": {
+                "utilization": 30.0,
+                "resets_at": "2026-03-01T00:00:00+00:00",
+            },
         }
         result = format_usage_compact(data)
         assert result is not None
@@ -674,7 +686,10 @@ class TestFormatUsageCompact:
         from untether.telegram.commands.usage import format_usage_compact
 
         data = {
-            "five_hour": {"utilization": 60.0, "resets_at": "2026-02-25T20:00:00+00:00"},
+            "five_hour": {
+                "utilization": 60.0,
+                "resets_at": "2026-02-25T20:00:00+00:00",
+            },
         }
         result = format_usage_compact(data)
         assert result is not None
@@ -690,8 +705,14 @@ class TestFormatUsageCompact:
         from untether.telegram.commands.usage import format_usage_compact
 
         data = {
-            "five_hour": {"utilization": 100.0, "resets_at": "2026-02-25T20:00:00+00:00"},
-            "seven_day": {"utilization": 80.0, "resets_at": "2026-03-01T00:00:00+00:00"},
+            "five_hour": {
+                "utilization": 100.0,
+                "resets_at": "2026-02-25T20:00:00+00:00",
+            },
+            "seven_day": {
+                "utilization": 80.0,
+                "resets_at": "2026-03-01T00:00:00+00:00",
+            },
         }
         result = format_usage_compact(data)
         assert result is not None
@@ -711,8 +732,14 @@ class TestMaybeAppendUsageFooterAlwaysShow:
 
         async def _fake_fetch():
             return {
-                "five_hour": {"utilization": 25.0, "resets_at": "2026-02-25T20:00:00+00:00"},
-                "seven_day": {"utilization": 10.0, "resets_at": "2026-03-01T00:00:00+00:00"},
+                "five_hour": {
+                    "utilization": 25.0,
+                    "resets_at": "2026-02-25T20:00:00+00:00",
+                },
+                "seven_day": {
+                    "utilization": 10.0,
+                    "resets_at": "2026-03-01T00:00:00+00:00",
+                },
             }
 
         monkeypatch.setattr(
@@ -731,8 +758,14 @@ class TestMaybeAppendUsageFooterAlwaysShow:
 
         async def _fake_fetch():
             return {
-                "five_hour": {"utilization": 25.0, "resets_at": "2026-02-25T20:00:00+00:00"},
-                "seven_day": {"utilization": 10.0, "resets_at": "2026-03-01T00:00:00+00:00"},
+                "five_hour": {
+                    "utilization": 25.0,
+                    "resets_at": "2026-02-25T20:00:00+00:00",
+                },
+                "seven_day": {
+                    "utilization": 10.0,
+                    "resets_at": "2026-03-01T00:00:00+00:00",
+                },
             }
 
         monkeypatch.setattr(
@@ -749,8 +782,14 @@ class TestMaybeAppendUsageFooterAlwaysShow:
 
         async def _fake_fetch():
             return {
-                "five_hour": {"utilization": 85.0, "resets_at": "2026-02-25T20:00:00+00:00"},
-                "seven_day": {"utilization": 40.0, "resets_at": "2026-03-01T00:00:00+00:00"},
+                "five_hour": {
+                    "utilization": 85.0,
+                    "resets_at": "2026-02-25T20:00:00+00:00",
+                },
+                "seven_day": {
+                    "utilization": 40.0,
+                    "resets_at": "2026-03-01T00:00:00+00:00",
+                },
             }
 
         monkeypatch.setattr(

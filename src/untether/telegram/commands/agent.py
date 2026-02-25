@@ -89,7 +89,9 @@ async def _handle_agent_command(
             "project_default": "project default",
             "global_default": "global default",
         }
-        agent_line = f"engine: **{selection.engine}** ({source_labels[selection.source]})"
+        agent_line = (
+            f"engine: **{selection.engine}** ({source_labels[selection.source]})"
+        )
         topic_override = None
         if tkey is not None and topic_store is not None:
             topic_override = await topic_store.get_engine_override(

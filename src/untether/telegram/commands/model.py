@@ -144,7 +144,9 @@ async def _handle_model_command(
         )
         if scope is None:
             return
-        logger.info("model.set", chat_id=msg.chat_id, engine=engine, model=model, scope=scope)
+        logger.info(
+            "model.set", chat_id=msg.chat_id, engine=engine, model=model, scope=scope
+        )
         if scope == "topic":
             await reply(
                 text=(

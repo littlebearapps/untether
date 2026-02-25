@@ -877,7 +877,9 @@ async def step_capture_chat(ui: UI, svc: Services, state: OnboardingState) -> No
 
 
 async def step_default_engine(ui: UI, svc: Services, state: OnboardingState) -> None:
-    ui.print("untether runs these engines on your computer. switch anytime with /agent.")
+    ui.print(
+        "untether runs these engines on your computer. switch anytime with /agent."
+    )
     rows = svc.list_engines()
     render_engine_table(ui, rows)
     installed_ids = [engine_id for engine_id, installed, _ in rows if installed]

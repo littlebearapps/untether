@@ -145,11 +145,15 @@ class TestReadFilePreview:
 
 class TestGetProjectRoot:
     def test_returns_run_base_dir_when_set(self, tmp_path):
-        with patch("untether.telegram.commands.browse.get_run_base_dir", return_value=tmp_path):
+        with patch(
+            "untether.telegram.commands.browse.get_run_base_dir", return_value=tmp_path
+        ):
             assert _get_project_root() == tmp_path
 
     def test_falls_back_to_cwd(self):
-        with patch("untether.telegram.commands.browse.get_run_base_dir", return_value=None):
+        with patch(
+            "untether.telegram.commands.browse.get_run_base_dir", return_value=None
+        ):
             root = _get_project_root()
             assert root == Path.cwd()
 
@@ -157,6 +161,7 @@ class TestGetProjectRoot:
 class TestRegistryTrimming:
     def test_trims_old_entries(self):
         import untether.telegram.commands.browse as mod
+
         old_max = mod._MAX_REGISTRY
         mod._MAX_REGISTRY = 3
         try:
@@ -200,6 +205,7 @@ class TestBrowseCommandHandle:
     def _make_ctx(self, args_text: str):
         """Build a minimal CommandContext-like object for testing."""
         from unittest.mock import AsyncMock, MagicMock
+
         ctx = MagicMock()
         ctx.args_text = args_text
         ctx.executor = AsyncMock()
@@ -211,7 +217,9 @@ class TestBrowseCommandHandle:
     async def test_browse_root_sends_keyboard(self, cmd, tmp_path):
         (tmp_path / "hello.py").write_text("x")
         ctx = self._make_ctx("")
-        with patch("untether.telegram.commands.browse._get_project_root", return_value=tmp_path):
+        with patch(
+            "untether.telegram.commands.browse._get_project_root", return_value=tmp_path
+        ):
             result = await cmd.handle(ctx)
         # Dir with files -> sent via executor (returns None)
         assert result is None
@@ -225,7 +233,9 @@ class TestBrowseCommandHandle:
         sub.mkdir()
         (sub / "main.py").write_text("code")
         ctx = self._make_ctx("src")
-        with patch("untether.telegram.commands.browse._get_project_root", return_value=tmp_path):
+        with patch(
+            "untether.telegram.commands.browse._get_project_root", return_value=tmp_path
+        ):
             result = await cmd.handle(ctx)
         assert result is None  # Sent via executor
         ctx.executor.send.assert_called_once()
@@ -235,7 +245,9 @@ class TestBrowseCommandHandle:
         f = tmp_path / "readme.md"
         f.write_text("# Hello World")
         ctx = self._make_ctx("readme.md")
-        with patch("untether.telegram.commands.browse._get_project_root", return_value=tmp_path):
+        with patch(
+            "untether.telegram.commands.browse._get_project_root", return_value=tmp_path
+        ):
             result = await cmd.handle(ctx)
         assert result is not None
         assert "Hello World" in result.text
@@ -245,7 +257,9 @@ class TestBrowseCommandHandle:
         (tmp_path / "item.txt").write_text("stuff")
         pid = _register_path(str(tmp_path))
         ctx = self._make_ctx(f"d:{pid}")
-        with patch("untether.telegram.commands.browse._get_project_root", return_value=tmp_path):
+        with patch(
+            "untether.telegram.commands.browse._get_project_root", return_value=tmp_path
+        ):
             result = await cmd.handle(ctx)
         assert result is None  # Dir with files, sent via executor
 
@@ -255,7 +269,9 @@ class TestBrowseCommandHandle:
         f.write_text("secret data")
         pid = _register_path(str(f))
         ctx = self._make_ctx(f"f:{pid}")
-        with patch("untether.telegram.commands.browse._get_project_root", return_value=tmp_path):
+        with patch(
+            "untether.telegram.commands.browse._get_project_root", return_value=tmp_path
+        ):
             result = await cmd.handle(ctx)
         assert result is not None
         assert "secret data" in result.text
@@ -263,7 +279,9 @@ class TestBrowseCommandHandle:
     @pytest.mark.anyio
     async def test_expired_path_id(self, cmd, tmp_path):
         ctx = self._make_ctx("d:99999")
-        with patch("untether.telegram.commands.browse._get_project_root", return_value=tmp_path):
+        with patch(
+            "untether.telegram.commands.browse._get_project_root", return_value=tmp_path
+        ):
             result = await cmd.handle(ctx)
         assert result is not None
         assert "expired" in result.text.lower()
@@ -271,7 +289,9 @@ class TestBrowseCommandHandle:
     @pytest.mark.anyio
     async def test_not_found(self, cmd, tmp_path):
         ctx = self._make_ctx("nonexistent_thing")
-        with patch("untether.telegram.commands.browse._get_project_root", return_value=tmp_path):
+        with patch(
+            "untether.telegram.commands.browse._get_project_root", return_value=tmp_path
+        ):
             result = await cmd.handle(ctx)
         assert result is not None
         assert "Not found" in result.text
@@ -279,7 +299,9 @@ class TestBrowseCommandHandle:
     @pytest.mark.anyio
     async def test_no_project_root(self, cmd):
         ctx = self._make_ctx("")
-        with patch("untether.telegram.commands.browse._get_project_root", return_value=None):
+        with patch(
+            "untether.telegram.commands.browse._get_project_root", return_value=None
+        ):
             result = await cmd.handle(ctx)
         assert result is not None
         assert "No project directory" in result.text
@@ -287,7 +309,9 @@ class TestBrowseCommandHandle:
     @pytest.mark.anyio
     async def test_path_outside_project(self, cmd, tmp_path):
         ctx = self._make_ctx("../../etc/passwd")
-        with patch("untether.telegram.commands.browse._get_project_root", return_value=tmp_path):
+        with patch(
+            "untether.telegram.commands.browse._get_project_root", return_value=tmp_path
+        ):
             result = await cmd.handle(ctx)
         assert result is not None
         assert "outside" in result.text.lower() or "Not found" in result.text
@@ -295,7 +319,9 @@ class TestBrowseCommandHandle:
     @pytest.mark.anyio
     async def test_invalid_dir_id(self, cmd, tmp_path):
         ctx = self._make_ctx("d:abc")
-        with patch("untether.telegram.commands.browse._get_project_root", return_value=tmp_path):
+        with patch(
+            "untether.telegram.commands.browse._get_project_root", return_value=tmp_path
+        ):
             result = await cmd.handle(ctx)
         assert result is not None
         assert "Invalid" in result.text
@@ -303,7 +329,9 @@ class TestBrowseCommandHandle:
     @pytest.mark.anyio
     async def test_invalid_file_id(self, cmd, tmp_path):
         ctx = self._make_ctx("f:abc")
-        with patch("untether.telegram.commands.browse._get_project_root", return_value=tmp_path):
+        with patch(
+            "untether.telegram.commands.browse._get_project_root", return_value=tmp_path
+        ):
             result = await cmd.handle(ctx)
         assert result is not None
         assert "Invalid" in result.text
@@ -314,7 +342,10 @@ class TestBrowseCommandHandle:
         empty_root = tmp_path / "empty_root"
         empty_root.mkdir()
         ctx = self._make_ctx("")
-        with patch("untether.telegram.commands.browse._get_project_root", return_value=empty_root):
+        with patch(
+            "untether.telegram.commands.browse._get_project_root",
+            return_value=empty_root,
+        ):
             result = await cmd.handle(ctx)
         assert result is not None
         assert "empty directory" in result.text

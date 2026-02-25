@@ -68,7 +68,9 @@ class TelegramOutbox:
         await self.ensure_worker()
         async with self._cond:
             if self._closed:
-                logger.warning("outbox.enqueue.closed", label=op.label, chat_id=op.chat_id)
+                logger.warning(
+                    "outbox.enqueue.closed", label=op.label, chat_id=op.chat_id
+                )
                 op.set_result(None)
                 return op.result
             previous = self._pending.get(key)

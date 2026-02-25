@@ -149,13 +149,17 @@ def _format_run_cost(usage: dict[str, Any] | None) -> str | None:
         input_tokens = token_usage.get("input_tokens", 0)
         output_tokens = token_usage.get("output_tokens", 0)
         if input_tokens or output_tokens:
+
             def _fmt_tokens(n: int) -> str:
                 if n >= 1_000_000:
                     return f"{n / 1_000_000:.1f}M"
                 if n >= 1_000:
                     return f"{n / 1_000:.1f}k"
                 return str(n)
-            parts.append(f"{_fmt_tokens(input_tokens)} in / {_fmt_tokens(output_tokens)} out")
+
+            parts.append(
+                f"{_fmt_tokens(input_tokens)} in / {_fmt_tokens(output_tokens)} out"
+            )
     return " · ".join(parts)
 
 
@@ -228,7 +232,11 @@ def _record_export_event(evt: UntetherEvent, resume: ResumeToken | None) -> None
                 record_session_usage(session_id, evt.usage)
         record_session_event(session_id, event_dict)
     except Exception as exc:  # noqa: BLE001
-        logger.debug("export_event.record_failed", error=str(exc), error_type=exc.__class__.__name__)
+        logger.debug(
+            "export_event.record_failed",
+            error=str(exc),
+            error_type=exc.__class__.__name__,
+        )
 
 
 def _log_runner_event(evt: UntetherEvent) -> None:
@@ -410,9 +418,7 @@ class ProgressEdits:
                 state, elapsed_s=now - self.started_at, label=self.label
             )
             # Detect approval button transitions for push notification
-            new_kb = rendered.extra.get("reply_markup", {}).get(
-                "inline_keyboard", []
-            )
+            new_kb = rendered.extra.get("reply_markup", {}).get("inline_keyboard", [])
             old_kb = (
                 self.last_rendered.extra.get("reply_markup", {}).get(
                     "inline_keyboard", []

@@ -117,7 +117,11 @@ async def _resolve_engine_run_options(
     merged = merge_overrides(topic_override, chat_override)
     if merged is None:
         return None
-    return EngineRunOptions(model=merged.model, reasoning=merged.reasoning, permission_mode=merged.permission_mode)
+    return EngineRunOptions(
+        model=merged.model,
+        reasoning=merged.reasoning,
+        permission_mode=merged.permission_mode,
+    )
 
 
 def _allowed_chat_ids(cfg: TelegramBridgeConfig) -> set[int]:
@@ -1859,6 +1863,7 @@ async def run_main_loop(
                         get_pending_ask_request,
                         answer_ask_question,
                     )
+
                     pending_ask = get_pending_ask_request()
                     if pending_ask is not None:
                         ask_req_id, ask_question = pending_ask

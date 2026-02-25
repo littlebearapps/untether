@@ -65,7 +65,9 @@ class ChatSessionStore(JsonStateStore[_ChatSessionsState]):
             if entry is None or not entry.resume:
                 logger.debug("session.get.no_resume", chat_id=chat_id, engine=engine)
                 return None
-            logger.debug("session.get.found", chat_id=chat_id, engine=engine, resume=entry.resume)
+            logger.debug(
+                "session.get.found", chat_id=chat_id, engine=engine, resume=entry.resume
+            )
             return ResumeToken(engine=engine, value=entry.resume)
 
     async def sync_startup_cwd(self, cwd: Path) -> bool:
