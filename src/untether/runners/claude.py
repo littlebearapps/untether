@@ -69,6 +69,10 @@ _HANDLED_REQUESTS: set[str] = set()
 # When user clicks "Pause & Outline Plan", this tracks when the denial was sent
 # so rapid ExitPlanMode retries can be auto-denied with escalating messages.
 _DISCUSS_COOLDOWN: dict[str, tuple[float, int]] = {}
+
+# A1: Pending AskUserQuestion requests: request_id -> question text
+# When Claude asks a question, the user can reply via Telegram text.
+_PENDING_ASK_REQUESTS: dict[str, str] = {}
 DISCUSS_COOLDOWN_BASE_SECONDS: float = 30.0
 DISCUSS_COOLDOWN_MAX_SECONDS: float = 120.0
 
@@ -108,6 +112,8 @@ class ClaudeStreamState:
     last_tool_use_id: str | None = None
     # Map tool_use_id -> control action_id for completing control actions on tool result
     control_action_for_tool: dict[str, str] = field(default_factory=dict)
+    # Auto-approve ExitPlanMode when permission_mode is "auto"
+    auto_approve_exit_plan_mode: bool = False
 
 
 def _normalize_tool_result(content: Any) -> str:
@@ -199,6 +205,64 @@ def _tool_result_event(
         ok=not is_error,
         detail=detail,
     )
+
+
+def _format_diff_preview(tool_name: str, tool_input: dict[str, Any]) -> str:
+    """Format a compact diff preview for Edit/Write tool approval messages."""
+    max_preview_lines = 8
+    max_line_len = 60
+
+    def _truncate(text: str, max_len: int) -> str:
+        if len(text) > max_len:
+            return text[:max_len - 1] + "…"
+        return text
+
+    if tool_name == "Edit":
+        file_path = tool_input.get("file_path", "")
+        old_string = tool_input.get("old_string", "")
+        new_string = tool_input.get("new_string", "")
+        if not old_string and not new_string:
+            return ""
+        lines: list[str] = []
+        if file_path:
+            from ..utils.paths import relativize_path
+            lines.append(f"📝 {relativize_path(file_path)}")
+        old_lines = old_string.splitlines()
+        new_lines = new_string.splitlines()
+        # Show removed/added lines
+        half = max_preview_lines // 2
+        lines.extend(f"- {_truncate(line, max_line_len)}" for line in old_lines[:half])
+        if len(old_lines) > half:
+            lines.append(f"  …({len(old_lines) - half} more removed)")
+        lines.extend(f"+ {_truncate(line, max_line_len)}" for line in new_lines[:half])
+        if len(new_lines) > half:
+            lines.append(f"  …({len(new_lines) - half} more added)")
+        return "\n".join(lines)
+
+    if tool_name == "Write":
+        file_path = tool_input.get("file_path", "")
+        content = tool_input.get("content", "")
+        if not content:
+            return ""
+        lines = []
+        if file_path:
+            from ..utils.paths import relativize_path
+            lines.append(f"📝 {relativize_path(file_path)}")
+        content_lines = content.splitlines()
+        line_count = len(content_lines)
+        for line in content_lines[:max_preview_lines]:
+            lines.append(f"+ {_truncate(line, max_line_len)}")
+        if line_count > max_preview_lines:
+            lines.append(f"  …({line_count - max_preview_lines} more lines)")
+        return "\n".join(lines)
+
+    if tool_name == "Bash":
+        command = tool_input.get("command", "")
+        if command:
+            return f"$ {_truncate(command, 200)}"
+        return ""
+
+    return ""
 
 
 def _extract_error(event: claude_schema.StreamResultMessage) -> str | None:
@@ -389,7 +453,7 @@ def translate_claude_event(
                 return []
 
             # Auto-approve tool requests that don't need user interaction
-            _TOOLS_REQUIRING_APPROVAL = {"ExitPlanMode"}
+            _TOOLS_REQUIRING_APPROVAL = {"ExitPlanMode", "AskUserQuestion"}
             if isinstance(request, claude_schema.ControlCanUseToolRequest):
                 tool_name = getattr(request, "tool_name", "unknown")
                 if tool_name not in _TOOLS_REQUIRING_APPROVAL:
@@ -397,6 +461,17 @@ def translate_claude_event(
                         "control_request.auto_approve_tool",
                         request_id=request_id,
                         tool_name=tool_name,
+                    )
+                    state.auto_approve_queue.append(request_id)
+                    return []
+
+            # Auto-approve ExitPlanMode in "auto" permission mode
+            if isinstance(request, claude_schema.ControlCanUseToolRequest):
+                tool_name = getattr(request, "tool_name", "")
+                if tool_name == "ExitPlanMode" and state.auto_approve_exit_plan_mode:
+                    logger.debug(
+                        "control_request.auto_approve_exit_plan_mode",
+                        request_id=request_id,
                     )
                     state.auto_approve_queue.append(request_id)
                     return []
@@ -421,6 +496,7 @@ def translate_claude_event(
 
             # Extract details based on request type
             details = ""
+            diff_preview = ""
             if isinstance(request, claude_schema.ControlCanUseToolRequest):
                 tool_name = getattr(request, "tool_name", "unknown")
                 tool_input = getattr(request, "input", {})
@@ -436,6 +512,8 @@ def translate_claude_event(
                             key_params.append(f"{key}={value}")
                     if key_params:
                         details += f" ({', '.join(key_params)})"
+                # CC4: Diff preview for Edit/Write tools
+                diff_preview = _format_diff_preview(tool_name, tool_input)
             elif isinstance(request, claude_schema.ControlSetPermissionModeRequest):
                 mode = getattr(request, "mode", "unknown")
                 details = f"mode: {mode}"
@@ -446,6 +524,8 @@ def translate_claude_event(
             warning_text = f"Permission Request [{request_type}]"
             if details:
                 warning_text += f" - {details}"
+            if diff_preview:
+                warning_text += f"\n{diff_preview}"
 
             # Store in pending requests with timestamp
             state.pending_control_requests[request_id] = (event, time.time())
@@ -513,6 +593,25 @@ def translate_claude_event(
                         },
                     ])
 
+            # A1: AskUserQuestion — extract the question for display
+            ask_question: str | None = None
+            if isinstance(request, claude_schema.ControlCanUseToolRequest):
+                tool_name = getattr(request, "tool_name", "")
+                if tool_name == "AskUserQuestion":
+                    ask_question = ""
+                    if tool_input:
+                        # Direct "question" key
+                        ask_question = tool_input.get("question", "")
+                        # Nested "questions" array format
+                        if not ask_question:
+                            questions = tool_input.get("questions", [])
+                            if questions and isinstance(questions, list):
+                                ask_question = questions[0].get("question", "") if isinstance(questions[0], dict) else ""
+                    if ask_question:
+                        warning_text = f"❓ {ask_question}"
+                    # Register this request for reply handling
+                    _PENDING_ASK_REQUESTS[request_id] = ask_question or ""
+
             detail: dict[str, Any] = {
                 "request_id": request_id,
                 "request_type": request_type,
@@ -520,6 +619,8 @@ def translate_claude_event(
                     "buttons": button_rows,
                 },
             }
+            if ask_question:
+                detail["ask_question"] = ask_question
 
             return [
                 factory.action_started(
@@ -684,7 +785,8 @@ class ClaudeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
             args.append("--dangerously-skip-permissions")
 
         if effective_mode is not None:
-            args.extend(["--permission-mode", effective_mode])
+            cli_mode = "plan" if effective_mode == "auto" else effective_mode
+            args.extend(["--permission-mode", cli_mode])
             args.extend(["--permission-prompt-tool", "stdio"])
             # Prompt sent via stdin as JSON, not as CLI arg
         else:
@@ -742,7 +844,11 @@ class ClaudeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
         return None
 
     def new_state(self, prompt: str, resume: ResumeToken | None) -> ClaudeStreamState:
-        return ClaudeStreamState()
+        state = ClaudeStreamState()
+        state.auto_approve_exit_plan_mode = (
+            self._effective_permission_mode() == "auto"
+        )
+        return state
 
     def start_run(
         self,
@@ -1335,6 +1441,32 @@ def check_discuss_cooldown(session_id: str) -> str | None:
 def clear_discuss_cooldown(session_id: str) -> None:
     """Clear the discuss cooldown for a session (e.g. on approve/deny)."""
     _DISCUSS_COOLDOWN.pop(session_id, None)
+
+
+def get_pending_ask_request() -> tuple[str, str] | None:
+    """Return the oldest pending AskUserQuestion (request_id, question) or None."""
+    if not _PENDING_ASK_REQUESTS:
+        return None
+    request_id = next(iter(_PENDING_ASK_REQUESTS))
+    return request_id, _PENDING_ASK_REQUESTS[request_id]
+
+
+async def answer_ask_question(request_id: str, answer: str) -> bool:
+    """Answer a pending AskUserQuestion by denying with the user's response.
+
+    The deny message contains the user's answer so Claude reads it and
+    continues with that information.
+    """
+    _PENDING_ASK_REQUESTS.pop(request_id, None)
+    deny_message = (
+        f"The user answered your question via Telegram:\n\n"
+        f'"{answer}"\n\n'
+        f"Use this answer and continue. Do not call AskUserQuestion again "
+        f"for this same question."
+    )
+    return await send_claude_control_response(
+        request_id, approved=False, deny_message=deny_message
+    )
 
 
 def get_active_claude_sessions() -> list[str]:

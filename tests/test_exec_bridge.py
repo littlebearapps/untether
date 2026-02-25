@@ -1,3 +1,4 @@
+import contextlib
 import uuid
 
 import anyio
@@ -9,6 +10,7 @@ from untether.runner_bridge import (
     IncomingMessage,
     ProgressEdits,
     _EPHEMERAL_MSGS,
+    _format_run_cost,
     handle_message,
     register_ephemeral_message,
 )
@@ -512,10 +514,8 @@ async def test_progress_edits_deletes_approval_notification_on_button_disappear(
     # Simulate event that triggers an edit with approval buttons
     presenter.set_approval_buttons()
     edits.event_seq = 1
-    try:
+    with contextlib.suppress(anyio.WouldBlock):
         edits.signal_send.send_nowait(None)
-    except anyio.WouldBlock:
-        pass
 
     async with anyio.create_task_group() as tg:
 
@@ -526,10 +526,8 @@ async def test_progress_edits_deletes_approval_notification_on_button_disappear(
             # Now remove approval buttons and trigger another iteration
             presenter.set_no_approval()
             edits.event_seq = 2
-            try:
+            with contextlib.suppress(anyio.WouldBlock):
                 edits.signal_send.send_nowait(None)
-            except anyio.WouldBlock:
-                pass
             await anyio.sleep(0)
             await anyio.sleep(0)
             # Close the signal to end the loop
@@ -597,3 +595,57 @@ async def test_progress_edits_delete_ephemeral_drains_registry() -> None:
     assert feedback_ref_2 in transport.delete_calls
     # Registry should be drained
     assert (123, 1) not in _EPHEMERAL_MSGS
+
+
+# ---------------------------------------------------------------------------
+# _format_run_cost tests
+# ---------------------------------------------------------------------------
+
+
+class TestFormatRunCost:
+    def test_none_usage(self):
+        assert _format_run_cost(None) is None
+
+    def test_no_cost(self):
+        assert _format_run_cost({"num_turns": 5}) is None
+
+    def test_cost_only(self):
+        result = _format_run_cost({"total_cost_usd": 0.15})
+        assert result is not None
+        assert "$0.15" in result
+
+    def test_small_cost(self):
+        result = _format_run_cost({"total_cost_usd": 0.003})
+        assert result is not None
+        assert "$0.0030" in result
+
+    def test_full_usage(self):
+        result = _format_run_cost({
+            "total_cost_usd": 1.23,
+            "num_turns": 8,
+            "duration_ms": 45000,
+            "usage": {"input_tokens": 15000, "output_tokens": 3200},
+        })
+        assert result is not None
+        assert "$1.23" in result
+        assert "8 turns" in result
+        assert "45.0s API" in result
+        assert "15.0k in" in result
+        assert "3.2k out" in result
+
+    def test_large_token_counts(self):
+        result = _format_run_cost({
+            "total_cost_usd": 5.00,
+            "usage": {"input_tokens": 1500000, "output_tokens": 250000},
+        })
+        assert result is not None
+        assert "1.5M in" in result
+        assert "250.0k out" in result
+
+    def test_long_duration(self):
+        result = _format_run_cost({
+            "total_cost_usd": 0.50,
+            "duration_ms": 125000,
+        })
+        assert result is not None
+        assert "2m 5s API" in result

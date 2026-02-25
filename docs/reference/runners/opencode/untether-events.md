@@ -17,7 +17,7 @@ Untether:   StartedEvent(engine="opencode", resume=ResumeToken(engine="opencode"
 
 ### ActionEvent
 
-Tool usage is translated to action events. Note: `opencode run --format json` currently only emits `tool_use` events when the tool finishes (`status == "completed"`). Pending/running tool states exist in the schema but are not emitted by the CLI JSON stream.
+Tool usage is translated to action events. The code handles `status` values of `"completed"` and `"error"`. Pending/running tool states exist in the schema but are not commonly emitted by the CLI JSON stream.
 
 **Started phase** (when tool is pending/running, if emitted by the JSON stream):
 ```
@@ -66,17 +66,22 @@ Untether:   CompletedEvent(engine="opencode", ok=False, error="API rate limit ex
 
 ## Usage Accumulation
 
-Token usage is accumulated across all `step_finish` events and reported in the final `CompletedEvent.usage`:
-
-```json
-{
-  "total_cost_usd": 0.001,
-  "tokens": {
-    "input": 22443,
-    "output": 118,
-    "reasoning": 0,
-    "cache_read": 21415,
-    "cache_write": 0
-  }
-}
-```
+> **Not yet implemented.** OpenCode's `step_finish` events may include token
+> usage and cost data, but the Untether runner does not currently extract or
+> accumulate these fields. `CompletedEvent.usage` is not populated for
+> OpenCode runs. This is a candidate for future work.
+>
+> Expected upstream shape (when available):
+>
+> ```json
+> {
+>   "total_cost_usd": 0.001,
+>   "tokens": {
+>     "input": 22443,
+>     "output": 118,
+>     "reasoning": 0,
+>     "cache_read": 21415,
+>     "cache_write": 0
+>   }
+> }
+> ```

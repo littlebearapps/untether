@@ -50,7 +50,7 @@ def test_env_overrides_toml(tmp_path: Path, monkeypatch) -> None:
         "chat_id = 123\n",
         encoding="utf-8",
     )
-    monkeypatch.setenv("TAKOPI__DEFAULT_ENGINE", "claude")
+    monkeypatch.setenv("UNTETHER__DEFAULT_ENGINE", "claude")
 
     settings, _ = load_settings(config_path)
 

@@ -7,6 +7,7 @@ from typing import Literal
 import anyio
 
 from ..backends import EngineBackend
+from ..config import read_config
 from ..logging import get_logger
 from ..runner_bridge import ExecBridgeConfig
 from ..settings import TelegramTopicsSettings, TelegramTransportSettings
@@ -39,6 +40,7 @@ def _build_startup_message(
     session_mode: Literal["stateless", "chat"],
     show_resume_line: bool,
     topics: TelegramTopicsSettings,
+    trigger_config: dict | None = None,
 ) -> str:
     available_engines = list(runtime.available_engine_ids())
     missing_engines = list(runtime.missing_engine_ids())
@@ -68,6 +70,11 @@ def _build_startup_message(
             f"auto ({resolved_scope})" if topics.scope == "auto" else resolved_scope
         )
         topics_label = f"enabled (scope={scope_label})"
+    triggers_label = "disabled"
+    if trigger_config and trigger_config.get("enabled"):
+        n_wh = len(trigger_config.get("webhooks", []))
+        n_cr = len(trigger_config.get("crons", []))
+        triggers_label = f"enabled ({n_wh} webhooks, {n_cr} crons)"
     return (
         f"\N{OCTOPUS} **untether is ready**\n\n"
         f"default: `{runtime.default_engine}`  \n"
@@ -75,6 +82,7 @@ def _build_startup_message(
         f"projects: `{project_list}`  \n"
         f"mode: `{session_mode}`  \n"
         f"topics: `{topics_label}`  \n"
+        f"triggers: `{triggers_label}`  \n"
         f"resume lines: `{resume_label}`  \n"
         f"working in: `{startup_pwd}`"
     )
@@ -111,6 +119,17 @@ class TelegramBackend(TransportBackend):
         settings = _expect_transport_settings(transport_config)
         token = settings.bot_token
         chat_id = settings.chat_id
+
+        # Extract trigger config from the raw TOML (optional section).
+        trigger_config: dict | None = None
+        try:
+            raw_toml = read_config(config_path)
+            raw_triggers = raw_toml.get("triggers")
+            if isinstance(raw_triggers, dict):
+                trigger_config = raw_triggers
+        except (OSError, ValueError, KeyError) as exc:
+            logger.debug("triggers.config.read_skipped", error=str(exc))
+
         startup_msg = _build_startup_message(
             runtime,
             startup_pwd=os.getcwd(),
@@ -118,6 +137,7 @@ class TelegramBackend(TransportBackend):
             session_mode=settings.session_mode,
             show_resume_line=settings.show_resume_line,
             topics=settings.topics,
+            trigger_config=trigger_config,
         )
         bot = TelegramClient(token)
         transport = TelegramTransport(bot)
@@ -145,6 +165,7 @@ class TelegramBackend(TransportBackend):
             allowed_user_ids=tuple(settings.allowed_user_ids),
             topics=settings.topics,
             files=settings.files,
+            trigger_config=trigger_config,
         )
 
         async def run_loop() -> None:

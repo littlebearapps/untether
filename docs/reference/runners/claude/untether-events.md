@@ -11,21 +11,27 @@ The goal is to make a Claude runner feel identical to the Codex runner from the 
 ## 1. Input stream contract (Claude CLI)
 
 Claude Code CLI emits **one JSON object per line** (JSONL) when invoked with
-`--output-format stream-json` (only valid with `-p/--print`).
+`--output-format stream-json`.
 
-Recommended invocation (matches claudecode-go):
+Non-interactive invocation:
 
 ```
-claude -p --output-format stream-json --verbose -- <query>
+claude -p --output-format stream-json --input-format stream-json --verbose -- <query>
+```
+
+Permission mode invocation (bidirectional control channel):
+
+```
+claude --output-format stream-json --input-format stream-json --verbose --permission-mode plan --permission-prompt-tool stdio
 ```
 
 Notes:
-- `--verbose` is required for `stream-json` output (clis may otherwise drop events).
-- `-p/--print` is required for `--output-format` and `--include-partial-messages`.
-- `-- <query>` is required to safely pass prompts that start with `-`.
-- Resuming uses `--resume <session_id>` and optional `--fork-session`.
-- The CLI does **not** read the prompt from stdin in claudecode-go; it passes the
-  prompt as the final positional argument after `--`.
+- `--verbose` is required for `stream-json` output (CLI may otherwise drop events).
+- `--input-format stream-json` enables JSON input on stdin.
+- In `-p` mode, the prompt is passed as a positional argument after `--`.
+- In permission mode, the prompt is sent via stdin as a JSON user message (no `-p`).
+- Resuming uses `--resume <session_id>`.
+- `-- <query>` safely passes prompts that start with `-`.
 
 ---
 
@@ -145,13 +151,11 @@ The terminal event looks like:
   No idle-timeout completion is used.
 
 #### Permission denials
-`result.permission_denials` may contain tool calls that were blocked. Emit a
-warning action for each denial *before* the final `completed` event:
 
-- `action.kind = "warning"`
-- `title = "permission denied: <tool_name>"`
-- `detail = {tool_name, tool_use_id, tool_input}`
-- `ok = False`, `level = "warning"`
+> **Not yet implemented.** The upstream Claude CLI may include
+> `result.permission_denials` with blocked tool calls, but Untether's
+> `StreamResultMessage` schema does not capture this field and the runner does
+> not emit warning actions for denials. This is a candidate for future work.
 
 ### 4.4 Error handling / malformed lines
 

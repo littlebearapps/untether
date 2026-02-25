@@ -7,6 +7,7 @@ readme = "readme.md"
 license = { file = "LICENSE" }
 requires-python = ">=3.12"
 dependencies = [
+  "aiohttp>=3.9.0",
   "anyio>=4.12.0",
   "httpx>=0.28.1",
   "markdown-it-py",
@@ -53,6 +54,8 @@ claude_control = "untether.telegram.commands.claude_control:BACKEND"
 usage = "untether.telegram.commands.usage:BACKEND"
 planmode = "untether.telegram.commands.planmode:BACKEND"
 ping = "untether.telegram.commands.ping:BACKEND"
+export = "untether.telegram.commands.export:BACKEND"
+browse = "untether.telegram.commands.browse:BACKEND"
 
 [build-system]
 requires = ["uv_build>=0.9.18,<0.10.0"]

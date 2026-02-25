@@ -1,7 +1,10 @@
 # Claude `stream-json` event cheatsheet
 
-`claude -p --output-format stream-json --verbose` writes **one JSON object per line**
-(JSONL) with a required `type` field. (`--output-format` only works with `-p`.)
+`claude -p --output-format stream-json --input-format stream-json --verbose` writes
+**one JSON object per line** (JSONL) with a required `type` field.
+
+In permission mode (without `-p`), the same flags apply but the prompt is sent via
+stdin as JSON rather than as a CLI argument.
 
 This cheatsheet is derived from `humanlayer/claudecode-go/types.go` and
 `client_test.go`.
@@ -71,10 +74,20 @@ Example (success):
 {"type":"result","subtype":"success","session_id":"session_01","total_cost_usd":0.0123,"is_error":false,"duration_ms":12345,"duration_api_ms":12000,"num_turns":2,"result":"Done.","usage":{"input_tokens":150,"output_tokens":70,"service_tier":"standard","server_tool_use":{"web_search_requests":0}}}
 ```
 
-Example (error + permission denials):
+Fields (error path):
+- Same as success, but `is_error`: `true`, `subtype`: `"error"`
+- `result` may be empty or contain an error description
+
+Example (error):
 ```json
-{"type":"result","subtype":"error","session_id":"session_02","total_cost_usd":0.001,"is_error":true,"duration_ms":2000,"duration_api_ms":1800,"num_turns":1,"result":"","error":"Permission denied","permission_denials":[{"tool_name":"Bash","tool_use_id":"toolu_9","tool_input":{"command":"git fetch origin main"}}]}
+{"type":"result","subtype":"error","session_id":"session_02","total_cost_usd":0.001,"is_error":true,"duration_ms":2000,"duration_api_ms":1800,"num_turns":1,"result":""}
 ```
+
+Optional fields (may appear in upstream Claude CLI output but are **not** captured
+by Untether's `StreamResultMessage` schema):
+- `error`: error description string
+- `permission_denials`: array of `{tool_name, tool_use_id, tool_input}`
+- `structured_output`: arbitrary structured output (captured by schema but unused)
 
 ## Message object (`message` field)
 

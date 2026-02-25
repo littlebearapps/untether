@@ -121,6 +121,33 @@ Configuration (under `[transports.telegram]`):
     forward_coalesce_s = 1.0 # set 0 to disable the delay
     ```
 
+### Media group coalescing
+
+When a user sends multiple documents as a Telegram media group (album), Telegram
+delivers them as separate messages sharing a `media_group_id`. Untether buffers
+these messages and processes them as a single batch once the group is complete.
+
+Behavior:
+
+- Messages with a `media_group_id` are collected by the `MediaGroupBuffer`.
+- After `media_group_debounce_s` seconds of quiet (no new messages in the same
+  group), the buffer flushes and routes the group to `handle_media_group`.
+- Each flush resets the debounce timer if new messages arrive before it fires.
+
+Configuration (under `[transports.telegram]`):
+
+=== "untether config"
+
+    ```sh
+    untether config set transports.telegram.media_group_debounce_s 1.0
+    ```
+
+=== "toml"
+
+    ```toml
+    media_group_debounce_s = 1.0 # set 0 to disable the delay
+    ```
+
 ## Chat sessions (optional)
 
 If you chose the **handoff** workflow during onboarding, Untether uses stateless mode

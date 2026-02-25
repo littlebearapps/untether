@@ -1218,6 +1218,45 @@ async def run_main_loop(
 
             scheduler = ThreadScheduler(task_group=tg, run_job=run_thread_job)
 
+            # --- Trigger system (webhooks + cron) ---
+            if cfg.trigger_config and cfg.trigger_config.get("enabled"):
+                from ..triggers.settings import parse_trigger_config
+                from ..triggers.dispatcher import TriggerDispatcher
+                from ..triggers.server import run_webhook_server
+                from ..triggers.cron import run_cron_scheduler
+
+                try:
+                    trigger_settings = parse_trigger_config(cfg.trigger_config)
+                    trigger_dispatcher = TriggerDispatcher(
+                        run_job=run_job,
+                        transport=cfg.exec_cfg.transport,
+                        default_chat_id=cfg.chat_id,
+                        task_group=tg,
+                    )
+                    if trigger_settings.webhooks:
+                        tg.start_soon(
+                            run_webhook_server,
+                            trigger_settings,
+                            trigger_dispatcher,
+                        )
+                    if trigger_settings.crons:
+                        tg.start_soon(
+                            run_cron_scheduler,
+                            trigger_settings.crons,
+                            trigger_dispatcher,
+                        )
+                    logger.info(
+                        "triggers.enabled",
+                        webhooks=len(trigger_settings.webhooks),
+                        crons=len(trigger_settings.crons),
+                    )
+                except (ValueError, TypeError, OSError) as exc:
+                    logger.error(
+                        "triggers.init_failed",
+                        error=str(exc),
+                        error_type=exc.__class__.__name__,
+                    )
+
             def resolve_topic_key(
                 msg: TelegramIncomingMessage,
             ) -> tuple[int, int] | None:
@@ -1759,6 +1798,25 @@ async def run_main_loop(
                             engine_overrides_resolver,
                         )
                         return
+
+                # A1: Intercept text as AskUserQuestion reply if one is pending
+                if text and not is_voice_transcribed:
+                    from ..runners.claude import (
+                        get_pending_ask_request,
+                        answer_ask_question,
+                    )
+                    pending_ask = get_pending_ask_request()
+                    if pending_ask is not None:
+                        ask_req_id, ask_question = pending_ask
+                        logger.info(
+                            "ask_user_question.answering",
+                            request_id=ask_req_id,
+                            answer_len=len(text),
+                        )
+                        success = await answer_ask_question(ask_req_id, text)
+                        if success:
+                            await reply(text=f"↩️ Answered: {text[:100]}")
+                            return
 
                 pending = _PendingPrompt(
                     msg=msg,

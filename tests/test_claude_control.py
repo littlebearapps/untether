@@ -853,3 +853,73 @@ def test_progressive_cooldown_count_preserved_after_expiry() -> None:
     msg = check_discuss_cooldown("sess-prog-2")
     assert msg is not None
     assert "60s" in msg
+
+
+# ===========================================================================
+# J. Auto-approve ExitPlanMode in "auto" permission mode
+# ===========================================================================
+
+def test_exit_plan_mode_auto_approved_in_auto_mode() -> None:
+    """ExitPlanMode is auto-approved when auto_approve_exit_plan_mode is True."""
+    state, factory = _make_state_with_session()
+    state.auto_approve_exit_plan_mode = True
+
+    event = _decode_event({
+        "type": "control_request",
+        "request_id": "req-auto-epm",
+        "request": {
+            "subtype": "can_use_tool",
+            "tool_name": "ExitPlanMode",
+            "input": {},
+        },
+    })
+    events = translate_claude_event(event, title="claude", state=state, factory=factory)
+
+    assert events == []
+    assert "req-auto-epm" in state.auto_approve_queue
+
+
+def test_exit_plan_mode_not_auto_approved_in_plan_mode() -> None:
+    """ExitPlanMode still requires approval when auto_approve_exit_plan_mode is False."""
+    state, factory = _make_state_with_session()
+    state.auto_approve_exit_plan_mode = False
+
+    event = _decode_event({
+        "type": "control_request",
+        "request_id": "req-plan-epm",
+        "request": {
+            "subtype": "can_use_tool",
+            "tool_name": "ExitPlanMode",
+            "input": {},
+        },
+    })
+    events = translate_claude_event(event, title="claude", state=state, factory=factory)
+
+    assert len(events) == 1
+    assert events[0].action.kind == "warning"
+    assert "req-plan-epm" not in state.auto_approve_queue
+
+
+def test_exit_plan_mode_auto_mode_skips_cooldown() -> None:
+    """Auto mode bypasses discuss cooldown — auto-approves even during cooldown."""
+    state, factory = _make_state_with_session("sess-auto-cd")
+    state.auto_approve_exit_plan_mode = True
+
+    # Set a discuss cooldown for this session
+    set_discuss_cooldown("sess-auto-cd")
+
+    event = _decode_event({
+        "type": "control_request",
+        "request_id": "req-auto-cd",
+        "request": {
+            "subtype": "can_use_tool",
+            "tool_name": "ExitPlanMode",
+            "input": {},
+        },
+    })
+    events = translate_claude_event(event, title="claude", state=state, factory=factory)
+
+    # Should be auto-approved, not auto-denied by cooldown
+    assert events == []
+    assert "req-auto-cd" in state.auto_approve_queue
+    assert state.auto_deny_queue == []
