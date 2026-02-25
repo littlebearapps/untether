@@ -1,11 +1,13 @@
 [project]
 name = "untether"
-authors = [{name = "Nathan Schram"}, {name = "banteg (upstream takopi)"}]
+authors = [{name = "Little Bear Apps", email = "hello@littlebearapps.com"}]
+maintainers = [{name = "Little Bear Apps", email = "hello@littlebearapps.com"}]
 version = "0.22.1"
 keywords = ["telegram", "claude-code", "codex", "opencode", "ai-agents", "coding-assistant", "remote-control", "cli-bridge"]
 description = "Telegram bridge for Claude Code, Codex, and other agent CLIs. Fork of takopi with interactive permission control."
 readme = "README.md"
-license = { file = "LICENSE" }
+license = "MIT"
+license-files = ["LICENSE"]
 requires-python = ">=3.12"
 dependencies = [
   "aiohttp>=3.9.0",
@@ -29,7 +31,6 @@ classifiers = [
   "Environment :: Console",
   "Framework :: AsyncIO",
   "Intended Audience :: Developers",
-  "License :: OSI Approved :: MIT License",
   "Operating System :: OS Independent",
   "Programming Language :: Python :: 3",
   "Programming Language :: Python :: 3 :: Only",

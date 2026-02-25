@@ -53,8 +53,7 @@ The wizard creates a Telegram bot, picks your workflow, and connects your chat. 
 
 That's it. Your agent runs on your machine, streams progress to Telegram, and you can reply to continue the conversation.
 
-> [!TIP]
-> Already have a bot token? Pass it directly: `untether --bot-token YOUR_TOKEN`
+**Tip:** Already have a bot token? Pass it directly: `untether --bot-token YOUR_TOKEN`
 
 ---
 
@@ -80,8 +79,7 @@ That's it. Your agent runs on your machine, streams progress to Telegram, and yo
 | [OpenCode](https://github.com/opencode-ai/opencode) | `npm i -g opencode-ai@latest` | 75+ providers via Models.dev, local models |
 | [Pi](https://github.com/mariozechner/pi-coding-agent) | `npm i -g @mariozechner/pi-coding-agent` | Multi-provider auth, conversational |
 
-> [!NOTE]
-> Use your existing Claude or ChatGPT subscription — no extra API keys needed (unless you want API billing).
+**Note:** Use your existing Claude or ChatGPT subscription — no extra API keys needed (unless you want API billing).
 
 ---
 
@@ -190,10 +188,9 @@ max_cost_per_run = 2.00
 max_cost_per_day = 10.00
 ```
 
-See the [full configuration reference](docs/reference/config.md) for all options.
+See the [full configuration reference](https://github.com/littlebearapps/untether/blob/master/docs/reference/config.md) for all options.
 
-> [!WARNING]
-> Never commit your `untether.toml` — it contains your bot token. The default location (`~/.untether/`) keeps it outside your repos.
+**Warning:** Never commit your `untether.toml` — it contains your bot token. The default location (`~/.untether/`) keeps it outside your repos.
 
 ---
 
@@ -209,30 +206,30 @@ See the [full configuration reference](docs/reference/config.md) for all options
 
 Detailed setup and usage for each engine:
 
-- [Claude Code guide](docs/reference/runners/claude/runner.md) — permission modes, plan mode, cost tracking, interactive approvals
-- [Codex guide](docs/reference/runners/codex/exec-json-cheatsheet.md) — profiles, extra args, exec mode
-- [OpenCode guide](docs/reference/runners/opencode/runner.md) — model selection, 75+ providers, local models
-- [Pi guide](docs/reference/runners/pi/runner.md) — multi-provider auth, model and provider selection
-- [Configuration reference](docs/reference/config.md) — full walkthrough of `untether.toml`
-- [Troubleshooting guide](docs/how-to/troubleshooting.md) — common issues and solutions
+- [Claude Code guide](https://github.com/littlebearapps/untether/blob/master/docs/reference/runners/claude/runner.md) — permission modes, plan mode, cost tracking, interactive approvals
+- [Codex guide](https://github.com/littlebearapps/untether/blob/master/docs/reference/runners/codex/exec-json-cheatsheet.md) — profiles, extra args, exec mode
+- [OpenCode guide](https://github.com/littlebearapps/untether/blob/master/docs/reference/runners/opencode/runner.md) — model selection, 75+ providers, local models
+- [Pi guide](https://github.com/littlebearapps/untether/blob/master/docs/reference/runners/pi/runner.md) — multi-provider auth, model and provider selection
+- [Configuration reference](https://github.com/littlebearapps/untether/blob/master/docs/reference/config.md) — full walkthrough of `untether.toml`
+- [Troubleshooting guide](https://github.com/littlebearapps/untether/blob/master/docs/how-to/troubleshooting.md) — common issues and solutions
 
 ---
 
 ## 📚 Documentation
 
-Full documentation is available in the [`docs/`](docs/) directory.
+Full documentation is available in the [`docs/`](https://github.com/littlebearapps/untether/tree/master/docs) directory.
 
-- [Install and onboard](docs/tutorials/install.md) — setup wizard walkthrough
-- [First run](docs/tutorials/first-run.md) — send your first task
-- [Projects and branches](docs/tutorials/projects-and-branches.md) — multi-repo workflows
-- [Multi-engine workflows](docs/tutorials/multi-engine.md) — switching between agents
-- [Architecture](docs/explanation/architecture.md) — how the pieces fit together
+- [Install and onboard](https://github.com/littlebearapps/untether/blob/master/docs/tutorials/install.md) — setup wizard walkthrough
+- [First run](https://github.com/littlebearapps/untether/blob/master/docs/tutorials/first-run.md) — send your first task
+- [Projects and branches](https://github.com/littlebearapps/untether/blob/master/docs/tutorials/projects-and-branches.md) — multi-repo workflows
+- [Multi-engine workflows](https://github.com/littlebearapps/untether/blob/master/docs/tutorials/multi-engine.md) — switching between agents
+- [Architecture](https://github.com/littlebearapps/untether/blob/master/docs/explanation/architecture.md) — how the pieces fit together
 
 ---
 
 ## 🤝 Contributing
 
-Contributions are welcome! See [CONTRIBUTING.md](CONTRIBUTING.md) for development setup, testing, and guidelines.
+Contributions are welcome! See [CONTRIBUTING.md](https://github.com/littlebearapps/untether/blob/master/CONTRIBUTING.md) for development setup, testing, and guidelines.
 
 ---
 
@@ -244,4 +241,4 @@ Untether is a fork of [takopi](https://github.com/banteg/takopi) by [@banteg](ht
 
 ## 📄 Licence
 
-[MIT](LICENSE)
+[MIT](https://github.com/littlebearapps/untether/blob/master/LICENSE)
