@@ -1,7 +1,3 @@
-<p align="center">
-  <img src="docs/assets/logo.svg" alt="Untether" width="120" />
-</p>
-
 <h1 align="center">Untether</h1>
 
 <p align="center">
@@ -13,7 +9,7 @@
   <a href="https://github.com/littlebearapps/untether/actions/workflows/ci.yml"><img src="https://github.com/littlebearapps/untether/actions/workflows/ci.yml/badge.svg" alt="CI" /></a>
   <a href="https://pypi.org/project/untether/"><img src="https://img.shields.io/pypi/v/untether" alt="PyPI" /></a>
   <a href="https://pypi.org/project/untether/"><img src="https://img.shields.io/pypi/pyversions/untether" alt="Python" /></a>
-  <a href="https://github.com/littlebearapps/untether/blob/master/LICENSE"><img src="https://img.shields.io/github/license/littlebearapps/untether" alt="License" /></a>
+  <a href="https://github.com/littlebearapps/untether/blob/master/LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue" alt="License" /></a>
 </p>
 
 ---
@@ -22,10 +18,30 @@ Untether is a Telegram bridge for AI coding agents. It connects [Claude Code](ht
 
 Walk the dog, watch the footy, sit at a friend's place. Your agents keep working. You stay in control.
 
+## Table of contents
+
+- [Quick start](#quick-start)
+- [Why Untether?](#why-untether)
+- [Supported engines](#supported-engines)
+- [Features](#features)
+- [Commands](#commands)
+- [Configuration](#configuration)
+- [Requirements](#requirements)
+- [Engine guides](#engine-guides)
+- [Documentation](#documentation)
+- [Contributing](#contributing)
+- [Acknowledgements](#acknowledgements)
+- [Licence](#licence)
+
 ## Quick start
 
 ```sh
-uv tool install -U untether    # install
+uv tool install untether        # recommended
+# or
+pipx install untether            # alternative
+```
+
+```sh
 untether                        # run setup wizard
 ```
 
