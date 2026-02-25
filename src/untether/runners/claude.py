@@ -1205,6 +1205,7 @@ class ClaudeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
         # PTY setup only for legacy (non-permission) mode
         pty_master_fd: int | None = None
         pty_slave_fd: int | None = None
+        this_proc_stdin: Any = None
 
         try:
             if use_control_channel:
@@ -1244,7 +1245,6 @@ class ClaudeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
                     use_control_channel=use_control_channel,
                 )
 
-                this_proc_stdin: Any = None
                 if use_control_channel and proc.stdin is not None:
                     # SDK-style: send payload but keep stdin open
                     if payload is not None:

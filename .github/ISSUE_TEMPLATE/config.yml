@@ -1,0 +1,8 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Documentation
+    url: https://untether.cc/
+    about: Check the docs for setup guides, configuration reference, and troubleshooting
+  - name: Discussions
+    url: https://github.com/littlebearapps/untether/discussions
+    about: Ask questions and share ideas

@@ -158,7 +158,7 @@ max_cost_per_run = 2.00
 max_cost_per_day = 10.00
 ```
 
-See the [full configuration reference](https://untether.dev/reference/config/) for all options.
+See the [full configuration reference](https://untether.cc/reference/config/) for all options.
 
 ## Requirements
 
@@ -170,22 +170,22 @@ See the [full configuration reference](https://untether.dev/reference/config/) f
 
 Detailed setup and usage for each engine:
 
-- [Claude Code guide](docs/how-to/using-claude-code.md) — permission modes, plan mode, cost tracking, interactive approvals
-- [Codex guide](docs/how-to/using-codex.md) — profiles, extra args, exec mode
-- [OpenCode guide](docs/how-to/using-opencode.md) — model selection, 75+ providers, local models
-- [Pi guide](docs/how-to/using-pi.md) — multi-provider auth, model and provider selection
-- [Configuration reference](https://untether.dev/reference/config/) — full walkthrough of `untether.toml`
-- [Troubleshooting guide](docs/how-to/troubleshooting.md) — common issues and solutions
+- [Claude Code guide](https://untether.cc/reference/runners/claude/runner/) — permission modes, plan mode, cost tracking, interactive approvals
+- [Codex guide](https://untether.cc/reference/runners/codex/exec-json-cheatsheet/) — profiles, extra args, exec mode
+- [OpenCode guide](https://untether.cc/reference/runners/opencode/runner/) — model selection, 75+ providers, local models
+- [Pi guide](https://untether.cc/reference/runners/pi/runner/) — multi-provider auth, model and provider selection
+- [Configuration reference](https://untether.cc/reference/config/) — full walkthrough of `untether.toml`
+- [Troubleshooting guide](https://untether.cc/how-to/troubleshooting/) — common issues and solutions
 
 ## Documentation
 
-Full documentation is available at **[untether.dev](https://untether.dev/)**.
+Full documentation is available at **[untether.cc](https://untether.cc/)**.
 
-- [Install and onboard](https://untether.dev/tutorials/install/) — setup wizard walkthrough
-- [First run](https://untether.dev/tutorials/first-run/) — send your first task
-- [Projects and branches](https://untether.dev/tutorials/projects-and-branches/) — multi-repo workflows
-- [Multi-engine workflows](https://untether.dev/tutorials/multi-engine/) — switching between agents
-- [Architecture](https://untether.dev/explanation/architecture/) — how the pieces fit together
+- [Install and onboard](https://untether.cc/tutorials/install/) — setup wizard walkthrough
+- [First run](https://untether.cc/tutorials/first-run/) — send your first task
+- [Projects and branches](https://untether.cc/tutorials/projects-and-branches/) — multi-repo workflows
+- [Multi-engine workflows](https://untether.cc/tutorials/multi-engine/) — switching between agents
+- [Architecture](https://untether.cc/explanation/architecture/) — how the pieces fit together
 
 ## Contributing
 

@@ -109,7 +109,7 @@ Telegram ←→ TelegramPresenter ←→ RunnerBridge ←→ Runner (claude/code
 - **TelegramPresenter** (`src/untether/telegram/bridge.py`) — renders progress and inline keyboards
 - **Commands** (`src/untether/telegram/commands/`) — in-chat command handlers
 
-See [Architecture](https://untether.dev/explanation/architecture/) for the full breakdown.
+See [Architecture](https://untether.cc/explanation/architecture/) for the full breakdown.
 
 ## Adding a new engine
 

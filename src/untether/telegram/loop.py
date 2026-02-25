@@ -1061,7 +1061,12 @@ async def run_main_loop(
         # Install graceful shutdown signal handlers
         import signal as _signal
 
-        from ..shutdown import DRAIN_TIMEOUT_S, is_shutting_down, request_shutdown
+        from ..shutdown import (
+            DRAIN_TIMEOUT_S,
+            is_shutting_down,
+            request_shutdown,
+            reset_shutdown,
+        )
 
         _prev_sigterm = _signal.getsignal(_signal.SIGTERM)
         _prev_sigint = _signal.getsignal(_signal.SIGINT)
@@ -2012,7 +2017,19 @@ async def run_main_loop(
 
             async for update in poller_fn(cfg):
                 await route_update(update)
+
+            # Poller exhausted (tests / finite pollers) — yield
+            # several times so pending start_soon chains (forward
+            # dispatch → resolve → run_engine) register in
+            # running_tasks, then wait for them to complete before
+            # triggering shutdown so _drain_and_exit() can exit.
+            for _ in range(10):
+                await anyio.sleep(0)
+            while state.running_tasks:
+                await sleep(0.1)
+            request_shutdown()
     finally:
         _signal.signal(_signal.SIGTERM, _prev_sigterm)
         _signal.signal(_signal.SIGINT, _prev_sigint)
+        reset_shutdown()
         await cfg.exec_cfg.transport.close()
