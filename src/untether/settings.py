@@ -131,10 +131,20 @@ class ProjectSettings(BaseModel):
     chat_id: StrictInt | None = None
 
 
+class CostBudgetSettings(BaseModel):
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    enabled: bool = False
+    max_cost_per_run: float | None = Field(default=None, ge=0)
+    max_cost_per_day: float | None = Field(default=None, ge=0)
+    warn_at_pct: int = Field(default=70, ge=0, le=100)
+    auto_cancel: bool = False
+
+
 class UntetherSettings(BaseSettings):
     model_config = SettingsConfigDict(
         extra="allow",
-        env_prefix="TAKOPI__",
+        env_prefix="UNTETHER__",
         env_nested_delimiter="__",
         str_strip_whitespace=True,
     )
@@ -148,6 +158,7 @@ class UntetherSettings(BaseSettings):
     transports: TransportsSettings
 
     plugins: PluginsSettings = Field(default_factory=PluginsSettings)
+    cost_budget: CostBudgetSettings = Field(default_factory=CostBudgetSettings)
 
     @model_validator(mode="before")
     @classmethod

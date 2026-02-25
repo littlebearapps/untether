@@ -6,7 +6,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from untether.commands import CommandBackend, CommandContext, CommandResult
+from untether.commands import CommandContext, CommandResult
 from untether.runner_bridge import _EPHEMERAL_MSGS
 from untether.telegram.commands import dispatch as dispatch_mod
 from untether.telegram.commands.dispatch import _dispatch_callback, _parse_callback_data

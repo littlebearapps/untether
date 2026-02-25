@@ -3,12 +3,13 @@ from __future__ import annotations
 import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
+from typing import Any
 
 import anyio
 
 from .context import RunContext
 from .logging import bind_run_context, get_logger
-from .model import CompletedEvent, ResumeToken, StartedEvent, UntetherEvent
+from .model import ActionEvent, CompletedEvent, ResumeToken, StartedEvent, UntetherEvent
 from .presenter import Presenter
 from .markdown import render_event_cli
 from .runner import Runner
@@ -79,6 +80,117 @@ async def _maybe_append_usage_footer(msg: RenderedMessage) -> RenderedMessage:
     except (ValueError, KeyError, TypeError):
         logger.debug("usage_footer.failed", exc_info=True)
         return msg
+
+
+def _format_run_cost(usage: dict[str, Any] | None) -> str | None:
+    """Format run cost/usage from CompletedEvent into a footer line."""
+    if not usage:
+        return None
+    cost = usage.get("total_cost_usd")
+    if cost is None:
+        return None
+    parts: list[str] = []
+    if cost >= 0.01:
+        parts.append(f"${cost:.2f}")
+    else:
+        parts.append(f"${cost:.4f}")
+    turns = usage.get("num_turns")
+    if turns:
+        parts.append(f"{turns} turns")
+    duration_ms = usage.get("duration_ms")
+    if duration_ms:
+        secs = duration_ms / 1000
+        if secs >= 60:
+            mins = int(secs // 60)
+            remaining = int(secs % 60)
+            parts.append(f"{mins}m {remaining}s API")
+        else:
+            parts.append(f"{secs:.1f}s API")
+    token_usage = usage.get("usage")
+    if isinstance(token_usage, dict):
+        input_tokens = token_usage.get("input_tokens", 0)
+        output_tokens = token_usage.get("output_tokens", 0)
+        if input_tokens or output_tokens:
+            def _fmt_tokens(n: int) -> str:
+                if n >= 1_000_000:
+                    return f"{n / 1_000_000:.1f}M"
+                if n >= 1_000:
+                    return f"{n / 1_000:.1f}k"
+                return str(n)
+            parts.append(f"{_fmt_tokens(input_tokens)} in / {_fmt_tokens(output_tokens)} out")
+    return " · ".join(parts)
+
+
+def _check_cost_budget(usage: dict[str, Any] | None) -> str | None:
+    """Check run cost against budget and return an alert string if needed."""
+    if not usage:
+        return None
+    cost = usage.get("total_cost_usd")
+    if cost is None or cost <= 0:
+        return None
+    try:
+        from .cost_tracker import (
+            CostBudget,
+            check_run_budget,
+            format_cost_alert,
+            record_run_cost,
+        )
+        from .settings import load_settings_if_exists
+
+        record_run_cost(cost)
+
+        result = load_settings_if_exists()
+        if result is None:
+            return None
+        settings, _ = result
+        budget_cfg = settings.cost_budget
+        if not budget_cfg.enabled:
+            return None
+        budget = CostBudget(
+            max_cost_per_run=budget_cfg.max_cost_per_run,
+            max_cost_per_day=budget_cfg.max_cost_per_day,
+            warn_at_pct=budget_cfg.warn_at_pct,
+            auto_cancel=budget_cfg.auto_cancel,
+        )
+        alert = check_run_budget(cost, budget)
+        if alert is not None:
+            return format_cost_alert(alert)
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("cost_budget.check_failed", error=str(exc))
+    return None
+
+
+def _record_export_event(evt: UntetherEvent, resume: ResumeToken | None) -> None:
+    """Record an event for the /export command."""
+    try:
+        from .telegram.commands.export import record_session_event, record_session_usage
+
+        session_id = resume.value if resume else None
+        if not session_id and isinstance(evt, StartedEvent) and evt.resume:
+            session_id = evt.resume.value
+        if not session_id:
+            return
+        event_dict: dict[str, Any] = {"type": evt.type}
+        if isinstance(evt, StartedEvent):
+            event_dict["engine"] = evt.engine
+            event_dict["title"] = evt.title
+        elif isinstance(evt, ActionEvent):
+            event_dict["phase"] = evt.phase
+            event_dict["ok"] = evt.ok
+            event_dict["action"] = {
+                "id": evt.action.id,
+                "kind": evt.action.kind,
+                "title": evt.action.title,
+            }
+        elif isinstance(evt, CompletedEvent):
+            event_dict["ok"] = evt.ok
+            event_dict["answer"] = evt.answer
+            event_dict["error"] = evt.error
+            if evt.usage:
+                record_session_usage(session_id, evt.usage)
+        record_session_event(session_id, event_dict)
+    except Exception:  # noqa: BLE001, S110
+        pass  # Export recording is best-effort
 
 
 def _log_runner_event(evt: UntetherEvent) -> None:
@@ -424,6 +536,8 @@ async def run_runner_with_cancel(
                     elif isinstance(evt, CompletedEvent):
                         outcome.resume = evt.resume or outcome.resume
                         outcome.completed = evt
+                    # A3: Record events for /export
+                    _record_export_event(evt, outcome.resume)
                     await edits.on_event(evt)
             finally:
                 tg.cancel_scope.cancel()
@@ -708,6 +822,22 @@ async def handle_message(
         status=status,
         answer=final_answer,
     )
+
+    # Append run cost footer (from CompletedEvent.usage)
+    cost_line = _format_run_cost(completed.usage)
+    if cost_line:
+        final_rendered = RenderedMessage(
+            text=final_rendered.text + f"\n\n\U0001f4b0 {cost_line}",
+            extra=final_rendered.extra,
+        )
+
+    # A4: Cost budget tracking and alerts
+    _cost_alert_text = _check_cost_budget(completed.usage)
+    if _cost_alert_text:
+        final_rendered = RenderedMessage(
+            text=final_rendered.text + f"\n\n{_cost_alert_text}",
+            extra=final_rendered.extra,
+        )
 
     # Append usage alert footer for Claude engine runs
     if runner.engine == "claude":

@@ -32,8 +32,13 @@ If you’re trying to understand the *why*, use **[Explanation](../explanation/i
 
 ## Transport reference
 
-- [Telegram transport](transports/telegram.md)  
+- [Telegram transport](transports/telegram.md)
   Rate limits, outbox behavior, retries, message editing rules.
+
+## Trigger reference
+
+- [Triggers](triggers/triggers.md)
+  Webhook and cron trigger system: config, auth, templating, routing.
 
 ## Runner reference
 

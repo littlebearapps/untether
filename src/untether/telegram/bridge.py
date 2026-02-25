@@ -150,6 +150,7 @@ class TelegramBridgeConfig:
     files: TelegramFilesSettings = field(default_factory=TelegramFilesSettings)
     chat_ids: tuple[int, ...] | None = None
     topics: TelegramTopicsSettings = field(default_factory=TelegramTopicsSettings)
+    trigger_config: dict | None = None
 
 
 class TelegramTransport:

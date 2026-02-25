@@ -57,3 +57,13 @@ def test_pi_run_options_override_model() -> None:
     assert "--model" in args
     model_idx = args.index("--model") + 1
     assert args[model_idx] == "pi-override"
+
+
+def test_claude_auto_mode_passes_plan_to_cli() -> None:
+    """permission_mode 'auto' produces '--permission-mode plan' in CLI args."""
+    runner = ClaudeRunner(claude_cmd="claude", permission_mode="auto")
+    args = runner.build_args("hi", None, state=None)
+
+    assert "--permission-mode" in args
+    mode_idx = args.index("--permission-mode") + 1
+    assert args[mode_idx] == "plan"

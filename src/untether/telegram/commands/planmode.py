@@ -8,11 +8,13 @@ from ...logging import get_logger
 logger = get_logger(__name__)
 
 PLANMODE_USAGE = (
-    "usage: `/planmode`, `/planmode on`, `/planmode off`, or `/planmode clear`"
+    "usage: `/planmode`, `/planmode on`, `/planmode auto`, `/planmode off`,"
+    " `/planmode show`, or `/planmode clear`"
 )
 
 PERMISSION_MODES = {
     "on": "plan",
+    "auto": "auto",
     "off": "acceptEdits",
 }
 
@@ -21,7 +23,7 @@ class PlanModeCommand:
     """Command backend for toggling Claude Code permission mode."""
 
     id = "planmode"
-    description = "Toggle Claude Code plan mode on/off"
+    description = "Toggle Claude Code plan mode on/auto/off"
 
     async def handle(self, ctx: CommandContext) -> CommandResult | None:
         from ..chat_prefs import ChatPrefsStore, resolve_prefs_path
@@ -44,6 +46,8 @@ class PlanModeCommand:
             mode = current.permission_mode if current else None
             if mode == "plan":
                 label = "<b>on</b> (plan mode)"
+            elif mode == "auto":
+                label = "<b>auto</b> (plan mode, auto-approve ExitPlanMode)"
             elif mode is not None:
                 label = f"<b>off</b> ({mode})"
             else:
@@ -53,10 +57,10 @@ class PlanModeCommand:
             )
 
         if args == "":
-            # Toggle: if currently plan mode, turn off; otherwise turn on
+            # Toggle: if currently plan/auto mode, turn off; otherwise turn on
             current = await chat_prefs.get_engine_override(chat_id, engine)
             current_mode = current.permission_mode if current else None
-            args = "off" if current_mode == "plan" else "on"
+            args = "off" if current_mode in ("plan", "auto") else "on"
 
         if args in PERMISSION_MODES:
             mode = PERMISSION_MODES[args]
@@ -67,11 +71,11 @@ class PlanModeCommand:
                 permission_mode=mode,
             )
             await chat_prefs.set_engine_override(chat_id, engine, updated)
-            label = "on" if args == "on" else "off"
+            cli_mode = "plan" if mode in ("plan", "auto") else mode
             return CommandResult(
                 text=(
-                    f"plan mode <b>{label}</b> for this chat.\n"
-                    f"new sessions will use <code>--permission-mode {mode}</code>."
+                    f"plan mode <b>{args}</b> for this chat.\n"
+                    f"new sessions will use <code>--permission-mode {cli_mode}</code>."
                 ),
                 notify=True,
                 parse_mode="HTML",

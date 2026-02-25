@@ -237,3 +237,78 @@ here; plugin engines should document their own keys.
     [opencode]
     model = "claude-sonnet"
     ```
+
+## Triggers
+
+Webhook and cron triggers that start agent runs from external events. See the
+full [Triggers reference](triggers/triggers.md) for auth, templating, and
+routing details.
+
+=== "toml"
+
+    ```toml
+    [triggers]
+    enabled = true
+
+    [triggers.server]
+    host = "127.0.0.1"
+    port = 9876
+    rate_limit = 60
+    max_body_bytes = 1_048_576
+
+    [[triggers.webhooks]]
+    id = "github-push"
+    path = "/hooks/github"
+    project = "myapp"
+    engine = "claude"
+    auth = "hmac-sha256"
+    secret = "whsec_abc..."
+    prompt_template = "Review push to {{ref}} by {{pusher.name}}"
+
+    [[triggers.crons]]
+    id = "daily-review"
+    schedule = "0 9 * * 1-5"
+    project = "myapp"
+    engine = "claude"
+    prompt = "Review open PRs and summarise status."
+    ```
+
+### `[triggers]`
+
+| Key | Type | Default | Notes |
+|-----|------|---------|-------|
+| `enabled` | bool | `false` | Master switch. No server or cron loop starts when `false`. |
+
+### `[triggers.server]`
+
+| Key | Type | Default | Notes |
+|-----|------|---------|-------|
+| `host` | string | `"127.0.0.1"` | Bind address. Use a reverse proxy for internet exposure. |
+| `port` | int | `9876` | Listen port (1--65535). |
+| `rate_limit` | int | `60` | Max requests per minute (global + per-webhook). |
+| `max_body_bytes` | int | `1048576` | Max request body size in bytes (1 KB--10 MB). |
+
+### `[[triggers.webhooks]]`
+
+| Key | Type | Default | Notes |
+|-----|------|---------|-------|
+| `id` | string | (required) | Unique identifier. |
+| `path` | string | (required) | URL path (e.g. `/hooks/github`). |
+| `project` | string\|null | `null` | Project alias for working directory. |
+| `engine` | string\|null | `null` | Engine override. |
+| `chat_id` | int\|null | `null` | Telegram chat. Falls back to transport default. |
+| `auth` | string | `"bearer"` | `"bearer"`, `"hmac-sha256"`, `"hmac-sha1"`, or `"none"`. |
+| `secret` | string\|null | `null` | Auth secret. Required when `auth` is not `"none"`. |
+| `prompt_template` | string | (required) | Prompt with `{{field.path}}` substitutions. |
+| `event_filter` | string\|null | `null` | Only process matching event type headers. |
+
+### `[[triggers.crons]]`
+
+| Key | Type | Default | Notes |
+|-----|------|---------|-------|
+| `id` | string | (required) | Unique identifier. |
+| `schedule` | string | (required) | 5-field cron expression. |
+| `project` | string\|null | `null` | Project alias for working directory. |
+| `engine` | string\|null | `null` | Engine override. |
+| `chat_id` | int\|null | `null` | Telegram chat. Falls back to transport default. |
+| `prompt` | string | (required) | Prompt sent to the engine. |

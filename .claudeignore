@@ -1,6 +1,4 @@
-dist/
 .venv/
-.mcp*.json
 *.egg-info/
 __pycache__/
 .pytest_cache/
@@ -8,7 +6,9 @@ __pycache__/
 .coverage
 .mutmut-cache/
 mutants/
-.worktrees/
-research/
+uv.lock
 _site/
 docs/reference/changelog.md
+.worktrees/
+research/
+incoming/
