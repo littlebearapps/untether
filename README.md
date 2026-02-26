@@ -50,73 +50,20 @@ That's it. Your agent runs on your machine, streams progress to Telegram, and yo
 
 ## 🎯 Features
 
-### 📡 Progress streaming
-
-Watch your agent work in real time. See tool calls, file changes, and elapsed time as they happen.
-
-### 🔐 Interactive permissions (Claude Code)
-
-When Claude Code runs in plan mode, Untether shows **Approve / Deny / Pause & Outline Plan** buttons for plan transitions. Tools execute automatically — only plan-exit and clarifying questions need your tap. A progressive cooldown prevents rapid retries after "Pause & Outline Plan".
-
-### 📋 Plan mode
-
-Toggle plan mode per chat with `/planmode`. Claude outlines its approach before making changes. Choose between:
-
-- **on** — full plan mode with manual approval
-- **auto** — plan mode with auto-approved transitions
-- **off** — no plan phase
-
-### 📁 Projects and worktrees
-
-Register repos with `untether init myproject`, then target them from chat:
-
-> /myproject @feat/new-api add the endpoint
-
-Each branch runs in an isolated git worktree. Multiple projects and branches can run in parallel.
-
-### 💰 Cost and usage tracking
-
-```toml
-[footer]
-show_api_cost = false           # hide API cost line (default: true)
-show_subscription_usage = true  # show 5h/weekly window usage (default: false)
-
-[cost_budget]
-enabled = true
-max_cost_per_run = 2.00
-max_cost_per_day = 10.00
-```
-
-See subscription usage or API costs in the progress footer. Use `/usage` for a detailed breakdown. Budget alerts fire at configurable thresholds, and can optionally auto-cancel runs.
-
-### 🏷 Model and mode metadata
-
-Every completed message shows the model and permission mode in the footer:
-
-> 🏷 sonnet · plan
-
-Works across all engines — Claude, Codex, OpenCode, and Pi.
-
-### 🎙️ Voice notes
-
-Dictate tasks instead of typing. Untether transcribes voice messages using a configurable Whisper-compatible endpoint and sends the text to your agent.
-
-### 💬 Conversation modes
-
-| Mode | Best for | How it works |
-|------|----------|-------------|
-| **Assistant** | Day-to-day use | Ongoing chat with auto-resume. `/new` to start fresh. |
-| **Workspace** | Teams and multi-project | Forum topics bound to repos and branches. |
-| **Handoff** | Terminal-first workflow | Reply-to-continue with resume lines you can paste into terminal. |
-
-### ✨ More features
-
+- 📡 **Progress streaming** — watch your agent work in real time; see tool calls, file changes, and elapsed time as they happen
+- 🔐 **Interactive permissions** — approve plan transitions and clarifying questions with inline buttons; tools auto-execute, with progressive cooldown after "Pause & Outline Plan"
+- 📋 **Plan mode** — toggle per chat with `/planmode`; choose full manual approval, auto-approved transitions, or no plan phase
+- 📁 **Projects and worktrees** — register repos with `untether init`, target with `/myproject @feat/thing`, run branches in isolated worktrees in parallel
+- 💰 **Cost and usage tracking** — per-run and daily budgets, subscription usage in the footer, `/usage` for detailed breakdowns, optional auto-cancel
+- 🏷 **Model and mode metadata** — every completed message shows the model and permission mode (e.g. `🏷 sonnet · plan`) across all engines
+- 🎙️ **Voice notes** — dictate tasks instead of typing; Untether transcribes via a configurable Whisper-compatible endpoint
 - 📎 **File transfer** — upload files to your repo or download results back
 - ⏰ **Scheduled tasks** — cron expressions and webhook triggers
 - 💬 **Forum topics** — map Telegram topics to projects and branches
 - 📤 **Session export** — `/export` for markdown or JSON transcripts
 - 🗂️ **File browser** — `/browse` to navigate project files with inline buttons
 - 🧩 **Plugin system** — extend with custom engines, transports, and commands
+- 💬 **Conversation modes** — assistant (ongoing chat), workspace (forum topics per project), or handoff (reply-to-continue with terminal resume)
 
 ---
 
@@ -220,7 +167,7 @@ Full documentation is available in the [`docs/`](https://github.com/littlebearap
 
 Found a bug? Got an idea? [Open an issue](https://github.com/littlebearapps/untether/issues) — we'd love to hear from you.
 
-Want to contribute code? See [CONTRIBUTING.md](https://github.com/littlebearapps/untether/blob/master/CONTRIBUTING.md) for development setup, testing, and guidelines. There's also a [Telegram group](https://t.me/+qBtYAMZLW_JkYWEy) for discussion.
+Want to contribute code? See [CONTRIBUTING.md](https://github.com/littlebearapps/untether/blob/master/CONTRIBUTING.md) for development setup, testing, and guidelines.
 
 ---
 
