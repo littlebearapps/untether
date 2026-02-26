@@ -1,8 +1,12 @@
 <h1 align="center">Untether</h1>
 
 <p align="center">
-  <strong>Run AI coding agents from your phone.</strong><br>
-  Voice a task, watch it happen, approve changes — while you're out walking the dog.
+  <strong>Telegram bridge for AI coding agents.</strong><br>
+  Send tasks by voice or text, stream progress live, and approve changes — from your phone, anywhere.
+</p>
+
+<p align="center">
+  Works with <a href="https://docs.anthropic.com/en/docs/claude-code">Claude Code</a> · <a href="https://github.com/openai/codex">Codex</a> · <a href="https://github.com/opencode-ai/opencode">OpenCode</a> · <a href="https://github.com/nicholasgasior/pi">Pi</a>
 </p>
 
 <p align="center">
@@ -12,26 +16,13 @@
   <a href="https://github.com/littlebearapps/untether/blob/master/LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue" alt="License" /></a>
 </p>
 
+<p align="center">
+  <a href="#-quick-start">Quick Start</a> · <a href="#-features">Features</a> · <a href="#-supported-engines">Engines</a> · <a href="#-commands">Commands</a> · <a href="#-contributing">Contributing</a>
+</p>
+
 ---
 
-Untether bridges [Claude Code](https://docs.anthropic.com/en/docs/claude-code), [Codex](https://github.com/openai/codex), [OpenCode](https://github.com/opencode-ai/opencode), and [Pi](https://github.com/nicholasgasior/pi) to Telegram. Send tasks by voice or text, stream progress live, and approve actions with a tap — from your phone, tablet, or any Telegram client.
-
-No desk required. Your agents work on your machine while you're anywhere else.
-
-## Table of contents
-
-- [Quick start](#-quick-start)
-- [Why Untether?](#-why-untether)
-- [Supported engines](#-supported-engines)
-- [Features](#-features)
-- [Commands](#-commands)
-- [Configuration](#%EF%B8%8F-configuration)
-- [Requirements](#-requirements)
-- [Engine guides](#-engine-guides)
-- [Documentation](#-documentation)
-- [Contributing](#-contributing)
-- [Acknowledgements](#-acknowledgements)
-- [Licence](#-licence)
+Your AI coding agents need a terminal, but you don't need to sit at one. Untether runs on your machine and connects your agents to a Telegram bot. Send a task from your phone — by voice or text — and watch your agent work in real time. When it needs permission, tap a button. When it's done, read the result. No desk, no SSH, no screen sharing.
 
 ---
 
@@ -54,33 +45,6 @@ The wizard creates a Telegram bot, picks your workflow, and connects your chat. 
 That's it. Your agent runs on your machine, streams progress to Telegram, and you can reply to continue the conversation.
 
 **Tip:** Already have a bot token? Pass it directly: `untether --bot-token YOUR_TOKEN`
-
----
-
-## 💡 Why Untether?
-
-| Problem | Untether's solution |
-|---------|-------------------|
-| You have to sit at your desk while agents work | Stream progress to Telegram — watch from anywhere |
-| Typing tasks on your phone is slow | Voice notes — dictate tasks, Untether transcribes them |
-| Agents need permission to run tools | Approve or deny with inline buttons, plus plan mode for oversight |
-| You can't tell what model or mode was used | Model and permission mode shown on every completed message |
-| You switch between Claude, Codex, and other agents | One bot, multiple engines — switch with `/claude`, `/codex`, etc. |
-| Managing multiple repos from chat is messy | Register projects, target with `/myproject`, branches with `@feat/thing` |
-| No cost visibility | Per-run and daily cost tracking with configurable budgets |
-
----
-
-## 🔌 Supported engines
-
-| Engine | Install | What it's good at |
-|--------|---------|-------------------|
-| [Claude Code](https://docs.anthropic.com/en/docs/claude-code) | `npm i -g @anthropic-ai/claude-code` | Complex refactors, architecture, long context |
-| [Codex](https://github.com/openai/codex) | `npm i -g @openai/codex` | Fast edits, shell commands, quick fixes |
-| [OpenCode](https://github.com/opencode-ai/opencode) | `npm i -g opencode-ai@latest` | 75+ providers via Models.dev, local models |
-| [Pi](https://github.com/mariozechner/pi-coding-agent) | `npm i -g @mariozechner/pi-coding-agent` | Multi-provider auth, conversational |
-
-**Note:** Use your existing Claude or ChatGPT subscription — no extra API keys needed (unless you want API billing).
 
 ---
 
@@ -153,6 +117,19 @@ Dictate tasks instead of typing. Untether transcribes voice messages using a con
 - 📤 **Session export** — `/export` for markdown or JSON transcripts
 - 🗂️ **File browser** — `/browse` to navigate project files with inline buttons
 - 🧩 **Plugin system** — extend with custom engines, transports, and commands
+
+---
+
+## 🔌 Supported engines
+
+| Engine | Install | What it's good at |
+|--------|---------|-------------------|
+| [Claude Code](https://docs.anthropic.com/en/docs/claude-code) | `npm i -g @anthropic-ai/claude-code` | Complex refactors, architecture, long context |
+| [Codex](https://github.com/openai/codex) | `npm i -g @openai/codex` | Fast edits, shell commands, quick fixes |
+| [OpenCode](https://github.com/opencode-ai/opencode) | `npm i -g opencode-ai@latest` | 75+ providers via Models.dev, local models |
+| [Pi](https://github.com/mariozechner/pi-coding-agent) | `npm i -g @mariozechner/pi-coding-agent` | Multi-provider auth, conversational |
+
+**Note:** Use your existing Claude or ChatGPT subscription — no extra API keys needed (unless you want API billing).
 
 ---
 
@@ -255,4 +232,4 @@ Untether is a fork of [takopi](https://github.com/banteg/takopi) by [@banteg](ht
 
 ## 📄 Licence
 
-[MIT](https://github.com/littlebearapps/untether/blob/master/LICENSE)
+[MIT](https://github.com/littlebearapps/untether/blob/master/LICENSE) — Made by [Little Bear Apps](https://github.com/littlebearapps) 🐶
