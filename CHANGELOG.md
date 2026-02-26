@@ -1,5 +1,17 @@
 # changelog
 
+## v0.23.4 (2026-02-26)
+
+### fixes
+
+- fix `test_doctor_voice_checks` env var leak from pydantic_settings [#12](https://github.com/littlebearapps/untether/issues/12)
+  - `UntetherSettings.model_validate()` auto-loads `UNTETHER__*` env vars, causing `voice_transcription_api_key` to leak into test
+  - added `monkeypatch.delenv()` for the pydantic_settings env var before constructing test settings
+
+### docs
+
+- add macOS Keychain credential info to install tutorial, troubleshooting guide, and command reference [#7](https://github.com/littlebearapps/untether/issues/7)
+
 ## v0.23.3 (2026-02-26)
 
 ### fixes

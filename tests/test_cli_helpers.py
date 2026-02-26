@@ -121,6 +121,10 @@ def test_doctor_voice_checks(monkeypatch) -> None:
     checks = cli._doctor_voice_checks(settings)
     assert checks[0].detail == "disabled"
 
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.delenv(
+        "UNTETHER__TRANSPORTS__TELEGRAM__VOICE_TRANSCRIPTION_API_KEY", raising=False
+    )
     settings = _settings(
         {
             "transports": {
@@ -132,7 +136,6 @@ def test_doctor_voice_checks(monkeypatch) -> None:
             }
         }
     )
-    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
     checks = cli._doctor_voice_checks(settings)
     assert checks[0].status == "error"
     assert checks[0].detail == "API key not set"
