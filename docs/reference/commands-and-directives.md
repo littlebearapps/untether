@@ -46,7 +46,7 @@ This line is parsed from replies and takes precedence over new directives.
 | `/ctx set <project> @branch` | Update context binding. |
 | `/ctx clear` | Remove context binding. |
 | `/planmode` | Toggle Claude Code plan mode (on/auto/off/show/clear). |
-| `/usage` | Show Claude Code subscription usage (5h window, weekly, per-model). |
+| `/usage` | Show Claude Code subscription usage (5h window, weekly, per-model). Requires Claude Code OAuth credentials (see [troubleshooting](../how-to/troubleshooting.md#claude-code-credentials)). |
 | `/export` | Export last session transcript as Markdown or JSON. |
 | `/browse` | Browse project files with inline keyboard navigation. |
 | `/ping` | Health check — replies with uptime. |
