@@ -802,3 +802,133 @@ class TestMaybeAppendUsageFooterAlwaysShow:
         msg = RenderedMessage(text="Done.", extra={})
         result = await _maybe_append_usage_footer(msg, always_show=False)
         assert "5h: 85%" in result.text
+
+    @pytest.mark.anyio
+    async def test_missing_credentials_returns_original_message(self, monkeypatch):
+        from untether.runner_bridge import _maybe_append_usage_footer
+
+        async def _raise_fnf():
+            raise FileNotFoundError("No Claude credentials")
+
+        monkeypatch.setattr(
+            "untether.telegram.commands.usage.fetch_claude_usage", _raise_fnf
+        )
+
+        msg = RenderedMessage(text="Done.", extra={})
+        result = await _maybe_append_usage_footer(msg, always_show=True)
+        assert result.text == "Done."
+
+    @pytest.mark.anyio
+    async def test_http_error_returns_original_message(self, monkeypatch):
+        import httpx
+
+        from untether.runner_bridge import _maybe_append_usage_footer
+
+        async def _raise_http():
+            response = httpx.Response(
+                status_code=401, request=httpx.Request("GET", "https://example.com")
+            )
+            raise httpx.HTTPStatusError(
+                "Unauthorized", request=response.request, response=response
+            )
+
+        monkeypatch.setattr(
+            "untether.telegram.commands.usage.fetch_claude_usage", _raise_http
+        )
+
+        msg = RenderedMessage(text="Done.", extra={})
+        result = await _maybe_append_usage_footer(msg, always_show=True)
+        assert result.text == "Done."
+
+
+# ---------------------------------------------------------------------------
+# _read_access_token credential source tests
+# ---------------------------------------------------------------------------
+
+
+class TestReadAccessToken:
+    def test_reads_from_file(self, tmp_path):
+        import json
+
+        from untether.telegram.commands.usage import _read_access_token
+
+        creds = {
+            "claudeAiOauth": {
+                "accessToken": "sk-test-token",
+                "expiresAt": 9999999999999,
+            }
+        }
+        creds_file = tmp_path / ".credentials.json"
+        creds_file.write_text(json.dumps(creds))
+
+        token, is_expired = _read_access_token(creds_file)
+        assert token == "sk-test-token"
+        assert not is_expired
+
+    def test_file_not_found_raises(self, tmp_path):
+        from untether.telegram.commands.usage import _read_access_token
+
+        missing = tmp_path / "nonexistent.json"
+        with pytest.raises(FileNotFoundError):
+            _read_access_token(missing)
+
+    def test_macos_keychain_fallback(self, tmp_path, monkeypatch):
+        import json
+
+        from untether.telegram.commands.usage import _read_access_token
+
+        monkeypatch.setattr("untether.telegram.commands.usage.sys.platform", "darwin")
+
+        creds = {
+            "claudeAiOauth": {
+                "accessToken": "sk-keychain-token",
+                "expiresAt": 9999999999999,
+            }
+        }
+
+        fake_result = type(
+            "Result", (), {"returncode": 0, "stdout": json.dumps(creds)}
+        )()
+        monkeypatch.setattr(
+            "untether.telegram.commands.usage.subprocess.run",
+            lambda *args, **kwargs: fake_result,
+        )
+
+        missing = tmp_path / "nonexistent.json"
+        token, is_expired = _read_access_token(missing)
+        assert token == "sk-keychain-token"
+        assert not is_expired
+
+    def test_file_preferred_over_keychain(self, tmp_path, monkeypatch):
+        import json
+
+        from untether.telegram.commands.usage import _read_access_token
+
+        monkeypatch.setattr("untether.telegram.commands.usage.sys.platform", "darwin")
+
+        creds = {
+            "claudeAiOauth": {
+                "accessToken": "sk-file-token",
+                "expiresAt": 9999999999999,
+            }
+        }
+        creds_file = tmp_path / ".credentials.json"
+        creds_file.write_text(json.dumps(creds))
+
+        # Keychain would return a different token — but file should win
+        keychain_creds = {
+            "claudeAiOauth": {
+                "accessToken": "sk-keychain-token",
+                "expiresAt": 9999999999999,
+            }
+        }
+        fake_result = type(
+            "Result", (), {"returncode": 0, "stdout": json.dumps(keychain_creds)}
+        )()
+        monkeypatch.setattr(
+            "untether.telegram.commands.usage.subprocess.run",
+            lambda *args, **kwargs: fake_result,
+        )
+
+        token, _ = _read_access_token(creds_file)
+        assert token == "sk-file-token"

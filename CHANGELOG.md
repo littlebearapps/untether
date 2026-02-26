@@ -1,5 +1,16 @@
 # changelog
 
+## v0.23.2 (2026-02-26)
+
+### fixes
+
+- fix crash when Claude OAuth credentials file missing (macOS Keychain, API key auth)
+  - `_maybe_append_usage_footer()` now catches `FileNotFoundError` and `httpx.HTTPStatusError`
+  - post-run messages are delivered to Telegram even when usage data is unavailable
+- add macOS Keychain support for `/usage` command and subscription usage footer
+  - on macOS, Claude Code stores OAuth credentials in the Keychain, not on disk
+  - `_read_access_token()` now tries the file first, then falls back to macOS Keychain
+
 ## v0.23.1 (2026-02-26)
 
 ### changes

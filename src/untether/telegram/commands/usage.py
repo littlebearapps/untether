@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import contextlib
 import json
+import subprocess
+import sys
 import time
 from datetime import UTC, datetime
 from pathlib import Path
@@ -51,9 +54,42 @@ def _read_access_token(
 ) -> tuple[str, bool]:
     """Read the OAuth access token from Claude credentials.
 
+    Tries the plain-text file first (Linux), then macOS Keychain.
     Returns (token, is_expired) tuple.
+    Raises FileNotFoundError if no credentials found.
     """
-    data = json.loads(credentials_path.read_text())
+    raw: str | None = None
+
+    # Try plain-text file first (Linux, or custom CLAUDE_CONFIG_DIR)
+    with contextlib.suppress(FileNotFoundError):
+        raw = credentials_path.read_text()
+
+    # macOS: try Keychain
+    if raw is None and sys.platform == "darwin":
+        try:
+            result = subprocess.run(
+                [
+                    "security",
+                    "find-generic-password",
+                    "-s",
+                    "Claude Code-credentials",
+                    "-w",
+                ],
+                capture_output=True,
+                text=True,
+                timeout=5,
+            )
+            if result.returncode == 0 and result.stdout.strip():
+                raw = result.stdout.strip()
+        except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
+            pass
+
+    if raw is None:
+        raise FileNotFoundError(
+            f"No Claude credentials at {credentials_path} or macOS Keychain"
+        )
+
+    data = json.loads(raw)
     oauth = data["claudeAiOauth"]
     token = oauth["accessToken"]
     expires_at_ms = oauth.get("expiresAt", 0)
@@ -159,7 +195,8 @@ class UsageCommand:
             data = await fetch_claude_usage()
         except FileNotFoundError:
             return CommandResult(
-                text="No Claude credentials found at ~/.claude/.credentials.json",
+                text="No Claude credentials found (checked ~/.claude/.credentials.json"
+                " and macOS Keychain). Run 'claude login' to authenticate.",
                 notify=True,
             )
         except httpx.HTTPStatusError as exc:

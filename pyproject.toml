@@ -2,7 +2,7 @@
 name = "untether"
 authors = [{name = "Little Bear Apps", email = "hello@littlebearapps.com"}]
 maintainers = [{name = "Little Bear Apps", email = "hello@littlebearapps.com"}]
-version = "0.23.1"
+version = "0.23.2"
 keywords = ["telegram", "claude-code", "codex", "opencode", "pi", "ai-agents", "coding-assistant", "remote-control", "cli-bridge"]
 description = "Run AI coding agents from your phone. Bridges Claude Code, Codex, OpenCode, and Pi to Telegram with interactive permissions, voice notes, and live progress."
 readme = "README.md"
