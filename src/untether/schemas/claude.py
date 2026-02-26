@@ -217,6 +217,25 @@ class StreamControlCancelRequest(
     request_id: str | None = None
 
 
+class RateLimitInfo(msgspec.Struct, forbid_unknown_fields=False):
+    requests_limit: int | None = None
+    requests_remaining: int | None = None
+    requests_reset: str | None = None
+    tokens_limit: int | None = None
+    tokens_remaining: int | None = None
+    tokens_reset: str | None = None
+    retry_after_ms: int | None = None
+
+
+class StreamRateLimitMessage(
+    msgspec.Struct,
+    tag="rate_limit_event",
+    tag_field="type",
+    forbid_unknown_fields=False,
+):
+    rate_limit_info: RateLimitInfo | None = None
+
+
 type StreamJsonMessage = (
     StreamUserMessage
     | StreamAssistantMessage
@@ -226,6 +245,7 @@ type StreamJsonMessage = (
     | StreamControlRequest
     | StreamControlResponse
     | StreamControlCancelRequest
+    | StreamRateLimitMessage
 )
 
 
