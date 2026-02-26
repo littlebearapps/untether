@@ -22,6 +22,8 @@ Untether adds interactive permission control, plan mode support, and several UX 
 - **Cost tracking and budget** — per-run and daily cost limits with configurable alerts
 - **Subscription usage footer** — configurable `[footer]` to show 5h/weekly subscription usage instead of/alongside API costs
 - **Graceful restart** — `/restart` command drains active runs before restarting; SIGTERM also triggers graceful drain
+- **Compact startup message** — version number, conditional diagnostics (only shows mode/topics/triggers/engines when they carry signal), project count instead of full list
+- **Model/mode footer** — final messages show model name + permission mode (e.g. `🏷 sonnet · plan`) from `StartedEvent.meta`; all 4 engines populate model info
 
 See `.claude/skills/claude-stream-json/` and `.claude/rules/control-channel.md` for implementation details.
 
@@ -47,6 +49,7 @@ Telegram <-> TelegramPresenter <-> RunnerBridge <-> Runner (claude/codex/opencod
 | `cost_tracker.py` | Per-run/daily cost tracking and budget alerts |
 | `commands/claude_control.py` | Approve/Deny/Discuss callback handler |
 | `commands/dispatch.py` | Callback dispatch and command routing |
+| `markdown.py` | Progress/final message formatting, meta_line footer |
 | `commands/planmode.py` | `/planmode` toggle command |
 | `commands/usage.py` | `/usage` command |
 | `commands/export.py` | `/export` command |
@@ -120,6 +123,7 @@ Rules in `.claude/rules/` auto-load when editing matching files:
 - `test_cost_tracker.py` — 56 tests: cost accumulation, per-run/daily budget thresholds, warning levels, daily reset, auto-cancel flag
 - `test_export_command.py` — 28 tests: session event recording, markdown/JSON export formatting, usage integration, session trimming
 - `test_browse_command.py` — 36 tests: path registry, directory listing, file preview, inline keyboard buttons, project-aware root resolution, security (path traversal)
+- `test_meta_line.py` — 26 tests: model name shortening, meta line formatting, ProgressTracker meta storage/snapshot, footer ordering (context/meta/resume)
 - `test_shutdown.py` — 4 tests: shutdown state transitions, idempotency, reset
 - `test_restart_command.py` — 3 tests: command triggers shutdown, idempotent response, command id
 

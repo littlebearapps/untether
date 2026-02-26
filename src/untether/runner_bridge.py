@@ -11,7 +11,7 @@ from .context import RunContext
 from .logging import bind_run_context, get_logger
 from .model import ActionEvent, CompletedEvent, ResumeToken, StartedEvent, UntetherEvent
 from .presenter import Presenter
-from .markdown import render_event_cli
+from .markdown import format_meta_line, render_event_cli
 from .runner import Runner
 from .progress import ProgressTracker
 from .transport import (
@@ -764,6 +764,7 @@ async def handle_message(
         state = progress_tracker.snapshot(
             resume_formatter=runner.format_resume,
             context_line=context_line,
+            meta_formatter=format_meta_line,
         )
         final_rendered = cfg.presenter.render_final(
             state,
@@ -808,6 +809,7 @@ async def handle_message(
         state = progress_tracker.snapshot(
             resume_formatter=runner.format_resume,
             context_line=context_line,
+            meta_formatter=format_meta_line,
         )
         final_rendered = cfg.presenter.render_progress(
             state,
@@ -862,6 +864,7 @@ async def handle_message(
     state = progress_tracker.snapshot(
         resume_formatter=runner.format_resume,
         context_line=context_line,
+        meta_formatter=format_meta_line,
     )
     final_rendered = cfg.presenter.render_final(
         state,

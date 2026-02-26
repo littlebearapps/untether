@@ -5,7 +5,8 @@ from typing import Any
 
 import pytest
 
-from untether.config import ProjectsConfig
+from untether import __version__
+from untether.config import ProjectConfig, ProjectsConfig
 from untether.router import AutoRouter, RunnerEntry
 from untether.runners.mock import Return, ScriptRunner
 from untether.settings import (
@@ -49,9 +50,9 @@ def test_build_startup_message_includes_missing_engines(tmp_path: Path) -> None:
         topics=TelegramTopicsSettings(),
     )
 
-    assert "untether is ready" in message
+    assert "untether" in message and "is ready" in message
     assert "engines: `codex (not installed: pi)`" in message
-    assert "projects: `none`" in message
+    assert "projects: `0`" in message
 
 
 def test_build_startup_message_surfaces_unavailable_engine_reasons(
@@ -92,9 +93,120 @@ def test_build_startup_message_surfaces_unavailable_engine_reasons(
         topics=TelegramTopicsSettings(),
     )
 
-    assert "engines: `codex" in message
+    assert "engines:" in message and "codex" in message
     assert "misconfigured: pi" in message
     assert "failed to load: claude" in message
+
+
+def _build_healthy_runtime() -> TransportRuntime:
+    """Build a runtime with a single healthy engine and no projects."""
+    runner = ScriptRunner([Return(answer="ok")], engine="claude")
+    router = AutoRouter(
+        entries=[RunnerEntry(engine="claude", runner=runner)],
+        default_engine="claude",
+    )
+    return TransportRuntime(
+        router=router,
+        projects=ProjectsConfig(projects={}, default_project=None),
+        watch_config=True,
+    )
+
+
+def test_startup_message_includes_version(tmp_path: Path) -> None:
+    runtime = _build_healthy_runtime()
+    message = telegram_backend._build_startup_message(
+        runtime,
+        startup_pwd=str(tmp_path),
+        chat_id=123,
+        session_mode="stateless",
+        show_resume_line=True,
+        topics=TelegramTopicsSettings(),
+    )
+    assert f"v{__version__}" in message
+
+
+def test_startup_message_uses_dog_emoji(tmp_path: Path) -> None:
+    runtime = _build_healthy_runtime()
+    message = telegram_backend._build_startup_message(
+        runtime,
+        startup_pwd=str(tmp_path),
+        chat_id=123,
+        session_mode="stateless",
+        show_resume_line=True,
+        topics=TelegramTopicsSettings(),
+    )
+    assert "\N{DOG}" in message
+    assert "\N{OCTOPUS}" not in message
+
+
+def test_startup_message_minimal_when_healthy(tmp_path: Path) -> None:
+    """When everything is healthy, only show primary info and working dir."""
+    runtime = _build_healthy_runtime()
+    message = telegram_backend._build_startup_message(
+        runtime,
+        startup_pwd=str(tmp_path),
+        chat_id=123,
+        session_mode="stateless",
+        show_resume_line=True,
+        topics=TelegramTopicsSettings(),
+    )
+    assert "mode:" not in message
+    assert "topics:" not in message
+    assert "triggers:" not in message
+    assert "engines:" not in message
+    assert "resume lines:" not in message
+    assert "working in:" in message
+
+
+def test_startup_message_shows_mode_chat(tmp_path: Path) -> None:
+    runtime = _build_healthy_runtime()
+    message = telegram_backend._build_startup_message(
+        runtime,
+        startup_pwd=str(tmp_path),
+        chat_id=123,
+        session_mode="chat",
+        show_resume_line=True,
+        topics=TelegramTopicsSettings(),
+    )
+    assert "mode: `chat`" in message
+
+
+def test_startup_message_project_count(tmp_path: Path) -> None:
+    runner = ScriptRunner([Return(answer="ok")], engine="claude")
+    router = AutoRouter(
+        entries=[RunnerEntry(engine="claude", runner=runner)],
+        default_engine="claude",
+    )
+    runtime = TransportRuntime(
+        router=router,
+        projects=ProjectsConfig(
+            projects={
+                "proj-a": ProjectConfig(
+                    alias="proj-a",
+                    path=Path("/a"),
+                    worktrees_dir=Path(".worktrees"),
+                    chat_id=1,
+                ),
+                "proj-b": ProjectConfig(
+                    alias="proj-b",
+                    path=Path("/b"),
+                    worktrees_dir=Path(".worktrees"),
+                    chat_id=2,
+                ),
+            },
+            default_project=None,
+        ),
+        watch_config=True,
+    )
+    message = telegram_backend._build_startup_message(
+        runtime,
+        startup_pwd=str(tmp_path),
+        chat_id=123,
+        session_mode="stateless",
+        show_resume_line=True,
+        topics=TelegramTopicsSettings(),
+    )
+    assert "projects: `2`" in message
 
 
 def test_telegram_backend_build_and_run_wires_config(

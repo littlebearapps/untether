@@ -1,8 +1,8 @@
 <h1 align="center">Untether</h1>
 
 <p align="center">
-  <strong>Control your AI coding agents from Telegram.</strong><br>
-  Stream progress, approve actions, manage projects — from anywhere.
+  <strong>Run AI coding agents from your phone.</strong><br>
+  Voice a task, watch it happen, approve changes — while you're out walking the dog.
 </p>
 
 <p align="center">
@@ -14,9 +14,9 @@
 
 ---
 
-Untether is a Telegram bridge for AI coding agents. It connects [Claude Code](https://docs.anthropic.com/en/docs/claude-code), [Codex](https://github.com/openai/codex), [OpenCode](https://github.com/opencode-ai/opencode), and [Pi](https://github.com/nicholasgasior/pi) to Telegram so you can send coding tasks, watch progress live, and approve actions — all from your phone.
+Untether bridges [Claude Code](https://docs.anthropic.com/en/docs/claude-code), [Codex](https://github.com/openai/codex), [OpenCode](https://github.com/opencode-ai/opencode), and [Pi](https://github.com/nicholasgasior/pi) to Telegram. Send tasks by voice or text, stream progress live, and approve actions with a tap — from your phone, tablet, or any Telegram client.
 
-Walk the dog, watch the footy, sit at a friend's place. Your agents keep working. You stay in control.
+No desk required. Your agents work on your machine while you're anywhere else.
 
 ## Table of contents
 
@@ -62,11 +62,12 @@ That's it. Your agent runs on your machine, streams progress to Telegram, and yo
 | Problem | Untether's solution |
 |---------|-------------------|
 | You have to sit at your desk while agents work | Stream progress to Telegram — watch from anywhere |
-| Agents need permission to run tools | Approve or deny actions with inline buttons on your phone |
-| You switch between Claude, Codex, and other agents | One bot, multiple engines — switch with `/claude`, `/codex`, `/opencode`, or `/pi` |
-| Managing multiple repos from chat is messy | Register projects, target them with `/myproject`, branch with `@feat/thing` |
+| Typing tasks on your phone is slow | Voice notes — dictate tasks, Untether transcribes them |
+| Agents need permission to run tools | Approve or deny with inline buttons, plus plan mode for oversight |
+| You can't tell what model or mode was used | Model and permission mode shown on every completed message |
+| You switch between Claude, Codex, and other agents | One bot, multiple engines — switch with `/claude`, `/codex`, etc. |
+| Managing multiple repos from chat is messy | Register projects, target with `/myproject`, branches with `@feat/thing` |
 | No cost visibility | Per-run and daily cost tracking with configurable budgets |
-| Can't continue terminal sessions remotely | Stateless resume — pick up any session in chat or terminal |
 
 ---
 
@@ -91,7 +92,7 @@ Watch your agent work in real time. See tool calls, file changes, and elapsed ti
 
 ### 🔐 Interactive permissions (Claude Code)
 
-When Claude Code needs to run a tool, Untether shows **Approve / Deny / Pause & Outline Plan** buttons in Telegram. Routine tools (Read, Grep, Glob) are auto-approved. Dangerous operations require your explicit approval with a diff preview.
+When Claude Code runs in plan mode, Untether shows **Approve / Deny / Pause & Outline Plan** buttons for plan transitions. Tools execute automatically — only plan-exit and clarifying questions need your tap. A progressive cooldown prevents rapid retries after "Pause & Outline Plan".
 
 ### 📋 Plan mode
 
@@ -124,6 +125,18 @@ max_cost_per_day = 10.00
 
 See subscription usage or API costs in the progress footer. Use `/usage` for a detailed breakdown. Budget alerts fire at configurable thresholds, and can optionally auto-cancel runs.
 
+### 🏷 Model and mode metadata
+
+Every completed message shows the model and permission mode in the footer:
+
+> 🏷 sonnet · plan
+
+Works across all engines — Claude, Codex, OpenCode, and Pi.
+
+### 🎙️ Voice notes
+
+Dictate tasks instead of typing. Untether transcribes voice messages using a configurable Whisper-compatible endpoint and sends the text to your agent.
+
 ### 💬 Conversation modes
 
 | Mode | Best for | How it works |
@@ -134,7 +147,6 @@ See subscription usage or API costs in the progress footer. Use `/usage` for a d
 
 ### ✨ More features
 
-- 🎙️ **Voice notes** — dictate tasks, Untether transcribes and sends to the agent
 - 📎 **File transfer** — upload files to your repo or download results back
 - ⏰ **Scheduled tasks** — cron expressions and webhook triggers
 - 💬 **Forum topics** — map Telegram topics to projects and branches
@@ -229,7 +241,9 @@ Full documentation is available in the [`docs/`](https://github.com/littlebearap
 
 ## 🤝 Contributing
 
-Contributions are welcome! See [CONTRIBUTING.md](https://github.com/littlebearapps/untether/blob/master/CONTRIBUTING.md) for development setup, testing, and guidelines.
+Found a bug? Got an idea? [Open an issue](https://github.com/littlebearapps/untether/issues) — we'd love to hear from you.
+
+Want to contribute code? See [CONTRIBUTING.md](https://github.com/littlebearapps/untether/blob/master/CONTRIBUTING.md) for development setup, testing, and guidelines. There's also a [Telegram group](https://t.me/+qBtYAMZLW_JkYWEy) for discussion.
 
 ---
 

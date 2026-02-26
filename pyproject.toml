@@ -2,7 +2,7 @@
 name = "untether"
 authors = [{name = "Little Bear Apps", email = "hello@littlebearapps.com"}]
 maintainers = [{name = "Little Bear Apps", email = "hello@littlebearapps.com"}]
-version = "0.22.2"
+version = "0.23.0"
 keywords = ["telegram", "claude-code", "codex", "opencode", "ai-agents", "coding-assistant", "remote-control", "cli-bridge"]
 description = "Telegram bridge for Claude Code, Codex, and other agent CLIs. Fork of takopi with interactive permission control."
 readme = "README.md"

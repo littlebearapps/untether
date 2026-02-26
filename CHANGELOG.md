@@ -4,6 +4,13 @@
 
 ### changes
 
+- refresh startup message: dog emoji, version number, conditional diagnostics, project count
+  - only shows mode/topics/triggers/engines lines when they carry signal
+  - removes `resume lines:` field (config detail, not actionable)
+- add model + permission mode footer on final messages (`🏷 sonnet · plan`)
+  - all 4 engines (Claude, Codex, OpenCode, Pi) populate `StartedEvent.meta` with model info
+  - Claude also includes `permissionMode` from `system.init`
+  - Codex/OpenCode use runner config since their JSONL streams don't include model metadata
 - route telegram callback queries to command backends [#116](https://github.com/banteg/takopi/issues/116)
   - callback data format: `command_id:args...` routes to registered command plugins
   - extracts `message_thread_id` from callback for proper topic context

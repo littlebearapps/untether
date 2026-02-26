@@ -116,7 +116,7 @@ Required:
 Optional:
 
 * `title: str`
-* `meta: dict`
+* `meta: dict` — engine-specific metadata. All engines SHOULD populate `meta.model` with the model name when available. Claude also populates `meta.permissionMode`. Used for the `🏷` footer line on final messages.
 
 #### 4.3.2 `action`
 

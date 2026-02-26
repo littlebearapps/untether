@@ -6,6 +6,7 @@ from typing import Literal
 
 import anyio
 
+from .. import __version__
 from ..backends import EngineBackend
 from ..config import read_config
 from ..logging import get_logger
@@ -42,26 +43,20 @@ def _build_startup_message(
     topics: TelegramTopicsSettings,
     trigger_config: dict | None = None,
 ) -> str:
-    available_engines = list(runtime.available_engine_ids())
-    missing_engines = list(runtime.missing_engine_ids())
-    misconfigured_engines = list(runtime.engine_ids_with_status("bad_config"))
-    failed_engines = list(runtime.engine_ids_with_status("load_error"))
-
-    engine_list = ", ".join(available_engines) if available_engines else "none"
-
-    notes: list[str] = []
-    if missing_engines:
-        notes.append(f"not installed: {', '.join(missing_engines)}")
-    if misconfigured_engines:
-        notes.append(f"misconfigured: {', '.join(misconfigured_engines)}")
-    if failed_engines:
-        notes.append(f"failed to load: {', '.join(failed_engines)}")
-    if notes:
-        engine_list = f"{engine_list} ({'; '.join(notes)})"
     project_aliases = sorted(set(runtime.project_aliases()), key=str.lower)
-    project_list = ", ".join(project_aliases) if project_aliases else "none"
-    resume_label = "shown" if show_resume_line else "hidden"
-    topics_label = "disabled"
+    project_count = len(project_aliases)
+
+    lines: list[str] = [
+        f"\N{DOG} **untether v{__version__} is ready**",
+        "",
+        f"engine: `{runtime.default_engine}` \N{MIDDLE DOT} projects: `{project_count}`",
+    ]
+
+    # mode — only shown when non-default (chat is interesting, stateless is not)
+    if session_mode == "chat":
+        lines.append(f"mode: `{session_mode}`")
+
+    # topics — only shown when enabled
     if topics.enabled:
         resolved_scope, _ = _resolve_topics_scope_raw(
             topics.scope, chat_id, runtime.project_chat_ids()
@@ -69,23 +64,32 @@ def _build_startup_message(
         scope_label = (
             f"auto ({resolved_scope})" if topics.scope == "auto" else resolved_scope
         )
-        topics_label = f"enabled (scope={scope_label})"
-    triggers_label = "disabled"
+        lines.append(f"topics: `enabled (scope={scope_label})`")
+
+    # triggers — only shown when enabled
     if trigger_config and trigger_config.get("enabled"):
         n_wh = len(trigger_config.get("webhooks", []))
         n_cr = len(trigger_config.get("crons", []))
-        triggers_label = f"enabled ({n_wh} webhooks, {n_cr} crons)"
-    return (
-        f"\N{OCTOPUS} **untether is ready**\n\n"
-        f"default: `{runtime.default_engine}`  \n"
-        f"engines: `{engine_list}`  \n"
-        f"projects: `{project_list}`  \n"
-        f"mode: `{session_mode}`  \n"
-        f"topics: `{topics_label}`  \n"
-        f"triggers: `{triggers_label}`  \n"
-        f"resume lines: `{resume_label}`  \n"
-        f"working in: `{startup_pwd}`"
-    )
+        lines.append(f"triggers: `enabled ({n_wh} webhooks, {n_cr} crons)`")
+
+    # engines — only shown when there are issues
+    missing_engines = list(runtime.missing_engine_ids())
+    misconfigured_engines = list(runtime.engine_ids_with_status("bad_config"))
+    failed_engines = list(runtime.engine_ids_with_status("load_error"))
+    engine_notes: list[str] = []
+    if missing_engines:
+        engine_notes.append(f"not installed: {', '.join(missing_engines)}")
+    if misconfigured_engines:
+        engine_notes.append(f"misconfigured: {', '.join(misconfigured_engines)}")
+    if failed_engines:
+        engine_notes.append(f"failed to load: {', '.join(failed_engines)}")
+    if engine_notes:
+        available_engines = list(runtime.available_engine_ids())
+        engine_list = ", ".join(available_engines) if available_engines else "none"
+        lines.append(f"engines: `{engine_list} ({'; '.join(engine_notes)})`")
+
+    lines.append(f"working in: `{startup_pwd}`")
+    return "\n".join(lines)
 
 
 class TelegramBackend(TransportBackend):

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from collections.abc import Callable
+from typing import Any
 
 from .model import Action, ActionEvent, ResumeToken, StartedEvent, UntetherEvent
 
@@ -25,20 +26,24 @@ class ProgressState:
     resume: ResumeToken | None
     resume_line: str | None
     context_line: str | None
+    meta_line: str | None = None
 
 
 class ProgressTracker:
     def __init__(self, *, engine: str) -> None:
         self.engine = engine
         self.resume: ResumeToken | None = None
+        self.meta: dict[str, Any] | None = None
         self.action_count = 0
         self._actions: dict[str, ActionState] = {}
         self._seq = 0
 
     def note_event(self, event: UntetherEvent) -> bool:
         match event:
-            case StartedEvent(resume=resume):
+            case StartedEvent(resume=resume, meta=meta):
                 self.resume = resume
+                if meta:
+                    self.meta = meta
                 return True
             case ActionEvent(action=action, phase=phase, ok=ok):
                 if action.kind == "turn":
@@ -82,10 +87,14 @@ class ProgressTracker:
         *,
         resume_formatter: Callable[[ResumeToken], str] | None = None,
         context_line: str | None = None,
+        meta_formatter: Callable[[dict[str, Any]], str | None] | None = None,
     ) -> ProgressState:
         resume_line: str | None = None
         if self.resume is not None and resume_formatter is not None:
             resume_line = resume_formatter(self.resume)
+        meta_line: str | None = None
+        if self.meta is not None and meta_formatter is not None:
+            meta_line = meta_formatter(self.meta)
         actions = tuple(
             sorted(self._actions.values(), key=lambda item: item.first_seen)
         )
@@ -96,4 +105,5 @@ class ProgressTracker:
             resume=self.resume,
             resume_line=resume_line,
             context_line=context_line,
+            meta_line=meta_line,
         )

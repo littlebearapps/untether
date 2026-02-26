@@ -331,6 +331,7 @@ def translate_claude_event(
             meta: dict[str, Any] = {}
             for key in (
                 "cwd",
+                "model",
                 "tools",
                 "permissionMode",
                 "output_style",
