@@ -6,6 +6,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 import anyio
+import httpx
 
 from .context import RunContext
 from .logging import bind_run_context, get_logger
@@ -115,7 +116,7 @@ async def _maybe_append_usage_footer(
             footer = f"\n\n\u26a1 5h: {pct_5h:.0f}% | Weekly: {pct_7d:.0f}% (resets in {reset})"
 
         return RenderedMessage(text=msg.text + footer, extra=msg.extra)
-    except (ValueError, KeyError, TypeError):
+    except (FileNotFoundError, httpx.HTTPStatusError, ValueError, KeyError, TypeError):
         logger.debug("usage_footer.failed", exc_info=True)
         return msg
 
