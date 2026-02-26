@@ -2938,13 +2938,13 @@ Untether’s CLI is an auto-router by default; engine subcommands override the d
 
 ---
 
-# Untether Specification v0.22.1 [2026-02-10]
+# Untether Specification v0.23.0 [2026-02-26]
 
 This document is **normative**. The words **MUST**, **SHOULD**, and **MAY** express requirements.
 
 ## 1. Scope
 
-Untether v0.22.1 specifies:
+Untether v0.23.0 specifies:
 
 - A **Telegram** bot bridge that runs an agent **Runner** and posts:
   - a throttled, edited **progress message**
@@ -4396,7 +4396,7 @@ Untether should:
   * `resume = ResumeToken(engine="claude", value=session_id)`
     (treat `session_id` as opaque; do not validate as UUID)
   * `title = model` (or user-specified config title; default `"claude"`)
-  * `meta` should include `cwd`, `tools`, `permissionMode`, `output_style` for debugging.
+  * `meta` should include `cwd`, `model`, `tools`, `permissionMode`, `output_style` for debugging. `model` and `permissionMode` are used for the `🏷` footer line on final messages.
 
 **Action events (progress)**
 The core useful progress comes from tool usage.

@@ -60,6 +60,8 @@ Untether requires **serialization per session token**:
 
 Pi emits `AgentSessionEvent` objects. Only a subset is required for Untether.
 
+**StartedEvent meta:** The Pi runner populates `meta` with `cwd`, and optionally `model` (from `--model` config) and `provider` (from `--provider` config). The `meta.model` field is used for the `🏷` footer line on final messages. Pi JSONL does not include model info in its event stream, so this comes from runner config.
+
 ### 4.1 `tool_execution_start`
 
 Example:
