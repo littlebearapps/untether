@@ -52,7 +52,7 @@ def test_build_startup_message_includes_missing_engines(tmp_path: Path) -> None:
 
     assert "untether" in message and "is ready" in message
     assert "engines: `codex (not installed: pi)`" in message
-    assert "projects: `0`" in message
+    assert "projects: `none`" in message
 
 
 def test_build_startup_message_surfaces_unavailable_engine_reasons(
@@ -140,7 +140,7 @@ def test_startup_message_uses_dog_emoji(tmp_path: Path) -> None:
 
 
 def test_startup_message_minimal_when_healthy(tmp_path: Path) -> None:
-    """When everything is healthy, only show primary info and working dir."""
+    """When everything is healthy, show all status fields."""
     runtime = _build_healthy_runtime()
     message = telegram_backend._build_startup_message(
         runtime,
@@ -150,11 +150,15 @@ def test_startup_message_minimal_when_healthy(tmp_path: Path) -> None:
         show_resume_line=True,
         topics=TelegramTopicsSettings(),
     )
-    assert "mode:" not in message
-    assert "topics:" not in message
-    assert "triggers:" not in message
-    assert "engines:" not in message
-    assert "resume lines:" not in message
+    assert "default: `claude`" in message
+    assert "engines: `claude`" in message
+    assert "projects: `none`" in message
+    assert "mode: `stateless`" in message
+    assert "topics: `disabled`" in message
+    assert "triggers: `disabled`" in message
+    assert "resume lines: `shown`" in message
+    assert "voice: `disabled`" in message
+    assert "files: `disabled`" in message
     assert "working in:" in message
 
 
@@ -169,6 +173,23 @@ def test_startup_message_shows_mode_chat(tmp_path: Path) -> None:
         topics=TelegramTopicsSettings(),
     )
     assert "mode: `chat`" in message
+
+
+def test_startup_message_voice_and_files_enabled(tmp_path: Path) -> None:
+    runtime = _build_healthy_runtime()
+    message = telegram_backend._build_startup_message(
+        runtime,
+        startup_pwd=str(tmp_path),
+        chat_id=123,
+        session_mode="stateless",
+        show_resume_line=False,
+        topics=TelegramTopicsSettings(),
+        voice_transcription=True,
+        files_enabled=True,
+    )
+    assert "voice: `enabled`" in message
+    assert "files: `enabled`" in message
+    assert "resume lines: `hidden`" in message
 
 
 def test_startup_message_project_count(tmp_path: Path) -> None:
@@ -206,7 +227,7 @@ def test_startup_message_project_count(tmp_path: Path) -> None:
         show_resume_line=True,
         topics=TelegramTopicsSettings(),
     )
-    assert "projects: `2`" in message
+    assert "projects: `proj-a, proj-b`" in message
 
 
 def test_telegram_backend_build_and_run_wires_config(

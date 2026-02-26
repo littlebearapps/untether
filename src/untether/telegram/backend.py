@@ -42,37 +42,19 @@ def _build_startup_message(
     show_resume_line: bool,
     topics: TelegramTopicsSettings,
     trigger_config: dict | None = None,
+    voice_transcription: bool = False,
+    files_enabled: bool = False,
 ) -> str:
     project_aliases = sorted(set(runtime.project_aliases()), key=str.lower)
-    project_count = len(project_aliases)
 
     lines: list[str] = [
         f"\N{DOG} **untether v{__version__} is ready**",
         "",
-        f"engine: `{runtime.default_engine}` \N{MIDDLE DOT} projects: `{project_count}`",
+        f"default: `{runtime.default_engine}`",
     ]
 
-    # mode — only shown when non-default (chat is interesting, stateless is not)
-    if session_mode == "chat":
-        lines.append(f"mode: `{session_mode}`")
-
-    # topics — only shown when enabled
-    if topics.enabled:
-        resolved_scope, _ = _resolve_topics_scope_raw(
-            topics.scope, chat_id, runtime.project_chat_ids()
-        )
-        scope_label = (
-            f"auto ({resolved_scope})" if topics.scope == "auto" else resolved_scope
-        )
-        lines.append(f"topics: `enabled (scope={scope_label})`")
-
-    # triggers — only shown when enabled
-    if trigger_config and trigger_config.get("enabled"):
-        n_wh = len(trigger_config.get("webhooks", []))
-        n_cr = len(trigger_config.get("crons", []))
-        lines.append(f"triggers: `enabled ({n_wh} webhooks, {n_cr} crons)`")
-
-    # engines — only shown when there are issues
+    # engines — always shown
+    available_engines = list(runtime.available_engine_ids())
     missing_engines = list(runtime.missing_engine_ids())
     misconfigured_engines = list(runtime.engine_ids_with_status("bad_config"))
     failed_engines = list(runtime.engine_ids_with_status("load_error"))
@@ -83,10 +65,49 @@ def _build_startup_message(
         engine_notes.append(f"misconfigured: {', '.join(misconfigured_engines)}")
     if failed_engines:
         engine_notes.append(f"failed to load: {', '.join(failed_engines)}")
+    engine_list = ", ".join(available_engines) if available_engines else "none"
     if engine_notes:
-        available_engines = list(runtime.available_engine_ids())
-        engine_list = ", ".join(available_engines) if available_engines else "none"
         lines.append(f"engines: `{engine_list} ({'; '.join(engine_notes)})`")
+    else:
+        lines.append(f"engines: `{engine_list}`")
+
+    # projects — listed by name
+    if project_aliases:
+        lines.append(f"projects: `{', '.join(project_aliases)}`")
+    else:
+        lines.append("projects: `none`")
+
+    # mode
+    lines.append(f"mode: `{session_mode}`")
+
+    # topics
+    if topics.enabled:
+        resolved_scope, _ = _resolve_topics_scope_raw(
+            topics.scope, chat_id, runtime.project_chat_ids()
+        )
+        scope_label = (
+            f"auto ({resolved_scope})" if topics.scope == "auto" else resolved_scope
+        )
+        lines.append(f"topics: `enabled (scope={scope_label})`")
+    else:
+        lines.append("topics: `disabled`")
+
+    # triggers
+    if trigger_config and trigger_config.get("enabled"):
+        n_wh = len(trigger_config.get("webhooks", []))
+        n_cr = len(trigger_config.get("crons", []))
+        lines.append(f"triggers: `enabled ({n_wh} webhooks, {n_cr} crons)`")
+    else:
+        lines.append("triggers: `disabled`")
+
+    # resume lines
+    lines.append(f"resume lines: `{'shown' if show_resume_line else 'hidden'}`")
+
+    # voice
+    lines.append(f"voice: `{'enabled' if voice_transcription else 'disabled'}`")
+
+    # files
+    lines.append(f"files: `{'enabled' if files_enabled else 'disabled'}`")
 
     lines.append(f"working in: `{startup_pwd}`")
     return "\n".join(lines)
@@ -142,6 +163,8 @@ class TelegramBackend(TransportBackend):
             show_resume_line=settings.show_resume_line,
             topics=settings.topics,
             trigger_config=trigger_config,
+            voice_transcription=settings.voice_transcription,
+            files_enabled=settings.files.enabled,
         )
         bot = TelegramClient(token)
         transport = TelegramTransport(bot)

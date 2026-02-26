@@ -1,5 +1,15 @@
 # changelog
 
+## v0.23.1 (2026-02-26)
+
+### changes
+
+- restructure startup message: one field per line, always show all status fields
+  - list project names instead of count
+  - always show mode, topics, triggers, resume lines, voice, and files status
+  - add voice and files enabled/disabled status
+- update PyPI description and keywords to reflect current feature set
+
 ## v0.23.0 (2026-02-26)
 
 ### changes
