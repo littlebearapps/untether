@@ -423,3 +423,15 @@ async def test_run_strips_anthropic_api_key_by_default(tmp_path, monkeypatch) ->
         if isinstance(event, CompletedEvent):
             answer = event.answer
     assert answer == "api=set"
+
+
+def test_rate_limit_event_returns_empty() -> None:
+    """rate_limit_event should decode and translate to no Untether events."""
+    event = _decode_event({"type": "rate_limit_event"})
+    assert isinstance(event, claude_schema.StreamRateLimitMessage)
+
+    state = ClaudeStreamState()
+    result = translate_claude_event(
+        event, title="claude", state=state, factory=state.factory
+    )
+    assert result == []

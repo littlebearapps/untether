@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
@@ -39,3 +40,30 @@ def test_claude_schema_parses_fixture(fixture: str) -> None:
     errors = _decode_fixture(fixture)
 
     assert not errors, f"{fixture} had {len(errors)} errors: " + "; ".join(errors[:5])
+
+
+def test_decode_rate_limit_event_full() -> None:
+    payload = {
+        "type": "rate_limit_event",
+        "rate_limit_info": {
+            "requests_limit": 1000,
+            "requests_remaining": 0,
+            "requests_reset": "2026-01-01T00:01:00Z",
+            "tokens_limit": 50000,
+            "tokens_remaining": 0,
+            "tokens_reset": "2026-01-01T00:01:00Z",
+            "retry_after_ms": 60000,
+        },
+    }
+    decoded = claude_schema.decode_stream_json_line(json.dumps(payload).encode())
+    assert isinstance(decoded, claude_schema.StreamRateLimitMessage)
+    assert decoded.rate_limit_info is not None
+    assert decoded.rate_limit_info.requests_limit == 1000
+    assert decoded.rate_limit_info.retry_after_ms == 60000
+
+
+def test_decode_rate_limit_event_bare() -> None:
+    payload = {"type": "rate_limit_event"}
+    decoded = claude_schema.decode_stream_json_line(json.dumps(payload).encode())
+    assert isinstance(decoded, claude_schema.StreamRateLimitMessage)
+    assert decoded.rate_limit_info is None

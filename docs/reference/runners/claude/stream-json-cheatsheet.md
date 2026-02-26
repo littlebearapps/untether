@@ -89,6 +89,33 @@ by Untether's `StreamResultMessage` schema):
 - `permission_denials`: array of `{tool_name, tool_use_id, tool_input}`
 - `structured_output`: arbitrary structured output (captured by schema but unused)
 
+### `rate_limit_event`
+
+Informational event emitted when Claude Code hits or approaches a rate limit (CLI v2.1.45+).
+Purely informational — the run continues, it does not terminate the session.
+
+Fields:
+- `type`: `"rate_limit_event"`
+- `rate_limit_info` (optional): object with rate limit details
+
+`rate_limit_info` fields (all optional):
+- `requests_limit`, `requests_remaining`, `requests_reset` (ISO 8601)
+- `tokens_limit`, `tokens_remaining`, `tokens_reset` (ISO 8601)
+- `retry_after_ms`
+
+Example (full):
+```json
+{"type":"rate_limit_event","rate_limit_info":{"requests_limit":1000,"requests_remaining":0,"requests_reset":"2026-01-01T00:01:00Z","tokens_limit":50000,"tokens_remaining":0,"tokens_reset":"2026-01-01T00:01:00Z","retry_after_ms":60000}}
+```
+
+Example (bare):
+```json
+{"type":"rate_limit_event"}
+```
+
+**Untether handling**: Decoded by `StreamRateLimitMessage` schema, silently skipped in
+`translate_claude_event` (no Untether events emitted).
+
 ## Message object (`message` field)
 
 Fields:

@@ -1,5 +1,14 @@
 # changelog
 
+## v0.23.3 (2026-02-26)
+
+### fixes
+
+- add `rate_limit_event` to Claude stream-json schema (CLI v2.1.45+)
+  - new `StreamRateLimitMessage` and `RateLimitInfo` msgspec structs
+  - event is decoded cleanly and silently skipped (informational only)
+  - eliminates noisy `jsonl.msgspec.invalid` warning in logs
+
 ## v0.23.2 (2026-02-26)
 
 ### fixes
