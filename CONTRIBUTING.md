@@ -136,6 +136,19 @@ See [Architecture](docs/explanation/architecture.md) for the full breakdown.
 - Update docs if you change user-facing behaviour
 - Reference any related issues in the PR description
 
+### Issue tracking
+
+- Every bug fix PR should reference a GitHub issue
+- Create issues for bugs you find, even if you fix them immediately
+- Use labels: `bug`, `enhancement`, `documentation`
+- Link issues in your PR description: `Fixes #N` or `Closes #N`
+
+### Changelog
+
+- Update `CHANGELOG.md` in your PR if it changes user-facing behaviour
+- Reference the GitHub issue in the changelog entry: `[#N](https://github.com/littlebearapps/untether/issues/N)`
+- Follow the existing format: version heading, dated, categorised sections
+
 ## Reporting issues
 
 Use [GitHub Issues](https://github.com/littlebearapps/untether/issues) to report bugs or request features. Include:

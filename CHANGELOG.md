@@ -4,7 +4,7 @@
 
 ### fixes
 
-- add `rate_limit_event` to Claude stream-json schema (CLI v2.1.45+)
+- add `rate_limit_event` to Claude stream-json schema (CLI v2.1.45+) [#8](https://github.com/littlebearapps/untether/issues/8)
   - new `StreamRateLimitMessage` and `RateLimitInfo` msgspec structs
   - event is decoded cleanly and silently skipped (informational only)
   - eliminates noisy `jsonl.msgspec.invalid` warning in logs
@@ -13,10 +13,10 @@
 
 ### fixes
 
-- fix crash when Claude OAuth credentials file missing (macOS Keychain, API key auth)
+- fix crash when Claude OAuth credentials file missing (macOS Keychain, API key auth) [#7](https://github.com/littlebearapps/untether/issues/7)
   - `_maybe_append_usage_footer()` now catches `FileNotFoundError` and `httpx.HTTPStatusError`
   - post-run messages are delivered to Telegram even when usage data is unavailable
-- add macOS Keychain support for `/usage` command and subscription usage footer
+- add macOS Keychain support for `/usage` command and subscription usage footer [#7](https://github.com/littlebearapps/untether/issues/7)
   - on macOS, Claude Code stores OAuth credentials in the Keychain, not on disk
   - `_read_access_token()` now tries the file first, then falls back to macOS Keychain
 
@@ -45,6 +45,14 @@
   - callback data format: `command_id:args...` routes to registered command plugins
   - extracts `message_thread_id` from callback for proper topic context
   - enables plugins to build interactive UX with inline keyboards
+
+## v0.22.2 (2026-02-25)
+
+### fixes
+
+- remove defunct Telegram notification scripts that caused CI/release workflows to report failure [#9](https://github.com/littlebearapps/untether/issues/9)
+- skip `uuid.uuid7` test on Python < 3.14 (only available in 3.14+) [#10](https://github.com/littlebearapps/untether/issues/10)
+- fix PyPI metadata: PEP 639 SPDX license, absolute doc links, remove deprecated classifier [#11](https://github.com/littlebearapps/untether/issues/11)
 
 ## v0.22.1 (2026-02-10)
 

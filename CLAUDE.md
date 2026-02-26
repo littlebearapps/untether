@@ -90,6 +90,7 @@ Domain-specific Claude Code skills for working on Untether:
 | Claude stream-json | `.claude/skills/claude-stream-json/` | Working on Claude runner, control channel, permission modes, auto-approve, cooldown |
 | Codex/OpenCode/Pi | `.claude/skills/codex-opencode-pi/` | Working on non-Claude runners, comparing engine protocols |
 | Untether Architecture | `.claude/skills/untether-architecture/` | Understanding overall data flow, config system, progress tracking, project system |
+| Release Coordination | `.claude/skills/release-coordination/` | Preparing releases, version bumps, changelog drafting, issue audits, rollback procedures |
 
 ## Hooks (project-scoped)
 
@@ -101,6 +102,7 @@ Project hooks in `.claude/hooks.json` fire automatically:
 | runner-edit-context | Edit/Write to `runners/*.py` | 3-event contract, PTY lifecycle, test/doc reminders |
 | schema-edit-context | Edit/Write to `schemas/*.py` | msgspec impact on parsing, fixture updates |
 | telegram-edit-context | Edit/Write to `telegram/*.py` | Outbox model, callback_data limits, early answering |
+| version-bump-checklist | Edit/Write to `pyproject.toml` (version change) | GitHub issues, CHANGELOG entry, `uv lock`, release checklist |
 
 ## Rules (project-scoped)
 
@@ -112,6 +114,7 @@ Rules in `.claude/rules/` auto-load when editing matching files:
 | `telegram-transport.md` | `telegram/**` | Outbox-only writes, 64-byte callback data, ephemeral cleanup |
 | `control-channel.md` | `runners/claude.py`, `claude_control.py` | PTY lifecycle, session registries, cooldown mechanics |
 | `testing-conventions.md` | `tests/**` | pytest+anyio, stub patterns, 81% coverage threshold |
+| `release-discipline.md` | `CHANGELOG.md`, `pyproject.toml` | GitHub issue linking, changelog format, semantic versioning |
 
 ## Tests
 
@@ -166,6 +169,39 @@ GitHub Actions CI runs on push to master and on PRs:
 All third-party actions are pinned to commit SHAs (supply chain protection). Top-level `permissions: {}` restricts to least-privilege.
 
 Release pipeline (`release.yml`) uses PyPI trusted publishing with OIDC.
+
+## Issue tracking & releases
+
+### GitHub issues
+
+Every bug fix and significant change MUST have a GitHub issue:
+- **Bugs found during debugging**: create an issue before or alongside the fix
+- **Issue body**: description, impact, affected files, fix reference
+- **Labels**: `bug`, `enhancement`, `documentation` as appropriate
+- **Closing**: reference the fixing PR or commit in a close comment
+
+### Changelog
+
+`CHANGELOG.md` must be updated with every version bump:
+- **Format**: `## vX.Y.Z (YYYY-MM-DD)` with `### fixes`, `### changes`, `### breaking`, `### docs`, `### tests` subsections
+- **Issue links**: every fix/change entry must reference its GitHub issue: `[#N](https://github.com/littlebearapps/untether/issues/N)`
+- **Scope**: one changelog section per release, no retroactive edits to prior sections
+
+### Version bumps (semantic versioning)
+
+- **Patch** (0.23.x → 0.23.y): bug fixes, schema additions for new upstream events, dependency updates
+- **Minor** (0.x.0 → 0.y.0): new features, new commands, new engine support, config additions
+- **Major** (x.0.0 → y.0.0): breaking changes to config format, runner protocol, or public API
+
+### Release checklist
+
+Before tagging a release:
+1. All related GitHub issues exist and are referenced in CHANGELOG.md
+2. CHANGELOG.md has an entry for the new version with correct date
+3. `pyproject.toml` version matches the changelog heading
+4. Tests pass: `uv run pytest`
+5. Lint clean: `uv run ruff check src/`
+6. Lockfile synced: `uv lock --check`
 
 ## Conventions
 

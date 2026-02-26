@@ -1,0 +1,35 @@
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "prompt",
+            "prompt": "Check if this command is restarting the Untether service:\n\nCommand: {{tool_input.command}}\n\nIf it contains 'systemctl --user restart untether' or 'systemctl --user start untether', respond with:\nREMINDER: Before restarting, verify:\n1. Tests pass: `uv run pytest --ignore=tests/test_cli_helpers.py`\n2. Lint clean: `uv run ruff check src/`\n3. Any config changes in untether.toml are intentional\n\nOtherwise respond: PASS"
+          }
+        ]
+      },
+      {
+        "matcher": "Edit|Write",
+        "hooks": [
+          {
+            "type": "prompt",
+            "prompt": "Check if this file edit touches an Untether runner:\n\nFile: {{tool_input.file_path}}\n\nIf the path matches src/untether/runners/*.py or src/untether/runner.py, respond with:\nRUNNER CONTEXT:\n- Maintain the 3-event contract: StartedEvent -> ActionEvent(s) -> CompletedEvent (exactly one, always last)\n- Use EventFactory for event creation (src/untether/events.py)\n- If editing claude.py: preserve PTY lifecycle (openpty/setraw/close) and session registries (_SESSION_STDIN, _REQUEST_TO_SESSION)\n- If editing translate(): update corresponding test fixtures and reference docs in docs/reference/runners/\n- Run: uv run pytest tests/test_*_runner.py tests/test_claude_control.py -x\n\nIf the path matches src/untether/schemas/*.py, respond with:\nSCHEMA CONTEXT:\n- msgspec schema changes affect JSONL parsing (fields silently ignored if absent)\n- Check runner translate() still handles the new/changed fields\n- Update reference docs (stream-json-cheatsheet.md) and test fixtures\n\nIf the path matches src/untether/telegram/*.py, respond with:\nTELEGRAM CONTEXT:\n- All writes go through TelegramOutbox (never call Bot API directly from handlers)\n- Callback data max 64 bytes (format: prefix:action:id)\n- Call answerCallbackQuery promptly to clear spinner\n- For approval buttons: use early answering (answer_early=True, early_answer_toast())\n- Ephemeral messages: register via register_ephemeral_message() for auto-cleanup\n\nOtherwise respond: PASS"
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Edit|Write",
+        "hooks": [
+          {
+            "type": "prompt",
+            "prompt": "Check if this edit bumped a version in pyproject.toml:\n\nFile: {{tool_input.file_path}}\n\nIf the file path ends with 'pyproject.toml' AND the edit changed a line containing 'version =', respond with:\nRELEASE CHECKLIST:\n1. Create GitHub issues for all bug fixes/changes in this release (label: bug/enhancement)\n2. Add CHANGELOG.md entry: `## vX.Y.Z (YYYY-MM-DD)` with issue links [#N](...)\n3. Run `uv lock` to sync the lockfile\n4. Verify: `uv run pytest && uv run ruff check src/`\n5. Semantic versioning: patch (bug fixes), minor (new features), major (breaking changes)\n\nOtherwise respond: PASS"
+          }
+        ]
+      }
+    ]
+  }
+}
