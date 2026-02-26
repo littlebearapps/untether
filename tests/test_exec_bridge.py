@@ -825,8 +825,12 @@ class TestMaybeAppendUsageFooterAlwaysShow:
         from untether.runner_bridge import _maybe_append_usage_footer
 
         async def _raise_http():
-            response = httpx.Response(status_code=401, request=httpx.Request("GET", "https://example.com"))
-            raise httpx.HTTPStatusError("Unauthorized", request=response.request, response=response)
+            response = httpx.Response(
+                status_code=401, request=httpx.Request("GET", "https://example.com")
+            )
+            raise httpx.HTTPStatusError(
+                "Unauthorized", request=response.request, response=response
+            )
 
         monkeypatch.setattr(
             "untether.telegram.commands.usage.fetch_claude_usage", _raise_http
@@ -882,7 +886,9 @@ class TestReadAccessToken:
             }
         }
 
-        fake_result = type("Result", (), {"returncode": 0, "stdout": json.dumps(creds)})()
+        fake_result = type(
+            "Result", (), {"returncode": 0, "stdout": json.dumps(creds)}
+        )()
         monkeypatch.setattr(
             "untether.telegram.commands.usage.subprocess.run",
             lambda *args, **kwargs: fake_result,
@@ -916,7 +922,9 @@ class TestReadAccessToken:
                 "expiresAt": 9999999999999,
             }
         }
-        fake_result = type("Result", (), {"returncode": 0, "stdout": json.dumps(keychain_creds)})()
+        fake_result = type(
+            "Result", (), {"returncode": 0, "stdout": json.dumps(keychain_creds)}
+        )()
         monkeypatch.setattr(
             "untether.telegram.commands.usage.subprocess.run",
             lambda *args, **kwargs: fake_result,

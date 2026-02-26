@@ -68,7 +68,13 @@ def _read_access_token(
     if raw is None and sys.platform == "darwin":
         try:
             result = subprocess.run(
-                ["security", "find-generic-password", "-s", "Claude Code-credentials", "-w"],
+                [
+                    "security",
+                    "find-generic-password",
+                    "-s",
+                    "Claude Code-credentials",
+                    "-w",
+                ],
                 capture_output=True,
                 text=True,
                 timeout=5,
