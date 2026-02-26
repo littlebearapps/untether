@@ -120,10 +120,4 @@ jobs:
           files: |
             dist/*
 
-      - name: Notify release
-        run: uv run scripts/release_notify.py
-        env:
-          REPO: ${{ github.repository }}
-          TAG_NAME: ${{ github.ref_name }}
-          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+
