@@ -4,6 +4,7 @@ import os
 import textwrap
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 from .model import Action, ActionEvent, StartedEvent, UntetherEvent
 from .progress import ProgressState
@@ -188,6 +189,29 @@ def render_event_cli(event: UntetherEvent) -> list[str]:
             return []
 
 
+def _short_model_name(model: str) -> str:
+    """Shorten a Claude model ID to its family name.
+
+    ``'claude-sonnet-4-5-20250929'`` → ``'sonnet'``
+    """
+    for family in ("opus", "sonnet", "haiku"):
+        if family in model.lower():
+            return family
+    return model.split("-202")[0] if "-202" in model else model
+
+
+def format_meta_line(meta: dict[str, Any]) -> str | None:
+    """Format model + permission mode into a compact footer line."""
+    parts: list[str] = []
+    model = meta.get("model")
+    if isinstance(model, str) and model:
+        parts.append(_short_model_name(model))
+    perm = meta.get("permissionMode")
+    if isinstance(perm, str) and perm:
+        parts.append(perm)
+    return ("\N{LABEL} " + HEADER_SEP.join(parts)) if parts else None
+
+
 class MarkdownFormatter:
     def __init__(
         self,
@@ -242,6 +266,8 @@ class MarkdownFormatter:
         lines: list[str] = []
         if state.context_line:
             lines.append(state.context_line)
+        if state.meta_line:
+            lines.append(state.meta_line)
         if state.resume_line:
             lines.append(state.resume_line)
         if not lines:

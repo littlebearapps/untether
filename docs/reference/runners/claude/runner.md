@@ -212,7 +212,7 @@ Untether should:
   * `resume = ResumeToken(engine="claude", value=session_id)`
     (treat `session_id` as opaque; do not validate as UUID)
   * `title = model` (or user-specified config title; default `"claude"`)
-  * `meta` should include `cwd`, `tools`, `permissionMode`, `output_style` for debugging.
+  * `meta` should include `cwd`, `model`, `tools`, `permissionMode`, `output_style` for debugging. `model` and `permissionMode` are used for the `🏷` footer line on final messages.
 
 **Action events (progress)**
 The core useful progress comes from tool usage.

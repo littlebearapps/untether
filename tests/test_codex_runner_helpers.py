@@ -187,6 +187,25 @@ def test_translate_codex_thread_started() -> None:
     assert out[0].resume.value == "sess-1"
 
 
+def test_translate_codex_thread_started_with_meta() -> None:
+    factory = EventFactory("codex")
+    event = codex_schema.ThreadStarted(thread_id="sess-2")
+    meta = {"model": "o3-pro"}
+    out = translate_codex_event(event, title="Codex", factory=factory, meta=meta)
+    assert len(out) == 1
+    assert isinstance(out[0], StartedEvent)
+    assert out[0].meta == {"model": "o3-pro"}
+
+
+def test_translate_codex_thread_started_no_meta() -> None:
+    factory = EventFactory("codex")
+    event = codex_schema.ThreadStarted(thread_id="sess-3")
+    out = translate_codex_event(event, title="Codex", factory=factory)
+    assert len(out) == 1
+    assert isinstance(out[0], StartedEvent)
+    assert out[0].meta is None
+
+
 def test_codex_runner_translate_reconnect_message() -> None:
     runner = CodexRunner(codex_cmd="codex", extra_args=[])
     state = runner.new_state("hi", None)

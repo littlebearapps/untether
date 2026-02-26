@@ -86,6 +86,7 @@ Claude emits a system init event early in the stream:
 
 **Mapping:**
 - Emit a Untether `started` event as soon as `session_id` is known.
+- Populate `meta` from `system.init` fields: `cwd`, `model`, `tools`, `permissionMode`, `output_style`. The `model` and `permissionMode` fields are used by the bridge to render the `🏷` footer line on final messages.
 - Assume only one `system.init` per run; if more appear, ignore the subsequent
   ones to avoid re-locking.
 - Optional: emit a `note` action summarizing tools/MCP servers (debug-only).

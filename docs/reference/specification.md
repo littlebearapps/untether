@@ -1,10 +1,10 @@
-# Untether Specification v0.22.1 [2026-02-10]
+# Untether Specification v0.23.0 [2026-02-26]
 
 This document is **normative**. The words **MUST**, **SHOULD**, and **MAY** express requirements.
 
 ## 1. Scope
 
-Untether v0.22.1 specifies:
+Untether v0.23.0 specifies:
 
 - A **Telegram** bot bridge that runs an agent **Runner** and posts:
   - a throttled, edited **progress message**
@@ -116,7 +116,7 @@ Required:
 Optional:
 
 * `title: str`
-* `meta: dict`
+* `meta: dict` — engine-specific metadata. All engines SHOULD populate `meta.model` with the model name when available. Claude also populates `meta.permissionMode`. Used for the `🏷` footer line on final messages.
 
 #### 4.3.2 `action`
 

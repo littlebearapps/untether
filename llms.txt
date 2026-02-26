@@ -1,0 +1,52 @@
+# Untether
+
+> Telegram bridge for AI coding agents. Send tasks by voice or text, stream progress live, and approve changes — from your phone, anywhere. Works with Claude Code, Codex, OpenCode, and Pi.
+
+## Tutorials
+
+- [Install and onboard](https://github.com/littlebearapps/untether/blob/master/docs/tutorials/install.md): Setup wizard walkthrough — create a bot, pick a workflow, generate config
+- [First run](https://github.com/littlebearapps/untether/blob/master/docs/tutorials/first-run.md): Send your first task, watch progress stream, continue conversations
+- [Projects and branches](https://github.com/littlebearapps/untether/blob/master/docs/tutorials/projects-and-branches.md): Register repos, target them from chat, run on feature branches
+- [Multi-engine workflows](https://github.com/littlebearapps/untether/blob/master/docs/tutorials/multi-engine.md): Switch between Claude Code, Codex, OpenCode, and Pi
+- [Conversation modes](https://github.com/littlebearapps/untether/blob/master/docs/tutorials/conversation-modes.md): Assistant, workspace, and handoff modes
+
+## How-to guides
+
+- [Chat sessions](https://github.com/littlebearapps/untether/blob/master/docs/how-to/chat-sessions.md): Auto-resume and stateless session management
+- [Voice notes](https://github.com/littlebearapps/untether/blob/master/docs/how-to/voice-notes.md): Dictate tasks with Whisper-compatible transcription
+- [File transfer](https://github.com/littlebearapps/untether/blob/master/docs/how-to/file-transfer.md): Upload files to repos, download results back
+- [Forum topics](https://github.com/littlebearapps/untether/blob/master/docs/how-to/topics.md): Map Telegram topics to projects and branches
+- [Projects](https://github.com/littlebearapps/untether/blob/master/docs/how-to/projects.md): Register and manage project aliases
+- [Worktrees](https://github.com/littlebearapps/untether/blob/master/docs/how-to/worktrees.md): Isolated git worktrees for parallel branch work
+- [Schedule tasks](https://github.com/littlebearapps/untether/blob/master/docs/how-to/schedule-tasks.md): Cron expressions and webhook triggers
+- [Switch engines](https://github.com/littlebearapps/untether/blob/master/docs/how-to/switch-engines.md): Change engines per chat, topic, or message
+- [Write a plugin](https://github.com/littlebearapps/untether/blob/master/docs/how-to/write-a-plugin.md): Extend with custom engines, transports, and commands
+- [Add a runner](https://github.com/littlebearapps/untether/blob/master/docs/how-to/add-a-runner.md): Implement a new engine backend
+- [Dev setup](https://github.com/littlebearapps/untether/blob/master/docs/how-to/dev-setup.md): Development environment and testing
+
+## Reference
+
+- [Configuration](https://github.com/littlebearapps/untether/blob/master/docs/reference/config.md): Full config reference for untether.toml
+- [Commands and directives](https://github.com/littlebearapps/untether/blob/master/docs/reference/commands-and-directives.md): Telegram commands, message directives, CLI flags
+- [Specification](https://github.com/littlebearapps/untether/blob/master/docs/reference/specification.md): Normative behaviour spec
+- [Environment variables](https://github.com/littlebearapps/untether/blob/master/docs/reference/env-vars.md): Env var reference
+- [Plugin API](https://github.com/littlebearapps/untether/blob/master/docs/reference/plugin-api.md): Plugin development API
+- [Triggers](https://github.com/littlebearapps/untether/blob/master/docs/reference/triggers/triggers.md): Webhook and cron trigger reference
+
+## Engine references
+
+- [Claude Code runner](https://github.com/littlebearapps/untether/blob/master/docs/reference/runners/claude/runner.md): Permission modes, plan mode, cost tracking, interactive approvals
+- [Claude stream-json](https://github.com/littlebearapps/untether/blob/master/docs/reference/runners/claude/stream-json-cheatsheet.md): JSONL event shapes for Claude Code
+- [Codex exec-json](https://github.com/littlebearapps/untether/blob/master/docs/reference/runners/codex/exec-json-cheatsheet.md): JSONL event shapes for Codex
+- [OpenCode runner](https://github.com/littlebearapps/untether/blob/master/docs/reference/runners/opencode/runner.md): Model selection, providers, session IDs
+- [OpenCode stream-json](https://github.com/littlebearapps/untether/blob/master/docs/reference/runners/opencode/stream-json-cheatsheet.md): JSONL event shapes for OpenCode
+- [Pi runner](https://github.com/littlebearapps/untether/blob/master/docs/reference/runners/pi/runner.md): Multi-provider auth, model and provider selection
+- [Pi stream-json](https://github.com/littlebearapps/untether/blob/master/docs/reference/runners/pi/stream-json-cheatsheet.md): JSONL event shapes for Pi
+- [Telegram transport](https://github.com/littlebearapps/untether/blob/master/docs/reference/transports/telegram.md): Bot API client, outbox, rate limiting, voice, forum topics
+
+## Explanation
+
+- [Architecture](https://github.com/littlebearapps/untether/blob/master/docs/explanation/architecture.md): How the pieces fit together
+- [Routing and sessions](https://github.com/littlebearapps/untether/blob/master/docs/explanation/routing-and-sessions.md): Message routing, context resolution, session management
+- [Plugin system](https://github.com/littlebearapps/untether/blob/master/docs/explanation/plugin-system.md): Entry points, discovery, and plugin lifecycle
+- [Module map](https://github.com/littlebearapps/untether/blob/master/docs/explanation/module-map.md): Source code module overview

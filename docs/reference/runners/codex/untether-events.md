@@ -18,9 +18,11 @@ Emitted once **as soon as you know the resume token** (Codex: `thread.started.th
   "engine": "codex",
   "resume": { "engine": "codex", "value": "0199..." },
   "title": "Codex",               // optional
-  "meta": { "raw": { ... } }      // optional: for debugging
+  "meta": { "model": "o3" }       // optional: model from run options, used for 🏷 footer
 }
 ```
+
+Note: Codex JSONL does not include model info in its event stream. The runner populates `meta.model` from the Codex run options (CLI `--model` flag) when available.
 
 ### 2) `action`
 

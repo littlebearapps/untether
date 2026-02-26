@@ -271,6 +271,44 @@ def test_translate_error_fixture() -> None:
     assert completed.resume == started.resume
 
 
+def test_translate_step_start_with_meta() -> None:
+    state = OpenCodeStreamState()
+    meta = {"model": "openai/gpt-5.2"}
+    events = translate_opencode_event(
+        _decode_event(
+            {
+                "type": "step_start",
+                "sessionID": "ses_meta_test",
+                "part": {"id": "prt_1", "sessionID": "ses_meta_test"},
+            }
+        ),
+        title="opencode",
+        state=state,
+        meta=meta,
+    )
+    assert len(events) == 1
+    assert isinstance(events[0], StartedEvent)
+    assert events[0].meta == {"model": "openai/gpt-5.2"}
+
+
+def test_translate_step_start_no_meta() -> None:
+    state = OpenCodeStreamState()
+    events = translate_opencode_event(
+        _decode_event(
+            {
+                "type": "step_start",
+                "sessionID": "ses_no_meta",
+                "part": {"id": "prt_1", "sessionID": "ses_no_meta"},
+            }
+        ),
+        title="opencode",
+        state=state,
+    )
+    assert len(events) == 1
+    assert isinstance(events[0], StartedEvent)
+    assert events[0].meta is None
+
+
 def test_step_finish_tool_calls_does_not_complete() -> None:
     state = OpenCodeStreamState()
     state.session_id = "ses_test123"

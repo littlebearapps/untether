@@ -421,11 +421,12 @@ def translate_codex_event(
     *,
     title: str,
     factory: EventFactory,
+    meta: dict[str, Any] | None = None,
 ) -> list[UntetherEvent]:
     match event:
         case codex_schema.ThreadStarted(thread_id=thread_id):
             token = ResumeToken(engine=ENGINE, value=thread_id)
-            return [factory.started(token, title=title)]
+            return [factory.started(token, title=title, meta=meta)]
         case codex_schema.ItemStarted(item=item):
             return _translate_item_event("started", item, factory=factory)
         case codex_schema.ItemUpdated(item=item):
@@ -608,10 +609,17 @@ class CodexRunner(ResumeTokenMixin, JsonlSubprocessRunner):
             case _:
                 pass
 
+        # Build meta from run options (Codex JSONL doesn't include model info)
+        meta: dict[str, Any] | None = None
+        run_options = get_run_options()
+        if run_options is not None and run_options.model:
+            meta = {"model": str(run_options.model)}
+
         return translate_codex_event(
             data,
             title=self.session_title,
             factory=factory,
+            meta=meta,
         )
 
     def process_error_events(

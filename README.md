@@ -1,8 +1,12 @@
 <h1 align="center">Untether</h1>
 
 <p align="center">
-  <strong>Control your AI coding agents from Telegram.</strong><br>
-  Stream progress, approve actions, manage projects — from anywhere.
+  <strong>Telegram bridge for AI coding agents.</strong><br>
+  Send tasks by voice or text, stream progress live, and approve changes — from your phone, anywhere.
+</p>
+
+<p align="center">
+  Works with <a href="https://docs.anthropic.com/en/docs/claude-code">Claude Code</a> · <a href="https://github.com/openai/codex">Codex</a> · <a href="https://github.com/opencode-ai/opencode">OpenCode</a> · <a href="https://github.com/nicholasgasior/pi">Pi</a>
 </p>
 
 <p align="center">
@@ -12,26 +16,13 @@
   <a href="https://github.com/littlebearapps/untether/blob/master/LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue" alt="License" /></a>
 </p>
 
+<p align="center">
+  <a href="#-quick-start">Quick Start</a> · <a href="#-features">Features</a> · <a href="#-supported-engines">Engines</a> · <a href="#-commands">Commands</a> · <a href="#-contributing">Contributing</a>
+</p>
+
 ---
 
-Untether is a Telegram bridge for AI coding agents. It connects [Claude Code](https://docs.anthropic.com/en/docs/claude-code), [Codex](https://github.com/openai/codex), [OpenCode](https://github.com/opencode-ai/opencode), and [Pi](https://github.com/nicholasgasior/pi) to Telegram so you can send coding tasks, watch progress live, and approve actions — all from your phone.
-
-Walk the dog, watch the footy, sit at a friend's place. Your agents keep working. You stay in control.
-
-## Table of contents
-
-- [Quick start](#-quick-start)
-- [Why Untether?](#-why-untether)
-- [Supported engines](#-supported-engines)
-- [Features](#-features)
-- [Commands](#-commands)
-- [Configuration](#%EF%B8%8F-configuration)
-- [Requirements](#-requirements)
-- [Engine guides](#-engine-guides)
-- [Documentation](#-documentation)
-- [Contributing](#-contributing)
-- [Acknowledgements](#-acknowledgements)
-- [Licence](#-licence)
+Your AI coding agents need a terminal, but you don't need to sit at one. Untether runs on your machine and connects your agents to a Telegram bot. Send a task from your phone — by voice or text — and watch your agent work in real time. When it needs permission, tap a button. When it's done, read the result. No desk, no SSH, no screen sharing.
 
 ---
 
@@ -57,16 +48,22 @@ That's it. Your agent runs on your machine, streams progress to Telegram, and yo
 
 ---
 
-## 💡 Why Untether?
+## 🎯 Features
 
-| Problem | Untether's solution |
-|---------|-------------------|
-| You have to sit at your desk while agents work | Stream progress to Telegram — watch from anywhere |
-| Agents need permission to run tools | Approve or deny actions with inline buttons on your phone |
-| You switch between Claude, Codex, and other agents | One bot, multiple engines — switch with `/claude`, `/codex`, `/opencode`, or `/pi` |
-| Managing multiple repos from chat is messy | Register projects, target them with `/myproject`, branch with `@feat/thing` |
-| No cost visibility | Per-run and daily cost tracking with configurable budgets |
-| Can't continue terminal sessions remotely | Stateless resume — pick up any session in chat or terminal |
+- 📡 **Progress streaming** — watch your agent work in real time; see tool calls, file changes, and elapsed time as they happen
+- 🔐 **Interactive permissions** — approve plan transitions and clarifying questions with inline buttons; tools auto-execute, with progressive cooldown after "Pause & Outline Plan"
+- 📋 **Plan mode** — toggle per chat with `/planmode`; choose full manual approval, auto-approved transitions, or no plan phase
+- 📁 **Projects and worktrees** — register repos with `untether init`, target with `/myproject @feat/thing`, run branches in isolated worktrees in parallel
+- 💰 **Cost and usage tracking** — per-run and daily budgets, subscription usage in the footer, `/usage` for detailed breakdowns, optional auto-cancel
+- 🏷 **Model and mode metadata** — every completed message shows the model and permission mode (e.g. `🏷 sonnet · plan`) across all engines
+- 🎙️ **Voice notes** — dictate tasks instead of typing; Untether transcribes via a configurable Whisper-compatible endpoint
+- 📎 **File transfer** — upload files to your repo or download results back
+- ⏰ **Scheduled tasks** — cron expressions and webhook triggers
+- 💬 **Forum topics** — map Telegram topics to projects and branches
+- 📤 **Session export** — `/export` for markdown or JSON transcripts
+- 🗂️ **File browser** — `/browse` to navigate project files with inline buttons
+- 🧩 **Plugin system** — extend with custom engines, transports, and commands
+- 💬 **Conversation modes** — assistant (ongoing chat), workspace (forum topics per project), or handoff (reply-to-continue with terminal resume)
 
 ---
 
@@ -80,67 +77,6 @@ That's it. Your agent runs on your machine, streams progress to Telegram, and yo
 | [Pi](https://github.com/mariozechner/pi-coding-agent) | `npm i -g @mariozechner/pi-coding-agent` | Multi-provider auth, conversational |
 
 **Note:** Use your existing Claude or ChatGPT subscription — no extra API keys needed (unless you want API billing).
-
----
-
-## 🎯 Features
-
-### 📡 Progress streaming
-
-Watch your agent work in real time. See tool calls, file changes, and elapsed time as they happen.
-
-### 🔐 Interactive permissions (Claude Code)
-
-When Claude Code needs to run a tool, Untether shows **Approve / Deny / Pause & Outline Plan** buttons in Telegram. Routine tools (Read, Grep, Glob) are auto-approved. Dangerous operations require your explicit approval with a diff preview.
-
-### 📋 Plan mode
-
-Toggle plan mode per chat with `/planmode`. Claude outlines its approach before making changes. Choose between:
-
-- **on** — full plan mode with manual approval
-- **auto** — plan mode with auto-approved transitions
-- **off** — no plan phase
-
-### 📁 Projects and worktrees
-
-Register repos with `untether init myproject`, then target them from chat:
-
-> /myproject @feat/new-api add the endpoint
-
-Each branch runs in an isolated git worktree. Multiple projects and branches can run in parallel.
-
-### 💰 Cost and usage tracking
-
-```toml
-[footer]
-show_api_cost = false           # hide API cost line (default: true)
-show_subscription_usage = true  # show 5h/weekly window usage (default: false)
-
-[cost_budget]
-enabled = true
-max_cost_per_run = 2.00
-max_cost_per_day = 10.00
-```
-
-See subscription usage or API costs in the progress footer. Use `/usage` for a detailed breakdown. Budget alerts fire at configurable thresholds, and can optionally auto-cancel runs.
-
-### 💬 Conversation modes
-
-| Mode | Best for | How it works |
-|------|----------|-------------|
-| **Assistant** | Day-to-day use | Ongoing chat with auto-resume. `/new` to start fresh. |
-| **Workspace** | Teams and multi-project | Forum topics bound to repos and branches. |
-| **Handoff** | Terminal-first workflow | Reply-to-continue with resume lines you can paste into terminal. |
-
-### ✨ More features
-
-- 🎙️ **Voice notes** — dictate tasks, Untether transcribes and sends to the agent
-- 📎 **File transfer** — upload files to your repo or download results back
-- ⏰ **Scheduled tasks** — cron expressions and webhook triggers
-- 💬 **Forum topics** — map Telegram topics to projects and branches
-- 📤 **Session export** — `/export` for markdown or JSON transcripts
-- 🗂️ **File browser** — `/browse` to navigate project files with inline buttons
-- 🧩 **Plugin system** — extend with custom engines, transports, and commands
 
 ---
 
@@ -229,7 +165,9 @@ Full documentation is available in the [`docs/`](https://github.com/littlebearap
 
 ## 🤝 Contributing
 
-Contributions are welcome! See [CONTRIBUTING.md](https://github.com/littlebearapps/untether/blob/master/CONTRIBUTING.md) for development setup, testing, and guidelines.
+Found a bug? Got an idea? [Open an issue](https://github.com/littlebearapps/untether/issues) — we'd love to hear from you.
+
+Want to contribute code? See [CONTRIBUTING.md](https://github.com/littlebearapps/untether/blob/master/CONTRIBUTING.md) for development setup, testing, and guidelines.
 
 ---
 
@@ -241,4 +179,4 @@ Untether is a fork of [takopi](https://github.com/banteg/takopi) by [@banteg](ht
 
 ## 📄 Licence
 
-[MIT](https://github.com/littlebearapps/untether/blob/master/LICENSE)
+[MIT](https://github.com/littlebearapps/untether/blob/master/LICENSE) — Made by [Little Bear Apps](https://github.com/littlebearapps) 🐶

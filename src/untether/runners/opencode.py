@@ -146,6 +146,7 @@ def translate_opencode_event(
     *,
     title: str,
     state: OpenCodeStreamState,
+    meta: dict[str, Any] | None = None,
 ) -> list[UntetherEvent]:
     """Translate an OpenCode JSON event into Untether events."""
     session_id = event.sessionID
@@ -165,6 +166,7 @@ def translate_opencode_event(
                         engine=ENGINE,
                         resume=ResumeToken(engine=ENGINE, value=state.session_id),
                         title=title,
+                        meta=meta,
                     )
                 ]
             return []
@@ -390,10 +392,20 @@ class OpenCodeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
         resume: ResumeToken | None,
         found_session: ResumeToken | None,
     ) -> list[UntetherEvent]:
+        # Build meta from runner config (OpenCode JSONL doesn't include model info)
+        meta: dict[str, Any] | None = None
+        model = self.model
+        run_options = get_run_options()
+        if run_options is not None and run_options.model:
+            model = run_options.model
+        if model is not None:
+            meta = {"model": str(model)}
+
         return translate_opencode_event(
             data,
             title=self.session_title,
             state=state,
+            meta=meta,
         )
 
     def decode_jsonl(self, *, line: bytes) -> opencode_schema.OpenCodeEvent:

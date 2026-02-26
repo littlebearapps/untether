@@ -16,22 +16,16 @@ untether
 Untether keeps running in your terminal. In Telegram, your bot will post a startup message like:
 
 !!! untether "Untether"
-    🐙 untether is ready
+    🐕 untether v0.23.0 is ready
 
-    default: codex<br>
-    engines: codex, claude<br>
-    projects: none<br>
-    mode: chat<br>
-    topics: disabled<br>
-    resume lines: hidden<br>
+    engine: `codex` · projects: `3`<br>
     working in: /Users/you/dev/your-project
 
-The engines/projects list reflects your setup. This tells you:
+The message is compact by default — diagnostic lines only appear when they carry signal (e.g. `mode: chat` when in chat mode, or engine issues). This tells you:
 
-- Which engine is the default
-- Which engines are available (and any missing ones)
-- Which projects are registered
+- Which engine is the default and how many projects are registered
 - Which directory Untether will run in
+- Any engine issues (missing, misconfigured) when relevant
 
 !!! note "Untether runs where you start it"
     The agent will see files in your current directory. If you want to work on a different repo, stop Untether (`Ctrl+C`) and restart it in that directory—or set up [projects](projects-and-branches.md) to switch repos from chat.

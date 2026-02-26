@@ -12,8 +12,10 @@ Emitted on the first `step_start` event that contains a `sessionID`.
 
 ```
 OpenCode: {"type":"step_start","sessionID":"ses_XXX",...}
-Untether:   StartedEvent(engine="opencode", resume=ResumeToken(engine="opencode", value="ses_XXX"))
+Untether:   StartedEvent(engine="opencode", resume=ResumeToken(engine="opencode", value="ses_XXX"), meta={"model": "claude-sonnet"})
 ```
+
+Note: OpenCode JSONL does not include model info in its event stream. The runner populates `meta.model` from the runner config or run options (`--model` flag) when available. This is used for the `🏷` footer line on final messages.
 
 ### ActionEvent
 
