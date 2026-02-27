@@ -1,5 +1,21 @@
 # changelog
 
+## v0.23.5 (2026-02-27)
+
+### docs
+
+- comprehensive documentation audit and upgrade [#13](https://github.com/littlebearapps/untether/issues/13)
+  - add how-to guides: interactive approval, plan mode, cost budgets, webhooks & cron
+  - expand schedule-tasks guide with cron and webhook trigger coverage
+  - remove orphaned `docs/user-guide.md` redirect stub
+  - fix stale version reference (0.19.0 → 0.23.4) in install tutorial and llms-full.txt
+  - regenerate `llms.txt` and `llms-full.txt` with 18 previously missing doc pages
+  - add AI IDE context files: `AGENTS.md`, `.cursorrules`, `.github/copilot-instructions.md`
+  - update `.codex/AGENTS.md` with correct project commands
+  - add `ROADMAP.md` with near/mid/future directional plans
+  - update README documentation section with new guide links
+  - update `zensical.toml` nav with new how-to guides
+
 ## v0.23.4 (2026-02-26)
 
 ### fixes
