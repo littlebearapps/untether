@@ -18,8 +18,14 @@
 - [Forum topics](https://github.com/littlebearapps/untether/blob/master/docs/how-to/topics.md): Map Telegram topics to projects and branches
 - [Projects](https://github.com/littlebearapps/untether/blob/master/docs/how-to/projects.md): Register and manage project aliases
 - [Worktrees](https://github.com/littlebearapps/untether/blob/master/docs/how-to/worktrees.md): Isolated git worktrees for parallel branch work
-- [Schedule tasks](https://github.com/littlebearapps/untether/blob/master/docs/how-to/schedule-tasks.md): Cron expressions and webhook triggers
+- [Interactive approval](https://github.com/littlebearapps/untether/blob/master/docs/how-to/interactive-approval.md): Approve, deny, and discuss tool calls from Telegram
+- [Plan mode](https://github.com/littlebearapps/untether/blob/master/docs/how-to/plan-mode.md): Control plan transitions with progressive cooldown
+- [Cost budgets](https://github.com/littlebearapps/untether/blob/master/docs/how-to/cost-budgets.md): Per-run and daily budget limits, warnings, and auto-cancel
+- [Schedule tasks](https://github.com/littlebearapps/untether/blob/master/docs/how-to/schedule-tasks.md): Telegram scheduling, cron triggers, and webhook triggers
+- [Webhooks and cron](https://github.com/littlebearapps/untether/blob/master/docs/how-to/webhooks-and-cron.md): Automated runs from external events and schedules
 - [Switch engines](https://github.com/littlebearapps/untether/blob/master/docs/how-to/switch-engines.md): Change engines per chat, topic, or message
+- [Route by chat](https://github.com/littlebearapps/untether/blob/master/docs/how-to/route-by-chat.md): Route messages to projects by chat or topic
+- [Troubleshooting](https://github.com/littlebearapps/untether/blob/master/docs/how-to/troubleshooting.md): Common issues, debug logging, and preflight checks
 - [Write a plugin](https://github.com/littlebearapps/untether/blob/master/docs/how-to/write-a-plugin.md): Extend with custom engines, transports, and commands
 - [Add a runner](https://github.com/littlebearapps/untether/blob/master/docs/how-to/add-a-runner.md): Implement a new engine backend
 - [Dev setup](https://github.com/littlebearapps/untether/blob/master/docs/how-to/dev-setup.md): Development environment and testing
@@ -28,20 +34,26 @@
 
 - [Configuration](https://github.com/littlebearapps/untether/blob/master/docs/reference/config.md): Full config reference for untether.toml
 - [Commands and directives](https://github.com/littlebearapps/untether/blob/master/docs/reference/commands-and-directives.md): Telegram commands, message directives, CLI flags
+- [Context resolution](https://github.com/littlebearapps/untether/blob/master/docs/reference/context-resolution.md): How Untether resolves project, branch, engine, and session context
 - [Specification](https://github.com/littlebearapps/untether/blob/master/docs/reference/specification.md): Normative behaviour spec
 - [Environment variables](https://github.com/littlebearapps/untether/blob/master/docs/reference/env-vars.md): Env var reference
 - [Plugin API](https://github.com/littlebearapps/untether/blob/master/docs/reference/plugin-api.md): Plugin development API
 - [Triggers](https://github.com/littlebearapps/untether/blob/master/docs/reference/triggers/triggers.md): Webhook and cron trigger reference
+- [Changelog](https://github.com/littlebearapps/untether/blob/master/docs/reference/changelog.md): Version history
 
 ## Engine references
 
 - [Claude Code runner](https://github.com/littlebearapps/untether/blob/master/docs/reference/runners/claude/runner.md): Permission modes, plan mode, cost tracking, interactive approvals
 - [Claude stream-json](https://github.com/littlebearapps/untether/blob/master/docs/reference/runners/claude/stream-json-cheatsheet.md): JSONL event shapes for Claude Code
+- [Claude event mapping](https://github.com/littlebearapps/untether/blob/master/docs/reference/runners/claude/untether-events.md): Claude JSONL to Untether event translation
 - [Codex exec-json](https://github.com/littlebearapps/untether/blob/master/docs/reference/runners/codex/exec-json-cheatsheet.md): JSONL event shapes for Codex
+- [Codex event mapping](https://github.com/littlebearapps/untether/blob/master/docs/reference/runners/codex/untether-events.md): Codex JSONL to Untether event translation
 - [OpenCode runner](https://github.com/littlebearapps/untether/blob/master/docs/reference/runners/opencode/runner.md): Model selection, providers, session IDs
 - [OpenCode stream-json](https://github.com/littlebearapps/untether/blob/master/docs/reference/runners/opencode/stream-json-cheatsheet.md): JSONL event shapes for OpenCode
+- [OpenCode event mapping](https://github.com/littlebearapps/untether/blob/master/docs/reference/runners/opencode/untether-events.md): OpenCode JSONL to Untether event translation
 - [Pi runner](https://github.com/littlebearapps/untether/blob/master/docs/reference/runners/pi/runner.md): Multi-provider auth, model and provider selection
 - [Pi stream-json](https://github.com/littlebearapps/untether/blob/master/docs/reference/runners/pi/stream-json-cheatsheet.md): JSONL event shapes for Pi
+- [Pi event mapping](https://github.com/littlebearapps/untether/blob/master/docs/reference/runners/pi/untether-events.md): Pi JSONL to Untether event translation
 - [Telegram transport](https://github.com/littlebearapps/untether/blob/master/docs/reference/transports/telegram.md): Bot API client, outbox, rate limiting, voice, forum topics
 
 ## Explanation

@@ -36,7 +36,7 @@ Verify it's installed:
 untether --version
 ```
 
-You should see something like `0.19.0`.
+You should see something like `0.23.4`.
 
 ## 3. Install agent CLIs
 
@@ -6129,4 +6129,3066 @@ This page is a high-level map of Untether’s internal modules: what they do and
 | `utils/streams.py` | Async stream helpers (`iter_bytes_lines`, stderr draining). |
 | `utils/subprocess.py` | Subprocess management helpers (terminate/kill best-effort). |
 
+
+---
+
+# Dev setup
+
+Set up Untether for local development and run the checks.
+
+## Clone and run
+
+```bash
+git clone https://github.com/littlebearapps/untether
+cd untether
+
+# Run directly with uv (installs deps automatically)
+uv run untether --help
+```
+
+## Install locally (optional)
+
+```bash
+uv tool install .
+untether --help
+```
+
+## Run checks
+
+```bash
+uv run pytest
+uv run ruff check src tests
+uv run ty check .
+
+# Or all at once
+just check
+```
+
+
+---
+
+# Route by chat
+
+Bind a Telegram chat to a project so messages in that chat automatically route to the right repo.
+
+## Capture a chat id and save it to a project
+
+Run:
+
+```sh
+untether chat-id --project happy-gadgets
+```
+
+Then send any message in the target chat. Untether captures the `chat_id` and updates your config:
+
+=== "untether config"
+
+    ```sh
+    untether config set projects.happy-gadgets.path "~/dev/happy-gadgets"
+    untether config set projects.happy-gadgets.chat_id -1001234567890
+    ```
+
+=== "toml"
+
+    ```toml
+    [projects.happy-gadgets]
+    path = "~/dev/happy-gadgets"
+    chat_id = -1001234567890
+    ```
+
+Messages from that chat now default to the project.
+
+## Rules for chat ids
+
+- Each `projects.*.chat_id` must be unique.
+- A project `chat_id` must not match `transports.telegram.chat_id`.
+- Telegram uses positive IDs for private chats and negative IDs for groups/supergroups.
+
+## Capture a chat id without saving
+
+```sh
+untether chat-id
+```
+
+## Related
+
+- [Topics](topics.md)
+- [Context resolution](../reference/context-resolution.md)
+
+---
+
+# Troubleshooting
+
+If something isn’t working, rerun with debug logging enabled:
+
+```sh
+untether --debug
+```
+
+Then check `debug.log` for errors and include it when reporting issues.
+
+You can also run a preflight check:
+
+```sh
+untether doctor
+```
+
+This validates your Telegram token, chat id, topics setup, file transfer permissions, and voice transcription configuration.
+
+## Claude Code credentials
+
+The `/usage` command reads your Claude Code OAuth credentials to fetch subscription usage data. If you see **"No Claude credentials found"**, run `claude login` in your terminal to authenticate.
+
+Credential storage varies by platform:
+
+| Platform | Storage | Path |
+|----------|---------|------|
+| Linux | Plain-text file | `~/.claude/.credentials.json` |
+| macOS | macOS Keychain | Entry: `Claude Code-credentials` |
+
+Untether checks both locations automatically. If `/usage` still fails after logging in, check that the Claude CLI is working by running `claude` directly.
+
+---
+
+# Context resolution
+
+This page documents how Untether resolves **run context** (project, worktree/branch, engine) from messages.
+For step-by-step usage, see [Projects](../how-to/projects.md) and [Worktrees](../how-to/worktrees.md).
+
+## Overview
+
+Projects let you give a repo an alias (used as `/alias` in messages) and opt into
+worktree-based runs via `@branch`.
+
+- If no projects are configured, Untether runs in the startup working directory.
+- If a project is configured, `@branch` resolves/creates a git worktree and runs
+  the task in that worktree.
+- Progress/final messages include a `ctx:` footer when project context is active.
+
+## Config schema (relevant subset)
+
+All config lives in `~/.untether/untether.toml`.
+See [Config](config.md) for the full reference.
+
+=== "untether config"
+
+    ```sh
+    untether config set default_engine "codex"
+    untether config set default_project "z80"
+    untether config set transport "telegram"
+    untether config set transports.telegram.bot_token "..."
+    untether config set transports.telegram.chat_id 123
+    untether config set projects.z80.path "~/dev/z80"
+    untether config set projects.z80.worktrees_dir ".worktrees"
+    untether config set projects.z80.default_engine "codex"
+    untether config set projects.z80.worktree_base "master"
+    untether config set projects.z80.chat_id -123
+    ```
+
+=== "toml"
+
+    ```toml
+    default_engine = "codex"       # optional
+    default_project = "z80"        # optional
+    transport = "telegram"         # optional, defaults to "telegram"
+
+    [transports.telegram]
+    bot_token = "..."              # required
+    chat_id = 123                  # required
+
+    [projects.z80]
+    path = "~/dev/z80"             # required (repo root)
+    worktrees_dir = ".worktrees"   # optional, default ".worktrees"
+    default_engine = "codex"       # optional, per-project override
+    worktree_base = "master"       # optional, base for new branches
+    chat_id = -123                 # optional, project chat id
+    ```
+
+Legacy config note: top-level `bot_token` / `chat_id` are auto-migrated into
+`[transports.telegram]` on startup.
+
+Note on `worktrees_dir`:
+
+- The default `.worktrees` lives inside the repo root. You'll see it as an
+  untracked directory (with nested git worktrees) unless you ignore it.
+- Options:
+  - add `.worktrees/` to your repo `.gitignore`, or
+  - set `worktrees_dir` to a path outside the repo (e.g. `~/.untether/worktrees/<alias>`).
+  - add it to `.git/info/exclude` if you prefer a local-only ignore.
+
+Validation rules:
+
+- `projects` is optional.
+- Each project entry must include `path` (string, non-empty).
+- `default_project` must match a configured project alias.
+- Project aliases cannot collide with engine ids or reserved commands (`/cancel`).
+- `default_engine` and per-project `default_engine` must be valid engine ids.
+- `projects.<alias>.chat_id` must be unique and must not match `transports.telegram.chat_id`.
+- `transport` defaults to `"telegram"` when omitted; override per-run with `--transport`.
+
+## `untether init`
+
+`untether init <alias>` registers the current repo as a project alias.
+
+Important behavior:
+
+- The stored `path` is the **main checkout** of the repo, even if you run
+  `untether init` inside a worktree. Untether resolves the repo root via the git
+  common dir and writes that path to `[projects.<alias>].path`.
+- `worktree_base` is set from the current repo using this resolution order:
+  `origin/HEAD` → current branch → `master` → `main`.
+
+## Directives and context resolution
+
+Untether parses the first non-empty line of a message for a directive prefix.
+
+Supported directives:
+
+- `/<engine-id>` or `/<engine-id>@bot`: chooses the engine
+- `/<project-alias>`: chooses a project alias
+- `@branch`: chooses a git branch/worktree
+
+Rules:
+
+- Directives must be a contiguous prefix of the line; parsing stops at the first
+  non-directive token.
+- At most one engine directive, one project directive, and one `@branch` are
+  allowed (duplicates are errors).
+- If a reply contains a `ctx:` line, Untether **ignores new directives** and uses
+  the reply context.
+
+## Context footer (`ctx:`)
+
+When a run has project context, Untether appends a footer line rendered as inline
+code (backticked):
+
+- With branch: `` `ctx: <project> @<branch>` ``
+- Without branch: `` `ctx: <project>` ``
+
+The `ctx:` line is parsed from replies and takes precedence over new directives.
+
+When a message arrives in a chat whose `chat_id` matches `projects.<alias>.chat_id`,
+Untether defaults the project context to that alias unless a reply `ctx:` or explicit
+`/<project-alias>` directive is present.
+
+In non-topic chats, `/ctx` can bind a chat context. That bound context is treated as
+ambient and takes precedence over the default project mapping until cleared.
+
+## Worktree resolution
+
+When `@branch` is present:
+
+```
+worktrees_root = <project.path> / <worktrees_dir>
+worktree_path = worktrees_root / <branch>
+```
+
+Branch validation:
+
+- Must be non-empty
+- Must not start with `/`
+- Must not contain `..` path segments
+- May include `/` (nested directories)
+- The resolved worktree path must stay within `worktrees_root`
+
+Worktree creation rules:
+
+1) If `worktree_path` exists:
+   - It must be a git worktree or Untether errors.
+2) If it does not exist:
+   - If local branch exists: `git worktree add <path> <branch>`
+   - Else if remote `origin/<branch>` exists:
+     `git worktree add -b <branch> <path> origin/<branch>`
+   - Else:
+     `git worktree add -b <branch> <path> <base>`
+
+Base branch selection:
+
+1) `projects.<alias>.worktree_base` (if set)
+2) `origin/HEAD` (if present)
+3) current checked out branch
+4) `master` if it exists
+5) `main` if it exists
+6) otherwise error
+
+When `@branch` is omitted:
+
+- Untether runs in `<project.path>` (the main checkout).
+
+## Examples
+
+Start a new thread in a worktree:
+
+```
+/z80 @feat/streaming fix flaky test
+```
+
+Reply to a progress message to continue in the same context:
+
+```
+ctx: z80 @feat/streaming
+```
+
+---
+
+# changelog
+
+## v0.23.0 (2026-02-26)
+
+### changes
+
+- refresh startup message: dog emoji, version number, conditional diagnostics, project count
+  - only shows mode/topics/triggers/engines lines when they carry signal
+  - removes `resume lines:` field (config detail, not actionable)
+- add model + permission mode footer on final messages (`🏷 sonnet · plan`)
+  - all 4 engines (Claude, Codex, OpenCode, Pi) populate `StartedEvent.meta` with model info
+  - Claude also includes `permissionMode` from `system.init`
+  - Codex/OpenCode use runner config since their JSONL streams don't include model metadata
+- route telegram callback queries to command backends [#116](https://github.com/banteg/takopi/issues/116)
+  - callback data format: `command_id:args...` routes to registered command plugins
+  - extracts `message_thread_id` from callback for proper topic context
+  - enables plugins to build interactive UX with inline keyboards
+
+## v0.22.1 (2026-02-10)
+
+### fixes
+
+- preserve ordered list numbering when nested list indentation is malformed in telegram render output [#202](https://github.com/banteg/takopi/pull/202)
+
+## v0.22.0 (2026-02-10)
+
+### changes
+
+- support Codex `phase` values and unknown action kinds in commentary rendering [#201](https://github.com/banteg/takopi/pull/201)
+
+## v0.21.5 (2026-02-08)
+
+### fixes
+
+- dedupe redelivered telegram updates to prevent duplicate runs in DMs [#198](https://github.com/banteg/takopi/pull/198)
+
+### changes
+
+- read package version from metadata instead of a hardcoded `__version__` constant
+
+### docs
+
+- rotate telegram invite link
+
+## v0.21.4 (2026-01-22)
+
+### changes
+
+- add allowed user gate to telegram [#179](https://github.com/banteg/takopi/pull/179)
+
+## v0.21.3 (2026-01-21)
+
+### fixes
+
+- ignore implicit topic root replies in telegram [#175](https://github.com/banteg/takopi/pull/175)
+
+## v0.21.2 (2026-01-20)
+
+### fixes
+
+- clear chat sessions on cwd change [#172](https://github.com/banteg/takopi/pull/172)
+
+### docs
+
+- add untether-slack plugin to reference [#168](https://github.com/banteg/takopi/pull/168)
+
+## v0.21.1 (2026-01-18)
+
+### fixes
+
+- separate telegram voice transcription client [#166](https://github.com/banteg/takopi/pull/166)
+- disable telegram link previews by default [#160](https://github.com/banteg/takopi/pull/160)
+
+### docs
+
+- align engine terminology in telegram and docs [#162](https://github.com/banteg/takopi/pull/162)
+- add untether-discord plugin to plugins reference [#164](https://github.com/banteg/takopi/pull/164)
+
+## v0.21.0 (2026-01-16)
+
+### changes
+
+- add `untether config` subcommand [#153](https://github.com/banteg/takopi/pull/153)
+- make telegram /ctx work everywhere [#159](https://github.com/banteg/takopi/pull/159)
+- improve telegram command planning and testability [#158](https://github.com/banteg/takopi/pull/158)
+- simplify telegram loop and jsonl runner [#155](https://github.com/banteg/takopi/pull/155)
+- refactor telegram schemas and parsing with msgspec [#156](https://github.com/banteg/takopi/pull/156)
+
+### tests
+
+- improve coverage and raise threshold to 80% [#154](https://github.com/banteg/takopi/pull/154)
+- stabilize mutmut runs and extend telegram coverage [#157](https://github.com/banteg/takopi/pull/157)
+
+### docs
+
+- add opengraph meta fallbacks [#150](https://github.com/banteg/takopi/pull/150)
+
+## v0.20.0 (2026-01-15)
+
+### changes
+
+- add telegram mentions-only trigger mode [#142](https://github.com/banteg/takopi/pull/142)
+- add telegram /model and /reasoning overrides [#147](https://github.com/banteg/takopi/pull/147)
+- coalesce forwarded telegram messages [#146](https://github.com/banteg/takopi/pull/146)
+- export plugin utilities for transport development [#137](https://github.com/banteg/takopi/pull/137)
+
+### fixes
+
+- handle forwarded uploads for telegram [#149](https://github.com/banteg/takopi/pull/149)
+- preserve directives for voice transcripts [#141](https://github.com/banteg/takopi/pull/141)
+- resolve claude.cmd via shutil.which on windows [#124](https://github.com/banteg/takopi/pull/124)
+
+### docs
+
+- add untether-scripts plugin to plugins list [#140](https://github.com/banteg/takopi/pull/140)
+
+## v0.19.0 (2026-01-15)
+
+### changes
+
+- overhaul onboarding with persona-based setup flows [#132](https://github.com/banteg/takopi/pull/132)
+- add queued cancel placeholder for Telegram runs [#136](https://github.com/banteg/takopi/pull/136)
+- prefix Telegram voice transcriptions for agent awareness [#135](https://github.com/banteg/takopi/pull/135)
+
+### docs
+
+- refresh onboarding docs with new widgets and hero flow [#138](https://github.com/banteg/takopi/pull/138)
+- fix docs site mobile layout and font consistency [#139](https://github.com/banteg/takopi/pull/139)
+- link to untether.dev docs site
+
+## v0.18.0 (2026-01-13)
+
+### changes
+
+- add per-chat and per-topic default agent via `/agent set` command [#109](https://github.com/banteg/takopi/pull/109)
+- add session resume shorthand for pi runner [#113](https://github.com/banteg/takopi/pull/113)
+- expose `sender_id` and `raw` fields on `MessageRef` for plugins [#112](https://github.com/banteg/takopi/pull/112)
+
+### fixes
+
+- recreate stale topic bindings when topic is deleted and recreated [#127](https://github.com/banteg/takopi/pull/127)
+- use stdout session header for pi runner [#126](https://github.com/banteg/takopi/pull/126)
+
+### docs
+
+- restructure docs into diataxis format and switch to zensical [#121](https://github.com/banteg/takopi/pull/121) [#125](https://github.com/banteg/takopi/pull/125)
+
+## v0.17.1 (2026-01-12)
+
+### fixes
+
+- fix telegram /new command crash [#106](https://github.com/banteg/takopi/pull/106)
+- track telegram sessions for plugin runs [#107](https://github.com/banteg/takopi/pull/107)
+- align telegram prompt upload resume flow [#105](https://github.com/banteg/takopi/pull/105)
+
+## v0.17.0 (2026-01-12)
+
+### changes
+
+- add chat session mode (`session_mode = "chat"`) for auto-resume per chat without replying, reset with `/new` [#102](https://github.com/banteg/takopi/pull/102)
+- add `message_overflow = "split"` to send long responses as multiple messages instead of trimming [#101](https://github.com/banteg/takopi/pull/101)
+- add `show_resume_line` option to hide resume lines when auto-resume is available [#100](https://github.com/banteg/takopi/pull/100)
+- add `auto_put_mode = "prompt"` to start a run with the caption after uploading a file [#97](https://github.com/banteg/takopi/pull/97)
+- expose `thread_id` to plugins via run context [#99](https://github.com/banteg/takopi/pull/99)
+- use tomli-w for config serialization [#103](https://github.com/banteg/takopi/pull/103)
+- add `voice_transcription_model` setting for local whisper servers [#98](https://github.com/banteg/takopi/pull/98)
+
+### docs
+
+- document chat sessions, message overflow, and voice transcription model settings
+
+## v0.16.0 (2026-01-12)
+
+### fixes
+
+- harden telegram file transfer handling [#84](https://github.com/banteg/takopi/pull/84)
+
+### changes
+
+- simplify runtime, config, and telegram internals [#85](https://github.com/banteg/takopi/pull/85)
+- refactor telegram boundary types [#90](https://github.com/banteg/takopi/pull/90)
+
+### docs
+
+- add tips section to user guide
+- rework readme
+
+## v0.15.0 (2026-01-11)
+
+### changes
+
+- add telegram file transfer support [#83](https://github.com/banteg/takopi/pull/83)
+
+### docs
+
+- document telegram file transfers [#83](https://github.com/banteg/takopi/pull/83)
+
+## v0.14.1 (2026-01-10)
+
+### changes
+
+- add topic scope and thread-aware replies for telegram topics [#81](https://github.com/banteg/takopi/pull/81)
+
+### docs
+
+- update telegram topics docs and user guide for topic scoping [#81](https://github.com/banteg/takopi/pull/81)
+
+## v0.14.0 (2026-01-10)
+
+### changes
+
+- add telegram forum topics support with `/topic` command for binding threads to projects/branches, persistent resume tokens per topic, and `/ctx` for inspecting or updating bindings [#80](https://github.com/banteg/takopi/pull/80)
+- add inline cancel button to progress messages [#79](https://github.com/banteg/takopi/pull/79)
+- add config hot-reload via watchfiles [#78](https://github.com/banteg/takopi/pull/78)
+
+### docs
+
+- add user guide and telegram topics documentation [#80](https://github.com/banteg/takopi/pull/80)
+
+## v0.13.0 (2026-01-09)
+
+### changes
+
+- add per-project chat routing [#76](https://github.com/banteg/takopi/pull/76)
+
+### fixes
+
+- hardcode codex exec flags [#75](https://github.com/banteg/takopi/pull/75)
+- reuse project root for current branch when resolving worktrees [#77](https://github.com/banteg/takopi/pull/77)
+
+### docs
+
+- normalize casing in the readme and changelog
+
+## v0.12.0 (2026-01-09)
+
+### changes
+
+- add optional telegram voice note transcription (routes transcript like typed text) [#74](https://github.com/banteg/takopi/pull/74)
+
+### fixes
+
+- fix plugin allowlist matching and windows session paths [#72](https://github.com/banteg/takopi/pull/72)
+
+### docs
+
+- document telegram voice transcription settings [#74](https://github.com/banteg/takopi/pull/74)
+
+## v0.11.0 (2026-01-08)
+
+### changes
+
+- add entrypoint-based plugins for engines/transports plus a `untether plugins` command and public API docs [#71](https://github.com/banteg/takopi/pull/71)
+
+### fixes
+
+- create pi sessions under the run base dir [#68](https://github.com/banteg/takopi/pull/68)
+- skip git repo checks for codex runs [#66](https://github.com/banteg/takopi/pull/66)
+
+## v0.10.0 (2026-01-08)
+
+### changes
+
+- add transport registry with `--transport` overrides and a `untether transports` command [#69](https://github.com/banteg/takopi/pull/69)
+- migrate config loading to pydantic-settings and move telegram credentials under `[transports.telegram]` [#65](https://github.com/banteg/takopi/pull/65)
+- include project aliases in the telegram slash-command menu with validation and limits [#67](https://github.com/banteg/takopi/pull/67)
+
+### fixes
+
+- validate worktree roots instead of treating nested paths as worktrees [#63](https://github.com/banteg/takopi/pull/63)
+- harden onboarding with clearer config errors, safe backups, and refreshed command menu wording [#70](https://github.com/banteg/takopi/pull/70)
+
+### docs
+
+- add architecture and lifecycle diagrams
+- call out the default worktrees directory [#64](https://github.com/banteg/takopi/pull/64)
+- document the transport registry and onboarding changes [#69](https://github.com/banteg/takopi/pull/69)
+
+## v0.9.0 (2026-01-07)
+
+### projects and worktrees
+
+- register repos with `untether init <alias>` and target them via `/project` directives
+- route runs to git worktrees with `@branch` — untether resolves or creates worktrees automatically
+- replies preserve context via `ctx: project @branch` footers, no need to repeat directives
+- set `default_project` to skip the `/project` prefix entirely
+- per-project `default_engine` and `worktree_base` configuration
+
+### changes
+
+- transport/presenter protocols plus transport-agnostic `exec_bridge`
+- move telegram polling + wiring into `untether.telegram` with transport/presenter adapters
+- list configured projects in the startup banner
+
+### fixes
+
+- render `ctx:` footer lines consistently (backticked + hard breaks) and include them in final messages
+
+### breaking
+
+- remove `untether.bridge`; use `untether.runner_bridge` and `untether.telegram` instead
+
+### docs
+
+- add a projects/worktrees guide and document `untether init` behavior in the readme
+
+## v0.8.0 (2026-01-05)
+
+### changes
+
+- queue telegram requests with rate limits and retry-after backoff [#54](https://github.com/banteg/takopi/pull/54)
+
+### docs
+
+- improve documentation coverage [#52](https://github.com/banteg/takopi/pull/52)
+- align runner guide with factory pattern
+- add missing pr links in the changelog
+
+## v0.7.0 (2026-01-04)
+
+### changes
+
+- migrate logging to structlog with structured pipelines and redaction [#46](https://github.com/banteg/takopi/pull/46)
+- add msgspec schemas for jsonl decoding across runners [#37](https://github.com/banteg/takopi/pull/37)
+
+## v0.6.0 (2026-01-03)
+
+### changes
+
+- interactive onboarding: run `untether` to set up bot token, chat id, and default engine via guided prompts [#39](https://github.com/banteg/takopi/pull/39)
+- lockfile to prevent multiple untether instances from racing the same bot token [#30](https://github.com/banteg/takopi/pull/30)
+- re-run onboarding anytime with `untether --onboard`
+
+## v0.5.3 (2026-01-02)
+
+### changes
+
+- default claude allowed tools to `["Bash", "Read", "Edit", "Write"]` when not configured [#29](https://github.com/banteg/takopi/pull/29)
+
+## v0.5.2 (2026-01-02)
+
+### changes
+
+- show not installed agents in the startup banner (while hiding them from slash commands)
+
+### fixes
+
+- treat codex reconnect notices as non-fatal progress updates instead of errors [#27](https://github.com/banteg/takopi/pull/27)
+- avoid crashes when codex tool/file-change events omit error fields [#27](https://github.com/banteg/takopi/pull/27)
+
+## v0.5.1 (2026-01-02)
+
+### changes
+
+- relax telegram ACL to check chat id only, enabling use in group chats and channels [#26](https://github.com/banteg/takopi/pull/26)
+- improve onboarding documentation and add tests [#25](https://github.com/banteg/takopi/pull/25)
+
+## v0.5.0 (2026-01-02)
+
+### changes
+
+- add an opencode runner via the `opencode` cli with json event parsing and resume support [#22](https://github.com/banteg/takopi/pull/22)
+- add a pi agent runner via the `pi` cli with jsonl streaming and resume support [#24](https://github.com/banteg/takopi/pull/24)
+- document the opencode and pi runners, event mappings, and stream capture tips
+
+### fixes
+
+- fix path relativization so progress output does not strip sibling directories [#23](https://github.com/banteg/takopi/pull/23)
+- reduce noisy debug logging from markdown_it/httpcore
+
+## v0.4.0 (2026-01-02)
+
+### changes
+
+- add auto-router runner selection with configurable default engine [#15](https://github.com/banteg/takopi/pull/15)
+- make auto-router the default entrypoint; subcommands or `/{engine}` prefixes override for new threads
+- add `/cancel` + `/{engine}` command menu sync on startup
+- show engine name in progress and final message headers
+- omit progress/action log lines from final output for cleaner answers [#21](https://github.com/banteg/takopi/pull/21)
+
+### fixes
+
+- improve codex exec error rendering with stderr extraction [#18](https://github.com/banteg/takopi/pull/18)
+- preserve markdown formatting and resume footer when trimming long responses [#20](https://github.com/banteg/takopi/pull/20)
+
+## v0.3.0 (2026-01-01)
+
+### changes
+
+- add a claude code runner via the `claude` cli with stream-json parsing and resume support [#9](https://github.com/banteg/takopi/pull/9)
+- auto-discover engine backends and generate cli subcommands from the registry [#12](https://github.com/banteg/takopi/pull/12)
+- add `BaseRunner` session locking plus a `JsonlSubprocessRunner` helper for jsonl subprocess engines
+- add jsonl stream parsing and subprocess helpers for runners
+- lazily allocate per-session locks and streamline backend setup/install metadata
+- improve startup message formatting and markdown rendering
+- add a debug onboarding helper for setup troubleshooting
+
+### breaking
+
+- runner implementations must define explicit resume parsing/formatting (no implicit standard resume pattern)
+
+### fixes
+
+- stop leaking a hidden `engine-id` cli option on engine subcommands
+
+### docs
+
+- add a runner guide plus claude code docs (runner, events, stream-json cheatsheet)
+- clarify the claude runner file layout and add guidance for jsonl-based runners
+- document "minimal" runner mode: started+completed only, completed-only actions allowed
+
+## v0.2.0 (2025-12-31)
+
+### changes
+
+- introduce runner protocol for multi-engine support [#7](https://github.com/banteg/takopi/pull/7)
+  - normalized event model (`started`, `action`, `completed`)
+  - actions with stable ids, lifecycle phases, and structured details
+  - engine-agnostic bridge and renderer
+- add `/cancel` command with progress message targeting [#4](https://github.com/banteg/takopi/pull/4)
+- migrate async runtime from asyncio to anyio [#6](https://github.com/banteg/takopi/pull/6)
+- stream runner events via async iterators (natural backpressure)
+- per-thread job queues with serialization for same-thread runs
+- render resume as `codex resume <token>` command lines
+- various rendering improvements including file edits
+
+### breaking
+
+- require python 3.14+
+- remove `--profile` flag; configure via `[codex].profile` only
+
+### fixes
+
+- serialize new sessions once resume token is known
+- preserve resume tokens in error renders [#3](https://github.com/banteg/takopi/pull/3)
+- preserve file-change paths in action events [#2](https://github.com/banteg/takopi/pull/2)
+- terminate codex process groups on cancel (posix)
+- correct resume command matching in bridge
+
+## v0.1.0 (2025-12-29)
+
+### features
+
+- telegram bot bridge for openai codex cli via `codex exec`
+- stateless session resume via `` `codex resume <token>` `` lines
+- real-time progress updates with ~2s throttling
+- full markdown rendering with telegram entities (markdown-it-py + sulguk)
+- per-session serialization to prevent race conditions
+- interactive onboarding guide for first-time setup
+- codex profile configuration
+- automatic telegram token redaction in logs
+- cli options: `--debug`, `--final-notify`, `--version`
+
+---
+
+Below is a concrete implementation spec for the **Anthropic Claude Code (“claude” CLI / Agent SDK runtime)** runner shipped in Untether (v0.3.0).
+
+---
+
+## Scope
+
+### Goal
+
+Provide the **`claude`** engine backend so Untether can:
+
+* Run Claude Code non-interactively via the **Agent SDK CLI** (`claude -p`). ([Claude Code][1])
+* Run Claude Code interactively via permission mode (`--permission-mode plan --permission-prompt-tool stdio`) with a bidirectional control channel.
+* Stream progress in Telegram by parsing **`--output-format stream-json --input-format stream-json --verbose`** (newline-delimited JSON). ([Claude Code][1])
+* Support resumable sessions via **`--resume <session_id>`** (Untether emits a canonical resume line the user can reply with). ([Claude Code][1])
+
+---
+
+## UX and behavior
+
+### Engine selection
+
+* Default: `untether` (auto-router uses `default_engine` from config)
+* Override: `untether claude`
+
+Untether runs in auto-router mode by default; `untether claude` or `/claude` selects
+Claude for new threads.
+
+### Resume UX (canonical line)
+
+Untether appends a **single backticked** resume line at the end of the message, like:
+
+```text
+`claude --resume 8b2d2b30-...`
+```
+
+Rationale:
+
+* Claude Code supports resuming a specific conversation by session ID with `--resume`. ([Claude Code][1])
+* The CLI reference also documents `--resume/-r` as the resume mechanism.
+
+Untether should parse either:
+
+* `claude --resume <id>`
+* `claude -r <id>` (short form from docs)
+
+**Note:** Claude session IDs should be treated as **opaque strings**. Do not assume UUID format.
+
+### Permissions
+
+Untether supports two modes:
+
+**Non-interactive (`-p` mode):** Claude Code can require tool approvals but Untether cannot answer interactive prompts. Users must preconfigure permissions via `--allowedTools` or Claude Code settings. ([Claude Code][2])
+
+**Interactive (permission mode):** When `permission_mode` is set (e.g. `plan` or `auto`), Untether uses `--permission-mode <mode> --permission-prompt-tool stdio` to establish a bidirectional control channel over stdin/stdout. Claude emits `control_request` events for tool approvals and plan mode exits; Untether responds with `control_response` (approve/deny with optional `denial_message`). This uses a PTY (`pty.openpty()`) to prevent stdin deadlock.
+
+Key control channel features:
+* Session registries (`_SESSION_STDIN`, `_REQUEST_TO_SESSION`) for concurrent session support
+* Auto-approve for routine tools (Grep, Glob, Read, Bash, etc.)
+* `ExitPlanMode` requests shown as Telegram inline buttons (Approve / Deny / Pause & Outline Plan) in `plan` mode
+* `ExitPlanMode` requests silently auto-approved in `auto` mode (no buttons shown)
+* Progressive cooldown on rapid ExitPlanMode retries (30s → 60s → 90s → 120s) — only applies in `plan` mode
+
+**Safety note:** `-p/--print` skips the workspace trust dialog; only use this flag in trusted directories.
+
+---
+
+## Config additions
+
+Untether config lives at `~/.untether/untether.toml`.
+
+Add a new optional `[claude]` section.
+
+Recommended v1 schema:
+
+=== "untether config"
+
+    ```sh
+    untether config set default_engine "claude"
+    untether config set claude.model "claude-sonnet-4-5-20250929"
+    untether config set claude.allowed_tools '["Bash", "Read", "Edit", "Write"]'
+    untether config set claude.dangerously_skip_permissions false
+    untether config set claude.use_api_billing false
+    ```
+
+=== "toml"
+
+    ```toml
+    # ~/.untether/untether.toml
+
+    default_engine = "claude"
+
+    [claude]
+    model = "claude-sonnet-4-5-20250929" # optional (Claude Code supports model override in settings too)
+    permission_mode = "auto"             # optional: "plan", "auto", or "acceptEdits"
+    allowed_tools = ["Bash", "Read", "Edit", "Write"] # optional but strongly recommended for automation
+    dangerously_skip_permissions = false # optional (high risk; prefer sandbox use only)
+    use_api_billing = false             # optional (keep ANTHROPIC_API_KEY for API billing)
+    ```
+
+Notes:
+
+* `--allowedTools` exists specifically to auto-approve tools in programmatic runs. ([Claude Code][1])
+* Claude Code tools (Bash/Edit/Write/WebSearch/etc.) and whether permission is required are documented. ([Claude Code][2])
+* If `allowed_tools` is omitted, Untether defaults to `["Bash", "Read", "Edit", "Write"]`.
+* Untether reads `model`, `permission_mode`, `allowed_tools`, `dangerously_skip_permissions`, and `use_api_billing` from `[claude]`.
+* `permission_mode = "auto"` uses `--permission-mode plan` on the CLI but auto-approves ExitPlanMode requests without showing Telegram buttons. Can also be set per chat via `/planmode auto`.
+* By default Untether strips `ANTHROPIC_API_KEY` from the subprocess environment so Claude uses subscription billing. Set `use_api_billing = true` to keep the key.
+
+---
+
+## Code changes (by file)
+
+### 1) New file: `src/untether/runners/claude.py`
+
+#### Backend export
+
+Expose a module-level `BACKEND = EngineBackend(...)` (from `untether.backends`).
+Untether auto-discovers runners by importing `untether.runners.*` and looking for
+`BACKEND`.
+
+`BACKEND` should provide:
+
+* Engine id: `"claude"`
+* `install_cmd`:
+  * Install command for `claude` (used by onboarding when missing on PATH).
+  * Error message should include official install options and “run `claude` once to authenticate”.
+
+    * Install methods include install scripts, Homebrew, and npm. ([Claude Code][4])
+    * Agent SDK / CLI can use Claude Code authentication from running `claude`, or API key auth. ([Claude][5])
+
+* `build_runner()` should parse `[claude]` config and instantiate `ClaudeRunner`.
+
+#### Runner implementation
+
+Implement a new `Runner`:
+
+#### Public API
+
+* `engine: EngineId = "claude"`
+* `format_resume(token) -> str`: returns `` `claude --resume {token}` ``
+* `extract_resume(text) -> ResumeToken | None`: parse last match of `--resume/-r`
+* `is_resume_line(line) -> bool`: matches the above patterns
+* `run(prompt, resume)` async generator of `UntetherEvent`
+
+#### Subprocess invocation
+
+Core invocation (non-interactive):
+
+* `claude -p --output-format stream-json --input-format stream-json --verbose` ([Claude Code][1])
+  * `--verbose` overrides config and is required for full stream-json output.
+  * `--input-format stream-json` enables JSON input on stdin.
+
+Core invocation (permission mode):
+
+* `claude --output-format stream-json --input-format stream-json --verbose --permission-mode <mode> --permission-prompt-tool stdio`
+  * No `-p` flag — prompt is sent via stdin as a JSON user message.
+  * `--permission-prompt-tool stdio` enables the bidirectional control channel.
+
+Resume:
+
+* add `--resume <session_id>` if resuming. ([Claude Code][1])
+
+Model:
+
+* add `--model <name>` if configured. ([Claude Code][1])
+
+Permissions:
+
+* add `--allowedTools "<rules>"` if configured. ([Claude Code][1])
+* add `--dangerously-skip-permissions` only if explicitly enabled (high risk; document clearly).
+
+Prompt passing:
+
+* Pass the prompt as the final positional argument after `--` (CLI expects `prompt` as an argument). This also protects prompts that begin with `-`. ([Claude Code][1])
+
+Other flags:
+
+* Claude exposes more CLI flags, but Untether does not surface them in config.
+
+#### Stream parsing
+
+In stream-json mode, Claude emits newline-delimited JSON objects. ([Claude Code][1])
+
+Per the official Agent SDK TypeScript reference, message types include:
+
+* `system` with `subtype: 'init'` and fields like `session_id`, `cwd`, `tools`, `model`, `permissionMode`, `output_style`. ([Claude Code][3])
+* `assistant` / `user` messages with Anthropic SDK message objects. ([Claude Code][3])
+* final `result` message with:
+
+  * `subtype: 'success'` or `'error'`,
+  * `is_error`, `result` (string on success),
+  * `usage`, `total_cost_usd`,
+  * `duration_ms`, `duration_api_ms`, `num_turns`,
+  * `structured_output` (optional). ([Claude Code][3])
+
+  Note: upstream Claude CLI may also emit `error`, `permission_denials`, and
+  `modelUsage` fields, but these are **not captured** by Untether's
+  `StreamResultMessage` schema (msgspec silently ignores unknown fields).
+
+Untether should:
+
+* Parse each line as JSON; on decode error emit a warning ActionEvent (like CodexRunner does) and continue.
+* Prefer stdout for JSON; log stderr separately (do not merge).
+* Treat unknown top-level fields (e.g., `parent_tool_use_id`) as optional metadata and ignore them unless needed.
+
+#### Mapping to Untether events
+
+**StartedEvent**
+
+* Emit upon first `system/init` message:
+
+  * `resume = ResumeToken(engine="claude", value=session_id)`
+    (treat `session_id` as opaque; do not validate as UUID)
+  * `title = model` (or user-specified config title; default `"claude"`)
+  * `meta` should include `cwd`, `model`, `tools`, `permissionMode`, `output_style` for debugging. `model` and `permissionMode` are used for the `🏷` footer line on final messages.
+
+**Action events (progress)**
+The core useful progress comes from tool usage.
+
+Claude Code tools list is documented (Bash/Edit/Write/WebSearch/WebFetch/TodoWrite/Task/etc.). ([Claude Code][2])
+
+Strategy:
+
+* When you see an **assistant message** with a content block `type: "tool_use"`:
+
+  * Emit `ActionEvent(phase="started")` with:
+
+    * `action.id = tool_use.id`
+    * `action.kind` based on tool name (complete mapping):
+
+      * `Bash` → `command`
+      * `Edit`/`Write`/`NotebookEdit` → `file_change` (best-effort path extraction)
+      * `Read` → `tool`
+      * `Glob`/`Grep` → `tool`
+      * `WebSearch`/`WebFetch` → `web_search`
+      * `TodoWrite`/`TodoRead` → `note`
+      * `AskUserQuestion` → `note`
+      * `Task`/`Agent` → `tool`
+      * `KillShell` → `command`
+      * otherwise → `tool`
+    * `action.title`:
+
+      * Bash: use `input.command` if present
+      * Read/Write/Edit/NotebookEdit: use file path (best-effort; field may be `file_path` or `path`)
+      * Glob/Grep: use pattern
+      * WebSearch: use query
+      * WebFetch: use URL
+      * TodoWrite/TodoRead: short summary (e.g., “update todos”)
+      * AskUserQuestion: short summary (e.g., “ask user”)
+      * otherwise: tool name
+    * `detail` includes a compacted copy of input (or a safe summary).
+
+* When you see a **user message** with a content block `type: "tool_result"`:
+
+  * Emit `ActionEvent(phase="completed")` for `tool_use_id`
+  * `ok = not is_error`
+  * `content` may be a string or an array of content blocks; normalize to a string for summaries
+  * `detail` includes a small summary (char count / first line / “(truncated)”)
+
+This mirrors CodexRunner’s “started → completed” item tracking and renders well in existing `UntetherProgressRenderer`.
+
+**CompletedEvent**
+
+* Emit on `result` message:
+
+  * `ok = (is_error == false)` (treat `is_error` as authoritative; `subtype` is informational)
+  * `answer = result` on success; on error, a concise message using `errors` and/or denials
+  * `usage` attach:
+
+    * `total_cost_usd`, `usage`, `modelUsage`, `duration_ms`, `duration_api_ms`, `num_turns` ([Claude Code][3])
+  * Always include `resume` (same session_id).
+* Emit exactly one completed event per run. After emitting it, ignore any
+  trailing JSON lines (do not emit a second completion).
+* We do not use an idle-timeout completion; completion is driven by Claude’s
+  `result` event or process exit handling.
+
+**Permission denials**
+Because result includes `permission_denials`, optionally emit warning ActionEvent(s) *before* CompletedEvent (CompletedEvent must be final):
+
+* kind: `warning`
+* title: “permission denied: <tool_name>”
+  This preserves the “warnings before started/completed” ordering principle Untether already tests for CodexRunner.
+
+#### Session serialization / locks
+
+Must match Untether runner contract:
+
+* Lock key: `claude:<session_id>` (string) in a `WeakValueDictionary` of `anyio.Lock`.
+* When resuming:
+
+  * acquire lock before spawning subprocess.
+* When starting a new session:
+
+  * you don’t know session_id until `system/init`, so:
+
+    * spawn process,
+    * wait until the **first** `system/init`,
+    * acquire lock for that session id **before** yielding StartedEvent,
+    * then continue yielding.
+
+This mirrors CodexRunner’s correct behavior and ensures “new run + resume run” serialize once the session is known.
+Assumption: Claude emits a single `system/init` per run. If multiple `init`
+events arrive, ignore the subsequent ones (do not attempt to re-lock).
+
+#### Cancellation / termination
+
+Reuse the existing subprocess lifecycle pattern (like `CodexRunner.manage_subprocess`):
+
+* Kill the process group on cancellation
+* Drain stderr concurrently (log-only)
+* Ensure locks release in `finally`
+
+## Documentation updates
+
+### README
+
+Add a “Claude Code engine” section that covers:
+
+* Installation (install script / brew / npm). ([Claude Code][4])
+* Authentication:
+
+  * run `claude` once and follow prompts, or use API key auth (Agent SDK docs mention `ANTHROPIC_API_KEY`). ([Claude][5])
+* Non-interactive permission caveat + how to configure:
+
+  * settings allow/deny rules,
+  * or `--allowedTools` / `[claude].allowed_tools`. ([Claude Code][2])
+* Resume format: `` `claude --resume <id>` ``.
+
+### `docs/developing.md`
+
+Extend “Adding a Runner” with:
+
+* “ClaudeRunner parses Agent SDK stream-json output”
+* Mention key message types and the init/result messages.
+
+---
+
+## Test plan
+
+Mirror the existing `CodexRunner` tests patterns.
+
+### New tests: `tests/test_claude_runner.py`
+
+1. **Contract & locking**
+
+* `test_run_serializes_same_session` (stub `run_impl` like Codex tests)
+* `test_run_allows_parallel_new_sessions`
+* `test_run_serializes_new_session_after_session_is_known`:
+
+  * Provide a fake `claude` executable in tmp_path that:
+
+    * prints system/init with session_id,
+    * then waits on a file gate,
+    * a second invocation with `--resume` writes a marker file and exits,
+    * assert the resume invocation doesn’t run until gate opens.
+
+2. **Resume parsing**
+
+* `format_resume` returns `claude --resume <id>`
+* `extract_resume` handles both `--resume` and `-r`
+
+3. **Translation / event ordering**
+
+* Fake `claude` outputs:
+
+  * system/init
+  * assistant tool_use (Bash)
+  * user tool_result
+  * result success with `result: "ok"`
+* Assert Untether yields:
+
+  * StartedEvent
+  * ActionEvent started
+  * ActionEvent completed
+  * CompletedEvent(ok=True, answer="ok")
+
+4. **Failure modes**
+
+* `result` subtype error with `errors: [...]`:
+
+  * CompletedEvent(ok=False)
+* permission_denials exist:
+
+  * warning ActionEvent(s) emitted before CompletedEvent
+
+5. **Cancellation**
+
+* Stub `claude` that sleeps; ensure cancellation kills it (pattern already used for codex subprocess cancellation tests).
+
+---
+
+## Implementation checklist (v0.3.0)
+
+* [x] Export `BACKEND = EngineBackend(...)` from `src/untether/runners/claude.py`.
+* [x] Add `src/untether/runners/claude.py` implementing the `Runner` protocol.
+* [x] Add tests + stub executable fixtures.
+* [x] Update README and developing docs.
+* [ ] Run full test suite before release.
+
+---
+
+If you want, I can also propose the exact **event-to-action mapping table** (tool → kind/title/detail rules) you should start with, based on Claude Code’s documented tool list (Bash/Edit/Write/WebSearch/etc.). ([Claude Code][2])
+
+---
+
+## Interactive enhancements (v0.4.0+)
+
+### AskUserQuestion support
+
+When Claude calls `AskUserQuestion`, the control request is intercepted and shown in Telegram. The question text is extracted from the tool input (supports both `{"question": "..."}` and `{"questions": [{"question": "..."}]}` formats).
+
+Flow:
+1. Claude emits `control_request` with `tool_name: "AskUserQuestion"`
+2. Runner registers in `_PENDING_ASK_REQUESTS[request_id] = question_text`
+3. Telegram shows the question with Approve/Deny buttons
+4. User replies with text → `telegram/loop.py` intercepts via `get_pending_ask_request()`
+5. `answer_ask_question()` sends `control_response(approved=False, denial_message="The user answered...")` — the answer is in the denial message so Claude reads it and continues
+
+### Diff preview in tool approvals
+
+When a tool requiring approval (Edit/Write/Bash) goes through the control request path, `_format_diff_preview()` generates a compact preview:
+- **Edit**: shows removed (`-`) and added (`+`) lines (up to 4 each, truncated to 60 chars)
+- **Write**: shows first 8 lines of new content
+- **Bash**: shows the command prefixed with `$`
+
+The preview is appended to the `warning_text` in the progress message. Only applies to tools that go through `ControlRequest` (not auto-approved tools).
+
+### Cost tracking and budget
+
+`runner_bridge.py` calls `_check_cost_budget()` after each `CompletedEvent` to compare run cost against configured budgets (`[cost_budget]` in `untether.toml`). Budget alerts are shown in the progress footer.
+
+`cost_tracker.py` provides:
+- `CostBudget` — per-run and daily budget thresholds with configurable warning percentage
+- `CostAlert` — alert levels: info, warning, critical, exceeded
+- `record_run_cost()` / `get_daily_cost()` — daily accumulation with midnight reset
+
+### Session export
+
+`commands/export.py` records session events during runs via `record_session_event()` and `record_session_usage()`. Up to 20 sessions are retained. `/export` outputs markdown; `/export json` outputs structured JSON.
+
+[1]: https://code.claude.com/docs/en/headless "Run Claude Code programmatically - Claude Code Docs"
+[2]: https://code.claude.com/docs/en/settings "Claude Code settings - Claude Code Docs"
+[3]: https://code.claude.com/docs/en/sdk/sdk-typescript "Agent SDK reference - TypeScript - Claude Docs"
+[4]: https://code.claude.com/docs/en/quickstart "Quickstart - Claude Code Docs"
+[5]: https://platform.claude.com/docs/en/agent-sdk/quickstart "Quickstart - Claude Docs"
+
+---
+
+# Claude `stream-json` event cheatsheet
+
+`claude -p --output-format stream-json --input-format stream-json --verbose` writes
+**one JSON object per line** (JSONL) with a required `type` field.
+
+In permission mode (without `-p`), the same flags apply but the prompt is sent via
+stdin as JSON rather than as a CLI argument.
+
+This cheatsheet is derived from `humanlayer/claudecode-go/types.go` and
+`client_test.go`.
+
+## Top-level event lines
+
+### `system` (init)
+
+Fields:
+- `type`: `"system"`
+- `subtype`: `"init"`
+- `session_id`
+- `tools`: array of tool names
+- `mcp_servers`: array of `{name, status}`
+- `cwd`, `model`, `permissionMode`, `apiKeySource` (optional)
+
+Example:
+```json
+{"type":"system","subtype":"init","session_id":"session_01","cwd":"/repo","model":"sonnet","permissionMode":"auto","apiKeySource":"env","tools":["Bash","Read","Write","WebSearch"],"mcp_servers":[{"name":"approvals","status":"connected"}]}
+```
+
+### `assistant` / `user`
+
+Fields:
+- `type`: `"assistant"` or `"user"`
+- `session_id`
+- `message` (see below)
+
+Example (assistant text):
+```json
+{"type":"assistant","session_id":"session_01","message":{"id":"msg_1","type":"message","role":"assistant","content":[{"type":"text","text":"Planning next steps."}],"usage":{"input_tokens":120,"output_tokens":45}}}
+```
+
+Example (assistant tool use):
+```json
+{"type":"assistant","session_id":"session_01","message":{"id":"msg_2","type":"message","role":"assistant","content":[{"type":"tool_use","id":"toolu_1","name":"Bash","input":{"command":"ls -la"}}]}}
+```
+
+Example (user tool result, string content):
+```json
+{"type":"user","session_id":"session_01","message":{"id":"msg_3","type":"message","role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_1","content":"total 2\nREADME.md\nsrc\n"}]}}
+```
+
+Example (user tool result, array content):
+```json
+{"type":"user","session_id":"session_01","message":{"id":"msg_4","type":"message","role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_2","content":[{"type":"text","text":"Task completed"}]}]}}
+```
+
+Optional parent field (for nested tool usage):
+```json
+{"type":"assistant","parent_tool_use_id":"toolu_parent","session_id":"session_01", ...}
+```
+
+### `result`
+
+Fields (success path):
+- `type`: `"result"`
+- `subtype`: `"success"` (or `"completion"`)
+- `session_id`
+- `total_cost_usd`, `is_error`, `duration_ms`, `duration_api_ms`, `num_turns`
+- `result`: final answer string
+- `usage`: usage object
+- `modelUsage`: optional per-model usage
+
+Example (success):
+```json
+{"type":"result","subtype":"success","session_id":"session_01","total_cost_usd":0.0123,"is_error":false,"duration_ms":12345,"duration_api_ms":12000,"num_turns":2,"result":"Done.","usage":{"input_tokens":150,"output_tokens":70,"service_tier":"standard","server_tool_use":{"web_search_requests":0}}}
+```
+
+Fields (error path):
+- Same as success, but `is_error`: `true`, `subtype`: `"error"`
+- `result` may be empty or contain an error description
+
+Example (error):
+```json
+{"type":"result","subtype":"error","session_id":"session_02","total_cost_usd":0.001,"is_error":true,"duration_ms":2000,"duration_api_ms":1800,"num_turns":1,"result":""}
+```
+
+Optional fields (may appear in upstream Claude CLI output but are **not** captured
+by Untether's `StreamResultMessage` schema):
+- `error`: error description string
+- `permission_denials`: array of `{tool_name, tool_use_id, tool_input}`
+- `structured_output`: arbitrary structured output (captured by schema but unused)
+
+### `rate_limit_event`
+
+Informational event emitted when Claude Code hits or approaches a rate limit (CLI v2.1.45+).
+Purely informational — the run continues, it does not terminate the session.
+
+Fields:
+- `type`: `"rate_limit_event"`
+- `rate_limit_info` (optional): object with rate limit details
+
+`rate_limit_info` fields (all optional):
+- `requests_limit`, `requests_remaining`, `requests_reset` (ISO 8601)
+- `tokens_limit`, `tokens_remaining`, `tokens_reset` (ISO 8601)
+- `retry_after_ms`
+
+Example (full):
+```json
+{"type":"rate_limit_event","rate_limit_info":{"requests_limit":1000,"requests_remaining":0,"requests_reset":"2026-01-01T00:01:00Z","tokens_limit":50000,"tokens_remaining":0,"tokens_reset":"2026-01-01T00:01:00Z","retry_after_ms":60000}}
+```
+
+Example (bare):
+```json
+{"type":"rate_limit_event"}
+```
+
+**Untether handling**: Decoded by `StreamRateLimitMessage` schema, silently skipped in
+`translate_claude_event` (no Untether events emitted).
+
+## Message object (`message` field)
+
+Fields:
+- `id`, `type`, `role`
+- `model` (optional)
+- `content`: array of content blocks
+- `usage` (assistant messages)
+
+## Content block shapes (in `message.content[]`)
+
+### Text
+```json
+{"type":"text","text":"Hello"}
+```
+
+### Tool use
+```json
+{"type":"tool_use","id":"toolu_1","name":"Bash","input":{"command":"ls -la"}}
+```
+
+### Tool result
+String content:
+```json
+{"type":"tool_result","tool_use_id":"toolu_1","content":"ok"}
+```
+
+Array content (Task tool format):
+```json
+{"type":"tool_result","tool_use_id":"toolu_2","content":[{"type":"text","text":"Task done"}]}
+```
+
+---
+
+# Claude Code -> Untether event mapping (spec)
+
+This document describes how the Claude Code runner translates Claude CLI JSONL events into Untether events.
+
+> **Authoritative source:** The schema definitions are in `src/untether/schemas/claude.py` and the translation logic is in `src/untether/runners/claude.py`. When in doubt, refer to the code.
+
+The goal is to make a Claude runner feel identical to the Codex runner from the bridge/renderer point of view while preserving Untether invariants (stable action ids, per-session serialization, single completed event).
+
+---
+
+## 1. Input stream contract (Claude CLI)
+
+Claude Code CLI emits **one JSON object per line** (JSONL) when invoked with
+`--output-format stream-json`.
+
+Non-interactive invocation:
+
+```
+claude -p --output-format stream-json --input-format stream-json --verbose -- <query>
+```
+
+Permission mode invocation (bidirectional control channel):
+
+```
+claude --output-format stream-json --input-format stream-json --verbose --permission-mode plan --permission-prompt-tool stdio
+```
+
+Notes:
+- `--verbose` is required for `stream-json` output (CLI may otherwise drop events).
+- `--input-format stream-json` enables JSON input on stdin.
+- In `-p` mode, the prompt is passed as a positional argument after `--`.
+- In permission mode, the prompt is sent via stdin as a JSON user message (no `-p`).
+- Resuming uses `--resume <session_id>`.
+- `-- <query>` safely passes prompts that start with `-`.
+
+---
+
+## 2. Resume tokens and resume lines
+
+- Engine id: `claude`
+- Canonical resume line (embedded in chat):
+
+```
+`claude --resume <session_id>`
+```
+
+Runner must implement its own regex because the resume format is
+`claude --resume <session_id>`. Suggested regex:
+
+```
+(?im)^\s*`?claude\s+(?:--resume|-r)\s+(?P<token>[^`\s]+)`?\s*$
+```
+
+**Note:** Claude session IDs should be treated as opaque strings.
+
+Resume rules:
+- If a resume token is provided to `run()`, the runner MUST verify that any
+  `session_id` observed in the stream matches it.
+- If the stream yields a different `session_id`, emit a fatal error and end the run.
+
+---
+
+## 3. Session lifecycle + serialization
+
+Untether requires **serialization per session id**:
+
+- For new runs (`resume=None`), do **not** acquire a lock until a `session_id`
+  is observed (usually the first `system.init` event).
+- Once the session id is known, acquire a lock for `claude:<session_id>` and hold
+  it until the run completes.
+- For resumed runs, acquire the lock immediately on entry.
+
+This matches the Codex runner behavior in `untether/runners/codex.py`.
+
+---
+
+## 4. Event translation (Claude JSONL -> Untether)
+
+### 4.1 Top-level `system` events
+
+Claude emits a system init event early in the stream:
+
+```
+{"type":"system","subtype":"init","session_id":"...", ...}
+```
+
+**Mapping:**
+- Emit a Untether `started` event as soon as `session_id` is known.
+- Populate `meta` from `system.init` fields: `cwd`, `model`, `tools`, `permissionMode`, `output_style`. The `model` and `permissionMode` fields are used by the bridge to render the `🏷` footer line on final messages.
+- Assume only one `system.init` per run; if more appear, ignore the subsequent
+  ones to avoid re-locking.
+- Optional: emit a `note` action summarizing tools/MCP servers (debug-only).
+
+### 4.2 `assistant` / `user` message events
+
+Claude messages include a `message` object with a `content[]` array. Each content
+block can represent text, tool usage, or tool results.
+
+For each content block:
+
+#### A) `type = "tool_use"`
+**Mapping:** emit `action` with `phase="started"`.
+
+- `action.id` = `content.id`
+- `action.kind` = map from tool name (see section 5)
+- `title`:
+  - if kind=`command`: use `input.command` if present
+  - else: tool name or derived label
+- `detail` should include:
+  - `tool_name`, `tool_input`, `message_id`, `parent_tool_use_id` (if provided)
+
+#### B) `type = "tool_result"`
+**Mapping:** emit `action` with `phase="completed"`.
+
+- `action.id` = `content.tool_use_id`
+- `ok`:
+  - if `content.is_error` exists and is true -> `ok=False`
+  - else `ok=True`
+- `detail` should include:
+  - `tool_use_id`, `content` (raw), `message_id`
+
+The runner SHOULD keep a small in-memory map from `tool_use_id -> tool_name`
+(learned from `tool_use`) so the completed action title can match the started
+action title.
+
+#### C) `type = "text"`
+**Mapping:**
+- Default: do **not** emit an action (avoid duplicate rendering).
+- Store the latest assistant text as a fallback final answer if `result.result`
+  is empty or missing.
+
+#### D) `type = "thinking"` or other unknown types
+**Mapping:** optional `note` action (phase completed) with title derived from
+content; otherwise ignore.
+
+### 4.3 `result` events
+
+The terminal event looks like:
+
+```
+{"type":"result","subtype":"success", ...}
+```
+
+**Mapping:** emit a single Untether `completed` event:
+
+- `ok = !event.is_error`
+- `answer = event.result` (fallback to last assistant text if empty)
+- `error = event.error` (if present)
+- `resume = ResumeToken(engine="claude", value=event.session_id)`
+- `usage = event.usage` (pass through)
+- Emit exactly one `completed` event; ignore any trailing JSON lines afterward.
+  No idle-timeout completion is used.
+
+#### Permission denials
+
+> **Not yet implemented.** The upstream Claude CLI may include
+> `result.permission_denials` with blocked tool calls, but Untether's
+> `StreamResultMessage` schema does not capture this field and the runner does
+> not emit warning actions for denials. This is a candidate for future work.
+
+### 4.4 Error handling / malformed lines
+
+- If a JSONL line is invalid JSON: emit a warning action and continue.
+- If the subprocess exits non-zero or the stream ends without a `result` event:
+  emit `completed` with `ok=False` and `error` explaining the failure.
+- Emit **exactly one** `completed` event per run.
+
+---
+
+## 5. Tool name -> ActionKind mapping heuristics
+
+Claude tool names can evolve. The runner SHOULD map based on tool name and input
+shape. Suggested rules:
+
+| Tool name pattern | ActionKind | Title logic |
+| --- | --- | --- |
+| `Bash`, `Shell` | `command` | `input.command` |
+| `Write`, `Edit`, `MultiEdit`, `NotebookEdit` | `file_change` | `input.path` |
+| `Read` | `tool` | `Read <path>` |
+| `WebSearch` | `web_search` | `input.query` |
+| (default) | `tool` | tool name |
+
+For `file_change`, emit `detail.changes = [{"path": <path>, "kind": "update"}]`.
+If input indicates creation (ex: `create: true`), use `kind: "add"`.
+
+If a tool name is unknown, map to `tool` and include the full input in `detail`.
+
+---
+
+## 6. Usage mapping
+
+Untether `completed.usage` should mirror the Claude `result.usage` object
+without transformation. Optionally include `modelUsage` inside `usage` or
+`detail` if downstream consumers want it (currently unused by renderers).
+
+---
+
+## 7. Implementation checklist (v0.3.0)
+
+Claude runner implementation summary (no Untether domain model changes):
+
+1. [x] Create `untether/runners/claude.py` implementing `Runner` and (custom)
+   resume parsing.
+2. [x] Define `BACKEND` in `untether/runners/claude.py`:
+   - `install_cmd`: install command for the `claude` binary
+   - `build_runner`: read `[claude]` config + construct runner
+3. [x] Add new docs (this file + `stream-json-cheatsheet.md`).
+4. [x] Add fixtures in `tests/fixtures/` (see below).
+5. [x] Add unit tests mirroring `tests/test_codex_*` but for Claude translation
+   and resume parsing (recommended, not required for initial handoff).
+
+---
+
+## 8. Suggested Untether config keys
+
+A minimal TOML config for Claude:
+
+=== "untether config"
+
+    ```sh
+    untether config set claude.model "sonnet"
+    untether config set claude.allowed_tools '["Bash", "Read", "Edit", "Write", "WebSearch"]'
+    untether config set claude.dangerously_skip_permissions false
+    untether config set claude.use_api_billing false
+    ```
+
+=== "toml"
+
+    ```toml
+    [claude]
+    # model: opus | sonnet | haiku
+    model = "sonnet"
+
+    allowed_tools = ["Bash", "Read", "Edit", "Write", "WebSearch"]
+    dangerously_skip_permissions = false
+    use_api_billing = false
+    ```
+
+Untether only maps these keys to Claude CLI flags; other options should be configured in Claude Code settings.
+If `allowed_tools` is omitted, Untether defaults to `["Bash", "Read", "Edit", "Write"]`.
+When `use_api_billing` is false (default), Untether strips `ANTHROPIC_API_KEY` from the Claude subprocess environment to prefer subscription billing.
+
+---
+
+# Codex -> Untether event mapping
+
+This document describes how Codex exec --json events are translated to Untether's normalized event model.
+
+> **Authoritative source:** The schema definitions are in `src/untether/schemas/codex.py` and the translation logic is in `src/untether/runners/codex.py`. When in doubt, refer to the code.
+
+## The 3-event Untether schema
+
+The Untether event model uses 3 event types. The `action` event includes a `phase` field to represent started/updated/completed lifecycles.
+
+### 1) `started`
+
+Emitted once **as soon as you know the resume token** (Codex: `thread.started.thread_id`).
+
+```json
+{
+  "type": "started",
+  "engine": "codex",
+  "resume": { "engine": "codex", "value": "0199..." },
+  "title": "Codex",               // optional
+  "meta": { "model": "o3" }       // optional: model from run options, used for 🏷 footer
+}
+```
+
+Note: Codex JSONL does not include model info in its event stream. The runner populates `meta.model` from the Codex run options (CLI `--model` flag) when available.
+
+### 2) `action`
+
+Emitted for **everything that is progress / updates / warnings / per-item lifecycle**.
+
+```json
+{
+  "type": "action",
+  "engine": "codex",
+  "action": {
+    "id": "item_5",
+    "kind": "tool",               // command | tool | file_change | web_search | subagent | note | turn | warning | telemetry
+    "title": "docs.search",       // short label for renderer
+    "detail": { ... }             // structured payload (freeform)
+  },
+  "phase": "started",             // started | updated | completed
+  "ok": true,                     // optional; present when phase=completed (or warnings)
+  "message": "optional text",     // optional; logs/warnings can use this
+  "level": "info"                 // optional: debug|info|warning|error
+}
+```
+
+### 3) `completed`
+
+Emitted once at end-of-run with the **final answer** (from `agent_message`) and final status.
+
+```json
+{
+  "type": "completed",
+  "engine": "codex",
+  "resume": { "engine": "codex", "value": "0199..." },  // if known
+  "ok": true,
+  "answer": "Done. I updated the docs...",
+  "error": null,
+  "usage": { "input_tokens": 24763, "cached_input_tokens": 24448, "output_tokens": 122 }  // optional
+}
+```
+
+Why this fits Untether cleanly:
+
+* Your `started` corresponds to the old “session.started” concept (runner learns resume token; bridge can now safely serialize per thread). 
+* Your `action` is “everything that would have been action.started/action.completed/log/error” collapsed into one stream. 
+* Your `completed` corresponds to final `RunResult` + status, using Codex’s `agent_message` as the answer source.  
+
+---
+
+## How everything fits together (end-to-end)
+
+From the bridge/runner point of view:
+
+1. **Bridge receives Telegram prompt**
+2. Bridge tries to extract a resume line (`codex resume <uuid>`) from the message/reply (runner-owned parsing). 
+3. Bridge calls `runner.run(prompt, resumeTokenOrNone)`
+4. Codex runner spawns `codex exec --json ...` and reads JSONL line-by-line. 
+5. The *first moment the runner can know thread identity* is:
+
+   * `thread.started` → contains `thread_id` (this is your resume value)
+6. Runner must (per Untether’s concurrency invariant) **acquire the per-thread lock as soon as the new thread token is known**, before emitting `started`. 
+7. Runner translates subsequent Codex JSONL lines into `action` events for progress rendering.
+8. Runner captures the final answer from `item.completed` where `item.type="agent_message"`. 
+9. Runner emits exactly one `completed` event when the run ends (`turn.completed` or failure), including the captured final answer.
+
+---
+
+## Direct translation: every Codex `exec --json` line → your 3-event schema
+
+Codex emits two categories: **top-level lines** and **item lines**. 
+
+### A) Top-level lines
+
+#### `thread.started`
+
+Codex:
+
+```json
+{"type":"thread.started","thread_id":"0199..."}
+```
+
+→ Untether:
+
+* emit **`started`**:
+
+  * `resume.value = thread_id`
+
+This is exactly the “learn resume tag” moment you described. 
+
+---
+
+#### `turn.started`
+
+Codex:
+
+```json
+{"type":"turn.started"}
+```
+
+→ Untether (recommended):
+
+* emit **`action`** with a synthetic action id, e.g. `"turn_0"`
+
+  * `kind="turn"`, `phase="started"`, `title="turn started"`
+
+You *can* also drop it if your UI doesn’t care, but if you want “every codex type translates”, this maps cleanly into `action`.
+
+---
+
+#### `turn.completed`
+
+Codex includes usage:
+
+```json
+{"type":"turn.completed","usage":{...}}
+```
+
+→ Untether:
+
+* emit **`completed`**
+
+  * `ok=true`
+  * `answer = last seen agent_message text` (or `""` if none)
+  * `usage = usage` (optional)
+
+This is your authoritative “run succeeded” boundary. 
+
+---
+
+#### `turn.failed`
+
+Codex:
+
+```json
+{"type":"turn.failed","error":{"message":"..."}}
+```
+
+→ Untether:
+
+* emit **`completed`**
+
+  * `ok=false`
+  * `error = error.message`
+  * `answer = last seen agent_message` (if any; usually empty)
+
+This is “run ended, but failed”. 
+
+---
+
+#### Top-level `error` (stream error)
+
+Codex:
+
+```json
+{"type":"error","message":"stream error: broken pipe"}
+```
+
+Cheatsheet meaning: this is a **fatal stream failure** (not just a tool failure).
+However, Codex may also emit transient reconnect notices as `type="error"` with
+messages like `"Reconnecting... 1/5"` while it retries a dropped stream. Treat
+those as non-fatal progress updates (do **not** end the run).
+
+→ Untether:
+
+* if you haven’t emitted `completed` yet: emit **`completed`** with `ok=false` and `error=message`
+* if you *already* emitted `completed`, treat it as an extra warning (or ignore; it’s “post-mortem noise”)
+
+---
+
+### B) Item lines: `item.started`, `item.updated`, `item.completed`
+
+All item lines include `item.id` and it is stable across updates/completion. 
+That means your `action.action.id` should just be `item.id` — perfect match to “stable within a run”.
+
+#### General rule (for any item.* line)
+
+* `action.action.id = item.id`
+* `action.phase = started | updated | completed`
+* `action.action.kind` derived from `item.type`
+* `action.action.detail` contains the relevant item fields (possibly trimmed)
+
+Now, map each `item.type`:
+
+---
+
+## Item-type mapping: `item.type` → `action.kind/title/detail/ok`
+
+Below is a “complete coverage” mapping for all item types listed in the cheatsheet. 
+
+### 1) `agent_message` (only `item.completed`)
+
+Codex:
+
+```json
+{"type":"item.completed","item":{"id":"item_3","type":"agent_message","text":"..."}}
+```
+
+→ Untether:
+
+* **do not emit an `action`** (recommended)
+* instead: **store** `final_answer = item.text`
+* final answer will be surfaced by the eventual `completed` event
+
+Reason: you want `completed` to be “final answer delivery”, and you probably don’t want the answer duplicated in progress rendering. 
+
+(If you *do* want to render it as it arrives, you can emit an `action` too, but then your renderer must avoid showing it twice.)
+
+---
+
+### 2) `reasoning` (only `item.completed`, if enabled)
+
+Codex gives a text breadcrumb. 
+
+→ Untether `action`:
+
+* `kind="note"`
+* `title="reasoning"` (or “thought”)
+* `phase="completed"`
+* `message=item.text` (or put it under `detail.text`)
+
+This is usually safe to show as a short “what it’s doing” line (or ignore if you don’t want to surface it).
+
+---
+
+### 3) `command_execution` (`item.started` and `item.completed`)
+
+Codex fields include `command`, `status`, `aggregated_output` (often noisy), and
+`exit_code` (null or omitted until completion). 
+
+→ Untether `action`:
+
+* `kind="command"`
+* `title=item.command` (or a shortened version like `pytest`)
+* `detail={ command, exit_code, status }` (optionally include output tail)
+* `phase="started"` on `item.started`
+* `phase="completed"` on `item.completed`
+* `ok = (item.status == "completed")` (and `exit_code == 0` when present)
+
+Note: “failed” command becomes `ok=false` but it’s still just an `action` completion — the overall run might still succeed later, depending on agent behavior.
+
+---
+
+### 4) `file_change` (only `item.completed`)
+
+Codex contains `changes[]` and `status`. 
+
+→ Untether `action`:
+
+* `kind="file_change"`
+* `title="file changes"`
+* `detail={ changes }`
+* `phase="completed"`
+* `ok = (item.status == "completed")`
+
+This is a great progress line for your UI (“updated docs/…, added …”).
+
+---
+
+### 5) `mcp_tool_call` (`item.started` and `item.completed`)
+
+Codex contains server/tool/arguments/status and may include result/error on
+completion. Result can be large; may include base64 in content blocks. 
+
+→ Untether `action`:
+
+* `kind="tool"`
+* `title=f"{item.server}.{item.tool}"`
+* `detail={ server, tool, arguments, status }`
+* on completion, include *summary* of result:
+
+  * e.g. `detail.result_summary = { content_blocks: N, has_structured: bool }`
+  * include `detail.error_message` if failed
+* `phase="started"` or `"completed"`
+* `ok = (item.status == "completed")`
+
+Recommendation: **do not dump** full `result.content` into `detail` if it can contain large blobs; keep a summary and optionally stash full raw elsewhere for debugging.
+
+---
+
+### 6) `web_search` (only `item.completed`)
+
+Codex includes `query`. 
+
+→ Untether `action`:
+
+* `kind="web_search"`
+* `title="web search"`
+* `detail={ query }`
+* `phase="completed"`
+* `ok=true` (this is just “it did a search”; success/failure is typically not expressed here)
+
+---
+
+### 7) `todo_list` (`item.started`, `item.updated`, `item.completed`)
+
+Codex includes checklist items with `completed` booleans. 
+
+→ Untether `action`:
+
+* `kind="note"` (or `"todo"`)
+* `title="plan"`
+* `detail={ items, done: count_done, total: count_total }`
+* `phase` maps 1:1 to started/updated/completed
+* `ok=true` when phase completed (optional)
+
+This is the one case where `item.updated` is common; your unified `action` event is exactly the right shape for it.
+
+---
+
+### 8) Item `error` (non-fatal warning as an item; only `item.completed`)
+
+Codex:
+
+```json
+{"type":"item.completed","item":{"id":"item_9","type":"error","message":"command output truncated"}}
+```
+
+Cheatsheet: this is a **non-fatal warning** (different from top-level fatal `error`). 
+
+→ Untether `action`:
+
+* `kind="warning"` (or `"note"`)
+* `title="warning"`
+* `message=item.message`
+* `level="warning"`
+* `phase="completed"`
+* `ok=true` (because it’s informational) **or** omit `ok`
+
+---
+
+## Suggested “single-pass” translator logic (pseudocode)
+
+This shows how to implement it without needing more than one pass or complicated buffering:
+
+```python
+final_answer = None
+resume = None
+did_emit_started = False
+did_emit_completed = False
+turn_index = 0
+
+def emit(evt): yield evt  # emit to the output event stream
+
+for line in codex_jsonl_stream:
+    t = line["type"]
+
+    if t == "thread.started":
+        resume = {"engine": "codex", "value": line["thread_id"]}
+        # acquire per-thread lock here (for new sessions) before emitting started
+        emit({"type":"started","engine":"codex","resume":resume,"title":"Codex"})
+        did_emit_started = True
+        continue
+
+    if t == "turn.started":
+        emit({"type":"action","engine":"codex",
+              "action":{"id":f"turn_{turn_index}","kind":"turn","title":"turn started","detail":{}},
+              "phase":"started"})
+        continue
+
+    if t == "item.started" or t == "item.updated" or t == "item.completed":
+        item = line["item"]
+        item_type = item["type"]
+        item_id = item["id"]
+
+        if t == "item.completed" and item_type == "agent_message":
+            final_answer = item.get("text","")
+            continue
+
+        # map item_type -> kind/title/detail/ok
+        action_evt = map_item_to_action(item, phase=t.split(".")[1])
+        emit(action_evt)
+        continue
+
+    if t == "turn.completed":
+        emit({"type":"completed","engine":"codex","resume":resume,
+              "ok":True,"answer":final_answer or "",
+              "error":None,"usage":line.get("usage")})
+        did_emit_completed = True
+        continue
+
+    if t == "turn.failed":
+        emit({"type":"completed","engine":"codex","resume":resume,
+              "ok":False,"answer":final_answer or "",
+              "error":line["error"]["message"]})
+        did_emit_completed = True
+        continue
+
+    if t == "error":  # fatal stream error
+        if not did_emit_completed:
+            emit({"type":"completed","engine":"codex","resume":resume,
+                  "ok":False,"answer":final_answer or "",
+                  "error":line.get("message")})
+            did_emit_completed = True
+        continue
+
+# Optional: if stream ends without turn.completed/failed,
+# emit completed with ok=False and error="unexpected EOF"
+```
+
+This design preserves the Untether ordering/serialization principles: `started` happens as soon as resume token is known, actions stream in order, and exactly one `completed` closes the run. 
+
+---
+
+## One practical note: what “completed” should mean
+
+Even though you *learn* the final answer at `agent_message`, you generally want `completed` to be emitted at the **turn boundary** (`turn.completed` / `turn.failed`), because:
+
+* you can attach usage (`turn.completed.usage`) only there, 
+* you guarantee `completed` is truly the last event,
+* you still use `agent_message` as the authoritative answer payload.
+
+That still matches your intent (“completed is when we get final answer”) because the answer comes from `agent_message`; you just *publish* it at the terminal boundary.
+
+---
+
+# OpenCode `run --format json` Event Cheatsheet
+
+`opencode run --format json` writes one JSON object per line (JSONL) to stdout.
+Each line has a `type` field indicating the event type.
+
+## Event Types
+
+### `step_start`
+
+Marks the beginning of a processing step.
+
+Fields:
+- `type`: `"step_start"`
+- `timestamp`: Unix timestamp in milliseconds
+- `sessionID`: Session identifier (format: `ses_XXX`)
+- `part.id`: Part identifier
+- `part.sessionID`: Session ID (duplicated)
+- `part.messageID`: Message ID
+- `part.type`: `"step-start"`
+- `part.snapshot`: Git snapshot hash
+
+Example:
+```json
+{"type":"step_start","timestamp":1767036059338,"sessionID":"ses_494719016ffe85dkDMj0FPRbHK","part":{"id":"prt_b6b8e7ec7001qAZUB7eTENxPpI","sessionID":"ses_494719016ffe85dkDMj0FPRbHK","messageID":"msg_b6b8e702b0012XuEC4bGe0XhKa","type":"step-start","snapshot":"71db24a798b347669c0ebadb2dfad238f991753d"}}
+```
+
+### `tool_use`
+
+Tool invocation event. Emitted when a tool finishes (`status == "completed"`).
+
+Fields:
+- `type`: `"tool_use"`
+- `timestamp`: Unix timestamp in milliseconds
+- `sessionID`: Session identifier
+- `part.id`: Part identifier
+- `part.callID`: Unique call ID for this tool invocation
+- `part.tool`: Tool name (e.g., "bash", "read", "write", "grep")
+- `part.state.status`: `"completed"` (the CLI JSON output does not emit pending/running tool states)
+- `part.state.input`: Tool input parameters
+- `part.state.output`: Tool output (when completed)
+- `part.state.title`: Human-readable description
+- `part.state.metadata`: Additional metadata (exit codes, etc.)
+- `part.state.time.start`: Start timestamp
+- `part.state.time.end`: End timestamp
+
+Example:
+```json
+{"type":"tool_use","timestamp":1767036061199,"sessionID":"ses_494719016ffe85dkDMj0FPRbHK","part":{"id":"prt_b6b8e85bb001CzBoN2dDlEZJnP","sessionID":"ses_494719016ffe85dkDMj0FPRbHK","messageID":"msg_b6b8e702b0012XuEC4bGe0XhKa","type":"tool","callID":"r9bQWsNLvOrJGIOz","tool":"bash","state":{"status":"completed","input":{"command":"echo hello","description":"Print hello to stdout"},"output":"hello\n","title":"Print hello to stdout","metadata":{"output":"hello\n","exit":0,"description":"Print hello to stdout"},"time":{"start":1767036061123,"end":1767036061173}}}}
+```
+
+### `text`
+
+Text output from the model.
+
+Fields:
+- `type`: `"text"`
+- `timestamp`: Unix timestamp in milliseconds
+- `sessionID`: Session identifier
+- `part.id`: Part identifier
+- `part.type`: `"text"`
+- `part.text`: The actual text content
+- `part.time.start`: Start timestamp
+- `part.time.end`: End timestamp
+
+Example:
+```json
+{"type":"text","timestamp":1767036064268,"sessionID":"ses_494719016ffe85dkDMj0FPRbHK","part":{"id":"prt_b6b8e8ff2002mxSx9LtvAlf8Ng","sessionID":"ses_494719016ffe85dkDMj0FPRbHK","messageID":"msg_b6b8e8627001yM4qKJCXdC7W1L","type":"text","text":"```\nhello\n```","time":{"start":1767036064265,"end":1767036064265}}}
+```
+
+### `step_finish`
+
+Marks the end of a processing step.
+
+Fields:
+- `type`: `"step_finish"`
+- `timestamp`: Unix timestamp in milliseconds
+- `sessionID`: Session identifier
+- `part.id`: Part identifier
+- `part.type`: `"step-finish"`
+- `part.reason`: Optional. `"stop"` (final) or `"tool-calls"` (continuing) when present.
+- `part.snapshot`: Git snapshot hash
+- `part.cost`: Cost in USD
+- `part.tokens.input`: Input token count
+- `part.tokens.output`: Output token count
+- `part.tokens.reasoning`: Reasoning token count
+- `part.tokens.cache.read`: Cache read tokens
+- `part.tokens.cache.write`: Cache write tokens
+
+Example (final step):
+```json
+{"type":"step_finish","timestamp":1767036064273,"sessionID":"ses_494719016ffe85dkDMj0FPRbHK","part":{"id":"prt_b6b8e9209001ojZ4ECN1geZISm","sessionID":"ses_494719016ffe85dkDMj0FPRbHK","messageID":"msg_b6b8e8627001yM4qKJCXdC7W1L","type":"step-finish","reason":"stop","snapshot":"09dd05d11a4ac013136c1df10932efc0ad9116e8","cost":0.001,"tokens":{"input":671,"output":8,"reasoning":0,"cache":{"read":21415,"write":0}}}}
+```
+
+Example (tool-calls step):
+```json
+{"type":"step_finish","timestamp":1767036061205,"sessionID":"ses_494719016ffe85dkDMj0FPRbHK","part":{"id":"prt_b6b8e85fb001L4I3WHMqH6EQNI","sessionID":"ses_494719016ffe85dkDMj0FPRbHK","messageID":"msg_b6b8e702b0012XuEC4bGe0XhKa","type":"step-finish","reason":"tool-calls","snapshot":"ee3406d50c7d9048674bbb1a3e325d82513b74ed","cost":0,"tokens":{"input":21772,"output":110,"reasoning":0,"cache":{"read":0,"write":0}}}}
+```
+
+### `error`
+
+Session error event.
+
+Fields:
+- `type`: `"error"`
+- `timestamp`: Unix timestamp in milliseconds
+- `sessionID`: Session identifier
+- `error.name`: Error type
+- `error.data.message`: Human-readable error (when available)
+
+Example:
+```json
+{"type":"error","timestamp":1767036065000,"sessionID":"ses_494719016ffe85dkDMj0FPRbHK","error":{"name":"APIError","data":{"message":"Rate limit exceeded","statusCode":429,"isRetryable":true}}}
+```
+
+## Mapping to Untether Events
+
+| OpenCode Event | Untether Event | Condition |
+|----------------|--------------|-----------|
+| `step_start` | `StartedEvent` | First occurrence |
+| `tool_use` | `ActionEvent(phase="completed")` | `status == "completed"` |
+| `text` | (accumulate text) | - |
+| `step_finish` | `CompletedEvent` | `reason == "stop"` |
+| `step_finish` | (ignored) | `reason == "tool-calls"` |
+| `error` | `CompletedEvent(ok=False)` | - |
+
+If `step_finish` omits `reason`, Untether treats a clean process exit as successful completion and emits `CompletedEvent(ok=True)` with accumulated usage.
+
+## Session ID Format
+
+OpenCode uses session IDs in the format: `ses_XXXXXXXXXXXXXXXXXXXX`
+
+Example: `ses_494719016ffe85dkDMj0FPRbHK`
+
+## Tool Types
+
+Common tool names in OpenCode:
+- `bash`: Shell command execution
+- `read`: Read file contents
+- `write`: Write file contents
+- `edit`: Edit file contents
+- `glob`: File pattern matching
+- `grep`: Content search
+- `webfetch`: Fetch web content
+- `websearch`: Web search
+- `task`: Spawn sub-agent tasks
+
+---
+
+# OpenCode to Untether Event Mapping
+
+This document describes how OpenCode JSON events are translated to Untether's normalized event model.
+
+> **Authoritative source:** The schema definitions are in `src/untether/schemas/opencode.py` and the translation logic is in `src/untether/runners/opencode.py`. When in doubt, refer to the code.
+
+## Event Translation
+
+### StartedEvent
+
+Emitted on the first `step_start` event that contains a `sessionID`.
+
+```
+OpenCode: {"type":"step_start","sessionID":"ses_XXX",...}
+Untether:   StartedEvent(engine="opencode", resume=ResumeToken(engine="opencode", value="ses_XXX"), meta={"model": "claude-sonnet"})
+```
+
+Note: OpenCode JSONL does not include model info in its event stream. The runner populates `meta.model` from the runner config or run options (`--model` flag) when available. This is used for the `🏷` footer line on final messages.
+
+### ActionEvent
+
+Tool usage is translated to action events. The code handles `status` values of `"completed"` and `"error"`. Pending/running tool states exist in the schema but are not commonly emitted by the CLI JSON stream.
+
+**Started phase** (when tool is pending/running, if emitted by the JSON stream):
+```
+OpenCode: {"type":"tool_use","part":{"tool":"bash","state":{"status":"pending",...}}}
+Untether:   ActionEvent(engine="opencode", action=Action(kind="command"), phase="started")
+```
+
+**Completed phase** (when tool finishes):
+```
+OpenCode: {"type":"tool_use","part":{"tool":"bash","state":{"status":"completed","metadata":{"exit":0}}}}
+Untether:   ActionEvent(engine="opencode", action=Action(kind="command"), phase="completed", ok=True)
+```
+
+### CompletedEvent
+
+Emitted on `step_finish` with `reason="stop"` or on `error` events.
+
+**Success**:
+```
+OpenCode: {"type":"step_finish","part":{"reason":"stop","tokens":{...},"cost":0.001}}
+Untether:   CompletedEvent(engine="opencode", ok=True, answer="<accumulated text>", usage={...})
+```
+
+If `step_finish` omits `reason`, Untether treats a clean process exit as successful completion and emits `CompletedEvent(ok=True)` with the accumulated usage.
+
+**Error**:
+```
+OpenCode: {"type":"error","error":{"name":"APIError","data":{"message":"API rate limit exceeded"}}}
+Untether:   CompletedEvent(engine="opencode", ok=False, error="API rate limit exceeded")
+```
+
+## Tool Kind Mapping
+
+| OpenCode Tool | Untether ActionKind |
+|---------------|-------------------|
+| `bash`, `shell` | `command` |
+| `edit`, `write`, `multiedit` | `file_change` |
+| `read` | `tool` |
+| `glob` | `tool` |
+| `grep` | `tool` |
+| `websearch`, `web_search` | `web_search` |
+| `webfetch`, `web_fetch` | `web_search` |
+| `todowrite`, `todoread` | `note` |
+| `task` | `tool` |
+| (other) | `tool` |
+
+## Usage Accumulation
+
+> **Not yet implemented.** OpenCode's `step_finish` events may include token
+> usage and cost data, but the Untether runner does not currently extract or
+> accumulate these fields. `CompletedEvent.usage` is not populated for
+> OpenCode runs. This is a candidate for future work.
+>
+> Expected upstream shape (when available):
+>
+> ```json
+> {
+>   "total_cost_usd": 0.001,
+>   "tokens": {
+>     "input": 22443,
+>     "output": 118,
+>     "reasoning": 0,
+>     "cache_read": 21415,
+>     "cache_write": 0
+>   }
+> }
+> ```
+
+---
+
+Below is a concrete implementation spec for the **Pi (pi-coding-agent CLI)** runner shipped in Untether (v0.5.0).
+
+---
+
+## Scope
+
+### Goal
+
+Provide the **`pi`** engine backend so Untether can:
+
+* Run Pi non-interactively via the **pi CLI** (`pi --print`).
+* Stream progress by parsing **`--mode json`** (newline-delimited JSON). Each line is a JSON object.
+* Support resumable sessions via **`--session <token>`** (Untether emits a canonical resume line the user can reply with).
+
+### Non-goals (v1)
+
+* Interactive TUI flows (session picker, prompts, etc.)
+* RPC mode (requires a long-running process and JSON commands)
+
+---
+
+## UX and behavior
+
+### Engine selection
+
+* Default: `untether` (auto-router uses `default_engine` from config)
+* Override: `untether pi`
+
+### Resume UX (canonical line)
+
+Untether appends a **single backticked** resume line at the end of the message, like:
+
+```text
+`pi --session ccd569e0`
+```
+
+Notes:
+
+* `pi --resume/-r` opens an interactive session picker, so Untether uses `--session <token>` instead.
+* The resume token is the **session id** (short prefix), derived from the session
+  header line (`{"type":"session", ...}`) emitted to stdout in `--mode json`.
+  This requires **pi-coding-agent >= 0.45.1**.
+* If the path contains spaces, the runner will quote it.
+
+### Non-interactive runs
+
+Use `--print` and `--mode json` for headless JSONL output.
+
+Pi does not accept `-- <prompt>` to protect prompts starting with `-`. Untether prefixes a leading space if the prompt begins with `-` so it is not parsed as a flag.
+
+---
+
+## Config additions
+
+Untether config lives at `~/.untether/untether.toml`.
+
+Add a new optional `[pi]` section.
+
+Recommended schema:
+
+=== "untether config"
+
+    ```sh
+    untether config set default_engine "pi"
+    untether config set pi.model "..."
+    untether config set pi.provider "..."
+    untether config set pi.extra_args "[]"
+    ```
+
+=== "toml"
+
+    ```toml
+    # ~/.untether/untether.toml
+
+    default_engine = "pi"
+
+    [pi]
+    model = "..."               # optional; passed as --model
+    provider = "..."            # optional; passed as --provider
+    extra_args = []             # optional list of strings, appended verbatim
+    ```
+
+Notes:
+
+* `extra_args` lets you pass new Pi flags without changing Untether.
+* Session files are stored under Pi's default session dir:
+  `~/.pi/agent/sessions/--<cwd>--` (with path separators replaced by `-`).
+
+---
+
+## Code changes (by file)
+
+### 1) New file: `src/untether/runners/pi.py`
+
+Expose a module-level `BACKEND = EngineBackend(...)`.
+
+#### Runner invocation
+
+The runner should launch Pi in headless JSON mode:
+
+```text
+pi --print --mode json --session <session.jsonl> <prompt>
+```
+
+When resuming, `<session.jsonl>` is replaced by the resume token extracted from the chat.
+
+#### Event translation
+
+Pi JSONL output is `AgentSessionEvent` (from `@mariozechner/pi-agent-core`).
+The runner should translate:
+
+* `tool_execution_start` -> `action` (phase: started)
+* `tool_execution_end` -> `action` (phase: completed)
+* `agent_end` -> `completed`
+
+For the final answer, use the most recent assistant message text (from
+`message_end` events). For errors, if the assistant stopReason is `error` or
+`aborted`, emit `completed(ok=false, error=...)`.
+
+---
+
+## Installation and auth
+
+Install the CLI globally:
+
+```text
+npm install -g @mariozechner/pi-coding-agent
+```
+
+Minimum supported pi version: **0.45.1**.
+
+Auth is stored under `~/.pi/agent/auth.json`. Run `pi` once interactively to
+set up credentials before using Untether.
+
+---
+
+## Known pitfalls
+
+* `--resume` is interactive; Untether uses `--session <path>` instead.
+* Prompts that start with `-` are interpreted as flags by the CLI. Untether
+  prefixes a space to make them safe.
+
+---
+
+If you want, I can also add a sample `untether.toml` snippet to the README or
+include a small quickstart section for Pi in the onboarding panel.
+
+---
+
+# Pi `--mode json` event cheatsheet
+
+`pi --print --mode json` writes **one JSON object per line** (JSONL) with a
+required `type` field. These are `AgentSessionEvent` objects from
+`@mariozechner/pi-agent-core`.
+
+## Top-level event lines
+
+### `session` (header, pi >= 0.45.1)
+
+```json
+{"type":"session","id":"ccd569e0-4e1b-4c7d-a981-637ed4107310","version":3,"timestamp":"2026-01-13T00:33:34.702Z","cwd":"/repo"}
+```
+
+### `agent_start`
+
+```json
+{"type":"agent_start"}
+```
+
+### `agent_end`
+
+```json
+{"type":"agent_end","messages":[{"role":"assistant","content":[{"type":"text","text":"Done."}],"stopReason":"stop","timestamp":123}]} 
+```
+
+### `turn_start` / `turn_end`
+
+```json
+{"type":"turn_start"}
+```
+
+```json
+{"type":"turn_end","message":{...},"toolResults":[...]} 
+```
+
+### `message_start` / `message_update` / `message_end`
+
+```json
+{"type":"message_start","message":{"role":"assistant","content":[{"type":"text","text":"Working..."}]}}
+```
+
+```json
+{"type":"message_update","message":{...},"assistantMessageEvent":{"type":"text_delta","delta":"...","contentIndex":0}} 
+```
+
+```json
+{"type":"message_end","message":{"role":"assistant","content":[{"type":"text","text":"Done."}],"stopReason":"stop"}}
+```
+
+### `tool_execution_start`
+
+```json
+{"type":"tool_execution_start","toolCallId":"tool_1","toolName":"bash","args":{"command":"ls"}}
+```
+
+### `tool_execution_update`
+
+```json
+{"type":"tool_execution_update","toolCallId":"tool_1","toolName":"bash","args":{"command":"ls"},"partialResult":{"content":[{"type":"text","text":"..."}]}} 
+```
+
+### `tool_execution_end`
+
+```json
+{"type":"tool_execution_end","toolCallId":"tool_1","toolName":"bash","result":{"content":[{"type":"text","text":"ok"}],"details":{}},"isError":false}
+```
+
+## Notes
+
+* `message_end` with `role = "assistant"` contains the final assistant text.
+* `assistantMessageEvent` in `message_update` provides streaming deltas.
+* `tool_execution_*` events map cleanly to Untether `action` events.
+
+---
+
+# Pi -> Untether event mapping (spec)
+
+This document describes how the Pi runner translates Pi CLI `--mode json` JSONL events into Untether events.
+
+> **Authoritative source:** The schema definitions are in `src/untether/schemas/pi.py` and the translation logic is in `src/untether/runners/pi.py`. When in doubt, refer to the code.
+
+The goal is to make Pi feel identical to the Codex/Claude runners from the bridge/renderer point of view while preserving Untether invariants (stable action ids, per-session serialization, single completed event).
+
+---
+
+## 1. Input stream contract (Pi CLI)
+
+Pi CLI emits **one JSON object per line** (JSONL) when invoked with:
+
+```
+pi --print --mode json <prompt>
+```
+
+Notes:
+- `--print` is required for non-interactive runs.
+- `--mode json` outputs all agent events (no TUI banners).
+- Pi does not support `-- <prompt>`; prompts starting with `-` must be
+  prefixed (Untether does this automatically).
+
+---
+
+## 2. Resume tokens and resume lines
+
+- Engine id: `pi`
+- Canonical resume line (embedded in chat):
+
+```
+`pi --session <id>`
+```
+
+The token is the **short session id**, derived from the session header line
+(`{"type":"session", ...}`) emitted on stdout when running in `--mode json`.
+This requires **pi-coding-agent >= 0.45.1**.
+
+Why not `--resume`?
+- `--resume/-r` opens an interactive session picker; it does not accept a
+  session token. Untether must use `--session <token>` instead.
+
+---
+
+## 3. Session lifecycle + serialization
+
+Untether requires **serialization per session token**:
+
+- For new runs (`resume=None`), do **not** acquire a lock until a `started`
+  event is emitted (Untether emits this as soon as the session header or first
+  JSON event arrives).
+- Once the session is known, acquire a lock for `pi:<session_token>` and hold it
+  until the run completes.
+- For resumed runs, acquire the lock immediately on entry.
+
+---
+
+## 4. Event translation (Pi JSONL -> Untether)
+
+Pi emits `AgentSessionEvent` objects. Only a subset is required for Untether.
+
+**StartedEvent meta:** The Pi runner populates `meta` with `cwd`, and optionally `model` (from `--model` config) and `provider` (from `--provider` config). The `meta.model` field is used for the `🏷` footer line on final messages. Pi JSONL does not include model info in its event stream, so this comes from runner config.
+
+### 4.1 `tool_execution_start`
+
+Example:
+```json
+{"type":"tool_execution_start","toolCallId":"tool_1","toolName":"bash","args":{"command":"ls"}}
+```
+
+Mapping:
+- Emit `action` with `phase="started"`.
+- `action.id = toolCallId`.
+- `action.kind` from tool name (see section 5).
+- `action.title` derived from tool + args.
+
+### 4.2 `tool_execution_end`
+
+Example:
+```json
+{"type":"tool_execution_end","toolCallId":"tool_1","toolName":"bash","result":{...},"isError":false}
+```
+
+Mapping:
+- Emit `action` with `phase="completed"`.
+- `ok = !isError`.
+- Carry `result` and `isError` in `detail` for debugging.
+
+### 4.3 `message_end` (assistant)
+
+Pi emits message lifecycle events. For `message_end` where `message.role == "assistant"`:
+
+- Store the latest assistant text as the **final answer fallback**.
+- If `stopReason` is `error` or `aborted`, store `errorMessage`.
+- Capture `usage` for `completed.usage`.
+
+### 4.4 `agent_end`
+
+Example:
+```json
+{"type":"agent_end","messages":[...]} 
+```
+
+Mapping:
+- Emit a single `completed` event:
+  - `ok = true` unless the last assistant message has `stopReason` `error` or `aborted`.
+  - `answer = last assistant text` (from `message_end` or `agent_end.messages`).
+  - `error = errorMessage` if present.
+  - `resume = ResumeToken(engine="pi", value=session_token)`.
+  - `usage = last assistant usage`.
+
+### 4.5 Other events
+
+Ignore unknown events. If a JSONL line is malformed, emit a warning action and
+continue (default `JsonlSubprocessRunner` behavior).
+
+---
+
+## 5. Tool name -> ActionKind mapping heuristics
+
+Pi tool names are lower-case by default. Suggested mapping:
+
+| Tool name | ActionKind | Title logic |
+| --- | --- | --- |
+| `bash` | `command` | `args.command` |
+| `edit`, `write` | `file_change` | `args.path` |
+| `read` | `tool` | `read: <path>` |
+| `grep` | `tool` | `grep: <pattern>` |
+| `find` | `tool` | `find: <pattern>` |
+| `ls` | `tool` | `ls: <path>` |
+| (default) | `tool` | tool name |
+
+For `file_change`, include `detail.changes = [{"path": <path>, "kind": "update"}]`.
+
+---
+
+## 6. Usage mapping
+
+Untether `completed.usage` should mirror Pi's assistant `usage` object without
+transformation.
+
+---
+
+## 7. Suggested Untether config keys
+
+A minimal TOML config for Pi:
+
+=== "untether config"
+
+    ```sh
+    untether config set pi.model "..."
+    untether config set pi.provider "..."
+    untether config set pi.extra_args "[]"
+    ```
+
+=== "toml"
+
+    ```toml
+    [pi]
+    model = "..."
+    provider = "..."
+    extra_args = []
+    ```
+
+Use `extra_args` for any Pi CLI flags not explicitly mapped.
+
+---
+
+# Interactive approval
+
+When Claude Code runs in permission mode, Untether shows inline buttons in Telegram so you can approve or deny tool calls from your phone.
+
+## When buttons appear
+
+Buttons appear when Claude wants to:
+
+- **Edit or create a file** (Edit, Write, MultiEdit)
+- **Run a shell command** (Bash)
+- **Exit plan mode** (ExitPlanMode)
+- **Ask you a question** (AskUserQuestion)
+
+Other tool calls (Read, Glob, Grep, WebSearch, etc.) are auto-approved — they don't change anything, so you won't be interrupted for them.
+
+## The three buttons
+
+When a permission request arrives, you see a message with the tool name and a compact diff preview, plus three buttons:
+
+| Button | What it does |
+|--------|-------------|
+| **Approve** | Let Claude proceed with the action |
+| **Deny** | Block the action and ask Claude to explain what it was about to do |
+| **Pause & Outline Plan** | Stop Claude and require a written plan before continuing (only appears for ExitPlanMode) |
+
+Buttons clear immediately when you tap them — no waiting for a spinner.
+
+## Diff previews
+
+For tools that modify files, the approval message includes a compact diff so you can see what's about to change before deciding:
+
+- **Edit**: shows removed lines (`- old`) and added lines (`+ new`), up to 4 lines each
+- **Write**: shows the first 8 lines of content to be written
+- **Bash**: shows the command to be run (up to 200 characters)
+
+This lets you make informed approve/deny decisions without leaving Telegram.
+
+## Answering questions
+
+When Claude calls `AskUserQuestion`, the approval message shows the question text with a `?` prefix. Instead of tapping a button, **reply to the message with your answer as text**. Untether sends your reply back to Claude, which reads it and continues.
+
+You can also tap Deny to dismiss the question.
+
+## Push notifications
+
+When approval buttons appear, Untether sends a separate notification message so you don't miss it — even if your phone is locked or you're in another app.
+
+## Ephemeral cleanup
+
+Approval-related messages (notifications, button messages) are automatically deleted when the run finishes, keeping your chat clean.
+
+## Auto-approve configuration
+
+You can configure which tools require approval and which are auto-approved. By default, only `ExitPlanMode` and `AskUserQuestion` require user interaction — all other tools are approved automatically.
+
+To change this behaviour, adjust the permission mode. See [Plan mode](plan-mode.md) for details.
+
+## Related
+
+- [Plan mode](plan-mode.md) — control when and how approval requests appear
+- [Commands & directives](../reference/commands-and-directives.md) — full command reference
+- [Claude Code runner](../reference/runners/claude/runner.md) — technical details of the control channel
+
+---
+
+# Plan mode
+
+Plan mode controls how Claude Code handles permission requests when running through Untether. You can require manual approval for plan transitions, auto-approve them, or skip the plan phase entirely.
+
+## Permission modes
+
+| Mode | `/planmode` command | CLI flag | Behaviour |
+|------|-------------------|----------|-----------|
+| **Plan** | `/planmode on` | `--permission-mode plan` | All tool calls and plan transitions require Telegram approval |
+| **Auto** | `/planmode auto` | `--permission-mode plan` | Tools are auto-approved; ExitPlanMode is also auto-approved (no buttons) |
+| **Accept edits** | `/planmode off` | `--permission-mode acceptEdits` | No approval buttons — Claude runs without interruption |
+
+**Plan** is the most interactive mode. You see every file edit, shell command, and plan transition as inline buttons.
+
+**Auto** is the recommended default for most users. Tools run without interruption, but Claude still goes through a plan phase. ExitPlanMode is silently approved so you don't need to tap a button for every plan-to-execution transition.
+
+**Accept edits** skips permission control entirely. Use this when you trust the agent to make changes autonomously.
+
+## Setting the mode
+
+Toggle per chat:
+
+```
+/planmode on       # enable plan mode
+/planmode auto     # plan mode with auto-approved transitions
+/planmode off      # disable plan mode
+/planmode          # toggle: if currently on/auto, turn off; otherwise turn on
+/planmode show     # show current mode
+/planmode clear    # remove override, use engine config default
+```
+
+Mode is stored per chat and persists across sessions. New runs in the chat use the configured mode.
+
+## "Pause & Outline Plan"
+
+When Claude tries to exit plan mode (ExitPlanMode), you see three buttons instead of two:
+
+- **Approve** — let Claude proceed to execution
+- **Deny** — block and ask Claude to explain
+- **Pause & Outline Plan** — require a written plan first
+
+Tapping "Pause & Outline Plan" tells Claude to stop and write a comprehensive plan as a visible message in the chat. The plan must include:
+
+1. Every file to be created or modified (full paths)
+2. What changes will be made in each file
+3. The order and phases of execution
+4. Key decisions, trade-offs, and risks
+5. The expected end result
+
+This is useful when you want to review the approach before Claude starts making changes.
+
+## Progressive cooldown
+
+After you tap "Pause & Outline Plan", a cooldown window prevents Claude from immediately retrying ExitPlanMode:
+
+| Click count | Cooldown |
+|-------------|----------|
+| 1st | 30 seconds |
+| 2nd | 60 seconds |
+| 3rd | 90 seconds |
+| 4th+ | 120 seconds (maximum) |
+
+During the cooldown, any ExitPlanMode attempt is automatically denied with an escalating message asking Claude to write a more detailed plan. The cooldown resets when you explicitly Approve or Deny a request.
+
+This prevents the agent from bulldozing through when you've asked it to slow down and explain its approach.
+
+## Related
+
+- [Interactive approval](interactive-approval.md) — how approval buttons and diff previews work
+- [Configuration](../reference/config.md) — setting default permission mode in `untether.toml`
+
+---
+
+# Cost budgets
+
+Untether tracks API costs per run and per day. You can set budget limits, warning thresholds, and auto-cancel behaviour to prevent surprise bills.
+
+## Configure budgets
+
+=== "untether config"
+
+    ```sh
+    untether config set cost_budget.enabled true
+    untether config set cost_budget.max_cost_per_run 2.00
+    untether config set cost_budget.max_cost_per_day 10.00
+    ```
+
+=== "toml"
+
+    ```toml
+    [cost_budget]
+    enabled = true
+    max_cost_per_run = 2.00
+    max_cost_per_day = 10.00
+    ```
+
+| Setting | Default | Description |
+|---------|---------|-------------|
+| `enabled` | `false` | Enable cost tracking and budget enforcement |
+| `max_cost_per_run` | (none) | Maximum cost for a single run (USD) |
+| `max_cost_per_day` | (none) | Maximum total cost per day (USD) |
+| `warn_at_pct` | `70` | Show a warning when this percentage of the budget is reached |
+| `auto_cancel` | `false` | Automatically cancel the run when a budget is exceeded |
+
+## How it works
+
+After each run completes, Untether checks the reported cost against your budgets:
+
+1. **Per-run check**: if the run cost exceeds `max_cost_per_run`, you get an alert
+2. **Daily check**: if the cumulative daily cost exceeds `max_cost_per_day`, you get an alert
+3. **Warning threshold**: at `warn_at_pct` (default 70%) of either budget, you get an early warning
+
+### Alert levels
+
+| Alert | Icon | Meaning |
+|-------|------|---------|
+| Warning | `???` | Cost is approaching the budget threshold |
+| Exceeded | `????` | Cost has exceeded the budget |
+
+When `auto_cancel = true` and a budget is exceeded, Untether cancels the run automatically. Otherwise, you see the alert but the run continues.
+
+### Daily reset
+
+The daily cost counter resets at midnight (local time, based on the server clock). Each new day starts from zero.
+
+## Check current usage
+
+Use the `/usage` command in Telegram to see your Claude Code subscription usage:
+
+```
+/usage
+```
+
+This shows:
+
+- **5h window**: usage percentage and time until reset
+- **Weekly**: 7-day usage percentage and time until reset
+- **Per-model breakdown**: Sonnet and Opus usage (if applicable)
+- **Extra credits**: any overage credits used
+
+The `/usage` command reads your Claude Code OAuth credentials to fetch live data from the Anthropic API. If you see "No Claude credentials found", run `claude login` in your terminal.
+
+## Subscription usage footer
+
+Untether can show subscription usage in the footer of completed messages. This is configured in the `[footer]` section:
+
+=== "toml"
+
+    ```toml
+    [footer]
+    show_usage = true
+    ```
+
+When enabled, completed messages show a line like:
+
+```
+5h: 45% (2h 15m) | 7d: 30% (4d 3h)
+```
+
+This tells you how much of your 5-hour and 7-day rate limits you've used, and when they reset.
+
+## Related
+
+- [Configuration](../reference/config.md) — full config reference for budget settings
+- [Troubleshooting](troubleshooting.md) — credential issues with `/usage`
+
+---
+
+# Webhooks and cron
+
+Untether can start agent runs automatically from external events (webhooks) or on a schedule (cron). Both use the same engine pipeline as Telegram messages, so project routing, progress streaming, and cost tracking all work normally.
+
+## Enable triggers
+
+Triggers are off by default. Enable them in your config:
+
+=== "untether config"
+
+    ```sh
+    untether config set triggers.enabled true
+    ```
+
+=== "toml"
+
+    ```toml
+    [triggers]
+    enabled = true
+    ```
+
+When enabled, Untether starts a webhook server on `127.0.0.1:9876` and a cron tick loop.
+
+## Set up a webhook
+
+Webhooks accept HTTP POST requests and turn them into agent runs. Example: trigger a code review when GitHub sends a push event.
+
+=== "toml"
+
+    ```toml
+    [[triggers.webhooks]]
+    id = "github-push"
+    path = "/hooks/github"
+    auth = "hmac-sha256"
+    secret = "whsec_your_github_secret"
+    event_filter = "push"
+    project = "myapp"
+    engine = "claude"
+    prompt_template = """
+    Review push to {{ref}} by {{pusher.name}}.
+    Repository: {{repository.full_name}}
+
+    Check for bugs, security issues, and style problems.
+    """
+    ```
+
+### How it works
+
+1. GitHub sends a POST to `http://your-server:9876/hooks/github`
+2. Untether verifies the HMAC signature against your secret
+3. The `event_filter` checks the `X-GitHub-Event` header — only `push` events proceed
+4. `{{ref}}` and `{{pusher.name}}` are substituted from the JSON payload
+5. The rendered prompt is sent to Claude in the `myapp` project
+6. A notification appears in your Telegram chat, and the run streams progress as usual
+
+### Authentication
+
+Every webhook requires explicit auth. Choose one:
+
+| Mode | Header | Use case |
+|------|--------|----------|
+| `bearer` | `Authorization: Bearer <token>` | Simple shared secret |
+| `hmac-sha256` | `X-Hub-Signature-256` | GitHub webhooks |
+| `hmac-sha1` | `X-Hub-Signature` | Legacy GitHub webhooks |
+| `none` | (none) | Local testing only |
+
+### Prompt templating
+
+Use `{{field.path}}` to substitute values from the webhook JSON payload:
+
+- **Nested paths**: `{{event.data.title}}`
+- **List indices**: `{{items.0}}`
+- **Missing fields**: render as empty strings (no error)
+
+All webhook prompts are automatically prefixed with an untrusted-payload marker so the agent treats the content with appropriate caution.
+
+### Test a webhook locally
+
+```bash
+curl -X POST http://127.0.0.1:9876/hooks/github \
+  -H "Authorization: Bearer my-secret-token" \
+  -H "Content-Type: application/json" \
+  -d '{"ref": "refs/heads/main", "pusher": {"name": "alice"}}'
+```
+
+A `202 Accepted` response means the run was dispatched.
+
+## Set up a cron schedule
+
+Cron triggers fire on a schedule using standard 5-field cron syntax.
+
+=== "toml"
+
+    ```toml
+    [[triggers.crons]]
+    id = "daily-review"
+    schedule = "0 9 * * 1-5"
+    project = "myapp"
+    engine = "claude"
+    prompt = "Review open PRs and summarise their status."
+    ```
+
+This runs every weekday at 9:00 AM.
+
+### Cron syntax
+
+```
+┌─── minute (0-59)
+│ ┌─── hour (0-23)
+│ │ ┌─── day of month (1-31)
+│ │ │ ┌─── month (1-12)
+│ │ │ │ ┌─── day of week (0-7, Sun=0 or 7)
+* * * * *
+```
+
+Common patterns:
+
+| Expression | Meaning |
+|-----------|---------|
+| `0 9 * * *` | Daily at 9:00 AM |
+| `0 9 * * 1-5` | Weekdays at 9:00 AM |
+| `*/15 * * * *` | Every 15 minutes |
+| `0 */2 * * *` | Every 2 hours |
+| `0 9,17 * * *` | At 9:00 AM and 5:00 PM |
+
+## Chat routing
+
+Each webhook and cron can specify where the Telegram notification appears:
+
+- Set `chat_id` to post in a specific chat
+- If omitted, uses the default chat from `[transports.telegram]`
+- Set `project` to run in a specific project's working directory
+
+## Server configuration
+
+=== "toml"
+
+    ```toml
+    [triggers.server]
+    host = "127.0.0.1"     # bind address (use reverse proxy for internet)
+    port = 9876            # listen port
+    rate_limit = 60        # max requests per minute
+    max_body_bytes = 1048576  # 1 MB max payload
+    ```
+
+The server includes a health endpoint at `GET /health` for uptime monitoring.
+
+## Security notes
+
+- The server binds to localhost by default. Use a reverse proxy (nginx, Caddy) with TLS to expose it to the internet.
+- All secret comparisons use timing-safe comparison.
+- Rate limiting prevents abuse (token-bucket, per-webhook and global).
+- Webhook prompts are prefixed with an untrusted-payload marker.
+
+## Related
+
+- [Triggers reference](../reference/triggers/triggers.md) — full configuration reference with all options
+- [Schedule tasks](schedule-tasks.md) — native Telegram scheduling (no server needed)
 
