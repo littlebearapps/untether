@@ -17,6 +17,9 @@ from untether.runner import (
     JsonlRunState,
     JsonlSubprocessRunner,
     ResumeTokenMixin,
+    _rc_label,
+    _session_label,
+    _stderr_excerpt,
 )
 
 
@@ -413,3 +416,139 @@ async def test_jsonl_run_impl_branches(monkeypatch: pytest.MonkeyPatch) -> None:
     runner = _BranchingJsonlRunner()
     events = [evt async for evt in runner.run_impl("hello", None)]
     assert any(isinstance(evt, CompletedEvent) for evt in events)
+
+
+# ===========================================================================
+# Error formatting helpers
+# ===========================================================================
+
+
+def test_rc_label_positive() -> None:
+    assert _rc_label(1) == "rc=1"
+    assert _rc_label(127) == "rc=127"
+
+
+def test_rc_label_negative_signal() -> None:
+    label = _rc_label(-15)
+    assert "rc=-15" in label
+    assert "SIGTERM" in label
+
+
+def test_rc_label_negative_unknown() -> None:
+    label = _rc_label(-999)
+    assert "rc=-999" in label
+
+
+def test_session_label_with_found_session() -> None:
+    token = ResumeToken(engine="test", value="abcdef1234567890")
+    label = _session_label(token, None)
+    assert label is not None
+    assert "abcdef12" in label
+    assert "new" in label
+
+
+def test_session_label_resumed() -> None:
+    token = ResumeToken(engine="test", value="abcdef1234567890")
+    label = _session_label(token, token)
+    assert label is not None
+    assert "resumed" in label
+
+
+def test_session_label_none() -> None:
+    assert _session_label(None, None) is None
+
+
+def test_stderr_excerpt_none() -> None:
+    assert _stderr_excerpt(None) is None
+    assert _stderr_excerpt([]) is None
+
+
+def test_stderr_excerpt_short() -> None:
+    result = _stderr_excerpt(["line 1", "line 2"])
+    assert result == "line 1\nline 2"
+
+
+def test_stderr_excerpt_truncates() -> None:
+    long_lines = ["x" * 200, "y" * 200]
+    result = _stderr_excerpt(long_lines, max_chars=300)
+    assert result is not None
+    assert len(result) == 301  # 300 + ellipsis char
+    assert result.endswith("…")
+
+
+def test_process_error_events_enriched_message() -> None:
+    """process_error_events includes rc label, session, and stderr."""
+    runner = _DummyJsonlRunner()
+    state = JsonlRunState()
+    token = ResumeToken(engine=runner.engine, value="abc12345deadbeef")
+    events = runner.process_error_events(
+        -15,
+        resume=token,
+        found_session=token,
+        state=state,
+        stderr_lines=["some error output"],
+    )
+    completed = events[-1]
+    assert isinstance(completed, CompletedEvent)
+    assert "SIGTERM" in completed.error
+    assert "abc12345" in completed.error
+    assert "some error output" in completed.error
+
+
+def test_stream_end_events_enriched_message() -> None:
+    """stream_end_events includes session info."""
+    runner = _DummyJsonlRunner()
+    state = JsonlRunState()
+    token = ResumeToken(engine=runner.engine, value="abc12345deadbeef")
+    events = runner.stream_end_events(
+        resume=token,
+        found_session=token,
+        state=state,
+    )
+    completed = events[-1]
+    assert isinstance(completed, CompletedEvent)
+    assert "abc12345" in completed.error
+    assert "resumed" in completed.error
+
+
+@pytest.mark.anyio
+async def test_drain_stderr_capture() -> None:
+    """drain_stderr collects lines into capture list."""
+    import anyio
+    from untether.utils.streams import drain_stderr, _STDERR_CAPTURE_MAX
+
+    send, receive = anyio.create_memory_object_stream[bytes](32)
+    capture: list[str] = []
+
+    async with anyio.create_task_group() as tg:
+
+        async def _write() -> None:
+            async with send:
+                for i in range(_STDERR_CAPTURE_MAX + 5):
+                    await send.send(f"line {i}\n".encode())
+
+        tg.start_soon(_write)
+        await drain_stderr(
+            receive, __import__("structlog").get_logger(), "test", capture
+        )
+
+    assert len(capture) == _STDERR_CAPTURE_MAX
+    assert capture[0] == "line 0"
+
+
+@pytest.mark.anyio
+async def test_drain_stderr_no_capture() -> None:
+    """drain_stderr works without capture param."""
+    import anyio
+    from untether.utils.streams import drain_stderr
+
+    send, receive = anyio.create_memory_object_stream[bytes](8)
+
+    async with anyio.create_task_group() as tg:
+
+        async def _write() -> None:
+            async with send:
+                await send.send(b"hello\n")
+
+        tg.start_soon(_write)
+        await drain_stderr(receive, __import__("structlog").get_logger(), "test")

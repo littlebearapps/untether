@@ -26,7 +26,14 @@ from ..model import (
     StartedEvent,
     UntetherEvent,
 )
-from ..runner import JsonlSubprocessRunner, ResumeTokenMixin, Runner
+from ..runner import (
+    JsonlSubprocessRunner,
+    ResumeTokenMixin,
+    Runner,
+    _rc_label,
+    _session_label,
+    _stderr_excerpt,
+)
 from .run_options import get_run_options
 from ..schemas import pi as pi_schema
 from ..utils.paths import get_run_base_dir
@@ -433,8 +440,16 @@ class PiRunner(ResumeTokenMixin, JsonlSubprocessRunner):
         resume: ResumeToken | None,
         found_session: ResumeToken | None,
         state: PiStreamState,
+        stderr_lines: list[str] | None = None,
     ) -> list[UntetherEvent]:
-        message = f"pi failed (rc={rc})."
+        parts = [f"pi failed ({_rc_label(rc)})."]
+        session = _session_label(found_session, resume)
+        if session:
+            parts.append(f"session: {session}")
+        excerpt = _stderr_excerpt(stderr_lines)
+        if excerpt:
+            parts.append(excerpt)
+        message = "\n".join(parts)
         logger.error("pi.process.failed", rc=rc, resume=state.resume.value)
         resume_for_completed = found_session or resume or state.resume
         return [
@@ -457,7 +472,11 @@ class PiRunner(ResumeTokenMixin, JsonlSubprocessRunner):
         state: PiStreamState,
     ) -> list[UntetherEvent]:
         resume_for_completed = found_session or resume or state.resume
-        message = "pi finished without an agent_end event"
+        parts = ["pi finished without an agent_end event"]
+        session = _session_label(found_session, resume)
+        if session:
+            parts.append(f"session: {session}")
+        message = "\n".join(parts)
         logger.warning("pi.stream.no_agent_end", resume=state.resume.value)
         return [
             CompletedEvent(

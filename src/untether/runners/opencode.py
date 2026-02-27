@@ -33,7 +33,14 @@ from ..model import (
     StartedEvent,
     UntetherEvent,
 )
-from ..runner import JsonlSubprocessRunner, ResumeTokenMixin, Runner
+from ..runner import (
+    JsonlSubprocessRunner,
+    ResumeTokenMixin,
+    Runner,
+    _rc_label,
+    _session_label,
+    _stderr_excerpt,
+)
 from .run_options import get_run_options
 from ..schemas import opencode as opencode_schema
 from ..utils.paths import relativize_path
@@ -441,8 +448,16 @@ class OpenCodeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
         resume: ResumeToken | None,
         found_session: ResumeToken | None,
         state: OpenCodeStreamState,
+        stderr_lines: list[str] | None = None,
     ) -> list[UntetherEvent]:
-        message = f"opencode failed (rc={rc})."
+        parts = [f"opencode failed ({_rc_label(rc)})."]
+        session = _session_label(found_session, resume)
+        if session:
+            parts.append(f"session: {session}")
+        excerpt = _stderr_excerpt(stderr_lines)
+        if excerpt:
+            parts.append(excerpt)
+        message = "\n".join(parts)
         logger.error("opencode.process.failed", rc=rc, session_id=state.session_id)
         resume_for_completed = found_session or resume
         return [
@@ -468,7 +483,11 @@ class OpenCodeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
         state: OpenCodeStreamState,
     ) -> list[UntetherEvent]:
         if not found_session:
-            message = "opencode finished but no session_id was captured"
+            parts = ["opencode finished but no session_id was captured"]
+            session = _session_label(None, resume)
+            if session:
+                parts.append(f"session: {session}")
+            message = "\n".join(parts)
             logger.warning("opencode.stream.no_session")
             resume_for_completed = resume
             return [
@@ -491,7 +510,11 @@ class OpenCodeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
                 )
             ]
 
-        message = "opencode finished without a result event"
+        parts = ["opencode finished without a result event"]
+        session = _session_label(found_session, resume)
+        if session:
+            parts.append(f"session: {session}")
+        message = "\n".join(parts)
         return [
             CompletedEvent(
                 engine=ENGINE,

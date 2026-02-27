@@ -34,7 +34,15 @@ from ..model import (
     UntetherEvent,
     CompletedEvent,
 )
-from ..runner import JsonlSubprocessRunner, ResumeTokenMixin, Runner, JsonlStreamState
+from ..runner import (
+    JsonlSubprocessRunner,
+    ResumeTokenMixin,
+    Runner,
+    JsonlStreamState,
+    _rc_label,
+    _session_label,
+    _stderr_excerpt,
+)
 from .run_options import get_run_options
 from ..schemas import claude as claude_schema
 from .tool_actions import tool_input_path, tool_kind_and_title
@@ -124,6 +132,8 @@ class ClaudeStreamState:
     control_action_for_tool: dict[str, str] = field(default_factory=dict)
     # Auto-approve ExitPlanMode when permission_mode is "auto"
     auto_approve_exit_plan_mode: bool = False
+    # Whether this run is a resume (for error diagnostics)
+    resumed: bool = False
 
 
 def _normalize_tool_result(content: Any) -> str:
@@ -277,15 +287,35 @@ def _format_diff_preview(tool_name: str, tool_input: dict[str, Any]) -> str:
     return ""
 
 
-def _extract_error(event: claude_schema.StreamResultMessage) -> str | None:
-    if event.is_error:
-        if isinstance(event.result, str) and event.result:
-            return event.result
-        subtype = event.subtype
-        if subtype:
-            return f"claude run failed ({subtype})"
-        return "claude run failed"
-    return None
+def _extract_error(
+    event: claude_schema.StreamResultMessage,
+    *,
+    resumed: bool = False,
+) -> str | None:
+    if not event.is_error:
+        return None
+    # First line: error summary
+    if isinstance(event.result, str) and event.result:
+        first = event.result
+    elif event.subtype:
+        first = f"claude run failed ({event.subtype})"
+    else:
+        first = "claude run failed"
+
+    # Second line: diagnostic context
+    parts: list[str] = []
+    sid = event.session_id[:8] if event.session_id else None
+    if sid:
+        parts.append(f"session: {sid}")
+    parts.append("resumed" if resumed else "new")
+    parts.append(f"turns: {event.num_turns}")
+    cost = event.total_cost_usd
+    if cost is not None:
+        parts.append(f"cost: ${cost:.2f}")
+    if event.duration_api_ms:
+        parts.append(f"api: {event.duration_api_ms}ms")
+
+    return f"{first}\n{' · '.join(parts)}"
 
 
 def _usage_payload(event: claude_schema.StreamResultMessage) -> dict[str, Any]:
@@ -435,7 +465,7 @@ def translate_claude_event(
                 result_text = state.last_assistant_text
 
             resume = ResumeToken(engine=ENGINE, value=event.session_id)
-            error = None if ok else _extract_error(event)
+            error = None if ok else _extract_error(event, resumed=state.resumed)
             usage = _usage_payload(event)
 
             return [
@@ -873,6 +903,7 @@ class ClaudeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
     def new_state(self, prompt: str, resume: ResumeToken | None) -> ClaudeStreamState:
         state = ClaudeStreamState()
         state.auto_approve_exit_plan_mode = self._effective_permission_mode() == "auto"
+        state.resumed = resume is not None
         return state
 
     def start_run(
@@ -1115,6 +1146,7 @@ class ClaudeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
         resume: ResumeToken | None,
         found_session: ResumeToken | None,
         state: ClaudeStreamState,
+        stderr_lines: list[str] | None = None,
     ) -> list[UntetherEvent]:
         # Phase 2: Cleanup runner registration on error
         session_id = (
@@ -1125,7 +1157,14 @@ class ClaudeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
             _SESSION_STDIN.pop(session_id, None)
             logger.debug("claude_runner.unregistered", session_id=session_id)
 
-        message = f"claude failed (rc={rc})."
+        parts = [f"claude failed ({_rc_label(rc)})."]
+        session = _session_label(found_session, resume)
+        if session:
+            parts.append(f"session: {session}")
+        excerpt = _stderr_excerpt(stderr_lines)
+        if excerpt:
+            parts.append(excerpt)
+        message = "\n".join(parts)
         resume_for_completed = found_session or resume
         return [
             self.note_event(message, state=state, ok=False),
@@ -1152,7 +1191,11 @@ class ClaudeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
             logger.debug("claude_runner.unregistered", session_id=session_id)
 
         if not found_session:
-            message = "claude finished but no session_id was captured"
+            parts = ["claude finished but no session_id was captured"]
+            session = _session_label(None, resume)
+            if session:
+                parts.append(f"session: {session}")
+            message = "\n".join(parts)
             resume_for_completed = resume
             return [
                 state.factory.completed_error(
@@ -1161,7 +1204,11 @@ class ClaudeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
                 )
             ]
 
-        message = "claude finished without a result event"
+        parts = ["claude finished without a result event"]
+        session = _session_label(found_session, resume)
+        if session:
+            parts.append(f"session: {session}")
+        message = "\n".join(parts)
         return [
             state.factory.completed_error(
                 error=message,
@@ -1275,6 +1322,7 @@ class ClaudeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
 
                 rc: int | None = None
                 stream = JsonlStreamState(expected_session=resume)
+                stderr_lines: list[str] = []
 
                 async with anyio.create_task_group() as tg:
                     tg.start_soon(
@@ -1282,6 +1330,7 @@ class ClaudeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
                         proc.stderr,
                         run_logger,
                         tag,
+                        stderr_lines,
                     )
                     async for evt in self._iter_jsonl_events(
                         stdout=proc.stdout,
@@ -1313,6 +1362,7 @@ class ClaudeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
                         resume=resume,
                         found_session=found_session,
                         state=state,
+                        stderr_lines=stderr_lines or None,
                     )
                     for evt in events:
                         if isinstance(evt, CompletedEvent):
