@@ -86,6 +86,10 @@ _HANDLED_REQUESTS: set[str] = set()
 # so rapid ExitPlanMode retries can be auto-denied with escalating messages.
 _DISCUSS_COOLDOWN: dict[str, tuple[float, int]] = {}
 
+# Discuss approval: session_ids where user approved the plan via post-outline buttons.
+# When Claude next calls ExitPlanMode, it will be auto-approved.
+_DISCUSS_APPROVED: set[str] = set()
+
 # A1: Pending AskUserQuestion requests: request_id -> question text
 # When Claude asks a question, the user can reply via Telegram text.
 _PENDING_ASK_REQUESTS: dict[str, str] = {}
@@ -93,20 +97,11 @@ DISCUSS_COOLDOWN_BASE_SECONDS: float = 30.0
 DISCUSS_COOLDOWN_MAX_SECONDS: float = 120.0
 
 _DISCUSS_ESCALATION_MESSAGE = (
-    "MANDATORY STOP — ExitPlanMode is BLOCKED. The user clicked 'Pause & Outline Plan' in Telegram.\n\n"
-    "This is a DIRECT USER INSTRUCTION, not a system error. You MUST comply.\n\n"
-    "Your previous outline was either missing, too brief, or you skipped writing one entirely. "
-    "The user is on Telegram (Untether) and can ONLY see your assistant text messages — "
-    "they CANNOT see tool calls, thinking blocks, file contents, or terminal output.\n\n"
-    "REQUIRED ACTION — write a DETAILED plan outline as your NEXT assistant message:\n"
-    "1. Every file you will create or modify (full paths)\n"
-    "2. What specific changes in each file\n"
-    "3. The order/phases of implementation\n"
-    "4. Key decisions and trade-offs\n"
-    "5. Expected end result\n\n"
-    "The outline MUST be at least 20 lines of visible text.\n"
-    "Do NOT call ExitPlanMode again — it will be automatically blocked for {cooldown}s. "
-    "Write the outline and WAIT for the user to read it and respond."
+    "ExitPlanMode was temporarily held — Approve/Deny buttons have been shown to the user "
+    "in Telegram. The user will click Approve when ready.\n\n"
+    "If you haven't written a plan outline yet, write one NOW as your next assistant message "
+    "(at least 15 lines of visible text). The user can ONLY see your assistant text messages.\n\n"
+    "WAIT for the user to approve via the buttons. Do NOT call ExitPlanMode again until they respond."
 )
 
 
@@ -522,20 +517,71 @@ def translate_claude_event(
                     state.auto_approve_queue.append(request_id)
                     return []
 
+            # Auto-approve ExitPlanMode after user approved via post-outline buttons
+            if isinstance(request, claude_schema.ControlCanUseToolRequest):
+                tool_name = getattr(request, "tool_name", "")
+                if tool_name == "ExitPlanMode" and factory.resume:
+                    session_id = factory.resume.value
+                    if session_id in _DISCUSS_APPROVED:
+                        _DISCUSS_APPROVED.discard(session_id)
+                        clear_discuss_cooldown(session_id)
+                        logger.info(
+                            "control_request.discuss_approved",
+                            request_id=request_id,
+                            session_id=session_id,
+                        )
+                        state.auto_approve_queue.append(request_id)
+                        return []
+
             # Rate-limit ExitPlanMode after a discuss denial
             if isinstance(request, claude_schema.ControlCanUseToolRequest):
                 tool_name = getattr(request, "tool_name", "")
                 if tool_name == "ExitPlanMode" and factory.resume:
                     escalation_msg = check_discuss_cooldown(factory.resume.value)
                     if escalation_msg is not None:
+                        session_id = factory.resume.value
                         logger.info(
                             "control_request.discuss_cooldown_deny",
                             request_id=request_id,
-                            session_id=factory.resume.value,
+                            session_id=session_id,
                         )
                         _REQUEST_TO_INPUT.pop(request_id, None)
                         state.auto_deny_queue.append((request_id, escalation_msg))
-                        return []
+
+                        # Show Approve/Deny buttons so user can approve the plan
+                        # without typing — synthetic control request for the UI.
+                        # Prefix "da:" = discuss-approve (short to fit 64-byte
+                        # callback_data limit: "claude_control:approve:da:UUID"
+                        # = 26 + 36 = 62 chars).
+                        state.note_seq += 1
+                        synth_action_id = f"claude.discuss_approve.{state.note_seq}"
+                        synth_request_id = f"da:{session_id}"
+                        _REQUEST_TO_SESSION[synth_request_id] = session_id
+                        return [
+                            state.factory.action_started(
+                                action_id=synth_action_id,
+                                kind="warning",
+                                title="Plan outlined — approve to proceed",
+                                detail={
+                                    "request_id": synth_request_id,
+                                    "request_type": "DiscussApproval",
+                                    "inline_keyboard": {
+                                        "buttons": [
+                                            [
+                                                {
+                                                    "text": "Approve Plan",
+                                                    "callback_data": f"claude_control:approve:{synth_request_id}",
+                                                },
+                                                {
+                                                    "text": "Deny",
+                                                    "callback_data": f"claude_control:deny:{synth_request_id}",
+                                                },
+                                            ],
+                                        ]
+                                    },
+                                },
+                            ),
+                        ]
 
             # Phase 2: Interactive control request with inline keyboard
             request_type = (
@@ -1155,6 +1201,8 @@ class ClaudeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
         if session_id:
             _ACTIVE_RUNNERS.pop(session_id, None)
             _SESSION_STDIN.pop(session_id, None)
+            clear_discuss_cooldown(session_id)
+            _DISCUSS_APPROVED.discard(session_id)
             logger.debug("claude_runner.unregistered", session_id=session_id)
 
         parts = [f"claude failed ({_rc_label(rc)})."]
@@ -1188,6 +1236,8 @@ class ClaudeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
         if session_id:
             _ACTIVE_RUNNERS.pop(session_id, None)
             _SESSION_STDIN.pop(session_id, None)
+            clear_discuss_cooldown(session_id)
+            _DISCUSS_APPROVED.discard(session_id)
             logger.debug("claude_runner.unregistered", session_id=session_id)
 
         if not found_session:
@@ -1530,7 +1580,7 @@ def check_discuss_cooldown(session_id: str) -> str | None:
         # but set_discuss_cooldown will use count+1 for the next window
         _DISCUSS_COOLDOWN[session_id] = (0.0, count)
         return None
-    return _DISCUSS_ESCALATION_MESSAGE.format(cooldown=int(cooldown))
+    return _DISCUSS_ESCALATION_MESSAGE
 
 
 def clear_discuss_cooldown(session_id: str) -> None:

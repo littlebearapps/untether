@@ -277,3 +277,45 @@ def test_footer_rejects_extra_keys(tmp_path: Path) -> None:
     }
     with pytest.raises(ConfigError, match="bogus_key"):
         validate_settings_data(data, config_path=config_path)
+
+
+# ---------------------------------------------------------------------------
+# PreambleSettings tests
+# ---------------------------------------------------------------------------
+
+
+def test_preamble_defaults() -> None:
+    from untether.settings import PreambleSettings
+
+    preamble = PreambleSettings()
+    assert preamble.enabled is True
+    assert preamble.text is None
+
+
+def test_preamble_from_toml(tmp_path: Path) -> None:
+    config_path = tmp_path / "untether.toml"
+    config_path.write_text(
+        'transport = "telegram"\n\n'
+        "[transports.telegram]\n"
+        'bot_token = "token"\n'
+        "chat_id = 123\n\n"
+        "[preamble]\n"
+        "enabled = false\n"
+        'text = "Custom preamble"\n',
+        encoding="utf-8",
+    )
+
+    settings, _ = load_settings(config_path)
+    assert settings.preamble.enabled is False
+    assert settings.preamble.text == "Custom preamble"
+
+
+def test_preamble_rejects_extra_keys(tmp_path: Path) -> None:
+    config_path = tmp_path / "untether.toml"
+    data = {
+        "transport": "telegram",
+        "transports": {"telegram": {"bot_token": "token", "chat_id": 123}},
+        "preamble": {"enabled": True, "bogus_key": True},
+    }
+    with pytest.raises(ConfigError, match="bogus_key"):
+        validate_settings_data(data, config_path=config_path)

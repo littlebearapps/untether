@@ -5,6 +5,7 @@ from __future__ import annotations
 from ...commands import CommandBackend, CommandContext, CommandResult
 from ...logging import get_logger
 from ...runners.claude import (
+    _DISCUSS_APPROVED,
     _REQUEST_TO_SESSION,
     clear_discuss_cooldown,
     send_claude_control_response,
@@ -20,6 +21,9 @@ _DISCUSS_DENY_MESSAGE = (
     "CONTEXT: The user is on Untether (Telegram bridge). They can ONLY see your assistant text "
     "messages. Tool calls, thinking blocks, file contents, and terminal UI are ALL invisible to them. "
     "If you already wrote a plan in thinking or as tool input, the user DID NOT SEE IT.\n\n"
+    "IMPORTANT: Even if you previously wrote a plan outline earlier in this conversation, the user "
+    "may NOT have seen it due to a session interruption (usage limit, error, restart). "
+    "You MUST write the full outline again as visible text NOW — do not skip or summarise.\n\n"
     "REQUIRED — write a COMPREHENSIVE plan outline as your IMMEDIATE next assistant message:\n"
     "1. Every file you will create or modify (full paths)\n"
     "2. What specific changes you will make in each file\n"
@@ -27,10 +31,9 @@ _DISCUSS_DENY_MESSAGE = (
     "4. Any key decisions, trade-offs, or risks\n"
     "5. What the end result will look like\n\n"
     "The outline MUST be at least 15 lines of VISIBLE TEXT in the chat.\n\n"
-    "CRITICAL: Do NOT call ExitPlanMode again after writing the outline. "
-    "ExitPlanMode will be AUTOMATICALLY BLOCKED for 30+ seconds. "
-    "Write the outline and STOP. Wait for the user to read it and respond. "
-    "The user will approve when they are ready."
+    "After writing the outline, call ExitPlanMode. Approve/Deny buttons will appear "
+    "in Telegram for the user to approve your plan. Do NOT wait for a text reply — "
+    "just call ExitPlanMode and the buttons will handle it."
 )
 
 _DENY_MESSAGE = (
@@ -130,6 +133,34 @@ class ClaudeControlCommand:
             )
 
         approved = action == "approve"
+
+        # Handle synthetic discuss-approval buttons (post-outline Approve/Deny)
+        if request_id.startswith("da:"):
+            session_id = request_id.removeprefix("da:")
+            # Clean up the synthetic request registration
+            _REQUEST_TO_SESSION.pop(request_id, None)
+
+            if approved:
+                _DISCUSS_APPROVED.add(session_id)
+                clear_discuss_cooldown(session_id)
+                logger.info(
+                    "claude_control.discuss_plan_approved",
+                    session_id=session_id,
+                )
+                return CommandResult(
+                    text="✅ Plan approved — Claude will proceed",
+                    notify=True,
+                )
+            else:
+                clear_discuss_cooldown(session_id)
+                logger.info(
+                    "claude_control.discuss_plan_denied",
+                    session_id=session_id,
+                )
+                return CommandResult(
+                    text="❌ Plan denied — send a follow-up message with feedback",
+                    notify=True,
+                )
 
         # Grab session_id before send_claude_control_response deletes it
         session_id = _REQUEST_TO_SESSION.get(request_id)

@@ -134,6 +134,13 @@ class FooterSettings(BaseModel):
     show_subscription_usage: bool = False
 
 
+class PreambleSettings(BaseModel):
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    enabled: bool = True
+    text: str | None = None
+
+
 class UntetherSettings(BaseSettings):
     model_config = SettingsConfigDict(
         extra="allow",
@@ -153,6 +160,7 @@ class UntetherSettings(BaseSettings):
     plugins: PluginsSettings = Field(default_factory=PluginsSettings)
     cost_budget: CostBudgetSettings = Field(default_factory=CostBudgetSettings)
     footer: FooterSettings = Field(default_factory=FooterSettings)
+    preamble: PreambleSettings = Field(default_factory=PreambleSettings)
 
     @model_validator(mode="before")
     @classmethod

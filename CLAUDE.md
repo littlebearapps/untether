@@ -10,7 +10,8 @@ Untether adds interactive permission control, plan mode support, and several UX 
 ## Features (vs upstream takopi)
 
 - **Interactive permission control** — bidirectional Telegram buttons for tool approval, plan mode, and clarifying questions
-- **Pause & Outline Plan** — third button on plan approval to request a written plan before proceeding, with progressive cooldown
+- **Pause & Outline Plan** — third button on plan approval; after Claude writes the outline, Approve/Deny buttons appear automatically (no need to type "approved")
+- **Agent context preamble** — configurable prompt preamble tells agents they're on Telegram and requests structured end-of-task summaries; `[preamble]` config section
 - **`/planmode`** — toggle permission mode per chat (on/off/auto)
 - **Early callback answering** — clears button spinners immediately instead of waiting for processing
 - **Approval push notifications** — separate notify message when approval buttons appear
@@ -45,7 +46,7 @@ Telegram <-> TelegramPresenter <-> RunnerBridge <-> Runner (claude/codex/opencod
 | File | Purpose |
 |------|---------|
 | `runners/claude.py` | Claude Code runner, interactive features |
-| `runner_bridge.py` | Connects runners to Telegram presenter |
+| `runner_bridge.py` | Connects runners to Telegram presenter, injects agent preamble |
 | `cost_tracker.py` | Per-run/daily cost tracking and budget alerts |
 | `commands/claude_control.py` | Approve/Deny/Discuss callback handler |
 | `commands/dispatch.py` | Callback dispatch and command routing |
@@ -113,12 +114,12 @@ Rules in `.claude/rules/` auto-load when editing matching files:
 | `runner-development.md` | `runners/**`, `runner.py` | EventFactory usage, session locking, entry point registration |
 | `telegram-transport.md` | `telegram/**` | Outbox-only writes, 64-byte callback data, ephemeral cleanup |
 | `control-channel.md` | `runners/claude.py`, `claude_control.py` | PTY lifecycle, session registries, cooldown mechanics |
-| `testing-conventions.md` | `tests/**` | pytest+anyio, stub patterns, 81% coverage threshold |
+| `testing-conventions.md` | `tests/**` | pytest+anyio, stub patterns, 80% coverage threshold |
 | `release-discipline.md` | `CHANGELOG.md`, `pyproject.toml` | GitHub issue linking, changelog format, semantic versioning |
 
 ## Tests
 
-888 tests, 80% coverage threshold. Key test files:
+896 tests, 80% coverage threshold. Key test files:
 
 - `test_claude_control.py` — 56 tests: control requests, response routing, registry lifecycle, auto-approve/auto-deny, tool auto-approve, custom deny messages, discuss action, early toast, progressive cooldown, auto permission mode
 - `test_callback_dispatch.py` — 28 tests: callback parsing, dispatch toast/ephemeral behaviour, early answering
@@ -131,6 +132,7 @@ Rules in `.claude/rules/` auto-load when editing matching files:
 - `test_meta_line.py` — 26 tests: model name shortening, meta line formatting, ProgressTracker meta storage/snapshot, footer ordering (context/meta/resume)
 - `test_runner_utils.py` — error formatting helpers, drain_stderr capture, enriched error messages
 - `test_shutdown.py` — 4 tests: shutdown state transitions, idempotency, reset
+- `test_preamble.py` — 5 tests: default preamble injection, disabled preamble, custom text override, empty text disables, settings defaults
 - `test_restart_command.py` — 3 tests: command triggers shutdown, idempotent response, command id
 
 ## Development

@@ -158,6 +158,25 @@ Controls what appears in the message footer after a run completes.
 
 When `show_subscription_usage` is enabled, a compact line like `⚡ 5h: 45% (2h 15m) | 7d: 30% (4d 3h)` appears after every Claude run. Threshold-based warnings (≥70%) appear regardless of this setting.
 
+## `preamble`
+
+Controls the context preamble injected at the start of every agent prompt.
+
+=== "toml"
+
+    ```toml
+    [preamble]
+    enabled = true
+    text = "Custom preamble text..."
+    ```
+
+| Key | Type | Default | Notes |
+|-----|------|---------|-------|
+| `enabled` | bool | `true` | Inject preamble into prompts. |
+| `text` | string\|null | `null` | Custom preamble text. `null` uses the built-in default. |
+
+The default preamble tells agents they're running via Telegram, lists key constraints (only assistant text is visible), and requests a structured end-of-task summary.
+
 ## `cost_budget`
 
 === "toml"

@@ -2,7 +2,7 @@
 name = "untether"
 authors = [{name = "Little Bear Apps", email = "hello@littlebearapps.com"}]
 maintainers = [{name = "Little Bear Apps", email = "hello@littlebearapps.com"}]
-version = "0.23.5"
+version = "0.24.0"
 keywords = ["telegram", "claude-code", "codex", "opencode", "pi", "ai-agents", "coding-assistant", "remote-control", "cli-bridge"]
 description = "Run AI coding agents from your phone. Bridges Claude Code, Codex, OpenCode, and Pi to Telegram with interactive permissions, voice notes, and live progress."
 readme = "README.md"
@@ -43,10 +43,10 @@ classifiers = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/littlebearapps/untether"
+Homepage = "https://littlebearapps.com/tools/untether/"
 Repository = "https://github.com/littlebearapps/untether.git"
 Issues = "https://github.com/littlebearapps/untether/issues"
-Documentation = "https://github.com/littlebearapps/untether/tree/master/docs"
+Documentation = "https://littlebearapps.com/tools/untether/"
 Changelog = "https://github.com/littlebearapps/untether/blob/master/CHANGELOG.md"
 Upstream = "https://github.com/banteg/takopi"
 

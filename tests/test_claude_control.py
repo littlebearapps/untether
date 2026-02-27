@@ -650,8 +650,8 @@ def test_check_discuss_cooldown_returns_escalation_within_window() -> None:
     set_discuss_cooldown("sess-cd-3")
     result = check_discuss_cooldown("sess-cd-3")
     assert result is not None
-    assert "BLOCKED" in result
-    assert "30s" in result  # count=1 -> 30s cooldown
+    assert "Approve/Deny buttons" in result
+    assert "WAIT" in result
 
 
 def test_check_discuss_cooldown_returns_none_when_not_set() -> None:
@@ -696,8 +696,8 @@ def test_clear_discuss_cooldown_noop_for_unknown() -> None:
 
 
 def test_exit_plan_mode_auto_denied_during_cooldown() -> None:
-    """ExitPlanMode request during discuss cooldown produces no events
-    and queues an auto-deny."""
+    """ExitPlanMode request during discuss cooldown queues an auto-deny
+    and returns a synthetic ActionEvent with Approve/Deny buttons."""
     state, factory = _make_state_with_session("sess-cooldown")
     set_discuss_cooldown("sess-cooldown")
 
@@ -714,9 +714,18 @@ def test_exit_plan_mode_auto_denied_during_cooldown() -> None:
     )
     events = translate_claude_event(event, title="claude", state=state, factory=factory)
 
-    assert events == []
     assert len(state.auto_deny_queue) == 1
     assert state.auto_deny_queue[0][0] == "req-cd-deny"
+    # Synthetic Approve/Deny buttons returned as ActionEvent
+    assert len(events) == 1
+    evt = events[0]
+    assert evt.action.kind == "warning"
+    assert "approve to proceed" in evt.action.title.lower()
+    assert evt.action.detail["request_id"] == "da:sess-cooldown"
+    buttons = evt.action.detail["inline_keyboard"]["buttons"]
+    assert len(buttons) == 1  # One row with Approve + Deny
+    assert len(buttons[0]) == 2
+    assert "Approve" in buttons[0][0]["text"]
 
 
 def test_exit_plan_mode_not_auto_denied_after_cooldown_expires() -> None:
@@ -885,14 +894,15 @@ def test_progressive_cooldown_increases_with_count() -> None:
     assert _cooldown_seconds(10) == 120.0
 
 
-def test_progressive_cooldown_escalation_message_shows_duration() -> None:
-    """Escalation message includes the current cooldown duration."""
+def test_progressive_cooldown_escalation_message_content() -> None:
+    """Escalation message tells Claude to wait for button approval."""
     set_discuss_cooldown("sess-prog-1")
     set_discuss_cooldown("sess-prog-1")  # count=2 -> 60s
 
     msg = check_discuss_cooldown("sess-prog-1")
     assert msg is not None
-    assert "60s" in msg
+    assert "Approve/Deny buttons" in msg
+    assert "WAIT" in msg
 
 
 def test_progressive_cooldown_count_preserved_after_expiry() -> None:
@@ -915,7 +925,7 @@ def test_progressive_cooldown_count_preserved_after_expiry() -> None:
 
     msg = check_discuss_cooldown("sess-prog-2")
     assert msg is not None
-    assert "60s" in msg
+    assert "WAIT" in msg
 
 
 # ===========================================================================

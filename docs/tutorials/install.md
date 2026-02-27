@@ -30,7 +30,7 @@ Verify it's installed:
 untether --version
 ```
 
-You should see something like `0.23.4`.
+You should see something like `0.24.0`.
 
 ## 3. Install agent CLIs
 

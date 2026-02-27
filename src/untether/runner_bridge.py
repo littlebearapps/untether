@@ -69,6 +69,56 @@ def _load_footer_settings():
         return FooterSettings()
 
 
+_DEFAULT_PREAMBLE = (
+    "[Untether] You are running via Untether, a Telegram bridge for coding agents. "
+    "The user is interacting through Telegram on a mobile device.\n\n"
+    "Key constraints:\n"
+    "- The user can ONLY see your final assistant text messages\n"
+    "- Tool calls, thinking blocks, file contents, and terminal output are invisible\n"
+    "- Keep the user informed by writing clear status updates as visible text\n\n"
+    "Every response that completes work MUST end with a structured summary:\n"
+    "  ## Summary\n"
+    "  ### Completed\n"
+    "  - [What was done, with specific file paths and line numbers where relevant]\n"
+    "  - [Key decisions made and why]\n"
+    "  ### Plan/Document Created (if applicable)\n"
+    "  - [Path and concise summary of any plan, design doc, or document created — "
+    "the user cannot easily open files from Telegram]\n"
+    "  ### Next Steps\n"
+    "  - [Remaining work, if any]\n"
+    "  ### Decisions Needed (if any)\n"
+    "  - [Blocking questions — state your recommended option clearly]"
+)
+
+
+def _load_preamble_settings():
+    """Load preamble settings from config, returning defaults if unavailable."""
+    try:
+        from .settings import PreambleSettings, load_settings_if_exists
+
+        result = load_settings_if_exists()
+        if result is None:
+            return PreambleSettings()
+        settings, _ = result
+        return settings.preamble
+    except Exception:  # noqa: BLE001
+        logger.debug("preamble_settings.load_failed", exc_info=True)
+        from .settings import PreambleSettings
+
+        return PreambleSettings()
+
+
+def _apply_preamble(prompt: str) -> str:
+    """Prepend the context preamble to the prompt if enabled."""
+    cfg = _load_preamble_settings()
+    if not cfg.enabled:
+        return prompt
+    text = cfg.text if cfg.text is not None else _DEFAULT_PREAMBLE
+    if not text:
+        return prompt
+    return f"{text}\n\n---\n\n{prompt}"
+
+
 async def _maybe_append_usage_footer(
     msg: RenderedMessage,
     *,
@@ -672,6 +722,7 @@ async def handle_message(
     is_resume_line = runner.is_resume_line
     resume_strip = strip_resume_line or is_resume_line
     runner_text = _strip_resume_lines(incoming.text, is_resume_line=resume_strip)
+    runner_text = _apply_preamble(runner_text)
 
     progress_tracker = ProgressTracker(engine=runner.engine)
 
