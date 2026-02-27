@@ -490,6 +490,7 @@ def test_process_error_events_enriched_message() -> None:
     )
     completed = events[-1]
     assert isinstance(completed, CompletedEvent)
+    assert completed.error is not None
     assert "SIGTERM" in completed.error
     assert "abc12345" in completed.error
     assert "some error output" in completed.error
@@ -507,6 +508,7 @@ def test_stream_end_events_enriched_message() -> None:
     )
     completed = events[-1]
     assert isinstance(completed, CompletedEvent)
+    assert completed.error is not None
     assert "abc12345" in completed.error
     assert "resumed" in completed.error
 
