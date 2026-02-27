@@ -12,7 +12,14 @@ from ..config import ConfigError
 from ..events import EventFactory
 from ..logging import get_logger
 from ..model import ActionPhase, EngineId, ResumeToken, UntetherEvent
-from ..runner import JsonlSubprocessRunner, ResumeTokenMixin, Runner
+from ..runner import (
+    JsonlSubprocessRunner,
+    ResumeTokenMixin,
+    Runner,
+    _rc_label,
+    _session_label,
+    _stderr_excerpt,
+)
 from .run_options import get_run_options
 from ..schemas import codex as codex_schema
 from ..utils.paths import relativize_command
@@ -629,8 +636,16 @@ class CodexRunner(ResumeTokenMixin, JsonlSubprocessRunner):
         resume: ResumeToken | None,
         found_session: ResumeToken | None,
         state: CodexRunState,
+        stderr_lines: list[str] | None = None,
     ) -> list[UntetherEvent]:
-        message = f"codex exec failed (rc={rc})."
+        parts = [f"codex exec failed ({_rc_label(rc)})."]
+        session = _session_label(found_session, resume)
+        if session:
+            parts.append(f"session: {session}")
+        excerpt = _stderr_excerpt(stderr_lines)
+        if excerpt:
+            parts.append(excerpt)
+        message = "\n".join(parts)
         resume_for_completed = found_session or resume
         return [
             self.note_event(
@@ -653,7 +668,11 @@ class CodexRunner(ResumeTokenMixin, JsonlSubprocessRunner):
         state: CodexRunState,
     ) -> list[UntetherEvent]:
         if not found_session:
-            message = "codex exec finished but no session_id/thread_id was captured"
+            parts = ["codex exec finished but no session_id/thread_id was captured"]
+            session = _session_label(None, resume)
+            if session:
+                parts.append(f"session: {session}")
+            message = "\n".join(parts)
             resume_for_completed = resume
             return [
                 state.factory.completed_error(

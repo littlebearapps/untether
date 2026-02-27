@@ -118,6 +118,8 @@ Rules in `.claude/rules/` auto-load when editing matching files:
 
 ## Tests
 
+888 tests, 80% coverage threshold. Key test files:
+
 - `test_claude_control.py` — 56 tests: control requests, response routing, registry lifecycle, auto-approve/auto-deny, tool auto-approve, custom deny messages, discuss action, early toast, progressive cooldown, auto permission mode
 - `test_callback_dispatch.py` — 28 tests: callback parsing, dispatch toast/ephemeral behaviour, early answering
 - `test_exec_bridge.py` — 24 tests: ephemeral notification cleanup, approval push notifications
@@ -127,6 +129,7 @@ Rules in `.claude/rules/` auto-load when editing matching files:
 - `test_export_command.py` — 28 tests: session event recording, markdown/JSON export formatting, usage integration, session trimming
 - `test_browse_command.py` — 36 tests: path registry, directory listing, file preview, inline keyboard buttons, project-aware root resolution, security (path traversal)
 - `test_meta_line.py` — 26 tests: model name shortening, meta line formatting, ProgressTracker meta storage/snapshot, footer ordering (context/meta/resume)
+- `test_runner_utils.py` — error formatting helpers, drain_stderr capture, enriched error messages
 - `test_shutdown.py` — 4 tests: shutdown state transitions, idempotency, reset
 - `test_restart_command.py` — 3 tests: command triggers shutdown, idempotent response, command id
 

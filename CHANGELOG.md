@@ -2,6 +2,15 @@
 
 ## v0.23.5 (2026-02-27)
 
+### changes
+
+- enrich error reporting in Telegram messages and structlog across all engines [#14](https://github.com/littlebearapps/untether/issues/14)
+  - Claude errors now show session ID, resumed/new status, turn count, cost, and API duration
+  - non-zero exit codes show signal name (e.g. `SIGTERM` for rc=-15) and captured stderr excerpt
+  - stream-ended-without-result errors include session context
+  - `runner.completed` structlog includes `num_turns`, `total_cost_usd`, `duration_api_ms`
+- compact startup message formatting with hard breaks [#14](https://github.com/littlebearapps/untether/issues/14)
+
 ### docs
 
 - comprehensive documentation audit and upgrade [#13](https://github.com/littlebearapps/untether/issues/13)

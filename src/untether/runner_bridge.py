@@ -852,6 +852,12 @@ async def handle_message(
     resume_token = completed.resume or outcome.resume
     if resume_token is not None:
         resume_value = resume_token.value
+    usage_log: dict[str, object] = {}
+    if completed.usage:
+        for key in ("num_turns", "total_cost_usd", "duration_api_ms"):
+            val = completed.usage.get(key)
+            if val is not None:
+                usage_log[key] = val
     logger.info(
         "runner.completed",
         ok=run_ok,
@@ -860,6 +866,7 @@ async def handle_message(
         elapsed_s=round(elapsed, 2),
         action_count=progress_tracker.action_count,
         resume=resume_value,
+        **usage_log,
     )
     sync_resume_token(progress_tracker, completed.resume or outcome.resume)
     state = progress_tracker.snapshot(

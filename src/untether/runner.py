@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import re
+import signal
 import subprocess
 from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass
@@ -87,6 +88,40 @@ class SessionLockMixin:
         async with lock:
             async for evt in run_fn(prompt, resume_token):
                 yield evt
+
+
+def _rc_label(rc: int) -> str:
+    """Format exit code, adding signal name for negative rc values."""
+    if rc < 0:
+        try:
+            name = signal.Signals(-rc).name
+        except (ValueError, AttributeError):
+            name = f"signal {-rc}"
+        return f"rc={rc} ({name})"
+    return f"rc={rc}"
+
+
+def _stderr_excerpt(lines: list[str] | None, max_chars: int = 300) -> str | None:
+    """First ~max_chars of captured stderr, or None."""
+    if not lines:
+        return None
+    text = "\n".join(lines)
+    if len(text) > max_chars:
+        text = text[:max_chars] + "…"
+    return text
+
+
+def _session_label(
+    found_session: ResumeToken | None,
+    resume: ResumeToken | None,
+) -> str | None:
+    """Short session ID (8 chars) with resumed/new indicator."""
+    token = found_session or resume
+    if token is None:
+        return None
+    sid = token.value[:8]
+    status = "resumed" if resume is not None else "new"
+    return f"{sid} · {status}"
 
 
 class BaseRunner(SessionLockMixin):
@@ -279,8 +314,16 @@ class JsonlSubprocessRunner(BaseRunner):
         resume: ResumeToken | None,
         found_session: ResumeToken | None,
         state: Any,
+        stderr_lines: list[str] | None = None,
     ) -> list[UntetherEvent]:
-        message = f"{self.tag()} failed (rc={rc})."
+        parts = [f"{self.tag()} failed ({_rc_label(rc)})."]
+        session = _session_label(found_session, resume)
+        if session:
+            parts.append(f"session: {session}")
+        excerpt = _stderr_excerpt(stderr_lines)
+        if excerpt:
+            parts.append(excerpt)
+        message = "\n".join(parts)
         resume_for_completed = found_session or resume
         return [
             self.note_event(message, state=state),
@@ -300,7 +343,11 @@ class JsonlSubprocessRunner(BaseRunner):
         found_session: ResumeToken | None,
         state: Any,
     ) -> list[UntetherEvent]:
-        message = f"{self.tag()} finished without a result event"
+        parts = [f"{self.tag()} finished without a result event"]
+        session = _session_label(found_session, resume)
+        if session:
+            parts.append(f"session: {session}")
+        message = "\n".join(parts)
         resume_for_completed = found_session or resume
         return [
             CompletedEvent(
@@ -638,6 +685,7 @@ class JsonlSubprocessRunner(BaseRunner):
 
             rc: int | None = None
             stream = JsonlStreamState(expected_session=resume)
+            stderr_lines: list[str] = []
 
             async with anyio.create_task_group() as tg:
                 tg.start_soon(
@@ -645,6 +693,7 @@ class JsonlSubprocessRunner(BaseRunner):
                     proc.stderr,
                     logger,
                     tag,
+                    stderr_lines,
                 )
                 async for evt in self._iter_jsonl_events(
                     stdout=proc.stdout,
@@ -668,6 +717,7 @@ class JsonlSubprocessRunner(BaseRunner):
                     resume=resume,
                     found_session=found_session,
                     state=state,
+                    stderr_lines=stderr_lines or None,
                 )
                 for evt in events:
                     if isinstance(evt, CompletedEvent):

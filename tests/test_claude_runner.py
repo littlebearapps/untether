@@ -435,3 +435,82 @@ def test_rate_limit_event_returns_empty() -> None:
         event, title="claude", state=state, factory=state.factory
     )
     assert result == []
+
+
+# ===========================================================================
+# _extract_error enrichment
+# ===========================================================================
+
+
+def test_extract_error_includes_diagnostic_context() -> None:
+    """_extract_error builds multi-line diagnostic with session, turns, cost."""
+    from untether.runners.claude import _extract_error
+
+    event = claude_schema.StreamResultMessage(
+        subtype="error_during_execution",
+        duration_ms=5000,
+        duration_api_ms=3000,
+        is_error=True,
+        num_turns=2,
+        session_id="abcdef1234567890",
+        total_cost_usd=0.15,
+    )
+    result = _extract_error(event, resumed=True)
+    assert result is not None
+    assert "error_during_execution" in result
+    assert "abcdef12" in result
+    assert "resumed" in result
+    assert "turns: 2" in result
+    assert "$0.15" in result
+    assert "3000ms" in result
+
+
+def test_extract_error_new_session() -> None:
+    """_extract_error shows 'new' for non-resumed sessions."""
+    from untether.runners.claude import _extract_error
+
+    event = claude_schema.StreamResultMessage(
+        subtype="error_during_execution",
+        duration_ms=1000,
+        duration_api_ms=500,
+        is_error=True,
+        num_turns=0,
+        session_id="sess123456789012",
+    )
+    result = _extract_error(event, resumed=False)
+    assert result is not None
+    assert "new" in result
+    assert "turns: 0" in result
+
+
+def test_extract_error_not_error() -> None:
+    """_extract_error returns None for non-error results."""
+    from untether.runners.claude import _extract_error
+
+    event = claude_schema.StreamResultMessage(
+        subtype="success",
+        duration_ms=1000,
+        duration_api_ms=500,
+        is_error=False,
+        num_turns=1,
+        session_id="sess123456789012",
+    )
+    assert _extract_error(event) is None
+
+
+def test_extract_error_with_result_text() -> None:
+    """_extract_error uses result text as first line when available."""
+    from untether.runners.claude import _extract_error
+
+    event = claude_schema.StreamResultMessage(
+        subtype="error_during_execution",
+        duration_ms=1000,
+        duration_api_ms=500,
+        is_error=True,
+        num_turns=0,
+        session_id="sess123456789012",
+        result="Context window limit reached",
+    )
+    result = _extract_error(event, resumed=False)
+    assert result is not None
+    assert result.startswith("Context window limit reached")

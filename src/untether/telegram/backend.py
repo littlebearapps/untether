@@ -47,11 +47,12 @@ def _build_startup_message(
 ) -> str:
     project_aliases = sorted(set(runtime.project_aliases()), key=str.lower)
 
-    lines: list[str] = [
-        f"\N{DOG} **untether v{__version__} is ready**",
-        "",
-        f"default: `{runtime.default_engine}`",
-    ]
+    # Hard break (two trailing spaces + newline) forces line breaks in CommonMark
+    BR = "  \n"
+
+    header = f"\N{DOG} **untether v{__version__} is ready**"
+
+    details: list[str] = [f"default: `{runtime.default_engine}`"]
 
     # engines — always shown
     available_engines = list(runtime.available_engine_ids())
@@ -67,18 +68,18 @@ def _build_startup_message(
         engine_notes.append(f"failed to load: {', '.join(failed_engines)}")
     engine_list = ", ".join(available_engines) if available_engines else "none"
     if engine_notes:
-        lines.append(f"engines: `{engine_list} ({'; '.join(engine_notes)})`")
+        details.append(f"engines: `{engine_list} ({'; '.join(engine_notes)})`")
     else:
-        lines.append(f"engines: `{engine_list}`")
+        details.append(f"engines: `{engine_list}`")
 
     # projects — listed by name
     if project_aliases:
-        lines.append(f"projects: `{', '.join(project_aliases)}`")
+        details.append(f"projects: `{', '.join(project_aliases)}`")
     else:
-        lines.append("projects: `none`")
+        details.append("projects: `none`")
 
     # mode
-    lines.append(f"mode: `{session_mode}`")
+    details.append(f"mode: `{session_mode}`")
 
     # topics
     if topics.enabled:
@@ -88,29 +89,30 @@ def _build_startup_message(
         scope_label = (
             f"auto ({resolved_scope})" if topics.scope == "auto" else resolved_scope
         )
-        lines.append(f"topics: `enabled (scope={scope_label})`")
+        details.append(f"topics: `enabled (scope={scope_label})`")
     else:
-        lines.append("topics: `disabled`")
+        details.append("topics: `disabled`")
 
     # triggers
     if trigger_config and trigger_config.get("enabled"):
         n_wh = len(trigger_config.get("webhooks", []))
         n_cr = len(trigger_config.get("crons", []))
-        lines.append(f"triggers: `enabled ({n_wh} webhooks, {n_cr} crons)`")
+        details.append(f"triggers: `enabled ({n_wh} webhooks, {n_cr} crons)`")
     else:
-        lines.append("triggers: `disabled`")
+        details.append("triggers: `disabled`")
 
     # resume lines
-    lines.append(f"resume lines: `{'shown' if show_resume_line else 'hidden'}`")
+    details.append(f"resume lines: `{'shown' if show_resume_line else 'hidden'}`")
 
     # voice
-    lines.append(f"voice: `{'enabled' if voice_transcription else 'disabled'}`")
+    details.append(f"voice: `{'enabled' if voice_transcription else 'disabled'}`")
 
     # files
-    lines.append(f"files: `{'enabled' if files_enabled else 'disabled'}`")
+    details.append(f"files: `{'enabled' if files_enabled else 'disabled'}`")
 
-    lines.append(f"working in: `{startup_pwd}`")
-    return "\n".join(lines)
+    details.append(f"working in: `{startup_pwd}`")
+
+    return header + "\n\n" + BR.join(details)
 
 
 class TelegramBackend(TransportBackend):
