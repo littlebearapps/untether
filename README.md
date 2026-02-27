@@ -1,4 +1,6 @@
-<h1 align="center">Untether</h1>
+<p align="center">
+  <img src="docs/assets/untether-logo-full.svg" height="200" alt="Untether" />
+</p>
 
 <p align="center">
   <strong>Telegram bridge for AI coding agents.</strong><br>
