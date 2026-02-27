@@ -1,5 +1,24 @@
 # changelog
 
+## v0.24.0 (2026-02-27)
+
+### changes
+
+- agent context preamble — configurable `[preamble]` injects Telegram context into every runner prompt, informing agents they're on Telegram and requesting structured end-of-task summaries; engine-agnostic (Claude, Codex, OpenCode, Pi) [#21](https://github.com/littlebearapps/untether/issues/21)
+- post-outline Approve/Deny buttons — after "Pause & Outline Plan", Claude writes the outline then Approve/Deny buttons appear automatically in Telegram; no need to type "approved" [#22](https://github.com/littlebearapps/untether/issues/22)
+
+### fixes
+
+- improved discuss denial message for resumed sessions — explicitly tells Claude to rewrite the outline even if one exists in prior context [#23](https://github.com/littlebearapps/untether/issues/23)
+- discuss cooldown state cleaned up on session end — prevents stale cooldown leaking into resumed runs [#23](https://github.com/littlebearapps/untether/issues/23)
+
+### docs
+
+- update plan-mode how-to with post-outline approval flow
+- update control-channel rule with new registries and discuss-approval mechanism
+- update CLAUDE.md feature list with preamble and discuss buttons
+- update site URL to `https://littlebearapps.com/tools/untether/`
+
 ## v0.23.5 (2026-02-27)
 
 ### changes

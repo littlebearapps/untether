@@ -2,7 +2,7 @@
 site_name = "untether"
 site_description = "Run coding agents on your computer, control them via Telegram. Send tasks from anywhere, stream progress live, pick up where you left off at the terminal."
 site_author = "Little Bear Apps"
-site_url = "https://github.com/littlebearapps/untether"
+site_url = "https://littlebearapps.com/tools/untether/"
 repo_url = "https://github.com/littlebearapps/untether"
 repo_name = "littlebearapps/untether"
 edit_uri = "edit/master/docs/"

@@ -939,7 +939,7 @@ async def test_run_main_loop_allows_allowed_sender() -> None:
     await run_main_loop(cfg, poller)
 
     assert runner.calls
-    assert runner.calls[0][0] == "hello"
+    assert runner.calls[0][0].endswith("hello")
 
 
 def test_cancel_command_accepts_extra_text() -> None:
@@ -1755,7 +1755,7 @@ async def test_run_main_loop_ignores_duplicate_update_id() -> None:
     await run_main_loop(cfg, poller)
 
     assert len(runner.calls) == 1
-    assert runner.calls[0][0] == "first"
+    assert runner.calls[0][0].endswith("first")
 
 
 @pytest.mark.anyio
@@ -2089,7 +2089,7 @@ async def test_run_main_loop_prompt_upload_uses_caption_directives(
     assert saved_path.read_bytes() == payload
     assert runner.calls
     prompt_text, _ = runner.calls[0]
-    assert prompt_text.startswith("do thing")
+    assert "do thing" in prompt_text
     assert "/other" not in prompt_text
     assert "[uploaded file: incoming/hello.txt]" in prompt_text
 
@@ -2164,7 +2164,7 @@ async def test_run_main_loop_voice_transcript_preserves_directive(
 
     assert not claude_runner.calls
     assert len(codex_runner.calls) == 1
-    assert codex_runner.calls[0][0].startswith("(voice transcribed) do thing")
+    assert "(voice transcribed) do thing" in codex_runner.calls[0][0]
 
 
 @pytest.mark.anyio
@@ -2244,7 +2244,7 @@ async def test_run_main_loop_debounces_forwarded_messages_preserves_directives()
     assert not claude_runner.calls
     assert len(codex_runner.calls) == 1
     prompt_text, _ = codex_runner.calls[0]
-    assert prompt_text == "summarize these\n\na\n\nb\n\nc"
+    assert prompt_text.endswith("summarize these\n\na\n\nb\n\nc")
 
 
 @pytest.mark.anyio
@@ -2368,7 +2368,7 @@ async def test_run_main_loop_forwarded_document_still_uploads(
     assert saved_path.read_bytes() == payload
     assert runner.calls
     prompt_text, _ = runner.calls[0]
-    assert prompt_text.startswith("do thing")
+    assert "do thing" in prompt_text
     assert "[uploaded file: incoming/hello.txt]" in prompt_text
 
 

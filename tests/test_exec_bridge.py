@@ -235,7 +235,7 @@ async def test_handle_message_strips_resume_line_from_prompt() -> None:
 
     assert runner.calls
     prompt, passed_resume = runner.calls[0]
-    assert prompt == "do this\nand that"
+    assert prompt.endswith("do this\nand that")
     assert passed_resume == resume
 
 
