@@ -1003,3 +1003,67 @@ def test_exit_plan_mode_auto_mode_skips_cooldown() -> None:
     assert events == []
     assert "req-auto-cd" in state.auto_approve_queue
     assert state.auto_deny_queue == []
+
+
+# ---------------------------------------------------------------------------
+# Timeout auto-deny (prevents hanging — see takopi #215)
+# ---------------------------------------------------------------------------
+
+
+def test_expired_control_request_queues_auto_deny() -> None:
+    """Expired control requests should be auto-denied, not just cleaned up.
+
+    Without sending a deny response, the subprocess hangs indefinitely
+    waiting for a control_response that never comes.
+    See: https://github.com/banteg/takopi/issues/215
+    """
+    import time as _time
+
+    state, factory = _make_state_with_session("sess-timeout")
+
+    # AskUserQuestion requires approval (not auto-approved), so it goes to pending
+    old_event = _decode_event(
+        {
+            "type": "control_request",
+            "request_id": "req-old",
+            "request": {
+                "subtype": "can_use_tool",
+                "tool_name": "AskUserQuestion",
+                "input": {"question": "Which database?"},
+            },
+        }
+    )
+    translate_claude_event(old_event, title="claude", state=state, factory=factory)
+
+    # Verify it was registered as pending
+    assert "req-old" in state.pending_control_requests
+
+    # Backdate the request to be older than the 5-minute timeout
+    evt_data, _ = state.pending_control_requests["req-old"]
+    state.pending_control_requests["req-old"] = (evt_data, _time.time() - 301.0)
+
+    # Trigger a NEW control request — the cleanup runs when processing new requests
+    new_event = _decode_event(
+        {
+            "type": "control_request",
+            "request_id": "req-new",
+            "request": {
+                "subtype": "can_use_tool",
+                "tool_name": "AskUserQuestion",
+                "input": {"question": "Which framework?"},
+            },
+        }
+    )
+    translate_claude_event(new_event, title="claude", state=state, factory=factory)
+
+    # The expired request should have been removed from pending
+    assert "req-old" not in state.pending_control_requests
+
+    # CRITICAL: It should have been queued for auto-deny (not just discarded)
+    deny_ids = [rid for rid, _ in state.auto_deny_queue]
+    assert "req-old" in deny_ids, (
+        "Expired request must be auto-denied to unblock subprocess"
+    )
+
+    # The new request should still be pending
+    assert "req-new" in state.pending_control_requests

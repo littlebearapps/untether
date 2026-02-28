@@ -100,6 +100,7 @@ _OUTLINE_MIN_CHARS = 200
 # A1: Pending AskUserQuestion requests: request_id -> question text
 # When Claude asks a question, the user can reply via Telegram text.
 _PENDING_ASK_REQUESTS: dict[str, str] = {}
+CONTROL_REQUEST_TIMEOUT_SECONDS: float = 300.0  # 5 minutes
 DISCUSS_COOLDOWN_BASE_SECONDS: float = 30.0
 DISCUSS_COOLDOWN_MAX_SECONDS: float = 120.0
 
@@ -708,17 +709,23 @@ def translate_claude_event(
                     session_id=session_id,
                 )
 
-            # Clean up expired requests (older than timeout)
+            # Clean up expired requests (older than timeout).
+            # Send auto-deny to unblock the subprocess — without this,
+            # Claude blocks forever waiting for a response that never comes.
+            # See: https://github.com/banteg/takopi/issues/215
             current_time = time.time()
             expired = [
                 rid
                 for rid, (_, timestamp) in state.pending_control_requests.items()
-                if current_time - timestamp > 300.0  # 5 minutes
+                if current_time - timestamp > CONTROL_REQUEST_TIMEOUT_SECONDS
             ]
             for rid in expired:
                 del state.pending_control_requests[rid]
                 _REQUEST_TO_INPUT.pop(rid, None)
-                logger.warning("control_request.expired", request_id=rid)
+                state.auto_deny_queue.append(
+                    (rid, "Request timed out — no response from user within 5 minutes.")
+                )
+                logger.warning("control_request.expired_auto_deny", request_id=rid)
 
             # Check max pending limit
             if len(state.pending_control_requests) > 100:
@@ -823,7 +830,7 @@ class ClaudeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
     supports_control_channel: bool = True
     _pty_master_fd: int | None = None  # legacy PTY approach (non-permission mode)
     _proc_stdin: Any | None = None  # PIPE stdin for control channel (permission mode)
-    _control_timeout_seconds: float = 300.0  # 5 minutes
+    _control_timeout_seconds: float = CONTROL_REQUEST_TIMEOUT_SECONDS
     _max_pending_control_requests: int = 100
 
     def format_resume(self, token: ResumeToken) -> str:
