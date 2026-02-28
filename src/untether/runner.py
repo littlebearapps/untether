@@ -27,6 +27,8 @@ from .utils.paths import get_run_base_dir
 from .utils.streams import drain_stderr, iter_bytes_lines
 from .utils.subprocess import manage_subprocess
 
+_lock_logger = get_logger(__name__)
+
 
 class ResumeTokenMixin:
     engine: EngineId
@@ -148,10 +150,16 @@ class BaseRunner(SessionLockMixin):
                     lock = self.lock_for(evt.resume)
                     await lock.acquire()
                     acquired = True
+                    _lock_logger.debug(
+                        "session_lock.acquired",
+                        session_id=evt.resume.value,
+                        engine=str(self.engine),
+                    )
                 yield evt
         finally:
             if acquired and lock is not None:
                 lock.release()
+                _lock_logger.debug("session_lock.released", engine=str(self.engine))
 
     async def run_impl(
         self, prompt: str, resume: ResumeToken | None

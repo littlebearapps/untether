@@ -6,7 +6,7 @@
         "hooks": [
           {
             "type": "prompt",
-            "prompt": "Check if this command is restarting the Untether service:\n\nCommand: {{tool_input.command}}\n\nIf it contains 'systemctl --user restart untether' or 'systemctl --user start untether', respond with:\nREMINDER: Before restarting, verify:\n1. Tests pass: `uv run pytest --ignore=tests/test_cli_helpers.py`\n2. Lint clean: `uv run ruff check src/`\n3. Any config changes in untether.toml are intentional\n\nOtherwise respond: PASS"
+            "prompt": "Check if this command interacts with Untether systemd services:\n\nCommand: {{tool_input.command}}\n\nRules:\n1. If it contains 'systemctl' with 'untether-dev' (e.g. restart/start/stop untether-dev): this is the DEV service, which is correct for testing local changes. Respond with:\nDEV SERVICE: Before restarting untether-dev, verify:\n1. Tests pass: `uv run pytest`\n2. Lint clean: `uv run ruff check src/`\n\n2. If it contains 'systemctl' with just 'untether' (NOT 'untether-dev') and 'restart' or 'start' (e.g. 'restart untether', 'start untether'): this is the PRODUCTION service. Respond with:\nBLOCKED: Do NOT restart production (untether.service). Production runs a frozen PyPI wheel — local code changes have no effect on it. Restarting production during development is always wrong.\n\nTo test local changes, use the dev service instead:\n  systemctl --user restart untether-dev\n\nProduction should only be restarted after `pipx upgrade untether` following a PyPI release.\n\n3. If it contains 'pipx upgrade untether' followed by 'systemctl' restart of production: this is the correct production upgrade path. Respond: PASS\n\n4. Otherwise respond: PASS"
           }
         ]
       },

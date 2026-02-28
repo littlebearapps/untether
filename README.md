@@ -97,6 +97,7 @@ That's it. Your agent runs on your machine, streams progress to Telegram, and yo
 | `/file put/get` | Transfer files |
 | `/topic` | Create or bind forum topics |
 | `/restart` | Gracefully restart Untether (drains active runs first) |
+| `/verbose` | Toggle verbose progress mode (show tool details) |
 
 Prefix any message with `/<engine>` to pick an engine for that task, or `/<project>` to target a repo:
 

@@ -25,6 +25,9 @@ Untether adds interactive permission control, plan mode support, and several UX 
 - **Graceful restart** — `/restart` command drains active runs before restarting; SIGTERM also triggers graceful drain
 - **Compact startup message** — version number, conditional diagnostics (only shows mode/topics/triggers/engines when they carry signal), project count instead of full list
 - **Model/mode footer** — final messages show model name + permission mode (e.g. `🏷 sonnet · plan`) from `StartedEvent.meta`; all 4 engines populate model info
+- **`/verbose`** — toggle verbose progress mode per chat; shows tool details (file paths, commands, patterns) in progress messages
+- **`[progress]` config** — global verbosity and max_actions settings in `untether.toml`
+- **Pi context compaction** — `AutoCompactionStart`/`AutoCompactionEnd` events rendered as progress actions
 
 See `.claude/skills/claude-stream-json/` and `.claude/rules/control-channel.md` for implementation details.
 
@@ -56,6 +59,7 @@ Telegram <-> TelegramPresenter <-> RunnerBridge <-> Runner (claude/codex/opencod
 | `commands/export.py` | `/export` command |
 | `commands/browse.py` | `/browse` file browser |
 | `commands/restart.py` | `/restart` graceful restart command |
+| `commands/verbose.py` | `/verbose` toggle command |
 | `shutdown.py` | Graceful shutdown state and drain logic |
 | `telegram/bridge.py` | Telegram message rendering |
 | `telegram/loop.py` | Telegram update loop, signal handlers, drain-then-exit |
@@ -99,7 +103,7 @@ Project hooks in `.claude/hooks.json` fire automatically:
 
 | Hook | Trigger | What it does |
 |------|---------|-------------|
-| pre-deploy-validation | `systemctl restart untether` | Reminds to run pytest + ruff first |
+| dev-workflow-guard | `systemctl` with `untether` | Blocks production restarts during dev; guides to `untether-dev`; allows `pipx upgrade` path |
 | runner-edit-context | Edit/Write to `runners/*.py` | 3-event contract, PTY lifecycle, test/doc reminders |
 | schema-edit-context | Edit/Write to `schemas/*.py` | msgspec impact on parsing, fixture updates |
 | telegram-edit-context | Edit/Write to `telegram/*.py` | Outbox model, callback_data limits, early answering |
@@ -116,10 +120,11 @@ Rules in `.claude/rules/` auto-load when editing matching files:
 | `control-channel.md` | `runners/claude.py`, `claude_control.py` | PTY lifecycle, session registries, cooldown mechanics |
 | `testing-conventions.md` | `tests/**` | pytest+anyio, stub patterns, 80% coverage threshold |
 | `release-discipline.md` | `CHANGELOG.md`, `pyproject.toml` | GitHub issue linking, changelog format, semantic versioning |
+| `dev-workflow.md` | `src/untether/**` | Dev vs production separation, never restart production for testing, always use untether-dev |
 
 ## Tests
 
-896 tests, 80% coverage threshold. Key test files:
+956 tests, 80% coverage threshold. Key test files:
 
 - `test_claude_control.py` — 56 tests: control requests, response routing, registry lifecycle, auto-approve/auto-deny, tool auto-approve, custom deny messages, discuss action, early toast, progressive cooldown, auto permission mode
 - `test_callback_dispatch.py` — 28 tests: callback parsing, dispatch toast/ephemeral behaviour, early answering
@@ -134,25 +139,42 @@ Rules in `.claude/rules/` auto-load when editing matching files:
 - `test_shutdown.py` — 4 tests: shutdown state transitions, idempotency, reset
 - `test_preamble.py` — 5 tests: default preamble injection, disabled preamble, custom text override, empty text disables, settings defaults
 - `test_restart_command.py` — 3 tests: command triggers shutdown, idempotent response, command id
+- `test_cooldown_bypass.py` — 3 tests: outline bypass, rapid retry auto-deny, no-text auto-deny
+- `test_verbose_progress.py` — 18 tests: format_verbose_detail() for each tool type, MarkdownFormatter verbose mode, compact regression
+- `test_verbose_command.py` — 8 tests: /verbose toggle on/off/clear, backend id
+- `test_pi_compaction.py` — 7 tests: compaction start/end, aborted, no tokens, sequence
 
 ## Development
 
+Two instances run on lba-1 — production (PyPI release) and dev (local editable source). See `docs/reference/dev-instance.md` for full quickref.
+
+| | Production (`@hetz_lba1_bot`) | Dev (`@untether_dev_bot`) |
+|---|---|---|
+| **Service** | `untether.service` | `untether-dev.service` |
+| **Binary** | `~/.local/bin/untether` (pipx) | `.venv/bin/untether` (editable) |
+| **Config** | `~/.untether/untether.toml` | `~/.untether-dev/untether.toml` |
+| **Source** | Frozen PyPI release | Local `/home/nathan/untether/src/` |
+
+### Dev/production separation (CRITICAL)
+
+- **NEVER restart `untether.service` (production)** to test local code changes. Production runs a frozen PyPI wheel — local edits have no effect on it. Restarting production during development is always wrong.
+- **ALWAYS use `untether-dev.service`** for testing. It runs the local editable source.
+- **ALWAYS test via `@untether_dev_bot`** before merging/releasing. Production (`@hetz_lba1_bot`) must only run publicly released PyPI versions.
+- Production is only restarted after `pipx upgrade untether` following a PyPI release.
+
+See `.claude/rules/dev-workflow.md` for full rules.
+
 ```bash
-# Install (editable)
-pipx install -e /home/nathan/untether
+# Dev cycle: edit source → restart dev → test via @untether_dev_bot
+systemctl --user restart untether-dev
+journalctl --user -u untether-dev -f
 
-# Run as systemd service
-systemctl --user restart untether
-journalctl --user -u untether -f
+# Promote to production (only after PyPI release)
+pipx upgrade untether && systemctl --user restart untether
 
-# Config
-~/.untether/untether.toml
-
-# Tests
-cd /home/nathan/untether && uv run pytest
-
-# Lint
-cd /home/nathan/untether && uv run ruff check src/
+# Tests / lint
+uv run pytest
+uv run ruff check src/
 ```
 
 ## CI Pipeline

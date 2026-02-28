@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from pathlib import Path
 from typing import Annotated, Any, ClassVar, Literal
 from collections.abc import Iterable
@@ -141,6 +142,13 @@ class PreambleSettings(BaseModel):
     text: str | None = None
 
 
+class ProgressSettings(BaseModel):
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    verbosity: Literal["compact", "verbose"] = "compact"
+    max_actions: int = Field(default=5, ge=0, le=50)
+
+
 class UntetherSettings(BaseSettings):
     model_config = SettingsConfigDict(
         extra="allow",
@@ -161,6 +169,7 @@ class UntetherSettings(BaseSettings):
     cost_budget: CostBudgetSettings = Field(default_factory=CostBudgetSettings)
     footer: FooterSettings = Field(default_factory=FooterSettings)
     preamble: PreambleSettings = Field(default_factory=PreambleSettings)
+    progress: ProgressSettings = Field(default_factory=ProgressSettings)
 
     @model_validator(mode="before")
     @classmethod
@@ -384,7 +393,12 @@ def require_telegram(settings: UntetherSettings, config_path: Path) -> tuple[str
 
 
 def _resolve_config_path(path: str | Path | None) -> Path:
-    return Path(path).expanduser() if path else HOME_CONFIG_PATH
+    if path:
+        return Path(path).expanduser()
+    env_path = os.environ.get("UNTETHER_CONFIG_PATH")
+    if env_path:
+        return Path(env_path).expanduser()
+    return HOME_CONFIG_PATH
 
 
 def _ensure_config_file(cfg_path: Path) -> None:

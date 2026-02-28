@@ -66,6 +66,18 @@ required `type` field. These are `AgentSessionEvent` objects from
 {"type":"tool_execution_end","toolCallId":"tool_1","toolName":"bash","result":{"content":[{"type":"text","text":"ok"}],"details":{}},"isError":false}
 ```
 
+### `auto_compaction_start`
+
+```json
+{"type":"auto_compaction_start","reason":"context_limit"}
+```
+
+### `auto_compaction_end`
+
+```json
+{"type":"auto_compaction_end","result":{"newNumTokens":42000},"aborted":false}
+```
+
 ## Notes
 
 * `message_end` with `role = "assistant"` contains the final assistant text.

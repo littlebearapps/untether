@@ -51,6 +51,7 @@ This line is parsed from replies and takes precedence over new directives.
 | `/browse` | Browse project files with inline keyboard navigation. |
 | `/ping` | Health check — replies with uptime. |
 | `/restart` | Gracefully drain active runs and restart Untether. |
+| `/verbose` | Toggle verbose progress mode (on/off/clear). Shows tool details in progress messages. |
 | `/new` | Clear stored sessions for the current scope (topic/chat). |
 
 Notes:

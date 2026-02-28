@@ -4,7 +4,7 @@ import os
 import textwrap
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from .model import Action, ActionEvent, StartedEvent, UntetherEvent
 from .progress import ProgressState
@@ -148,6 +148,10 @@ def format_action_title(action: Action, *, command_width: int | None) -> str:
     if kind == "file_change":
         return format_file_change_title(action, command_width=command_width)
     if kind in {"note", "warning"}:
+        # Multi-line titles (e.g. plan outlines) are intentionally long;
+        # don't truncate them — the body trim (3500 chars) handles overflow.
+        if "\n" in title:
+            return title
         return shorten(title, command_width)
     return shorten(title, command_width)
 
@@ -167,6 +171,90 @@ def format_action_line(
     return (
         f"{status} {format_action_title(action, command_width=command_width)}{suffix}"
     )
+
+
+_VERBOSE_DETAIL_WIDTH = 120
+
+
+def format_verbose_detail(action: Action) -> str | None:
+    """Extract a compact detail line from action.detail for verbose mode.
+
+    Returns a single line like ``"→ src/settings.py (4821 chars)"`` or None
+    if no meaningful detail is available.
+    """
+    detail = action.detail or {}
+    name = detail.get("name", "")
+    inp = detail.get("input") or detail.get("arguments") or detail.get("args") or {}
+    if not isinstance(inp, dict):
+        inp = {}
+
+    # Bash/command: show command text
+    if action.kind == "command":
+        cmd = inp.get("command", "") if isinstance(inp, dict) else str(inp)
+        if cmd:
+            return shorten(cmd, 200)
+        return None
+
+    # Read: show file path + result size
+    if name in ("Read", "read"):
+        path = inp.get("file_path", "")
+        if path:
+            result_len = detail.get("result_len")
+            suffix = f" ({result_len} chars)" if result_len else ""
+            return f"→ {relativize_path(path)}{suffix}"
+        return None
+
+    # Edit: show file path + brief old text
+    if name in ("Edit", "edit"):
+        path = inp.get("file_path", "")
+        if path:
+            old = shorten(str(inp.get("old_string", "")), 40)
+            return (
+                f"→ {relativize_path(path)} `{old}`→…"
+                if old
+                else f"→ {relativize_path(path)}"
+            )
+        return None
+
+    # Write: show file path
+    if name in ("Write", "write"):
+        path = inp.get("file_path", "")
+        if path:
+            return f"→ {relativize_path(path)}"
+        return None
+
+    # Grep/Glob: show pattern
+    if name in ("Grep", "grep", "Glob", "glob"):
+        pattern = inp.get("pattern", "")
+        if pattern:
+            return f"→ `{shorten(pattern, 60)}`"
+        return None
+
+    # Task/subagent: show description
+    if name in ("Task",):
+        desc = inp.get("description", "")
+        if desc:
+            return f"→ {shorten(desc, 80)}"
+        return None
+
+    # WebSearch: show query
+    if name in ("WebSearch",):
+        query = inp.get("query", "")
+        if query:
+            return f'→ "{shorten(query, 80)}"'
+        return None
+
+    # MCP tools: show server:tool
+    server = detail.get("server", "")
+    tool = detail.get("tool", name)
+    if server:
+        return f"→ {server}:{tool}"
+
+    # Fallback: show first short string arg
+    for v in inp.values():
+        if isinstance(v, str) and v and len(v) < 200:
+            return f"→ {shorten(v, 80)}"
+    return None
 
 
 def render_event_cli(event: UntetherEvent) -> list[str]:
@@ -218,9 +306,11 @@ class MarkdownFormatter:
         *,
         max_actions: int = 5,
         command_width: int | None = MAX_PROGRESS_CMD_LEN,
+        verbosity: Literal["compact", "verbose"] = "compact",
     ) -> None:
         self.max_actions = max(0, int(max_actions))
         self.command_width = command_width
+        self.verbosity = verbosity
 
     def render_progress_parts(
         self,
@@ -277,15 +367,20 @@ class MarkdownFormatter:
     def _format_actions(self, state: ProgressState) -> list[str]:
         actions = list(state.actions)
         actions = [] if self.max_actions == 0 else actions[-self.max_actions :]
-        return [
-            format_action_line(
+        lines: list[str] = []
+        for action_state in actions:
+            line = format_action_line(
                 action_state.action,
                 action_state.display_phase,
                 action_state.ok,
                 command_width=self.command_width,
             )
-            for action_state in actions
-        ]
+            lines.append(line)
+            if self.verbosity == "verbose":
+                detail_line = format_verbose_detail(action_state.action)
+                if detail_line:
+                    lines.append(f"  {shorten(detail_line, _VERBOSE_DETAIL_WIDTH)}")
+        return lines
 
     @staticmethod
     def _assemble_body(lines: list[str]) -> str | None:
