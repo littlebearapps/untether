@@ -18,16 +18,12 @@ _SESSION_HISTORY: dict[_SessionKey, tuple[float, list[dict], dict | None]] = {}
 _MAX_SESSIONS = 20
 
 
-def record_session_event(
-    session_id: str, event: dict, *, channel_id: int = 0
-) -> None:
+def record_session_event(session_id: str, event: dict, *, channel_id: int = 0) -> None:
     """Record an event for later export."""
     key: _SessionKey = (channel_id, session_id)
     entry = _SESSION_HISTORY.get(key)
     if entry is None:
-        logger.debug(
-            "export.session.new", session_id=session_id, channel_id=channel_id
-        )
+        logger.debug("export.session.new", session_id=session_id, channel_id=channel_id)
         _SESSION_HISTORY[key] = (time.time(), [event], None)
     else:
         ts, events, usage = entry
@@ -40,9 +36,7 @@ def record_session_event(
         logger.debug("export.session.trimmed", removed=oldest_key)
 
 
-def record_session_usage(
-    session_id: str, usage: dict, *, channel_id: int = 0
-) -> None:
+def record_session_usage(session_id: str, usage: dict, *, channel_id: int = 0) -> None:
     """Record final usage data for a session."""
     key: _SessionKey = (channel_id, session_id)
     entry = _SESSION_HISTORY.get(key)
@@ -156,9 +150,7 @@ class ExportCommand:
 
         # Filter sessions belonging to this chat
         chat_id = ctx.message.channel_id
-        chat_sessions = {
-            k: v for k, v in _SESSION_HISTORY.items() if k[0] == chat_id
-        }
+        chat_sessions = {k: v for k, v in _SESSION_HISTORY.items() if k[0] == chat_id}
 
         if not chat_sessions:
             return CommandResult(

@@ -80,7 +80,9 @@ def _detect_cli_version(cmd: str) -> str | None:
 
 def _build_versions_line(engine_ids: tuple[str, ...]) -> str | None:
     """Build a ``py X.Y.Z · engine X.Y.Z`` versions line."""
-    py = f"py {sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}"
+    py = (
+        f"py {sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}"
+    )
     parts = [py]
     for engine in sorted(engine_ids):
         version = _detect_cli_version(engine)

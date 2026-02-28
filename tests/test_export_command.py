@@ -76,9 +76,17 @@ class TestExportChatIsolation:
     async def test_export_returns_own_chat_session(self):
         import time
 
-        record_session_event("sess_a", {"type": "started", "engine": "claude", "title": "opus"}, channel_id=CHAT_A)
+        record_session_event(
+            "sess_a",
+            {"type": "started", "engine": "claude", "title": "opus"},
+            channel_id=CHAT_A,
+        )
         time.sleep(0.01)
-        record_session_event("sess_b", {"type": "started", "engine": "opencode", "title": "opencode"}, channel_id=CHAT_B)
+        record_session_event(
+            "sess_b",
+            {"type": "started", "engine": "opencode", "title": "opencode"},
+            channel_id=CHAT_B,
+        )
 
         cmd = ExportCommand()
 

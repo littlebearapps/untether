@@ -313,7 +313,9 @@ def test_detect_cli_version_returns_version(monkeypatch: pytest.MonkeyPatch) -> 
     import subprocess as sp
 
     def fake_run(args, **kwargs):
-        return sp.CompletedProcess(args=args, returncode=0, stdout="myengine v1.2.3\n", stderr="")
+        return sp.CompletedProcess(
+            args=args, returncode=0, stdout="myengine v1.2.3\n", stderr=""
+        )
 
     monkeypatch.setattr(sp, "run", fake_run)
     result = telegram_backend._detect_cli_version("myengine")

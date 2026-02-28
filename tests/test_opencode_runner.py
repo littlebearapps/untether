@@ -136,7 +136,11 @@ def test_translate_accumulates_text() -> None:
             {
                 "type": "step_finish",
                 "sessionID": "ses_test123",
-                "part": {"reason": "stop", "tokens": {"input": 100, "output": 10}, "cost": 0.005},
+                "part": {
+                    "reason": "stop",
+                    "tokens": {"input": 100, "output": 10},
+                    "cost": 0.005,
+                },
             }
         ),
         title="opencode",
@@ -169,7 +173,12 @@ def test_translate_accumulates_cost_across_steps() -> None:
                 "part": {
                     "reason": "tool-calls",
                     "cost": 0.003,
-                    "tokens": {"input": 500, "output": 50, "reasoning": 0, "cache": {"read": 100, "write": 0}},
+                    "tokens": {
+                        "input": 500,
+                        "output": 50,
+                        "reasoning": 0,
+                        "cache": {"read": 100, "write": 0},
+                    },
                 },
             }
         ),
@@ -186,7 +195,12 @@ def test_translate_accumulates_cost_across_steps() -> None:
                 "part": {
                     "reason": "stop",
                     "cost": 0.002,
-                    "tokens": {"input": 600, "output": 30, "reasoning": 10, "cache": {"read": 200, "write": 50}},
+                    "tokens": {
+                        "input": 600,
+                        "output": 30,
+                        "reasoning": 10,
+                        "cache": {"read": 200, "write": 50},
+                    },
                 },
             }
         ),
