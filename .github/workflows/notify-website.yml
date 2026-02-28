@@ -1,0 +1,20 @@
+name: Notify Website
+
+# Triggers a rebuild of littlebearapps.com when a new release is published,
+# so version badges and changelogs update automatically.
+
+on:
+  release:
+    types: [published]
+
+jobs:
+  notify:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Trigger website rebuild
+        run: |
+          curl -s -X POST \
+            -H "Accept: application/vnd.github+json" \
+            -H "Authorization: Bearer ${{ secrets.WEBSITE_DISPATCH_TOKEN }}" \
+            https://api.github.com/repos/littlebearapps/littlebearapps.com/dispatches \
+            -d '{"event_type":"release-published","client_payload":{"repo":"untether","tag":"${{ github.event.release.tag_name }}"}}'
