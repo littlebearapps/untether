@@ -22,6 +22,31 @@ _MAX_ENTRIES = 20  # max items shown in one listing
 _FILE_PREVIEW_LINES = 25
 _FILE_PREVIEW_CHARS = 2000
 
+# File extension -> code block language tag
+_EXT_LANG: dict[str, str] = {
+    ".py": "python",
+    ".js": "javascript",
+    ".ts": "typescript",
+    ".tsx": "typescript",
+    ".jsx": "javascript",
+    ".json": "json",
+    ".yaml": "yaml",
+    ".yml": "yaml",
+    ".toml": "toml",
+    ".sh": "bash",
+    ".bash": "bash",
+    ".zsh": "bash",
+    ".rs": "rust",
+    ".go": "go",
+    ".rb": "ruby",
+    ".sql": "sql",
+    ".html": "html",
+    ".css": "css",
+    ".md": "markdown",
+    ".xml": "xml",
+    ".dockerfile": "dockerfile",
+}
+
 
 def _register_path(path: str) -> int:
     """Register a path and return a short numeric ID."""
@@ -248,7 +273,7 @@ class BrowseCommand:
                     text="Path expired. Use /browse to start over.",
                     notify=True,
                 )
-            return self._view_file(Path(path_str), root)
+            return await self._view_file(Path(path_str), root, ctx)
         # Direct path argument
         if args:
             target = (root / args).resolve()
@@ -258,7 +283,7 @@ class BrowseCommand:
             target = root
 
         if target.is_file():
-            return self._view_file(target, root)
+            return await self._view_file(target, root, ctx)
         if target.is_dir():
             return await self._browse_dir(target, root, ctx)
         return CommandResult(text=f"Not found: {args}", notify=True)
@@ -293,7 +318,9 @@ class BrowseCommand:
             return None  # Already sent
         return CommandResult(text=text, notify=True)
 
-    def _view_file(self, filepath: Path, root: Path) -> CommandResult:
+    async def _view_file(
+        self, filepath: Path, root: Path, ctx: CommandContext
+    ) -> CommandResult | None:
         if not filepath.is_file():
             return CommandResult(text="File not found.", notify=True)
         if not filepath.is_relative_to(root):
@@ -301,11 +328,22 @@ class BrowseCommand:
 
         rel = filepath.relative_to(root)
         preview = _read_file_preview(filepath)
-        text = f"📄 {rel}\n\n```\n{preview}\n```"
+        lang = _EXT_LANG.get(filepath.suffix.lower(), "")
+        text = f"📄 {rel}\n\n```{lang}\n{preview}\n```"
         # Truncate to Telegram limit
         if len(text) > 3500:
             text = text[:3500] + "\n…(truncated)```"
-        return CommandResult(text=text, notify=True)
+
+        # Back button to parent directory
+        parent_pid = _register_path(str(filepath.parent))
+        buttons = [[{"text": "📂 Back", "callback_data": f"browse:d:{parent_pid}"}]]
+
+        msg = RenderedMessage(
+            text=text,
+            extra={"reply_markup": {"inline_keyboard": buttons}},
+        )
+        await ctx.executor.send(msg, reply_to=ctx.message, notify=True)
+        return None  # Already sent
 
 
 BACKEND: CommandBackend = BrowseCommand()
