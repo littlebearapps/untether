@@ -119,6 +119,42 @@ def _apply_preamble(prompt: str) -> str:
     return f"{text}\n\n---\n\n{prompt}"
 
 
+def _resolve_presenter(default_presenter: Presenter, channel_id: int) -> Presenter:
+    """Return a presenter with the effective verbosity for this channel.
+
+    Checks for a per-chat /verbose override. If one exists and differs from
+    the default presenter's formatter, creates a new presenter with the
+    overridden verbosity. Otherwise returns the default.
+    """
+    try:
+        from .telegram.commands.verbose import get_verbosity_override
+        from .telegram.bridge import TelegramPresenter
+        from .markdown import MarkdownFormatter
+
+        override = get_verbosity_override(channel_id)
+        if override is None:
+            return default_presenter
+        # Only create a new presenter if the override differs
+        if (
+            isinstance(default_presenter, TelegramPresenter)
+            and default_presenter._formatter.verbosity == override
+        ):
+            return default_presenter
+        if isinstance(default_presenter, TelegramPresenter):
+            formatter = MarkdownFormatter(
+                max_actions=default_presenter._formatter.max_actions,
+                command_width=default_presenter._formatter.command_width,
+                verbosity=override,
+            )
+            return TelegramPresenter(
+                formatter=formatter,
+                message_overflow=default_presenter._message_overflow,
+            )
+    except Exception:  # noqa: BLE001
+        logger.debug("resolve_presenter.failed", exc_info=True)
+    return default_presenter
+
+
 async def _maybe_append_usage_footer(
     msg: RenderedMessage,
     *,
@@ -141,7 +177,7 @@ async def _maybe_append_usage_footer(
         if always_show:
             compact = format_usage_compact(data)
             if compact:
-                footer = f"\n\n\u26a1 {compact}"
+                footer = f"\n\u26a1 {compact}"
                 return RenderedMessage(text=msg.text + footer, extra=msg.extra)
             return msg
 
@@ -159,11 +195,11 @@ async def _maybe_append_usage_footer(
         reset = _time_until(five_hour["resets_at"])
 
         if pct_5h >= 100:
-            footer = f"\n\n\U0001f6d1 5h limit hit \u2014 resets in {reset}"
+            footer = f"\n\U0001f6d1 5h limit hit \u2014 resets in {reset}"
         elif pct_5h >= _USAGE_CRITICAL_PCT:
-            footer = f"\n\n\u26a0\ufe0f 5h: {pct_5h:.0f}% | Weekly: {pct_7d:.0f}% \u2014 approaching limit (resets in {reset})"
+            footer = f"\n\u26a0\ufe0f 5h: {pct_5h:.0f}% | Weekly: {pct_7d:.0f}% \u2014 approaching limit (resets in {reset})"
         else:
-            footer = f"\n\n\u26a1 5h: {pct_5h:.0f}% | Weekly: {pct_7d:.0f}% (resets in {reset})"
+            footer = f"\n\u26a1 5h: {pct_5h:.0f}% | Weekly: {pct_7d:.0f}% (resets in {reset})"
 
         return RenderedMessage(text=msg.text + footer, extra=msg.extra)
     except (FileNotFoundError, httpx.HTTPStatusError, ValueError, KeyError, TypeError):
@@ -316,7 +352,7 @@ def _flatten_exception_group(error: BaseException) -> list[BaseException]:
     return [error]
 
 
-def _format_error(error: Exception) -> str:
+def _format_error(error: BaseException) -> str:
     cancel_exc = anyio.get_cancelled_exc_class()
     flattened = [
         exc
@@ -480,39 +516,44 @@ class ProgressEdits:
             has_approval = len(new_kb) > 1
             had_approval = len(old_kb) > 1
 
-            if has_approval and not had_approval and not self._approval_notified:
-                self._approval_notified = True
-                self._approval_notify_ref = await self.transport.send(
-                    channel_id=self.channel_id,
-                    message=RenderedMessage(
-                        text="Action required \u2014 approval needed"
-                    ),
-                    options=SendOptions(
-                        notify=True,
-                        reply_to=self.progress_ref,
-                        thread_id=self.thread_id,
-                    ),
-                )
-            elif had_approval and not has_approval:
-                if self._approval_notify_ref is not None:
-                    await self.transport.delete(ref=self._approval_notify_ref)
-                    self._approval_notify_ref = None
-                self._approval_notified = False
+            try:
+                if has_approval and not had_approval and not self._approval_notified:
+                    self._approval_notified = True
+                    self._approval_notify_ref = await self.transport.send(
+                        channel_id=self.channel_id,
+                        message=RenderedMessage(
+                            text="Action required \u2014 approval needed"
+                        ),
+                        options=SendOptions(
+                            notify=True,
+                            reply_to=self.progress_ref,
+                            thread_id=self.thread_id,
+                        ),
+                    )
+                elif had_approval and not has_approval:
+                    if self._approval_notify_ref is not None:
+                        await self.transport.delete(ref=self._approval_notify_ref)
+                        self._approval_notify_ref = None
+                    self._approval_notified = False
 
-            if rendered != self.last_rendered:
-                logger.debug(
-                    "transport.edit_message",
-                    channel_id=self.channel_id,
-                    message_id=self.progress_ref.message_id,
-                    rendered=rendered.text,
-                )
-                edited = await self.transport.edit(
-                    ref=self.progress_ref,
-                    message=rendered,
-                    wait=False,
-                )
-                if edited is not None:
-                    self.last_rendered = rendered
+                if rendered != self.last_rendered:
+                    logger.debug(
+                        "transport.edit_message",
+                        channel_id=self.channel_id,
+                        message_id=self.progress_ref.message_id,
+                        rendered=rendered.text,
+                    )
+                    edited = await self.transport.edit(
+                        ref=self.progress_ref,
+                        message=rendered,
+                        wait=False,
+                    )
+                    if edited is not None:
+                        self.last_rendered = rendered
+            except Exception:  # noqa: BLE001
+                # Transport errors (timeouts, network issues) are best-effort —
+                # never crash a run because a progress edit failed to send.
+                logger.debug("progress_edits.transport_error", exc_info=True)
 
             self.rendered_seq = seq_at_render
 
@@ -612,39 +653,54 @@ async def run_runner_with_cancel(
     on_thread_known: Callable[[ResumeToken, anyio.Event], Awaitable[None]] | None,
 ) -> RunOutcome:
     outcome = RunOutcome()
-    async with anyio.create_task_group() as tg:
+    try:
+        async with anyio.create_task_group() as tg:
 
-        async def run_runner() -> None:
-            try:
-                async for evt in runner.run(prompt, resume_token):
-                    _log_runner_event(evt)
-                    if isinstance(evt, StartedEvent):
-                        outcome.resume = evt.resume
-                        bind_run_context(resume=evt.resume.value)
-                        if running_task is not None and running_task.resume is None:
-                            running_task.resume = evt.resume
-                            try:
-                                if on_thread_known is not None:
-                                    await on_thread_known(evt.resume, running_task.done)
-                            finally:
-                                running_task.resume_ready.set()
-                    elif isinstance(evt, CompletedEvent):
-                        outcome.resume = evt.resume or outcome.resume
-                        outcome.completed = evt
-                    # A3: Record events for /export
-                    _record_export_event(evt, outcome.resume)
-                    await edits.on_event(evt)
-            finally:
+            async def run_runner() -> None:
+                try:
+                    async for evt in runner.run(prompt, resume_token):
+                        _log_runner_event(evt)
+                        if isinstance(evt, StartedEvent):
+                            outcome.resume = evt.resume
+                            bind_run_context(resume=evt.resume.value)
+                            if running_task is not None and running_task.resume is None:
+                                running_task.resume = evt.resume
+                                try:
+                                    if on_thread_known is not None:
+                                        await on_thread_known(
+                                            evt.resume, running_task.done
+                                        )
+                                finally:
+                                    running_task.resume_ready.set()
+                        elif isinstance(evt, CompletedEvent):
+                            outcome.resume = evt.resume or outcome.resume
+                            outcome.completed = evt
+                        # A3: Record events for /export
+                        _record_export_event(evt, outcome.resume)
+                        await edits.on_event(evt)
+                finally:
+                    tg.cancel_scope.cancel()
+
+            async def wait_cancel(task: RunningTask) -> None:
+                await task.cancel_requested.wait()
+                outcome.cancelled = True
                 tg.cancel_scope.cancel()
 
-        async def wait_cancel(task: RunningTask) -> None:
-            await task.cancel_requested.wait()
-            outcome.cancelled = True
-            tg.cancel_scope.cancel()
-
-        tg.start_soon(run_runner)
-        if running_task is not None:
-            tg.start_soon(wait_cancel, running_task)
+            tg.start_soon(run_runner)
+            if running_task is not None:
+                tg.start_soon(wait_cancel, running_task)
+    except BaseExceptionGroup as eg:
+        # Unwrap ExceptionGroup from anyio TaskGroup so callers' `except Exception`
+        # handlers can catch the real error.  Filter out cancellation exceptions
+        # (normal TaskGroup shutdown) and re-raise the first real exception.
+        cancel_exc = anyio.get_cancelled_exc_class()
+        non_cancelled = [
+            exc
+            for exc in _flatten_exception_group(eg)
+            if not isinstance(exc, cancel_exc)
+        ]
+        if non_cancelled:
+            raise non_cancelled[0] from eg
 
     return outcome
 
@@ -726,6 +782,9 @@ async def handle_message(
 
     progress_tracker = ProgressTracker(engine=runner.engine)
 
+    # Resolve effective presenter: check for per-chat verbose override
+    effective_presenter = _resolve_presenter(cfg.presenter, incoming.channel_id)
+
     user_ref = MessageRef(
         channel_id=incoming.channel_id,
         message_id=incoming.message_id,
@@ -745,7 +804,7 @@ async def handle_message(
 
     edits = ProgressEdits(
         transport=cfg.transport,
-        presenter=cfg.presenter,
+        presenter=effective_presenter,
         channel_id=incoming.channel_id,
         progress_ref=progress_ref,
         tracker=progress_tracker,
@@ -818,7 +877,7 @@ async def handle_message(
             context_line=context_line,
             meta_formatter=format_meta_line,
         )
-        final_rendered = cfg.presenter.render_final(
+        final_rendered = effective_presenter.render_final(
             state,
             elapsed_s=elapsed,
             status="error",
@@ -863,7 +922,7 @@ async def handle_message(
             context_line=context_line,
             meta_formatter=format_meta_line,
         )
-        final_rendered = cfg.presenter.render_progress(
+        final_rendered = effective_presenter.render_progress(
             state,
             elapsed_s=elapsed,
             label="`cancelled`",
@@ -890,6 +949,25 @@ async def handle_message(
     run_error = completed.error
 
     final_answer = completed.answer
+
+    # If there's a plan outline stored in a synthetic warning action,
+    # prepend it to the final answer so the user can read it.
+    # (The progress message that showed the outline gets replaced by
+    # the final message, so the outline would otherwise be lost.)
+    _outline_prefix = "Plan outline:\n"
+    for _action_state in progress_tracker.snapshot(
+        resume_formatter=runner.format_resume,
+        context_line=None,
+    ).actions:
+        _title = _action_state.action.title or ""
+        if _action_state.action.kind == "warning" and _title.startswith(
+            _outline_prefix
+        ):
+            _outline_body = _title[len(_outline_prefix) :]
+            if _outline_body.strip():
+                final_answer = f"{_outline_body}\n\n{final_answer}"
+            break
+
     if run_ok is False and run_error:
         if final_answer.strip():
             final_answer = f"{final_answer}\n\n{run_error}"
@@ -925,7 +1003,7 @@ async def handle_message(
         context_line=context_line,
         meta_formatter=format_meta_line,
     )
-    final_rendered = cfg.presenter.render_final(
+    final_rendered = effective_presenter.render_final(
         state,
         elapsed_s=elapsed,
         status=status,
@@ -940,7 +1018,7 @@ async def handle_message(
         cost_line = _format_run_cost(completed.usage)
         if cost_line:
             final_rendered = RenderedMessage(
-                text=final_rendered.text + f"\n\n\U0001f4b0 {cost_line}",
+                text=final_rendered.text + f"\n\U0001f4b0 {cost_line}",
                 extra=final_rendered.extra,
             )
 
@@ -948,7 +1026,7 @@ async def handle_message(
     _cost_alert_text = _check_cost_budget(completed.usage)
     if _cost_alert_text:
         final_rendered = RenderedMessage(
-            text=final_rendered.text + f"\n\n{_cost_alert_text}",
+            text=final_rendered.text + f"\n{_cost_alert_text}",
             extra=final_rendered.extra,
         )
 

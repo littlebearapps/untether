@@ -177,6 +177,25 @@ Controls the context preamble injected at the start of every agent prompt.
 
 The default preamble tells agents they're running via Telegram, lists key constraints (only assistant text is visible), and requests a structured end-of-task summary.
 
+## `progress`
+
+Controls progress message rendering during agent runs.
+
+=== "toml"
+
+    ```toml
+    [progress]
+    verbosity = "verbose"
+    max_actions = 8
+    ```
+
+| Key | Type | Default | Notes |
+|-----|------|---------|-------|
+| `verbosity` | `"compact"` \| `"verbose"` | `"compact"` | `compact` shows status + title only. `verbose` adds tool detail lines (file paths, commands, patterns). |
+| `max_actions` | int (0–50) | `5` | Maximum action lines shown in the progress message. |
+
+Per-chat override: `/verbose on` and `/verbose off` override the config default for the current chat without editing the TOML file. `/verbose clear` removes the override.
+
 ## `cost_budget`
 
 === "toml"

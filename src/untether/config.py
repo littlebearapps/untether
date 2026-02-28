@@ -58,6 +58,10 @@ def read_config(cfg_path: Path) -> dict:
 
 
 def load_or_init_config(path: str | Path | None = None) -> tuple[dict, Path]:
+    if path is None:
+        env_path = os.environ.get("UNTETHER_CONFIG_PATH")
+        if env_path:
+            path = env_path
     cfg_path = Path(path).expanduser() if path else HOME_CONFIG_PATH
     if cfg_path.exists() and not cfg_path.is_file():
         raise ConfigError(f"Config path {cfg_path} exists but is not a file.") from None

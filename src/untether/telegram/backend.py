@@ -11,7 +11,12 @@ from ..backends import EngineBackend
 from ..config import read_config
 from ..logging import get_logger
 from ..runner_bridge import ExecBridgeConfig
-from ..settings import TelegramTopicsSettings, TelegramTransportSettings
+from ..markdown import MarkdownFormatter
+from ..settings import (
+    ProgressSettings,
+    TelegramTopicsSettings,
+    TelegramTransportSettings,
+)
 from ..transport_runtime import TransportRuntime
 from ..transports import SetupResult, TransportBackend
 from .bridge import (
@@ -25,6 +30,21 @@ from .onboarding import check_setup, interactive_setup
 from .topics import _resolve_topics_scope_raw
 
 logger = get_logger(__name__)
+
+
+def _load_progress_settings() -> ProgressSettings:
+    """Load progress settings from config, returning defaults if unavailable."""
+    try:
+        from ..settings import load_settings_if_exists
+
+        result = load_settings_if_exists()
+        if result is None:
+            return ProgressSettings()
+        settings, _ = result
+        return settings.progress
+    except Exception:  # noqa: BLE001
+        logger.debug("progress_settings.load_failed", exc_info=True)
+        return ProgressSettings()
 
 
 def _expect_transport_settings(transport_config: object) -> TelegramTransportSettings:
@@ -170,7 +190,15 @@ class TelegramBackend(TransportBackend):
         )
         bot = TelegramClient(token)
         transport = TelegramTransport(bot)
-        presenter = TelegramPresenter(message_overflow=settings.message_overflow)
+        progress_cfg = _load_progress_settings()
+        formatter = MarkdownFormatter(
+            max_actions=progress_cfg.max_actions,
+            verbosity=progress_cfg.verbosity,
+        )
+        presenter = TelegramPresenter(
+            formatter=formatter,
+            message_overflow=settings.message_overflow,
+        )
         exec_cfg = ExecBridgeConfig(
             transport=transport,
             presenter=presenter,

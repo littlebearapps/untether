@@ -117,6 +117,7 @@ async def _dispatch_command(
         )
         await executor.send(f"error:\n{exc}", reply_to=message_ref, notify=True)
         return
+    logger.debug("command.executed", command=command_id, chat_id=chat_id)
     if result is not None:
         reply_to = message_ref if result.reply_to is None else result.reply_to
         msg: RenderedMessage | str = result.text
@@ -218,6 +219,7 @@ async def _dispatch_callback(
             )
             await _answer_callback(str(exc)[:200])
             return
+        logger.debug("callback.executed", command=command_id, chat_id=chat_id)
         if result is not None:
             reply_to = message_ref if result.reply_to is None else result.reply_to
             cb_msg: RenderedMessage | str = result.text

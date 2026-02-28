@@ -932,3 +932,134 @@ class TestReadAccessToken:
 
         token, _ = _read_access_token(creds_file)
         assert token == "sk-file-token"
+
+
+# ---------------------------------------------------------------------------
+# ExceptionGroup unwrapping in run_runner_with_cancel (issue #17)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.anyio
+async def test_handle_message_catches_exception_group() -> None:
+    """ExceptionGroup from runner should be caught and rendered as error."""
+    transport = FakeTransport()
+    session_id = "019b66fc-64c2-7a71-81cd-081c504cfeb2"
+    runner = ScriptRunner(
+        [Raise(ExceptionGroup("task group", [RuntimeError("inner boom")]))],
+        engine=CODEX_ENGINE,
+        resume_value=session_id,
+    )
+    cfg = ExecBridgeConfig(
+        transport=transport,
+        presenter=MarkdownPresenter(),
+        final_notify=True,
+    )
+
+    await handle_message(
+        cfg,
+        runner=runner,
+        incoming=IncomingMessage(channel_id=123, message_id=10, text="do something"),
+        resume_token=None,
+    )
+
+    assert transport.edit_calls
+    last_edit = transport.edit_calls[-1]["message"].text
+    assert "error" in last_edit.lower()
+    assert "inner boom" in last_edit
+
+
+@pytest.mark.anyio
+async def test_handle_message_exception_group_preserves_resume() -> None:
+    """ExceptionGroup error path should still include the resume token."""
+    transport = FakeTransport()
+    session_id = "019b66fc-64c2-7a71-81cd-081c504cfeb2"
+    runner = ScriptRunner(
+        [Raise(ExceptionGroup("tg", [ValueError("fail")]))],
+        engine=CODEX_ENGINE,
+        resume_value=session_id,
+    )
+    cfg = ExecBridgeConfig(
+        transport=transport,
+        presenter=MarkdownPresenter(),
+        final_notify=True,
+    )
+
+    await handle_message(
+        cfg,
+        runner=runner,
+        incoming=IncomingMessage(channel_id=123, message_id=10, text="test"),
+        resume_token=None,
+    )
+
+    assert transport.edit_calls
+    last_edit = transport.edit_calls[-1]["message"].text
+    assert session_id in last_edit
+
+
+@pytest.mark.anyio
+async def test_format_error_with_exception_group() -> None:
+    """_format_error should flatten ExceptionGroup and show all inner exceptions."""
+    from untether.runner_bridge import _format_error
+
+    eg = ExceptionGroup("group", [RuntimeError("boom"), ValueError("pow")])
+    result = _format_error(eg)
+    assert "boom" in result
+    assert "pow" in result
+
+
+# ---------------------------------------------------------------------------
+# ProgressEdits transport resilience (issue #15)
+# ---------------------------------------------------------------------------
+
+
+class _FailingTransport(FakeTransport):
+    """Transport that raises on edit calls to simulate network timeouts."""
+
+    def __init__(self, *, fail_count: int = 1) -> None:
+        super().__init__()
+        self._fail_count = fail_count
+        self._edit_attempts = 0
+
+    async def edit(
+        self, *, ref: MessageRef, message: RenderedMessage, wait: bool = True
+    ) -> MessageRef:
+        self._edit_attempts += 1
+        if self._edit_attempts <= self._fail_count:
+            raise TimeoutError("read timeout")
+        return await super().edit(ref=ref, message=message, wait=wait)
+
+
+@pytest.mark.anyio
+async def test_progress_edits_survives_transport_error() -> None:
+    """ProgressEdits should continue running when transport.edit raises."""
+    transport = _FailingTransport(fail_count=1)
+    presenter = _KeyboardPresenter()
+    edits = _make_edits(transport, presenter)
+
+    async with anyio.create_task_group() as tg:
+
+        async def drive() -> None:
+            # First edit — will raise TimeoutError inside ProgressEdits.run()
+            edits.event_seq = 1
+            with contextlib.suppress(anyio.WouldBlock):
+                edits.signal_send.send_nowait(None)
+            await anyio.sleep(0)
+            await anyio.sleep(0)
+
+            # Second edit — transport succeeds this time
+            presenter.set_no_approval()  # change rendered text to trigger an edit
+            edits.event_seq = 2
+            with contextlib.suppress(anyio.WouldBlock):
+                edits.signal_send.send_nowait(None)
+            await anyio.sleep(0)
+            await anyio.sleep(0)
+
+            edits.signal_send.close()
+
+        tg.start_soon(edits.run)
+        tg.start_soon(drive)
+
+    # First edit raised TimeoutError, but ProgressEdits continued.
+    # Second edit should have succeeded.
+    assert transport._edit_attempts == 2
+    assert len(transport.edit_calls) == 1  # only the successful one recorded

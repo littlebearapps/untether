@@ -90,6 +90,13 @@ _DISCUSS_COOLDOWN: dict[str, tuple[float, int]] = {}
 # When Claude next calls ExitPlanMode, it will be auto-approved.
 _DISCUSS_APPROVED: set[str] = set()
 
+# Sessions where "Pause & Outline Plan" was clicked and we're waiting for outline text.
+# StreamTextBlock handler checks this to emit visible note events in the progress message.
+_OUTLINE_PENDING: set[str] = set()
+
+# Minimum characters for an outline to be considered "substantial".
+_OUTLINE_MIN_CHARS = 200
+
 # A1: Pending AskUserQuestion requests: request_id -> question text
 # When Claude asks a question, the user can reply via Telegram text.
 _PENDING_ASK_REQUESTS: dict[str, str] = {}
@@ -102,6 +109,13 @@ _DISCUSS_ESCALATION_MESSAGE = (
     "If you haven't written a plan outline yet, write one NOW as your next assistant message "
     "(at least 15 lines of visible text). The user can ONLY see your assistant text messages.\n\n"
     "WAIT for the user to approve via the buttons. Do NOT call ExitPlanMode again until they respond."
+)
+
+_OUTLINE_WAIT_MESSAGE = (
+    "Your plan outline is now visible to the user in Telegram. "
+    "Approve/Deny buttons have been shown — the user will click one when ready.\n\n"
+    "WAIT for the user to click Approve or Deny. "
+    "Do NOT call ExitPlanMode again until they respond."
 )
 
 
@@ -129,6 +143,10 @@ class ClaudeStreamState:
     auto_approve_exit_plan_mode: bool = False
     # Whether this run is a resume (for error diagnostics)
     resumed: bool = False
+    # Track max text block length seen (for cooldown bypass — survives overwrites)
+    max_text_len_since_cooldown: int = 0
+    # Store outline text for embedding in synthetic approve/deny action
+    outline_text: str | None = None
 
 
 def _normalize_tool_result(content: Any) -> str:
@@ -349,6 +367,11 @@ def translate_claude_event(
     match event:
         case claude_schema.StreamSystemMessage(subtype=subtype):
             if subtype != "init":
+                logger.debug(
+                    "claude.system_event.non_init",
+                    subtype=subtype,
+                    session_id=event.session_id,
+                )
                 return []
             session_id = event.session_id
             if not session_id:
@@ -415,6 +438,18 @@ def translate_claude_event(
                     case claude_schema.StreamTextBlock(text=text):
                         if text:
                             state.last_assistant_text = text
+                            if len(text) > state.max_text_len_since_cooldown:
+                                state.max_text_len_since_cooldown = len(text)
+                            # When outline is pending (user clicked "Pause & Outline Plan"),
+                            # store the outline text so it can be embedded in the synthetic
+                            # approve/deny action that follows (separate note actions get
+                            # scrolled off by the max_actions window).
+                            if (
+                                factory.resume
+                                and factory.resume.value in _OUTLINE_PENDING
+                                and len(text) >= _OUTLINE_MIN_CHARS
+                            ):
+                                state.outline_text = text
                     case _:
                         continue
             return out
@@ -524,6 +559,7 @@ def translate_claude_event(
                     session_id = factory.resume.value
                     if session_id in _DISCUSS_APPROVED:
                         _DISCUSS_APPROVED.discard(session_id)
+                        _OUTLINE_PENDING.discard(session_id)
                         clear_discuss_cooldown(session_id)
                         logger.info(
                             "control_request.discuss_approved",
@@ -533,23 +569,43 @@ def translate_claude_event(
                         state.auto_approve_queue.append(request_id)
                         return []
 
-            # Rate-limit ExitPlanMode after a discuss denial
+            # Rate-limit ExitPlanMode after a discuss denial.
+            # Both paths (outline written / not written) auto-deny and show
+            # synthetic 2-button Approve/Deny.  The old "fall through to normal
+            # 3-button flow" caused a confusing loop where the user kept seeing
+            # the same Pause & Outline Plan button.
             if isinstance(request, claude_schema.ControlCanUseToolRequest):
                 tool_name = getattr(request, "tool_name", "")
                 if tool_name == "ExitPlanMode" and factory.resume:
                     escalation_msg = check_discuss_cooldown(factory.resume.value)
                     if escalation_msg is not None:
                         session_id = factory.resume.value
-                        logger.info(
-                            "control_request.discuss_cooldown_deny",
-                            request_id=request_id,
-                            session_id=session_id,
-                        )
-                        _REQUEST_TO_INPUT.pop(request_id, None)
-                        state.auto_deny_queue.append((request_id, escalation_msg))
+                        text_len = state.max_text_len_since_cooldown
 
-                        # Show Approve/Deny buttons so user can approve the plan
-                        # without typing — synthetic control request for the UI.
+                        if text_len >= _OUTLINE_MIN_CHARS:
+                            # Outline was written — auto-deny with "wait" message
+                            logger.info(
+                                "control_request.discuss_cooldown_bypass",
+                                request_id=request_id,
+                                session_id=session_id,
+                                text_chars=text_len,
+                            )
+                            _OUTLINE_PENDING.discard(session_id)
+                            state.max_text_len_since_cooldown = 0
+                            deny_msg = _OUTLINE_WAIT_MESSAGE
+                        else:
+                            # Rapid retry without outline — auto-deny with escalation
+                            logger.info(
+                                "control_request.discuss_cooldown_deny",
+                                request_id=request_id,
+                                session_id=session_id,
+                            )
+                            deny_msg = escalation_msg
+
+                        _REQUEST_TO_INPUT.pop(request_id, None)
+                        state.auto_deny_queue.append((request_id, deny_msg))
+
+                        # Show synthetic Approve/Deny buttons (no "Pause" option).
                         # Prefix "da:" = discuss-approve (short to fit 64-byte
                         # callback_data limit: "claude_control:approve:da:UUID"
                         # = 26 + 36 = 62 chars).
@@ -557,11 +613,26 @@ def translate_claude_event(
                         synth_action_id = f"claude.discuss_approve.{state.note_seq}"
                         synth_request_id = f"da:{session_id}"
                         _REQUEST_TO_SESSION[synth_request_id] = session_id
+
+                        # Embed outline text in the action title so it's
+                        # always visible alongside the Approve/Deny buttons
+                        # (separate note actions get scrolled off by max_actions).
+                        if state.outline_text:
+                            preview = (
+                                state.outline_text[:1500] + "…"
+                                if len(state.outline_text) > 1500
+                                else state.outline_text
+                            )
+                            synth_title = f"Plan outline:\n{preview}"
+                            state.outline_text = None
+                        else:
+                            synth_title = "Plan outlined — approve to proceed"
+
                         return [
                             state.factory.action_started(
                                 action_id=synth_action_id,
                                 kind="warning",
-                                title="Plan outlined — approve to proceed",
+                                title=synth_title,
                                 detail={
                                     "request_id": synth_request_id,
                                     "request_type": "DiscussApproval",
@@ -1203,6 +1274,7 @@ class ClaudeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
             _SESSION_STDIN.pop(session_id, None)
             clear_discuss_cooldown(session_id)
             _DISCUSS_APPROVED.discard(session_id)
+            _OUTLINE_PENDING.discard(session_id)
             logger.debug("claude_runner.unregistered", session_id=session_id)
 
         parts = [f"claude failed ({_rc_label(rc)})."]
@@ -1238,6 +1310,7 @@ class ClaudeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
             _SESSION_STDIN.pop(session_id, None)
             clear_discuss_cooldown(session_id)
             _DISCUSS_APPROVED.discard(session_id)
+            _OUTLINE_PENDING.discard(session_id)
             logger.debug("claude_runner.unregistered", session_id=session_id)
 
         if not found_session:
@@ -1312,8 +1385,15 @@ class ClaudeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
             elif self.supports_control_channel and os.name == "posix":
                 # Legacy: use PTY for stdin
                 pty_master_fd, pty_slave_fd = pty.openpty()
-                with contextlib.suppress(OSError):
+                run_logger.debug(
+                    "pty.opened", master_fd=pty_master_fd, slave_fd=pty_slave_fd
+                )
+                try:
                     tty.setraw(pty_master_fd)
+                except OSError:
+                    run_logger.debug(
+                        "pty.setraw_failed", fd=pty_master_fd, exc_info=True
+                    )
                 self._pty_master_fd = pty_master_fd
                 stdin_arg = pty_slave_fd
             else:
@@ -1330,6 +1410,7 @@ class ClaudeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
                 # Close slave fd in parent after subprocess starts (PTY mode)
                 if pty_slave_fd is not None:
                     os.close(pty_slave_fd)
+                    run_logger.debug("pty.slave_closed", fd=pty_slave_fd)
                     pty_slave_fd = None
 
                 if proc.stdout is None or proc.stderr is None:
@@ -1446,11 +1527,19 @@ class ClaudeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
                 with contextlib.suppress(Exception):
                     await this_proc_stdin.aclose()
             if pty_slave_fd is not None:
-                with contextlib.suppress(OSError):
+                try:
                     os.close(pty_slave_fd)
+                except OSError:
+                    logger.debug(
+                        "pty.slave_close_failed", fd=pty_slave_fd, exc_info=True
+                    )
             if pty_master_fd is not None:
-                with contextlib.suppress(OSError):
+                try:
                     os.close(pty_master_fd)
+                except OSError:
+                    logger.debug(
+                        "pty.master_close_failed", fd=pty_master_fd, exc_info=True
+                    )
             self._pty_master_fd = None
 
 
@@ -1555,6 +1644,7 @@ def set_discuss_cooldown(session_id: str) -> None:
     count = (existing[1] + 1) if existing else 1
     _DISCUSS_COOLDOWN[session_id] = (time.time(), count)
     cooldown = _cooldown_seconds(count)
+    _OUTLINE_PENDING.add(session_id)
     logger.info(
         "discuss_cooldown.set",
         session_id=session_id,

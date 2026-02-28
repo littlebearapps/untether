@@ -6,6 +6,7 @@ from ...commands import CommandBackend, CommandContext, CommandResult
 from ...logging import get_logger
 from ...runners.claude import (
     _DISCUSS_APPROVED,
+    _OUTLINE_PENDING,
     _REQUEST_TO_SESSION,
     clear_discuss_cooldown,
     send_claude_control_response,
@@ -31,9 +32,10 @@ _DISCUSS_DENY_MESSAGE = (
     "4. Any key decisions, trade-offs, or risks\n"
     "5. What the end result will look like\n\n"
     "The outline MUST be at least 15 lines of VISIBLE TEXT in the chat.\n\n"
-    "After writing the outline, call ExitPlanMode. Approve/Deny buttons will appear "
-    "in Telegram for the user to approve your plan. Do NOT wait for a text reply — "
-    "just call ExitPlanMode and the buttons will handle it."
+    "After writing the outline, call ExitPlanMode. The system will show Approve/Deny buttons "
+    "to the user automatically. If the buttons appear but the user has not yet responded, "
+    "WAIT — do NOT call ExitPlanMode repeatedly or proceed with implementation until "
+    "you receive approval."
 )
 
 _DENY_MESSAGE = (
@@ -142,6 +144,7 @@ class ClaudeControlCommand:
 
             if approved:
                 _DISCUSS_APPROVED.add(session_id)
+                _OUTLINE_PENDING.discard(session_id)
                 clear_discuss_cooldown(session_id)
                 logger.info(
                     "claude_control.discuss_plan_approved",
@@ -152,6 +155,7 @@ class ClaudeControlCommand:
                     notify=True,
                 )
             else:
+                _OUTLINE_PENDING.discard(session_id)
                 clear_discuss_cooldown(session_id)
                 logger.info(
                     "claude_control.discuss_plan_denied",
@@ -185,6 +189,7 @@ class ClaudeControlCommand:
         # Clear any discuss cooldown on explicit approve/deny
         if session_id:
             clear_discuss_cooldown(session_id)
+            _OUTLINE_PENDING.discard(session_id)
 
         action_text = "✅ Approved" if approved else "❌ Denied"
         logger.info(

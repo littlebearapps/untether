@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import shutil
 from contextlib import contextmanager
 from collections.abc import Awaitable, Callable
@@ -43,6 +44,12 @@ from ..transports import SetupResult
 from .api_models import User
 from .client import TelegramClient, TelegramRetryAfter
 from .topics import _validate_topics_setup_for
+
+
+def _resolve_home_config() -> Path:
+    env_path = os.environ.get("UNTETHER_CONFIG_PATH")
+    return Path(env_path).expanduser() if env_path else HOME_CONFIG_PATH
+
 
 __all__ = [
     "ChatInfo",
@@ -197,7 +204,7 @@ def check_setup(
     transport_override: str | None = None,
 ) -> SetupResult:
     issues: list[SetupIssue] = []
-    config_path = HOME_CONFIG_PATH
+    config_path = _resolve_home_config()
     cmd = backend.cli_cmd or backend.id
     backend_issues: list[SetupIssue] = []
     if shutil.which(cmd) is None:
@@ -968,7 +975,7 @@ async def run_onboarding(ui: UI, svc: Services, state: OnboardingState) -> bool:
 async def capture_chat_id(*, token: str | None = None) -> ChatInfo | None:
     ui = InteractiveUI(Console())
     svc = LiveServices()
-    state = OnboardingState(config_path=HOME_CONFIG_PATH, force=False)
+    state = OnboardingState(config_path=_resolve_home_config(), force=False)
     with suppress_logging():
         try:
             if token is not None:
@@ -1004,7 +1011,7 @@ async def capture_chat_id(*, token: str | None = None) -> ChatInfo | None:
 async def interactive_setup(*, force: bool) -> bool:
     ui = InteractiveUI(Console())
     svc = LiveServices()
-    state = OnboardingState(config_path=HOME_CONFIG_PATH, force=force)
+    state = OnboardingState(config_path=_resolve_home_config(), force=force)
 
     if state.config_path.exists() and not force:
         ui.print(

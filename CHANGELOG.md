@@ -1,5 +1,29 @@
 # changelog
 
+## v0.25.0 (2026-02-28)
+
+### changes
+
+- `/verbose` command and `[progress]` config — per-chat verbose toggle shows tool details (file paths, commands, patterns) in progress messages; global verbosity and max_actions settings [#25](https://github.com/littlebearapps/untether/issues/25)
+- Pi context compaction events — render `AutoCompactionStart`/`AutoCompactionEnd` as progress actions with token counts [#26](https://github.com/littlebearapps/untether/issues/26)
+- `UNTETHER_CONFIG_PATH` env var — override config file location for multi-instance setups [#27](https://github.com/littlebearapps/untether/issues/27)
+- ExceptionGroup unwrapping, transport resilience, and debug logging improvements [#30](https://github.com/littlebearapps/untether/issues/30)
+
+### fixes
+
+- outline not visible in Pause & Outline Plan flow — outline was scrolled off by max_actions truncation and lost in final message [#28](https://github.com/littlebearapps/untether/issues/28)
+- footer double-spacing — sulguk trailing `\n\n` caused blank lines between footer items (context/meta/resume) [#29](https://github.com/littlebearapps/untether/issues/29)
+
+### docs
+
+- add dev instance quickref (`docs/reference/dev-instance.md`) documenting production vs dev separation
+- add dev workflow rule (`.claude/rules/dev-workflow.md`) preventing accidental production restarts
+- update CLAUDE.md and README with verbose mode, Pi compaction, and config path features
+
+### tests
+
+- add test suites for verbose command, verbose progress formatting, config path env var, cooldown bypass, and Pi compaction (44 new tests)
+
 ## v0.24.0 (2026-02-27)
 
 ### changes

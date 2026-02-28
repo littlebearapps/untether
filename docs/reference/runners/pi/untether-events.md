@@ -110,7 +110,31 @@ Mapping:
   - `resume = ResumeToken(engine="pi", value=session_token)`.
   - `usage = last assistant usage`.
 
-### 4.5 Other events
+### 4.5 `auto_compaction_start` / `auto_compaction_end`
+
+When Pi compacts its context window to free tokens, it emits these events.
+
+`auto_compaction_start` example:
+```json
+{"type":"auto_compaction_start","reason":"context_limit"}
+```
+
+Mapping:
+- Emit `action` with `phase="started"`, `kind="note"`.
+- `action.title = "compacting context… (reason)"`.
+- Sequential action ids: `compaction_1`, `compaction_2`, etc.
+
+`auto_compaction_end` example:
+```json
+{"type":"auto_compaction_end","result":{"newNumTokens":42000},"aborted":false}
+```
+
+Mapping:
+- Emit `action` with `phase="completed"`.
+- `action.title = "context compacted (42,000 tokens)"` (formatted with commas).
+- If `aborted=true`, title is `"context compaction aborted"`.
+
+### 4.6 Other events
 
 Ignore unknown events. If a JSONL line is malformed, emit a warning action and
 continue (default `JsonlSubprocessRunner` behavior).

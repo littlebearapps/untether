@@ -77,6 +77,9 @@ def render_markdown(md: str) -> tuple[str, list[dict[str, Any]]]:
     rendered = transform_html(html)
 
     text = _BULLET_RE.sub(r"\1-", rendered.text)
+    # sulguk adds trailing \n\n after the last paragraph; strip it so
+    # post-render appends (cost footer, usage) don't get double-spaced.
+    text = text.rstrip("\n")
 
     entities = [dict(e) for e in rendered.entities]
     return text, entities

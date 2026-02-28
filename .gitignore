@@ -10,5 +10,10 @@ __pycache__/
 mutants/
 .worktrees/
 research/
+test-projects/
 _site/
 docs/reference/changelog.md
+.envrc
+.claude/settings.json
+.claude/plans/
+launch/

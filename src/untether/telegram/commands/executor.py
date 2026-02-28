@@ -175,6 +175,12 @@ async def _run_engine(
         await reply(text="Untether is restarting — try again shortly.")
         return
 
+    logger.debug(
+        "handle.engine_start",
+        chat_id=chat_id,
+        engine=str(engine_override) if engine_override else None,
+        resume=resume_token.value if resume_token else None,
+    )
     try:
         try:
             entry = runtime.resolve_runner(

@@ -58,6 +58,8 @@ class PiStreamState:
     last_usage: dict[str, Any] | None = None
     started: bool = False
     note_seq: int = 0
+    compaction_seq: int = 0
+    compaction_action_id: str | None = None
 
 
 def _looks_like_session_path(token: str) -> bool:
@@ -284,6 +286,52 @@ def translate_pi_event(
                     resume=state.resume,
                     error=error,
                     usage=state.last_usage,
+                )
+            )
+            return out
+
+        case pi_schema.AutoCompactionStart(reason=reason):
+            state.compaction_seq += 1
+            action_id = f"compaction_{state.compaction_seq}"
+            state.compaction_action_id = action_id
+            reason_str = f" ({reason})" if reason else ""
+            out.append(
+                _action_event(
+                    phase="started",
+                    action=Action(
+                        id=action_id,
+                        kind="note",
+                        title=f"compacting context…{reason_str}",
+                        detail={},
+                    ),
+                )
+            )
+            return out
+
+        case pi_schema.AutoCompactionEnd(result=result, aborted=aborted):
+            action_id = (
+                state.compaction_action_id or f"compaction_{state.compaction_seq}"
+            )
+            state.compaction_action_id = None
+            tokens_before = None
+            if isinstance(result, dict):
+                tokens_before = result.get("tokensBefore")
+            if aborted:
+                title = "context compaction aborted"
+            elif tokens_before:
+                title = f"context compacted ({tokens_before:,} tokens)"
+            else:
+                title = "context compacted"
+            out.append(
+                _action_event(
+                    phase="completed",
+                    action=Action(
+                        id=action_id,
+                        kind="note",
+                        title=title,
+                        detail={"result": result} if result else {},
+                    ),
+                    ok=not aborted,
                 )
             )
             return out
