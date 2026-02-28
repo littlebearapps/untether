@@ -308,6 +308,63 @@ def test_telegram_backend_build_and_run_wires_config(
     assert kwargs["transport_id"] == "telegram"
 
 
+def test_detect_cli_version_returns_version(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Version detection extracts version from CLI output."""
+    import subprocess as sp
+
+    def fake_run(args, **kwargs):
+        return sp.CompletedProcess(args=args, returncode=0, stdout="myengine v1.2.3\n", stderr="")
+
+    monkeypatch.setattr(sp, "run", fake_run)
+    result = telegram_backend._detect_cli_version("myengine")
+    assert result == "1.2.3"
+
+
+def test_detect_cli_version_missing_cli(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Missing CLI returns None gracefully."""
+    import subprocess as sp
+
+    def fake_run(args, **kwargs):
+        raise FileNotFoundError("not found")
+
+    monkeypatch.setattr(sp, "run", fake_run)
+    assert telegram_backend._detect_cli_version("missing") is None
+
+
+def test_build_versions_line(monkeypatch: pytest.MonkeyPatch) -> None:
+    versions = {"claude": "2.1.63", "opencode": "1.1.11"}
+    monkeypatch.setattr(
+        telegram_backend,
+        "_detect_cli_version",
+        lambda cmd: versions.get(cmd),
+    )
+    line = telegram_backend._build_versions_line(("claude", "opencode"))
+    assert "py " in line
+    assert "claude 2.1.63" in line
+    assert "opencode 1.1.11" in line
+
+
+def test_startup_message_includes_versions_line(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    runtime = _build_healthy_runtime()
+    monkeypatch.setattr(
+        telegram_backend,
+        "_detect_cli_version",
+        lambda cmd: "1.0.0",
+    )
+    message = telegram_backend._build_startup_message(
+        runtime,
+        startup_pwd=str(tmp_path),
+        chat_id=123,
+        session_mode="stateless",
+        show_resume_line=True,
+        topics=TelegramTopicsSettings(),
+    )
+    assert "versions:" in message
+    assert "claude 1.0.0" in message
+
+
 def test_telegram_files_settings_defaults() -> None:
     cfg = TelegramFilesSettings()
 

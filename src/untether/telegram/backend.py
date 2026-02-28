@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import os
+import subprocess
+import sys
 from pathlib import Path
 from typing import Literal
 
@@ -51,6 +53,40 @@ def _expect_transport_settings(transport_config: object) -> TelegramTransportSet
     if isinstance(transport_config, TelegramTransportSettings):
         return transport_config
     raise TypeError("transport_config must be TelegramTransportSettings")
+
+
+def _detect_cli_version(cmd: str) -> str | None:
+    """Run ``<cmd> --version`` and return the version string, or None."""
+    try:
+        result = subprocess.run(
+            [cmd, "--version"],
+            capture_output=True,
+            text=True,
+            timeout=3,
+        )
+        if result.returncode == 0 and result.stdout.strip():
+            # Extract just the version number from output like "claude v1.0.20"
+            text = result.stdout.strip().splitlines()[0]
+            # Try to find a version-like substring
+            for token in text.split():
+                cleaned = token.lstrip("vV")
+                if cleaned and cleaned[0].isdigit():
+                    return cleaned
+            return text
+    except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
+        pass
+    return None
+
+
+def _build_versions_line(engine_ids: tuple[str, ...]) -> str | None:
+    """Build a ``py X.Y.Z · engine X.Y.Z`` versions line."""
+    py = f"py {sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}"
+    parts = [py]
+    for engine in sorted(engine_ids):
+        version = _detect_cli_version(engine)
+        if version:
+            parts.append(f"{engine} {version}")
+    return " · ".join(parts) if len(parts) > 1 else None
 
 
 def _build_startup_message(
@@ -131,6 +167,11 @@ def _build_startup_message(
     details.append(f"files: `{'enabled' if files_enabled else 'disabled'}`")
 
     details.append(f"working in: `{startup_pwd}`")
+
+    # CLI versions (non-blocking, fault-tolerant)
+    versions_line = _build_versions_line(tuple(available_engines))
+    if versions_line:
+        details.append(f"versions: `{versions_line}`")
 
     return header + "\n\n" + BR.join(details)
 
