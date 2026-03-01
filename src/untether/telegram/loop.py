@@ -945,6 +945,60 @@ async def send_with_resume(
     )
 
 
+async def _notify_drain_start(
+    transport: object,
+    running_tasks: Mapping[MessageRef, object],
+) -> None:
+    """Send a draining notice to each unique chat with active runs."""
+    from ..transport import RenderedMessage
+
+    msg = RenderedMessage(
+        text="\U0001f504 Restarting \N{EM DASH} waiting for your run to finish\N{HORIZONTAL ELLIPSIS}",
+        extra={},
+    )
+    notified: set[int] = set()
+    for ref in list(running_tasks):
+        if ref.channel_id not in notified:
+            notified.add(ref.channel_id)
+            try:
+                await transport.send(channel_id=ref.channel_id, message=msg)  # type: ignore[attr-defined]
+            except Exception:  # noqa: BLE001
+                logger.debug("shutdown.drain_notify_failed", channel_id=ref.channel_id)
+
+
+async def _notify_drain_timeout(
+    transport: object,
+    running_tasks: Mapping[MessageRef, object],
+    remaining: int,
+) -> None:
+    """Send a timeout notice to each unique chat still running after drain."""
+    from ..transport import RenderedMessage
+
+    hint = (
+        "Untether was restarted. Your session is saved"
+        " \N{EM DASH} resume by sending a new message"
+        " or starting /claude."
+    )
+    msg = RenderedMessage(
+        text=(
+            f"\N{WARNING SIGN} Restart timed out \N{EM DASH}"
+            f" {remaining} run(s) interrupted."
+            f"\n\n\N{ELECTRIC LIGHT BULB} {hint}"
+        ),
+        extra={},
+    )
+    notified: set[int] = set()
+    for ref in list(running_tasks):
+        if ref.channel_id not in notified:
+            notified.add(ref.channel_id)
+            try:
+                await transport.send(channel_id=ref.channel_id, message=msg)  # type: ignore[attr-defined]
+            except Exception:  # noqa: BLE001
+                logger.debug(
+                    "shutdown.timeout_notify_failed", channel_id=ref.channel_id
+                )
+
+
 async def run_main_loop(
     cfg: TelegramBridgeConfig,
     poller: Callable[
@@ -1143,15 +1197,8 @@ async def run_main_loop(
                 logger.info("shutdown.draining", active_runs=active)
 
                 if active > 0:
-                    # Send a draining notice to the default chat
-                    from ..transport import RenderedMessage
-
-                    draining_msg = RenderedMessage(
-                        text=f"\U0001f504 Restarting — waiting for {active} active run(s) to finish…",
-                        extra={},
-                    )
-                    await cfg.exec_cfg.transport.send(
-                        channel_id=cfg.chat_id, message=draining_msg
+                    await _notify_drain_start(
+                        cfg.exec_cfg.transport, state.running_tasks
                     )
 
                     # Wait for all runs to complete (up to drain timeout)
@@ -1165,6 +1212,11 @@ async def run_main_loop(
                             "shutdown.drain_timeout",
                             remaining=remaining,
                             timeout_s=DRAIN_TIMEOUT_S,
+                        )
+                        await _notify_drain_timeout(
+                            cfg.exec_cfg.transport,
+                            state.running_tasks,
+                            remaining,
                         )
 
                 logger.info("shutdown.exiting")
