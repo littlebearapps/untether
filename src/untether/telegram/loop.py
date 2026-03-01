@@ -945,6 +945,60 @@ async def send_with_resume(
     )
 
 
+async def _notify_drain_start(
+    transport: object,
+    running_tasks: Mapping[MessageRef, object],
+) -> None:
+    """Send a draining notice to each unique chat with active runs."""
+    from ..transport import RenderedMessage
+
+    msg = RenderedMessage(
+        text="\U0001f504 Restarting \N{EM DASH} waiting for your run to finish\N{HORIZONTAL ELLIPSIS}",
+        extra={},
+    )
+    notified: set[int] = set()
+    for ref in list(running_tasks):
+        if ref.channel_id not in notified:
+            notified.add(ref.channel_id)
+            try:
+                await transport.send(channel_id=ref.channel_id, message=msg)  # type: ignore[attr-defined]
+            except Exception:  # noqa: BLE001
+                logger.debug("shutdown.drain_notify_failed", channel_id=ref.channel_id)
+
+
+async def _notify_drain_timeout(
+    transport: object,
+    running_tasks: Mapping[MessageRef, object],
+    remaining: int,
+) -> None:
+    """Send a timeout notice to each unique chat still running after drain."""
+    from ..transport import RenderedMessage
+
+    hint = (
+        "Untether was restarted. Your session is saved"
+        " \N{EM DASH} resume by sending a new message"
+        " or starting /claude."
+    )
+    msg = RenderedMessage(
+        text=(
+            f"\N{WARNING SIGN} Restart timed out \N{EM DASH}"
+            f" {remaining} run(s) interrupted."
+            f"\n\n\N{ELECTRIC LIGHT BULB} {hint}"
+        ),
+        extra={},
+    )
+    notified: set[int] = set()
+    for ref in list(running_tasks):
+        if ref.channel_id not in notified:
+            notified.add(ref.channel_id)
+            try:
+                await transport.send(channel_id=ref.channel_id, message=msg)  # type: ignore[attr-defined]
+            except Exception:  # noqa: BLE001
+                logger.debug(
+                    "shutdown.timeout_notify_failed", channel_id=ref.channel_id
+                )
+
+
 async def run_main_loop(
     cfg: TelegramBridgeConfig,
     poller: Callable[
@@ -1143,15 +1197,8 @@ async def run_main_loop(
                 logger.info("shutdown.draining", active_runs=active)
 
                 if active > 0:
-                    # Send a draining notice to the default chat
-                    from ..transport import RenderedMessage
-
-                    draining_msg = RenderedMessage(
-                        text=f"\U0001f504 Restarting — waiting for {active} active run(s) to finish…",
-                        extra={},
-                    )
-                    await cfg.exec_cfg.transport.send(
-                        channel_id=cfg.chat_id, message=draining_msg
+                    await _notify_drain_start(
+                        cfg.exec_cfg.transport, state.running_tasks
                     )
 
                     # Wait for all runs to complete (up to drain timeout)
@@ -1165,6 +1212,11 @@ async def run_main_loop(
                             "shutdown.drain_timeout",
                             remaining=remaining,
                             timeout_s=DRAIN_TIMEOUT_S,
+                        )
+                        await _notify_drain_timeout(
+                            cfg.exec_cfg.transport,
+                            state.running_tasks,
+                            remaining,
                         )
 
                 logger.info("shutdown.exiting")
@@ -1193,6 +1245,28 @@ async def run_main_loop(
                     ):
                         await state.chat_session_store.set_session_resume(
                             chat_session_key[0], chat_session_key[1], token
+                        )
+
+                return _wrapped
+
+            def wrap_on_resume_failed(
+                topic_key: tuple[int, int] | None,
+                chat_session_key: tuple[int, int | None] | None,
+            ) -> Callable[[ResumeToken], Awaitable[None]] | None:
+                if topic_key is None and chat_session_key is None:
+                    return None
+
+                async def _wrapped(token: ResumeToken) -> None:
+                    if state.topic_store is not None and topic_key is not None:
+                        await state.topic_store.clear_engine_session(
+                            topic_key[0], topic_key[1], token.engine
+                        )
+                    if (
+                        state.chat_session_store is not None
+                        and chat_session_key is not None
+                    ):
+                        await state.chat_session_store.clear_engine_session(
+                            chat_session_key[0], chat_session_key[1], token.engine
                         )
 
                 return _wrapped
@@ -1257,6 +1331,7 @@ async def run_main_loop(
                     on_thread_known=wrap_on_thread_known(
                         on_thread_known, topic_key, chat_session_key
                     ),
+                    on_resume_failed=wrap_on_resume_failed(topic_key, chat_session_key),
                     engine_override=engine_override,
                     thread_id=thread_id,
                     show_resume_line=show_resume_line,

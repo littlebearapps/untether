@@ -768,6 +768,7 @@ async def handle_message(
     running_tasks: RunningTasks | None = None,
     on_thread_known: Callable[[ResumeToken, anyio.Event], Awaitable[None]]
     | None = None,
+    on_resume_failed: Callable[[ResumeToken], Awaitable[None]] | None = None,
     progress_ref: MessageRef | None = None,
     clock: Callable[[], float] = time.monotonic,
 ) -> None:
@@ -975,6 +976,23 @@ async def handle_message(
             if _outline_body.strip():
                 final_answer = f"{_outline_body}\n\n{final_answer}"
             break
+
+    # Auto-clear broken session: if a resumed run failed with 0 turns,
+    # clear the saved session so the next message starts fresh.
+    if run_ok is False and resume_token is not None and on_resume_failed is not None:
+        _num_turns = 0
+        if completed.usage:
+            _num_turns = completed.usage.get("num_turns", 0) or 0
+        if _num_turns == 0:
+            try:
+                await on_resume_failed(resume_token)
+                logger.info(
+                    "session.auto_cleared",
+                    engine=resume_token.engine,
+                    resume=resume_token.value,
+                )
+            except Exception:  # noqa: BLE001
+                logger.debug("session.auto_clear_failed", exc_info=True)
 
     if run_ok is False and run_error:
         error_text = str(run_error)

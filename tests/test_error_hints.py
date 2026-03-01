@@ -46,3 +46,21 @@ class TestGetErrorHint:
     def test_case_insensitive(self):
         hint = get_error_hint("RATE LIMIT exceeded")
         assert hint is not None
+
+    def test_error_during_execution_resumed(self):
+        msg = (
+            "claude run failed (error_during_execution)\n"
+            "session: abcdef12 \N{MIDDLE DOT} resumed \N{MIDDLE DOT} turns: 0 \N{MIDDLE DOT} cost: $0.00"
+        )
+        hint = get_error_hint(msg)
+        assert hint is not None
+        assert "/new" in hint
+
+    def test_error_during_execution_new_session(self):
+        msg = (
+            "claude run failed (error_during_execution)\n"
+            "session: abcdef12 \N{MIDDLE DOT} new \N{MIDDLE DOT} turns: 0"
+        )
+        hint = get_error_hint(msg)
+        assert hint is not None
+        assert "failed to load" in hint.lower()
