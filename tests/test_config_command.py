@@ -689,3 +689,516 @@ class TestEngineAwareTransitions:
         msg = _last_edit_msg(ctx)
         assert "Plan mode" not in msg.text
         assert "config:pm" not in _buttons_data(msg)
+
+    @pytest.mark.anyio
+    async def test_switch_to_codex_reveals_reasoning(self, tmp_path):
+        """After switching engine to codex, home page shows reasoning."""
+        state_path = tmp_path / "prefs.json"
+        cmd = ConfigCommand()
+        ctx = _make_ctx(
+            args_text="ag:codex",
+            text="config:ag:codex",
+            config_path=state_path,
+            default_engine="claude",
+        )
+        await cmd.handle(ctx)
+        msg = _last_edit_msg(ctx)
+        assert "Reasoning" in msg.text
+        assert "config:rs" in _buttons_data(msg)
+
+    @pytest.mark.anyio
+    async def test_switch_from_codex_hides_reasoning(self, tmp_path):
+        """After switching engine away from codex, home page hides reasoning."""
+        state_path = tmp_path / "prefs.json"
+        cmd = ConfigCommand()
+        ctx = _make_ctx(
+            args_text="ag:claude",
+            text="config:ag:claude",
+            config_path=state_path,
+            default_engine="codex",
+        )
+        await cmd.handle(ctx)
+        msg = _last_edit_msg(ctx)
+        assert "Reasoning" not in msg.text
+        assert "config:rs" not in _buttons_data(msg)
+
+
+# ---------------------------------------------------------------------------
+# Model sub-page
+# ---------------------------------------------------------------------------
+
+
+class TestModel:
+    @pytest.mark.anyio
+    async def test_model_page_renders(self, tmp_path):
+        state_path = tmp_path / "prefs.json"
+        cmd = ConfigCommand()
+        ctx = _make_ctx(args_text="md", text="config:md", config_path=state_path)
+        await cmd.handle(ctx)
+        msg = _last_edit_msg(ctx)
+        assert "Model" in msg.text
+        assert "default" in msg.text.lower()
+
+    @pytest.mark.anyio
+    async def test_model_shows_current_engine(self, tmp_path):
+        state_path = tmp_path / "prefs.json"
+        cmd = ConfigCommand()
+        ctx = _make_ctx(
+            args_text="md",
+            text="config:md",
+            config_path=state_path,
+            default_engine="claude",
+        )
+        await cmd.handle(ctx)
+        assert "claude" in _last_edit_msg(ctx).text
+
+    @pytest.mark.anyio
+    async def test_model_shows_override_value(self, tmp_path):
+        """When a model override is set, sub-page shows it."""
+        from untether.telegram.chat_prefs import ChatPrefsStore, resolve_prefs_path
+        from untether.telegram.engine_overrides import EngineOverrides
+
+        state_path = tmp_path / "prefs.json"
+        prefs = ChatPrefsStore(resolve_prefs_path(state_path))
+        await prefs.set_engine_override(
+            123, "codex", EngineOverrides(model="gpt-4.1-mini")
+        )
+
+        cmd = ConfigCommand()
+        ctx = _make_ctx(
+            args_text="md",
+            text="config:md",
+            config_path=state_path,
+            default_engine="codex",
+        )
+        await cmd.handle(ctx)
+        assert "gpt-4.1-mini" in _last_edit_msg(ctx).text
+
+    @pytest.mark.anyio
+    async def test_model_clear_returns_home(self, tmp_path):
+        from untether.telegram.chat_prefs import ChatPrefsStore, resolve_prefs_path
+        from untether.telegram.engine_overrides import EngineOverrides
+
+        state_path = tmp_path / "prefs.json"
+        prefs = ChatPrefsStore(resolve_prefs_path(state_path))
+        await prefs.set_engine_override(
+            123, "codex", EngineOverrides(model="gpt-4.1-mini")
+        )
+
+        cmd = ConfigCommand()
+        ctx = _make_ctx(
+            args_text="md:clr",
+            text="config:md:clr",
+            config_path=state_path,
+            default_engine="codex",
+        )
+        await cmd.handle(ctx)
+        msg = _last_edit_msg(ctx)
+        assert "Settings" in msg.text  # Home page
+
+    @pytest.mark.anyio
+    async def test_model_clear_removes_override(self, tmp_path):
+        from untether.telegram.chat_prefs import ChatPrefsStore, resolve_prefs_path
+        from untether.telegram.engine_overrides import EngineOverrides
+
+        state_path = tmp_path / "prefs.json"
+        prefs = ChatPrefsStore(resolve_prefs_path(state_path))
+        await prefs.set_engine_override(
+            123, "codex", EngineOverrides(model="gpt-4.1-mini")
+        )
+
+        cmd = ConfigCommand()
+        ctx = _make_ctx(
+            args_text="md:clr",
+            text="config:md:clr",
+            config_path=state_path,
+            default_engine="codex",
+        )
+        await cmd.handle(ctx)
+
+        override = await prefs.get_engine_override(123, "codex")
+        assert override is None or override.model is None
+
+    @pytest.mark.anyio
+    async def test_model_clear_preserves_other_overrides(self, tmp_path):
+        """Clearing model preserves reasoning and permission_mode."""
+        from untether.telegram.chat_prefs import ChatPrefsStore, resolve_prefs_path
+        from untether.telegram.engine_overrides import EngineOverrides
+
+        state_path = tmp_path / "prefs.json"
+        prefs = ChatPrefsStore(resolve_prefs_path(state_path))
+        await prefs.set_engine_override(
+            123,
+            "codex",
+            EngineOverrides(model="gpt-4.1", reasoning="high"),
+        )
+
+        cmd = ConfigCommand()
+        ctx = _make_ctx(
+            args_text="md:clr",
+            text="config:md:clr",
+            config_path=state_path,
+            default_engine="codex",
+        )
+        await cmd.handle(ctx)
+
+        override = await prefs.get_engine_override(123, "codex")
+        assert override is not None
+        assert override.model is None
+        assert override.reasoning == "high"
+
+    @pytest.mark.anyio
+    async def test_model_no_config_path(self):
+        cmd = ConfigCommand()
+        ctx = _make_ctx(args_text="md", text="config:md", config_path=None)
+        await cmd.handle(ctx)
+        assert "Unavailable" in _last_edit_msg(ctx).text
+
+    @pytest.mark.anyio
+    async def test_model_has_back_button(self, tmp_path):
+        state_path = tmp_path / "prefs.json"
+        cmd = ConfigCommand()
+        ctx = _make_ctx(args_text="md", text="config:md", config_path=state_path)
+        await cmd.handle(ctx)
+        assert "config:home" in _buttons_data(_last_edit_msg(ctx))
+
+    @pytest.mark.anyio
+    async def test_model_has_clear_button(self, tmp_path):
+        state_path = tmp_path / "prefs.json"
+        cmd = ConfigCommand()
+        ctx = _make_ctx(args_text="md", text="config:md", config_path=state_path)
+        await cmd.handle(ctx)
+        assert "config:md:clr" in _buttons_data(_last_edit_msg(ctx))
+
+    @pytest.mark.anyio
+    async def test_home_shows_model_label(self, tmp_path):
+        """Model label always appears on home page."""
+        state_path = tmp_path / "prefs.json"
+        cmd = ConfigCommand()
+        ctx = _make_ctx(config_path=state_path)
+        await cmd.handle(ctx)
+        assert "Model" in _last_send_msg(ctx).text
+
+    @pytest.mark.anyio
+    async def test_home_shows_model_button(self, tmp_path):
+        """Model button always appears on home page."""
+        state_path = tmp_path / "prefs.json"
+        cmd = ConfigCommand()
+        ctx = _make_ctx(config_path=state_path)
+        await cmd.handle(ctx)
+        assert "config:md" in _buttons_data(_last_send_msg(ctx))
+
+    @pytest.mark.anyio
+    async def test_home_model_shows_override(self, tmp_path):
+        """Home page model label shows override value when set."""
+        from untether.telegram.chat_prefs import ChatPrefsStore, resolve_prefs_path
+        from untether.telegram.engine_overrides import EngineOverrides
+
+        state_path = tmp_path / "prefs.json"
+        prefs = ChatPrefsStore(resolve_prefs_path(state_path))
+        await prefs.set_engine_override(123, "codex", EngineOverrides(model="o4-mini"))
+
+        cmd = ConfigCommand()
+        ctx = _make_ctx(config_path=state_path, default_engine="codex")
+        await cmd.handle(ctx)
+        assert "o4-mini" in _last_send_msg(ctx).text
+
+
+# ---------------------------------------------------------------------------
+# Reasoning sub-page
+# ---------------------------------------------------------------------------
+
+
+class TestReasoning:
+    @pytest.mark.anyio
+    async def test_reasoning_page_renders(self, tmp_path):
+        state_path = tmp_path / "prefs.json"
+        cmd = ConfigCommand()
+        ctx = _make_ctx(
+            args_text="rs",
+            text="config:rs",
+            config_path=state_path,
+            default_engine="codex",
+        )
+        await cmd.handle(ctx)
+        msg = _last_edit_msg(ctx)
+        assert "Reasoning" in msg.text
+        assert "config:rs:min" in _buttons_data(msg)
+
+    @pytest.mark.anyio
+    async def test_reasoning_shows_all_levels(self, tmp_path):
+        state_path = tmp_path / "prefs.json"
+        cmd = ConfigCommand()
+        ctx = _make_ctx(
+            args_text="rs",
+            text="config:rs",
+            config_path=state_path,
+            default_engine="codex",
+        )
+        await cmd.handle(ctx)
+        data = _buttons_data(_last_edit_msg(ctx))
+        assert "config:rs:min" in data
+        assert "config:rs:low" in data
+        assert "config:rs:med" in data
+        assert "config:rs:hi" in data
+        assert "config:rs:xhi" in data
+
+    @pytest.mark.anyio
+    async def test_reasoning_set_returns_home(self, tmp_path):
+        state_path = tmp_path / "prefs.json"
+        cmd = ConfigCommand()
+        ctx = _make_ctx(
+            args_text="rs:hi",
+            text="config:rs:hi",
+            config_path=state_path,
+            default_engine="codex",
+        )
+        await cmd.handle(ctx)
+        msg = _last_edit_msg(ctx)
+        assert "Settings" in msg.text
+
+    @pytest.mark.anyio
+    async def test_reasoning_set_persists(self, tmp_path):
+        from untether.telegram.chat_prefs import ChatPrefsStore, resolve_prefs_path
+
+        state_path = tmp_path / "prefs.json"
+        cmd = ConfigCommand()
+        ctx = _make_ctx(
+            args_text="rs:med",
+            text="config:rs:med",
+            config_path=state_path,
+            default_engine="codex",
+        )
+        await cmd.handle(ctx)
+
+        prefs = ChatPrefsStore(resolve_prefs_path(state_path))
+        override = await prefs.get_engine_override(123, "codex")
+        assert override is not None
+        assert override.reasoning == "medium"
+
+    @pytest.mark.anyio
+    async def test_reasoning_set_all_levels(self, tmp_path):
+        """All 5 reasoning levels map correctly."""
+        from untether.telegram.chat_prefs import ChatPrefsStore, resolve_prefs_path
+
+        expected = {
+            "min": "minimal",
+            "low": "low",
+            "med": "medium",
+            "hi": "high",
+            "xhi": "xhigh",
+        }
+        state_path = tmp_path / "prefs.json"
+
+        for action, level in expected.items():
+            cmd = ConfigCommand()
+            ctx = _make_ctx(
+                args_text=f"rs:{action}",
+                text=f"config:rs:{action}",
+                config_path=state_path,
+                default_engine="codex",
+            )
+            await cmd.handle(ctx)
+            prefs = ChatPrefsStore(resolve_prefs_path(state_path))
+            override = await prefs.get_engine_override(123, "codex")
+            assert override is not None
+            assert override.reasoning == level, f"rs:{action} should set {level}"
+
+    @pytest.mark.anyio
+    async def test_reasoning_clear_returns_home(self, tmp_path):
+        from untether.telegram.chat_prefs import ChatPrefsStore, resolve_prefs_path
+        from untether.telegram.engine_overrides import EngineOverrides
+
+        state_path = tmp_path / "prefs.json"
+        prefs = ChatPrefsStore(resolve_prefs_path(state_path))
+        await prefs.set_engine_override(123, "codex", EngineOverrides(reasoning="high"))
+
+        cmd = ConfigCommand()
+        ctx = _make_ctx(
+            args_text="rs:clr",
+            text="config:rs:clr",
+            config_path=state_path,
+            default_engine="codex",
+        )
+        await cmd.handle(ctx)
+        msg = _last_edit_msg(ctx)
+        assert "Settings" in msg.text
+
+    @pytest.mark.anyio
+    async def test_reasoning_clear_removes_override(self, tmp_path):
+        from untether.telegram.chat_prefs import ChatPrefsStore, resolve_prefs_path
+        from untether.telegram.engine_overrides import EngineOverrides
+
+        state_path = tmp_path / "prefs.json"
+        prefs = ChatPrefsStore(resolve_prefs_path(state_path))
+        await prefs.set_engine_override(123, "codex", EngineOverrides(reasoning="high"))
+
+        cmd = ConfigCommand()
+        ctx = _make_ctx(
+            args_text="rs:clr",
+            text="config:rs:clr",
+            config_path=state_path,
+            default_engine="codex",
+        )
+        await cmd.handle(ctx)
+
+        override = await prefs.get_engine_override(123, "codex")
+        assert override is None or override.reasoning is None
+
+    @pytest.mark.anyio
+    async def test_reasoning_clear_preserves_model(self, tmp_path):
+        """Clearing reasoning preserves model override."""
+        from untether.telegram.chat_prefs import ChatPrefsStore, resolve_prefs_path
+        from untether.telegram.engine_overrides import EngineOverrides
+
+        state_path = tmp_path / "prefs.json"
+        prefs = ChatPrefsStore(resolve_prefs_path(state_path))
+        await prefs.set_engine_override(
+            123,
+            "codex",
+            EngineOverrides(model="gpt-4.1", reasoning="high"),
+        )
+
+        cmd = ConfigCommand()
+        ctx = _make_ctx(
+            args_text="rs:clr",
+            text="config:rs:clr",
+            config_path=state_path,
+            default_engine="codex",
+        )
+        await cmd.handle(ctx)
+
+        override = await prefs.get_engine_override(123, "codex")
+        assert override is not None
+        assert override.model == "gpt-4.1"
+        assert override.reasoning is None
+
+    @pytest.mark.anyio
+    async def test_reasoning_guard_non_codex(self, tmp_path):
+        """Reasoning page shows guard message when engine is not codex."""
+        state_path = tmp_path / "prefs.json"
+        cmd = ConfigCommand()
+        ctx = _make_ctx(
+            args_text="rs",
+            text="config:rs",
+            config_path=state_path,
+            default_engine="claude",
+        )
+        await cmd.handle(ctx)
+        msg = _last_edit_msg(ctx)
+        assert "Only available for engines" in msg.text
+        assert "config:home" in _buttons_data(msg)
+
+    @pytest.mark.anyio
+    async def test_reasoning_no_config_path(self):
+        cmd = ConfigCommand()
+        ctx = _make_ctx(args_text="rs", text="config:rs", config_path=None)
+        await cmd.handle(ctx)
+        assert "Unavailable" in _last_edit_msg(ctx).text
+
+    @pytest.mark.anyio
+    async def test_reasoning_has_back_button(self, tmp_path):
+        state_path = tmp_path / "prefs.json"
+        cmd = ConfigCommand()
+        ctx = _make_ctx(
+            args_text="rs",
+            text="config:rs",
+            config_path=state_path,
+            default_engine="codex",
+        )
+        await cmd.handle(ctx)
+        assert "config:home" in _buttons_data(_last_edit_msg(ctx))
+
+    @pytest.mark.anyio
+    async def test_reasoning_checkmark_on_active(self, tmp_path):
+        """Active reasoning level shows checkmark."""
+        from untether.telegram.chat_prefs import ChatPrefsStore, resolve_prefs_path
+        from untether.telegram.engine_overrides import EngineOverrides
+
+        state_path = tmp_path / "prefs.json"
+        prefs = ChatPrefsStore(resolve_prefs_path(state_path))
+        await prefs.set_engine_override(123, "codex", EngineOverrides(reasoning="high"))
+
+        cmd = ConfigCommand()
+        ctx = _make_ctx(
+            args_text="rs",
+            text="config:rs",
+            config_path=state_path,
+            default_engine="codex",
+        )
+        await cmd.handle(ctx)
+        labels = _buttons_labels(_last_edit_msg(ctx))
+        assert any("✓" in label and "High" in label for label in labels)
+
+    @pytest.mark.anyio
+    async def test_home_shows_reasoning_for_codex(self, tmp_path):
+        """Reasoning label and button visible when engine is codex."""
+        state_path = tmp_path / "prefs.json"
+        cmd = ConfigCommand()
+        ctx = _make_ctx(
+            config_path=state_path,
+            default_engine="codex",
+        )
+        await cmd.handle(ctx)
+        msg = _last_send_msg(ctx)
+        assert "Reasoning" in msg.text
+        assert "config:rs" in _buttons_data(msg)
+
+    @pytest.mark.anyio
+    async def test_home_hides_reasoning_for_claude(self, tmp_path):
+        """Reasoning label and button hidden when engine is claude."""
+        state_path = tmp_path / "prefs.json"
+        cmd = ConfigCommand()
+        ctx = _make_ctx(
+            config_path=state_path,
+            default_engine="claude",
+        )
+        await cmd.handle(ctx)
+        msg = _last_send_msg(ctx)
+        assert "Reasoning" not in msg.text
+        assert "config:rs" not in _buttons_data(msg)
+
+    @pytest.mark.anyio
+    async def test_home_reasoning_shows_override(self, tmp_path):
+        """Home page reasoning label shows override value when set."""
+        from untether.telegram.chat_prefs import ChatPrefsStore, resolve_prefs_path
+        from untether.telegram.engine_overrides import EngineOverrides
+
+        state_path = tmp_path / "prefs.json"
+        prefs = ChatPrefsStore(resolve_prefs_path(state_path))
+        await prefs.set_engine_override(
+            123, "codex", EngineOverrides(reasoning="medium")
+        )
+
+        cmd = ConfigCommand()
+        ctx = _make_ctx(config_path=state_path, default_engine="codex")
+        await cmd.handle(ctx)
+        assert "medium" in _last_send_msg(ctx).text
+
+
+# ---------------------------------------------------------------------------
+# Reasoning toasts
+# ---------------------------------------------------------------------------
+
+
+class TestReasoningToasts:
+    def test_toast_reasoning_minimal(self):
+        assert ConfigCommand.early_answer_toast("rs:min") == "Reasoning: minimal"
+
+    def test_toast_reasoning_low(self):
+        assert ConfigCommand.early_answer_toast("rs:low") == "Reasoning: low"
+
+    def test_toast_reasoning_medium(self):
+        assert ConfigCommand.early_answer_toast("rs:med") == "Reasoning: medium"
+
+    def test_toast_reasoning_high(self):
+        assert ConfigCommand.early_answer_toast("rs:hi") == "Reasoning: high"
+
+    def test_toast_reasoning_xhigh(self):
+        assert ConfigCommand.early_answer_toast("rs:xhi") == "Reasoning: xhigh"
+
+    def test_toast_reasoning_clear(self):
+        assert ConfigCommand.early_answer_toast("rs:clr") == "Reasoning: cleared"
+
+    def test_toast_model_clear(self):
+        assert ConfigCommand.early_answer_toast("md:clr") == "Model: cleared"

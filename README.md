@@ -64,7 +64,7 @@ That's it. Your agent runs on your machine, streams progress to Telegram, and yo
 - 💬 **Forum topics** — map Telegram topics to projects and branches
 - 📤 **Session export** — `/export` for markdown or JSON transcripts
 - 🗂️ **File browser** — `/browse` to navigate project files with inline buttons
-- ⚙️ **Inline settings** — `/config` opens an in-place settings menu; toggle plan mode, verbose, engine, and trigger with buttons
+- ⚙️ **Inline settings** — `/config` opens an in-place settings menu; toggle plan mode, verbose, engine, model, reasoning, and trigger with buttons
 - 🧩 **Plugin system** — extend with custom engines, transports, and commands
 - 💬 **Conversation modes** — assistant (ongoing chat), workspace (forum topics per project), or handoff (reply-to-continue with terminal resume)
 
@@ -99,7 +99,11 @@ That's it. Your agent runs on your machine, streams progress to Telegram, and yo
 | `/topic` | Create or bind forum topics |
 | `/restart` | Gracefully restart Untether (drains active runs first) |
 | `/verbose` | Toggle verbose progress mode (show tool details) |
-| `/config` | Interactive settings menu (plan mode, verbose, engine, trigger) |
+| `/config` | Interactive settings menu (plan mode, verbose, engine, model, reasoning, trigger) |
+| `/ctx` | Show or update project/branch context |
+| `/reasoning` | Set reasoning level override |
+| `/trigger` | Set group chat trigger mode |
+| `/ping` | Health check / uptime |
 
 Prefix any message with `/<engine>` to pick an engine for that task, or `/<project>` to target a repo:
 
@@ -168,6 +172,14 @@ Full documentation is available in the [`docs/`](https://github.com/littlebearap
 - [Webhooks and cron](https://github.com/littlebearapps/untether/blob/master/docs/how-to/webhooks-and-cron.md) — automated runs from external events
 - [Projects and branches](https://github.com/littlebearapps/untether/blob/master/docs/tutorials/projects-and-branches.md) — multi-repo workflows
 - [Multi-engine workflows](https://github.com/littlebearapps/untether/blob/master/docs/tutorials/multi-engine.md) — switching between agents
+- [Inline settings](https://github.com/littlebearapps/untether/blob/master/docs/how-to/inline-settings.md) — `/config` button menu
+- [Verbose progress](https://github.com/littlebearapps/untether/blob/master/docs/how-to/verbose-progress.md) — tool detail display
+- [Voice notes](https://github.com/littlebearapps/untether/blob/master/docs/how-to/voice-notes.md) — dictate tasks from your phone
+- [File browser](https://github.com/littlebearapps/untether/blob/master/docs/how-to/browse-files.md) — `/browse` inline navigation
+- [Session export](https://github.com/littlebearapps/untether/blob/master/docs/how-to/export-sessions.md) — markdown and JSON transcripts
+- [Group chats](https://github.com/littlebearapps/untether/blob/master/docs/how-to/group-chat.md) — multi-user and trigger modes
+- [Context binding](https://github.com/littlebearapps/untether/blob/master/docs/how-to/context-binding.md) — per-chat project/branch binding
+- [Conversation modes](https://github.com/littlebearapps/untether/blob/master/docs/tutorials/conversation-modes.md) — assistant, workspace, and handoff
 - [Architecture](https://github.com/littlebearapps/untether/blob/master/docs/explanation/architecture.md) — how the pieces fit together
 
 ---

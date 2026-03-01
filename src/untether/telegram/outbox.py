@@ -54,7 +54,7 @@ class TelegramOutbox:
         self._start_lock = anyio.Lock()
         self._closed = False
         self._tg: TaskGroup | None = None
-        self.next_at = 0.0
+        self._next_at: dict[int | None, float] = {}
         self.retry_at = 0.0
 
     async def ensure_worker(self) -> None:
@@ -117,13 +117,27 @@ class TelegramOutbox:
             pending.set_result(None)
         self._pending.clear()
 
-    def pick_locked(self) -> tuple[Hashable, OutboxOp] | None:
-        if not self._pending:
-            return None
-        return min(
-            self._pending.items(),
-            key=lambda item: (item[1].priority, item[1].queued_at),
-        )
+    def _pick_ready(self, now: float) -> tuple[Hashable, OutboxOp] | None:
+        """Pick the highest-priority, oldest-queued op whose chat is not blocked."""
+        best: tuple[Hashable, OutboxOp] | None = None
+        best_key: tuple[int, float] | None = None
+        for key, op in self._pending.items():
+            if self._next_at.get(op.chat_id, 0.0) > now:
+                continue
+            candidate = (op.priority, op.queued_at)
+            if best_key is None or candidate < best_key:
+                best = (key, op)
+                best_key = candidate
+        return best
+
+    def _earliest_unblock(self) -> float | None:
+        """Earliest time any pending op's chat becomes ready."""
+        earliest: float | None = None
+        for op in self._pending.values():
+            t = self._next_at.get(op.chat_id, 0.0)
+            if earliest is None or t < earliest:
+                earliest = t
+        return earliest
 
     async def execute_op(self, op: OutboxOp) -> Any:
         try:
@@ -162,18 +176,22 @@ class TelegramOutbox:
                         await self._cond.wait()
                     if self._closed and not self._pending:
                         return
-                blocked_until = max(self.next_at, self.retry_at)
-                if self._clock() < blocked_until:
-                    await self.sleep_until(blocked_until)
+                if self._clock() < self.retry_at:
+                    await self.sleep_until(self.retry_at)
                     continue
                 async with self._cond:
                     if self._closed and not self._pending:
                         return
-                    picked = self.pick_locked()
-                    if picked is None:
-                        continue
-                    key, op = picked
-                    self._pending.pop(key, None)
+                    now = self._clock()
+                    picked = self._pick_ready(now)
+                    if picked is not None:
+                        key, op = picked
+                        self._pending.pop(key, None)
+                if picked is None:
+                    earliest = self._earliest_unblock()
+                    if earliest is not None and earliest > self._clock():
+                        await self.sleep_until(earliest)
+                    continue
                 started_at = self._clock()
                 try:
                     result = await self.execute_op(op)
@@ -198,7 +216,9 @@ class TelegramOutbox:
                             )
                             op.set_result(None)
                     continue
-                self.next_at = started_at + self._interval_for_chat(op.chat_id)
+                self._next_at[op.chat_id] = started_at + self._interval_for_chat(
+                    op.chat_id
+                )
                 op.set_result(result)
         except cancel_exc:
             logger.debug("outbox.worker.cancelled")

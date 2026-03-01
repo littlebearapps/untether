@@ -277,9 +277,10 @@ Scheduling:
 
 - Per-chat pacing is computed from `private_chat_rps` and `group_chat_rps`.
   Defaults: 1.0 msg/s for private, 20/60 msg/s for groups (≈1 message every 3s).
-- Pacing is currently enforced via a single global `next_at`; per-chat
-  `next_at` is a future consideration if we ever run multiple chats in parallel.
-- The worker waits until `max(next_at, retry_at)` before executing the next op.
+- Pacing is enforced per-chat via `_next_at[chat_id]`; each chat tracks its own
+  earliest-allowed send time independently.
+- The worker picks the highest-priority ready op whose chat is not blocked.
+  On 429, `retry_at` blocks all chats globally until the retry window expires.
 - On 429, `RetryAfter` is raised using `parameters.retry_after` when present;
   if missing, we fall back to a 5s delay. The outbox sets `retry_at` and
   requeues the op if no newer op for the same key has arrived.

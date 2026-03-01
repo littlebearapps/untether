@@ -102,7 +102,7 @@ Key formats (include `chat_id` to avoid cross-chat collisions):
 ## Rate limiting
 
 - Per-chat pacing: `private_chat_rps` (default 1.0 msg/s), `group_chat_rps` (default 20/60 msg/s)
-- Global `next_at` timestamp — worker waits until `max(next_at, retry_at)`
+- Per-chat `_next_at[chat_id]` timestamps — worker picks from unblocked chats; global `retry_at` blocks all on 429
 - On 429: `RetryAfter` raised using `parameters.retry_after`; op requeued if no newer op superseded it
 - Non-429 errors: logged and dropped (no retry)
 

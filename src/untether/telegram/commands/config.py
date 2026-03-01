@@ -45,6 +45,7 @@ def _check(label: str, *, active: bool) -> str:
 
 async def _page_home(ctx: CommandContext) -> None:
     from ..chat_prefs import ChatPrefsStore, resolve_prefs_path
+    from ..engine_overrides import supports_reasoning
     from .verbose import get_verbosity_override
 
     chat_id = ctx.message.channel_id
@@ -54,6 +55,8 @@ async def _page_home(ctx: CommandContext) -> None:
     engine_label = ctx.runtime.default_engine
     current_engine = ctx.runtime.default_engine
     trigger_label = "all"
+    model_label = "default"
+    reasoning_label = "default"
 
     if config_path is not None:
         prefs = ChatPrefsStore(resolve_prefs_path(config_path))
@@ -75,6 +78,15 @@ async def _page_home(ctx: CommandContext) -> None:
         trig = await prefs.get_trigger_mode(chat_id)
         trigger_label = trig or "all"
 
+        # Model override for current engine
+        engine_override = await prefs.get_engine_override(chat_id, current_engine)
+        if engine_override and engine_override.model:
+            model_label = engine_override.model
+
+        # Reasoning override for current engine
+        if engine_override and engine_override.reasoning:
+            reasoning_label = engine_override.reasoning
+
     verbose = get_verbosity_override(chat_id)
     if verbose == "verbose":
         verbose_label = "on"
@@ -84,6 +96,7 @@ async def _page_home(ctx: CommandContext) -> None:
         verbose_label = "default"
 
     show_plan_mode = current_engine == "claude"
+    show_reasoning = supports_reasoning(current_engine)
 
     lines = [
         "<b>⚙️ Settings</b>",
@@ -95,11 +108,16 @@ async def _page_home(ctx: CommandContext) -> None:
         [
             f"Verbose: <b>{verbose_label}</b>",
             f"Engine: <b>{engine_label}</b>",
+            f"Model: <b>{model_label}</b>",
             f"Trigger: <b>{trigger_label}</b>",
         ]
     )
+    if show_reasoning:
+        lines.append(f"Reasoning: <b>{reasoning_label}</b>")
 
     buttons: list[list[dict[str, str]]] = []
+
+    # Row 1
     if show_plan_mode:
         buttons.append(
             [
@@ -111,14 +129,40 @@ async def _page_home(ctx: CommandContext) -> None:
         buttons.append(
             [
                 {"text": "Verbose", "callback_data": "config:vb"},
+                {"text": "Model", "callback_data": "config:md"},
             ]
         )
-    buttons.append(
-        [
-            {"text": "Engine", "callback_data": "config:ag"},
-            {"text": "Trigger", "callback_data": "config:tr"},
-        ]
-    )
+
+    # Row 2
+    if show_plan_mode:
+        buttons.append(
+            [
+                {"text": "Engine", "callback_data": "config:ag"},
+                {"text": "Model", "callback_data": "config:md"},
+            ]
+        )
+    elif show_reasoning:
+        buttons.append(
+            [
+                {"text": "Engine", "callback_data": "config:ag"},
+                {"text": "Reasoning", "callback_data": "config:rs"},
+            ]
+        )
+    else:
+        buttons.append(
+            [
+                {"text": "Engine", "callback_data": "config:ag"},
+                {"text": "Trigger", "callback_data": "config:tr"},
+            ]
+        )
+
+    # Row 3: remaining buttons
+    if show_plan_mode or show_reasoning:
+        buttons.append(
+            [
+                {"text": "Trigger", "callback_data": "config:tr"},
+            ]
+        )
 
     await _respond(ctx, "\n".join(lines), buttons)
 
@@ -429,6 +473,188 @@ async def _page_trigger(ctx: CommandContext, action: str | None = None) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Model
+# ---------------------------------------------------------------------------
+
+
+async def _page_model(ctx: CommandContext, action: str | None = None) -> None:
+    from ..chat_prefs import ChatPrefsStore, resolve_prefs_path
+    from ..engine_overrides import EngineOverrides
+
+    config_path = ctx.config_path
+    if config_path is None:
+        await _respond(
+            ctx,
+            "<b>⚙️ Model</b>\n\nUnavailable (no config path).",
+            [[{"text": "← Back", "callback_data": "config:home"}]],
+        )
+        return
+
+    prefs = ChatPrefsStore(resolve_prefs_path(config_path))
+    chat_id = ctx.message.channel_id
+
+    # Resolve current engine
+    eng = await prefs.get_default_engine(chat_id)
+    current_engine = eng if eng else ctx.runtime.default_engine
+
+    if action == "clr":
+        current = await prefs.get_engine_override(chat_id, current_engine)
+        updated = EngineOverrides(
+            model=None,
+            reasoning=current.reasoning if current else None,
+            permission_mode=current.permission_mode if current else None,
+        )
+        await prefs.set_engine_override(chat_id, current_engine, updated)
+        logger.info("config.model.cleared", chat_id=chat_id, engine=current_engine)
+        await _page_home(ctx)
+        return
+
+    override = await prefs.get_engine_override(chat_id, current_engine)
+    model = override.model if override else None
+    current_label = model or "default"
+
+    lines = [
+        "<b>⚙️ Model</b>",
+        "",
+        "Per-engine model override for this chat.",
+        f"Engine: <b>{current_engine}</b>",
+        f"Current: <b>{current_label}</b>",
+        "",
+        "Use <code>/model set &lt;name&gt;</code> to set a specific model.",
+    ]
+
+    buttons = [
+        [
+            {"text": "Clear override", "callback_data": "config:md:clr"},
+            {"text": "← Back", "callback_data": "config:home"},
+        ],
+    ]
+
+    await _respond(ctx, "\n".join(lines), buttons)
+
+
+# ---------------------------------------------------------------------------
+# Reasoning
+# ---------------------------------------------------------------------------
+
+_RS_ACTIONS: dict[str, str] = {
+    "min": "minimal",
+    "low": "low",
+    "med": "medium",
+    "hi": "high",
+    "xhi": "xhigh",
+}
+
+_RS_LABELS: dict[str, str] = {v: k for k, v in _RS_ACTIONS.items()}
+
+
+async def _page_reasoning(ctx: CommandContext, action: str | None = None) -> None:
+    from ..chat_prefs import ChatPrefsStore, resolve_prefs_path
+    from ..engine_overrides import EngineOverrides, supports_reasoning
+
+    config_path = ctx.config_path
+    if config_path is None:
+        await _respond(
+            ctx,
+            "<b>⚙️ Reasoning</b>\n\nUnavailable (no config path).",
+            [[{"text": "← Back", "callback_data": "config:home"}]],
+        )
+        return
+
+    prefs = ChatPrefsStore(resolve_prefs_path(config_path))
+    chat_id = ctx.message.channel_id
+
+    # Reasoning is engine-specific — guard against unsupported engines
+    eng = await prefs.get_default_engine(chat_id)
+    current_engine = eng if eng else ctx.runtime.default_engine
+    if not supports_reasoning(current_engine):
+        await _respond(
+            ctx,
+            "<b>⚙️ Reasoning</b>\n\nOnly available for engines that support reasoning levels.",
+            [[{"text": "← Back", "callback_data": "config:home"}]],
+        )
+        return
+
+    if action in _RS_ACTIONS:
+        level = _RS_ACTIONS[action]
+        current = await prefs.get_engine_override(chat_id, current_engine)
+        updated = EngineOverrides(
+            model=current.model if current else None,
+            reasoning=level,
+            permission_mode=current.permission_mode if current else None,
+        )
+        await prefs.set_engine_override(chat_id, current_engine, updated)
+        logger.info(
+            "config.reasoning.set",
+            chat_id=chat_id,
+            engine=current_engine,
+            level=level,
+        )
+        await _page_home(ctx)
+        return
+    elif action == "clr":
+        current = await prefs.get_engine_override(chat_id, current_engine)
+        updated = EngineOverrides(
+            model=current.model if current else None,
+            reasoning=None,
+            permission_mode=current.permission_mode if current else None,
+        )
+        await prefs.set_engine_override(chat_id, current_engine, updated)
+        logger.info("config.reasoning.cleared", chat_id=chat_id, engine=current_engine)
+        await _page_home(ctx)
+        return
+
+    override = await prefs.get_engine_override(chat_id, current_engine)
+    reasoning = override.reasoning if override else None
+    current_label = reasoning or "default"
+
+    lines = [
+        "<b>⚙️ Reasoning</b>",
+        "",
+        "Controls reasoning effort level.",
+        "• <b>minimal</b> — fastest, least reasoning",
+        "• <b>low</b> / <b>medium</b> / <b>high</b>",
+        "• <b>xhigh</b> — most thorough reasoning",
+        "",
+        f"Engine: <b>{current_engine}</b>",
+        f"Current: <b>{current_label}</b>",
+    ]
+
+    buttons = [
+        [
+            {
+                "text": _check("Minimal", active=reasoning == "minimal"),
+                "callback_data": "config:rs:min",
+            },
+            {
+                "text": _check("Low", active=reasoning == "low"),
+                "callback_data": "config:rs:low",
+            },
+            {
+                "text": _check("Medium", active=reasoning == "medium"),
+                "callback_data": "config:rs:med",
+            },
+        ],
+        [
+            {
+                "text": _check("High", active=reasoning == "high"),
+                "callback_data": "config:rs:hi",
+            },
+            {
+                "text": _check("Xhigh", active=reasoning == "xhigh"),
+                "callback_data": "config:rs:xhi",
+            },
+        ],
+        [
+            {"text": "Clear override", "callback_data": "config:rs:clr"},
+            {"text": "← Back", "callback_data": "config:home"},
+        ],
+    ]
+
+    await _respond(ctx, "\n".join(lines), buttons)
+
+
+# ---------------------------------------------------------------------------
 # Routing
 # ---------------------------------------------------------------------------
 
@@ -437,6 +663,8 @@ _PAGES: dict[str, object] = {
     "vb": _page_verbose,
     "ag": _page_engine,
     "tr": _page_trigger,
+    "md": _page_model,
+    "rs": _page_reasoning,
 }
 
 
@@ -474,6 +702,15 @@ class ConfigCommand:
                 "all": "Trigger: all",
                 "men": "Trigger: mentions",
                 "clr": "Trigger: cleared",
+            },
+            "md": {"clr": "Model: cleared"},
+            "rs": {
+                "min": "Reasoning: minimal",
+                "low": "Reasoning: low",
+                "med": "Reasoning: medium",
+                "hi": "Reasoning: high",
+                "xhi": "Reasoning: xhigh",
+                "clr": "Reasoning: cleared",
             },
         }
         page_labels = _TOAST_LABELS.get(page, {})

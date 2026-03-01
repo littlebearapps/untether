@@ -144,7 +144,7 @@ Rules in `.claude/rules/` auto-load when editing matching files:
 - `test_cooldown_bypass.py` — 3 tests: outline bypass, rapid retry auto-deny, no-text auto-deny
 - `test_verbose_progress.py` — 18 tests: format_verbose_detail() for each tool type, MarkdownFormatter verbose mode, compact regression
 - `test_verbose_command.py` — 8 tests: /verbose toggle on/off/clear, backend id
-- `test_config_command.py` — 44 tests: home page, plan mode/verbose/engine/trigger sub-pages, toggle actions, callback vs command routing, button layout
+- `test_config_command.py` — 98 tests: home page, plan mode/verbose/engine/trigger/model/reasoning sub-pages, toggle actions, callback vs command routing, button layout, engine-aware visibility
 - `test_pi_compaction.py` — 7 tests: compaction start/end, aborted, no tokens, sequence
 
 ## Development

@@ -18,10 +18,12 @@ Settings
 Plan mode: default
 Verbose: default
 Engine: claude (global)
+Model: default
 Trigger: all
 
 [ Plan mode ] [ Verbose ]
-[  Engine   ] [ Trigger ]
+[  Engine   ] [  Model  ]
+[  Trigger  ]
 ```
 
 ## Navigate sub-pages
@@ -41,14 +43,15 @@ When you tap a setting button:
 1. **Confirmation toast** — a brief popup appears confirming the change (e.g. "Plan mode: off", "Verbose: on"). This uses the same toast mechanism as Claude approval buttons.
 2. **Auto-return** — the menu automatically navigates back to the home page, showing the updated value across all settings. No need to tap "Back" manually.
 
-### Engine-aware plan mode
+### Engine-aware visibility
 
-Plan mode is only available for Claude Code. If the current engine is Codex, OpenCode, or Pi:
+Some settings are engine-specific and only appear when relevant:
 
-- The plan mode label and button are hidden from the home page
-- Navigating directly to the plan mode sub-page shows "Only available for Claude Code" with a Back button
+- **Plan mode** — only available for Claude Code. Hidden for other engines; the sub-page shows "Only available for Claude Code" with a Back button.
+- **Reasoning** — only available for engines that support reasoning levels (currently Codex). Hidden for Claude, OpenCode, and Pi.
+- **Model** — always visible. Shows the current model override and lets you clear it. To set a model, use `/model set <name>`.
 
-When you switch the engine back to Claude (via the Engine sub-page), the plan mode button reappears on the home page automatically.
+When you switch engines via the Engine sub-page, the home page automatically shows or hides the relevant settings.
 
 ## Available settings
 
@@ -57,6 +60,8 @@ When you switch the engine back to Claude (via the Engine sub-page), the plan mo
 | Plan mode | off, on, auto | Yes (chat prefs) |
 | Verbose | off, on | No (in-memory, resets on restart) |
 | Engine | any configured engine | Yes (chat prefs) |
+| Model | view + clear (set via `/model set`) | Yes (chat prefs) |
+| Reasoning | minimal, low, medium, high, xhigh | Yes (chat prefs) |
 | Trigger | all, mentions | Yes (chat prefs) |
 
 ## Callbacks vs commands
