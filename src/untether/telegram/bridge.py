@@ -48,7 +48,7 @@ class TelegramPresenter:
         self,
         *,
         formatter: MarkdownFormatter | None = None,
-        message_overflow: str = "trim",
+        message_overflow: str = "split",
     ) -> None:
         self._formatter = formatter or MarkdownFormatter()
         self._message_overflow = message_overflow

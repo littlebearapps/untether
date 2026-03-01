@@ -185,21 +185,21 @@ line stays visible so reply-to-continue still works.
 
 ## Message overflow
 
-By default, untether trims long final responses to ~3500 characters to stay under
-Telegram's 4096 character limit after entity parsing. You can opt into splitting
-instead:
+By default, untether splits long final responses across multiple messages to stay
+under Telegram's 4096 character limit after entity parsing. You can opt into
+trimming instead:
 
 === "untether config"
 
     ```sh
-    untether config set transports.telegram.message_overflow "split"
+    untether config set transports.telegram.message_overflow "trim"
     ```
 
 === "toml"
 
     ```toml
     [transports.telegram]
-    message_overflow = "split" # trim | split
+    message_overflow = "trim" # trim | split
     ```
 
 Split mode sends multiple messages. Each chunk includes the footer; follow-up

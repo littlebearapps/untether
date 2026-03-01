@@ -1,5 +1,11 @@
 # changelog
 
+## v0.25.1 (2026-03-01)
+
+### changes
+
+- default `message_overflow` changed from `"trim"` to `"split"` — long final responses now split across multiple Telegram messages instead of being truncated [#42](https://github.com/littlebearapps/untether/issues/42)
+
 ## v0.25.0 (2026-02-28)
 
 ### changes

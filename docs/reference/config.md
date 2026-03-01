@@ -47,7 +47,7 @@ If you expect to edit config while Untether is running, set:
 | `bot_token` | string | (required) | Telegram bot token from @BotFather. |
 | `chat_id` | int | (required) | Default chat id. |
 | `allowed_user_ids` | int[] | `[]` | Allowed sender user ids. Empty disables sender filtering; when set, only these users can interact (including DMs). |
-| `message_overflow` | `"trim"`\|`"split"` | `"trim"` | How to handle long final responses. |
+| `message_overflow` | `"trim"`\|`"split"` | `"split"` | How to handle long final responses. |
 | `forward_coalesce_s` | float | `1.0` | Quiet window for combining a prompt with immediately-following forwarded messages; set `0` to disable. |
 | `voice_transcription` | bool | `false` | Enable voice note transcription. |
 | `voice_max_bytes` | int | `10485760` | Max voice note size (bytes). |
