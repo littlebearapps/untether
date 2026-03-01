@@ -52,6 +52,7 @@ async def _page_home(ctx: CommandContext) -> None:
 
     pm_label = "—"
     engine_label = ctx.runtime.default_engine
+    current_engine = ctx.runtime.default_engine
     trigger_label = "all"
 
     if config_path is not None:
@@ -68,6 +69,7 @@ async def _page_home(ctx: CommandContext) -> None:
             pm_label = "default"
 
         eng = await prefs.get_default_engine(chat_id)
+        current_engine = eng if eng else ctx.runtime.default_engine
         engine_label = eng if eng else f"{ctx.runtime.default_engine} (global)"
 
         trig = await prefs.get_trigger_mode(chat_id)
@@ -81,25 +83,42 @@ async def _page_home(ctx: CommandContext) -> None:
     else:
         verbose_label = "default"
 
+    show_plan_mode = current_engine == "claude"
+
     lines = [
         "<b>⚙️ Settings</b>",
         "",
-        f"Plan mode: <b>{pm_label}</b>",
-        f"Verbose: <b>{verbose_label}</b>",
-        f"Engine: <b>{engine_label}</b>",
-        f"Trigger: <b>{trigger_label}</b>",
     ]
-
-    buttons = [
+    if show_plan_mode:
+        lines.append(f"Plan mode: <b>{pm_label}</b>")
+    lines.extend(
         [
-            {"text": "Plan mode", "callback_data": "config:pm"},
-            {"text": "Verbose", "callback_data": "config:vb"},
-        ],
+            f"Verbose: <b>{verbose_label}</b>",
+            f"Engine: <b>{engine_label}</b>",
+            f"Trigger: <b>{trigger_label}</b>",
+        ]
+    )
+
+    buttons: list[list[dict[str, str]]] = []
+    if show_plan_mode:
+        buttons.append(
+            [
+                {"text": "Plan mode", "callback_data": "config:pm"},
+                {"text": "Verbose", "callback_data": "config:vb"},
+            ]
+        )
+    else:
+        buttons.append(
+            [
+                {"text": "Verbose", "callback_data": "config:vb"},
+            ]
+        )
+    buttons.append(
         [
             {"text": "Engine", "callback_data": "config:ag"},
             {"text": "Trigger", "callback_data": "config:tr"},
-        ],
-    ]
+        ]
+    )
 
     await _respond(ctx, "\n".join(lines), buttons)
 
@@ -126,6 +145,18 @@ async def _page_planmode(ctx: CommandContext, action: str | None = None) -> None
 
     prefs = ChatPrefsStore(resolve_prefs_path(config_path))
     chat_id = ctx.message.channel_id
+
+    # Plan mode is Claude-only — guard against non-Claude engines
+    eng = await prefs.get_default_engine(chat_id)
+    current_engine = eng if eng else ctx.runtime.default_engine
+    if current_engine != "claude":
+        await _respond(
+            ctx,
+            "<b>⚙️ Plan mode</b>\n\nOnly available for Claude Code.",
+            [[{"text": "← Back", "callback_data": "config:home"}]],
+        )
+        return
+
     engine = "claude"
 
     if action in _PM_MODES:
@@ -137,6 +168,8 @@ async def _page_planmode(ctx: CommandContext, action: str | None = None) -> None
         )
         await prefs.set_engine_override(chat_id, engine, updated)
         logger.info("config.planmode.set", chat_id=chat_id, mode=action)
+        await _page_home(ctx)
+        return
     elif action == "clr":
         current = await prefs.get_engine_override(chat_id, engine)
         updated = EngineOverrides(
@@ -146,6 +179,8 @@ async def _page_planmode(ctx: CommandContext, action: str | None = None) -> None
         )
         await prefs.set_engine_override(chat_id, engine, updated)
         logger.info("config.planmode.cleared", chat_id=chat_id)
+        await _page_home(ctx)
+        return
 
     override = await prefs.get_engine_override(chat_id, engine)
     pm = override.permission_mode if override else None
@@ -206,12 +241,18 @@ async def _page_verbose(ctx: CommandContext, action: str | None = None) -> None:
     if action == "on":
         _VERBOSE_OVERRIDES[chat_id] = "verbose"
         logger.info("config.verbose.set", chat_id=chat_id, verbosity="verbose")
+        await _page_home(ctx)
+        return
     elif action == "off":
         _VERBOSE_OVERRIDES[chat_id] = "compact"
         logger.info("config.verbose.set", chat_id=chat_id, verbosity="compact")
+        await _page_home(ctx)
+        return
     elif action == "clr":
         _VERBOSE_OVERRIDES.pop(chat_id, None)
         logger.info("config.verbose.cleared", chat_id=chat_id)
+        await _page_home(ctx)
+        return
 
     current = get_verbosity_override(chat_id)
     if current == "verbose":
@@ -275,9 +316,13 @@ async def _page_engine(ctx: CommandContext, action: str | None = None) -> None:
     if action == "clr":
         await prefs.clear_default_engine(chat_id)
         logger.info("config.engine.cleared", chat_id=chat_id)
+        await _page_home(ctx)
+        return
     elif action and action in available:
         await prefs.set_default_engine(chat_id, action)
         logger.info("config.engine.set", chat_id=chat_id, engine=action)
+        await _page_home(ctx)
+        return
 
     current = await prefs.get_default_engine(chat_id)
     global_default = ctx.runtime.default_engine
@@ -337,12 +382,18 @@ async def _page_trigger(ctx: CommandContext, action: str | None = None) -> None:
     if action == "all":
         await prefs.clear_trigger_mode(chat_id)
         logger.info("config.trigger.set", chat_id=chat_id, mode="all")
+        await _page_home(ctx)
+        return
     elif action == "men":
         await prefs.set_trigger_mode(chat_id, "mentions")
         logger.info("config.trigger.set", chat_id=chat_id, mode="mentions")
+        await _page_home(ctx)
+        return
     elif action == "clr":
         await prefs.clear_trigger_mode(chat_id)
         logger.info("config.trigger.cleared", chat_id=chat_id)
+        await _page_home(ctx)
+        return
 
     current = await prefs.get_trigger_mode(chat_id)
     current_label = current or "all"
@@ -396,8 +447,40 @@ class ConfigCommand:
     description = "Interactive settings menu"
     answer_early = True
 
-    def early_answer_toast(self, args_text: str) -> str | None:
-        """Return None for silent feedback — the in-place edit is the response."""
+    @staticmethod
+    def early_answer_toast(args_text: str) -> str | None:
+        """Return a confirmation toast for toggle actions, None for navigation."""
+        parts = args_text.split(":")
+        if len(parts) < 2:
+            return None  # Home page navigation
+        page = parts[0]
+        action = parts[1] if len(parts) > 1 else None
+        if action is None:
+            return None  # Sub-page navigation only
+        _TOAST_LABELS: dict[str, dict[str, str]] = {
+            "pm": {
+                "on": "Plan mode: on",
+                "off": "Plan mode: off",
+                "auto": "Plan mode: auto",
+                "clr": "Plan mode: cleared",
+            },
+            "vb": {
+                "on": "Verbose: on",
+                "off": "Verbose: off",
+                "clr": "Verbose: cleared",
+            },
+            "ag": {"clr": "Engine: cleared"},
+            "tr": {
+                "all": "Trigger: all",
+                "men": "Trigger: mentions",
+                "clr": "Trigger: cleared",
+            },
+        }
+        page_labels = _TOAST_LABELS.get(page, {})
+        if action in page_labels:
+            return page_labels[action]
+        if page == "ag" and action != "clr":
+            return f"Engine: {action}"
         return None
 
     async def handle(self, ctx: CommandContext) -> CommandResult | None:

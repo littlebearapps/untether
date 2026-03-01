@@ -45,6 +45,28 @@ def _make_ctx(
     return ctx
 
 
+def _last_edit_msg(ctx: MagicMock):
+    """Extract the last RenderedMessage from edit calls."""
+    return ctx.executor.edit.call_args[0][1]
+
+
+def _last_send_msg(ctx: MagicMock):
+    """Extract the last RenderedMessage from send calls."""
+    return ctx.executor.send.call_args[0][0]
+
+
+def _buttons_data(msg) -> list[str]:
+    """Extract all callback_data values from a rendered message."""
+    buttons = msg.extra["reply_markup"]["inline_keyboard"]
+    return [b["callback_data"] for row in buttons for b in row]
+
+
+def _buttons_labels(msg) -> list[str]:
+    """Extract all button text labels from a rendered message."""
+    buttons = msg.extra["reply_markup"]["inline_keyboard"]
+    return [b["text"] for row in buttons for b in row]
+
+
 # ---------------------------------------------------------------------------
 # Backend metadata
 # ---------------------------------------------------------------------------
@@ -61,11 +83,6 @@ def test_backend_description():
 def test_answer_early():
     cmd = ConfigCommand()
     assert cmd.answer_early is True
-
-
-def test_early_answer_toast_is_none():
-    cmd = ConfigCommand()
-    assert cmd.early_answer_toast("pm:on") is None
 
 
 # ---------------------------------------------------------------------------
@@ -89,6 +106,61 @@ def test_is_callback_true():
 def test_is_callback_false():
     ctx = _make_ctx(text="/config")
     assert _is_callback(ctx) is False
+
+
+# ---------------------------------------------------------------------------
+# Confirmation toasts
+# ---------------------------------------------------------------------------
+
+
+class TestToasts:
+    def test_toast_planmode_on(self):
+        assert ConfigCommand.early_answer_toast("pm:on") == "Plan mode: on"
+
+    def test_toast_planmode_off(self):
+        assert ConfigCommand.early_answer_toast("pm:off") == "Plan mode: off"
+
+    def test_toast_planmode_auto(self):
+        assert ConfigCommand.early_answer_toast("pm:auto") == "Plan mode: auto"
+
+    def test_toast_planmode_clear(self):
+        assert ConfigCommand.early_answer_toast("pm:clr") == "Plan mode: cleared"
+
+    def test_toast_verbose_on(self):
+        assert ConfigCommand.early_answer_toast("vb:on") == "Verbose: on"
+
+    def test_toast_verbose_off(self):
+        assert ConfigCommand.early_answer_toast("vb:off") == "Verbose: off"
+
+    def test_toast_verbose_clear(self):
+        assert ConfigCommand.early_answer_toast("vb:clr") == "Verbose: cleared"
+
+    def test_toast_engine_set(self):
+        assert ConfigCommand.early_answer_toast("ag:codex") == "Engine: codex"
+
+    def test_toast_engine_clear(self):
+        assert ConfigCommand.early_answer_toast("ag:clr") == "Engine: cleared"
+
+    def test_toast_trigger_all(self):
+        assert ConfigCommand.early_answer_toast("tr:all") == "Trigger: all"
+
+    def test_toast_trigger_mentions(self):
+        assert ConfigCommand.early_answer_toast("tr:men") == "Trigger: mentions"
+
+    def test_toast_trigger_clear(self):
+        assert ConfigCommand.early_answer_toast("tr:clr") == "Trigger: cleared"
+
+    def test_toast_navigation_home(self):
+        """No toast for navigation to home page."""
+        assert ConfigCommand.early_answer_toast("home") is None
+
+    def test_toast_navigation_sub_page(self):
+        """No toast for navigating into a sub-page (no action)."""
+        assert ConfigCommand.early_answer_toast("pm") is None
+
+    def test_toast_navigation_empty(self):
+        """No toast for empty args."""
+        assert ConfigCommand.early_answer_toast("") is None
 
 
 # ---------------------------------------------------------------------------
@@ -121,17 +193,29 @@ class TestHomePage:
         cmd = ConfigCommand()
         ctx = _make_ctx(config_path=state_path)
         await cmd.handle(ctx)
-        msg = ctx.executor.send.call_args[0][0]
-        assert "Settings" in msg.text
+        assert "Settings" in _last_send_msg(ctx).text
 
     @pytest.mark.anyio
-    async def test_home_shows_plan_mode(self, tmp_path):
+    async def test_home_shows_plan_mode_when_claude(self, tmp_path):
+        """Plan mode label and button visible when engine is claude."""
         state_path = tmp_path / "prefs.json"
         cmd = ConfigCommand()
-        ctx = _make_ctx(config_path=state_path)
+        ctx = _make_ctx(config_path=state_path, default_engine="claude")
         await cmd.handle(ctx)
-        msg = ctx.executor.send.call_args[0][0]
+        msg = _last_send_msg(ctx)
         assert "Plan mode" in msg.text
+        assert "config:pm" in _buttons_data(msg)
+
+    @pytest.mark.anyio
+    async def test_home_hides_plan_mode_when_not_claude(self, tmp_path):
+        """Plan mode label and button hidden when engine is not claude."""
+        state_path = tmp_path / "prefs.json"
+        cmd = ConfigCommand()
+        ctx = _make_ctx(config_path=state_path, default_engine="codex")
+        await cmd.handle(ctx)
+        msg = _last_send_msg(ctx)
+        assert "Plan mode" not in msg.text
+        assert "config:pm" not in _buttons_data(msg)
 
     @pytest.mark.anyio
     async def test_home_shows_engine(self, tmp_path):
@@ -139,22 +223,33 @@ class TestHomePage:
         cmd = ConfigCommand()
         ctx = _make_ctx(config_path=state_path, default_engine="codex")
         await cmd.handle(ctx)
-        msg = ctx.executor.send.call_args[0][0]
-        assert "codex" in msg.text
+        assert "codex" in _last_send_msg(ctx).text
 
     @pytest.mark.anyio
-    async def test_home_has_nav_buttons(self, tmp_path):
+    async def test_home_has_nav_buttons_claude(self, tmp_path):
+        """When engine is claude, all 4 nav buttons present."""
         state_path = tmp_path / "prefs.json"
         cmd = ConfigCommand()
-        ctx = _make_ctx(config_path=state_path)
+        ctx = _make_ctx(config_path=state_path, default_engine="claude")
         await cmd.handle(ctx)
-        msg = ctx.executor.send.call_args[0][0]
-        buttons = msg.extra["reply_markup"]["inline_keyboard"]
-        callback_data = [b["callback_data"] for row in buttons for b in row]
-        assert "config:pm" in callback_data
-        assert "config:vb" in callback_data
-        assert "config:ag" in callback_data
-        assert "config:tr" in callback_data
+        data = _buttons_data(_last_send_msg(ctx))
+        assert "config:pm" in data
+        assert "config:vb" in data
+        assert "config:ag" in data
+        assert "config:tr" in data
+
+    @pytest.mark.anyio
+    async def test_home_has_nav_buttons_non_claude(self, tmp_path):
+        """When engine is not claude, 3 nav buttons (no plan mode)."""
+        state_path = tmp_path / "prefs.json"
+        cmd = ConfigCommand()
+        ctx = _make_ctx(config_path=state_path, default_engine="codex")
+        await cmd.handle(ctx)
+        data = _buttons_data(_last_send_msg(ctx))
+        assert "config:pm" not in data
+        assert "config:vb" in data
+        assert "config:ag" in data
+        assert "config:tr" in data
 
     @pytest.mark.anyio
     async def test_home_no_config_path(self):
@@ -162,9 +257,7 @@ class TestHomePage:
         ctx = _make_ctx(config_path=None)
         await cmd.handle(ctx)
         ctx.executor.send.assert_called_once()
-        msg = ctx.executor.send.call_args[0][0]
-        # Should still render with defaults
-        assert "Settings" in msg.text
+        assert "Settings" in _last_send_msg(ctx).text
 
     @pytest.mark.anyio
     async def test_home_shows_verbose_state(self, tmp_path):
@@ -173,8 +266,7 @@ class TestHomePage:
         cmd = ConfigCommand()
         ctx = _make_ctx(config_path=state_path)
         await cmd.handle(ctx)
-        msg = ctx.executor.send.call_args[0][0]
-        assert "on" in msg.text.lower()
+        assert "on" in _last_send_msg(ctx).text.lower()
 
 
 # ---------------------------------------------------------------------------
@@ -185,66 +277,58 @@ class TestHomePage:
 class TestPlanMode:
     @pytest.mark.anyio
     async def test_planmode_page_renders(self, tmp_path):
+        """Navigating to plan mode sub-page (no action) shows sub-page."""
         state_path = tmp_path / "prefs.json"
         cmd = ConfigCommand()
-        ctx = _make_ctx(args_text="pm", text="config:pm", config_path=state_path)
+        ctx = _make_ctx(
+            args_text="pm",
+            text="config:pm",
+            config_path=state_path,
+            default_engine="claude",
+        )
         await cmd.handle(ctx)
         ctx.executor.edit.assert_called_once()
-        msg = ctx.executor.edit.call_args[0][1]
+        msg = _last_edit_msg(ctx)
         assert "Plan mode" in msg.text
+        assert "config:pm:on" in _buttons_data(msg)
 
     @pytest.mark.anyio
-    async def test_planmode_set_on(self, tmp_path):
-        state_path = tmp_path / "prefs.json"
-        cmd = ConfigCommand()
-        ctx = _make_ctx(args_text="pm:on", text="config:pm:on", config_path=state_path)
-        await cmd.handle(ctx)
-        msg = ctx.executor.edit.call_args[0][1]
-        # Should show checkmark on "On"
-        buttons = msg.extra["reply_markup"]["inline_keyboard"]
-        labels = [b["text"] for row in buttons for b in row]
-        assert any("✓" in lbl and "On" in lbl for lbl in labels)
-
-    @pytest.mark.anyio
-    async def test_planmode_set_auto(self, tmp_path):
+    async def test_planmode_set_returns_home(self, tmp_path):
+        """Toggling plan mode returns to home page."""
         state_path = tmp_path / "prefs.json"
         cmd = ConfigCommand()
         ctx = _make_ctx(
-            args_text="pm:auto", text="config:pm:auto", config_path=state_path
+            args_text="pm:on",
+            text="config:pm:on",
+            config_path=state_path,
+            default_engine="claude",
         )
         await cmd.handle(ctx)
-        msg = ctx.executor.edit.call_args[0][1]
-        assert "auto" in msg.text.lower()
+        msg = _last_edit_msg(ctx)
+        assert "Settings" in msg.text  # Home page header
+        assert "on" in msg.text.lower()
 
     @pytest.mark.anyio
-    async def test_planmode_set_off(self, tmp_path):
-        state_path = tmp_path / "prefs.json"
-        cmd = ConfigCommand()
-        # First set to on
-        ctx = _make_ctx(args_text="pm:on", text="config:pm:on", config_path=state_path)
-        await cmd.handle(ctx)
-        # Then set to off
-        ctx = _make_ctx(
-            args_text="pm:off", text="config:pm:off", config_path=state_path
-        )
-        await cmd.handle(ctx)
-        msg = ctx.executor.edit.call_args[0][1]
-        buttons = msg.extra["reply_markup"]["inline_keyboard"]
-        labels = [b["text"] for row in buttons for b in row]
-        assert any("✓" in lbl and "Off" in lbl for lbl in labels)
-
-    @pytest.mark.anyio
-    async def test_planmode_clear(self, tmp_path):
+    async def test_planmode_clear_returns_home(self, tmp_path):
         state_path = tmp_path / "prefs.json"
         cmd = ConfigCommand()
         # Set then clear
-        ctx = _make_ctx(args_text="pm:on", text="config:pm:on", config_path=state_path)
-        await cmd.handle(ctx)
         ctx = _make_ctx(
-            args_text="pm:clr", text="config:pm:clr", config_path=state_path
+            args_text="pm:on",
+            text="config:pm:on",
+            config_path=state_path,
+            default_engine="claude",
         )
         await cmd.handle(ctx)
-        msg = ctx.executor.edit.call_args[0][1]
+        ctx = _make_ctx(
+            args_text="pm:clr",
+            text="config:pm:clr",
+            config_path=state_path,
+            default_engine="claude",
+        )
+        await cmd.handle(ctx)
+        msg = _last_edit_msg(ctx)
+        assert "Settings" in msg.text
         assert "default" in msg.text.lower()
 
     @pytest.mark.anyio
@@ -252,19 +336,56 @@ class TestPlanMode:
         cmd = ConfigCommand()
         ctx = _make_ctx(args_text="pm", text="config:pm", config_path=None)
         await cmd.handle(ctx)
-        msg = ctx.executor.edit.call_args[0][1]
-        assert "Unavailable" in msg.text
+        assert "Unavailable" in _last_edit_msg(ctx).text
 
     @pytest.mark.anyio
     async def test_planmode_has_back_button(self, tmp_path):
         state_path = tmp_path / "prefs.json"
         cmd = ConfigCommand()
-        ctx = _make_ctx(args_text="pm", text="config:pm", config_path=state_path)
+        ctx = _make_ctx(
+            args_text="pm",
+            text="config:pm",
+            config_path=state_path,
+            default_engine="claude",
+        )
         await cmd.handle(ctx)
-        msg = ctx.executor.edit.call_args[0][1]
-        buttons = msg.extra["reply_markup"]["inline_keyboard"]
-        callback_data = [b["callback_data"] for row in buttons for b in row]
-        assert "config:home" in callback_data
+        assert "config:home" in _buttons_data(_last_edit_msg(ctx))
+
+    @pytest.mark.anyio
+    async def test_planmode_guard_non_claude(self, tmp_path):
+        """Plan mode page shows guard message when engine is not claude."""
+        state_path = tmp_path / "prefs.json"
+        cmd = ConfigCommand()
+        ctx = _make_ctx(
+            args_text="pm",
+            text="config:pm",
+            config_path=state_path,
+            default_engine="codex",
+        )
+        await cmd.handle(ctx)
+        msg = _last_edit_msg(ctx)
+        assert "Only available for Claude Code" in msg.text
+        assert "config:home" in _buttons_data(msg)
+
+    @pytest.mark.anyio
+    async def test_planmode_guard_non_claude_with_override(self, tmp_path):
+        """Plan mode guard respects per-chat engine override."""
+        from untether.telegram.chat_prefs import ChatPrefsStore, resolve_prefs_path
+
+        state_path = tmp_path / "prefs.json"
+        prefs = ChatPrefsStore(resolve_prefs_path(state_path))
+        await prefs.set_default_engine(123, "opencode")
+
+        cmd = ConfigCommand()
+        ctx = _make_ctx(
+            args_text="pm",
+            text="config:pm",
+            config_path=state_path,
+            default_engine="claude",
+        )
+        await cmd.handle(ctx)
+        msg = _last_edit_msg(ctx)
+        assert "Only available for Claude Code" in msg.text
 
 
 # ---------------------------------------------------------------------------
@@ -278,19 +399,16 @@ class TestVerbose:
         cmd = ConfigCommand()
         ctx = _make_ctx(args_text="vb", text="config:vb")
         await cmd.handle(ctx)
-        msg = ctx.executor.edit.call_args[0][1]
-        assert "Verbose" in msg.text
+        assert "Verbose" in _last_edit_msg(ctx).text
 
     @pytest.mark.anyio
-    async def test_verbose_set_on(self):
+    async def test_verbose_set_on_returns_home(self):
         cmd = ConfigCommand()
         ctx = _make_ctx(args_text="vb:on", text="config:vb:on")
         await cmd.handle(ctx)
         assert _VERBOSE_OVERRIDES.get(123) == "verbose"
-        msg = ctx.executor.edit.call_args[0][1]
-        buttons = msg.extra["reply_markup"]["inline_keyboard"]
-        labels = [b["text"] for row in buttons for b in row]
-        assert any("✓" in lbl and "On" in lbl for lbl in labels)
+        msg = _last_edit_msg(ctx)
+        assert "Settings" in msg.text  # Home page
 
     @pytest.mark.anyio
     async def test_verbose_set_off(self):
@@ -313,10 +431,7 @@ class TestVerbose:
         cmd = ConfigCommand()
         ctx = _make_ctx(args_text="vb", text="config:vb")
         await cmd.handle(ctx)
-        msg = ctx.executor.edit.call_args[0][1]
-        buttons = msg.extra["reply_markup"]["inline_keyboard"]
-        callback_data = [b["callback_data"] for row in buttons for b in row]
-        assert "config:home" in callback_data
+        assert "config:home" in _buttons_data(_last_edit_msg(ctx))
 
 
 # ---------------------------------------------------------------------------
@@ -331,8 +446,7 @@ class TestEngine:
         cmd = ConfigCommand()
         ctx = _make_ctx(args_text="ag", text="config:ag", config_path=state_path)
         await cmd.handle(ctx)
-        msg = ctx.executor.edit.call_args[0][1]
-        assert "engine" in msg.text.lower()
+        assert "engine" in _last_edit_msg(ctx).text.lower()
 
     @pytest.mark.anyio
     async def test_engine_shows_available(self, tmp_path):
@@ -345,45 +459,47 @@ class TestEngine:
             engine_ids=("codex", "claude", "opencode"),
         )
         await cmd.handle(ctx)
-        msg = ctx.executor.edit.call_args[0][1]
-        buttons = msg.extra["reply_markup"]["inline_keyboard"]
-        callback_data = [b["callback_data"] for row in buttons for b in row]
-        assert "config:ag:codex" in callback_data
-        assert "config:ag:claude" in callback_data
-        assert "config:ag:opencode" in callback_data
+        data = _buttons_data(_last_edit_msg(ctx))
+        assert "config:ag:codex" in data
+        assert "config:ag:claude" in data
+        assert "config:ag:opencode" in data
 
     @pytest.mark.anyio
-    async def test_engine_set(self, tmp_path):
+    async def test_engine_set_returns_home(self, tmp_path):
+        """Setting an engine returns to home page."""
         state_path = tmp_path / "prefs.json"
         cmd = ConfigCommand()
         ctx = _make_ctx(
-            args_text="ag:claude", text="config:ag:claude", config_path=state_path
+            args_text="ag:claude",
+            text="config:ag:claude",
+            config_path=state_path,
         )
         await cmd.handle(ctx)
-        msg = ctx.executor.edit.call_args[0][1]
-        buttons = msg.extra["reply_markup"]["inline_keyboard"]
-        labels = [b["text"] for row in buttons for b in row]
-        assert any("✓" in lbl and "claude" in lbl for lbl in labels)
+        msg = _last_edit_msg(ctx)
+        assert "Settings" in msg.text  # Home page
 
     @pytest.mark.anyio
-    async def test_engine_clear(self, tmp_path):
+    async def test_engine_clear_returns_home(self, tmp_path):
         state_path = tmp_path / "prefs.json"
         cmd = ConfigCommand()
-        # Set then clear
         ctx = _make_ctx(
-            args_text="ag:claude", text="config:ag:claude", config_path=state_path
+            args_text="ag:claude",
+            text="config:ag:claude",
+            config_path=state_path,
         )
         await cmd.handle(ctx)
         ctx = _make_ctx(
-            args_text="ag:clr", text="config:ag:clr", config_path=state_path
+            args_text="ag:clr",
+            text="config:ag:clr",
+            config_path=state_path,
         )
         await cmd.handle(ctx)
-        msg = ctx.executor.edit.call_args[0][1]
-        assert "global default" in msg.text.lower()
+        msg = _last_edit_msg(ctx)
+        assert "Settings" in msg.text
 
     @pytest.mark.anyio
-    async def test_engine_invalid_ignored(self, tmp_path):
-        """Setting an engine not in engine_ids should be silently ignored."""
+    async def test_engine_invalid_shows_sub_page(self, tmp_path):
+        """Setting an engine not in engine_ids stays on sub-page (no action taken)."""
         state_path = tmp_path / "prefs.json"
         cmd = ConfigCommand()
         ctx = _make_ctx(
@@ -392,8 +508,7 @@ class TestEngine:
             config_path=state_path,
         )
         await cmd.handle(ctx)
-        msg = ctx.executor.edit.call_args[0][1]
-        # Should show global default, not "nonexistent"
+        msg = _last_edit_msg(ctx)
         assert "global default" in msg.text.lower()
 
     @pytest.mark.anyio
@@ -401,8 +516,7 @@ class TestEngine:
         cmd = ConfigCommand()
         ctx = _make_ctx(args_text="ag", text="config:ag", config_path=None)
         await cmd.handle(ctx)
-        msg = ctx.executor.edit.call_args[0][1]
-        assert "Unavailable" in msg.text
+        assert "Unavailable" in _last_edit_msg(ctx).text
 
     @pytest.mark.anyio
     async def test_engine_buttons_packed_two_per_row(self, tmp_path):
@@ -415,9 +529,7 @@ class TestEngine:
             engine_ids=("codex", "claude", "opencode"),
         )
         await cmd.handle(ctx)
-        msg = ctx.executor.edit.call_args[0][1]
-        buttons = msg.extra["reply_markup"]["inline_keyboard"]
-        # 3 engines → 2 rows (2+1), plus 1 footer row (clear + back) = 3 rows
+        buttons = _last_edit_msg(ctx).extra["reply_markup"]["inline_keyboard"]
         engine_rows = [
             r
             for r in buttons
@@ -439,66 +551,63 @@ class TestTrigger:
         cmd = ConfigCommand()
         ctx = _make_ctx(args_text="tr", text="config:tr", config_path=state_path)
         await cmd.handle(ctx)
-        msg = ctx.executor.edit.call_args[0][1]
-        assert "Trigger" in msg.text
+        assert "Trigger" in _last_edit_msg(ctx).text
 
     @pytest.mark.anyio
-    async def test_trigger_set_mentions(self, tmp_path):
+    async def test_trigger_set_mentions_returns_home(self, tmp_path):
         state_path = tmp_path / "prefs.json"
         cmd = ConfigCommand()
         ctx = _make_ctx(
-            args_text="tr:men", text="config:tr:men", config_path=state_path
+            args_text="tr:men",
+            text="config:tr:men",
+            config_path=state_path,
         )
         await cmd.handle(ctx)
-        msg = ctx.executor.edit.call_args[0][1]
-        buttons = msg.extra["reply_markup"]["inline_keyboard"]
-        labels = [b["text"] for row in buttons for b in row]
-        assert any("✓" in lbl and "Mentions" in lbl for lbl in labels)
+        msg = _last_edit_msg(ctx)
+        assert "Settings" in msg.text  # Home page
 
     @pytest.mark.anyio
-    async def test_trigger_set_all(self, tmp_path):
-        state_path = tmp_path / "prefs.json"
-        cmd = ConfigCommand()
-        # Set to mentions first
-        ctx = _make_ctx(
-            args_text="tr:men", text="config:tr:men", config_path=state_path
-        )
-        await cmd.handle(ctx)
-        # Then set to all
-        ctx = _make_ctx(
-            args_text="tr:all", text="config:tr:all", config_path=state_path
-        )
-        await cmd.handle(ctx)
-        msg = ctx.executor.edit.call_args[0][1]
-        buttons = msg.extra["reply_markup"]["inline_keyboard"]
-        labels = [b["text"] for row in buttons for b in row]
-        assert any("✓" in lbl and "All" in lbl for lbl in labels)
-
-    @pytest.mark.anyio
-    async def test_trigger_clear(self, tmp_path):
+    async def test_trigger_set_all_returns_home(self, tmp_path):
         state_path = tmp_path / "prefs.json"
         cmd = ConfigCommand()
         ctx = _make_ctx(
-            args_text="tr:men", text="config:tr:men", config_path=state_path
+            args_text="tr:men",
+            text="config:tr:men",
+            config_path=state_path,
         )
         await cmd.handle(ctx)
         ctx = _make_ctx(
-            args_text="tr:clr", text="config:tr:clr", config_path=state_path
+            args_text="tr:all",
+            text="config:tr:all",
+            config_path=state_path,
         )
         await cmd.handle(ctx)
-        msg = ctx.executor.edit.call_args[0][1]
-        # After clear, should be "all" (default)
-        buttons = msg.extra["reply_markup"]["inline_keyboard"]
-        labels = [b["text"] for row in buttons for b in row]
-        assert any("✓" in lbl and "All" in lbl for lbl in labels)
+        assert "Settings" in _last_edit_msg(ctx).text
+
+    @pytest.mark.anyio
+    async def test_trigger_clear_returns_home(self, tmp_path):
+        state_path = tmp_path / "prefs.json"
+        cmd = ConfigCommand()
+        ctx = _make_ctx(
+            args_text="tr:men",
+            text="config:tr:men",
+            config_path=state_path,
+        )
+        await cmd.handle(ctx)
+        ctx = _make_ctx(
+            args_text="tr:clr",
+            text="config:tr:clr",
+            config_path=state_path,
+        )
+        await cmd.handle(ctx)
+        assert "Settings" in _last_edit_msg(ctx).text
 
     @pytest.mark.anyio
     async def test_trigger_no_config_path(self):
         cmd = ConfigCommand()
         ctx = _make_ctx(args_text="tr", text="config:tr", config_path=None)
         await cmd.handle(ctx)
-        msg = ctx.executor.edit.call_args[0][1]
-        assert "Unavailable" in msg.text
+        assert "Unavailable" in _last_edit_msg(ctx).text
 
     @pytest.mark.anyio
     async def test_trigger_has_back_button(self, tmp_path):
@@ -506,10 +615,7 @@ class TestTrigger:
         cmd = ConfigCommand()
         ctx = _make_ctx(args_text="tr", text="config:tr", config_path=state_path)
         await cmd.handle(ctx)
-        msg = ctx.executor.edit.call_args[0][1]
-        buttons = msg.extra["reply_markup"]["inline_keyboard"]
-        callback_data = [b["callback_data"] for row in buttons for b in row]
-        assert "config:home" in callback_data
+        assert "config:home" in _buttons_data(_last_edit_msg(ctx))
 
 
 # ---------------------------------------------------------------------------
@@ -524,8 +630,7 @@ class TestRouting:
         cmd = ConfigCommand()
         ctx = _make_ctx(args_text="xyz", text="config:xyz", config_path=state_path)
         await cmd.handle(ctx)
-        msg = ctx.executor.edit.call_args[0][1]
-        assert "Settings" in msg.text
+        assert "Settings" in _last_edit_msg(ctx).text
 
     @pytest.mark.anyio
     async def test_returns_none(self, tmp_path):
@@ -542,5 +647,45 @@ class TestRouting:
         cmd = ConfigCommand()
         ctx = _make_ctx(config_path=state_path)
         await cmd.handle(ctx)
-        msg = ctx.executor.send.call_args[0][0]
-        assert msg.extra["parse_mode"] == "HTML"
+        assert _last_send_msg(ctx).extra["parse_mode"] == "HTML"
+
+
+# ---------------------------------------------------------------------------
+# Engine-aware home page transitions
+# ---------------------------------------------------------------------------
+
+
+class TestEngineAwareTransitions:
+    @pytest.mark.anyio
+    async def test_switch_to_claude_reveals_plan_mode(self, tmp_path):
+        """After switching engine to claude, home page shows plan mode."""
+        state_path = tmp_path / "prefs.json"
+        cmd = ConfigCommand()
+        # Set engine to claude (returns home)
+        ctx = _make_ctx(
+            args_text="ag:claude",
+            text="config:ag:claude",
+            config_path=state_path,
+            default_engine="codex",
+        )
+        await cmd.handle(ctx)
+        msg = _last_edit_msg(ctx)
+        assert "Plan mode" in msg.text
+        assert "config:pm" in _buttons_data(msg)
+
+    @pytest.mark.anyio
+    async def test_switch_from_claude_hides_plan_mode(self, tmp_path):
+        """After switching engine away from claude, home page hides plan mode."""
+        state_path = tmp_path / "prefs.json"
+        cmd = ConfigCommand()
+        # Start with claude, switch to codex
+        ctx = _make_ctx(
+            args_text="ag:codex",
+            text="config:ag:codex",
+            config_path=state_path,
+            default_engine="claude",
+        )
+        await cmd.handle(ctx)
+        msg = _last_edit_msg(ctx)
+        assert "Plan mode" not in msg.text
+        assert "config:pm" not in _buttons_data(msg)
