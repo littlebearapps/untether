@@ -1,0 +1,37 @@
+# Untether — Telegram bridge for Claude Code / Codex / OpenCode / Pi
+#
+# Install:
+#   cp contrib/untether.service ~/.config/systemd/user/untether.service
+#   systemctl --user daemon-reload
+#   systemctl --user enable --now untether
+#
+# Key settings:
+#   KillMode=process     — only SIGTERM the main process; let the drain
+#                          mechanism gracefully finish active Claude runs
+#   TimeoutStopSec=150   — give the 120s drain timeout room to complete
+#                          before systemd sends SIGKILL
+
+[Unit]
+Description=Untether - Telegram bridge for Claude Code/OpenCode
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=%h/.local/bin/untether
+Restart=always
+RestartSec=10
+
+# Graceful shutdown: only signal the main process, not child engines.
+# Without this, systemd sends SIGTERM to ALL processes in the cgroup
+# (including active Claude Code sessions), bypassing the drain mechanism.
+KillMode=process
+TimeoutStopSec=150
+
+Environment=HOME=%h
+Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin
+EnvironmentFile=%h/.untether/.env
+WorkingDirectory=%h
+
+[Install]
+WantedBy=default.target

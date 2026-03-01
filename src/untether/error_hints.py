@@ -28,6 +28,18 @@ _HINT_PATTERNS: list[tuple[str, str]] = [
         "connection refused",
         "Check that the target service is running.",
     ),
+    (
+        "sigterm",
+        "Untether was restarted. Your session is saved \N{EM DASH} resume by sending a new message or starting /claude.",
+    ),
+    (
+        "sigkill",
+        "The process was forcefully terminated (timeout or out of memory). Try resuming with /claude.",
+    ),
+    (
+        "sigabrt",
+        "The process aborted unexpectedly. Try starting a fresh session with /claude.",
+    ),
 ]
 
 

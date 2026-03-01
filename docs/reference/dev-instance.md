@@ -38,6 +38,12 @@ systemctl --user restart untether         # Restart (same PyPI version)
 journalctl --user -u untether -f          # Tail prod logs
 
 # --- Upgrade production after a PyPI release ---
+# Option A: graceful (waits for active runs to finish)
+# Send /restart in Telegram, wait for drain, then:
+pipx upgrade untether
+systemctl --user restart untether
+
+# Option B: immediate (interrupts active runs)
 pipx upgrade untether
 systemctl --user restart untether
 
@@ -98,3 +104,28 @@ To add another test route:
 3. Add a `[projects.name]` section to `~/.untether-dev/untether.toml`
 4. Create a workspace directory under `test-projects/`
 5. Restart dev: `systemctl --user restart untether-dev`
+
+## Systemd service configuration
+
+An example service file lives at `contrib/untether.service`. Two settings are
+critical for graceful shutdown:
+
+```ini
+KillMode=process        # Only SIGTERM the main process, not child engines
+TimeoutStopSec=150      # Give the 120s drain timeout room to complete
+```
+
+Without `KillMode=process`, systemd sends SIGTERM to **all** processes in the
+cgroup (including active Claude Code sessions), bypassing the drain mechanism
+entirely. Without `TimeoutStopSec=150`, systemd's default 90s timeout may kill
+the process before the 120s drain finishes.
+
+To apply:
+
+```bash
+cp contrib/untether.service ~/.config/systemd/user/untether.service
+systemctl --user daemon-reload
+systemctl --user restart untether
+```
+
+The same settings should be applied to `untether-dev.service`.

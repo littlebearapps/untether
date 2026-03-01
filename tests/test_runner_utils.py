@@ -554,3 +554,46 @@ async def test_drain_stderr_no_capture() -> None:
 
         tg.start_soon(_write)
         await drain_stderr(receive, __import__("structlog").get_logger(), "test")
+
+
+# ===========================================================================
+# Signal error hints
+# ===========================================================================
+
+
+class TestSignalErrorHints:
+    """get_error_hint returns actionable hints for signal-based errors."""
+
+    def test_sigterm_hint(self) -> None:
+        from untether.error_hints import get_error_hint
+
+        hint = get_error_hint("dummy-jsonl failed (rc=-15 (SIGTERM)).")
+        assert hint is not None
+        assert "restarted" in hint.lower()
+        assert "resume" in hint.lower()
+
+    def test_sigkill_hint(self) -> None:
+        from untether.error_hints import get_error_hint
+
+        hint = get_error_hint("dummy-jsonl failed (rc=-9 (SIGKILL)).")
+        assert hint is not None
+        assert "terminated" in hint.lower()
+
+    def test_sigabrt_hint(self) -> None:
+        from untether.error_hints import get_error_hint
+
+        hint = get_error_hint("dummy-jsonl failed (rc=-6 (SIGABRT)).")
+        assert hint is not None
+        assert "aborted" in hint.lower()
+
+    def test_signal_hint_case_insensitive(self) -> None:
+        from untether.error_hints import get_error_hint
+
+        hint = get_error_hint("process received sigterm unexpectedly")
+        assert hint is not None
+
+    def test_no_hint_for_normal_exit(self) -> None:
+        from untether.error_hints import get_error_hint
+
+        hint = get_error_hint("dummy-jsonl failed (rc=1).")
+        assert hint is None

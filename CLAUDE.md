@@ -170,6 +170,7 @@ systemctl --user restart untether-dev
 journalctl --user -u untether-dev -f
 
 # Promote to production (only after PyPI release)
+# For graceful upgrade: send /restart in Telegram first, wait for drain
 pipx upgrade untether && systemctl --user restart untether
 
 # Tests / lint
