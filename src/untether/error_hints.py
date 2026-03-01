@@ -40,6 +40,10 @@ _HINT_PATTERNS: list[tuple[str, str]] = [
         "sigabrt",
         "The process aborted unexpectedly. Try starting a fresh session with /claude.",
     ),
+    (
+        "error_during_execution",
+        "The session failed to load \N{EM DASH} it may have been corrupted during a restart. Send /new to start a fresh session.",
+    ),
 ]
 
 

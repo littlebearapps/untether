@@ -19,7 +19,15 @@ from untether.markdown import MarkdownParts, MarkdownPresenter
 from untether.model import ResumeToken, UntetherEvent
 from untether.telegram.render import prepare_telegram
 from untether.runners.codex import CodexRunner
-from untether.runners.mock import Advance, Emit, Raise, Return, ScriptRunner, Wait
+from untether.runners.mock import (
+    Advance,
+    Emit,
+    ErrorReturn,
+    Raise,
+    Return,
+    ScriptRunner,
+    Wait,
+)
 from untether.settings import load_settings, require_telegram
 from untether.transport import MessageRef, RenderedMessage, SendOptions
 from tests.factories import action_completed, action_started
@@ -1063,3 +1071,131 @@ async def test_progress_edits_survives_transport_error() -> None:
     # Second edit should have succeeded.
     assert transport._edit_attempts == 2
     assert len(transport.edit_calls) == 1  # only the successful one recorded
+
+
+# ---------------------------------------------------------------------------
+# on_resume_failed auto-clear tests (issue #44)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.anyio
+async def test_on_resume_failed_called_for_zero_turn_error() -> None:
+    """Callback fires when a resumed run fails with 0 turns."""
+    transport = FakeTransport()
+    runner = ScriptRunner(
+        [ErrorReturn(error="error_during_execution", usage={"num_turns": 0})],
+        engine=CODEX_ENGINE,
+        resume_value="broken-session",
+    )
+    cfg = ExecBridgeConfig(
+        transport=transport,
+        presenter=MarkdownPresenter(),
+        final_notify=True,
+    )
+    resume = ResumeToken(engine=CODEX_ENGINE, value="broken-session")
+    cleared_tokens: list[ResumeToken] = []
+
+    async def on_resume_failed(token: ResumeToken) -> None:
+        cleared_tokens.append(token)
+
+    await handle_message(
+        cfg,
+        runner=runner,
+        incoming=IncomingMessage(channel_id=123, message_id=10, text="hi"),
+        resume_token=resume,
+        on_resume_failed=on_resume_failed,
+    )
+
+    assert len(cleared_tokens) == 1
+    assert cleared_tokens[0] == resume
+
+
+@pytest.mark.anyio
+async def test_on_resume_failed_not_called_on_success() -> None:
+    """Callback does not fire when the run succeeds."""
+    transport = FakeTransport()
+    runner = ScriptRunner(
+        [Return(answer="done")],
+        engine=CODEX_ENGINE,
+        resume_value="good-session",
+    )
+    cfg = ExecBridgeConfig(
+        transport=transport,
+        presenter=MarkdownPresenter(),
+        final_notify=True,
+    )
+    resume = ResumeToken(engine=CODEX_ENGINE, value="good-session")
+    cleared_tokens: list[ResumeToken] = []
+
+    async def on_resume_failed(token: ResumeToken) -> None:
+        cleared_tokens.append(token)
+
+    await handle_message(
+        cfg,
+        runner=runner,
+        incoming=IncomingMessage(channel_id=123, message_id=10, text="hi"),
+        resume_token=resume,
+        on_resume_failed=on_resume_failed,
+    )
+
+    assert len(cleared_tokens) == 0
+
+
+@pytest.mark.anyio
+async def test_on_resume_failed_not_called_with_turns() -> None:
+    """Callback does not fire when num_turns > 0 (partial progress made)."""
+    transport = FakeTransport()
+    runner = ScriptRunner(
+        [ErrorReturn(error="some error", usage={"num_turns": 3})],
+        engine=CODEX_ENGINE,
+        resume_value="partial-session",
+    )
+    cfg = ExecBridgeConfig(
+        transport=transport,
+        presenter=MarkdownPresenter(),
+        final_notify=True,
+    )
+    resume = ResumeToken(engine=CODEX_ENGINE, value="partial-session")
+    cleared_tokens: list[ResumeToken] = []
+
+    async def on_resume_failed(token: ResumeToken) -> None:
+        cleared_tokens.append(token)
+
+    await handle_message(
+        cfg,
+        runner=runner,
+        incoming=IncomingMessage(channel_id=123, message_id=10, text="hi"),
+        resume_token=resume,
+        on_resume_failed=on_resume_failed,
+    )
+
+    assert len(cleared_tokens) == 0
+
+
+@pytest.mark.anyio
+async def test_on_resume_failed_not_called_when_not_resumed() -> None:
+    """Callback does not fire for new sessions (resume_token=None)."""
+    transport = FakeTransport()
+    runner = ScriptRunner(
+        [ErrorReturn(error="error_during_execution", usage={"num_turns": 0})],
+        engine=CODEX_ENGINE,
+    )
+    cfg = ExecBridgeConfig(
+        transport=transport,
+        presenter=MarkdownPresenter(),
+        final_notify=True,
+    )
+    cleared_tokens: list[ResumeToken] = []
+
+    async def on_resume_failed(token: ResumeToken) -> None:
+        cleared_tokens.append(token)
+
+    await handle_message(
+        cfg,
+        runner=runner,
+        incoming=IncomingMessage(channel_id=123, message_id=10, text="hi"),
+        resume_token=None,
+        on_resume_failed=on_resume_failed,
+    )
+
+    assert len(cleared_tokens) == 0

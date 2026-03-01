@@ -3,7 +3,8 @@ from __future__ import annotations
 import re
 import uuid
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterable
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
+from typing import Any
 
 import anyio
 
@@ -51,7 +52,14 @@ class Raise:
     error: Exception
 
 
-type ScriptStep = Emit | Advance | Sleep | Wait | Return | Raise
+@dataclass(frozen=True, slots=True)
+class ErrorReturn:
+    error: str
+    answer: str = ""
+    usage: dict[str, Any] = field(default_factory=dict)
+
+
+type ScriptStep = Emit | Advance | Sleep | Wait | Return | Raise | ErrorReturn
 
 
 def _resume_token(engine: EngineId, value: str | None) -> ResumeToken:
@@ -209,6 +217,16 @@ class ScriptRunner(MockRunner):
                         resume=token,
                         ok=True,
                         answer=step.answer,
+                    )
+                    return
+                if isinstance(step, ErrorReturn):
+                    yield CompletedEvent(
+                        engine=self.engine,
+                        resume=token,
+                        ok=False,
+                        answer=step.answer,
+                        error=step.error,
+                        usage=step.usage or None,
                     )
                     return
                 raise RuntimeError(f"Unhandled script step: {step!r}")

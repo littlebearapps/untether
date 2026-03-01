@@ -273,6 +273,19 @@ class TopicStateStore(JsonStateStore[_TopicState]):
             thread.sessions = {}
             self._save_locked()
 
+    async def clear_engine_session(
+        self, chat_id: int, thread_id: int, engine: str
+    ) -> None:
+        """Clear the saved session for a specific engine in a topic thread."""
+        async with self._lock:
+            self._reload_locked_if_needed()
+            thread = self._get_thread_locked(chat_id, thread_id)
+            if thread is None:
+                return
+            removed = thread.sessions.pop(engine, None)
+            if removed is not None:
+                self._save_locked()
+
     async def delete_thread(self, chat_id: int, thread_id: int) -> None:
         async with self._lock:
             self._reload_locked_if_needed()

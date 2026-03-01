@@ -1,5 +1,21 @@
 # changelog
 
+## v0.25.3 (2026-03-01)
+
+### fixes
+- increase SIGTERM→SIGKILL grace period from 2s to 10s — gives engines time to flush session transcripts before forced kill [#45](https://github.com/littlebearapps/untether/issues/45)
+- add `error_during_execution` error hint — users see actionable recovery guidance when a session fails to load [#45](https://github.com/littlebearapps/untether/issues/45)
+- auto-clear broken session on failed resume — when a resumed run fails with 0 turns, the saved token is automatically cleared so the next message starts fresh [#45](https://github.com/littlebearapps/untether/issues/45)
+  - new `clear_engine_session()` on `ChatSessionStore` and `TopicStateStore`
+  - `on_resume_failed` callback threaded through `handle_message` → `_run_engine` → `wrap_on_resume_failed`
+
+### tests
+- add `ErrorReturn` step type to `ScriptRunner` mock for simulating engine failures
+- add 4 auto-clear unit tests (zero-turn error, success, partial turns, new session)
+- add SIGTERM→SIGKILL 10s timeout assertion test
+- add 2 `error_during_execution` hint tests (resumed and new session variants)
+- integration-tested across Claude, Codex, and OpenCode via untether-dev
+
 ## v0.25.2 (2026-03-01)
 
 ### fixes

@@ -120,6 +120,24 @@ class ChatSessionStore(JsonStateStore[_ChatSessionsState]):
             self._save_locked()
             logger.info("session.cleared", chat_id=chat_id, cleared_count=session_count)
 
+    async def clear_engine_session(
+        self, chat_id: int, owner_id: int | None, engine: str
+    ) -> None:
+        """Clear the saved session for a specific engine in a chat."""
+        async with self._lock:
+            self._reload_locked_if_needed()
+            chat = self._get_chat_locked(chat_id, owner_id)
+            if chat is None:
+                return
+            removed = chat.sessions.pop(engine, None)
+            if removed is not None:
+                self._save_locked()
+                logger.info(
+                    "session.engine_cleared",
+                    chat_id=chat_id,
+                    engine=engine,
+                )
+
     def _get_chat_locked(self, chat_id: int, owner_id: int | None) -> _ChatState | None:
         return self._state.chats.get(_chat_key(chat_id, owner_id))
 

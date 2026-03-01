@@ -1249,6 +1249,28 @@ async def run_main_loop(
 
                 return _wrapped
 
+            def wrap_on_resume_failed(
+                topic_key: tuple[int, int] | None,
+                chat_session_key: tuple[int, int | None] | None,
+            ) -> Callable[[ResumeToken], Awaitable[None]] | None:
+                if topic_key is None and chat_session_key is None:
+                    return None
+
+                async def _wrapped(token: ResumeToken) -> None:
+                    if state.topic_store is not None and topic_key is not None:
+                        await state.topic_store.clear_engine_session(
+                            topic_key[0], topic_key[1], token.engine
+                        )
+                    if (
+                        state.chat_session_store is not None
+                        and chat_session_key is not None
+                    ):
+                        await state.chat_session_store.clear_engine_session(
+                            chat_session_key[0], chat_session_key[1], token.engine
+                        )
+
+                return _wrapped
+
             async def run_job(
                 chat_id: int,
                 user_msg_id: int,
@@ -1309,6 +1331,7 @@ async def run_main_loop(
                     on_thread_known=wrap_on_thread_known(
                         on_thread_known, topic_key, chat_session_key
                     ),
+                    on_resume_failed=wrap_on_resume_failed(topic_key, chat_session_key),
                     engine_override=engine_override,
                     thread_id=thread_id,
                     show_resume_line=show_resume_line,

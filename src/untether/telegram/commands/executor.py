@@ -154,6 +154,7 @@ async def _run_engine(
     reply_ref: MessageRef | None = None,
     on_thread_known: Callable[[ResumeToken, anyio.Event], Awaitable[None]]
     | None = None,
+    on_resume_failed: Callable[[ResumeToken], Awaitable[None]] | None = None,
     engine_override: EngineId | None = None,
     thread_id: int | None = None,
     show_resume_line: bool = True,
@@ -246,6 +247,7 @@ async def _run_engine(
                     strip_resume_line=runtime.is_resume_line,
                     running_tasks=running_tasks,
                     on_thread_known=on_thread_known,
+                    on_resume_failed=on_resume_failed,
                     progress_ref=progress_ref,
                 )
         finally:
