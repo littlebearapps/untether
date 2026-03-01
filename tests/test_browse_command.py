@@ -249,8 +249,16 @@ class TestBrowseCommandHandle:
             "untether.telegram.commands.browse._get_project_root", return_value=tmp_path
         ):
             result = await cmd.handle(ctx)
-        assert result is not None
-        assert "Hello World" in result.text
+        # File preview now sent via executor with inline keyboard
+        assert result is None
+        ctx.executor.send.assert_called_once()
+        sent_msg = ctx.executor.send.call_args[0][0]
+        assert "Hello World" in sent_msg.text
+        # Language detection: .md -> markdown
+        assert "```markdown" in sent_msg.text
+        # Back button present
+        keyboard = sent_msg.extra["reply_markup"]["inline_keyboard"]
+        assert any("Back" in btn["text"] for row in keyboard for btn in row)
 
     @pytest.mark.anyio
     async def test_browse_dir_by_id(self, cmd, tmp_path):
@@ -273,8 +281,11 @@ class TestBrowseCommandHandle:
             "untether.telegram.commands.browse._get_project_root", return_value=tmp_path
         ):
             result = await cmd.handle(ctx)
-        assert result is not None
-        assert "secret data" in result.text
+        # File preview sent via executor
+        assert result is None
+        ctx.executor.send.assert_called_once()
+        sent_msg = ctx.executor.send.call_args[0][0]
+        assert "secret data" in sent_msg.text
 
     @pytest.mark.anyio
     async def test_expired_path_id(self, cmd, tmp_path):
@@ -335,6 +346,49 @@ class TestBrowseCommandHandle:
             result = await cmd.handle(ctx)
         assert result is not None
         assert "Invalid" in result.text
+
+    @pytest.mark.anyio
+    async def test_file_preview_python_language(self, cmd, tmp_path):
+        f = tmp_path / "app.py"
+        f.write_text("print('hello')")
+        ctx = self._make_ctx("app.py")
+        with patch(
+            "untether.telegram.commands.browse._get_project_root", return_value=tmp_path
+        ):
+            await cmd.handle(ctx)
+        sent_msg = ctx.executor.send.call_args[0][0]
+        assert "```python" in sent_msg.text
+
+    @pytest.mark.anyio
+    async def test_file_preview_no_lang_for_unknown_ext(self, cmd, tmp_path):
+        f = tmp_path / "data.csv"
+        f.write_text("a,b,c")
+        ctx = self._make_ctx("data.csv")
+        with patch(
+            "untether.telegram.commands.browse._get_project_root", return_value=tmp_path
+        ):
+            await cmd.handle(ctx)
+        sent_msg = ctx.executor.send.call_args[0][0]
+        # Unknown extension -> bare code block
+        assert "```\n" in sent_msg.text
+
+    @pytest.mark.anyio
+    async def test_file_preview_back_button_points_to_parent(self, cmd, tmp_path):
+        sub = tmp_path / "src"
+        sub.mkdir()
+        f = sub / "main.py"
+        f.write_text("code")
+        pid = _register_path(str(f))
+        ctx = self._make_ctx(f"f:{pid}")
+        with patch(
+            "untether.telegram.commands.browse._get_project_root", return_value=tmp_path
+        ):
+            await cmd.handle(ctx)
+        sent_msg = ctx.executor.send.call_args[0][0]
+        keyboard = sent_msg.extra["reply_markup"]["inline_keyboard"]
+        back_btn = keyboard[0][0]
+        assert "Back" in back_btn["text"]
+        assert back_btn["callback_data"].startswith("browse:d:")
 
     @pytest.mark.anyio
     async def test_empty_root_dir_returns_result(self, cmd, tmp_path):

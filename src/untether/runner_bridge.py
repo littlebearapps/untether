@@ -9,6 +9,7 @@ import anyio
 import httpx
 
 from .context import RunContext
+from .error_hints import get_error_hint as _get_error_hint
 from .logging import bind_run_context, get_logger
 from .model import ActionEvent, CompletedEvent, ResumeToken, StartedEvent, UntetherEvent
 from .presenter import Presenter
@@ -289,7 +290,9 @@ def _check_cost_budget(usage: dict[str, Any] | None) -> str | None:
     return None
 
 
-def _record_export_event(evt: UntetherEvent, resume: ResumeToken | None) -> None:
+def _record_export_event(
+    evt: UntetherEvent, resume: ResumeToken | None, *, channel_id: int = 0
+) -> None:
     """Record an event for the /export command."""
     try:
         from .telegram.commands.export import record_session_event, record_session_usage
@@ -316,8 +319,8 @@ def _record_export_event(evt: UntetherEvent, resume: ResumeToken | None) -> None
             event_dict["answer"] = evt.answer
             event_dict["error"] = evt.error
             if evt.usage:
-                record_session_usage(session_id, evt.usage)
-        record_session_event(session_id, event_dict)
+                record_session_usage(session_id, evt.usage, channel_id=channel_id)
+        record_session_event(session_id, event_dict, channel_id=channel_id)
     except Exception as exc:  # noqa: BLE001
         logger.debug(
             "export_event.record_failed",
@@ -651,6 +654,7 @@ async def run_runner_with_cancel(
     edits: ProgressEdits,
     running_task: RunningTask | None,
     on_thread_known: Callable[[ResumeToken, anyio.Event], Awaitable[None]] | None,
+    channel_id: int = 0,
 ) -> RunOutcome:
     outcome = RunOutcome()
     try:
@@ -676,7 +680,7 @@ async def run_runner_with_cancel(
                             outcome.resume = evt.resume or outcome.resume
                             outcome.completed = evt
                         # A3: Record events for /export
-                        _record_export_event(evt, outcome.resume)
+                        _record_export_event(evt, outcome.resume, channel_id=channel_id)
                         await edits.on_event(evt)
                 finally:
                     tg.cancel_scope.cancel()
@@ -847,6 +851,7 @@ async def handle_message(
                 edits=edits,
                 running_task=running_task,
                 on_thread_known=on_thread_known,
+                channel_id=incoming.channel_id,
             )
         except Exception as exc:
             error = exc
@@ -872,6 +877,9 @@ async def handle_message(
     if error is not None:
         sync_resume_token(progress_tracker, outcome.resume)
         err_body = _format_error(error)
+        hint = _get_error_hint(err_body)
+        if hint:
+            err_body = f"{err_body}\n\n\N{ELECTRIC LIGHT BULB} {hint}"
         state = progress_tracker.snapshot(
             resume_formatter=runner.format_resume,
             context_line=context_line,
@@ -969,10 +977,14 @@ async def handle_message(
             break
 
     if run_ok is False and run_error:
+        error_text = str(run_error)
+        hint = _get_error_hint(error_text)
+        if hint:
+            error_text = f"{error_text}\n\n\N{ELECTRIC LIGHT BULB} {hint}"
         if final_answer.strip():
-            final_answer = f"{final_answer}\n\n{run_error}"
+            final_answer = f"{final_answer}\n\n{error_text}"
         else:
-            final_answer = str(run_error)
+            final_answer = error_text
 
     status = (
         "error" if run_ok is False else ("done" if final_answer.strip() else "error")

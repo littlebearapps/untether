@@ -38,7 +38,7 @@ Use `EventFactory` for event construction. Never construct event dataclasses dir
 - ALL writes go through `TelegramOutbox` (never call Bot API directly)
 - Callback data max 64 bytes, format: `prefix:action:id`
 - Call `answerCallbackQuery` promptly to clear button spinners
-- Message limit 4096 chars; Untether trims to ~3500 by default
+- Message limit 4096 chars; Untether splits long responses across multiple messages by default
 
 ## Testing
 

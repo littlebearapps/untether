@@ -42,8 +42,8 @@ Messages that should auto-delete when a run finishes:
 ## Message limits
 
 - Telegram message limit: 4096 chars after entity parsing
-- Untether trims to ~3500 chars by default
-- Split mode (`message_overflow = "split"`) sends multiple messages
+- Untether splits long responses across multiple messages by default (~3500 chars per chunk)
+- Trim mode (`message_overflow = "trim"`) truncates to a single message
 
 ## Inline keyboards
 

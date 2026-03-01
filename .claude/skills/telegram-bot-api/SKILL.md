@@ -149,9 +149,9 @@ Comment + forwarded messages arrive as separate updates:
 
 ## Message overflow
 
-- Default: trim to ~3500 chars (Telegram limit is 4096 after entity parsing)
-- Split mode: multiple messages with "continued (N/M)" headers
-- Configure via `message_overflow = "trim" | "split"`
+- Default: split across multiple messages with "continued (N/M)" headers (~3500 chars per chunk)
+- Trim mode: truncate to single message (~3500 chars)
+- Configure via `message_overflow = "split" | "trim"`
 
 ## Approval push notifications
 

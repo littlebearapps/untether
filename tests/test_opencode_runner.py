@@ -136,7 +136,11 @@ def test_translate_accumulates_text() -> None:
             {
                 "type": "step_finish",
                 "sessionID": "ses_test123",
-                "part": {"reason": "stop", "tokens": {"input": 100, "output": 10}},
+                "part": {
+                    "reason": "stop",
+                    "tokens": {"input": 100, "output": 10},
+                    "cost": 0.005,
+                },
             }
         ),
         title="opencode",
@@ -148,6 +152,95 @@ def test_translate_accumulates_text() -> None:
     assert isinstance(completed, CompletedEvent)
     assert completed.answer == "Hello World"
     assert completed.ok is True
+    assert completed.usage is not None
+    assert completed.usage["total_cost_usd"] == 0.005
+    assert completed.usage["usage"]["input_tokens"] == 100
+    assert completed.usage["usage"]["output_tokens"] == 10
+
+
+def test_translate_accumulates_cost_across_steps() -> None:
+    """Cost and tokens accumulate across multiple step_finish events."""
+    state = OpenCodeStreamState()
+    state.session_id = "ses_cost_test"
+    state.emitted_started = True
+
+    # First step (tool-calls, not final)
+    translate_opencode_event(
+        _decode_event(
+            {
+                "type": "step_finish",
+                "sessionID": "ses_cost_test",
+                "part": {
+                    "reason": "tool-calls",
+                    "cost": 0.003,
+                    "tokens": {
+                        "input": 500,
+                        "output": 50,
+                        "reasoning": 0,
+                        "cache": {"read": 100, "write": 0},
+                    },
+                },
+            }
+        ),
+        title="opencode",
+        state=state,
+    )
+
+    # Second step (final)
+    events = translate_opencode_event(
+        _decode_event(
+            {
+                "type": "step_finish",
+                "sessionID": "ses_cost_test",
+                "part": {
+                    "reason": "stop",
+                    "cost": 0.002,
+                    "tokens": {
+                        "input": 600,
+                        "output": 30,
+                        "reasoning": 10,
+                        "cache": {"read": 200, "write": 50},
+                    },
+                },
+            }
+        ),
+        title="opencode",
+        state=state,
+    )
+
+    assert len(events) == 1
+    completed = events[0]
+    assert isinstance(completed, CompletedEvent)
+    assert completed.usage is not None
+    assert completed.usage["total_cost_usd"] == pytest.approx(0.005)
+    assert completed.usage["usage"]["input_tokens"] == 1100
+    assert completed.usage["usage"]["output_tokens"] == 80
+    assert completed.usage["usage"]["reasoning_tokens"] == 10
+    assert completed.usage["usage"]["cache_read_tokens"] == 300
+    assert completed.usage["usage"]["cache_write_tokens"] == 50
+
+
+def test_translate_no_cost_produces_no_usage() -> None:
+    """When step_finish has no cost/token data, usage is None."""
+    state = OpenCodeStreamState()
+    state.session_id = "ses_nocost"
+    state.emitted_started = True
+
+    events = translate_opencode_event(
+        _decode_event(
+            {
+                "type": "step_finish",
+                "sessionID": "ses_nocost",
+                "part": {"reason": "stop"},
+            }
+        ),
+        title="opencode",
+        state=state,
+    )
+
+    completed = events[0]
+    assert isinstance(completed, CompletedEvent)
+    assert completed.usage is None
 
 
 def test_translate_tool_use_completed() -> None:

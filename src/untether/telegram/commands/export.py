@@ -12,21 +12,23 @@ from ...logging import get_logger
 logger = get_logger(__name__)
 
 # Store recent completed events for export
-# Keyed by session_id -> (timestamp, events_list, usage_dict)
-_SESSION_HISTORY: dict[str, tuple[float, list[dict], dict | None]] = {}
+# Keyed by (channel_id, session_id) -> (timestamp, events_list, usage_dict)
+_SessionKey = tuple[int, str]
+_SESSION_HISTORY: dict[_SessionKey, tuple[float, list[dict], dict | None]] = {}
 _MAX_SESSIONS = 20
 
 
-def record_session_event(session_id: str, event: dict) -> None:
+def record_session_event(session_id: str, event: dict, *, channel_id: int = 0) -> None:
     """Record an event for later export."""
-    entry = _SESSION_HISTORY.get(session_id)
+    key: _SessionKey = (channel_id, session_id)
+    entry = _SESSION_HISTORY.get(key)
     if entry is None:
-        logger.debug("export.session.new", session_id=session_id)
-        _SESSION_HISTORY[session_id] = (time.time(), [event], None)
+        logger.debug("export.session.new", session_id=session_id, channel_id=channel_id)
+        _SESSION_HISTORY[key] = (time.time(), [event], None)
     else:
         ts, events, usage = entry
         events.append(event)
-        _SESSION_HISTORY[session_id] = (ts, events, usage)
+        _SESSION_HISTORY[key] = (ts, events, usage)
     # Trim old sessions
     if len(_SESSION_HISTORY) > _MAX_SESSIONS:
         oldest_key = min(_SESSION_HISTORY, key=lambda k: _SESSION_HISTORY[k][0])
@@ -34,12 +36,13 @@ def record_session_event(session_id: str, event: dict) -> None:
         logger.debug("export.session.trimmed", removed=oldest_key)
 
 
-def record_session_usage(session_id: str, usage: dict) -> None:
+def record_session_usage(session_id: str, usage: dict, *, channel_id: int = 0) -> None:
     """Record final usage data for a session."""
-    entry = _SESSION_HISTORY.get(session_id)
+    key: _SessionKey = (channel_id, session_id)
+    entry = _SESSION_HISTORY.get(key)
     if entry is not None:
         ts, events, _ = entry
-        _SESSION_HISTORY[session_id] = (ts, events, usage)
+        _SESSION_HISTORY[key] = (ts, events, usage)
 
 
 def _format_export_markdown(
@@ -145,15 +148,20 @@ class ExportCommand:
         args = ctx.args_text.strip().lower()
         fmt = "json" if args == "json" else "md"
 
-        if not _SESSION_HISTORY:
+        # Filter sessions belonging to this chat
+        chat_id = ctx.message.channel_id
+        chat_sessions = {k: v for k, v in _SESSION_HISTORY.items() if k[0] == chat_id}
+
+        if not chat_sessions:
             return CommandResult(
                 text="No session history available to export.",
                 notify=True,
             )
 
-        # Get the most recent session
-        session_id = max(_SESSION_HISTORY, key=lambda k: _SESSION_HISTORY[k][0])
-        ts, events, usage = _SESSION_HISTORY[session_id]
+        # Get the most recent session for this chat
+        key = max(chat_sessions, key=lambda k: chat_sessions[k][0])
+        session_id = key[1]
+        ts, events, usage = chat_sessions[key]
 
         if not events:
             return CommandResult(

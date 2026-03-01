@@ -65,6 +65,8 @@ class OpenCodeStreamState:
     session_id: str | None = None
     emitted_started: bool = False
     saw_step_finish: bool = False
+    accumulated_cost: float = 0.0
+    accumulated_tokens: dict[str, int] = field(default_factory=dict)
 
 
 def _action_event(
@@ -83,6 +85,53 @@ def _action_event(
         message=message,
         level=level,
     )
+
+
+def _accumulate_step_cost(state: OpenCodeStreamState, part: dict[str, Any]) -> None:
+    """Accumulate cost and token data from a step_finish event."""
+    cost = part.get("cost")
+    if isinstance(cost, (int, float)):
+        state.accumulated_cost += float(cost)
+    tokens = part.get("tokens")
+    if isinstance(tokens, dict):
+        for key in ("input", "output", "reasoning"):
+            val = tokens.get(key)
+            if isinstance(val, int):
+                state.accumulated_tokens[key] = (
+                    state.accumulated_tokens.get(key, 0) + val
+                )
+        cache = tokens.get("cache")
+        if isinstance(cache, dict):
+            for key in ("read", "write"):
+                val = cache.get(key)
+                if isinstance(val, int):
+                    cache_key = f"cache_{key}"
+                    state.accumulated_tokens[cache_key] = (
+                        state.accumulated_tokens.get(cache_key, 0) + val
+                    )
+
+
+def _build_usage(state: OpenCodeStreamState) -> dict[str, Any] | None:
+    """Build a usage dict from accumulated cost/token data."""
+    if state.accumulated_cost <= 0 and not state.accumulated_tokens:
+        return None
+    usage: dict[str, Any] = {}
+    if state.accumulated_cost > 0:
+        usage["total_cost_usd"] = state.accumulated_cost
+    if state.accumulated_tokens:
+        usage["usage"] = {
+            "input_tokens": state.accumulated_tokens.get("input", 0),
+            "output_tokens": state.accumulated_tokens.get("output", 0),
+        }
+        reasoning = state.accumulated_tokens.get("reasoning", 0)
+        if reasoning:
+            usage["usage"]["reasoning_tokens"] = reasoning
+        cache_read = state.accumulated_tokens.get("cache_read", 0)
+        cache_write = state.accumulated_tokens.get("cache_write", 0)
+        if cache_read or cache_write:
+            usage["usage"]["cache_read_tokens"] = cache_read
+            usage["usage"]["cache_write_tokens"] = cache_write
+    return usage
 
 
 def _tool_kind_and_title(
@@ -260,16 +309,19 @@ def translate_opencode_event(
             part = part or {}
             reason = part.get("reason")
             state.saw_step_finish = True
+            _accumulate_step_cost(state, part)
 
             if reason == "stop":
                 resume = None
                 if state.session_id:
                     resume = ResumeToken(engine=ENGINE, value=state.session_id)
 
+                usage = _build_usage(state)
                 logger.info(
                     "opencode.completed",
                     session_id=state.session_id,
                     answer_len=len(state.last_text or ""),
+                    cost=state.accumulated_cost,
                 )
                 return [
                     CompletedEvent(
@@ -277,6 +329,7 @@ def translate_opencode_event(
                         ok=True,
                         answer=state.last_text or "",
                         resume=resume,
+                        usage=usage,
                     )
                 ]
             return []
@@ -507,6 +560,7 @@ class OpenCodeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
                     ok=True,
                     answer=state.last_text or "",
                     resume=found_session,
+                    usage=_build_usage(state),
                 )
             ]
 
