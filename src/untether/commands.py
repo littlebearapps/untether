@@ -38,6 +38,12 @@ class CommandExecutor(Protocol):
         notify: bool = True,
     ) -> MessageRef | None: ...
 
+    async def edit(
+        self,
+        ref: MessageRef,
+        message: RenderedMessage | str,
+    ) -> MessageRef | None: ...
+
     async def run_one(
         self, request: RunRequest, *, mode: RunMode = "emit"
     ) -> RunResult: ...

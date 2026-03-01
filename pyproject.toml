@@ -71,6 +71,7 @@ export = "untether.telegram.commands.export:BACKEND"
 browse = "untether.telegram.commands.browse:BACKEND"
 restart = "untether.telegram.commands.restart:BACKEND"
 verbose = "untether.telegram.commands.verbose:BACKEND"
+config = "untether.telegram.commands.config:BACKEND"
 
 [build-system]
 requires = ["uv_build>=0.9.18,<0.10.0"]

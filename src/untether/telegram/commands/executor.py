@@ -379,6 +379,18 @@ class _TelegramCommandExecutor(CommandExecutor):
             ),
         )
 
+    async def edit(
+        self,
+        ref: MessageRef,
+        message: RenderedMessage | str,
+    ) -> MessageRef | None:
+        rendered = (
+            message
+            if isinstance(message, RenderedMessage)
+            else RenderedMessage(text=message)
+        )
+        return await self._exec_cfg.transport.edit(ref=ref, message=rendered)
+
     async def run_one(
         self, request: RunRequest, *, mode: RunMode = "emit"
     ) -> RunResult:
