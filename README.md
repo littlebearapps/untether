@@ -64,6 +64,7 @@ That's it. Your agent runs on your machine, streams progress to Telegram, and yo
 - 💬 **Forum topics** — map Telegram topics to projects and branches
 - 📤 **Session export** — `/export` for markdown or JSON transcripts
 - 🗂️ **File browser** — `/browse` to navigate project files with inline buttons
+- ⚙️ **Inline settings** — `/config` opens an in-place settings menu; toggle plan mode, verbose, engine, and trigger with buttons
 - 🧩 **Plugin system** — extend with custom engines, transports, and commands
 - 💬 **Conversation modes** — assistant (ongoing chat), workspace (forum topics per project), or handoff (reply-to-continue with terminal resume)
 

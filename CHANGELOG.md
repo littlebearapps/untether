@@ -1,5 +1,23 @@
 # changelog
 
+## v0.26.0 (2026-03-01)
+
+### changes
+
+- `/config` inline settings menu — BotFather-style inline keyboard for toggling plan mode, verbose, engine, and trigger; edits message in-place [#47](https://github.com/littlebearapps/untether/issues/47)
+  - confirmation toasts on toggle actions (e.g. "Plan mode: off")
+  - auto-return to home page after setting changes
+  - engine-aware plan mode — hidden for non-Claude engines
+
+### docs
+
+- comprehensive tutorials and how-to guides — 15 new/expanded guides covering daily use, interactive control, messaging, cost management, security, and operations
+- inline settings how-to (`docs/how-to/inline-settings.md`)
+
+### tests
+
+- add 62-test suite for `/config` (toast permutations, engine-aware visibility, auto-return, callback dispatch)
+
 ## v0.25.3 (2026-03-01)
 
 ### fixes

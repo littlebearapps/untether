@@ -34,6 +34,22 @@ Tap any button to open that setting's page. Each sub-page shows:
 - A **Clear override** button to revert to the default
 - A **Back** button to return to the home page
 
+## Toggle behaviour
+
+When you tap a setting button:
+
+1. **Confirmation toast** — a brief popup appears confirming the change (e.g. "Plan mode: off", "Verbose: on"). This uses the same toast mechanism as Claude approval buttons.
+2. **Auto-return** — the menu automatically navigates back to the home page, showing the updated value across all settings. No need to tap "Back" manually.
+
+### Engine-aware plan mode
+
+Plan mode is only available for Claude Code. If the current engine is Codex, OpenCode, or Pi:
+
+- The plan mode label and button are hidden from the home page
+- Navigating directly to the plan mode sub-page shows "Only available for Claude Code" with a Back button
+
+When you switch the engine back to Claude (via the Engine sub-page), the plan mode button reappears on the home page automatically.
+
 ## Available settings
 
 | Setting | Options | Persisted |
