@@ -9,6 +9,8 @@ cd ~/dev/happy-gadgets
 untether init happy-gadgets
 ```
 
+<!-- SCREENSHOT: Terminal output of untether init showing project registration confirmation -->
+
 This adds a project to your config:
 
 === "untether config"

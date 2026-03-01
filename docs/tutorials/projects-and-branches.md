@@ -1,6 +1,6 @@
 # Projects and branches
 
-This tutorial shows you how to register repos as projects and run tasks on feature branches without switching directories.
+This tutorial shows you how to register repos as projects and run tasks on feature branches without switching directories. Untether works via [Telegram](https://telegram.org), available on iPhone, iPad, Android, Mac, Windows, Linux, and [Telegram Web](https://web.telegram.org).
 
 **What you'll learn:** How to target repos from anywhere with `/<project-alias>`, and run on branches with `@branch`.
 
@@ -63,6 +63,8 @@ And target the project by prefixing your message:
 
 Untether runs the agent in `~/dev/happy-gadgets`, not your current directory.
 
+<!-- SCREENSHOT: Telegram showing /<project> command and response with ctx: footer -->
+
 The response includes a context footer:
 
 !!! untether "Untether"
@@ -112,6 +114,8 @@ Untether:
 2. If the branch exists locally, it adds a worktree for it
 3. If the branch doesn't exist, it creates it from `worktree_base` (or the repo default) and adds the worktree
 4. Runs the agent in that worktree
+
+<!-- SCREENSHOT: Telegram showing @branch directive response with ctx: project @branch footer -->
 
 The response shows both project and branch:
 

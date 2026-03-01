@@ -25,6 +25,8 @@ When a permission request arrives, you see a message with the tool name and a co
 
 Buttons clear immediately when you tap them — no waiting for a spinner.
 
+<!-- SCREENSHOT: Telegram approval message showing Approve / Deny / Pause & Outline Plan inline buttons beneath a tool call summary -->
+
 ## Diff previews
 
 For tools that modify files, the approval message includes a compact diff so you can see what's about to change before deciding:
@@ -35,11 +37,15 @@ For tools that modify files, the approval message includes a compact diff so you
 
 This lets you make informed approve/deny decisions without leaving Telegram.
 
+<!-- SCREENSHOT: Telegram approval message with a compact diff preview showing removed and added lines for an Edit tool call -->
+
 ## Answering questions
 
 When Claude calls `AskUserQuestion`, the approval message shows the question text with a `?` prefix. Instead of tapping a button, **reply to the message with your answer as text**. Untether sends your reply back to Claude, which reads it and continues.
 
 You can also tap Deny to dismiss the question.
+
+<!-- SCREENSHOT: Telegram AskUserQuestion message showing the question text with a reply containing the user's answer -->
 
 ## Push notifications
 

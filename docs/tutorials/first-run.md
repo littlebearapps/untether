@@ -1,6 +1,6 @@
 # First run
 
-This tutorial walks you through sending your first task, watching it execute, and learning the core interaction patterns.
+This tutorial walks you through sending your first task, watching it execute, and learning the core interaction patterns. Untether works via [Telegram](https://telegram.org), available on iPhone, iPad, Android, Mac, Windows, Linux, and [Telegram Web](https://web.telegram.org).
 
 **What you'll learn:** How Untether streams progress, how to continue conversations, and how to cancel a run.
 
@@ -45,6 +45,8 @@ Untether immediately posts a progress message and updates it as the agent works:
 !!! untether "Untether"
     starting · codex · 0s
 
+<!-- SCREENSHOT: progress message in Telegram showing "working · codex · 12s · step 3" with action list -->
+
 As the agent calls tools and makes progress, you'll see updates like:
 
 !!! untether "Untether"
@@ -57,6 +59,8 @@ As the agent calls tools and makes progress, you'll see updates like:
 The progress message is edited in-place.
 
 ## 4. See the final answer
+
+<!-- SCREENSHOT: final answer message in Telegram with model/cost footer and resume line -->
 
 When the agent finishes, Untether sends a new message and replaces the progress message, so you get a notification.
 
@@ -110,6 +114,8 @@ While the progress message is showing, tap the **cancel** button or reply to it 
 
     !!! user "You"
         /cancel
+
+<!-- SCREENSHOT: cancel button on progress message and the resulting "cancelled" status -->
 
 Untether sends `SIGTERM` to the agent process and posts a cancelled status:
 
@@ -167,6 +173,6 @@ Make sure you're **replying** to a message that contains a resume line. If you h
 
 ## Next
 
-You've mastered the basics. Next, let's set up projects so you can target specific repos and branches from anywhere.
+You've mastered the basics. Next, learn how to control Claude Code's actions in real time with Telegram buttons.
 
-[Projects and branches →](projects-and-branches.md)
+[Interactive control →](interactive-control.md)

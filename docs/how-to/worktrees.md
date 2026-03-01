@@ -31,6 +31,8 @@ Send a message like:
 /happy-gadgets @feat/memory-box freeze artifacts forever
 ```
 
+<!-- SCREENSHOT: Telegram message showing a worktree run with the @branch directive and project context in the footer -->
+
 ## Ignore `.worktrees/` in git status
 
 If you use the default `.worktrees/` directory inside the repo, add it to a gitignore.

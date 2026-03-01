@@ -10,6 +10,8 @@ In Telegram, long-press the send button and choose **Schedule Message** to run t
 
 This is the simplest approach — no server or config changes needed.
 
+<!-- SCREENSHOT: Telegram scheduled message picker showing the Schedule Message option for a task -->
+
 ## Cron triggers
 
 For more control, use Untether's built-in cron system. Cron triggers fire on a schedule and start agent runs automatically.

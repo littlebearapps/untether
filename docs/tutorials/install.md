@@ -1,6 +1,6 @@
 # Install and onboard
 
-This tutorial walks you through installing Untether, creating a Telegram bot, and generating your config file.
+This tutorial walks you through installing Untether, creating a Telegram bot, and generating your config file. Untether works via [Telegram](https://telegram.org), available on iPhone, iPad, Android, Mac, Windows, Linux, and [Telegram Web](https://web.telegram.org) — so you can control your coding agents from any device.
 
 **What you'll have at the end:** A working `~/.untether/untether.toml` with your bot token, chat ID, workflow settings, and default engine.
 
@@ -98,6 +98,8 @@ If you answered **n**, follow these steps (or skip to step 6 if you already have
 3. Choose a display name (the obvious choice is "untether")
 4. Choose a username ending in `bot` (e.g., `my_untether_bot`)
 
+<!-- SCREENSHOT: BotFather conversation showing /newbot flow and the generated token -->
+
 BotFather will congratulate you on your new bot and will reply with your token:
 
 ```
@@ -131,6 +133,8 @@ Paste your token when prompted:
 Untether validates the token by calling the Telegram API. If it fails, double-check you copied the full token.
 
 ## 7. Pick your workflow
+
+<!-- SCREENSHOT: onboarding wizard in terminal showing the workflow selection step -->
 
 Untether shows three workflow previews:
 
@@ -264,6 +268,8 @@ Press **y** or **Enter** to save. You'll see:
 ```
 
 Untether is now running and listening for messages!
+
+<!-- SCREENSHOT: Telegram startup message from the bot showing version and engine info -->
 
 ## What just happened
 

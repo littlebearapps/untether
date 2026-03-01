@@ -39,6 +39,8 @@ When Claude tries to exit plan mode (ExitPlanMode), you see three buttons instea
 - **Deny** — block and ask Claude to explain
 - **Pause & Outline Plan** — require a written plan first
 
+<!-- SCREENSHOT: Telegram ExitPlanMode message with Approve / Deny / Pause & Outline Plan inline buttons -->
+
 Tapping "Pause & Outline Plan" tells Claude to stop and write a comprehensive plan as a visible message in the chat. The plan must include:
 
 1. Every file to be created or modified (full paths)
@@ -50,6 +52,8 @@ Tapping "Pause & Outline Plan" tells Claude to stop and write a comprehensive pl
 This is useful when you want to review the approach before Claude starts making changes.
 
 After Claude writes the outline, **Approve Plan / Deny** buttons appear automatically in Telegram. Tap "Approve Plan" to let Claude proceed, or "Deny" to stop and provide feedback. You no longer need to type "approved" — the buttons handle it.
+
+<!-- SCREENSHOT: Telegram message showing Claude's written outline plan with Approve Plan / Deny inline buttons below -->
 
 ## Progressive cooldown
 
@@ -65,6 +69,8 @@ After you tap "Pause & Outline Plan", a cooldown window prevents Claude from imm
 During the cooldown, any ExitPlanMode attempt is automatically denied, but **Approve Plan / Deny buttons** are shown in Telegram so you can approve the plan as soon as you've read it. The cooldown resets when you explicitly Approve or Deny.
 
 This prevents the agent from bulldozing through when you've asked it to slow down and explain its approach, while still giving you a one-tap way to approve once you're satisfied.
+
+<!-- SCREENSHOT: Telegram message showing auto-denied ExitPlanMode during cooldown with Approve Plan / Deny buttons -->
 
 ## Related
 

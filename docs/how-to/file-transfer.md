@@ -55,6 +55,8 @@ Use `--force` to overwrite:
 /file put --force docs/spec.pdf
 ```
 
+<!-- SCREENSHOT: Telegram document upload with /file put caption showing the file saved confirmation message -->
+
 ## Fetch a file (`/file get`)
 
 Send:
@@ -64,6 +66,8 @@ Send:
 ```
 
 Directories are zipped automatically.
+
+<!-- SCREENSHOT: Telegram /file get response showing the fetched file sent as a document in the chat -->
 
 ## Related
 

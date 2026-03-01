@@ -24,6 +24,8 @@ If you chose **handoff** during onboarding and want to switch to chat mode:
 
 With `session_mode = "chat"`, new messages in the chat continue the current thread automatically.
 
+<!-- SCREENSHOT: Telegram chat showing a follow-up message auto-resuming the previous session without a reply -->
+
 ## Reset a session
 
 Use `/new` to clear the stored session for the current scope:

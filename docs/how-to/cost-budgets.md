@@ -46,6 +46,8 @@ After each run completes, Untether checks the reported cost against your budgets
 
 When `auto_cancel = true` and a budget is exceeded, Untether cancels the run automatically. Otherwise, you see the alert but the run continues.
 
+<!-- SCREENSHOT: Telegram cost warning alert message showing budget threshold exceeded notification -->
+
 ### Daily reset
 
 The daily cost counter resets at midnight (local time, based on the server clock). Each new day starts from zero.
@@ -66,6 +68,8 @@ This shows:
 - **Extra credits**: any overage credits used
 
 The `/usage` command reads your Claude Code OAuth credentials to fetch live data from the Anthropic API. If you see "No Claude credentials found", run `claude login` in your terminal.
+
+<!-- SCREENSHOT: Telegram /usage command output showing 5h window, weekly usage, per-model breakdown, and extra credits -->
 
 ## Subscription usage footer
 

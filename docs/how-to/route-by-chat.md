@@ -29,6 +29,8 @@ Then send any message in the target chat. Untether captures the `chat_id` and up
 
 Messages from that chat now default to the project.
 
+<!-- SCREENSHOT: Telegram chat bound to a project, showing a message routed to the correct repo with project context in the footer -->
+
 ## Rules for chat ids
 
 - Each `projects.*.chat_id` must be unique.

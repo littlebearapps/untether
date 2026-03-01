@@ -1,6 +1,6 @@
 # Conversation modes
 
-Untether can handle follow-up messages in two ways: **chat mode** (auto-resume) or **stateless** (reply-to-continue).
+Untether can handle follow-up messages in two ways: **chat mode** (auto-resume) or **stateless** (reply-to-continue). Untether works via [Telegram](https://telegram.org), available on iPhone, iPad, Android, Mac, Windows, Linux, and [Telegram Web](https://web.telegram.org).
 
 During [onboarding](install.md), you chose a **workflow** (assistant, workspace, or handoff) that automatically configured this for you:
 
@@ -13,6 +13,8 @@ During [onboarding](install.md), you chose a **workflow** (assistant, workspace,
 This page explains what those settings mean and how to change them.
 
 ## Chat mode (auto-resume)
+
+<!-- SCREENSHOT: Telegram showing chat mode — user sends follow-up without replying, bot auto-resumes -->
 
 **What it feels like:** a normal chat assistant.
 
@@ -41,6 +43,8 @@ To pin a project or branch for the chat, use:
 Tip: set a default engine for this chat with `/agent set claude`.
 
 ## Stateless (reply-to-continue)
+
+<!-- SCREENSHOT: Telegram showing stateless mode — user replying to a message with resume line -->
 
 **What it feels like:** every message is independent until you reply.
 

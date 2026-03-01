@@ -1,6 +1,6 @@
 # Multi-engine workflows
 
-This tutorial shows you how to use different engines for different tasks and set up defaults so you don't have to think about it.
+This tutorial shows you how to use different engines for different tasks and set up defaults so you don't have to think about it. Untether works via [Telegram](https://telegram.org), available on iPhone, iPad, Android, Mac, Windows, Linux, and [Telegram Web](https://web.telegram.org).
 
 **What you'll learn:** Engine directives, persistent defaults, and when to use which engine.
 
@@ -73,6 +73,8 @@ Check the current default:
 
 !!! user "You"
     /agent
+
+<!-- SCREENSHOT: /agent command output showing engine resolution layers -->
 
 Example response:
 
@@ -220,6 +222,7 @@ That's the end of the tutorials. You now know how to:
 - ✅ Install and configure Untether
 - ✅ Send tasks and continue conversations
 - ✅ Cancel runs mid-flight
+- ✅ Control agent actions with approval buttons
 - ✅ Target repos and branches from chat
 - ✅ Use multiple engines effectively
 
