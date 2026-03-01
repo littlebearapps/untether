@@ -8,7 +8,6 @@ from unittest.mock import patch
 import pytest
 
 from untether.telegram.commands.browse import (
-    _EXT_LANG,
     BrowseCommand,
     _MAX_ENTRIES,
     _PATH_REGISTRY,
