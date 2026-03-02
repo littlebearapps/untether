@@ -29,6 +29,10 @@ _HINT_PATTERNS: list[tuple[str, str]] = [
         "Check that the target service is running.",
     ),
     (
+        "readtimeout",
+        "Connection timed out \N{EM DASH} this is usually transient. Try again.",
+    ),
+    (
         "sigterm",
         "Untether was restarted. Your session is saved \N{EM DASH} resume by sending a new message or starting /claude.",
     ),
