@@ -1,5 +1,32 @@
 # changelog
 
+## v0.28.0 (2026-03-02)
+
+### changes
+
+- interactive ask mode — AskUserQuestion renders option buttons in Telegram, sequential multi-question flows (1 of N), "Other (type reply)" fallback, and structured `updatedInput` responses [#51](https://github.com/littlebearapps/untether/issues/51)
+  - `/config` toggle: "Ask mode" sub-page (Claude-only) to enable/disable interactive questions
+  - dynamic preamble encourages or discourages AskUserQuestion based on toggle state
+  - auto-deny when toggle is OFF — Claude proceeds with defaults instead of asking
+- Gemini CLI and Amp engine runners added (coming soon — not yet released for production use)
+
+### fixes
+
+- synthetic Approve Plan button now returns an error when session has already ended, instead of silently succeeding [#50](https://github.com/littlebearapps/untether/issues/50)
+  - session-alive check in `da:` button handler (`claude_control.py`)
+  - stale `_REQUEST_TO_SESSION` entries cleaned up during session end
+
+### tests
+
+- 27 new tests for ask mode: option button rendering, multi-question flow management, structured answer responses, config toggle, auto-deny when OFF
+- 4 new tests for synthetic approve after session ends (#50): dead approve, dead deny, active approve, session cleanup
+
+### docs
+
+- updated inline-settings how-to, interactive-control tutorial, README, and CLAUDE.md for ask mode
+- added ask mode to `/config` command description and features list
+- Gemini CLI and Amp listed as "coming soon" in README engines table
+
 ## v0.27.1 (2026-03-02)
 
 ### fixes

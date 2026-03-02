@@ -101,6 +101,21 @@ _OUTLINE_MIN_CHARS = 200
 # A1: Pending AskUserQuestion requests: request_id -> question text
 # When Claude asks a question, the user can reply via Telegram text.
 _PENDING_ASK_REQUESTS: dict[str, str] = {}
+
+
+@dataclass(slots=True)
+class AskQuestionState:
+    """Tracks multi-question AskUserQuestion flow state."""
+
+    request_id: str
+    questions: list[dict[str, Any]]
+    current_index: int = 0
+    answers: dict[str, str] = field(default_factory=dict)
+    awaiting_text: bool = False  # True when "Other" was clicked
+
+
+# Active AskUserQuestion flows: request_id -> AskQuestionState
+_ASK_QUESTION_FLOWS: dict[str, AskQuestionState] = {}
 CONTROL_REQUEST_TIMEOUT_SECONDS: float = 300.0  # 5 minutes
 DISCUSS_COOLDOWN_BASE_SECONDS: float = 30.0
 DISCUSS_COOLDOWN_MAX_SECONDS: float = 120.0
@@ -543,6 +558,28 @@ def translate_claude_event(
                     state.auto_approve_queue.append(request_id)
                     return []
 
+            # Auto-deny AskUserQuestion when ask_questions toggle is OFF
+            if isinstance(request, claude_schema.ControlCanUseToolRequest):
+                tool_name = getattr(request, "tool_name", "")
+                if tool_name == "AskUserQuestion":
+                    from .run_options import get_run_options
+
+                    run_opts = get_run_options()
+                    if run_opts and run_opts.ask_questions is False:
+                        logger.info(
+                            "control_request.ask_questions_disabled",
+                            request_id=request_id,
+                        )
+                        _REQUEST_TO_INPUT.pop(request_id, None)
+                        state.auto_deny_queue.append(
+                            (
+                                request_id,
+                                "AskUserQuestion is disabled. Proceed with reasonable "
+                                "defaults and state your assumptions.",
+                            )
+                        )
+                        return []
+
             # Auto-approve ExitPlanMode in "auto" permission mode
             if isinstance(request, claude_schema.ControlCanUseToolRequest):
                 tool_name = getattr(request, "tool_name", "")
@@ -768,26 +805,73 @@ def translate_claude_event(
                         ]
                     )
 
-            # A1: AskUserQuestion — extract the question for display
+            # A1: AskUserQuestion — extract questions and render option buttons
             ask_question: str | None = None
             if isinstance(request, claude_schema.ControlCanUseToolRequest):
                 tool_name = getattr(request, "tool_name", "")
                 if tool_name == "AskUserQuestion":
-                    ask_question = ""
+                    # Parse the full questions array
+                    questions_list: list[dict[str, Any]] = []
                     if tool_input:
-                        # Direct "question" key
-                        ask_question = tool_input.get("question", "")
-                        # Nested "questions" array format
-                        if not ask_question:
-                            questions = tool_input.get("questions", [])
-                            if questions and isinstance(questions, list):
-                                ask_question = (
-                                    questions[0].get("question", "")
-                                    if isinstance(questions[0], dict)
-                                    else ""
+                        raw_questions = tool_input.get("questions", [])
+                        if raw_questions and isinstance(raw_questions, list):
+                            questions_list = [
+                                q for q in raw_questions if isinstance(q, dict)
+                            ]
+                        # Fallback: single "question" key without options
+                        if not questions_list:
+                            single_q = tool_input.get("question", "")
+                            if single_q:
+                                questions_list = [{"question": single_q}]
+
+                    if questions_list:
+                        first_q = questions_list[0]
+                        ask_question = first_q.get("question", "")
+                        options = first_q.get("options", [])
+                        total = len(questions_list)
+
+                        # Build question header with counter
+                        if total > 1:
+                            warning_text = f"❓ Question 1 of {total}: {ask_question}"
+                        else:
+                            warning_text = f"❓ {ask_question}"
+
+                        # Create flow state and option buttons
+                        if options and isinstance(options, list):
+                            flow = AskQuestionState(
+                                request_id=request_id,
+                                questions=questions_list,
+                            )
+                            _ASK_QUESTION_FLOWS[request_id] = flow
+                            # Add option buttons
+                            for i, opt in enumerate(options[:4]):
+                                label = opt.get("label", f"Option {i + 1}")
+                                # Truncate label to fit 64-byte callback limit
+                                # Format: aq:opt:N — very compact
+                                button_rows.append(
+                                    [
+                                        {
+                                            "text": label,
+                                            "callback_data": f"aq:opt:{i}",
+                                        }
+                                    ]
                                 )
-                    if ask_question:
-                        warning_text = f"❓ {ask_question}"
+                            # Add "Other" button for free text
+                            button_rows.append(
+                                [
+                                    {
+                                        "text": "Other (type reply)",
+                                        "callback_data": "aq:other",
+                                    }
+                                ]
+                            )
+                        else:
+                            # No options — keep Approve/Deny for text reply
+                            pass
+
+                    else:
+                        ask_question = ""
+
                     # Register this request for reply handling
                     _PENDING_ASK_REQUESTS[request_id] = ask_question or ""
 
@@ -1283,6 +1367,10 @@ class ClaudeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
             clear_discuss_cooldown(session_id)
             _DISCUSS_APPROVED.discard(session_id)
             _OUTLINE_PENDING.discard(session_id)
+            # Clean up stale request mappings for this session
+            stale = [k for k, v in _REQUEST_TO_SESSION.items() if v == session_id]
+            for k in stale:
+                del _REQUEST_TO_SESSION[k]
             logger.debug("claude_runner.unregistered", session_id=session_id)
 
         parts = [f"claude failed ({_rc_label(rc)})."]
@@ -1319,6 +1407,10 @@ class ClaudeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
             clear_discuss_cooldown(session_id)
             _DISCUSS_APPROVED.discard(session_id)
             _OUTLINE_PENDING.discard(session_id)
+            # Clean up stale request mappings for this session
+            stale = [k for k, v in _REQUEST_TO_SESSION.items() if v == session_id]
+            for k in stale:
+                del _REQUEST_TO_SESSION[k]
             logger.debug("claude_runner.unregistered", session_id=session_id)
 
         if not found_session:
@@ -1710,6 +1802,59 @@ async def answer_ask_question(request_id: str, answer: str) -> bool:
     return await send_claude_control_response(
         request_id, approved=False, deny_message=deny_message
     )
+
+
+def get_ask_question_flow() -> AskQuestionState | None:
+    """Return the active AskUserQuestion flow, or None."""
+    if not _ASK_QUESTION_FLOWS:
+        return None
+    request_id = next(iter(_ASK_QUESTION_FLOWS))
+    return _ASK_QUESTION_FLOWS[request_id]
+
+
+def get_ask_question_flow_by_id(request_id: str) -> AskQuestionState | None:
+    """Return a specific AskUserQuestion flow, or None."""
+    return _ASK_QUESTION_FLOWS.get(request_id)
+
+
+async def answer_ask_question_with_options(request_id: str) -> bool:
+    """Send a structured answer for an AskUserQuestion flow with collected answers.
+
+    Approves the request with updatedInput containing the answers dict.
+    """
+    flow = _ASK_QUESTION_FLOWS.pop(request_id, None)
+    _PENDING_ASK_REQUESTS.pop(request_id, None)
+    if flow is None:
+        return False
+
+    # Update the stored input to include answers
+    stored_input = _REQUEST_TO_INPUT.get(request_id)
+    if stored_input is not None:
+        stored_input["answers"] = flow.answers
+
+    return await send_claude_control_response(request_id, approved=True)
+
+
+def format_question_message(flow: AskQuestionState) -> str:
+    """Format the current question in a flow as a display string."""
+    q = flow.questions[flow.current_index]
+    question_text = q.get("question", "")
+    total = len(flow.questions)
+    if total > 1:
+        return f"❓ Question {flow.current_index + 1} of {total}: {question_text}"
+    return f"❓ {question_text}"
+
+
+def get_question_option_buttons(flow: AskQuestionState) -> list[list[dict[str, str]]]:
+    """Build inline keyboard buttons for the current question's options."""
+    q = flow.questions[flow.current_index]
+    options = q.get("options", [])
+    buttons: list[list[dict[str, str]]] = []
+    for i, opt in enumerate(options[:4]):
+        label = opt.get("label", f"Option {i + 1}")
+        buttons.append([{"text": label, "callback_data": f"aq:opt:{i}"}])
+    buttons.append([{"text": "Other (type reply)", "callback_data": "aq:other"}])
+    return buttons
 
 
 def get_active_claude_sessions() -> list[str]:

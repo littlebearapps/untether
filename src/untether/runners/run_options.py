@@ -11,6 +11,7 @@ class EngineRunOptions:
     model: str | None = None
     reasoning: str | None = None
     permission_mode: str | None = None
+    ask_questions: bool | None = None
 
 
 _RUN_OPTIONS: ContextVar[EngineRunOptions | None] = ContextVar(

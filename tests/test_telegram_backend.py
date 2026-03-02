@@ -279,6 +279,7 @@ def test_telegram_backend_build_and_run_wires_config(
         voice_transcription_model="whisper-1",
         voice_transcription_base_url="http://localhost:8000/v1",
         voice_transcription_api_key="local",
+        voice_show_transcription=False,
         files=TelegramFilesSettings(enabled=True, allowed_user_ids=[1, 2]),
         topics=TelegramTopicsSettings(enabled=True, scope="main"),
     )
@@ -299,6 +300,7 @@ def test_telegram_backend_build_and_run_wires_config(
     assert cfg.voice_transcription_model == "whisper-1"
     assert cfg.voice_transcription_base_url == "http://localhost:8000/v1"
     assert cfg.voice_transcription_api_key == "local"
+    assert cfg.voice_show_transcription is False
     assert cfg.allowed_user_ids == (7, 8)
     assert cfg.files.enabled is True
     assert cfg.files.allowed_user_ids == [1, 2]

@@ -26,6 +26,8 @@ Compact mode shows only the action status and title — no extra detail. This is
 
 Here's the same action shown in both modes:
 
+<!-- SCREENSHOT: Side-by-side or sequential comparison of compact vs verbose progress for the same tool action in Telegram -->
+
 !!! note "Compact"
     ```
     ...tool: edit: Update import order

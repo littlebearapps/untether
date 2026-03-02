@@ -1202,3 +1202,173 @@ class TestReasoningToasts:
 
     def test_toast_model_clear(self):
         assert ConfigCommand.early_answer_toast("md:clr") == "Model: cleared"
+
+
+# ---------------------------------------------------------------------------
+# Ask questions sub-page
+# ---------------------------------------------------------------------------
+
+
+class TestAskQuestions:
+    @pytest.mark.anyio
+    async def test_ask_questions_page_renders(self, tmp_path):
+        state_path = tmp_path / "prefs.json"
+        cmd = ConfigCommand()
+        ctx = _make_ctx(
+            args_text="aq",
+            text="config:aq",
+            config_path=state_path,
+            default_engine="claude",
+        )
+        await cmd.handle(ctx)
+        msg = _last_edit_msg(ctx)
+        assert "Ask mode" in msg.text
+        assert "config:aq:on" in _buttons_data(msg)
+        assert "config:aq:off" in _buttons_data(msg)
+
+    @pytest.mark.anyio
+    async def test_ask_questions_set_on(self, tmp_path):
+        from untether.telegram.chat_prefs import ChatPrefsStore, resolve_prefs_path
+
+        state_path = tmp_path / "prefs.json"
+        cmd = ConfigCommand()
+        ctx = _make_ctx(
+            args_text="aq:on",
+            text="config:aq:on",
+            config_path=state_path,
+            default_engine="claude",
+        )
+        await cmd.handle(ctx)
+        msg = _last_edit_msg(ctx)
+        assert "Settings" in msg.text
+
+        prefs = ChatPrefsStore(resolve_prefs_path(state_path))
+        override = await prefs.get_engine_override(123, "claude")
+        assert override is not None
+        assert override.ask_questions is True
+
+    @pytest.mark.anyio
+    async def test_ask_questions_set_off(self, tmp_path):
+        from untether.telegram.chat_prefs import ChatPrefsStore, resolve_prefs_path
+
+        state_path = tmp_path / "prefs.json"
+        cmd = ConfigCommand()
+        ctx = _make_ctx(
+            args_text="aq:off",
+            text="config:aq:off",
+            config_path=state_path,
+            default_engine="claude",
+        )
+        await cmd.handle(ctx)
+
+        prefs = ChatPrefsStore(resolve_prefs_path(state_path))
+        override = await prefs.get_engine_override(123, "claude")
+        assert override is not None
+        assert override.ask_questions is False
+
+    @pytest.mark.anyio
+    async def test_ask_questions_clear(self, tmp_path):
+        from untether.telegram.chat_prefs import ChatPrefsStore, resolve_prefs_path
+        from untether.telegram.engine_overrides import EngineOverrides
+
+        state_path = tmp_path / "prefs.json"
+        prefs = ChatPrefsStore(resolve_prefs_path(state_path))
+        await prefs.set_engine_override(
+            123, "claude", EngineOverrides(ask_questions=True)
+        )
+
+        cmd = ConfigCommand()
+        ctx = _make_ctx(
+            args_text="aq:clr",
+            text="config:aq:clr",
+            config_path=state_path,
+            default_engine="claude",
+        )
+        await cmd.handle(ctx)
+
+        override = await prefs.get_engine_override(123, "claude")
+        assert override is None or override.ask_questions is None
+
+    @pytest.mark.anyio
+    async def test_ask_questions_preserves_model(self, tmp_path):
+        """Setting ask_questions should preserve model override."""
+        from untether.telegram.chat_prefs import ChatPrefsStore, resolve_prefs_path
+        from untether.telegram.engine_overrides import EngineOverrides
+
+        state_path = tmp_path / "prefs.json"
+        prefs = ChatPrefsStore(resolve_prefs_path(state_path))
+        await prefs.set_engine_override(123, "claude", EngineOverrides(model="sonnet"))
+
+        cmd = ConfigCommand()
+        ctx = _make_ctx(
+            args_text="aq:on",
+            text="config:aq:on",
+            config_path=state_path,
+            default_engine="claude",
+        )
+        await cmd.handle(ctx)
+
+        override = await prefs.get_engine_override(123, "claude")
+        assert override is not None
+        assert override.model == "sonnet"
+        assert override.ask_questions is True
+
+    @pytest.mark.anyio
+    async def test_ask_questions_guard_non_claude(self, tmp_path):
+        """Ask questions page shows guard message for non-Claude engines."""
+        state_path = tmp_path / "prefs.json"
+        cmd = ConfigCommand()
+        ctx = _make_ctx(
+            args_text="aq",
+            text="config:aq",
+            config_path=state_path,
+            default_engine="codex",
+        )
+        await cmd.handle(ctx)
+        msg = _last_edit_msg(ctx)
+        assert "Only available for Claude Code" in msg.text
+
+    @pytest.mark.anyio
+    async def test_ask_questions_no_config_path(self):
+        cmd = ConfigCommand()
+        ctx = _make_ctx(args_text="aq", text="config:aq", config_path=None)
+        await cmd.handle(ctx)
+        assert "Unavailable" in _last_edit_msg(ctx).text
+
+    @pytest.mark.anyio
+    async def test_ask_questions_shown_on_home_for_claude(self, tmp_path):
+        """Ask button should appear on home page when engine is Claude."""
+        state_path = tmp_path / "prefs.json"
+        cmd = ConfigCommand()
+        ctx = _make_ctx(config_path=state_path, default_engine="claude")
+        await cmd.handle(ctx)
+        msg = _last_send_msg(ctx)
+        assert "Ask mode:" in msg.text
+        assert "config:aq" in _buttons_data(msg)
+
+    @pytest.mark.anyio
+    async def test_ask_questions_hidden_on_home_for_codex(self, tmp_path):
+        """Ask button should NOT appear on home page when engine is Codex."""
+        state_path = tmp_path / "prefs.json"
+        cmd = ConfigCommand()
+        ctx = _make_ctx(config_path=state_path, default_engine="codex")
+        await cmd.handle(ctx)
+        msg = _last_send_msg(ctx)
+        assert "Ask mode:" not in msg.text
+        assert "config:aq" not in _buttons_data(msg)
+
+
+# ---------------------------------------------------------------------------
+# Ask questions toasts
+# ---------------------------------------------------------------------------
+
+
+class TestAskQuestionsToasts:
+    def test_toast_ask_on(self):
+        assert ConfigCommand.early_answer_toast("aq:on") == "Ask mode: on"
+
+    def test_toast_ask_off(self):
+        assert ConfigCommand.early_answer_toast("aq:off") == "Ask mode: off"
+
+    def test_toast_ask_clear(self):
+        assert ConfigCommand.early_answer_toast("aq:clr") == "Ask mode: cleared"

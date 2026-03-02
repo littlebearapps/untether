@@ -45,7 +45,7 @@ def _check(label: str, *, active: bool) -> str:
 
 async def _page_home(ctx: CommandContext) -> None:
     from ..chat_prefs import ChatPrefsStore, resolve_prefs_path
-    from ..engine_overrides import supports_reasoning
+    from ..engine_overrides import ASK_QUESTIONS_SUPPORTED_ENGINES, supports_reasoning
     from .verbose import get_verbosity_override
 
     chat_id = ctx.message.channel_id
@@ -57,6 +57,7 @@ async def _page_home(ctx: CommandContext) -> None:
     trigger_label = "all"
     model_label = "default"
     reasoning_label = "default"
+    aq_label = "default"
 
     if config_path is not None:
         prefs = ChatPrefsStore(resolve_prefs_path(config_path))
@@ -87,6 +88,10 @@ async def _page_home(ctx: CommandContext) -> None:
         if engine_override and engine_override.reasoning:
             reasoning_label = engine_override.reasoning
 
+        # Ask questions override for current engine
+        if engine_override and engine_override.ask_questions is not None:
+            aq_label = "on" if engine_override.ask_questions else "off"
+
     verbose = get_verbosity_override(chat_id)
     if verbose == "verbose":
         verbose_label = "on"
@@ -97,6 +102,7 @@ async def _page_home(ctx: CommandContext) -> None:
 
     show_plan_mode = current_engine == "claude"
     show_reasoning = supports_reasoning(current_engine)
+    show_ask_questions = current_engine in ASK_QUESTIONS_SUPPORTED_ENGINES
 
     lines = [
         "<b>⚙️ Settings</b>",
@@ -104,6 +110,8 @@ async def _page_home(ctx: CommandContext) -> None:
     ]
     if show_plan_mode:
         lines.append(f"Plan mode: <b>{pm_label}</b>")
+    if show_ask_questions:
+        lines.append(f"Ask mode: <b>{aq_label}</b>")
     lines.extend(
         [
             f"Verbose: <b>{verbose_label}</b>",
@@ -122,7 +130,7 @@ async def _page_home(ctx: CommandContext) -> None:
         buttons.append(
             [
                 {"text": "Plan mode", "callback_data": "config:pm"},
-                {"text": "Verbose", "callback_data": "config:vb"},
+                {"text": "Ask mode", "callback_data": "config:aq"},
             ]
         )
     else:
@@ -137,7 +145,7 @@ async def _page_home(ctx: CommandContext) -> None:
     if show_plan_mode:
         buttons.append(
             [
-                {"text": "Engine", "callback_data": "config:ag"},
+                {"text": "Verbose", "callback_data": "config:vb"},
                 {"text": "Model", "callback_data": "config:md"},
             ]
         )
@@ -156,8 +164,15 @@ async def _page_home(ctx: CommandContext) -> None:
             ]
         )
 
-    # Row 3: remaining buttons
-    if show_plan_mode or show_reasoning:
+    # Row 3
+    if show_plan_mode:
+        buttons.append(
+            [
+                {"text": "Engine", "callback_data": "config:ag"},
+                {"text": "Trigger", "callback_data": "config:tr"},
+            ]
+        )
+    elif show_reasoning:
         buttons.append(
             [
                 {"text": "Trigger", "callback_data": "config:tr"},
@@ -209,6 +224,7 @@ async def _page_planmode(ctx: CommandContext, action: str | None = None) -> None
             model=current.model if current else None,
             reasoning=current.reasoning if current else None,
             permission_mode=_PM_MODES[action],
+            ask_questions=current.ask_questions if current else None,
         )
         await prefs.set_engine_override(chat_id, engine, updated)
         logger.info("config.planmode.set", chat_id=chat_id, mode=action)
@@ -220,6 +236,7 @@ async def _page_planmode(ctx: CommandContext, action: str | None = None) -> None
             model=current.model if current else None,
             reasoning=current.reasoning if current else None,
             permission_mode=None,
+            ask_questions=current.ask_questions if current else None,
         )
         await prefs.set_engine_override(chat_id, engine, updated)
         logger.info("config.planmode.cleared", chat_id=chat_id)
@@ -503,6 +520,7 @@ async def _page_model(ctx: CommandContext, action: str | None = None) -> None:
             model=None,
             reasoning=current.reasoning if current else None,
             permission_mode=current.permission_mode if current else None,
+            ask_questions=current.ask_questions if current else None,
         )
         await prefs.set_engine_override(chat_id, current_engine, updated)
         logger.info("config.model.cleared", chat_id=chat_id, engine=current_engine)
@@ -582,6 +600,7 @@ async def _page_reasoning(ctx: CommandContext, action: str | None = None) -> Non
             model=current.model if current else None,
             reasoning=level,
             permission_mode=current.permission_mode if current else None,
+            ask_questions=current.ask_questions if current else None,
         )
         await prefs.set_engine_override(chat_id, current_engine, updated)
         logger.info(
@@ -598,6 +617,7 @@ async def _page_reasoning(ctx: CommandContext, action: str | None = None) -> Non
             model=current.model if current else None,
             reasoning=None,
             permission_mode=current.permission_mode if current else None,
+            ask_questions=current.ask_questions if current else None,
         )
         await prefs.set_engine_override(chat_id, current_engine, updated)
         logger.info("config.reasoning.cleared", chat_id=chat_id, engine=current_engine)
@@ -655,6 +675,117 @@ async def _page_reasoning(ctx: CommandContext, action: str | None = None) -> Non
 
 
 # ---------------------------------------------------------------------------
+# Ask questions
+# ---------------------------------------------------------------------------
+
+
+async def _page_ask_questions(ctx: CommandContext, action: str | None = None) -> None:
+    from ..chat_prefs import ChatPrefsStore, resolve_prefs_path
+    from ..engine_overrides import ASK_QUESTIONS_SUPPORTED_ENGINES, EngineOverrides
+
+    config_path = ctx.config_path
+    if config_path is None:
+        await _respond(
+            ctx,
+            "<b>⚙️ Ask questions</b>\n\nUnavailable (no config path).",
+            [[{"text": "← Back", "callback_data": "config:home"}]],
+        )
+        return
+
+    prefs = ChatPrefsStore(resolve_prefs_path(config_path))
+    chat_id = ctx.message.channel_id
+
+    # Claude-only guard
+    eng = await prefs.get_default_engine(chat_id)
+    current_engine = eng if eng else ctx.runtime.default_engine
+    if current_engine not in ASK_QUESTIONS_SUPPORTED_ENGINES:
+        await _respond(
+            ctx,
+            "<b>⚙️ Ask questions</b>\n\nOnly available for Claude Code.",
+            [[{"text": "← Back", "callback_data": "config:home"}]],
+        )
+        return
+
+    engine = current_engine
+
+    if action == "on":
+        current = await prefs.get_engine_override(chat_id, engine)
+        updated = EngineOverrides(
+            model=current.model if current else None,
+            reasoning=current.reasoning if current else None,
+            permission_mode=current.permission_mode if current else None,
+            ask_questions=True,
+        )
+        await prefs.set_engine_override(chat_id, engine, updated)
+        logger.info("config.ask_questions.set", chat_id=chat_id, value=True)
+        await _page_home(ctx)
+        return
+    elif action == "off":
+        current = await prefs.get_engine_override(chat_id, engine)
+        updated = EngineOverrides(
+            model=current.model if current else None,
+            reasoning=current.reasoning if current else None,
+            permission_mode=current.permission_mode if current else None,
+            ask_questions=False,
+        )
+        await prefs.set_engine_override(chat_id, engine, updated)
+        logger.info("config.ask_questions.set", chat_id=chat_id, value=False)
+        await _page_home(ctx)
+        return
+    elif action == "clr":
+        current = await prefs.get_engine_override(chat_id, engine)
+        updated = EngineOverrides(
+            model=current.model if current else None,
+            reasoning=current.reasoning if current else None,
+            permission_mode=current.permission_mode if current else None,
+            ask_questions=None,
+        )
+        await prefs.set_engine_override(chat_id, engine, updated)
+        logger.info("config.ask_questions.cleared", chat_id=chat_id)
+        await _page_home(ctx)
+        return
+
+    override = await prefs.get_engine_override(chat_id, engine)
+    aq = override.ask_questions if override else None
+    if aq is True:
+        current_label = "on"
+    elif aq is False:
+        current_label = "off"
+    else:
+        current_label = "default (on)"
+
+    lines = [
+        "<b>⚙️ Ask mode</b>",
+        "",
+        "When enabled, Claude Code can ask interactive",
+        "questions with option buttons instead of guessing.",
+        "• <b>on</b> — show questions with option buttons",
+        "• <b>off</b> — Claude proceeds with defaults",
+        "",
+        f"Current: <b>{current_label}</b>",
+    ]
+
+    buttons = [
+        [
+            {
+                "text": _check("Off", active=aq is False),
+                "callback_data": "config:aq:off",
+            },
+            {
+                "text": _check("On", active=aq is True),
+                "callback_data": "config:aq:on",
+            },
+        ],
+        [
+            {"text": "Clear override", "callback_data": "config:aq:clr"},
+            {"text": "← Back", "callback_data": "config:home"},
+        ],
+    ]
+
+    await _respond(ctx, "\n".join(lines), buttons)
+
+
+# ---------------------------------------------------------------------------
 # Routing
 # ---------------------------------------------------------------------------
 
@@ -665,6 +796,7 @@ _PAGES: dict[str, object] = {
     "tr": _page_trigger,
     "md": _page_model,
     "rs": _page_reasoning,
+    "aq": _page_ask_questions,
 }
 
 
@@ -711,6 +843,11 @@ class ConfigCommand:
                 "hi": "Reasoning: high",
                 "xhi": "Reasoning: xhigh",
                 "clr": "Reasoning: cleared",
+            },
+            "aq": {
+                "on": "Ask mode: on",
+                "off": "Ask mode: off",
+                "clr": "Ask mode: cleared",
             },
         }
         page_labels = _TOAST_LABELS.get(page, {})

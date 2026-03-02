@@ -117,6 +117,24 @@ def _apply_preamble(prompt: str) -> str:
     text = cfg.text if cfg.text is not None else _DEFAULT_PREAMBLE
     if not text:
         return prompt
+
+    # Append AskUserQuestion guidance based on per-chat toggle
+    from .runners.run_options import get_run_options
+
+    run_opts = get_run_options()
+    # Default is ON (ask_questions=None treated as True)
+    ask_questions = run_opts.ask_questions if run_opts else None
+    if ask_questions is False:
+        text += (
+            "\n\nDo NOT call AskUserQuestion. Proceed with reasonable defaults. "
+            "State any assumptions in your Decisions Needed summary section."
+        )
+    else:
+        text += (
+            "\n\nWhen you need clarification from the user, use AskUserQuestion "
+            "with clear options. The user will see interactive buttons to choose from."
+        )
+
     return f"{text}\n\n---\n\n{prompt}"
 
 

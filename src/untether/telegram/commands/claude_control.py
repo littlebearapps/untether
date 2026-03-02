@@ -5,6 +5,7 @@ from __future__ import annotations
 from ...commands import CommandBackend, CommandContext, CommandResult
 from ...logging import get_logger
 from ...runners.claude import (
+    _ACTIVE_RUNNERS,
     _DISCUSS_APPROVED,
     _OUTLINE_PENDING,
     _REQUEST_TO_SESSION,
@@ -141,6 +142,21 @@ class ClaudeControlCommand:
             session_id = request_id.removeprefix("da:")
             # Clean up the synthetic request registration
             _REQUEST_TO_SESSION.pop(request_id, None)
+
+            # Check if session is still alive — it may have ended
+            # (context exhaustion) before the user clicked the button
+            if session_id not in _ACTIVE_RUNNERS:
+                logger.warning(
+                    "claude_control.discuss_plan_session_ended",
+                    session_id=session_id,
+                )
+                return CommandResult(
+                    text=(
+                        "⚠️ Session has ended — start a new run"
+                        " or resume with /claude continue"
+                    ),
+                    notify=True,
+                )
 
             if approved:
                 _DISCUSS_APPROVED.add(session_id)

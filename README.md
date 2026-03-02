@@ -8,7 +8,7 @@
 </p>
 
 <p align="center">
-  Works with <a href="https://docs.anthropic.com/en/docs/claude-code">Claude Code</a> · <a href="https://github.com/openai/codex">Codex</a> · <a href="https://github.com/opencode-ai/opencode">OpenCode</a> · <a href="https://github.com/nicholasgasior/pi">Pi</a>
+  Works with <a href="https://docs.anthropic.com/en/docs/claude-code">Claude Code</a> · <a href="https://github.com/openai/codex">Codex</a> · <a href="https://github.com/opencode-ai/opencode">OpenCode</a> · <a href="https://github.com/nicholasgasior/pi">Pi</a> · <a href="https://github.com/google-gemini/gemini-cli">Gemini CLI</a> · <a href="https://ampcode.com">Amp</a>
 </p>
 
 <p align="center">
@@ -71,7 +71,7 @@ systemctl --user restart untether  # from shell (systemd)
 ## 🎯 Features
 
 - 📡 **Progress streaming** — watch your agent work in real time; see tool calls, file changes, and elapsed time as they happen
-- 🔐 **Interactive permissions** — approve plan transitions and clarifying questions with inline buttons; tools auto-execute, with progressive cooldown after "Pause & Outline Plan"
+- 🔐 **Interactive permissions** — approve plan transitions and answer clarifying questions with inline option buttons; tools auto-execute, with progressive cooldown after "Pause & Outline Plan"
 - 📋 **Plan mode** — toggle per chat with `/planmode`; choose full manual approval, auto-approved transitions, or no plan phase
 - 📁 **Projects and worktrees** — register repos with `untether init`, target with `/myproject @feat/thing`, run branches in isolated worktrees in parallel
 - 💰 **Cost and usage tracking** — per-run and daily budgets, subscription usage in the footer, `/usage` for detailed breakdowns, optional auto-cancel
@@ -82,7 +82,7 @@ systemctl --user restart untether  # from shell (systemd)
 - 💬 **Forum topics** — map Telegram topics to projects and branches
 - 📤 **Session export** — `/export` for markdown or JSON transcripts
 - 🗂️ **File browser** — `/browse` to navigate project files with inline buttons
-- ⚙️ **Inline settings** — `/config` opens an in-place settings menu; toggle plan mode, verbose, engine, model, reasoning, and trigger with buttons
+- ⚙️ **Inline settings** — `/config` opens an in-place settings menu; toggle plan mode, ask mode, verbose, engine, model, reasoning, and trigger with buttons
 - 🧩 **Plugin system** — extend with custom engines, transports, and commands
 - 💬 **Conversation modes** — assistant (ongoing chat), workspace (forum topics per project), or handoff (reply-to-continue with terminal resume)
 
@@ -96,6 +96,8 @@ systemctl --user restart untether  # from shell (systemd)
 | [Codex](https://github.com/openai/codex) | `npm i -g @openai/codex` | Fast edits, shell commands, quick fixes |
 | [OpenCode](https://github.com/opencode-ai/opencode) | `npm i -g opencode-ai@latest` | 75+ providers via Models.dev, local models |
 | [Pi](https://github.com/mariozechner/pi-coding-agent) | `npm i -g @mariozechner/pi-coding-agent` | Multi-provider auth, conversational |
+| [Gemini CLI](https://github.com/google-gemini/gemini-cli) | `npm i -g @google/gemini-cli` | Google Gemini models, streaming JSON _(coming soon)_ |
+| [Amp](https://ampcode.com) | `npm i -g @sourcegraph/amp` | Sourcegraph's AI coding agent _(coming soon)_ |
 
 **Note:** Use your existing Claude or ChatGPT subscription — no extra API keys needed (unless you want API billing).
 
@@ -117,7 +119,7 @@ systemctl --user restart untether  # from shell (systemd)
 | `/topic` | Create or bind forum topics |
 | `/restart` | Gracefully restart Untether (drains active runs first) |
 | `/verbose` | Toggle verbose progress mode (show tool details) |
-| `/config` | Interactive settings menu (plan mode, verbose, engine, model, reasoning, trigger) |
+| `/config` | Interactive settings menu (plan mode, ask mode, verbose, engine, model, reasoning, trigger) |
 | `/ctx` | Show or update project/branch context |
 | `/reasoning` | Set reasoning level override |
 | `/trigger` | Set group chat trigger mode |

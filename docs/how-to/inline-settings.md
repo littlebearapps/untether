@@ -12,18 +12,21 @@ Send `/config` in any chat:
 
 The home page shows current values for all settings:
 
+<!-- SCREENSHOT: /config home page showing inline keyboard buttons for Plan mode, Verbose, Engine, Model, Trigger with current values -->
+
 ```
 Settings
 
 Plan mode: default
+Ask mode: default
 Verbose: default
 Engine: claude (global)
 Model: default
 Trigger: all
 
-[ Plan mode ] [ Verbose ]
-[  Engine   ] [  Model  ]
-[  Trigger  ]
+[ Plan mode ] [ Ask mode ]
+[  Verbose  ] [  Model   ]
+[  Engine   ] [ Trigger  ]
 ```
 
 ## Navigate sub-pages
@@ -48,6 +51,7 @@ When you tap a setting button:
 Some settings are engine-specific and only appear when relevant:
 
 - **Plan mode** — only available for Claude Code. Hidden for other engines; the sub-page shows "Only available for Claude Code" with a Back button.
+- **Ask mode** — only available for Claude Code. When enabled, Claude can ask interactive questions with option buttons instead of guessing. Hidden for other engines.
 - **Reasoning** — only available for engines that support reasoning levels (currently Codex). Hidden for Claude, OpenCode, and Pi.
 - **Model** — always visible. Shows the current model override and lets you clear it. To set a model, use `/model set <name>`.
 
@@ -58,6 +62,7 @@ When you switch engines via the Engine sub-page, the home page automatically sho
 | Setting | Options | Persisted |
 |---------|---------|-----------|
 | Plan mode | off, on, auto | Yes (chat prefs) |
+| Ask mode | off, on | Yes (chat prefs) |
 | Verbose | off, on | No (in-memory, resets on restart) |
 | Engine | any configured engine | Yes (chat prefs) |
 | Model | view + clear (set via `/model set`) | Yes (chat prefs) |

@@ -2168,6 +2168,148 @@ async def test_run_main_loop_voice_transcript_preserves_directive(
 
 
 @pytest.mark.anyio
+async def test_run_main_loop_voice_shows_transcription_echo(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When voice_show_transcription is True, a 🎙 echo reply is sent."""
+    runner = ScriptRunner([Return(answer="ok")], engine="claude")
+    router = AutoRouter(
+        entries=[RunnerEntry(engine=runner.engine, runner=runner)],
+        default_engine=runner.engine,
+    )
+    runtime = TransportRuntime(router=router, projects=_empty_projects())
+    transport = FakeTransport()
+    exec_cfg = ExecBridgeConfig(
+        transport=transport,
+        presenter=MarkdownPresenter(),
+        final_notify=True,
+    )
+    cfg = TelegramBridgeConfig(
+        bot=FakeBot(),
+        runtime=runtime,
+        chat_id=123,
+        startup_msg="",
+        exec_cfg=exec_cfg,
+        forward_coalesce_s=FAST_FORWARD_COALESCE_S,
+        media_group_debounce_s=FAST_MEDIA_GROUP_DEBOUNCE_S,
+        voice_transcription=True,
+        voice_show_transcription=True,
+    )
+
+    async def _fake_transcribe(
+        *,
+        bot: BotClient,
+        msg: TelegramIncomingMessage,
+        enabled: bool,
+        model: str,
+        max_bytes: int | None = None,
+        reply,
+        base_url: str | None = None,
+        api_key: str | None = None,
+    ) -> str:
+        _ = bot, msg, enabled, model, max_bytes, reply, base_url, api_key
+        return "hello world"
+
+    monkeypatch.setattr(telegram_loop, "transcribe_voice", _fake_transcribe)
+    monkeypatch.setattr(telegram_loop, "list_command_ids", lambda **_: [])
+
+    async def poller(_cfg: TelegramBridgeConfig):
+        yield TelegramIncomingMessage(
+            transport="telegram",
+            chat_id=123,
+            message_id=1,
+            text="",
+            reply_to_message_id=None,
+            reply_to_text=None,
+            sender_id=123,
+            voice=TelegramVoice(
+                file_id="voice-1",
+                mime_type=None,
+                file_size=None,
+                duration=None,
+                raw={"file_id": "voice-1"},
+            ),
+        )
+
+    await run_main_loop(cfg, poller)
+
+    # First send should be the transcription echo
+    echo_texts = [c["message"].text for c in transport.send_calls]
+    assert any("hello world" in t for t in echo_texts)
+
+
+@pytest.mark.anyio
+async def test_run_main_loop_voice_hides_transcription_when_disabled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When voice_show_transcription is False, no echo reply is sent."""
+    runner = ScriptRunner([Return(answer="ok")], engine="claude")
+    router = AutoRouter(
+        entries=[RunnerEntry(engine=runner.engine, runner=runner)],
+        default_engine=runner.engine,
+    )
+    runtime = TransportRuntime(router=router, projects=_empty_projects())
+    transport = FakeTransport()
+    exec_cfg = ExecBridgeConfig(
+        transport=transport,
+        presenter=MarkdownPresenter(),
+        final_notify=True,
+    )
+    cfg = TelegramBridgeConfig(
+        bot=FakeBot(),
+        runtime=runtime,
+        chat_id=123,
+        startup_msg="",
+        exec_cfg=exec_cfg,
+        forward_coalesce_s=FAST_FORWARD_COALESCE_S,
+        media_group_debounce_s=FAST_MEDIA_GROUP_DEBOUNCE_S,
+        voice_transcription=True,
+        voice_show_transcription=False,
+    )
+
+    async def _fake_transcribe(
+        *,
+        bot: BotClient,
+        msg: TelegramIncomingMessage,
+        enabled: bool,
+        model: str,
+        max_bytes: int | None = None,
+        reply,
+        base_url: str | None = None,
+        api_key: str | None = None,
+    ) -> str:
+        _ = bot, msg, enabled, model, max_bytes, reply, base_url, api_key
+        return "hello world"
+
+    monkeypatch.setattr(telegram_loop, "transcribe_voice", _fake_transcribe)
+    monkeypatch.setattr(telegram_loop, "list_command_ids", lambda **_: [])
+
+    async def poller(_cfg: TelegramBridgeConfig):
+        yield TelegramIncomingMessage(
+            transport="telegram",
+            chat_id=123,
+            message_id=1,
+            text="",
+            reply_to_message_id=None,
+            reply_to_text=None,
+            sender_id=123,
+            voice=TelegramVoice(
+                file_id="voice-1",
+                mime_type=None,
+                file_size=None,
+                duration=None,
+                raw={"file_id": "voice-1"},
+            ),
+        )
+
+    await run_main_loop(cfg, poller)
+
+    # No transcription echo — only progress/final messages
+    echo_texts = [c["message"].text for c in transport.send_calls]
+    assert not any("hello world" in t for t in echo_texts)
+
+
+@pytest.mark.anyio
 async def test_run_main_loop_debounces_forwarded_messages_preserves_directives() -> (
     None
 ):

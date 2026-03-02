@@ -121,6 +121,7 @@ async def _resolve_engine_run_options(
         model=merged.model,
         reasoning=merged.reasoning,
         permission_mode=merged.permission_mode,
+        ask_questions=merged.ask_questions,
     )
 
 
@@ -1863,6 +1864,8 @@ async def run_main_loop(
                     if text is None:
                         return
                     is_voice_transcribed = True
+                    if cfg.voice_show_transcription:
+                        await reply(text=f"🎙 {text}")
                 if msg.document is not None:
                     if cfg.files.enabled and cfg.files.auto_put:
                         caption_text = text.strip()
@@ -1940,9 +1943,51 @@ async def run_main_loop(
                 # A1: Intercept text as AskUserQuestion reply if one is pending
                 if text and not is_voice_transcribed:
                     from ..runners.claude import (
-                        get_pending_ask_request,
                         answer_ask_question,
+                        answer_ask_question_with_options,
+                        format_question_message,
+                        get_ask_question_flow,
+                        get_pending_ask_request,
+                        get_question_option_buttons,
                     )
+
+                    # Check for active option flow in "Other" text mode first
+                    flow = get_ask_question_flow()
+                    if flow is not None and flow.awaiting_text:
+                        flow.awaiting_text = False
+                        current_q = flow.questions[flow.current_index]
+                        question_key = current_q.get(
+                            "question",
+                            f"Question {flow.current_index + 1}",
+                        )
+                        flow.answers[question_key] = text
+                        flow.current_index += 1
+
+                        if flow.current_index < len(flow.questions):
+                            # More questions — show next one
+                            # Note: we can't easily edit the progress message from
+                            # here, so just send a new message with the next question
+                            msg_text = format_question_message(flow)
+                            buttons = get_question_option_buttons(flow)
+                            from ..transport import RenderedMessage as _RM
+
+                            next_msg = _RM(
+                                text=msg_text,
+                                extra={
+                                    "parse_mode": "HTML",
+                                    "reply_markup": {"inline_keyboard": buttons},
+                                },
+                            )
+                            await reply(text=next_msg)
+                            return
+                        else:
+                            # All done — send structured answer
+                            success = await answer_ask_question_with_options(
+                                flow.request_id
+                            )
+                            if success:
+                                await reply(text=f"↩️ Answered: {text[:100]}")
+                            return
 
                     pending_ask = get_pending_ask_request()
                     if pending_ask is not None:

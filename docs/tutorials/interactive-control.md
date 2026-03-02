@@ -99,11 +99,15 @@ After Claude writes the outline, **Approve Plan** and **Deny** buttons appear au
 
 ## 8. Answer a question
 
-Sometimes Claude needs to ask you something — like which approach to take or what naming convention to use. When Claude calls `AskUserQuestion`, you'll see the question in the chat with a ❓ prefix:
+Sometimes Claude needs to ask you something — like which approach to take or what naming convention to use. When Claude calls `AskUserQuestion`, you'll see the question in the chat with a ❓ prefix and **option buttons** for each choice:
 
-<!-- SCREENSHOT: AskUserQuestion message showing the question text with Approve/Deny buttons -->
+<!-- SCREENSHOT: AskUserQuestion message showing the question text with option buttons -->
 
-Instead of tapping a button, **reply to the message with your answer as text**. Untether routes your reply back to Claude, which reads it and continues.
+**Tap an option button** to select your answer. Claude receives your choice and continues immediately.
+
+For multi-question flows (1 of N, 2 of N), each question appears in sequence after you answer the previous one.
+
+If none of the options fit, tap **Other (type reply)** and type a custom answer as text. Untether routes your reply back to Claude, which reads it and continues.
 
 ```
 You: Use snake_case for all variable names
@@ -112,6 +116,9 @@ You: Use snake_case for all variable names
 <!-- SCREENSHOT: user replying with text to an AskUserQuestion, Claude continuing -->
 
 You can also tap **Deny** to dismiss the question if it's not relevant.
+
+!!! tip "Ask mode toggle"
+    Control whether Claude asks interactive questions via `/config` → **Ask mode**. When off, Claude proceeds with reasonable defaults instead of asking.
 
 ## 9. Switch to auto mode
 
@@ -151,7 +158,7 @@ Key concepts:
 - **Approval buttons** appear inline in Telegram when Claude needs permission — Approve, Deny, or Pause & Outline Plan
 - **Diff previews** show you exactly what will change before you approve
 - **"Pause & Outline Plan"** forces Claude to write a visible plan before executing
-- **AskUserQuestion** lets you answer Claude's questions with a text reply
+- **AskUserQuestion** lets you answer Claude's questions with option buttons or a text reply
 - **Push notifications** ensure you don't miss approval requests, even from another app
 - **Ephemeral cleanup** automatically removes button messages when the run finishes
 

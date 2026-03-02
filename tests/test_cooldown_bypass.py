@@ -12,14 +12,19 @@ from __future__ import annotations
 
 import pytest
 
+from unittest.mock import AsyncMock
+
 from untether.model import ActionEvent, ResumeToken
 from untether.runners.claude import (
+    ClaudeRunner,
     ClaudeStreamState,
+    _ACTIVE_RUNNERS,
     _DISCUSS_APPROVED,
     _DISCUSS_COOLDOWN,
     _OUTLINE_PENDING,
     _REQUEST_TO_INPUT,
     _REQUEST_TO_SESSION,
+    _SESSION_STDIN,
     _OUTLINE_MIN_CHARS,
     _OUTLINE_WAIT_MESSAGE,
     set_discuss_cooldown,
@@ -36,12 +41,16 @@ def _clear_registries():
     _OUTLINE_PENDING.clear()
     _REQUEST_TO_SESSION.clear()
     _REQUEST_TO_INPUT.clear()
+    _ACTIVE_RUNNERS.clear()
+    _SESSION_STDIN.clear()
     yield
     _DISCUSS_COOLDOWN.clear()
     _DISCUSS_APPROVED.clear()
     _OUTLINE_PENDING.clear()
     _REQUEST_TO_SESSION.clear()
     _REQUEST_TO_INPUT.clear()
+    _ACTIVE_RUNNERS.clear()
+    _SESSION_STDIN.clear()
 
 
 def _make_resume(session_id: str) -> ResumeToken:
@@ -338,3 +347,135 @@ def test_set_discuss_cooldown_adds_outline_pending():
 def test_outline_min_chars_constant():
     """_OUTLINE_MIN_CHARS should be 200."""
     assert _OUTLINE_MIN_CHARS == 200
+
+
+# --- Synthetic button after session ends (#50) ---
+
+
+@pytest.mark.anyio
+async def test_synthetic_approve_after_session_ends():
+    """Clicking synthetic approve after session ends should return error, not success."""
+    from untether.commands import CommandContext
+    from untether.telegram.commands.claude_control import ClaudeControlCommand
+    from untether.transport import MessageRef
+
+    session_id = "sess-dead"
+    synth_request_id = f"da:{session_id}"
+
+    # Register synthetic request but do NOT add to _ACTIVE_RUNNERS (session ended)
+    _REQUEST_TO_SESSION[synth_request_id] = session_id
+
+    ctx = CommandContext(
+        command="claude_control",
+        text=f"claude_control:approve:{synth_request_id}",
+        args_text=f"approve:{synth_request_id}",
+        args=(f"approve:{synth_request_id}",),
+        message=MessageRef(channel_id=123, message_id=1),
+        reply_to=None,
+        reply_text=None,
+        config_path=None,
+        plugin_config=None,  # type: ignore[arg-type]
+        runtime=None,  # type: ignore[arg-type]
+        executor=None,  # type: ignore[arg-type]
+    )
+
+    cmd = ClaudeControlCommand()
+    result = await cmd.handle(ctx)
+
+    assert result is not None
+    assert "Session has ended" in result.text
+    # Should NOT be in _DISCUSS_APPROVED
+    assert session_id not in _DISCUSS_APPROVED
+
+
+@pytest.mark.anyio
+async def test_synthetic_deny_after_session_ends():
+    """Clicking synthetic deny after session ends should return error."""
+    from untether.commands import CommandContext
+    from untether.telegram.commands.claude_control import ClaudeControlCommand
+    from untether.transport import MessageRef
+
+    session_id = "sess-dead-deny"
+    synth_request_id = f"da:{session_id}"
+
+    _REQUEST_TO_SESSION[synth_request_id] = session_id
+    # No _ACTIVE_RUNNERS entry — session ended
+
+    ctx = CommandContext(
+        command="claude_control",
+        text=f"claude_control:deny:{synth_request_id}",
+        args_text=f"deny:{synth_request_id}",
+        args=(f"deny:{synth_request_id}",),
+        message=MessageRef(channel_id=123, message_id=1),
+        reply_to=None,
+        reply_text=None,
+        config_path=None,
+        plugin_config=None,  # type: ignore[arg-type]
+        runtime=None,  # type: ignore[arg-type]
+        executor=None,  # type: ignore[arg-type]
+    )
+
+    cmd = ClaudeControlCommand()
+    result = await cmd.handle(ctx)
+
+    assert result is not None
+    assert "Session has ended" in result.text
+
+
+@pytest.mark.anyio
+async def test_synthetic_approve_with_active_session():
+    """Clicking synthetic approve with active session should succeed normally."""
+    from untether.commands import CommandContext
+    from untether.telegram.commands.claude_control import ClaudeControlCommand
+    from untether.transport import MessageRef
+
+    runner = ClaudeRunner(claude_cmd="claude")
+    session_id = "sess-alive"
+    synth_request_id = f"da:{session_id}"
+
+    # Session IS alive
+    _ACTIVE_RUNNERS[session_id] = (runner, 0.0)
+    _SESSION_STDIN[session_id] = AsyncMock()
+    _REQUEST_TO_SESSION[synth_request_id] = session_id
+
+    ctx = CommandContext(
+        command="claude_control",
+        text=f"claude_control:approve:{synth_request_id}",
+        args_text=f"approve:{synth_request_id}",
+        args=(f"approve:{synth_request_id}",),
+        message=MessageRef(channel_id=123, message_id=1),
+        reply_to=None,
+        reply_text=None,
+        config_path=None,
+        plugin_config=None,  # type: ignore[arg-type]
+        runtime=None,  # type: ignore[arg-type]
+        executor=None,  # type: ignore[arg-type]
+    )
+
+    cmd = ClaudeControlCommand()
+    result = await cmd.handle(ctx)
+
+    assert result is not None
+    assert "Plan approved" in result.text
+    assert session_id in _DISCUSS_APPROVED
+
+
+def test_session_cleanup_removes_synthetic_requests():
+    """stream_end_events should remove stale _REQUEST_TO_SESSION entries for the session."""
+    runner = ClaudeRunner(claude_cmd="claude")
+    session_id = "sess-cleanup"
+    resume = _make_resume(session_id)
+
+    # Simulate active session with a synthetic request
+    _ACTIVE_RUNNERS[session_id] = (runner, 0.0)
+    _SESSION_STDIN[session_id] = AsyncMock()
+    _REQUEST_TO_SESSION[f"da:{session_id}"] = session_id
+    _REQUEST_TO_SESSION["req_normal"] = session_id
+
+    state = _make_state(session_id)
+    runner.stream_end_events(resume=resume, found_session=resume, state=state)
+
+    # Both entries should be cleaned up
+    assert f"da:{session_id}" not in _REQUEST_TO_SESSION
+    assert "req_normal" not in _REQUEST_TO_SESSION
+    assert session_id not in _ACTIVE_RUNNERS

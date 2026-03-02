@@ -145,6 +145,7 @@ class TelegramBridgeConfig:
     voice_transcription_model: str = "gpt-4o-mini-transcribe"
     voice_transcription_base_url: str | None = None
     voice_transcription_api_key: str | None = None
+    voice_show_transcription: bool = True
     forward_coalesce_s: float = 1.0
     media_group_debounce_s: float = 1.0
     allowed_user_ids: tuple[int, ...] = ()
