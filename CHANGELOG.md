@@ -1,5 +1,27 @@
 # changelog
 
+## v0.28.1 (2026-03-03)
+
+### changes
+
+- add 20 new API/LLM error hints for graceful failure during provider outages [#54](https://github.com/littlebearapps/untether/issues/54)
+  - subscription limits: Claude "out of extra usage" / "hit your limit" — tells user session is saved, wait for reset
+  - billing errors: OpenAI `insufficient_quota`, `billing_hard_limit_reached`; Google `resource_exhausted`
+  - API overload: Anthropic `overloaded_error` (529), generic "server is overloaded"
+  - server errors: 500 `internal_server_error`, 502 `bad gateway`, 503 `service unavailable`, 504 `gateway timeout`
+  - rate limits: `too many requests` (extends existing `rate limit` pattern)
+  - network: `connecttimeout`, DNS failure, network unreachable
+  - auth: `openai_api_key`, `google_api_key` (extends existing `anthropic_api_key`)
+
+### fixes
+
+- deduplicate error messages when answer and error share the same first line (e.g. Claude subscription limits showed "You're out of extra usage" twice) [#55](https://github.com/littlebearapps/untether/issues/55)
+
+### tests
+
+- 19 new tests for API error hint patterns: subscription limits, billing, overload, server errors, network, ordering
+- 2 new tests for error/answer deduplication in runner_bridge [#55](https://github.com/littlebearapps/untether/issues/55)
+
 ## v0.28.0 (2026-03-02)
 
 ### changes

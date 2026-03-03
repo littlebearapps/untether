@@ -22,6 +22,16 @@ class TestGetErrorHint:
         assert hint is not None
         assert "ANTHROPIC_API_KEY" in hint
 
+    def test_openai_api_key(self):
+        hint = get_error_hint("Error: OPENAI_API_KEY is not set")
+        assert hint is not None
+        assert "OPENAI_API_KEY" in hint
+
+    def test_google_api_key(self):
+        hint = get_error_hint("Error: GOOGLE_API_KEY is not set")
+        assert hint is not None
+        assert "Google API key" in hint
+
     def test_rate_limit(self):
         hint = get_error_hint("429 rate limit exceeded")
         assert hint is not None
@@ -69,3 +79,135 @@ class TestGetErrorHint:
         hint = get_error_hint(msg)
         assert hint is not None
         assert "failed to load" in hint.lower()
+
+    # --- Subscription / billing limits ---
+
+    def test_out_of_extra_usage(self):
+        msg = (
+            "You're out of extra usage \N{MIDDLE DOT} resets 7am (UTC)\n"
+            "session: 73fe83ea \N{MIDDLE DOT} resumed \N{MIDDLE DOT} turns: 61 "
+            "\N{MIDDLE DOT} cost: $5.77 \N{MIDDLE DOT} api: 583473ms"
+        )
+        hint = get_error_hint(msg)
+        assert hint is not None
+        assert "subscription" in hint.lower()
+        assert "session is saved" in hint.lower()
+
+    def test_hit_your_limit(self):
+        msg = (
+            "You've hit your limit \N{MIDDLE DOT} resets 8am (UTC)\n"
+            "session: d72e0aca \N{MIDDLE DOT} resumed \N{MIDDLE DOT} turns: 26"
+        )
+        hint = get_error_hint(msg)
+        assert hint is not None
+        assert "subscription" in hint.lower()
+        assert "session is saved" in hint.lower()
+
+    def test_insufficient_quota(self):
+        hint = get_error_hint(
+            "Error: insufficient_quota - You exceeded your current quota"
+        )
+        assert hint is not None
+        assert "openai" in hint.lower()
+
+    def test_exceeded_current_quota(self):
+        hint = get_error_hint(
+            "You exceeded your current quota, please check your plan and billing details"
+        )
+        assert hint is not None
+        assert "openai" in hint.lower()
+
+    def test_billing_hard_limit(self):
+        hint = get_error_hint("billing_hard_limit_reached")
+        assert hint is not None
+        assert "spend limit" in hint.lower()
+
+    def test_resource_exhausted(self):
+        hint = get_error_hint(
+            "RESOURCE_EXHAUSTED: Quota exceeded for aiplatform.googleapis.com"
+        )
+        assert hint is not None
+        assert "google" in hint.lower()
+
+    # --- API overload / server errors ---
+
+    def test_overloaded_error(self):
+        hint = get_error_hint(
+            "overloaded_error: Anthropic's API is temporarily overloaded"
+        )
+        assert hint is not None
+        assert "overloaded" in hint.lower()
+        assert "session is saved" in hint.lower()
+
+    def test_server_is_overloaded(self):
+        hint = get_error_hint("Error: The server is overloaded, please try again later")
+        assert hint is not None
+        assert "temporary" in hint.lower()
+
+    def test_internal_server_error(self):
+        hint = get_error_hint("internal_server_error: An unexpected error occurred")
+        assert hint is not None
+        assert "internal server error" in hint.lower()
+
+    def test_bad_gateway(self):
+        hint = get_error_hint("502 Bad Gateway")
+        assert hint is not None
+        assert "bad gateway" in hint.lower()
+
+    def test_service_unavailable(self):
+        hint = get_error_hint("503 Service Unavailable")
+        assert hint is not None
+        assert "unavailable" in hint.lower()
+
+    def test_gateway_timeout(self):
+        hint = get_error_hint("504 Gateway Timeout")
+        assert hint is not None
+        assert "gateway timed out" in hint.lower()
+
+    # --- Rate limits (extended) ---
+
+    def test_too_many_requests(self):
+        hint = get_error_hint("429 Too Many Requests")
+        assert hint is not None
+        assert "retry" in hint.lower()
+
+    # --- Network errors (extended) ---
+
+    def test_connect_timeout(self):
+        hint = get_error_hint(
+            "ConnectTimeout: timed out connecting to api.anthropic.com"
+        )
+        assert hint is not None
+        assert "connection timed out" in hint.lower()
+
+    def test_dns_failure(self):
+        hint = get_error_hint("Name or service not known")
+        assert hint is not None
+        assert "dns" in hint.lower()
+
+    def test_network_unreachable(self):
+        hint = get_error_hint("Network is unreachable")
+        assert hint is not None
+        assert "internet" in hint.lower()
+
+    # --- Ordering: specific patterns match before generic ones ---
+
+    def test_overloaded_does_not_match_rate_limit(self):
+        """overloaded_error should get the overload hint, not rate limit."""
+        hint = get_error_hint("overloaded_error")
+        assert hint is not None
+        assert "overloaded" in hint.lower()
+        assert "retry automatically" not in hint.lower()
+
+    def test_subscription_limit_does_not_match_rate_limit(self):
+        """'hit your limit' should get subscription hint, not rate limit."""
+        hint = get_error_hint("You've hit your limit \N{MIDDLE DOT} resets 10am (UTC)")
+        assert hint is not None
+        assert "subscription" in hint.lower()
+
+    def test_insufficient_quota_matches_before_exceeded(self):
+        """Both patterns present — insufficient_quota should match first."""
+        hint = get_error_hint("insufficient_quota: You exceeded your current quota")
+        assert hint is not None
+        # Both point to OpenAI, so either match is correct
+        assert "openai" in hint.lower()

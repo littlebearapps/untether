@@ -1019,7 +1019,18 @@ async def handle_message(
         if hint:
             error_text = f"{error_text}\n\n\N{ELECTRIC LIGHT BULB} {hint}"
         if final_answer.strip():
-            final_answer = f"{final_answer}\n\n{error_text}"
+            # Deduplicate: if the answer already starts with the error's first
+            # line (common when runner sets both answer and error from the same
+            # source, e.g. Claude subscription limits), only append the
+            # diagnostic context and hint — not the repeated summary.
+            error_head = error_text.split("\n", 1)[0].strip()
+            answer_head = final_answer.strip().split("\n", 1)[0].strip()
+            if error_head and error_head == answer_head:
+                _, _, remainder = error_text.partition("\n")
+                if remainder.strip():
+                    final_answer = f"{final_answer}\n\n{remainder.strip()}"
+            else:
+                final_answer = f"{final_answer}\n\n{error_text}"
         else:
             final_answer = error_text
 

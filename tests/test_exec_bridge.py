@@ -1235,3 +1235,78 @@ async def test_on_resume_failed_not_called_when_not_resumed() -> None:
     )
 
     assert len(cleared_tokens) == 0
+
+
+# ---------------------------------------------------------------------------
+# Error/answer deduplication tests
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.anyio
+async def test_error_answer_dedup_strips_duplicate_first_line() -> None:
+    """When answer and error share the same first line, avoid repeating it."""
+    shared_line = "You're out of extra usage \N{MIDDLE DOT} resets 7am (UTC)"
+    transport = FakeTransport()
+    runner = ScriptRunner(
+        [
+            ErrorReturn(
+                answer=shared_line,
+                error=f"{shared_line}\nsession: 73fe \N{MIDDLE DOT} resumed \N{MIDDLE DOT} turns: 61 \N{MIDDLE DOT} cost: $5.77",
+            )
+        ],
+        engine=CODEX_ENGINE,
+    )
+    cfg = ExecBridgeConfig(
+        transport=transport,
+        presenter=MarkdownPresenter(),
+        final_notify=True,
+    )
+
+    await handle_message(
+        cfg,
+        runner=runner,
+        incoming=IncomingMessage(channel_id=123, message_id=10, text="go"),
+        resume_token=None,
+    )
+
+    # Final message is sent (not edited) when final_notify=True
+    assert len(transport.send_calls) >= 2
+    final_text = transport.send_calls[-1]["message"].text
+    # The shared line should appear exactly once, not twice
+    assert final_text.count(shared_line) == 1
+    # The diagnostic context should still be present
+    assert "session: 73fe" in final_text
+    # The hint should be appended
+    assert "\N{ELECTRIC LIGHT BULB}" in final_text
+
+
+@pytest.mark.anyio
+async def test_error_answer_no_dedup_when_different() -> None:
+    """When answer and error differ, both are shown in full."""
+    transport = FakeTransport()
+    runner = ScriptRunner(
+        [
+            ErrorReturn(
+                answer="Task completed partially",
+                error="429 rate limit exceeded",
+            )
+        ],
+        engine=CODEX_ENGINE,
+    )
+    cfg = ExecBridgeConfig(
+        transport=transport,
+        presenter=MarkdownPresenter(),
+        final_notify=True,
+    )
+
+    await handle_message(
+        cfg,
+        runner=runner,
+        incoming=IncomingMessage(channel_id=123, message_id=10, text="go"),
+        resume_token=None,
+    )
+
+    assert len(transport.send_calls) >= 2
+    final_text = transport.send_calls[-1]["message"].text
+    assert "Task completed partially" in final_text
+    assert "rate limit" in final_text.lower()
