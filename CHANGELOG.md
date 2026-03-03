@@ -15,6 +15,7 @@
 - synthetic Approve Plan button now returns an error when session has already ended, instead of silently succeeding [#50](https://github.com/littlebearapps/untether/issues/50)
   - session-alive check in `da:` button handler (`claude_control.py`)
   - stale `_REQUEST_TO_SESSION` entries cleaned up during session end
+- ReadTimeout in usage footer no longer kills final message delivery — chat appeared frozen when Anthropic usage API was slow [#53](https://github.com/littlebearapps/untether/issues/53)
 
 ### tests
 

@@ -848,6 +848,42 @@ class TestMaybeAppendUsageFooterAlwaysShow:
         result = await _maybe_append_usage_footer(msg, always_show=True)
         assert result.text == "Done."
 
+    @pytest.mark.anyio
+    async def test_read_timeout_returns_original_message(self, monkeypatch):
+        """ReadTimeout on usage API must not block final message delivery (#53)."""
+        import httpx
+
+        from untether.runner_bridge import _maybe_append_usage_footer
+
+        async def _raise_timeout():
+            raise httpx.ReadTimeout("")
+
+        monkeypatch.setattr(
+            "untether.telegram.commands.usage.fetch_claude_usage", _raise_timeout
+        )
+
+        msg = RenderedMessage(text="Done.", extra={})
+        result = await _maybe_append_usage_footer(msg, always_show=True)
+        assert result.text == "Done."
+
+    @pytest.mark.anyio
+    async def test_connect_error_returns_original_message(self, monkeypatch):
+        """Network errors must not block final message delivery (#53)."""
+        import httpx
+
+        from untether.runner_bridge import _maybe_append_usage_footer
+
+        async def _raise_connect():
+            raise httpx.ConnectError("")
+
+        monkeypatch.setattr(
+            "untether.telegram.commands.usage.fetch_claude_usage", _raise_connect
+        )
+
+        msg = RenderedMessage(text="Done.", extra={})
+        result = await _maybe_append_usage_footer(msg, always_show=True)
+        assert result.text == "Done."
+
 
 # ---------------------------------------------------------------------------
 # _read_access_token credential source tests
