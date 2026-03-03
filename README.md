@@ -75,6 +75,7 @@ systemctl --user restart untether  # from shell (systemd)
 - 📋 **Plan mode** — toggle per chat with `/planmode`; choose full manual approval, auto-approved transitions, or no plan phase
 - 📁 **Projects and worktrees** — register repos with `untether init`, target with `/myproject @feat/thing`, run branches in isolated worktrees in parallel
 - 💰 **Cost and usage tracking** — per-run and daily budgets, subscription usage in the footer, `/usage` for detailed breakdowns, optional auto-cancel
+- 💡 **Actionable error hints** — friendly messages for API outages, rate limits, billing errors, and network failures with resume guidance
 - 🏷 **Model and mode metadata** — every completed message shows the model and permission mode (e.g. `🏷 sonnet · plan`) across all engines
 - 🎙️ **Voice notes** — dictate tasks instead of typing; Untether transcribes via a configurable Whisper-compatible endpoint
 - 📎 **File transfer** — upload files to your repo or download results back

@@ -52,7 +52,7 @@ This line is parsed from replies and takes precedence over new directives.
 | `/ping` | Health check — replies with uptime. |
 | `/restart` | Gracefully drain active runs and restart Untether. |
 | `/verbose` | Toggle verbose progress mode (on/off/clear). Shows tool details in progress messages. |
-| `/config` | Interactive settings menu — plan mode, verbose, engine, trigger toggles with inline buttons. |
+| `/config` | Interactive settings menu — plan mode, ask mode, verbose, engine, model, reasoning, trigger toggles with inline buttons. |
 | `/new` | Clear stored sessions for the current scope (topic/chat). |
 
 Notes:

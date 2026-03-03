@@ -41,11 +41,16 @@ This lets you make informed approve/deny decisions without leaving Telegram.
 
 ## Answering questions
 
-When Claude calls `AskUserQuestion`, the approval message shows the question text with a `?` prefix. Instead of tapping a button, **reply to the message with your answer as text**. Untether sends your reply back to Claude, which reads it and continues.
+When Claude calls `AskUserQuestion`, Untether renders the question with interactive option buttons in Telegram:
 
-You can also tap Deny to dismiss the question.
+- **Option buttons** — tap any option to answer instantly. Claude receives your choice and continues.
+- **"Other (type reply)"** — tap this to type a custom answer. Send your reply as a regular message and Untether routes it back to Claude.
+- **Multi-question flows** — if Claude asks multiple questions, they appear one at a time (e.g. "1 of 3"). Answer each to step through the sequence.
+- **Deny** — tap Deny to dismiss the question. Claude proceeds with its default assumptions.
 
-<!-- SCREENSHOT: Telegram AskUserQuestion message showing the question text with a reply containing the user's answer -->
+Toggle ask mode on or off via `/config` → Ask mode. When off, questions are auto-denied and Claude proceeds with defaults.
+
+<!-- SCREENSHOT: Telegram AskUserQuestion message showing option buttons and "Other (type reply)" -->
 
 ## Push notifications
 
