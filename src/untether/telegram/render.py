@@ -81,7 +81,18 @@ def render_markdown(md: str) -> tuple[str, list[dict[str, Any]]]:
     # post-render appends (cost footer, usage) don't get double-spaced.
     text = text.rstrip("\n")
 
-    entities = [dict(e) for e in rendered.entities]
+    # Clamp entities to new text length — sulguk may reference stripped trailing \n
+    text_utf16_len = len(text.encode("utf-16-le")) // 2
+    entities: list[dict[str, Any]] = []
+    for e in rendered.entities:
+        ed = dict(e)
+        offset = ed.get("offset", 0)
+        length = ed.get("length", 0)
+        if offset >= text_utf16_len:
+            continue
+        if offset + length > text_utf16_len:
+            ed["length"] = text_utf16_len - offset
+        entities.append(ed)
     return text, entities
 
 

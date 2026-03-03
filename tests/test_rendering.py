@@ -50,6 +50,43 @@ def test_render_markdown_keeps_ordered_numbering_with_unindented_sub_bullets() -
     ]
 
 
+def test_render_markdown_clamps_entities_after_strip() -> None:
+    """The voice-disabled hint ends with a code block; sulguk entities must
+    not overflow the text after rstrip('\\n')."""
+    from untether.telegram.voice import VOICE_TRANSCRIPTION_DISABLED_HINT
+
+    text, entities = render_markdown(VOICE_TRANSCRIPTION_DISABLED_HINT)
+    text_utf16_len = len(text.encode("utf-16-le")) // 2
+    for e in entities:
+        end = e.get("offset", 0) + e.get("length", 0)
+        assert end <= text_utf16_len, (
+            f"entity {e} overflows text (len={text_utf16_len})"
+        )
+
+
+def test_render_markdown_code_block_at_end() -> None:
+    """Any markdown ending with a fenced code block should have valid entities."""
+    md = "intro\n```\nsome code\n```"
+    text, entities = render_markdown(md)
+    text_utf16_len = len(text.encode("utf-16-le")) // 2
+    for e in entities:
+        end = e.get("offset", 0) + e.get("length", 0)
+        assert end <= text_utf16_len
+
+
+def test_render_markdown_preserves_inner_entities() -> None:
+    """Code block NOT at the end — entities should be unchanged."""
+    md = "```\ncode\n```\n\nafter"
+    text, entities = render_markdown(md)
+    assert "after" in text
+    code_entities = [e for e in entities if e.get("type") in ("pre", "code")]
+    assert len(code_entities) > 0
+    text_utf16_len = len(text.encode("utf-16-le")) // 2
+    for e in entities:
+        end = e.get("offset", 0) + e.get("length", 0)
+        assert end <= text_utf16_len
+
+
 def test_split_markdown_body_closes_and_reopens_fence() -> None:
     body = "```py\n" + ("line\n" * 10) + "```\n\npost"
 
