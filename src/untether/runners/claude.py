@@ -562,8 +562,6 @@ def translate_claude_event(
             if isinstance(request, claude_schema.ControlCanUseToolRequest):
                 tool_name = getattr(request, "tool_name", "")
                 if tool_name == "AskUserQuestion":
-                    from .run_options import get_run_options
-
                     run_opts = get_run_options()
                     if run_opts and run_opts.ask_questions is False:
                         logger.info(
@@ -716,8 +714,10 @@ def translate_claude_event(
                             key_params.append(f"{key}={value}")
                     if key_params:
                         details += f" ({', '.join(key_params)})"
-                # CC4: Diff preview for Edit/Write tools
-                diff_preview = _format_diff_preview(tool_name, tool_input)
+                # CC4: Diff preview for Edit/Write tools (gated on per-chat setting)
+                run_opts = get_run_options()
+                if run_opts is None or run_opts.diff_preview is not False:
+                    diff_preview = _format_diff_preview(tool_name, tool_input)
             elif isinstance(request, claude_schema.ControlSetPermissionModeRequest):
                 mode = getattr(request, "mode", "unknown")
                 details = f"mode: {mode}"

@@ -122,6 +122,7 @@ async def _resolve_engine_run_options(
         reasoning=merged.reasoning,
         permission_mode=merged.permission_mode,
         ask_questions=merged.ask_questions,
+        diff_preview=merged.diff_preview,
     )
 
 

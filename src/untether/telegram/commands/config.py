@@ -45,7 +45,11 @@ def _check(label: str, *, active: bool) -> str:
 
 async def _page_home(ctx: CommandContext) -> None:
     from ..chat_prefs import ChatPrefsStore, resolve_prefs_path
-    from ..engine_overrides import ASK_QUESTIONS_SUPPORTED_ENGINES, supports_reasoning
+    from ..engine_overrides import (
+        ASK_QUESTIONS_SUPPORTED_ENGINES,
+        DIFF_PREVIEW_SUPPORTED_ENGINES,
+        supports_reasoning,
+    )
     from .verbose import get_verbosity_override
 
     chat_id = ctx.message.channel_id
@@ -58,6 +62,7 @@ async def _page_home(ctx: CommandContext) -> None:
     model_label = "default"
     reasoning_label = "default"
     aq_label = "default"
+    dp_label = "default"
 
     if config_path is not None:
         prefs = ChatPrefsStore(resolve_prefs_path(config_path))
@@ -92,6 +97,10 @@ async def _page_home(ctx: CommandContext) -> None:
         if engine_override and engine_override.ask_questions is not None:
             aq_label = "on" if engine_override.ask_questions else "off"
 
+        # Diff preview override for current engine
+        if engine_override and engine_override.diff_preview is not None:
+            dp_label = "on" if engine_override.diff_preview else "off"
+
     verbose = get_verbosity_override(chat_id)
     if verbose == "verbose":
         verbose_label = "on"
@@ -103,6 +112,7 @@ async def _page_home(ctx: CommandContext) -> None:
     show_plan_mode = current_engine == "claude"
     show_reasoning = supports_reasoning(current_engine)
     show_ask_questions = current_engine in ASK_QUESTIONS_SUPPORTED_ENGINES
+    show_diff_preview = current_engine in DIFF_PREVIEW_SUPPORTED_ENGINES
 
     lines = [
         "<b>⚙️ Settings</b>",
@@ -112,6 +122,8 @@ async def _page_home(ctx: CommandContext) -> None:
         lines.append(f"Plan mode: <b>{pm_label}</b>")
     if show_ask_questions:
         lines.append(f"Ask mode: <b>{aq_label}</b>")
+    if show_diff_preview:
+        lines.append(f"Diff preview: <b>{dp_label}</b>")
     lines.extend(
         [
             f"Verbose: <b>{verbose_label}</b>",
@@ -143,12 +155,11 @@ async def _page_home(ctx: CommandContext) -> None:
 
     # Row 2
     if show_plan_mode:
-        buttons.append(
-            [
-                {"text": "Verbose", "callback_data": "config:vb"},
-                {"text": "Model", "callback_data": "config:md"},
-            ]
-        )
+        row2 = []
+        if show_diff_preview:
+            row2.append({"text": "Diff preview", "callback_data": "config:dp"})
+        row2.append({"text": "Verbose", "callback_data": "config:vb"})
+        buttons.append(row2)
     elif show_reasoning:
         buttons.append(
             [
@@ -168,8 +179,8 @@ async def _page_home(ctx: CommandContext) -> None:
     if show_plan_mode:
         buttons.append(
             [
+                {"text": "Model", "callback_data": "config:md"},
                 {"text": "Engine", "callback_data": "config:ag"},
-                {"text": "Trigger", "callback_data": "config:tr"},
             ]
         )
     elif show_reasoning:
@@ -178,6 +189,16 @@ async def _page_home(ctx: CommandContext) -> None:
                 {"text": "Trigger", "callback_data": "config:tr"},
             ]
         )
+
+    # Row 4
+    if show_plan_mode:
+        buttons.append(
+            [
+                {"text": "Trigger", "callback_data": "config:tr"},
+            ]
+        )
+    elif show_reasoning:
+        pass  # already handled
 
     await _respond(ctx, "\n".join(lines), buttons)
 
@@ -225,6 +246,7 @@ async def _page_planmode(ctx: CommandContext, action: str | None = None) -> None
             reasoning=current.reasoning if current else None,
             permission_mode=_PM_MODES[action],
             ask_questions=current.ask_questions if current else None,
+            diff_preview=current.diff_preview if current else None,
         )
         await prefs.set_engine_override(chat_id, engine, updated)
         logger.info("config.planmode.set", chat_id=chat_id, mode=action)
@@ -237,6 +259,7 @@ async def _page_planmode(ctx: CommandContext, action: str | None = None) -> None
             reasoning=current.reasoning if current else None,
             permission_mode=None,
             ask_questions=current.ask_questions if current else None,
+            diff_preview=current.diff_preview if current else None,
         )
         await prefs.set_engine_override(chat_id, engine, updated)
         logger.info("config.planmode.cleared", chat_id=chat_id)
@@ -521,6 +544,7 @@ async def _page_model(ctx: CommandContext, action: str | None = None) -> None:
             reasoning=current.reasoning if current else None,
             permission_mode=current.permission_mode if current else None,
             ask_questions=current.ask_questions if current else None,
+            diff_preview=current.diff_preview if current else None,
         )
         await prefs.set_engine_override(chat_id, current_engine, updated)
         logger.info("config.model.cleared", chat_id=chat_id, engine=current_engine)
@@ -601,6 +625,7 @@ async def _page_reasoning(ctx: CommandContext, action: str | None = None) -> Non
             reasoning=level,
             permission_mode=current.permission_mode if current else None,
             ask_questions=current.ask_questions if current else None,
+            diff_preview=current.diff_preview if current else None,
         )
         await prefs.set_engine_override(chat_id, current_engine, updated)
         logger.info(
@@ -618,6 +643,7 @@ async def _page_reasoning(ctx: CommandContext, action: str | None = None) -> Non
             reasoning=None,
             permission_mode=current.permission_mode if current else None,
             ask_questions=current.ask_questions if current else None,
+            diff_preview=current.diff_preview if current else None,
         )
         await prefs.set_engine_override(chat_id, current_engine, updated)
         logger.info("config.reasoning.cleared", chat_id=chat_id, engine=current_engine)
@@ -715,6 +741,7 @@ async def _page_ask_questions(ctx: CommandContext, action: str | None = None) ->
             reasoning=current.reasoning if current else None,
             permission_mode=current.permission_mode if current else None,
             ask_questions=True,
+            diff_preview=current.diff_preview if current else None,
         )
         await prefs.set_engine_override(chat_id, engine, updated)
         logger.info("config.ask_questions.set", chat_id=chat_id, value=True)
@@ -727,6 +754,7 @@ async def _page_ask_questions(ctx: CommandContext, action: str | None = None) ->
             reasoning=current.reasoning if current else None,
             permission_mode=current.permission_mode if current else None,
             ask_questions=False,
+            diff_preview=current.diff_preview if current else None,
         )
         await prefs.set_engine_override(chat_id, engine, updated)
         logger.info("config.ask_questions.set", chat_id=chat_id, value=False)
@@ -739,6 +767,7 @@ async def _page_ask_questions(ctx: CommandContext, action: str | None = None) ->
             reasoning=current.reasoning if current else None,
             permission_mode=current.permission_mode if current else None,
             ask_questions=None,
+            diff_preview=current.diff_preview if current else None,
         )
         await prefs.set_engine_override(chat_id, engine, updated)
         logger.info("config.ask_questions.cleared", chat_id=chat_id)
@@ -785,6 +814,114 @@ async def _page_ask_questions(ctx: CommandContext, action: str | None = None) ->
     await _respond(ctx, "\n".join(lines), buttons)
 
 
+async def _page_diff_preview(ctx: CommandContext, action: str | None = None) -> None:
+    from ..chat_prefs import ChatPrefsStore, resolve_prefs_path
+    from ..engine_overrides import DIFF_PREVIEW_SUPPORTED_ENGINES, EngineOverrides
+
+    config_path = ctx.config_path
+    if config_path is None:
+        await _respond(
+            ctx,
+            "<b>⚙️ Diff preview</b>\n\nUnavailable (no config path).",
+            [[{"text": "← Back", "callback_data": "config:home"}]],
+        )
+        return
+
+    prefs = ChatPrefsStore(resolve_prefs_path(config_path))
+    chat_id = ctx.message.channel_id
+
+    # Claude-only guard
+    eng = await prefs.get_default_engine(chat_id)
+    current_engine = eng if eng else ctx.runtime.default_engine
+    if current_engine not in DIFF_PREVIEW_SUPPORTED_ENGINES:
+        await _respond(
+            ctx,
+            "<b>⚙️ Diff preview</b>\n\nOnly available for Claude Code.",
+            [[{"text": "← Back", "callback_data": "config:home"}]],
+        )
+        return
+
+    engine = current_engine
+
+    if action == "on":
+        current = await prefs.get_engine_override(chat_id, engine)
+        updated = EngineOverrides(
+            model=current.model if current else None,
+            reasoning=current.reasoning if current else None,
+            permission_mode=current.permission_mode if current else None,
+            ask_questions=current.ask_questions if current else None,
+            diff_preview=True,
+        )
+        await prefs.set_engine_override(chat_id, engine, updated)
+        logger.info("config.diff_preview.set", chat_id=chat_id, value=True)
+        await _page_home(ctx)
+        return
+    elif action == "off":
+        current = await prefs.get_engine_override(chat_id, engine)
+        updated = EngineOverrides(
+            model=current.model if current else None,
+            reasoning=current.reasoning if current else None,
+            permission_mode=current.permission_mode if current else None,
+            ask_questions=current.ask_questions if current else None,
+            diff_preview=False,
+        )
+        await prefs.set_engine_override(chat_id, engine, updated)
+        logger.info("config.diff_preview.set", chat_id=chat_id, value=False)
+        await _page_home(ctx)
+        return
+    elif action == "clr":
+        current = await prefs.get_engine_override(chat_id, engine)
+        updated = EngineOverrides(
+            model=current.model if current else None,
+            reasoning=current.reasoning if current else None,
+            permission_mode=current.permission_mode if current else None,
+            ask_questions=current.ask_questions if current else None,
+            diff_preview=None,
+        )
+        await prefs.set_engine_override(chat_id, engine, updated)
+        logger.info("config.diff_preview.cleared", chat_id=chat_id)
+        await _page_home(ctx)
+        return
+
+    override = await prefs.get_engine_override(chat_id, engine)
+    dp = override.diff_preview if override else None
+    if dp is True:
+        current_label = "on"
+    elif dp is False:
+        current_label = "off"
+    else:
+        current_label = "default (on)"
+
+    lines = [
+        "<b>⚙️ Diff preview</b>",
+        "",
+        "Shows compact diffs in tool approval messages.",
+        "• <b>on</b> — show Edit/Write diffs and Bash commands",
+        "• <b>off</b> — approval buttons only, no preview",
+        "",
+        f"Current: <b>{current_label}</b>",
+    ]
+
+    buttons = [
+        [
+            {
+                "text": _check("Off", active=dp is False),
+                "callback_data": "config:dp:off",
+            },
+            {
+                "text": _check("On", active=dp is True),
+                "callback_data": "config:dp:on",
+            },
+        ],
+        [
+            {"text": "Clear override", "callback_data": "config:dp:clr"},
+            {"text": "← Back", "callback_data": "config:home"},
+        ],
+    ]
+
+    await _respond(ctx, "\n".join(lines), buttons)
+
+
 # ---------------------------------------------------------------------------
 # Routing
 # ---------------------------------------------------------------------------
@@ -797,6 +934,7 @@ _PAGES: dict[str, object] = {
     "md": _page_model,
     "rs": _page_reasoning,
     "aq": _page_ask_questions,
+    "dp": _page_diff_preview,
 }
 
 
@@ -848,6 +986,11 @@ class ConfigCommand:
                 "on": "Ask mode: on",
                 "off": "Ask mode: off",
                 "clr": "Ask mode: cleared",
+            },
+            "dp": {
+                "on": "Diff preview: on",
+                "off": "Diff preview: off",
+                "clr": "Diff preview: cleared",
             },
         }
         page_labels = _TOAST_LABELS.get(page, {})

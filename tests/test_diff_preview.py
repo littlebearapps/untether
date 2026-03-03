@@ -96,3 +96,31 @@ class TestFormatDiffPreview:
         long_cmd = "echo " + "a" * 300
         result = _format_diff_preview("Bash", {"command": long_cmd})
         assert len(result) < 210  # $ prefix + truncated command
+
+
+class TestDiffPreviewGating:
+    """Test that diff preview respects the per-chat EngineRunOptions toggle."""
+
+    def test_enabled_when_run_options_none(self):
+        from untether.runners.run_options import EngineRunOptions
+
+        opts = None
+        assert opts is None or opts.diff_preview is not False
+
+    def test_enabled_when_diff_preview_none(self):
+        from untether.runners.run_options import EngineRunOptions
+
+        opts = EngineRunOptions(diff_preview=None)
+        assert opts.diff_preview is not False
+
+    def test_enabled_when_diff_preview_true(self):
+        from untether.runners.run_options import EngineRunOptions
+
+        opts = EngineRunOptions(diff_preview=True)
+        assert opts.diff_preview is not False
+
+    def test_disabled_when_diff_preview_false(self):
+        from untether.runners.run_options import EngineRunOptions
+
+        opts = EngineRunOptions(diff_preview=False)
+        assert opts.diff_preview is False

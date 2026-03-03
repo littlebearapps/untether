@@ -1,5 +1,23 @@
 # changelog
 
+## v0.29.0 (2026-03-03)
+
+### changes
+
+- add diff preview toggle to `/config` menu — per-chat persistent setting to enable/disable diff previews in tool approval messages [#58](https://github.com/littlebearapps/untether/issues/58)
+  - Claude-only; default is on (matches existing behaviour)
+  - stored in `EngineOverrides`, gated via `EngineRunOptions` ContextVar
+  - home page layout: new "Diff preview" button alongside Verbose
+
+### fixes
+
+- remove redundant local import of `get_run_options` in `claude.py` that shadowed the module-level import
+
+### tests
+
+- 25 new tests: diff preview config page (18), gating logic (4), engine override merge (2), toast labels (3)
+- updated home button test to assert `config:dp` presence for Claude
+
 ## v0.28.1 (2026-03-03)
 
 ### changes

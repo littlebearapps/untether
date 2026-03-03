@@ -95,3 +95,19 @@ async def test_topic_state_engine_overrides_roundtrip(tmp_path) -> None:
     assert override2 is not None
     assert override2.model == "gpt-4.1"
     assert override2.reasoning == "medium"
+
+
+def test_merge_overrides_diff_preview_topic_wins() -> None:
+    topic = EngineOverrides(diff_preview=False)
+    chat = EngineOverrides(diff_preview=True)
+    merged = merge_overrides(topic, chat)
+    assert merged is not None
+    assert merged.diff_preview is False
+
+
+def test_merge_overrides_diff_preview_chat_fallback() -> None:
+    topic = EngineOverrides(diff_preview=None)
+    chat = EngineOverrides(diff_preview=True)
+    merged = merge_overrides(topic, chat)
+    assert merged is not None
+    assert merged.diff_preview is True

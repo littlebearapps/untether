@@ -227,7 +227,7 @@ class TestHomePage:
 
     @pytest.mark.anyio
     async def test_home_has_nav_buttons_claude(self, tmp_path):
-        """When engine is claude, all 4 nav buttons present."""
+        """When engine is claude, all nav buttons present."""
         state_path = tmp_path / "prefs.json"
         cmd = ConfigCommand()
         ctx = _make_ctx(config_path=state_path, default_engine="claude")
@@ -237,6 +237,7 @@ class TestHomePage:
         assert "config:vb" in data
         assert "config:ag" in data
         assert "config:tr" in data
+        assert "config:dp" in data
 
     @pytest.mark.anyio
     async def test_home_has_nav_buttons_non_claude(self, tmp_path):
@@ -1372,3 +1373,284 @@ class TestAskQuestionsToasts:
 
     def test_toast_ask_clear(self):
         assert ConfigCommand.early_answer_toast("aq:clr") == "Ask mode: cleared"
+
+
+# ---------------------------------------------------------------------------
+# Diff preview toggle
+# ---------------------------------------------------------------------------
+
+
+class TestDiffPreview:
+    @pytest.mark.anyio
+    async def test_diff_preview_page_renders(self, tmp_path):
+        state_path = tmp_path / "prefs.json"
+        cmd = ConfigCommand()
+        ctx = _make_ctx(
+            args_text="dp",
+            text="config:dp",
+            config_path=state_path,
+            default_engine="claude",
+        )
+        await cmd.handle(ctx)
+        msg = _last_edit_msg(ctx)
+        assert "Diff preview" in msg.text
+        assert "config:dp:on" in _buttons_data(msg)
+        assert "config:dp:off" in _buttons_data(msg)
+
+    @pytest.mark.anyio
+    async def test_diff_preview_set_on(self, tmp_path):
+        from untether.telegram.chat_prefs import ChatPrefsStore, resolve_prefs_path
+
+        state_path = tmp_path / "prefs.json"
+        cmd = ConfigCommand()
+        ctx = _make_ctx(
+            args_text="dp:on",
+            text="config:dp:on",
+            config_path=state_path,
+            default_engine="claude",
+        )
+        await cmd.handle(ctx)
+        msg = _last_edit_msg(ctx)
+        assert "Settings" in msg.text
+
+        prefs = ChatPrefsStore(resolve_prefs_path(state_path))
+        override = await prefs.get_engine_override(123, "claude")
+        assert override is not None
+        assert override.diff_preview is True
+
+    @pytest.mark.anyio
+    async def test_diff_preview_set_off(self, tmp_path):
+        from untether.telegram.chat_prefs import ChatPrefsStore, resolve_prefs_path
+
+        state_path = tmp_path / "prefs.json"
+        cmd = ConfigCommand()
+        ctx = _make_ctx(
+            args_text="dp:off",
+            text="config:dp:off",
+            config_path=state_path,
+            default_engine="claude",
+        )
+        await cmd.handle(ctx)
+
+        prefs = ChatPrefsStore(resolve_prefs_path(state_path))
+        override = await prefs.get_engine_override(123, "claude")
+        assert override is not None
+        assert override.diff_preview is False
+
+    @pytest.mark.anyio
+    async def test_diff_preview_clear(self, tmp_path):
+        from untether.telegram.chat_prefs import ChatPrefsStore, resolve_prefs_path
+        from untether.telegram.engine_overrides import EngineOverrides
+
+        state_path = tmp_path / "prefs.json"
+        prefs = ChatPrefsStore(resolve_prefs_path(state_path))
+        await prefs.set_engine_override(
+            123, "claude", EngineOverrides(diff_preview=True)
+        )
+
+        cmd = ConfigCommand()
+        ctx = _make_ctx(
+            args_text="dp:clr",
+            text="config:dp:clr",
+            config_path=state_path,
+            default_engine="claude",
+        )
+        await cmd.handle(ctx)
+
+        override = await prefs.get_engine_override(123, "claude")
+        assert override is None or override.diff_preview is None
+
+    @pytest.mark.anyio
+    async def test_diff_preview_preserves_model(self, tmp_path):
+        """Setting diff_preview should preserve model override."""
+        from untether.telegram.chat_prefs import ChatPrefsStore, resolve_prefs_path
+        from untether.telegram.engine_overrides import EngineOverrides
+
+        state_path = tmp_path / "prefs.json"
+        prefs = ChatPrefsStore(resolve_prefs_path(state_path))
+        await prefs.set_engine_override(123, "claude", EngineOverrides(model="sonnet"))
+
+        cmd = ConfigCommand()
+        ctx = _make_ctx(
+            args_text="dp:off",
+            text="config:dp:off",
+            config_path=state_path,
+            default_engine="claude",
+        )
+        await cmd.handle(ctx)
+
+        override = await prefs.get_engine_override(123, "claude")
+        assert override is not None
+        assert override.model == "sonnet"
+        assert override.diff_preview is False
+
+    @pytest.mark.anyio
+    async def test_diff_preview_guard_non_claude(self, tmp_path):
+        """Diff preview page shows guard message for non-Claude engines."""
+        state_path = tmp_path / "prefs.json"
+        cmd = ConfigCommand()
+        ctx = _make_ctx(
+            args_text="dp",
+            text="config:dp",
+            config_path=state_path,
+            default_engine="codex",
+        )
+        await cmd.handle(ctx)
+        msg = _last_edit_msg(ctx)
+        assert "Only available for Claude Code" in msg.text
+
+    @pytest.mark.anyio
+    async def test_diff_preview_no_config_path(self):
+        cmd = ConfigCommand()
+        ctx = _make_ctx(args_text="dp", text="config:dp", config_path=None)
+        await cmd.handle(ctx)
+        assert "Unavailable" in _last_edit_msg(ctx).text
+
+    @pytest.mark.anyio
+    async def test_diff_preview_shown_on_home_for_claude(self, tmp_path):
+        """Diff preview button should appear on home page when engine is Claude."""
+        state_path = tmp_path / "prefs.json"
+        cmd = ConfigCommand()
+        ctx = _make_ctx(config_path=state_path, default_engine="claude")
+        await cmd.handle(ctx)
+        msg = _last_send_msg(ctx)
+        assert "Diff preview:" in msg.text
+        assert "config:dp" in _buttons_data(msg)
+
+    @pytest.mark.anyio
+    async def test_diff_preview_hidden_on_home_for_codex(self, tmp_path):
+        """Diff preview button should NOT appear on home page for Codex."""
+        state_path = tmp_path / "prefs.json"
+        cmd = ConfigCommand()
+        ctx = _make_ctx(config_path=state_path, default_engine="codex")
+        await cmd.handle(ctx)
+        msg = _last_send_msg(ctx)
+        assert "Diff preview:" not in msg.text
+        assert "config:dp" not in _buttons_data(msg)
+
+    @pytest.mark.anyio
+    async def test_diff_preview_default_label_on_home(self, tmp_path):
+        """No override → home shows 'default'."""
+        state_path = tmp_path / "prefs.json"
+        cmd = ConfigCommand()
+        ctx = _make_ctx(config_path=state_path, default_engine="claude")
+        await cmd.handle(ctx)
+        msg = _last_send_msg(ctx)
+        assert "Diff preview: <b>default</b>" in msg.text
+
+    @pytest.mark.anyio
+    async def test_diff_preview_on_label_on_home(self, tmp_path):
+        """diff_preview=True → home shows 'on'."""
+        from untether.telegram.chat_prefs import ChatPrefsStore, resolve_prefs_path
+        from untether.telegram.engine_overrides import EngineOverrides
+
+        state_path = tmp_path / "prefs.json"
+        prefs = ChatPrefsStore(resolve_prefs_path(state_path))
+        await prefs.set_engine_override(
+            123, "claude", EngineOverrides(diff_preview=True)
+        )
+
+        cmd = ConfigCommand()
+        ctx = _make_ctx(config_path=state_path, default_engine="claude")
+        await cmd.handle(ctx)
+        msg = _last_send_msg(ctx)
+        assert "Diff preview: <b>on</b>" in msg.text
+
+    @pytest.mark.anyio
+    async def test_diff_preview_off_label_on_home(self, tmp_path):
+        """diff_preview=False → home shows 'off'."""
+        from untether.telegram.chat_prefs import ChatPrefsStore, resolve_prefs_path
+        from untether.telegram.engine_overrides import EngineOverrides
+
+        state_path = tmp_path / "prefs.json"
+        prefs = ChatPrefsStore(resolve_prefs_path(state_path))
+        await prefs.set_engine_override(
+            123, "claude", EngineOverrides(diff_preview=False)
+        )
+
+        cmd = ConfigCommand()
+        ctx = _make_ctx(config_path=state_path, default_engine="claude")
+        await cmd.handle(ctx)
+        msg = _last_send_msg(ctx)
+        assert "Diff preview: <b>off</b>" in msg.text
+
+    @pytest.mark.anyio
+    async def test_diff_preview_has_back_button(self, tmp_path):
+        state_path = tmp_path / "prefs.json"
+        cmd = ConfigCommand()
+        ctx = _make_ctx(
+            args_text="dp",
+            text="config:dp",
+            config_path=state_path,
+            default_engine="claude",
+        )
+        await cmd.handle(ctx)
+        assert "config:home" in _buttons_data(_last_edit_msg(ctx))
+
+    @pytest.mark.anyio
+    async def test_diff_preview_has_clear_button(self, tmp_path):
+        state_path = tmp_path / "prefs.json"
+        cmd = ConfigCommand()
+        ctx = _make_ctx(
+            args_text="dp",
+            text="config:dp",
+            config_path=state_path,
+            default_engine="claude",
+        )
+        await cmd.handle(ctx)
+        assert "config:dp:clr" in _buttons_data(_last_edit_msg(ctx))
+
+    @pytest.mark.anyio
+    async def test_diff_preview_checkmark_on(self, tmp_path):
+        """When diff_preview=True, On button has checkmark."""
+        from untether.telegram.chat_prefs import ChatPrefsStore, resolve_prefs_path
+        from untether.telegram.engine_overrides import EngineOverrides
+
+        state_path = tmp_path / "prefs.json"
+        prefs = ChatPrefsStore(resolve_prefs_path(state_path))
+        await prefs.set_engine_override(
+            123, "claude", EngineOverrides(diff_preview=True)
+        )
+
+        cmd = ConfigCommand()
+        ctx = _make_ctx(
+            args_text="dp",
+            text="config:dp",
+            config_path=state_path,
+            default_engine="claude",
+        )
+        await cmd.handle(ctx)
+        msg = _last_edit_msg(ctx)
+        labels = _buttons_labels(msg)
+        assert "✓ On" in labels
+
+    @pytest.mark.anyio
+    async def test_diff_preview_default_label_on_page(self, tmp_path):
+        """No override → page shows 'default (on)'."""
+        state_path = tmp_path / "prefs.json"
+        cmd = ConfigCommand()
+        ctx = _make_ctx(
+            args_text="dp",
+            text="config:dp",
+            config_path=state_path,
+            default_engine="claude",
+        )
+        await cmd.handle(ctx)
+        msg = _last_edit_msg(ctx)
+        assert "default (on)" in msg.text
+
+
+# ---------------------------------------------------------------------------
+# Diff preview toasts
+# ---------------------------------------------------------------------------
+
+
+class TestDiffPreviewToasts:
+    def test_toast_diff_preview_on(self):
+        assert ConfigCommand.early_answer_toast("dp:on") == "Diff preview: on"
+
+    def test_toast_diff_preview_off(self):
+        assert ConfigCommand.early_answer_toast("dp:off") == "Diff preview: off"
+
+    def test_toast_diff_preview_clear(self):
+        assert ConfigCommand.early_answer_toast("dp:clr") == "Diff preview: cleared"

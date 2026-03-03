@@ -13,12 +13,15 @@ REASONING_SUPPORTED_ENGINES = frozenset({"codex"})
 
 ASK_QUESTIONS_SUPPORTED_ENGINES = frozenset({"claude"})
 
+DIFF_PREVIEW_SUPPORTED_ENGINES = frozenset({"claude"})
+
 
 class EngineOverrides(msgspec.Struct, forbid_unknown_fields=False):
     model: str | None = None
     reasoning: str | None = None
     permission_mode: str | None = None
     ask_questions: bool | None = None
+    diff_preview: bool | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -43,11 +46,13 @@ def normalize_overrides(overrides: EngineOverrides | None) -> EngineOverrides | 
     reasoning = normalize_override_value(overrides.reasoning)
     permission_mode = normalize_override_value(overrides.permission_mode)
     ask_questions = overrides.ask_questions
+    diff_preview = overrides.diff_preview
     if (
         model is None
         and reasoning is None
         and permission_mode is None
         and ask_questions is None
+        and diff_preview is None
     ):
         return None
     return EngineOverrides(
@@ -55,6 +60,7 @@ def normalize_overrides(overrides: EngineOverrides | None) -> EngineOverrides | 
         reasoning=reasoning,
         permission_mode=permission_mode,
         ask_questions=ask_questions,
+        diff_preview=diff_preview,
     )
 
 
@@ -86,12 +92,18 @@ def merge_overrides(
         ask_questions = topic.ask_questions
     elif chat is not None:
         ask_questions = chat.ask_questions
+    diff_preview = None
+    if topic is not None and topic.diff_preview is not None:
+        diff_preview = topic.diff_preview
+    elif chat is not None:
+        diff_preview = chat.diff_preview
     return normalize_overrides(
         EngineOverrides(
             model=model,
             reasoning=reasoning,
             permission_mode=permission_mode,
             ask_questions=ask_questions,
+            diff_preview=diff_preview,
         )
     )
 
