@@ -1,5 +1,33 @@
 # changelog
 
+## v0.30.0 (2026-03-04)
+
+### changes
+
+- add `/stats` command — persistent per-engine session statistics (runs, actions, duration) with today/week/all periods [#41](https://github.com/littlebearapps/untether/issues/41)
+  - `SessionStatsStore` with JSON persistence in config dir
+  - auto-prune data older than 90 days
+  - recording hook in `runner_bridge.py` on run completion
+- add `/auth` command — headless engine re-authentication via Telegram [#40](https://github.com/littlebearapps/untether/issues/40)
+  - runs `codex login --device-auth` and sends verification URL + device code
+  - `/auth status` checks CLI availability
+  - concurrent guard and 16-minute timeout
+- add API cost and subscription usage toggles to `/config` menu
+  - per-chat persistent settings for `show_api_cost` and `show_subscription_usage`
+
+### fixes
+
+- diff preview on approval buttons was dead code — Edit/Write/Bash were always auto-approved before reaching the diff preview path [#52](https://github.com/littlebearapps/untether/issues/52)
+  - when `diff_preview` is enabled, previewable tools now route through interactive approval
+  - default behaviour (diff_preview off) unchanged
+
+### tests
+
+- 16 new diff preview gate tests (parametrised across tools and settings)
+- 18 new session stats storage tests (record, aggregate, persist, prune, corrupt file)
+- 13 new stats command tests (formatting, duration, handle with args)
+- 13 new auth command tests (ANSI stripping, device code parsing, concurrent guard, status)
+
 ## v0.29.0 (2026-03-03)
 
 ### changes
