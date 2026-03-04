@@ -13,6 +13,8 @@ class EngineRunOptions:
     permission_mode: str | None = None
     ask_questions: bool | None = None
     diff_preview: bool | None = None
+    show_api_cost: bool | None = None
+    show_subscription_usage: bool | None = None
 
 
 _RUN_OPTIONS: ContextVar[EngineRunOptions | None] = ContextVar(

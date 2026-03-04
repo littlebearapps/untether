@@ -48,6 +48,7 @@ async def _page_home(ctx: CommandContext) -> None:
     from ..engine_overrides import (
         ASK_QUESTIONS_SUPPORTED_ENGINES,
         DIFF_PREVIEW_SUPPORTED_ENGINES,
+        SUBSCRIPTION_USAGE_SUPPORTED_ENGINES,
         supports_reasoning,
     )
     from .verbose import get_verbosity_override
@@ -63,6 +64,8 @@ async def _page_home(ctx: CommandContext) -> None:
     reasoning_label = "default"
     aq_label = "default"
     dp_label = "default"
+    ac_label = "default"
+    su_label = "default"
 
     if config_path is not None:
         prefs = ChatPrefsStore(resolve_prefs_path(config_path))
@@ -101,6 +104,14 @@ async def _page_home(ctx: CommandContext) -> None:
         if engine_override and engine_override.diff_preview is not None:
             dp_label = "on" if engine_override.diff_preview else "off"
 
+        # API cost override for current engine
+        if engine_override and engine_override.show_api_cost is not None:
+            ac_label = "on" if engine_override.show_api_cost else "off"
+
+        # Subscription usage override for current engine
+        if engine_override and engine_override.show_subscription_usage is not None:
+            su_label = "on" if engine_override.show_subscription_usage else "off"
+
     verbose = get_verbosity_override(chat_id)
     if verbose == "verbose":
         verbose_label = "on"
@@ -113,6 +124,7 @@ async def _page_home(ctx: CommandContext) -> None:
     show_reasoning = supports_reasoning(current_engine)
     show_ask_questions = current_engine in ASK_QUESTIONS_SUPPORTED_ENGINES
     show_diff_preview = current_engine in DIFF_PREVIEW_SUPPORTED_ENGINES
+    show_subscription_usage = current_engine in SUBSCRIPTION_USAGE_SUPPORTED_ENGINES
 
     lines = [
         "<b>⚙️ Settings</b>",
@@ -124,6 +136,9 @@ async def _page_home(ctx: CommandContext) -> None:
         lines.append(f"Ask mode: <b>{aq_label}</b>")
     if show_diff_preview:
         lines.append(f"Diff preview: <b>{dp_label}</b>")
+    lines.append(f"API cost: <b>{ac_label}</b>")
+    if show_subscription_usage:
+        lines.append(f"Sub usage: <b>{su_label}</b>")
     lines.extend(
         [
             f"Verbose: <b>{verbose_label}</b>",
@@ -137,68 +152,73 @@ async def _page_home(ctx: CommandContext) -> None:
 
     buttons: list[list[dict[str, str]]] = []
 
-    # Row 1
     if show_plan_mode:
+        # Claude layout: 5 rows
         buttons.append(
             [
                 {"text": "Plan mode", "callback_data": "config:pm"},
                 {"text": "Ask mode", "callback_data": "config:aq"},
             ]
         )
-    else:
-        buttons.append(
-            [
-                {"text": "Verbose", "callback_data": "config:vb"},
-                {"text": "Model", "callback_data": "config:md"},
-            ]
-        )
-
-    # Row 2
-    if show_plan_mode:
         row2 = []
         if show_diff_preview:
             row2.append({"text": "Diff preview", "callback_data": "config:dp"})
         row2.append({"text": "Verbose", "callback_data": "config:vb"})
         buttons.append(row2)
-    elif show_reasoning:
-        buttons.append(
-            [
-                {"text": "Engine", "callback_data": "config:ag"},
-                {"text": "Reasoning", "callback_data": "config:rs"},
-            ]
-        )
-    else:
-        buttons.append(
-            [
-                {"text": "Engine", "callback_data": "config:ag"},
-                {"text": "Trigger", "callback_data": "config:tr"},
-            ]
-        )
-
-    # Row 3
-    if show_plan_mode:
+        row3 = [{"text": "API cost", "callback_data": "config:ac"}]
+        if show_subscription_usage:
+            row3.append({"text": "Sub usage", "callback_data": "config:su"})
+        buttons.append(row3)
         buttons.append(
             [
                 {"text": "Model", "callback_data": "config:md"},
                 {"text": "Engine", "callback_data": "config:ag"},
             ]
         )
-    elif show_reasoning:
-        buttons.append(
-            [
-                {"text": "Trigger", "callback_data": "config:tr"},
-            ]
-        )
-
-    # Row 4
-    if show_plan_mode:
         buttons.append(
             [
                 {"text": "Trigger", "callback_data": "config:tr"},
             ]
         )
     elif show_reasoning:
-        pass  # already handled
+        # Codex layout
+        buttons.append(
+            [
+                {"text": "API cost", "callback_data": "config:ac"},
+                {"text": "Verbose", "callback_data": "config:vb"},
+            ]
+        )
+        buttons.append(
+            [
+                {"text": "Model", "callback_data": "config:md"},
+                {"text": "Engine", "callback_data": "config:ag"},
+            ]
+        )
+        buttons.append(
+            [
+                {"text": "Reasoning", "callback_data": "config:rs"},
+                {"text": "Trigger", "callback_data": "config:tr"},
+            ]
+        )
+    else:
+        # Other engines
+        buttons.append(
+            [
+                {"text": "API cost", "callback_data": "config:ac"},
+                {"text": "Verbose", "callback_data": "config:vb"},
+            ]
+        )
+        buttons.append(
+            [
+                {"text": "Model", "callback_data": "config:md"},
+                {"text": "Engine", "callback_data": "config:ag"},
+            ]
+        )
+        buttons.append(
+            [
+                {"text": "Trigger", "callback_data": "config:tr"},
+            ]
+        )
 
     await _respond(ctx, "\n".join(lines), buttons)
 
@@ -247,6 +267,10 @@ async def _page_planmode(ctx: CommandContext, action: str | None = None) -> None
             permission_mode=_PM_MODES[action],
             ask_questions=current.ask_questions if current else None,
             diff_preview=current.diff_preview if current else None,
+            show_api_cost=current.show_api_cost if current else None,
+            show_subscription_usage=current.show_subscription_usage
+            if current
+            else None,
         )
         await prefs.set_engine_override(chat_id, engine, updated)
         logger.info("config.planmode.set", chat_id=chat_id, mode=action)
@@ -260,6 +284,10 @@ async def _page_planmode(ctx: CommandContext, action: str | None = None) -> None
             permission_mode=None,
             ask_questions=current.ask_questions if current else None,
             diff_preview=current.diff_preview if current else None,
+            show_api_cost=current.show_api_cost if current else None,
+            show_subscription_usage=current.show_subscription_usage
+            if current
+            else None,
         )
         await prefs.set_engine_override(chat_id, engine, updated)
         logger.info("config.planmode.cleared", chat_id=chat_id)
@@ -545,6 +573,10 @@ async def _page_model(ctx: CommandContext, action: str | None = None) -> None:
             permission_mode=current.permission_mode if current else None,
             ask_questions=current.ask_questions if current else None,
             diff_preview=current.diff_preview if current else None,
+            show_api_cost=current.show_api_cost if current else None,
+            show_subscription_usage=current.show_subscription_usage
+            if current
+            else None,
         )
         await prefs.set_engine_override(chat_id, current_engine, updated)
         logger.info("config.model.cleared", chat_id=chat_id, engine=current_engine)
@@ -626,6 +658,10 @@ async def _page_reasoning(ctx: CommandContext, action: str | None = None) -> Non
             permission_mode=current.permission_mode if current else None,
             ask_questions=current.ask_questions if current else None,
             diff_preview=current.diff_preview if current else None,
+            show_api_cost=current.show_api_cost if current else None,
+            show_subscription_usage=current.show_subscription_usage
+            if current
+            else None,
         )
         await prefs.set_engine_override(chat_id, current_engine, updated)
         logger.info(
@@ -644,6 +680,10 @@ async def _page_reasoning(ctx: CommandContext, action: str | None = None) -> Non
             permission_mode=current.permission_mode if current else None,
             ask_questions=current.ask_questions if current else None,
             diff_preview=current.diff_preview if current else None,
+            show_api_cost=current.show_api_cost if current else None,
+            show_subscription_usage=current.show_subscription_usage
+            if current
+            else None,
         )
         await prefs.set_engine_override(chat_id, current_engine, updated)
         logger.info("config.reasoning.cleared", chat_id=chat_id, engine=current_engine)
@@ -742,6 +782,10 @@ async def _page_ask_questions(ctx: CommandContext, action: str | None = None) ->
             permission_mode=current.permission_mode if current else None,
             ask_questions=True,
             diff_preview=current.diff_preview if current else None,
+            show_api_cost=current.show_api_cost if current else None,
+            show_subscription_usage=current.show_subscription_usage
+            if current
+            else None,
         )
         await prefs.set_engine_override(chat_id, engine, updated)
         logger.info("config.ask_questions.set", chat_id=chat_id, value=True)
@@ -755,6 +799,10 @@ async def _page_ask_questions(ctx: CommandContext, action: str | None = None) ->
             permission_mode=current.permission_mode if current else None,
             ask_questions=False,
             diff_preview=current.diff_preview if current else None,
+            show_api_cost=current.show_api_cost if current else None,
+            show_subscription_usage=current.show_subscription_usage
+            if current
+            else None,
         )
         await prefs.set_engine_override(chat_id, engine, updated)
         logger.info("config.ask_questions.set", chat_id=chat_id, value=False)
@@ -768,6 +816,10 @@ async def _page_ask_questions(ctx: CommandContext, action: str | None = None) ->
             permission_mode=current.permission_mode if current else None,
             ask_questions=None,
             diff_preview=current.diff_preview if current else None,
+            show_api_cost=current.show_api_cost if current else None,
+            show_subscription_usage=current.show_subscription_usage
+            if current
+            else None,
         )
         await prefs.set_engine_override(chat_id, engine, updated)
         logger.info("config.ask_questions.cleared", chat_id=chat_id)
@@ -851,6 +903,10 @@ async def _page_diff_preview(ctx: CommandContext, action: str | None = None) -> 
             permission_mode=current.permission_mode if current else None,
             ask_questions=current.ask_questions if current else None,
             diff_preview=True,
+            show_api_cost=current.show_api_cost if current else None,
+            show_subscription_usage=current.show_subscription_usage
+            if current
+            else None,
         )
         await prefs.set_engine_override(chat_id, engine, updated)
         logger.info("config.diff_preview.set", chat_id=chat_id, value=True)
@@ -864,6 +920,10 @@ async def _page_diff_preview(ctx: CommandContext, action: str | None = None) -> 
             permission_mode=current.permission_mode if current else None,
             ask_questions=current.ask_questions if current else None,
             diff_preview=False,
+            show_api_cost=current.show_api_cost if current else None,
+            show_subscription_usage=current.show_subscription_usage
+            if current
+            else None,
         )
         await prefs.set_engine_override(chat_id, engine, updated)
         logger.info("config.diff_preview.set", chat_id=chat_id, value=False)
@@ -877,6 +937,10 @@ async def _page_diff_preview(ctx: CommandContext, action: str | None = None) -> 
             permission_mode=current.permission_mode if current else None,
             ask_questions=current.ask_questions if current else None,
             diff_preview=None,
+            show_api_cost=current.show_api_cost if current else None,
+            show_subscription_usage=current.show_subscription_usage
+            if current
+            else None,
         )
         await prefs.set_engine_override(chat_id, engine, updated)
         logger.info("config.diff_preview.cleared", chat_id=chat_id)
@@ -923,6 +987,245 @@ async def _page_diff_preview(ctx: CommandContext, action: str | None = None) -> 
 
 
 # ---------------------------------------------------------------------------
+# API cost
+# ---------------------------------------------------------------------------
+
+
+async def _page_api_cost(ctx: CommandContext, action: str | None = None) -> None:
+    from ..chat_prefs import ChatPrefsStore, resolve_prefs_path
+    from ..engine_overrides import EngineOverrides
+
+    config_path = ctx.config_path
+    if config_path is None:
+        await _respond(
+            ctx,
+            "<b>⚙️ API cost</b>\n\nUnavailable (no config path).",
+            [[{"text": "← Back", "callback_data": "config:home"}]],
+        )
+        return
+
+    prefs = ChatPrefsStore(resolve_prefs_path(config_path))
+    chat_id = ctx.message.channel_id
+
+    eng = await prefs.get_default_engine(chat_id)
+    current_engine = eng if eng else ctx.runtime.default_engine
+
+    if action == "on":
+        current = await prefs.get_engine_override(chat_id, current_engine)
+        updated = EngineOverrides(
+            model=current.model if current else None,
+            reasoning=current.reasoning if current else None,
+            permission_mode=current.permission_mode if current else None,
+            ask_questions=current.ask_questions if current else None,
+            diff_preview=current.diff_preview if current else None,
+            show_api_cost=True,
+            show_subscription_usage=current.show_subscription_usage
+            if current
+            else None,
+        )
+        await prefs.set_engine_override(chat_id, current_engine, updated)
+        logger.info("config.api_cost.set", chat_id=chat_id, value=True)
+        await _page_home(ctx)
+        return
+    elif action == "off":
+        current = await prefs.get_engine_override(chat_id, current_engine)
+        updated = EngineOverrides(
+            model=current.model if current else None,
+            reasoning=current.reasoning if current else None,
+            permission_mode=current.permission_mode if current else None,
+            ask_questions=current.ask_questions if current else None,
+            diff_preview=current.diff_preview if current else None,
+            show_api_cost=False,
+            show_subscription_usage=current.show_subscription_usage
+            if current
+            else None,
+        )
+        await prefs.set_engine_override(chat_id, current_engine, updated)
+        logger.info("config.api_cost.set", chat_id=chat_id, value=False)
+        await _page_home(ctx)
+        return
+    elif action == "clr":
+        current = await prefs.get_engine_override(chat_id, current_engine)
+        updated = EngineOverrides(
+            model=current.model if current else None,
+            reasoning=current.reasoning if current else None,
+            permission_mode=current.permission_mode if current else None,
+            ask_questions=current.ask_questions if current else None,
+            diff_preview=current.diff_preview if current else None,
+            show_api_cost=None,
+            show_subscription_usage=current.show_subscription_usage
+            if current
+            else None,
+        )
+        await prefs.set_engine_override(chat_id, current_engine, updated)
+        logger.info("config.api_cost.cleared", chat_id=chat_id)
+        await _page_home(ctx)
+        return
+
+    override = await prefs.get_engine_override(chat_id, current_engine)
+    ac = override.show_api_cost if override else None
+    if ac is True:
+        current_label = "on"
+    elif ac is False:
+        current_label = "off"
+    else:
+        current_label = "default"
+
+    lines = [
+        "<b>⚙️ API cost</b>",
+        "",
+        "Shows run cost in the final message footer.",
+        "• <b>on</b> — show cost, tokens, and duration",
+        "• <b>off</b> — hide cost footer",
+        "",
+        f"Current: <b>{current_label}</b>",
+    ]
+
+    buttons = [
+        [
+            {
+                "text": _check("Off", active=ac is False),
+                "callback_data": "config:ac:off",
+            },
+            {
+                "text": _check("On", active=ac is True),
+                "callback_data": "config:ac:on",
+            },
+        ],
+        [
+            {"text": "Clear override", "callback_data": "config:ac:clr"},
+            {"text": "← Back", "callback_data": "config:home"},
+        ],
+    ]
+
+    await _respond(ctx, "\n".join(lines), buttons)
+
+
+# ---------------------------------------------------------------------------
+# Subscription usage
+# ---------------------------------------------------------------------------
+
+
+async def _page_subscription_usage(
+    ctx: CommandContext, action: str | None = None
+) -> None:
+    from ..chat_prefs import ChatPrefsStore, resolve_prefs_path
+    from ..engine_overrides import (
+        EngineOverrides,
+        SUBSCRIPTION_USAGE_SUPPORTED_ENGINES,
+    )
+
+    config_path = ctx.config_path
+    if config_path is None:
+        await _respond(
+            ctx,
+            "<b>⚙️ Subscription usage</b>\n\nUnavailable (no config path).",
+            [[{"text": "← Back", "callback_data": "config:home"}]],
+        )
+        return
+
+    prefs = ChatPrefsStore(resolve_prefs_path(config_path))
+    chat_id = ctx.message.channel_id
+
+    # Claude-only guard
+    eng = await prefs.get_default_engine(chat_id)
+    current_engine = eng if eng else ctx.runtime.default_engine
+    if current_engine not in SUBSCRIPTION_USAGE_SUPPORTED_ENGINES:
+        await _respond(
+            ctx,
+            "<b>⚙️ Subscription usage</b>\n\nOnly available for Claude Code.",
+            [[{"text": "← Back", "callback_data": "config:home"}]],
+        )
+        return
+
+    engine = current_engine
+
+    if action == "on":
+        current = await prefs.get_engine_override(chat_id, engine)
+        updated = EngineOverrides(
+            model=current.model if current else None,
+            reasoning=current.reasoning if current else None,
+            permission_mode=current.permission_mode if current else None,
+            ask_questions=current.ask_questions if current else None,
+            diff_preview=current.diff_preview if current else None,
+            show_api_cost=current.show_api_cost if current else None,
+            show_subscription_usage=True,
+        )
+        await prefs.set_engine_override(chat_id, engine, updated)
+        logger.info("config.subscription_usage.set", chat_id=chat_id, value=True)
+        await _page_home(ctx)
+        return
+    elif action == "off":
+        current = await prefs.get_engine_override(chat_id, engine)
+        updated = EngineOverrides(
+            model=current.model if current else None,
+            reasoning=current.reasoning if current else None,
+            permission_mode=current.permission_mode if current else None,
+            ask_questions=current.ask_questions if current else None,
+            diff_preview=current.diff_preview if current else None,
+            show_api_cost=current.show_api_cost if current else None,
+            show_subscription_usage=False,
+        )
+        await prefs.set_engine_override(chat_id, engine, updated)
+        logger.info("config.subscription_usage.set", chat_id=chat_id, value=False)
+        await _page_home(ctx)
+        return
+    elif action == "clr":
+        current = await prefs.get_engine_override(chat_id, engine)
+        updated = EngineOverrides(
+            model=current.model if current else None,
+            reasoning=current.reasoning if current else None,
+            permission_mode=current.permission_mode if current else None,
+            ask_questions=current.ask_questions if current else None,
+            diff_preview=current.diff_preview if current else None,
+            show_api_cost=current.show_api_cost if current else None,
+            show_subscription_usage=None,
+        )
+        await prefs.set_engine_override(chat_id, engine, updated)
+        logger.info("config.subscription_usage.cleared", chat_id=chat_id)
+        await _page_home(ctx)
+        return
+
+    override = await prefs.get_engine_override(chat_id, engine)
+    su = override.show_subscription_usage if override else None
+    if su is True:
+        current_label = "on"
+    elif su is False:
+        current_label = "off"
+    else:
+        current_label = "default"
+
+    lines = [
+        "<b>⚙️ Subscription usage</b>",
+        "",
+        "Shows Claude subscription usage in the message footer.",
+        "• <b>on</b> — always show 5h/weekly usage",
+        "• <b>off</b> — only show when approaching limits",
+        "",
+        f"Current: <b>{current_label}</b>",
+    ]
+
+    buttons = [
+        [
+            {
+                "text": _check("Off", active=su is False),
+                "callback_data": "config:su:off",
+            },
+            {
+                "text": _check("On", active=su is True),
+                "callback_data": "config:su:on",
+            },
+        ],
+        [
+            {"text": "Clear override", "callback_data": "config:su:clr"},
+            {"text": "← Back", "callback_data": "config:home"},
+        ],
+    ]
+
+    await _respond(ctx, "\n".join(lines), buttons)
+
+
+# ---------------------------------------------------------------------------
 # Routing
 # ---------------------------------------------------------------------------
 
@@ -935,6 +1238,8 @@ _PAGES: dict[str, object] = {
     "rs": _page_reasoning,
     "aq": _page_ask_questions,
     "dp": _page_diff_preview,
+    "ac": _page_api_cost,
+    "su": _page_subscription_usage,
 }
 
 
@@ -991,6 +1296,16 @@ class ConfigCommand:
                 "on": "Diff preview: on",
                 "off": "Diff preview: off",
                 "clr": "Diff preview: cleared",
+            },
+            "ac": {
+                "on": "API cost: on",
+                "off": "API cost: off",
+                "clr": "API cost: cleared",
+            },
+            "su": {
+                "on": "Sub usage: on",
+                "off": "Sub usage: off",
+                "clr": "Sub usage: cleared",
             },
         }
         page_labels = _TOAST_LABELS.get(page, {})

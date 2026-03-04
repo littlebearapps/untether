@@ -15,6 +15,8 @@ ASK_QUESTIONS_SUPPORTED_ENGINES = frozenset({"claude"})
 
 DIFF_PREVIEW_SUPPORTED_ENGINES = frozenset({"claude"})
 
+SUBSCRIPTION_USAGE_SUPPORTED_ENGINES = frozenset({"claude"})
+
 
 class EngineOverrides(msgspec.Struct, forbid_unknown_fields=False):
     model: str | None = None
@@ -22,6 +24,8 @@ class EngineOverrides(msgspec.Struct, forbid_unknown_fields=False):
     permission_mode: str | None = None
     ask_questions: bool | None = None
     diff_preview: bool | None = None
+    show_api_cost: bool | None = None
+    show_subscription_usage: bool | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -47,12 +51,16 @@ def normalize_overrides(overrides: EngineOverrides | None) -> EngineOverrides | 
     permission_mode = normalize_override_value(overrides.permission_mode)
     ask_questions = overrides.ask_questions
     diff_preview = overrides.diff_preview
+    show_api_cost = overrides.show_api_cost
+    show_subscription_usage = overrides.show_subscription_usage
     if (
         model is None
         and reasoning is None
         and permission_mode is None
         and ask_questions is None
         and diff_preview is None
+        and show_api_cost is None
+        and show_subscription_usage is None
     ):
         return None
     return EngineOverrides(
@@ -61,6 +69,8 @@ def normalize_overrides(overrides: EngineOverrides | None) -> EngineOverrides | 
         permission_mode=permission_mode,
         ask_questions=ask_questions,
         diff_preview=diff_preview,
+        show_api_cost=show_api_cost,
+        show_subscription_usage=show_subscription_usage,
     )
 
 
@@ -97,6 +107,16 @@ def merge_overrides(
         diff_preview = topic.diff_preview
     elif chat is not None:
         diff_preview = chat.diff_preview
+    show_api_cost = None
+    if topic is not None and topic.show_api_cost is not None:
+        show_api_cost = topic.show_api_cost
+    elif chat is not None:
+        show_api_cost = chat.show_api_cost
+    show_subscription_usage = None
+    if topic is not None and topic.show_subscription_usage is not None:
+        show_subscription_usage = topic.show_subscription_usage
+    elif chat is not None:
+        show_subscription_usage = chat.show_subscription_usage
     return normalize_overrides(
         EngineOverrides(
             model=model,
@@ -104,6 +124,8 @@ def merge_overrides(
             permission_mode=permission_mode,
             ask_questions=ask_questions,
             diff_preview=diff_preview,
+            show_api_cost=show_api_cost,
+            show_subscription_usage=show_subscription_usage,
         )
     )
 

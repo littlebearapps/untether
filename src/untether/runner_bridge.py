@@ -919,8 +919,14 @@ async def handle_message(
         # Append usage footer for Claude engine runs (even on error)
         if runner.engine == "claude":
             footer_cfg = _load_footer_settings()
+            from .runners.run_options import get_run_options
+
+            _err_run_opts = get_run_options()
+            _show_sub = footer_cfg.show_subscription_usage
+            if _err_run_opts and _err_run_opts.show_subscription_usage is not None:
+                _show_sub = _err_run_opts.show_subscription_usage
             final_rendered = await _maybe_append_usage_footer(
-                final_rendered, always_show=footer_cfg.show_subscription_usage
+                final_rendered, always_show=_show_sub
             )
 
         logger.debug(
@@ -1074,11 +1080,17 @@ async def handle_message(
         answer=final_answer,
     )
 
-    # Load footer display config
+    # Load footer display config (global defaults + per-chat overrides)
     footer_cfg = _load_footer_settings()
+    from .runners.run_options import get_run_options
+
+    _footer_run_opts = get_run_options()
 
     # Append run cost footer (from CompletedEvent.usage)
-    if footer_cfg.show_api_cost:
+    _show_cost = footer_cfg.show_api_cost
+    if _footer_run_opts and _footer_run_opts.show_api_cost is not None:
+        _show_cost = _footer_run_opts.show_api_cost
+    if _show_cost:
         cost_line = _format_run_cost(completed.usage)
         if cost_line:
             final_rendered = RenderedMessage(
@@ -1096,8 +1108,11 @@ async def handle_message(
 
     # Append usage footer for Claude engine runs
     if runner.engine == "claude":
+        _show_sub = footer_cfg.show_subscription_usage
+        if _footer_run_opts and _footer_run_opts.show_subscription_usage is not None:
+            _show_sub = _footer_run_opts.show_subscription_usage
         final_rendered = await _maybe_append_usage_footer(
-            final_rendered, always_show=footer_cfg.show_subscription_usage
+            final_rendered, always_show=_show_sub
         )
 
     logger.debug(

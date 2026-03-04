@@ -1654,3 +1654,324 @@ class TestDiffPreviewToasts:
 
     def test_toast_diff_preview_clear(self):
         assert ConfigCommand.early_answer_toast("dp:clr") == "Diff preview: cleared"
+
+
+class TestApiCost:
+    @pytest.mark.anyio
+    async def test_api_cost_page_renders(self, tmp_path):
+        state_path = tmp_path / "prefs.json"
+        cmd = ConfigCommand()
+        ctx = _make_ctx(
+            args_text="ac",
+            text="config:ac",
+            config_path=state_path,
+            default_engine="claude",
+        )
+        await cmd.handle(ctx)
+        msg = _last_edit_msg(ctx)
+        assert "API cost" in msg.text
+        assert "config:ac:on" in _buttons_data(msg)
+        assert "config:ac:off" in _buttons_data(msg)
+
+    @pytest.mark.anyio
+    async def test_api_cost_set_on(self, tmp_path):
+        from untether.telegram.chat_prefs import ChatPrefsStore, resolve_prefs_path
+
+        state_path = tmp_path / "prefs.json"
+        cmd = ConfigCommand()
+        ctx = _make_ctx(
+            args_text="ac:on",
+            text="config:ac:on",
+            config_path=state_path,
+            default_engine="claude",
+        )
+        await cmd.handle(ctx)
+        msg = _last_edit_msg(ctx)
+        assert "Settings" in msg.text
+
+        prefs = ChatPrefsStore(resolve_prefs_path(state_path))
+        override = await prefs.get_engine_override(123, "claude")
+        assert override is not None
+        assert override.show_api_cost is True
+
+    @pytest.mark.anyio
+    async def test_api_cost_set_off(self, tmp_path):
+        from untether.telegram.chat_prefs import ChatPrefsStore, resolve_prefs_path
+
+        state_path = tmp_path / "prefs.json"
+        cmd = ConfigCommand()
+        ctx = _make_ctx(
+            args_text="ac:off",
+            text="config:ac:off",
+            config_path=state_path,
+            default_engine="claude",
+        )
+        await cmd.handle(ctx)
+
+        prefs = ChatPrefsStore(resolve_prefs_path(state_path))
+        override = await prefs.get_engine_override(123, "claude")
+        assert override is not None
+        assert override.show_api_cost is False
+
+    @pytest.mark.anyio
+    async def test_api_cost_clear(self, tmp_path):
+        from untether.telegram.chat_prefs import ChatPrefsStore, resolve_prefs_path
+        from untether.telegram.engine_overrides import EngineOverrides
+
+        state_path = tmp_path / "prefs.json"
+        prefs = ChatPrefsStore(resolve_prefs_path(state_path))
+        await prefs.set_engine_override(
+            123, "claude", EngineOverrides(show_api_cost=True)
+        )
+
+        cmd = ConfigCommand()
+        ctx = _make_ctx(
+            args_text="ac:clr",
+            text="config:ac:clr",
+            config_path=state_path,
+            default_engine="claude",
+        )
+        await cmd.handle(ctx)
+
+        override = await prefs.get_engine_override(123, "claude")
+        assert override is None or override.show_api_cost is None
+
+    @pytest.mark.anyio
+    async def test_api_cost_preserves_model(self, tmp_path):
+        """Setting api_cost should preserve model override."""
+        from untether.telegram.chat_prefs import ChatPrefsStore, resolve_prefs_path
+        from untether.telegram.engine_overrides import EngineOverrides
+
+        state_path = tmp_path / "prefs.json"
+        prefs = ChatPrefsStore(resolve_prefs_path(state_path))
+        await prefs.set_engine_override(123, "claude", EngineOverrides(model="sonnet"))
+
+        cmd = ConfigCommand()
+        ctx = _make_ctx(
+            args_text="ac:off",
+            text="config:ac:off",
+            config_path=state_path,
+            default_engine="claude",
+        )
+        await cmd.handle(ctx)
+
+        override = await prefs.get_engine_override(123, "claude")
+        assert override is not None
+        assert override.model == "sonnet"
+        assert override.show_api_cost is False
+
+    @pytest.mark.anyio
+    async def test_api_cost_available_for_all_engines(self, tmp_path):
+        """API cost page should be available for non-Claude engines too."""
+        state_path = tmp_path / "prefs.json"
+        cmd = ConfigCommand()
+        ctx = _make_ctx(
+            args_text="ac",
+            text="config:ac",
+            config_path=state_path,
+            default_engine="codex",
+        )
+        await cmd.handle(ctx)
+        msg = _last_edit_msg(ctx)
+        assert "API cost" in msg.text
+        assert "Only available" not in msg.text
+
+    @pytest.mark.anyio
+    async def test_api_cost_no_config_path(self):
+        cmd = ConfigCommand()
+        ctx = _make_ctx(args_text="ac", text="config:ac", config_path=None)
+        await cmd.handle(ctx)
+        assert "Unavailable" in _last_edit_msg(ctx).text
+
+    @pytest.mark.anyio
+    async def test_api_cost_shown_on_home_for_claude(self, tmp_path):
+        """API cost button should appear on home page for Claude."""
+        state_path = tmp_path / "prefs.json"
+        cmd = ConfigCommand()
+        ctx = _make_ctx(config_path=state_path, default_engine="claude")
+        await cmd.handle(ctx)
+        msg = _last_send_msg(ctx)
+        assert "API cost:" in msg.text
+        assert "config:ac" in _buttons_data(msg)
+
+    @pytest.mark.anyio
+    async def test_api_cost_shown_on_home_for_codex(self, tmp_path):
+        """API cost button should appear on home page for non-Claude engines."""
+        state_path = tmp_path / "prefs.json"
+        cmd = ConfigCommand()
+        ctx = _make_ctx(config_path=state_path, default_engine="codex")
+        await cmd.handle(ctx)
+        msg = _last_send_msg(ctx)
+        assert "API cost:" in msg.text
+        assert "config:ac" in _buttons_data(msg)
+
+
+class TestApiCostToasts:
+    def test_toast_api_cost_on(self):
+        assert ConfigCommand.early_answer_toast("ac:on") == "API cost: on"
+
+    def test_toast_api_cost_off(self):
+        assert ConfigCommand.early_answer_toast("ac:off") == "API cost: off"
+
+    def test_toast_api_cost_clear(self):
+        assert ConfigCommand.early_answer_toast("ac:clr") == "API cost: cleared"
+
+
+class TestSubscriptionUsage:
+    @pytest.mark.anyio
+    async def test_subscription_usage_page_renders(self, tmp_path):
+        state_path = tmp_path / "prefs.json"
+        cmd = ConfigCommand()
+        ctx = _make_ctx(
+            args_text="su",
+            text="config:su",
+            config_path=state_path,
+            default_engine="claude",
+        )
+        await cmd.handle(ctx)
+        msg = _last_edit_msg(ctx)
+        assert "Subscription usage" in msg.text
+        assert "config:su:on" in _buttons_data(msg)
+        assert "config:su:off" in _buttons_data(msg)
+
+    @pytest.mark.anyio
+    async def test_subscription_usage_set_on(self, tmp_path):
+        from untether.telegram.chat_prefs import ChatPrefsStore, resolve_prefs_path
+
+        state_path = tmp_path / "prefs.json"
+        cmd = ConfigCommand()
+        ctx = _make_ctx(
+            args_text="su:on",
+            text="config:su:on",
+            config_path=state_path,
+            default_engine="claude",
+        )
+        await cmd.handle(ctx)
+        msg = _last_edit_msg(ctx)
+        assert "Settings" in msg.text
+
+        prefs = ChatPrefsStore(resolve_prefs_path(state_path))
+        override = await prefs.get_engine_override(123, "claude")
+        assert override is not None
+        assert override.show_subscription_usage is True
+
+    @pytest.mark.anyio
+    async def test_subscription_usage_set_off(self, tmp_path):
+        from untether.telegram.chat_prefs import ChatPrefsStore, resolve_prefs_path
+
+        state_path = tmp_path / "prefs.json"
+        cmd = ConfigCommand()
+        ctx = _make_ctx(
+            args_text="su:off",
+            text="config:su:off",
+            config_path=state_path,
+            default_engine="claude",
+        )
+        await cmd.handle(ctx)
+
+        prefs = ChatPrefsStore(resolve_prefs_path(state_path))
+        override = await prefs.get_engine_override(123, "claude")
+        assert override is not None
+        assert override.show_subscription_usage is False
+
+    @pytest.mark.anyio
+    async def test_subscription_usage_clear(self, tmp_path):
+        from untether.telegram.chat_prefs import ChatPrefsStore, resolve_prefs_path
+        from untether.telegram.engine_overrides import EngineOverrides
+
+        state_path = tmp_path / "prefs.json"
+        prefs = ChatPrefsStore(resolve_prefs_path(state_path))
+        await prefs.set_engine_override(
+            123, "claude", EngineOverrides(show_subscription_usage=True)
+        )
+
+        cmd = ConfigCommand()
+        ctx = _make_ctx(
+            args_text="su:clr",
+            text="config:su:clr",
+            config_path=state_path,
+            default_engine="claude",
+        )
+        await cmd.handle(ctx)
+
+        override = await prefs.get_engine_override(123, "claude")
+        assert override is None or override.show_subscription_usage is None
+
+    @pytest.mark.anyio
+    async def test_subscription_usage_preserves_model(self, tmp_path):
+        """Setting subscription_usage should preserve model override."""
+        from untether.telegram.chat_prefs import ChatPrefsStore, resolve_prefs_path
+        from untether.telegram.engine_overrides import EngineOverrides
+
+        state_path = tmp_path / "prefs.json"
+        prefs = ChatPrefsStore(resolve_prefs_path(state_path))
+        await prefs.set_engine_override(123, "claude", EngineOverrides(model="sonnet"))
+
+        cmd = ConfigCommand()
+        ctx = _make_ctx(
+            args_text="su:off",
+            text="config:su:off",
+            config_path=state_path,
+            default_engine="claude",
+        )
+        await cmd.handle(ctx)
+
+        override = await prefs.get_engine_override(123, "claude")
+        assert override is not None
+        assert override.model == "sonnet"
+        assert override.show_subscription_usage is False
+
+    @pytest.mark.anyio
+    async def test_subscription_usage_guard_non_claude(self, tmp_path):
+        """Subscription usage page shows guard message for non-Claude engines."""
+        state_path = tmp_path / "prefs.json"
+        cmd = ConfigCommand()
+        ctx = _make_ctx(
+            args_text="su",
+            text="config:su",
+            config_path=state_path,
+            default_engine="codex",
+        )
+        await cmd.handle(ctx)
+        msg = _last_edit_msg(ctx)
+        assert "Only available for Claude Code" in msg.text
+
+    @pytest.mark.anyio
+    async def test_subscription_usage_no_config_path(self):
+        cmd = ConfigCommand()
+        ctx = _make_ctx(args_text="su", text="config:su", config_path=None)
+        await cmd.handle(ctx)
+        assert "Unavailable" in _last_edit_msg(ctx).text
+
+    @pytest.mark.anyio
+    async def test_subscription_usage_shown_on_home_for_claude(self, tmp_path):
+        """Sub usage button should appear on home page for Claude."""
+        state_path = tmp_path / "prefs.json"
+        cmd = ConfigCommand()
+        ctx = _make_ctx(config_path=state_path, default_engine="claude")
+        await cmd.handle(ctx)
+        msg = _last_send_msg(ctx)
+        assert "Sub usage:" in msg.text
+        assert "config:su" in _buttons_data(msg)
+
+    @pytest.mark.anyio
+    async def test_subscription_usage_hidden_on_home_for_codex(self, tmp_path):
+        """Sub usage button should NOT appear on home for non-Claude engines."""
+        state_path = tmp_path / "prefs.json"
+        cmd = ConfigCommand()
+        ctx = _make_ctx(config_path=state_path, default_engine="codex")
+        await cmd.handle(ctx)
+        msg = _last_send_msg(ctx)
+        assert "Sub usage:" not in msg.text
+        assert "config:su" not in _buttons_data(msg)
+
+
+class TestSubscriptionUsageToasts:
+    def test_toast_subscription_usage_on(self):
+        assert ConfigCommand.early_answer_toast("su:on") == "Sub usage: on"
+
+    def test_toast_subscription_usage_off(self):
+        assert ConfigCommand.early_answer_toast("su:off") == "Sub usage: off"
+
+    def test_toast_subscription_usage_clear(self):
+        assert ConfigCommand.early_answer_toast("su:clr") == "Sub usage: cleared"
