@@ -1075,3 +1075,145 @@ def test_expired_control_request_queues_auto_deny() -> None:
 
     # The new request should still be pending
     assert "req-new" in state.pending_control_requests
+
+
+# ── Diff preview gate tests ────────────────────────────────────────────────
+
+
+@pytest.mark.parametrize("tool_name", ["Edit", "Write", "Bash"])
+def test_diff_preview_enabled_skips_auto_approve(tool_name: str) -> None:
+    """When diff_preview=True, Edit/Write/Bash are NOT auto-approved."""
+    from untether.runners.run_options import EngineRunOptions, apply_run_options
+
+    state, factory = _make_state_with_session()
+    event = _decode_event(
+        {
+            "type": "control_request",
+            "request_id": f"req-dp-{tool_name}",
+            "request": {
+                "subtype": "can_use_tool",
+                "tool_name": tool_name,
+                "input": {"command": "ls"}
+                if tool_name == "Bash"
+                else {"file_path": "/tmp/x", "old_string": "a", "new_string": "b"},
+            },
+        }
+    )
+    with apply_run_options(EngineRunOptions(diff_preview=True)):
+        events = translate_claude_event(
+            event, title="claude", state=state, factory=factory
+        )
+
+    # Should produce an ActionEvent (not be auto-approved)
+    assert f"req-dp-{tool_name}" not in state.auto_approve_queue
+    assert len(events) >= 1
+    assert isinstance(events[0], ActionEvent)
+
+
+@pytest.mark.parametrize("tool_name", ["Edit", "Write", "Bash"])
+def test_diff_preview_disabled_still_auto_approves(tool_name: str) -> None:
+    """When diff_preview=False, Edit/Write/Bash are auto-approved as normal."""
+    from untether.runners.run_options import EngineRunOptions, apply_run_options
+
+    state, factory = _make_state_with_session()
+    event = _decode_event(
+        {
+            "type": "control_request",
+            "request_id": f"req-nodp-{tool_name}",
+            "request": {
+                "subtype": "can_use_tool",
+                "tool_name": tool_name,
+                "input": {},
+            },
+        }
+    )
+    with apply_run_options(EngineRunOptions(diff_preview=False)):
+        events = translate_claude_event(
+            event, title="claude", state=state, factory=factory
+        )
+
+    assert events == []
+    assert f"req-nodp-{tool_name}" in state.auto_approve_queue
+
+
+@pytest.mark.parametrize("tool_name", ["Edit", "Write", "Bash"])
+def test_diff_preview_default_auto_approves(tool_name: str) -> None:
+    """When diff_preview=None (default), Edit/Write/Bash are auto-approved."""
+    state, factory = _make_state_with_session()
+    event = _decode_event(
+        {
+            "type": "control_request",
+            "request_id": f"req-def-{tool_name}",
+            "request": {
+                "subtype": "can_use_tool",
+                "tool_name": tool_name,
+                "input": {},
+            },
+        }
+    )
+    # No run_options set at all
+    events = translate_claude_event(event, title="claude", state=state, factory=factory)
+
+    assert events == []
+    assert f"req-def-{tool_name}" in state.auto_approve_queue
+
+
+@pytest.mark.parametrize("tool_name", ["Read", "Glob", "Grep", "WebFetch"])
+def test_diff_preview_enabled_non_previewable_still_auto_approved(
+    tool_name: str,
+) -> None:
+    """When diff_preview=True, non-previewable tools are still auto-approved."""
+    from untether.runners.run_options import EngineRunOptions, apply_run_options
+
+    state, factory = _make_state_with_session()
+    event = _decode_event(
+        {
+            "type": "control_request",
+            "request_id": f"req-np-{tool_name}",
+            "request": {
+                "subtype": "can_use_tool",
+                "tool_name": tool_name,
+                "input": {},
+            },
+        }
+    )
+    with apply_run_options(EngineRunOptions(diff_preview=True)):
+        events = translate_claude_event(
+            event, title="claude", state=state, factory=factory
+        )
+
+    assert events == []
+    assert f"req-np-{tool_name}" in state.auto_approve_queue
+
+
+def test_diff_preview_edit_shows_diff_text() -> None:
+    """When diff_preview=True, Edit approval message contains diff text."""
+    from untether.runners.run_options import EngineRunOptions, apply_run_options
+
+    state, factory = _make_state_with_session()
+    event = _decode_event(
+        {
+            "type": "control_request",
+            "request_id": "req-diff-edit",
+            "request": {
+                "subtype": "can_use_tool",
+                "tool_name": "Edit",
+                "input": {
+                    "file_path": "/tmp/test.py",
+                    "old_string": "old_value",
+                    "new_string": "new_value",
+                },
+            },
+        }
+    )
+    with apply_run_options(EngineRunOptions(diff_preview=True)):
+        events = translate_claude_event(
+            event, title="claude", state=state, factory=factory
+        )
+
+    assert len(events) >= 1
+    action_event = events[0]
+    assert isinstance(action_event, ActionEvent)
+    # The action title should contain diff markers
+    assert "- old_value" in action_event.action.title
+    assert "+ new_value" in action_event.action.title

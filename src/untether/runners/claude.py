@@ -547,16 +547,31 @@ def translate_claude_event(
 
             # Auto-approve tool requests that don't need user interaction
             _TOOLS_REQUIRING_APPROVAL = {"ExitPlanMode", "AskUserQuestion"}
+            _DIFF_PREVIEW_TOOLS = frozenset({"Edit", "Write", "Bash"})
             if isinstance(request, claude_schema.ControlCanUseToolRequest):
                 tool_name = getattr(request, "tool_name", "unknown")
                 if tool_name not in _TOOLS_REQUIRING_APPROVAL:
-                    logger.debug(
-                        "control_request.auto_approve_tool",
-                        request_id=request_id,
-                        tool_name=tool_name,
-                    )
-                    state.auto_approve_queue.append(request_id)
-                    return []
+                    # When diff_preview is enabled, route previewable tools
+                    # through interactive approval so users see the diff
+                    run_opts = get_run_options()
+                    if (
+                        run_opts
+                        and run_opts.diff_preview is True
+                        and tool_name in _DIFF_PREVIEW_TOOLS
+                    ):
+                        logger.debug(
+                            "control_request.diff_preview_gate",
+                            request_id=request_id,
+                            tool_name=tool_name,
+                        )
+                    else:
+                        logger.debug(
+                            "control_request.auto_approve_tool",
+                            request_id=request_id,
+                            tool_name=tool_name,
+                        )
+                        state.auto_approve_queue.append(request_id)
+                        return []
 
             # Auto-deny AskUserQuestion when ask_questions toggle is OFF
             if isinstance(request, claude_schema.ControlCanUseToolRequest):
