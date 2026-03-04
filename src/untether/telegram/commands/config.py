@@ -171,17 +171,15 @@ async def _page_home(ctx: CommandContext) -> None:
             row2.append({"text": "Diff preview", "callback_data": "config:dp"})
         row2.append({"text": "Verbose", "callback_data": "config:vb"})
         buttons.append(row2)
+        row3 = []
         if show_cost_usage:
-            buttons.append([{"text": "Cost & usage", "callback_data": "config:cu"}])
+            row3.append({"text": "Cost & usage", "callback_data": "config:cu"})
+        row3.append({"text": "Trigger", "callback_data": "config:tr"})
+        buttons.append(row3)
         buttons.append(
             [
                 {"text": "Model", "callback_data": "config:md"},
                 {"text": "Engine", "callback_data": "config:ag"},
-            ]
-        )
-        buttons.append(
-            [
-                {"text": "Trigger", "callback_data": "config:tr"},
             ]
         )
     else:
