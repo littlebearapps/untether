@@ -45,6 +45,13 @@ def test_parse_device_code_with_ansi() -> None:
     assert code == "WXYZ-5678"
 
 
+def test_parse_device_code_real_codex_format() -> None:
+    """Real codex output has 4-5 char codes on a separate line."""
+    text = "   CS33-V5YT6"
+    url, code = parse_device_code(text)
+    assert code == "CS33-V5YT6"
+
+
 def test_parse_device_code_no_match() -> None:
     url, code = parse_device_code("Logging in...")
     assert url is None

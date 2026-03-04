@@ -13,7 +13,7 @@ _ANSI_RE = re.compile(r"\x1b\[[0-9;]*[a-zA-Z]")
 
 # Device code extraction patterns (codex login --device-auth output)
 _URL_RE = re.compile(r"(https?://\S+)")
-_CODE_RE = re.compile(r"(?:code|Code)[:\s]+([A-Z0-9]{4}-[A-Z0-9]{4})")
+_CODE_RE = re.compile(r"([A-Z0-9]{4,6}-[A-Z0-9]{4,6})")
 
 _AUTH_TIMEOUT_SECONDS = 960  # 16 minutes
 
