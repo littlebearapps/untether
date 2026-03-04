@@ -156,6 +156,12 @@ async def _page_home(ctx: CommandContext) -> None:
     if show_reasoning:
         lines.append(f"Reasoning: <b>{reasoning_label}</b>")
 
+    _DOCS_URL = "https://github.com/littlebearapps/untether#-quick-start"
+    lines.append(
+        f'\nFor help, see the user guide and how-to docs '
+        f'in the <a href="{_DOCS_URL}">Untether repo</a>.'
+    )
+
     buttons: list[list[dict[str, str]]] = []
 
     if show_plan_mode:
