@@ -344,6 +344,105 @@ def test_system_init_non_init_subtype_ignored() -> None:
     assert state.session_id is None
 
 
+def test_subagent_parent_tool_use_id_tracked() -> None:
+    """parent_tool_use_id from subagent messages is stored in action detail."""
+    state = AmpStreamState(session_id="T-ses1", emitted_started=True)
+    # Assistant message with parent_tool_use_id (subagent)
+    events = translate_amp_event(
+        _decode_event(
+            {
+                "type": "assistant",
+                "session_id": "T-ses1",
+                "parent_tool_use_id": "toolu_parent_01",
+                "message": {
+                    "role": "assistant",
+                    "content": [
+                        {
+                            "type": "tool_use",
+                            "id": "toolu_sub_01",
+                            "name": "Read",
+                            "input": {"file_path": "src/main.py"},
+                        },
+                    ],
+                    "stop_reason": "tool_use",
+                    "usage": {"input_tokens": 50, "output_tokens": 10},
+                },
+            }
+        ),
+        title="amp",
+        state=state,
+        meta=None,
+    )
+    assert len(events) == 1
+    assert isinstance(events[0], ActionEvent)
+    assert events[0].action.detail["parent_tool_use_id"] == "toolu_parent_01"
+
+    # Now test the tool_result side
+    from untether.model import Action
+
+    state.pending_actions["toolu_sub_01"] = Action(
+        id="toolu_sub_01",
+        kind="tool",
+        title="read: src/main.py",
+        detail={"tool_name": "Read", "input": {}, "tool_id": "toolu_sub_01"},
+    )
+    result_events = translate_amp_event(
+        _decode_event(
+            {
+                "type": "user",
+                "session_id": "T-ses1",
+                "parent_tool_use_id": "toolu_parent_01",
+                "message": {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "tool_result",
+                            "tool_use_id": "toolu_sub_01",
+                            "content": [{"type": "text", "text": "file contents"}],
+                        },
+                    ],
+                },
+            }
+        ),
+        title="amp",
+        state=state,
+        meta=None,
+    )
+    assert len(result_events) == 1
+    assert result_events[0].action.detail["parent_tool_use_id"] == "toolu_parent_01"
+
+
+def test_no_parent_tool_use_id_when_absent() -> None:
+    """When parent_tool_use_id is None, it should not appear in detail."""
+    state = AmpStreamState(session_id="T-ses1", emitted_started=True)
+    events = translate_amp_event(
+        _decode_event(
+            {
+                "type": "assistant",
+                "session_id": "T-ses1",
+                "message": {
+                    "role": "assistant",
+                    "content": [
+                        {
+                            "type": "tool_use",
+                            "id": "toolu_normal",
+                            "name": "Bash",
+                            "input": {"command": "ls"},
+                        },
+                    ],
+                    "stop_reason": "tool_use",
+                    "usage": {"input_tokens": 10, "output_tokens": 5},
+                },
+            }
+        ),
+        title="amp",
+        state=state,
+        meta=None,
+    )
+    assert len(events) == 1
+    assert "parent_tool_use_id" not in events[0].action.detail
+
+
 def test_orphan_tool_result_ignored() -> None:
     """A tool_result with no matching pending action should be ignored."""
     state = AmpStreamState(session_id="T-ses1", emitted_started=True)

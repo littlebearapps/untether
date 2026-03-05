@@ -171,6 +171,7 @@ def translate_amp_event(
         message = event.message
         blocks = _extract_content_blocks(message)
         _accumulate_usage(state, message)
+        parent_tool_use_id = event.parent_tool_use_id
         results: list[UntetherEvent] = []
         for block in blocks:
             if not isinstance(block, dict):
@@ -197,6 +198,8 @@ def translate_amp_event(
                     "input": tool_input,
                     "tool_id": tool_id,
                 }
+                if parent_tool_use_id:
+                    detail["parent_tool_use_id"] = parent_tool_use_id
                 if kind == "file_change":
                     path = tool_input_path(tool_input, path_keys=("file_path", "path"))
                     if path:
@@ -211,6 +214,7 @@ def translate_amp_event(
     if isinstance(event, amp_schema.UserMessage):
         message = event.message
         blocks = _extract_content_blocks(message)
+        parent_tool_use_id = event.parent_tool_use_id
         results = []
         for block in blocks:
             if not isinstance(block, dict):
@@ -237,6 +241,8 @@ def translate_amp_event(
                 elif isinstance(content, str):
                     output = content
                 detail = dict(pending.detail)
+                if parent_tool_use_id:
+                    detail["parent_tool_use_id"] = parent_tool_use_id
                 if output:
                     detail["output_preview"] = (
                         output[:500] if len(output) > 500 else output
