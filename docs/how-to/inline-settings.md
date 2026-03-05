@@ -1,6 +1,6 @@
 # Inline settings menu
 
-The `/config` command opens an interactive settings menu with inline keyboard buttons — similar to BotFather's settings style. Tap buttons to navigate sub-pages, toggle settings, and return to the overview, all within a single message that edits in place.
+Adjust Untether's behaviour without editing config files or restarting — tap buttons right in Telegram. The `/config` command opens an interactive settings menu with inline keyboard buttons, similar to BotFather's settings style. Navigate sub-pages, toggle settings, and return to the overview, all within a single message that edits in place.
 
 ## Open the menu
 

@@ -1,6 +1,6 @@
 # Worktrees
 
-Use `@branch` to run tasks in a dedicated git worktree for that branch.
+Run tasks on multiple branches in parallel without touching your main checkout. Untether creates isolated git worktrees so you can kick off work on `@feat/auth` and `@fix/memory-leak` at the same time — all from Telegram.
 
 ## Enable worktree-based runs for a project
 

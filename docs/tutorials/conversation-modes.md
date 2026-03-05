@@ -1,6 +1,6 @@
 # Conversation modes
 
-Untether can handle follow-up messages in two ways: **chat mode** (auto-resume) or **stateless** (reply-to-continue). Untether works via [Telegram](https://telegram.org), available on iPhone, iPad, Android, Mac, Windows, Linux, and [Telegram Web](https://web.telegram.org).
+Untether can handle follow-up messages in two ways: **chat mode** (auto-resume) or **stateless** (reply-to-continue). Both work across all your devices — start a conversation on your phone, continue it from your laptop, or check in from [Telegram Web](https://web.telegram.org).
 
 During [onboarding](install.md), you chose a **workflow** (assistant, workspace, or handoff) that automatically configured this for you:
 

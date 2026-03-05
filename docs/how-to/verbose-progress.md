@@ -1,6 +1,6 @@
 # Verbose progress mode
 
-Untether shows progress messages as the agent works, updating in real time. You can control how much detail these messages include — from compact summaries to full tool details — directly from Telegram, available on iPhone, iPad, Android, Mac, Windows, Linux, and Telegram Web.
+Untether shows progress messages as the agent works, updating in real time. Control how much detail you see — from compact summaries to full tool details — so you can follow along from your phone or get a quick glance from [Telegram](https://telegram.org) on any device.
 
 ## Enable verbose mode
 

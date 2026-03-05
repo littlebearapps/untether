@@ -1,6 +1,6 @@
 # Troubleshooting
 
-Common issues and fixes for Untether, the Telegram bridge for coding agents. Untether works via [Telegram](https://telegram.org), available on iPhone, iPad, Android, Mac, Windows, Linux, and [Telegram Web](https://web.telegram.org).
+Common issues and fixes for Untether. If your agent isn't responding, messages aren't arriving, or something looks off — start here.
 
 ## Quick diagnostics
 

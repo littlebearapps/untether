@@ -1,6 +1,6 @@
 # Plan mode
 
-Plan mode controls how Claude Code handles permission requests when running through Untether. You can require manual approval for plan transitions, auto-approve them, or skip the plan phase entirely.
+When you're away from the terminal, you need confidence that your agent won't go off-script. Plan mode controls how Claude Code handles permission requests through Untether — require manual approval from your phone, auto-approve transitions, or let Claude run freely.
 
 ## Permission modes
 

@@ -1,6 +1,6 @@
 # Interactive control
 
-This tutorial walks you through Untether's interactive permission system — approving, denying, and shaping agent actions from Telegram on your phone, tablet, or desktop. Untether works via [Telegram](https://telegram.org), which is available on iPhone, iPad, Android, Mac, Windows, Linux, and [Telegram Web](https://web.telegram.org).
+This tutorial walks you through Untether's interactive permission system — approving, denying, and shaping agent actions from [Telegram](https://telegram.org) on whatever device is in your hand. Stay in control while you're away from the terminal.
 
 **What you'll learn:** How to control Claude Code's actions in real time with Telegram buttons, how to request and review a plan before execution, and how to answer agent questions from anywhere.
 

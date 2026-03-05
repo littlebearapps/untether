@@ -1,6 +1,6 @@
 # Browse project files
 
-Untether includes an inline file browser that lets you navigate your project's directory tree and preview files without leaving Telegram — available on iPhone, iPad, Android, Mac, Windows, Linux, and Telegram Web.
+Browse your project's directory tree and preview files without leaving [Telegram](https://telegram.org) — check a config, review a file, or orient yourself in the repo from your phone or any device.
 
 ## Start browsing
 

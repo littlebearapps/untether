@@ -28,6 +28,20 @@ Your AI coding agents need a terminal, but you don't need to sit at one. Untethe
 
 ---
 
+## 🐕 Why Untether?
+
+AI coding agents are powerful, but they're chained to a terminal window. Untether breaks that chain:
+
+- **Your machine does the work** — agents run on your computer (or server) as normal. Untether just bridges them to Telegram.
+- **Work from anywhere** — walking the dog, at the gym, on the train, at a friend's place. If you have Telegram, you have your agents.
+- **Agents run in the background** — start a task from your phone and put it away. The agent keeps working even if you close Telegram, lose signal, or your phone dies. Check the result when you're ready.
+- **Any device, any time** — phone, tablet, laptop, or [Telegram Web](https://web.telegram.org). Start a task on your phone at the park, review results on your laptop at home.
+- **Talk instead of type** — send a voice note and Untether transcribes it. Hands full? Dictate your next task.
+- **Swap projects and agents** — switch between repos, branches, and engines from the same chat. No restarting, no SSH, no context switching.
+- **Stay in control remotely** — budgets, cost tracking, and interactive approval buttons mean you can trust your agents to run without hovering over a terminal.
+
+---
+
 ## ⚡ Quick start
 
 ```sh
@@ -74,10 +88,10 @@ systemctl --user restart untether  # from shell (systemd)
 - 🔐 **Interactive permissions** — approve plan transitions and answer clarifying questions with inline option buttons; tools auto-execute, with progressive cooldown after "Pause & Outline Plan"
 - 📋 **Plan mode** — toggle per chat with `/planmode`; choose full manual approval, auto-approved transitions, or no plan phase
 - 📁 **Projects and worktrees** — register repos with `untether init`, target with `/myproject @feat/thing`, run branches in isolated worktrees in parallel
-- 💰 **Cost and usage tracking** — per-run and daily budgets, subscription usage in the footer, `/usage` for detailed breakdowns, optional auto-cancel
+- 💰 **Cost and usage tracking** — run agents remotely with confidence; per-run and daily budgets, `/usage` breakdowns, and optional auto-cancel keep spending visible
 - 💡 **Actionable error hints** — friendly messages for API outages, rate limits, billing errors, and network failures with resume guidance
 - 🏷 **Model and mode metadata** — every completed message shows the model and permission mode (e.g. `🏷 sonnet · plan`) across all engines
-- 🎙️ **Voice notes** — dictate tasks instead of typing; Untether transcribes via a configurable Whisper-compatible endpoint
+- 🎙️ **Voice notes** — hands full? Dictate tasks instead of typing; Untether transcribes via a configurable Whisper-compatible endpoint
 - 📎 **File transfer** — upload files to your repo or download results back
 - ⏰ **Scheduled tasks** — cron expressions and webhook triggers
 - 💬 **Forum topics** — map Telegram topics to projects and branches
@@ -86,7 +100,7 @@ systemctl --user restart untether  # from shell (systemd)
 - ⚙️ **Inline settings** — `/config` opens an in-place settings menu; toggle plan mode, ask mode, verbose, engine, model, reasoning, and trigger with buttons
 - 🧩 **Plugin system** — extend with custom engines, transports, and commands
 - 📊 **Session statistics** — `/stats` shows per-engine run counts, action totals, and duration across today, this week, and all time
-- 💬 **Conversation modes** — assistant (ongoing chat), workspace (forum topics per project), or handoff (reply-to-continue with terminal resume)
+- 💬 **Conversation modes** — pick the style that fits how you work: assistant (ongoing chat), workspace (forum topics per project), or handoff (reply-to-continue with terminal resume)
 
 ---
 

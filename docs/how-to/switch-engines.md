@@ -1,6 +1,6 @@
 # Switch engines
 
-Run a one-off message on a specific engine, or set a persistent default for a chat/topic.
+Different tasks suit different agents. Switch engines on the fly — use Claude for deep refactors, Codex for quick fixes — without restarting or reconfiguring anything.
 
 ## Use an engine for one message
 

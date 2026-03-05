@@ -1,6 +1,6 @@
 # Model and reasoning overrides
 
-Untether lets you override which model the agent uses and its reasoning level, per chat or per engine — all from Telegram, available on iPhone, iPad, Android, Mac, Windows, Linux, and Telegram Web.
+Untether lets you override which model the agent uses and its reasoning level, per chat or per engine — all from [Telegram](https://telegram.org), without editing config files or restarting.
 
 ## Check current model
 

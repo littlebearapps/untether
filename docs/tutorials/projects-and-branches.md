@@ -1,6 +1,6 @@
 # Projects and branches
 
-This tutorial shows you how to register repos as projects and run tasks on feature branches without switching directories. Untether works via [Telegram](https://telegram.org), available on iPhone, iPad, Android, Mac, Windows, Linux, and [Telegram Web](https://web.telegram.org).
+This tutorial shows you how to register repos as projects and run tasks on feature branches — all from [Telegram](https://telegram.org), without touching a terminal. Jump between repos from wherever you are; your machine handles the checkout.
 
 **What you'll learn:** How to target repos from anywhere with `/<project-alias>`, and run on branches with `@branch`.
 

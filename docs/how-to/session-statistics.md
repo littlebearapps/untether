@@ -1,6 +1,6 @@
 # Session statistics
 
-The `/stats` command shows per-engine session statistics — run counts, action totals, and duration — across three time periods.
+See how much work your agents have done while you've been away. The `/stats` command shows per-engine session statistics — run counts, action totals, and duration — across today, this week, and all time.
 
 ## View statistics
 

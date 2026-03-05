@@ -1,6 +1,6 @@
 # Group chat and multi-user setup
 
-Untether works in Telegram group chats, letting multiple people interact with coding agents from any device — iPhone, iPad, Android, Mac, Windows, Linux, or Telegram Web. This guide covers adding the bot to a group, restricting access, and configuring trigger behaviour.
+Untether works in Telegram group chats, letting multiple people interact with coding agents from any device. This guide covers adding the bot to a group, restricting access, and configuring trigger behaviour.
 
 ## Add the bot to a group
 

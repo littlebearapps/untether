@@ -1,6 +1,6 @@
 # Projects
 
-Projects let you route messages to repos from anywhere using `/alias`.
+Projects let you target any registered repo from Telegram — no need to restart Untether or change directories. Send `/myapp fix the tests` from your phone and the agent runs in the right repo.
 
 ## Register a repo as a project
 
