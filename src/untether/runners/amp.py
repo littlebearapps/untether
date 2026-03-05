@@ -302,6 +302,7 @@ class AmpRunner(ResumeTokenMixin, JsonlSubprocessRunner):
     model: str | None = None
     mode: str | None = None
     dangerously_allow_all: bool = True
+    stream_json_input: bool = False
     session_title: str = "amp"
     logger = logger
 
@@ -336,6 +337,8 @@ class AmpRunner(ResumeTokenMixin, JsonlSubprocessRunner):
         if model:
             args.extend(["--model", str(model)])
         args.extend(["-x", "--stream-json"])
+        if self.stream_json_input:
+            args.append("--stream-json-input")
         args.append(prompt)
         return args
 
@@ -517,12 +520,21 @@ def build_runner(config: EngineConfig, config_path: Path) -> Runner:
             f"Invalid `amp.dangerously_allow_all` in {config_path}; expected a boolean."
         )
 
+    stream_json_input = config.get("stream_json_input")
+    if stream_json_input is None:
+        stream_json_input = False
+    elif not isinstance(stream_json_input, bool):
+        raise ConfigError(
+            f"Invalid `amp.stream_json_input` in {config_path}; expected a boolean."
+        )
+
     title = str(model) if model is not None else "amp"
 
     return AmpRunner(
         model=model,
         mode=mode,
         dangerously_allow_all=dangerously_allow_all,
+        stream_json_input=stream_json_input,
         session_title=title,
     )
 

@@ -14,8 +14,6 @@ Provide the **`amp`** engine backend so Untether can:
 
 ### Non-goals (v1)
 
-* Interactive features via `--stream-json-input` — AMP supports stdin streaming for multi-turn conversations but this is not yet wired.
-* Subagent tracking — `parent_tool_use_id` is present in the schema but not used for nested progress.
 * Thread management commands — `amp threads list/search/share` etc. are not exposed via Telegram.
 
 ---
@@ -55,6 +53,7 @@ Flags:
 * `--model <model>` — optional, from config or `/config` override
 * `-x` — execute mode (non-interactive)
 * `--stream-json` — JSONL output
+* `--stream-json-input` — optional; enables stdin streaming (preliminary support, configurable)
 
 For resumed sessions:
 
@@ -86,12 +85,14 @@ amp threads continue <thread-id> --dangerously-allow-all -x --stream-json <promp
     model = "claude-sonnet-4-6"       # optional; passed as --model
     mode = "smart"                     # optional; deep|free|rush|smart
     dangerously_allow_all = true       # default: true
+    stream_json_input = false          # default: false; passes --stream-json-input
     ```
 
 Notes:
 
 * `mode` controls model selection, system prompt, and tool availability within AMP.
 * `dangerously_allow_all` defaults to `true` since Untether runs headless.
+* `stream_json_input` enables `--stream-json-input` for stdin streaming. This is preliminary plumbing — the interactive control flow (approve/deny via Telegram) is not yet wired.
 
 ---
 
@@ -104,7 +105,7 @@ Exposes `BACKEND = EngineBackend(id="amp", build_runner=build_runner, install_cm
 #### Runner invocation
 
 ```text
-amp [threads continue <thread-id>] --dangerously-allow-all [--mode <mode>] [--model <model>] -x --stream-json <prompt>
+amp [threads continue <thread-id>] --dangerously-allow-all [--mode <mode>] [--model <model>] -x --stream-json [--stream-json-input] <prompt>
 ```
 
 #### Event translation
@@ -116,6 +117,10 @@ AMP uses a Claude Code-compatible JSONL protocol with a `type` discriminator. Th
 * `user` (tool_result blocks) -> `ActionEvent` (phase: completed)
 * `assistant` (text blocks) -> text accumulation for final answer
 * `result` -> `CompletedEvent` (with accumulated usage)
+
+#### Subagent tracking
+
+`parent_tool_use_id` from assistant/user messages is stored in `action.detail["parent_tool_use_id"]` when present. This tracks which tool calls belong to subagent invocations.
 
 #### Usage accumulation
 
@@ -139,6 +144,5 @@ Run `amp login` to authenticate with Sourcegraph.
 
 * AMP uses `amp threads continue <thread-id>` for resume, not `--resume`.
 * Thread IDs use the format `T-<uuid>` (e.g., `T-2775dc92-90ed-4f85-8b73-8f9766029e83`).
-* `--stream-json-input` exists but is not yet wired — this could enable interactive features in the future.
-* `parent_tool_use_id` in assistant/user messages tracks subagent nesting but is not used by the runner.
+* `--stream-json-input` is passed when `stream_json_input = true` in config. The interactive control flow (approve/deny buttons in Telegram) is not yet wired — this is preliminary plumbing.
 * AMP's `--model` flag may have no effect when using hosted models (model is controlled server-side by `--mode`).

@@ -312,6 +312,21 @@ def test_build_args_dangerously_allow_all_false() -> None:
     assert "--dangerously-allow-all" not in args
 
 
+def test_build_args_stream_json_input() -> None:
+    runner = AmpRunner(stream_json_input=True)
+    state = AmpStreamState()
+    args = runner.build_args("hello", None, state=state)
+    assert "--stream-json-input" in args
+    assert "--stream-json" in args
+
+
+def test_build_args_stream_json_input_off_by_default() -> None:
+    runner = AmpRunner()
+    state = AmpStreamState()
+    args = runner.build_args("hello", None, state=state)
+    assert "--stream-json-input" not in args
+
+
 def test_build_args_mode() -> None:
     runner = AmpRunner(mode="rush")
     state = AmpStreamState()
