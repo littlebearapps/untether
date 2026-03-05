@@ -1,0 +1,2 @@
+{"type":"system","subtype":"init","session_id":"T-err-session-id","cwd":"/tmp","tools":[],"mcp_servers":[]}
+{"type":"result","subtype":"error","is_error":true,"result":"","error":"Authentication failed","session_id":"T-err-session-id","duration_ms":100,"num_turns":0}

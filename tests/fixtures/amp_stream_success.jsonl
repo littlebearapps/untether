@@ -1,0 +1,5 @@
+{"type":"system","subtype":"init","session_id":"T-2775dc92-90ed-4f85-8b73-8f9766029e83","cwd":"/tmp","tools":["Bash","Read","Write"],"mcp_servers":[]}
+{"type":"assistant","session_id":"T-2775dc92-90ed-4f85-8b73-8f9766029e83","message":{"role":"assistant","content":[{"type":"tool_use","id":"toolu_01","name":"Bash","input":{"command":"echo hello"}}],"stop_reason":"tool_use","usage":{"input_tokens":100,"output_tokens":20}}}
+{"type":"user","session_id":"T-2775dc92-90ed-4f85-8b73-8f9766029e83","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_01","content":[{"type":"text","text":"hello"}]}]}}
+{"type":"assistant","session_id":"T-2775dc92-90ed-4f85-8b73-8f9766029e83","message":{"role":"assistant","content":[{"type":"text","text":"hello"}],"stop_reason":"end_turn","usage":{"input_tokens":50,"output_tokens":10}}}
+{"type":"result","subtype":"success","is_error":false,"result":"hello","duration_ms":1500,"num_turns":1,"session_id":"T-2775dc92-90ed-4f85-8b73-8f9766029e83"}

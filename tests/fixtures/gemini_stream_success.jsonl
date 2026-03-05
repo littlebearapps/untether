@@ -1,0 +1,7 @@
+{"type":"init","session_id":"abc123def","model":"gemini-2.0-flash-exp","timestamp":"2026-01-15T10:00:00Z"}
+{"type":"tool_use","tool_name":"Bash","tool_id":"tool_1","parameters":{"command":"echo hello"},"timestamp":"2026-01-15T10:00:01Z"}
+{"type":"tool_result","tool_id":"tool_1","status":"success","output":"hello","timestamp":"2026-01-15T10:00:02Z"}
+{"type":"tool_use","tool_name":"write_file","tool_id":"tool_2","parameters":{"file_path":"notes.md","content":"hello"},"timestamp":"2026-01-15T10:00:03Z"}
+{"type":"tool_result","tool_id":"tool_2","status":"success","output":"wrote notes.md","timestamp":"2026-01-15T10:00:04Z"}
+{"type":"message","role":"assistant","content":"The command output `hello`.","timestamp":"2026-01-15T10:00:05Z"}
+{"type":"result","status":"success","stats":{"input_tokens":100,"output_tokens":50},"timestamp":"2026-01-15T10:00:06Z"}

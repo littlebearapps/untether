@@ -88,6 +88,12 @@ Detailed protocol specs and event cheatsheets for each integration:
 | Pi runner spec | `docs/reference/runners/pi/runner.md` | CLI invocation, file-based sessions, provider/model selection |
 | Pi stream-json | `docs/reference/runners/pi/stream-json-cheatsheet.md` | JSONL event shapes (`SessionHeader`, `AgentStart`, `ToolExecution`) |
 | Pi event mapping | `docs/reference/runners/pi/untether-events.md` | Pi JSONL → Untether event translation rules |
+| Gemini runner spec | `docs/reference/runners/gemini/runner.md` | CLI invocation, stream-json, model selection |
+| Gemini stream-json | `docs/reference/runners/gemini/stream-json-cheatsheet.md` | JSONL event shapes (`init`, `message`, `tool_use`, `tool_result`, `result`, `error`) |
+| Gemini event mapping | `docs/reference/runners/gemini/untether-events.md` | Gemini JSONL → Untether event translation rules |
+| AMP runner spec | `docs/reference/runners/amp/runner.md` | CLI invocation, stream-json, mode/model selection |
+| AMP stream-json | `docs/reference/runners/amp/stream-json-cheatsheet.md` | JSONL event shapes (`system`, `assistant`, `user`, `result`) |
+| AMP event mapping | `docs/reference/runners/amp/untether-events.md` | AMP JSONL → Untether event translation rules |
 | Telegram transport | `docs/reference/transports/telegram.md` | Bot API client, outbox/rate-limiting, voice transcription, forum topics |
 
 ## Skills (project-scoped)
