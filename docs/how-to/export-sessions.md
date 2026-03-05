@@ -1,6 +1,6 @@
 # Export session transcripts
 
-Untether records session events as they stream from the agent, so you can export a full transcript of any run directly from Telegram — available on iPhone, iPad, Android, Mac, Windows, Linux, and Telegram Web.
+Untether records session events as they stream from the agent, so you can export a full transcript of any run directly from [Telegram](https://telegram.org) — review what your agent did while you were away, or share the results with your team.
 
 ## Export as markdown
 

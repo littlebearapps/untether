@@ -1,6 +1,6 @@
 # Subscription usage tracking
 
-Untether can show your Claude Code subscription usage directly in Telegram, available on iPhone, iPad, Android, Mac, Windows, Linux, and Telegram Web. This guide covers checking usage on demand and enabling automatic usage footers after every run.
+Keep tabs on your Claude Code subscription from anywhere — Untether surfaces usage directly in [Telegram](https://telegram.org). This guide covers checking usage on demand and enabling automatic usage footers after every run.
 
 ## Check usage with /usage
 

@@ -1,6 +1,6 @@
 # Security hardening
 
-Untether gives remote access to coding agents on your server, so locking down who can interact with the bot and what files they can access is important. This guide covers the key security controls available in Untether, manageable from any device with Telegram — iPhone, iPad, Android, Mac, Windows, Linux, or Telegram Web.
+Untether gives remote access to coding agents on your server, so locking down who can interact with the bot and what files they can access is important. This guide covers the key security controls — all manageable from [Telegram](https://telegram.org) on any device.
 
 ## Restrict access
 

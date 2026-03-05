@@ -1,6 +1,6 @@
 # Voice notes
 
-Enable transcription so voice notes become normal text runs.
+Dictate coding tasks hands-free — while walking, driving, or away from a keyboard. Untether transcribes your Telegram voice notes via a Whisper-compatible endpoint and runs them as normal text prompts.
 
 ## Enable transcription
 

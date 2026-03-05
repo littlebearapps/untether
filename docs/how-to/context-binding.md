@@ -1,6 +1,6 @@
 # Context binding
 
-Untether can bind a chat or forum topic to a specific project and branch, so every message in that scope runs in the right directory automatically — no need to prefix with `/<project>` each time. Manage bindings from Telegram, available on iPhone, iPad, Android, Mac, Windows, Linux, and Telegram Web.
+Bind a chat or forum topic to a specific project and branch, so every message runs in the right directory automatically — no need to prefix with `/<project>` each time. Set it once from [Telegram](https://telegram.org) and forget about it.
 
 ## Check current context
 

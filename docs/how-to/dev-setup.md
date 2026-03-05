@@ -1,6 +1,6 @@
 # Dev setup
 
-Set up Untether for local development, run checks, and test changes safely via the dev instance. Untether works via [Telegram](https://telegram.org), available on iPhone, iPad, Android, Mac, Windows, Linux, and [Telegram Web](https://web.telegram.org).
+Set up Untether for local development, run checks, and test changes safely via the dev instance before releasing to production.
 
 ## Clone and install
 

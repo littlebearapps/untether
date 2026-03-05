@@ -1,6 +1,6 @@
-# Untether — Cursor Rules
+# Untether — Gemini Instructions
 
-Telegram bridge for AI coding agents (Claude Code, Codex, OpenCode, Pi, Gemini CLI, Amp). Lets users control agents from their phone or any device — agents run on the user's machine while they're away from the terminal.
+Telegram bridge for AI coding agents. Control Claude Code, Codex, OpenCode, Pi, Gemini CLI, and Amp from your phone or any device — agents run on your machine in the background while you're away from the terminal. Features interactive permissions, voice input, cost tracking, and live progress streaming.
 
 ## Stack & conventions
 
@@ -25,7 +25,7 @@ Telegram <-> TelegramPresenter <-> RunnerBridge <-> Runner
 
 ## Key rules
 
-- Runner 3-event contract: StartedEvent → ActionEvent(s) → CompletedEvent (always)
+- Runner 3-event contract: StartedEvent -> ActionEvent(s) -> CompletedEvent (always)
 - Use EventFactory for event construction, never construct dataclasses directly
 - ALL Telegram writes go through TelegramOutbox (never call Bot API directly)
 - Callback data max 64 bytes (Telegram-enforced)
@@ -41,10 +41,10 @@ Telegram <-> TelegramPresenter <-> RunnerBridge <-> Runner
 ## Key files
 
 - runners/claude.py — Claude Code runner with interactive features
+- runners/gemini.py — Gemini CLI runner
+- runners/amp.py — AMP CLI runner (Sourcegraph)
 - runner_bridge.py — Runner-to-transport bridge
 - cost_tracker.py — Per-run/daily cost tracking
 - telegram/bridge.py — Telegram message rendering
 - commands/claude_control.py — Approve/Deny/Discuss callback handler
-- commands/stats.py — /stats session statistics
-- commands/auth.py — /auth Codex device re-authentication
 - markdown.py — Progress/final message formatting

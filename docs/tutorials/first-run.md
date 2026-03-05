@@ -1,6 +1,6 @@
 # First run
 
-This tutorial walks you through sending your first task, watching it execute, and learning the core interaction patterns. Untether works via [Telegram](https://telegram.org), available on iPhone, iPad, Android, Mac, Windows, Linux, and [Telegram Web](https://web.telegram.org).
+This tutorial walks you through sending your first task, watching it execute, and learning the core interaction patterns. Your agent runs on your machine; you control it from [Telegram](https://telegram.org) on whatever device is in your hand.
 
 **What you'll learn:** How Untether streams progress, how to continue conversations, and how to cancel a run.
 

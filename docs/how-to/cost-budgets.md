@@ -1,6 +1,6 @@
 # Cost budgets
 
-Untether tracks API costs per run and per day. You can set budget limits, warning thresholds, and auto-cancel behaviour to prevent surprise bills.
+Running agents remotely means they can rack up costs while you're not watching. Untether tracks API costs per run and per day, with configurable budget limits, warning thresholds, and auto-cancel to keep spending under control — even when you're away from the screen.
 
 ## Configure budgets
 

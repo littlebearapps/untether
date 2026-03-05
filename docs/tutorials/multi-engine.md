@@ -1,6 +1,6 @@
 # Multi-engine workflows
 
-This tutorial shows you how to use different engines for different tasks and set up defaults so you don't have to think about it. Untether works via [Telegram](https://telegram.org), available on iPhone, iPad, Android, Mac, Windows, Linux, and [Telegram Web](https://web.telegram.org).
+This tutorial shows you how to use different engines for different tasks and set up defaults so you don't have to think about it. Swap between Claude Code, Codex, OpenCode, Pi, Gemini CLI, and Amp with a single prefix — from your phone, laptop, or any device with [Telegram](https://telegram.org).
 
 **What you'll learn:** Engine directives, persistent defaults, and when to use which engine.
 

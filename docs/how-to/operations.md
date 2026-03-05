@@ -1,6 +1,6 @@
 # Operations and monitoring
 
-Untether runs as a long-lived process, typically managed by systemd. This guide covers health checks, graceful restarts, diagnostics, and day-to-day operations — all controllable from Telegram on iPhone, iPad, Android, Mac, Windows, Linux, or Telegram Web.
+Untether runs as a long-lived process, typically managed by systemd. This guide covers health checks, graceful restarts, diagnostics, and day-to-day operations — all controllable from [Telegram](https://telegram.org) without SSH.
 
 ## Health check
 

@@ -6,7 +6,7 @@
 
 # Conversation modes
 
-Untether can handle follow-up messages in two ways: **chat mode** (auto-resume) or **stateless** (reply-to-continue). Untether works via [Telegram](https://telegram.org), available on iPhone, iPad, Android, Mac, Windows, Linux, and [Telegram Web](https://web.telegram.org).
+Untether can handle follow-up messages in two ways: **chat mode** (auto-resume) or **stateless** (reply-to-continue). Both work across all your devices — start a conversation on your phone, continue it from your laptop, or check in from [Telegram Web](https://web.telegram.org).
 
 During [onboarding](install.md), you chose a **workflow** (assistant, workspace, or handoff) that automatically configured this for you:
 
@@ -136,7 +136,7 @@ Now that you know which mode you want, move on to your first run:
 
 # First run
 
-This tutorial walks you through sending your first task, watching it execute, and learning the core interaction patterns. Untether works via [Telegram](https://telegram.org), available on iPhone, iPad, Android, Mac, Windows, Linux, and [Telegram Web](https://web.telegram.org).
+This tutorial walks you through sending your first task, watching it execute, and learning the core interaction patterns. Your agent runs on your machine; you control it from [Telegram](https://telegram.org) on whatever device is in your hand.
 
 **What you'll learn:** How Untether streams progress, how to continue conversations, and how to cancel a run.
 
@@ -329,7 +329,7 @@ See also: [Conversation modes](conversation-modes.md)
 
 # Install and onboard
 
-This tutorial walks you through installing Untether, creating a Telegram bot, and generating your config file. Untether works via [Telegram](https://telegram.org), available on iPhone, iPad, Android, Mac, Windows, Linux, and [Telegram Web](https://web.telegram.org) — so you can control your coding agents from any device.
+This tutorial walks you through installing Untether, creating a Telegram bot, and generating your config file. Once set up, you can send coding tasks from your phone while you're out, review results on your tablet, or keep working from your laptop — anywhere [Telegram](https://telegram.org) runs.
 
 **What you'll have at the end:** A working `~/.untether/untether.toml` with your bot token, chat ID, workflow settings, and default engine.
 
@@ -742,7 +742,7 @@ Learn more about conversation modes and how your workflow choice affects follow-
 
 # Interactive control
 
-This tutorial walks you through Untether's interactive permission system — approving, denying, and shaping agent actions from Telegram on your phone, tablet, or desktop. Untether works via [Telegram](https://telegram.org), which is available on iPhone, iPad, Android, Mac, Windows, Linux, and [Telegram Web](https://web.telegram.org).
+This tutorial walks you through Untether's interactive permission system — approving, denying, and shaping agent actions from [Telegram](https://telegram.org) on whatever device is in your hand. Stay in control while you're away from the terminal.
 
 **What you'll learn:** How to control Claude Code's actions in real time with Telegram buttons, how to request and review a plan before execution, and how to answer agent questions from anywhere.
 
@@ -932,7 +932,7 @@ Now that you can control your agent interactively, learn how to target specific 
 
 # Multi-engine workflows
 
-This tutorial shows you how to use different engines for different tasks and set up defaults so you don't have to think about it. Untether works via [Telegram](https://telegram.org), available on iPhone, iPad, Android, Mac, Windows, Linux, and [Telegram Web](https://web.telegram.org).
+This tutorial shows you how to use different engines for different tasks and set up defaults so you don't have to think about it. Swap between Claude Code, Codex, OpenCode, Pi, Gemini CLI, and Amp with a single prefix — from your phone, laptop, or any device with [Telegram](https://telegram.org).
 
 **What you'll learn:** Engine directives, persistent defaults, and when to use which engine.
 
@@ -1184,7 +1184,7 @@ That's the end of the tutorials. You now know how to:
 
 # Projects and branches
 
-This tutorial shows you how to register repos as projects and run tasks on feature branches without switching directories. Untether works via [Telegram](https://telegram.org), available on iPhone, iPad, Android, Mac, Windows, Linux, and [Telegram Web](https://web.telegram.org).
+This tutorial shows you how to register repos as projects and run tasks on feature branches — all from [Telegram](https://telegram.org), without touching a terminal. Jump between repos from wherever you are; your machine handles the checkout.
 
 **What you'll learn:** How to target repos from anywhere with `/<project-alias>`, and run on branches with `@branch`.
 
@@ -2065,7 +2065,7 @@ Before you call the runner “done”:
 
 # Browse project files
 
-Untether includes an inline file browser that lets you navigate your project's directory tree and preview files without leaving Telegram — available on iPhone, iPad, Android, Mac, Windows, Linux, and Telegram Web.
+Browse your project's directory tree and preview files without leaving [Telegram](https://telegram.org) — check a config, review a file, or orient yourself in the repo from your phone or any device.
 
 ## Start browsing
 
@@ -2213,7 +2213,7 @@ When `session_mode = "chat"` is enabled, Untether clears stored chat sessions on
 
 # Context binding
 
-Untether can bind a chat or forum topic to a specific project and branch, so every message in that scope runs in the right directory automatically — no need to prefix with `/<project>` each time. Manage bindings from Telegram, available on iPhone, iPad, Android, Mac, Windows, Linux, and Telegram Web.
+Bind a chat or forum topic to a specific project and branch, so every message runs in the right directory automatically — no need to prefix with `/<project>` each time. Set it once from [Telegram](https://telegram.org) and forget about it.
 
 ## Check current context
 
@@ -2408,7 +2408,7 @@ This shows per-engine session statistics (runs, actions, duration) across today,
 
 # Dev setup
 
-Set up Untether for local development, run checks, and test changes safely via the dev instance. Untether works via [Telegram](https://telegram.org), available on iPhone, iPad, Android, Mac, Windows, Linux, and [Telegram Web](https://web.telegram.org).
+Set up Untether for local development, run checks, and test changes safely via the dev instance before releasing to production.
 
 ## Clone and install
 
@@ -2548,7 +2548,7 @@ Follow conventional branch names:
 
 # Export session transcripts
 
-Untether records session events as they stream from the agent, so you can export a full transcript of any run directly from Telegram — available on iPhone, iPad, Android, Mac, Windows, Linux, and Telegram Web.
+Untether records session events as they stream from the agent, so you can export a full transcript of any run directly from [Telegram](https://telegram.org) — review what your agent did while you were away, or share the results with your team.
 
 ## Export as markdown
 
@@ -2694,7 +2694,7 @@ Directories are zipped automatically.
 
 # Group chat and multi-user setup
 
-Untether works in Telegram group chats, letting multiple people interact with coding agents from any device — iPhone, iPad, Android, Mac, Windows, Linux, or Telegram Web. This guide covers adding the bot to a group, restricting access, and configuring trigger behaviour.
+Untether works in Telegram group chats, letting multiple people interact with coding agents from any device. This guide covers adding the bot to a group, restricting access, and configuring trigger behaviour.
 
 ## Add the bot to a group
 
@@ -3043,7 +3043,7 @@ To change this behaviour, adjust the permission mode. See [Plan mode](plan-mode.
 
 # Model and reasoning overrides
 
-Untether lets you override which model the agent uses and its reasoning level, per chat or per engine — all from Telegram, available on iPhone, iPad, Android, Mac, Windows, Linux, and Telegram Web.
+Untether lets you override which model the agent uses and its reasoning level, per chat or per engine — all from [Telegram](https://telegram.org), without editing config files or restarting.
 
 ## Check current model
 
@@ -3151,7 +3151,7 @@ In group chats, model and reasoning changes require **admin** or **creator** sta
 
 # Operations and monitoring
 
-Untether runs as a long-lived process, typically managed by systemd. This guide covers health checks, graceful restarts, diagnostics, and day-to-day operations — all controllable from Telegram on iPhone, iPad, Android, Mac, Windows, Linux, or Telegram Web.
+Untether runs as a long-lived process, typically managed by systemd. This guide covers health checks, graceful restarts, diagnostics, and day-to-day operations — all controllable from [Telegram](https://telegram.org) without SSH.
 
 ## Health check
 
@@ -3640,7 +3640,7 @@ See [Webhooks and cron](webhooks-and-cron.md) for the full setup guide, includin
 
 # Security hardening
 
-Untether gives remote access to coding agents on your server, so locking down who can interact with the bot and what files they can access is important. This guide covers the key security controls available in Untether, manageable from any device with Telegram — iPhone, iPad, Android, Mac, Windows, Linux, or Telegram Web.
+Untether gives remote access to coding agents on your server, so locking down who can interact with the bot and what files they can access is important. This guide covers the key security controls — all manageable from [Telegram](https://telegram.org) on any device.
 
 ## Restrict access
 
@@ -3871,7 +3871,7 @@ Data is stored in `stats.json` in the Untether config directory (`~/.untether/` 
 
 # Subscription usage tracking
 
-Untether can show your Claude Code subscription usage directly in Telegram, available on iPhone, iPad, Android, Mac, Windows, Linux, and Telegram Web. This guide covers checking usage on demand and enabling automatic usage footers after every run.
+Keep tabs on your Claude Code subscription from anywhere — Untether surfaces usage directly in [Telegram](https://telegram.org). This guide covers checking usage on demand and enabling automatic usage footers after every run.
 
 ## Check usage with /usage
 
@@ -4133,7 +4133,7 @@ Topic bindings and sessions live in:
 
 # Troubleshooting
 
-Common issues and fixes for Untether, the Telegram bridge for coding agents. Untether works via [Telegram](https://telegram.org), available on iPhone, iPad, Android, Mac, Windows, Linux, and [Telegram Web](https://web.telegram.org).
+Common issues and fixes for Untether. If your agent isn't responding, messages aren't arriving, or something looks off — start here.
 
 ## Quick diagnostics
 
@@ -4462,7 +4462,7 @@ All hints are case-insensitive and pattern-matched against the full error output
 
 # Verbose progress mode
 
-Untether shows progress messages as the agent works, updating in real time. You can control how much detail these messages include — from compact summaries to full tool details — directly from Telegram, available on iPhone, iPad, Android, Mac, Windows, Linux, and Telegram Web.
+Untether shows progress messages as the agent works, updating in real time. Control how much detail you see — from compact summaries to full tool details — so you can follow along from your phone or get a quick glance from [Telegram](https://telegram.org) on any device.
 
 ## Enable verbose mode
 

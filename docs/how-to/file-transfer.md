@@ -1,6 +1,6 @@
 # File transfer
 
-Upload files into the active repo/worktree or fetch files back into Telegram.
+Send files to your repo or pull results back — directly from Telegram on any device. Useful when you need to share a spec, screenshot, or config file with your agent without opening a terminal.
 
 ## Enable file transfer
 

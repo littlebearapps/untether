@@ -1,6 +1,6 @@
 # Install and onboard
 
-This tutorial walks you through installing Untether, creating a Telegram bot, and generating your config file. Untether works via [Telegram](https://telegram.org), available on iPhone, iPad, Android, Mac, Windows, Linux, and [Telegram Web](https://web.telegram.org) — so you can control your coding agents from any device.
+This tutorial walks you through installing Untether, creating a Telegram bot, and generating your config file. Once set up, you can send coding tasks from your phone while you're out, review results on your tablet, or keep working from your laptop — anywhere [Telegram](https://telegram.org) runs.
 
 **What you'll have at the end:** A working `~/.untether/untether.toml` with your bot token, chat ID, workflow settings, and default engine.
 
