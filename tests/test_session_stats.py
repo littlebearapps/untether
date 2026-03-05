@@ -6,7 +6,6 @@ import json
 import time
 
 from untether.session_stats import (
-    AggregatedStats,
     DayBucket,
     SessionStatsStore,
 )

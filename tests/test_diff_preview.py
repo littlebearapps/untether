@@ -102,8 +102,6 @@ class TestDiffPreviewGating:
     """Test that diff preview respects the per-chat EngineRunOptions toggle."""
 
     def test_enabled_when_run_options_none(self):
-        from untether.runners.run_options import EngineRunOptions
-
         opts = None
         assert opts is None or opts.diff_preview is not False
 

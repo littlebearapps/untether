@@ -55,8 +55,17 @@ By default, the bot responds to every message (`all` mode). In busy groups, swit
 | `/trigger mentions` | Only respond to @bot_name mentions |
 | `/trigger clear` | Reset to the default (`all`) |
 
-!!! tip "Mentions mode"
-    In `mentions` mode, start your message with `@your_bot_name` or include the mention anywhere in the text. The bot ignores messages that don't mention it.
+!!! tip "What triggers a response in mentions mode"
+    In `mentions` mode, the bot responds when any of these conditions are met:
+
+    - **@mention** — include `@your_bot_name` anywhere in the message
+    - **Reply to the bot** — reply to any message the bot sent
+    - **Slash command** — use a known command like `/claude`, `/cancel`, `/usage`, or a project alias like `/myproject`
+
+    All other messages are silently ignored.
+
+!!! note "Per-topic overrides"
+    In forum groups, you can set trigger mode per topic. A topic override takes priority over the chat-level default. For example, set `mentions` on general chat but leave coding topics on `all`. See [Topics](topics.md) for details.
 
 ## Admin-only commands
 

@@ -1,5 +1,25 @@
 # changelog
 
+## v0.31.0 (2026-03-05)
+
+### changes
+
+- merge API cost and subscription usage into unified "Cost & usage" config page [#67](https://github.com/littlebearapps/untether/issues/67)
+- make `/auth` codex-only, move auth status to `/stats auth` [#68](https://github.com/littlebearapps/untether/issues/68)
+- add docs link to `/config` home page [#69](https://github.com/littlebearapps/untether/issues/69)
+
+### fixes
+
+- widen device code regex for real codex output format [#40](https://github.com/littlebearapps/untether/issues/40)
+- improve `/auth` info message wording [#70](https://github.com/littlebearapps/untether/issues/70)
+- put Cost & usage and Trigger on same row in `/config` [#71](https://github.com/littlebearapps/untether/issues/71)
+- 5 optimisations from 4-engine test sweep [#72](https://github.com/littlebearapps/untether/issues/72)
+
+### docs
+
+- add triggers/webhooks/cron architecture and how-to documentation
+- expand trigger mode and group chat documentation
+
 ## v0.30.0 (2026-03-04)
 
 ### changes

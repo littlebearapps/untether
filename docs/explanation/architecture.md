@@ -43,9 +43,16 @@ flowchart TB
         markdown[markdown.py]
     end
 
+    subgraph Triggers["Triggers Layer"]
+        trigger_server[triggers/server.py<br/>webhook HTTP server]
+        trigger_cron[triggers/cron.py<br/>cron scheduler]
+        trigger_dispatch[triggers/dispatcher.py<br/>dispatch to run_job]
+    end
+
     subgraph External["External"]
         agent_clis[Agent CLIs<br/>claude, codex, pi]
         telegram_api[Telegram Bot API]
+        webhook_sources[Webhook Sources<br/>GitHub, CI, etc.]
     end
 
     cli --> router
@@ -74,6 +81,10 @@ flowchart TB
     presenter --> tg_render
     presenter --> markdown
     tg_client --> telegram_api
+    webhook_sources --> trigger_server
+    trigger_server --> trigger_dispatch
+    trigger_cron --> trigger_dispatch
+    trigger_dispatch --> runner_bridge
 ```
 
 ---
@@ -392,5 +403,6 @@ flowchart TD
 | **Bridge** | `telegram/bridge.py`, `runner_bridge.py` | Message handling, execution coordination |
 | **Runner** | `runner.py`, `runners/*.py`, `schemas/*.py` | Agent CLI subprocess, JSONL parsing, event translation |
 | **Transport** | `transport.py`, `presenter.py`, `telegram/client.py` | Telegram API, message rendering |
+| **Triggers** | `triggers/server.py`, `triggers/cron.py`, `triggers/dispatcher.py` | Webhook server, cron scheduler, run dispatch |
 | **Domain** | `model.py`, `progress.py`, `events.py` | Event types, action tracking |
 | **Utils** | `worktrees.py`, `utils/*.py`, `markdown.py` | Git worktrees, formatting, paths |
