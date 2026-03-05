@@ -28,8 +28,12 @@ If you need exact options and defaults, use **[Reference](../reference/index.md)
 
 - [Voice notes](voice-notes.md) (transcribe and run)
 - [File transfer](file-transfer.md) (`/file put` and `/file get`)
-- [Schedule tasks](schedule-tasks.md) (Telegram scheduled messages)
 - [Export sessions](export-sessions.md) (export transcripts as markdown or JSON)
+
+## Automation
+
+- [Webhooks and cron](webhooks-and-cron.md) (start runs from GitHub, CI, or on a schedule)
+- [Schedule tasks](schedule-tasks.md) (native Telegram scheduled messages)
 
 ## Cost and usage
 

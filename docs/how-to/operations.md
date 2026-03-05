@@ -11,6 +11,14 @@ Send `/ping` in Telegram to verify the bot is running:
 
 The response includes the bot's uptime since last restart. Use this as a quick liveness check.
 
+If [webhooks and cron](webhooks-and-cron.md) are enabled, the webhook server also exposes a health endpoint:
+
+```
+GET http://127.0.0.1:9876/health
+```
+
+Returns `{"status": "ok", "webhooks": N}` where N is the number of configured webhooks. Useful for external monitoring tools.
+
 ## Graceful restart
 
 Send `/restart` in Telegram to initiate a graceful shutdown:
