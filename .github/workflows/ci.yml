@@ -119,7 +119,7 @@ jobs:
       - name: Install wheel in clean venv
         run: |
           uv venv /tmp/clean-env
-          /tmp/clean-env/bin/python -m pip install dist/*.whl
+          uv pip install --python /tmp/clean-env/bin/python dist/*.whl
 
       - name: Smoke-test imports
         run: |
