@@ -131,7 +131,7 @@ jobs:
           from untether.runners.pi import BACKEND as pi_backend
           from untether.runners.gemini import BACKEND as gemini_backend
           from untether.runners.amp import BACKEND as amp_backend
-          from untether.settings import load_config
+          from untether.settings import load_settings
           print('All imports OK')
           "
 
