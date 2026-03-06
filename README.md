@@ -196,16 +196,16 @@ pipx upgrade untether            # if installed with pipx
 Then restart to apply:
 
 ```sh
-/restart                         # from Telegram (preferred — works on all platforms)
+/restart                         # from Telegram (preferred — drains active runs first)
 ```
 
-Or from your shell — stop the running process (Ctrl+C) and re-run:
+Or from your terminal — stop the running process (Ctrl+C) and re-run:
 
 ```sh
 untether
 ```
 
-On Linux with systemd: `systemctl --user restart untether`
+> **Note:** If you've set up a systemd service on Linux, use `systemctl --user restart untether` instead.
 
 ---
 
