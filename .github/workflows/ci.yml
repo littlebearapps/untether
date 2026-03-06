@@ -98,6 +98,43 @@ jobs:
             uv run --no-sync python -m coverage report || true
           } >> "$GITHUB_STEP_SUMMARY"
 
+  install-test:
+    name: install-test
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@eac588ad8def6316056a12d4907a9d4d84ff7a3b # v7
+        with:
+          python-version: "3.14"
+          enable-cache: true
+
+      - name: Build wheel
+        run: uv build
+
+      - name: Install wheel in clean venv
+        run: |
+          uv venv /tmp/clean-env
+          /tmp/clean-env/bin/python -m pip install dist/*.whl
+
+      - name: Smoke-test imports
+        run: |
+          /tmp/clean-env/bin/python -c "
+          from untether.telegram.render import render_markdown
+          from untether.runners.claude import BACKEND as claude_backend
+          from untether.runners.codex import BACKEND as codex_backend
+          from untether.runners.opencode import BACKEND as opencode_backend
+          from untether.runners.pi import BACKEND as pi_backend
+          from untether.runners.gemini import BACKEND as gemini_backend
+          from untether.runners.amp import BACKEND as amp_backend
+          from untether.settings import load_config
+          print('All imports OK')
+          "
+
   security:
     name: ${{ matrix.task }}
     runs-on: ubuntu-latest

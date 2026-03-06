@@ -89,6 +89,7 @@ GitHub Actions runs these checks on every push and PR:
 | pytest | Tests on Python 3.12, 3.13, 3.14 with 80% coverage |
 | build | `uv build` wheel + sdist validation |
 | lockfile | `uv lock --check` ensures lockfile is in sync |
+| install-test | Clean wheel install + import smoke-test (catches undeclared deps) |
 | pip-audit | Dependency vulnerability scanning |
 | bandit | Python security static analysis |
 | docs | Documentation site build |

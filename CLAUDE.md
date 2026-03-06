@@ -203,6 +203,7 @@ GitHub Actions CI runs on push to master and on PRs:
 | pytest | Tests on Python 3.12, 3.13, 3.14 with 80% coverage threshold |
 | build | `uv build` wheel + sdist validation |
 | lockfile | `uv lock --check` ensures lockfile is in sync |
+| install-test | Clean wheel install + smoke-test imports (catches undeclared deps) |
 | pip-audit | Dependency vulnerability scanning (PyPA advisory DB) |
 | bandit | Python SAST (security static analysis) |
 | docs | Zensical docs build |
