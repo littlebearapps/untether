@@ -1,5 +1,11 @@
 # changelog
 
+## v0.33.1 (2026-03-06)
+
+### fixes
+
+- fall back to plain commonmark renderer when `linkify-it-py` is missing instead of crash-looping on startup [#83](https://github.com/littlebearapps/untether/issues/83)
+
 ## v0.33.0 (2026-03-06)
 
 ### changes
