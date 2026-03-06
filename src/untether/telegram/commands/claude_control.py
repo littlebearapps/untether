@@ -114,7 +114,7 @@ class ClaudeControlCommand:
             # Grab session_id before send_claude_control_response deletes it
             session_id = _REQUEST_TO_SESSION.get(request_id)
 
-            # Deny with a message asking Claude to outline the plan
+            # Deny with a message asking Claude Code to outline the plan
             success = await send_claude_control_response(
                 request_id, approved=False, deny_message=_DISCUSS_DENY_MESSAGE
             )
@@ -139,7 +139,7 @@ class ClaudeControlCommand:
                 action=action,
             )
             return CommandResult(
-                text="📋 Asked Claude to outline the plan",
+                text="📋 Asked Claude Code to outline the plan",
                 notify=True,
             )
 
@@ -175,7 +175,7 @@ class ClaudeControlCommand:
                     session_id=session_id,
                 )
                 return CommandResult(
-                    text="✅ Plan approved — Claude will proceed",
+                    text="✅ Plan approved — Claude Code will proceed",
                     notify=True,
                 )
             else:

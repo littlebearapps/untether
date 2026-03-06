@@ -553,7 +553,7 @@ class ProgressEdits:
                     notify_text = "Action required \u2014 approval needed"
                     for a in state.actions:
                         if not a.completed and a.action.detail.get("ask_question"):
-                            notify_text = "Question from Claude"
+                            notify_text = "Question from Claude Code"
                             break
                     self._approval_notify_ref = await self.transport.send(
                         channel_id=self.channel_id,
@@ -924,7 +924,7 @@ async def handle_message(
             answer=err_body,
         )
 
-        # Append usage footer for Claude engine runs (even on error)
+        # Append usage footer for Claude Code engine runs (even on error)
         if runner.engine == "claude":
             footer_cfg = _load_footer_settings()
             from .runners.run_options import get_run_options
@@ -1039,7 +1039,7 @@ async def handle_message(
         if final_answer.strip():
             # Deduplicate: if the answer already starts with the error's first
             # line (common when runner sets both answer and error from the same
-            # source, e.g. Claude subscription limits), only append the
+            # source, e.g. Claude Code subscription limits), only append the
             # diagnostic context and hint — not the repeated summary.
             error_head = error_text.split("\n", 1)[0].strip()
             answer_head = final_answer.strip().split("\n", 1)[0].strip()
@@ -1086,7 +1086,7 @@ async def handle_message(
     sync_resume_token(progress_tracker, completed.resume or outcome.resume)
 
     # Post-outline guidance: if the session was outline-pending (user clicked
-    # "Pause & Outline Plan" but Claude ended the run instead of calling
+    # "Pause & Outline Plan" but Claude Code ended the run instead of calling
     # ExitPlanMode), append resume instructions so the user knows how to proceed.
     if runner.engine == "claude" and resume_value:
         from .runners.claude import _OUTLINE_PENDING
@@ -1136,7 +1136,7 @@ async def handle_message(
             extra=final_rendered.extra,
         )
 
-    # Append usage footer for Claude engine runs
+    # Append usage footer for Claude Code engine runs
     if runner.engine == "claude":
         _show_sub = footer_cfg.show_subscription_usage
         if _footer_run_opts and _footer_run_opts.show_subscription_usage is not None:

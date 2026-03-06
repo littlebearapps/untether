@@ -2,7 +2,7 @@
 
 When the user clicks "Pause & Outline Plan", a cooldown is set.
 Subsequent ExitPlanMode calls are handled differently depending on
-whether Claude has written substantial outline text (>= 200 chars):
+whether Claude Code has written substantial outline text (>= 200 chars):
 
 - With outline: auto-deny with _OUTLINE_WAIT_MESSAGE + synthetic Approve/Deny buttons
 - Without outline: auto-deny with escalation message + synthetic Approve/Deny buttons
@@ -163,7 +163,7 @@ def test_bypass_clears_outline_pending():
 def test_bypass_survives_text_overwrite():
     """Bypass works even if a short text block overwrites the long outline.
 
-    Claude may write a 500-char outline in message #1, then a short "Calling
+    Claude Code may write a 500-char outline in message #1, then a short "Calling
     ExitPlanMode" in message #2.  ``last_assistant_text`` gets overwritten, but
     ``max_text_len_since_cooldown`` preserves the peak length.
     """

@@ -64,7 +64,7 @@ class TestGetErrorHint:
 
     def test_error_during_execution_resumed(self):
         msg = (
-            "claude run failed (error_during_execution)\n"
+            "Claude Code run failed (error_during_execution)\n"
             "session: abcdef12 \N{MIDDLE DOT} resumed \N{MIDDLE DOT} turns: 0 \N{MIDDLE DOT} cost: $0.00"
         )
         hint = get_error_hint(msg)
@@ -73,7 +73,7 @@ class TestGetErrorHint:
 
     def test_error_during_execution_new_session(self):
         msg = (
-            "claude run failed (error_during_execution)\n"
+            "Claude Code run failed (error_during_execution)\n"
             "session: abcdef12 \N{MIDDLE DOT} new \N{MIDDLE DOT} turns: 0"
         )
         hint = get_error_hint(msg)
@@ -189,6 +189,59 @@ class TestGetErrorHint:
         hint = get_error_hint("Network is unreachable")
         assert hint is not None
         assert "internet" in hint.lower()
+
+    # --- Signal errors ---
+
+    def test_sigterm(self):
+        hint = get_error_hint("gemini failed (rc=-15 (SIGTERM)).")
+        assert hint is not None
+        assert "restarted" in hint.lower()
+        assert "session is saved" in hint.lower()
+
+    def test_sigkill(self):
+        hint = get_error_hint("claude failed (rc=-9 (SIGKILL)).")
+        assert hint is not None
+        assert "forcefully terminated" in hint.lower()
+        assert "session is saved" in hint.lower()
+
+    def test_sigabrt(self):
+        hint = get_error_hint("codex exec failed (rc=-6 (SIGABRT)).")
+        assert hint is not None
+        assert "/new" in hint
+
+    def test_signal_hints_are_engine_agnostic(self):
+        """Signal hints should not hardcode a specific engine command."""
+        for sig in ("sigterm", "sigkill", "sigabrt"):
+            hint = get_error_hint(sig)
+            assert hint is not None
+            assert "/claude" not in hint, f"{sig} hint should not hardcode /claude"
+
+    # --- Process / session errors ---
+
+    def test_finished_without_result(self):
+        hint = get_error_hint("amp finished without a result event")
+        assert hint is not None
+        assert "exited before producing" in hint.lower()
+        assert "session is saved" in hint.lower()
+
+    def test_finished_without_result_cross_engine(self):
+        """Pattern matches all engine names."""
+        for engine in ("claude code", "codex", "opencode", "pi", "gemini", "amp"):
+            msg = f"{engine} finished without a result event"
+            hint = get_error_hint(msg)
+            assert hint is not None, f"no hint for: {msg}"
+
+    def test_no_session_id(self):
+        hint = get_error_hint("opencode finished but no session_id was captured")
+        assert hint is not None
+        assert "crashed during startup" in hint.lower()
+
+    def test_no_session_id_cross_engine(self):
+        """Pattern matches all engine names."""
+        for engine in ("claude code", "codex", "gemini", "amp", "opencode"):
+            msg = f"{engine} finished but no session_id was captured"
+            hint = get_error_hint(msg)
+            assert hint is not None, f"no hint for: {msg}"
 
     # --- Ordering: specific patterns match before generic ones ---
 

@@ -21,6 +21,15 @@ _DEFAULT_CREDENTIALS_PATH = Path.home() / ".claude" / ".credentials.json"
 _USAGE_URL = "https://api.anthropic.com/api/oauth/usage"
 _TIMEOUT = 10.0
 
+# User-friendly descriptions for HTTP errors from the usage API.
+_HTTP_STATUS_HINTS: dict[int, str] = {
+    429: "Rate limited by Anthropic \N{EM DASH} too many requests. Try again in a minute.",
+    500: "Anthropic API internal error. This is temporary \N{EM DASH} try again shortly.",
+    502: "Anthropic API returned a bad gateway error. Try again in a few minutes.",
+    503: "Anthropic API is temporarily unavailable. Try again in a few minutes.",
+    504: "Anthropic API gateway timed out. Try again shortly.",
+}
+
 
 def _progress_bar(pct: float, width: int = 10) -> str:
     """Render a text progress bar like ████░░░░░░."""
@@ -52,7 +61,7 @@ def _time_until(iso_ts: str) -> str:
 def _read_access_token(
     credentials_path: Path = _DEFAULT_CREDENTIALS_PATH,
 ) -> tuple[str, bool]:
-    """Read the OAuth access token from Claude credentials.
+    """Read the OAuth access token from Claude Code credentials.
 
     Tries the plain-text file first (Linux), then macOS Keychain.
     Returns (token, is_expired) tuple.
@@ -86,7 +95,7 @@ def _read_access_token(
 
     if raw is None:
         raise FileNotFoundError(
-            f"No Claude credentials at {credentials_path} or macOS Keychain"
+            f"No Claude Code credentials at {credentials_path} or macOS Keychain"
         )
 
     data = json.loads(raw)
@@ -195,7 +204,7 @@ class UsageCommand:
             data = await fetch_claude_usage()
         except FileNotFoundError:
             return CommandResult(
-                text="No Claude credentials found (checked ~/.claude/.credentials.json"
+                text="No Claude Code credentials found (checked ~/.claude/.credentials.json"
                 " and macOS Keychain). Run 'claude login' to authenticate.",
                 notify=True,
             )
@@ -203,24 +212,39 @@ class UsageCommand:
             status = exc.response.status_code
             if status == 401:
                 return CommandResult(
-                    text="Claude OAuth token expired or invalid. "
+                    text="Claude Code OAuth token expired or invalid. "
                     "Run a Claude Code session to refresh it.",
                     notify=True,
                 )
             if status == 403:
                 return CommandResult(
-                    text="Claude OAuth token lacks user:profile scope.",
+                    text="Claude Code OAuth token lacks user:profile scope.",
                     notify=True,
                 )
+            hint = _HTTP_STATUS_HINTS.get(status, "Unexpected error.")
             logger.exception("usage.api_error", status=status)
             return CommandResult(
-                text=f"Usage API error: HTTP {status}",
+                text=f"Usage API error (HTTP {status}): {hint}",
+                notify=True,
+            )
+        except httpx.ConnectError:
+            logger.exception("usage.connect_failed")
+            return CommandResult(
+                text="Could not reach the Anthropic usage API"
+                " \N{EM DASH} check your network connection and try again.",
+                notify=True,
+            )
+        except httpx.TimeoutException:
+            logger.exception("usage.timeout")
+            return CommandResult(
+                text="Anthropic usage API timed out"
+                " \N{EM DASH} this is usually temporary. Try again shortly.",
                 notify=True,
             )
         except Exception as exc:
             logger.exception("usage.fetch_failed", error=str(exc))
             return CommandResult(
-                text=f"Failed to fetch usage: {exc}",
+                text=f"Failed to fetch usage: {type(exc).__name__}: {exc}",
                 notify=True,
             )
 

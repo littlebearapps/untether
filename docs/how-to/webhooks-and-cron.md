@@ -50,7 +50,7 @@ Webhooks accept HTTP POST requests and turn them into agent runs. Example: trigg
 2. Untether verifies the HMAC signature against your secret
 3. The `event_filter` checks the `X-GitHub-Event` header — only `push` events proceed
 4. `{{ref}}` and `{{pusher.name}}` are substituted from the JSON payload
-5. The rendered prompt is sent to Claude in the `myapp` project
+5. The rendered prompt is sent to Claude Code in the `myapp` project
 6. A notification appears in your Telegram chat, and the run streams progress as usual
 
 ### Authentication

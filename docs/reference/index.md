@@ -45,7 +45,7 @@ If you’re trying to understand the *why*, use **[Explanation](../explanation/i
 These are “engine adapter” implementation details: JSONL formats, mapping rules, and emitted events.
 
 - [Runners overview](runners/index.md)
-- Claude:
+- Claude Code:
   - [runner.md](runners/claude/runner.md)
   - [stream-json-cheatsheet.md](runners/claude/stream-json-cheatsheet.md)
   - [untether-events.md](runners/claude/untether-events.md)

@@ -816,7 +816,7 @@ class TestMaybeAppendUsageFooterAlwaysShow:
         from untether.runner_bridge import _maybe_append_usage_footer
 
         async def _raise_fnf():
-            raise FileNotFoundError("No Claude credentials")
+            raise FileNotFoundError("No Claude Code credentials")
 
         monkeypatch.setattr(
             "untether.telegram.commands.usage.fetch_claude_usage", _raise_fnf
@@ -1319,7 +1319,7 @@ async def test_error_answer_no_dedup_when_different() -> None:
 
 @pytest.mark.anyio
 async def test_outline_pending_session_gets_resume_guidance() -> None:
-    """When a Claude run completes while outline-pending, append resume guidance."""
+    """When a Claude Code run completes while outline-pending, append resume guidance."""
     from untether.runners.claude import _OUTLINE_PENDING
 
     session_id = f"outline-test-{uuid.uuid4().hex[:8]}"

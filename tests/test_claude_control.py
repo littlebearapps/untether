@@ -903,7 +903,7 @@ def test_progressive_cooldown_increases_with_count() -> None:
 
 
 def test_progressive_cooldown_escalation_message_content() -> None:
-    """Escalation message tells Claude to wait for button approval."""
+    """Escalation message tells Claude Code to wait for button approval."""
     set_discuss_cooldown("sess-prog-1")
     set_discuss_cooldown("sess-prog-1")  # count=2 -> 60s
 

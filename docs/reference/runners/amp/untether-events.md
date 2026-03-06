@@ -153,7 +153,7 @@ Path keys checked: `file_path`, `path`.
 
 ## 6. Usage accumulation
 
-Unlike Claude (which reports usage in the `result` event) or Gemini (which reports in `result.stats`),
+Unlike Claude Code (which reports usage in the `result` event) or Gemini (which reports in `result.stats`),
 AMP reports per-message `usage` in each `assistant` event.
 
 The runner accumulates tokens across all assistant messages:

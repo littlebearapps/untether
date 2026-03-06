@@ -154,9 +154,9 @@ Controls what appears in the message footer after a run completes.
 | Key | Type | Default | Notes |
 |-----|------|---------|-------|
 | `show_api_cost` | bool | `true` | Show the API cost/tokens line (💰). |
-| `show_subscription_usage` | bool | `false` | Show 5h/weekly subscription usage (⚡). Claude engine only. |
+| `show_subscription_usage` | bool | `false` | Show 5h/weekly subscription usage (⚡). Claude Code engine only. |
 
-When `show_subscription_usage` is enabled, a compact line like `⚡ 5h: 45% (2h 15m) | 7d: 30% (4d 3h)` appears after every Claude run. Threshold-based warnings (≥70%) appear regardless of this setting.
+When `show_subscription_usage` is enabled, a compact line like `⚡ 5h: 45% (2h 15m) | 7d: 30% (4d 3h)` appears after every Claude Code run. Threshold-based warnings (≥70%) appear regardless of this setting.
 
 ## `preamble`
 
@@ -252,7 +252,7 @@ here; plugin engines should document their own keys.
 |-----|------|---------|-------|
 | `model` | string | (unset) | Optional model override. |
 | `allowed_tools` | string[] | `["Bash", "Read", "Edit", "Write"]` | Auto-approve tool rules. |
-| `dangerously_skip_permissions` | bool | `false` | Skip Claude permissions prompts. |
+| `dangerously_skip_permissions` | bool | `false` | Skip Claude Code permissions prompts. |
 | `use_api_billing` | bool | `false` | Keep `ANTHROPIC_API_KEY` for API billing. |
 
 === "untether config"

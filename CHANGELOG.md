@@ -1,5 +1,38 @@
 # changelog
 
+## v0.33.0 (2026-03-06)
+
+### changes
+
+- add effort control for Claude Code — `--effort` flag with low/medium/high levels via `/reasoning` and `/config` [#80](https://github.com/littlebearapps/untether/issues/80)
+- show model version numbers in footer — e.g. `opus 4.6` instead of `opus` [#80](https://github.com/littlebearapps/untether/issues/80)
+- show effort level in meta line between model and permission mode (e.g. `opus 4.6 · medium · plan`) [#80](https://github.com/littlebearapps/untether/issues/80)
+- rename all user-facing "Claude" to "Claude Code" for product clarity [#81](https://github.com/littlebearapps/untether/issues/81)
+  - error messages, button labels, config descriptions, notification text
+  - engine IDs (`"claude"`) and model/subscription references unchanged
+
+### fixes
+
+- signal error hints (SIGTERM/SIGKILL/SIGABRT) no longer hardcode `/claude` — now engine-agnostic [#81](https://github.com/littlebearapps/untether/issues/81)
+- config reasoning page showed bare "Claude" instead of "Claude Code" due to `.capitalize()` [#81](https://github.com/littlebearapps/untether/issues/81)
+- `/usage` HTTP errors now show descriptive messages (e.g. "Rate limited by Anthropic — too many requests") instead of bare status codes [#81](https://github.com/littlebearapps/untether/issues/81)
+- `/usage` now handles ConnectError and TimeoutException with specific recovery guidance [#81](https://github.com/littlebearapps/untether/issues/81)
+- add error hints for "finished without a result event" and "finished but no session_id" — covers all 6 engines [#81](https://github.com/littlebearapps/untether/issues/81)
+
+### docs
+
+- update 27 documentation files with Claude Code naming
+- update troubleshooting guide with new error hint categories (process/session errors)
+- update inline settings guide — reasoning now shows Claude Code and Codex as supported
+- update model-reasoning guide with Claude Code effort levels
+
+### tests
+
+- add 8 new error hint tests (signal engine-agnostic, cross-engine process/session errors)
+- update model version tests for `_short_model_name()` (e.g. `opus 4.6`)
+- add effort/meta line tests for `format_meta_line()`
+- update config command tests for Claude Code reasoning support
+
 ## v0.32.1 (2026-03-06)
 
 ### fixes

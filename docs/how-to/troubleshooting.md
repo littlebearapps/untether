@@ -187,7 +187,7 @@ Run `untether doctor` to validate voice configuration.
 
 ## macOS and Linux credential differences
 
-| Platform | Claude credentials | Path |
+| Platform | Claude Code credentials | Path |
 |----------|-------------------|------|
 | Linux | Plain-text JSON file | `~/.claude/.credentials.json` |
 | macOS | macOS Keychain | Entry: `Claude Code-credentials` |
@@ -305,15 +305,17 @@ When an engine fails, Untether scans the error message and shows an actionable r
 | Error | Hint |
 |-------|------|
 | SIGTERM | Untether was restarted — session saved, resume by sending a new message |
-| SIGKILL | Process forcefully terminated (timeout or OOM) — try resuming |
-| SIGABRT | Process aborted unexpectedly — try starting a fresh session |
+| SIGKILL | Process forcefully terminated (timeout or OOM) — session saved, try resuming |
+| SIGABRT | Process aborted unexpectedly — try starting a fresh session with `/new` |
 
-### Session errors
+### Session and process errors
 
 | Error | Hint |
 |-------|------|
 | Session not found | Try a fresh session without --session flag |
 | Error during execution | Session failed to load (possibly corrupted) — send `/new` to start fresh |
+| Finished without a result event | Engine exited before producing a final answer (crash or timeout) — session saved, try resuming |
+| Finished but no session_id | Engine crashed during startup — check that the engine CLI is installed and working |
 
 All hints are case-insensitive and pattern-matched against the full error output. The first matching hint wins. Your session is automatically saved in most cases, so you can resume after resolving the issue.
 

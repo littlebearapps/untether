@@ -1,16 +1,16 @@
 # Claude Code -> Untether event mapping (spec)
 
-This document describes how the Claude Code runner translates Claude CLI JSONL events into Untether events.
+This document describes how the Claude Code runner translates Claude Code CLI JSONL events into Untether events.
 
 > **Authoritative source:** The schema definitions are in `src/untether/schemas/claude.py` and the translation logic is in `src/untether/runners/claude.py`. When in doubt, refer to the code.
 
-The goal is to make a Claude runner feel identical to the Codex runner from the bridge/renderer point of view while preserving Untether invariants (stable action ids, per-session serialization, single completed event).
+The goal is to make a Claude Code runner feel identical to the Codex runner from the bridge/renderer point of view while preserving Untether invariants (stable action ids, per-session serialization, single completed event).
 
 ---
 
-## 1. Input stream contract (Claude CLI)
+## 1. Input stream contract (Claude Code CLI)
 
-Claude Code CLI emits **one JSON object per line** (JSONL) when invoked with
+The Claude Code CLI emits **one JSON object per line** (JSONL) when invoked with
 `--output-format stream-json`.
 
 Non-interactive invocation:
@@ -51,7 +51,7 @@ Runner must implement its own regex because the resume format is
 (?im)^\s*`?claude\s+(?:--resume|-r)\s+(?P<token>[^`\s]+)`?\s*$
 ```
 
-**Note:** Claude session IDs should be treated as opaque strings.
+**Note:** Claude Code session IDs should be treated as opaque strings.
 
 Resume rules:
 - If a resume token is provided to `run()`, the runner MUST verify that any
@@ -74,11 +74,11 @@ This matches the Codex runner behavior in `untether/runners/codex.py`.
 
 ---
 
-## 4. Event translation (Claude JSONL -> Untether)
+## 4. Event translation (Claude Code JSONL -> Untether)
 
 ### 4.1 Top-level `system` events
 
-Claude emits a system init event early in the stream:
+Claude Code emits a system init event early in the stream:
 
 ```
 {"type":"system","subtype":"init","session_id":"...", ...}
@@ -93,7 +93,7 @@ Claude emits a system init event early in the stream:
 
 ### 4.2 `assistant` / `user` message events
 
-Claude messages include a `message` object with a `content[]` array. Each content
+Claude Code messages include a `message` object with a `content[]` array. Each content
 block can represent text, tool usage, or tool results.
 
 For each content block:
@@ -153,7 +153,7 @@ The terminal event looks like:
 
 #### Permission denials
 
-> **Not yet implemented.** The upstream Claude CLI may include
+> **Not yet implemented.** The upstream Claude Code CLI may include
 > `result.permission_denials` with blocked tool calls, but Untether's
 > `StreamResultMessage` schema does not capture this field and the runner does
 > not emit warning actions for denials. This is a candidate for future work.
@@ -169,7 +169,7 @@ The terminal event looks like:
 
 ## 5. Tool name -> ActionKind mapping heuristics
 
-Claude tool names can evolve. The runner SHOULD map based on tool name and input
+Claude Code tool names can evolve. The runner SHOULD map based on tool name and input
 shape. Suggested rules:
 
 | Tool name pattern | ActionKind | Title logic |
@@ -189,7 +189,7 @@ If a tool name is unknown, map to `tool` and include the full input in `detail`.
 
 ## 6. Usage mapping
 
-Untether `completed.usage` should mirror the Claude `result.usage` object
+Untether `completed.usage` should mirror the Claude Code `result.usage` object
 without transformation. Optionally include `modelUsage` inside `usage` or
 `detail` if downstream consumers want it (currently unused by renderers).
 
@@ -197,7 +197,7 @@ without transformation. Optionally include `modelUsage` inside `usage` or
 
 ## 7. Implementation checklist (v0.3.0)
 
-Claude runner implementation summary (no Untether domain model changes):
+Claude Code runner implementation summary (no Untether domain model changes):
 
 1. [x] Create `untether/runners/claude.py` implementing `Runner` and (custom)
    resume parsing.
@@ -206,14 +206,14 @@ Claude runner implementation summary (no Untether domain model changes):
    - `build_runner`: read `[claude]` config + construct runner
 3. [x] Add new docs (this file + `stream-json-cheatsheet.md`).
 4. [x] Add fixtures in `tests/fixtures/` (see below).
-5. [x] Add unit tests mirroring `tests/test_codex_*` but for Claude translation
+5. [x] Add unit tests mirroring `tests/test_codex_*` but for Claude Code translation
    and resume parsing (recommended, not required for initial handoff).
 
 ---
 
 ## 8. Suggested Untether config keys
 
-A minimal TOML config for Claude:
+A minimal TOML config for Claude Code:
 
 === "untether config"
 
@@ -236,6 +236,6 @@ A minimal TOML config for Claude:
     use_api_billing = false
     ```
 
-Untether only maps these keys to Claude CLI flags; other options should be configured in Claude Code settings.
+Untether only maps these keys to Claude Code CLI flags; other options should be configured in Claude Code settings.
 If `allowed_tools` is omitted, Untether defaults to `["Bash", "Read", "Edit", "Write"]`.
-When `use_api_billing` is false (default), Untether strips `ANTHROPIC_API_KEY` from the Claude subprocess environment to prefer subscription billing.
+When `use_api_billing` is false (default), Untether strips `ANTHROPIC_API_KEY` from the Claude Code subprocess environment to prefer subscription billing.

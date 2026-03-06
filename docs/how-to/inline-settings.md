@@ -43,7 +43,7 @@ Tap any button to open that setting's page. Each sub-page shows:
 
 When you tap a setting button:
 
-1. **Confirmation toast** — a brief popup appears confirming the change (e.g. "Plan mode: off", "Verbose: on"). This uses the same toast mechanism as Claude approval buttons.
+1. **Confirmation toast** — a brief popup appears confirming the change (e.g. "Plan mode: off", "Verbose: on"). This uses the same toast mechanism as Claude Code approval buttons.
 2. **Auto-return** — the menu automatically navigates back to the home page, showing the updated value across all settings. No need to tap "Back" manually.
 
 ### Engine-aware visibility
@@ -51,8 +51,8 @@ When you tap a setting button:
 Some settings are engine-specific and only appear when relevant:
 
 - **Plan mode** — available for Claude Code and Gemini CLI. Hidden for other engines; the sub-page shows a "not available" message with a Back button.
-- **Ask mode** — only available for Claude Code. When enabled, Claude can ask interactive questions with option buttons instead of guessing. Hidden for other engines.
-- **Reasoning** — only available for engines that support reasoning levels (currently Codex). Hidden for Claude, OpenCode, and Pi.
+- **Ask mode** — only available for Claude Code. When enabled, Claude Code can ask interactive questions with option buttons instead of guessing. Hidden for other engines.
+- **Reasoning** — only available for engines that support reasoning levels (Claude Code and Codex). Hidden for OpenCode, Pi, and others.
 - **Model** — always visible. Shows the current model override and lets you clear it. To set a model, use `/model set <name>`.
 
 When you switch engines via the Engine sub-page, the home page automatically shows or hides the relevant settings.

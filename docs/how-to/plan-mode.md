@@ -1,6 +1,6 @@
 # Plan mode
 
-When you're away from the terminal, you need confidence that your agent won't go off-script. Plan mode controls how Claude Code handles permission requests through Untether — require manual approval from your phone, auto-approve transitions, or let Claude run freely.
+When you're away from the terminal, you need confidence that your agent won't go off-script. Plan mode controls how Claude Code handles permission requests through Untether — require manual approval from your phone, auto-approve transitions, or let Claude Code run freely.
 
 ## Permission modes
 
@@ -8,11 +8,11 @@ When you're away from the terminal, you need confidence that your agent won't go
 |------|-------------------|----------|-----------|
 | **Plan** | `/planmode on` | `--permission-mode plan` | All tool calls and plan transitions require Telegram approval |
 | **Auto** | `/planmode auto` | `--permission-mode plan` | Tools are auto-approved; ExitPlanMode is also auto-approved (no buttons) |
-| **Accept edits** | `/planmode off` | `--permission-mode acceptEdits` | No approval buttons — Claude runs without interruption |
+| **Accept edits** | `/planmode off` | `--permission-mode acceptEdits` | No approval buttons — Claude Code runs without interruption |
 
 **Plan** is the most interactive mode. You see every file edit, shell command, and plan transition as inline buttons.
 
-**Auto** is the recommended default for most users. Tools run without interruption, but Claude still goes through a plan phase. ExitPlanMode is silently approved so you don't need to tap a button for every plan-to-execution transition.
+**Auto** is the recommended default for most users. Tools run without interruption, but Claude Code still goes through a plan phase. ExitPlanMode is silently approved so you don't need to tap a button for every plan-to-execution transition.
 
 **Accept edits** skips permission control entirely. Use this when you trust the agent to make changes autonomously.
 
@@ -33,15 +33,15 @@ Mode is stored per chat and persists across sessions. New runs in the chat use t
 
 ## "Pause & Outline Plan"
 
-When Claude tries to exit plan mode (ExitPlanMode), you see three buttons instead of two:
+When Claude Code tries to exit plan mode (ExitPlanMode), you see three buttons instead of two:
 
-- **Approve** — let Claude proceed to execution
-- **Deny** — block and ask Claude to explain
+- **Approve** — let Claude Code proceed to execution
+- **Deny** — block and ask Claude Code to explain
 - **Pause & Outline Plan** — require a written plan first
 
 <!-- SCREENSHOT: Telegram ExitPlanMode message with Approve / Deny / Pause & Outline Plan inline buttons -->
 
-Tapping "Pause & Outline Plan" tells Claude to stop and write a comprehensive plan as a visible message in the chat. The plan must include:
+Tapping "Pause & Outline Plan" tells Claude Code to stop and write a comprehensive plan as a visible message in the chat. The plan must include:
 
 1. Every file to be created or modified (full paths)
 2. What changes will be made in each file
@@ -49,15 +49,15 @@ Tapping "Pause & Outline Plan" tells Claude to stop and write a comprehensive pl
 4. Key decisions, trade-offs, and risks
 5. The expected end result
 
-This is useful when you want to review the approach before Claude starts making changes.
+This is useful when you want to review the approach before Claude Code starts making changes.
 
-After Claude writes the outline, **Approve Plan / Deny** buttons appear automatically in Telegram. Tap "Approve Plan" to let Claude proceed, or "Deny" to stop and provide feedback. You no longer need to type "approved" — the buttons handle it.
+After Claude Code writes the outline, **Approve Plan / Deny** buttons appear automatically in Telegram. Tap "Approve Plan" to let Claude Code proceed, or "Deny" to stop and provide feedback. You no longer need to type "approved" — the buttons handle it.
 
-<!-- SCREENSHOT: Telegram message showing Claude's written outline plan with Approve Plan / Deny inline buttons below -->
+<!-- SCREENSHOT: Telegram message showing Claude Code's written outline plan with Approve Plan / Deny inline buttons below -->
 
 ## Progressive cooldown
 
-After you tap "Pause & Outline Plan", a cooldown window prevents Claude from immediately retrying ExitPlanMode:
+After you tap "Pause & Outline Plan", a cooldown window prevents Claude Code from immediately retrying ExitPlanMode:
 
 | Click count | Cooldown |
 |-------------|----------|

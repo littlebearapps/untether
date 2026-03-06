@@ -199,7 +199,7 @@ async def _page_home(ctx: CommandContext) -> None:
         "",
     ]
 
-    # --- Agent controls (Claude-only features) ---
+    # --- Agent controls (Claude Code-only features) ---
     if show_plan_mode:
         lines.append("<b>Agent controls</b> <i>(Claude Code)</i>")
         lines.append(f"Plan mode: <b>{pm_label}</b>{_home_hint('pm', pm_label)}")
@@ -241,7 +241,7 @@ async def _page_home(ctx: CommandContext) -> None:
     buttons: list[list[dict[str, str]]] = []
 
     if show_plan_mode:
-        # Claude layout
+        # Claude Code layout
         buttons.append(
             [
                 {"text": "Plan mode", "callback_data": "config:pm"},
@@ -258,14 +258,15 @@ async def _page_home(ctx: CommandContext) -> None:
             row3.append({"text": "Cost & usage", "callback_data": "config:cu"})
         row3.append({"text": "Trigger", "callback_data": "config:tr"})
         buttons.append(row3)
-        buttons.append(
-            [
-                {"text": "Model", "callback_data": "config:md"},
-                {"text": "Engine", "callback_data": "config:ag"},
-            ]
-        )
+        row4 = [
+            {"text": "Model", "callback_data": "config:md"},
+            {"text": "Engine", "callback_data": "config:ag"},
+        ]
+        buttons.append(row4)
+        if show_reasoning:
+            buttons.append([{"text": "Reasoning", "callback_data": "config:rs"}])
     else:
-        # Non-Claude engines
+        # Non-Claude Code engines
         if show_cost_usage:
             buttons.append([{"text": "Cost & usage", "callback_data": "config:cu"}])
         buttons.append(
@@ -309,7 +310,7 @@ async def _page_planmode(ctx: CommandContext, action: str | None = None) -> None
     prefs = ChatPrefsStore(resolve_prefs_path(config_path))
     chat_id = ctx.message.channel_id
 
-    # Plan mode is Claude-only — guard against non-Claude engines
+    # Plan mode is Claude Code-only — guard against non-Claude Code engines
     current_engine, _ = await _resolve_effective_engine(ctx)
     if current_engine != "claude":
         await _respond(
@@ -705,7 +706,11 @@ _RS_LABELS: dict[str, str] = {v: k for k, v in _RS_ACTIONS.items()}
 
 async def _page_reasoning(ctx: CommandContext, action: str | None = None) -> None:
     from ..chat_prefs import ChatPrefsStore, resolve_prefs_path
-    from ..engine_overrides import EngineOverrides, supports_reasoning
+    from ..engine_overrides import (
+        EngineOverrides,
+        allowed_reasoning_levels,
+        supports_reasoning,
+    )
 
     config_path = ctx.config_path
     if config_path is None:
@@ -774,17 +779,32 @@ async def _page_reasoning(ctx: CommandContext, action: str | None = None) -> Non
     reasoning = override.reasoning if override else None
     current_label = reasoning or "default"
 
+    levels = allowed_reasoning_levels(current_engine)
+    supported_engines = sorted(e for e in ("claude", "codex") if supports_reasoning(e))
+    _ENGINE_DISPLAY = {"claude": "Claude Code", "codex": "Codex"}
+    works_with = (
+        ", ".join(_ENGINE_DISPLAY.get(e, e.capitalize()) for e in supported_engines)
+        or "Codex"
+    )
+
+    level_descriptions: list[str] = []
+    if "minimal" in levels:
+        level_descriptions.append("• <b>minimal</b> — fastest responses")
+    if "low" in levels or "medium" in levels or "high" in levels:
+        present = [f"<b>{lv}</b>" for lv in ("low", "medium", "high") if lv in levels]
+        level_descriptions.append(f"• {' · '.join(present)} — balanced options")
+    if "xhigh" in levels:
+        level_descriptions.append("• <b>xhigh</b> — most thorough (slowest)")
+
     lines = [
         "<b>⚙️ Reasoning</b>",
         "",
         "How deeply the model thinks before answering.",
         "Higher = more thorough but slower and costlier.",
         "",
-        "• <b>minimal</b> — fastest responses",
-        "• <b>low</b> · <b>medium</b> · <b>high</b> — balanced options",
-        "• <b>xhigh</b> — most thorough (slowest)",
+        *level_descriptions,
         "",
-        "Works with: Codex",
+        f"Works with: {works_with}",
         "",
         f"Engine: <b>{current_engine}</b>",
         f"Current: <b>{current_label}</b>",
@@ -792,31 +812,28 @@ async def _page_reasoning(ctx: CommandContext, action: str | None = None) -> Non
         f'📖 <a href="{_DOCS_BASE}model-reasoning/">Learn more</a>',
     ]
 
+    # Build level buttons dynamically based on engine
+    _LEVEL_BUTTON_MAP: dict[str, tuple[str, str]] = {
+        "minimal": ("Minimal", "min"),
+        "low": ("Low", "low"),
+        "medium": ("Medium", "med"),
+        "high": ("High", "hi"),
+        "xhigh": ("Xhigh", "xhi"),
+    }
+    level_buttons: list[dict[str, str]] = []
+    for level in levels:
+        label, action_key = _LEVEL_BUTTON_MAP[level]
+        level_buttons.append(
+            {
+                "text": _check(label, active=reasoning == level),
+                "callback_data": f"config:rs:{action_key}",
+            }
+        )
+    # Split into rows of 3
+    button_rows = [level_buttons[i : i + 3] for i in range(0, len(level_buttons), 3)]
+
     buttons = [
-        [
-            {
-                "text": _check("Minimal", active=reasoning == "minimal"),
-                "callback_data": "config:rs:min",
-            },
-            {
-                "text": _check("Low", active=reasoning == "low"),
-                "callback_data": "config:rs:low",
-            },
-            {
-                "text": _check("Medium", active=reasoning == "medium"),
-                "callback_data": "config:rs:med",
-            },
-        ],
-        [
-            {
-                "text": _check("High", active=reasoning == "high"),
-                "callback_data": "config:rs:hi",
-            },
-            {
-                "text": _check("Xhigh", active=reasoning == "xhigh"),
-                "callback_data": "config:rs:xhi",
-            },
-        ],
+        *button_rows,
         [
             {"text": "Clear override", "callback_data": "config:rs:clr"},
             {"text": "← Back", "callback_data": "config:home"},
@@ -847,7 +864,7 @@ async def _page_ask_questions(ctx: CommandContext, action: str | None = None) ->
     prefs = ChatPrefsStore(resolve_prefs_path(config_path))
     chat_id = ctx.message.channel_id
 
-    # Claude-only guard
+    # Claude Code-only guard
     current_engine, _ = await _resolve_effective_engine(ctx)
     if current_engine not in ASK_QUESTIONS_SUPPORTED_ENGINES:
         await _respond(
@@ -972,7 +989,7 @@ async def _page_diff_preview(ctx: CommandContext, action: str | None = None) -> 
     prefs = ChatPrefsStore(resolve_prefs_path(config_path))
     chat_id = ctx.message.channel_id
 
-    # Claude-only guard
+    # Claude Code-only guard
     current_engine, _ = await _resolve_effective_engine(ctx)
     if current_engine not in DIFF_PREVIEW_SUPPORTED_ENGINES:
         await _respond(
@@ -1117,8 +1134,8 @@ async def _page_cost_usage(ctx: CommandContext, action: str | None = None) -> No
             (
                 "<b>⚙️ Cost & usage</b>\n\n"
                 f"Not available for <b>{current_engine}</b>.\n"
-                "API cost works with Claude and OpenCode.\n"
-                "Subscription usage works with Claude."
+                "API cost works with Claude Code and OpenCode.\n"
+                "Subscription usage works with Claude Code."
             ),
             [[{"text": "← Back", "callback_data": "config:home"}]],
         )
@@ -1165,14 +1182,14 @@ async def _page_cost_usage(ctx: CommandContext, action: str | None = None) -> No
         ac_label = "on" if ac is True else ("off" if ac is False else "default")
         lines.append(f"<b>API cost</b>: {ac_label}")
         lines.append("  Show cost, tokens, and time after each task.")
-        lines.append("  Works with: Claude, OpenCode, Gemini, Amp")
+        lines.append("  Works with: Claude Code, OpenCode, Gemini, Amp")
         lines.append("")
 
     if has_sub_usage:
         su_label = "on" if su is True else ("off" if su is False else "default")
         lines.append(f"<b>Subscription usage</b>: {su_label}")
         lines.append("  Show how much of your 5h/weekly quota is used.")
-        lines.append("  Works with: Claude (Pro/Max plans)")
+        lines.append("  Works with: Claude Code (Pro/Max plans)")
         lines.append("")
 
     lines.append(f'📖 <a href="{_DOCS_BASE}cost-budgets/">Learn more</a>')

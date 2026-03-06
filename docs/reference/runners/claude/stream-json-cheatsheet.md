@@ -1,4 +1,4 @@
-# Claude `stream-json` event cheatsheet
+# Claude Code `stream-json` event cheatsheet
 
 `claude -p --output-format stream-json --input-format stream-json --verbose` writes
 **one JSON object per line** (JSONL) with a required `type` field.
@@ -83,7 +83,7 @@ Example (error):
 {"type":"result","subtype":"error","session_id":"session_02","total_cost_usd":0.001,"is_error":true,"duration_ms":2000,"duration_api_ms":1800,"num_turns":1,"result":""}
 ```
 
-Optional fields (may appear in upstream Claude CLI output but are **not** captured
+Optional fields (may appear in upstream Claude Code CLI output but are **not** captured
 by Untether's `StreamResultMessage` schema):
 - `error`: error description string
 - `permission_denials`: array of `{tool_name, tool_use_id, tool_input}`

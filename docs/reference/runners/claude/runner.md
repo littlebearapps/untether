@@ -23,7 +23,7 @@ Provide the **`claude`** engine backend so Untether can:
 * Override: `untether claude`
 
 Untether runs in auto-router mode by default; `untether claude` or `/claude` selects
-Claude for new threads.
+Claude Code for new threads.
 
 ### Resume UX (canonical line)
 
@@ -43,7 +43,7 @@ Untether should parse either:
 * `claude --resume <id>`
 * `claude -r <id>` (short form from docs)
 
-**Note:** Claude session IDs should be treated as **opaque strings**. Do not assume UUID format.
+**Note:** Claude Code session IDs should be treated as **opaque strings**. Do not assume UUID format.
 
 ### Permissions
 
@@ -51,7 +51,7 @@ Untether supports two modes:
 
 **Non-interactive (`-p` mode):** Claude Code can require tool approvals but Untether cannot answer interactive prompts. Users must preconfigure permissions via `--allowedTools` or Claude Code settings. ([Claude Code][2])
 
-**Interactive (permission mode):** When `permission_mode` is set (e.g. `plan` or `auto`), Untether uses `--permission-mode <mode> --permission-prompt-tool stdio` to establish a bidirectional control channel over stdin/stdout. Claude emits `control_request` events for tool approvals and plan mode exits; Untether responds with `control_response` (approve/deny with optional `denial_message`). This uses a PTY (`pty.openpty()`) to prevent stdin deadlock.
+**Interactive (permission mode):** When `permission_mode` is set (e.g. `plan` or `auto`), Untether uses `--permission-mode <mode> --permission-prompt-tool stdio` to establish a bidirectional control channel over stdin/stdout. Claude Code emits `control_request` events for tool approvals and plan mode exits; Untether responds with `control_response` (approve/deny with optional `denial_message`). This uses a PTY (`pty.openpty()`) to prevent stdin deadlock.
 
 Key control channel features:
 * Session registries (`_SESSION_STDIN`, `_REQUEST_TO_SESSION`) for concurrent session support
@@ -104,7 +104,7 @@ Notes:
 * If `allowed_tools` is omitted, Untether defaults to `["Bash", "Read", "Edit", "Write"]`.
 * Untether reads `model`, `permission_mode`, `allowed_tools`, `dangerously_skip_permissions`, and `use_api_billing` from `[claude]`.
 * `permission_mode = "auto"` uses `--permission-mode plan` on the CLI but auto-approves ExitPlanMode requests without showing Telegram buttons. Can also be set per chat via `/planmode auto`.
-* By default Untether strips `ANTHROPIC_API_KEY` from the subprocess environment so Claude uses subscription billing. Set `use_api_billing = true` to keep the key.
+* By default Untether strips `ANTHROPIC_API_KEY` from the subprocess environment so Claude Code uses subscription billing. Set `use_api_billing = true` to keep the key.
 
 ---
 
@@ -126,7 +126,7 @@ Untether auto-discovers runners by importing `untether.runners.*` and looking fo
   * Error message should include official install options and “run `claude` once to authenticate”.
 
     * Install methods include install scripts, Homebrew, and npm. ([Claude Code][4])
-    * Agent SDK / CLI can use Claude Code authentication from running `claude`, or API key auth. ([Claude][5])
+    * Agent SDK / CLI can use Claude Code authentication from running `claude`, or API key auth. ([Claude Code][5])
 
 * `build_runner()` should parse `[claude]` config and instantiate `ClaudeRunner`.
 
@@ -164,6 +164,10 @@ Model:
 
 * add `--model <name>` if configured. ([Claude Code][1])
 
+Effort (reasoning depth):
+
+* add `--effort <level>` if a reasoning override is set (low/medium/high).
+
 Permissions:
 
 * add `--allowedTools "<rules>"` if configured. ([Claude Code][1])
@@ -175,11 +179,11 @@ Prompt passing:
 
 Other flags:
 
-* Claude exposes more CLI flags, but Untether does not surface them in config.
+* Claude Code exposes more CLI flags, but Untether does not surface them in config.
 
 #### Stream parsing
 
-In stream-json mode, Claude emits newline-delimited JSON objects. ([Claude Code][1])
+In stream-json mode, Claude Code emits newline-delimited JSON objects. ([Claude Code][1])
 
 Per the official Agent SDK TypeScript reference, message types include:
 
@@ -193,7 +197,7 @@ Per the official Agent SDK TypeScript reference, message types include:
   * `duration_ms`, `duration_api_ms`, `num_turns`,
   * `structured_output` (optional). ([Claude Code][3])
 
-  Note: upstream Claude CLI may also emit `error`, `permission_denials`, and
+  Note: upstream Claude Code CLI may also emit `error`, `permission_denials`, and
   `modelUsage` fields, but these are **not captured** by Untether's
   `StreamResultMessage` schema (msgspec silently ignores unknown fields).
 
@@ -271,7 +275,7 @@ This mirrors CodexRunner’s “started → completed” item tracking and rende
   * Always include `resume` (same session_id).
 * Emit exactly one completed event per run. After emitting it, ignore any
   trailing JSON lines (do not emit a second completion).
-* We do not use an idle-timeout completion; completion is driven by Claude’s
+* We do not use an idle-timeout completion; completion is driven by Claude Code’s
   `result` event or process exit handling.
 
 **Permission denials**
@@ -299,7 +303,7 @@ Must match Untether runner contract:
     * then continue yielding.
 
 This mirrors CodexRunner’s correct behavior and ensures “new run + resume run” serialize once the session is known.
-Assumption: Claude emits a single `system/init` per run. If multiple `init`
+Assumption: Claude Code emits a single `system/init` per run. If multiple `init`
 events arrive, ignore the subsequent ones (do not attempt to re-lock).
 
 #### Cancellation / termination
@@ -319,7 +323,7 @@ Add a “Claude Code engine” section that covers:
 * Installation (install script / brew / npm). ([Claude Code][4])
 * Authentication:
 
-  * run `claude` once and follow prompts, or use API key auth (Agent SDK docs mention `ANTHROPIC_API_KEY`). ([Claude][5])
+  * run `claude` once and follow prompts, or use API key auth (Agent SDK docs mention `ANTHROPIC_API_KEY`). ([Claude Code][5])
 * Non-interactive permission caveat + how to configure:
 
   * settings allow/deny rules,
@@ -407,14 +411,14 @@ If you want, I can also propose the exact **event-to-action mapping table** (too
 
 ### AskUserQuestion support
 
-When Claude calls `AskUserQuestion`, the control request is intercepted and shown in Telegram. The question text is extracted from the tool input (supports both `{"question": "..."}` and `{"questions": [{"question": "..."}]}` formats).
+When Claude Code calls `AskUserQuestion`, the control request is intercepted and shown in Telegram. The question text is extracted from the tool input (supports both `{"question": "..."}` and `{"questions": [{"question": "..."}]}` formats).
 
 Flow:
-1. Claude emits `control_request` with `tool_name: "AskUserQuestion"`
+1. Claude Code emits `control_request` with `tool_name: "AskUserQuestion"`
 2. Runner registers in `_PENDING_ASK_REQUESTS[request_id] = question_text`
 3. Telegram shows the question with Approve/Deny buttons
 4. User replies with text → `telegram/loop.py` intercepts via `get_pending_ask_request()`
-5. `answer_ask_question()` sends `control_response(approved=False, denial_message="The user answered...")` — the answer is in the denial message so Claude reads it and continues
+5. `answer_ask_question()` sends `control_response(approved=False, denial_message="The user answered...")` — the answer is in the denial message so Claude Code reads it and continues
 
 ### Diff preview in tool approvals
 

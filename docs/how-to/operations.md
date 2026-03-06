@@ -59,7 +59,7 @@ This validates:
 - Topics configuration (if enabled)
 - File transfer permissions and deny globs
 - Voice transcription setup
-- Engine availability (Claude, Codex, OpenCode, Pi)
+- Engine availability (Claude Code, Codex, OpenCode, Pi)
 
 Run this after any config change, after upgrading, or when something isn't working.
 
