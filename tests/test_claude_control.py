@@ -759,7 +759,7 @@ def test_exit_plan_mode_blocked_after_cooldown_expires_without_outline() -> None
             },
         }
     )
-    events = translate_claude_event(event, title="claude", state=state, factory=factory)
+    translate_claude_event(event, title="claude", state=state, factory=factory)
 
     # Outline guard blocks ExitPlanMode — auto-denied with escalation
     assert len(state.auto_deny_queue) == 1
