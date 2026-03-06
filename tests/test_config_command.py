@@ -710,15 +710,16 @@ class TestEngineAwareTransitions:
         assert "config:rs" in _buttons_data(msg)
 
     @pytest.mark.anyio
-    async def test_switch_from_codex_hides_reasoning(self, tmp_path):
-        """After switching engine away from codex, home page hides reasoning."""
+    async def test_switch_to_unsupported_hides_reasoning(self, tmp_path):
+        """After switching engine to one without reasoning, home page hides it."""
         state_path = tmp_path / "prefs.json"
         cmd = ConfigCommand()
         ctx = _make_ctx(
-            args_text="ag:claude",
-            text="config:ag:claude",
+            args_text="ag:gemini",
+            text="config:ag:gemini",
             config_path=state_path,
             default_engine="codex",
+            engine_ids=("codex", "gemini"),
         )
         await cmd.handle(ctx)
         msg = _last_edit_msg(ctx)
@@ -751,7 +752,7 @@ class TestProjectDefaultEngine:
         await cmd.handle(ctx)
         msg = _last_send_msg(ctx)
         assert "Engine: <b>codex</b>" in msg.text
-        # Claude-specific buttons hidden
+        # Claude Code-specific buttons hidden
         assert "Plan mode" not in msg.text
         assert "config:pm" not in _buttons_data(msg)
 
@@ -772,7 +773,7 @@ class TestProjectDefaultEngine:
         await cmd.handle(ctx)
         msg = _last_send_msg(ctx)
         assert "Engine: <b>claude (default)</b>" in msg.text
-        # Claude buttons should be visible
+        # Claude Code buttons should be visible
         assert "Plan mode" in msg.text
         assert "config:pm" in _buttons_data(msg)
 
@@ -1047,7 +1048,7 @@ class TestReasoning:
         assert "config:rs:min" in _buttons_data(msg)
 
     @pytest.mark.anyio
-    async def test_reasoning_shows_all_levels(self, tmp_path):
+    async def test_reasoning_shows_all_codex_levels(self, tmp_path):
         state_path = tmp_path / "prefs.json"
         cmd = ConfigCommand()
         ctx = _make_ctx(
@@ -1063,6 +1064,25 @@ class TestReasoning:
         assert "config:rs:med" in data
         assert "config:rs:hi" in data
         assert "config:rs:xhi" in data
+
+    @pytest.mark.anyio
+    async def test_reasoning_shows_claude_levels(self, tmp_path):
+        """Claude Code engine shows only low/medium/high (no minimal/xhigh)."""
+        state_path = tmp_path / "prefs.json"
+        cmd = ConfigCommand()
+        ctx = _make_ctx(
+            args_text="rs",
+            text="config:rs",
+            config_path=state_path,
+            default_engine="claude",
+        )
+        await cmd.handle(ctx)
+        data = _buttons_data(_last_edit_msg(ctx))
+        assert "config:rs:low" in data
+        assert "config:rs:med" in data
+        assert "config:rs:hi" in data
+        assert "config:rs:min" not in data
+        assert "config:rs:xhi" not in data
 
     @pytest.mark.anyio
     async def test_reasoning_set_returns_home(self, tmp_path):
@@ -1195,15 +1215,16 @@ class TestReasoning:
         assert override.reasoning is None
 
     @pytest.mark.anyio
-    async def test_reasoning_guard_non_codex(self, tmp_path):
-        """Reasoning page shows guard message when engine is not codex."""
+    async def test_reasoning_guard_unsupported_engine(self, tmp_path):
+        """Reasoning page shows guard message for unsupported engines."""
         state_path = tmp_path / "prefs.json"
         cmd = ConfigCommand()
         ctx = _make_ctx(
             args_text="rs",
             text="config:rs",
             config_path=state_path,
-            default_engine="claude",
+            default_engine="gemini",
+            engine_ids=("gemini", "claude"),
         )
         await cmd.handle(ctx)
         msg = _last_edit_msg(ctx)
@@ -1266,8 +1287,8 @@ class TestReasoning:
         assert "config:rs" in _buttons_data(msg)
 
     @pytest.mark.anyio
-    async def test_home_hides_reasoning_for_claude(self, tmp_path):
-        """Reasoning label and button hidden when engine is claude."""
+    async def test_home_shows_reasoning_for_claude(self, tmp_path):
+        """Reasoning label and button visible when engine is claude."""
         state_path = tmp_path / "prefs.json"
         cmd = ConfigCommand()
         ctx = _make_ctx(
@@ -1276,8 +1297,8 @@ class TestReasoning:
         )
         await cmd.handle(ctx)
         msg = _last_send_msg(ctx)
-        assert "Reasoning" not in msg.text
-        assert "config:rs" not in _buttons_data(msg)
+        assert "Reasoning" in msg.text
+        assert "config:rs" in _buttons_data(msg)
 
     @pytest.mark.anyio
     async def test_home_reasoning_shows_override(self, tmp_path):
@@ -1436,7 +1457,7 @@ class TestAskQuestions:
 
     @pytest.mark.anyio
     async def test_ask_questions_guard_non_claude(self, tmp_path):
-        """Ask questions page shows guard message for non-Claude engines."""
+        """Ask questions page shows guard message for non-Claude Code engines."""
         state_path = tmp_path / "prefs.json"
         cmd = ConfigCommand()
         ctx = _make_ctx(
@@ -1458,7 +1479,7 @@ class TestAskQuestions:
 
     @pytest.mark.anyio
     async def test_ask_questions_shown_on_home_for_claude(self, tmp_path):
-        """Ask button should appear on home page when engine is Claude."""
+        """Ask button should appear on home page when engine is Claude Code."""
         state_path = tmp_path / "prefs.json"
         cmd = ConfigCommand()
         ctx = _make_ctx(config_path=state_path, default_engine="claude")
@@ -1606,7 +1627,7 @@ class TestDiffPreview:
 
     @pytest.mark.anyio
     async def test_diff_preview_guard_non_claude(self, tmp_path):
-        """Diff preview page shows guard message for non-Claude engines."""
+        """Diff preview page shows guard message for non-Claude Code engines."""
         state_path = tmp_path / "prefs.json"
         cmd = ConfigCommand()
         ctx = _make_ctx(
@@ -1628,7 +1649,7 @@ class TestDiffPreview:
 
     @pytest.mark.anyio
     async def test_diff_preview_shown_on_home_for_claude(self, tmp_path):
-        """Diff preview button should appear on home page when engine is Claude."""
+        """Diff preview button should appear on home page when engine is Claude Code."""
         state_path = tmp_path / "prefs.json"
         cmd = ConfigCommand()
         ctx = _make_ctx(config_path=state_path, default_engine="claude")
@@ -1779,7 +1800,7 @@ class TestDiffPreviewToasts:
 class TestCostUsage:
     @pytest.mark.anyio
     async def test_cost_usage_page_renders_for_claude(self, tmp_path):
-        """Claude sees both API cost and subscription usage toggles."""
+        """Claude Code sees both API cost and subscription usage toggles."""
         state_path = tmp_path / "prefs.json"
         cmd = ConfigCommand()
         ctx = _make_ctx(
@@ -1986,7 +2007,7 @@ class TestCostUsage:
 
     @pytest.mark.anyio
     async def test_cost_usage_shown_on_home_for_claude(self, tmp_path):
-        """Cost & usage button should appear on home for Claude."""
+        """Cost & usage button should appear on home for Claude Code."""
         state_path = tmp_path / "prefs.json"
         cmd = ConfigCommand()
         ctx = _make_ctx(config_path=state_path, default_engine="claude")

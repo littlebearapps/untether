@@ -148,7 +148,7 @@ def test_translate_error_fixture_permission_denials() -> None:
     completed = next(evt for evt in events if isinstance(evt, CompletedEvent))
     assert completed.ok is False
     assert completed.error is not None
-    assert "claude run failed" in completed.error
+    assert "Claude Code run failed" in completed.error
     assert completed.resume == started.resume
 
 

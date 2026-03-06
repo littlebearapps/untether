@@ -19,7 +19,7 @@ Different engines have different strengths:
 
 See the [engine compatibility matrix](https://github.com/littlebearapps/untether#engine-compatibility) in the README for a full feature-by-feature breakdown.
 
-You might want Codex for quick tasks and Claude for deep work—without manually specifying every time.
+You might want Codex for quick tasks and Claude Code for deep work—without manually specifying every time.
 
 ## 1. One-off engine selection
 
@@ -40,7 +40,7 @@ The engine only applies to that message. The response will have a resume line fo
     done · claude · 8s<br>
     claude --resume abc123
 
-When you reply, Untether sees `claude --resume` and automatically uses Claude—you don't need to repeat `/claude`.
+When you reply, Untether sees `claude --resume` and automatically uses Claude Code—you don't need to repeat `/claude`.
 
 ## 2. Engine + project + branch
 
@@ -54,10 +54,10 @@ Or:
 !!! user "You"
     /happy-gadgets @feat/di /claude refactor to use dependency injection
 
-Both do the same thing: run Claude in the `happy-gadgets` project on the `feat/di` branch.
+Both do the same thing: run Claude Code in the `happy-gadgets` project on the `feat/di` branch.
 
 !!! note "Directives are only parsed at the start"
-    Everything after the first non-directive word is the prompt. `/claude fix /this/path` uses Claude with prompt "fix /this/path"—it doesn't try to parse `/this` as a directive.
+    Everything after the first non-directive word is the prompt. `/claude fix /this/path` uses Claude Code with prompt "fix /this/path"—it doesn't try to parse `/this` as a directive.
 
 ## 3. Set a default engine for a chat
 
@@ -71,7 +71,7 @@ Response:
 !!! untether "Untether"
     chat default engine set to claude
 
-Now all new conversations in this chat use Claude (unless you explicitly override with `/codex`).
+Now all new conversations in this chat use Claude Code (unless you explicitly override with `/codex`).
 
 Check the current default:
 
@@ -130,13 +130,13 @@ Set a default engine in your project config:
     default_engine = "claude"
     ```
 
-Now `/happy-gadgets` tasks default to Claude, even if your global default is Codex.
+Now `/happy-gadgets` tasks default to Claude Code, even if your global default is Codex.
 
 ## 6. Selection precedence
 
 When Untether picks an engine, it checks (highest to lowest):
 
-1. **Resume line** — replying to `claude --resume ...` uses Claude
+1. **Resume line** — replying to `claude --resume ...` uses Claude Code
 2. **Explicit directive** — `/codex ...` uses Codex
 3. **Topic default** — `/agent set` in this forum topic
 4. **Chat default** — `/agent set` in this chat
@@ -152,8 +152,8 @@ This means: resume lines always win, then explicit directives, then the most spe
     Chat sessions with two engines (assume default engine is `codex`):
 
     1. You send: `fix the failing tests` -> bot replies with `codex resume A` (stores Codex session A).
-    2. You reply to an older Claude message containing `claude --resume B` -> runs Claude and stores Claude session B.
-    3. You send a new message (not a reply) -> auto-resumes Codex session A (default engine), Claude session B remains stored for future replies or defaults.
+    2. You reply to an older Claude Code message containing `claude --resume B` -> runs Claude Code and stores Claude Code session B.
+    3. You send a new message (not a reply) -> auto-resumes Codex session A (default engine), Claude Code session B remains stored for future replies or defaults.
 
 ## 7. Practical patterns
 
@@ -182,14 +182,14 @@ This means: resume lines always win, then explicit directives, then the most spe
     default_engine = "claude"
     ```
 
-Simple messages go to Codex. `/backend` messages go to Claude.
+Simple messages go to Codex. `/backend` messages go to Claude Code.
 
 **Pattern: Topic per engine**
 
-Create forum topics like "Claude work" and "Codex tasks", then `/agent set` in each:
+Create forum topics like "Claude Code work" and "Codex tasks", then `/agent set` in each:
 
 !!! user "You"
-    topic: Claude deep-dives<br>
+    topic: Claude Code deep-dives<br>
     /agent set claude
 
 !!! user "You"

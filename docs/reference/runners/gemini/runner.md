@@ -139,4 +139,4 @@ Run `gemini` once interactively to authenticate with Google AI Studio or Vertex 
 
 * Gemini has no `--stream-json-input` mode, so interactive features (approve/deny, plan mode toggle) are not possible in headless mode.
 * `--approval-mode` is passed through from `permission_mode` run options but **has no observable effect** in headless `--output-format stream-json` mode — all tools are auto-approved regardless. This is an upstream limitation.
-* Tool names are snake_case (e.g., `read_file`) unlike Claude's PascalCase — the runner normalises these.
+* Tool names are snake_case (e.g., `read_file`) unlike Claude Code's PascalCase — the runner normalises these.

@@ -38,7 +38,7 @@ If you need exact options and defaults, use **[Reference](../reference/index.md)
 ## Cost and usage
 
 - [Cost budgets](cost-budgets.md) (per-run and daily cost limits)
-- [Subscription usage](subscription-usage.md) (monitor Claude subscription from Telegram)
+- [Subscription usage](subscription-usage.md) (monitor Claude Code subscription from Telegram)
 
 ## Multi-user and security
 

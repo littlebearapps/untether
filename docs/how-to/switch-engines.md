@@ -1,6 +1,6 @@
 # Switch engines
 
-Different tasks suit different agents. Switch engines on the fly — use Claude for deep refactors, Codex for quick fixes — without restarting or reconfiguring anything.
+Different tasks suit different agents. Switch engines on the fly — use Claude Code for deep refactors, Codex for quick fixes — without restarting or reconfiguring anything.
 
 ## Use an engine for one message
 

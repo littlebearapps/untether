@@ -29,7 +29,7 @@ The breakdown includes:
 
 ## Enable footer usage line
 
-To show a compact usage summary after every completed Claude run, enable the subscription usage footer:
+To show a compact usage summary after every completed Claude Code run, enable the subscription usage footer:
 
 === "untether config"
 
@@ -74,7 +74,7 @@ Or disable API cost to show only subscription usage:
     show_subscription_usage = true
     ```
 
-## Claude credentials
+## Claude Code credentials
 
 The `/usage` command reads your Claude Code OAuth credentials to fetch live data from the Anthropic API. If you see **"No Claude credentials found"**, run `claude login` in your terminal to authenticate.
 
@@ -85,7 +85,7 @@ Credential storage varies by platform:
 | Linux | Plain-text file | `~/.claude/.credentials.json` |
 | macOS | macOS Keychain | Entry: `Claude Code-credentials` |
 
-Untether checks both locations automatically. If `/usage` still fails after logging in, verify that the Claude CLI is working by running `claude` directly.
+Untether checks both locations automatically. If `/usage` still fails after logging in, verify that the Claude Code CLI is working by running `claude` directly.
 
 ## Related
 

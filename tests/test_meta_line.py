@@ -12,16 +12,19 @@ from untether.progress import ProgressTracker
 
 class TestShortModelName:
     def test_sonnet_full_id(self) -> None:
-        assert _short_model_name("claude-sonnet-4-5-20250929") == "sonnet"
+        assert _short_model_name("claude-sonnet-4-5-20250929") == "sonnet 4.5"
 
     def test_opus_full_id(self) -> None:
-        assert _short_model_name("claude-opus-4-6") == "opus"
+        assert _short_model_name("claude-opus-4-6") == "opus 4.6"
 
     def test_haiku_full_id(self) -> None:
-        assert _short_model_name("claude-haiku-4-5-20251001") == "haiku"
+        assert _short_model_name("claude-haiku-4-5-20251001") == "haiku 4.5"
 
     def test_already_short(self) -> None:
         assert _short_model_name("sonnet") == "sonnet"
+
+    def test_bare_opus(self) -> None:
+        assert _short_model_name("opus") == "opus"
 
     def test_non_claude_with_date_suffix(self) -> None:
         assert _short_model_name("gpt-4o-20240513") == "gpt-4o"
@@ -30,7 +33,10 @@ class TestShortModelName:
         assert _short_model_name("gemini-pro") == "gemini-pro"
 
     def test_case_insensitive(self) -> None:
-        assert _short_model_name("Claude-Sonnet-4-5") == "sonnet"
+        assert _short_model_name("Claude-Sonnet-4-5") == "sonnet 4.5"
+
+    def test_gemini_unchanged(self) -> None:
+        assert _short_model_name("gemini-2.5-pro") == "gemini-2.5-pro"
 
 
 class TestFormatMetaLine:
@@ -38,7 +44,7 @@ class TestFormatMetaLine:
         result = format_meta_line(
             {"model": "claude-sonnet-4-5-20250929", "permissionMode": "plan"}
         )
-        assert result == "sonnet \N{MIDDLE DOT} plan"
+        assert result == "sonnet 4.5 \N{MIDDLE DOT} plan"
 
     def test_already_short_model(self) -> None:
         result = format_meta_line({"model": "opus", "permissionMode": "default"})
@@ -46,7 +52,7 @@ class TestFormatMetaLine:
 
     def test_model_only(self) -> None:
         result = format_meta_line({"model": "claude-haiku-4-5-20251001"})
-        assert result == "haiku"
+        assert result == "haiku 4.5"
 
     def test_permission_only(self) -> None:
         result = format_meta_line({"permissionMode": "plan"})
@@ -63,6 +69,32 @@ class TestFormatMetaLine:
 
     def test_non_string_values_ignored(self) -> None:
         assert format_meta_line({"model": 42, "permissionMode": True}) is None
+
+    def test_effort_between_model_and_permission(self) -> None:
+        result = format_meta_line(
+            {
+                "model": "claude-opus-4-6",
+                "effort": "medium",
+                "permissionMode": "plan",
+            }
+        )
+        assert result == "opus 4.6 \N{MIDDLE DOT} medium \N{MIDDLE DOT} plan"
+
+    def test_effort_with_model_only(self) -> None:
+        result = format_meta_line({"model": "claude-opus-4-6", "effort": "low"})
+        assert result == "opus 4.6 \N{MIDDLE DOT} low"
+
+    def test_effort_only(self) -> None:
+        result = format_meta_line({"effort": "high"})
+        assert result == "high"
+
+    def test_effort_ignored_when_empty(self) -> None:
+        result = format_meta_line({"model": "opus", "effort": ""})
+        assert result == "opus"
+
+    def test_effort_ignored_when_non_string(self) -> None:
+        result = format_meta_line({"model": "opus", "effort": 42})
+        assert result == "opus"
 
 
 class TestProgressTrackerMeta:
@@ -98,7 +130,7 @@ class TestProgressTrackerMeta:
         )
         tracker.note_event(evt)
         state = tracker.snapshot(meta_formatter=format_meta_line)
-        assert state.meta_line == "sonnet \N{MIDDLE DOT} plan"
+        assert state.meta_line == "sonnet 4.5 \N{MIDDLE DOT} plan"
 
     def test_snapshot_without_meta_formatter(self) -> None:
         tracker = ProgressTracker(engine="claude")
@@ -147,7 +179,8 @@ class TestFooterWithMetaLine:
         assert parts.footer is not None
         lines = parts.footer.split(HARD_BREAK)
         assert (
-            lines[0] == "\N{LABEL} dir: untether @master | sonnet \N{MIDDLE DOT} plan"
+            lines[0]
+            == "\N{LABEL} dir: untether @master | sonnet 4.5 \N{MIDDLE DOT} plan"
         )
         assert lines[1] == "`claude --resume sess-1`"
 
@@ -272,7 +305,9 @@ class TestCrossEngineFooter:
             meta={"model": "claude-sonnet-4-5-20250929", "permissionMode": "plan"},
             context_line="dir: untether @master",
         )
-        assert footer == "\N{LABEL} dir: untether @master | sonnet \N{MIDDLE DOT} plan"
+        assert (
+            footer == "\N{LABEL} dir: untether @master | sonnet 4.5 \N{MIDDLE DOT} plan"
+        )
 
     def test_gemini_model(self) -> None:
         footer = self._render_footer(
@@ -296,7 +331,7 @@ class TestCrossEngineFooter:
             meta={"model": "claude-sonnet-4-6"},
             context_line="dir: amp-test",
         )
-        assert footer == "\N{LABEL} dir: amp-test | sonnet"
+        assert footer == "\N{LABEL} dir: amp-test | sonnet 4.6"
 
     def test_pi_model(self) -> None:
         footer = self._render_footer(
@@ -320,7 +355,7 @@ class TestCrossEngineFooter:
             meta={"model": "claude-sonnet-4-5-20250929"},
             context_line="dir: oc-test",
         )
-        assert footer == "\N{LABEL} dir: oc-test | sonnet"
+        assert footer == "\N{LABEL} dir: oc-test | sonnet 4.5"
 
     def test_no_model_dir_only(self) -> None:
         footer = self._render_footer(

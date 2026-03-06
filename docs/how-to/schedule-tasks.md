@@ -30,7 +30,7 @@ For more control, use Untether's built-in cron system. Cron triggers fire on a s
     prompt = "Review open PRs and summarise their status."
     ```
 
-This runs every weekday at 9:00 AM in the `myapp` project using Claude.
+This runs every weekday at 9:00 AM in the `myapp` project using Claude Code.
 
 Common schedules:
 

@@ -630,6 +630,10 @@ class CodexRunner(ResumeTokenMixin, JsonlSubprocessRunner):
             model = run_options.model
         if model is not None:
             meta = {"model": str(model)}
+        if run_options is not None and run_options.reasoning:
+            if meta is None:
+                meta = {}
+            meta["effort"] = run_options.reasoning
 
         return translate_codex_event(
             data,

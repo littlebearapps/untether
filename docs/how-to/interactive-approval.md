@@ -4,7 +4,7 @@ When Claude Code runs in permission mode, Untether shows inline buttons in Teleg
 
 ## When buttons appear
 
-Buttons appear when Claude wants to:
+Buttons appear when Claude Code wants to:
 
 - **Edit or create a file** (Edit, Write, MultiEdit)
 - **Run a shell command** (Bash)
@@ -19,9 +19,9 @@ When a permission request arrives, you see a message with the tool name and a co
 
 | Button | What it does |
 |--------|-------------|
-| **Approve** | Let Claude proceed with the action |
-| **Deny** | Block the action and ask Claude to explain what it was about to do |
-| **Pause & Outline Plan** | Stop Claude and require a written plan before continuing (only appears for ExitPlanMode) |
+| **Approve** | Let Claude Code proceed with the action |
+| **Deny** | Block the action and ask Claude Code to explain what it was about to do |
+| **Pause & Outline Plan** | Stop Claude Code and require a written plan before continuing (only appears for ExitPlanMode) |
 
 Buttons clear immediately when you tap them — no waiting for a spinner.
 
@@ -41,14 +41,14 @@ This lets you make informed approve/deny decisions without leaving Telegram.
 
 ## Answering questions
 
-When Claude calls `AskUserQuestion`, Untether renders the question with interactive option buttons in Telegram:
+When Claude Code calls `AskUserQuestion`, Untether renders the question with interactive option buttons in Telegram:
 
-- **Option buttons** — tap any option to answer instantly. Claude receives your choice and continues.
-- **"Other (type reply)"** — tap this to type a custom answer. Send your reply as a regular message and Untether routes it back to Claude.
-- **Multi-question flows** — if Claude asks multiple questions, they appear one at a time (e.g. "1 of 3"). Answer each to step through the sequence.
-- **Deny** — tap Deny to dismiss the question. Claude proceeds with its default assumptions.
+- **Option buttons** — tap any option to answer instantly. Claude Code receives your choice and continues.
+- **"Other (type reply)"** — tap this to type a custom answer. Send your reply as a regular message and Untether routes it back to Claude Code.
+- **Multi-question flows** — if Claude Code asks multiple questions, they appear one at a time (e.g. "1 of 3"). Answer each to step through the sequence.
+- **Deny** — tap Deny to dismiss the question. Claude Code proceeds with its default assumptions.
 
-Toggle ask mode on or off via `/config` → Ask mode. When off, questions are auto-denied and Claude proceeds with defaults.
+Toggle ask mode on or off via `/config` → Ask mode. When off, questions are auto-denied and Claude Code proceeds with defaults.
 
 <!-- SCREENSHOT: Telegram AskUserQuestion message showing option buttons and "Other (type reply)" -->
 

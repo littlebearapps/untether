@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import re
 import textwrap
 from dataclasses import dataclass
 from pathlib import Path
@@ -277,11 +278,18 @@ def render_event_cli(event: UntetherEvent) -> list[str]:
             return []
 
 
-def _short_model_name(model: str) -> str:
-    """Shorten a Claude model ID to its family name.
+_CLAUDE_MODEL_RE = re.compile(r"(opus|sonnet|haiku)[- ](\d+)[.-](\d+)", re.IGNORECASE)
 
-    ``'claude-sonnet-4-5-20250929'`` → ``'sonnet'``
+
+def _short_model_name(model: str) -> str:
+    """Shorten a Claude model ID to its family name with version.
+
+    ``'claude-opus-4-6'`` → ``'opus 4.6'``
+    ``'claude-sonnet-4-5-20250929'`` → ``'sonnet 4.5'``
     """
+    m = _CLAUDE_MODEL_RE.search(model)
+    if m:
+        return f"{m.group(1).lower()} {m.group(2)}.{m.group(3)}"
     for family in ("opus", "sonnet", "haiku"):
         if family in model.lower():
             return family
@@ -289,11 +297,14 @@ def _short_model_name(model: str) -> str:
 
 
 def format_meta_line(meta: dict[str, Any]) -> str | None:
-    """Format model + permission mode into a compact footer line."""
+    """Format model + effort + permission mode into a compact footer line."""
     parts: list[str] = []
     model = meta.get("model")
     if isinstance(model, str) and model:
         parts.append(_short_model_name(model))
+    effort = meta.get("effort")
+    if isinstance(effort, str) and effort:
+        parts.append(effort)
     perm = meta.get("permissionMode")
     if isinstance(perm, str) and perm:
         parts.append(perm)

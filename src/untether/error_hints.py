@@ -128,20 +128,36 @@ _HINT_PATTERNS: list[tuple[str, str]] = [
     # --- Signal errors ---
     (
         "sigterm",
-        "Untether was restarted. Your session is saved \N{EM DASH} resume by sending a new message or starting /claude.",
+        "Untether was restarted. Your session is saved"
+        " \N{EM DASH} resume by sending a new message.",
     ),
     (
         "sigkill",
-        "The process was forcefully terminated (timeout or out of memory). Try resuming with /claude.",
+        "The process was forcefully terminated (timeout or out of memory)."
+        " Your session is saved \N{EM DASH} try resuming by sending a new message.",
     ),
     (
         "sigabrt",
-        "The process aborted unexpectedly. Try starting a fresh session with /claude.",
+        "The process aborted unexpectedly. Try starting a fresh session with /new.",
     ),
     # --- Execution errors ---
     (
         "error_during_execution",
-        "The session failed to load \N{EM DASH} it may have been corrupted during a restart. Send /new to start a fresh session.",
+        "The session failed to load \N{EM DASH} it may have been"
+        " corrupted during a restart. Send /new to start a fresh session.",
+    ),
+    # --- Process / session errors ---
+    (
+        "finished without a result event",
+        "The engine exited before producing a final answer."
+        " This can happen after a crash or timeout."
+        " Your session is saved \N{EM DASH} try sending a new message to resume.",
+    ),
+    (
+        "finished but no session_id",
+        "The engine exited before establishing a session."
+        " This usually means it crashed during startup."
+        " Check that the engine CLI is installed and working, then try again.",
     ),
 ]
 

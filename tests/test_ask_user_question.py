@@ -224,12 +224,12 @@ async def test_answer_ask_question_sends_deny_with_answer() -> None:
 
 
 # ===========================================================================
-# Nested questions array format (real Claude AskUserQuestion input)
+# Nested questions array format (real Claude Code AskUserQuestion input)
 # ===========================================================================
 
 
 def test_ask_question_nested_questions_array() -> None:
-    """Claude sends AskUserQuestion with {"questions": [{"question": "..."}]}."""
+    """Claude Code sends AskUserQuestion with {"questions": [{"question": "..."}]}."""
     state, factory = _make_state_with_session()
     event = _decode_event(
         {

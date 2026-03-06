@@ -72,7 +72,7 @@ That's it. Your agent runs on your machine, streams progress to Telegram, and yo
 - 📁 **Projects and worktrees** — register repos with `untether init`, target with `/myproject @feat/thing`, run branches in isolated worktrees in parallel
 - 💰 **Cost and usage tracking** — run agents remotely with confidence; per-run and daily budgets, `/usage` breakdowns, and optional auto-cancel keep spending visible
 - 💡 **Actionable error hints** — friendly messages for API outages, rate limits, billing errors, and network failures with resume guidance
-- 🏷 **Model and mode metadata** — every completed message shows the model and permission mode (e.g. `🏷 sonnet · plan`) across all engines
+- 🏷 **Model and mode metadata** — every completed message shows model with version, effort level, and permission mode (e.g. `🏷 opus 4.6 · medium · plan`) across all engines
 - 🎙️ **Voice notes** — hands full? Dictate tasks instead of typing; Untether transcribes via a configurable Whisper-compatible endpoint
 - 📎 **File transfer** — upload files to your repo or download results back
 - ⏰ **Scheduled tasks** — cron expressions and webhook triggers
@@ -110,20 +110,21 @@ That's it. Your agent runs on your machine, streams progress to Telegram, and yo
 | **Verbose progress** | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | **Error hints** | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | **Preamble injection** | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| **Cost tracking** | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| **Cost tracking** | ✅ | ~³ | ✅ | ~³ | ✅ | ~³ |
 | **Interactive permissions** | ✅ | — | — | — | — | — |
-| **Plan mode** | ✅ | — | — | — | ✅² | — |
+| **Plan mode** | ✅ | — | — | — | ~² | — |
 | **Ask mode (option buttons)** | ✅ | — | — | — | — | — |
 | **Diff preview** | ✅ | — | — | — | — | — |
 | **Auto-approve safe tools** | ✅ | — | — | — | — | — |
 | **Progressive cooldown** | ✅ | — | — | — | — | — |
 | **Subscription usage** | ✅ | — | — | — | — | — |
-| **Reasoning levels** | — | ✅ | — | — | — | — |
+| **Reasoning/effort levels** | ✅ | ✅ | — | — | — | — |
 | **Device re-auth (`/auth`)** | — | ✅ | — | — | — | — |
 | **Context compaction** | — | — | — | ✅ | — | — |
 
 ¹ Amp model override maps to `--mode` (deep/free/rush/smart).
-² Gemini plan mode uses `--approval-mode` passthrough.
+² Passthrough to Gemini CLI's `--approval-mode`; not Untether's interactive approve/deny workflow.
+³ Token usage counts only — no USD cost reporting.
 
 ---
 

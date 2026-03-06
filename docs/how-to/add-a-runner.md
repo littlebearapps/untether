@@ -92,7 +92,7 @@ For Acme we’ll use:
 
 #### Write a resume regex
 
-Follow the pattern used by Claude/Codex: accept optional backticks, be case-insensitive,
+Follow the pattern used by Claude Code/Codex: accept optional backticks, be case-insensitive,
 match full line, and capture a group named `token`.
 
 ```py
@@ -155,7 +155,7 @@ Untether provides `JsonlSubprocessRunner`, which:
 
 #### Define a state object
 
-Copy the Claude pattern: create a small dataclass to hold streaming state.
+Copy the Claude Code pattern: create a small dataclass to hold streaming state.
 
 Common things to track:
 
@@ -239,7 +239,7 @@ For this guide, assume Acme outputs events like:
 
 #### Map them to Untether events
 
-Use this mapping (mirrors Claude’s approach):
+Use this mapping (mirrors Claude Code’s approach):
 
 - `session.start` → `StartedEvent(engine="acme", resume=ResumeToken("acme", session_id))`
 - `tool.use` → `ActionEvent(phase="started")` and stash action in `pending_actions`
@@ -250,11 +250,11 @@ Use this mapping (mirrors Claude’s approach):
 
 #### Make the translator a pure function
 
-Claude keeps translation logic in a standalone function (`translate_claude_event(...)`).
+Claude Code keeps translation logic in a standalone function (`translate_claude_event(...)`).
 This makes it easy to unit test without spawning a subprocess.
 
 Do the same for Acme. Use pattern matching against msgspec shapes, and rely on the
-`EventFactory` (as in Codex/Claude) to standardize event creation:
+`EventFactory` (as in Codex/Claude Code) to standardize event creation:
 
 ```py
 def translate_acme_event(
@@ -279,7 +279,7 @@ def translate_acme_event(
             name = str(name or "tool")
 
             # Keep titles short and friendly.
-            # (Claude uses untether.utils.paths.relativize_command / relativize_path)
+            # (Claude Code uses untether.utils.paths.relativize_command / relativize_path)
             kind: ActionKind = "tool"
             title = name
             if name in {"Bash", "Shell"}:
@@ -361,7 +361,7 @@ def translate_acme_event(
             return []
 ```
 
-This is intentionally close to Claude’s structure:
+This is intentionally close to Claude Code’s structure:
 
 - Match on the msgspec event type
 - Handle “init/session start” first
@@ -379,7 +379,7 @@ Most engines can implement a runner by combining:
 
 #### Why this combo?
 
-It matches Claude/Codex:
+It matches Claude Code/Codex:
 
 - Runner owns resume format/regex.
 - Base class owns locking and subprocess lifecycle.
@@ -499,18 +499,18 @@ Notes:
 - When `resume=None`, Untether will acquire a per-session lock after it sees the first
   `StartedEvent`. This is why emitting `StartedEvent` early is important.
 
-#### Optional but recommended overrides (Claude-inspired)
+#### Optional but recommended overrides (Claude Code-inspired)
 
 Depending on how robust you want the integration, consider adding:
 
-- `env(...)`: to strip or inject environment variables (Claude strips `ANTHROPIC_API_KEY`
+- `env(...)`: to strip or inject environment variables (Claude Code strips `ANTHROPIC_API_KEY`
   unless configured to use API billing).
 - `invalid_json_events(...)`: emit a helpful warning `ActionEvent` on malformed JSONL.
 - `decode_error_events(...)`: log + drop `msgspec.DecodeError` if the engine emits garbage.
 - `process_error_events(...)`: customize rc != 0 behavior.
 - `stream_end_events(...)`: handle “process exited cleanly but never emitted a final event”.
 
-Claude uses these to produce better failures instead of silent hangs.
+Claude Code uses these to produce better failures instead of silent hangs.
 
 ---
 
@@ -557,7 +557,7 @@ so onboarding can find it on PATH.
 
 ---
 
-### Step 6 — Add tests (copy Claude’s testing strategy)
+### Step 6 — Add tests (copy Claude Code’s testing strategy)
 
 A good runner PR usually contains 3 types of tests.
 
@@ -573,7 +573,7 @@ For Acme, assert:
 
 #### 2) Translation unit tests (fixtures)
 
-Claude’s translation tests load JSONL fixtures and feed them into the pure translator.
+Claude Code’s translation tests load JSONL fixtures and feed them into the pure translator.
 
 Do the same:
 
@@ -593,7 +593,7 @@ If you use msgspec, also add a tiny schema sanity test (pattern from
 
 #### 3) Lock/serialization tests (optional, but great)
 
-Claude has async tests proving that:
+Claude Code has async tests proving that:
 
 - two runs with the same resume token serialize (`max_in_flight == 1`)
 - a new session run locks correctly after it emits `StartedEvent`
@@ -603,7 +603,7 @@ one targeted test catches regressions.
 
 ---
 
-## Common pitfalls (and how Claude avoided them)
+## Common pitfalls (and how Claude Code avoided them)
 
 - **StartedEvent arrives too late**
   - If you wait until the end to emit `StartedEvent`, Untether can’t acquire the per-session lock
@@ -615,18 +615,18 @@ one targeted test catches regressions.
   - `JsonlSubprocessRunner` will stop reading after the first `CompletedEvent` it sees.
 
 - **Missing completion event**
-  - Claude handles “stream ended without a result event” by emitting a synthetic `CompletedEvent`
+  - Claude Code handles “stream ended without a result event” by emitting a synthetic `CompletedEvent`
     in `stream_end_events(...)`.
 
 - **Unhelpful error reporting**
-  - Include stderr tail in a warning action (Claude includes `stderr_tail` in `detail`).
+  - Include stderr tail in a warning action (Claude Code includes `stderr_tail` in `detail`).
 
 - **Resume line gets truncated**
   - Ensure `is_resume_line()` matches your `format_resume()` output. Untether tries to preserve
     resume lines during truncation.
 
 - **Leaking secrets**
-  - If your engine can run in “subscription mode” without env keys, strip env vars like Claude
+  - If your engine can run in “subscription mode” without env keys, strip env vars like Claude Code
     does with `ANTHROPIC_API_KEY`.
 
 ---

@@ -92,7 +92,7 @@ _HANDLED_REQUESTS: set[str] = set()
 _DISCUSS_COOLDOWN: dict[str, tuple[float, int]] = {}
 
 # Discuss approval: session_ids where user approved the plan via post-outline buttons.
-# When Claude next calls ExitPlanMode, it will be auto-approved.
+# When Claude Code next calls ExitPlanMode, it will be auto-approved.
 _DISCUSS_APPROVED: set[str] = set()
 
 # Sessions where "Pause & Outline Plan" was clicked and we're waiting for outline text.
@@ -103,7 +103,7 @@ _OUTLINE_PENDING: set[str] = set()
 _OUTLINE_MIN_CHARS = 200
 
 # A1: Pending AskUserQuestion requests: request_id -> question text
-# When Claude asks a question, the user can reply via Telegram text.
+# When Claude Code asks a question, the user can reply via Telegram text.
 _PENDING_ASK_REQUESTS: dict[str, str] = {}
 
 
@@ -332,9 +332,9 @@ def _extract_error(
     if isinstance(event.result, str) and event.result:
         first = event.result
     elif event.subtype:
-        first = f"claude run failed ({event.subtype})"
+        first = f"Claude Code run failed ({event.subtype})"
     else:
-        first = "claude run failed"
+        first = "Claude Code run failed"
 
     # Second line: diagnostic context
     parts: list[str] = []
@@ -400,6 +400,9 @@ def translate_claude_event(
                 value = getattr(event, key, None)
                 if value is not None:
                     meta[key] = value
+            run_options = get_run_options()
+            if run_options is not None and run_options.reasoning:
+                meta["effort"] = run_options.reasoning
             model = event.model
             token = ResumeToken(engine=ENGINE, value=session_id)
             event_title = str(model) if isinstance(model, str) and model else title
@@ -763,7 +766,7 @@ def translate_claude_event(
 
             # Clean up expired requests (older than timeout).
             # Send auto-deny to unblock the subprocess — without this,
-            # Claude blocks forever waiting for a response that never comes.
+            # Claude Code blocks forever waiting for a response that never comes.
             # See: https://github.com/banteg/takopi/issues/215
             current_time = time.time()
             expired = [
@@ -1066,6 +1069,11 @@ class ClaudeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
             model = run_options.model
         if model is not None:
             args.extend(["--model", str(model)])
+        reasoning = None
+        if run_options is not None and run_options.reasoning:
+            reasoning = run_options.reasoning
+        if reasoning is not None:
+            args.extend(["--effort", reasoning])
         allowed_tools = _coerce_comma_list(self.allowed_tools)
         if allowed_tools is not None:
             args.extend(["--allowedTools", allowed_tools])
@@ -1395,7 +1403,7 @@ class ClaudeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
                 del _REQUEST_TO_SESSION[k]
             logger.debug("claude_runner.unregistered", session_id=session_id)
 
-        parts = [f"claude failed ({_rc_label(rc)})."]
+        parts = [f"Claude Code failed ({_rc_label(rc)})."]
         session = _session_label(found_session, resume)
         if session:
             parts.append(f"session: {session}")
@@ -1436,7 +1444,7 @@ class ClaudeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
             logger.debug("claude_runner.unregistered", session_id=session_id)
 
         if not found_session:
-            parts = ["claude finished but no session_id was captured"]
+            parts = ["Claude Code finished but no session_id was captured"]
             session = _session_label(None, resume)
             if session:
                 parts.append(f"session: {session}")
@@ -1449,7 +1457,7 @@ class ClaudeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
                 )
             ]
 
-        parts = ["claude finished without a result event"]
+        parts = ["Claude Code finished without a result event"]
         session = _session_label(found_session, resume)
         if session:
             parts.append(f"session: {session}")
@@ -1812,7 +1820,7 @@ def get_pending_ask_request() -> tuple[str, str] | None:
 async def answer_ask_question(request_id: str, answer: str) -> bool:
     """Answer a pending AskUserQuestion by denying with the user's response.
 
-    The deny message contains the user's answer so Claude reads it and
+    The deny message contains the user's answer so Claude Code reads it and
     continues with that information.
     """
     _PENDING_ASK_REQUESTS.pop(request_id, None)
