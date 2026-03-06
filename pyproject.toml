@@ -2,7 +2,7 @@
 name = "untether"
 authors = [{name = "Little Bear Apps", email = "hello@littlebearapps.com"}]
 maintainers = [{name = "Little Bear Apps", email = "hello@littlebearapps.com"}]
-version = "0.32.0"
+version = "0.32.1"
 keywords = ["telegram", "claude-code", "codex", "opencode", "pi", "gemini-cli", "amp", "ai-agents", "coding-assistant", "remote-control", "cli-bridge"]
 description = "Run AI coding agents from your phone. Bridges Claude Code, Codex, OpenCode, Pi, Gemini CLI, and Amp to Telegram with interactive permissions, voice input, cost tracking, and live progress."
 readme = {file = "README.md", content-type = "text/markdown"}
@@ -13,7 +13,7 @@ dependencies = [
   "aiohttp>=3.9.0",
   "anyio>=4.12.0",
   "httpx>=0.28.1",
-  "markdown-it-py",
+  "markdown-it-py[linkify]",
   "msgspec>=0.20.0",
   "openai>=2.15.0",
   "pydantic>=2.12.5",

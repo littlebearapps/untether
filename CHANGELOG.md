@@ -1,5 +1,17 @@
 # changelog
 
+## v0.32.1 (2026-03-06)
+
+### fixes
+
+- missing `linkify-it-py` dependency crashes service on startup after 0.32.0 upgrade [#79](https://github.com/littlebearapps/untether/issues/79)
+  - `markdown-it-py` linkify feature requires optional `linkify-it-py` package
+  - changed dependency to `markdown-it-py[linkify]` to include the extra
+
+### docs
+
+- cross-platform process management instructions — platform tabs for restart/logs, contextualise systemd as Linux-specific
+
 ## v0.32.0 (2026-03-06)
 
 ### changes
