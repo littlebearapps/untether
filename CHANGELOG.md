@@ -1,5 +1,13 @@
 # changelog
 
+## v0.33.3 (2026-03-06)
+
+### fixes
+
+- block ExitPlanMode after cooldown expires when no outline has been written — adds outline guard check before time-based cooldown [#87](https://github.com/littlebearapps/untether/issues/87)
+  - `_OUTLINE_PENDING` + `max_text_len_since_cooldown < 200` guard fires regardless of cooldown expiry
+  - strengthened deny/escalation messages with consequence warnings and concrete framing
+
 ## v0.33.2 (2026-03-06)
 
 ### fixes
