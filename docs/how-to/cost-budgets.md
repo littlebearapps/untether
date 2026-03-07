@@ -37,6 +37,9 @@ After each run completes, Untether checks the reported cost against your budgets
 2. **Daily check**: if the cumulative daily cost exceeds `max_cost_per_day`, you get an alert
 3. **Warning threshold**: at `warn_at_pct` (default 70%) of either budget, you get an early warning
 
+!!! note "Token-only engines"
+    Engines that don't report USD costs (Codex, Pi, Gemini CLI, Amp) show token counts in the footer instead (e.g. `💰 26.0k in / 71 out`). Budget alerts only apply to engines that report USD costs.
+
 ### Alert levels
 
 | Alert | Icon | Meaning |
