@@ -219,6 +219,25 @@ Per-chat override: `/verbose on` and `/verbose off` override the config default 
 
 Budget alerts always appear regardless of `[footer]` settings.
 
+## `watchdog`
+
+=== "toml"
+
+    ```toml
+    [watchdog]
+    liveness_timeout = 600.0
+    stall_auto_kill = false
+    stall_repeat_seconds = 180.0
+    ```
+
+| Key | Type | Default | Notes |
+|-----|------|---------|-------|
+| `liveness_timeout` | float | `600.0` | Seconds of no stdout before `subprocess.liveness_stall` warning (60–3600). |
+| `stall_auto_kill` | bool | `false` | Auto-kill stalled processes. Requires zero TCP + CPU not increasing. |
+| `stall_repeat_seconds` | float | `180.0` | Interval between repeat stall warnings in Telegram (30–600). |
+
+The stall monitor in `ProgressEdits` fires at 5 min (300s) idle with progressive Telegram notifications. The liveness watchdog in the subprocess layer fires at `liveness_timeout` with `/proc` diagnostics. When `stall_auto_kill` is enabled, auto-kill requires a triple safety gate: timeout exceeded + zero TCP connections + CPU ticks not increasing between snapshots.
+
 ## Engine-specific config tables
 
 Engines use **top-level tables** keyed by engine id. Built-in engines are listed
