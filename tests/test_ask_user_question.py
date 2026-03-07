@@ -196,6 +196,7 @@ async def test_answer_ask_question_clears_pending() -> None:
 
     # Need an active runner for the response to work
     mock_runner = AsyncMock()
+    mock_runner.write_control_response.return_value = True
     _ACTIVE_RUNNERS["sess-1"] = (mock_runner, 0.0)
     _REQUEST_TO_SESSION["req-a"] = "sess-1"
 
@@ -503,6 +504,7 @@ def test_get_question_option_buttons() -> None:
 async def test_answer_with_options_approves_with_answers() -> None:
     """Answering all questions should approve with structured answers."""
     mock_runner = AsyncMock()
+    mock_runner.write_control_response.return_value = True
     _ACTIVE_RUNNERS["sess-1"] = (mock_runner, 0.0)
     _REQUEST_TO_SESSION["req-opts-a"] = "sess-1"
     _REQUEST_TO_INPUT["req-opts-a"] = {

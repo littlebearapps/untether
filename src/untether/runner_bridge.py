@@ -517,6 +517,9 @@ class ProgressEdits:
         self._sleep = sleep
         self._last_render_at: float = 0.0
         self._has_rendered: bool = False
+        self._last_event_at: float = 0.0
+        self._stall_warned: bool = False
+        self._stall_check_interval: float = 60.0
         self.event_seq = 0
         self.rendered_seq = 0
         self.signal_send, self.signal_recv = anyio.create_memory_object_stream(1)
@@ -524,8 +527,32 @@ class ProgressEdits:
     async def run(self) -> None:
         if self.progress_ref is None:
             return
+        stall_scope = anyio.CancelScope()
+
+        async def _monitor() -> None:
+            with stall_scope:
+                await self._stall_monitor()
+
         async with anyio.create_task_group() as bg_tg:
+            bg_tg.start_soon(_monitor)
             await self._run_loop(bg_tg)
+            stall_scope.cancel()
+
+    async def _stall_monitor(self) -> None:
+        """Periodically check for event stalls and log warnings."""
+        while True:
+            await anyio.sleep(self._stall_check_interval)
+            if self._last_event_at == 0:
+                continue
+            elapsed = self.clock() - self._last_event_at
+            if elapsed >= self._STALL_THRESHOLD_SECONDS and not self._stall_warned:
+                self._stall_warned = True
+                logger.warning(
+                    "progress_edits.stall_detected",
+                    channel_id=self.channel_id,
+                    seconds_since_last_event=round(elapsed, 1),
+                    last_event_seq=self.event_seq,
+                )
 
     async def _run_loop(self, bg_tg: anyio.abc.TaskGroup) -> None:
         while True:
@@ -630,11 +657,23 @@ class ProgressEdits:
 
             self.rendered_seq = seq_at_render
 
+    _STALL_THRESHOLD_SECONDS: float = 300.0  # 5 minutes
+
     async def on_event(self, evt: UntetherEvent) -> None:
         if not self.tracker.note_event(evt):
             return
         if self.progress_ref is None:
             return
+        now = self.clock()
+        if self._stall_warned:
+            elapsed_stall = now - self._last_event_at if self._last_event_at else 0
+            logger.info(
+                "progress_edits.stall_recovered",
+                channel_id=self.channel_id,
+                stall_seconds=round(elapsed_stall, 1),
+            )
+            self._stall_warned = False
+        self._last_event_at = now
         self.event_seq += 1
         try:
             self.signal_send.send_nowait(None)

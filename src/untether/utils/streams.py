@@ -16,7 +16,7 @@ async def iter_bytes_lines(stream: ByteReceiveStream) -> AsyncIterator[bytes]:
     while True:
         try:
             line = await buffered.receive_until(b"\n", sys.maxsize)
-        except anyio.IncompleteRead:
+        except (anyio.IncompleteRead, anyio.ClosedResourceError):
             return
         yield line
 

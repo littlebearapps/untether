@@ -1,5 +1,15 @@
 # changelog
 
+## v0.33.5 (2026-03-07)
+
+### fixes
+
+- downgrade `control_response.failed` ClosedResourceError from error to warning — race condition when Telegram callback arrives after session stdin closes; `write_control_response()` now returns `bool` and `send_claude_control_response()` propagates it [#61](https://github.com/littlebearapps/untether/issues/61)
+  - also downgrade `auto_approve_failed` and `auto_deny_failed` for consistency
+- add subprocess watchdog — detects orphaned child processes (e.g. MCP servers) holding stdout pipes open after parent exits; kills process group after grace period
+- add stall monitor — warns when no progress events arrive for 5 minutes; clears on recovery
+- handle `ClosedResourceError` in `iter_bytes_lines()` on abrupt pipe close
+
 ## v0.33.4 (2026-03-06)
 
 ### fixes

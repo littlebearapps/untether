@@ -966,7 +966,7 @@ class ClaudeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
 
     async def write_control_response(
         self, request_id: str, approved: bool, *, deny_message: str | None = None
-    ) -> None:
+    ) -> bool:
         """Write a control response to the Claude Code process via PIPE or PTY.
 
         Uses _SESSION_STDIN to find the correct stdin for the session,
@@ -1010,9 +1010,10 @@ class ClaudeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
                     session_id=session_id,
                     channel="pipe",
                 )
+                return True
             except (OSError, anyio.ClosedResourceError) as e:
-                logger.error(
-                    "control_response.failed",
+                logger.warning(
+                    "control_response.pipe_closed",
                     request_id=request_id,
                     approved=approved,
                     session_id=session_id,
@@ -1020,6 +1021,7 @@ class ClaudeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
                     error_type=e.__class__.__name__,
                     channel="pipe",
                 )
+                return False
         elif self._pty_master_fd is not None:
             try:
                 os.write(self._pty_master_fd, jsonl_line.encode())
@@ -1030,9 +1032,10 @@ class ClaudeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
                     session_id=session_id,
                     channel="pty",
                 )
+                return True
             except OSError as e:
-                logger.error(
-                    "control_response.failed",
+                logger.warning(
+                    "control_response.pipe_closed",
                     request_id=request_id,
                     approved=approved,
                     session_id=session_id,
@@ -1040,6 +1043,7 @@ class ClaudeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
                     error_type=e.__class__.__name__,
                     channel="pty",
                 )
+                return False
         else:
             logger.warning(
                 "control_response.no_channel",
@@ -1047,6 +1051,7 @@ class ClaudeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
                 approved=approved,
                 session_id=session_id,
             )
+            return False
 
     def _build_args(self, prompt: str, resume: ResumeToken | None) -> list[str]:
         run_options = get_run_options()
@@ -1303,11 +1308,11 @@ class ClaudeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
                         channel="pty",
                     )
                 else:
-                    logger.error(
+                    logger.warning(
                         "control_response.auto_approve_failed", request_id=req_id
                     )
             except (OSError, anyio.ClosedResourceError) as e:
-                logger.error(
+                logger.warning(
                     "control_response.auto_approve_failed",
                     request_id=req_id,
                     error=str(e),
@@ -1346,9 +1351,11 @@ class ClaudeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
                         "control_response.auto_denied", request_id=req_id, channel="pty"
                     )
                 else:
-                    logger.error("control_response.auto_deny_failed", request_id=req_id)
+                    logger.warning(
+                        "control_response.auto_deny_failed", request_id=req_id
+                    )
             except (OSError, anyio.ClosedResourceError) as e:
-                logger.error(
+                logger.warning(
                     "control_response.auto_deny_failed",
                     request_id=req_id,
                     error=str(e),
@@ -1592,9 +1599,9 @@ class ClaudeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
                     await proc.stdin.send(payload)
                     await proc.stdin.aclose()
 
-                rc: int | None = None
                 stream = JsonlStreamState(expected_session=resume)
                 stderr_lines: list[str] = []
+                reader_done = anyio.Event()
 
                 async with anyio.create_task_group() as tg:
                     tg.start_soon(
@@ -1603,6 +1610,14 @@ class ClaudeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
                         run_logger,
                         tag,
                         stderr_lines,
+                    )
+                    tg.start_soon(
+                        self._subprocess_watchdog,
+                        proc,
+                        stream,
+                        reader_done,
+                        run_logger,
+                        proc.pid,
                     )
                     async for evt in self._iter_jsonl_events(
                         stdout=proc.stdout,
@@ -1614,6 +1629,7 @@ class ClaudeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
                         session_stdin=this_proc_stdin if use_control_channel else None,
                     ):
                         yield evt
+                    reader_done.set()
 
                     # Close stdin after all events to let CLI exit.
                     # Use this_proc_stdin (local) not self._proc_stdin (may
@@ -1622,13 +1638,12 @@ class ClaudeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
                         with contextlib.suppress(Exception):
                             await this_proc_stdin.aclose()
 
-                    rc = await proc.wait()
-
+                rc = await proc.wait()
                 run_logger.info("subprocess.exit", pid=proc.pid, rc=rc)
                 if stream.did_emit_completed:
                     return
                 found_session = stream.found_session
-                if rc is not None and rc != 0:
+                if rc != 0:
                     events = self.process_error_events(
                         rc,
                         resume=resume,
@@ -1756,7 +1771,9 @@ async def send_claude_control_response(
         return False
 
     runner, _ = _ACTIVE_RUNNERS[session_id]
-    await runner.write_control_response(request_id, approved, deny_message=deny_message)
+    success = await runner.write_control_response(
+        request_id, approved, deny_message=deny_message
+    )
 
     # Clean up the mapping after use
     del _REQUEST_TO_SESSION[request_id]
@@ -1766,7 +1783,7 @@ async def send_claude_control_response(
     if len(_HANDLED_REQUESTS) > 100:
         _HANDLED_REQUESTS.clear()
 
-    return True
+    return success
 
 
 def _cooldown_seconds(count: int) -> float:

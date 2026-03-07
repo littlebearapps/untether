@@ -1709,3 +1709,61 @@ async def test_handle_message_with_min_render_interval() -> None:
 
     # Should complete successfully with the interval set
     assert any("done" in c["message"].text.lower() for c in transport.send_calls)
+
+
+@pytest.mark.anyio
+async def test_progress_edits_stall_monitor_logs_warning(
+    capfd: pytest.CaptureFixture[str],
+) -> None:
+    """Stall monitor warns when no events arrive for _STALL_THRESHOLD_SECONDS."""
+    transport = FakeTransport()
+    presenter = _KeyboardPresenter()
+    clock = _FakeClock(start=100.0)
+    edits = _make_edits(transport, presenter, clock=clock)
+    # Shorten thresholds for test speed
+    edits._stall_check_interval = 0.01
+    edits._STALL_THRESHOLD_SECONDS = 0.05
+
+    # Simulate one event arriving, then stall
+    edits._last_event_at = 100.0
+
+    async with anyio.create_task_group() as tg:
+
+        async def drive() -> None:
+            # Advance clock past stall threshold
+            clock.set(100.1)
+            await anyio.sleep(0.05)
+            # Close signal to end the run loop
+            edits.signal_send.close()
+
+        tg.start_soon(edits.run)
+        tg.start_soon(drive)
+
+    # Check that stall was detected
+    assert edits._stall_warned is True
+
+
+@pytest.mark.anyio
+async def test_progress_edits_stall_recovery_clears_warning() -> None:
+    """Receiving an event after a stall clears the warning flag."""
+    transport = FakeTransport()
+    presenter = _KeyboardPresenter()
+    clock = _FakeClock(start=100.0)
+    edits = _make_edits(transport, presenter, clock=clock)
+
+    # Simulate stall state
+    edits._stall_warned = True
+    edits._last_event_at = 100.0
+
+    # Receive a new event
+    clock.set(200.0)
+    from untether.model import ActionEvent, Action
+
+    evt = ActionEvent(
+        engine="codex",
+        action=Action(id="x", kind="command", title="echo"),
+        phase="started",
+    )
+    await edits.on_event(evt)
+
+    assert edits._stall_warned is False

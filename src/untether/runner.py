@@ -659,6 +659,58 @@ class JsonlSubprocessRunner(BaseRunner):
             ):
                 yield evt
 
+    _WATCHDOG_GRACE_SECONDS: float = 5.0
+
+    _WATCHDOG_POLL_SECONDS: float = 0.5
+
+    async def _subprocess_watchdog(
+        self,
+        proc: Any,
+        stream: JsonlStreamState,
+        reader_done: anyio.Event,
+        logger: Any,
+        pid: int,
+    ) -> None:
+        """Kill orphan children if stdout outlives the process.
+
+        When a subprocess dies but child processes (e.g. MCP servers) inherit the
+        stdout pipe FD, the JSONL reader blocks forever.  This watchdog polls for
+        process death (``proc.wait()`` blocks until pipes drain, so we use
+        ``os.kill(pid, 0)``), then after a grace period kills the process group
+        to terminate orphan children and unblock the readers.
+        """
+        import os as _os
+
+        # Poll until the process is dead or the reader finishes.
+        while not reader_done.is_set():
+            try:
+                _os.kill(pid, 0)
+            except (ProcessLookupError, PermissionError):
+                break  # process exited
+            await anyio.sleep(self._WATCHDOG_POLL_SECONDS)
+        if stream.did_emit_completed or reader_done.is_set():
+            return
+        # Process is dead but reader hasn't finished — wait grace period.
+        with anyio.move_on_after(self._WATCHDOG_GRACE_SECONDS):
+            await reader_done.wait()
+        if stream.did_emit_completed or reader_done.is_set():
+            return
+        # Reader still blocked — pipes likely held open by orphan children.
+        logger.warning(
+            "subprocess.died_without_completion",
+            pid=pid,
+        )
+        # Kill the process group to terminate orphan children holding pipes open.
+        # manage_subprocess uses start_new_session=True, so the process group
+        # matches the subprocess PID.
+        try:
+            _os.killpg(pid, signal.SIGKILL)
+            logger.warning("subprocess.killed_orphan_group", pid=pid)
+        except (ProcessLookupError, PermissionError):
+            pass
+        except OSError:
+            logger.debug("subprocess.killpg_failed", pid=pid, exc_info=True)
+
     async def run_impl(
         self, prompt: str, resume: ResumeToken | None
     ) -> AsyncIterator[UntetherEvent]:
@@ -702,9 +754,9 @@ class JsonlSubprocessRunner(BaseRunner):
 
             await self._send_payload(proc, payload, logger=logger, resume=resume)
 
-            rc: int | None = None
             stream = JsonlStreamState(expected_session=resume)
             stderr_lines: list[str] = []
+            reader_done = anyio.Event()
 
             async with anyio.create_task_group() as tg:
                 tg.start_soon(
@@ -713,6 +765,14 @@ class JsonlSubprocessRunner(BaseRunner):
                     logger,
                     tag,
                     stderr_lines,
+                )
+                tg.start_soon(
+                    self._subprocess_watchdog,
+                    proc,
+                    stream,
+                    reader_done,
+                    logger,
+                    proc.pid,
                 )
                 async for evt in self._iter_jsonl_events(
                     stdout=proc.stdout,
@@ -723,14 +783,14 @@ class JsonlSubprocessRunner(BaseRunner):
                     pid=proc.pid,
                 ):
                     yield evt
+                reader_done.set()
 
-                rc = await proc.wait()
-
+            rc = await proc.wait()
             logger.info("subprocess.exit", pid=proc.pid, rc=rc)
             if stream.did_emit_completed:
                 return
             found_session = stream.found_session
-            if rc is not None and rc != 0:
+            if rc != 0:
                 events = self.process_error_events(
                     rc,
                     resume=resume,

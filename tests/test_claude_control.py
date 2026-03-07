@@ -7,6 +7,7 @@ import json
 from typing import Any
 from unittest.mock import AsyncMock
 
+import anyio
 import pytest
 
 from untether.events import EventFactory
@@ -321,6 +322,70 @@ async def test_write_control_response_deny_format() -> None:
     assert inner["message"] == "User denied"
     # updatedInput should NOT be present on deny
     assert "updatedInput" not in inner
+
+
+# ---------------------------------------------------------------------------
+# B2. Closed-pipe race condition (#61)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.anyio
+async def test_write_control_response_returns_true_on_success() -> None:
+    """Happy path: write_control_response returns True."""
+    runner = ClaudeRunner(claude_cmd="claude")
+    session_id = "sess-ok"
+    fake_stdin = AsyncMock()
+    _SESSION_STDIN[session_id] = fake_stdin
+    _REQUEST_TO_SESSION["req-ok"] = session_id
+
+    result = await runner.write_control_response("req-ok", approved=True)
+    assert result is True
+
+
+@pytest.mark.anyio
+async def test_write_control_response_returns_false_on_closed_resource() -> None:
+    """ClosedResourceError returns False instead of raising."""
+    runner = ClaudeRunner(claude_cmd="claude")
+    session_id = "sess-closed"
+    fake_stdin = AsyncMock()
+    fake_stdin.send.side_effect = anyio.ClosedResourceError()
+    _SESSION_STDIN[session_id] = fake_stdin
+    _REQUEST_TO_SESSION["req-closed"] = session_id
+
+    result = await runner.write_control_response("req-closed", approved=True)
+    assert result is False
+
+
+@pytest.mark.anyio
+async def test_write_control_response_returns_false_on_oserror() -> None:
+    """OSError returns False instead of raising."""
+    runner = ClaudeRunner(claude_cmd="claude")
+    session_id = "sess-os"
+    fake_stdin = AsyncMock()
+    fake_stdin.send.side_effect = OSError("Broken pipe")
+    _SESSION_STDIN[session_id] = fake_stdin
+    _REQUEST_TO_SESSION["req-os"] = session_id
+
+    result = await runner.write_control_response("req-os", approved=True)
+    assert result is False
+
+
+@pytest.mark.anyio
+async def test_send_control_response_returns_false_on_closed_pipe() -> None:
+    """End-to-end: broken stdin → send_claude_control_response returns False."""
+    runner = ClaudeRunner(claude_cmd="claude")
+    session_id = "sess-e2e"
+    fake_stdin = AsyncMock()
+    fake_stdin.send.side_effect = anyio.ClosedResourceError()
+    _ACTIVE_RUNNERS[session_id] = (runner, 0.0)
+    _SESSION_STDIN[session_id] = fake_stdin
+    _REQUEST_TO_SESSION["req-e2e"] = session_id
+
+    result = await send_claude_control_response("req-e2e", approved=True)
+    assert result is False
+    # Cleanup still happens
+    assert "req-e2e" not in _REQUEST_TO_SESSION
+    assert "req-e2e" in _HANDLED_REQUESTS
 
 
 # ===========================================================================

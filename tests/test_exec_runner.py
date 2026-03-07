@@ -549,3 +549,42 @@ async def test_run_serializes_two_new_sessions_same_thread(
         with anyio.fail_after(2):
             await started_first.wait()
             await started_second.wait()
+
+
+@pytest.mark.anyio
+async def test_watchdog_force_closes_orphaned_pipes(tmp_path, monkeypatch) -> None:
+    """When subprocess dies but stdout stays open, watchdog force-closes pipes."""
+    import os
+    import signal as sig
+
+    # Create a script that spawns a child holding stdout open, then exits.
+    script = tmp_path / "codex"
+    script.write_text(
+        "#!/usr/bin/env python3\n"
+        "import json, os, sys, time\n"
+        # Print a started event
+        "sid = '019b73c4-0000-0000-0000-000000000001'\n"
+        "print(json.dumps({'type': 'thread.started', 'thread_id': sid}), flush=True)\n"
+        # Fork a child that holds stdout open
+        "pid = os.fork()\n"
+        "if pid == 0:\n"
+        "    time.sleep(60)\n"  # child: hold pipe open for 60s
+        "    sys.exit(0)\n"
+        "# parent exits immediately without CompletedEvent\n"
+        "sys.exit(0)\n",
+        encoding="utf-8",
+    )
+    script.chmod(0o755)
+
+    runner = CodexRunner(codex_cmd=str(script), extra_args=[])
+    # Use a short grace period so the test doesn't wait long
+    runner._WATCHDOG_GRACE_SECONDS = 0.5
+
+    events: list[UntetherEvent] = []
+    with anyio.fail_after(5):
+        async for evt in runner.run("test", None):
+            events.append(evt)
+
+    # Should have completed (watchdog force-closed the orphaned pipe)
+    assert any(isinstance(e, StartedEvent) for e in events)
+    assert any(isinstance(e, CompletedEvent) for e in events)
