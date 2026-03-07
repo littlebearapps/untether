@@ -6,6 +6,9 @@
 
 - ExitPlanMode stuck after cancel + resume: stale outline_guard not cleaned up [#93](https://github.com/littlebearapps/untether/issues/93)
   - extract `_cleanup_session_registries()` helper, call from `run_impl` finally block
+- stall monitor fails to detect stalls when no events arrive after session start; no Telegram notification [#95](https://github.com/littlebearapps/untether/issues/95)
+  - initialise `_last_event_at` from `clock()` instead of `0.0` so threshold works from session start
+  - send `⏳ No progress for N min` Telegram notification on stall detection (previously journal-only)
 
 ### changes
 
