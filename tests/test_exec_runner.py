@@ -554,9 +554,6 @@ async def test_run_serializes_two_new_sessions_same_thread(
 @pytest.mark.anyio
 async def test_watchdog_force_closes_orphaned_pipes(tmp_path, monkeypatch) -> None:
     """When subprocess dies but stdout stays open, watchdog force-closes pipes."""
-    import os
-    import signal as sig
-
     # Create a script that spawns a child holding stdout open, then exits.
     script = tmp_path / "codex"
     script.write_text(
@@ -580,10 +577,8 @@ async def test_watchdog_force_closes_orphaned_pipes(tmp_path, monkeypatch) -> No
     # Use a short grace period so the test doesn't wait long
     runner._WATCHDOG_GRACE_SECONDS = 0.5
 
-    events: list[UntetherEvent] = []
     with anyio.fail_after(5):
-        async for evt in runner.run("test", None):
-            events.append(evt)
+        events: list[UntetherEvent] = [evt async for evt in runner.run("test", None)]
 
     # Should have completed (watchdog force-closed the orphaned pipe)
     assert any(isinstance(e, StartedEvent) for e in events)

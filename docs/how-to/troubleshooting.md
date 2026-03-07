@@ -43,6 +43,12 @@ npm install -g opencode-ai@latest
 
 # Pi
 npm install -g @mariozechner/pi-coding-agent
+
+# Gemini CLI
+npm install -g @google/gemini-cli
+
+# Amp
+npm install -g @sourcegraph/amp
 ```
 
 Verify with `which codex` (or `which claude`, etc.). If installed via `npm -g` but not found, check that npm's global bin directory is in your PATH.
@@ -57,6 +63,8 @@ Run `untether doctor` to see which engines are detected.
 - **Claude Code:** Run `claude login` to authenticate. On macOS, credentials are stored in Keychain; on Linux, in `~/.claude/.credentials.json`
 - **OpenCode:** Run `opencode` and authenticate with your chosen provider
 - **Pi:** Run `pi` and log in with your provider
+- **Gemini CLI:** Run `gemini` and authenticate with your Google account
+- **Amp:** Run `amp` and sign in with your Sourcegraph account
 
 ## Progress stuck on "starting"
 

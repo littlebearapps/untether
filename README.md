@@ -110,7 +110,7 @@ That's it. Your agent runs on your machine, streams progress to Telegram, and yo
 | **Verbose progress** | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | **Error hints** | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | **Preamble injection** | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| **Cost tracking** | ✅ | ~³ | ✅ | ~³ | ✅ | ~³ |
+| **Cost tracking** | ✅ | ~³ | ✅ | ~³ | ~³ | ~³ |
 | **Interactive permissions** | ✅ | — | — | — | — | — |
 | **Plan mode** | ✅ | — | — | — | ~² | — |
 | **Ask mode (option buttons)** | ✅ | — | — | — | — | — |
@@ -144,7 +144,7 @@ That's it. Your agent runs on your machine, streams progress to Telegram, and yo
 | `/topic` | Create or bind forum topics |
 | `/restart` | Gracefully restart Untether (drains active runs first) |
 | `/verbose` | Toggle verbose progress mode (show tool details) |
-| `/config` | Interactive settings menu (plan mode, ask mode, verbose, engine, model, reasoning, trigger) |
+| `/config` | Interactive settings menu (plan mode, ask mode, verbose, engine, model, reasoning, trigger, approval mode, cost & usage) |
 | `/ctx` | Show or update project/branch context |
 | `/reasoning` | Set reasoning level override |
 | `/trigger` | Set group chat trigger mode |

@@ -1,6 +1,6 @@
 # Agent preamble
 
-Untether injects a context preamble at the start of every agent prompt, telling the engine it's running via Telegram and requesting structured end-of-task summaries. This works across all engines (Claude Code, Codex, OpenCode, Pi).
+Untether injects a context preamble at the start of every agent prompt, telling the engine it's running via Telegram and requesting structured end-of-task summaries. This works across all engines (Claude Code, Codex, OpenCode, Pi, Gemini CLI, Amp).
 
 ## What the default preamble does
 
