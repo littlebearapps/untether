@@ -1960,28 +1960,23 @@ async def test_stall_auto_cancel_dead_process() -> None:
     edits.cancel_event = cancel_event
 
     # Patch collect_proc_diag to return dead process
-    import untether.runner_bridge as rb
     from unittest.mock import patch
     from untether.utils.proc_diag import ProcessDiag
 
     dead_diag = ProcessDiag(pid=99999, alive=False)
 
-    with patch.object(rb, "_stall_monitor_collect_diag", None, create=True):
-        # Patch at the import location in the method
-        with patch(
-            "untether.utils.proc_diag.collect_proc_diag", return_value=dead_diag
-        ):
-            async with anyio.create_task_group() as tg:
+    with patch("untether.utils.proc_diag.collect_proc_diag", return_value=dead_diag):
+        async with anyio.create_task_group() as tg:
 
-                async def drive() -> None:
-                    clock.set(100.1)
-                    await anyio.sleep(0.1)
-                    # If auto-cancel didn't fire, close manually
-                    if not cancel_event.is_set():
-                        edits.signal_send.close()
+            async def drive() -> None:
+                clock.set(100.1)
+                await anyio.sleep(0.1)
+                # If auto-cancel didn't fire, close manually
+                if not cancel_event.is_set():
+                    edits.signal_send.close()
 
-                tg.start_soon(edits.run)
-                tg.start_soon(drive)
+            tg.start_soon(edits.run)
+            tg.start_soon(drive)
 
     assert cancel_event.is_set()
     # Should have sent auto-cancel notification
