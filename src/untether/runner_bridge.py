@@ -574,7 +574,13 @@ class ProgressEdits:
             elapsed = self.clock() - self._last_event_at
             self._peak_idle = max(self._peak_idle, elapsed)
 
-            if elapsed < self._STALL_THRESHOLD_SECONDS:
+            # Use longer threshold when waiting for user approval
+            threshold = (
+                self._STALL_THRESHOLD_APPROVAL
+                if self._has_pending_approval()
+                else self._STALL_THRESHOLD_SECONDS
+            )
+            if elapsed < threshold:
                 continue
             now = self.clock()
             if (
@@ -686,6 +692,14 @@ class ProgressEdits:
                     "progress_edits.stall_notify_failed",
                     exc_info=True,
                 )
+
+    def _has_pending_approval(self) -> bool:
+        """Check if the most recent non-completed action is waiting for user approval."""
+        for action_state in reversed(list(self.tracker._actions.values())):
+            if not action_state.completed:
+                return bool(action_state.action.detail.get("inline_keyboard"))
+            break  # only check the most recent
+        return False
 
     def _last_action_summary(self) -> str | None:
         """Return a short description of the most recent action."""
@@ -799,6 +813,7 @@ class ProgressEdits:
             self.rendered_seq = seq_at_render
 
     _STALL_THRESHOLD_SECONDS: float = 300.0  # 5 minutes
+    _STALL_THRESHOLD_APPROVAL: float = 1800.0  # 30 minutes when waiting for approval
     _STALL_MAX_WARNINGS: int = 10  # absolute cap
     _STALL_MAX_WARNINGS_NO_PID: int = 3  # aggressive cap when pid=None + no events
 

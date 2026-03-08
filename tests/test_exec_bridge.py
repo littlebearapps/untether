@@ -2106,3 +2106,126 @@ async def test_stall_no_auto_cancel_without_cancel_event() -> None:
         c for c in transport.send_calls if "Auto-cancelled" in c["message"].text
     ]
     assert len(auto_cancel_msgs) == 1
+
+
+@pytest.mark.anyio
+async def test_stall_suppressed_while_waiting_for_approval() -> None:
+    """Stall monitor uses longer threshold when pending approval action exists."""
+    transport = FakeTransport()
+    presenter = _KeyboardPresenter()
+    clock = _FakeClock(start=100.0)
+    edits = _make_edits(transport, presenter, clock=clock)
+    edits._stall_check_interval = 0.01
+    edits._STALL_THRESHOLD_SECONDS = 0.05
+    edits._STALL_THRESHOLD_APPROVAL = 0.5  # 500ms for test
+
+    # Simulate a pending approval action (has inline_keyboard in detail)
+    from untether.model import Action, ActionEvent
+
+    evt = ActionEvent(
+        engine="codex",
+        action=Action(
+            id="ctrl.1",
+            kind="warning",
+            title="Permission Request [CanUseTool] - tool: ExitPlanMode",
+            detail={"inline_keyboard": {"buttons": [[{"text": "Approve"}]]}},
+        ),
+        phase="started",
+    )
+    await edits.on_event(evt)
+    clock.set(100.0)  # reset after on_event
+
+    async with anyio.create_task_group() as tg:
+
+        async def drive() -> None:
+            # Advance past normal threshold (0.05) but NOT past approval threshold (0.5)
+            clock.set(100.2)
+            await anyio.sleep(0.05)
+            # Should NOT have warned yet
+            edits.signal_send.close()
+
+        tg.start_soon(edits.run)
+        tg.start_soon(drive)
+
+    # No stall warning should have fired
+    assert edits._stall_warn_count == 0
+    stall_msgs = [c for c in transport.send_calls if "No progress" in c["message"].text]
+    assert len(stall_msgs) == 0
+
+
+@pytest.mark.anyio
+async def test_stall_fires_after_approval_threshold() -> None:
+    """Stall monitor fires after the longer approval threshold is exceeded."""
+    transport = FakeTransport()
+    presenter = _KeyboardPresenter()
+    clock = _FakeClock(start=100.0)
+    edits = _make_edits(transport, presenter, clock=clock)
+    edits._stall_check_interval = 0.01
+    edits._STALL_THRESHOLD_SECONDS = 0.05
+    edits._STALL_THRESHOLD_APPROVAL = 0.1  # short for test
+
+    from untether.model import Action, ActionEvent
+
+    evt = ActionEvent(
+        engine="codex",
+        action=Action(
+            id="ctrl.1",
+            kind="warning",
+            title="Permission Request [CanUseTool] - tool: Bash",
+            detail={"inline_keyboard": {"buttons": [[{"text": "Approve"}]]}},
+        ),
+        phase="started",
+    )
+    await edits.on_event(evt)
+    clock.set(100.0)
+
+    async with anyio.create_task_group() as tg:
+
+        async def drive() -> None:
+            # Advance past the approval threshold (0.1)
+            clock.set(100.2)
+            await anyio.sleep(0.05)
+            edits.signal_send.close()
+
+        tg.start_soon(edits.run)
+        tg.start_soon(drive)
+
+    assert edits._stall_warn_count >= 1
+    stall_msgs = [c for c in transport.send_calls if "No progress" in c["message"].text]
+    assert len(stall_msgs) >= 1
+
+
+@pytest.mark.anyio
+async def test_stall_normal_threshold_without_approval() -> None:
+    """Stall monitor uses normal threshold when no pending approval."""
+    transport = FakeTransport()
+    presenter = _KeyboardPresenter()
+    clock = _FakeClock(start=100.0)
+    edits = _make_edits(transport, presenter, clock=clock)
+    edits._stall_check_interval = 0.01
+    edits._STALL_THRESHOLD_SECONDS = 0.05
+    edits._STALL_THRESHOLD_APPROVAL = 10.0  # very long, shouldn't matter
+
+    # No pending approval — normal action without inline_keyboard
+    from untether.model import Action, ActionEvent
+
+    evt = ActionEvent(
+        engine="codex",
+        action=Action(id="a1", kind="tool", title="Bash"),
+        phase="started",
+    )
+    await edits.on_event(evt)
+    clock.set(100.0)
+
+    async with anyio.create_task_group() as tg:
+
+        async def drive() -> None:
+            clock.set(100.1)  # past normal threshold (0.05)
+            await anyio.sleep(0.05)
+            edits.signal_send.close()
+
+        tg.start_soon(edits.run)
+        tg.start_soon(drive)
+
+    # Should have warned using the normal threshold
+    assert edits._stall_warn_count >= 1
