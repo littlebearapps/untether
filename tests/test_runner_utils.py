@@ -600,3 +600,51 @@ class TestSignalErrorHints:
 
         hint = get_error_hint("dummy-jsonl failed (rc=1).")
         assert hint is None
+
+
+# ===========================================================================
+# Phase 2g: Stderr sanitisation (#85)
+# ===========================================================================
+
+
+class TestStderrSanitisation:
+    """_sanitise_stderr redacts absolute paths and URLs."""
+
+    def test_redacts_absolute_path(self) -> None:
+        from untether.runner import _sanitise_stderr
+
+        result = _sanitise_stderr("Error at /home/user/project/src/main.py:42")
+        assert "/home/user" not in result
+        assert "[path]" in result
+
+    def test_redacts_url(self) -> None:
+        from untether.runner import _sanitise_stderr
+
+        result = _sanitise_stderr("See https://api.example.com/v2/status for details")
+        # The path regex may consume parts of the URL first, but either way
+        # the sensitive domain/path is redacted
+        assert "api.example.com" not in result
+
+    def test_preserves_normal_text(self) -> None:
+        from untether.runner import _sanitise_stderr
+
+        text = "Error: connection refused on port 8080"
+        result = _sanitise_stderr(text)
+        assert result == text
+
+    def test_redacts_multiple_paths_and_urls(self) -> None:
+        from untether.runner import _sanitise_stderr
+
+        text = (
+            "Error in /usr/local/lib/python/module.py: See http://docs.example.com/help"
+        )
+        result = _sanitise_stderr(text)
+        assert "/usr/local" not in result
+        assert "docs.example.com" not in result
+        assert result.count("[path]") >= 1
+
+    def test_stderr_excerpt_applies_sanitisation(self) -> None:
+        result = _stderr_excerpt(["/home/user/.config/secret.json: not found"])
+        assert result is not None
+        assert "/home/user" not in result
+        assert "[path]" in result

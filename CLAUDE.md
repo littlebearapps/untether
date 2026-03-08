@@ -138,7 +138,9 @@ Rules in `.claude/rules/` auto-load when editing matching files:
 
 ## Tests
 
-1472 tests, 80% coverage threshold. Key test files:
+1472 unit tests, 80% coverage threshold. Integration testing against `@untether_dev_bot` is **mandatory before every release** — see `docs/reference/integration-testing.md` for the full playbook with per-release-type tier requirements (patch/minor/major).
+
+Key test files:
 
 - `test_claude_control.py` — 56 tests: control requests, response routing, registry lifecycle, auto-approve/auto-deny, tool auto-approve, custom deny messages, discuss action, early toast, progressive cooldown, auto permission mode
 - `test_callback_dispatch.py` — 28 tests: callback parsing, dispatch toast/ephemeral behaviour, early answering
@@ -163,7 +165,7 @@ Rules in `.claude/rules/` auto-load when editing matching files:
 
 ## Development
 
-Two instances run on lba-1 — production (PyPI release) and dev (local editable source). See `docs/reference/dev-instance.md` for full quickref.
+Two instances run on lba-1 — production (PyPI release) and dev (local editable source). See `docs/reference/dev-instance.md` for full quickref. See `docs/reference/integration-testing.md` for the structured integration test playbook run against `@untether_dev_bot` before every release.
 
 | | Production (`@hetz_lba1_bot`) | Dev (`@untether_dev_bot`) |
 |---|---|---|

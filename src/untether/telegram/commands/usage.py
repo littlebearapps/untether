@@ -222,7 +222,10 @@ class UsageCommand:
                     notify=True,
                 )
             hint = _HTTP_STATUS_HINTS.get(status, "Unexpected error.")
-            logger.exception("usage.api_error", status=status)
+            if status == 429:
+                logger.warning("usage.rate_limited", status=status)
+            else:
+                logger.exception("usage.api_error", status=status)
             return CommandResult(
                 text=f"Usage API error (HTTP {status}): {hint}",
                 notify=True,

@@ -31,10 +31,10 @@ Step-by-step release workflow for Untether. Covers the full lifecycle from issue
 ## Release workflow phases
 
 ```
-1. Issue audit  →  2. Version decision  →  3. Changelog  →  4. Validate  →  5. Tag & publish
+1. Issue audit  →  2. Version decision  →  3. Changelog  →  4. Validate  →  5. Integration test  →  6. Tag & publish
 ```
 
-All five phases happen in a single branch (typically `master` for patches, `feature/*` for minors). The CI release pipeline triggers on `v*` tags pushed to `master`.
+All six phases happen in a single branch (typically `master` for patches, `feature/*` for minors). The CI release pipeline triggers on `v*` tags pushed to `master`.
 
 ## Phase 1: Issue audit
 
@@ -155,7 +155,48 @@ print(f'Version {v} matches changelog ✓')
 - [ ] Lockfile synced: `uv lock --check`
 - [ ] No uncommitted changes: `git status`
 
-## Phase 5: Tag and publish
+## Phase 5: Integration testing (MANDATORY)
+
+**NEVER skip this phase.** Run the structured integration test suite against `@untether_dev_bot` before tagging. See `docs/reference/integration-testing.md` for the full playbook.
+
+**NEVER test against `@hetz_lba1_bot` (production). ALWAYS use `@untether_dev_bot` (dev service).**
+
+```bash
+# Restart dev bot to pick up latest code
+systemctl --user restart untether-dev
+
+# Tail logs in a separate terminal
+journalctl --user -u untether-dev -f
+```
+
+### Required tiers per release type
+
+| Release type | Required tiers | Time |
+|---|---|---|
+| **Patch** | Tier 7 (command smoke) + Tier 1 (affected engine + Claude) + relevant Tier 6 (stress) | ~30 min |
+| **Minor** | Tier 7 + Tier 1 (all 6 engines) + Tier 2 (Claude interactive) + relevant Tier 3-4 + Tier 6 + upgrade path | ~75 min |
+| **Major** | ALL tiers (1-7), ALL engines, full upgrade path testing | ~120 min |
+
+### What to focus on per change type
+
+| Changed area | Must-run integration tests |
+|---|---|
+| Runner code (`runners/*.py`) | U1-U4, U6, U7 (all engines) |
+| Telegram transport (`telegram/*.py`) | T1-T10, S7, S8 |
+| Control channel (`claude_control.py`) | C1-C6, T8, S9 |
+| Config/settings (`settings.py`) | O1-O9, S5, upgrade path |
+| Cost tracking (`cost_tracker.py`) | B1-B3, U8 |
+| Progress/formatting (`markdown.py`) | U3, T6, T7, S4, S8 |
+| Commands (`commands/*.py`) | Tier 7 (all) + specific command test |
+
+### Checklist
+
+- [ ] Dev bot restarted: `systemctl --user restart untether-dev`
+- [ ] Required tiers executed via `@untether_dev_bot` per release type
+- [ ] No warnings/errors in logs: `journalctl --user -u untether-dev --since "1 hour ago" | grep -E "WARNING|ERROR"`
+- [ ] Upgrade path tested (minor/major): old config parses, state files survive restart
+
+## Phase 6: Tag and publish
 
 ```bash
 # Commit release changes (version bump, changelog, lockfile)

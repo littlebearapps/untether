@@ -50,6 +50,16 @@ assert all(isinstance(e, ActionEvent) for e in events[1:-1])
 - Run all: `uv run pytest`
 - Run specific: `uv run pytest tests/test_claude_control.py -x`
 
+## Integration testing (MANDATORY before releases)
+
+Unit tests cover code paths but NOT live Telegram interaction. Before every version bump, run the structured integration test suite against `@untether_dev_bot`. See `docs/reference/integration-testing.md` for the full playbook.
+
+- **Patch**: Tier 7 (command smoke) + Tier 1 (affected engine + Claude) + relevant Tier 6
+- **Minor**: Tier 7 + Tier 1 (all 6 engines) + Tier 2 (Claude interactive) + relevant Tier 3-4 + Tier 6 + upgrade path
+- **Major**: ALL tiers (1-7), ALL engines, full upgrade path
+
+**NEVER use `@hetz_lba1_bot` (production) for testing. ALWAYS use `@untether_dev_bot` (dev service).**
+
 ## Key test files
 
 | File | Covers |

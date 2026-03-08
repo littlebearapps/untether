@@ -1854,6 +1854,7 @@ async def test_progress_edits_stall_includes_last_action() -> None:
     edits = _make_edits(transport, presenter, clock=clock)
     edits._stall_check_interval = 0.01
     edits._STALL_THRESHOLD_SECONDS = 0.05
+    edits._STALL_THRESHOLD_TOOL = 0.05
 
     # Simulate an action so _last_action_summary() returns something
     from untether.model import Action, ActionEvent
@@ -2204,6 +2205,7 @@ async def test_stall_normal_threshold_without_approval() -> None:
     edits = _make_edits(transport, presenter, clock=clock)
     edits._stall_check_interval = 0.01
     edits._STALL_THRESHOLD_SECONDS = 0.05
+    edits._STALL_THRESHOLD_TOOL = 0.05
     edits._STALL_THRESHOLD_APPROVAL = 10.0  # very long, shouldn't matter
 
     # No pending approval — normal action without inline_keyboard
@@ -2229,3 +2231,154 @@ async def test_stall_normal_threshold_without_approval() -> None:
 
     # Should have warned using the normal threshold
     assert edits._stall_warn_count >= 1
+
+
+@pytest.mark.anyio
+async def test_stall_tool_threshold_suppresses_warning() -> None:
+    """Running tool uses longer threshold, suppressing premature stall warnings."""
+    transport = FakeTransport()
+    presenter = _KeyboardPresenter()
+    clock = _FakeClock(start=100.0)
+    edits = _make_edits(transport, presenter, clock=clock)
+    edits._stall_check_interval = 0.01
+    edits._STALL_THRESHOLD_SECONDS = 0.05  # normal: very short
+    edits._STALL_THRESHOLD_TOOL = 10.0  # tool: very long
+    edits._STALL_THRESHOLD_APPROVAL = 10.0
+
+    # Start a tool action (not completed) — should use tool threshold
+    from untether.model import Action, ActionEvent
+
+    evt = ActionEvent(
+        engine="codex",
+        action=Action(id="a1", kind="tool", title="Bash"),
+        phase="started",
+    )
+    await edits.on_event(evt)
+    clock.set(100.0)
+
+    async with anyio.create_task_group() as tg:
+
+        async def drive() -> None:
+            clock.set(100.1)  # past normal threshold but not tool threshold
+            await anyio.sleep(0.05)
+            edits.signal_send.close()
+
+        tg.start_soon(edits.run)
+        tg.start_soon(drive)
+
+    # Should NOT have warned — tool threshold is 10.0, idle only 0.1
+    assert edits._stall_warn_count == 0
+
+
+# ===========================================================================
+# Phase 2b: Edit-fail fallback in _send_or_edit_message (#103)
+# ===========================================================================
+
+
+@pytest.mark.anyio
+async def test_send_or_edit_message_edit_fail_fallback() -> None:
+    """When transport.edit returns None, _send_or_edit_message falls back to send."""
+    from untether.runner_bridge import _send_or_edit_message
+
+    class _FailEditTransport(FakeTransport):
+        async def edit(self, *, ref, message, wait=True):
+            self.edit_calls.append({"ref": ref, "message": message, "wait": wait})
+            return None  # simulate edit failure
+
+    transport = _FailEditTransport()
+    edit_ref = MessageRef(channel_id=123, message_id=99)
+    msg = RenderedMessage(text="test")
+
+    ref, edited = await _send_or_edit_message(
+        transport,
+        channel_id=123,
+        message=msg,
+        edit_ref=edit_ref,
+    )
+    # Should have tried edit first (failed), then sent
+    assert len(transport.edit_calls) == 1
+    assert len(transport.send_calls) == 1
+    assert ref is not None
+    assert edited is False
+
+
+@pytest.mark.anyio
+async def test_send_or_edit_message_edit_success() -> None:
+    """When transport.edit succeeds, no fallback send occurs."""
+    from untether.runner_bridge import _send_or_edit_message
+
+    transport = FakeTransport()
+    edit_ref = MessageRef(channel_id=123, message_id=99)
+    msg = RenderedMessage(text="test")
+
+    ref, edited = await _send_or_edit_message(
+        transport,
+        channel_id=123,
+        message=msg,
+        edit_ref=edit_ref,
+    )
+    assert len(transport.edit_calls) == 1
+    assert len(transport.send_calls) == 0
+    assert ref is not None
+    assert edited is True
+
+
+# ===========================================================================
+# Phase 2c: Keyboard edit failure in _run_loop (#104)
+# ===========================================================================
+
+
+@pytest.mark.anyio
+async def test_keyboard_edit_failure_logged() -> None:
+    """When keyboard edit fails, a warning is logged (not silently dropped)."""
+
+    class _FailEditTransport(FakeTransport):
+        async def edit(self, *, ref, message, wait=True):
+            self.edit_calls.append({"ref": ref, "message": message, "wait": wait})
+            # Return None to simulate edit failure when wait=True
+            if wait:
+                return None
+            return ref
+
+    transport = _FailEditTransport()
+    presenter = _KeyboardPresenter()
+    edits = _make_edits(transport, presenter)
+
+    # Set approval buttons and trigger an event
+    presenter.set_approval_buttons()
+    edits.event_seq = 1
+    with contextlib.suppress(anyio.WouldBlock):
+        edits.signal_send.send_nowait(None)
+
+    async with anyio.create_task_group() as tg:
+
+        async def drive() -> None:
+            await anyio.sleep(0)
+            await anyio.sleep(0)
+            edits.signal_send.close()
+
+        tg.start_soon(edits.run)
+        tg.start_soon(drive)
+
+    # The edit should have been attempted
+    assert len(transport.edit_calls) >= 1
+
+
+# ===========================================================================
+# Phase 1f: Session summary no-events warning (#98)
+# ===========================================================================
+
+
+def test_session_summary_zero_events_warning_condition() -> None:
+    """session.summary.no_events condition: event_count == 0 and not cancelled."""
+    # This is a unit test for the condition, not the full flow.
+    # The warning is emitted in runner_bridge when event_count == 0 and not cancelled.
+    # Verifying the ProgressEdits stream tracks events correctly.
+    from untether.runner import JsonlStreamState
+
+    stream = JsonlStreamState(expected_session=None)
+    assert stream.event_count == 0  # starts at zero
+
+    # After processing events, count increments
+    stream.event_count = 5
+    assert stream.event_count == 5

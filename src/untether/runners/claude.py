@@ -1171,9 +1171,10 @@ class ClaudeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
         # Phase 2: Register this runner for control responses
         if resume is not None and self.supports_control_channel:
             _ACTIVE_RUNNERS[resume.value] = (self, time.time())
-            logger.debug(
+            logger.info(
                 "claude_runner.registered",
                 session_id=resume.value,
+                registries=["active_runners"],
             )
 
     def decode_jsonl(
@@ -1256,7 +1257,7 @@ class ClaudeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
                 ):
                     registered_session_id = evt.resume.value
                     _SESSION_STDIN[registered_session_id] = session_stdin
-                    logger.debug(
+                    logger.info(
                         "session_stdin.registered",
                         session_id=registered_session_id,
                         pid=pid,
@@ -1837,15 +1838,30 @@ def _cleanup_session_registries(session_id: str) -> None:
     Called from run_impl finally (covers cancel), process_error_events,
     and stream_end_events. All operations are idempotent.
     """
-    _ACTIVE_RUNNERS.pop(session_id, None)
-    _SESSION_STDIN.pop(session_id, None)
+    cleaned: list[str] = []
+    if _ACTIVE_RUNNERS.pop(session_id, None) is not None:
+        cleaned.append("active_runners")
+    if _SESSION_STDIN.pop(session_id, None) is not None:
+        cleaned.append("session_stdin")
+    if session_id in _DISCUSS_COOLDOWN:
+        cleaned.append("discuss_cooldown")
     clear_discuss_cooldown(session_id)
+    if session_id in _DISCUSS_APPROVED:
+        cleaned.append("discuss_approved")
     _DISCUSS_APPROVED.discard(session_id)
+    if session_id in _OUTLINE_PENDING:
+        cleaned.append("outline_pending")
     _OUTLINE_PENDING.discard(session_id)
     stale = [k for k, v in _REQUEST_TO_SESSION.items() if v == session_id]
+    if stale:
+        cleaned.append(f"requests({len(stale)})")
     for k in stale:
         del _REQUEST_TO_SESSION[k]
-    logger.debug("claude_runner.session_cleanup", session_id=session_id)
+    logger.info(
+        "claude_runner.session_cleanup",
+        session_id=session_id,
+        cleaned=cleaned,
+    )
 
 
 def get_pending_ask_request() -> tuple[str, str] | None:

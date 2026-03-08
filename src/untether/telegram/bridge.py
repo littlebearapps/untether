@@ -283,7 +283,15 @@ class TelegramTransport:
             wait=wait,
         )
         if edited is None:
-            return ref if not wait else None
+            if wait:
+                logger.warning(
+                    "transport.edit.failed",
+                    chat_id=chat_id,
+                    message_id=message_id,
+                    has_reply_markup=reply_markup is not None,
+                )
+                return None
+            return ref
         if followups:
             reply_to_message_id = cast(
                 int | None, message.extra.get("followup_reply_to_message_id")

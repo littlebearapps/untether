@@ -479,6 +479,11 @@ async def _send_or_edit_message(
         edited = await transport.edit(ref=edit_ref, message=msg)
         if edited is not None:
             return edited, True
+        logger.warning(
+            "transport.edit_failed_fallback_send",
+            channel_id=channel_id,
+            edit_message_id=edit_ref.message_id,
+        )
 
     logger.debug(
         "transport.send_message",
@@ -574,14 +579,25 @@ class ProgressEdits:
             elapsed = self.clock() - self._last_event_at
             self._peak_idle = max(self._peak_idle, elapsed)
 
-            # Use longer threshold when waiting for user approval
-            threshold = (
-                self._STALL_THRESHOLD_APPROVAL
-                if self._has_pending_approval()
-                else self._STALL_THRESHOLD_SECONDS
-            )
+            # Use longer threshold when waiting for user approval or running a tool
+            if self._has_pending_approval():
+                threshold = self._STALL_THRESHOLD_APPROVAL
+                threshold_reason = "pending_approval"
+            elif self._has_running_tool():
+                threshold = self._STALL_THRESHOLD_TOOL
+                threshold_reason = "running_tool"
+            else:
+                threshold = self._STALL_THRESHOLD_SECONDS
+                threshold_reason = "normal"
             if elapsed < threshold:
                 continue
+            logger.info(
+                "progress_edits.stall_threshold_selected",
+                channel_id=self.channel_id,
+                threshold=threshold,
+                reason=threshold_reason,
+                elapsed=round(elapsed, 1),
+            )
             now = self.clock()
             if (
                 self._stall_warned
@@ -701,6 +717,14 @@ class ProgressEdits:
             break  # only check the most recent
         return False
 
+    def _has_running_tool(self) -> bool:
+        """Check if any action is still running (e.g. Bash command, TaskOutput)."""
+        for action_state in reversed(list(self.tracker._actions.values())):
+            if not action_state.completed:
+                return True
+            break  # only check the most recent
+        return False
+
     def _last_action_summary(self) -> str | None:
         """Return a short description of the most recent action."""
         for action_state in reversed(list(self.tracker._actions.values())):
@@ -790,6 +814,14 @@ class ProgressEdits:
                         bg_tg.start_soon(_delete_notify, ref_to_delete)
 
                 if rendered != self.last_rendered:
+                    # Log keyboard transitions at info level for #103/#104 diagnostics
+                    if has_approval and not had_approval:
+                        logger.info(
+                            "progress_edits.keyboard_attach",
+                            channel_id=self.channel_id,
+                            message_id=self.progress_ref.message_id,
+                            keyboard_rows=len(new_kb),
+                        )
                     logger.debug(
                         "transport.edit_message",
                         channel_id=self.channel_id,
@@ -799,20 +831,28 @@ class ProgressEdits:
                     edited = await self.transport.edit(
                         ref=self.progress_ref,
                         message=rendered,
-                        wait=False,
+                        wait=has_approval and not had_approval,
                     )
                     if edited is not None:
                         self.last_rendered = rendered
                         self._last_render_at = self.clock()
                         self._has_rendered = True
+                    elif has_approval:
+                        logger.warning(
+                            "progress_edits.keyboard_edit_failed",
+                            channel_id=self.channel_id,
+                            message_id=self.progress_ref.message_id,
+                            keyboard_rows=len(new_kb),
+                        )
             except Exception:  # noqa: BLE001
                 # Transport errors (timeouts, network issues) are best-effort —
                 # never crash a run because a progress edit failed to send.
-                logger.debug("progress_edits.transport_error", exc_info=True)
+                logger.warning("progress_edits.transport_error", exc_info=True)
 
             self.rendered_seq = seq_at_render
 
     _STALL_THRESHOLD_SECONDS: float = 300.0  # 5 minutes
+    _STALL_THRESHOLD_TOOL: float = 600.0  # 10 minutes when a tool is actively running
     _STALL_THRESHOLD_APPROVAL: float = 1800.0  # 30 minutes when waiting for approval
     _STALL_MAX_WARNINGS: int = 10  # absolute cap
     _STALL_MAX_WARNINGS_NO_PID: int = 3  # aggressive cap when pid=None + no events
@@ -1001,18 +1041,26 @@ async def run_runner_with_cancel(
 
     # Session completion summary
     duration = time.monotonic() - start_time
+    event_count = edits.stream.event_count if edits.stream else 0
     logger.info(
         "session.summary",
         session_id=outcome.resume.value if outcome.resume else None,
         engine=runner.engine,
         duration_seconds=round(duration, 1),
-        event_count=edits.stream.event_count if edits.stream else 0,
+        event_count=event_count,
         stall_warnings=edits._stall_warn_count,
         peak_idle_seconds=round(edits._peak_idle, 1),
         last_event_type=edits.stream.last_event_type if edits.stream else None,
         cancelled=outcome.cancelled,
         ok=outcome.completed.ok if outcome.completed else None,
     )
+    if event_count == 0 and not outcome.cancelled:
+        logger.warning(
+            "session.summary.no_events",
+            session_id=outcome.resume.value if outcome.resume else None,
+            engine=runner.engine,
+            duration_seconds=round(duration, 1),
+        )
 
     return outcome
 

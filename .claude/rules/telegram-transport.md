@@ -50,3 +50,9 @@ Messages that should auto-delete when a run finishes:
 - `RenderedMessage.extra["reply_markup"]["inline_keyboard"]` for buttons
 - Approval buttons: detect transitions via keyboard length changes
 - Push notification: sent separately (`notify=True`) when approval buttons appear
+
+## After changes
+
+If this change will be released, run integration tests T1-T10 (Telegram transport), S7 (rapid-fire), S8 (long prompt) via `@untether_dev_bot`. See `docs/reference/integration-testing.md` — the "Changed area" table maps `telegram/*.py` changes to required tests.
+
+**NEVER test against `@hetz_lba1_bot` (production). ALWAYS use `@untether_dev_bot` (dev service).**

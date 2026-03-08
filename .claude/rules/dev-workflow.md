@@ -43,8 +43,20 @@ systemctl --user restart untether
 1. Edit code in `src/`
 2. `uv run pytest && uv run ruff check src/`
 3. `systemctl --user restart untether-dev`
-4. Test via `@untether_dev_bot`
+4. Test via `@untether_dev_bot` — follow `docs/reference/integration-testing.md`
 5. When satisfied: commit, push, release
+
+### Integration testing before release (MANDATORY)
+
+Before ANY version bump (patch, minor, or major), run the structured integration test suite against `@untether_dev_bot`. See `docs/reference/integration-testing.md` for the full playbook.
+
+| Release type | Required tiers | Time |
+|---|---|---|
+| **Patch** | Tier 7 (smoke) + Tier 1 (affected engine + Claude) + relevant Tier 6 | ~30 min |
+| **Minor** | Tier 7 + Tier 1 (all engines) + Tier 2 (Claude) + relevant Tier 3-4 + Tier 6 + upgrade path | ~75 min |
+| **Major** | ALL tiers (1-7), ALL engines, full upgrade path | ~120 min |
+
+**NEVER skip integration testing. NEVER test against production (`@hetz_lba1_bot`).**
 
 ## After changes
 

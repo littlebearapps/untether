@@ -449,6 +449,69 @@ def test_stream_end_events_cleans_registries() -> None:
     assert session_id not in _SESSION_STDIN
 
 
+# ---------------------------------------------------------------------------
+# C2. Cleanup includes cooldown, outline, and approval state (#93)
+# ---------------------------------------------------------------------------
+
+
+def test_cleanup_session_registries_clears_all_state() -> None:
+    """_cleanup_session_registries clears cooldown, outline, and approval state."""
+    runner = ClaudeRunner(claude_cmd="claude")
+    session_id = "sess-full-cleanup"
+
+    # Populate all registries
+    _ACTIVE_RUNNERS[session_id] = (runner, 0.0)
+    _SESSION_STDIN[session_id] = AsyncMock()
+    set_discuss_cooldown(session_id)
+    _DISCUSS_APPROVED.add(session_id)
+    _OUTLINE_PENDING.add(session_id)
+    _REQUEST_TO_SESSION["req-a"] = session_id
+    _REQUEST_TO_SESSION["req-b"] = session_id
+
+    _cleanup_session_registries(session_id)
+
+    assert session_id not in _ACTIVE_RUNNERS
+    assert session_id not in _SESSION_STDIN
+    assert session_id not in _DISCUSS_COOLDOWN
+    assert session_id not in _DISCUSS_APPROVED
+    assert session_id not in _OUTLINE_PENDING
+    assert "req-a" not in _REQUEST_TO_SESSION
+    assert "req-b" not in _REQUEST_TO_SESSION
+
+
+def test_cleanup_session_registries_idempotent() -> None:
+    """Calling _cleanup_session_registries twice does not raise."""
+    session_id = "sess-idempotent"
+    _cleanup_session_registries(session_id)
+    _cleanup_session_registries(session_id)
+    # No error raised
+
+
+def test_cleanup_preserves_other_sessions() -> None:
+    """_cleanup_session_registries only affects the specified session."""
+    runner = ClaudeRunner(claude_cmd="claude")
+    keep_id = "sess-keep"
+    clean_id = "sess-clean"
+
+    _ACTIVE_RUNNERS[keep_id] = (runner, 0.0)
+    _ACTIVE_RUNNERS[clean_id] = (runner, 0.0)
+    _SESSION_STDIN[keep_id] = AsyncMock()
+    _SESSION_STDIN[clean_id] = AsyncMock()
+    _REQUEST_TO_SESSION["req-keep"] = keep_id
+    _REQUEST_TO_SESSION["req-clean"] = clean_id
+
+    _cleanup_session_registries(clean_id)
+
+    assert keep_id in _ACTIVE_RUNNERS
+    assert keep_id in _SESSION_STDIN
+    assert "req-keep" in _REQUEST_TO_SESSION
+    assert clean_id not in _ACTIVE_RUNNERS
+    assert "req-clean" not in _REQUEST_TO_SESSION
+
+    # Clean up remaining state
+    _cleanup_session_registries(keep_id)
+
+
 # ===========================================================================
 # D. Auto-approve Drain
 # ===========================================================================

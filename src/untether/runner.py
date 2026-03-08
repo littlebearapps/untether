@@ -305,6 +305,11 @@ class JsonlSubprocessRunner(BaseRunner):
         try:
             return cast(dict[str, Any], json.loads(text))
         except json.JSONDecodeError:
+            self.get_logger().warning(
+                "runner.jsonl.decode_failed",
+                engine=self.engine,
+                line=text[:200],
+            )
             return None
 
     async def iter_json_lines(
@@ -831,6 +836,7 @@ class JsonlSubprocessRunner(BaseRunner):
             resume=resume.value if resume else None,
             prompt=prompt[:100] + "…" if len(prompt) > 100 else prompt,
             prompt_len=len(prompt),
+            args=cmd[1:],
         )
 
         cwd = get_run_base_dir()

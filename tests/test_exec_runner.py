@@ -647,3 +647,42 @@ def test_jsonl_stream_state_recent_events_ring_buffer() -> None:
     assert len(stream.recent_events) == 10
     # Oldest entries should have been evicted
     assert stream.recent_events[0] == (5.0, "type_5")
+
+
+# ===========================================================================
+# Phase 2e: _ResumeLineProxy.current_stream forwarding (#98)
+# ===========================================================================
+
+
+def test_resume_line_proxy_current_stream_forwarding() -> None:
+    """_ResumeLineProxy.current_stream returns inner runner's stream."""
+    from untether.runner import JsonlStreamState
+    from untether.telegram.commands.executor import _ResumeLineProxy
+
+    runner = CodexRunner(codex_cmd="codex", extra_args=[])
+    stream = JsonlStreamState(expected_session=None)
+    runner.current_stream = stream
+
+    proxy = _ResumeLineProxy(runner=runner)
+    assert proxy.current_stream is stream
+
+
+def test_resume_line_proxy_current_stream_none() -> None:
+    """_ResumeLineProxy.current_stream returns None when runner has no stream."""
+    from untether.telegram.commands.executor import _ResumeLineProxy
+
+    runner = CodexRunner(codex_cmd="codex", extra_args=[])
+    runner.current_stream = None
+
+    proxy = _ResumeLineProxy(runner=runner)
+    assert proxy.current_stream is None
+
+
+def test_resume_line_proxy_current_stream_no_attr() -> None:
+    """_ResumeLineProxy.current_stream returns None for runners without the attr."""
+    from untether.telegram.commands.executor import _ResumeLineProxy
+    from untether.runners.mock import MockRunner
+
+    runner = MockRunner(engine="mock")
+    proxy = _ResumeLineProxy(runner=runner)
+    assert proxy.current_stream is None

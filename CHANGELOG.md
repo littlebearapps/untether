@@ -1,5 +1,33 @@
 # changelog
 
+## v0.34.3 (2026-03-08)
+
+### fixes
+
+- tool-aware stall threshold: 10-minute threshold (`_STALL_THRESHOLD_TOOL = 600s`) when a tool action is started but not completed, preventing false stall warnings during long-running Bash commands, Agent tasks, and TaskOutput waits [#105](https://github.com/littlebearapps/untether/issues/105)
+  - three-tier system: normal (5 min), running tool (10 min), pending approval (30 min)
+  - `_has_running_tool()` checks most recent action state
+  - stall threshold selection logged at info level with reason
+- progress message edit failure: log warning and fall back to sending a new message when the initial "queued" → "starting" edit fails, preventing stuck "queued" messages [#103](https://github.com/littlebearapps/untether/issues/103)
+- approval keyboard edit failure: use `wait=True` for keyboard transitions (approval buttons appearing), log keyboard attach at info level and edit failures at warning level for diagnostics [#104](https://github.com/littlebearapps/untether/issues/104)
+  - `transport.edit.failed` warning in `TelegramTransport.edit()` when `wait=True` edit returns `None`
+  - `progress_edits.keyboard_attach` info log on keyboard transitions
+  - `progress_edits.keyboard_edit_failed` warning when keyboard edit fails
+  - transport errors upgraded from debug to warning level
+- `/usage` 429 rate limit: downgrade from error to warning level, preventing untether-issue-watcher noise for transient rate limits [#89](https://github.com/littlebearapps/untether/issues/89)
+
+### changes
+
+- session cleanup structured reporting: `_cleanup_session_registries()` now logs cleaned registry names at info level for post-mortem analysis [#93](https://github.com/littlebearapps/untether/issues/93)
+  - session registration (`claude_runner.registered`, `session_stdin.registered`) upgraded to info level
+- JSONL decode failure logged at warning level with truncated line content (first 200 chars)
+- runner spawn now logs CLI args in `runner.start` event
+- no-events session warning: `session.summary.no_events` logged when a non-cancelled session completes with zero events
+
+### tests
+
+- new test coverage for tool-aware stall threshold, keyboard edit failure recovery, edit-fail fallback send, session cleanup tracking, stderr sanitisation [#85](https://github.com/littlebearapps/untether/issues/85), build args validation, loop coverage
+
 ## v0.34.2 (2026-03-08)
 
 ### fixes

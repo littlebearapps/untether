@@ -95,3 +95,5 @@ Denial with message:
 ```bash
 uv run pytest tests/test_claude_control.py tests/test_ask_user_question.py tests/test_diff_preview.py -x
 ```
+
+If this change will be released, also run integration tests C1-C6 (Claude interactive), T8 (stale buttons), S9 (concurrent clicks) via `@untether_dev_bot`. See `docs/reference/integration-testing.md`.
