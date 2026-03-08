@@ -138,11 +138,11 @@ Rules in `.claude/rules/` auto-load when editing matching files:
 
 ## Tests
 
-1470 tests, 80% coverage threshold. Key test files:
+1472 tests, 80% coverage threshold. Key test files:
 
 - `test_claude_control.py` — 56 tests: control requests, response routing, registry lifecycle, auto-approve/auto-deny, tool auto-approve, custom deny messages, discuss action, early toast, progressive cooldown, auto permission mode
 - `test_callback_dispatch.py` — 28 tests: callback parsing, dispatch toast/ephemeral behaviour, early answering
-- `test_exec_bridge.py` — 77 tests: ephemeral notification cleanup, approval push notifications, progressive stall warnings, stall diagnostics, stall auto-cancel, session summary, PID/stream threading
+- `test_exec_bridge.py` — 80 tests: ephemeral notification cleanup, approval push notifications, progressive stall warnings, stall diagnostics, stall auto-cancel, approval-aware stall threshold, session summary, PID/stream threading
 - `test_ask_user_question.py` — 27 tests: AskUserQuestion control request handling, question extraction, pending request registry, answer routing, option button rendering, multi-question flows, structured answer responses, ask mode toggle auto-deny
 - `test_diff_preview.py` — 10 tests: Edit diff display, Write content preview, Bash command display, line/char truncation
 - `test_cost_tracker.py` — 56 tests: cost accumulation, per-run/daily budget thresholds, warning levels, daily reset, auto-cancel flag
