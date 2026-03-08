@@ -83,10 +83,17 @@ Integration tests are automated via Telegram MCP tools by Claude Code during the
 4. `list_inline_buttons` → `press_inline_button` for interactive tests
 5. `reply_to_message` for resume/session continuation tests
 
-### Tests requiring manual steps
+### Log inspection and issue creation
 
-- **T1 (voice)**, **T5 (media groups)** — require Telegram client interaction
-- **B4 (SIGTERM)** — requires shell access (`kill -TERM`)
+After integration tests, use Bash tool to check dev bot logs for warnings/errors and create GitHub issues for any Untether bugs found. Distinguish Untether bugs from upstream engine API errors.
+
+### Additional MCP tools
+
+- `send_voice` — OGG/Opus voice files for T1 (voice message test)
+- `send_file` — file upload/media group tests (T2, T5)
+- Bash tool — `kill -TERM` for B4 (SIGTERM), `journalctl` for B5 (log inspection)
+
+All integration test tiers are fully automatable by Claude Code.
 
 ## Key test files
 

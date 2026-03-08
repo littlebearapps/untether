@@ -42,14 +42,28 @@ Tests are sent to 6 dedicated `ut-dev:` engine chats via `@untether_dev_bot`:
 4. For interactive tests: uses `list_inline_buttons` and `press_inline_button` to interact with approval/config buttons
 5. For resume tests: uses `reply_to_message` to reply to the resume line
 
-### Tests requiring manual steps
+### Additional MCP tools for media tests
 
-Some tests cannot be fully automated via MCP and still require manual interaction or shell access:
+- `send_voice` — send an OGG/Opus voice file as a voice message (for T1)
+- `send_file` — send a file with optional caption (for T2, T3, T5)
 
-- **T1 (voice message)** — requires recording and sending a voice note
-- **T5 (media group)** — requires sending a batch of images/files via Telegram client
-- **B4 (SIGTERM drain)** — requires `kill -TERM` from the shell
-- **B5 (log inspection)** — requires `journalctl` access
+### Log inspection and issue creation
+
+After running integration tests, Claude Code MUST:
+
+1. **Check dev bot logs** via Bash tool: `journalctl --user -u untether-dev --since "1 hour ago" | grep -E "WARNING|ERROR"`
+2. **Check for zombies/FD leaks**: `ps aux | grep defunct`, FD count via `/proc/<pid>/fd`
+3. **Track test results**: for each test, note pass/fail/error with reason. Distinguish between Untether bugs and upstream engine API errors (e.g. authentication failures, rate limits, engine-side crashes)
+4. **Create GitHub issues** via GitHub MCP for any Untether bugs discovered during testing — engine API errors are not Untether bugs unless Untether handles them poorly (crashes, hangs, no error message)
+
+### Tests with special tooling
+
+These tests were previously considered "manual" but can be automated via MCP and Bash:
+
+- **T1 (voice message)** — use `send_voice` with a pre-recorded OGG/Opus test file
+- **T5 (media group)** — use `send_file` to send multiple files rapidly (may not trigger media group coalescing depending on Telegram API batching)
+- **B4 (SIGTERM drain)** — use Bash tool: `kill -TERM $(pgrep -f '.venv/bin/untether')`
+- **B5 (log inspection)** — use Bash tool: `journalctl --user -u untether-dev --since "1 hour ago"`
 
 ## Engine Feature Matrix
 
@@ -226,7 +240,7 @@ journalctl --user -u untether-dev --since "1 minute ago" | grep -iE "error|parse
 
 ## Execution Process
 
-Integration tests are run by Claude Code via Telegram MCP tools (see "Automated Testing via Telegram MCP" above). Claude Code sends prompts and commands to the `ut-dev:` engine chats, reads back responses, interacts with inline buttons, and verifies expected behaviour. Tests that require manual steps (voice, media groups, SIGTERM, log inspection) are called out explicitly.
+Integration tests are run by Claude Code via Telegram MCP tools (see "Automated Testing via Telegram MCP" above). Claude Code sends prompts and commands to the `ut-dev:` engine chats, reads back responses, interacts with inline buttons, and verifies expected behaviour. Voice messages (T1) use `send_voice`, file tests use `send_file`, SIGTERM (B4) and log inspection (B5) use the Bash tool. All tiers are fully automatable by Claude Code.
 
 ### Before every version bump
 
@@ -270,10 +284,15 @@ Integration tests are run by Claude Code via Telegram MCP tools (see "Automated 
 11. Run upgrade path tests (minor/major only) — 5 minutes
     Config compatibility, state file compatibility
 
-12. Check logs for warnings/errors (manual)
+12. Check logs for warnings/errors (via Bash tool)
     journalctl --user -u untether-dev --since "1 hour ago" | grep -E "WARNING|ERROR"
+    Check FD count and zombie processes
+    Create GitHub issues for any Untether bugs found
 
-13. If all pass: commit, tag, release
+13. Report results: list each test as pass/fail/error with reason
+    Distinguish Untether bugs from upstream engine API errors
+
+14. If all pass: commit, tag, release
 ```
 
 ### Per release type
