@@ -529,7 +529,7 @@ async def test_handle_cancel_without_reply_prompts_user() -> None:
     await handle_cancel(cfg, msg, running_tasks)
 
     assert len(transport.send_calls) == 1
-    assert "reply to the progress message" in transport.send_calls[0]["message"].text
+    assert "nothing running" in transport.send_calls[0]["message"].text
 
 
 @pytest.mark.anyio
@@ -659,6 +659,103 @@ async def test_handle_cancel_cancels_queued_job() -> None:
     assert transport.edit_calls
     assert "cancelled" in transport.edit_calls[0]["message"].text.lower()
     assert await scheduler.cancel_queued(123, progress_ref.message_id) is None
+
+
+@pytest.mark.anyio
+async def test_handle_cancel_standalone_single_active_run() -> None:
+    """Standalone /cancel (no reply) cancels when exactly one run is active."""
+    transport = FakeTransport()
+    cfg = make_cfg(transport)
+    msg = TelegramIncomingMessage(
+        transport="telegram",
+        chat_id=123,
+        message_id=10,
+        text="/cancel",
+        reply_to_message_id=None,
+        reply_to_text=None,
+        sender_id=123,
+    )
+    running_task = RunningTask()
+    running_tasks = {MessageRef(channel_id=123, message_id=42): running_task}
+
+    await handle_cancel(cfg, msg, running_tasks)
+
+    assert running_task.cancel_requested.is_set() is True
+    assert len(transport.send_calls) == 0
+
+
+@pytest.mark.anyio
+async def test_handle_cancel_standalone_multiple_active_runs() -> None:
+    """Standalone /cancel with multiple runs prompts to reply."""
+    transport = FakeTransport()
+    cfg = make_cfg(transport)
+    msg = TelegramIncomingMessage(
+        transport="telegram",
+        chat_id=123,
+        message_id=10,
+        text="/cancel",
+        reply_to_message_id=None,
+        reply_to_text=None,
+        sender_id=123,
+    )
+    task_a = RunningTask()
+    task_b = RunningTask()
+    running_tasks = {
+        MessageRef(channel_id=123, message_id=1): task_a,
+        MessageRef(channel_id=123, message_id=2): task_b,
+    }
+
+    await handle_cancel(cfg, msg, running_tasks)
+
+    assert not task_a.cancel_requested.is_set()
+    assert not task_b.cancel_requested.is_set()
+    assert len(transport.send_calls) == 1
+    assert "multiple runs active" in transport.send_calls[0]["message"].text
+
+
+@pytest.mark.anyio
+async def test_handle_cancel_standalone_no_runs_nothing_running() -> None:
+    """Standalone /cancel with no runs says nothing running."""
+    transport = FakeTransport()
+    cfg = make_cfg(transport)
+    msg = TelegramIncomingMessage(
+        transport="telegram",
+        chat_id=123,
+        message_id=10,
+        text="/cancel",
+        reply_to_message_id=None,
+        reply_to_text=None,
+        sender_id=123,
+    )
+
+    await handle_cancel(cfg, msg, {})
+
+    assert len(transport.send_calls) == 1
+    assert "nothing running" in transport.send_calls[0]["message"].text
+
+
+@pytest.mark.anyio
+async def test_handle_cancel_standalone_other_chat_ignored() -> None:
+    """Standalone /cancel ignores runs in other chats."""
+    transport = FakeTransport()
+    cfg = make_cfg(transport)
+    msg = TelegramIncomingMessage(
+        transport="telegram",
+        chat_id=123,
+        message_id=10,
+        text="/cancel",
+        reply_to_message_id=None,
+        reply_to_text=None,
+        sender_id=123,
+    )
+    running_task = RunningTask()
+    running_tasks = {MessageRef(channel_id=999, message_id=42): running_task}
+
+    await handle_cancel(cfg, msg, running_tasks)
+
+    assert not running_task.cancel_requested.is_set()
+    assert len(transport.send_calls) == 1
+    assert "nothing running" in transport.send_calls[0]["message"].text
 
 
 @pytest.mark.anyio

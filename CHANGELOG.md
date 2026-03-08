@@ -1,5 +1,15 @@
 # changelog
 
+## v0.34.2 (2026-03-08)
+
+### fixes
+
+- stall monitor loops forever after laptop sleep — no auto-cancel, `/cancel` requires reply [#99](https://github.com/littlebearapps/untether/issues/99)
+  - stall auto-cancel: dead process detection (immediate), no-PID zombie cap (3 warnings), absolute cap (10 warnings)
+  - early PID threading: `last_pid` set at subprocess spawn, polled by `run_runner_with_cancel` before `StartedEvent`
+  - standalone `/cancel` fallback: cancels single active run without requiring reply; prompts when multiple runs active
+  - `queued_for_chat()` method on `ThreadScheduler` for standalone cancel of queued jobs
+
 ## v0.34.1 (2026-03-07)
 
 ### fixes

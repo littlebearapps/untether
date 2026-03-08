@@ -546,6 +546,7 @@ class ProgressEdits:
         self._stall_repeat_seconds: float = 180.0
         self.pid: int | None = None
         self.stream: Any = None  # JsonlStreamState, set from run_runner_with_cancel
+        self.cancel_event: anyio.Event | None = None  # threaded from RunningTask
         self.event_seq = 0
         self.rendered_seq = 0
         self.signal_send, self.signal_recv = anyio.create_memory_object_stream(1)
@@ -620,6 +621,46 @@ class ProgressEdits:
                 stderr_hint=stderr_hint,
             )
             self._prev_diag = diag
+
+            # Auto-cancel: dead process, no-PID zombie, or absolute cap
+            auto_cancel_reason: str | None = None
+            if diag and diag.alive is False:
+                auto_cancel_reason = "process_dead"
+            elif (
+                self.pid is None
+                and self.event_seq == 0
+                and self._stall_warn_count >= self._STALL_MAX_WARNINGS_NO_PID
+            ):
+                auto_cancel_reason = "no_pid_no_events"
+            elif self._stall_warn_count >= self._STALL_MAX_WARNINGS:
+                auto_cancel_reason = "max_warnings"
+
+            if auto_cancel_reason is not None:
+                logger.warning(
+                    "progress_edits.stall_auto_cancel",
+                    channel_id=self.channel_id,
+                    reason=auto_cancel_reason,
+                    stall_warn_count=self._stall_warn_count,
+                    pid=self.pid,
+                    event_seq=self.event_seq,
+                )
+                if self.cancel_event is not None:
+                    self.cancel_event.set()
+                try:
+                    await self.transport.send(
+                        channel_id=self.channel_id,
+                        message=RenderedMessage(
+                            text=f"Auto-cancelled: session appears stuck ({auto_cancel_reason})."
+                        ),
+                        options=SendOptions(thread_id=self.thread_id),
+                    )
+                except Exception:  # noqa: BLE001
+                    logger.debug(
+                        "progress_edits.stall_auto_cancel_notify_failed", exc_info=True
+                    )
+                # Close signal stream so _run_loop exits
+                self.signal_send.close()
+                return
 
             # Telegram notification
             parts = [f"⏳ No progress for {int(elapsed // 60)} min"]
@@ -758,6 +799,8 @@ class ProgressEdits:
             self.rendered_seq = seq_at_render
 
     _STALL_THRESHOLD_SECONDS: float = 300.0  # 5 minutes
+    _STALL_MAX_WARNINGS: int = 10  # absolute cap
+    _STALL_MAX_WARNINGS_NO_PID: int = 3  # aggressive cap when pid=None + no events
 
     async def on_event(self, evt: UntetherEvent) -> None:
         if not self.tracker.note_event(evt):
@@ -911,8 +954,22 @@ async def run_runner_with_cancel(
                 outcome.cancelled = True
                 tg.cancel_scope.cancel()
 
+            async def thread_pid() -> None:
+                """Poll for early PID from subprocess spawn before StartedEvent."""
+                for _ in range(50):  # poll up to 5s
+                    pid = getattr(runner, "last_pid", None)
+                    if isinstance(pid, int):
+                        edits.pid = pid
+                        cs = getattr(runner, "current_stream", None)
+                        if cs is not None:
+                            edits.stream = cs
+                        return
+                    await anyio.sleep(0.1)
+
             tg.start_soon(run_runner)
+            tg.start_soon(thread_pid)
             if running_task is not None:
+                edits.cancel_event = running_task.cancel_requested
                 tg.start_soon(wait_cancel, running_task)
     except BaseExceptionGroup as eg:
         # Unwrap ExceptionGroup from anyio TaskGroup so callers' `except Exception`

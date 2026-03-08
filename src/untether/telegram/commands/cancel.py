@@ -30,7 +30,38 @@ async def handle_cancel(
         if msg.reply_to_text:
             await reply(text="nothing is currently running for that message.")
             return
-        await reply(text="reply to the progress message to cancel.")
+        # Fallback: single active run or single queued job in this chat
+        matches = [
+            (ref, t) for ref, t in running_tasks.items() if ref.channel_id == chat_id
+        ]
+        if len(matches) == 1:
+            ref, task = matches[0]
+            logger.info(
+                "cancel.requested", chat_id=chat_id, progress_message_id=ref.message_id
+            )
+            task.cancel_requested.set()
+            return
+        if len(matches) > 1:
+            await reply(
+                text="multiple runs active — reply to the progress message to cancel a specific one."
+            )
+            return
+        # Check queued jobs
+        if scheduler is not None:
+            queued = scheduler.queued_for_chat(chat_id)
+            if len(queued) == 1:
+                job = await scheduler.cancel_queued(
+                    chat_id, queued[0].progress_ref.message_id
+                )
+                if job:
+                    await _edit_cancelled_message(cfg, queued[0].progress_ref, job)
+                    return
+            if len(queued) > 1:
+                await reply(
+                    text="multiple jobs queued — reply to the progress message to cancel a specific one."
+                )
+                return
+        await reply(text="nothing running in this chat.")
         return
 
     progress_ref = MessageRef(channel_id=chat_id, message_id=reply_id)

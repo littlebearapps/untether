@@ -1944,3 +1944,165 @@ async def test_last_action_summary_with_actions() -> None:
     assert summary is not None
     assert "tool:Bash" in summary
     assert "running" in summary
+
+
+@pytest.mark.anyio
+async def test_stall_auto_cancel_dead_process() -> None:
+    """Stall monitor auto-cancels when process is confirmed dead."""
+    transport = FakeTransport()
+    presenter = _KeyboardPresenter()
+    clock = _FakeClock(start=100.0)
+    edits = _make_edits(transport, presenter, clock=clock)
+    edits._stall_check_interval = 0.01
+    edits._STALL_THRESHOLD_SECONDS = 0.05
+    edits.pid = 99999  # non-existent PID
+    cancel_event = anyio.Event()
+    edits.cancel_event = cancel_event
+
+    # Patch collect_proc_diag to return dead process
+    from unittest.mock import patch
+    from untether.utils.proc_diag import ProcessDiag
+
+    dead_diag = ProcessDiag(pid=99999, alive=False)
+
+    with patch("untether.utils.proc_diag.collect_proc_diag", return_value=dead_diag):
+        async with anyio.create_task_group() as tg:
+
+            async def drive() -> None:
+                clock.set(100.1)
+                await anyio.sleep(0.1)
+                # If auto-cancel didn't fire, close manually
+                if not cancel_event.is_set():
+                    edits.signal_send.close()
+
+            tg.start_soon(edits.run)
+            tg.start_soon(drive)
+
+    assert cancel_event.is_set()
+    # Should have sent auto-cancel notification
+    auto_cancel_msgs = [
+        c for c in transport.send_calls if "Auto-cancelled" in c["message"].text
+    ]
+    assert len(auto_cancel_msgs) == 1
+    assert "process_dead" in auto_cancel_msgs[0]["message"].text
+
+
+@pytest.mark.anyio
+async def test_stall_auto_cancel_no_pid_no_events() -> None:
+    """Stall monitor auto-cancels after _STALL_MAX_WARNINGS_NO_PID when pid=None."""
+    transport = FakeTransport()
+    presenter = _KeyboardPresenter()
+    clock = _FakeClock(start=100.0)
+    edits = _make_edits(transport, presenter, clock=clock)
+    edits._stall_check_interval = 0.01
+    edits._STALL_THRESHOLD_SECONDS = 0.05
+    edits._stall_repeat_seconds = 0.01
+    edits._STALL_MAX_WARNINGS_NO_PID = 2
+    edits.pid = None  # no PID known
+    edits.event_seq = 0  # no events received
+    cancel_event = anyio.Event()
+    edits.cancel_event = cancel_event
+
+    async with anyio.create_task_group() as tg:
+
+        async def drive() -> None:
+            # Each iteration: advance clock past threshold + repeat
+            for i in range(5):
+                clock.set(100.1 + i * 0.1)
+                await anyio.sleep(0.03)
+                if cancel_event.is_set():
+                    break
+            if not cancel_event.is_set():
+                edits.signal_send.close()
+
+        tg.start_soon(edits.run)
+        tg.start_soon(drive)
+
+    assert cancel_event.is_set()
+    auto_cancel_msgs = [
+        c for c in transport.send_calls if "Auto-cancelled" in c["message"].text
+    ]
+    assert len(auto_cancel_msgs) == 1
+    assert "no_pid_no_events" in auto_cancel_msgs[0]["message"].text
+
+
+@pytest.mark.anyio
+async def test_stall_auto_cancel_max_warnings() -> None:
+    """Stall monitor auto-cancels after _STALL_MAX_WARNINGS absolute cap."""
+    from unittest.mock import patch
+    from untether.utils.proc_diag import ProcessDiag
+
+    transport = FakeTransport()
+    presenter = _KeyboardPresenter()
+    clock = _FakeClock(start=100.0)
+    edits = _make_edits(transport, presenter, clock=clock)
+    edits._stall_check_interval = 0.01
+    edits._STALL_THRESHOLD_SECONDS = 0.05
+    edits._stall_repeat_seconds = 0.01
+    edits._STALL_MAX_WARNINGS = 3
+    edits.pid = 12345
+    edits.event_seq = 5  # has events, so no_pid path won't trigger
+    cancel_event = anyio.Event()
+    edits.cancel_event = cancel_event
+
+    # Mock collect_proc_diag to return alive process so process_dead doesn't fire
+    alive_diag = ProcessDiag(pid=12345, alive=True)
+    with patch("untether.utils.proc_diag.collect_proc_diag", return_value=alive_diag):
+        async with anyio.create_task_group() as tg:
+
+            async def drive() -> None:
+                for i in range(10):
+                    clock.set(100.1 + i * 0.1)
+                    await anyio.sleep(0.03)
+                    if cancel_event.is_set():
+                        break
+                if not cancel_event.is_set():
+                    edits.signal_send.close()
+
+            tg.start_soon(edits.run)
+            tg.start_soon(drive)
+
+    assert cancel_event.is_set()
+    auto_cancel_msgs = [
+        c for c in transport.send_calls if "Auto-cancelled" in c["message"].text
+    ]
+    assert len(auto_cancel_msgs) == 1
+    assert "max_warnings" in auto_cancel_msgs[0]["message"].text
+
+
+@pytest.mark.anyio
+async def test_stall_no_auto_cancel_without_cancel_event() -> None:
+    """Stall auto-cancel logs but doesn't crash when cancel_event is None."""
+    from unittest.mock import patch
+    from untether.utils.proc_diag import ProcessDiag
+
+    transport = FakeTransport()
+    presenter = _KeyboardPresenter()
+    clock = _FakeClock(start=100.0)
+    edits = _make_edits(transport, presenter, clock=clock)
+    edits._stall_check_interval = 0.01
+    edits._STALL_THRESHOLD_SECONDS = 0.05
+    edits._stall_repeat_seconds = 0.01
+    edits._STALL_MAX_WARNINGS = 2
+    edits.pid = 12345
+    edits.event_seq = 5
+    edits.cancel_event = None  # no cancel event wired
+
+    alive_diag = ProcessDiag(pid=12345, alive=True)
+    with patch("untether.utils.proc_diag.collect_proc_diag", return_value=alive_diag):
+        async with anyio.create_task_group() as tg:
+
+            async def drive() -> None:
+                for i in range(5):
+                    clock.set(100.1 + i * 0.1)
+                    await anyio.sleep(0.03)
+                edits.signal_send.close()
+
+            tg.start_soon(edits.run)
+            tg.start_soon(drive)
+
+    # Should still send the auto-cancel notification
+    auto_cancel_msgs = [
+        c for c in transport.send_calls if "Auto-cancelled" in c["message"].text
+    ]
+    assert len(auto_cancel_msgs) == 1

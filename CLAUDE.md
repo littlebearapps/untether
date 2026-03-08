@@ -30,6 +30,7 @@ Untether adds interactive permission control, plan mode support, and several UX 
 - **`/config`** — inline settings menu with navigable sub-pages; toggle plan mode, ask mode, verbose, engine, trigger via buttons
 - **`[progress]` config** — global verbosity and max_actions settings in `untether.toml`
 - **Pi context compaction** — `AutoCompactionStart`/`AutoCompactionEnd` events rendered as progress actions
+- **Stall diagnostics & liveness watchdog** — `/proc` process diagnostics (CPU, RSS, TCP, FDs), progressive stall warnings with Telegram notifications, liveness watchdog for alive-but-silent subprocesses, stall auto-cancel (dead process, no-PID zombie, absolute cap), `session.summary` structured log; `[watchdog]` config section
 
 See `.claude/skills/claude-stream-json/` and `.claude/rules/control-channel.md` for implementation details.
 
@@ -66,6 +67,7 @@ Telegram <-> TelegramPresenter <-> RunnerBridge <-> Runner (claude/codex/opencod
 | `commands/verbose.py` | `/verbose` toggle command |
 | `commands/config.py` | `/config` inline settings menu |
 | `commands/ask_question.py` | AskUserQuestion option button handler |
+| `utils/proc_diag.py` | `/proc` process diagnostics for stall analysis (CPU, RSS, TCP, FDs, children) |
 | `shutdown.py` | Graceful shutdown state and drain logic |
 | `telegram/bridge.py` | Telegram message rendering |
 | `telegram/loop.py` | Telegram update loop, signal handlers, drain-then-exit |
@@ -136,11 +138,11 @@ Rules in `.claude/rules/` auto-load when editing matching files:
 
 ## Tests
 
-1171 tests, 80% coverage threshold. Key test files:
+1470 tests, 80% coverage threshold. Key test files:
 
 - `test_claude_control.py` — 56 tests: control requests, response routing, registry lifecycle, auto-approve/auto-deny, tool auto-approve, custom deny messages, discuss action, early toast, progressive cooldown, auto permission mode
 - `test_callback_dispatch.py` — 28 tests: callback parsing, dispatch toast/ephemeral behaviour, early answering
-- `test_exec_bridge.py` — 24 tests: ephemeral notification cleanup, approval push notifications
+- `test_exec_bridge.py` — 77 tests: ephemeral notification cleanup, approval push notifications, progressive stall warnings, stall diagnostics, stall auto-cancel, session summary, PID/stream threading
 - `test_ask_user_question.py` — 27 tests: AskUserQuestion control request handling, question extraction, pending request registry, answer routing, option button rendering, multi-question flows, structured answer responses, ask mode toggle auto-deny
 - `test_diff_preview.py` — 10 tests: Edit diff display, Write content preview, Bash command display, line/char truncation
 - `test_cost_tracker.py` — 56 tests: cost accumulation, per-run/daily budget thresholds, warning levels, daily reset, auto-cancel flag
@@ -156,6 +158,8 @@ Rules in `.claude/rules/` auto-load when editing matching files:
 - `test_verbose_command.py` — 8 tests: /verbose toggle on/off/clear, backend id
 - `test_config_command.py` — 108 tests: home page, plan mode/ask mode/verbose/engine/trigger/model/reasoning sub-pages, toggle actions, callback vs command routing, button layout, engine-aware visibility
 - `test_pi_compaction.py` — 7 tests: compaction start/end, aborted, no tokens, sequence
+- `test_proc_diag.py` — 27 tests: format_diag, is_cpu_active, collect_proc_diag (Linux /proc reads), ProcessDiag defaults
+- `test_exec_runner.py` — 28 tests: event tracking (event_count, recent_events ring buffer, PID in StartedEvent meta), JsonlStreamState defaults
 
 ## Development
 

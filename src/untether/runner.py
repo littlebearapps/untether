@@ -209,6 +209,7 @@ class JsonlStreamState:
 class JsonlSubprocessRunner(BaseRunner):
     # Exposed for diagnostics — set during run_impl, cleared on exit
     current_stream: JsonlStreamState | None = None
+    last_pid: int | None = None
 
     def get_logger(self) -> Any:
         return getattr(self, "logger", get_logger(__name__))
@@ -847,6 +848,7 @@ class JsonlSubprocessRunner(BaseRunner):
             if payload is not None and proc.stdin is None:
                 raise RuntimeError(self.pipes_error_message())
 
+            self.last_pid = proc.pid
             logger.info(
                 "subprocess.spawn",
                 cmd=cmd[0] if cmd else None,
