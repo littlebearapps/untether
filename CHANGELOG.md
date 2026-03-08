@@ -9,6 +9,7 @@
   - early PID threading: `last_pid` set at subprocess spawn, polled by `run_runner_with_cancel` before `StartedEvent`
   - standalone `/cancel` fallback: cancels single active run without requiring reply; prompts when multiple runs active
   - `queued_for_chat()` method on `ThreadScheduler` for standalone cancel of queued jobs
+  - approval-aware stall threshold: 30 min when waiting for user approval (inline keyboard detected), 5 min otherwise
 
 ## v0.34.1 (2026-03-07)
 
