@@ -6,6 +6,7 @@
 
 - preamble hook awareness: add constraint to default preamble instructing Claude that if hooks fire at session end, the final response must still contain the user's requested content — hook concerns are secondary and should be noted after main content, never instead of it [#107](https://github.com/littlebearapps/untether/issues/107)
   - addresses content displacement when Claude Code plugin Stop hooks (e.g. PitchDocs context-guard) consume the final Telegram message with meta-commentary instead of user-requested content
+- `UNTETHER_SESSION` env var: Claude runner now sets `UNTETHER_SESSION=1` in subprocess environment, enabling Claude Code hooks to detect Untether sessions and adjust behaviour (e.g. PitchDocs context-guard skips blocking Stop hooks in Telegram) [#107](https://github.com/littlebearapps/untether/issues/107)
 
 ### docs
 

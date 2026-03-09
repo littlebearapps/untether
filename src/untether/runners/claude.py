@@ -1149,11 +1149,13 @@ class ClaudeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
         return None
 
     def env(self, *, state: Any) -> dict[str, str] | None:
+        env = dict(os.environ)
+        # Let Claude Code hooks detect Untether sessions (e.g. PitchDocs
+        # context-guard skips blocking Stop hooks in Telegram).
+        env["UNTETHER_SESSION"] = "1"
         if self.use_api_billing is not True:
-            env = dict(os.environ)
             env.pop("ANTHROPIC_API_KEY", None)
-            return env
-        return None
+        return env
 
     def new_state(self, prompt: str, resume: ResumeToken | None) -> ClaudeStreamState:
         state = ClaudeStreamState()

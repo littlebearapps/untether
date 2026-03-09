@@ -425,6 +425,20 @@ async def test_run_strips_anthropic_api_key_by_default(tmp_path, monkeypatch) ->
     assert answer == "api=set"
 
 
+def test_env_sets_untether_session() -> None:
+    """env() sets UNTETHER_SESSION=1 for Claude Code hook detection."""
+    runner = ClaudeRunner(claude_cmd="claude")
+    env = runner.env(state=None)
+    assert env is not None
+    assert env["UNTETHER_SESSION"] == "1"
+
+    # Also set when using API billing
+    runner_api = ClaudeRunner(claude_cmd="claude", use_api_billing=True)
+    env_api = runner_api.env(state=None)
+    assert env_api is not None
+    assert env_api["UNTETHER_SESSION"] == "1"
+
+
 def test_rate_limit_event_returns_empty() -> None:
     """rate_limit_event should decode and translate to no Untether events."""
     event = _decode_event({"type": "rate_limit_event"})
