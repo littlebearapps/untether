@@ -1,5 +1,16 @@
 # changelog
 
+## v0.34.4 (2026-03-09)
+
+### fixes
+
+- preamble hook awareness: add constraint to default preamble instructing Claude that if hooks fire at session end, the final response must still contain the user's requested content — hook concerns are secondary and should be noted after main content, never instead of it [#107](https://github.com/littlebearapps/untether/issues/107)
+  - addresses content displacement when Claude Code plugin Stop hooks (e.g. PitchDocs context-guard) consume the final Telegram message with meta-commentary instead of user-requested content
+
+### docs
+
+- audit: PitchDocs context-guard interference analysis — root cause (false positive from `git status --porcelain` on untracked hook infrastructure), cross-project comparison (BIP/Scout/Brand Copilot/littlebearapps.com), recommendations for both Untether and PitchDocs [#107](https://github.com/littlebearapps/untether/issues/107)
+
 ## v0.34.3 (2026-03-08)
 
 ### fixes
