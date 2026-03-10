@@ -114,7 +114,17 @@ If you answered **n**, follow these steps (or skip to step 6 if you already have
 3. Choose a display name (the obvious choice is "untether")
 4. Choose a username ending in `bot` (e.g., `my_untether_bot`)
 
-<!-- SCREENSHOT: BotFather conversation showing /newbot flow and the generated token -->
+!!! user "You"
+    /newbot
+
+!!! untether "BotFather"
+    Alright, a new bot. How are we going to call it? Please choose a name for your bot.
+
+!!! user "You"
+    untether
+
+!!! untether "BotFather"
+    Good. Now let's choose a username for your bot...
 
 BotFather will congratulate you on your new bot and will reply with your token:
 

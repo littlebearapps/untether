@@ -37,7 +37,16 @@ For tools that modify files, the approval message includes a compact diff so you
 
 This lets you make informed approve/deny decisions without leaving Telegram.
 
-<!-- SCREENSHOT: Telegram approval message with a compact diff preview showing removed and added lines for an Edit tool call -->
+!!! untether "Untether"
+    **Edit** `src/main.py`
+
+    ```diff
+    - import sys
+    + import sys
+    + from pathlib import Path
+    ```
+
+    `Approve` · `Deny`
 
 ## Answering questions
 

@@ -85,7 +85,12 @@ curl -X POST http://127.0.0.1:9876/hooks/github \
 
 A `202 Accepted` response means the run was dispatched.
 
-<!-- SCREENSHOT: Telegram notification from a webhook-triggered run showing the rendered prompt and agent progress -->
+!!! untether "Untether"
+    🔔 **webhook** · github-push
+
+    Review push to refs/heads/main by alice
+
+    working · claude · 4s · step 1
 
 ## Set up a cron schedule
 

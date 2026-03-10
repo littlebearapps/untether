@@ -12,8 +12,6 @@ Send `/config` in any chat:
 
 The home page shows current values for all settings:
 
-<!-- SCREENSHOT: /config home page showing inline keyboard buttons for Plan mode, Verbose, Engine, Model, Trigger with current values -->
-
 ```
 Settings
 

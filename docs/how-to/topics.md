@@ -64,7 +64,10 @@ Examples:
 
 Untether will bind the topic and rename it to match the context.
 
-<!-- SCREENSHOT: Telegram forum topic bound to a project and branch, showing the renamed topic title and context footer -->
+!!! untether "Untether"
+    topic bound: **backend** @feat/api
+
+    Topic renamed to `backend @feat/api`
 
 ## Inspect or change the binding
 

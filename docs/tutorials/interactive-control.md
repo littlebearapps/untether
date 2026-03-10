@@ -120,11 +120,10 @@ For multi-question flows (1 of N, 2 of N), each question appears in sequence aft
 
 If none of the options fit, tap **Other (type reply)** and type a custom answer as text. Untether routes your reply back to Claude Code, which reads it and continues.
 
-```
-You: Use snake_case for all variable names
-```
+!!! user "You"
+    Use snake_case for all variable names
 
-<!-- SCREENSHOT: user replying with text to an AskUserQuestion, Claude Code continuing -->
+Untether routes your reply back to Claude Code, which reads it and continues.
 
 You can also tap **Deny** to dismiss the question if it's not relevant.
 

@@ -12,7 +12,13 @@ Send `/browse` to open the project root:
 
 Untether replies with a directory listing rendered as inline keyboard buttons. Each button is a file or directory you can tap.
 
-<!-- SCREENSHOT: /browse showing project root with directory and file buttons -->
+!!! untether "Untether"
+    **/ happy-gadgets**
+
+    `📁 src/` · `📁 docs/` · `📁 tests/`<br>
+    `📄 pyproject.toml` · `📄 README.md`<br>
+    `📄 CHANGELOG.md` · `📄 .gitignore`<br>
+    `(..)` back
 
 ## Navigate directories
 
