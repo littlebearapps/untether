@@ -57,7 +57,12 @@ uv run untether                      # Ctrl+C first if already running
 # 4. Test via @your_dev_bot in Telegram
 ```
 
-<!-- SCREENSHOT: journalctl output showing untether-dev starting cleanly -->
+```
+$ journalctl --user -u untether-dev -f
+Mar 10 09:15:23 lba-1 untether[12345]: untether.started version=0.34.0 engine=codex projects=3
+Mar 10 09:15:23 lba-1 untether[12345]: telegram.connected bot=@untether_dev_bot
+Mar 10 09:15:23 lba-1 untether[12345]: telegram.polling started
+```
 
 Always test via the dev bot before merging. Never send test messages to the production bot.
 

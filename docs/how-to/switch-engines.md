@@ -17,7 +17,12 @@ Prefix the first non-empty line with an engine directive:
 
 Directives are only parsed at the start of the first non-empty line.
 
-<!-- SCREENSHOT: Telegram chat showing an engine directive message (e.g. /codex) with the engine name in the progress footer -->
+!!! untether "Untether"
+    working · codex · 5s · step 1
+
+    ✓ Read `src/timeline.py`
+
+    `🏷 codex`
 
 ## Set a default engine for the current scope
 

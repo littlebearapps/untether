@@ -27,7 +27,8 @@ Open your Telegram chat with the bot and send:
 /planmode on
 ```
 
-<!-- SCREENSHOT: /planmode on response showing "plan mode: on" confirmation -->
+!!! untether "Untether"
+    plan mode: **on**
 
 The bot confirms that plan mode is now active. This setting is stored per chat and persists across sessions.
 
@@ -38,8 +39,6 @@ Send Claude Code a task that will require file changes:
 ```
 add a comment to the top of README.md explaining what this project does
 ```
-
-<!-- SCREENSHOT: user sending a task message to the bot -->
 
 Claude Code starts working and you'll see a progress message stream in.
 
@@ -61,7 +60,11 @@ Your phone will also buzz with a push notification so you don't miss it.
 
 Tap **Approve** to let Claude Code proceed with the action. The button clears instantly — no spinner, no waiting. Claude Code continues with its work.
 
-<!-- SCREENSHOT: progress message after approving, showing the action completed -->
+!!! untether "Untether"
+    working · claude · 8s · step 2
+
+    ✓ Read `README.md`<br>
+    … Edit `README.md`
 
 You may see several approval requests in a row as Claude Code works through multiple steps.
 
@@ -69,7 +72,8 @@ You may see several approval requests in a row as Claude Code works through mult
 
 If something doesn't look right, tap **Deny** instead. Claude Code receives a denial message explaining that you've blocked the action and asking it to communicate via visible text instead.
 
-<!-- SCREENSHOT: deny response — Claude Code acknowledging the denial and explaining its intent -->
+!!! untether "Untether"
+    I was going to add a comment to the top of README.md with a project description. Would you prefer I explain what I had in mind first, or should I take a different approach?
 
 This is useful when you want Claude Code to explain its reasoning before making changes. After denying, Claude Code will typically describe what it was trying to do and ask for guidance.
 
@@ -85,7 +89,14 @@ Tap it to require Claude Code to write a comprehensive plan as a visible message
 4. Key decisions and trade-offs
 5. The expected end result
 
-<!-- SCREENSHOT: Claude Code's written outline/plan appearing as visible text in the chat -->
+!!! untether "Untether"
+    Here's my plan:
+
+    1. **Read** `README.md` to understand current content
+    2. **Edit** `README.md` to add a project description comment at line 1
+    3. **Verify** the comment is correctly formatted
+
+    Files to modify: `README.md`
 
 After Claude Code writes the outline, **Approve Plan** and **Deny** buttons appear automatically — no need to type "approved":
 
@@ -128,7 +139,8 @@ Once you're comfortable with how Claude Code works, you might want less interrup
 /planmode auto
 ```
 
-<!-- SCREENSHOT: /planmode auto confirmation -->
+!!! untether "Untether"
+    plan mode: **auto**
 
 In auto mode, tool calls (Edit, Write, Bash) are still auto-approved — Claude Code works without interruption. Plan transitions are also auto-approved, so you won't see ExitPlanMode buttons. The agent preamble still requests summaries and structured output.
 
@@ -148,7 +160,8 @@ To check your current mode at any time:
 /planmode show
 ```
 
-<!-- SCREENSHOT: /planmode show output showing current mode and source -->
+!!! untether "Untether"
+    plan mode: **on** (chat default)
 
 ## What just happened
 

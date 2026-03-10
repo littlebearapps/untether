@@ -49,7 +49,8 @@ After each run completes, Untether checks the reported cost against your budgets
 
 When `auto_cancel = true` and a budget is exceeded, Untether cancels the run automatically. Otherwise, you see the alert but the run continues.
 
-<!-- SCREENSHOT: Telegram cost warning alert message showing budget threshold exceeded notification -->
+!!! untether "Untether"
+    ⚠️ **cost warning** — run cost $1.45 is 73% of $2.00 per-run budget
 
 ### Daily reset
 
@@ -72,7 +73,14 @@ This shows:
 
 The `/usage` command reads your Claude Code OAuth credentials to fetch live data from the Anthropic API. If you see "No Claude credentials found", run `claude login` in your terminal.
 
-<!-- SCREENSHOT: Telegram /usage command output showing 5h window, weekly usage, per-model breakdown, and extra credits -->
+!!! untether "Untether"
+    **Claude Code usage**
+
+    **5h window**: 42% used (2h 6m left)<br>
+    **Weekly**: 28% used (5d 2h left)
+
+    sonnet: 38% · opus: 4%<br>
+    extra credits: $0.00
 
 ## Subscription usage footer
 

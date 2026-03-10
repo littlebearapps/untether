@@ -45,8 +45,6 @@ Untether immediately posts a progress message and updates it as the agent works:
 !!! untether "Untether"
     starting · codex · 0s
 
-<!-- SCREENSHOT: progress message in Telegram showing "working · codex · 12s · step 3" with action list -->
-
 As the agent calls tools and makes progress, you'll see updates like:
 
 !!! untether "Untether"
@@ -59,8 +57,6 @@ As the agent calls tools and makes progress, you'll see updates like:
 The progress message is edited in-place.
 
 ## 4. See the final answer
-
-<!-- SCREENSHOT: final answer message in Telegram with model/cost footer and resume line -->
 
 When the agent finishes, Untether sends a new message and replaces the progress message, so you get a notification.
 
@@ -114,8 +110,6 @@ While the progress message is showing, tap the **cancel** button or reply to it 
 
     !!! user "You"
         /cancel
-
-<!-- SCREENSHOT: cancel button on progress message and the resulting "cancelled" status -->
 
 Untether sends `SIGTERM` to the agent process and posts a cancelled status:
 

@@ -78,8 +78,6 @@ Check the current default:
 !!! user "You"
     /agent
 
-<!-- SCREENSHOT: /agent command output showing engine resolution layers -->
-
 Example response:
 
 !!! untether "Untether"

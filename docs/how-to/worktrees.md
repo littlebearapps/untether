@@ -31,7 +31,13 @@ Send a message like:
 /happy-gadgets @feat/memory-box freeze artifacts forever
 ```
 
-<!-- SCREENSHOT: Telegram message showing a worktree run with the @branch directive and project context in the footer -->
+!!! untether "Untether"
+    working · codex · 5s · step 2
+
+    ✓ Read `src/memory.py`<br>
+    … Edit `src/memory.py`
+
+    dir: happy-gadgets @feat/memory-box
 
 ## Ignore `.worktrees/` in git status
 

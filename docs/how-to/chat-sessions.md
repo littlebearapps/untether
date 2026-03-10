@@ -24,7 +24,18 @@ If you chose **handoff** during onboarding and want to switch to chat mode:
 
 With `session_mode = "chat"`, new messages in the chat continue the current thread automatically.
 
-<!-- SCREENSHOT: Telegram chat showing a follow-up message auto-resuming the previous session without a reply -->
+!!! user "You"
+    explain the auth flow
+
+!!! untether "Untether"
+    done · claude · 15s · step 4
+
+    The auth flow uses JWT tokens…
+
+!!! user "You"
+    now add rate limiting to it
+
+The second message automatically continues the same session — no reply needed.
 
 ## Reset a session
 

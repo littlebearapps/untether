@@ -11,7 +11,16 @@ untether --debug    # start with debug logging → writes debug.log
 untether doctor     # preflight check: token, chat, topics, files, voice, engines
 ```
 
-<!-- SCREENSHOT: untether doctor output showing check results -->
+```
+$ untether doctor
+✓ bot token valid (@my_untether_bot)
+✓ chat 123456789 reachable
+✓ engine codex found at /usr/local/bin/codex
+✓ engine claude found at /usr/local/bin/claude
+✗ engine opencode not found
+✓ voice transcription configured
+✓ file transfer directory exists
+```
 
 ## Bot not responding
 
@@ -258,7 +267,17 @@ It validates:
 - Voice transcription configuration (API reachability)
 - Engine CLI availability (on PATH)
 
-<!-- SCREENSHOT: untether doctor output with all checks passing -->
+```
+$ untether doctor
+✓ bot token valid (@my_untether_bot)
+✓ chat 123456789 reachable
+✓ engine codex found at /usr/local/bin/codex
+✓ engine claude found at /usr/local/bin/claude
+✓ engine opencode found at /usr/local/bin/opencode
+✓ voice transcription configured
+✓ file transfer directory exists
+all checks passed
+```
 
 ## Checking logs
 

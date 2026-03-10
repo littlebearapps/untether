@@ -9,7 +9,9 @@ cd ~/dev/happy-gadgets
 untether init happy-gadgets
 ```
 
-<!-- SCREENSHOT: Terminal output of untether init showing project registration confirmation -->
+```
+saved project 'happy-gadgets' to ~/.untether/untether.toml
+```
 
 This adds a project to your config:
 

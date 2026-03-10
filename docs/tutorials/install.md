@@ -150,8 +150,6 @@ Untether validates the token by calling the Telegram API. If it fails, double-ch
 
 ## 7. Pick your workflow
 
-<!-- SCREENSHOT: onboarding wizard in terminal showing the workflow selection step -->
-
 Untether shows three workflow previews:
 
 === "assistant"
@@ -287,7 +285,11 @@ Press **y** or **Enter** to save. You'll see:
 
 Untether is now running and listening for messages!
 
-<!-- SCREENSHOT: Telegram startup message from the bot showing version and engine info -->
+!!! untether "Untether"
+    🐕 untether v0.34.0 is ready
+
+    engine: `codex` · projects: `0`<br>
+    working in: /Users/you/dev/your-project
 
 ## What just happened
 
