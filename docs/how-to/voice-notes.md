@@ -38,7 +38,15 @@ requires a specific model name, set `voice_transcription_model` (for example,
 When you send a voice note, Untether transcribes it and runs the result as a normal text message.
 If transcription fails, you’ll get an error message and the run is skipped.
 
-<!-- SCREENSHOT: Telegram voice note message followed by the transcribed text and agent run output -->
+!!! user "You"
+    🎤 *(voice note — 0:12)*
+
+!!! untether "Untether"
+    📝 *"Add error handling to the upload function and make sure it retries on timeout"*
+
+    working · claude · 0s
+
+    … Read `src/upload.py`
 
 ## Related
 

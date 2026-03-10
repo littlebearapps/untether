@@ -46,7 +46,24 @@ Claude Code starts working and you'll see a progress message stream in.
 
 When Claude Code wants to modify a file, Untether intercepts the tool call and shows you what's about to happen. You'll see a message like:
 
-<!-- SCREENSHOT: approval buttons showing Edit tool with diff preview — Approve / Deny / Pause & Outline Plan -->
+<div markdown>
+
+!!! untether "Untether"
+    **Edit** `README.md`
+
+    ```diff
+    - # My Project
+    + # My Project
+    + # A tool for managing widgets
+    ```
+
+<div class="tg-buttons">
+<span class="tg-btn">Approve</span>
+<span class="tg-btn">Deny</span>
+<span class="tg-btn">Pause &amp; Outline Plan</span>
+</div>
+
+</div>
 
 The message includes:
 
@@ -100,7 +117,10 @@ Tap it to require Claude Code to write a comprehensive plan as a visible message
 
 After Claude Code writes the outline, **Approve Plan** and **Deny** buttons appear automatically — no need to type "approved":
 
-<!-- SCREENSHOT: post-outline Approve Plan / Deny buttons in Telegram -->
+<div class="tg-buttons">
+<span class="tg-btn">Approve Plan</span>
+<span class="tg-btn">Deny</span>
+</div>
 
 - Tap **Approve Plan** to let Claude Code proceed with implementation
 - Tap **Deny** to stop Claude Code and provide different direction
@@ -112,7 +132,21 @@ After Claude Code writes the outline, **Approve Plan** and **Deny** buttons appe
 
 Sometimes Claude Code needs to ask you something — like which approach to take or what naming convention to use. When Claude Code calls `AskUserQuestion`, you'll see the question in the chat with a ❓ prefix and **option buttons** for each choice:
 
-<!-- SCREENSHOT: AskUserQuestion message showing the question text with option buttons -->
+<div markdown>
+
+!!! untether "Untether"
+    ❓ What naming convention should I use for the new variables?
+
+<div class="tg-buttons">
+<span class="tg-btn">snake_case</span>
+<span class="tg-btn">camelCase</span>
+</div>
+<div class="tg-buttons">
+<span class="tg-btn">Other (type reply)</span>
+<span class="tg-btn">Deny</span>
+</div>
+
+</div>
 
 **Tap an option button** to select your answer. Claude Code receives your choice and continues immediately.
 

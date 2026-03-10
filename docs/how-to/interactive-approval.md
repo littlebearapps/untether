@@ -25,7 +25,24 @@ When a permission request arrives, you see a message with the tool name and a co
 
 Buttons clear immediately when you tap them — no waiting for a spinner.
 
-<!-- SCREENSHOT: Telegram approval message showing Approve / Deny / Pause & Outline Plan inline buttons beneath a tool call summary -->
+<div markdown>
+
+!!! untether "Untether"
+    **Edit** `src/main.py`
+
+    ```diff
+    - import sys
+    + import sys
+    + from pathlib import Path
+    ```
+
+<div class="tg-buttons">
+<span class="tg-btn">Approve</span>
+<span class="tg-btn">Deny</span>
+<span class="tg-btn">Pause &amp; Outline Plan</span>
+</div>
+
+</div>
 
 ## Diff previews
 
@@ -59,7 +76,21 @@ When Claude Code calls `AskUserQuestion`, Untether renders the question with int
 
 Toggle ask mode on or off via `/config` → Ask mode. When off, questions are auto-denied and Claude Code proceeds with defaults.
 
-<!-- SCREENSHOT: Telegram AskUserQuestion message showing option buttons and "Other (type reply)" -->
+<div markdown>
+
+!!! untether "Untether"
+    ❓ Which test framework should I use?
+
+<div class="tg-buttons">
+<span class="tg-btn">pytest</span>
+<span class="tg-btn">unittest</span>
+</div>
+<div class="tg-buttons">
+<span class="tg-btn">Other (type reply)</span>
+<span class="tg-btn">Deny</span>
+</div>
+
+</div>
 
 ## Push notifications
 

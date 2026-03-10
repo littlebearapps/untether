@@ -96,3 +96,29 @@
   color: rgba(255, 255, 255, 0.85);
   border-radius: 2px;
 }
+
+/* Telegram inline keyboard button mockups */
+.tg-buttons {
+  display: flex;
+  gap: 4px;
+  margin-top: 4px;
+}
+
+.tg-btn {
+  flex: 1;
+  text-align: center;
+  background: #e4e7eb;
+  color: #3390ec;
+  font-size: 13px;
+  font-weight: 500;
+  padding: 8px 4px;
+  border-radius: 6px;
+  cursor: default;
+  user-select: none;
+  white-space: nowrap;
+}
+
+[data-md-color-scheme="slate"] .tg-btn {
+  background: #2b313a;
+  color: #6ab2f2;
+}

@@ -39,7 +39,20 @@ When Claude Code tries to exit plan mode (ExitPlanMode), you see three buttons i
 - **Deny** — block and ask Claude Code to explain
 - **Pause & Outline Plan** — require a written plan first
 
-<!-- SCREENSHOT: Telegram ExitPlanMode message with Approve / Deny / Pause & Outline Plan inline buttons -->
+<div markdown>
+
+!!! untether "Untether"
+    **ExitPlanMode**
+
+    Claude Code wants to start executing the plan.
+
+<div class="tg-buttons">
+<span class="tg-btn">Approve</span>
+<span class="tg-btn">Deny</span>
+<span class="tg-btn">Pause &amp; Outline Plan</span>
+</div>
+
+</div>
 
 Tapping "Pause & Outline Plan" tells Claude Code to stop and write a comprehensive plan as a visible message in the chat. The plan must include:
 
@@ -53,7 +66,21 @@ This is useful when you want to review the approach before Claude Code starts ma
 
 After Claude Code writes the outline, **Approve Plan / Deny** buttons appear automatically in Telegram. Tap "Approve Plan" to let Claude Code proceed, or "Deny" to stop and provide feedback. You no longer need to type "approved" — the buttons handle it.
 
-<!-- SCREENSHOT: Telegram message showing Claude Code's written outline plan with Approve Plan / Deny inline buttons below -->
+<div markdown>
+
+!!! untether "Untether"
+    Here's my plan:
+
+    1. **Read** `src/main.py` to understand current structure
+    2. **Edit** `src/main.py` to refactor the `process()` function
+    3. **Run** tests to verify no regressions
+
+<div class="tg-buttons">
+<span class="tg-btn">Approve Plan</span>
+<span class="tg-btn">Deny</span>
+</div>
+
+</div>
 
 ## Progressive cooldown
 
@@ -70,7 +97,17 @@ During the cooldown, any ExitPlanMode attempt is automatically denied, but **App
 
 This prevents the agent from bulldozing through when you've asked it to slow down and explain its approach, while still giving you a one-tap way to approve once you're satisfied.
 
-<!-- SCREENSHOT: Telegram message showing auto-denied ExitPlanMode during cooldown with Approve Plan / Deny buttons -->
+<div markdown>
+
+!!! untether "Untether"
+    **ExitPlanMode** — auto-denied (cooldown: 28s remaining)
+
+<div class="tg-buttons">
+<span class="tg-btn">Approve Plan</span>
+<span class="tg-btn">Deny</span>
+</div>
+
+</div>
 
 ## Related
 
