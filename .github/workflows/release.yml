@@ -58,15 +58,8 @@ jobs:
       - name: Run tests
         run: uv run pytest
 
-      - name: Build (wheel + sdist)
-        run: uv build
-
-      - name: Upload dist artifacts
-        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
-        with:
-          name: dist
-          path: dist/
-          if-no-files-found: error
+      - name: Build and inspect
+        uses: hynek/build-and-inspect-python-package@73aea398b9c8de9ea9e4464c6b13cb8b1f3d6294 # v2.9.0
 
   publish:
     name: Publish to PyPI (trusted publishing)
@@ -82,7 +75,7 @@ jobs:
       - name: Download dist artifacts
         uses: actions/download-artifact@70fc10c6e5e1ce46ad2ea6f2b72d43f7d47b13c3 # v8.0.0
         with:
-          name: dist
+          name: Packages
           path: dist/
 
       - name: Publish package distributions to PyPI
@@ -110,7 +103,7 @@ jobs:
       - name: Download dist artifacts
         uses: actions/download-artifact@70fc10c6e5e1ce46ad2ea6f2b72d43f7d47b13c3 # v8.0.0
         with:
-          name: dist
+          name: Packages
           path: dist/
 
       - name: Create GitHub release and upload artifacts

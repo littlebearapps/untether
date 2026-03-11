@@ -1,0 +1,50 @@
+# git-cliff configuration for Untether changelog drafting.
+#
+# Usage:
+#   git-cliff --unreleased          # draft next release section
+#   git-cliff --latest              # show latest tag's section
+#   git-cliff -o CHANGELOG.md       # overwrite (use with care)
+#
+# This generates a DRAFT — hand-edit for sub-bullets, detail, and polish
+# before committing to CHANGELOG.md.
+
+[changelog]
+header = "# changelog\n"
+body = """
+{%- macro remote_url() -%}https://github.com/littlebearapps/untether{%- endmacro -%}
+
+{% if version -%}
+## {{ version }} ({{ timestamp | date(format="%Y-%m-%d") }})
+{% endif -%}
+
+{% for group, commits in commits | group_by(attribute="group") %}
+### {{ group | lower }}
+{% for commit in commits %}
+- {{ commit.message | split(pat="\n") | first | trim }} \
+  [#{{ commit.id | truncate(length=7, end="") }}]({{ self::remote_url() }}/commit/{{ commit.id }})
+{%- endfor %}
+{% endfor %}
+"""
+trim = true
+
+[git]
+conventional_commits = true
+filter_unconventional = true
+split_commits = false
+commit_parsers = [
+    { message = "^feat", group = "changes" },
+    { message = "^fix", group = "fixes" },
+    { message = "^docs", group = "docs" },
+    { message = "^test", group = "tests" },
+    { message = "^perf", group = "changes" },
+    { message = "^refactor", group = "changes" },
+    # Skip CI, dependency, and chore commits (not user-facing)
+    { message = "^ci", skip = true },
+    { message = "^deps", skip = true },
+    { message = "^chore", skip = true },
+    { message = "^build", skip = true },
+    { message = "^style", skip = true },
+]
+filter_commits = false
+tag_pattern = "v[0-9].*"
+sort_commits = "oldest"
