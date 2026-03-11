@@ -42,10 +42,23 @@ Integration tests are automated via Telegram MCP tools (`send_message`, `get_his
 - Each entry: `- description [#N](https://github.com/littlebearapps/untether/issues/N)`
 - Sub-bullets for implementation details (no issue link needed on sub-bullets)
 
+## Automated validation
+
+`scripts/validate_release.py` runs in CI on PRs that bump the version. It checks:
+- Changelog section exists for the new version
+- Date is valid ISO format
+- All entries have issue links `[#N]`
+- Subsection headings are from the allowed set
+
+Run locally: `python3 scripts/validate_release.py`
+
 ## After changes
 
 ```bash
 # Verify changelog format
 grep -E '## v[0-9]' CHANGELOG.md | head -5
 grep -E '#[0-9]+' CHANGELOG.md | head -10
+
+# Full automated validation
+python3 scripts/validate_release.py
 ```

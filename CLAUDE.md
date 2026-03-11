@@ -72,6 +72,9 @@ Telegram <-> TelegramPresenter <-> RunnerBridge <-> Runner (claude/codex/opencod
 | `telegram/bridge.py` | Telegram message rendering |
 | `telegram/loop.py` | Telegram update loop, signal handlers, drain-then-exit |
 | `commands.py` | Command result types |
+| `scripts/validate_release.py` | Release validation (changelog format, issue links, version match) |
+| `scripts/healthcheck.sh` | Post-deploy health check (systemd, version, logs, Bot API) |
+| `cliff.toml` | git-cliff config for changelog drafting |
 
 ## Reference docs
 
@@ -209,19 +212,22 @@ GitHub Actions CI runs on push to master and on PRs:
 | ruff | `ruff check` with GitHub annotations |
 | ty | Type checking (Astral's ty) |
 | pytest | Tests on Python 3.12, 3.13, 3.14 with 80% coverage threshold |
-| build | `uv build` wheel + sdist validation |
+| build | `uv build` + `twine check` + `check-wheel-contents` validation |
 | lockfile | `uv lock --check` ensures lockfile is in sync |
 | install-test | Clean wheel install + smoke-test imports (catches undeclared deps) |
+| testpypi-publish | Publishes to TestPyPI on master push (OIDC, `skip-existing: true`) |
+| release-validation | PR-only: validates changelog format, issue links, date when version changes |
 | pip-audit | Dependency vulnerability scanning (PyPA advisory DB) |
 | bandit | Python SAST (security static analysis) |
 | codeql | CodeQL code scanning (Python + Actions), blocks PRs on new alerts |
 | docs | Zensical docs build |
+| prerelease-deps | Weekly (Monday): tests with `--upgrade --prerelease=allow` (informational) |
 
 All third-party actions are pinned to commit SHAs (supply chain protection). Top-level `permissions: {}` restricts to least-privilege.
 
 Dependabot auto-merge (`dependabot-auto-merge.yml`) auto-squash-merges dependency updates after CI passes. GitHub Actions deps (CI-only, never shipped) are auto-merged for all version bumps including major. Python deps (shipped in wheel) are auto-merged for patch/minor only; major bumps get flagged for manual review.
 
-Release pipeline (`release.yml`) uses PyPI trusted publishing with OIDC.
+Release pipeline (`release.yml`) uses PyPI trusted publishing with OIDC. The `pypi` GitHub Environment has required reviewer approval as a gate before publishing. `scripts/validate_release.py` enforces changelog/version consistency.
 
 ## Issue tracking & releases
 

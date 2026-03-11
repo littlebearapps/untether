@@ -24,8 +24,12 @@ Step-by-step release workflow for Untether. Covers the full lifecycle from issue
 | `pyproject.toml` | Package version (`version = "X.Y.Z"`) |
 | `CHANGELOG.md` | Release notes with issue links |
 | `uv.lock` | Locked dependency versions |
-| `.github/workflows/release.yml` | Tag-triggered PyPI publish (OIDC trusted publishing) |
-| `.github/workflows/ci.yml` | PR/push CI (format, lint, ty, pytest, build, lockfile, audit, bandit, docs) |
+| `.github/workflows/release.yml` | Tag-triggered PyPI publish (OIDC trusted publishing, reviewer approval gate) |
+| `.github/workflows/ci.yml` | PR/push CI (format, lint, ty, pytest, build, lockfile, audit, bandit, docs, testpypi, release-validation) |
+| `.github/workflows/prerelease-deps.yml` | Weekly pre-release dependency testing (informational) |
+| `scripts/validate_release.py` | Automated changelog/version validation (runs in CI on version-bump PRs) |
+| `scripts/healthcheck.sh` | Post-deploy health check (systemd, version, logs, Bot API) |
+| `cliff.toml` | git-cliff config for changelog drafting from conventional commits |
 | `.claude/rules/release-discipline.md` | Auto-loaded rule enforcing issue/changelog discipline |
 
 ## Release workflow phases
@@ -115,6 +119,17 @@ Analyse commits since the last tag and determine the version bump:
 - One changelog section per release — no retroactive edits to prior sections
 - Date is the date of the release tag, not the date of the commit
 
+### git-cliff drafting
+
+Use `git-cliff` to generate a draft from conventional commits, then hand-edit:
+
+```bash
+git-cliff --unreleased          # draft next release section
+git-cliff --latest              # show latest tag's section
+```
+
+Config in `cliff.toml` maps `fix:` to fixes, `feat:` to changes, `docs:` to docs, `test:` to tests. Skips `ci:`, `deps:`, `chore:`.
+
 ## Phase 4: Pre-release validation
 
 Run all checks before tagging:
@@ -153,6 +168,7 @@ print(f'Version {v} matches changelog ✓')
 - [ ] Lint clean: `uv run ruff check src/`
 - [ ] Format clean: `uv run ruff format --check src/ tests/`
 - [ ] Lockfile synced: `uv lock --check`
+- [ ] Release validation: `python3 scripts/validate_release.py`
 - [ ] No uncommitted changes: `git status`
 
 ## Phase 5: Integration testing (MANDATORY)
@@ -243,9 +259,9 @@ The `release.yml` workflow triggers automatically on `v*` tags:
 
 1. Validates tag matches `pyproject.toml` version
 2. Runs full pytest suite
-3. Builds wheel + sdist via `uv build`
-4. Publishes to PyPI via trusted publishing (OIDC)
-5. Creates a GitHub Release with auto-generated notes
+3. Builds wheel + sdist via `uv build`, validates with `twine check` and `check-wheel-contents`
+4. Publishes to PyPI via trusted publishing (OIDC) — requires reviewer approval on the `pypi` GitHub Environment
+5. Creates a GitHub Release with auto-generated notes and uploads dist artifacts
 
 **Do not push the tag until the commit is on `master`.**
 
@@ -262,8 +278,12 @@ pip index versions untether
 direnv exec . gh release view vX.Y.Z
 
 # Install and test locally
-pipx install untether==X.Y.Z
+pipx upgrade untether
 untether --version
+
+# Health check (after service restart)
+scripts/healthcheck.sh --version X.Y.Z
+scripts/healthcheck.sh --dev --version X.Y.Z
 ```
 
 ## Rollback procedures
