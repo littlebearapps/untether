@@ -50,7 +50,7 @@ Tip: set a default engine for this chat with `/agent set claude`.
 !!! untether "Untether"
     done · codex · 8s
     ...
-    codex resume abc123
+    `codex resume abc123`
 
 To continue the same session, **reply** to a message with a resume line:
 

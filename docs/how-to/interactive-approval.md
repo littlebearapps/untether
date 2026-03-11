@@ -28,13 +28,11 @@ Buttons clear immediately when you tap them — no waiting for a spinner.
 <div markdown>
 
 !!! untether "Untether"
-    **Edit** `src/main.py`
-
-    ```diff
-    - import sys
-    + import sys
-    + from pathlib import Path
-    ```
+    ▸ Permission Request [CanUseTool] - tool: Edit (file_path=src/main.py)<br>
+    📝 src/main.py<br>
+    `- import sys`<br>
+    `+ import sys`<br>
+    `+ from pathlib import Path`
 
 <div class="tg-buttons">
 <span class="tg-btn">Approve</span>
@@ -48,22 +46,18 @@ Buttons clear immediately when you tap them — no waiting for a spinner.
 
 For tools that modify files, the approval message includes a compact diff so you can see what's about to change before deciding:
 
-- **Edit**: shows removed lines (`- old`) and added lines (`+ new`), up to 4 lines each
-- **Write**: shows the first 8 lines of content to be written
-- **Bash**: shows the command to be run (up to 200 characters)
+- **Edit**: 📝 file path, removed lines (`- old`) and added lines (`+ new`), up to 4 lines each
+- **Write**: 📝 file path, then the first 8 lines of content to be written
+- **Bash**: `$ command` (up to 200 characters)
 
 This lets you make informed approve/deny decisions without leaving Telegram.
 
 !!! untether "Untether"
-    **Edit** `src/main.py`
-
-    ```diff
-    - import sys
-    + import sys
-    + from pathlib import Path
-    ```
-
-    `Approve` · `Deny`
+    ▸ Permission Request [CanUseTool] - tool: Edit (file_path=src/main.py)<br>
+    📝 src/main.py<br>
+    `- import sys`<br>
+    `+ import sys`<br>
+    `+ from pathlib import Path`
 
 ## Answering questions
 

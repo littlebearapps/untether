@@ -67,7 +67,7 @@ The response includes a context footer:
 
 !!! untether "Untether"
     dir: happy-gadgets<br>
-    codex resume abc123
+    `codex resume abc123`
 
 That `dir:` line tells you which project is active. When you reply, Untether automatically uses the same project—you don't need to repeat `/happy-gadgets`.
 
@@ -117,7 +117,7 @@ The response shows both project and branch:
 
 !!! untether "Untether"
     dir: happy-gadgets @feat/new-login<br>
-    codex resume xyz789
+    `codex resume xyz789`
 
 Replies stay on the same branch. Your main checkout is untouched.
 

@@ -42,9 +42,7 @@ When Claude Code tries to exit plan mode (ExitPlanMode), you see three buttons i
 <div markdown>
 
 !!! untether "Untether"
-    **ExitPlanMode**
-
-    Claude Code wants to start executing the plan.
+    ▸ Permission Request [CanUseTool] - tool: ExitPlanMode
 
 <div class="tg-buttons">
 <span class="tg-btn">Approve</span>
@@ -100,7 +98,7 @@ This prevents the agent from bulldozing through when you've asked it to slow dow
 <div markdown>
 
 !!! untether "Untether"
-    **ExitPlanMode** — auto-denied (cooldown: 28s remaining)
+    ▸ Plan outlined — approve to proceed
 
 <div class="tg-buttons">
 <span class="tg-btn">Approve Plan</span>

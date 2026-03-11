@@ -38,7 +38,7 @@ Messages from that chat now default to the project.
     Fixed the two failing assertions in test_auth.py…
 
     dir: happy-gadgets<br>
-    codex resume abc123
+    `codex resume abc123`
 
 ## Rules for chat ids
 

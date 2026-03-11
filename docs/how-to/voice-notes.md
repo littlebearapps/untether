@@ -46,7 +46,7 @@ If transcription fails, you’ll get an error message and the run is skipped.
 
     working · claude · 0s
 
-    … Read `src/upload.py`
+    ▸ Read `src/upload.py`
 
 ## Related
 

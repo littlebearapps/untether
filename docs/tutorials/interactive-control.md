@@ -49,13 +49,11 @@ When Claude Code wants to modify a file, Untether intercepts the tool call and s
 <div markdown>
 
 !!! untether "Untether"
-    **Edit** `README.md`
-
-    ```diff
-    - # My Project
-    + # My Project
-    + # A tool for managing widgets
-    ```
+    ▸ Permission Request [CanUseTool] - tool: Edit (file_path=README.md)<br>
+    📝 README.md<br>
+    `- # My Project`<br>
+    `+ # My Project`<br>
+    `+ # A tool for managing widgets`
 
 <div class="tg-buttons">
 <span class="tg-btn">Approve</span>
@@ -67,8 +65,8 @@ When Claude Code wants to modify a file, Untether intercepts the tool call and s
 
 The message includes:
 
-- **Tool name** (e.g. Edit, Write, Bash)
-- **Diff preview** — removed lines (`- old`) and added lines (`+ new`) so you can see what will change
+- **Request type and tool name** with key parameters (e.g. file path, command)
+- **Diff preview** — 📝 file path, removed lines (`- old`) and added lines (`+ new`)
 - **Three buttons**: Approve, Deny, and Pause & Outline Plan
 
 Your phone will also buzz with a push notification so you don't miss it.
@@ -81,7 +79,7 @@ Tap **Approve** to let Claude Code proceed with the action. The button clears in
     working · claude · 8s · step 2
 
     ✓ Read `README.md`<br>
-    … Edit `README.md`
+    ▸ Edit `README.md`
 
 You may see several approval requests in a row as Claude Code works through multiple steps.
 
@@ -194,7 +192,7 @@ To check your current mode at any time:
 ```
 
 !!! untether "Untether"
-    plan mode: **on** (chat default)
+    plan mode: **on** (plan mode)
 
 ## What just happened
 

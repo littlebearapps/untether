@@ -22,7 +22,7 @@ Directives are only parsed at the start of the first non-empty line.
 
     ✓ Read `src/timeline.py`
 
-    `🏷 codex`
+    🏷 codex
 
 ## Set a default engine for the current scope
 

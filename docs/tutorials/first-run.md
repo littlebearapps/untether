@@ -66,7 +66,7 @@ When the agent finishes, Untether sends a new message and replaces the progress 
     
     Untether is a Telegram bridge for AI coding agents (Codex, Claude Code, OpenCode, Pi). It lets you run agents from chat, manage multiple projects and git worktrees, stream progress (commands, file changes, elapsed time), and resume sessions from either chat or terminal. It also supports file transfer, group topics mapped to repo/branch contexts, and multiple engines via chat commands, with a plugin system for engines/transports/commands.
 
-    codex resume 019bb89b-1b0b-7e90-96e4-c33181b49714
+    `codex resume 019bb89b-1b0b-7e90-96e4-c33181b49714`
 
 
 That last line is the **resume line**—it's how Untether knows which conversation to continue.
@@ -116,7 +116,7 @@ Untether sends `SIGTERM` to the agent process and posts a cancelled status:
 !!! failure ""
     cancelled · codex · 12s
 
-    codex resume 019bb89b-1b0b-7e90-96e4-c33181b49714
+    `codex resume 019bb89b-1b0b-7e90-96e4-c33181b49714`
 
 If a resume token was already issued (and resume lines are enabled), it will still be included so you can continue from where it stopped.
 

@@ -38,7 +38,7 @@ The engine only applies to that message. The response will have a resume line fo
 
 !!! untether "Untether"
     done · claude · 8s<br>
-    claude --resume abc123
+    `claude --resume abc123`
 
 When you reply, Untether sees `claude --resume` and automatically uses Claude Code—you don't need to repeat `/claude`.
 
