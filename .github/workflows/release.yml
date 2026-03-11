@@ -58,10 +58,20 @@ jobs:
       - name: Run tests
         run: uv run pytest
 
-      - name: Build and inspect
-        uses: hynek/build-and-inspect-python-package@73aea398b9c8de9ea9e4464c6b13cb8b1f3d6294 # v2.9.0
+      - name: Build (wheel + sdist)
+        run: uv build
+
+      - name: Inspect with twine and check-wheel-contents
+        run: |
+          uvx twine check dist/*
+          uvx check-wheel-contents dist/*.whl
+
+      - name: Upload packages
+        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
         with:
-          python-version: "3.13"
+          name: Packages
+          path: dist/
+          if-no-files-found: error
 
   publish:
     name: Publish to PyPI (trusted publishing)
