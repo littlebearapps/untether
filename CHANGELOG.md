@@ -1,5 +1,23 @@
 # changelog
 
+## v0.34.5 (2026-03-12)
+
+### fixes
+
+- hold ExitPlanMode request open after outline so post-outline Approve/Deny buttons persist — instead of auto-denying (which caused Claude to exit ~7s later), the control request is never responded to, keeping Claude alive while the user reads the outline [#114](https://github.com/littlebearapps/untether/issues/114), [#117](https://github.com/littlebearapps/untether/issues/117)
+  - buttons use real `request_id` from `pending_control_requests` for direct callback routing
+  - 5-minute safety timeout cleans up stale held requests
+- suppress stall auto-cancel when CPU is active — extended thinking phases produce no JSONL events but the process is alive and busy; `is_cpu_active()` check prevents false-positive kills [#114](https://github.com/littlebearapps/untether/issues/114)
+
+### tests
+
+- hold-open outline flow: new tests for hold-open path, real request_id buttons, pending cleanup, approval routing [#114](https://github.com/littlebearapps/untether/issues/114)
+- stall suppression: tests for CPU-active branch in auto-cancel logic [#114](https://github.com/littlebearapps/untether/issues/114)
+
+### changes
+
+- temporary debug logging for hold-open callback routing — will be removed after dogfooding confirms [#118](https://github.com/littlebearapps/untether/issues/118) is resolved
+
 ## v0.34.4 (2026-03-09)
 
 ### fixes
