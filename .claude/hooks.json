@@ -5,6 +5,33 @@
         "matcher": "Bash",
         "hooks": [
           {
+            "type": "command",
+            "command": ".claude/hooks/release-guard.sh"
+          }
+        ]
+      },
+      {
+        "matcher": "Edit|Write",
+        "hooks": [
+          {
+            "type": "command",
+            "command": ".claude/hooks/release-guard-protect.sh"
+          }
+        ]
+      },
+      {
+        "matcher": "mcp__github__push_files|mcp__github__merge_pull_request|mcp__github__create_or_update_file|mcp__github__delete_file",
+        "hooks": [
+          {
+            "type": "command",
+            "command": ".claude/hooks/release-guard-mcp.sh"
+          }
+        ]
+      },
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
             "type": "prompt",
             "prompt": "Check if this command interacts with Untether systemd services:\n\nCommand: {{tool_input.command}}\n\nRules:\n1. If it contains 'systemctl' with 'untether-dev' (e.g. restart/start/stop untether-dev): this is the DEV service, which is correct for testing local changes. Respond with:\nDEV SERVICE: Before restarting untether-dev, verify:\n1. Tests pass: `uv run pytest`\n2. Lint clean: `uv run ruff check src/`\n\n2. If it contains 'systemctl' with just 'untether' (NOT 'untether-dev') and 'restart' or 'start' (e.g. 'restart untether', 'start untether'): this is the STAGING service. Respond with:\nBLOCKED: Do NOT restart staging (untether.service). Staging runs a PyPI/TestPyPI wheel — local code changes have no effect on it. Restarting staging during development is always wrong.\n\nTo test local changes, use the dev service instead:\n  systemctl --user restart untether-dev\n\nStaging should only be restarted after `scripts/staging.sh install` (TestPyPI rc) or `pipx upgrade untether` (PyPI release).\n\n3. If it contains 'staging.sh install' or 'pipx upgrade untether' followed by 'systemctl' restart of staging: this is the correct staging upgrade path. Respond: PASS\n\n4. Otherwise respond: PASS"
           }
