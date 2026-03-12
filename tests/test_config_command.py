@@ -1913,7 +1913,7 @@ class TestDiffPreview:
 
     @pytest.mark.anyio
     async def test_diff_preview_default_label_on_page(self, tmp_path):
-        """No override → page shows 'default (on)'."""
+        """No override → page shows 'default (off)'."""
         state_path = tmp_path / "prefs.json"
         cmd = ConfigCommand()
         ctx = _make_ctx(
@@ -1924,7 +1924,7 @@ class TestDiffPreview:
         )
         await cmd.handle(ctx)
         msg = _last_edit_msg(ctx)
-        assert "default (on)" in msg.text
+        assert "default (off)" in msg.text
 
 
 # ---------------------------------------------------------------------------
