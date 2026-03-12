@@ -234,8 +234,8 @@ jobs:
         id: version-check
         run: |
           git fetch origin ${{ github.base_ref }} --depth=1
-          BASE_VERSION=$(git show origin/${{ github.base_ref }}:pyproject.toml | python3 -c "import sys, tomllib; print(tomllib.loads(sys.stdin.buffer.read())['project']['version'])")
-          PR_VERSION=$(python3 -c "import tomllib; print(tomllib.loads(open('pyproject.toml','rb').read())['project']['version'])")
+          BASE_VERSION=$(git show origin/${{ github.base_ref }}:pyproject.toml | python3 -c "import sys, tomllib; print(tomllib.loads(sys.stdin.read())['project']['version'])")
+          PR_VERSION=$(python3 -c "import tomllib; print(tomllib.load(open('pyproject.toml','rb'))['project']['version'])")
           if [ "$BASE_VERSION" != "$PR_VERSION" ]; then
             echo "changed=true" >> "$GITHUB_OUTPUT"
             echo "Version changed: $BASE_VERSION -> $PR_VERSION"
