@@ -2530,9 +2530,9 @@ async def test_stall_auto_cancel_suppressed_by_cpu_activity() -> None:
         c for c in transport.send_calls if "Auto-cancelled" in c["message"].text
     ]
     assert len(auto_cancel_msgs) == 0
-    # Should still have sent stall warnings (just not auto-cancel)
+    # First stall fires (cpu_active=None, no baseline), subsequent suppressed
     stall_msgs = [c for c in transport.send_calls if "No progress" in c["message"].text]
-    assert len(stall_msgs) >= 3
+    assert len(stall_msgs) <= 1
 
 
 @pytest.mark.anyio
@@ -2590,3 +2590,111 @@ async def test_stall_auto_cancel_fires_with_flat_cpu() -> None:
     ]
     assert len(auto_cancel_msgs) == 1
     assert "max_warnings" in auto_cancel_msgs[0]["message"].text
+
+
+@pytest.mark.anyio
+async def test_stall_notification_suppressed_when_cpu_active() -> None:
+    """Stall notifications suppressed when cpu_active=True; heartbeat re-renders fire."""
+    from unittest.mock import patch
+    from untether.utils.proc_diag import ProcessDiag
+
+    transport = FakeTransport()
+    presenter = _KeyboardPresenter()
+    clock = _FakeClock(start=100.0)
+    edits = _make_edits(transport, presenter, clock=clock)
+    edits._stall_check_interval = 0.01
+    edits._STALL_THRESHOLD_SECONDS = 0.05
+    edits._stall_repeat_seconds = 0.01
+    # High max so we don't hit auto-cancel
+    edits._STALL_MAX_WARNINGS = 100
+    edits.pid = 12345
+    edits.event_seq = 5
+    cancel_event = anyio.Event()
+    edits.cancel_event = cancel_event
+
+    call_count = 0
+
+    def active_cpu_diag(pid: int) -> ProcessDiag:
+        nonlocal call_count
+        call_count += 1
+        return ProcessDiag(
+            pid=pid,
+            alive=True,
+            cpu_utime=1000 + call_count * 300,
+            cpu_stime=200 + call_count * 50,
+        )
+
+    initial_seq = edits.event_seq
+
+    with patch(
+        "untether.utils.proc_diag.collect_proc_diag",
+        side_effect=active_cpu_diag,
+    ):
+        async with anyio.create_task_group() as tg:
+
+            async def drive() -> None:
+                for i in range(10):
+                    clock.set(100.1 + i * 0.1)
+                    await anyio.sleep(0.03)
+                    if cancel_event.is_set():
+                        break
+                edits.signal_send.close()
+
+            tg.start_soon(edits.run)
+            tg.start_soon(drive)
+
+    # First stall fires (cpu_active=None, no baseline), subsequent suppressed
+    stall_msgs = [c for c in transport.send_calls if "No progress" in c["message"].text]
+    assert len(stall_msgs) <= 1
+
+    # Heartbeat should have bumped event_seq (re-renders via edit)
+    assert edits.event_seq > initial_seq
+
+
+@pytest.mark.anyio
+async def test_stall_notification_fires_when_cpu_inactive() -> None:
+    """Stall notifications should fire when cpu_active=False (flat CPU)."""
+    from unittest.mock import patch
+    from untether.utils.proc_diag import ProcessDiag
+
+    transport = FakeTransport()
+    presenter = _KeyboardPresenter()
+    clock = _FakeClock(start=100.0)
+    edits = _make_edits(transport, presenter, clock=clock)
+    edits._stall_check_interval = 0.01
+    edits._STALL_THRESHOLD_SECONDS = 0.05
+    edits._stall_repeat_seconds = 0.01
+    # High max so we don't hit auto-cancel
+    edits._STALL_MAX_WARNINGS = 100
+    edits.pid = 12345
+    edits.event_seq = 5
+    cancel_event = anyio.Event()
+    edits.cancel_event = cancel_event
+
+    flat_diag = ProcessDiag(
+        pid=12345,
+        alive=True,
+        cpu_utime=1000,
+        cpu_stime=200,
+    )
+    with patch(
+        "untether.utils.proc_diag.collect_proc_diag",
+        return_value=flat_diag,
+    ):
+        async with anyio.create_task_group() as tg:
+
+            async def drive() -> None:
+                for i in range(10):
+                    clock.set(100.1 + i * 0.1)
+                    await anyio.sleep(0.03)
+                    if cancel_event.is_set():
+                        break
+                if not cancel_event.is_set():
+                    edits.signal_send.close()
+
+            tg.start_soon(edits.run)
+            tg.start_soon(drive)
+
+    # Stall notifications should have fired (CPU inactive)
+    stall_msgs = [c for c in transport.send_calls if "No progress" in c["message"].text]
+    assert len(stall_msgs) >= 1
