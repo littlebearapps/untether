@@ -1321,6 +1321,91 @@ async def test_error_answer_no_dedup_when_different() -> None:
 
 
 # ===========================================================================
+# Cost footer suppression on error runs
+# ===========================================================================
+
+
+def _force_show_api_cost(monkeypatch):
+    """Patch footer settings to always show API cost (independent of real config)."""
+    from untether.settings import FooterSettings
+
+    monkeypatch.setattr(
+        "untether.runner_bridge._load_footer_settings",
+        lambda: FooterSettings(show_api_cost=True),
+    )
+
+
+@pytest.mark.anyio
+async def test_cost_footer_suppressed_on_error_run(monkeypatch) -> None:
+    """Error runs should not show the cost footer — diagnostic line has cost already."""
+    _force_show_api_cost(monkeypatch)
+    transport = FakeTransport()
+    runner = ScriptRunner(
+        [
+            ErrorReturn(
+                error="Claude Code run failed",
+                usage={"total_cost_usd": 2.50, "num_turns": 10, "duration_ms": 60000},
+            )
+        ],
+        engine=CODEX_ENGINE,
+    )
+    cfg = ExecBridgeConfig(
+        transport=transport,
+        presenter=MarkdownPresenter(),
+        final_notify=True,
+    )
+
+    await handle_message(
+        cfg,
+        runner=runner,
+        incoming=IncomingMessage(channel_id=123, message_id=10, text="go"),
+        resume_token=None,
+    )
+
+    assert len(transport.send_calls) >= 2
+    final_text = transport.send_calls[-1]["message"].text
+    # Error text should be present
+    assert "Claude Code run failed" in final_text
+    # Cost footer (money bag emoji) should NOT appear on error runs
+    assert "\U0001f4b0" not in final_text
+
+
+@pytest.mark.anyio
+async def test_cost_footer_shown_on_success_run(monkeypatch) -> None:
+    """Successful runs should show the cost footer when usage data is present."""
+    _force_show_api_cost(monkeypatch)
+    transport = FakeTransport()
+    runner = ScriptRunner(
+        [
+            Return(
+                answer="All done!",
+                usage={"total_cost_usd": 1.25, "num_turns": 5, "duration_ms": 30000},
+            )
+        ],
+        engine=CODEX_ENGINE,
+    )
+    cfg = ExecBridgeConfig(
+        transport=transport,
+        presenter=MarkdownPresenter(),
+        final_notify=True,
+    )
+
+    await handle_message(
+        cfg,
+        runner=runner,
+        incoming=IncomingMessage(channel_id=123, message_id=10, text="go"),
+        resume_token=None,
+    )
+
+    assert len(transport.send_calls) >= 2
+    final_text = transport.send_calls[-1]["message"].text
+    assert "All done!" in final_text
+    # Cost footer (money bag emoji) SHOULD appear on success runs
+    assert "\U0001f4b0" in final_text
+    assert "$1.25" in final_text
+
+
+# ===========================================================================
 # Post-outline flow guidance
 # ===========================================================================
 

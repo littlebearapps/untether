@@ -1474,7 +1474,7 @@ async def handle_message(
     _show_cost = footer_cfg.show_api_cost
     if _footer_run_opts and _footer_run_opts.show_api_cost is not None:
         _show_cost = _footer_run_opts.show_api_cost
-    if _show_cost:
+    if _show_cost and run_ok is not False:
         cost_line = _format_run_cost(completed.usage)
         if cost_line:
             final_rendered = RenderedMessage(
