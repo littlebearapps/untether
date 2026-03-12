@@ -134,13 +134,6 @@ _DISCUSS_ESCALATION_MESSAGE = (
     "Any further calls without visible outline text will also be rejected."
 )
 
-_OUTLINE_WAIT_MESSAGE = (
-    "Your plan outline is now visible to the user in Telegram. "
-    "Approve/Deny buttons have been shown — the user will click one when ready.\n\n"
-    "WAIT for the user to click Approve or Deny. Do NOT call ExitPlanMode again — "
-    "it will be automatically rejected until the user responds via the buttons."
-)
-
 
 @dataclass(slots=True)
 class ClaudeStreamState:
@@ -638,20 +631,45 @@ def translate_claude_event(
                     outline_guard = (
                         session_id in _OUTLINE_PENDING and text_len < _OUTLINE_MIN_CHARS
                     )
+                    # Catch outline-pending sessions even after cooldown expires.
+                    # Without this, expired cooldown + written outline would skip
+                    # the synthetic 2-button flow and fall through to normal
+                    # 3-button ExitPlanMode (showing "Pause & Outline" again).
+                    outline_ready = (
+                        session_id in _OUTLINE_PENDING
+                        and text_len >= _OUTLINE_MIN_CHARS
+                    )
 
                     escalation_msg = check_discuss_cooldown(session_id)
-                    if outline_guard or escalation_msg is not None:
+                    if outline_guard or escalation_msg is not None or outline_ready:
                         if text_len >= _OUTLINE_MIN_CHARS:
-                            # Outline was written — auto-deny with "wait" message
+                            # Outline was written — hold the request open.
+                            # Don't auto-deny; keep the control request pending
+                            # so Claude blocks on stdin until the user clicks
+                            # Approve/Deny in Telegram.
                             logger.info(
-                                "control_request.discuss_cooldown_bypass",
+                                "control_request.discuss_outline_hold_open",
                                 request_id=request_id,
                                 session_id=session_id,
                                 text_chars=text_len,
                             )
                             _OUTLINE_PENDING.discard(session_id)
                             state.max_text_len_since_cooldown = 0
-                            deny_msg = _OUTLINE_WAIT_MESSAGE
+                            # Store as pending so the 5-min timeout safety net
+                            # applies.  Register session/input/tool-name mappings
+                            # here because the early return below skips the normal
+                            # registration at line ~779.
+                            state.pending_control_requests[request_id] = (
+                                event,
+                                time.time(),
+                            )
+                            _REQUEST_TO_SESSION[request_id] = session_id
+                            _REQUEST_TO_INPUT[request_id] = getattr(
+                                request, "input", {}
+                            )
+                            _REQUEST_TO_TOOL_NAME[request_id] = getattr(
+                                request, "tool_name", ""
+                            )
                         else:
                             # Retry without outline — auto-deny with escalation.
                             # outline_guard catches expired-cooldown retries too.
@@ -662,19 +680,23 @@ def translate_claude_event(
                                 outline_guard=outline_guard,
                             )
                             deny_msg = escalation_msg or _DISCUSS_ESCALATION_MESSAGE
-
-                        _REQUEST_TO_INPUT.pop(request_id, None)
-                        _REQUEST_TO_TOOL_NAME.pop(request_id, None)
-                        state.auto_deny_queue.append((request_id, deny_msg))
+                            _REQUEST_TO_INPUT.pop(request_id, None)
+                            _REQUEST_TO_TOOL_NAME.pop(request_id, None)
+                            state.auto_deny_queue.append((request_id, deny_msg))
 
                         # Show synthetic Approve/Deny buttons (no "Pause" option).
-                        # Prefix "da:" = discuss-approve (short to fit 64-byte
-                        # callback_data limit: "claude_control:approve:da:UUID"
-                        # = 26 + 36 = 62 chars).
+                        # For outline-ready: uses the REAL request_id so the
+                        # normal approve/deny flow in claude_control.py responds
+                        # directly to the held-open control request.
+                        # For escalation: uses da: prefix (discuss-approve) since
+                        # the request was already auto-denied.
                         state.note_seq += 1
                         synth_action_id = f"claude.discuss_approve.{state.note_seq}"
-                        synth_request_id = f"da:{session_id}"
-                        _REQUEST_TO_SESSION[synth_request_id] = session_id
+                        if text_len >= _OUTLINE_MIN_CHARS:
+                            button_request_id = request_id
+                        else:
+                            button_request_id = f"da:{session_id}"
+                            _REQUEST_TO_SESSION[button_request_id] = session_id
 
                         # Embed outline text in the action title so it's
                         # always visible alongside the Approve/Deny buttons
@@ -696,18 +718,18 @@ def translate_claude_event(
                                 kind="warning",
                                 title=synth_title,
                                 detail={
-                                    "request_id": synth_request_id,
+                                    "request_id": button_request_id,
                                     "request_type": "DiscussApproval",
                                     "inline_keyboard": {
                                         "buttons": [
                                             [
                                                 {
                                                     "text": "Approve Plan",
-                                                    "callback_data": f"claude_control:approve:{synth_request_id}",
+                                                    "callback_data": f"claude_control:approve:{button_request_id}",
                                                 },
                                                 {
                                                     "text": "Deny",
-                                                    "callback_data": f"claude_control:deny:{synth_request_id}",
+                                                    "callback_data": f"claude_control:deny:{button_request_id}",
                                                 },
                                             ],
                                         ]

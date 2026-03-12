@@ -2382,3 +2382,126 @@ def test_session_summary_zero_events_warning_condition() -> None:
     # After processing events, count increments
     stream.event_count = 5
     assert stream.event_count == 5
+
+
+@pytest.mark.anyio
+async def test_stall_auto_cancel_suppressed_by_cpu_activity() -> None:
+    """Stall auto-cancel should be suppressed when CPU is actively working.
+
+    Regression test for #115: long-running sessions with active CPU
+    (extended thinking) should not be auto-cancelled at max_warnings.
+    """
+    from unittest.mock import patch
+    from untether.utils.proc_diag import ProcessDiag
+
+    transport = FakeTransport()
+    presenter = _KeyboardPresenter()
+    clock = _FakeClock(start=100.0)
+    edits = _make_edits(transport, presenter, clock=clock)
+    edits._stall_check_interval = 0.01
+    edits._STALL_THRESHOLD_SECONDS = 0.05
+    edits._stall_repeat_seconds = 0.01
+    edits._STALL_MAX_WARNINGS = 3
+    edits.pid = 12345
+    edits.event_seq = 5
+    cancel_event = anyio.Event()
+    edits.cancel_event = cancel_event
+
+    # Return successive diagnostics with incrementing CPU ticks
+    # (simulating an active process during extended thinking)
+    call_count = 0
+
+    def active_cpu_diag(pid: int) -> ProcessDiag:
+        nonlocal call_count
+        call_count += 1
+        return ProcessDiag(
+            pid=pid,
+            alive=True,
+            cpu_utime=1000 + call_count * 300,
+            cpu_stime=200 + call_count * 50,
+        )
+
+    with patch(
+        "untether.utils.proc_diag.collect_proc_diag",
+        side_effect=active_cpu_diag,
+    ):
+        async with anyio.create_task_group() as tg:
+
+            async def drive() -> None:
+                for i in range(10):
+                    clock.set(100.1 + i * 0.1)
+                    await anyio.sleep(0.03)
+                    if cancel_event.is_set():
+                        break
+                # CPU-active process should NOT be cancelled — close manually
+                edits.signal_send.close()
+
+            tg.start_soon(edits.run)
+            tg.start_soon(drive)
+
+    # Should NOT have been auto-cancelled
+    assert not cancel_event.is_set()
+    auto_cancel_msgs = [
+        c for c in transport.send_calls if "Auto-cancelled" in c["message"].text
+    ]
+    assert len(auto_cancel_msgs) == 0
+    # Should still have sent stall warnings (just not auto-cancel)
+    stall_msgs = [c for c in transport.send_calls if "No progress" in c["message"].text]
+    assert len(stall_msgs) >= 3
+
+
+@pytest.mark.anyio
+async def test_stall_auto_cancel_fires_with_flat_cpu() -> None:
+    """Stall auto-cancel should still fire when CPU is flat (not active).
+
+    Complements test_stall_auto_cancel_suppressed_by_cpu_activity to
+    ensure the guard only suppresses when CPU is genuinely active.
+    """
+    from unittest.mock import patch
+    from untether.utils.proc_diag import ProcessDiag
+
+    transport = FakeTransport()
+    presenter = _KeyboardPresenter()
+    clock = _FakeClock(start=100.0)
+    edits = _make_edits(transport, presenter, clock=clock)
+    edits._stall_check_interval = 0.01
+    edits._STALL_THRESHOLD_SECONDS = 0.05
+    edits._stall_repeat_seconds = 0.01
+    edits._STALL_MAX_WARNINGS = 3
+    edits.pid = 12345
+    edits.event_seq = 5
+    cancel_event = anyio.Event()
+    edits.cancel_event = cancel_event
+
+    # Return successive diagnostics with FLAT CPU ticks (idle process)
+    flat_diag = ProcessDiag(
+        pid=12345,
+        alive=True,
+        cpu_utime=1000,
+        cpu_stime=200,
+    )
+    with patch(
+        "untether.utils.proc_diag.collect_proc_diag",
+        return_value=flat_diag,
+    ):
+        async with anyio.create_task_group() as tg:
+
+            async def drive() -> None:
+                for i in range(10):
+                    clock.set(100.1 + i * 0.1)
+                    await anyio.sleep(0.03)
+                    if cancel_event.is_set():
+                        break
+                if not cancel_event.is_set():
+                    edits.signal_send.close()
+
+            tg.start_soon(edits.run)
+            tg.start_soon(drive)
+
+    # Should have been auto-cancelled (CPU flat = not active)
+    assert cancel_event.is_set()
+    auto_cancel_msgs = [
+        c for c in transport.send_calls if "Auto-cancelled" in c["message"].text
+    ]
+    assert len(auto_cancel_msgs) == 1
+    assert "max_warnings" in auto_cancel_msgs[0]["message"].text

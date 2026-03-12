@@ -4,8 +4,8 @@ When the user clicks "Pause & Outline Plan", a cooldown is set.
 Subsequent ExitPlanMode calls are handled differently depending on
 whether Claude Code has written substantial outline text (>= 200 chars):
 
-- With outline: auto-deny with _OUTLINE_WAIT_MESSAGE + synthetic Approve/Deny buttons
-- Without outline: auto-deny with escalation message + synthetic Approve/Deny buttons
+- With outline: hold request open + synthetic Approve/Deny buttons (real request_id)
+- Without outline: auto-deny with escalation message + synthetic Approve/Deny buttons (da: prefix)
 """
 
 from __future__ import annotations
@@ -24,9 +24,9 @@ from untether.runners.claude import (
     _OUTLINE_PENDING,
     _REQUEST_TO_INPUT,
     _REQUEST_TO_SESSION,
+    _REQUEST_TO_TOOL_NAME,
     _SESSION_STDIN,
     _OUTLINE_MIN_CHARS,
-    _OUTLINE_WAIT_MESSAGE,
     set_discuss_cooldown,
     translate_claude_event,
 )
@@ -41,6 +41,7 @@ def _clear_registries():
     _OUTLINE_PENDING.clear()
     _REQUEST_TO_SESSION.clear()
     _REQUEST_TO_INPUT.clear()
+    _REQUEST_TO_TOOL_NAME.clear()
     _ACTIVE_RUNNERS.clear()
     _SESSION_STDIN.clear()
     yield
@@ -49,6 +50,7 @@ def _clear_registries():
     _OUTLINE_PENDING.clear()
     _REQUEST_TO_SESSION.clear()
     _REQUEST_TO_INPUT.clear()
+    _REQUEST_TO_TOOL_NAME.clear()
     _ACTIVE_RUNNERS.clear()
     _SESSION_STDIN.clear()
 
@@ -87,33 +89,40 @@ def _make_text_block(text: str) -> claude_schema.StreamAssistantMessage:
     )
 
 
-# --- Bypass path: outline written (text >= 200 chars) ---
+# --- Hold-open path: outline written (text >= 200 chars) ---
 
 
-def test_bypass_auto_denies_with_wait_message():
-    """ExitPlanMode after outline text should auto-deny with _OUTLINE_WAIT_MESSAGE."""
+def test_outline_ready_holds_request_open():
+    """ExitPlanMode after outline text should hold request open, not auto-deny.
+
+    The hold-open path returns early (before the normal registration at ~line 779),
+    so it must register _REQUEST_TO_SESSION / _REQUEST_TO_INPUT / _REQUEST_TO_TOOL_NAME
+    itself.  This test does NOT pre-set those mappings to verify the code creates them.
+    """
     state = _make_state("sess-1")
     set_discuss_cooldown("sess-1")
     state.last_assistant_text = "x" * 300
     state.max_text_len_since_cooldown = 300
 
     request_id = "req_exit_plan"
-    _REQUEST_TO_SESSION[request_id] = "sess-1"
-    _REQUEST_TO_INPUT[request_id] = {}
+    # Do NOT pre-set _REQUEST_TO_SESSION etc. — the hold-open path must register them.
 
     event = _make_exit_plan_mode_request(request_id)
     translate_claude_event(event, title="claude", state=state, factory=state.factory)
 
-    # Bypass path now auto-denies (not fall-through to normal buttons)
-    assert len(state.auto_deny_queue) == 1
-    assert state.auto_deny_queue[0][0] == request_id
-    assert state.auto_deny_queue[0][1] == _OUTLINE_WAIT_MESSAGE
-    # Counter should be reset after bypass
+    # Request should be held open (pending), NOT auto-denied
+    assert len(state.auto_deny_queue) == 0
+    assert request_id in state.pending_control_requests
+    # Hold-open path must register session/input/tool-name for callback routing
+    assert _REQUEST_TO_SESSION[request_id] == "sess-1"
+    assert _REQUEST_TO_TOOL_NAME[request_id] == "ExitPlanMode"
+    assert request_id in _REQUEST_TO_INPUT
+    # Counter should be reset after hold-open
     assert state.max_text_len_since_cooldown == 0
 
 
-def test_bypass_produces_synthetic_approve_deny_buttons():
-    """Bypass path should return synthetic Approve/Deny buttons (no Pause button)."""
+def test_outline_ready_buttons_use_real_request_id():
+    """Outline-ready path should use the real request_id in button callbacks."""
     state = _make_state("sess-2")
     set_discuss_cooldown("sess-2")
     state.max_text_len_since_cooldown = 300
@@ -138,9 +147,9 @@ def test_bypass_produces_synthetic_approve_deny_buttons():
     assert len(buttons[0]) == 2
     assert buttons[0][0]["text"] == "Approve Plan"
     assert buttons[0][1]["text"] == "Deny"
-    # Callback data uses da: prefix
-    assert buttons[0][0]["callback_data"].startswith("claude_control:approve:da:")
-    assert buttons[0][1]["callback_data"].startswith("claude_control:deny:da:")
+    # Callback data uses REAL request_id (not da: prefix)
+    assert buttons[0][0]["callback_data"] == f"claude_control:approve:{request_id}"
+    assert buttons[0][1]["callback_data"] == f"claude_control:deny:{request_id}"
 
 
 def test_bypass_clears_outline_pending():
@@ -189,9 +198,9 @@ def test_bypass_survives_text_overwrite():
     event = _make_exit_plan_mode_request(request_id)
     translate_claude_event(event, title="claude", state=state, factory=state.factory)
 
-    # Should still trigger bypass (max_text_len_since_cooldown=500 >= 200)
-    assert len(state.auto_deny_queue) == 1
-    assert state.auto_deny_queue[0][1] == _OUTLINE_WAIT_MESSAGE
+    # Should still trigger hold-open (max_text_len_since_cooldown=500 >= 200)
+    assert len(state.auto_deny_queue) == 0
+    assert request_id in state.pending_control_requests
     assert state.max_text_len_since_cooldown == 0
 
 
@@ -213,8 +222,6 @@ def test_auto_deny_without_outline():
 
     assert len(state.auto_deny_queue) == 1
     assert state.auto_deny_queue[0][0] == request_id
-    # Should use escalation message, not wait message
-    assert state.auto_deny_queue[0][1] != _OUTLINE_WAIT_MESSAGE
 
 
 def test_auto_deny_no_text():
@@ -230,6 +237,32 @@ def test_auto_deny_no_text():
     event = _make_exit_plan_mode_request(request_id)
     translate_claude_event(event, title="claude", state=state, factory=state.factory)
 
+    assert len(state.auto_deny_queue) == 1
+
+
+def test_escalation_path_uses_da_prefix():
+    """No-outline escalation path should use da: prefix in button callbacks."""
+    state = _make_state("sess-esc")
+    set_discuss_cooldown("sess-esc")
+    state.max_text_len_since_cooldown = 50  # below threshold
+
+    request_id = "req_exit_plan"
+    _REQUEST_TO_SESSION[request_id] = "sess-esc"
+    _REQUEST_TO_INPUT[request_id] = {}
+
+    event = _make_exit_plan_mode_request(request_id)
+    events = translate_claude_event(
+        event, title="claude", state=state, factory=state.factory
+    )
+
+    action_events = [e for e in events if isinstance(e, ActionEvent)]
+    assert len(action_events) == 1
+    detail = action_events[0].action.detail
+    buttons = detail["inline_keyboard"]["buttons"]
+    # Escalation path uses da: prefix
+    assert buttons[0][0]["callback_data"].startswith("claude_control:approve:da:")
+    assert buttons[0][1]["callback_data"].startswith("claude_control:deny:da:")
+    # Should have auto-denied
     assert len(state.auto_deny_queue) == 1
 
 
@@ -458,6 +491,55 @@ async def test_synthetic_approve_with_active_session():
     assert result is not None
     assert "Plan approved" in result.text
     assert session_id in _DISCUSS_APPROVED
+
+
+def test_hold_open_after_cooldown_expires_with_outline():
+    """Request should be held open even after cooldown expires.
+
+    Regression test for #114: when cooldown expires before Claude calls
+    ExitPlanMode but the outline has been written (text >= 200 chars),
+    the code should still enter the hold-open path with synthetic buttons
+    — not fall through to the normal 3-button ExitPlanMode flow.
+    """
+    import time
+    from unittest.mock import patch
+
+    state = _make_state("sess-expired")
+    set_discuss_cooldown("sess-expired")
+    assert "sess-expired" in _OUTLINE_PENDING
+
+    # Simulate outline written
+    state.max_text_len_since_cooldown = 400
+    state.outline_text = "Step 1: Do this\nStep 2: Do that\n" * 15
+
+    # Advance time past max cooldown (120s)
+    with patch.object(time, "time", return_value=time.time() + 200):
+        request_id = "req_exit_plan"
+        _REQUEST_TO_SESSION[request_id] = "sess-expired"
+        _REQUEST_TO_INPUT[request_id] = {}
+
+        event = _make_exit_plan_mode_request(request_id)
+        events = translate_claude_event(
+            event, title="claude", state=state, factory=state.factory
+        )
+
+    # Should still produce synthetic 2-button action (not 3-button)
+    action_events = [e for e in events if isinstance(e, ActionEvent)]
+    assert len(action_events) == 1
+    detail = action_events[0].action.detail
+    assert detail["request_type"] == "DiscussApproval"
+    buttons = detail["inline_keyboard"]["buttons"]
+    assert len(buttons) == 1
+    assert len(buttons[0]) == 2
+    assert buttons[0][0]["text"] == "Approve Plan"
+    assert buttons[0][1]["text"] == "Deny"
+    # Request should be held open (not auto-denied)
+    assert len(state.auto_deny_queue) == 0
+    assert request_id in state.pending_control_requests
+    # Buttons should use real request_id
+    assert buttons[0][0]["callback_data"] == f"claude_control:approve:{request_id}"
+    # _OUTLINE_PENDING should be cleared
+    assert "sess-expired" not in _OUTLINE_PENDING
 
 
 def test_session_cleanup_removes_synthetic_requests():

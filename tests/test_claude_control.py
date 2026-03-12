@@ -897,8 +897,15 @@ def test_exit_plan_mode_blocked_after_cooldown_expires_without_outline() -> None
     assert "REJECTED" in state.auto_deny_queue[0][1]
 
 
-def test_exit_plan_mode_allowed_after_cooldown_expires_with_outline() -> None:
-    """ExitPlanMode after cooldown expires WITH outline written falls through to normal flow."""
+def test_exit_plan_mode_after_cooldown_expires_with_outline_shows_synthetic_buttons() -> (
+    None
+):
+    """ExitPlanMode after cooldown expires WITH outline written shows synthetic 2-button flow.
+
+    Regression test for #114: previously this fell through to the normal
+    3-button flow (Approve/Deny/Pause & Outline), confusing users who had
+    already outlined. Now it correctly enters the synthetic 2-button path.
+    """
     import time as _time
 
     state, factory = _make_state_with_session("sess-cd-outline")
@@ -925,11 +932,20 @@ def test_exit_plan_mode_allowed_after_cooldown_expires_with_outline() -> None:
     )
     events = translate_claude_event(event, title="claude", state=state, factory=factory)
 
-    # Outline guard is False (text >= 200), cooldown expired → normal 3-button flow
-    assert state.auto_deny_queue == []
+    # Should hold request open and show synthetic Approve/Deny buttons (#114 fix)
+    assert len(state.auto_deny_queue) == 0
+    assert "req-cd-outline" in state.pending_control_requests
     assert len(events) == 1
     assert isinstance(events[0], ActionEvent)
-    assert events[0].action.kind == "warning"
+    detail = events[0].action.detail
+    assert detail["request_type"] == "DiscussApproval"
+    buttons = detail["inline_keyboard"]["buttons"]
+    assert len(buttons) == 1
+    assert len(buttons[0]) == 2
+    assert buttons[0][0]["text"] == "Approve Plan"
+    assert buttons[0][1]["text"] == "Deny"
+    # Outline-ready uses real request_id (not da: prefix)
+    assert buttons[0][0]["callback_data"] == "claude_control:approve:req-cd-outline"
 
 
 @pytest.mark.anyio
