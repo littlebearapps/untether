@@ -45,6 +45,7 @@ class Wait:
 @dataclass(frozen=True, slots=True)
 class Return:
     answer: str
+    usage: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True, slots=True)
@@ -217,6 +218,7 @@ class ScriptRunner(MockRunner):
                         resume=token,
                         ok=True,
                         answer=step.answer,
+                        usage=step.usage or None,
                     )
                     return
                 if isinstance(step, ErrorReturn):

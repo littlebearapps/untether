@@ -82,6 +82,7 @@ _HOME_HINTS: dict[str, dict[str, str]] = {
         "on": "approve actions",
         "off": "run freely",
         "auto": "auto-approve actions",
+        "default": "agent decides",
         "full access": "all tools approved",
         "read-only": "write tools blocked",
     },
@@ -92,7 +93,7 @@ _HOME_HINTS: dict[str, dict[str, str]] = {
     },
     "dp": {
         "on": "show code changes",
-        "default": "show code changes",
+        "default": "buttons only",
         "off": "buttons only",
     },
     "vb": {
@@ -458,7 +459,7 @@ async def _page_planmode(ctx: CommandContext, action: str | None = None) -> None
             "• <b>on</b> — ask before every action (safest)",
             "• <b>auto</b> — approve actions, ask before finalising plans",
             "",
-            "Works with: Claude Code",
+            "ℹ️ <i>Default: uses Claude Code's own permission mode</i>",
             "",
             f"Current: <b>{current_label}</b>",
             "",
@@ -498,8 +499,6 @@ async def _page_planmode(ctx: CommandContext, action: str | None = None) -> None
             "",
             "• <b>read-only</b> — write tools blocked (default)",
             "• <b>full access</b> — all tools approved",
-            "",
-            "Works with: Gemini CLI",
             "",
             f"Current: <b>{current_label}</b>",
             "",
@@ -567,8 +566,6 @@ async def _page_verbose(ctx: CommandContext, action: str | None = None) -> None:
         "",
         "• <b>on</b> — show file paths, commands, and search patterns",
         "• <b>off</b> — show action names only (default)",
-        "",
-        "Works with: all engines",
         "",
         f"Current: <b>{current_label}</b>",
         "",
@@ -710,8 +707,6 @@ async def _page_trigger(ctx: CommandContext, action: str | None = None) -> None:
         "• <b>all</b> — respond to every message (default)",
         "• <b>mentions</b> — only respond when @mentioned",
         "",
-        "Works with: all engines",
-        "",
         f"Current: <b>{current_label}</b>",
         "",
         f'📖 <a href="{_DOCS_BASE}group-chat/">Learn more</a>',
@@ -781,7 +776,7 @@ async def _page_model(ctx: CommandContext, action: str | None = None) -> None:
 
     override = await prefs.get_engine_override(chat_id, current_engine)
     model = override.model if override else None
-    current_label = model or "default"
+    current_label = model or "default (engine decides)"
 
     lines = [
         "<b>⚙️ Model</b>",
@@ -895,15 +890,9 @@ async def _page_reasoning(ctx: CommandContext, action: str | None = None) -> Non
 
     override = await prefs.get_engine_override(chat_id, current_engine)
     reasoning = override.reasoning if override else None
-    current_label = reasoning or "default"
+    current_label = reasoning or "default (engine decides)"
 
     levels = allowed_reasoning_levels(current_engine)
-    supported_engines = sorted(e for e in ("claude", "codex") if supports_reasoning(e))
-    _ENGINE_DISPLAY = {"claude": "Claude Code", "codex": "Codex"}
-    works_with = (
-        ", ".join(_ENGINE_DISPLAY.get(e, e.capitalize()) for e in supported_engines)
-        or "Codex"
-    )
 
     level_descriptions: list[str] = []
     if "minimal" in levels:
@@ -922,7 +911,7 @@ async def _page_reasoning(ctx: CommandContext, action: str | None = None) -> Non
         "",
         *level_descriptions,
         "",
-        f"Works with: {works_with}",
+        "ℹ️ <i>Default: uses engine's own reasoning level</i>",
         "",
         f"Engine: <b>{current_engine}</b>",
         f"Current: <b>{current_label}</b>",
@@ -1064,8 +1053,6 @@ async def _page_ask_questions(ctx: CommandContext, action: str | None = None) ->
         "• <b>on</b> — questions shown with option buttons (default)",
         "• <b>off</b> — agent makes its best guess and continues",
         "",
-        "Works with: Claude Code",
-        "",
         f"Current: <b>{current_label}</b>",
         "",
         f'📖 <a href="{_DOCS_BASE}inline-settings/">Learn more</a>',
@@ -1178,7 +1165,7 @@ async def _page_diff_preview(ctx: CommandContext, action: str | None = None) -> 
     elif dp is False:
         current_label = "off"
     else:
-        current_label = "default (on)"
+        current_label = "default (off)"
 
     lines = [
         "<b>⚙️ Diff preview</b>",
@@ -1186,10 +1173,8 @@ async def _page_diff_preview(ctx: CommandContext, action: str | None = None) -> 
         "See what the agent wants to change before you approve it.",
         "Shows a compact diff of edits and commands.",
         "",
-        "• <b>on</b> — show code changes in approval messages (default)",
-        "• <b>off</b> — show approval buttons only",
-        "",
-        "Works with: Claude Code",
+        "• <b>on</b> — show code changes in approval messages",
+        "• <b>off</b> — show approval buttons only (default)",
         "",
         f"Current: <b>{current_label}</b>",
         "",
@@ -1297,17 +1282,15 @@ async def _page_cost_usage(ctx: CommandContext, action: str | None = None) -> No
     ]
 
     if has_api_cost:
-        ac_label = "on" if ac is True else ("off" if ac is False else "default")
+        ac_label = "on" if ac is True else ("off" if ac is False else "default (on)")
         lines.append(f"<b>API cost</b>: {ac_label}")
         lines.append("  Show cost, tokens, and time after each task.")
-        lines.append("  Works with: Claude Code, OpenCode, Gemini, Amp")
         lines.append("")
 
     if has_sub_usage:
-        su_label = "on" if su is True else ("off" if su is False else "default")
+        su_label = "on" if su is True else ("off" if su is False else "default (off)")
         lines.append(f"<b>Subscription usage</b>: {su_label}")
         lines.append("  Show how much of your 5h/weekly quota is used.")
-        lines.append("  Works with: Claude Code (Pro/Max plans)")
         lines.append("")
 
     lines.append(f'📖 <a href="{_DOCS_BASE}cost-budgets/">Learn more</a>')

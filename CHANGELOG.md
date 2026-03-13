@@ -8,15 +8,24 @@
   - buttons use real `request_id` from `pending_control_requests` for direct callback routing
   - 5-minute safety timeout cleans up stale held requests
 - suppress stall auto-cancel when CPU is active — extended thinking phases produce no JSONL events but the process is alive and busy; `is_cpu_active()` check prevents false-positive kills [#114](https://github.com/littlebearapps/untether/issues/114)
+- suppress redundant cost footer on error runs — diagnostic context line already contains cost data, `💰` footer no longer duplicates it [#120](https://github.com/littlebearapps/untether/issues/120)
+- clarify /config default labels and remove redundant "Works with" lines [#119](https://github.com/littlebearapps/untether/issues/119)
+
+### changes
+
+- suppress stall Telegram notifications when CPU-active; heartbeat re-render keeps elapsed time counter ticking during extended thinking phases [#121](https://github.com/littlebearapps/untether/issues/121)
+- temporary debug logging for hold-open callback routing — will be removed after dogfooding confirms [#118](https://github.com/littlebearapps/untether/issues/118) is resolved
 
 ### tests
 
 - hold-open outline flow: new tests for hold-open path, real request_id buttons, pending cleanup, approval routing [#114](https://github.com/littlebearapps/untether/issues/114)
-- stall suppression: tests for CPU-active branch in auto-cancel logic [#114](https://github.com/littlebearapps/untether/issues/114)
+- stall suppression: tests for CPU-active auto-cancel, notification suppression when cpu_active=True, notification fires when cpu_active=False [#114](https://github.com/littlebearapps/untether/issues/114), [#121](https://github.com/littlebearapps/untether/issues/121)
+- cost footer: tests for suppression on error runs, display on success runs [#120](https://github.com/littlebearapps/untether/issues/120)
 
-### changes
+### ci
 
-- temporary debug logging for hold-open callback routing — will be removed after dogfooding confirms [#118](https://github.com/littlebearapps/untether/issues/118) is resolved
+- add CODEOWNERS (`* @littlebearapps/core`), update third-party action SHA pins, add permission comments
+- add release guard hooks and document protection in CLAUDE.md
 
 ## v0.34.4 (2026-03-09)
 

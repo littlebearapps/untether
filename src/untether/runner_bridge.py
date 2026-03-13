@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import contextlib
 import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
@@ -703,30 +704,52 @@ class ProgressEdits:
                 self.signal_send.close()
                 return
 
-            # Telegram notification
-            parts = [f"⏳ No progress for {int(elapsed // 60)} min"]
-            if self._stall_warn_count > 1:
-                parts[0] += f" (warned {self._stall_warn_count}x)"
-            parts.append("— session may be stuck.")
-            if last_action:
-                parts.append(f"Last: {last_action}")
-            if diag:
-                parts.append(f"PID {diag.pid}: {format_diag(diag)}")
-            parts.append("/cancel to stop.")
-            text = "\n".join(parts)
-            try:
-                await self.transport.send(
+            # Suppress Telegram notification when process is CPU-active
+            # (extended thinking, background agents). Instead, trigger a
+            # heartbeat re-render so the elapsed time counter keeps ticking.
+            if cpu_active is True:
+                logger.info(
+                    "progress_edits.stall_suppressed_notification",
                     channel_id=self.channel_id,
-                    message=RenderedMessage(text=text),
-                    options=SendOptions(
-                        thread_id=self.thread_id,
-                    ),
+                    seconds_since_last_event=round(elapsed, 1),
+                    stall_warn_count=self._stall_warn_count,
+                    pid=self.pid,
                 )
-            except Exception:  # noqa: BLE001
-                logger.debug(
-                    "progress_edits.stall_notify_failed",
-                    exc_info=True,
-                )
+                # Heartbeat: bump event_seq to wake the render loop and
+                # refresh the progress message with updated elapsed time.
+                # Does NOT reset _last_event_at or stall counters.
+                self.event_seq += 1
+                with contextlib.suppress(
+                    anyio.WouldBlock,
+                    anyio.BrokenResourceError,
+                    anyio.ClosedResourceError,
+                ):
+                    self.signal_send.send_nowait(None)
+            else:
+                # Telegram notification (cpu_active=False or None)
+                parts = [f"⏳ No progress for {int(elapsed // 60)} min"]
+                if self._stall_warn_count > 1:
+                    parts[0] += f" (warned {self._stall_warn_count}x)"
+                parts.append("— session may be stuck.")
+                if last_action:
+                    parts.append(f"Last: {last_action}")
+                if diag:
+                    parts.append(f"PID {diag.pid}: {format_diag(diag)}")
+                parts.append("/cancel to stop.")
+                text = "\n".join(parts)
+                try:
+                    await self.transport.send(
+                        channel_id=self.channel_id,
+                        message=RenderedMessage(text=text),
+                        options=SendOptions(
+                            thread_id=self.thread_id,
+                        ),
+                    )
+                except Exception:  # noqa: BLE001
+                    logger.debug(
+                        "progress_edits.stall_notify_failed",
+                        exc_info=True,
+                    )
 
     def _has_pending_approval(self) -> bool:
         """Check if the most recent non-completed action is waiting for user approval."""
@@ -1474,7 +1497,7 @@ async def handle_message(
     _show_cost = footer_cfg.show_api_cost
     if _footer_run_opts and _footer_run_opts.show_api_cost is not None:
         _show_cost = _footer_run_opts.show_api_cost
-    if _show_cost:
+    if _show_cost and run_ok is not False:
         cost_line = _format_run_cost(completed.usage)
         if cost_line:
             final_rendered = RenderedMessage(

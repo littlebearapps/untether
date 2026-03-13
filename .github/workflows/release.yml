@@ -19,7 +19,7 @@ jobs:
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
 
       - name: Install uv
-        uses: astral-sh/setup-uv@5a095e7a2014a4212f075830d4f7277575a9d098 # v7
+        uses: astral-sh/setup-uv@6ee6290f1cbc4156c0bdd66691b2c144ef8df19a # v7.4.0
         with:
           python-version: "3.14"
           enable-cache: true
@@ -82,16 +82,16 @@ jobs:
       url: https://pypi.org/p/untether
     permissions:
       contents: read
-      id-token: write
+      id-token: write  # OIDC trusted publishing to PyPI
     steps:
       - name: Download dist artifacts
-        uses: actions/download-artifact@70fc10c6e5e1ce46ad2ea6f2b72d43f7d47b13c3 # v8.0.0
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: Packages
           path: dist/
 
       - name: Publish package distributions to PyPI
-        uses: pypa/gh-action-pypi-publish@ed0c53931b1dc9bd32cbe73a98c7f6766f8a527e # release/v1
+        uses: pypa/gh-action-pypi-publish@ed0c53931b1dc9bd32cbe73a98c7f6766f8a527e # v1.13.0
         with:
           packages-dir: dist/
           skip-existing: true
@@ -101,25 +101,25 @@ jobs:
     needs: publish
     runs-on: ubuntu-latest
     permissions:
-      contents: write
+      contents: write  # create GitHub release + upload artifacts
     steps:
       - name: Checkout
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
 
       - name: Install uv
-        uses: astral-sh/setup-uv@5a095e7a2014a4212f075830d4f7277575a9d098 # v7
+        uses: astral-sh/setup-uv@6ee6290f1cbc4156c0bdd66691b2c144ef8df19a # v7.4.0
         with:
           python-version: "3.14"
           enable-cache: true
 
       - name: Download dist artifacts
-        uses: actions/download-artifact@70fc10c6e5e1ce46ad2ea6f2b72d43f7d47b13c3 # v8.0.0
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: Packages
           path: dist/
 
       - name: Create GitHub release and upload artifacts
-        uses: softprops/action-gh-release@a06a81a03ee405af7f2048a818ed3f03bbf83c7b # v2
+        uses: softprops/action-gh-release@a06a81a03ee405af7f2048a818ed3f03bbf83c7b # v2.5.0
         with:
           generate_release_notes: true
           files: |
