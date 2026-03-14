@@ -49,6 +49,9 @@ Examples:
 
 If you send a file **without a caption**, Untether saves it to `incoming/<original_filename>`.
 
+!!! note "iOS: captions on documents"
+    Telegram on iOS doesn't always show a caption field when sending files via the "File" picker — the file sends immediately. To add a `/file put <path>` caption on iOS, send photos (which always show the caption field) or use **Telegram Desktop / macOS**, which shows a caption field for all file types. Alternatively, skip the caption and let files auto-save to `incoming/`.
+
 Use `--force` to overwrite:
 
 ```
@@ -58,7 +61,7 @@ Use `--force` to overwrite:
 !!! untether "Untether"
     📄 saved `docs/spec.pdf` (42 KB)
 
-<img src="../assets/screenshots/file-put.jpg" alt="Document upload with /file put caption showing saved confirmation" width="360" loading="lazy" />
+<img src="../assets/screenshots/file-put.jpg" alt="Photos uploaded and auto-saved with confirmation" width="360" loading="lazy" />
 
 ## Fetch a file (`/file get`)
 
