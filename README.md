@@ -26,16 +26,13 @@
 
 Your AI coding agents need a terminal, but you don't need to sit at one. Untether runs on your machine and connects your agents to a Telegram bot. Send a task from your phone — by voice or text — and watch your agent work in real time. When it needs permission, tap a button. When it's done, read the result. No desk, no SSH, no screen sharing.
 
-<p align="center">
-  <img src="https://raw.githubusercontent.com/littlebearapps/untether/feature/github-hardening/docs/assets/screenshots/hero-voice-to-result.jpg" alt="Voice note to streamed progress to final result — all in Telegram" width="270" /><br>
-  <sub>Send tasks by voice (Whisper transcription)</sub>
-  &nbsp;&nbsp;&nbsp;&nbsp;
-  <img src="https://raw.githubusercontent.com/littlebearapps/untether/feature/github-hardening/docs/assets/screenshots/approval-diff-preview.jpg" alt="Approve or deny file changes with inline diff preview" width="270" /><br>
-  <sub>Approve changes remotely</sub>
-  &nbsp;&nbsp;&nbsp;&nbsp;
-  <img src="https://raw.githubusercontent.com/littlebearapps/untether/feature/github-hardening/docs/assets/screenshots/config-menu.jpg" alt="Configure everything from Telegram with inline settings" width="270" /><br>
-  <sub>Configure from Telegram</sub>
-</p>
+<table align="center">
+<tr>
+<td align="center"><img src="https://raw.githubusercontent.com/littlebearapps/untether/feature/github-hardening/docs/assets/screenshots/hero-voice-to-result.jpg" alt="Voice note to streamed progress to final result — all in Telegram" width="270" /><br><sub>Send tasks by voice (Whisper transcription)</sub></td>
+<td align="center"><img src="https://raw.githubusercontent.com/littlebearapps/untether/feature/github-hardening/docs/assets/screenshots/approval-diff-preview.jpg" alt="Approve or deny file changes with inline diff preview" width="270" /><br><sub>Approve changes remotely</sub></td>
+<td align="center"><img src="https://raw.githubusercontent.com/littlebearapps/untether/feature/github-hardening/docs/assets/screenshots/config-menu.jpg" alt="Configure everything from Telegram with inline settings" width="270" /><br><sub>Configure from Telegram</sub></td>
+</tr>
+</table>
 
 ---
 
