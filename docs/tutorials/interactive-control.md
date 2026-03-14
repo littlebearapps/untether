@@ -30,6 +30,8 @@ Open your Telegram chat with the bot and send:
 !!! untether "Untether"
     plan mode: **on**
 
+![/planmode on confirmation](../assets/screenshots/planmode-on.jpg){ loading=lazy }
+
 The bot confirms that plan mode is now active. This setting is stored per chat and persists across sessions.
 
 ## 3. Send a task
@@ -69,6 +71,8 @@ The message includes:
 - **Diff preview** — 📝 file path, removed lines (`- old`) and added lines (`+ new`)
 - **Three buttons**: Approve, Deny, and Pause & Outline Plan
 
+![Approval buttons with diff preview — Approve / Deny / Pause & Outline Plan](../assets/screenshots/approval-diff-preview.jpg){ loading=lazy }
+
 Your phone will also buzz with a push notification so you don't miss it.
 
 ## 5. Approve a tool call
@@ -89,6 +93,8 @@ If something doesn't look right, tap **Deny** instead. Claude Code receives a de
 
 !!! untether "Untether"
     I was going to add a comment to the top of README.md with a project description. Would you prefer I explain what I had in mind first, or should I take a different approach?
+
+![Deny response — Claude acknowledging the denial](../assets/screenshots/deny-response.jpg){ loading=lazy }
 
 This is useful when you want Claude Code to explain its reasoning before making changes. After denying, Claude Code will typically describe what it was trying to do and ask for guidance.
 
@@ -113,12 +119,16 @@ Tap it to require Claude Code to write a comprehensive plan as a visible message
 
     Files to modify: `README.md`
 
+![Claude's written outline/plan appearing as visible text in chat](../assets/screenshots/plan-outline-text.jpg){ loading=lazy }
+
 After Claude Code writes the outline, **Approve Plan** and **Deny** buttons appear automatically — no need to type "approved":
 
 <div class="tg-buttons">
 <span class="tg-btn">Approve Plan</span>
 <span class="tg-btn">Deny</span>
 </div>
+
+![Post-outline Approve Plan / Deny buttons](../assets/screenshots/post-outline-buttons.jpg){ loading=lazy }
 
 - Tap **Approve Plan** to let Claude Code proceed with implementation
 - Tap **Deny** to stop Claude Code and provide different direction
@@ -146,6 +156,8 @@ Sometimes Claude Code needs to ask you something — like which approach to take
 
 </div>
 
+![AskUserQuestion with option buttons](../assets/screenshots/ask-question-options.jpg){ loading=lazy }
+
 **Tap an option button** to select your answer. Claude Code receives your choice and continues immediately.
 
 For multi-question flows (1 of N, 2 of N), each question appears in sequence after you answer the previous one.
@@ -154,6 +166,8 @@ If none of the options fit, tap **Other (type reply)** and type a custom answer 
 
 !!! user "You"
     Use snake_case for all variable names
+
+![User replying with text to an AskUserQuestion](../assets/screenshots/ask-reply-continue.jpg){ loading=lazy }
 
 Untether routes your reply back to Claude Code, which reads it and continues.
 
@@ -172,6 +186,8 @@ Once you're comfortable with how Claude Code works, you might want less interrup
 
 !!! untether "Untether"
     plan mode: **auto**
+
+![/planmode auto confirmation](../assets/screenshots/planmode-auto.jpg){ loading=lazy }
 
 In auto mode, tool calls (Edit, Write, Bash) are still auto-approved — Claude Code works without interruption. Plan transitions are also auto-approved, so you won't see ExitPlanMode buttons. The agent preamble still requests summaries and structured output.
 
@@ -193,6 +209,8 @@ To check your current mode at any time:
 
 !!! untether "Untether"
     plan mode: **on** (plan mode)
+
+![/planmode show output showing current mode](../assets/screenshots/planmode-show.jpg){ loading=lazy }
 
 ## What just happened
 

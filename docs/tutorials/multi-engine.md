@@ -34,6 +34,8 @@ Prefix any message with `/<engine>`:
 !!! user "You"
     /pi explain how the event loop works in this codebase
 
+![Engine switching — /claude then /codex in the same chat](../assets/screenshots/multi-engine-switch.jpg){ loading=lazy }
+
 The engine only applies to that message. The response will have a resume line for that engine:
 
 !!! untether "Untether"
@@ -84,6 +86,8 @@ Example response:
     engine: claude (chat default)<br>
     defaults: topic: none, chat: claude, project: none, global: codex<br>
     available: codex, claude, opencode, pi, gemini, amp
+
+![/agent command output showing engine resolution layers](../assets/screenshots/agent-resolution.jpg){ loading=lazy }
 
 Clear it:
 

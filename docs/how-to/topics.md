@@ -69,6 +69,9 @@ Untether will bind the topic and rename it to match the context.
 
     Topic renamed to `backend @feat/api`
 
+<!-- TODO: capture screenshot -->
+<!-- ![Forum topic bound to project and branch with renamed title and context footer](../assets/screenshots/forum-topic-context.jpg){ loading=lazy } -->
+
 ## Inspect or change the binding
 
 - `/ctx` shows the current binding

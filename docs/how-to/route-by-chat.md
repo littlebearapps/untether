@@ -29,6 +29,8 @@ Then send any message in the target chat. Untether captures the `chat_id` and up
 
 Messages from that chat now default to the project.
 
+![Chat bound to a project, message routed with project context in footer](../assets/screenshots/project-command.jpg){ loading=lazy }
+
 !!! user "You"
     fix the failing tests
 

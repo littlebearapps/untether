@@ -14,6 +14,8 @@ This page explains what those settings mean and how to change them.
 
 ## Chat mode (auto-resume)
 
+![Follow-up message auto-resumes the previous session without replying](../assets/screenshots/chat-auto-resume.jpg){ loading=lazy }
+
 **What it feels like:** a normal chat assistant.
 
 !!! user "You"
@@ -41,6 +43,8 @@ To pin a project or branch for the chat, use:
 Tip: set a default engine for this chat with `/agent set claude`.
 
 ## Stateless (reply-to-continue)
+
+![Stateless mode — user replying to a message with resume line](../assets/screenshots/stateless-reply-resume.jpg){ loading=lazy }
 
 **What it feels like:** every message is independent until you reply.
 

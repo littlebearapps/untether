@@ -64,6 +64,9 @@ Mar 10 09:15:23 lba-1 untether[12345]: telegram.connected bot=@untether_dev_bot
 Mar 10 09:15:23 lba-1 untether[12345]: telegram.polling started
 ```
 
+<!-- TODO: capture screenshot -->
+<!-- ![journalctl output showing untether-dev starting cleanly](../assets/screenshots/journalctl-startup.jpg){ loading=lazy } -->
+
 Always test via the dev bot before merging. Never send test messages to the production bot.
 
 ## Run checks

@@ -143,6 +143,9 @@ by anyone to control your bot.
 
 Copy the token (the `123456789:ABC...` part).
 
+<!-- TODO: capture screenshot -->
+<!-- ![BotFather /newbot flow showing the generated token](../assets/screenshots/botfather-newbot.jpg){ loading=lazy } -->
+
 !!! warning "Keep your token secret"
     Anyone with your bot token can control your bot. Don't commit it to git or share it publicly.
 
@@ -207,6 +210,9 @@ Untether shows three workflow previews:
    workspace (projects + branches, i'll set those up)
    handoff (reply to continue, terminal resume)
 ```
+
+<!-- TODO: capture screenshot -->
+<!-- ![Onboarding wizard showing the workflow selection step](../assets/screenshots/onboarding-wizard.jpg){ loading=lazy } -->
 
 Each choice automatically configures conversation mode, topics, and resume lines:
 
@@ -300,6 +306,8 @@ Untether is now running and listening for messages!
 
     engine: `codex` · projects: `0`<br>
     working in: /Users/you/dev/your-project
+
+![Telegram startup message showing version and engine info](../assets/screenshots/startup-message.jpg){ loading=lazy }
 
 ## What just happened
 
