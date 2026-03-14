@@ -31,7 +31,7 @@ Your AI coding agents need a terminal, but you don't need to sit at one. Untethe
   &nbsp;
   <img src="https://raw.githubusercontent.com/littlebearapps/untether/feature/github-hardening/docs/assets/screenshots/approval-diff-preview.jpg" alt="Approve or deny file changes with inline diff preview" width="270" />
   &nbsp;
-  <img src="https://raw.githubusercontent.com/littlebearapps/untether/feature/github-hardening/docs/assets/screenshots/plan-outline-approve.jpg" alt="Review and approve an agent's plan before execution" width="270" />
+  <img src="https://raw.githubusercontent.com/littlebearapps/untether/feature/github-hardening/docs/assets/screenshots/config-menu.jpg" alt="Configure everything from Telegram with inline settings" width="270" />
 </p>
 
 ---
