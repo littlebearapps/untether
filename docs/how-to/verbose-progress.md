@@ -41,7 +41,7 @@ Here's the same action shown in both modes:
 
 Verbose mode adds context lines underneath each action, so you can see exactly what the agent is doing without waiting for the final answer.
 
-![Compact vs verbose progress for the same tool action](../assets/screenshots/verbose-progress.jpg){ loading=lazy }
+<img src="../assets/screenshots/verbose-progress.jpg" alt="Compact vs verbose progress for the same tool action" width="360" loading="lazy" />
 
 ## Set global default in config
 

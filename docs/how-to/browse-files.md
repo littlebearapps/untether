@@ -12,7 +12,7 @@ Send `/browse` to open the project root:
 
 Untether replies with a directory listing rendered as inline keyboard buttons. Each button is a file or directory you can tap.
 
-![/browse showing project root with directory and file buttons](../assets/screenshots/browse-directory.jpg){ loading=lazy }
+<img src="../assets/screenshots/browse-directory.jpg" alt="/browse showing project root with directory and file buttons" width="360" loading="lazy" />
 
 !!! untether "Untether"
     **/ happy-gadgets**

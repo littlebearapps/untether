@@ -40,7 +40,7 @@ Send a message like:
     dir: happy-gadgets @feat/memory-box
 
 <!-- TODO: capture screenshot -->
-<!-- ![Worktree run with @branch directive and project context in footer](../assets/screenshots/worktree-run.jpg){ loading=lazy } -->
+<!-- <img src="../assets/screenshots/worktree-run.jpg" alt="Worktree run with @branch directive and project context in footer" width="360" loading="lazy" /> -->
 
 ## Ignore `.worktrees/` in git status
 

@@ -58,7 +58,7 @@ Use `--force` to overwrite:
 !!! untether "Untether"
     📄 saved `docs/spec.pdf` (42 KB)
 
-![Document upload with /file put caption showing saved confirmation](../assets/screenshots/file-put.jpg){ loading=lazy }
+<img src="../assets/screenshots/file-put.jpg" alt="Document upload with /file put caption showing saved confirmation" width="360" loading="lazy" />
 
 ## Fetch a file (`/file get`)
 
@@ -73,7 +73,7 @@ Directories are zipped automatically.
 !!! untether "Untether"
     📎 `src/main.py` (1.2 KB)
 
-![/file get response showing fetched file as a document](../assets/screenshots/file-get.jpg){ loading=lazy }
+<img src="../assets/screenshots/file-get.jpg" alt="/file get response showing fetched file as a document" width="360" loading="lazy" />
 
 ## Related
 

@@ -14,7 +14,7 @@ saved project 'happy-gadgets' to ~/.untether/untether.toml
 ```
 
 <!-- TODO: capture screenshot -->
-<!-- ![Terminal output of untether init showing project registration](../assets/screenshots/project-init.jpg){ loading=lazy } -->
+<!-- <img src="../assets/screenshots/project-init.jpg" alt="Terminal output of untether init showing project registration" width="360" loading="lazy" /> -->
 
 This adds a project to your config:
 

@@ -23,7 +23,7 @@ $ untether doctor
 ```
 
 <!-- TODO: capture screenshot -->
-<!-- ![untether doctor output showing check results](../assets/screenshots/doctor-output.jpg){ loading=lazy } -->
+<!-- <img src="../assets/screenshots/doctor-output.jpg" alt="untether doctor output showing check results" width="360" loading="lazy" /> -->
 
 ## Bot not responding
 
@@ -283,7 +283,7 @@ all checks passed
 ```
 
 <!-- TODO: capture screenshot -->
-<!-- ![untether doctor with all checks passing](../assets/screenshots/doctor-all-passing.jpg){ loading=lazy } -->
+<!-- <img src="../assets/screenshots/doctor-all-passing.jpg" alt="untether doctor with all checks passing" width="360" loading="lazy" /> -->
 
 ## Checking logs
 

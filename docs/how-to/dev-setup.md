@@ -65,7 +65,7 @@ Mar 10 09:15:23 lba-1 untether[12345]: telegram.polling started
 ```
 
 <!-- TODO: capture screenshot -->
-<!-- ![journalctl output showing untether-dev starting cleanly](../assets/screenshots/journalctl-startup.jpg){ loading=lazy } -->
+<!-- <img src="../assets/screenshots/journalctl-startup.jpg" alt="journalctl output showing untether-dev starting cleanly" width="360" loading="lazy" /> -->
 
 Always test via the dev bot before merging. Never send test messages to the production bot.
 

@@ -25,7 +25,7 @@ When a permission request arrives, you see a message with the tool name and a co
 
 Buttons clear immediately when you tap them — no waiting for a spinner.
 
-![Approval message with Approve / Deny / Pause & Outline Plan buttons](../assets/screenshots/approval-buttons-howto.jpg){ loading=lazy }
+<img src="../assets/screenshots/approval-buttons-howto.jpg" alt="Approval message with Approve / Deny / Pause & Outline Plan buttons" width="360" loading="lazy" />
 
 <div markdown>
 
@@ -61,7 +61,7 @@ This lets you make informed approve/deny decisions without leaving Telegram.
     `+ import sys`<br>
     `+ from pathlib import Path`
 
-![Approval message with compact diff preview showing removed and added lines](../assets/screenshots/approval-diff-preview.jpg){ loading=lazy }
+<img src="../assets/screenshots/approval-diff-preview.jpg" alt="Approval message with compact diff preview showing removed and added lines" width="360" loading="lazy" />
 
 ## Answering questions
 
@@ -74,7 +74,7 @@ When Claude Code calls `AskUserQuestion`, Untether renders the question with int
 
 Toggle ask mode on or off via `/config` → Ask mode. When off, questions are auto-denied and Claude Code proceeds with defaults.
 
-![AskUserQuestion with option buttons and "Other (type reply)"](../assets/screenshots/ask-text-reply-howto.jpg){ loading=lazy }
+<img src="../assets/screenshots/ask-text-reply-howto.jpg" alt="AskUserQuestion with option buttons and &quot;Other (type reply)&quot;" width="360" loading="lazy" />
 
 <div markdown>
 

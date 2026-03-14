@@ -69,7 +69,7 @@ The response includes a context footer:
     dir: happy-gadgets<br>
     `codex resume abc123`
 
-![/<project> command and response with ctx: footer](../assets/screenshots/project-command.jpg){ loading=lazy }
+<img src="../assets/screenshots/project-command.jpg" alt="/<project> command and response with ctx: footer" width="360" loading="lazy" />
 
 That `dir:` line tells you which project is active. When you reply, Untether automatically uses the same project—you don't need to repeat `/happy-gadgets`.
 
@@ -122,7 +122,7 @@ The response shows both project and branch:
     `codex resume xyz789`
 
 <!-- TODO: capture screenshot -->
-<!-- ![@branch directive response with ctx: project @branch footer](../assets/screenshots/branch-directive.jpg){ loading=lazy } -->
+<!-- <img src="../assets/screenshots/branch-directive.jpg" alt="@branch directive response with ctx: project @branch footer" width="360" loading="lazy" /> -->
 
 Replies stay on the same branch. Your main checkout is untouched.
 

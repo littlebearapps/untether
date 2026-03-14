@@ -48,7 +48,7 @@ If transcription fails, you’ll get an error message and the run is skipped.
 
     ▸ Read `src/upload.py`
 
-![Voice note followed by transcribed text and agent run output](../assets/screenshots/voice-transcription.jpg){ loading=lazy }
+<img src="../assets/screenshots/voice-transcription.jpg" alt="Voice note followed by transcribed text and agent run output" width="360" loading="lazy" />
 
 ## Related
 

@@ -24,7 +24,7 @@ Directives are only parsed at the start of the first non-empty line.
 
     🏷 codex
 
-![Engine directive with engine name in the progress footer](../assets/screenshots/engine-footer.jpg){ loading=lazy }
+<img src="../assets/screenshots/engine-footer.jpg" alt="Engine directive with engine name in the progress footer" width="360" loading="lazy" />
 
 ## Set a default engine for the current scope
 

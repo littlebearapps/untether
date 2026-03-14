@@ -52,7 +52,7 @@ When Claude Code tries to exit plan mode (ExitPlanMode), you see three buttons i
 
 </div>
 
-![ExitPlanMode with Approve / Deny / Pause & Outline Plan buttons](../assets/screenshots/exit-planmode-buttons.jpg){ loading=lazy }
+<img src="../assets/screenshots/exit-planmode-buttons.jpg" alt="ExitPlanMode with Approve / Deny / Pause & Outline Plan buttons" width="360" loading="lazy" />
 
 Tapping "Pause & Outline Plan" tells Claude Code to stop and write a comprehensive plan as a visible message in the chat. The plan must include:
 
@@ -66,7 +66,7 @@ This is useful when you want to review the approach before Claude Code starts ma
 
 After Claude Code writes the outline, **Approve Plan / Deny** buttons appear automatically in Telegram. Tap "Approve Plan" to let Claude Code proceed, or "Deny" to stop and provide feedback. You no longer need to type "approved" — the buttons handle it.
 
-![Written outline with Approve Plan / Deny buttons](../assets/screenshots/post-outline-buttons.jpg){ loading=lazy }
+<img src="../assets/screenshots/post-outline-buttons.jpg" alt="Written outline with Approve Plan / Deny buttons" width="360" loading="lazy" />
 
 <div markdown>
 
@@ -99,7 +99,7 @@ During the cooldown, any ExitPlanMode attempt is automatically denied, but **App
 
 This prevents the agent from bulldozing through when you've asked it to slow down and explain its approach, while still giving you a one-tap way to approve once you're satisfied.
 
-![Auto-denied ExitPlanMode during cooldown with Approve Plan / Deny buttons](../assets/screenshots/cooldown-auto-deny.jpg){ loading=lazy }
+<img src="../assets/screenshots/cooldown-auto-deny.jpg" alt="Auto-denied ExitPlanMode during cooldown with Approve Plan / Deny buttons" width="360" loading="lazy" />
 
 <div markdown>
 
