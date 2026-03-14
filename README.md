@@ -27,13 +27,11 @@
 Your AI coding agents need a terminal, but you don't need to sit at one. Untether runs on your machine and connects your agents to a Telegram bot. Send a task from your phone — by voice or text — and watch your agent work in real time. When it needs permission, tap a button. When it's done, read the result. No desk, no SSH, no screen sharing.
 
 <p align="center">
-  <img src="https://raw.githubusercontent.com/littlebearapps/untether/feature/github-hardening/docs/assets/screenshots/hero-voice-to-result.jpg" alt="Voice note to streamed progress to final result — all in Telegram" width="360" />
-</p>
-
-<p align="center">
-  <img src="https://raw.githubusercontent.com/littlebearapps/untether/feature/github-hardening/docs/assets/screenshots/approval-diff-preview.jpg" alt="Approve or deny file changes with inline diff preview" width="360" />
-  &nbsp;&nbsp;
-  <img src="https://raw.githubusercontent.com/littlebearapps/untether/feature/github-hardening/docs/assets/screenshots/plan-outline-approve.jpg" alt="Review and approve an agent's plan before execution" width="360" />
+  <img src="https://raw.githubusercontent.com/littlebearapps/untether/feature/github-hardening/docs/assets/screenshots/hero-voice-to-result.jpg" alt="Voice note to streamed progress to final result — all in Telegram" width="270" />
+  &nbsp;
+  <img src="https://raw.githubusercontent.com/littlebearapps/untether/feature/github-hardening/docs/assets/screenshots/approval-diff-preview.jpg" alt="Approve or deny file changes with inline diff preview" width="270" />
+  &nbsp;
+  <img src="https://raw.githubusercontent.com/littlebearapps/untether/feature/github-hardening/docs/assets/screenshots/plan-outline-approve.jpg" alt="Review and approve an agent's plan before execution" width="270" />
 </p>
 
 ---
