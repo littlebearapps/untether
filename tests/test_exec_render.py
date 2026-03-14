@@ -193,7 +193,8 @@ def test_progress_renderer_footer_includes_ctx_before_resume() -> None:
     parts = formatter.render_progress_parts(state, elapsed_s=0.0)
     assert parts.footer == (
         "\N{LABEL} dir: z80 @feat/name"
-        f"{HARD_BREAK}`codex resume 0199a213-81c0-7800-8aa1-bbab2a035a53`"
+        f"{HARD_BREAK}"
+        f"{HARD_BREAK}\u21a9\ufe0f `codex resume 0199a213-81c0-7800-8aa1-bbab2a035a53`"
     )
 
 

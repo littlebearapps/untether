@@ -1900,7 +1900,11 @@ async def run_main_loop(
                             )
                         else:
                             tg.start_soon(
-                                partial(reply, text=FILE_PUT_USAGE),
+                                handle_file_put_default,
+                                cfg,
+                                msg,
+                                ambient_context,
+                                state.topic_store,
                             )
                     elif cfg.files.enabled:
                         tg.start_soon(

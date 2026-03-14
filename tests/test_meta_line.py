@@ -182,7 +182,8 @@ class TestFooterWithMetaLine:
             lines[0]
             == "\N{LABEL} dir: untether @master | sonnet 4.5 \N{MIDDLE DOT} plan"
         )
-        assert lines[1] == "`claude --resume sess-1`"
+        assert lines[1] == ""  # blank line for visual separation
+        assert lines[2] == "\u21a9\ufe0f `claude --resume sess-1`"
 
     def test_footer_meta_only(self) -> None:
         tracker = ProgressTracker(engine="claude")
@@ -249,7 +250,9 @@ class TestFooterWithMetaLine:
         parts = formatter.render_final_parts(
             state, elapsed_s=5.0, status="done", answer="ok"
         )
-        assert parts.footer == "`codex resume t-1`"
+        lines = parts.footer.split(HARD_BREAK)
+        assert lines[0] == ""  # blank line for visual separation
+        assert lines[1] == "\u21a9\ufe0f `codex resume t-1`"
 
     def test_footer_dir_and_resume_no_meta(self) -> None:
         """Dir + resume but no model info."""
@@ -269,9 +272,10 @@ class TestFooterWithMetaLine:
         )
         assert parts.footer is not None
         lines = parts.footer.split(HARD_BREAK)
-        assert len(lines) == 2
+        assert len(lines) == 3
         assert lines[0] == "\N{LABEL} dir: proj @main"
-        assert lines[1] == "`codex resume t-1`"
+        assert lines[1] == ""  # blank line for visual separation
+        assert lines[2] == "\u21a9\ufe0f `codex resume t-1`"
 
 
 class TestCrossEngineFooter:

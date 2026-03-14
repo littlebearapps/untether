@@ -148,11 +148,12 @@ async def test_save_document_payload_denied_path(tmp_path: Path) -> None:
 
 
 @pytest.mark.anyio
-async def test_save_document_payload_existing_file(tmp_path: Path) -> None:
+async def test_save_document_payload_existing_file_deduplicates(tmp_path: Path) -> None:
     transport = FakeTransport()
+    payload = b"new content"
     cfg = replace(
         make_cfg(transport),
-        bot=_FileBot(file_info=File(file_path="files/report.txt"), payload=None),
+        bot=_FileBot(file_info=File(file_path="files/report.txt"), payload=payload),
     )
     document = _document(file_name="report.txt")
     target = tmp_path / cfg.files.uploads_dir / "report.txt"
@@ -168,7 +169,13 @@ async def test_save_document_payload_existing_file(tmp_path: Path) -> None:
         force=False,
     )
 
-    assert result.error == "file already exists; use --force to overwrite."
+    assert result.error is None
+    assert result.name == "report_1.txt"
+    assert result.rel_path is not None
+    assert result.rel_path.name == "report_1.txt"
+    saved = tmp_path / result.rel_path
+    assert saved.read_bytes() == payload
+    assert target.read_text(encoding="utf-8") == "existing"  # original untouched
 
 
 @pytest.mark.anyio

@@ -1823,7 +1823,7 @@ class TestDiffPreview:
         ctx = _make_ctx(config_path=state_path, default_engine="claude")
         await cmd.handle(ctx)
         msg = _last_send_msg(ctx)
-        assert "Diff preview: <b>default</b>" in msg.text
+        assert "Diff preview: <b>off</b>" in msg.text
 
     @pytest.mark.anyio
     async def test_diff_preview_on_label_on_home(self, tmp_path):
@@ -2399,8 +2399,8 @@ class TestHomePageSections:
         assert "respond to everything" in _last_send_msg(ctx).text
 
     @pytest.mark.anyio
-    async def test_home_shows_versions_line(self, tmp_path, monkeypatch):
-        """Versions line should appear at the bottom of /config home page."""
+    async def test_home_no_versions_line(self, tmp_path, monkeypatch):
+        """Versions line moved to About page — should not appear on home."""
         from untether.telegram import backend as telegram_backend
 
         monkeypatch.setattr(
@@ -2411,5 +2411,89 @@ class TestHomePageSections:
         ctx = _make_ctx(config_path=state_path, default_engine="claude")
         await cmd.handle(ctx)
         text = _last_send_msg(ctx).text
+        assert "py " not in text
+        assert "claude 1.0.0" not in text
+
+    @pytest.mark.anyio
+    async def test_home_has_about_button(self, tmp_path):
+        """Home page should have an About button."""
+        state_path = tmp_path / "prefs.json"
+        cmd = ConfigCommand()
+        ctx = _make_ctx(config_path=state_path, default_engine="claude")
+        await cmd.handle(ctx)
+        assert "config:ab" in _buttons_data(_last_send_msg(ctx))
+
+    @pytest.mark.anyio
+    async def test_home_has_about_button_codex(self, tmp_path):
+        """About button appears for non-Claude engines too."""
+        state_path = tmp_path / "prefs.json"
+        cmd = ConfigCommand()
+        ctx = _make_ctx(config_path=state_path, default_engine="codex")
+        await cmd.handle(ctx)
+        assert "config:ab" in _buttons_data(_last_send_msg(ctx))
+
+    @pytest.mark.anyio
+    async def test_home_has_about_button_gemini(self, tmp_path):
+        """About button appears for Gemini engine."""
+        state_path = tmp_path / "prefs.json"
+        cmd = ConfigCommand()
+        ctx = _make_ctx(config_path=state_path, default_engine="gemini")
+        await cmd.handle(ctx)
+        assert "config:ab" in _buttons_data(_last_send_msg(ctx))
+
+
+# ---------------------------------------------------------------------------
+# About page
+# ---------------------------------------------------------------------------
+
+
+class TestAboutPage:
+    @pytest.mark.anyio
+    async def test_about_shows_version(self, tmp_path):
+        """About page should show Untether version."""
+        from untether import __version__
+
+        state_path = tmp_path / "prefs.json"
+        cmd = ConfigCommand()
+        ctx = _make_ctx(args_text="ab", text="config:ab", config_path=state_path)
+        await cmd.handle(ctx)
+        text = _last_edit_msg(ctx).text
+        assert __version__ in text
+        assert "About Untether" in text
+
+    @pytest.mark.anyio
+    async def test_about_shows_versions_line(self, tmp_path, monkeypatch):
+        """About page should show engine versions."""
+        from untether.telegram import backend as telegram_backend
+
+        monkeypatch.setattr(
+            telegram_backend, "_detect_cli_version", lambda cmd: "1.0.0"
+        )
+        state_path = tmp_path / "prefs.json"
+        cmd = ConfigCommand()
+        ctx = _make_ctx(args_text="ab", text="config:ab", config_path=state_path)
+        await cmd.handle(ctx)
+        text = _last_edit_msg(ctx).text
         assert "py " in text
         assert "claude 1.0.0" in text
+
+    @pytest.mark.anyio
+    async def test_about_shows_github_links(self, tmp_path):
+        """About page should show GitHub repo and issue links."""
+        state_path = tmp_path / "prefs.json"
+        cmd = ConfigCommand()
+        ctx = _make_ctx(args_text="ab", text="config:ab", config_path=state_path)
+        await cmd.handle(ctx)
+        text = _last_edit_msg(ctx).text
+        assert "github.com/littlebearapps/untether" in text
+        assert "Report a bug" in text
+        assert "Feature request" in text
+
+    @pytest.mark.anyio
+    async def test_about_has_back_button(self, tmp_path):
+        """About page should have a back button."""
+        state_path = tmp_path / "prefs.json"
+        cmd = ConfigCommand()
+        ctx = _make_ctx(args_text="ab", text="config:ab", config_path=state_path)
+        await cmd.handle(ctx)
+        assert "config:home" in _buttons_data(_last_edit_msg(ctx))

@@ -11,6 +11,7 @@ from ...directives import DirectiveError
 from ...transport_runtime import ResolvedMessage
 from ..context import _format_context
 from ..files import (
+    deduplicate_target,
     default_upload_name,
     default_upload_path,
     deny_reason,
@@ -244,12 +245,9 @@ async def _save_document_payload(
                 error="upload target is a directory.",
             )
         if not force:
-            return _FilePutResult(
-                name=name,
-                rel_path=None,
-                size=None,
-                error="file already exists; use --force to overwrite.",
-            )
+            target = deduplicate_target(target)
+            resolved_path = target.relative_to(run_root)
+            name = target.name
     payload = await cfg.bot.download_file(file_path)
     if payload is None:
         return _FilePutResult(

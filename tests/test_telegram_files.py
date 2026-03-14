@@ -109,3 +109,29 @@ def test_format_bytes_various_units() -> None:
 def test_default_upload_name_fallbacks() -> None:
     assert tg_files.default_upload_name("", "files/report.txt") == "report.txt"
     assert tg_files.default_upload_name(None, None) == "upload.bin"
+
+
+def test_deduplicate_target_no_conflict(tmp_path: Path) -> None:
+    target = tmp_path / "file.jpg"
+    assert tg_files.deduplicate_target(target) == target
+
+
+def test_deduplicate_target_single_conflict(tmp_path: Path) -> None:
+    target = tmp_path / "file.jpg"
+    target.write_bytes(b"existing")
+    result = tg_files.deduplicate_target(target)
+    assert result == tmp_path / "file_1.jpg"
+
+
+def test_deduplicate_target_multiple_conflicts(tmp_path: Path) -> None:
+    for name in ("file.jpg", "file_1.jpg", "file_2.jpg"):
+        (tmp_path / name).write_bytes(b"x")
+    result = tg_files.deduplicate_target(tmp_path / "file.jpg")
+    assert result == tmp_path / "file_3.jpg"
+
+
+def test_deduplicate_target_no_extension(tmp_path: Path) -> None:
+    target = tmp_path / "Makefile"
+    target.write_bytes(b"x")
+    result = tg_files.deduplicate_target(target)
+    assert result == tmp_path / "Makefile_1"

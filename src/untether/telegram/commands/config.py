@@ -88,26 +88,40 @@ _HOME_HINTS: dict[str, dict[str, str]] = {
     },
     "aq": {
         "on": "interactive questions",
-        "default": "interactive questions",
         "off": "agent guesses",
     },
     "dp": {
         "on": "show code changes",
-        "default": "buttons only",
         "off": "buttons only",
     },
     "vb": {
         "on": "detailed progress",
         "off": "compact progress",
-        "default": "compact progress",
     },
     "tr": {"all": "respond to everything", "mentions": "@mention only"},
+    "md": {"default": "from CLI settings"},
+    "rs": {"default": "from CLI settings"},
 }
+
+# Map "default" to effective value for settings with known defaults.
+_DEFAULT_EFFECTIVE: dict[str, str] = {
+    "aq": "on",
+    "dp": "off",
+    "vb": "off",
+}
+
+
+def _resolve_default(setting: str, value: str) -> str:
+    """Replace 'default' with the effective value when known."""
+    if value == "default" and setting in _DEFAULT_EFFECTIVE:
+        return _DEFAULT_EFFECTIVE[setting]
+    return value
 
 
 def _home_hint(setting: str, value: str) -> str:
     """Return a micro-description suffix for the home page, or empty string."""
-    hint = _HOME_HINTS.get(setting, {}).get(value, "")
+    resolved = _resolve_default(setting, value)
+    hint = _HOME_HINTS.get(setting, {}).get(resolved, "")
     return f"  · {hint}" if hint else ""
 
 
@@ -205,16 +219,23 @@ async def _page_home(ctx: CommandContext) -> None:
         "",
     ]
 
+    # Resolve "default" to effective values where known.
+    aq_display = _resolve_default("aq", aq_label)
+    dp_display = _resolve_default("dp", dp_label)
+    vb_display = _resolve_default("vb", verbose_label)
+
     # --- Agent controls ---
     if show_plan_mode:
         if current_engine == "claude":
             lines.append("<b>Agent controls</b> <i>(Claude Code)</i>")
             lines.append(f"Plan mode: <b>{pm_label}</b>{_home_hint('pm', pm_label)}")
             if show_ask_questions:
-                lines.append(f"Ask mode: <b>{aq_label}</b>{_home_hint('aq', aq_label)}")
+                lines.append(
+                    f"Ask mode: <b>{aq_display}</b>{_home_hint('aq', aq_label)}"
+                )
             if show_diff_preview:
                 lines.append(
-                    f"Diff preview: <b>{dp_label}</b>{_home_hint('dp', dp_label)}"
+                    f"Diff preview: <b>{dp_display}</b>{_home_hint('dp', dp_label)}"
                 )
         elif current_engine == "gemini":
             lines.append("<b>Agent controls</b> <i>(Gemini CLI)</i>")
@@ -227,16 +248,18 @@ async def _page_home(ctx: CommandContext) -> None:
     lines.append("<b>Display</b>")
     if show_cost_usage:
         lines.append(f"Cost & usage: <b>{cu_label}</b>")
-    lines.append(f"Verbose: <b>{verbose_label}</b>{_home_hint('vb', verbose_label)}")
+    lines.append(f"Verbose: <b>{vb_display}</b>{_home_hint('vb', verbose_label)}")
     lines.append("")
 
     # --- Routing ---
     lines.append("<b>Routing</b>")
     lines.append(f"Engine: <b>{engine_label}</b>")
-    lines.append(f"Model: <b>{model_label}</b>")
+    lines.append(f"Model: <b>{model_label}</b>{_home_hint('md', model_label)}")
     lines.append(f"Trigger: <b>{trigger_label}</b>{_home_hint('tr', trigger_label)}")
     if show_reasoning:
-        lines.append(f"Reasoning: <b>{reasoning_label}</b>")
+        lines.append(
+            f"Reasoning: <b>{reasoning_label}</b>{_home_hint('rs', reasoning_label)}"
+        )
 
     _DOCS_SETTINGS = f"{_DOCS_BASE}inline-settings/"
     _DOCS_TROUBLE = f"{_DOCS_BASE}troubleshooting/"
@@ -246,75 +269,77 @@ async def _page_home(ctx: CommandContext) -> None:
         f' · <a href="{_DOCS_TROUBLE}">Troubleshooting</a>'
     )
 
-    from ..backend import _build_versions_line
-
-    versions_line = _build_versions_line(tuple(ctx.runtime.engine_ids))
-    if versions_line:
-        lines.append(f"<code>{versions_line}</code>")
-
     buttons: list[list[dict[str, str]]] = []
 
     if current_engine == "claude":
         # Claude Code layout
         buttons.append(
             [
-                {"text": "Plan mode", "callback_data": "config:pm"},
-                {"text": "Ask mode", "callback_data": "config:aq"},
+                {"text": "📋 Plan mode", "callback_data": "config:pm"},
+                {"text": "❓ Ask mode", "callback_data": "config:aq"},
             ]
         )
         row2 = []
         if show_diff_preview:
-            row2.append({"text": "Diff preview", "callback_data": "config:dp"})
-        row2.append({"text": "Verbose", "callback_data": "config:vb"})
+            row2.append({"text": "📝 Diff preview", "callback_data": "config:dp"})
+        row2.append({"text": "🔍 Verbose", "callback_data": "config:vb"})
         buttons.append(row2)
         row3 = []
         if show_cost_usage:
-            row3.append({"text": "Cost & usage", "callback_data": "config:cu"})
-        row3.append({"text": "Trigger", "callback_data": "config:tr"})
+            row3.append({"text": "💰 Cost & usage", "callback_data": "config:cu"})
+        row3.append({"text": "📡 Trigger", "callback_data": "config:tr"})
         buttons.append(row3)
-        row4 = [
-            {"text": "Model", "callback_data": "config:md"},
-            {"text": "Engine", "callback_data": "config:ag"},
-        ]
-        buttons.append(row4)
+        buttons.append(
+            [
+                {"text": "🤖 Model", "callback_data": "config:md"},
+                {"text": "⚙️ Engine", "callback_data": "config:ag"},
+            ]
+        )
+        row5 = []
         if show_reasoning:
-            buttons.append([{"text": "Reasoning", "callback_data": "config:rs"}])
+            row5.append({"text": "🧠 Reasoning", "callback_data": "config:rs"})
+        row5.append({"text": "ℹ️ About", "callback_data": "config:ab"})
+        buttons.append(row5)
     elif current_engine == "gemini":
         # Gemini layout
-        row1 = [{"text": "Approval mode", "callback_data": "config:pm"}]
+        row1 = [{"text": "📋 Approval mode", "callback_data": "config:pm"}]
         if show_cost_usage:
-            row1.append({"text": "Cost & usage", "callback_data": "config:cu"})
+            row1.append({"text": "💰 Cost & usage", "callback_data": "config:cu"})
         buttons.append(row1)
         buttons.append(
             [
-                {"text": "Verbose", "callback_data": "config:vb"},
-                {"text": "Model", "callback_data": "config:md"},
+                {"text": "🔍 Verbose", "callback_data": "config:vb"},
+                {"text": "🤖 Model", "callback_data": "config:md"},
             ]
         )
         buttons.append(
             [
-                {"text": "Engine", "callback_data": "config:ag"},
-                {"text": "Trigger", "callback_data": "config:tr"},
+                {"text": "⚙️ Engine", "callback_data": "config:ag"},
+                {"text": "📡 Trigger", "callback_data": "config:tr"},
             ]
         )
+        buttons.append([{"text": "ℹ️ About", "callback_data": "config:ab"}])
     else:
         # Other engines
         if show_cost_usage:
-            buttons.append([{"text": "Cost & usage", "callback_data": "config:cu"}])
+            buttons.append([{"text": "💰 Cost & usage", "callback_data": "config:cu"}])
         buttons.append(
             [
-                {"text": "Verbose", "callback_data": "config:vb"},
-                {"text": "Model", "callback_data": "config:md"},
+                {"text": "🔍 Verbose", "callback_data": "config:vb"},
+                {"text": "🤖 Model", "callback_data": "config:md"},
             ]
         )
         buttons.append(
             [
-                {"text": "Engine", "callback_data": "config:ag"},
-                {"text": "Trigger", "callback_data": "config:tr"},
+                {"text": "⚙️ Engine", "callback_data": "config:ag"},
+                {"text": "📡 Trigger", "callback_data": "config:tr"},
             ]
         )
+        row_last = []
         if show_reasoning:
-            buttons.append([{"text": "Reasoning", "callback_data": "config:rs"}])
+            row_last.append({"text": "🧠 Reasoning", "callback_data": "config:rs"})
+        row_last.append({"text": "ℹ️ About", "callback_data": "config:ab"})
+        buttons.append(row_last)
 
     await _respond(ctx, "\n".join(lines), buttons)
 
@@ -339,7 +364,7 @@ async def _page_planmode(ctx: CommandContext, action: str | None = None) -> None
     if config_path is None:
         await _respond(
             ctx,
-            "<b>⚙️ Permission mode</b>\n\nUnavailable (no config path).",
+            "<b>📋 Permission mode</b>\n\nUnavailable (no config path).",
             [[{"text": "← Back", "callback_data": "config:home"}]],
         )
         return
@@ -352,7 +377,7 @@ async def _page_planmode(ctx: CommandContext, action: str | None = None) -> None
         await _respond(
             ctx,
             (
-                "<b>⚙️ Permission mode</b>\n\n"
+                "<b>📋 Permission mode</b>\n\n"
                 "Only available for Claude Code and Gemini CLI."
             ),
             [[{"text": "← Back", "callback_data": "config:home"}]],
@@ -451,7 +476,7 @@ async def _page_planmode(ctx: CommandContext, action: str | None = None) -> None
             current_label = "default"
 
         lines = [
-            "<b>⚙️ Plan mode</b>",
+            "<b>📋 Plan mode</b>",
             "",
             "Review and approve each action before it runs.",
             "",
@@ -491,7 +516,7 @@ async def _page_planmode(ctx: CommandContext, action: str | None = None) -> None
         current_label = "full access" if pm == "yolo" else "read-only"
 
         lines = [
-            "<b>⚙️ Approval mode</b>",
+            "<b>📋 Approval mode</b>",
             "",
             "Control which tools Gemini can use in non-interactive mode.",
             "Write tools are blocked by default — enable full access",
@@ -560,7 +585,7 @@ async def _page_verbose(ctx: CommandContext, action: str | None = None) -> None:
         current_label = "default"
 
     lines = [
-        "<b>⚙️ Verbose progress</b>",
+        "<b>🔍 Verbose progress</b>",
         "",
         "Choose how much detail to show while the agent is working.",
         "",
@@ -604,7 +629,7 @@ async def _page_engine(ctx: CommandContext, action: str | None = None) -> None:
     if config_path is None:
         await _respond(
             ctx,
-            "<b>⚙️ Default engine</b>\n\nUnavailable (no config path).",
+            "<b>⚙️ Engine</b>\n\nUnavailable (no config path).",
             [[{"text": "← Back", "callback_data": "config:home"}]],
         )
         return
@@ -628,7 +653,7 @@ async def _page_engine(ctx: CommandContext, action: str | None = None) -> None:
     _, effective_label = await _resolve_effective_engine(ctx)
 
     lines = [
-        "<b>⚙️ Default engine</b>",
+        "<b>⚙️ Engine</b>",
         "",
         "Choose which coding agent runs your tasks in this chat.",
         "The global default is used unless you override it here.",
@@ -672,7 +697,7 @@ async def _page_trigger(ctx: CommandContext, action: str | None = None) -> None:
     if config_path is None:
         await _respond(
             ctx,
-            "<b>⚙️ Trigger mode</b>\n\nUnavailable (no config path).",
+            "<b>📡 Trigger mode</b>\n\nUnavailable (no config path).",
             [[{"text": "← Back", "callback_data": "config:home"}]],
         )
         return
@@ -700,7 +725,7 @@ async def _page_trigger(ctx: CommandContext, action: str | None = None) -> None:
     current_label = current or "all"
 
     lines = [
-        "<b>⚙️ Trigger mode</b>",
+        "<b>📡 Trigger mode</b>",
         "",
         "Control when the bot responds in group chats.",
         "",
@@ -745,7 +770,7 @@ async def _page_model(ctx: CommandContext, action: str | None = None) -> None:
     if config_path is None:
         await _respond(
             ctx,
-            "<b>⚙️ Model</b>\n\nUnavailable (no config path).",
+            "<b>🤖 Model</b>\n\nUnavailable (no config path).",
             [[{"text": "← Back", "callback_data": "config:home"}]],
         )
         return
@@ -776,10 +801,10 @@ async def _page_model(ctx: CommandContext, action: str | None = None) -> None:
 
     override = await prefs.get_engine_override(chat_id, current_engine)
     model = override.model if override else None
-    current_label = model or "default (engine decides)"
+    current_label = model or "default (from CLI settings)"
 
     lines = [
-        "<b>⚙️ Model</b>",
+        "<b>🤖 Model</b>",
         "",
         "Override the AI model used by the current engine.",
         "Each engine has its own default model.",
@@ -829,7 +854,7 @@ async def _page_reasoning(ctx: CommandContext, action: str | None = None) -> Non
     if config_path is None:
         await _respond(
             ctx,
-            "<b>⚙️ Reasoning</b>\n\nUnavailable (no config path).",
+            "<b>🧠 Reasoning</b>\n\nUnavailable (no config path).",
             [[{"text": "← Back", "callback_data": "config:home"}]],
         )
         return
@@ -842,7 +867,7 @@ async def _page_reasoning(ctx: CommandContext, action: str | None = None) -> Non
     if not supports_reasoning(current_engine):
         await _respond(
             ctx,
-            "<b>⚙️ Reasoning</b>\n\nOnly available for engines that support reasoning levels.",
+            "<b>🧠 Reasoning</b>\n\nOnly available for engines that support reasoning levels.",
             [[{"text": "← Back", "callback_data": "config:home"}]],
         )
         return
@@ -890,7 +915,7 @@ async def _page_reasoning(ctx: CommandContext, action: str | None = None) -> Non
 
     override = await prefs.get_engine_override(chat_id, current_engine)
     reasoning = override.reasoning if override else None
-    current_label = reasoning or "default (engine decides)"
+    current_label = reasoning or "default (from CLI settings)"
 
     levels = allowed_reasoning_levels(current_engine)
 
@@ -904,7 +929,7 @@ async def _page_reasoning(ctx: CommandContext, action: str | None = None) -> Non
         level_descriptions.append("• <b>xhigh</b> — most thorough (slowest)")
 
     lines = [
-        "<b>⚙️ Reasoning</b>",
+        "<b>🧠 Reasoning</b>",
         "",
         "How deeply the model thinks before answering.",
         "Higher = more thorough but slower and costlier.",
@@ -963,7 +988,7 @@ async def _page_ask_questions(ctx: CommandContext, action: str | None = None) ->
     if config_path is None:
         await _respond(
             ctx,
-            "<b>⚙️ Ask questions</b>\n\nUnavailable (no config path).",
+            "<b>❓ Ask mode</b>\n\nUnavailable (no config path).",
             [[{"text": "← Back", "callback_data": "config:home"}]],
         )
         return
@@ -976,7 +1001,7 @@ async def _page_ask_questions(ctx: CommandContext, action: str | None = None) ->
     if current_engine not in ASK_QUESTIONS_SUPPORTED_ENGINES:
         await _respond(
             ctx,
-            "<b>⚙️ Ask questions</b>\n\nOnly available for Claude Code.",
+            "<b>❓ Ask mode</b>\n\nOnly available for Claude Code.",
             [[{"text": "← Back", "callback_data": "config:home"}]],
         )
         return
@@ -1045,7 +1070,7 @@ async def _page_ask_questions(ctx: CommandContext, action: str | None = None) ->
         current_label = "default (on)"
 
     lines = [
-        "<b>⚙️ Ask mode</b>",
+        "<b>❓ Ask mode</b>",
         "",
         "Let the agent ask you questions mid-task instead of guessing.",
         "Answers appear as tappable buttons.",
@@ -1086,7 +1111,7 @@ async def _page_diff_preview(ctx: CommandContext, action: str | None = None) -> 
     if config_path is None:
         await _respond(
             ctx,
-            "<b>⚙️ Diff preview</b>\n\nUnavailable (no config path).",
+            "<b>📝 Diff preview</b>\n\nUnavailable (no config path).",
             [[{"text": "← Back", "callback_data": "config:home"}]],
         )
         return
@@ -1099,7 +1124,7 @@ async def _page_diff_preview(ctx: CommandContext, action: str | None = None) -> 
     if current_engine not in DIFF_PREVIEW_SUPPORTED_ENGINES:
         await _respond(
             ctx,
-            "<b>⚙️ Diff preview</b>\n\nOnly available for Claude Code.",
+            "<b>📝 Diff preview</b>\n\nOnly available for Claude Code.",
             [[{"text": "← Back", "callback_data": "config:home"}]],
         )
         return
@@ -1168,7 +1193,7 @@ async def _page_diff_preview(ctx: CommandContext, action: str | None = None) -> 
         current_label = "default (off)"
 
     lines = [
-        "<b>⚙️ Diff preview</b>",
+        "<b>📝 Diff preview</b>",
         "",
         "See what the agent wants to change before you approve it.",
         "Shows a compact diff of edits and commands.",
@@ -1218,7 +1243,7 @@ async def _page_cost_usage(ctx: CommandContext, action: str | None = None) -> No
     if config_path is None:
         await _respond(
             ctx,
-            "<b>⚙️ Cost & usage</b>\n\nUnavailable (no config path).",
+            "<b>💰 Cost & usage</b>\n\nUnavailable (no config path).",
             [[{"text": "← Back", "callback_data": "config:home"}]],
         )
         return
@@ -1235,7 +1260,7 @@ async def _page_cost_usage(ctx: CommandContext, action: str | None = None) -> No
         await _respond(
             ctx,
             (
-                "<b>⚙️ Cost & usage</b>\n\n"
+                "<b>💰 Cost & usage</b>\n\n"
                 f"Not available for <b>{current_engine}</b>.\n"
                 "API cost works with Claude Code and OpenCode.\n"
                 "Subscription usage works with Claude Code."
@@ -1277,7 +1302,7 @@ async def _page_cost_usage(ctx: CommandContext, action: str | None = None) -> No
     su = override.show_subscription_usage if override else None
 
     lines = [
-        "<b>⚙️ Cost & usage</b>",
+        "<b>💰 Cost & usage</b>",
         "",
     ]
 
@@ -1339,6 +1364,38 @@ async def _page_cost_usage(ctx: CommandContext, action: str | None = None) -> No
 
 
 # ---------------------------------------------------------------------------
+# About
+# ---------------------------------------------------------------------------
+
+_REPO_URL = "https://github.com/littlebearapps/untether"
+
+
+async def _page_about(ctx: CommandContext, action: str | None = None) -> None:
+    from ... import __version__
+    from ..backend import _build_versions_line
+
+    lines = [
+        "\N{DOG} <b>About Untether</b>",
+        "",
+        f"Version: <b>{__version__}</b>",
+    ]
+
+    versions_line = _build_versions_line(tuple(ctx.runtime.engine_ids))
+    if versions_line:
+        lines.append(f"<code>{versions_line}</code>")
+
+    lines.append("")
+    lines.append(
+        f'🔗 <a href="{_REPO_URL}">GitHub</a>'
+        f' · <a href="{_REPO_URL}/issues/new?template=bug_report.yml">Report a bug</a>'
+        f' · <a href="{_REPO_URL}/issues/new?template=feature_request.yml">Feature request</a>'
+    )
+
+    buttons = [[{"text": "← Back", "callback_data": "config:home"}]]
+    await _respond(ctx, "\n".join(lines), buttons)
+
+
+# ---------------------------------------------------------------------------
 # Routing
 # ---------------------------------------------------------------------------
 
@@ -1352,6 +1409,7 @@ _PAGES: dict[str, object] = {
     "aq": _page_ask_questions,
     "dp": _page_diff_preview,
     "cu": _page_cost_usage,
+    "ab": _page_about,
 }
 
 

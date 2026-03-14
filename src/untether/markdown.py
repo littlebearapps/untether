@@ -374,7 +374,8 @@ class MarkdownFormatter:
         if info_parts:
             lines.append("\N{LABEL} " + " | ".join(info_parts))
         if state.resume_line:
-            lines.append(state.resume_line)
+            lines.append("")  # blank line for visual separation
+            lines.append(f"\u21a9\ufe0f {state.resume_line}")
         if not lines:
             return None
         return HARD_BREAK.join(lines)

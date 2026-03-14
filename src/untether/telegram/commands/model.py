@@ -138,6 +138,15 @@ async def _handle_model_command(
             update=lambda current: EngineOverrides(
                 model=model,
                 reasoning=current.reasoning if current is not None else None,
+                permission_mode=current.permission_mode
+                if current is not None
+                else None,
+                ask_questions=current.ask_questions if current is not None else None,
+                diff_preview=current.diff_preview if current is not None else None,
+                show_api_cost=current.show_api_cost if current is not None else None,
+                show_subscription_usage=current.show_subscription_usage
+                if current is not None
+                else None,
             ),
             topic_unavailable="topic model overrides are unavailable.",
             chat_unavailable="chat model overrides are unavailable (no config path).",
@@ -206,6 +215,15 @@ async def _handle_model_command(
             update=lambda current: EngineOverrides(
                 model=None,
                 reasoning=current.reasoning if current is not None else None,
+                permission_mode=current.permission_mode
+                if current is not None
+                else None,
+                ask_questions=current.ask_questions if current is not None else None,
+                diff_preview=current.diff_preview if current is not None else None,
+                show_api_cost=current.show_api_cost if current is not None else None,
+                show_subscription_usage=current.show_subscription_usage
+                if current is not None
+                else None,
             ),
             topic_unavailable="topic model overrides are unavailable.",
             chat_unavailable="chat model overrides are unavailable (no config path).",

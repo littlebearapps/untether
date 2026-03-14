@@ -130,14 +130,13 @@ async def _handle_media_group(
                 prompt = annotation
             await run_prompt(command_msg, prompt, resolved)
             return
-        if not caption_text:
-            await _handle_file_put_group(
-                cfg,
-                command_msg,
-                "",
-                ordered,
-                ambient_context,
-                topic_store,
-            )
-            return
+        await _handle_file_put_group(
+            cfg,
+            command_msg,
+            "",
+            ordered,
+            ambient_context,
+            topic_store,
+        )
+        return
     await reply(text=FILE_PUT_USAGE)

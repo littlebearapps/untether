@@ -10,6 +10,7 @@ from pathlib import Path, PurePosixPath
 
 __all__ = [
     "ZipTooLargeError",
+    "deduplicate_target",
     "default_upload_name",
     "default_upload_path",
     "deny_reason",
@@ -132,6 +133,20 @@ def default_upload_path(
     uploads_dir: str, filename: str | None, file_path: str | None
 ) -> Path:
     return Path(uploads_dir) / default_upload_name(filename, file_path)
+
+
+def deduplicate_target(target: Path) -> Path:
+    """Return *target* if it doesn't exist, otherwise append ``_1``, ``_2``, … before the extension."""
+    if not target.exists():
+        return target
+    stem = target.stem
+    suffix = target.suffix
+    parent = target.parent
+    for i in range(1, 1000):
+        candidate = parent / f"{stem}_{i}{suffix}"
+        if not candidate.exists():
+            return candidate
+    return target  # give up after 999 — let the caller handle it
 
 
 def write_bytes_atomic(path: Path, payload: bytes) -> None:

@@ -562,6 +562,7 @@ def translate_claude_event(
                             request_id=request_id,
                             tool_name=tool_name,
                         )
+                        _REQUEST_TO_INPUT[request_id] = getattr(request, "input", {})
                         state.auto_approve_queue.append(request_id)
                         return []
 
@@ -594,6 +595,7 @@ def translate_claude_event(
                         "control_request.auto_approve_exit_plan_mode",
                         request_id=request_id,
                     )
+                    _REQUEST_TO_INPUT[request_id] = getattr(request, "input", {})
                     state.auto_approve_queue.append(request_id)
                     return []
 
@@ -611,6 +613,7 @@ def translate_claude_event(
                             request_id=request_id,
                             session_id=session_id,
                         )
+                        _REQUEST_TO_INPUT[request_id] = getattr(request, "input", {})
                         state.auto_approve_queue.append(request_id)
                         return []
 
@@ -1308,12 +1311,15 @@ class ClaudeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
         # Use provided stdin (session-specific) or fall back to instance
         pipe = stdin or self._proc_stdin
         for req_id in state.auto_approve_queue:
+            inner: dict[str, Any] = {"behavior": "allow"}
+            if req_id in _REQUEST_TO_INPUT:
+                inner["updatedInput"] = _REQUEST_TO_INPUT.pop(req_id)
             response = {
                 "type": "control_response",
                 "response": {
                     "subtype": "success",
                     "request_id": req_id,
-                    "response": {"behavior": "allow"},
+                    "response": inner,
                 },
             }
             payload = (json.dumps(response) + "\n").encode()

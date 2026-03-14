@@ -69,6 +69,12 @@ class PlanModeCommand:
                 model=current.model if current else None,
                 reasoning=current.reasoning if current else None,
                 permission_mode=mode,
+                ask_questions=current.ask_questions if current else None,
+                diff_preview=current.diff_preview if current else None,
+                show_api_cost=current.show_api_cost if current else None,
+                show_subscription_usage=current.show_subscription_usage
+                if current
+                else None,
             )
             await chat_prefs.set_engine_override(chat_id, engine, updated)
             cli_mode = "plan" if mode in ("plan", "auto") else mode
@@ -88,6 +94,12 @@ class PlanModeCommand:
                 model=current.model if current else None,
                 reasoning=current.reasoning if current else None,
                 permission_mode=None,
+                ask_questions=current.ask_questions if current else None,
+                diff_preview=current.diff_preview if current else None,
+                show_api_cost=current.show_api_cost if current else None,
+                show_subscription_usage=current.show_subscription_usage
+                if current
+                else None,
             )
             await chat_prefs.set_engine_override(chat_id, engine, updated)
             logger.info("planmode.cleared", chat_id=chat_id)
