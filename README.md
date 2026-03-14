@@ -29,6 +29,7 @@ Your AI coding agents need a terminal, but you don't need to sit at one. Untethe
 <p align="center">
   <img src="https://raw.githubusercontent.com/littlebearapps/untether/feature/github-hardening/docs/assets/screenshots/hero-collage.jpg" alt="Send tasks by voice, approve changes remotely, configure from Telegram" width="100%" />
 </p>
+<p align="center"><sub>* Feature availability varies by engine — see <a href="#-supported-engines">engine compatibility</a></sub></p>
 
 ---
 
