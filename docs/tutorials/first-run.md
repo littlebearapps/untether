@@ -73,7 +73,7 @@ When the agent finishes, Untether sends a new message and replaces the progress 
 
 <img src="../assets/screenshots/final-answer-footer.jpg" alt="Final answer with model/cost footer and resume line" width="360" loading="lazy" />
 
-That last line is the **resume line**—it's how Untether knows which conversation to continue.
+The footer shows which engine, model, and mode were used, plus cost if available. When resume lines are enabled, a line like `codex resume abc123` appears too—that's how Untether knows which conversation to continue.
 
 ## 5. Continue the conversation
 

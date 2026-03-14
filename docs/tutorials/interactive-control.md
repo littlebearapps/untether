@@ -208,7 +208,7 @@ To check your current mode at any time:
 ```
 
 !!! untether "Untether"
-    plan mode: **on** (plan mode)
+    plan mode: **auto** (plan mode, auto-approve ExitPlanMode)
 
 <img src="../assets/screenshots/planmode-show.jpg" alt="/planmode show output showing current mode" width="360" loading="lazy" />
 
