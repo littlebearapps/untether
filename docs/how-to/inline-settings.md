@@ -29,8 +29,8 @@ Trigger: all
 
 <img src="../assets/screenshots/config-menu.jpg" alt="/config home page with inline keyboard buttons for settings" width="360" loading="lazy" />
 
-!!! note "Gemini CLI"
-    When the engine is Gemini CLI, the home page shows **Approval mode** (read-only / full access) instead of Plan mode, Ask mode, and Diff preview.
+!!! note "Engine-specific controls"
+    When the engine is **Codex CLI**, the home page shows **Approval policy** (full auto / safe) instead of Plan mode, Ask mode, and Diff preview. When the engine is **Gemini CLI**, it shows **Approval mode** (read-only / edit files / full access).
 
 ## Navigate sub-pages
 
@@ -54,7 +54,8 @@ When you tap a setting button:
 Some settings are engine-specific and only appear when relevant:
 
 - **Plan mode** — available for Claude Code. Hidden for other engines; the sub-page shows a "not available" message with a Back button.
-- **Approval mode** — only available for Gemini CLI. Toggle between "read-only" (default, write tools blocked) and "full access" (all tools approved). This replaces the Plan mode button on the home page when the engine is Gemini.
+- **Approval policy** — only available for Codex CLI. Toggle between "full auto" (default, all tools approved) and "safe" (only trusted commands run, untrusted denied via `--ask-for-approval untrusted`). This is a pre-run policy — not interactive mid-run approval.
+- **Approval mode** — only available for Gemini CLI. Toggle between "read-only" (default, write tools blocked), "edit files" (file reads/writes OK, shell commands blocked via `--approval-mode auto_edit`), and "full access" (all tools approved via `--approval-mode yolo`). This is a pre-run policy — not interactive mid-run approval.
 - **Ask mode** — only available for Claude Code. When enabled, Claude Code can ask interactive questions with option buttons instead of guessing. Hidden for other engines.
 - **Reasoning** — only available for engines that support reasoning levels (Claude Code and Codex). Hidden for OpenCode, Pi, and others.
 - **Model** — always visible. Shows the current model override and lets you clear it. To set a model, use `/model set <name>`.
@@ -66,7 +67,8 @@ When you switch engines via the Engine sub-page, the home page automatically sho
 | Setting | Options | Persisted |
 |---------|---------|-----------|
 | Plan mode | off, on, auto | Yes (chat prefs) |
-| Approval mode | read-only, full access | Yes (chat prefs) |
+| Approval policy | full auto, safe | Yes (chat prefs) |
+| Approval mode | read-only, edit files, full access | Yes (chat prefs) |
 | Ask mode | off, on | Yes (chat prefs) |
 | Verbose | off, on | No (in-memory, resets on restart) |
 | Diff preview | off, on | Yes (chat prefs) |
@@ -76,7 +78,7 @@ When you switch engines via the Engine sub-page, the home page automatically sho
 | Cost & usage | API cost on/off, subscription usage on/off | Yes (chat prefs) |
 | Trigger | all, mentions | Yes (chat prefs) |
 
-Approval mode appears instead of Plan mode when the engine is Gemini CLI.
+Approval policy appears instead of Plan mode when the engine is Codex CLI. Approval mode appears instead of Plan mode when the engine is Gemini CLI.
 
 ### Cost & Usage page
 

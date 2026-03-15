@@ -31,6 +31,8 @@ Untether adds interactive permission control, plan mode support, and several UX 
 - **`[progress]` config** — global verbosity and max_actions settings in `untether.toml`
 - **Pi context compaction** — `AutoCompactionStart`/`AutoCompactionEnd` events rendered as progress actions
 - **Stall diagnostics & liveness watchdog** — `/proc` process diagnostics (CPU, RSS, TCP, FDs), progressive stall warnings with Telegram notifications, liveness watchdog for alive-but-silent subprocesses, stall auto-cancel (dead process, no-PID zombie, absolute cap) with CPU-active suppression, `session.summary` structured log; `[watchdog]` config section
+- **File upload deduplication** — auto-appends `_1`, `_2`, … when target file exists, instead of requiring `--force`; media groups without captions auto-save to `incoming/`
+- **Resume line formatting** — visual separation with blank line and ↩️ prefix in final message footer
 
 See `.claude/skills/claude-stream-json/` and `.claude/rules/control-channel.md` for implementation details.
 
@@ -71,6 +73,7 @@ Telegram <-> TelegramPresenter <-> RunnerBridge <-> Runner (claude/codex/opencod
 | `shutdown.py` | Graceful shutdown state and drain logic |
 | `telegram/bridge.py` | Telegram message rendering |
 | `telegram/loop.py` | Telegram update loop, signal handlers, drain-then-exit |
+| `telegram/files.py` | File upload helpers, deduplication, deny globs, atomic writes |
 | `commands.py` | Command result types |
 | `scripts/validate_release.py` | Release validation (changelog format, issue links, version match) |
 | `scripts/healthcheck.sh` | Post-deploy health check (systemd, version, logs, Bot API) |
@@ -144,7 +147,7 @@ Rules in `.claude/rules/` auto-load when editing matching files:
 
 ## Tests
 
-1553 unit tests, 80% coverage threshold. Integration testing against `@untether_dev_bot` is **mandatory before every release** — see `docs/reference/integration-testing.md` for the full playbook with per-release-type tier requirements (patch/minor/major). All integration test tiers are fully automated by Claude Code via Telegram MCP tools and Bash.
+1568 unit tests, 80% coverage threshold. Integration testing against `@untether_dev_bot` is **mandatory before every release** — see `docs/reference/integration-testing.md` for the full playbook with per-release-type tier requirements (patch/minor/major). All integration test tiers are fully automated by Claude Code via Telegram MCP tools and Bash.
 
 Key test files:
 
@@ -164,11 +167,13 @@ Key test files:
 - `test_cooldown_bypass.py` — 19 tests: outline bypass, rapid retry auto-deny, no-text auto-deny, cooldown escalation, hold-open outline flow
 - `test_verbose_progress.py` — 21 tests: format_verbose_detail() for each tool type, MarkdownFormatter verbose mode, compact regression
 - `test_verbose_command.py` — 7 tests: /verbose toggle on/off/clear, backend id
-- `test_config_command.py` — 181 tests: home page, plan mode/ask mode/verbose/engine/trigger/model/reasoning sub-pages, toggle actions, callback vs command routing, button layout, engine-aware visibility
+- `test_config_command.py` — 188 tests: home page, plan mode/ask mode/verbose/engine/trigger/model/reasoning sub-pages, toggle actions, callback vs command routing, button layout, engine-aware visibility, default resolution
 - `test_pi_compaction.py` — 6 tests: compaction start/end, aborted, no tokens, sequence
 - `test_proc_diag.py` — 24 tests: format_diag, is_cpu_active, collect_proc_diag (Linux /proc reads), ProcessDiag defaults
 - `test_exec_runner.py` — 28 tests: event tracking (event_count, recent_events ring buffer, PID in StartedEvent meta), JsonlStreamState defaults
 - `test_build_args.py` — 30 tests: CLI argument construction for all 6 engines, model/reasoning/permission flags
+- `test_telegram_files.py` — 17 tests: file helpers, deduplication, deny globs, default upload paths
+- `test_telegram_file_transfer_helpers.py` — 48 tests: `/file put` and `/file get` command handling, media groups, force overwrite
 - `test_loop_coverage.py` — 29 tests: update loop edge cases, message routing, callback dispatch, shutdown integration
 
 ## Development
@@ -303,6 +308,10 @@ Before tagging a release:
 4. Tests pass: `uv run pytest`
 5. Lint clean: `uv run ruff check src/`
 6. Lockfile synced: `uv lock --check`
+
+## Documentation screenshots
+
+44 screenshots in `docs/assets/screenshots/` with a tracking checklist in `CAPTURES.md`. README uses a composite hero collage (`hero-collage.jpg`) built with ImageMagick for mobile responsiveness. Doc files use HTML `<img>` tags with `width="360"` and `loading="lazy"` (works in both GitHub and MkDocs). 11 screenshots are still missing and commented out with `<!-- TODO: capture screenshot -->` markers.
 
 ## Conventions
 

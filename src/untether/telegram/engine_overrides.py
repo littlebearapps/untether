@@ -18,7 +18,7 @@ _ENGINE_REASONING_LEVELS: dict[str, tuple[str, ...]] = {
 
 ASK_QUESTIONS_SUPPORTED_ENGINES = frozenset({"claude"})
 
-PERMISSION_MODE_SUPPORTED_ENGINES = frozenset({"claude", "gemini"})
+PERMISSION_MODE_SUPPORTED_ENGINES = frozenset({"claude", "codex", "gemini"})
 
 DIFF_PREVIEW_SUPPORTED_ENGINES = frozenset({"claude"})
 

@@ -84,7 +84,7 @@ That's it. Your agent runs on your machine, streams progress to Telegram, and yo
 - 💬 **Forum topics** — map Telegram topics to projects and branches
 - 📤 **Session export** — `/export` for markdown or JSON transcripts
 - 🗂️ **File browser** — `/browse` to navigate project files with inline buttons
-- ⚙️ **Inline settings** — `/config` opens an in-place settings menu; toggle plan mode, ask mode, verbose, engine, model, reasoning, and trigger with buttons
+- ⚙️ **Inline settings** — `/config` opens an in-place settings menu; toggle plan mode, ask mode, approval policy (Codex), approval mode (Gemini), verbose, engine, model, reasoning, and trigger with buttons
 - 🧩 **Plugin system** — extend with custom engines, transports, and commands
 - 🔌 **Plugin-compatible** — Claude Code plugins detect Untether sessions via `UNTETHER_SESSION` env var, preventing hooks from interfering with Telegram output; works with [PitchDocs](https://github.com/littlebearapps/lba-plugins) and other Claude Code plugins
 - 📊 **Session statistics** — `/stats` shows per-engine run counts, action totals, and duration across today, this week, and all time
@@ -112,13 +112,15 @@ That's it. Your agent runs on your machine, streams progress to Telegram, and yo
 | **Progress streaming** | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | **Session resume** | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | **Model override** | ✅ | ✅ | ✅ | ✅ | ✅ | ✅¹ |
+| **Model in footer** | ✅ | — | — | — | ✅ | — |
 | **Voice input** | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | **Verbose progress** | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | **Error hints** | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | **Preamble injection** | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | **Cost tracking** | ✅ | ~³ | ✅ | ~³ | ~³ | ~³ |
 | **Interactive permissions** | ✅ | — | — | — | — | — |
-| **Plan mode** | ✅ | — | — | — | ~² | — |
+| **Approval policy** | ✅ | ~⁴ | — | — | ~² | — |
+| **Plan mode** | ✅ | — | — | — | — | — |
 | **Ask mode (option buttons)** | ✅ | — | — | — | — | — |
 | **Diff preview** | ✅ | — | — | — | — | — |
 | **Auto-approve safe tools** | ✅ | — | — | — | — | — |
@@ -129,8 +131,9 @@ That's it. Your agent runs on your machine, streams progress to Telegram, and yo
 | **Context compaction** | — | — | — | ✅ | — | — |
 
 ¹ Amp model override maps to `--mode` (deep/free/rush/smart).
-² Toggle via `/config` between read-only (default) and full access (`--approval-mode=yolo`); not Untether's interactive approve/deny workflow.
+² Toggle via `/config` between read-only (default), edit files (`--approval-mode=auto_edit`, files OK but no shell), and full access (`--approval-mode=yolo`); pre-run policy, not interactive mid-run approval.
 ³ Token usage counts only — no USD cost reporting.
+⁴ Toggle via `/config` between full auto (default) and safe (`--ask-for-approval=untrusted`, untrusted tools blocked); pre-run policy, not interactive mid-run approval.
 
 ---
 

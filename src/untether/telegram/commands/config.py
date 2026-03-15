@@ -83,7 +83,10 @@ _HOME_HINTS: dict[str, dict[str, str]] = {
         "off": "run freely",
         "auto": "auto-approve actions",
         "default": "agent decides",
+        "full auto": "all tools approved",
+        "safe": "untrusted tools blocked",
         "full access": "all tools approved",
+        "edit files": "files ok, no shell",
         "read-only": "write tools blocked",
     },
     "aq": {
@@ -101,6 +104,16 @@ _HOME_HINTS: dict[str, dict[str, str]] = {
     "tr": {"all": "respond to everything", "mentions": "@mention only"},
     "md": {"default": "from CLI settings"},
     "rs": {"default": "from CLI settings"},
+}
+
+# Engine-specific default model hints shown when no model override is set.
+_ENGINE_MODEL_HINTS: dict[str, str] = {
+    "claude": "from CLI settings",
+    "codex": "codex-mini-latest",
+    "gemini": "auto (routes Flash ↔ Pro)",
+    "amp": "smart mode (Opus 4.6)",
+    "opencode": "from provider config",
+    "pi": "from provider config",
 }
 
 # Map "default" to effective value for settings with known defaults.
@@ -163,8 +176,15 @@ async def _page_home(ctx: CommandContext) -> None:
                 pm_label = "off"
             else:
                 pm_label = "default"
+        elif current_engine == "codex":
+            pm_label = "safe" if pm == "safe" else "full auto"
         elif current_engine == "gemini":
-            pm_label = "full access" if pm == "yolo" else "read-only"
+            if pm == "yolo":
+                pm_label = "full access"
+            elif pm == "auto_edit":
+                pm_label = "edit files"
+            else:
+                pm_label = "read-only"
 
         trig = await prefs.get_trigger_mode(chat_id)
         trigger_label = trig or "all"
@@ -237,6 +257,11 @@ async def _page_home(ctx: CommandContext) -> None:
                 lines.append(
                     f"Diff preview: <b>{dp_display}</b>{_home_hint('dp', dp_label)}"
                 )
+        elif current_engine == "codex":
+            lines.append("<b>Agent controls</b> <i>(Codex CLI)</i>")
+            lines.append(
+                f"Approval policy: <b>{pm_label}</b>{_home_hint('pm', pm_label)}"
+            )
         elif current_engine == "gemini":
             lines.append("<b>Agent controls</b> <i>(Gemini CLI)</i>")
             lines.append(
@@ -254,7 +279,11 @@ async def _page_home(ctx: CommandContext) -> None:
     # --- Routing ---
     lines.append("<b>Routing</b>")
     lines.append(f"Engine: <b>{engine_label}</b>")
-    lines.append(f"Model: <b>{model_label}</b>{_home_hint('md', model_label)}")
+    model_hint = _home_hint("md", model_label)
+    if model_label == "default":
+        engine_hint = _ENGINE_MODEL_HINTS.get(current_engine, "from CLI settings")
+        model_hint = f"  · {engine_hint}"
+    lines.append(f"Model: <b>{model_label}</b>{model_hint}")
     lines.append(f"Trigger: <b>{trigger_label}</b>{_home_hint('tr', trigger_label)}")
     if show_reasoning:
         lines.append(
@@ -300,6 +329,27 @@ async def _page_home(ctx: CommandContext) -> None:
             row5.append({"text": "🧠 Reasoning", "callback_data": "config:rs"})
         row5.append({"text": "ℹ️ About", "callback_data": "config:ab"})
         buttons.append(row5)
+    elif current_engine == "codex":
+        # Codex layout
+        row1 = [{"text": "📋 Approval policy", "callback_data": "config:pm"}]
+        if show_cost_usage:
+            row1.append({"text": "💰 Cost & usage", "callback_data": "config:cu"})
+        buttons.append(row1)
+        buttons.append(
+            [
+                {"text": "🔍 Verbose", "callback_data": "config:vb"},
+                {"text": "🤖 Model", "callback_data": "config:md"},
+            ]
+        )
+        buttons.append(
+            [
+                {"text": "⚙️ Engine", "callback_data": "config:ag"},
+                {"text": "📡 Trigger", "callback_data": "config:tr"},
+            ]
+        )
+        row_last = [{"text": "🧠 Reasoning", "callback_data": "config:rs"}]
+        row_last.append({"text": "ℹ️ About", "callback_data": "config:ab"})
+        buttons.append(row_last)
     elif current_engine == "gemini":
         # Gemini layout
         row1 = [{"text": "📋 Approval mode", "callback_data": "config:pm"}]
@@ -350,7 +400,9 @@ async def _page_home(ctx: CommandContext) -> None:
 
 _PM_MODES: dict[str, str] = {"on": "plan", "auto": "auto", "off": "acceptEdits"}
 
-_GEMINI_AM_MODES: dict[str, str] = {"fa": "yolo"}
+_CODEX_PM_MODES: dict[str, str] = {"fa": "auto", "safe": "safe"}
+
+_GEMINI_AM_MODES: dict[str, str] = {"fa": "yolo", "ae": "auto_edit"}
 
 
 async def _page_planmode(ctx: CommandContext, action: str | None = None) -> None:
@@ -378,13 +430,33 @@ async def _page_planmode(ctx: CommandContext, action: str | None = None) -> None
             ctx,
             (
                 "<b>📋 Permission mode</b>\n\n"
-                "Only available for Claude Code and Gemini CLI."
+                "Only available for Claude Code, Codex, and Gemini CLI."
             ),
             [[{"text": "← Back", "callback_data": "config:home"}]],
         )
         return
 
     engine = current_engine
+
+    # --- Codex approval policy actions ---
+    if engine == "codex" and action in _CODEX_PM_MODES:
+        current = await prefs.get_engine_override(chat_id, engine)
+        mode_value = _CODEX_PM_MODES[action]
+        updated = EngineOverrides(
+            model=current.model if current else None,
+            reasoning=current.reasoning if current else None,
+            permission_mode=mode_value if mode_value != "auto" else None,
+            ask_questions=current.ask_questions if current else None,
+            diff_preview=current.diff_preview if current else None,
+            show_api_cost=current.show_api_cost if current else None,
+            show_subscription_usage=current.show_subscription_usage
+            if current
+            else None,
+        )
+        await prefs.set_engine_override(chat_id, engine, updated)
+        logger.info("config.approval_policy.set", chat_id=chat_id, mode=action)
+        await _page_home(ctx)
+        return
 
     # --- Claude plan mode actions ---
     if engine == "claude" and action in _PM_MODES:
@@ -512,17 +584,55 @@ async def _page_planmode(ctx: CommandContext, action: str | None = None) -> None
             ],
         ]
 
+    elif engine == "codex":
+        current_label = "safe" if pm == "safe" else "full auto"
+
+        lines = [
+            "<b>📋 Approval policy</b>",
+            "",
+            "Control which tools Codex can use.",
+            "Codex runs non-interactively — approval is set before the run.",
+            "",
+            "• <b>full auto</b> — all tools approved (default)",
+            "• <b>safe</b> — only trusted commands run, untrusted denied",
+            "",
+            f"Current: <b>{current_label}</b>",
+            "",
+            f'📖 <a href="{_DOCS_BASE}inline-settings/">Learn more</a>',
+        ]
+
+        buttons = [
+            [
+                {
+                    "text": _check("Full auto", active=current_label == "full auto"),
+                    "callback_data": "config:pm:fa",
+                },
+                {
+                    "text": _check("Safe", active=current_label == "safe"),
+                    "callback_data": "config:pm:safe",
+                },
+            ],
+            [
+                {"text": "Clear override", "callback_data": "config:pm:clr"},
+                {"text": "← Back", "callback_data": "config:home"},
+            ],
+        ]
+
     elif engine == "gemini":
-        current_label = "full access" if pm == "yolo" else "read-only"
+        if pm == "yolo":
+            current_label = "full access"
+        elif pm == "auto_edit":
+            current_label = "edit files"
+        else:
+            current_label = "read-only"
 
         lines = [
             "<b>📋 Approval mode</b>",
             "",
             "Control which tools Gemini can use in non-interactive mode.",
-            "Write tools are blocked by default — enable full access",
-            "to allow file creation and editing.",
             "",
-            "• <b>read-only</b> — write tools blocked (default)",
+            "• <b>read-only</b> — research only, no modifications (default)",
+            "• <b>edit files</b> — file reads/writes OK, shell commands blocked",
             "• <b>full access</b> — all tools approved",
             "",
             f"Current: <b>{current_label}</b>",
@@ -533,8 +643,12 @@ async def _page_planmode(ctx: CommandContext, action: str | None = None) -> None
         buttons = [
             [
                 {
-                    "text": _check("Read-only", active=pm != "yolo"),
+                    "text": _check("Read-only", active=pm not in {"yolo", "auto_edit"}),
                     "callback_data": "config:pm:ro",
+                },
+                {
+                    "text": _check("Edit files", active=pm == "auto_edit"),
+                    "callback_data": "config:pm:ae",
                 },
                 {
                     "text": _check("Full access", active=pm == "yolo"),
@@ -801,7 +915,8 @@ async def _page_model(ctx: CommandContext, action: str | None = None) -> None:
 
     override = await prefs.get_engine_override(chat_id, current_engine)
     model = override.model if override else None
-    current_label = model or "default (from CLI settings)"
+    engine_hint = _ENGINE_MODEL_HINTS.get(current_engine, "from CLI settings")
+    current_label = model or f"default ({engine_hint})"
 
     lines = [
         "<b>🤖 Model</b>",
@@ -1437,7 +1552,9 @@ class ConfigCommand:
                 "auto": "Plan mode: auto",
                 "clr": "Permission mode: cleared",
                 "fa": "Approval mode: full access",
+                "ae": "Approval mode: edit files",
                 "ro": "Approval mode: read-only",
+                "safe": "Approval policy: safe",
             },
             "vb": {
                 "on": "Verbose: on",

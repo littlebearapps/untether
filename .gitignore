@@ -13,6 +13,7 @@ research/
 test-projects/
 _site/
 docs/reference/changelog.md
+docs/plans/
 .envrc
 .claude/settings.json
 .claude/plans/

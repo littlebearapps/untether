@@ -497,6 +497,8 @@ class CodexRunner(ResumeTokenMixin, JsonlSubprocessRunner):
                         f"model_reasoning_effort={run_options.reasoning}",
                     ]
                 )
+        if run_options is not None and run_options.permission_mode == "safe":
+            args.extend(["--ask-for-approval", "untrusted"])
         args.extend(
             [
                 "exec",

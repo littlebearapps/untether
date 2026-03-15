@@ -142,6 +142,26 @@ class TestCodexBuildArgs:
         assert "-c" in args
         assert "notify=[]" in args
 
+    def test_permission_mode_safe(self) -> None:
+        runner = self._runner()
+        state = runner.new_state("hello", None)
+        opts = RunOptions(permission_mode="safe")
+        with patch("untether.runners.codex.get_run_options", return_value=opts):
+            args = runner.build_args("hello", None, state=state)
+        assert "--ask-for-approval" in args
+        idx = args.index("--ask-for-approval")
+        assert args[idx + 1] == "untrusted"
+        # Must come before "exec" (top-level flag, not exec subcommand flag)
+        assert idx < args.index("exec")
+
+    def test_permission_mode_none_no_approval_flag(self) -> None:
+        runner = self._runner()
+        state = runner.new_state("hello", None)
+        opts = RunOptions(permission_mode=None)
+        with patch("untether.runners.codex.get_run_options", return_value=opts):
+            args = runner.build_args("hello", None, state=state)
+        assert "--ask-for-approval" not in args
+
 
 # ---------------------------------------------------------------------------
 # OpenCode
@@ -242,6 +262,16 @@ class TestGeminiBuildArgs:
         assert "--approval-mode" in args
         idx = args.index("--approval-mode")
         assert args[idx + 1] == "auto"
+
+    def test_permission_mode_auto_edit(self) -> None:
+        runner = self._runner()
+        state = runner.new_state("hello", None)
+        opts = RunOptions(permission_mode="auto_edit")
+        with patch("untether.runners.gemini.get_run_options", return_value=opts):
+            args = runner.build_args("hello", None, state=state)
+        assert "--approval-mode" in args
+        idx = args.index("--approval-mode")
+        assert args[idx + 1] == "auto_edit"
 
 
 # ---------------------------------------------------------------------------

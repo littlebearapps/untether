@@ -357,7 +357,7 @@ here; plugin engines should document their own keys.
     ```
 
 !!! note "Approval mode"
-    Gemini CLI's approval mode (read-only vs full access) is toggled per chat via `/config` → **Approval mode**, not the config file. See [inline settings](../how-to/inline-settings.md).
+    Gemini CLI's approval mode (read-only / edit files / full access) is toggled per chat via `/config` → **Approval mode**, not the config file. Codex CLI's approval policy (full auto / safe) is similarly toggled via `/config` → **Approval policy**. See [inline settings](../how-to/inline-settings.md).
 
 ### `amp`
 

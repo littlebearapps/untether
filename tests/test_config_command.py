@@ -209,14 +209,15 @@ class TestHomePage:
         assert "config:pm" in _buttons_data(msg)
 
     @pytest.mark.anyio
-    async def test_home_hides_plan_mode_when_not_claude(self, tmp_path):
-        """Plan mode label and button hidden when engine is not claude."""
+    async def test_home_hides_plan_mode_when_not_supported(self, tmp_path):
+        """Plan mode label and button hidden for unsupported engines."""
         state_path = tmp_path / "prefs.json"
         cmd = ConfigCommand()
-        ctx = _make_ctx(config_path=state_path, default_engine="codex")
+        ctx = _make_ctx(config_path=state_path, default_engine="opencode")
         await cmd.handle(ctx)
         msg = _last_send_msg(ctx)
         assert "Plan mode" not in msg.text
+        assert "Approval" not in msg.text
         assert "config:pm" not in _buttons_data(msg)
 
     @pytest.mark.anyio
@@ -242,11 +243,11 @@ class TestHomePage:
         assert "config:dp" in data
 
     @pytest.mark.anyio
-    async def test_home_has_nav_buttons_non_claude(self, tmp_path):
-        """When engine is not claude, 3 nav buttons (no plan mode)."""
+    async def test_home_has_nav_buttons_non_permission_engine(self, tmp_path):
+        """When engine has no permission support, no pm button."""
         state_path = tmp_path / "prefs.json"
         cmd = ConfigCommand()
-        ctx = _make_ctx(config_path=state_path, default_engine="codex")
+        ctx = _make_ctx(config_path=state_path, default_engine="opencode")
         await cmd.handle(ctx)
         data = _buttons_data(_last_send_msg(ctx))
         assert "config:pm" not in data
@@ -363,11 +364,11 @@ class TestPlanMode:
             args_text="pm",
             text="config:pm",
             config_path=state_path,
-            default_engine="codex",
+            default_engine="opencode",
         )
         await cmd.handle(ctx)
         msg = _last_edit_msg(ctx)
-        assert "Only available for Claude Code and Gemini CLI" in msg.text
+        assert "Only available for" in msg.text
         assert "config:home" in _buttons_data(msg)
 
     @pytest.mark.anyio
@@ -388,7 +389,95 @@ class TestPlanMode:
         )
         await cmd.handle(ctx)
         msg = _last_edit_msg(ctx)
-        assert "Only available for Claude Code and Gemini CLI" in msg.text
+        assert "Only available for" in msg.text
+
+
+# ---------------------------------------------------------------------------
+# Codex approval policy (via plan mode page)
+# ---------------------------------------------------------------------------
+
+
+class TestCodexApprovalPolicy:
+    @pytest.mark.anyio
+    async def test_approval_policy_page_renders(self, tmp_path):
+        """Navigating to pm page with codex engine shows approval policy."""
+        state_path = tmp_path / "prefs.json"
+        cmd = ConfigCommand()
+        ctx = _make_ctx(
+            args_text="pm",
+            text="config:pm",
+            config_path=state_path,
+            default_engine="codex",
+        )
+        await cmd.handle(ctx)
+        msg = _last_edit_msg(ctx)
+        assert "Approval policy" in msg.text
+        assert "full auto" in msg.text.lower()
+        data = _buttons_data(msg)
+        assert "config:pm:fa" in data
+        assert "config:pm:safe" in data
+
+    @pytest.mark.anyio
+    async def test_set_safe_mode(self, tmp_path):
+        """Setting safe mode stores permission_mode='safe'."""
+        from untether.telegram.chat_prefs import ChatPrefsStore, resolve_prefs_path
+
+        state_path = tmp_path / "prefs.json"
+        cmd = ConfigCommand()
+        ctx = _make_ctx(
+            args_text="pm:safe",
+            text="config:pm:safe",
+            config_path=state_path,
+            default_engine="codex",
+        )
+        await cmd.handle(ctx)
+        prefs = ChatPrefsStore(resolve_prefs_path(state_path))
+        override = await prefs.get_engine_override(123, "codex")
+        assert override is not None
+        assert override.permission_mode == "safe"
+
+    @pytest.mark.anyio
+    async def test_set_full_auto_clears_permission(self, tmp_path):
+        """Setting full auto clears permission_mode."""
+        from untether.telegram.chat_prefs import ChatPrefsStore, resolve_prefs_path
+
+        state_path = tmp_path / "prefs.json"
+        prefs = ChatPrefsStore(resolve_prefs_path(state_path))
+        from untether.telegram.engine_overrides import EngineOverrides
+
+        await prefs.set_engine_override(
+            123, "codex", EngineOverrides(permission_mode="safe")
+        )
+
+        cmd = ConfigCommand()
+        ctx = _make_ctx(
+            args_text="pm:fa",
+            text="config:pm:fa",
+            config_path=state_path,
+            default_engine="codex",
+        )
+        await cmd.handle(ctx)
+        override = await prefs.get_engine_override(123, "codex")
+        # "full auto" maps to "auto" which clears to None
+        assert override is None or override.permission_mode is None
+
+    @pytest.mark.anyio
+    async def test_home_page_shows_codex_permission(self, tmp_path):
+        """Home page shows approval policy for codex engine."""
+        from untether.telegram.chat_prefs import ChatPrefsStore, resolve_prefs_path
+        from untether.telegram.engine_overrides import EngineOverrides
+
+        state_path = tmp_path / "prefs.json"
+        prefs = ChatPrefsStore(resolve_prefs_path(state_path))
+        await prefs.set_engine_override(
+            123, "codex", EngineOverrides(permission_mode="safe")
+        )
+
+        cmd = ConfigCommand()
+        ctx = _make_ctx(config_path=state_path, default_engine="codex")
+        await cmd.handle(ctx)
+        msg = _last_send_msg(ctx)
+        assert "safe" in msg.text.lower()
 
 
 # ---------------------------------------------------------------------------
@@ -514,6 +603,60 @@ class TestGeminiApprovalMode:
         await cmd.handle(ctx)
         msg = _last_send_msg(ctx)
         assert "full access" in msg.text.lower()
+
+    @pytest.mark.anyio
+    async def test_set_auto_edit_stores_mode(self, tmp_path):
+        """Setting edit files stores 'auto_edit' as permission_mode."""
+        from untether.telegram.chat_prefs import ChatPrefsStore, resolve_prefs_path
+
+        state_path = tmp_path / "prefs.json"
+        cmd = ConfigCommand()
+        ctx = _make_ctx(
+            args_text="pm:ae",
+            text="config:pm:ae",
+            config_path=state_path,
+            default_engine="gemini",
+        )
+        await cmd.handle(ctx)
+        prefs = ChatPrefsStore(resolve_prefs_path(state_path))
+        override = await prefs.get_engine_override(123, "gemini")
+        assert override is not None
+        assert override.permission_mode == "auto_edit"
+
+    @pytest.mark.anyio
+    async def test_home_shows_edit_files_label(self, tmp_path):
+        """Home page shows 'edit files' when auto_edit is set."""
+        from untether.telegram.chat_prefs import ChatPrefsStore, resolve_prefs_path
+        from untether.telegram.engine_overrides import EngineOverrides
+
+        state_path = tmp_path / "prefs.json"
+        prefs = ChatPrefsStore(resolve_prefs_path(state_path))
+        await prefs.set_engine_override(
+            123, "gemini", EngineOverrides(permission_mode="auto_edit")
+        )
+
+        cmd = ConfigCommand()
+        ctx = _make_ctx(config_path=state_path, default_engine="gemini")
+        await cmd.handle(ctx)
+        msg = _last_send_msg(ctx)
+        assert "edit files" in msg.text.lower()
+
+    @pytest.mark.anyio
+    async def test_approval_page_shows_three_options(self, tmp_path):
+        """Gemini approval page shows read-only, edit files, and full access."""
+        state_path = tmp_path / "prefs.json"
+        cmd = ConfigCommand()
+        ctx = _make_ctx(
+            args_text="pm",
+            text="config:pm",
+            config_path=state_path,
+            default_engine="gemini",
+        )
+        await cmd.handle(ctx)
+        data = _buttons_data(_last_edit_msg(ctx))
+        assert "config:pm:ro" in data
+        assert "config:pm:ae" in data
+        assert "config:pm:fa" in data
 
     @pytest.mark.anyio
     async def test_approval_mode_has_back_button(self, tmp_path):
@@ -827,10 +970,10 @@ class TestEngineAwareTransitions:
         """After switching engine away from claude, home page hides plan mode."""
         state_path = tmp_path / "prefs.json"
         cmd = ConfigCommand()
-        # Start with claude, switch to codex
+        # Start with claude, switch to opencode (no permission mode)
         ctx = _make_ctx(
-            args_text="ag:codex",
-            text="config:ag:codex",
+            args_text="ag:opencode",
+            text="config:ag:opencode",
             config_path=state_path,
             default_engine="claude",
         )
@@ -898,9 +1041,10 @@ class TestProjectDefaultEngine:
         await cmd.handle(ctx)
         msg = _last_send_msg(ctx)
         assert "Engine: <b>codex</b>" in msg.text
-        # Claude Code-specific buttons hidden
+        # Claude Code-specific "Plan mode" label hidden; shows "Approval policy"
         assert "Plan mode" not in msg.text
-        assert "config:pm" not in _buttons_data(msg)
+        assert "Approval policy" in msg.text
+        assert "config:pm" in _buttons_data(msg)
 
     @pytest.mark.anyio
     async def test_home_project_default_shows_default_annotation(self, tmp_path):
@@ -958,15 +1102,15 @@ class TestProjectDefaultEngine:
             config_path=state_path,
             default_engine="claude",
         )
-        # Project default is codex — plan mode should be blocked
+        # Project default is opencode — permission mode should be blocked
         ctx.runtime.default_context_for_chat.return_value = RunContext(
-            project="codex-test"
+            project="opencode-test"
         )
-        ctx.runtime.project_default_engine.return_value = "codex"
+        ctx.runtime.project_default_engine.return_value = "opencode"
 
         await cmd.handle(ctx)
         msg = _last_edit_msg(ctx)
-        assert "Only available for Claude Code" in msg.text
+        assert "Only available for" in msg.text
 
     @pytest.mark.anyio
     async def test_engine_page_shows_effective_from_project(self, tmp_path):
@@ -2355,10 +2499,10 @@ class TestHomePageSections:
         assert "Claude Code" in text
 
     @pytest.mark.anyio
-    async def test_non_claude_home_no_agent_controls(self, tmp_path):
+    async def test_non_permission_engine_home_no_agent_controls(self, tmp_path):
         state_path = tmp_path / "prefs.json"
         cmd = ConfigCommand()
-        ctx = _make_ctx(config_path=state_path, default_engine="codex")
+        ctx = _make_ctx(config_path=state_path, default_engine="opencode")
         await cmd.handle(ctx)
         text = _last_send_msg(ctx).text
         assert "Agent controls" not in text

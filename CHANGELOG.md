@@ -2,6 +2,13 @@
 
 ## v0.34.5 (2026-03-12)
 
+### changes
+
+- expand pre-run permission policies for Codex CLI and Gemini CLI in `/config` [#131](https://github.com/littlebearapps/untether/issues/131)
+  - Codex: new "Approval policy" page — full auto (default) or safe (`--ask-for-approval untrusted`)
+  - Gemini: expanded approval mode from 2 to 3 tiers — read-only, edit files (`--approval-mode auto_edit`), full access
+  - both engines show "Agent controls" section on `/config` home page with engine-specific labels
+
 ### fixes
 
 - hold ExitPlanMode request open after outline so post-outline Approve/Deny buttons persist — instead of auto-denying (which caused Claude to exit ~7s later), the control request is never responded to, keeping Claude alive while the user reads the outline [#114](https://github.com/littlebearapps/untether/issues/114), [#117](https://github.com/littlebearapps/untether/issues/117)

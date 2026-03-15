@@ -11,10 +11,10 @@ Different engines have different strengths:
 | Engine | Good at | Unique features |
 |-------|---------|----------------|
 | **Claude Code** | Complex refactors, architecture, long context | Interactive permissions, plan mode, ask mode, diff preview |
-| **Codex** | Fast edits, shell commands, quick fixes | Reasoning levels, device re-auth (`/auth`) |
+| **Codex** | Fast edits, shell commands, quick fixes | Reasoning levels, approval policy (safe mode), device re-auth (`/auth`) |
 | **OpenCode** | 75+ providers via Models.dev, local models | Broadest provider support |
 | **Pi** | Multi-provider auth, conversational | Context compaction |
-| **Gemini CLI** | Google models, plan mode, model routing | Auto Pro/Flash routing, sandboxing, extensions |
+| **Gemini CLI** | Google models, plan mode, model routing | 3-tier approval mode (read-only/edit/full), auto Pro/Flash routing, extensions |
 | **AMP** | Sourcegraph integration, thread sharing | Mode selection (deep/rush/smart), rich permissions |
 
 See the [engine compatibility matrix](https://github.com/littlebearapps/untether#engine-compatibility) in the README for a full feature-by-feature breakdown.
