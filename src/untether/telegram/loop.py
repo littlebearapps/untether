@@ -850,8 +850,8 @@ class MediaGroupBuffer:
                     await reply(
                         text="Couldn't process that upload group — please try again."
                     )
-                except Exception:  # noqa: BLE001, S110
-                    pass  # best-effort notification
+                except Exception:  # noqa: BLE001
+                    logger.debug("media_group.flush.notify_failed")
             return
 
 
