@@ -141,7 +141,7 @@ This uses Claude Code for just this message. The resume line will show `claude -
 Available prefixes depend on what you have installed: `/claude`, `/codex`, `/opencode`, `/pi`, `/gemini`, `/amp`.
 
 !!! tip "Set a default engine"
-    Use `/agent set claude` to make this chat (or topic) use Claude Code by default. Run `/agent` to see what's set.
+    Use `/config` → Engine & model to change the default engine from Telegram, or `/agent set claude` for quick per-chat overrides.
 
 ## What just happened
 

@@ -4,7 +4,7 @@ This tutorial walks you through installing Untether, creating a Telegram bot, an
 
 **What you'll have at the end:** A working `~/.untether/untether.toml` with your bot token, chat ID, workflow settings, and default engine.
 
-## 1. Install Python 3.14 and uv
+## 1. Install Python and uv
 
 Install `uv`, the modern Python [package manager](https://docs.astral.sh/uv/):
 
@@ -12,7 +12,7 @@ Install `uv`, the modern Python [package manager](https://docs.astral.sh/uv/):
 curl -LsSf https://astral.sh/uv/install.sh | sh
 ```
 
-Install Python 3.14 with uv:
+Install Python 3.12 or newer with uv (3.14 recommended):
 
 ```sh
 uv python install 3.14
@@ -30,7 +30,7 @@ Verify it's installed:
 untether --version
 ```
 
-You should see something like `0.31.0`.
+You should see the installed version number (e.g. `0.34.5`).
 
 ## 3. Install agent CLIs
 
@@ -283,7 +283,7 @@ untether runs these engines on your computer. switch anytime with /agent.
    claude
 ```
 
-Pick whichever you prefer. You can always switch engines per-message with `/codex`, `/claude`, etc.
+Pick whichever you prefer. You can switch engines per-message with `/codex`, `/claude`, etc., or change the default anytime via `/config` in Telegram.
 
 ## 10. Save your config
 
@@ -409,7 +409,7 @@ Your config file lives at `~/.untether/untether.toml`. The exact contents depend
         scope = "auto"
         ```
 
-This config file controls all of Untether's behavior. You can edit it directly to change settings or add advanced features.
+This config file controls all of Untether's behavior. You can edit it directly or change most settings from Telegram using the `/config` inline menu — no file editing needed.
 
 [Full config reference →](../reference/config.md)
 

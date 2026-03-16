@@ -74,6 +74,7 @@ class ChatInfo:
     first_name: str | None
     last_name: str | None
     chat_type: str | None
+    user_id: int | None = None
 
     @property
     def is_group(self) -> bool:
@@ -302,6 +303,7 @@ async def wait_for_chat(
                 first_name=chat.first_name,
                 last_name=chat.last_name,
                 chat_type=chat.type,
+                user_id=sender.id if sender is not None else None,
             )
     finally:
         await bot.close()
@@ -715,7 +717,7 @@ def build_transport_patch(state: OnboardingState, *, bot_token: str) -> dict[str
         raise RuntimeError("onboarding state missing session mode")
     if state.show_resume_line is None:
         raise RuntimeError("onboarding state missing resume choice")
-    return {
+    patch: dict[str, Any] = {
         "bot_token": bot_token,
         "chat_id": state.chat.chat_id,
         "session_mode": state.session_mode,
@@ -725,6 +727,9 @@ def build_transport_patch(state: OnboardingState, *, bot_token: str) -> dict[str
             "scope": state.topics_scope,
         },
     }
+    if state.chat.user_id is not None:
+        patch["allowed_user_ids"] = [state.chat.user_id]
+    return patch
 
 
 def build_config_patch(state: OnboardingState, *, bot_token: str) -> dict[str, Any]:
@@ -759,6 +764,8 @@ def merge_config(
     telegram["chat_id"] = telegram_patch["chat_id"]
     telegram["session_mode"] = telegram_patch["session_mode"]
     telegram["show_resume_line"] = telegram_patch["show_resume_line"]
+    if "allowed_user_ids" in telegram_patch:
+        telegram["allowed_user_ids"] = telegram_patch["allowed_user_ids"]
     topics = ensure_table(
         telegram,
         "topics",
@@ -936,6 +943,14 @@ async def step_save_config(ui: UI, svc: Services, state: OnboardingState) -> Non
     svc.write_config(state.config_path, merged)
     ui.print("")
     ui.print(Text("✓ setup complete. starting untether...", style="green"))
+    ui.print("")
+    ui.print("  next steps:")
+    ui.print("  • send a message to test: what is 2+2?")
+    ui.print("  • change settings from telegram: /config")
+    ui.print("  • enable voice notes: add voice_transcription = true to config")
+    ui.print("  • set up projects: see docs at littlebearapps.com/tools/untether/")
+    if state.chat and state.chat.user_id is not None:
+        ui.print(f"  • bot is locked to your account (user id {state.chat.user_id})")
 
 
 def always_true(_state: OnboardingState) -> bool:
