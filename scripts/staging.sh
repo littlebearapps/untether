@@ -28,7 +28,9 @@ case "${1:-}" in
         ;;
     rollback)
         echo "Rolling back to latest stable PyPI release..."
-        pipx install --force "$PACKAGE"
+        pipx install --force \
+            --pip-args="--index-url https://pypi.org/simple/" \
+            "$PACKAGE"
         INSTALLED=$(untether --version 2>/dev/null || echo "unknown")
         echo "Rolled back to $INSTALLED"
         echo ""
@@ -37,7 +39,9 @@ case "${1:-}" in
         ;;
     reset)
         echo "Resetting to real PyPI (post-release)..."
-        pipx install --force "$PACKAGE"
+        pipx install --force \
+            --pip-args="--index-url https://pypi.org/simple/" \
+            "$PACKAGE"
         INSTALLED=$(untether --version 2>/dev/null || echo "unknown")
         echo "Reset to $INSTALLED from PyPI"
         echo ""

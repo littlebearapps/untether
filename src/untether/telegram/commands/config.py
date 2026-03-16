@@ -294,9 +294,20 @@ async def _page_home(ctx: CommandContext) -> None:
         lines.append("")
 
     # --- Resume line ---
-    rl_label = "default"
+    _resume_default = True
+    try:
+        from ...settings import load_settings_if_exists as _load_rl_cfg
+
+        _rl_result = _load_rl_cfg()
+        if _rl_result is not None:
+            _resume_default = _rl_result[0].transports.telegram.show_resume_line
+    except (OSError, ValueError, KeyError):
+        pass
+
     if engine_override and engine_override.show_resume_line is not None:
         rl_label = "on" if engine_override.show_resume_line else "off"
+    else:
+        rl_label = f"default ({'on' if _resume_default else 'off'})"
 
     # --- Display ---
     lines.append("<b>Display</b>")
@@ -437,7 +448,7 @@ _PM_MODES: dict[str, str] = {"on": "plan", "auto": "auto", "off": "acceptEdits"}
 
 _CODEX_PM_MODES: dict[str, str] = {"fa": "auto", "safe": "safe"}
 
-_GEMINI_AM_MODES: dict[str, str] = {"fa": "yolo", "ae": "auto_edit"}
+_GEMINI_AM_MODES: dict[str, str] = {"ya": "yolo", "ae": "auto_edit"}
 
 
 async def _page_planmode(ctx: CommandContext, action: str | None = None) -> None:
@@ -704,7 +715,7 @@ async def _page_planmode(ctx: CommandContext, action: str | None = None) -> None
             [
                 {
                     "text": _check("Full access", active=pm == "yolo"),
-                    "callback_data": "config:pm:fa",
+                    "callback_data": "config:pm:ya",
                 },
                 {"text": "Clear override", "callback_data": "config:pm:clr"},
             ],
@@ -1660,7 +1671,24 @@ async def _page_resume_line(ctx: CommandContext, action: str | None = None) -> N
     # Display
     override = await prefs.get_engine_override(chat_id, current_engine)
     rl = override.show_resume_line if override else None
-    rl_label = "on" if rl is True else ("off" if rl is False else "default (on)")
+
+    _resume_default = True
+    try:
+        from ...settings import load_settings_if_exists as _load_rl_cfg
+
+        _rl_result = _load_rl_cfg()
+        if _rl_result is not None:
+            _resume_default = _rl_result[0].transports.telegram.show_resume_line
+    except (OSError, ValueError, KeyError):
+        pass
+
+    rl_label = (
+        "on"
+        if rl is True
+        else (
+            "off" if rl is False else f"default ({'on' if _resume_default else 'off'})"
+        )
+    )
 
     lines = [
         "<b>↩️ Resume line</b>",
@@ -1678,7 +1706,7 @@ async def _page_resume_line(ctx: CommandContext, action: str | None = None) -> N
         _toggle_row(
             "Resume",
             current=rl,
-            default=True,
+            default=_resume_default,
             on_data="config:rl:on",
             off_data="config:rl:off",
             clr_data="config:rl:clr",
@@ -1763,7 +1791,8 @@ class ConfigCommand:
                 "off": "Plan mode: off",
                 "auto": "Plan mode: auto",
                 "clr": "Permission mode: cleared",
-                "fa": "Approval mode: full access",
+                "fa": "Approval policy: full auto",
+                "ya": "Approval mode: full access",
                 "ae": "Approval mode: edit files",
                 "ro": "Approval mode: read-only",
                 "safe": "Approval policy: safe",

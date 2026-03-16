@@ -41,6 +41,7 @@ _RECONNECTING_RE = re.compile(
     re.IGNORECASE,
 )
 _EXEC_ONLY_FLAGS = {
+    "--ask-for-approval",
     "--skip-git-repo-check",
     "--json",
     "--output-schema",

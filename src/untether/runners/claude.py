@@ -924,6 +924,7 @@ def translate_claude_event(
                             pass
 
                     else:
+                        session_id = factory.resume.value if factory.resume else None
                         logger.warning(
                             "ask_question.extraction_failed",
                             request_id=request_id,

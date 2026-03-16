@@ -155,7 +155,7 @@ def deduplicate_target(target: Path) -> Path:
                 renamed=str(candidate),
             )
             return candidate
-    return target  # give up after 999 — let the caller handle it
+    raise FileExistsError(f"no available deduplicated path for {target}")
 
 
 def write_bytes_atomic(path: Path, payload: bytes) -> None:

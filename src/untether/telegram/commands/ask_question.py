@@ -53,7 +53,9 @@ class AskQuestionCommand:
                     request_id=flow.request_id,
                     raw_value=option_idx_str,
                 )
-                option_idx = 0
+                return CommandResult(
+                    text="That option is no longer valid.", notify=True
+                )
 
             # Get the selected option label
             current_q = flow.questions[flow.current_index]

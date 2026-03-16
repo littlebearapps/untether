@@ -500,7 +500,7 @@ class TestGeminiApprovalMode:
         await cmd.handle(ctx)
         msg = _last_edit_msg(ctx)
         assert "Approval mode" in msg.text
-        assert "config:pm:fa" in _buttons_data(msg)
+        assert "config:pm:ya" in _buttons_data(msg)
         assert "config:pm:ro" in _buttons_data(msg)
 
     @pytest.mark.anyio
@@ -511,8 +511,8 @@ class TestGeminiApprovalMode:
         state_path = tmp_path / "prefs.json"
         cmd = ConfigCommand()
         ctx = _make_ctx(
-            args_text="pm:fa",
-            text="config:pm:fa",
+            args_text="pm:ya",
+            text="config:pm:ya",
             config_path=state_path,
             default_engine="gemini",
         )
@@ -556,8 +556,8 @@ class TestGeminiApprovalMode:
         state_path = tmp_path / "prefs.json"
         cmd = ConfigCommand()
         ctx = _make_ctx(
-            args_text="pm:fa",
-            text="config:pm:fa",
+            args_text="pm:ya",
+            text="config:pm:ya",
             config_path=state_path,
             default_engine="gemini",
         )
@@ -656,7 +656,7 @@ class TestGeminiApprovalMode:
         data = _buttons_data(_last_edit_msg(ctx))
         assert "config:pm:ro" in data
         assert "config:pm:ae" in data
-        assert "config:pm:fa" in data
+        assert "config:pm:ya" in data
 
     @pytest.mark.anyio
     async def test_approval_mode_has_back_button(self, tmp_path):
@@ -674,7 +674,10 @@ class TestGeminiApprovalMode:
 
 class TestGeminiApprovalModeToasts:
     def test_toast_full_access(self):
-        assert ConfigCommand.early_answer_toast("pm:fa") == "Approval mode: full access"
+        assert ConfigCommand.early_answer_toast("pm:ya") == "Approval mode: full access"
+
+    def test_toast_codex_full_auto(self):
+        assert ConfigCommand.early_answer_toast("pm:fa") == "Approval policy: full auto"
 
     def test_toast_read_only(self):
         assert ConfigCommand.early_answer_toast("pm:ro") == "Approval mode: read-only"
@@ -2668,8 +2671,8 @@ class TestResumeLine:
         msg = _last_edit_msg(ctx)
         assert "Resume line" in msg.text
         data = _buttons_data(msg)
-        # Toggle row: default on -> shows off toggle and clear
-        assert "config:rl:off" in data
+        # Toggle row: shows on or off toggle (depending on config default) and clear
+        assert "config:rl:on" in data or "config:rl:off" in data
         assert "config:rl:clr" in data
 
     @pytest.mark.anyio

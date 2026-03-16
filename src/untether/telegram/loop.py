@@ -845,6 +845,13 @@ class MediaGroupBuffer:
                     media_group_id=key[1],
                     message_count=len(messages),
                 )
+                try:
+                    reply = make_reply(self._cfg, messages[0])
+                    await reply(
+                        text="Couldn't process that upload group — please try again."
+                    )
+                except Exception:  # noqa: BLE001, S110
+                    pass  # best-effort notification
             return
 
 
