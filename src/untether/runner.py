@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import contextlib
 import json
 import re
 import signal
@@ -55,6 +54,9 @@ class ResumeTokenMixin:
                 found = token
         if not found:
             return None
+        _lock_logger.debug(
+            "session.resume_token.found", engine=str(self.engine), session_id=found[:8]
+        )
         return ResumeToken(engine=self.engine, value=found)
 
 
@@ -789,10 +791,16 @@ class JsonlSubprocessRunner(BaseRunner):
                             pid=pid,
                             reason="zero_tcp_zero_cpu",
                         )
-                        with contextlib.suppress(
-                            ProcessLookupError, PermissionError, OSError
-                        ):
+                        try:
                             _os.killpg(pid, signal.SIGKILL)
+                        except (ProcessLookupError, PermissionError, OSError) as e:
+                            logger.debug(
+                                "subprocess.watchdog.suppressed",
+                                pid=pid,
+                                error=str(e),
+                                error_type=e.__class__.__name__,
+                                context="liveness_kill",
+                            )
                     prev_diag = diag
 
             await anyio.sleep(self._WATCHDOG_POLL_SECONDS)
@@ -814,8 +822,14 @@ class JsonlSubprocessRunner(BaseRunner):
         try:
             _os.killpg(pid, signal.SIGKILL)
             logger.warning("subprocess.killed_orphan_group", pid=pid)
-        except (ProcessLookupError, PermissionError):
-            pass
+        except (ProcessLookupError, PermissionError) as e:
+            logger.debug(
+                "subprocess.watchdog.suppressed",
+                pid=pid,
+                error=str(e),
+                error_type=e.__class__.__name__,
+                context="orphan_killpg",
+            )
         except OSError:
             logger.debug("subprocess.killpg_failed", pid=pid, exc_info=True)
 
@@ -850,8 +864,20 @@ class JsonlSubprocessRunner(BaseRunner):
             cwd=cwd,
         ) as proc:
             if proc.stdout is None or proc.stderr is None:
+                logger.error(
+                    "subprocess.create.failed",
+                    engine=self.engine,
+                    reason="missing stdout/stderr pipes",
+                    pid=proc.pid,
+                )
                 raise RuntimeError(self.pipes_error_message())
             if payload is not None and proc.stdin is None:
+                logger.error(
+                    "subprocess.create.failed",
+                    engine=self.engine,
+                    reason="missing stdin pipe for payload",
+                    pid=proc.pid,
+                )
                 raise RuntimeError(self.pipes_error_message())
 
             self.last_pid = proc.pid

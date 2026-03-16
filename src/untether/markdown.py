@@ -278,21 +278,34 @@ def render_event_cli(event: UntetherEvent) -> list[str]:
             return []
 
 
-_CLAUDE_MODEL_RE = re.compile(r"(opus|sonnet|haiku)[- ](\d+)[.-](\d+)", re.IGNORECASE)
+_CLAUDE_MODEL_RE = re.compile(
+    r"(opus|sonnet|haiku)[- ](\d+)[.-](\d+)[^\[]*(?:\[([^\]]+)\])?",
+    re.IGNORECASE,
+)
+
+_CONTEXT_SUFFIX_MAP: dict[str, str] = {"1m": "1M"}
 
 
 def _short_model_name(model: str) -> str:
     """Shorten a Claude model ID to its family name with version.
 
     ``'claude-opus-4-6'`` → ``'opus 4.6'``
+    ``'claude-opus-4-6[1m]'`` → ``'opus 4.6 (1M)'``
     ``'claude-sonnet-4-5-20250929'`` → ``'sonnet 4.5'``
     """
     m = _CLAUDE_MODEL_RE.search(model)
     if m:
-        return f"{m.group(1).lower()} {m.group(2)}.{m.group(3)}"
+        base = f"{m.group(1).lower()} {m.group(2)}.{m.group(3)}"
+        suffix = m.group(4)
+        if suffix:
+            label = _CONTEXT_SUFFIX_MAP.get(suffix.lower(), suffix.upper())
+            return f"{base} ({label})"
+        return base
     for family in ("opus", "sonnet", "haiku"):
         if family in model.lower():
             return family
+    if model.lower().startswith("auto-"):
+        model = model[5:]
     return model.split("-202")[0] if "-202" in model else model
 
 

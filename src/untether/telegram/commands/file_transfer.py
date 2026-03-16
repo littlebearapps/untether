@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING
 
 from ...config import ConfigError
 from ...context import RunContext
+from ...logging import get_logger
 from ...directives import DirectiveError
 from ...transport_runtime import ResolvedMessage
 from ..context import _format_context
@@ -31,6 +32,8 @@ from .reply import make_reply
 
 if TYPE_CHECKING:
     from ..bridge import TelegramBridgeConfig
+
+logger = get_logger(__name__)
 
 FILE_PUT_USAGE = "usage: `/file put <path>`"
 FILE_GET_USAGE = "usage: `/file get <path>`"
@@ -105,6 +108,12 @@ async def _check_file_permissions(
         return False
     if cfg.files.allowed_user_ids:
         if sender_id not in cfg.files.allowed_user_ids:
+            logger.warning(
+                "file_transfer.denied",
+                reason="user_not_allowed",
+                user_id=sender_id,
+                chat_id=msg.chat_id,
+            )
             await reply(text="file transfer is not allowed for this user.")
             return False
         return True
@@ -112,10 +121,23 @@ async def _check_file_permissions(
         return True
     member = await cfg.bot.get_chat_member(msg.chat_id, sender_id)
     if member is None:
+        logger.warning(
+            "file_transfer.denied",
+            reason="member_fetch_failed",
+            user_id=sender_id,
+            chat_id=msg.chat_id,
+        )
         await reply(text="failed to verify file transfer permissions.")
         return False
     if member.status in {"creator", "administrator"}:
         return True
+    logger.warning(
+        "file_transfer.denied",
+        reason="not_admin",
+        user_id=sender_id,
+        chat_id=msg.chat_id,
+        member_status=member.status,
+    )
     await reply(text="file transfer is restricted to group admins.")
     return False
 

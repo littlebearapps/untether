@@ -176,16 +176,24 @@ class TelegramTransport:
         notify: bool,
     ) -> None:
         for followup in followups:
-            await self._bot.send_message(
-                chat_id=chat_id,
-                text=followup.text,
-                entities=followup.extra.get("entities"),
-                parse_mode=followup.extra.get("parse_mode"),
-                reply_markup=followup.extra.get("reply_markup"),
-                reply_to_message_id=reply_to_message_id,
-                message_thread_id=message_thread_id,
-                disable_notification=not notify,
-            )
+            try:
+                await self._bot.send_message(
+                    chat_id=chat_id,
+                    text=followup.text,
+                    entities=followup.extra.get("entities"),
+                    parse_mode=followup.extra.get("parse_mode"),
+                    reply_markup=followup.extra.get("reply_markup"),
+                    reply_to_message_id=reply_to_message_id,
+                    message_thread_id=message_thread_id,
+                    disable_notification=not notify,
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "transport.followup.failed",
+                    chat_id=chat_id,
+                    error=str(exc),
+                    error_type=exc.__class__.__name__,
+                )
 
     async def close(self) -> None:
         await self._bot.close()
@@ -242,6 +250,10 @@ class TelegramTransport:
             disable_notification=not notify,
         )
         if sent is None:
+            logger.warning(
+                "transport.send.failed",
+                chat_id=chat_id,
+            )
             return None
         if followups:
             await self._send_followups(
@@ -291,6 +303,9 @@ class TelegramTransport:
                     has_reply_markup=reply_markup is not None,
                 )
                 return None
+            logger.debug(
+                "transport.edit.queued", chat_id=chat_id, message_id=message_id
+            )
             return ref
         if followups:
             reply_to_message_id = cast(
@@ -321,10 +336,20 @@ class TelegramTransport:
         )
 
     async def delete(self, *, ref: MessageRef) -> bool:
-        return await self._bot.delete_message(
-            chat_id=cast(int, ref.channel_id),
-            message_id=cast(int, ref.message_id),
-        )
+        try:
+            return await self._bot.delete_message(
+                chat_id=cast(int, ref.channel_id),
+                message_id=cast(int, ref.message_id),
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "transport.delete.failed",
+                chat_id=ref.channel_id,
+                message_id=ref.message_id,
+                error=str(exc),
+                error_type=exc.__class__.__name__,
+            )
+            return False
 
 
 async def send_plain(

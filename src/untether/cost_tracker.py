@@ -26,6 +26,8 @@ class CostAlert:
     level: str  # "info", "warning", "critical", "exceeded"
     message: str
     should_cancel: bool = False
+    ratio: float = 0.0  # percentage of budget used (e.g. 34.0)
+    scope: str = ""  # "per_run" or "per_day"
 
 
 def _today() -> str:
@@ -77,6 +79,8 @@ def check_run_budget(
                     f"per-run budget ${budget.max_cost_per_run:.2f}"
                 ),
                 should_cancel=budget.auto_cancel,
+                ratio=run_cost / budget.max_cost_per_run * 100,
+                scope="per_run",
             )
         ratio = run_cost / budget.max_cost_per_run * 100
         if ratio >= budget.warn_at_pct:
@@ -93,6 +97,8 @@ def check_run_budget(
                     f"⚠️ Run cost ${run_cost:.2f} is {ratio:.0f}% of "
                     f"per-run budget ${budget.max_cost_per_run:.2f}"
                 ),
+                ratio=ratio,
+                scope="per_run",
             )
 
     if budget.max_cost_per_day is not None:
@@ -112,6 +118,8 @@ def check_run_budget(
                     f"budget ${budget.max_cost_per_day:.2f}"
                 ),
                 should_cancel=budget.auto_cancel,
+                ratio=daily / budget.max_cost_per_day * 100,
+                scope="per_day",
             )
         ratio = daily / budget.max_cost_per_day * 100
         if ratio >= budget.warn_at_pct:
@@ -128,6 +136,8 @@ def check_run_budget(
                     f"⚠️ Daily cost ${daily:.2f} is {ratio:.0f}% of "
                     f"budget ${budget.max_cost_per_day:.2f}"
                 ),
+                ratio=ratio,
+                scope="per_day",
             )
 
     return None

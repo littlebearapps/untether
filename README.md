@@ -113,6 +113,7 @@ That's it. Your agent runs on your machine, streams progress to Telegram, and yo
 | **Session resume** | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | **Model override** | ✅ | ✅ | ✅ | ✅ | ✅ | ✅¹ |
 | **Model in footer** | ✅ | — | — | — | ✅ | — |
+| **Approval mode in footer** | ✅ | ~⁴ | — | — | ~² | — |
 | **Voice input** | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | **Verbose progress** | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | **Error hints** | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |

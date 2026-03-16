@@ -30,6 +30,8 @@ def _parse_callback_data(data: str) -> tuple[str, str]:
     """
     parts = data.split(":", 1)
     command_id = parts[0].lower()
+    if not command_id:
+        logger.warning("callback.parse_failed", data=data[:64])
     args_text = parts[1] if len(parts) > 1 else ""
     return command_id, args_text
 
@@ -88,6 +90,11 @@ async def _dispatch_command(
         await executor.send(f"error:\n{exc}", reply_to=message_ref, notify=True)
         return
     if backend is None:
+        logger.warning(
+            "command.unknown_command",
+            command=command_id,
+            chat_id=chat_id,
+        )
         return
     try:
         plugin_config = cfg.runtime.plugin_config(command_id)
@@ -183,6 +190,11 @@ async def _dispatch_callback(
             await _answer_callback(str(exc)[:200])
             return
         if backend is None:
+            logger.warning(
+                "callback.unknown_command",
+                command=command_id,
+                chat_id=chat_id,
+            )
             return
         try:
             plugin_config = cfg.runtime.plugin_config(command_id)

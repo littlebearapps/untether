@@ -15,6 +15,9 @@ class EngineRunOptions:
     diff_preview: bool | None = None
     show_api_cost: bool | None = None
     show_subscription_usage: bool | None = None
+    show_resume_line: bool | None = None
+    budget_enabled: bool | None = None
+    budget_auto_cancel: bool | None = None
 
 
 _RUN_OPTIONS: ContextVar[EngineRunOptions | None] = ContextVar(

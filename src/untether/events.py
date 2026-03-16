@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from .logging import get_logger
 from .model import (
     Action,
     ActionEvent,
@@ -15,6 +16,8 @@ from .model import (
     ResumeToken,
     StartedEvent,
 )
+
+logger = get_logger(__name__)
 
 
 class EventFactory:
@@ -36,8 +39,18 @@ class EventFactory:
         meta: dict[str, Any] | None = None,
     ) -> StartedEvent:
         if token.engine != self.engine:
+            logger.debug(
+                "event.factory.resume_mismatch",
+                expected_engine=str(self.engine),
+                token_engine=str(token.engine),
+            )
             raise RuntimeError(f"resume token is for engine {token.engine!r}")
         if self._resume is not None and self._resume != token:
+            logger.debug(
+                "event.factory.resume_mismatch",
+                existing=self._resume.value[:8],
+                incoming=token.value[:8],
+            )
             raise RuntimeError(
                 f"resume token mismatch: {self._resume.value} vs {token.value}"
             )

@@ -40,6 +40,29 @@ def _check(label: str, *, active: bool) -> str:
     return f"✓ {label}" if active else label
 
 
+def _toggle_row(
+    label: str,
+    *,
+    current: bool | None,
+    default: bool,
+    on_data: str,
+    off_data: str,
+    clr_data: str,
+) -> list[dict[str, str]]:
+    """Build a 2-button toggle row: [Label: state checkmark] [Clear]."""
+    effective = current if current is not None else default
+    if effective:
+        toggle_text = f"✓ {label}: on"
+        toggle_data = off_data  # clicking toggles OFF
+    else:
+        toggle_text = f"{label}: off"
+        toggle_data = on_data  # clicking toggles ON
+    return [
+        {"text": toggle_text, "callback_data": toggle_data},
+        {"text": "Clear", "callback_data": clr_data},
+    ]
+
+
 async def _resolve_effective_engine(
     ctx: CommandContext,
 ) -> tuple[str, str]:
@@ -162,6 +185,7 @@ async def _page_home(ctx: CommandContext) -> None:
     aq_label = "default"
     dp_label = "default"
     cu_label = "default"
+    engine_override = None
 
     if config_path is not None:
         prefs = ChatPrefsStore(resolve_prefs_path(config_path))
@@ -269,11 +293,17 @@ async def _page_home(ctx: CommandContext) -> None:
             )
         lines.append("")
 
+    # --- Resume line ---
+    rl_label = "default"
+    if engine_override and engine_override.show_resume_line is not None:
+        rl_label = "on" if engine_override.show_resume_line else "off"
+
     # --- Display ---
     lines.append("<b>Display</b>")
     if show_cost_usage:
         lines.append(f"Cost & usage: <b>{cu_label}</b>")
     lines.append(f"Verbose: <b>{vb_display}</b>{_home_hint('vb', verbose_label)}")
+    lines.append(f"Resume line: <b>{rl_label}</b>")
     lines.append("")
 
     # --- Routing ---
@@ -308,27 +338,30 @@ async def _page_home(ctx: CommandContext) -> None:
                 {"text": "❓ Ask mode", "callback_data": "config:aq"},
             ]
         )
-        row2 = []
-        if show_diff_preview:
-            row2.append({"text": "📝 Diff preview", "callback_data": "config:dp"})
-        row2.append({"text": "🔍 Verbose", "callback_data": "config:vb"})
-        buttons.append(row2)
-        row3 = []
-        if show_cost_usage:
-            row3.append({"text": "💰 Cost & usage", "callback_data": "config:cu"})
-        row3.append({"text": "📡 Trigger", "callback_data": "config:tr"})
-        buttons.append(row3)
         buttons.append(
             [
-                {"text": "🤖 Model", "callback_data": "config:md"},
-                {"text": "⚙️ Engine", "callback_data": "config:ag"},
+                {"text": "📝 Diff preview", "callback_data": "config:dp"},
+                {"text": "🔍 Verbose", "callback_data": "config:vb"},
             ]
         )
-        row5 = []
-        if show_reasoning:
-            row5.append({"text": "🧠 Reasoning", "callback_data": "config:rs"})
-        row5.append({"text": "ℹ️ About", "callback_data": "config:ab"})
-        buttons.append(row5)
+        buttons.append(
+            [
+                {"text": "💰 Cost & usage", "callback_data": "config:cu"},
+                {"text": "↩️ Resume line", "callback_data": "config:rl"},
+            ]
+        )
+        buttons.append(
+            [
+                {"text": "📡 Trigger", "callback_data": "config:tr"},
+                {"text": "⚙️ Engine & model", "callback_data": "config:ag"},
+            ]
+        )
+        buttons.append(
+            [
+                {"text": "🧠 Reasoning", "callback_data": "config:rs"},
+                {"text": "ℹ️ About", "callback_data": "config:ab"},
+            ]
+        )
     elif current_engine == "codex":
         # Codex layout
         row1 = [{"text": "📋 Approval policy", "callback_data": "config:pm"}]
@@ -338,58 +371,60 @@ async def _page_home(ctx: CommandContext) -> None:
         buttons.append(
             [
                 {"text": "🔍 Verbose", "callback_data": "config:vb"},
-                {"text": "🤖 Model", "callback_data": "config:md"},
+                {"text": "↩️ Resume line", "callback_data": "config:rl"},
             ]
         )
         buttons.append(
             [
-                {"text": "⚙️ Engine", "callback_data": "config:ag"},
                 {"text": "📡 Trigger", "callback_data": "config:tr"},
+                {"text": "⚙️ Engine & model", "callback_data": "config:ag"},
             ]
         )
-        row_last = [{"text": "🧠 Reasoning", "callback_data": "config:rs"}]
-        row_last.append({"text": "ℹ️ About", "callback_data": "config:ab"})
-        buttons.append(row_last)
+        buttons.append(
+            [
+                {"text": "🧠 Reasoning", "callback_data": "config:rs"},
+                {"text": "ℹ️ About", "callback_data": "config:ab"},
+            ]
+        )
     elif current_engine == "gemini":
         # Gemini layout
-        row1 = [{"text": "📋 Approval mode", "callback_data": "config:pm"}]
-        if show_cost_usage:
-            row1.append({"text": "💰 Cost & usage", "callback_data": "config:cu"})
-        buttons.append(row1)
+        buttons.append(
+            [
+                {"text": "📋 Approval mode", "callback_data": "config:pm"},
+                {"text": "💰 Cost & usage", "callback_data": "config:cu"},
+            ]
+        )
         buttons.append(
             [
                 {"text": "🔍 Verbose", "callback_data": "config:vb"},
-                {"text": "🤖 Model", "callback_data": "config:md"},
+                {"text": "↩️ Resume line", "callback_data": "config:rl"},
             ]
         )
         buttons.append(
             [
-                {"text": "⚙️ Engine", "callback_data": "config:ag"},
                 {"text": "📡 Trigger", "callback_data": "config:tr"},
+                {"text": "⚙️ Engine & model", "callback_data": "config:ag"},
             ]
         )
         buttons.append([{"text": "ℹ️ About", "callback_data": "config:ab"}])
     else:
         # Other engines
+        row1 = []
         if show_cost_usage:
-            buttons.append([{"text": "💰 Cost & usage", "callback_data": "config:cu"}])
+            row1.append({"text": "💰 Cost & usage", "callback_data": "config:cu"})
+        row1.append({"text": "↩️ Resume line", "callback_data": "config:rl"})
+        buttons.append(row1)
         buttons.append(
             [
                 {"text": "🔍 Verbose", "callback_data": "config:vb"},
-                {"text": "🤖 Model", "callback_data": "config:md"},
+                {"text": "⚙️ Engine & model", "callback_data": "config:ag"},
             ]
         )
-        buttons.append(
-            [
-                {"text": "⚙️ Engine", "callback_data": "config:ag"},
-                {"text": "📡 Trigger", "callback_data": "config:tr"},
-            ]
-        )
-        row_last = []
+        row3 = [{"text": "📡 Trigger", "callback_data": "config:tr"}]
         if show_reasoning:
-            row_last.append({"text": "🧠 Reasoning", "callback_data": "config:rs"})
-        row_last.append({"text": "ℹ️ About", "callback_data": "config:ab"})
-        buttons.append(row_last)
+            row3.append({"text": "🧠 Reasoning", "callback_data": "config:rs"})
+        buttons.append(row3)
+        buttons.append([{"text": "ℹ️ About", "callback_data": "config:ab"}])
 
     await _respond(ctx, "\n".join(lines), buttons)
 
@@ -452,6 +487,9 @@ async def _page_planmode(ctx: CommandContext, action: str | None = None) -> None
             show_subscription_usage=current.show_subscription_usage
             if current
             else None,
+            show_resume_line=current.show_resume_line if current else None,
+            budget_enabled=current.budget_enabled if current else None,
+            budget_auto_cancel=current.budget_auto_cancel if current else None,
         )
         await prefs.set_engine_override(chat_id, engine, updated)
         logger.info("config.approval_policy.set", chat_id=chat_id, mode=action)
@@ -471,6 +509,9 @@ async def _page_planmode(ctx: CommandContext, action: str | None = None) -> None
             show_subscription_usage=current.show_subscription_usage
             if current
             else None,
+            show_resume_line=current.show_resume_line if current else None,
+            budget_enabled=current.budget_enabled if current else None,
+            budget_auto_cancel=current.budget_auto_cancel if current else None,
         )
         await prefs.set_engine_override(chat_id, engine, updated)
         logger.info("config.planmode.set", chat_id=chat_id, mode=action)
@@ -490,6 +531,9 @@ async def _page_planmode(ctx: CommandContext, action: str | None = None) -> None
             show_subscription_usage=current.show_subscription_usage
             if current
             else None,
+            show_resume_line=current.show_resume_line if current else None,
+            budget_enabled=current.budget_enabled if current else None,
+            budget_auto_cancel=current.budget_auto_cancel if current else None,
         )
         await prefs.set_engine_override(chat_id, engine, updated)
         logger.info("config.approval_mode.set", chat_id=chat_id, mode=action)
@@ -508,6 +552,9 @@ async def _page_planmode(ctx: CommandContext, action: str | None = None) -> None
             show_subscription_usage=current.show_subscription_usage
             if current
             else None,
+            show_resume_line=current.show_resume_line if current else None,
+            budget_enabled=current.budget_enabled if current else None,
+            budget_auto_cancel=current.budget_auto_cancel if current else None,
         )
         await prefs.set_engine_override(chat_id, engine, updated)
         logger.info("config.approval_mode.set", chat_id=chat_id, mode="ro")
@@ -527,6 +574,9 @@ async def _page_planmode(ctx: CommandContext, action: str | None = None) -> None
             show_subscription_usage=current.show_subscription_usage
             if current
             else None,
+            show_resume_line=current.show_resume_line if current else None,
+            budget_enabled=current.budget_enabled if current else None,
+            budget_auto_cancel=current.budget_auto_cancel if current else None,
         )
         await prefs.set_engine_override(chat_id, engine, updated)
         logger.info("config.permission_mode.cleared", chat_id=chat_id, engine=engine)
@@ -573,15 +623,15 @@ async def _page_planmode(ctx: CommandContext, action: str | None = None) -> None
                     "text": _check("On", active=current_label == "on"),
                     "callback_data": "config:pm:on",
                 },
+            ],
+            [
                 {
                     "text": _check("Auto", active=current_label == "auto"),
                     "callback_data": "config:pm:auto",
                 },
-            ],
-            [
                 {"text": "Clear override", "callback_data": "config:pm:clr"},
-                {"text": "← Back", "callback_data": "config:home"},
             ],
+            [{"text": "← Back", "callback_data": "config:home"}],
         ]
 
     elif engine == "codex":
@@ -650,15 +700,15 @@ async def _page_planmode(ctx: CommandContext, action: str | None = None) -> None
                     "text": _check("Edit files", active=pm == "auto_edit"),
                     "callback_data": "config:pm:ae",
                 },
+            ],
+            [
                 {
                     "text": _check("Full access", active=pm == "yolo"),
                     "callback_data": "config:pm:fa",
                 },
-            ],
-            [
                 {"text": "Clear override", "callback_data": "config:pm:clr"},
-                {"text": "← Back", "callback_data": "config:home"},
             ],
+            [{"text": "← Back", "callback_data": "config:home"}],
         ]
 
     await _respond(ctx, "\n".join(lines), buttons)
@@ -711,21 +761,17 @@ async def _page_verbose(ctx: CommandContext, action: str | None = None) -> None:
         f'📖 <a href="{_DOCS_BASE}verbose-progress/">Learn more</a>',
     ]
 
+    is_on = current == "verbose"
     buttons = [
-        [
-            {
-                "text": _check("Off", active=current_label == "off"),
-                "callback_data": "config:vb:off",
-            },
-            {
-                "text": _check("On", active=current_label == "on"),
-                "callback_data": "config:vb:on",
-            },
-        ],
-        [
-            {"text": "Clear override", "callback_data": "config:vb:clr"},
-            {"text": "← Back", "callback_data": "config:home"},
-        ],
+        _toggle_row(
+            "Verbose",
+            current=True if is_on else (False if current == "compact" else None),
+            default=False,
+            on_data="config:vb:on",
+            off_data="config:vb:off",
+            clr_data="config:vb:clr",
+        ),
+        [{"text": "← Back", "callback_data": "config:home"}],
     ]
 
     await _respond(ctx, "\n".join(lines), buttons)
@@ -738,12 +784,13 @@ async def _page_verbose(ctx: CommandContext, action: str | None = None) -> None:
 
 async def _page_engine(ctx: CommandContext, action: str | None = None) -> None:
     from ..chat_prefs import ChatPrefsStore, resolve_prefs_path
+    from ..engine_overrides import EngineOverrides
 
     config_path = ctx.config_path
     if config_path is None:
         await _respond(
             ctx,
-            "<b>⚙️ Engine</b>\n\nUnavailable (no config path).",
+            "<b>⚙️ Engine & model</b>\n\nUnavailable (no config path).",
             [[{"text": "← Back", "callback_data": "config:home"}]],
         )
         return
@@ -751,6 +798,28 @@ async def _page_engine(ctx: CommandContext, action: str | None = None) -> None:
     prefs = ChatPrefsStore(resolve_prefs_path(config_path))
     chat_id = ctx.message.channel_id
     available = list(ctx.runtime.engine_ids)
+
+    if action == "md_clr":
+        # Clear model override (handled here for the merged page)
+        current_engine, _ = await _resolve_effective_engine(ctx)
+        current = await prefs.get_engine_override(chat_id, current_engine)
+        if current and current.model:
+            updated = EngineOverrides(
+                model=None,
+                reasoning=current.reasoning,
+                permission_mode=current.permission_mode,
+                ask_questions=current.ask_questions,
+                diff_preview=current.diff_preview,
+                show_api_cost=current.show_api_cost,
+                show_subscription_usage=current.show_subscription_usage,
+                show_resume_line=current.show_resume_line,
+                budget_enabled=current.budget_enabled,
+                budget_auto_cancel=current.budget_auto_cancel,
+            )
+            await prefs.set_engine_override(chat_id, current_engine, updated)
+            logger.info("config.model.cleared", chat_id=chat_id)
+        await _page_engine(ctx)
+        return
 
     if action == "clr":
         await prefs.clear_default_engine(chat_id)
@@ -764,15 +833,24 @@ async def _page_engine(ctx: CommandContext, action: str | None = None) -> None:
         return
 
     current = await prefs.get_default_engine(chat_id)
-    _, effective_label = await _resolve_effective_engine(ctx)
+    current_engine, effective_label = await _resolve_effective_engine(ctx)
+
+    # Model info
+    engine_override = await prefs.get_engine_override(chat_id, current_engine)
+    model_override = engine_override.model if engine_override else None
+    engine_hint = _ENGINE_MODEL_HINTS.get(current_engine, "from CLI settings")
+    model_label = model_override or f"default ({engine_hint})"
 
     lines = [
-        "<b>⚙️ Engine</b>",
+        "<b>⚙️ Engine & model</b>",
         "",
         "Choose which coding agent runs your tasks in this chat.",
         "The global default is used unless you override it here.",
         "",
-        f"Current: <b>{effective_label}</b>",
+        f"Engine: <b>{effective_label}</b>",
+        f"Model: <b>{model_label}</b>",
+        "",
+        "Use <code>/model set &lt;name&gt;</code> to choose a model.",
         "",
         f'📖 <a href="{_DOCS_BASE}switch-engines/">Learn more</a>',
     ]
@@ -791,10 +869,11 @@ async def _page_engine(ctx: CommandContext, action: str | None = None) -> None:
 
     buttons.append(
         [
-            {"text": "Clear override", "callback_data": "config:ag:clr"},
-            {"text": "← Back", "callback_data": "config:home"},
+            {"text": "Clear engine", "callback_data": "config:ag:clr"},
+            {"text": "Clear model", "callback_data": "config:ag:md_clr"},
         ]
     )
+    buttons.append([{"text": "← Back", "callback_data": "config:home"}])
 
     await _respond(ctx, "\n".join(lines), buttons)
 
@@ -877,69 +956,42 @@ async def _page_trigger(ctx: CommandContext, action: str | None = None) -> None:
 
 
 async def _page_model(ctx: CommandContext, action: str | None = None) -> None:
+    """Legacy model page — redirects to the merged engine & model page.
+
+    Kept for backwards compatibility (deep links to ``config:md``).
+    The ``clr`` action is still handled here, then redirects to engine page.
+    """
     from ..chat_prefs import ChatPrefsStore, resolve_prefs_path
     from ..engine_overrides import EngineOverrides
 
-    config_path = ctx.config_path
-    if config_path is None:
-        await _respond(
-            ctx,
-            "<b>🤖 Model</b>\n\nUnavailable (no config path).",
-            [[{"text": "← Back", "callback_data": "config:home"}]],
-        )
-        return
-
-    prefs = ChatPrefsStore(resolve_prefs_path(config_path))
-    chat_id = ctx.message.channel_id
-
-    # Resolve current engine
-    current_engine, _ = await _resolve_effective_engine(ctx)
-
     if action == "clr":
-        current = await prefs.get_engine_override(chat_id, current_engine)
-        updated = EngineOverrides(
-            model=None,
-            reasoning=current.reasoning if current else None,
-            permission_mode=current.permission_mode if current else None,
-            ask_questions=current.ask_questions if current else None,
-            diff_preview=current.diff_preview if current else None,
-            show_api_cost=current.show_api_cost if current else None,
-            show_subscription_usage=current.show_subscription_usage
-            if current
-            else None,
-        )
-        await prefs.set_engine_override(chat_id, current_engine, updated)
-        logger.info("config.model.cleared", chat_id=chat_id, engine=current_engine)
-        await _page_home(ctx)
+        config_path = ctx.config_path
+        if config_path is not None:
+            prefs = ChatPrefsStore(resolve_prefs_path(config_path))
+            chat_id = ctx.message.channel_id
+            current_engine, _ = await _resolve_effective_engine(ctx)
+            current = await prefs.get_engine_override(chat_id, current_engine)
+            updated = EngineOverrides(
+                model=None,
+                reasoning=current.reasoning if current else None,
+                permission_mode=current.permission_mode if current else None,
+                ask_questions=current.ask_questions if current else None,
+                diff_preview=current.diff_preview if current else None,
+                show_api_cost=current.show_api_cost if current else None,
+                show_subscription_usage=current.show_subscription_usage
+                if current
+                else None,
+                show_resume_line=current.show_resume_line if current else None,
+                budget_enabled=current.budget_enabled if current else None,
+                budget_auto_cancel=current.budget_auto_cancel if current else None,
+            )
+            await prefs.set_engine_override(chat_id, current_engine, updated)
+            logger.info("config.model.cleared", chat_id=chat_id, engine=current_engine)
+        await _page_engine(ctx)
         return
 
-    override = await prefs.get_engine_override(chat_id, current_engine)
-    model = override.model if override else None
-    engine_hint = _ENGINE_MODEL_HINTS.get(current_engine, "from CLI settings")
-    current_label = model or f"default ({engine_hint})"
-
-    lines = [
-        "<b>🤖 Model</b>",
-        "",
-        "Override the AI model used by the current engine.",
-        "Each engine has its own default model.",
-        "",
-        f"Engine: <b>{current_engine}</b>",
-        f"Current: <b>{current_label}</b>",
-        "",
-        "Use <code>/model set &lt;name&gt;</code> to choose a model.",
-        "",
-        f'📖 <a href="{_DOCS_BASE}model-reasoning/">Learn more</a>',
-    ]
-
-    buttons = [
-        [
-            {"text": "Clear override", "callback_data": "config:md:clr"},
-            {"text": "← Back", "callback_data": "config:home"},
-        ],
-    ]
-
-    await _respond(ctx, "\n".join(lines), buttons)
+    # For navigation, redirect to the merged engine & model page
+    await _page_engine(ctx)
 
 
 # ---------------------------------------------------------------------------
@@ -1000,6 +1052,9 @@ async def _page_reasoning(ctx: CommandContext, action: str | None = None) -> Non
             show_subscription_usage=current.show_subscription_usage
             if current
             else None,
+            show_resume_line=current.show_resume_line if current else None,
+            budget_enabled=current.budget_enabled if current else None,
+            budget_auto_cancel=current.budget_auto_cancel if current else None,
         )
         await prefs.set_engine_override(chat_id, current_engine, updated)
         logger.info(
@@ -1022,6 +1077,9 @@ async def _page_reasoning(ctx: CommandContext, action: str | None = None) -> Non
             show_subscription_usage=current.show_subscription_usage
             if current
             else None,
+            show_resume_line=current.show_resume_line if current else None,
+            budget_enabled=current.budget_enabled if current else None,
+            budget_auto_cancel=current.budget_auto_cancel if current else None,
         )
         await prefs.set_engine_override(chat_id, current_engine, updated)
         logger.info("config.reasoning.cleared", chat_id=chat_id, engine=current_engine)
@@ -1135,6 +1193,9 @@ async def _page_ask_questions(ctx: CommandContext, action: str | None = None) ->
             show_subscription_usage=current.show_subscription_usage
             if current
             else None,
+            show_resume_line=current.show_resume_line if current else None,
+            budget_enabled=current.budget_enabled if current else None,
+            budget_auto_cancel=current.budget_auto_cancel if current else None,
         )
         await prefs.set_engine_override(chat_id, engine, updated)
         logger.info("config.ask_questions.set", chat_id=chat_id, value=True)
@@ -1152,6 +1213,9 @@ async def _page_ask_questions(ctx: CommandContext, action: str | None = None) ->
             show_subscription_usage=current.show_subscription_usage
             if current
             else None,
+            show_resume_line=current.show_resume_line if current else None,
+            budget_enabled=current.budget_enabled if current else None,
+            budget_auto_cancel=current.budget_auto_cancel if current else None,
         )
         await prefs.set_engine_override(chat_id, engine, updated)
         logger.info("config.ask_questions.set", chat_id=chat_id, value=False)
@@ -1169,6 +1233,9 @@ async def _page_ask_questions(ctx: CommandContext, action: str | None = None) ->
             show_subscription_usage=current.show_subscription_usage
             if current
             else None,
+            show_resume_line=current.show_resume_line if current else None,
+            budget_enabled=current.budget_enabled if current else None,
+            budget_auto_cancel=current.budget_auto_cancel if current else None,
         )
         await prefs.set_engine_override(chat_id, engine, updated)
         logger.info("config.ask_questions.cleared", chat_id=chat_id)
@@ -1199,20 +1266,15 @@ async def _page_ask_questions(ctx: CommandContext, action: str | None = None) ->
     ]
 
     buttons = [
-        [
-            {
-                "text": _check("Off", active=aq is False),
-                "callback_data": "config:aq:off",
-            },
-            {
-                "text": _check("On", active=aq is True),
-                "callback_data": "config:aq:on",
-            },
-        ],
-        [
-            {"text": "Clear override", "callback_data": "config:aq:clr"},
-            {"text": "← Back", "callback_data": "config:home"},
-        ],
+        _toggle_row(
+            "Ask",
+            current=aq,
+            default=False,
+            on_data="config:aq:on",
+            off_data="config:aq:off",
+            clr_data="config:aq:clr",
+        ),
+        [{"text": "← Back", "callback_data": "config:home"}],
     ]
 
     await _respond(ctx, "\n".join(lines), buttons)
@@ -1258,6 +1320,9 @@ async def _page_diff_preview(ctx: CommandContext, action: str | None = None) -> 
             show_subscription_usage=current.show_subscription_usage
             if current
             else None,
+            show_resume_line=current.show_resume_line if current else None,
+            budget_enabled=current.budget_enabled if current else None,
+            budget_auto_cancel=current.budget_auto_cancel if current else None,
         )
         await prefs.set_engine_override(chat_id, engine, updated)
         logger.info("config.diff_preview.set", chat_id=chat_id, value=True)
@@ -1275,6 +1340,9 @@ async def _page_diff_preview(ctx: CommandContext, action: str | None = None) -> 
             show_subscription_usage=current.show_subscription_usage
             if current
             else None,
+            show_resume_line=current.show_resume_line if current else None,
+            budget_enabled=current.budget_enabled if current else None,
+            budget_auto_cancel=current.budget_auto_cancel if current else None,
         )
         await prefs.set_engine_override(chat_id, engine, updated)
         logger.info("config.diff_preview.set", chat_id=chat_id, value=False)
@@ -1292,6 +1360,9 @@ async def _page_diff_preview(ctx: CommandContext, action: str | None = None) -> 
             show_subscription_usage=current.show_subscription_usage
             if current
             else None,
+            show_resume_line=current.show_resume_line if current else None,
+            budget_enabled=current.budget_enabled if current else None,
+            budget_auto_cancel=current.budget_auto_cancel if current else None,
         )
         await prefs.set_engine_override(chat_id, engine, updated)
         logger.info("config.diff_preview.cleared", chat_id=chat_id)
@@ -1322,20 +1393,15 @@ async def _page_diff_preview(ctx: CommandContext, action: str | None = None) -> 
     ]
 
     buttons = [
-        [
-            {
-                "text": _check("Off", active=dp is False),
-                "callback_data": "config:dp:off",
-            },
-            {
-                "text": _check("On", active=dp is True),
-                "callback_data": "config:dp:on",
-            },
-        ],
-        [
-            {"text": "Clear override", "callback_data": "config:dp:clr"},
-            {"text": "← Back", "callback_data": "config:home"},
-        ],
+        _toggle_row(
+            "Diff",
+            current=dp,
+            default=False,
+            on_data="config:dp:on",
+            off_data="config:dp:off",
+            clr_data="config:dp:clr",
+        ),
+        [{"text": "← Back", "callback_data": "config:home"}],
     ]
 
     await _respond(ctx, "\n".join(lines), buttons)
@@ -1384,12 +1450,14 @@ async def _page_cost_usage(ctx: CommandContext, action: str | None = None) -> No
         )
         return
 
-    # --- Actions: ac_on/ac_off/ac_clr, su_on/su_off/su_clr ---
+    # --- Actions: ac_on/ac_off/ac_clr, su_on/su_off/su_clr, bg_on/bg_off/bg_clr, bc_on/bc_off/bc_clr ---
     if action and "_" in action:
         prefix, act = action.split("_", 1)
         current = await prefs.get_engine_override(chat_id, current_engine)
         ac_val = current.show_api_cost if current else None
         su_val = current.show_subscription_usage if current else None
+        bg_val = current.budget_enabled if current else None
+        bc_val = current.budget_auto_cancel if current else None
 
         if prefix == "ac" and has_api_cost:
             ac_val = {"on": True, "off": False, "clr": None}[act]
@@ -1397,6 +1465,12 @@ async def _page_cost_usage(ctx: CommandContext, action: str | None = None) -> No
         elif prefix == "su" and has_sub_usage:
             su_val = {"on": True, "off": False, "clr": None}[act]
             logger.info("config.subscription_usage.set", chat_id=chat_id, value=su_val)
+        elif prefix == "bg":
+            bg_val = {"on": True, "off": False, "clr": None}[act]
+            logger.info("config.budget_enabled.set", chat_id=chat_id, value=bg_val)
+        elif prefix == "bc":
+            bc_val = {"on": True, "off": False, "clr": None}[act]
+            logger.info("config.budget_auto_cancel.set", chat_id=chat_id, value=bc_val)
 
         updated = EngineOverrides(
             model=current.model if current else None,
@@ -1406,6 +1480,9 @@ async def _page_cost_usage(ctx: CommandContext, action: str | None = None) -> No
             diff_preview=current.diff_preview if current else None,
             show_api_cost=ac_val,
             show_subscription_usage=su_val,
+            show_resume_line=current.show_resume_line if current else None,
+            budget_enabled=bg_val,
+            budget_auto_cancel=bc_val,
         )
         await prefs.set_engine_override(chat_id, current_engine, updated)
         await _page_cost_usage(ctx)
@@ -1433,47 +1510,181 @@ async def _page_cost_usage(ctx: CommandContext, action: str | None = None) -> No
         lines.append("  Show how much of your 5h/weekly quota is used.")
         lines.append("")
 
+    # Budget section
+    budget_cfg = None
+    try:
+        from ...settings import load_settings_if_exists
+
+        result = load_settings_if_exists()
+        budget_cfg = result[0].cost_budget if result else None
+    except (OSError, ValueError, KeyError):
+        pass
+
+    bg = override.budget_enabled if override else None
+    bc = override.budget_auto_cancel if override else None
+
+    lines.append("<b>Budget</b>")
+    if budget_cfg is not None:
+        global_enabled = budget_cfg.enabled
+        bg_label = (
+            "on"
+            if bg is True
+            else (
+                "off"
+                if bg is False
+                else f"default ({'on' if global_enabled else 'off'})"
+            )
+        )
+        lines.append(f"  Enabled: {bg_label}")
+        if budget_cfg.max_cost_per_run is not None:
+            lines.append(f"  Per-run limit: ${budget_cfg.max_cost_per_run:.2f}")
+        if budget_cfg.max_cost_per_day is not None:
+            lines.append(f"  Daily limit: ${budget_cfg.max_cost_per_day:.2f}")
+        global_ac = budget_cfg.auto_cancel
+        bc_label = (
+            "on"
+            if bc is True
+            else ("off" if bc is False else f"default ({'on' if global_ac else 'off'})")
+        )
+        lines.append(f"  Auto-cancel: {bc_label}")
+    else:
+        bg_label = "on" if bg is True else ("off" if bg is False else "default (off)")
+        bc_label = "on" if bc is True else ("off" if bc is False else "default (off)")
+        lines.append(f"  Enabled: {bg_label}")
+        lines.append(f"  Auto-cancel: {bc_label}")
+    lines.append("  Set limits in untether.toml [cost_budget] section.")
+    lines.append("")
+
     lines.append(f'📖 <a href="{_DOCS_BASE}cost-budgets/">Learn more</a>')
+
+    # Determine budget defaults from global config
+    budget_default_enabled = budget_cfg.enabled if budget_cfg is not None else False
+    budget_default_ac = budget_cfg.auto_cancel if budget_cfg is not None else False
 
     buttons: list[list[dict[str, str]]] = []
 
     if has_api_cost:
         buttons.append(
-            [
-                {
-                    "text": _check("Cost off", active=ac is False),
-                    "callback_data": "config:cu:ac_off",
-                },
-                {
-                    "text": _check("Cost on", active=ac is True),
-                    "callback_data": "config:cu:ac_on",
-                },
-                {
-                    "text": "Clear",
-                    "callback_data": "config:cu:ac_clr",
-                },
-            ]
+            _toggle_row(
+                "Cost",
+                current=ac,
+                default=True,
+                on_data="config:cu:ac_on",
+                off_data="config:cu:ac_off",
+                clr_data="config:cu:ac_clr",
+            )
         )
 
     if has_sub_usage:
         buttons.append(
-            [
-                {
-                    "text": _check("Sub off", active=su is False),
-                    "callback_data": "config:cu:su_off",
-                },
-                {
-                    "text": _check("Sub on", active=su is True),
-                    "callback_data": "config:cu:su_on",
-                },
-                {
-                    "text": "Clear",
-                    "callback_data": "config:cu:su_clr",
-                },
-            ]
+            _toggle_row(
+                "Sub",
+                current=su,
+                default=False,
+                on_data="config:cu:su_on",
+                off_data="config:cu:su_off",
+                clr_data="config:cu:su_clr",
+            )
         )
 
+    buttons.append(
+        _toggle_row(
+            "Budget",
+            current=bg,
+            default=budget_default_enabled,
+            on_data="config:cu:bg_on",
+            off_data="config:cu:bg_off",
+            clr_data="config:cu:bg_clr",
+        )
+    )
+    buttons.append(
+        _toggle_row(
+            "Auto-cancel",
+            current=bc,
+            default=budget_default_ac,
+            on_data="config:cu:bc_on",
+            off_data="config:cu:bc_off",
+            clr_data="config:cu:bc_clr",
+        )
+    )
+
     buttons.append([{"text": "← Back", "callback_data": "config:home"}])
+
+    await _respond(ctx, "\n".join(lines), buttons)
+
+
+# ---------------------------------------------------------------------------
+# Resume line
+# ---------------------------------------------------------------------------
+
+
+async def _page_resume_line(ctx: CommandContext, action: str | None = None) -> None:
+    from ..chat_prefs import ChatPrefsStore, resolve_prefs_path
+    from ..engine_overrides import EngineOverrides
+
+    config_path = ctx.config_path
+    if config_path is None:
+        await _respond(
+            ctx,
+            "<b>↩️ Resume line</b>\n\nUnavailable (no config path).",
+            [[{"text": "← Back", "callback_data": "config:home"}]],
+        )
+        return
+
+    prefs = ChatPrefsStore(resolve_prefs_path(config_path))
+    chat_id = ctx.message.channel_id
+    current_engine, _ = await _resolve_effective_engine(ctx)
+
+    if action in ("on", "off", "clr"):
+        current = await prefs.get_engine_override(chat_id, current_engine)
+        new_val = {"on": True, "off": False, "clr": None}[action]
+        updated = EngineOverrides(
+            model=current.model if current else None,
+            reasoning=current.reasoning if current else None,
+            permission_mode=current.permission_mode if current else None,
+            ask_questions=current.ask_questions if current else None,
+            diff_preview=current.diff_preview if current else None,
+            show_api_cost=current.show_api_cost if current else None,
+            show_subscription_usage=current.show_subscription_usage
+            if current
+            else None,
+            show_resume_line=new_val,
+            budget_enabled=current.budget_enabled if current else None,
+            budget_auto_cancel=current.budget_auto_cancel if current else None,
+        )
+        await prefs.set_engine_override(chat_id, current_engine, updated)
+        logger.info("config.resume_line.set", chat_id=chat_id, value=new_val)
+        await _page_home(ctx)
+        return
+
+    # Display
+    override = await prefs.get_engine_override(chat_id, current_engine)
+    rl = override.show_resume_line if override else None
+    rl_label = "on" if rl is True else ("off" if rl is False else "default (on)")
+
+    lines = [
+        "<b>↩️ Resume line</b>",
+        "",
+        f"Current: <b>{rl_label}</b>",
+        "",
+        "Shows the engine's resume command in message footers.",
+        "Reply to continue in Telegram, or copy-paste into your",
+        "terminal to pick up the session in CLI.",
+        "",
+        f'📖 <a href="{_DOCS_BASE}conversation-modes/">Learn more</a>',
+    ]
+
+    buttons = [
+        _toggle_row(
+            "Resume",
+            current=rl,
+            default=True,
+            on_data="config:rl:on",
+            off_data="config:rl:off",
+            clr_data="config:rl:clr",
+        ),
+        [{"text": "← Back", "callback_data": "config:home"}],
+    ]
 
     await _respond(ctx, "\n".join(lines), buttons)
 
@@ -1524,6 +1735,7 @@ _PAGES: dict[str, object] = {
     "aq": _page_ask_questions,
     "dp": _page_diff_preview,
     "cu": _page_cost_usage,
+    "rl": _page_resume_line,
     "ab": _page_about,
 }
 
@@ -1561,7 +1773,7 @@ class ConfigCommand:
                 "off": "Verbose: off",
                 "clr": "Verbose: cleared",
             },
-            "ag": {"clr": "Engine: cleared"},
+            "ag": {"clr": "Engine: cleared", "md_clr": "Model: cleared"},
             "tr": {
                 "all": "Trigger: all",
                 "men": "Trigger: mentions",
@@ -1593,6 +1805,17 @@ class ConfigCommand:
                 "su_on": "Sub usage: on",
                 "su_off": "Sub usage: off",
                 "su_clr": "Sub usage: cleared",
+                "bg_on": "Budget: on",
+                "bg_off": "Budget: off",
+                "bg_clr": "Budget: cleared",
+                "bc_on": "Auto-cancel: on",
+                "bc_off": "Auto-cancel: off",
+                "bc_clr": "Auto-cancel: cleared",
+            },
+            "rl": {
+                "on": "Resume line: on",
+                "off": "Resume line: off",
+                "clr": "Resume line: cleared",
             },
         }
         page_labels = _TOAST_LABELS.get(page, {})

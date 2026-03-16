@@ -95,9 +95,22 @@ class ProjectsConfig:
     def resolve(self, alias: str | None) -> ProjectConfig | None:
         if alias is None:
             if self.default_project is None:
+                logger.debug(
+                    "config.resolve.failed", alias=alias, reason="no_default_project"
+                )
                 return None
-            return self.projects.get(self.default_project)
-        return self.projects.get(alias.lower())
+            result = self.projects.get(self.default_project)
+            if result is None:
+                logger.debug(
+                    "config.resolve.failed",
+                    alias=self.default_project,
+                    reason="default_project_not_found",
+                )
+            return result
+        result = self.projects.get(alias.lower())
+        if result is None:
+            logger.debug("config.resolve.failed", alias=alias, reason="alias_not_found")
+        return result
 
     def project_for_chat(self, chat_id: int | str | None) -> str | None:
         if chat_id is None:

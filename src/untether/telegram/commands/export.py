@@ -36,7 +36,7 @@ def record_session_event(
     if len(_SESSION_HISTORY) > _MAX_SESSIONS:
         oldest_key = min(_SESSION_HISTORY, key=lambda k: _SESSION_HISTORY[k][0])
         _SESSION_HISTORY.pop(oldest_key, None)
-        logger.debug("export.session.trimmed", removed=oldest_key)
+        logger.info("export.session.trimmed", removed=oldest_key)
 
 
 def record_session_usage(

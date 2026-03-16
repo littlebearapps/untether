@@ -392,6 +392,17 @@ class GeminiRunner(ResumeTokenMixin, JsonlSubprocessRunner):
             model = run_options.model
         if model is not None:
             meta = {"model": str(model)}
+        if run_options is not None and run_options.permission_mode:
+            pm = run_options.permission_mode
+            if pm == "yolo":
+                if meta is None:
+                    meta = {}
+                meta["permissionMode"] = "full access"
+            elif pm == "auto_edit":
+                if meta is None:
+                    meta = {}
+                meta["permissionMode"] = "edit files"
+            # Default (None/read-only) — omit from footer
         return translate_gemini_event(
             data,
             title=self.session_title,

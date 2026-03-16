@@ -278,6 +278,12 @@ class BrowseCommand:
         if args:
             target = (root / args).resolve()
             if not target.is_relative_to(root):
+                logger.warning(
+                    "browse.path_escape_attempted",
+                    attempted_path=str(target),
+                    root=str(root),
+                    args=args,
+                )
                 return CommandResult(text="Path outside project.", notify=True)
         else:
             target = root
@@ -297,6 +303,11 @@ class BrowseCommand:
         if not dirpath.is_dir():
             return CommandResult(text="Directory not found.", notify=True)
         if not dirpath.is_relative_to(root):
+            logger.warning(
+                "browse.path_escape_attempted",
+                attempted_path=str(dirpath),
+                root=str(root),
+            )
             return CommandResult(text="Path outside project.", notify=True)
 
         dirs, files = _list_directory(dirpath)
@@ -324,6 +335,11 @@ class BrowseCommand:
         if not filepath.is_file():
             return CommandResult(text="File not found.", notify=True)
         if not filepath.is_relative_to(root):
+            logger.warning(
+                "browse.path_escape_attempted",
+                attempted_path=str(filepath),
+                root=str(root),
+            )
             return CommandResult(text="Path outside project.", notify=True)
 
         rel = filepath.relative_to(root)

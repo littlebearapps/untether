@@ -128,33 +128,60 @@ async def _handle_model_command(
                     text=f"unknown engine `{engine}`.\navailable engines: `{available}`"
                 )
                 return
-        scope = await apply_engine_override(
-            reply=reply,
-            tkey=tkey,
-            topic_store=topic_store,
-            chat_prefs=chat_prefs,
-            chat_id=msg.chat_id,
-            engine=engine,
-            update=lambda current: EngineOverrides(
-                model=model,
-                reasoning=current.reasoning if current is not None else None,
-                permission_mode=current.permission_mode
-                if current is not None
-                else None,
-                ask_questions=current.ask_questions if current is not None else None,
-                diff_preview=current.diff_preview if current is not None else None,
-                show_api_cost=current.show_api_cost if current is not None else None,
-                show_subscription_usage=current.show_subscription_usage
-                if current is not None
-                else None,
-            ),
-            topic_unavailable="topic model overrides are unavailable.",
-            chat_unavailable="chat model overrides are unavailable (no config path).",
-        )
+        try:
+            scope = await apply_engine_override(
+                reply=reply,
+                tkey=tkey,
+                topic_store=topic_store,
+                chat_prefs=chat_prefs,
+                chat_id=msg.chat_id,
+                engine=engine,
+                update=lambda current: EngineOverrides(
+                    model=model,
+                    reasoning=current.reasoning if current is not None else None,
+                    permission_mode=current.permission_mode
+                    if current is not None
+                    else None,
+                    ask_questions=current.ask_questions
+                    if current is not None
+                    else None,
+                    diff_preview=current.diff_preview if current is not None else None,
+                    show_api_cost=current.show_api_cost
+                    if current is not None
+                    else None,
+                    show_subscription_usage=current.show_subscription_usage
+                    if current is not None
+                    else None,
+                    show_resume_line=current.show_resume_line
+                    if current is not None
+                    else None,
+                    budget_enabled=current.budget_enabled
+                    if current is not None
+                    else None,
+                    budget_auto_cancel=current.budget_auto_cancel
+                    if current is not None
+                    else None,
+                ),
+                topic_unavailable="topic model overrides are unavailable.",
+                chat_unavailable="chat model overrides are unavailable (no config path).",
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "model.override.failed",
+                error=str(exc),
+                error_type=exc.__class__.__name__,
+            )
+            await reply(text="failed to apply model override.")
+            return
         if scope is None:
             return
         logger.info(
-            "model.set", chat_id=msg.chat_id, engine=engine, model=model, scope=scope
+            "model.set",
+            chat_id=msg.chat_id,
+            engine=engine,
+            model=model,
+            scope=scope,
+            command="model",
         )
         if scope == "topic":
             await reply(
@@ -222,6 +249,13 @@ async def _handle_model_command(
                 diff_preview=current.diff_preview if current is not None else None,
                 show_api_cost=current.show_api_cost if current is not None else None,
                 show_subscription_usage=current.show_subscription_usage
+                if current is not None
+                else None,
+                show_resume_line=current.show_resume_line
+                if current is not None
+                else None,
+                budget_enabled=current.budget_enabled if current is not None else None,
+                budget_auto_cancel=current.budget_auto_cancel
                 if current is not None
                 else None,
             ),

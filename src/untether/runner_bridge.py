@@ -155,7 +155,12 @@ def _apply_preamble(prompt: str) -> str:
             "with clear options. The user will see interactive buttons to choose from."
         )
 
-    logger.info("preamble.applied", preamble_len=len(text))
+    source = "default"
+    if cfg.text is not None:
+        source = "config"
+    if cfg.text is not None and cfg.text != _DEFAULT_PREAMBLE:
+        source = "override"
+    logger.info("preamble.applied", preamble_len=len(text), source=source)
     return f"{text}\n\n---\n\n{prompt}"
 
 
@@ -239,9 +244,11 @@ async def _maybe_append_usage_footer(
         if pct_5h >= 100:
             footer = f"\n\U0001f6d1 5h limit hit \u2014 resets in {reset}"
         elif pct_5h >= _USAGE_CRITICAL_PCT:
-            footer = f"\n\u26a0\ufe0f 5h: {pct_5h:.0f}% | Weekly: {pct_7d:.0f}% \u2014 approaching limit (resets in {reset})"
+            _7d_part = f" | 7d: {pct_7d:.0f}%" if pct_7d else ""
+            footer = f"\n\u26a0\ufe0f 5h: {pct_5h:.0f}% ({reset}){_7d_part}"
         else:
-            footer = f"\n\u26a1 5h: {pct_5h:.0f}% | Weekly: {pct_7d:.0f}% (resets in {reset})"
+            _7d_part = f" | 7d: {pct_7d:.0f}%" if pct_7d else ""
+            footer = f"\n\u26a15h: {pct_5h:.0f}% ({reset}){_7d_part}"
 
         return RenderedMessage(text=msg.text + footer, extra=msg.extra)
     except Exception:  # noqa: BLE001 — cosmetic footer must never block final message
@@ -268,16 +275,16 @@ def _format_run_cost(usage: dict[str, Any] | None) -> str | None:
             parts.append(f"${cost:.4f}")
     turns = usage.get("num_turns")
     if turns:
-        parts.append(f"{turns} turns")
+        parts.append(f"{turns} tn")
     duration_ms = usage.get("duration_ms")
     if duration_ms:
         secs = duration_ms / 1000
         if secs >= 60:
             mins = int(secs // 60)
             remaining = int(secs % 60)
-            parts.append(f"{mins}m {remaining}s API")
+            parts.append(f"{mins}m {remaining}s")
         else:
-            parts.append(f"{secs:.1f}s API")
+            parts.append(f"{secs:.1f}s")
     if has_tokens:
         input_tokens = token_usage.get("input_tokens", 0)
         output_tokens = token_usage.get("output_tokens", 0)
@@ -290,19 +297,27 @@ def _format_run_cost(usage: dict[str, Any] | None) -> str | None:
                     return f"{n / 1_000:.1f}k"
                 return str(n)
 
-            parts.append(
-                f"{_fmt_tokens(input_tokens)} in / {_fmt_tokens(output_tokens)} out"
-            )
+            parts.append(f"{_fmt_tokens(input_tokens)}/{_fmt_tokens(output_tokens)}")
     return " · ".join(parts) or None
 
 
-def _check_cost_budget(usage: dict[str, Any] | None) -> str | None:
-    """Check run cost against budget and return an alert string if needed."""
+def _check_cost_budget(
+    usage: dict[str, Any] | None,
+) -> tuple[str | None, object | None]:
+    """Check run cost against budget.
+
+    Returns ``(alert_text, alert_object)`` where *alert_object* is a
+    :class:`CostAlert` (or *None*) containing ``ratio`` and ``level`` fields
+    for inline budget suffix rendering.
+
+    Per-chat overrides for ``budget_enabled`` and ``budget_auto_cancel``
+    are read from :func:`get_run_options` when available.
+    """
     if not usage:
-        return None
+        return None, None
     cost = usage.get("total_cost_usd")
     if cost is None or cost <= 0:
-        return None
+        return None, None
     try:
         from .cost_tracker import (
             CostBudget,
@@ -310,33 +325,59 @@ def _check_cost_budget(usage: dict[str, Any] | None) -> str | None:
             format_cost_alert,
             record_run_cost,
         )
+        from .runners.run_options import get_run_options
         from .settings import load_settings_if_exists
 
         record_run_cost(cost)
 
         result = load_settings_if_exists()
         if result is None:
-            return None
+            return None, None
         settings, _ = result
         budget_cfg = settings.cost_budget
-        if not budget_cfg.enabled:
-            return None
+
+        # Per-chat overrides take priority over global config
+        run_options = get_run_options()
+        if run_options is not None and run_options.budget_enabled is not None:
+            budget_enabled = run_options.budget_enabled
+        else:
+            budget_enabled = budget_cfg.enabled
+        if not budget_enabled:
+            return None, None
+
+        if run_options is not None and run_options.budget_auto_cancel is not None:
+            auto_cancel = run_options.budget_auto_cancel
+        else:
+            auto_cancel = budget_cfg.auto_cancel
+
         budget = CostBudget(
             max_cost_per_run=budget_cfg.max_cost_per_run,
             max_cost_per_day=budget_cfg.max_cost_per_day,
             warn_at_pct=budget_cfg.warn_at_pct,
-            auto_cancel=budget_cfg.auto_cancel,
+            auto_cancel=auto_cancel,
         )
         alert = check_run_budget(cost, budget)
         if alert is not None:
-            return format_cost_alert(alert)
+            return format_cost_alert(alert), alert
+        return None, None
     except Exception as exc:  # noqa: BLE001
         logger.warning(
             "cost_budget.check_failed",
             error=str(exc),
             error_type=exc.__class__.__name__,
         )
-    return None
+        return None, None
+
+
+def _format_budget_suffix(alert: object) -> str:
+    """Format a CostAlert as an inline suffix for the cost line."""
+    level = getattr(alert, "level", "")
+    ratio = getattr(alert, "ratio", 0.0)
+    if level == "exceeded":
+        return " \U0001f6d1 budget"  # 🛑
+    if ratio > 0:
+        return f" \u26a0\ufe0f {ratio:.0f}%"  # ⚠️
+    return ""
 
 
 def _record_export_event(
@@ -370,6 +411,12 @@ def _record_export_event(
             if evt.usage:
                 record_session_usage(session_id, evt.usage, channel_id=channel_id)
         record_session_event(session_id, event_dict, channel_id=channel_id)
+        if isinstance(evt, ActionEvent):
+            logger.debug(
+                "action.recorded",
+                kind=evt.action.kind,
+                title=evt.action.title,
+            )
     except Exception as exc:  # noqa: BLE001
         logger.warning(
             "export_event.record_failed",
@@ -558,6 +605,7 @@ class ProgressEdits:
         self.cancel_event: anyio.Event | None = None  # threaded from RunningTask
         self.event_seq = 0
         self.rendered_seq = 0
+        self._outline_sent: bool = False
         self.signal_send, self.signal_recv = anyio.create_memory_object_stream(1)
 
     async def run(self) -> None:
@@ -812,6 +860,15 @@ class ProgressEdits:
             had_approval = len(old_kb) > 1
 
             try:
+                # Send full outline as separate message(s) when approval buttons appear
+                if has_approval and not had_approval and not self._outline_sent:
+                    for a in state.actions:
+                        outline_text = a.action.detail.get("outline_full_text")
+                        if outline_text and isinstance(outline_text, str):
+                            self._outline_sent = True
+                            await self._send_outline(outline_text, bg_tg)
+                            break
+
                 if has_approval and not had_approval and not self._approval_notified:
                     self._approval_notified = True
                     # Contextual notification text
@@ -925,17 +982,87 @@ class ProgressEdits:
         except (anyio.BrokenResourceError, anyio.ClosedResourceError):
             pass
 
+    async def _send_outline(self, text: str, bg_tg: anyio.abc.TaskGroup) -> None:
+        """Send plan outline as separate ephemeral message(s).
+
+        Splits long outlines across multiple messages to avoid Telegram's
+        4096 char limit. Each message is registered as ephemeral so it
+        auto-deletes when the run finishes.
+        """
+        max_chars = 3500  # leave room for entities/overhead
+        chunks: list[str] = []
+        remaining = text
+        while remaining:
+            if len(remaining) <= max_chars:
+                chunks.append(remaining)
+                break
+            # Split at last paragraph break within limit
+            split_at = remaining.rfind("\n\n", 0, max_chars)
+            if split_at <= 0:
+                # No paragraph break — split at last newline
+                split_at = remaining.rfind("\n", 0, max_chars)
+            if split_at <= 0:
+                # No newline — hard split
+                split_at = max_chars
+            chunks.append(remaining[:split_at])
+            remaining = remaining[split_at:].lstrip("\n")
+
+        async def _do_send() -> None:
+            for chunk in chunks:
+                try:
+                    ref = await self.transport.send(
+                        channel_id=self.channel_id,
+                        message=RenderedMessage(text=chunk),
+                        options=SendOptions(
+                            reply_to=self.progress_ref,
+                            notify=False,
+                            thread_id=self.thread_id,
+                        ),
+                    )
+                    if ref and self.progress_ref:
+                        register_ephemeral_message(
+                            self.channel_id,
+                            self.progress_ref.message_id,
+                            ref,
+                        )
+                except Exception:  # noqa: BLE001
+                    logger.warning(
+                        "progress_edits.outline_send_failed",
+                        channel_id=self.channel_id,
+                        exc_info=True,
+                    )
+
+        bg_tg.start_soon(_do_send)
+
     async def delete_ephemeral(self) -> None:
         """Delete any tracked ephemeral notification messages."""
         if self._approval_notify_ref is not None:
-            await self.transport.delete(ref=self._approval_notify_ref)
+            try:
+                await self.transport.delete(ref=self._approval_notify_ref)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "ephemeral.delete.failed",
+                    chat_id=self.channel_id,
+                    message_id=self._approval_notify_ref.message_id,
+                    error=str(exc),
+                    error_type=exc.__class__.__name__,
+                )
             self._approval_notify_ref = None
         # Drain messages registered by callback handlers (e.g. approve/deny feedback).
         if self.progress_ref is not None:
             key = (self.channel_id, self.progress_ref.message_id)
             refs = _EPHEMERAL_MSGS.pop(key, [])
             for ref in refs:
-                await self.transport.delete(ref=ref)
+                try:
+                    await self.transport.delete(ref=ref)
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning(
+                        "ephemeral.delete.failed",
+                        chat_id=self.channel_id,
+                        message_id=ref.message_id,
+                        error=str(exc),
+                        error_type=exc.__class__.__name__,
+                    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -1493,21 +1620,25 @@ async def handle_message(
 
     _footer_run_opts = get_run_options()
 
-    # Append run cost footer (from CompletedEvent.usage)
+    # Append run cost footer with inline budget suffix
     _show_cost = footer_cfg.show_api_cost
     if _footer_run_opts and _footer_run_opts.show_api_cost is not None:
         _show_cost = _footer_run_opts.show_api_cost
+    _cost_alert_text, _cost_alert_obj = _check_cost_budget(completed.usage)
     if _show_cost and run_ok is not False:
         cost_line = _format_run_cost(completed.usage)
         if cost_line:
+            budget_suffix = (
+                _format_budget_suffix(_cost_alert_obj)
+                if _cost_alert_obj is not None
+                else ""
+            )
             final_rendered = RenderedMessage(
-                text=final_rendered.text + f"\n\U0001f4b0 {cost_line}",
+                text=final_rendered.text + f"\n\U0001f4b0{cost_line}{budget_suffix}",
                 extra=final_rendered.extra,
             )
-
-    # A4: Cost budget tracking and alerts (always, regardless of footer config)
-    _cost_alert_text = _check_cost_budget(completed.usage)
-    if _cost_alert_text:
+    elif _cost_alert_text:
+        # Budget exceeded but cost display is off — show standalone alert
         final_rendered = RenderedMessage(
             text=final_rendered.text + f"\n{_cost_alert_text}",
             extra=final_rendered.extra,

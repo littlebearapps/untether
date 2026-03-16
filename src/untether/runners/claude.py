@@ -701,16 +701,14 @@ def translate_claude_event(
                             button_request_id = f"da:{session_id}"
                             _REQUEST_TO_SESSION[button_request_id] = session_id
 
-                        # Embed outline text in the action title so it's
-                        # always visible alongside the Approve/Deny buttons
-                        # (separate note actions get scrolled off by max_actions).
+                        # Send full outline as a separate ephemeral message
+                        # (progress message is limited to 4096 chars and truncates).
+                        # The outline_full_text in detail triggers ProgressEdits
+                        # to send it as a standalone message.
+                        outline_detail: dict[str, object] = {}
                         if state.outline_text:
-                            preview = (
-                                state.outline_text[:1500] + "…"
-                                if len(state.outline_text) > 1500
-                                else state.outline_text
-                            )
-                            synth_title = f"Plan outline:\n{preview}"
+                            synth_title = "📋 Plan outline (see above)"
+                            outline_detail["outline_full_text"] = state.outline_text
                             state.outline_text = None
                         else:
                             synth_title = "Plan outlined — approve to proceed"
@@ -721,6 +719,7 @@ def translate_claude_event(
                                 kind="warning",
                                 title=synth_title,
                                 detail={
+                                    **outline_detail,
                                     "request_id": button_request_id,
                                     "request_type": "DiscussApproval",
                                     "inline_keyboard": {
@@ -925,6 +924,14 @@ def translate_claude_event(
                             pass
 
                     else:
+                        logger.warning(
+                            "ask_question.extraction_failed",
+                            request_id=request_id,
+                            session_id=session_id,
+                            tool_input_keys=list(tool_input.keys())
+                            if tool_input
+                            else [],
+                        )
                         ask_question = ""
 
                     # Register this request for reply handling
@@ -1047,6 +1054,17 @@ class ClaudeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
                     channel="pipe",
                 )
                 return False
+            except Exception as e:  # noqa: BLE001
+                logger.error(
+                    "control_response.write_failed",
+                    request_id=request_id,
+                    approved=approved,
+                    session_id=session_id,
+                    error=str(e),
+                    error_type=e.__class__.__name__,
+                    channel="pipe",
+                )
+                return False
         elif self._pty_master_fd is not None:
             try:
                 os.write(self._pty_master_fd, jsonl_line.encode())
@@ -1061,6 +1079,17 @@ class ClaudeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
             except OSError as e:
                 logger.warning(
                     "control_response.pipe_closed",
+                    request_id=request_id,
+                    approved=approved,
+                    session_id=session_id,
+                    error=str(e),
+                    error_type=e.__class__.__name__,
+                    channel="pty",
+                )
+                return False
+            except Exception as e:  # noqa: BLE001
+                logger.error(
+                    "control_response.write_failed",
                     request_id=request_id,
                     approved=approved,
                     session_id=session_id,
@@ -1702,7 +1731,15 @@ class ClaudeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
                 except (NameError, AttributeError):
                     pass
             if _sid:
-                _cleanup_session_registries(_sid)
+                try:
+                    _cleanup_session_registries(_sid)
+                except Exception as e:  # noqa: BLE001
+                    logger.warning(
+                        "session.registry.cleanup_failed",
+                        session_id=_sid,
+                        error=str(e),
+                        error_type=e.__class__.__name__,
+                    )
             # Cleanup - close the local stdin if it wasn't already closed
             if this_proc_stdin is not None:
                 with contextlib.suppress(Exception):

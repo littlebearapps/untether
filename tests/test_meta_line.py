@@ -38,6 +38,30 @@ class TestShortModelName:
     def test_gemini_unchanged(self) -> None:
         assert _short_model_name("gemini-2.5-pro") == "gemini-2.5-pro"
 
+    def test_auto_gemini_stripped(self) -> None:
+        assert _short_model_name("auto-gemini-3") == "gemini-3"
+
+    def test_auto_gemini_with_variant(self) -> None:
+        assert _short_model_name("auto-gemini-2.5-pro") == "gemini-2.5-pro"
+
+    def test_auto_claude_stripped(self) -> None:
+        assert _short_model_name("auto-claude-sonnet-4-5") == "sonnet 4.5"
+
+    def test_opus_with_1m_context(self) -> None:
+        assert _short_model_name("claude-opus-4-6[1m]") == "opus 4.6 (1M)"
+
+    def test_sonnet_with_1m_context(self) -> None:
+        assert _short_model_name("claude-sonnet-4-5[1m]") == "sonnet 4.5 (1M)"
+
+    def test_opus_with_date_and_1m(self) -> None:
+        assert _short_model_name("claude-opus-4-6-20260101[1m]") == "opus 4.6 (1M)"
+
+    def test_unknown_context_suffix(self) -> None:
+        assert _short_model_name("claude-opus-4-6[500k]") == "opus 4.6 (500K)"
+
+    def test_no_bracket_unchanged(self) -> None:
+        assert _short_model_name("claude-opus-4-6") == "opus 4.6"
+
 
 class TestFormatMetaLine:
     def test_full_model_and_permission(self) -> None:
@@ -95,6 +119,12 @@ class TestFormatMetaLine:
     def test_effort_ignored_when_non_string(self) -> None:
         result = format_meta_line({"model": "opus", "effort": 42})
         assert result == "opus"
+
+    def test_1m_model_with_permission(self) -> None:
+        result = format_meta_line(
+            {"model": "claude-opus-4-6[1m]", "permissionMode": "plan"}
+        )
+        assert result == "opus 4.6 (1M) \N{MIDDLE DOT} plan"
 
 
 class TestProgressTrackerMeta:
@@ -376,6 +406,25 @@ class TestCrossEngineFooter:
             context_line=None,
         )
         assert footer == "\N{LABEL} opus"
+
+    def test_claude_1m_model(self) -> None:
+        footer = self._render_footer(
+            "claude",
+            meta={"model": "claude-opus-4-6[1m]", "permissionMode": "plan"},
+            context_line="dir: untether @master",
+        )
+        assert (
+            footer
+            == "\N{LABEL} dir: untether @master | opus 4.6 (1M) \N{MIDDLE DOT} plan"
+        )
+
+    def test_gemini_auto_model(self) -> None:
+        footer = self._render_footer(
+            "gemini",
+            meta={"model": "auto-gemini-3"},
+            context_line="dir: gemini-test",
+        )
+        assert footer == "\N{LABEL} dir: gemini-test | gemini-3"
 
     def test_neither_dir_nor_model(self) -> None:
         footer = self._render_footer("codex", meta=None, context_line=None)

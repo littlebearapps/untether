@@ -79,10 +79,21 @@ async def transcribe_voice(
         return None
     file_info = await bot.get_file(voice.file_id)
     if file_info is None:
+        logger.warning(
+            "voice.file_info.failed",
+            file_id=voice.file_id,
+            file_size=voice.file_size,
+        )
         await reply(text="failed to fetch voice file.")
         return None
     audio_bytes = await bot.download_file(file_info.file_path)
     if audio_bytes is None:
+        logger.warning(
+            "voice.download.failed",
+            file_id=voice.file_id,
+            file_size=voice.file_size,
+            file_path=file_info.file_path,
+        )
         await reply(text="failed to download voice file.")
         return None
     if max_bytes is not None and len(audio_bytes) > max_bytes:
@@ -91,12 +102,20 @@ async def transcribe_voice(
     if transcriber is None:
         transcriber = OpenAIVoiceTranscriber(base_url=base_url, api_key=api_key)
     try:
-        return await transcriber.transcribe(model=model, audio_bytes=audio_bytes)
+        text = await transcriber.transcribe(model=model, audio_bytes=audio_bytes)
+        logger.debug(
+            "voice.transcribe.success",
+            model=model,
+            audio_size=len(audio_bytes),
+        )
+        return text
     except OpenAIError as exc:
         logger.error(
             "openai.transcribe.error",
             error=str(exc),
             error_type=exc.__class__.__name__,
+            file_id=voice.file_id,
+            file_size=voice.file_size,
         )
         await reply(text=str(exc).strip() or "voice transcription failed")
         return None
@@ -105,11 +124,18 @@ async def transcribe_voice(
             "voice.transcribe.error",
             error=str(exc),
             error_type=exc.__class__.__name__,
+            file_id=voice.file_id,
+            file_size=voice.file_size,
         )
         await reply(text=str(exc).strip() or "voice transcription failed")
         return None
     except TimeoutError as exc:
-        logger.error("voice.transcribe.timeout", error=str(exc))
+        logger.error(
+            "voice.transcribe.timeout",
+            error=str(exc),
+            file_id=voice.file_id,
+            file_size=voice.file_size,
+        )
         await reply(text="voice transcription timed out")
         return None
     except Exception as exc:  # noqa: BLE001
@@ -117,6 +143,8 @@ async def transcribe_voice(
             "voice.transcribe.unexpected",
             error=str(exc),
             error_type=exc.__class__.__name__,
+            file_id=voice.file_id,
+            file_size=voice.file_size,
         )
         await reply(text=str(exc).strip() or "voice transcription failed")
         return None

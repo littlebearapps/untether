@@ -75,10 +75,19 @@ class PlanModeCommand:
                 show_subscription_usage=current.show_subscription_usage
                 if current
                 else None,
+                show_resume_line=current.show_resume_line if current else None,
+                budget_enabled=current.budget_enabled if current else None,
+                budget_auto_cancel=current.budget_auto_cancel if current else None,
             )
             await chat_prefs.set_engine_override(chat_id, engine, updated)
             cli_mode = "plan" if mode in ("plan", "auto") else mode
-            logger.info("planmode.set", chat_id=chat_id, mode=args, cli_mode=cli_mode)
+            logger.info(
+                "planmode.set",
+                chat_id=chat_id,
+                mode=args,
+                cli_mode=cli_mode,
+                command="planmode",
+            )
             return CommandResult(
                 text=(
                     f"plan mode <b>{args}</b> for this chat.\n"
@@ -100,9 +109,12 @@ class PlanModeCommand:
                 show_subscription_usage=current.show_subscription_usage
                 if current
                 else None,
+                show_resume_line=current.show_resume_line if current else None,
+                budget_enabled=current.budget_enabled if current else None,
+                budget_auto_cancel=current.budget_auto_cancel if current else None,
             )
             await chat_prefs.set_engine_override(chat_id, engine, updated)
-            logger.info("planmode.cleared", chat_id=chat_id)
+            logger.info("planmode.cleared", chat_id=chat_id, command="planmode")
             return CommandResult(
                 text="plan mode <b>override cleared</b> (using engine config default).",
                 notify=True,

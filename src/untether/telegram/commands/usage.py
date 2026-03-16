@@ -133,21 +133,27 @@ async def fetch_claude_usage(
 def format_usage_compact(data: dict) -> str | None:
     """Format usage data into a compact single-line footer.
 
-    Returns something like ``5h: 45% (2h 15m) | 7d: 30% (4d 3h)``
-    or *None* if no data is available.
+    Returns something like ``5h: 45% | 7d: 30%`` (low usage)
+    or ``5h: 72% (1h 14m) | 7d: 30%`` (reset times shown when >50%).
     """
     parts: list[str] = []
     five_hour = data.get("five_hour")
     if five_hour:
         pct = five_hour["utilization"]
-        reset = _time_until(five_hour["resets_at"])
-        parts.append(f"5h: {pct:.0f}% ({reset})")
+        if pct >= 50:
+            reset = _time_until(five_hour["resets_at"])
+            parts.append(f"5h: {pct:.0f}% ({reset})")
+        else:
+            parts.append(f"5h: {pct:.0f}%")
 
     seven_day = data.get("seven_day")
     if seven_day:
         pct = seven_day["utilization"]
-        reset = _time_until(seven_day["resets_at"])
-        parts.append(f"7d: {pct:.0f}% ({reset})")
+        if pct >= 50:
+            reset = _time_until(seven_day["resets_at"])
+            parts.append(f"7d: {pct:.0f}% ({reset})")
+        else:
+            parts.append(f"7d: {pct:.0f}%")
 
     if not parts:
         return None

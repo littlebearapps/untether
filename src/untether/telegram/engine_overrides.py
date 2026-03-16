@@ -35,6 +35,9 @@ class EngineOverrides(msgspec.Struct, forbid_unknown_fields=False):
     diff_preview: bool | None = None
     show_api_cost: bool | None = None
     show_subscription_usage: bool | None = None
+    show_resume_line: bool | None = None
+    budget_enabled: bool | None = None
+    budget_auto_cancel: bool | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -62,6 +65,9 @@ def normalize_overrides(overrides: EngineOverrides | None) -> EngineOverrides | 
     diff_preview = overrides.diff_preview
     show_api_cost = overrides.show_api_cost
     show_subscription_usage = overrides.show_subscription_usage
+    show_resume_line = overrides.show_resume_line
+    budget_enabled = overrides.budget_enabled
+    budget_auto_cancel = overrides.budget_auto_cancel
     if (
         model is None
         and reasoning is None
@@ -70,6 +76,9 @@ def normalize_overrides(overrides: EngineOverrides | None) -> EngineOverrides | 
         and diff_preview is None
         and show_api_cost is None
         and show_subscription_usage is None
+        and show_resume_line is None
+        and budget_enabled is None
+        and budget_auto_cancel is None
     ):
         return None
     return EngineOverrides(
@@ -80,6 +89,9 @@ def normalize_overrides(overrides: EngineOverrides | None) -> EngineOverrides | 
         diff_preview=diff_preview,
         show_api_cost=show_api_cost,
         show_subscription_usage=show_subscription_usage,
+        show_resume_line=show_resume_line,
+        budget_enabled=budget_enabled,
+        budget_auto_cancel=budget_auto_cancel,
     )
 
 
@@ -126,6 +138,21 @@ def merge_overrides(
         show_subscription_usage = topic.show_subscription_usage
     elif chat is not None:
         show_subscription_usage = chat.show_subscription_usage
+    show_resume_line = None
+    if topic is not None and topic.show_resume_line is not None:
+        show_resume_line = topic.show_resume_line
+    elif chat is not None:
+        show_resume_line = chat.show_resume_line
+    budget_enabled = None
+    if topic is not None and topic.budget_enabled is not None:
+        budget_enabled = topic.budget_enabled
+    elif chat is not None:
+        budget_enabled = chat.budget_enabled
+    budget_auto_cancel = None
+    if topic is not None and topic.budget_auto_cancel is not None:
+        budget_auto_cancel = topic.budget_auto_cancel
+    elif chat is not None:
+        budget_auto_cancel = chat.budget_auto_cancel
     return normalize_overrides(
         EngineOverrides(
             model=model,
@@ -135,6 +162,9 @@ def merge_overrides(
             diff_preview=diff_preview,
             show_api_cost=show_api_cost,
             show_subscription_usage=show_subscription_usage,
+            show_resume_line=show_resume_line,
+            budget_enabled=budget_enabled,
+            budget_auto_cancel=budget_auto_cancel,
         )
     )
 

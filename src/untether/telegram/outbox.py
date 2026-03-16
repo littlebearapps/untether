@@ -217,6 +217,12 @@ class TelegramOutbox:
                             )
                             op.set_result(None)
                     continue
+                logger.debug(
+                    "outbox.op.completed",
+                    label=op.label,
+                    chat_id=op.chat_id,
+                    elapsed_ms=round((self._clock() - op.queued_at) * 1000, 1),
+                )
                 self._next_at[op.chat_id] = started_at + self._interval_for_chat(
                     op.chat_id
                 )

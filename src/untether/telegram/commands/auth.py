@@ -11,6 +11,9 @@ import re
 import shutil
 
 from ...commands import CommandBackend, CommandContext, CommandResult
+from ...logging import get_logger
+
+logger = get_logger(__name__)
 
 # ANSI escape sequence pattern
 _ANSI_RE = re.compile(r"\x1b\[[0-9;]*[a-zA-Z]")
@@ -113,6 +116,9 @@ class AuthCommand:
                             timeout=_AUTH_TIMEOUT_SECONDS,
                         )
                     except TimeoutError:
+                        logger.warning(
+                            "auth.timeout", timeout_seconds=_AUTH_TIMEOUT_SECONDS
+                        )
                         proc.kill()
                         return CommandResult(
                             text=f"\u23f0 Auth timed out after {_AUTH_TIMEOUT_SECONDS // 60} minutes"

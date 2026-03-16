@@ -125,6 +125,9 @@ async def _resolve_engine_run_options(
         diff_preview=merged.diff_preview,
         show_api_cost=merged.show_api_cost,
         show_subscription_usage=merged.show_subscription_usage,
+        show_resume_line=merged.show_resume_line,
+        budget_enabled=merged.budget_enabled,
+        budget_auto_cancel=merged.budget_auto_cancel,
     )
 
 
@@ -825,13 +828,23 @@ class MediaGroupBuffer:
                 for msg in messages
             ):
                 return
-            await handle_media_group(
-                self._cfg,
-                messages,
-                self._topic_store,
-                self._run_prompt_from_upload,
-                self._resolve_prompt_message,
-            )
+            try:
+                await handle_media_group(
+                    self._cfg,
+                    messages,
+                    self._topic_store,
+                    self._run_prompt_from_upload,
+                    self._resolve_prompt_message,
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "media_group.flush.failed",
+                    error=str(exc),
+                    error_type=exc.__class__.__name__,
+                    chat_id=key[0],
+                    media_group_id=key[1],
+                    message_count=len(messages),
+                )
             return
 
 
@@ -1137,6 +1150,7 @@ async def run_main_loop(
 
         _signal.signal(_signal.SIGTERM, _shutdown_handler)
         _signal.signal(_signal.SIGINT, _shutdown_handler)
+        logger.info("signal.handler.installed", signals=["SIGTERM", "SIGINT"])
 
         async with anyio.create_task_group() as tg:
             poller_fn: Callable[
@@ -2054,6 +2068,17 @@ async def run_main_loop(
                     "Set [transports.telegram] allowed_user_ids to restrict access.",
                 )
 
+            async def _safe_answer_callback(query_id: str) -> None:
+                try:
+                    await cfg.bot.answer_callback_query(query_id)
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning(
+                        "callback.answer.failed",
+                        error=str(exc),
+                        error_type=exc.__class__.__name__,
+                        callback_query_id=query_id,
+                    )
+
             async def route_update(update: TelegramIncomingUpdate) -> None:
                 if allowed_user_ids:
                     sender_id = update.sender_id
@@ -2148,11 +2173,11 @@ async def run_main_loop(
                             )
                         else:
                             tg.start_soon(
-                                cfg.bot.answer_callback_query, update.callback_query_id
+                                _safe_answer_callback, update.callback_query_id
                             )
                     else:
                         tg.start_soon(
-                            cfg.bot.answer_callback_query,
+                            _safe_answer_callback,
                             update.callback_query_id,
                         )
                     return
@@ -2174,5 +2199,6 @@ async def run_main_loop(
     finally:
         _signal.signal(_signal.SIGTERM, _prev_sigterm)
         _signal.signal(_signal.SIGINT, _prev_sigint)
+        logger.debug("signal.handler.restored", signals=["SIGTERM", "SIGINT"])
         reset_shutdown()
         await cfg.exec_cfg.transport.close()

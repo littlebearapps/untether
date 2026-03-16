@@ -625,7 +625,7 @@ class TestFormatRunCost:
             {"usage": {"input_tokens": 72500, "output_tokens": 120}}
         )
         assert result is not None
-        assert result == "72.5k in / 120 out"
+        assert result == "72.5k/120"
         assert "$" not in result
 
     def test_cost_only(self):
@@ -649,10 +649,9 @@ class TestFormatRunCost:
         )
         assert result is not None
         assert "$1.23" in result
-        assert "8 turns" in result
-        assert "45.0s API" in result
-        assert "15.0k in" in result
-        assert "3.2k out" in result
+        assert "8 tn" in result
+        assert "45.0s" in result
+        assert "15.0k/3.2k" in result
 
     def test_large_token_counts(self):
         result = _format_run_cost(
@@ -662,8 +661,7 @@ class TestFormatRunCost:
             }
         )
         assert result is not None
-        assert "1.5M in" in result
-        assert "250.0k out" in result
+        assert "1.5M/250.0k" in result
 
     def test_long_duration(self):
         result = _format_run_cost(
@@ -673,7 +671,7 @@ class TestFormatRunCost:
             }
         )
         assert result is not None
-        assert "2m 5s API" in result
+        assert "2m 5s" in result
 
 
 # ---------------------------------------------------------------------------

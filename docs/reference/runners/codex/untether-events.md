@@ -18,11 +18,11 @@ Emitted once **as soon as you know the resume token** (Codex: `thread.started.th
   "engine": "codex",
   "resume": { "engine": "codex", "value": "0199..." },
   "title": "Codex",               // optional
-  "meta": { "model": "o3" }       // optional: model from run options, used for 🏷 footer
+  "meta": { "model": "o3", "permissionMode": "safe" }  // optional: used for 🏷 footer
 }
 ```
 
-Note: Codex JSONL does not include model info in its event stream. The runner populates `meta.model` from the Codex run options (CLI `--model` flag) when available.
+Note: Codex JSONL does not include model or permission info in its event stream. The runner populates `meta.model` from run options (CLI `--model` flag) and `meta.permissionMode` when approval policy is set to "safe" (non-default).
 
 ### 2) `action`
 

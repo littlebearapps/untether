@@ -61,6 +61,7 @@ Mapping:
 - Emit `StartedEvent`.
 - `resume = ResumeToken(engine="gemini", value=session_id)`.
 - `meta.model = model` (used for the footer line).
+- `meta.permissionMode = "full access"` or `"edit files"` when non-default approval mode is set (used for footer).
 - Store `session_id` and `model` in state.
 
 ### 4.2 `tool_use`

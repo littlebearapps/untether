@@ -636,6 +636,10 @@ class CodexRunner(ResumeTokenMixin, JsonlSubprocessRunner):
             if meta is None:
                 meta = {}
             meta["effort"] = run_options.reasoning
+        if run_options is not None and run_options.permission_mode == "safe":
+            if meta is None:
+                meta = {}
+            meta["permissionMode"] = "safe"
 
         return translate_codex_event(
             data,

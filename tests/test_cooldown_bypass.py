@@ -313,8 +313,8 @@ def test_outline_text_not_stored_for_short_text():
     assert state.outline_text is None
 
 
-def test_outline_embedded_in_synthetic_action():
-    """Synthetic Approve/Deny action should include outline text in title."""
+def test_outline_in_synthetic_action_detail():
+    """Synthetic Approve/Deny action should include full outline in detail dict."""
     state = _make_state("sess-embed")
     set_discuss_cooldown("sess-embed")
 
@@ -334,19 +334,21 @@ def test_outline_embedded_in_synthetic_action():
 
     action_events = [e for e in events if isinstance(e, ActionEvent)]
     assert len(action_events) == 1
-    title = action_events[0].action.title
-    assert title.startswith("Plan outline:\n")
-    assert "Step 1: Do X" in title
+    action = action_events[0].action
+    # Short reference title (not the full outline)
+    assert "see above" in action.title
+    # Full outline text in detail dict
+    assert action.detail["outline_full_text"] == outline
     # Outline text should be cleared after use
     assert state.outline_text is None
 
 
-def test_outline_truncated_in_synthetic_action():
-    """Outline text longer than 1500 chars should be truncated in synthetic action."""
+def test_long_outline_not_truncated_in_detail():
+    """Outline text of any length should be passed fully in detail dict (no truncation)."""
     state = _make_state("sess-trunc")
     set_discuss_cooldown("sess-trunc")
 
-    long_text = "B" * 2000
+    long_text = "B" * 5000
     state.outline_text = long_text
     state.max_text_len_since_cooldown = len(long_text)
 
@@ -361,11 +363,10 @@ def test_outline_truncated_in_synthetic_action():
 
     action_events = [e for e in events if isinstance(e, ActionEvent)]
     assert len(action_events) == 1
-    title = action_events[0].action.title
-    # "Plan outline:\n" prefix + 1500 chars + "…"
-    assert title.startswith("Plan outline:\n")
-    assert title.endswith("…")
-    assert len(title) < 1520
+    action = action_events[0].action
+    # Full text preserved — no truncation
+    assert action.detail["outline_full_text"] == long_text
+    assert len(action.detail["outline_full_text"]) == 5000
 
 
 # --- _OUTLINE_PENDING lifecycle ---

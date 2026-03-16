@@ -200,7 +200,10 @@ async def _run_engine(
             await reply(text=f"error:\n{exc}")
             return
         runner: Runner = entry.runner
-        if not show_resume_line:
+        effective_resume = show_resume_line
+        if run_options is not None and run_options.show_resume_line is not None:
+            effective_resume = run_options.show_resume_line
+        if not effective_resume:
             runner = cast(Runner, _ResumeLineProxy(runner))
         warning = _reasoning_warning(engine=runner.engine, run_options=run_options)
         if warning is not None:

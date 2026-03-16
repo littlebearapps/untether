@@ -39,6 +39,7 @@ class AskQuestionCommand:
 
         flow = get_ask_question_flow()
         if flow is None:
+            logger.warning("ask_question.flow_missing", action=action)
             return CommandResult(text="No active question", notify=False)
 
         if action == "opt":
@@ -47,6 +48,11 @@ class AskQuestionCommand:
             try:
                 option_idx = int(option_idx_str)
             except ValueError:
+                logger.warning(
+                    "ask_question.option_parse_failed",
+                    request_id=flow.request_id,
+                    raw_value=option_idx_str,
+                )
                 option_idx = 0
 
             # Get the selected option label
