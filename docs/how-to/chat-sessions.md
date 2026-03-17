@@ -79,5 +79,6 @@ When `session_mode = "chat"` is enabled, Untether clears stored chat sessions on
 ## Related
 
 - [Conversation modes](../tutorials/conversation-modes.md)
+- [Cross-environment resume](cross-environment-resume.md) — pick up CLI sessions from Telegram with `/continue`
 - [Forum topics](topics.md)
 - [Commands & directives](../reference/commands-and-directives.md)

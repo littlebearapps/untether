@@ -1,0 +1,1075 @@
+{
+  "audit_results": [
+  {
+    "id": "audit_result_1764389853650_e70xiq",
+    "audit_date": "2025-11-29",
+    "project_id": "cand_2025_0424a370",
+    "score_assessment": "appropriate",
+    "explanation": "Unable to parse LLM response. Defaulting to appropriate.",
+    "confidence_in_assessment": 2,
+    "model_used": "gemini-2.5-flash",
+    "cost_usd": 0.000030149999999999998
+  },
+  {
+    "id": "audit_result_1764389856811_1dzbp4",
+    "audit_date": "2025-11-29",
+    "project_id": "cand_2025_3f50d6b8",
+    "score_assessment": "appropriate",
+    "explanation": "Unable to parse LLM response. Defaulting to appropriate.",
+    "confidence_in_assessment": 2,
+    "model_used": "gemini-2.5-flash",
+    "cost_usd": 0.000030299999999999998
+  },
+  {
+    "id": "audit_result_1764389859906_wabone",
+    "audit_date": "2025-11-29",
+    "project_id": "cand_2025_6046b7ee",
+    "score_assessment": "appropriate",
+    "explanation": "Unable to parse LLM response. Defaulting to appropriate.",
+    "confidence_in_assessment": 2,
+    "model_used": "gemini-2.5-flash",
+    "cost_usd": 0.000030149999999999998
+  },
+  {
+    "id": "audit_result_1764389863070_4ynwy7",
+    "audit_date": "2025-11-29",
+    "project_id": "cand_2025_44f6bb58",
+    "score_assessment": "appropriate",
+    "explanation": "Unable to parse LLM response. Defaulting to appropriate.",
+    "confidence_in_assessment": 2,
+    "model_used": "gemini-2.5-flash",
+    "cost_usd": 0.000030149999999999998
+  },
+  {
+    "id": "audit_result_1764389866335_d61m4b",
+    "audit_date": "2025-11-29",
+    "project_id": "cand_2025_57ea89f6",
+    "score_assessment": "appropriate",
+    "explanation": "Unable to parse LLM response. Defaulting to appropriate.",
+    "confidence_in_assessment": 2,
+    "model_used": "gemini-2.5-flash",
+    "cost_usd": 0.000030225
+  }
+]
+,
+  "backtest_results": []
+,
+  "backtest_runs": []
+,
+  "baselines": [
+  {
+    "ecosystem": "github",
+    "stars_delta_median": null,
+    "stars_delta_mad": null,
+    "downloads_delta_median": null,
+    "downloads_delta_mad": null,
+    "signups_median": null,
+    "signups_mad": null,
+    "sample_size": null,
+    "computed_at": "2026-01-01T09:00:20.795Z",
+    "metrics": "{\"stars_delta\":{\"median\":0,\"mad\":1,\"samples\":7},\"forks_delta\":{\"median\":0,\"mad\":1,\"samples\":0},\"downloads_delta\":{\"median\":0,\"mad\":1,\"samples\":7},\"signups\":{\"median\":0,\"mad\":1,\"samples\":7}}"
+  },
+  {
+    "ecosystem": "hackernews",
+    "stars_delta_median": null,
+    "stars_delta_mad": null,
+    "downloads_delta_median": null,
+    "downloads_delta_mad": null,
+    "signups_median": null,
+    "signups_mad": null,
+    "sample_size": null,
+    "computed_at": "2026-01-01T09:00:20.795Z",
+    "metrics": "{\"points_delta\":{\"median\":0,\"mad\":1,\"samples\":0},\"comments_delta\":{\"median\":0,\"mad\":1,\"samples\":0},\"stars_delta\":{\"median\":0,\"mad\":1,\"samples\":2},\"downloads_delta\":{\"median\":0,\"mad\":1,\"samples\":2},\"signups\":{\"median\":0,\"mad\":1,\"samples\":2}}"
+  },
+  {
+    "ecosystem": "devto",
+    "stars_delta_median": null,
+    "stars_delta_mad": null,
+    "downloads_delta_median": null,
+    "downloads_delta_mad": null,
+    "signups_median": null,
+    "signups_mad": null,
+    "sample_size": null,
+    "computed_at": "2026-01-01T09:00:20.795Z",
+    "metrics": "{\"reactions_delta\":{\"median\":0,\"mad\":1,\"samples\":0},\"comments_delta\":{\"median\":0,\"mad\":1,\"samples\":0},\"stars_delta\":{\"median\":0,\"mad\":1,\"samples\":9},\"downloads_delta\":{\"median\":0,\"mad\":1,\"samples\":9},\"signups\":{\"median\":0,\"mad\":1,\"samples\":9}}"
+  },
+  {
+    "ecosystem": "producthunt",
+    "stars_delta_median": null,
+    "stars_delta_mad": null,
+    "downloads_delta_median": null,
+    "downloads_delta_mad": null,
+    "signups_median": null,
+    "signups_mad": null,
+    "sample_size": null,
+    "computed_at": "2026-01-01T09:00:20.795Z",
+    "metrics": "{\"votes_delta\":{\"median\":0,\"mad\":1,\"samples\":0},\"comments_delta\":{\"median\":0,\"mad\":1,\"samples\":0},\"stars_delta\":{\"median\":0,\"mad\":1,\"samples\":4},\"downloads_delta\":{\"median\":0,\"mad\":1,\"samples\":4},\"signups\":{\"median\":0,\"mad\":1,\"samples\":4}}"
+  },
+  {
+    "ecosystem": "stackoverflow",
+    "stars_delta_median": null,
+    "stars_delta_mad": null,
+    "downloads_delta_median": null,
+    "downloads_delta_mad": null,
+    "signups_median": null,
+    "signups_mad": null,
+    "sample_size": null,
+    "computed_at": "2026-01-01T09:00:20.795Z",
+    "metrics": "{\"score_delta\":{\"median\":0,\"mad\":1,\"samples\":0},\"views_delta\":{\"median\":0,\"mad\":1,\"samples\":0},\"stars_delta\":{\"median\":0,\"mad\":1,\"samples\":11},\"downloads_delta\":{\"median\":0,\"mad\":1,\"samples\":11},\"signups\":{\"median\":0,\"mad\":1,\"samples\":11}}"
+  }
+]
+,
+  "brief_validations": [
+  {
+    "id": "briefs/2025-11-29.top1.md",
+    "project_id": "cand_2025_65e95763",
+    "validated_at": "2025-11-29T09:15:58.221Z",
+    "overall_score": 6,
+    "actionability": 5,
+    "specificity": 9,
+    "evidence_quality": 6,
+    "issues": "[\"Missing required sections: summary, problem, solution, mvp, timeline\",\"No clear timeline or action plan provided\",\"No clear success metrics defined\"]",
+    "summary": "Good brief (6/10). Strengths: specific and concrete. Areas for improvement: missing sections. 3 specific issues identified.",
+    "model_used": null,
+    "cost_usd": null,
+    "completeness": 3
+  },
+  {
+    "id": "briefs/2025-12-01.top1.md",
+    "project_id": "cand_2025_44fd6bad",
+    "validated_at": "2025-12-01T06:08:58.009Z",
+    "overall_score": 6,
+    "actionability": 6,
+    "specificity": 8,
+    "evidence_quality": 5,
+    "issues": "[\"Missing required sections: summary, problem, solution, mvp, timeline\",\"No clear timeline or action plan provided\",\"No clear success metrics defined\"]",
+    "summary": "Good brief (6/10). Strengths: specific and concrete. Areas for improvement: missing sections. 3 specific issues identified.",
+    "model_used": null,
+    "cost_usd": null,
+    "completeness": 3
+  },
+  {
+    "id": "briefs/2025-12-01.top5.md",
+    "project_id": "cand_2025_6f724bfc",
+    "validated_at": "2025-12-01T06:08:59.293Z",
+    "overall_score": 5,
+    "actionability": 5,
+    "specificity": 6,
+    "evidence_quality": 6,
+    "issues": "[\"Missing required sections: summary, problem, solution, mvp, timeline\",\"No clear timeline or action plan provided\",\"No clear success metrics defined\"]",
+    "summary": "Needs Improvement brief (5/10). Areas for improvement: missing sections. 3 specific issues identified.",
+    "model_used": null,
+    "cost_usd": null,
+    "completeness": 3
+  },
+  {
+    "id": "briefs/2025-12-01.top2.md",
+    "project_id": "cand_2025_0e23ea92",
+    "validated_at": "2025-12-01T06:09:06.451Z",
+    "overall_score": 6,
+    "actionability": 7,
+    "specificity": 7,
+    "evidence_quality": 6,
+    "issues": "[\"Missing required sections: summary, problem, solution, mvp, timeline\",\"No clear timeline or action plan provided\",\"No clear success metrics defined\"]",
+    "summary": "Good brief (6/10). Strengths: actionable, specific and concrete. Areas for improvement: missing sections. 3 specific issues identified.",
+    "model_used": null,
+    "cost_usd": null,
+    "completeness": 3
+  },
+  {
+    "id": "briefs/2025-12-01.top3.md",
+    "project_id": "cand_2025_3c772374",
+    "validated_at": "2025-12-01T06:09:15.066Z",
+    "overall_score": 5,
+    "actionability": 5,
+    "specificity": 8,
+    "evidence_quality": 6,
+    "issues": "[\"Missing required sections: summary, problem, solution, mvp, timeline\",\"No clear timeline or action plan provided\",\"No clear success metrics defined\"]",
+    "summary": "Needs Improvement brief (5/10). Strengths: specific and concrete. Areas for improvement: missing sections. 3 specific issues identified.",
+    "model_used": null,
+    "cost_usd": null,
+    "completeness": 3
+  }
+]
+,
+  "competitor_alerts": []
+,
+  "competitor_snapshots": [
+  {
+    "id": "snap_1764560558786_925dum",
+    "repo": "github:wrenchpilot/it-tools-mcp",
+    "stars": 14,
+    "forks": 3,
+    "downloads_monthly": 0,
+    "latest_release": "2025-11-29T15:48:53Z",
+    "snapshot_at": "2025-12-01T03:42:38.392Z"
+  }
+]
+,
+  "competitors": [
+  {
+    "candidate_id": "cand_2025_69267690",
+    "repo": "github:wrenchpilot/it-tools-mcp",
+    "source": "github_keywords",
+    "reason": "Shared keywords: corentinth, tools",
+    "baseline_stars": 14,
+    "baseline_downloads": 0,
+    "discovered_at": "2025-12-01T03:42:20.976Z"
+  }
+]
+,
+  "cron_runs": [
+  {
+    "id": "cron_audit_2025_11_30",
+    "cron_type": "audit",
+    "status": "completed",
+    "started_at": "2025-11-30T10:00:25.956Z",
+    "completed_at": "2025-11-30T10:06:19.783Z",
+    "checkpoint": null,
+    "error": null,
+    "retries": 1
+  },
+  {
+    "id": "cron_weight_suggestion_2025_12_02",
+    "cron_type": "weight_suggestion",
+    "status": "completed",
+    "started_at": "2025-12-02T10:00:36.987Z",
+    "completed_at": "2025-12-02T10:00:38.148Z",
+    "checkpoint": null,
+    "error": null,
+    "retries": 1
+  },
+  {
+    "id": "cron_audit_2025_12_03",
+    "cron_type": "audit",
+    "status": "completed",
+    "started_at": "2025-12-03T10:01:06.690Z",
+    "completed_at": "2025-12-03T10:11:34.989Z",
+    "checkpoint": null,
+    "error": null,
+    "retries": 1
+  },
+  {
+    "id": "cron_audit_2025_12_07",
+    "cron_type": "audit",
+    "status": "completed",
+    "started_at": "2025-12-07T10:00:35.346Z",
+    "completed_at": "2025-12-07T10:07:10.643Z",
+    "checkpoint": null,
+    "error": null,
+    "retries": 1
+  },
+  {
+    "id": "cron_audit_2025_12_10",
+    "cron_type": "audit",
+    "status": "completed",
+    "started_at": "2025-12-10T10:00:37.446Z",
+    "completed_at": "2025-12-10T10:08:13.862Z",
+    "checkpoint": null,
+    "error": null,
+    "retries": 1
+  }
+]
+,
+  "d1_migrations": [
+  {
+    "id": 1,
+    "name": "0001_schema.sql",
+    "applied_at": "2025-12-26 11:19:41"
+  },
+  {
+    "id": 2,
+    "name": "0002_add_completeness_column.sql",
+    "applied_at": "2025-12-26 11:20:13"
+  },
+  {
+    "id": 3,
+    "name": "0003_add_cron_runs_table.sql",
+    "applied_at": "2025-12-26 11:20:13"
+  },
+  {
+    "id": 4,
+    "name": "0004_add_api_costs_table.sql",
+    "applied_at": "2025-12-26 11:20:13"
+  },
+  {
+    "id": 5,
+    "name": "0005_add_evidence_sources_tables.sql",
+    "applied_at": "2025-12-26 11:20:13"
+  }
+]
+,
+  "decisions": [
+  {
+    "decision_id": "dec_1764400733359_laalkx",
+    "project_id": "cand_2025_074b36e0",
+    "decided_at": "2025-11-29T07:18:53.359Z",
+    "promoted": 1,
+    "predicted_score": 62,
+    "predicted_confidence": 0.42467000000000005,
+    "weights_version": "2025-11-29",
+    "weights_hash": "sha256:default",
+    "config_snapshot": "{}"
+  },
+  {
+    "decision_id": "dec_1764400800229_sp8hm3",
+    "project_id": "cand_2025_11dee68a",
+    "decided_at": "2025-11-29T07:20:00.229Z",
+    "promoted": 1,
+    "predicted_score": 61,
+    "predicted_confidence": 0.42593250000000005,
+    "weights_version": "2025-11-29",
+    "weights_hash": "sha256:default",
+    "config_snapshot": "{}"
+  },
+  {
+    "decision_id": "dec_1764400803034_1ksfti",
+    "project_id": "cand_2025_761bc240",
+    "decided_at": "2025-11-29T07:20:03.034Z",
+    "promoted": 1,
+    "predicted_score": 61,
+    "predicted_confidence": 0.42683250000000006,
+    "weights_version": "2025-11-29",
+    "weights_hash": "sha256:default",
+    "config_snapshot": "{}"
+  },
+  {
+    "decision_id": "dec_manual_1764482657947_rdu07x",
+    "project_id": "cand_2025_7e553fbf",
+    "decided_at": "2025-11-30T06:04:17.599Z",
+    "promoted": 1,
+    "predicted_score": 61,
+    "predicted_confidence": 0.5562981458923446,
+    "weights_version": "2025-11-30",
+    "weights_hash": "sha256:default",
+    "config_snapshot": "{}"
+  },
+  {
+    "decision_id": "dec_force_1764561061116_akx7ql",
+    "project_id": "cand_2025_49652bd0",
+    "decided_at": "2025-12-01T03:51:00.830Z",
+    "promoted": 1,
+    "predicted_score": 60,
+    "predicted_confidence": 0.42675,
+    "weights_version": "2025-12-01",
+    "weights_hash": "sha256:default",
+    "config_snapshot": "{}"
+  }
+]
+,
+  "dlq_messages": []
+,
+  "events": [
+  {
+    "id": "gh_663900193",
+    "type": "github_repo",
+    "project_id": "cand_2025_0424a370",
+    "source": "github",
+    "payload": "{\"id\":\"gh_663900193\",\"title\":\"sxyazi/yazi\",\"url\":\"https://github.com/sxyazi/yazi\",\"timestamp\":\"2025-11-27T06:22:19Z\",\"type\":\"github_repo\",\"text\":\"💥 Blazing fast terminal file manager written in Rust, based on async I/O.\",\"metrics\":{\"stars\":30158,\"forks\":656,\"watchers\":30158},\"tags\":[\"android\",\"asyncio\",\"cli\",\"command-line\",\"concurrency\",\"cross-platform\",\"developer-tools\",\"file-explorer\",\"file-manager\",\"filesystem\",\"linux\",\"macos\",\"neovim\",\"productivity\",\"rust\",\"terminal\",\"tui\",\"vim\",\"windows\"]}",
+    "event_ts": "2025-11-27T06:22:19Z",
+    "created_at": "2025-11-27 06:25:12"
+  },
+  {
+    "id": "gh_1069457150",
+    "type": "github_repo",
+    "project_id": "cand_2025_3f50d6b8",
+    "source": "github",
+    "payload": "{\"id\":\"gh_1069457150\",\"title\":\"marcusgoll/Spec-Flow\",\"url\":\"https://github.com/marcusgoll/Spec-Flow\",\"timestamp\":\"2025-11-27T06:16:14Z\",\"type\":\"github_repo\",\"text\":\"Turn product ideas into production launches with Spec-Driven Development. Repeatable Claude Code workflows with quality gates, token budgets, and auditable artifacts.\",\"metrics\":{\"stars\":12,\"forks\":1,\"watchers\":12},\"tags\":[\"ai-agents\",\"ai-assisted-development\",\"ai-workflows\",\"automation\",\"bash\",\"claude\",\"claude-ai\",\"claude-code\",\"developer-tools\",\"documentation\",\"powershell\",\"productivity\",\"spec-driven-development\",\"workflow\",\"workflow-automation\"]}",
+    "event_ts": "2025-11-27T06:16:14Z",
+    "created_at": "2025-11-27 06:25:12"
+  },
+  {
+    "id": "gh_791194177",
+    "type": "github_repo",
+    "project_id": "cand_2025_41b690c0",
+    "source": "github",
+    "payload": "{\"id\":\"gh_791194177\",\"title\":\"brandonyoungdev/tldx\",\"url\":\"https://github.com/brandonyoungdev/tldx\",\"timestamp\":\"2025-11-27T06:15:50Z\",\"type\":\"github_repo\",\"text\":\"Domain Availability Research Tool\",\"metrics\":{\"stars\":1721,\"forks\":66,\"watchers\":1721},\"tags\":[\"cli\",\"developer-tools\",\"domain\",\"golang\"]}",
+    "event_ts": "2025-11-27T06:15:50Z",
+    "created_at": "2025-11-27 06:25:13"
+  },
+  {
+    "id": "gh_488641606",
+    "type": "github_repo",
+    "project_id": "cand_2025_4c7cb7d0",
+    "source": "github",
+    "payload": "{\"id\":\"gh_488641606\",\"title\":\"agno-agi/agno\",\"url\":\"https://github.com/agno-agi/agno\",\"timestamp\":\"2025-11-27T06:22:38Z\",\"type\":\"github_repo\",\"text\":\"Multi-agent framework, runtime and control plane. Built for speed, privacy, and scale.\",\"metrics\":{\"stars\":35555,\"forks\":4684,\"watchers\":35555},\"tags\":[\"agents\",\"ai\",\"ai-agents\",\"developer-tools\",\"python\"]}",
+    "event_ts": "2025-11-27T06:22:38Z",
+    "created_at": "2025-11-27 06:25:13"
+  },
+  {
+    "id": "gh_644686905",
+    "type": "github_repo",
+    "project_id": "cand_2025_7a05a860",
+    "source": "github",
+    "payload": "{\"id\":\"gh_644686905\",\"title\":\"continuedev/continue\",\"url\":\"https://github.com/continuedev/continue\",\"timestamp\":\"2025-11-27T06:05:30Z\",\"type\":\"github_repo\",\"text\":\"⏩ Ship faster with Continuous AI. Open-source CLI that can be used in TUI mode as a coding agent or Headless mode to run background agents\",\"metrics\":{\"stars\":30010,\"forks\":3826,\"watchers\":30010},\"tags\":[\"agent\",\"ai\",\"background-agents\",\"claude\",\"cli\",\"continuous-ai\",\"developer-tools\",\"gemini\",\"gpt\",\"hacktoberfest\",\"jetbrains\",\"llm\",\"open-source\",\"qwen\",\"vscode\",\"workflows\"]}",
+    "event_ts": "2025-11-27T06:05:30Z",
+    "created_at": "2025-11-27 06:25:14"
+  }
+]
+,
+  "evidence": [
+  {
+    "id": "ev_gh_1764561145031_3bs0c7",
+    "project_id": "cand_2025_49652bd0",
+    "opportunity_id": null,
+    "kind": "pro",
+    "source": "github:commits",
+    "summary": "1 commits in last 7 days",
+    "url": "https://github.com/Secreto31126/whatsapp-api-js/commits",
+    "observed_at": "2025-12-01T03:52:24.183Z"
+  },
+  {
+    "id": "ev_gh_1764561145081_49ueoz",
+    "project_id": "cand_2025_49652bd0",
+    "opportunity_id": null,
+    "kind": "pro",
+    "source": "github:activity",
+    "summary": "Active - updated 0 days ago",
+    "url": "https://github.com/Secreto31126/whatsapp-api-js",
+    "observed_at": "2025-12-01T03:52:24.183Z"
+  },
+  {
+    "id": "ev_gh_1764561145997_035yfm",
+    "project_id": "cand_2025_0424a370",
+    "opportunity_id": null,
+    "kind": "pro",
+    "source": "github:commits",
+    "summary": "5 commits in last 7 days",
+    "url": "https://github.com/sxyazi/yazi/commits",
+    "observed_at": "2025-12-01T03:52:24.183Z"
+  },
+  {
+    "id": "ev_gh_1764561146044_05xoi1",
+    "project_id": "cand_2025_0424a370",
+    "opportunity_id": null,
+    "kind": "pro",
+    "source": "github:activity",
+    "summary": "Active - updated 0 days ago",
+    "url": "https://github.com/sxyazi/yazi",
+    "observed_at": "2025-12-01T03:52:24.183Z"
+  },
+  {
+    "id": "ev_vmqaa0",
+    "project_id": "cand_2025_074b36e0",
+    "opportunity_id": null,
+    "kind": "neutral",
+    "source": "hackernews",
+    "summary": "Show HN: I Curated Premium Black Friday Deals for SaaS and Apps",
+    "url": "https://www.blackfridaydeals.directory",
+    "observed_at": "2025-12-01T09:00:32.825Z"
+  }
+]
+,
+  "evidence_refresh": [
+  {
+    "project_id": "cand_2025_161ba1f2",
+    "last_refresh_at": "2025-12-07T04:41:11.093Z",
+    "sources_collected": "[\"github_stars\"]"
+  },
+  {
+    "project_id": "cand_2025_3fb54690",
+    "last_refresh_at": "2025-12-07T04:41:13.091Z",
+    "sources_collected": "[\"npm_downloads\",\"github_stars\"]"
+  },
+  {
+    "project_id": "cand_2025_77cf53d0",
+    "last_refresh_at": "2025-12-07T04:41:14.278Z",
+    "sources_collected": "[\"github_stars\"]"
+  },
+  {
+    "project_id": "cand_2025_54f1d070",
+    "last_refresh_at": "2025-12-07T04:41:15.523Z",
+    "sources_collected": "[\"github_stars\"]"
+  },
+  {
+    "project_id": "cand_2025_7d512a3c",
+    "last_refresh_at": "2025-12-07T04:41:16.768Z",
+    "sources_collected": "[\"github_stars\"]"
+  }
+]
+,
+  "ingest_log": [
+  {
+    "id": 1,
+    "source": "reddit",
+    "source_id": "reddit_1ppr6gh",
+    "raw_path": "layer1/reddit/2025/12/27/reddit.jsonl",
+    "ingested_at": "2025-12-27 03:19:19",
+    "processed_at": "2026-01-03T08:58:00.956Z",
+    "status": "pending",
+    "quarantine_reason": null,
+    "fingerprint": null,
+    "occurrence_count": 1,
+    "last_seen": "2025-12-27 03:19:19"
+  },
+  {
+    "id": 2,
+    "source": "reddit",
+    "source_id": "reddit_1oaq2kx",
+    "raw_path": "layer1/reddit/2025/12/27/reddit.jsonl",
+    "ingested_at": "2025-12-27 03:19:19",
+    "processed_at": "2026-01-03T08:58:03.732Z",
+    "status": "pending",
+    "quarantine_reason": null,
+    "fingerprint": null,
+    "occurrence_count": 1,
+    "last_seen": "2025-12-27 03:19:19"
+  },
+  {
+    "id": 3,
+    "source": "reddit",
+    "source_id": "reddit_1pwaz5e",
+    "raw_path": "layer1/reddit/2025/12/27/reddit.jsonl",
+    "ingested_at": "2025-12-27 03:19:19",
+    "processed_at": "2026-01-03T08:58:05.025Z",
+    "status": "pending",
+    "quarantine_reason": null,
+    "fingerprint": null,
+    "occurrence_count": 1,
+    "last_seen": "2025-12-27 03:19:19"
+  },
+  {
+    "id": 4,
+    "source": "reddit",
+    "source_id": "reddit_1pwhzzf",
+    "raw_path": "layer1/reddit/2025/12/27/reddit.jsonl",
+    "ingested_at": "2025-12-27 03:19:19",
+    "processed_at": "2026-01-03T08:58:07.835Z",
+    "status": "pending",
+    "quarantine_reason": null,
+    "fingerprint": null,
+    "occurrence_count": 1,
+    "last_seen": "2025-12-27 03:19:19"
+  },
+  {
+    "id": 5,
+    "source": "reddit",
+    "source_id": "reddit_1pw3oq3",
+    "raw_path": "layer1/reddit/2025/12/27/reddit.jsonl",
+    "ingested_at": "2025-12-27 03:19:19",
+    "processed_at": "2026-01-03T08:58:10.312Z",
+    "status": "pending",
+    "quarantine_reason": null,
+    "fingerprint": null,
+    "occurrence_count": 1,
+    "last_seen": "2025-12-27 03:19:19"
+  }
+]
+,
+  "learning_proposals": [
+  {
+    "run_id": "suggest_20251202T100037",
+    "run_at": "2025-12-02T10:00:37.203Z",
+    "outcomes_count": 0,
+    "current_brier": 0.25,
+    "proposals": "[]",
+    "validation_brier": null,
+    "improvement_pct": null,
+    "status": "pending"
+  },
+  {
+    "run_id": "suggest_20260102T100014",
+    "run_at": "2026-01-02T10:00:14.471Z",
+    "outcomes_count": 0,
+    "current_brier": 0.25,
+    "proposals": "[]",
+    "validation_brier": null,
+    "improvement_pct": null,
+    "status": "pending"
+  }
+]
+,
+  "manifests": [
+  {
+    "id": "manifest_github_20251201",
+    "source": "github",
+    "ts": "2025-12-01 06:00:43",
+    "record_count": 90,
+    "duration_ms": null,
+    "status": "completed",
+    "metadata": "{\"r2_key\":\"bronze/2025/12/01/github.jsonl\",\"byte_count\":39529}"
+  },
+  {
+    "id": "manifest_hackernews_20251201",
+    "source": "hackernews",
+    "ts": "2025-12-01 06:00:49",
+    "record_count": 80,
+    "duration_ms": null,
+    "status": "completed",
+    "metadata": "{\"r2_key\":\"bronze/2025/12/01/hackernews.jsonl\",\"byte_count\":20058}"
+  },
+  {
+    "id": "manifest_devto_20251201",
+    "source": "devto",
+    "ts": "2025-12-01 06:01:03",
+    "record_count": 75,
+    "duration_ms": null,
+    "status": "completed",
+    "metadata": "{\"r2_key\":\"bronze/2025/12/01/devto.jsonl\",\"byte_count\":34071}"
+  },
+  {
+    "id": "manifest_producthunt_20251201",
+    "source": "producthunt",
+    "ts": "2025-12-01 06:01:11",
+    "record_count": 20,
+    "duration_ms": null,
+    "status": "completed",
+    "metadata": "{\"r2_key\":\"bronze/2025/12/01/producthunt.jsonl\",\"byte_count\":8045}"
+  },
+  {
+    "id": "manifest_dataforseo_20251201",
+    "source": "dataforseo",
+    "ts": "2025-12-01 06:02:17",
+    "record_count": 6,
+    "duration_ms": null,
+    "status": "completed",
+    "metadata": "{\"r2_key\":\"bronze/2025/12/01/dataforseo.jsonl\",\"byte_count\":1753}"
+  }
+]
+,
+  "npm_downloads": [
+  {
+    "id": "npm_cand_2025_3fb54690_2025-12-07",
+    "project_id": "cand_2025_3fb54690",
+    "package_name": "pyroscope",
+    "downloads_weekly": 281,
+    "downloads_monthly": 1125,
+    "snapshot_at": "2025-12-07T04:41:12.487Z"
+  },
+  {
+    "id": "npm_cand_2025_66fb41e4_2025-12-07",
+    "project_id": "cand_2025_66fb41e4",
+    "package_name": "dingo",
+    "downloads_weekly": 6,
+    "downloads_monthly": 13,
+    "snapshot_at": "2025-12-07T04:41:21.197Z"
+  },
+  {
+    "id": "npm_cand_2025_43bfaa98_2025-12-07",
+    "project_id": "cand_2025_43bfaa98",
+    "package_name": "ostrio-analytics",
+    "downloads_weekly": 112,
+    "downloads_monthly": 176,
+    "snapshot_at": "2025-12-07T04:51:04.408Z"
+  },
+  {
+    "id": "npm_cand_2025_17bd2790_2025-12-07",
+    "project_id": "cand_2025_17bd2790",
+    "package_name": "repomix",
+    "downloads_weekly": 32274,
+    "downloads_monthly": 127078,
+    "snapshot_at": "2025-12-07T04:51:34.951Z"
+  },
+  {
+    "id": "npm_cand_2025_6bdd8b48_2025-12-07",
+    "project_id": "cand_2025_6bdd8b48",
+    "package_name": "mirrord",
+    "downloads_weekly": 0,
+    "downloads_monthly": 0,
+    "snapshot_at": "2025-12-07T04:51:38.767Z"
+  }
+]
+,
+  "opportunities": [
+  {
+    "id": "opp_2026_itlb6b",
+    "source_event_id": "1",
+    "title": "Nightlife ticketing platform UX and feature gaps",
+    "summary": "The nightlife ticketing platform Purpl.do has UX and feature gaps that need to be addressed to improve user experience and retention. A micro-SaaS solution could help fill these gaps, providing a competitive advantage and increasing revenue through innovative monetization strategies.",
+    "pain_level": 8,
+    "vertical": "plugin",
+    "status": "new",
+    "created_at": "2026-01-03T08:58:00.956Z",
+    "vertical_metadata": null,
+    "triage_error": null,
+    "triage_error_at": null,
+    "title_hash": null,
+    "updated_at": "2026-01-18T08:00:44.624Z",
+    "cost_accrued": 0,
+    "token_usage": null,
+    "investigation_status": "expired",
+    "ai_reasoning": null,
+    "solo_dev_score": null,
+    "rejection_reason": null
+  },
+  {
+    "id": "opp_2026_z8e8lo",
+    "source_event_id": "2",
+    "title": "Nightlife ticketing platform UX and feature gaps",
+    "summary": "The nightlife ticketing platform Purpl.do has UX and feature gaps that need addressing to improve user experience and retention. A micro-SaaS solution could help fill these gaps and provide a competitive edge in the market.",
+    "pain_level": 8,
+    "vertical": "plugin",
+    "status": "new",
+    "created_at": "2026-01-03T08:58:03.732Z",
+    "vertical_metadata": null,
+    "triage_error": null,
+    "triage_error_at": null,
+    "title_hash": null,
+    "updated_at": "2026-01-18T08:00:44.624Z",
+    "cost_accrued": 0,
+    "token_usage": null,
+    "investigation_status": "expired",
+    "ai_reasoning": null,
+    "solo_dev_score": null,
+    "rejection_reason": null
+  },
+  {
+    "id": "opp_2026_1nqh0a",
+    "source_event_id": "3",
+    "title": "Nightlife ticketing platform UX and feature gaps",
+    "summary": "Nightlife event organizers and customers struggle with inefficient ticketing processes, leading to lost revenue and poor customer experiences. A micro-SaaS solution could integrate with existing ticketing platforms to provide a more seamless and user-friendly experience, increasing revenue and customer satisfaction.",
+    "pain_level": 8,
+    "vertical": "integration",
+    "status": "new",
+    "created_at": "2026-01-03T08:58:05.025Z",
+    "vertical_metadata": null,
+    "triage_error": null,
+    "triage_error_at": null,
+    "title_hash": null,
+    "updated_at": "2026-01-18T08:00:44.624Z",
+    "cost_accrued": 0,
+    "token_usage": null,
+    "investigation_status": "expired",
+    "ai_reasoning": null,
+    "solo_dev_score": null,
+    "rejection_reason": null
+  },
+  {
+    "id": "opp_2026_z9qdev",
+    "source_event_id": "4",
+    "title": "Nightlife ticketing platform UX and feature gaps",
+    "summary": "The nightlife ticketing platform Purpl.do faces UX and feature gaps, hindering its growth and competitiveness. A micro-SaaS solution could address these issues, providing a more seamless experience for users and increasing revenue for the platform.",
+    "pain_level": 8,
+    "vertical": "plugin",
+    "status": "new",
+    "created_at": "2026-01-03T08:58:07.835Z",
+    "vertical_metadata": null,
+    "triage_error": null,
+    "triage_error_at": null,
+    "title_hash": null,
+    "updated_at": "2026-01-18T08:00:44.624Z",
+    "cost_accrued": 0,
+    "token_usage": null,
+    "investigation_status": "expired",
+    "ai_reasoning": null,
+    "solo_dev_score": null,
+    "rejection_reason": null
+  },
+  {
+    "id": "opp_2026_m5u1av",
+    "source_event_id": "5",
+    "title": "Nightlife ticketing platform UX and feature gaps",
+    "summary": "Nightlife event organizers and attendees struggle with inefficient ticketing processes, leading to lost revenue and poor user experience. A micro-SaaS solution could provide a more streamlined and user-friendly platform, addressing specific pain points and increasing revenue for organizers and satisfaction for attendees.",
+    "pain_level": 8,
+    "vertical": "plugin",
+    "status": "new",
+    "created_at": "2026-01-03T08:58:10.312Z",
+    "vertical_metadata": null,
+    "triage_error": null,
+    "triage_error_at": null,
+    "title_hash": null,
+    "updated_at": "2026-01-18T08:00:44.624Z",
+    "cost_accrued": 0,
+    "token_usage": null,
+    "investigation_status": "expired",
+    "ai_reasoning": null,
+    "solo_dev_score": null,
+    "rejection_reason": null
+  }
+]
+,
+  "outcomes": [
+  {
+    "id": "outcome_1764400733687_b2kpo6",
+    "project_id": "cand_2025_074b36e0",
+    "decision_id": "dec_1764400733359_laalkx",
+    "action": "rejected",
+    "horizon_days": 28,
+    "decided_at": "2025-11-29T07:18:53.359Z",
+    "observed_at": "2025-12-07T02:31:30.865Z",
+    "baseline": "{\"stars\":0,\"downloads\":0,\"signups\":0}",
+    "realized": "{\"stars_delta\":0,\"downloads_delta\":0,\"signups\":0}",
+    "notes": "Black Friday deals curation - seasonal, low differentiation",
+    "bad_classification": 0
+  },
+  {
+    "id": "outcome_1764400800540_syq1hs",
+    "project_id": "cand_2025_11dee68a",
+    "decision_id": "dec_1764400800229_sp8hm3",
+    "action": "spiked",
+    "horizon_days": 28,
+    "decided_at": "2025-11-29T07:20:00.229Z",
+    "observed_at": "2025-12-07T02:31:30.693Z",
+    "baseline": "{\"stars\":0,\"downloads\":0,\"signups\":0}",
+    "realized": "{\"stars_delta\":0,\"downloads_delta\":0,\"signups\":0}",
+    "notes": "Visual API generator - already built by author, Show HN post",
+    "bad_classification": 0
+  },
+  {
+    "id": "outcome_1764400803078_cc7p8e",
+    "project_id": "cand_2025_761bc240",
+    "decision_id": "dec_1764400803034_1ksfti",
+    "action": "deferred",
+    "horizon_days": 28,
+    "decided_at": "2025-11-29T07:20:03.034Z",
+    "observed_at": "2025-11-30T07:33:11.305Z",
+    "baseline": "{\"stars\":0,\"downloads\":0,\"signups\":0}",
+    "realized": "{\"stars_delta\":3,\"downloads_delta\":0,\"signups\":0}",
+    "notes": "Testing shell update fix",
+    "bad_classification": 0
+  },
+  {
+    "id": "outcome_manual_1764482657947_d4it6b",
+    "project_id": "cand_2025_7e553fbf",
+    "decision_id": "dec_manual_1764482657947_rdu07x",
+    "action": "spiked",
+    "horizon_days": 0,
+    "decided_at": "2025-11-30T06:04:17.599Z",
+    "observed_at": "2025-11-30T06:04:17.599Z",
+    "baseline": "{\"stars\":0,\"downloads\":0,\"signups\":0}",
+    "realized": "{\"stars_delta\":5,\"downloads_delta\":0,\"signups\":0}",
+    "notes": "Test v0.5.5 manual outcome",
+    "bad_classification": 0
+  },
+  {
+    "id": "outcome_force_1764561061116_3tsd7y",
+    "project_id": "cand_2025_49652bd0",
+    "decision_id": "dec_force_1764561061116_akx7ql",
+    "action": "spiked",
+    "horizon_days": 28,
+    "decided_at": "2025-12-01T03:51:00.830Z",
+    "observed_at": "2025-12-07T02:31:30.506Z",
+    "baseline": "{\"stars\":0,\"downloads\":0,\"signups\":0}",
+    "realized": "{\"stars_delta\":0,\"downloads_delta\":0,\"signups\":0}",
+    "notes": "whatsapp-api-js - library for existing API, limited opportunity",
+    "bad_classification": 0
+  }
+]
+,
+  "platform_readiness": []
+,
+  "projects": [
+  {
+    "id": "cand_2025_0424a370",
+    "title": "sxyazi/yazi",
+    "url": "https://github.com/sxyazi/yazi",
+    "source": "github",
+    "score": 56,
+    "confidence": 0.20723528047792278,
+    "status": "scored",
+    "created_at": "2025-11-27 06:25:12",
+    "updated_at": "2025-12-30 06:02:21"
+  },
+  {
+    "id": "cand_2025_3f50d6b8",
+    "title": "marcusgoll/Spec-Flow",
+    "url": "https://github.com/marcusgoll/Spec-Flow",
+    "source": "github",
+    "score": 51,
+    "confidence": 0.226062042501044,
+    "status": "scored",
+    "created_at": "2025-11-27 06:25:12",
+    "updated_at": "2025-12-15 06:03:03"
+  },
+  {
+    "id": "cand_2025_41b690c0",
+    "title": "brandonyoungdev/tldx",
+    "url": "https://github.com/brandonyoungdev/tldx",
+    "source": "github",
+    "score": 57,
+    "confidence": 0.23083934538260575,
+    "status": "scored",
+    "created_at": "2025-11-27 06:25:13",
+    "updated_at": "2025-12-15 06:02:52"
+  },
+  {
+    "id": "cand_2025_4c7cb7d0",
+    "title": "agno-agi/agno",
+    "url": "https://github.com/agno-agi/agno",
+    "source": "github",
+    "score": 59,
+    "confidence": 0.21764435853922243,
+    "status": "scored",
+    "created_at": "2025-11-27 06:25:13",
+    "updated_at": "2025-12-26 06:02:41"
+  },
+  {
+    "id": "cand_2025_7a05a860",
+    "title": "continuedev/continue",
+    "url": "https://github.com/continuedev/continue",
+    "source": "github",
+    "score": 58,
+    "confidence": 0.21310698112825027,
+    "status": "scored",
+    "created_at": "2025-11-27 06:25:14",
+    "updated_at": "2025-12-29 06:02:10"
+  }
+]
+,
+  "pypi_downloads": [
+  {
+    "id": "pypi_cand_2025_47519b4d_2025-12-07",
+    "project_id": "cand_2025_47519b4d",
+    "package_name": "promptv",
+    "downloads_daily": 3,
+    "downloads_weekly": 790,
+    "downloads_monthly": 790,
+    "snapshot_at": "2025-12-07T04:51:28.922Z"
+  },
+  {
+    "id": "pypi_cand_2025_41b690c0_2025-12-07",
+    "project_id": "cand_2025_41b690c0",
+    "package_name": "tldx",
+    "downloads_daily": 2,
+    "downloads_weekly": 5,
+    "downloads_monthly": 19,
+    "snapshot_at": "2025-12-07T04:51:32.758Z"
+  },
+  {
+    "id": "pypi_cand_2025_17bd2790_2025-12-07",
+    "project_id": "cand_2025_17bd2790",
+    "package_name": "repomix",
+    "downloads_daily": 3630,
+    "downloads_weekly": 33960,
+    "downloads_monthly": 124511,
+    "snapshot_at": "2025-12-07T04:51:35.287Z"
+  },
+  {
+    "id": "pypi_cand_2025_741dd310_2025-12-07",
+    "project_id": "cand_2025_741dd310",
+    "package_name": "files",
+    "downloads_daily": 50,
+    "downloads_weekly": 456,
+    "downloads_monthly": 1876,
+    "snapshot_at": "2025-12-07T04:51:40.817Z"
+  },
+  {
+    "id": "pypi_cand_2025_1a0ea4e4_2025-12-07",
+    "project_id": "cand_2025_1a0ea4e4",
+    "package_name": "decentralized-internet",
+    "downloads_daily": 0,
+    "downloads_weekly": 4,
+    "downloads_monthly": 45,
+    "snapshot_at": "2025-12-07T04:51:42.724Z"
+  }
+]
+,
+  "serp_queries": [
+  {
+    "candidate_id": "cand_2025_17bd2790",
+    "query": "\"yamadashy/repomix\" tool OR extension OR plugin",
+    "saturation": 0.3,
+    "competing_tools_count": 3,
+    "queried_at": "2025-12-07T07:00:32.190Z",
+    "cost_usd": 0.03,
+    "cached": 0
+  },
+  {
+    "candidate_id": "cand_2025_5fed6c34",
+    "query": "\"Wireshark 4.6.2 Is Out to Update Protocol/Capture File Support and Fix More Bugs\" tool OR extension OR plugin",
+    "saturation": 0,
+    "competing_tools_count": 0,
+    "queried_at": "2025-12-07T07:00:37.730Z",
+    "cost_usd": 0.03,
+    "cached": 0
+  },
+  {
+    "candidate_id": "cand_2025_01e4a74d",
+    "query": "\"Frustrated users crowdfund a $2,000 fix for Lenovo Legion ‘speakers not working properly’ error — bug bounty posted, coder wins the cash by fixing complex audio annoyance in just a month\" tool OR extension OR plugin",
+    "saturation": 0,
+    "competing_tools_count": 0,
+    "queried_at": "2025-12-07T07:00:39.453Z",
+    "cost_usd": 0.03,
+    "cached": 0
+  },
+  {
+    "candidate_id": "cand_2025_0c023650",
+    "query": "\"ankeetmaini/react-infinite-scroll-component\" tool OR extension OR plugin",
+    "saturation": 0.4,
+    "competing_tools_count": 4,
+    "queried_at": "2025-12-14T07:00:46.352Z",
+    "cost_usd": 0.03,
+    "cached": 0
+  },
+  {
+    "candidate_id": "cand_2025_1e240935",
+    "query": "\"Amis’s characters -and probably Amis - are the essence of Reform / Brexit Britain. \n\nThe bigotry...\" tool OR extension OR plugin",
+    "saturation": 0,
+    "competing_tools_count": 0,
+    "queried_at": "2025-12-14T07:00:50.342Z",
+    "cost_usd": 0.03,
+    "cached": 0
+  }
+]
+,
+  "signals": [
+  {
+    "project_id": "cand_2025_0424a370",
+    "signal_type": "pain_intensity",
+    "value": 5,
+    "source": "score_worker",
+    "computed_at": "2025-12-30 06:02:19"
+  },
+  {
+    "project_id": "cand_2025_0424a370",
+    "signal_type": "monetizability",
+    "value": 5.5,
+    "source": "score_worker",
+    "computed_at": "2025-12-30 06:02:19"
+  },
+  {
+    "project_id": "cand_2025_0424a370",
+    "signal_type": "competitor_gap",
+    "value": 7.5,
+    "source": "score_worker",
+    "computed_at": "2025-12-30 06:02:20"
+  },
+  {
+    "project_id": "cand_2025_0424a370",
+    "signal_type": "evidence_quality",
+    "value": 2,
+    "source": "score_worker",
+    "computed_at": "2025-12-30 06:02:20"
+  },
+  {
+    "project_id": "cand_2025_3f50d6b8",
+    "signal_type": "pain_intensity",
+    "value": 5.4,
+    "source": "score_worker",
+    "computed_at": "2025-12-15 06:03:02"
+  }
+]
+,
+  "stars_history": [
+  {
+    "id": "stars_cand_2025_161ba1f2_2025-12-07",
+    "project_id": "cand_2025_161ba1f2",
+    "stars": 26626,
+    "snapshot_at": "2025-12-07T04:41:11.014Z"
+  },
+  {
+    "id": "stars_cand_2025_3fb54690_2025-12-07",
+    "project_id": "cand_2025_3fb54690",
+    "stars": 11057,
+    "snapshot_at": "2025-12-07T04:41:13.014Z"
+  },
+  {
+    "id": "stars_cand_2025_77cf53d0_2025-12-07",
+    "project_id": "cand_2025_77cf53d0",
+    "stars": 137,
+    "snapshot_at": "2025-12-07T04:41:14.203Z"
+  },
+  {
+    "id": "stars_cand_2025_54f1d070_2025-12-07",
+    "project_id": "cand_2025_54f1d070",
+    "stars": 624,
+    "snapshot_at": "2025-12-07T04:41:15.456Z"
+  },
+  {
+    "id": "stars_cand_2025_7d512a3c_2025-12-07",
+    "project_id": "cand_2025_7d512a3c",
+    "stars": 205,
+    "snapshot_at": "2025-12-07T04:41:16.682Z"
+  }
+]
+}

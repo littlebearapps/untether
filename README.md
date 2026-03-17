@@ -130,11 +130,14 @@ That's it. Your agent runs on your machine, streams progress to Telegram, and yo
 | **Reasoning/effort levels** | ✅ | ✅ | — | — | — | — |
 | **Device re-auth (`/auth`)** | — | ✅ | — | — | — | — |
 | **Context compaction** | — | — | — | ✅ | — | — |
+| **Cross-env resume (`/continue`)** | ✅ | ✅ | ✅ | ✅⁵ | ✅ | —⁶ |
 
 ¹ Amp model override maps to `--mode` (deep/free/rush/smart).
 ² Toggle via `/config` between read-only (default), edit files (`--approval-mode=auto_edit`, files OK but no shell), and full access (`--approval-mode=yolo`); pre-run policy, not interactive mid-run approval.
 ³ Token usage counts only — no USD cost reporting.
 ⁴ Toggle via `/config` between full auto (default) and safe (`--ask-for-approval=untrusted`, untrusted tools blocked); pre-run policy, not interactive mid-run approval.
+⁵ Pi requires `provider = "openai-codex"` in engine config for OAuth subscriptions in headless mode.
+⁶ AMP requires an explicit thread ID; no "most recent" mode.
 
 ---
 
@@ -150,6 +153,7 @@ That's it. Your agent runs on your machine, streams progress to Telegram, and yo
 | `/export` | Export session transcript |
 | `/browse` | Browse project files |
 | `/new` | Clear stored sessions |
+| `/continue` | Resume the most recent CLI session in this project ([guide](docs/how-to/cross-environment-resume.md)) |
 | `/file put/get` | Transfer files |
 | `/topic` | Create or bind forum topics |
 | `/restart` | Gracefully restart Untether (drains active runs first) |

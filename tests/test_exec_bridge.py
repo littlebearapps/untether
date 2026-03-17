@@ -2696,3 +2696,211 @@ async def test_stall_notification_fires_when_cpu_inactive() -> None:
     # Stall notifications should have fired (CPU inactive)
     stall_msgs = [c for c in transport.send_calls if "No progress" in c["message"].text]
     assert len(stall_msgs) >= 1
+
+
+# ---------------------------------------------------------------------------
+# Plan outline rendering, keyboard, and cleanup tests
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.anyio
+async def test_outline_messages_rendered_with_entities() -> None:
+    """Outline messages should be rendered as markdown with Telegram entities."""
+    transport = FakeTransport()
+    presenter = _KeyboardPresenter()
+    edits = _make_edits(transport, presenter)
+
+    outline = "## Heading\n\n**Bold text** and `code`."
+    async with anyio.create_task_group() as tg:
+        await edits._send_outline(outline, tg)
+        # Let the background task complete
+        await anyio.sleep(0)
+
+    # Should have sent one message (short text)
+    outline_sends = [
+        s for s in transport.send_calls if s["message"].extra.get("entities")
+    ]
+    assert len(outline_sends) == 1
+    msg = outline_sends[0]["message"]
+    # Entities should be present (not raw markdown)
+    assert len(msg.extra["entities"]) > 0
+    # Raw markdown syntax should NOT appear in the text
+    assert "##" not in msg.text
+    assert "**" not in msg.text
+
+
+@pytest.mark.anyio
+async def test_outline_last_message_has_approval_keyboard() -> None:
+    """The last outline message should have the approval keyboard attached."""
+    transport = FakeTransport()
+    presenter = _KeyboardPresenter()
+    edits = _make_edits(transport, presenter)
+
+    approval_kb = {"inline_keyboard": [[{"text": "Approve Plan"}, {"text": "Deny"}]]}
+    outline = "## Plan\n\nStep 1.\n\nStep 2."
+    async with anyio.create_task_group() as tg:
+        await edits._send_outline(outline, tg, approval_keyboard=approval_kb)
+        await anyio.sleep(0)
+
+    # The last sent message should have the approval keyboard
+    last_send = transport.send_calls[-1]
+    assert last_send["message"].extra.get("reply_markup") == approval_kb
+
+
+@pytest.mark.anyio
+async def test_outline_multi_chunk_keyboard_only_on_last() -> None:
+    """When outline is split across messages, only the last gets buttons."""
+    transport = FakeTransport()
+    presenter = _KeyboardPresenter()
+    edits = _make_edits(transport, presenter)
+
+    approval_kb = {"inline_keyboard": [[{"text": "Approve Plan"}, {"text": "Deny"}]]}
+    # Create text that will be split (>3500 chars)
+    outline = "## Section\n\n" + "x" * 3000 + "\n\n## Section 2\n\n" + "y" * 3000
+    async with anyio.create_task_group() as tg:
+        await edits._send_outline(outline, tg, approval_keyboard=approval_kb)
+        await anyio.sleep(0)
+
+    outline_sends = list(transport.send_calls)
+    assert len(outline_sends) >= 2
+    # Only the last should have the keyboard
+    for s in outline_sends[:-1]:
+        assert s["message"].extra.get("reply_markup") is None
+    assert outline_sends[-1]["message"].extra.get("reply_markup") == approval_kb
+
+
+@pytest.mark.anyio
+async def test_outline_refs_tracked() -> None:
+    """Sent outline message refs are tracked in _outline_refs."""
+    transport = FakeTransport()
+    presenter = _KeyboardPresenter()
+    edits = _make_edits(transport, presenter)
+
+    outline = "## Plan\n\nDo things."
+    async with anyio.create_task_group() as tg:
+        await edits._send_outline(outline, tg)
+        await anyio.sleep(0)
+
+    assert len(edits._outline_refs) == 1
+    assert edits._outline_refs[0] == transport.send_calls[-1]["ref"]
+
+
+@pytest.mark.anyio
+async def test_outline_messages_deleted_on_approval_transition() -> None:
+    """When approval buttons disappear, outline messages should be deleted."""
+    transport = FakeTransport()
+    presenter = _KeyboardPresenter()
+    edits = _make_edits(transport, presenter)
+
+    # Simulate: approval buttons appear → outline sent → buttons disappear
+    presenter.set_approval_buttons()
+    edits.event_seq = 1
+    with contextlib.suppress(anyio.WouldBlock):
+        edits.signal_send.send_nowait(None)
+
+    async with anyio.create_task_group() as tg:
+
+        async def run_cycle() -> None:
+            # Let first render (with approval) complete
+            await anyio.sleep(0)
+            await anyio.sleep(0)
+            # Manually inject outline refs (simulating _send_outline)
+            outline_ref = MessageRef(channel_id=123, message_id=999)
+            edits._outline_refs.append(outline_ref)
+            # Now remove approval buttons
+            presenter.set_no_approval()
+            edits.event_seq = 2
+            with contextlib.suppress(anyio.WouldBlock):
+                edits.signal_send.send_nowait(None)
+            await anyio.sleep(0)
+            await anyio.sleep(0)
+            edits.signal_send.close()
+
+        tg.start_soon(edits.run)
+        tg.start_soon(run_cycle)
+
+    # The outline ref (999) should have been deleted
+    deleted_ids = [r.message_id for r in transport.delete_calls]
+    assert 999 in deleted_ids
+    assert edits._outline_refs == []
+
+
+@pytest.mark.anyio
+async def test_outline_deleted_on_keyboard_change() -> None:
+    """Outline deleted when approval buttons change (e.g. ExitPlanMode → Write)."""
+    transport = FakeTransport()
+    presenter = _KeyboardPresenter()
+    edits = _make_edits(transport, presenter)
+
+    # Simulate: approval buttons appear (ExitPlanMode) → outline sent
+    presenter.set_approval_buttons()
+    edits.event_seq = 1
+    with contextlib.suppress(anyio.WouldBlock):
+        edits.signal_send.send_nowait(None)
+
+    async with anyio.create_task_group() as tg:
+
+        async def run_cycle() -> None:
+            # Let first render (with approval) complete
+            await anyio.sleep(0)
+            await anyio.sleep(0)
+            # Inject outline refs
+            outline_ref = MessageRef(channel_id=123, message_id=888)
+            edits._outline_refs.append(outline_ref)
+            # Change keyboard to DIFFERENT approval buttons (simulates
+            # ExitPlanMode resolved → new Write tool approval appeared)
+            presenter.keyboard = [
+                [{"text": "Approve", "callback_data": "ctrl:approve:new_req"}],
+                [{"text": "Cancel"}],
+            ]
+            edits.event_seq = 2
+            with contextlib.suppress(anyio.WouldBlock):
+                edits.signal_send.send_nowait(None)
+            await anyio.sleep(0)
+            await anyio.sleep(0)
+            edits.signal_send.close()
+
+        tg.start_soon(edits.run)
+        tg.start_soon(run_cycle)
+
+    # Outline should be deleted even though buttons never disappeared
+    deleted_ids = [r.message_id for r in transport.delete_calls]
+    assert 888 in deleted_ids
+    assert edits._outline_refs == []
+
+
+@pytest.mark.anyio
+async def test_outline_messages_deleted_in_delete_ephemeral() -> None:
+    """Safety net: delete_ephemeral() cleans up remaining outline refs."""
+    transport = FakeTransport()
+    presenter = _KeyboardPresenter()
+    edits = _make_edits(transport, presenter)
+
+    # Manually add outline refs
+    edits._outline_refs = [
+        MessageRef(channel_id=123, message_id=50),
+        MessageRef(channel_id=123, message_id=51),
+    ]
+
+    await edits.delete_ephemeral()
+
+    deleted_ids = [r.message_id for r in transport.delete_calls]
+    assert 50 in deleted_ids
+    assert 51 in deleted_ids
+    assert edits._outline_refs == []
+
+
+@pytest.mark.anyio
+async def test_outline_not_double_deleted() -> None:
+    """Refs cleared on transition should not be re-deleted in delete_ephemeral."""
+    transport = FakeTransport()
+    presenter = _KeyboardPresenter()
+    edits = _make_edits(transport, presenter)
+
+    # Simulate transition already cleared the refs
+    edits._outline_refs = []
+
+    await edits.delete_ephemeral()
+
+    # No outline deletes should have happened
+    assert transport.delete_calls == []

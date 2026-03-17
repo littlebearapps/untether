@@ -113,10 +113,17 @@ If you prefer always-visible resume lines, set:
 
 Even in chat mode, replying to a message with a resume line takes precedence and branches from that point.
 
+## Cross-environment resume
+
+Started a session in your terminal and left the house? Use `/continue` to pick it up from Telegram — no reply needed. Works with Claude, Codex, OpenCode, Pi, and Gemini.
+
+See the [cross-environment resume guide](../how-to/cross-environment-resume.md) for details.
+
 ## Related
 
 - [Routing and sessions](../explanation/routing-and-sessions.md)
 - [Chat sessions](../how-to/chat-sessions.md)
+- [Cross-environment resume](../how-to/cross-environment-resume.md)
 - [Forum topics](../how-to/topics.md)
 - [Commands & directives](../reference/commands-and-directives.md)
 

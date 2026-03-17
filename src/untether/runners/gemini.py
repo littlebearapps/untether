@@ -334,7 +334,10 @@ class GeminiRunner(ResumeTokenMixin, JsonlSubprocessRunner):
         run_options = get_run_options()
         args: list[str] = []
         if resume is not None:
-            args.extend(["--resume", resume.value])
+            if resume.is_continue:
+                args.extend(["--resume", "latest"])
+            else:
+                args.extend(["--resume", resume.value])
         args.extend(["--output-format", "stream-json"])
         model = self.model
         if run_options is not None and run_options.model:

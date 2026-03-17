@@ -409,7 +409,10 @@ class OpenCodeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
         run_options = get_run_options()
         args = ["run", "--format", "json"]
         if resume is not None:
-            args.extend(["--session", resume.value])
+            if resume.is_continue:
+                args.append("--continue")
+            else:
+                args.extend(["--session", resume.value])
         model = self.model
         if run_options is not None and run_options.model:
             model = run_options.model

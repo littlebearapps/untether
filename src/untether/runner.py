@@ -422,7 +422,11 @@ class JsonlSubprocessRunner(BaseRunner):
             raise RuntimeError(
                 f"{self.tag()} emitted session token for engine {event.engine!r}"
             )
-        if expected_session is not None and event.resume != expected_session:
+        if (
+            expected_session is not None
+            and not expected_session.is_continue
+            and event.resume != expected_session
+        ):
             message = (
                 f"{self.tag()} emitted session id {event.resume.value} "
                 f"but expected {expected_session.value}"

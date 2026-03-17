@@ -48,6 +48,16 @@ class TestClaudeBuildArgs:
         idx = args.index("--resume")
         assert args[idx + 1] == "sess123"
 
+    def test_continue(self) -> None:
+        runner = self._runner()
+        from untether.runners.claude import ClaudeStreamState
+
+        state = ClaudeStreamState()
+        token = ResumeToken(engine="claude", value="", is_continue=True)
+        args = runner.build_args("hello", token, state=state)
+        assert "--continue" in args
+        assert "--resume" not in args
+
     def test_model_override(self) -> None:
         runner = self._runner()
         from untether.runners.claude import ClaudeStreamState
@@ -112,6 +122,15 @@ class TestCodexBuildArgs:
         args = runner.build_args("hello", token, state=state)
         assert "resume" in args
         assert "thread123" in args
+
+    def test_continue(self) -> None:
+        runner = self._runner()
+        state = runner.new_state("hello", None)
+        token = ResumeToken(engine="codex", value="", is_continue=True)
+        args = runner.build_args("hello", token, state=state)
+        assert "resume" in args
+        assert "--last" in args
+        assert args[-1] == "-"
 
     def test_model_override(self) -> None:
         runner = self._runner()
@@ -193,6 +212,14 @@ class TestOpenCodeBuildArgs:
         idx = args.index("--session")
         assert args[idx + 1] == "ses_abc123"
 
+    def test_continue(self) -> None:
+        runner = self._runner()
+        state = runner.new_state("hello", None)
+        token = ResumeToken(engine="opencode", value="", is_continue=True)
+        args = runner.build_args("hello", token, state=state)
+        assert "--continue" in args
+        assert "--session" not in args
+
     def test_model_override(self) -> None:
         runner = self._runner()
         state = runner.new_state("hello", None)
@@ -233,6 +260,15 @@ class TestGeminiBuildArgs:
         assert "--resume" in args
         idx = args.index("--resume")
         assert args[idx + 1] == "abc123"
+
+    def test_continue(self) -> None:
+        runner = self._runner()
+        state = runner.new_state("hello", None)
+        token = ResumeToken(engine="gemini", value="", is_continue=True)
+        args = runner.build_args("hello", token, state=state)
+        assert "--resume" in args
+        idx = args.index("--resume")
+        assert args[idx + 1] == "latest"
 
     def test_model_override(self) -> None:
         runner = self._runner()
@@ -302,6 +338,15 @@ class TestAmpBuildArgs:
         assert "threads" in args
         assert "continue" in args
         assert "T-abc-123" in args
+
+    def test_continue_skipped(self) -> None:
+        """AMP has no 'most recent' mode, so is_continue is a no-op (starts new)."""
+        runner = self._runner()
+        state = runner.new_state("hello", None)
+        token = ResumeToken(engine="amp", value="", is_continue=True)
+        args = runner.build_args("hello", token, state=state)
+        assert "threads" not in args
+        assert "continue" not in args
 
     def test_model_override_becomes_mode(self) -> None:
         """AMP uses --mode not --model; model override maps to mode."""
@@ -376,6 +421,14 @@ class TestPiBuildArgs:
         assert "--session" in args
         idx = args.index("--session")
         assert args[idx + 1] == "/path/to/session.jsonl"
+
+    def test_continue(self) -> None:
+        runner = self._runner()
+        token = ResumeToken(engine="pi", value="", is_continue=True)
+        state = runner.new_state("hello", token)
+        args = runner.build_args("hello", token, state=state)
+        assert "--continue" in args
+        assert "--session" not in args
 
     def test_model_override(self) -> None:
         runner = self._runner()
