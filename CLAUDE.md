@@ -33,6 +33,7 @@ Untether adds interactive permission control, plan mode support, and several UX 
 - **Stall diagnostics & liveness watchdog** — `/proc` process diagnostics (CPU, RSS, TCP, FDs), progressive stall warnings with Telegram notifications, liveness watchdog for alive-but-silent subprocesses, stall auto-cancel (dead process, no-PID zombie, absolute cap) with CPU-active suppression, `session.summary` structured log; `[watchdog]` config section
 - **File upload deduplication** — auto-appends `_1`, `_2`, … when target file exists, instead of requiring `--force`; media groups without captions auto-save to `incoming/`
 - **Resume line formatting** — visual separation with blank line and ↩️ prefix in final message footer
+- **`/continue`** — cross-environment resume; pick up the most recent CLI session from Telegram using each engine's native continue flag (`--continue`, `resume --last`, `--resume latest`); supported for Claude, Codex, OpenCode, Pi, Gemini (not AMP)
 
 See `.claude/skills/claude-stream-json/` and `.claude/rules/control-channel.md` for implementation details.
 

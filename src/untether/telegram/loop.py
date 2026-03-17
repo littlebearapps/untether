@@ -1852,6 +1852,42 @@ async def run_main_loop(
                             )
                         )
                         return
+                if command_id == "continue":
+                    forward_coalescer.cancel(forward_key)
+                    prompt_text = args_text.strip() if args_text else ""
+                    resolved = cfg.runtime.resolve_message(
+                        text=prompt_text,
+                        reply_text=msg.reply_to_text,
+                        ambient_context=ambient_context,
+                        chat_id=chat_id,
+                    )
+                    engine_resolution = await resolve_engine_defaults(
+                        explicit_engine=resolved.engine_override,
+                        context=resolved.context,
+                        chat_id=chat_id,
+                        topic_key=topic_key,
+                    )
+                    continue_token = ResumeToken(
+                        engine=engine_resolution.engine,
+                        value="",
+                        is_continue=True,
+                    )
+                    resolved = ResolvedMessage(
+                        prompt=resolved.prompt,
+                        resume_token=continue_token,
+                        engine_override=resolved.engine_override,
+                        context=resolved.context,
+                    )
+                    await dispatch_prompt_run(
+                        msg=msg,
+                        prompt_text=resolved.prompt,
+                        resolved=resolved,
+                        topic_key=topic_key,
+                        chat_session_key=chat_session_key,
+                        reply_ref=reply_ref,
+                        reply_id=reply_id,
+                    )
+                    return
                 if command_id is not None and _dispatch_builtin_command(
                     ctx=TelegramCommandContext(
                         cfg=cfg,

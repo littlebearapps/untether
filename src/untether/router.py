@@ -1,11 +1,16 @@
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from typing import Literal
 from collections.abc import Iterable
 
 from .model import EngineId, ResumeToken
 from .runner import Runner
+
+# Strip Untether's ↩️ prefix from resume footer lines so engine regexes can match.
+# Handles both ↩️ (U+21A9 + U+FE0F) and ↩ (U+21A9 alone).
+_RESUME_EMOJI_PREFIX = re.compile(r"(?m)^[\u21a9][\ufe0f]?\s*")
 
 
 class RunnerUnavailableError(RuntimeError):
@@ -107,7 +112,8 @@ class AutoRouter:
             return token
         if reply_text is None:
             return None
-        return self.extract_resume(reply_text)
+        cleaned = _RESUME_EMOJI_PREFIX.sub("", reply_text)
+        return self.extract_resume(cleaned)
 
     def is_resume_line(self, line: str) -> bool:
         return any(entry.runner.is_resume_line(line) for entry in self._entries)

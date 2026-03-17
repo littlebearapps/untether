@@ -1134,7 +1134,10 @@ class ClaudeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
             ]
 
         if resume is not None:
-            args.extend(["--resume", resume.value])
+            if resume.is_continue:
+                args.append("--continue")
+            else:
+                args.extend(["--resume", resume.value])
         model = self.model
         if run_options is not None and run_options.model:
             model = run_options.model
@@ -1226,7 +1229,11 @@ class ClaudeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
         state: ClaudeStreamState,
     ) -> None:
         # Phase 2: Register this runner for control responses
-        if resume is not None and self.supports_control_channel:
+        if (
+            resume is not None
+            and not resume.is_continue
+            and self.supports_control_channel
+        ):
             _ACTIVE_RUNNERS[resume.value] = (self, time.time())
             logger.info(
                 "claude_runner.registered",

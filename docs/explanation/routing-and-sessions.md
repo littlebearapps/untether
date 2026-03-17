@@ -4,7 +4,7 @@ Untether supports both **stateless** and **chat** modes for session handling. In
 
 ## Continuation (how threads persist)
 
-Untether supports three ways to continue a thread:
+Untether supports four ways to continue a thread:
 
 1. **Reply-to-continue** (always available)
    - Reply to any bot message that contains a resume line in the footer.
@@ -20,6 +20,11 @@ Untether supports three ways to continue a thread:
    - Stored sessions are per engine; resuming a different engine does not overwrite others.
    - State is stored in `telegram_chat_sessions_state.json`.
    - Reset with `/new`.
+4. **Cross-environment resume** (`/continue`)
+   - Resume the most recent session in the project directory, regardless of where it was started.
+   - Useful for picking up a CLI session (iTerm, tmux, mosh) from Telegram while away from the terminal.
+   - Uses each engine's native "continue" flag (`--continue`, `resume --last`, `--resume latest`).
+   - Works with Claude, Codex, OpenCode, Pi, and Gemini. Not supported for AMP. See the [cross-environment resume guide](../how-to/cross-environment-resume.md).
 
 Reply-to-continue works even if topics or chat sessions are enabled.
 

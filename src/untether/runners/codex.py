@@ -509,7 +509,10 @@ class CodexRunner(ResumeTokenMixin, JsonlSubprocessRunner):
             ]
         )
         if resume:
-            args.extend(["resume", resume.value, "-"])
+            if resume.is_continue:
+                args.extend(["resume", "--last", "-"])
+            else:
+                args.extend(["resume", resume.value, "-"])
         else:
             args.append("-")
         return args

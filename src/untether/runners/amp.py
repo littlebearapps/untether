@@ -335,7 +335,7 @@ class AmpRunner(ResumeTokenMixin, JsonlSubprocessRunner):
         state: Any,
     ) -> list[str]:
         args: list[str] = []
-        if resume is not None:
+        if resume is not None and not resume.is_continue:
             args.extend(["threads", "continue", resume.value])
         if self.dangerously_allow_all:
             args.append("--dangerously-allow-all")

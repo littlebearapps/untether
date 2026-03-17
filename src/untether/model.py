@@ -33,6 +33,7 @@ type ActionLevel = Literal["debug", "info", "warning", "error"]
 class ResumeToken:
     engine: EngineId
     value: str
+    is_continue: bool = False
 
 
 @dataclass(frozen=True, slots=True)
