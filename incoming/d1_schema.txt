@@ -1,0 +1,401 @@
+CREATE INDEX idx_audit_results_date ON audit_results(audit_date DESC)
+CREATE INDEX idx_audit_results_project ON audit_results(project_id)
+CREATE INDEX idx_backtest_results_bin ON backtest_results(confidence_bin)
+CREATE INDEX idx_backtest_results_run ON backtest_results(run_id)
+CREATE INDEX idx_brief_validations_project ON brief_validations(project_id)
+CREATE INDEX idx_competitor_alerts_candidate ON competitor_alerts(candidate_id)
+CREATE INDEX idx_competitor_alerts_detected ON competitor_alerts(detected_at DESC)
+CREATE INDEX idx_competitor_alerts_type ON competitor_alerts(type)
+CREATE INDEX idx_competitor_snapshots_at ON competitor_snapshots(snapshot_at DESC)
+CREATE INDEX idx_competitor_snapshots_repo ON competitor_snapshots(repo)
+CREATE INDEX idx_competitors_candidate ON competitors(candidate_id)
+CREATE INDEX idx_competitors_repo ON competitors(repo)
+CREATE INDEX idx_cron_runs_started ON cron_runs(started_at DESC)
+CREATE INDEX idx_cron_runs_status ON cron_runs(status)
+CREATE INDEX idx_cron_runs_type ON cron_runs(cron_type)
+CREATE INDEX idx_decisions_decided ON decisions(decided_at DESC)
+CREATE INDEX idx_decisions_project ON decisions(project_id)
+CREATE INDEX idx_decisions_promoted ON decisions(promoted)
+CREATE INDEX idx_dlq_messages_queue ON dlq_messages(original_queue)
+CREATE INDEX idx_dlq_messages_received ON dlq_messages(received_at DESC)
+CREATE INDEX idx_events_created ON events(created_at DESC)
+CREATE INDEX idx_events_project ON events(project_id)
+CREATE INDEX idx_events_source ON events(source)
+CREATE INDEX idx_events_type ON events(type)
+CREATE INDEX idx_evidence_opportunity_id ON evidence(opportunity_id)
+CREATE INDEX idx_evidence_refresh_last ON evidence_refresh(last_refresh_at ASC)
+CREATE INDEX idx_ingest_log_fingerprint
+ON ingest_log(fingerprint)
+WHERE fingerprint IS NOT NULL
+CREATE INDEX idx_ingest_log_ingested_at ON ingest_log(ingested_at)
+CREATE INDEX idx_ingest_log_processed_at ON ingest_log(processed_at)
+CREATE INDEX idx_ingest_log_source ON ingest_log(source)
+CREATE INDEX idx_ingest_log_status ON ingest_log(status)
+CREATE INDEX idx_ingest_log_status_ingested ON ingest_log(status, ingested_at)
+CREATE INDEX idx_ingest_log_unprocessed ON ingest_log(processed_at, ingested_at)
+CREATE INDEX idx_manifests_source ON manifests(source)
+CREATE INDEX idx_manifests_ts ON manifests(ts DESC)
+CREATE INDEX idx_npm_downloads_package ON npm_downloads(package_name)
+CREATE INDEX idx_npm_downloads_project ON npm_downloads(project_id)
+CREATE INDEX idx_npm_downloads_snapshot ON npm_downloads(snapshot_at DESC)
+CREATE INDEX idx_opportunities_created_at ON opportunities(created_at)
+CREATE INDEX idx_opportunities_governor_dispatch
+ON opportunities(investigation_status, pain_level DESC)
+WHERE investigation_status = 'pending'
+CREATE INDEX idx_opportunities_needs_review
+ON opportunities(status) WHERE status = 'needs_review'
+CREATE INDEX idx_opportunities_pain_level ON opportunities(pain_level DESC)
+CREATE INDEX idx_opportunities_rejection_reason
+ON opportunities(rejection_reason, created_at)
+WHERE rejection_reason IS NOT NULL
+CREATE INDEX idx_opportunities_solo_dev_score
+ON opportunities(solo_dev_score)
+WHERE solo_dev_score IS NOT NULL
+CREATE INDEX idx_opportunities_source_event ON opportunities(source_event_id)
+CREATE INDEX idx_opportunities_status ON opportunities(status)
+CREATE INDEX idx_opportunities_title_hash_status ON opportunities(title_hash, status)
+CREATE INDEX idx_opportunities_vertical ON opportunities(vertical)
+CREATE INDEX idx_outcomes_action ON outcomes(action)
+CREATE INDEX idx_outcomes_decided ON outcomes(decided_at DESC)
+CREATE INDEX idx_outcomes_project ON outcomes(project_id)
+CREATE INDEX idx_platform_readiness_candidate ON platform_readiness(candidate_id)
+CREATE INDEX idx_platform_readiness_score ON platform_readiness(readiness_score DESC)
+CREATE INDEX idx_projects_score ON projects(score DESC)
+CREATE INDEX idx_projects_source ON projects(source)
+CREATE INDEX idx_projects_status ON projects(status)
+CREATE INDEX idx_projects_status_score
+ON projects(status, score DESC)
+CREATE INDEX idx_projects_updated ON projects(updated_at DESC)
+CREATE INDEX idx_pypi_downloads_project ON pypi_downloads(project_id)
+CREATE INDEX idx_pypi_downloads_snapshot ON pypi_downloads(snapshot_at)
+CREATE INDEX idx_serp_queries_candidate ON serp_queries(candidate_id)
+CREATE INDEX idx_serp_queries_queried ON serp_queries(queried_at DESC)
+CREATE INDEX idx_signals_project ON signals(project_id)
+CREATE INDEX idx_signals_type ON signals(signal_type)
+CREATE INDEX idx_stars_history_project ON stars_history(project_id)
+CREATE UNIQUE INDEX idx_stars_history_project_date ON stars_history(project_id, date(snapshot_at))
+CREATE INDEX idx_stars_history_snapshot ON stars_history(snapshot_at DESC)
+CREATE TABLE _cf_KV (
+        key TEXT PRIMARY KEY,
+        value BLOB
+      ) WITHOUT ROWID
+CREATE TABLE audit_results (
+  id TEXT PRIMARY KEY,
+  audit_date TEXT,
+  project_id TEXT NOT NULL,
+  score_assessment TEXT,                            -- appropriate, overconfident, underconfident, anomaly
+  explanation TEXT,
+  confidence_in_assessment INTEGER,                 -- 1-5
+  model_used TEXT,
+  cost_usd REAL,
+  FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE
+)
+CREATE TABLE backtest_results (
+  run_id TEXT NOT NULL,
+  project_id TEXT NOT NULL,
+  decision_id TEXT,
+  predicted_score REAL,
+  predicted_confidence REAL,
+  realized_outcome INTEGER,                         -- 0 = failure, 1 = success
+  realized_stars_delta INTEGER,
+  realized_downloads_delta INTEGER,
+  realized_signups INTEGER,
+  prediction_error REAL,
+  confidence_bin TEXT,                              -- '0.0-0.2', '0.2-0.4', etc.
+  PRIMARY KEY (run_id, project_id),
+  FOREIGN KEY (run_id) REFERENCES backtest_runs(run_id) ON DELETE CASCADE
+)
+CREATE TABLE backtest_runs (
+  run_id TEXT PRIMARY KEY,
+  run_at TEXT,
+  outcomes_count INTEGER,
+  brier_score REAL,
+  config TEXT                                       -- JSON: backtest parameters
+)
+CREATE TABLE baselines (
+  ecosystem TEXT PRIMARY KEY,                       -- github, npm, pypi, chrome
+  stars_delta_median REAL,
+  stars_delta_mad REAL,
+  downloads_delta_median REAL,
+  downloads_delta_mad REAL,
+  signups_median REAL,
+  signups_mad REAL,
+  sample_size INTEGER,
+  computed_at TEXT DEFAULT (datetime('now'))
+, metrics TEXT)
+CREATE TABLE brief_validations (
+  id TEXT PRIMARY KEY,
+  project_id TEXT NOT NULL,
+  validated_at TEXT,
+  overall_score INTEGER,                            -- 1-10
+  actionability INTEGER,
+  specificity INTEGER,
+  evidence_quality INTEGER,
+  issues TEXT,                                      -- JSON: string[]
+  summary TEXT,
+  model_used TEXT,
+  cost_usd REAL, completeness INTEGER,
+  FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE
+)
+CREATE TABLE competitor_alerts (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  type TEXT NOT NULL,                               -- competitor_surge, crowded_market
+  candidate_id TEXT NOT NULL,
+  repo TEXT,
+  metric TEXT,                                      -- stars, downloads
+  delta INTEGER,
+  growth_pct REAL,
+  message TEXT,
+  competitors_count INTEGER,
+  detected_at TEXT DEFAULT (datetime('now')),
+  FOREIGN KEY (candidate_id) REFERENCES projects(id) ON DELETE CASCADE
+)
+CREATE TABLE competitor_snapshots (
+  id TEXT PRIMARY KEY,
+  repo TEXT NOT NULL,                               -- github:owner/repo
+  stars INTEGER,
+  forks INTEGER,
+  downloads_monthly INTEGER DEFAULT 0,
+  latest_release TEXT,
+  snapshot_at TEXT DEFAULT (datetime('now')),
+  UNIQUE(repo, snapshot_at)
+)
+CREATE TABLE competitors (
+  candidate_id TEXT NOT NULL,
+  repo TEXT NOT NULL,                               -- github:owner/repo
+  source TEXT,                                      -- github_topics, github_keywords
+  reason TEXT,
+  baseline_stars INTEGER DEFAULT 0,
+  baseline_downloads INTEGER DEFAULT 0,
+  discovered_at TEXT DEFAULT (datetime('now')),
+  PRIMARY KEY (candidate_id, repo),
+  FOREIGN KEY (candidate_id) REFERENCES projects(id) ON DELETE CASCADE
+)
+CREATE TABLE cron_runs (
+  id TEXT PRIMARY KEY,                              -- cron_audit_2025_11_30
+  cron_type TEXT NOT NULL,                          -- audit, weight_suggestion, daily_harvest, weekly_analysis
+  status TEXT DEFAULT 'pending',                    -- pending, running, completed, failed
+  started_at TEXT,
+  completed_at TEXT,
+  checkpoint TEXT,                                  -- JSON: resume state
+  error TEXT,
+  retries INTEGER DEFAULT 0
+)
+CREATE TABLE d1_migrations(
+		id         INTEGER PRIMARY KEY AUTOINCREMENT,
+		name       TEXT UNIQUE,
+		applied_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP NOT NULL
+)
+CREATE TABLE decisions (
+  decision_id TEXT PRIMARY KEY,                     -- dec_2025_00077
+  project_id TEXT NOT NULL,
+  decided_at TEXT,
+  promoted INTEGER DEFAULT 0,                       -- 0 = no, 1 = yes (SQLite bool)
+  predicted_score REAL,
+  predicted_confidence REAL,
+  weights_version TEXT,
+  weights_hash TEXT,
+  config_snapshot TEXT,                             -- JSON: full config at decision time
+  FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE
+)
+CREATE TABLE dlq_messages (id TEXT PRIMARY KEY, original_queue TEXT NOT NULL, message_body TEXT, error_reason TEXT, received_at TEXT DEFAULT (datetime('now')), attempts INTEGER DEFAULT 0)
+CREATE TABLE events (
+  id TEXT PRIMARY KEY,                              -- gh_123456, hn_789012, etc.
+  type TEXT NOT NULL,                               -- github_repo, hackernews_story, devto_article, producthunt_post
+  project_id TEXT,
+  source TEXT NOT NULL,                             -- github, hackernews, devto, producthunt
+  payload TEXT,                                     -- JSON blob with full event data
+  event_ts TEXT,                                    -- When the event originally occurred
+  created_at TEXT DEFAULT (datetime('now')),
+  FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE SET NULL
+)
+CREATE TABLE "evidence" (
+  id TEXT PRIMARY KEY,
+  project_id TEXT,  
+  opportunity_id TEXT,
+  kind TEXT NOT NULL,  
+  source TEXT NOT NULL,
+  summary TEXT,
+  url TEXT,
+  observed_at TEXT DEFAULT (datetime('now')),
+  FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE,
+  FOREIGN KEY (opportunity_id) REFERENCES opportunities(id) ON DELETE CASCADE
+)
+CREATE TABLE evidence_refresh (
+  project_id TEXT PRIMARY KEY,
+  last_refresh_at TEXT DEFAULT (datetime('now')),
+  sources_collected TEXT,  -- JSON array of sources successfully collected
+  FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE
+)
+CREATE TABLE ingest_log (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  source TEXT NOT NULL,           
+  source_id TEXT NOT NULL,        
+  raw_path TEXT NOT NULL,         
+  ingested_at TEXT NOT NULL DEFAULT (datetime('now')), processed_at TEXT, status TEXT NOT NULL DEFAULT 'pending', quarantine_reason TEXT, fingerprint TEXT, occurrence_count INTEGER DEFAULT 1, last_seen TEXT,
+  UNIQUE(source, source_id)
+)
+CREATE TABLE learning_proposals (
+  run_id TEXT PRIMARY KEY,
+  run_at TEXT,
+  outcomes_count INTEGER,
+  current_brier REAL,
+  proposals TEXT,                                   -- JSON: WeightProposal[]
+  validation_brier REAL,
+  improvement_pct REAL,
+  status TEXT DEFAULT 'pending'                     -- pending, approved, rejected, applied
+)
+CREATE TABLE manifests (
+  id TEXT PRIMARY KEY,                              -- manifest_2025_11_26_github
+  source TEXT NOT NULL,                             -- github, hackernews, rss, etc.
+  ts TEXT NOT NULL,                                 -- Ingest timestamp
+  record_count INTEGER DEFAULT 0,                   -- Events harvested
+  duration_ms INTEGER,                              -- Harvest duration
+  status TEXT DEFAULT 'completed',                  -- completed, failed, partial
+  metadata TEXT                                     -- JSON: {rate_limit_remaining: 4500, ...}
+)
+CREATE TABLE npm_downloads (
+  id TEXT PRIMARY KEY,
+  project_id TEXT NOT NULL,
+  package_name TEXT NOT NULL,
+  downloads_weekly INTEGER DEFAULT 0,
+  downloads_monthly INTEGER DEFAULT 0,
+  snapshot_at TEXT DEFAULT (datetime('now')),
+  FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE
+)
+CREATE TABLE opportunities (
+  id TEXT PRIMARY KEY,                    
+  source_event_id TEXT,                   
+  title TEXT NOT NULL,                    
+  summary TEXT NOT NULL,                  
+  pain_level INTEGER NOT NULL CHECK(pain_level >= 1 AND pain_level <= 10), 
+  vertical TEXT NOT NULL,                 
+  status TEXT NOT NULL DEFAULT 'new',     
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+, vertical_metadata TEXT, triage_error TEXT, triage_error_at TEXT, title_hash TEXT, updated_at TEXT, cost_accrued REAL DEFAULT 0, token_usage TEXT, investigation_status TEXT DEFAULT 'pending', ai_reasoning TEXT, solo_dev_score INTEGER, rejection_reason TEXT)
+CREATE TABLE outcomes (
+  id TEXT PRIMARY KEY,                              -- outcome_2025_00001
+  project_id TEXT NOT NULL,
+  decision_id TEXT,                                 -- Reference to decision snapshot
+  action TEXT,                                      -- shipped, built, spiked, deferred, rejected
+  horizon_days INTEGER DEFAULT 28,
+  decided_at TEXT,
+  observed_at TEXT,
+  baseline TEXT,                                    -- JSON: {stars: 0, downloads: 0, signups: 0}
+  realized TEXT,                                    -- JSON: {stars: 38, downloads: 1234, signups: 12}
+  notes TEXT, bad_classification INTEGER DEFAULT 0,
+  FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE
+)
+CREATE TABLE platform_readiness (
+  candidate_id TEXT PRIMARY KEY,
+  readiness_score REAL,
+  maintenance_score REAL,
+  popularity_score REAL,
+  hygiene_score REAL,
+  risk_score REAL,
+  signals TEXT,                                     -- JSON: raw signal values
+  computed_at TEXT DEFAULT (datetime('now')),
+  FOREIGN KEY (candidate_id) REFERENCES projects(id) ON DELETE CASCADE
+)
+CREATE TABLE projects (
+  id TEXT PRIMARY KEY,                              -- cand_2025_abc12345
+  title TEXT NOT NULL,
+  url TEXT,
+  source TEXT,                                      -- github, hackernews, devto, producthunt
+  score REAL DEFAULT 0,
+  confidence REAL DEFAULT 0,
+  status TEXT DEFAULT 'new',                        -- new, harvested, scored, briefed, promoted
+  created_at TEXT DEFAULT (datetime('now')),
+  updated_at TEXT DEFAULT (datetime('now'))
+)
+CREATE TABLE pypi_downloads (
+  id TEXT PRIMARY KEY,
+  project_id TEXT NOT NULL,
+  package_name TEXT NOT NULL,
+  downloads_daily INTEGER NOT NULL DEFAULT 0,
+  downloads_weekly INTEGER NOT NULL DEFAULT 0,
+  downloads_monthly INTEGER NOT NULL DEFAULT 0,
+  snapshot_at TEXT NOT NULL,
+  FOREIGN KEY (project_id) REFERENCES projects(id)
+)
+CREATE TABLE serp_queries (
+  candidate_id TEXT PRIMARY KEY,
+  query TEXT,
+  saturation REAL,                                  -- 0.0-1.0
+  competing_tools_count INTEGER,
+  queried_at TEXT,
+  cost_usd REAL,
+  cached INTEGER DEFAULT 0,                         -- 0 = no, 1 = yes
+  FOREIGN KEY (candidate_id) REFERENCES projects(id) ON DELETE CASCADE
+)
+CREATE TABLE signals (
+  project_id TEXT NOT NULL,
+  signal_type TEXT NOT NULL,                        -- pain_intensity, monetizability, competitor_gap, evidence_quality
+  value REAL NOT NULL,
+  source TEXT,                                      -- score_worker, manual
+  computed_at TEXT DEFAULT (datetime('now')),
+  PRIMARY KEY (project_id, signal_type),
+  FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE
+)
+CREATE TABLE sqlite_sequence(name,seq)
+CREATE TABLE sqlite_stat1(tbl,idx,stat)
+CREATE TABLE stars_history (
+  id TEXT PRIMARY KEY,
+  project_id TEXT NOT NULL,
+  stars INTEGER NOT NULL,
+  snapshot_at TEXT DEFAULT (datetime('now')),
+  FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE
+)
+CREATE VIEW calibration_curve AS
+SELECT
+  run_id,
+  confidence_bin,
+  COUNT(*) as n,
+  ROUND(AVG(predicted_confidence), 3) as avg_predicted,
+  ROUND(AVG(CAST(realized_outcome AS REAL)), 3) as avg_actual,
+  ROUND(AVG((predicted_confidence - CAST(realized_outcome AS REAL)) * (predicted_confidence - CAST(realized_outcome AS REAL))), 4) as bin_brier
+FROM backtest_results
+GROUP BY run_id, confidence_bin
+ORDER BY run_id, confidence_bin
+CREATE VIEW outcome_summary AS
+SELECT
+  action,
+  COUNT(*) as count,
+  ROUND(AVG(json_extract(realized, '$.stars_delta')), 1) as avg_stars,
+  ROUND(AVG(json_extract(realized, '$.downloads_delta')), 1) as avg_downloads
+FROM outcomes
+WHERE action IS NOT NULL
+GROUP BY action
+CREATE VIEW shortlist AS
+SELECT
+  p.id,
+  p.title,
+  p.url,
+  p.source,
+  p.score,
+  p.confidence,
+  p.status,
+  p.created_at,
+  p.updated_at,
+  MAX(CASE WHEN s.signal_type = 'pain_intensity' THEN s.value END) as pain_intensity,
+  MAX(CASE WHEN s.signal_type = 'monetizability' THEN s.value END) as monetizability,
+  MAX(CASE WHEN s.signal_type = 'competitor_gap' THEN s.value END) as competitor_gap,
+  MAX(CASE WHEN s.signal_type = 'evidence_quality' THEN s.value END) as evidence_quality
+FROM projects p
+LEFT JOIN signals s ON p.id = s.project_id
+WHERE p.score >= 60 AND p.confidence >= 0.6
+GROUP BY p.id
+ORDER BY p.score DESC
+CREATE VIEW shortlisted AS
+SELECT * FROM projects
+WHERE status = 'scored' AND score >= 60
+ORDER BY score DESC
+CREATE VIEW source_stats AS
+SELECT
+  source,
+  COUNT(*) as total_projects,
+  ROUND(AVG(score), 1) as avg_score,
+  SUM(CASE WHEN score >= 60 THEN 1 ELSE 0 END) as shortlisted_count,
+  MAX(updated_at) as last_update
+FROM projects
+GROUP BY source
