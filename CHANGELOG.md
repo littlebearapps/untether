@@ -11,9 +11,21 @@
   - added `channel_id` contextvar (`get_run_channel_id`/`set_run_channel_id`) to `utils/paths.py`
   - `get_pending_ask_request()` and `get_ask_question_flow()` now accept `channel_id` and filter by it
   - session cleanup now also clears stale pending asks and flows
+- standalone override commands (`/planmode`, `/model`, `/reasoning`) now preserve all `EngineOverrides` fields instead of resetting unrelated overrides [#124](https://github.com/littlebearapps/untether/issues/124)
+- register input for system-level auto-approved control requests (Initialize, HookCallback, McpMessage, RewindFiles, Interrupt) so `updatedInput` is included in the response — prevents ZodError in Claude Code [#123](https://github.com/littlebearapps/untether/issues/123)
 
 ### changes
 
+- `/continue` command — cross-environment resume; pick up the most recent CLI session from Telegram using each engine's native continue flag (`--continue`, `resume --last`, `--resume latest`); supported for Claude, Codex, OpenCode, Pi, Gemini (not AMP) [#135](https://github.com/littlebearapps/untether/issues/135)
+  - `ResumeToken` extended with `is_continue: bool = False`
+  - all 6 runners' `build_args()` updated to handle continue tokens
+  - `/continue` handled as reserved command in Telegram loop
+  - new how-to guide: `docs/how-to/cross-environment-resume.md`
+- `/config` UX overhaul — 2-column toggle pattern replaces all 3-button rows with single `[✓ Feature: on]` toggle + `[Clear]` for better mobile tap targets; merged Engine + Model into single page; max 2 buttons per row on home page; plan mode 2+1 split layout [#132](https://github.com/littlebearapps/untether/issues/132)
+- resume line toggle — per-chat `show_resume_line` override via `/config` settings; configurable via EngineOverrides [#128](https://github.com/littlebearapps/untether/issues/128)
+- cost budget settings — per-chat `budget_enabled` and `budget_auto_cancel` overrides on Cost & Usage page in `/config` [#129](https://github.com/littlebearapps/untether/issues/129)
+- model metadata improvements — shorten model display names in footer: `claude-opus-4-6[1m]` → `opus 4.6 (1M)`, `auto-gemini-3` → `gemini-3`; all engines populate model info from `StartedEvent.meta` [#132](https://github.com/littlebearapps/untether/issues/132)
+- resume line formatting — visual separation with blank line and `↩️` prefix in final message footer [#127](https://github.com/littlebearapps/untether/issues/127)
 - agent-initiated file delivery — agents write files to `.untether-outbox/` during a run; Untether sends them as Telegram documents on completion with `📎 filename (size)` captions; flat scan, deny-glob security, size limits, auto-cleanup [#143](https://github.com/littlebearapps/untether/issues/143)
   - new module `telegram/outbox_delivery.py` with `scan_outbox()`, `cleanup_outbox()`, `deliver_outbox_files()`
   - `ExecBridgeConfig` gains `send_file` callback + `outbox_config` (transport-agnostic)
@@ -25,6 +37,8 @@
 - 8 new outline UX tests: markdown rendering with entities, approval keyboard on last chunk, multi-chunk keyboard placement, ref tracking, deletion on approval transition, deletion on keyboard change, safety-net cleanup, no double-deletion [#139](https://github.com/littlebearapps/untether/issues/139), [#140](https://github.com/littlebearapps/untether/issues/140), [#141](https://github.com/littlebearapps/untether/issues/141)
 - 22 new outbox delivery tests: scan (empty, single, sorted, max_files, deny globs, size limit, empty file, symlink, subdir), cleanup (delete, keep unsent, already gone), delivery (send, cleanup, no-cleanup, empty, send failure), integration (after completion, disabled, error run) [#143](https://github.com/littlebearapps/untether/issues/143)
 - 4 new cross-chat ask isolation tests: pending ask scoped by channel, correct channel returned, flow scoped by channel, translate registers with channel_id [#144](https://github.com/littlebearapps/untether/issues/144)
+- 99 new `/continue` tests: 46 auto-router assertions (continue token handling, engine routing) + 53 build-args assertions (continue flags for all 6 engines) [#135](https://github.com/littlebearapps/untether/issues/135)
+- 195 `/config` tests covering home page, all sub-pages, toggle actions, callback routing, button layout, engine-aware visibility [#132](https://github.com/littlebearapps/untether/issues/132)
 
 ## v0.34.5 (2026-03-12)
 

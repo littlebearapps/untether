@@ -8,7 +8,6 @@ from unittest.mock import AsyncMock
 import pytest
 
 from untether.telegram.outbox_delivery import (
-    OutboxResult,
     cleanup_outbox,
     deliver_outbox_files,
     scan_outbox,

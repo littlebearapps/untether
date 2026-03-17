@@ -159,6 +159,40 @@ def test_auto_approve_types_add_to_queue(subtype: str, extra_fields: dict) -> No
 
 
 @pytest.mark.parametrize(
+    "subtype,extra_fields,expected_input",
+    [
+        ("initialize", {"hooks": None}, {}),
+        (
+            "hook_callback",
+            {"callback_id": "cb-1", "input": {"key": "val"}},
+            {"key": "val"},
+        ),
+        ("mcp_message", {"server_name": "srv", "message": {}}, {}),
+        ("rewind_files", {"user_message_id": "msg-1"}, {}),
+        ("interrupt", {}, {}),
+    ],
+)
+def test_auto_approve_types_register_input(
+    subtype: str, extra_fields: dict, expected_input: dict
+) -> None:
+    """Auto-approve types register input in _REQUEST_TO_INPUT for updatedInput."""
+    state, factory = _make_state_with_session()
+    request = {"subtype": subtype, **extra_fields}
+    req_id = f"req-input-{subtype}"
+    event = _decode_event(
+        {
+            "type": "control_request",
+            "request_id": req_id,
+            "request": request,
+        }
+    )
+    translate_claude_event(event, title="claude", state=state, factory=factory)
+
+    assert req_id in _REQUEST_TO_INPUT
+    assert _REQUEST_TO_INPUT[req_id] == expected_input
+
+
+@pytest.mark.parametrize(
     "tool_name",
     [
         "Bash",

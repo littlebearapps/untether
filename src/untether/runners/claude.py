@@ -536,6 +536,7 @@ def translate_claude_event(
                     request_id=request_id,
                     request_type=request_type,
                 )
+                _REQUEST_TO_INPUT[request_id] = getattr(request, "input", {})
                 state.auto_approve_queue.append(request_id)
                 return []
 
