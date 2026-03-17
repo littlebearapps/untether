@@ -382,3 +382,38 @@ def test_progress_group_chat_rps_rejects_zero(tmp_path: Path) -> None:
     }
     with pytest.raises(ConfigError):
         validate_settings_data(data, config_path=tmp_path / "c.toml")
+
+
+# ---------------------------------------------------------------------------
+# TelegramFilesSettings outbox config tests
+# ---------------------------------------------------------------------------
+
+
+def test_files_outbox_defaults() -> None:
+    from untether.settings import TelegramFilesSettings
+
+    cfg = TelegramFilesSettings()
+    assert cfg.outbox_enabled is True
+    assert cfg.outbox_dir == ".untether-outbox"
+    assert cfg.outbox_max_files == 10
+    assert cfg.outbox_cleanup is True
+
+
+def test_files_outbox_dir_rejects_absolute() -> None:
+    from pydantic import ValidationError
+
+    from untether.settings import TelegramFilesSettings
+
+    with pytest.raises(ValidationError, match="relative path"):
+        TelegramFilesSettings(outbox_dir="/tmp/outbox")
+
+
+def test_files_outbox_max_files_range() -> None:
+    from pydantic import ValidationError
+
+    from untether.settings import TelegramFilesSettings
+
+    with pytest.raises(ValidationError):
+        TelegramFilesSettings(outbox_max_files=0)
+    with pytest.raises(ValidationError):
+        TelegramFilesSettings(outbox_max_files=51)

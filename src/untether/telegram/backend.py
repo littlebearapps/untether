@@ -213,11 +213,32 @@ class TelegramBackend(TransportBackend):
             formatter=formatter,
             message_overflow=settings.message_overflow,
         )
+        _files_enabled = settings.files.enabled and settings.files.outbox_enabled
+
+        async def _send_file_via_bot(
+            chat_id: int,
+            thread_id: int | None,
+            filename: str,
+            content: bytes,
+            reply_to: int | None,
+            caption: str | None,
+        ) -> None:
+            await bot.send_document(
+                chat_id=chat_id,
+                filename=filename,
+                content=content,
+                reply_to_message_id=reply_to,
+                message_thread_id=thread_id,
+                caption=caption,
+            )
+
         exec_cfg = ExecBridgeConfig(
             transport=transport,
             presenter=presenter,
             final_notify=final_notify,
             min_render_interval=progress_cfg.min_render_interval,
+            send_file=_send_file_via_bot if _files_enabled else None,
+            outbox_config=settings.files if _files_enabled else None,
         )
         cfg = TelegramBridgeConfig(
             bot=bot,

@@ -8,6 +8,9 @@ from pathlib import Path
 _run_base_dir: ContextVar[Path | None] = ContextVar(
     "untether_run_base_dir", default=None
 )
+_run_channel_id: ContextVar[int | None] = ContextVar(
+    "untether_run_channel_id", default=None
+)
 
 
 def get_run_base_dir() -> Path | None:
@@ -20,6 +23,18 @@ def set_run_base_dir(base_dir: Path | None) -> Token[Path | None]:
 
 def reset_run_base_dir(token: Token[Path | None]) -> None:
     _run_base_dir.reset(token)
+
+
+def get_run_channel_id() -> int | None:
+    return _run_channel_id.get()
+
+
+def set_run_channel_id(channel_id: int | None) -> Token[int | None]:
+    return _run_channel_id.set(channel_id)
+
+
+def reset_run_channel_id(token: Token[int | None]) -> None:
+    _run_channel_id.reset(token)
 
 
 def relativize_path(value: str, *, base_dir: Path | None = None) -> str:

@@ -18,4 +18,5 @@ docs/promotion/
 .envrc
 .claude/settings.json
 .claude/plans/
+.untether-outbox/
 launch/

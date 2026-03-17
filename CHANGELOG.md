@@ -7,10 +7,24 @@
 - render plan outline as formatted text instead of raw markdown — outline messages now use `render_markdown()` + `split_markdown_body()` so headings, bold, code, and lists display properly in Telegram [#139](https://github.com/littlebearapps/untether/issues/139)
 - add approve/deny buttons to the last outline message — users no longer need to scroll back up past long outlines to find the buttons [#140](https://github.com/littlebearapps/untether/issues/140)
 - delete outline messages on approve/deny — outline and notification messages are cleaned up immediately via module-level `_OUTLINE_REGISTRY`, and stale approval keyboard on the progress message is suppressed [#141](https://github.com/littlebearapps/untether/issues/141)
+- scope AskUserQuestion pending requests by channel_id — `_PENDING_ASK_REQUESTS` and `_ASK_QUESTION_FLOWS` were global dicts with no chat scoping; a pending ask in one chat would steal the next message from any other chat, causing cross-chat contamination and lost messages [#144](https://github.com/littlebearapps/untether/issues/144)
+  - added `channel_id` contextvar (`get_run_channel_id`/`set_run_channel_id`) to `utils/paths.py`
+  - `get_pending_ask_request()` and `get_ask_question_flow()` now accept `channel_id` and filter by it
+  - session cleanup now also clears stale pending asks and flows
+
+### changes
+
+- agent-initiated file delivery — agents write files to `.untether-outbox/` during a run; Untether sends them as Telegram documents on completion with `📎 filename (size)` captions; flat scan, deny-glob security, size limits, auto-cleanup [#143](https://github.com/littlebearapps/untether/issues/143)
+  - new module `telegram/outbox_delivery.py` with `scan_outbox()`, `cleanup_outbox()`, `deliver_outbox_files()`
+  - `ExecBridgeConfig` gains `send_file` callback + `outbox_config` (transport-agnostic)
+  - preamble updated with outbox instructions for all 6 engines
+  - config: `outbox_enabled`, `outbox_dir`, `outbox_max_files`, `outbox_cleanup` in `[transports.telegram.files]`
 
 ### tests
 
 - 8 new outline UX tests: markdown rendering with entities, approval keyboard on last chunk, multi-chunk keyboard placement, ref tracking, deletion on approval transition, deletion on keyboard change, safety-net cleanup, no double-deletion [#139](https://github.com/littlebearapps/untether/issues/139), [#140](https://github.com/littlebearapps/untether/issues/140), [#141](https://github.com/littlebearapps/untether/issues/141)
+- 22 new outbox delivery tests: scan (empty, single, sorted, max_files, deny globs, size limit, empty file, symlink, subdir), cleanup (delete, keep unsent, already gone), delivery (send, cleanup, no-cleanup, empty, send failure), integration (after completion, disabled, error run) [#143](https://github.com/littlebearapps/untether/issues/143)
+- 4 new cross-chat ask isolation tests: pending ask scoped by channel, correct channel returned, flow scoped by channel, translate registers with channel_id [#144](https://github.com/littlebearapps/untether/issues/144)
 
 ## v0.34.5 (2026-03-12)
 

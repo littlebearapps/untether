@@ -2904,3 +2904,104 @@ async def test_outline_not_double_deleted() -> None:
 
     # No outline deletes should have happened
     assert transport.delete_calls == []
+
+
+# ---------------------------------------------------------------------------
+# Outbox file delivery tests
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.anyio
+async def test_outbox_files_sent_after_completion(tmp_path) -> None:
+    """Outbox files are delivered as documents after a successful run."""
+    from unittest.mock import AsyncMock
+
+    from untether.settings import TelegramFilesSettings
+    from untether.utils.paths import set_run_base_dir, reset_run_base_dir
+
+    outbox = tmp_path / ".untether-outbox"
+    outbox.mkdir()
+    (outbox / "result.txt").write_text("hello", encoding="utf-8")
+
+    send_file = AsyncMock()
+    files_cfg = TelegramFilesSettings(enabled=True)
+    transport = FakeTransport()
+    runner = _return_runner(answer="done")
+    cfg = ExecBridgeConfig(
+        transport=transport,
+        presenter=MarkdownPresenter(),
+        final_notify=False,
+        send_file=send_file,
+        outbox_config=files_cfg,
+    )
+    incoming = IncomingMessage(channel_id=1, message_id=1, text="test")
+    token = set_run_base_dir(tmp_path)
+    try:
+        await handle_message(cfg, runner=runner, incoming=incoming, resume_token=None)
+    finally:
+        reset_run_base_dir(token)
+
+    send_file.assert_called_once()
+    call_args = send_file.call_args[0]
+    assert call_args[2] == "result.txt"  # filename
+
+
+@pytest.mark.anyio
+async def test_outbox_not_scanned_when_disabled(tmp_path) -> None:
+    """Outbox is not scanned when send_file callback is None."""
+    from untether.utils.paths import set_run_base_dir, reset_run_base_dir
+
+    outbox = tmp_path / ".untether-outbox"
+    outbox.mkdir()
+    (outbox / "result.txt").write_text("hello", encoding="utf-8")
+
+    transport = FakeTransport()
+    runner = _return_runner(answer="done")
+    cfg = ExecBridgeConfig(
+        transport=transport,
+        presenter=MarkdownPresenter(),
+        final_notify=False,
+        # send_file=None (default) — outbox disabled
+    )
+    incoming = IncomingMessage(channel_id=1, message_id=1, text="test")
+    token = set_run_base_dir(tmp_path)
+    try:
+        await handle_message(cfg, runner=runner, incoming=incoming, resume_token=None)
+    finally:
+        reset_run_base_dir(token)
+
+    # File should still exist — outbox was not processed
+    assert (outbox / "result.txt").exists()
+
+
+@pytest.mark.anyio
+async def test_outbox_not_scanned_on_error(tmp_path) -> None:
+    """Outbox delivery is skipped when run_ok is False."""
+    from unittest.mock import AsyncMock
+
+    from untether.settings import TelegramFilesSettings
+    from untether.utils.paths import set_run_base_dir, reset_run_base_dir
+
+    outbox = tmp_path / ".untether-outbox"
+    outbox.mkdir()
+    (outbox / "result.txt").write_text("hello", encoding="utf-8")
+
+    send_file = AsyncMock()
+    files_cfg = TelegramFilesSettings(enabled=True)
+    transport = FakeTransport()
+    runner = ScriptRunner([ErrorReturn(error="failed")], engine=CODEX_ENGINE)
+    cfg = ExecBridgeConfig(
+        transport=transport,
+        presenter=MarkdownPresenter(),
+        final_notify=False,
+        send_file=send_file,
+        outbox_config=files_cfg,
+    )
+    incoming = IncomingMessage(channel_id=1, message_id=1, text="test")
+    token = set_run_base_dir(tmp_path)
+    try:
+        await handle_message(cfg, runner=runner, incoming=incoming, resume_token=None)
+    finally:
+        reset_run_base_dir(token)
+
+    send_file.assert_not_called()

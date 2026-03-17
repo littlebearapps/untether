@@ -32,6 +32,7 @@ Untether adds interactive permission control, plan mode support, and several UX 
 - **Pi context compaction** — `AutoCompactionStart`/`AutoCompactionEnd` events rendered as progress actions
 - **Stall diagnostics & liveness watchdog** — `/proc` process diagnostics (CPU, RSS, TCP, FDs), progressive stall warnings with Telegram notifications, liveness watchdog for alive-but-silent subprocesses, stall auto-cancel (dead process, no-PID zombie, absolute cap) with CPU-active suppression, `session.summary` structured log; `[watchdog]` config section
 - **File upload deduplication** — auto-appends `_1`, `_2`, … when target file exists, instead of requiring `--force`; media groups without captions auto-save to `incoming/`
+- **Agent-initiated file delivery (outbox)** — agents write files to `.untether-outbox/` during a run; Untether sends them as Telegram documents on completion with `📎` captions; deny-glob security, size limits, file count cap, auto-cleanup; `[transports.telegram.files]` config
 - **Resume line formatting** — visual separation with blank line and ↩️ prefix in final message footer
 - **`/continue`** — cross-environment resume; pick up the most recent CLI session from Telegram using each engine's native continue flag (`--continue`, `resume --last`, `--resume latest`); supported for Claude, Codex, OpenCode, Pi, Gemini (not AMP)
 
@@ -75,6 +76,7 @@ Telegram <-> TelegramPresenter <-> RunnerBridge <-> Runner (claude/codex/opencod
 | `telegram/bridge.py` | Telegram message rendering |
 | `telegram/loop.py` | Telegram update loop, signal handlers, drain-then-exit |
 | `telegram/files.py` | File upload helpers, deduplication, deny globs, atomic writes |
+| `telegram/outbox_delivery.py` | Agent-initiated file delivery: scan, send, cleanup outbox files |
 | `commands.py` | Command result types |
 | `scripts/validate_release.py` | Release validation (changelog format, issue links, version match) |
 | `scripts/healthcheck.sh` | Post-deploy health check (systemd, version, logs, Bot API) |

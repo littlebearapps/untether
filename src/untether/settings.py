@@ -68,11 +68,24 @@ class TelegramFilesSettings(BaseModel):
         ]
     )
 
+    # Outbox: agent-initiated file delivery
+    outbox_enabled: bool = True
+    outbox_dir: NonEmptyStr = ".untether-outbox"
+    outbox_max_files: int = Field(default=10, ge=1, le=50)
+    outbox_cleanup: bool = True
+
     @field_validator("uploads_dir")
     @classmethod
     def _validate_uploads_dir(cls, value: str) -> str:
         if Path(value).is_absolute():
             raise ValueError("files.uploads_dir must be a relative path")
+        return value
+
+    @field_validator("outbox_dir")
+    @classmethod
+    def _validate_outbox_dir(cls, value: str) -> str:
+        if Path(value).is_absolute():
+            raise ValueError("files.outbox_dir must be a relative path")
         return value
 
 

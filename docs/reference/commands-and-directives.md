@@ -40,7 +40,7 @@ This line is parsed from replies and takes precedence over new directives. For b
 | `/reasoning` | Show/set the reasoning override for the current scope. |
 | `/trigger` | Show/set trigger mode (mentions-only vs all). |
 | `/file put <path>` | Upload a document into the repo/worktree (requires file transfer enabled). |
-| `/file get <path>` | Fetch a file or directory back into Telegram. |
+| `/file get <path>` | Fetch a file or directory back into Telegram. Agents can also send files automatically via `.untether-outbox/` — see [file transfer](../how-to/file-transfer.md#agent-initiated-delivery-outbox). |
 | `/topic <project> @branch` | Create/bind a topic (topics enabled). |
 | `/ctx` | Show context binding (chat or topic). |
 | `/ctx set <project> @branch` | Update context binding. |

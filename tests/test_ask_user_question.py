@@ -66,9 +66,17 @@ def _make_state_with_session(
     return state, state.factory
 
 
+CHAT_A = -100001
+CHAT_B = -100002
+
+
 @pytest.fixture(autouse=True)
 def _clear_registries():
+    from untether.utils.paths import set_run_channel_id, reset_run_channel_id
+
+    token = set_run_channel_id(CHAT_A)
     yield
+    reset_run_channel_id(token)
     _ACTIVE_RUNNERS.clear()
     _SESSION_STDIN.clear()
     _REQUEST_TO_SESSION.clear()
@@ -143,7 +151,7 @@ def test_ask_user_question_registered_pending() -> None:
     )
     translate_claude_event(event, title="claude", state=state, factory=factory)
     assert "req-ask-3" in _PENDING_ASK_REQUESTS
-    assert _PENDING_ASK_REQUESTS["req-ask-3"] == "Which database?"
+    assert _PENDING_ASK_REQUESTS["req-ask-3"] == (CHAT_A, "Which database?")
 
 
 def test_ask_user_question_has_inline_keyboard() -> None:
@@ -181,9 +189,9 @@ def test_get_pending_ask_request_empty() -> None:
 
 
 def test_get_pending_ask_request_returns_oldest() -> None:
-    _PENDING_ASK_REQUESTS["req-1"] = "Question 1"
-    _PENDING_ASK_REQUESTS["req-2"] = "Question 2"
-    result = get_pending_ask_request()
+    _PENDING_ASK_REQUESTS["req-1"] = (CHAT_A, "Question 1")
+    _PENDING_ASK_REQUESTS["req-2"] = (CHAT_A, "Question 2")
+    result = get_pending_ask_request(channel_id=CHAT_A)
     assert result is not None
     assert result[0] == "req-1"
     assert result[1] == "Question 1"
@@ -192,7 +200,7 @@ def test_get_pending_ask_request_returns_oldest() -> None:
 @pytest.mark.anyio
 async def test_answer_ask_question_clears_pending() -> None:
     """Answering should clear the pending request."""
-    _PENDING_ASK_REQUESTS["req-a"] = "What?"
+    _PENDING_ASK_REQUESTS["req-a"] = (CHAT_A, "What?")
 
     # Need an active runner for the response to work
     mock_runner = AsyncMock()
@@ -211,7 +219,7 @@ async def test_answer_ask_question_sends_deny_with_answer() -> None:
     mock_runner = AsyncMock()
     _ACTIVE_RUNNERS["sess-1"] = (mock_runner, 0.0)
     _REQUEST_TO_SESSION["req-b"] = "sess-1"
-    _PENDING_ASK_REQUESTS["req-b"] = "What colour?"
+    _PENDING_ASK_REQUESTS["req-b"] = (CHAT_A, "What colour?")
 
     await answer_ask_question("req-b", "Blue")
 
@@ -252,7 +260,10 @@ def test_ask_question_nested_questions_array() -> None:
     assert "What is your favourite colour?" in events[0].action.title
     # Should be registered in pending
     assert "req-nested-1" in _PENDING_ASK_REQUESTS
-    assert _PENDING_ASK_REQUESTS["req-nested-1"] == "What is your favourite colour?"
+    assert _PENDING_ASK_REQUESTS["req-nested-1"] == (
+        CHAT_A,
+        "What is your favourite colour?",
+    )
 
 
 def test_ask_question_nested_empty_questions() -> None:
@@ -453,15 +464,17 @@ def test_get_ask_question_flow_empty() -> None:
 def test_get_ask_question_flow_returns_active() -> None:
     flow = AskQuestionState(
         request_id="req-flow-1",
+        channel_id=CHAT_A,
         questions=[{"question": "Q1", "options": [{"label": "A"}]}],
     )
     _ASK_QUESTION_FLOWS["req-flow-1"] = flow
-    assert get_ask_question_flow() is flow
+    assert get_ask_question_flow(channel_id=CHAT_A) is flow
 
 
 def test_format_question_message_single() -> None:
     flow = AskQuestionState(
         request_id="req-1",
+        channel_id=CHAT_A,
         questions=[{"question": "Pick a colour"}],
     )
     msg = format_question_message(flow)
@@ -471,6 +484,7 @@ def test_format_question_message_single() -> None:
 def test_format_question_message_multi() -> None:
     flow = AskQuestionState(
         request_id="req-1",
+        channel_id=CHAT_A,
         questions=[{"question": "First?"}, {"question": "Second?"}],
     )
     assert "1 of 2" in format_question_message(flow)
@@ -481,6 +495,7 @@ def test_format_question_message_multi() -> None:
 def test_get_question_option_buttons() -> None:
     flow = AskQuestionState(
         request_id="req-1",
+        channel_id=CHAT_A,
         questions=[
             {
                 "question": "Pick",
@@ -510,10 +525,11 @@ async def test_answer_with_options_approves_with_answers() -> None:
     _REQUEST_TO_INPUT["req-opts-a"] = {
         "questions": [{"question": "Which DB?", "options": [{"label": "PG"}]}]
     }
-    _PENDING_ASK_REQUESTS["req-opts-a"] = "Which DB?"
+    _PENDING_ASK_REQUESTS["req-opts-a"] = (CHAT_A, "Which DB?")
 
     flow = AskQuestionState(
         request_id="req-opts-a",
+        channel_id=CHAT_A,
         questions=[{"question": "Which DB?", "options": [{"label": "PG"}]}],
         answers={"Which DB?": "PG"},
     )
@@ -546,6 +562,7 @@ async def test_answer_with_options_includes_answers_in_input() -> None:
 
     flow = AskQuestionState(
         request_id="req-opts-b",
+        channel_id=CHAT_A,
         questions=[{"question": "Colour?"}],
         answers={"Colour?": "Red"},
     )
@@ -636,3 +653,58 @@ def test_ask_question_not_denied_when_on() -> None:
         assert isinstance(events[0], ActionEvent)
     finally:
         reset_run_options(token)
+
+
+# ===========================================================================
+# Cross-chat isolation (#144)
+# ===========================================================================
+
+
+def test_pending_ask_scoped_by_channel() -> None:
+    """Pending ask in chat A should NOT be returned for chat B."""
+    _PENDING_ASK_REQUESTS["req-x"] = (CHAT_A, "Question for A")
+    assert get_pending_ask_request(channel_id=CHAT_A) is not None
+    assert get_pending_ask_request(channel_id=CHAT_B) is None
+
+
+def test_pending_ask_returns_correct_channel() -> None:
+    """Each channel should only see its own pending asks."""
+    _PENDING_ASK_REQUESTS["req-a"] = (CHAT_A, "Q for A")
+    _PENDING_ASK_REQUESTS["req-b"] = (CHAT_B, "Q for B")
+    result_a = get_pending_ask_request(channel_id=CHAT_A)
+    result_b = get_pending_ask_request(channel_id=CHAT_B)
+    assert result_a is not None and result_a[0] == "req-a"
+    assert result_b is not None and result_b[0] == "req-b"
+
+
+def test_ask_flow_scoped_by_channel() -> None:
+    """Ask question flow in chat A should NOT be returned for chat B."""
+    flow = AskQuestionState(
+        request_id="req-flow-a",
+        channel_id=CHAT_A,
+        questions=[{"question": "Q?", "options": [{"label": "X"}]}],
+    )
+    _ASK_QUESTION_FLOWS["req-flow-a"] = flow
+    assert get_ask_question_flow(channel_id=CHAT_A) is flow
+    assert get_ask_question_flow(channel_id=CHAT_B) is None
+
+
+def test_translate_registers_ask_with_channel_id() -> None:
+    """AskUserQuestion should be registered with the current channel_id."""
+    state, factory = _make_state_with_session()
+    event = _decode_event(
+        {
+            "type": "control_request",
+            "request_id": "req-chan-1",
+            "request": {
+                "subtype": "can_use_tool",
+                "tool_name": "AskUserQuestion",
+                "input": {"question": "Which?"},
+            },
+        }
+    )
+    translate_claude_event(event, title="claude", state=state, factory=factory)
+    assert "req-chan-1" in _PENDING_ASK_REQUESTS
+    channel_id, question = _PENDING_ASK_REQUESTS["req-chan-1"]
+    assert channel_id == CHAT_A
+    assert question == "Which?"

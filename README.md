@@ -79,7 +79,7 @@ That's it. Your agent runs on your machine, streams progress to Telegram, and yo
 - 💡 **Actionable error hints** — friendly messages for API outages, rate limits, billing errors, and network failures with resume guidance
 - 🏷 **Model and mode metadata** — every completed message shows model with version, effort level, and permission mode (e.g. `🏷 opus 4.6 · medium · plan`) across all engines
 - 🎙️ **Voice notes** — hands full? Dictate tasks instead of typing; Untether transcribes via a configurable Whisper-compatible endpoint
-- 📎 **File transfer** — upload files to your repo or download results back
+- 📎 **File transfer** — upload files to your repo, download results back, or let agents send files to you automatically via `.untether-outbox/`
 - ⏰ **Scheduled tasks** — cron expressions and webhook triggers
 - 💬 **Forum topics** — map Telegram topics to projects and branches
 - 📤 **Session export** — `/export` for markdown or JSON transcripts

@@ -25,7 +25,12 @@ from ...runner_bridge import (
 from ...scheduler import ThreadScheduler
 from ...transport import MessageRef, RenderedMessage, SendOptions
 from ...transport_runtime import TransportRuntime
-from ...utils.paths import reset_run_base_dir, set_run_base_dir
+from ...utils.paths import (
+    reset_run_base_dir,
+    reset_run_channel_id,
+    set_run_base_dir,
+    set_run_channel_id,
+)
 from ..bridge import send_plain
 from ..engine_overrides import supports_reasoning
 
@@ -226,6 +231,7 @@ async def _run_engine(
             await reply(text=f"error:\n{exc}")
             return
         run_base_token = set_run_base_dir(cwd)
+        run_channel_token = set_run_channel_id(chat_id)
         try:
             run_fields = {
                 "chat_id": chat_id,
@@ -263,6 +269,7 @@ async def _run_engine(
                 )
         finally:
             reset_run_base_dir(run_base_token)
+            reset_run_channel_id(run_channel_token)
     except Exception as exc:
         logger.exception(
             "handle.worker_failed",

@@ -2026,7 +2026,7 @@ async def run_main_loop(
                     )
 
                     # Check for active option flow in "Other" text mode first
-                    flow = get_ask_question_flow()
+                    flow = get_ask_question_flow(channel_id=msg.chat_id)
                     if flow is not None and flow.awaiting_text:
                         flow.awaiting_text = False
                         current_q = flow.questions[flow.current_index]
@@ -2063,7 +2063,7 @@ async def run_main_loop(
                                 await reply(text=f"↩️ Answered: {text[:100]}")
                             return
 
-                    pending_ask = get_pending_ask_request()
+                    pending_ask = get_pending_ask_request(channel_id=msg.chat_id)
                     if pending_ask is not None:
                         ask_req_id, ask_question = pending_ask
                         logger.info(

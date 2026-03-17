@@ -102,9 +102,10 @@ _OUTLINE_PENDING: set[str] = set()
 # Minimum characters for an outline to be considered "substantial".
 _OUTLINE_MIN_CHARS = 200
 
-# A1: Pending AskUserQuestion requests: request_id -> question text
+# A1: Pending AskUserQuestion requests: request_id -> (channel_id, question text)
 # When Claude Code asks a question, the user can reply via Telegram text.
-_PENDING_ASK_REQUESTS: dict[str, str] = {}
+# Scoped by channel_id to prevent cross-chat message stealing (#144).
+_PENDING_ASK_REQUESTS: dict[str, tuple[int, str]] = {}
 
 
 @dataclass(slots=True)
@@ -112,6 +113,7 @@ class AskQuestionState:
     """Tracks multi-question AskUserQuestion flow state."""
 
     request_id: str
+    channel_id: int
     questions: list[dict[str, Any]]
     current_index: int = 0
     answers: dict[str, str] = field(default_factory=dict)
@@ -863,6 +865,9 @@ def translate_claude_event(
             if isinstance(request, claude_schema.ControlCanUseToolRequest):
                 tool_name = getattr(request, "tool_name", "")
                 if tool_name == "AskUserQuestion":
+                    from ..utils.paths import get_run_channel_id
+
+                    _ask_channel = get_run_channel_id() or 0
                     # Parse the full questions array
                     questions_list: list[dict[str, Any]] = []
                     if tool_input:
@@ -893,6 +898,7 @@ def translate_claude_event(
                         if options and isinstance(options, list):
                             flow = AskQuestionState(
                                 request_id=request_id,
+                                channel_id=_ask_channel,
                                 questions=questions_list,
                             )
                             _ASK_QUESTION_FLOWS[request_id] = flow
@@ -935,8 +941,11 @@ def translate_claude_event(
                         )
                         ask_question = ""
 
-                    # Register this request for reply handling
-                    _PENDING_ASK_REQUESTS[request_id] = ask_question or ""
+                    # Register this request for reply handling (scoped by channel)
+                    _PENDING_ASK_REQUESTS[request_id] = (
+                        _ask_channel,
+                        ask_question or "",
+                    )
 
             detail: dict[str, Any] = {
                 "request_id": request_id,
@@ -1932,6 +1941,9 @@ def _cleanup_session_registries(session_id: str) -> None:
         cleaned.append(f"requests({len(stale)})")
     for k in stale:
         del _REQUEST_TO_SESSION[k]
+        # Also clean up any pending ask requests and flows for stale requests
+        _PENDING_ASK_REQUESTS.pop(k, None)
+        _ASK_QUESTION_FLOWS.pop(k, None)
     logger.info(
         "claude_runner.session_cleanup",
         session_id=session_id,
@@ -1939,12 +1951,19 @@ def _cleanup_session_registries(session_id: str) -> None:
     )
 
 
-def get_pending_ask_request() -> tuple[str, str] | None:
-    """Return the oldest pending AskUserQuestion (request_id, question) or None."""
-    if not _PENDING_ASK_REQUESTS:
-        return None
-    request_id = next(iter(_PENDING_ASK_REQUESTS))
-    return request_id, _PENDING_ASK_REQUESTS[request_id]
+def get_pending_ask_request(
+    channel_id: int | None = None,
+) -> tuple[str, str] | None:
+    """Return the oldest pending AskUserQuestion for *channel_id*, or None.
+
+    When *channel_id* is provided, only requests from that channel are
+    returned — preventing cross-chat message stealing (#144).
+    """
+    for request_id, (ch, question) in _PENDING_ASK_REQUESTS.items():
+        if channel_id is not None and ch != channel_id:
+            continue
+        return request_id, question
+    return None
 
 
 async def answer_ask_question(request_id: str, answer: str) -> bool:
@@ -1965,12 +1984,15 @@ async def answer_ask_question(request_id: str, answer: str) -> bool:
     )
 
 
-def get_ask_question_flow() -> AskQuestionState | None:
-    """Return the active AskUserQuestion flow, or None."""
-    if not _ASK_QUESTION_FLOWS:
-        return None
-    request_id = next(iter(_ASK_QUESTION_FLOWS))
-    return _ASK_QUESTION_FLOWS[request_id]
+def get_ask_question_flow(
+    channel_id: int | None = None,
+) -> AskQuestionState | None:
+    """Return the active AskUserQuestion flow for *channel_id*, or None."""
+    for flow in _ASK_QUESTION_FLOWS.values():
+        if channel_id is not None and flow.channel_id != channel_id:
+            continue
+        return flow
+    return None
 
 
 def get_ask_question_flow_by_id(request_id: str) -> AskQuestionState | None:

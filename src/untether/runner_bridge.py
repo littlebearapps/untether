@@ -138,6 +138,11 @@ _DEFAULT_PREAMBLE = (
     "  ### Plan/Document Created (if applicable)\n"
     "  - [Path and concise summary of any plan, design doc, or document created — "
     "the user cannot easily open files from Telegram]\n"
+    "  ### Files for Review (if applicable)\n"
+    "  - To send files to the user, write them to `.untether-outbox/`\n"
+    "  - Example: `mkdir -p .untether-outbox && cp docs/plan.md .untether-outbox/`\n"
+    "  - Files are delivered as Telegram documents when the run completes\n"
+    "  - The user can also request any project file with `/file get <path>`\n"
     "  ### Next Steps\n"
     "  - [Remaining work, if any]\n"
     "  ### Decisions Needed (if any)\n"
@@ -520,6 +525,8 @@ class ExecBridgeConfig:
     presenter: Presenter
     final_notify: bool
     min_render_interval: float = 0.0
+    send_file: Callable[..., Awaitable[Any]] | None = None
+    outbox_config: Any | None = None
 
 
 @dataclass(slots=True)
@@ -1789,3 +1796,31 @@ async def handle_message(
         delete_tag="final",
         thread_id=incoming.thread_id,
     )
+
+    # Deliver outbox files (agent-initiated file delivery)
+    if (
+        cfg.send_file is not None
+        and cfg.outbox_config is not None
+        and run_ok is not False
+    ):
+        from .telegram.outbox_delivery import deliver_outbox_files
+        from .utils.paths import get_run_base_dir
+
+        _run_root = get_run_base_dir()
+        if _run_root is not None:
+            _oc = cfg.outbox_config
+            try:
+                await deliver_outbox_files(
+                    send_file=cfg.send_file,
+                    channel_id=incoming.channel_id,
+                    thread_id=incoming.thread_id,
+                    reply_to_msg_id=user_ref.message_id,
+                    run_root=_run_root,
+                    outbox_dir=_oc.outbox_dir,
+                    deny_globs=_oc.deny_globs,
+                    max_download_bytes=_oc.max_download_bytes,
+                    max_files=_oc.outbox_max_files,
+                    cleanup=_oc.outbox_cleanup,
+                )
+            except Exception:  # noqa: BLE001
+                logger.warning("outbox.delivery_failed", exc_info=True)

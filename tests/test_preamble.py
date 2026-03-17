@@ -48,3 +48,9 @@ def test_preamble_settings_defaults() -> None:
     cfg = PreambleSettings()
     assert cfg.enabled is True
     assert cfg.text is None
+
+
+def test_default_preamble_includes_outbox_instructions() -> None:
+    """Default preamble tells agents about the .untether-outbox/ delivery mechanism."""
+    assert ".untether-outbox/" in _DEFAULT_PREAMBLE
+    assert "/file get" in _DEFAULT_PREAMBLE
