@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from ...commands import CommandBackend, CommandContext, CommandResult
 from ...logging import get_logger
+from ...runner_bridge import delete_outline_messages
 from ...runners.claude import (
     _ACTIVE_RUNNERS,
     _DISCUSS_APPROVED,
@@ -163,6 +164,9 @@ class ClaudeControlCommand:
                     notify=True,
                 )
 
+            # Delete outline messages immediately on approve or deny
+            await delete_outline_messages(session_id)
+
             if approved:
                 _DISCUSS_APPROVED.add(session_id)
                 _OUTLINE_PENDING.discard(session_id)
@@ -219,6 +223,8 @@ class ClaudeControlCommand:
         if session_id:
             clear_discuss_cooldown(session_id)
             _OUTLINE_PENDING.discard(session_id)
+            # Delete outline messages when ExitPlanMode is approved/denied
+            await delete_outline_messages(session_id)
 
         action_text = "✅ Approved" if approved else "❌ Denied"
         logger.info(

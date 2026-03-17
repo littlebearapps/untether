@@ -48,6 +48,41 @@ def register_ephemeral_message(
     _EPHEMERAL_MSGS.setdefault(key, []).append(ref)
 
 
+# Outline message cleanup registry.
+# Maps session_id → (transport, list of outline refs).
+# Populated by ProgressEdits._send_outline(), consumed by
+# delete_outline_messages() which the callback handler calls.
+
+_OUTLINE_REGISTRY: dict[str, tuple[Any, list[MessageRef]]] = {}
+
+
+def register_outline_cleanup(
+    session_id: str,
+    transport: Any,
+    refs: list[MessageRef],
+) -> None:
+    """Register outline refs for a session so the callback handler can delete them."""
+    _OUTLINE_REGISTRY[session_id] = (transport, refs)
+
+
+async def delete_outline_messages(session_id: str) -> None:
+    """Delete outline messages for a session.  Called from callback handler.
+
+    Also clears the shared refs list so ProgressEdits detects the cleanup
+    and removes the stale keyboard on its next render cycle.
+    """
+    entry = _OUTLINE_REGISTRY.pop(session_id, None)
+    if entry is None:
+        return
+    transport, refs = entry
+    for ref in refs:
+        try:
+            await transport.delete(ref=ref)
+        except Exception:  # noqa: BLE001
+            logger.debug("outline_cleanup.delete_failed", exc_info=True)
+    refs.clear()
+
+
 # Usage alert thresholds (percentage of 5h window)
 _USAGE_WARN_PCT = 70
 _USAGE_CRITICAL_PCT = 90
@@ -606,6 +641,7 @@ class ProgressEdits:
         self.event_seq = 0
         self.rendered_seq = 0
         self._outline_sent: bool = False
+        self._outline_refs: list[MessageRef] = []
         self.signal_send, self.signal_recv = anyio.create_memory_object_stream(1)
 
     async def run(self) -> None:
@@ -859,6 +895,21 @@ class ProgressEdits:
             has_approval = len(new_kb) > 1
             had_approval = len(old_kb) > 1
 
+            # If the callback handler already cleaned up outline messages
+            # (via delete_outline_messages), the synthetic discuss_approve
+            # action still renders stale buttons. Force cancel-only keyboard.
+            if self._outline_sent and not self._outline_refs and has_approval:
+                cancel_row = new_kb[-1:]  # keep only the cancel row
+                rendered = RenderedMessage(
+                    text=rendered.text,
+                    extra={
+                        **rendered.extra,
+                        "reply_markup": {"inline_keyboard": cancel_row},
+                    },
+                )
+                new_kb = cancel_row
+                has_approval = False
+
             try:
                 # Send full outline as separate message(s) when approval buttons appear
                 if has_approval and not had_approval and not self._outline_sent:
@@ -866,7 +917,20 @@ class ProgressEdits:
                         outline_text = a.action.detail.get("outline_full_text")
                         if outline_text and isinstance(outline_text, str):
                             self._outline_sent = True
-                            await self._send_outline(outline_text, bg_tg)
+                            # Pass approval rows (exclude cancel) for the last outline msg
+                            approval_kb = (
+                                {"inline_keyboard": new_kb[:-1]}
+                                if len(new_kb) > 1
+                                else None
+                            )
+                            await self._send_outline(
+                                outline_text,
+                                bg_tg,
+                                approval_keyboard=approval_kb,
+                                session_id=(
+                                    state.resume.value if state.resume else None
+                                ),
+                            )
                             break
 
                 if has_approval and not had_approval and not self._approval_notified:
@@ -911,6 +975,31 @@ class ProgressEdits:
                                 )
 
                         bg_tg.start_soon(_delete_notify, ref_to_delete)
+
+                # Delete outline messages when approval is resolved.
+                # Triggers on: buttons disappear (had→!has), OR keyboard
+                # content changes (old approval replaced by new one, e.g.
+                # ExitPlanMode → Write).
+                if self._outline_refs and (
+                    (had_approval and not has_approval)
+                    or (had_approval and has_approval and new_kb != old_kb)
+                ):
+                    outline_refs = list(self._outline_refs)
+                    self._outline_refs.clear()
+
+                    async def _delete_outlines(
+                        refs: list[MessageRef],
+                    ) -> None:
+                        for ref in refs:
+                            try:
+                                await self.transport.delete(ref=ref)
+                            except Exception:  # noqa: BLE001
+                                logger.debug(
+                                    "progress_edits.outline_delete_failed",
+                                    exc_info=True,
+                                )
+
+                    bg_tg.start_soon(_delete_outlines, outline_refs)
 
                 if rendered != self.last_rendered:
                     # Log keyboard transitions at info level for #103/#104 diagnostics
@@ -982,55 +1071,59 @@ class ProgressEdits:
         except (anyio.BrokenResourceError, anyio.ClosedResourceError):
             pass
 
-    async def _send_outline(self, text: str, bg_tg: anyio.abc.TaskGroup) -> None:
+    async def _send_outline(
+        self,
+        text: str,
+        bg_tg: anyio.abc.TaskGroup,
+        *,
+        approval_keyboard: dict[str, Any] | None = None,
+        session_id: str | None = None,
+    ) -> None:
         """Send plan outline as separate ephemeral message(s).
 
         Splits long outlines across multiple messages to avoid Telegram's
-        4096 char limit. Each message is registered as ephemeral so it
-        auto-deletes when the run finishes.
+        4096 char limit.  Each chunk is rendered from markdown to Telegram
+        entities so headings, bold, code etc. display correctly.  The last
+        message gets the approve/deny keyboard so the user doesn't have to
+        scroll up.  Refs are tracked in ``_outline_refs`` and registered in
+        the module-level ``_OUTLINE_REGISTRY`` so the callback handler can
+        delete them on approve/deny.
         """
+        # Local import to avoid circular dependency (telegram.bridge → runner_bridge)
+        from .telegram.render import render_markdown, split_markdown_body
+
         max_chars = 3500  # leave room for entities/overhead
-        chunks: list[str] = []
-        remaining = text
-        while remaining:
-            if len(remaining) <= max_chars:
-                chunks.append(remaining)
-                break
-            # Split at last paragraph break within limit
-            split_at = remaining.rfind("\n\n", 0, max_chars)
-            if split_at <= 0:
-                # No paragraph break — split at last newline
-                split_at = remaining.rfind("\n", 0, max_chars)
-            if split_at <= 0:
-                # No newline — hard split
-                split_at = max_chars
-            chunks.append(remaining[:split_at])
-            remaining = remaining[split_at:].lstrip("\n")
+        chunks = split_markdown_body(text, max_chars) or [text]
 
         async def _do_send() -> None:
-            for chunk in chunks:
+            last_idx = len(chunks) - 1
+            for idx, chunk in enumerate(chunks):
                 try:
+                    rendered_text, entities = render_markdown(chunk)
+                    extra: dict[str, Any] = {"entities": entities}
+                    if approval_keyboard and idx == last_idx:
+                        extra["reply_markup"] = approval_keyboard
                     ref = await self.transport.send(
                         channel_id=self.channel_id,
-                        message=RenderedMessage(text=chunk),
+                        message=RenderedMessage(text=rendered_text, extra=extra),
                         options=SendOptions(
                             reply_to=self.progress_ref,
                             notify=False,
                             thread_id=self.thread_id,
                         ),
                     )
-                    if ref and self.progress_ref:
-                        register_ephemeral_message(
-                            self.channel_id,
-                            self.progress_ref.message_id,
-                            ref,
-                        )
+                    if ref:
+                        self._outline_refs.append(ref)
                 except Exception:  # noqa: BLE001
                     logger.warning(
                         "progress_edits.outline_send_failed",
                         channel_id=self.channel_id,
                         exc_info=True,
                     )
+            # Register in module-level registry so callback handler can
+            # trigger immediate deletion on approve/deny.
+            if session_id and self._outline_refs:
+                register_outline_cleanup(session_id, self.transport, self._outline_refs)
 
         bg_tg.start_soon(_do_send)
 
@@ -1048,6 +1141,28 @@ class ProgressEdits:
                     error_type=exc.__class__.__name__,
                 )
             self._approval_notify_ref = None
+        # Safety-net: delete any outline messages not already cleaned up
+        # (e.g. run cancelled while outline is visible).
+        # Also remove from the module-level registry to avoid stale entries.
+        stale_sessions = [
+            sid
+            for sid, (_, refs) in _OUTLINE_REGISTRY.items()
+            if refs is self._outline_refs
+        ]
+        for sid in stale_sessions:
+            _OUTLINE_REGISTRY.pop(sid, None)
+        for ref in self._outline_refs:
+            try:
+                await self.transport.delete(ref=ref)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "ephemeral.outline_delete.failed",
+                    chat_id=self.channel_id,
+                    message_id=ref.message_id,
+                    error=str(exc),
+                    error_type=exc.__class__.__name__,
+                )
+        self._outline_refs.clear()
         # Drain messages registered by callback handlers (e.g. approve/deny feedback).
         if self.progress_ref is not None:
             key = (self.channel_id, self.progress_ref.message_id)
