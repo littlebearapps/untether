@@ -663,6 +663,7 @@ class ProgressEdits:
         self.rendered_seq = 0
         self._outline_sent: bool = False
         self._outline_refs: list[MessageRef] = []
+        self._outline_just_resolved: bool = False
         self.signal_send, self.signal_recv = anyio.create_memory_object_stream(1)
 
     async def run(self) -> None:
@@ -930,6 +931,10 @@ class ProgressEdits:
                 )
                 new_kb = cancel_row
                 has_approval = False
+                # Suppress the push notification for the next real approval
+                # buttons — the user just interacted with the outline and
+                # doesn't need another "Action required" push.
+                self._outline_just_resolved = True
 
             try:
                 # Send full outline as separate message(s) when approval buttons appear
@@ -956,30 +961,37 @@ class ProgressEdits:
 
                 if has_approval and not had_approval and not self._approval_notified:
                     self._approval_notified = True
-                    # Contextual notification text
-                    notify_text = "Action required \u2014 approval needed"
-                    for a in state.actions:
-                        if not a.completed and a.action.detail.get("ask_question"):
-                            notify_text = "Question from Claude Code"
-                            break
+                    # After an outline flow, skip one notification cycle —
+                    # the user just approved/denied via outline buttons and
+                    # doesn't need a duplicate "Action required" push.
+                    if self._outline_just_resolved:
+                        self._outline_just_resolved = False
+                    else:
+                        # Contextual notification text
+                        notify_text = "Action required \u2014 approval needed"
+                        for a in state.actions:
+                            if not a.completed and a.action.detail.get("ask_question"):
+                                notify_text = "Question from Claude Code"
+                                break
 
-                    async def _send_notify(text: str) -> None:
-                        try:
-                            self._approval_notify_ref = await self.transport.send(
-                                channel_id=self.channel_id,
-                                message=RenderedMessage(text=text),
-                                options=SendOptions(
-                                    notify=True,
-                                    reply_to=self.progress_ref,
-                                    thread_id=self.thread_id,
-                                ),
-                            )
-                        except Exception:  # noqa: BLE001
-                            logger.debug(
-                                "progress_edits.notify_send_failed", exc_info=True
-                            )
+                        async def _send_notify(text: str) -> None:
+                            try:
+                                self._approval_notify_ref = await self.transport.send(
+                                    channel_id=self.channel_id,
+                                    message=RenderedMessage(text=text),
+                                    options=SendOptions(
+                                        notify=True,
+                                        reply_to=self.progress_ref,
+                                        thread_id=self.thread_id,
+                                    ),
+                                )
+                            except Exception:  # noqa: BLE001
+                                logger.debug(
+                                    "progress_edits.notify_send_failed",
+                                    exc_info=True,
+                                )
 
-                    bg_tg.start_soon(_send_notify, notify_text)
+                        bg_tg.start_soon(_send_notify, notify_text)
                 elif had_approval and not has_approval:
                     ref_to_delete = self._approval_notify_ref
                     self._approval_notify_ref = None
