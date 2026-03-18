@@ -254,7 +254,7 @@ class TelegramTransport:
                 "transport.send.failed",
                 chat_id=chat_id,
                 reply_to_message_id=reply_to_message_id,
-                text_preview=message.text[:80] if message.text else None,
+                text_len=len(message.text) if message.text else 0,
             )
             return None
         if followups:

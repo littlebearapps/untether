@@ -1211,12 +1211,8 @@ class ProgressEdits:
                         error=str(exc),
                         error_type=exc.__class__.__name__,
                     )
-        # Unregister from progress persistence file.
-        if self.progress_ref is not None and _PROGRESS_PERSISTENCE_PATH is not None:
-            from .telegram.progress_persistence import unregister_progress
-
-            session_key = f"{self.channel_id}:{self.progress_ref.message_id}"
-            unregister_progress(_PROGRESS_PERSISTENCE_PATH, session_key)
+        # Note: unregister_progress() is called AFTER send_result_message()
+        # in handle_message(), not here, to avoid an orphan window.
 
 
 @dataclass(frozen=True, slots=True)
@@ -1838,6 +1834,15 @@ async def handle_message(
         delete_tag="final",
         thread_id=incoming.thread_id,
     )
+
+    # Unregister progress persistence after the final message is sent.
+    # Must happen AFTER send_result_message() so a crash between
+    # delete_ephemeral() and here still has an orphan cleanup pointer.
+    if progress_ref is not None and _PROGRESS_PERSISTENCE_PATH is not None:
+        from .telegram.progress_persistence import unregister_progress
+
+        session_key = f"{incoming.channel_id}:{progress_ref.message_id}"
+        unregister_progress(_PROGRESS_PERSISTENCE_PATH, session_key)
 
     # Deliver outbox files (agent-initiated file delivery)
     if (

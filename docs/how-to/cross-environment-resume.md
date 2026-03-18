@@ -13,7 +13,7 @@ Each engine CLI stores sessions per directory. Untether projects map to director
 
 ## Usage
 
-```
+```text
 /continue                           # resume with no new prompt
 /continue add tests for the auth    # resume with a follow-up prompt
 ```
