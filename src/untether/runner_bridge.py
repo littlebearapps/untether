@@ -97,6 +97,7 @@ def set_progress_persistence_path(path: Path | None) -> None:
     _PROGRESS_PERSISTENCE_PATH = path
 
 
+
 # Usage alert thresholds (percentage of 5h window)
 _USAGE_WARN_PCT = 70
 _USAGE_CRITICAL_PCT = 90
