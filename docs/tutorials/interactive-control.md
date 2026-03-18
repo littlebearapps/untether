@@ -110,6 +110,8 @@ Tap it to require Claude Code to write a comprehensive plan as a visible message
 4. Key decisions and trade-offs
 5. The expected end result
 
+The outline renders as **formatted Telegram text** — headings, bold, code blocks, and lists display properly instead of raw markdown:
+
 !!! untether "Untether"
     Here's my plan:
 
@@ -119,9 +121,9 @@ Tap it to require Claude Code to write a comprehensive plan as a visible message
 
     Files to modify: `README.md`
 
-<img src="../assets/screenshots/plan-outline-text.jpg" alt="Claude's written outline/plan appearing as visible text in chat" width="360" loading="lazy" />
+<img src="../assets/screenshots/plan-outline-text.jpg" alt="Claude's written outline/plan appearing as formatted text in chat" width="360" loading="lazy" />
 
-After Claude Code writes the outline, **Approve Plan** and **Deny** buttons appear automatically — no need to type "approved":
+After Claude Code writes the outline, **Approve Plan** and **Deny** buttons appear automatically on the last message of the outline — no need to scroll back up or type "approved":
 
 <div class="tg-buttons">
 <span class="tg-btn">Approve Plan</span>
@@ -220,6 +222,7 @@ Key concepts:
 - **Approval buttons** appear inline in Telegram when Claude Code needs permission — Approve, Deny, or Pause & Outline Plan
 - **Diff previews** show you exactly what will change before you approve
 - **"Pause & Outline Plan"** forces Claude Code to write a visible plan before executing
+- **Outline formatting** — plans render as proper Telegram text with headings, bold, and lists; buttons appear on the last message; outline messages are cleaned up after you act on them
 - **AskUserQuestion** lets you answer Claude Code's questions with option buttons or a text reply
 - **Push notifications** ensure you don't miss approval requests, even from another app
 - **Ephemeral cleanup** automatically removes button messages when the run finishes

@@ -72,6 +72,16 @@ bars, no keyboard, no notification tray.
 - [ ] `journalctl-startup.jpg` — journalctl output showing untether-dev starting cleanly.
 - [ ] `worktree-run.jpg` — Worktree run with @branch directive and project context in footer.
 
+## Tier 5: v0.35.0 features (7 images)
+
+- [ ] `config-menu-v035.jpg` — `/config` home page with 2-column toggle layout (replaces old `config-menu.jpg` when captured).
+- [ ] `outline-formatted.jpg` — Formatted plan outline with headings/bold/code blocks in Telegram.
+- [ ] `outline-buttons-bottom.jpg` — Approve/Deny buttons on the last chunk of a multi-message outline.
+- [ ] `outbox-delivery.jpg` — Agent-sent files appearing as Telegram documents with `📎` captions.
+- [ ] `orphan-cleanup.jpg` — Progress message showing "⚠️ interrupted by restart" after orphan cleanup.
+- [ ] `continue-command.jpg` — `/continue` picking up a CLI session from Telegram.
+- [ ] `config-cost-budget.jpg` — Cost & Usage sub-page with budget and auto-cancel toggles.
+
 ## Reuse map
 
 Some screenshots appear in multiple doc pages. The filename column shows which

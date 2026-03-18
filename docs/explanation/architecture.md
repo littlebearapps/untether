@@ -31,7 +31,7 @@ flowchart TB
 
     subgraph Runner["Runner Layer"]
         runner_proto[Runner Protocol<br/>runner.py]
-        runners[runners/<br/>claude, codex, opencode, pi]
+        runners[runners/<br/>claude, codex, opencode, pi, gemini, amp]
         schemas[schemas/<br/>JSONL decoders]
     end
 
@@ -50,7 +50,7 @@ flowchart TB
     end
 
     subgraph External["External"]
-        agent_clis[Agent CLIs<br/>claude, codex, pi]
+        agent_clis[Agent CLIs<br/>claude, codex, opencode, pi, gemini, amp]
         telegram_api[Telegram Bot API]
         webhook_sources[Webhook Sources<br/>GitHub, CI, etc.]
     end

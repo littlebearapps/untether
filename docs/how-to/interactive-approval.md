@@ -106,8 +106,38 @@ You can configure which tools require approval and which are auto-approved. By d
 
 To change this behaviour, adjust the permission mode. See [Plan mode](plan-mode.md) for details.
 
+## Engine-specific approval policies
+
+Claude Code is the only engine with interactive mid-run approval buttons. Other engines offer pre-run policies that control what the agent is allowed to do before it starts:
+
+### Codex CLI — Approval policy
+
+Toggle via `/config` → **Approval policy**:
+
+| Policy | CLI flag | Behaviour |
+|--------|----------|-----------|
+| **Full auto** (default) | (none) | All tools approved — Codex runs without restriction |
+| **Safe** | `--ask-for-approval untrusted` | Only trusted commands run; untrusted tools are blocked |
+
+This is a pre-run policy — Codex doesn't pause mid-run to ask for permission. The policy is set before the run starts.
+
+### Gemini CLI — Approval mode
+
+Toggle via `/config` → **Approval mode**:
+
+| Mode | CLI flag | Behaviour |
+|------|----------|-----------|
+| **Read-only** (default) | (none) | Write tools blocked — Gemini can only read files |
+| **Edit files** | `--approval-mode auto_edit` | File reads and writes OK, shell commands blocked |
+| **Full access** | `--approval-mode yolo` | All tools approved — full autonomy |
+
+This is also a pre-run policy. Gemini CLI doesn't have interactive mid-run approval.
+
+Both policies persist per chat via `/config` and can be cleared back to the default. See [Inline settings](inline-settings.md) for the full `/config` menu reference.
+
 ## Related
 
 - [Plan mode](plan-mode.md) — control when and how approval requests appear
+- [Inline settings](inline-settings.md) — `/config` menu for toggling approval policies
 - [Commands & directives](../reference/commands-and-directives.md) — full command reference
 - [Claude Code runner](../reference/runners/claude/runner.md) — technical details of the control channel

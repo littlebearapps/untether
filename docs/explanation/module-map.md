@@ -17,6 +17,8 @@ This page is a high-level map of Untether’s internal modules: what they do and
 | `router.py` | Auto-router: resolves resume tokens by polling runners; selects a runner for a message. |
 | `scheduler.py` | Per-thread FIFO job queueing with serialization. |
 | `transport_runtime.py` | Facade used by transports and commands to resolve messages and runners without importing internal router/project types. |
+| `cost_tracker.py` | Per-run and daily cost tracking with budget alerts and auto-cancel. |
+| `shutdown.py` | Graceful shutdown state and drain logic. |
 
 ## Domain model and events
 
@@ -44,6 +46,8 @@ This page is a high-level map of Untether’s internal modules: what they do and
 | `telegram/render.py` | Telegram markdown rendering and trimming. |
 | `telegram/onboarding.py` | Interactive setup and setup validation UX. |
 | `telegram/commands/*` | In-chat command handlers (`/agent`, `/file`, `/topic`, `/ctx`, `/new`, …). |
+| `telegram/outbox_delivery.py` | Agent-initiated file delivery: scan outbox, send files as Telegram documents, cleanup. |
+| `telegram/progress_persistence.py` | Active progress message persistence for orphan cleanup on restart. |
 
 ## Plugins
 
@@ -60,7 +64,7 @@ This page is a high-level map of Untether’s internal modules: what they do and
 
 | Module | Responsibility |
 |--------|----------------|
-| `runners/*` | Engine runner implementations (Codex, Claude Code, OpenCode, Pi). |
+| `runners/*` | Engine runner implementations (Claude Code, Codex, OpenCode, Pi, Gemini CLI, Amp). |
 | `schemas/*` | msgspec schemas / decoders for engine JSONL streams. |
 
 ## Configuration and persistence
@@ -78,4 +82,5 @@ This page is a high-level map of Untether’s internal modules: what they do and
 | `utils/paths.py` | Path/command relativization helpers. |
 | `utils/streams.py` | Async stream helpers (`iter_bytes_lines`, stderr draining). |
 | `utils/subprocess.py` | Subprocess management helpers (terminate/kill best-effort). |
+| `utils/proc_diag.py` | Process diagnostics for stall analysis (CPU, RSS, TCP, FDs, children). |
 

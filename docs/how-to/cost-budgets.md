@@ -29,6 +29,15 @@ Running agents remotely means they can rack up costs while you're not watching. 
 | `warn_at_pct` | `70` | Show a warning when this percentage of the budget is reached |
 | `auto_cancel` | `false` | Automatically cancel the run when a budget is exceeded |
 
+## Per-chat overrides
+
+You can toggle budgets on or off per chat without editing the config file. Open `/config` → **Cost & Usage** and use the toggle buttons:
+
+- **Budget enabled** — turn budget tracking on or off for this chat
+- **Budget auto-cancel** — enable or disable automatic run cancellation when a budget is exceeded
+
+These override the global `[cost_budget]` settings for the specific chat. Clear the override to revert to the global setting. See [Inline settings](inline-settings.md) for the full `/config` menu reference.
+
 ## How it works
 
 After each run completes, Untether checks the reported cost against your budgets:

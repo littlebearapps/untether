@@ -1,10 +1,10 @@
-# Untether Specification v0.23.0 [2026-02-26]
+# Untether Specification v0.35.0 [2026-03-18]
 
 This document is **normative**. The words **MUST**, **SHOULD**, and **MAY** express requirements.
 
 ## 1. Scope
 
-Untether v0.23.0 specifies:
+Untether v0.35.0 specifies:
 
 - A **Telegram** bot bridge that runs an agent **Runner** and posts:
   - a throttled, edited **progress message**
@@ -15,7 +15,7 @@ Untether v0.23.0 specifies:
 - **Automatic runner selection** among multiple engines based on ResumeLine (with a configurable default for new threads)
 - A Untether-owned **normalized event model** produced by runners and consumed by renderers/bridge
 
-Out of scope for v0.22.1:
+Out of scope:
 
 - Non-Telegram clients (Slack/Discord/etc.)
 - Token-by-token streaming of the assistant’s final answer
@@ -444,7 +444,47 @@ The lock file MUST contain JSON with:
 
 The lock file SHOULD be removed on clean shutdown. Stale locks from crashed processes are handled by the acquisition rules above.
 
-## 11. Changelog
+## 11. Progress persistence
+
+### 11.1 Tracking active progress messages (MUST)
+
+The bridge MUST track active progress messages in a persistent store (`active_progress.json` in the config directory). When a progress message is sent to Telegram, the bridge MUST register it with `(chat_id, message_id)`. When a run completes and the progress message is cleaned up, the bridge MUST unregister it.
+
+### 11.2 Orphan cleanup on startup (MUST)
+
+On startup, the bridge MUST load the active progress store and edit any orphan progress messages to indicate they were interrupted. Orphan messages MUST have their inline keyboards removed (no stale approval buttons). The bridge MUST clear the store after cleanup and before sending its startup message.
+
+### 11.3 Persistence format
+
+The store SHOULD be a JSON file containing an array of `{chat_id, message_id}` entries. The bridge SHOULD tolerate a missing or corrupt store file by treating it as empty.
+
+## 12. Outbox delivery
+
+### 12.1 Agent-initiated file delivery (MAY)
+
+Runners MAY write files to a designated outbox directory (default: `.untether-outbox/` relative to the project root) during a run. The bridge MUST scan the outbox after `CompletedEvent` and deliver any files as Telegram documents.
+
+### 12.2 Constraints (MUST)
+
+The bridge MUST enforce:
+
+* **Deny globs** — files matching configured deny patterns (e.g. `*.env`, `.git/**`) MUST NOT be delivered
+* **Max files** — at most `outbox_max_files` files per run (default: 10)
+* **Size limit** — individual file size MUST NOT exceed the Telegram Bot API file upload limit (50 MB)
+* **Flat scan** — only files in the top-level outbox directory are scanned; subdirectories are ignored
+
+### 12.3 Cleanup (SHOULD)
+
+When `outbox_cleanup` is `true` (default), the bridge SHOULD delete delivered files from the outbox directory after successful delivery.
+
+## 13. Changelog
+
+### v0.35.0 (2026-03-18)
+
+- Add progress persistence specification (§11): active progress messages MUST be tracked and orphans cleaned up on restart.
+- Add outbox delivery specification (§12): runners MAY write files to an outbox directory; the bridge MUST scan, deliver, and enforce constraints.
+- Bump version from v0.23.0 to v0.35.0 to align with the release.
+- Clarify `ResumeToken` MAY include `is_continue: bool` for cross-environment resume.
 
 ### v0.22.1 (2026-02-10)
 

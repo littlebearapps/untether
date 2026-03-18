@@ -31,6 +31,7 @@ nav = [
     { "Topics" = "how-to/topics.md" },
     { "Chat sessions" = "how-to/chat-sessions.md" },
     { "Context binding" = "how-to/context-binding.md" },
+    { "Cross-environment resume" = "how-to/cross-environment-resume.md" },
     { "Browse files" = "how-to/browse-files.md" },
     { "Interactive approval" = "how-to/interactive-approval.md" },
     { "Plan mode" = "how-to/plan-mode.md" },
@@ -87,6 +88,16 @@ nav = [
         { "Runner" = "reference/runners/pi/runner.md" },
         { "Stream JSON cheatsheet" = "reference/runners/pi/stream-json-cheatsheet.md" },
         { "Untether events" = "reference/runners/pi/untether-events.md" },
+      ] },
+      { "Gemini" = [
+        { "Runner" = "reference/runners/gemini/runner.md" },
+        { "Stream JSON cheatsheet" = "reference/runners/gemini/stream-json-cheatsheet.md" },
+        { "Untether events" = "reference/runners/gemini/untether-events.md" },
+      ] },
+      { "Amp" = [
+        { "Runner" = "reference/runners/amp/runner.md" },
+        { "Stream JSON cheatsheet" = "reference/runners/amp/stream-json-cheatsheet.md" },
+        { "Untether events" = "reference/runners/amp/untether-events.md" },
       ] },
     ] },
     { "For agents" = [
