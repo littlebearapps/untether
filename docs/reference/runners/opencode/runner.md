@@ -53,3 +53,15 @@ OpenCode outputs JSON events with the following types:
 | `error` | Error event |
 
 See [stream-json-cheatsheet.md](./stream-json-cheatsheet.md) for detailed event format documentation.
+
+## Known Limitations
+
+### No auto-compaction
+
+OpenCode does not support automatic context compaction. Unlike Pi (which emits `AutoCompactionStart`/`AutoCompactionEnd` events to trim context) and Claude Code (which manages its context window internally), OpenCode sessions accumulate unbounded context across turns.
+
+**Impact:** Long sessions with many prompts will progressively slow down as the full conversation history is sent to the model on every turn. A session that starts at 72k tokens can grow past 77k+ after just 4-5 prompts.
+
+**Workaround:** Start a fresh session with `/new` when response times degrade noticeably.
+
+If OpenCode adds compaction events in the future, Untether will need schema and runner updates following the Pi compaction pattern.

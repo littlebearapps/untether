@@ -417,6 +417,7 @@ When detected, note the engine, chat ID, message IDs, and exact behaviour. Creat
 
 ### Engine-specific
 
+- **OpenCode: no auto-compaction** — OpenCode sessions accumulate unbounded context across turns (no compaction events). After 4-5 prompts, response times degrade significantly (72k → 77k+ input tokens). Use `/new` to start a fresh session before isolated tests (e.g. error handling) to avoid slowdowns from prior context.
 - **Resume (U4)** requires replying to the specific resume line in the final message. Resume token format varies by engine.
 - **Model override (U5)** availability depends on which models each engine supports. Use `/config` → Model to see available options.
 - **Long response (U3)** behaviour varies by engine — some produce shorter responses. The key check is message splitting, not word count.
