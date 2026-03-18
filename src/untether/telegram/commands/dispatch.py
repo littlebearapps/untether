@@ -12,7 +12,7 @@ from ...model import EngineId, ResumeToken
 from ...runners.run_options import EngineRunOptions
 from ...runner_bridge import RunningTasks, register_ephemeral_message
 from ...scheduler import ThreadScheduler
-from ...transport import MessageRef, RenderedMessage
+from ...transport import MessageRef, RenderedMessage, SendOptions
 from ..files import split_command_args
 from ..types import TelegramCallbackQuery, TelegramIncomingMessage
 from .executor import _TelegramCommandExecutor
@@ -245,20 +245,32 @@ async def _dispatch_callback(
             return
         logger.debug("callback.executed", command=command_id, chat_id=chat_id)
         if result is not None:
-            if result.skip_reply:
-                reply_to = None
-            elif result.reply_to is not None:
-                reply_to = result.reply_to
-            else:
-                reply_to = message_ref
             cb_msg: RenderedMessage | str = result.text
             if result.parse_mode is not None:
                 cb_msg = RenderedMessage(
                     text=result.text, extra={"parse_mode": result.parse_mode}
                 )
-            sent_ref = await executor.send(
-                cb_msg, reply_to=reply_to, notify=result.notify
+            rendered = (
+                cb_msg
+                if isinstance(cb_msg, RenderedMessage)
+                else RenderedMessage(text=cb_msg)
             )
+            if result.skip_reply:
+                # Send without reply_to — bypass executor default which
+                # would reply to the callback's message (possibly deleted).
+                sent_ref = await cfg.exec_cfg.transport.send(
+                    channel_id=chat_id,
+                    message=rendered,
+                    options=SendOptions(notify=result.notify, thread_id=thread_id),
+                )
+            else:
+                if result.reply_to is not None:
+                    reply_to = result.reply_to
+                else:
+                    reply_to = message_ref
+                sent_ref = await executor.send(
+                    cb_msg, reply_to=reply_to, notify=result.notify
+                )
             # Register feedback message for cleanup when the run finishes.
             if sent_ref is not None and callback_query_id is not None:
                 register_ephemeral_message(chat_id, user_msg_id, sent_ref)

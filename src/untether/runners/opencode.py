@@ -61,6 +61,7 @@ class OpenCodeStreamState:
 
     pending_actions: dict[str, Action] = field(default_factory=dict)
     last_text: str | None = None
+    last_tool_error: str | None = None
     note_seq: int = 0
     session_id: str | None = None
     emitted_started: bool = False
@@ -275,6 +276,7 @@ def translate_opencode_event(
                 detail = dict(action.detail)
                 if error is not None:
                     detail["error"] = error
+                    state.last_tool_error = str(error)
                 detail["exit_code"] = exit_code
 
                 state.pending_actions.pop(action.id, None)
@@ -318,17 +320,21 @@ def translate_opencode_event(
                     resume = ResumeToken(engine=ENGINE, value=state.session_id)
 
                 usage = _build_usage(state)
+                # When OpenCode handles errors internally (e.g. file not
+                # found), it may complete normally with no Text events.
+                # Fall back to the last tool error message.
+                answer = state.last_text or state.last_tool_error or ""
                 logger.info(
                     "opencode.completed",
                     session_id=state.session_id,
-                    answer_len=len(state.last_text or ""),
+                    answer_len=len(answer),
                     cost=state.accumulated_cost,
                 )
                 return [
                     CompletedEvent(
                         engine=ENGINE,
                         ok=True,
-                        answer=state.last_text or "",
+                        answer=answer,
                         resume=resume,
                         usage=usage,
                     )
@@ -562,11 +568,12 @@ class OpenCodeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
             ]
 
         if state.saw_step_finish:
+            answer = state.last_text or state.last_tool_error or ""
             return [
                 CompletedEvent(
                     engine=ENGINE,
                     ok=True,
-                    answer=state.last_text or "",
+                    answer=answer,
                     resume=found_session,
                     usage=_build_usage(state),
                 )

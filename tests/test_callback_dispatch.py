@@ -402,3 +402,49 @@ async def test_no_early_answer_without_attribute(monkeypatch) -> None:
     # Only finally-block answer, no early toast
     assert len(bot.callback_calls) == 1
     assert bot.callback_calls[0]["text"] is None
+
+
+# ---------------------------------------------------------------------------
+# #148: skip_reply sends via transport without reply_to
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.anyio
+async def test_dispatch_callback_skip_reply_sends_without_reply_to(
+    monkeypatch,
+) -> None:
+    """skip_reply=True sends message via transport without reply_to_message_id.
+
+    This prevents 'message to be replied not found' when the callback's
+    message (e.g. an outline message) has been deleted.
+    """
+    transport = FakeTransport()
+    cfg = make_cfg(transport)
+    backend = _StubBackend(
+        CommandResult(text="✅ Plan approved", notify=True, skip_reply=True)
+    )
+    monkeypatch.setattr(dispatch_mod, "get_command", lambda *a, **kw: backend)
+
+    await _dispatch_callback(
+        cfg,
+        _make_callback_query(),
+        "test_cmd",
+        "args",
+        None,
+        {},
+        AsyncMock(),
+        None,
+        False,
+        None,
+        "cb-123",
+    )
+
+    # Message was sent
+    assert len(transport.send_calls) == 1
+    call = transport.send_calls[0]
+    assert "Plan approved" in call["message"].text
+    # The send went directly to the transport (not via executor) so
+    # reply_to must be None — not the callback's message_id (42).
+    options = call["options"]
+    assert options is not None
+    assert options.reply_to is None
