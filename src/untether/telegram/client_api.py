@@ -132,7 +132,7 @@ class HttpBotClient:
         self,
         token: str,
         *,
-        timeout_s: float = 120,
+        timeout_s: float = 30,
         http_client: httpx.AsyncClient | None = None,
     ) -> None:
         if not token:
@@ -191,15 +191,21 @@ class HttpBotClient:
         json: dict[str, Any] | None = None,
         data: dict[str, Any] | None = None,
         files: dict[str, Any] | None = None,
+        request_timeout: float | None = None,
     ) -> Any | None:
         request_payload = json if json is not None else data
         logger.debug("telegram.request", method=method, payload=request_payload)
+        timeout_kwargs: dict[str, Any] = {}
+        if request_timeout is not None:
+            timeout_kwargs["timeout"] = request_timeout
         try:
             if json is not None:
-                resp = await self._http_client.post(f"{self._base}/{method}", json=json)
+                resp = await self._http_client.post(
+                    f"{self._base}/{method}", json=json, **timeout_kwargs
+                )
             else:
                 resp = await self._http_client.post(
-                    f"{self._base}/{method}", data=data, files=files
+                    f"{self._base}/{method}", data=data, files=files, **timeout_kwargs
                 )
         except httpx.HTTPError as exc:
             url = getattr(exc.request, "url", None)
@@ -289,8 +295,16 @@ class HttpBotClient:
             )
             return None
 
-    async def _post(self, method: str, json_data: dict[str, Any]) -> Any | None:
-        return await self._request(method, json=json_data)
+    async def _post(
+        self,
+        method: str,
+        json_data: dict[str, Any],
+        *,
+        request_timeout: float | None = None,
+    ) -> Any | None:
+        return await self._request(
+            method, json=json_data, request_timeout=request_timeout
+        )
 
     async def _post_form(
         self,
@@ -311,7 +325,7 @@ class HttpBotClient:
             params["offset"] = offset
         if allowed_updates is not None:
             params["allowed_updates"] = allowed_updates
-        result = await self._post("getUpdates", params)
+        result = await self._post("getUpdates", params, request_timeout=timeout_s + 20)
         if result is None or not isinstance(result, list):
             return None
         try:

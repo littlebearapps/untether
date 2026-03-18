@@ -497,3 +497,55 @@ async def test_run_serializes_same_session() -> None:
         await anyio.sleep(0)
         gate.set()
     assert max_in_flight == 1
+
+
+# ---------------------------------------------------------------------------
+# Issue #146 — error events with no prior text should show error message
+# ---------------------------------------------------------------------------
+
+
+def test_error_event_no_prior_text_uses_error_message() -> None:
+    """When Error arrives with no prior Text events, answer must contain error text."""
+    state = OpenCodeStreamState()
+    state.session_id = "ses_err"
+    state.emitted_started = True
+
+    events = translate_opencode_event(
+        _decode_event(
+            {
+                "type": "error",
+                "sessionID": "ses_err",
+                "error": "Rate limit exceeded",
+            }
+        ),
+        title="opencode",
+        state=state,
+    )
+    assert len(events) == 1
+    completed = events[0]
+    assert isinstance(completed, CompletedEvent)
+    assert completed.ok is False
+    assert completed.answer != ""
+    assert "Rate limit" in completed.answer
+
+
+def test_process_error_no_prior_text_uses_error_message() -> None:
+    """process_error_events with empty state produces non-empty answer."""
+    runner = OpenCodeRunner(opencode_cmd="opencode")
+    state = OpenCodeStreamState()
+    events = runner.process_error_events(
+        1, resume=None, found_session=None, state=state
+    )
+    completed = next(e for e in events if isinstance(e, CompletedEvent))
+    assert completed.answer != ""
+    assert "opencode failed" in completed.answer
+
+
+def test_stream_end_no_session_no_text_uses_error_message() -> None:
+    """stream_end_events no-session path with no text produces non-empty answer."""
+    runner = OpenCodeRunner(opencode_cmd="opencode")
+    state = OpenCodeStreamState()
+    events = runner.stream_end_events(resume=None, found_session=None, state=state)
+    completed = next(e for e in events if isinstance(e, CompletedEvent))
+    assert completed.answer != ""
+    assert "no session_id" in completed.answer

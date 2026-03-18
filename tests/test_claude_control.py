@@ -1605,3 +1605,72 @@ class TestCancelCleanup:
         # Verify the outline_guard check returns False
         outline_guard = sid in _OUTLINE_PENDING and 0 < 200
         assert not outline_guard
+
+
+# ---------------------------------------------------------------------------
+# Issue #148 — discuss-approval results skip reply to deleted outline message
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.anyio
+async def test_discuss_approve_result_skips_reply() -> None:
+    """Post-outline 'Approve Plan' returns CommandResult with skip_reply=True."""
+    from untether.commands import CommandContext
+    from untether.telegram.commands.claude_control import ClaudeControlCommand
+    from untether.transport import MessageRef
+
+    runner = ClaudeRunner(claude_cmd="claude")
+    session_id = "sess-skip"
+    _ACTIVE_RUNNERS[session_id] = (runner, 0.0)
+
+    ctx = CommandContext(
+        command="claude_control",
+        text=f"claude_control:approve:da:{session_id}",
+        args_text=f"approve:da:{session_id}",
+        args=(f"approve:da:{session_id}",),
+        message=MessageRef(channel_id=123, message_id=1),
+        reply_to=None,
+        reply_text=None,
+        config_path=None,
+        plugin_config={},
+        runtime=None,  # type: ignore[arg-type]
+        executor=None,  # type: ignore[arg-type]
+    )
+
+    cmd = ClaudeControlCommand()
+    result = await cmd.handle(ctx)
+    assert result is not None
+    assert result.skip_reply is True
+    assert "approved" in result.text.lower()
+
+
+@pytest.mark.anyio
+async def test_discuss_deny_result_skips_reply() -> None:
+    """Post-outline 'Deny' returns CommandResult with skip_reply=True."""
+    from untether.commands import CommandContext
+    from untether.telegram.commands.claude_control import ClaudeControlCommand
+    from untether.transport import MessageRef
+
+    runner = ClaudeRunner(claude_cmd="claude")
+    session_id = "sess-skip-deny"
+    _ACTIVE_RUNNERS[session_id] = (runner, 0.0)
+
+    ctx = CommandContext(
+        command="claude_control",
+        text=f"claude_control:deny:da:{session_id}",
+        args_text=f"deny:da:{session_id}",
+        args=(f"deny:da:{session_id}",),
+        message=MessageRef(channel_id=123, message_id=1),
+        reply_to=None,
+        reply_text=None,
+        config_path=None,
+        plugin_config={},
+        runtime=None,  # type: ignore[arg-type]
+        executor=None,  # type: ignore[arg-type]
+    )
+
+    cmd = ClaudeControlCommand()
+    result = await cmd.handle(ctx)
+    assert result is not None
+    assert result.skip_reply is True
+    assert "denied" in result.text.lower()

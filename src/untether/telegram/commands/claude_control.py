@@ -178,6 +178,7 @@ class ClaudeControlCommand:
                 return CommandResult(
                     text="✅ Plan approved — Claude Code will proceed",
                     notify=True,
+                    skip_reply=True,
                 )
             else:
                 _OUTLINE_PENDING.discard(session_id)
@@ -189,6 +190,7 @@ class ClaudeControlCommand:
                 return CommandResult(
                     text="❌ Plan denied — send a follow-up message with feedback",
                     notify=True,
+                    skip_reply=True,
                 )
 
         # Grab session_id before send_claude_control_response deletes it

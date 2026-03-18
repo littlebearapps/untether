@@ -13,6 +13,10 @@
   - session cleanup now also clears stale pending asks and flows
 - standalone override commands (`/planmode`, `/model`, `/reasoning`) now preserve all `EngineOverrides` fields instead of resetting unrelated overrides [#124](https://github.com/littlebearapps/untether/issues/124)
 - register input for system-level auto-approved control requests (Initialize, HookCallback, McpMessage, RewindFiles, Interrupt) so `updatedInput` is included in the response — prevents ZodError in Claude Code [#123](https://github.com/littlebearapps/untether/issues/123)
+- reduce Telegram API default timeout from 120s to 30s — a single ReadTimeout on `editMessageText` could make the bot appear unresponsive for up to 2 minutes; `getUpdates` long-poll now uses a dedicated timeout of `timeout_s + 20` so network failures are detected faster [#145](https://github.com/littlebearapps/untether/issues/145)
+- OpenCode error runs now show the error message instead of an empty body — `CompletedEvent.answer` falls back to the error text when no prior `Text` events were emitted [#146](https://github.com/littlebearapps/untether/issues/146)
+- Pi `/continue` now captures the session ID from `SessionHeader` — `allow_id_promotion` was `False` for continue runs, preventing the resume token from being populated [#147](https://github.com/littlebearapps/untether/issues/147)
+- post-outline approval notification no longer fails with "message to be replied not found" — `CommandResult.skip_reply` prevents the dispatch layer from replying to the just-deleted outline message [#148](https://github.com/littlebearapps/untether/issues/148)
 
 ### changes
 
@@ -31,6 +35,10 @@
   - `ExecBridgeConfig` gains `send_file` callback + `outbox_config` (transport-agnostic)
   - preamble updated with outbox instructions for all 6 engines
   - config: `outbox_enabled`, `outbox_dir`, `outbox_max_files`, `outbox_cleanup` in `[transports.telegram.files]`
+- orphan progress message cleanup on restart — active progress messages are persisted to `active_progress.json`; on startup, orphan messages from a prior instance are edited to show "⚠️ interrupted by restart" with no keyboard [#149](https://github.com/littlebearapps/untether/issues/149)
+  - new module `telegram/progress_persistence.py` with `register_progress()`, `unregister_progress()`, `load_active_progress()`, `clear_all_progress()`
+  - `runner_bridge.py` registers on progress send, unregisters on ephemeral cleanup
+  - `telegram/loop.py` cleans up orphans before sending startup message
 
 ### tests
 
@@ -39,6 +47,11 @@
 - 4 new cross-chat ask isolation tests: pending ask scoped by channel, correct channel returned, flow scoped by channel, translate registers with channel_id [#144](https://github.com/littlebearapps/untether/issues/144)
 - 99 new `/continue` tests: 46 auto-router assertions (continue token handling, engine routing) + 53 build-args assertions (continue flags for all 6 engines) [#135](https://github.com/littlebearapps/untether/issues/135)
 - 195 `/config` tests covering home page, all sub-pages, toggle actions, callback routing, button layout, engine-aware visibility [#132](https://github.com/littlebearapps/untether/issues/132)
+- 3 new OpenCode error message tests: Error event with no prior text, process_error_events, stream_end_events [#146](https://github.com/littlebearapps/untether/issues/146)
+- 3 new Pi /continue tests: allow_id_promotion flag, session ID promotion from SessionHeader, normal resume no promotion [#147](https://github.com/littlebearapps/untether/issues/147)
+- 3 new timeout tests: default 30s timeout, getUpdates per-request timeout, sendMessage uses default [#145](https://github.com/littlebearapps/untether/issues/145)
+- 2 new discuss-approval skip_reply tests: approve and deny results set skip_reply=True [#148](https://github.com/littlebearapps/untether/issues/148)
+- 8 new progress persistence tests: register/load roundtrip, unregister, missing file, corrupt file, non-dict, multiple entries, clear all, clear nonexistent [#149](https://github.com/littlebearapps/untether/issues/149)
 
 ## v0.34.5 (2026-03-12)
 

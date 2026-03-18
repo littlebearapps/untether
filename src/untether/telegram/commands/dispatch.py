@@ -127,7 +127,12 @@ async def _dispatch_command(
         return
     logger.debug("command.executed", command=command_id, chat_id=chat_id)
     if result is not None:
-        reply_to = message_ref if result.reply_to is None else result.reply_to
+        if result.skip_reply:
+            reply_to = None
+        elif result.reply_to is not None:
+            reply_to = result.reply_to
+        else:
+            reply_to = message_ref
         msg: RenderedMessage | str = result.text
         if result.parse_mode is not None:
             msg = RenderedMessage(
@@ -240,7 +245,12 @@ async def _dispatch_callback(
             return
         logger.debug("callback.executed", command=command_id, chat_id=chat_id)
         if result is not None:
-            reply_to = message_ref if result.reply_to is None else result.reply_to
+            if result.skip_reply:
+                reply_to = None
+            elif result.reply_to is not None:
+                reply_to = result.reply_to
+            else:
+                reply_to = message_ref
             cb_msg: RenderedMessage | str = result.text
             if result.parse_mode is not None:
                 cb_msg = RenderedMessage(

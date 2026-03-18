@@ -78,6 +78,7 @@ class CommandResult:
     notify: bool = True
     reply_to: MessageRef | None = None
     parse_mode: str | None = None
+    skip_reply: bool = False
 
 
 @runtime_checkable

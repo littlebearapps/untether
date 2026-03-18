@@ -365,7 +365,7 @@ def translate_opencode_event(
                 CompletedEvent(
                     engine=ENGINE,
                     ok=False,
-                    answer=state.last_text or "",
+                    answer=state.last_text or str(message),
                     resume=resume,
                     error=str(message),
                 )
@@ -530,7 +530,7 @@ class OpenCodeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
             CompletedEvent(
                 engine=ENGINE,
                 ok=False,
-                answer=state.last_text or "",
+                answer=state.last_text or message,
                 resume=resume_for_completed,
                 error=message,
             ),
@@ -555,7 +555,7 @@ class OpenCodeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
                 CompletedEvent(
                     engine=ENGINE,
                     ok=False,
-                    answer=state.last_text or "",
+                    answer=state.last_text or message,
                     resume=resume_for_completed,
                     error=message,
                 )
@@ -581,7 +581,7 @@ class OpenCodeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
             CompletedEvent(
                 engine=ENGINE,
                 ok=False,
-                answer=state.last_text or "",
+                answer=state.last_text or message,
                 resume=found_session,
                 error=message,
             )

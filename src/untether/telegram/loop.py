@@ -325,6 +325,48 @@ async def _drain_backlog(cfg: TelegramBridgeConfig, offset: int | None) -> int |
         drained += len(updates)
 
 
+async def _cleanup_orphan_progress(cfg: TelegramBridgeConfig) -> None:
+    """Edit orphan progress messages from a prior instance to show interrupted."""
+    config_path = cfg.runtime.config_path
+    if config_path is None:
+        return
+    from .progress_persistence import (
+        clear_all_progress,
+        load_active_progress,
+        resolve_progress_path,
+    )
+
+    progress_path = resolve_progress_path(config_path)
+    entries = load_active_progress(progress_path)
+    if not entries:
+        return
+    logger.info("startup.orphan_cleanup", count=len(entries))
+    for entry in entries.values():
+        chat_id = entry.get("chat_id")
+        message_id = entry.get("message_id")
+        if chat_id is None or message_id is None:
+            continue
+        try:
+            await cfg.bot.edit_message_text(
+                chat_id=int(chat_id),
+                message_id=int(message_id),
+                text="\u26a0\ufe0f interrupted by restart",
+            )
+            logger.debug(
+                "startup.orphan_cleanup.edited",
+                chat_id=chat_id,
+                message_id=message_id,
+            )
+        except Exception:  # noqa: BLE001
+            logger.debug(
+                "startup.orphan_cleanup.edit_failed",
+                chat_id=chat_id,
+                message_id=message_id,
+                exc_info=True,
+            )
+    clear_all_progress(progress_path)
+
+
 async def poll_updates(
     cfg: TelegramBridgeConfig,
     *,
@@ -332,6 +374,7 @@ async def poll_updates(
 ) -> AsyncIterator[TelegramIncomingUpdate]:
     offset: int | None = None
     offset = await _drain_backlog(cfg, offset)
+    await _cleanup_orphan_progress(cfg)
     await _send_startup(cfg)
 
     async for msg in poll_incoming(
@@ -1083,6 +1126,11 @@ async def run_main_loop(
     try:
         config_path = cfg.runtime.config_path
         if config_path is not None:
+            from ..runner_bridge import set_progress_persistence_path
+            from .progress_persistence import resolve_progress_path
+
+            set_progress_persistence_path(resolve_progress_path(config_path))
+
             state.chat_prefs = ChatPrefsStore(resolve_prefs_path(config_path))
             logger.info(
                 "chat_prefs.enabled",

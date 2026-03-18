@@ -4,6 +4,7 @@ import contextlib
 import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 
 import anyio
@@ -81,6 +82,19 @@ async def delete_outline_messages(session_id: str) -> None:
         except Exception:  # noqa: BLE001
             logger.debug("outline_cleanup.delete_failed", exc_info=True)
     refs.clear()
+
+
+# ---------------------------------------------------------------------------
+# Progress message persistence (orphan cleanup across restarts)
+# ---------------------------------------------------------------------------
+
+_PROGRESS_PERSISTENCE_PATH: Path | None = None
+
+
+def set_progress_persistence_path(path: Path | None) -> None:
+    """Set the path for progress message persistence (called from loop.py)."""
+    global _PROGRESS_PERSISTENCE_PATH  # noqa: PLW0603
+    _PROGRESS_PERSISTENCE_PATH = path
 
 
 # Usage alert thresholds (percentage of 5h window)
@@ -1185,6 +1199,12 @@ class ProgressEdits:
                         error=str(exc),
                         error_type=exc.__class__.__name__,
                     )
+        # Unregister from progress persistence file.
+        if self.progress_ref is not None and _PROGRESS_PERSISTENCE_PATH is not None:
+            from .telegram.progress_persistence import unregister_progress
+
+            session_key = f"{self.channel_id}:{self.progress_ref.message_id}"
+            unregister_progress(_PROGRESS_PERSISTENCE_PATH, session_key)
 
 
 @dataclass(frozen=True, slots=True)
@@ -1233,6 +1253,16 @@ async def send_initial_progress(
             channel_id=sent_ref.channel_id,
             message_id=sent_ref.message_id,
         )
+        if _PROGRESS_PERSISTENCE_PATH is not None:
+            from .telegram.progress_persistence import register_progress
+
+            session_key = f"{channel_id}:{sent_ref.message_id}"
+            register_progress(
+                _PROGRESS_PERSISTENCE_PATH,
+                session_key,
+                int(channel_id),
+                int(sent_ref.message_id),
+            )
 
     return ProgressMessageState(
         ref=sent_ref,

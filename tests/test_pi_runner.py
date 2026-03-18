@@ -228,3 +228,45 @@ def test_session_path_sanitizes_windows_separators() -> None:
     name = session_dir.name
     assert "\\" not in name
     assert ":" not in name
+
+
+# ---------------------------------------------------------------------------
+# Issue #147 — /continue should allow session ID promotion
+# ---------------------------------------------------------------------------
+
+
+def test_continue_allows_id_promotion() -> None:
+    """new_state() with is_continue=True sets allow_id_promotion=True."""
+    runner = PiRunner(extra_args=[], model=None, provider=None)
+    continue_token = ResumeToken(engine=ENGINE, value="", is_continue=True)
+    state = runner.new_state("prompt", continue_token)
+    assert state.allow_id_promotion is True
+
+
+def test_normal_resume_does_not_allow_id_promotion() -> None:
+    """new_state() with a normal resume token keeps allow_id_promotion=False."""
+    runner = PiRunner(extra_args=[], model=None, provider=None)
+    resume_token = ResumeToken(engine=ENGINE, value="ses_existing")
+    state = runner.new_state("prompt", resume_token)
+    assert state.allow_id_promotion is False
+
+
+def test_continue_session_id_promoted_from_header() -> None:
+    """During /continue, SessionHeader promotes the session ID into resume token."""
+    continue_token = ResumeToken(engine=ENGINE, value="", is_continue=True)
+    state = PiStreamState(resume=continue_token, allow_id_promotion=True)
+
+    events = translate_pi_event(
+        pi_schema.SessionHeader(
+            id="ccd569e0-4e1b-4c7d-a981-637ed4107310",
+            version=3,
+            timestamp="2026-01-13T00:33:34.702Z",
+            cwd="/tmp",
+        ),
+        title="pi",
+        meta=None,
+        state=state,
+    )
+    started = next(e for e in events if isinstance(e, StartedEvent))
+    assert started.resume.value == "ccd569e0"
+    assert started.resume.value != ""

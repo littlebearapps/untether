@@ -87,7 +87,9 @@ async def test_client_methods_build_params_and_decode() -> None:
     class _StubClient(HttpBotClient):
         def __init__(self) -> None:
             super().__init__("token", http_client=httpx.AsyncClient())
-            self.calls: list[tuple[str, dict | None, dict | None, dict | None]] = []
+            self.calls: list[
+                tuple[str, dict | None, dict | None, dict | None, float | None]
+            ] = []
 
         async def _request(
             self,
@@ -96,8 +98,9 @@ async def test_client_methods_build_params_and_decode() -> None:
             json: dict | None = None,
             data: dict | None = None,
             files: dict | None = None,
+            request_timeout: float | None = None,
         ) -> object | None:
-            self.calls.append((method, json, data, files))
+            self.calls.append((method, json, data, files, request_timeout))
             return payloads.get(method)
 
     client = _StubClient()
@@ -169,6 +172,66 @@ async def test_client_methods_build_params_and_decode() -> None:
 
     edit_call = next(call for call in client.calls if call[0] == "editMessageText")
     assert edit_call[1]["link_preview_options"] == {"is_disabled": True}
+
+
+def test_default_timeout_is_30s() -> None:
+    client = HttpBotClient("token")
+    # httpx stores timeout as httpx.Timeout; default pool/connect/read/write = 30
+    assert client._http_client.timeout.read == 30
+
+
+@pytest.mark.anyio
+async def test_get_updates_passes_per_request_timeout() -> None:
+    payloads = {"getUpdates": [{"update_id": 1}]}
+
+    class _Stub(HttpBotClient):
+        def __init__(self) -> None:
+            super().__init__("token", http_client=httpx.AsyncClient())
+            self.last_timeout: float | None = None
+
+        async def _request(
+            self,
+            method: str,
+            *,
+            json: dict | None = None,
+            data: dict | None = None,
+            files: dict | None = None,
+            request_timeout: float | None = None,
+        ) -> object | None:
+            self.last_timeout = request_timeout
+            return payloads.get(method)
+
+    client = _Stub()
+    await client.get_updates(offset=None, timeout_s=50)
+    assert client.last_timeout == 70  # timeout_s + 20
+    await client.close()
+
+
+@pytest.mark.anyio
+async def test_send_message_uses_default_timeout() -> None:
+    payloads = {"sendMessage": {"message_id": 1, "chat": {"id": 1, "type": "private"}}}
+
+    class _Stub(HttpBotClient):
+        def __init__(self) -> None:
+            super().__init__("token", http_client=httpx.AsyncClient())
+            self.last_timeout: float | None = None
+
+        async def _request(
+            self,
+            method: str,
+            *,
+            json: dict | None = None,
+            data: dict | None = None,
+            files: dict | None = None,
+            request_timeout: float | None = None,
+        ) -> object | None:
+            self.last_timeout = request_timeout
+            return payloads.get(method)
+
+    client = _Stub()
+    await client.send_message(1, "hi")
+    assert client.last_timeout is None  # uses client default, no per-request override
+    await client.close()
 
 
 @pytest.mark.anyio

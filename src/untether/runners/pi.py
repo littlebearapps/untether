@@ -89,7 +89,9 @@ def _maybe_promote_session_id(state: PiStreamState, session_id: str | None) -> N
         return
     if not state.allow_id_promotion:
         return
-    if not _looks_like_session_path(state.resume.value):
+    # For /continue runs the resume value is empty; for fresh runs it's a
+    # session path — either way, promotion is allowed when the flag is set.
+    if state.resume.value and not _looks_like_session_path(state.resume.value):
         return
     old_value = state.resume.value
     state.resume = ResumeToken(engine=ENGINE, value=_short_session_id(session_id))
@@ -436,7 +438,7 @@ class PiRunner(ResumeTokenMixin, JsonlSubprocessRunner):
                 resume=token,
                 allow_id_promotion=True,
             )
-        return PiStreamState(resume=resume)
+        return PiStreamState(resume=resume, allow_id_promotion=resume.is_continue)
 
     def translate(
         self,
