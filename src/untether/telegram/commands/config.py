@@ -185,6 +185,8 @@ async def _page_home(ctx: CommandContext) -> None:
     aq_label = "default"
     dp_label = "default"
     cu_label = "default"
+    _cu_ac: bool | None = None
+    _cu_su: bool | None = None
     engine_override = None
 
     if config_path is not None:
@@ -229,17 +231,9 @@ async def _page_home(ctx: CommandContext) -> None:
         if engine_override and engine_override.diff_preview is not None:
             dp_label = "on" if engine_override.diff_preview else "off"
 
-        # Cost & usage — summarise both toggles
-        if engine_override:
-            _ac = engine_override.show_api_cost
-            _su = engine_override.show_subscription_usage
-            if _ac is not None or _su is not None:
-                parts = []
-                if _ac is not None:
-                    parts.append(f"cost {'on' if _ac else 'off'}")
-                if _su is not None:
-                    parts.append(f"sub {'on' if _su else 'off'}")
-                cu_label = ", ".join(parts)
+        # Cost & usage overrides — resolution deferred until has_api_cost is known
+        _cu_ac = engine_override.show_api_cost if engine_override else None
+        _cu_su = engine_override.show_subscription_usage if engine_override else None
 
     verbose = get_verbosity_override(chat_id)
     if verbose == "verbose":
@@ -257,6 +251,28 @@ async def _page_home(ctx: CommandContext) -> None:
         current_engine in API_COST_SUPPORTED_ENGINES
         or current_engine in SUBSCRIPTION_USAGE_SUPPORTED_ENGINES
     )
+    has_api_cost = current_engine in API_COST_SUPPORTED_ENGINES
+    has_sub_usage = current_engine in SUBSCRIPTION_USAGE_SUPPORTED_ENGINES
+
+    # Resolve cost & usage label to effective values
+    if show_cost_usage:
+        from ...settings import FooterSettings, load_settings_if_exists as _load_cu_cfg
+
+        try:
+            _cu_result = _load_cu_cfg()
+            _footer_cfg = _cu_result[0].footer if _cu_result else FooterSettings()
+        except (OSError, ValueError, KeyError):
+            _footer_cfg = FooterSettings()
+
+        _eff_ac = _cu_ac if _cu_ac is not None else _footer_cfg.show_api_cost
+        _eff_su = _cu_su if _cu_su is not None else _footer_cfg.show_subscription_usage
+        parts: list[str] = []
+        if has_api_cost:
+            parts.append(f"cost {'on' if _eff_ac else 'off'}")
+        if has_sub_usage:
+            parts.append(f"sub {'on' if _eff_su else 'off'}")
+        if parts:
+            cu_label = ", ".join(parts)
 
     lines = [
         "\N{DOG} <b>Untether settings</b>",
@@ -307,7 +323,7 @@ async def _page_home(ctx: CommandContext) -> None:
     if engine_override and engine_override.show_resume_line is not None:
         rl_label = "on" if engine_override.show_resume_line else "off"
     else:
-        rl_label = f"default ({'on' if _resume_default else 'off'})"
+        rl_label = "on" if _resume_default else "off"
 
     # --- Display ---
     lines.append("<b>Display</b>")
@@ -757,7 +773,7 @@ async def _page_verbose(ctx: CommandContext, action: str | None = None) -> None:
     elif current == "compact":
         current_label = "off"
     else:
-        current_label = "default"
+        current_label = "off"
 
     lines = [
         "<b>🔍 Verbose progress</b>",
@@ -1260,7 +1276,7 @@ async def _page_ask_questions(ctx: CommandContext, action: str | None = None) ->
     elif aq is False:
         current_label = "off"
     else:
-        current_label = "default (on)"
+        current_label = "on"
 
     lines = [
         "<b>❓ Ask mode</b>",
@@ -1387,7 +1403,7 @@ async def _page_diff_preview(ctx: CommandContext, action: str | None = None) -> 
     elif dp is False:
         current_label = "off"
     else:
-        current_label = "default (off)"
+        current_label = "off"
 
     lines = [
         "<b>📝 Diff preview</b>",
@@ -1510,13 +1526,13 @@ async def _page_cost_usage(ctx: CommandContext, action: str | None = None) -> No
     ]
 
     if has_api_cost:
-        ac_label = "on" if ac is True else ("off" if ac is False else "default (on)")
+        ac_label = "on" if ac is True else ("off" if ac is False else "on")
         lines.append(f"<b>API cost</b>: {ac_label}")
         lines.append("  Show cost, tokens, and time after each task.")
         lines.append("")
 
     if has_sub_usage:
-        su_label = "on" if su is True else ("off" if su is False else "default (off)")
+        su_label = "on" if su is True else ("off" if su is False else "off")
         lines.append(f"<b>Subscription usage</b>: {su_label}")
         lines.append("  Show how much of your 5h/weekly quota is used.")
         lines.append("")
@@ -1540,11 +1556,7 @@ async def _page_cost_usage(ctx: CommandContext, action: str | None = None) -> No
         bg_label = (
             "on"
             if bg is True
-            else (
-                "off"
-                if bg is False
-                else f"default ({'on' if global_enabled else 'off'})"
-            )
+            else ("off" if bg is False else ("on" if global_enabled else "off"))
         )
         lines.append(f"  Enabled: {bg_label}")
         if budget_cfg.max_cost_per_run is not None:
@@ -1555,12 +1567,12 @@ async def _page_cost_usage(ctx: CommandContext, action: str | None = None) -> No
         bc_label = (
             "on"
             if bc is True
-            else ("off" if bc is False else f"default ({'on' if global_ac else 'off'})")
+            else ("off" if bc is False else ("on" if global_ac else "off"))
         )
         lines.append(f"  Auto-cancel: {bc_label}")
     else:
-        bg_label = "on" if bg is True else ("off" if bg is False else "default (off)")
-        bc_label = "on" if bc is True else ("off" if bc is False else "default (off)")
+        bg_label = "on" if bg is True else ("off" if bg is False else "off")
+        bc_label = "on" if bc is True else ("off" if bc is False else "off")
         lines.append(f"  Enabled: {bg_label}")
         lines.append(f"  Auto-cancel: {bc_label}")
     lines.append("  Set limits in untether.toml [cost_budget] section.")
@@ -1685,9 +1697,7 @@ async def _page_resume_line(ctx: CommandContext, action: str | None = None) -> N
     rl_label = (
         "on"
         if rl is True
-        else (
-            "off" if rl is False else f"default ({'on' if _resume_default else 'off'})"
-        )
+        else ("off" if rl is False else ("on" if _resume_default else "off"))
     )
 
     lines = [
