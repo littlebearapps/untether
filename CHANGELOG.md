@@ -14,9 +14,9 @@
 - standalone override commands (`/planmode`, `/model`, `/reasoning`) now preserve all `EngineOverrides` fields instead of resetting unrelated overrides [#124](https://github.com/littlebearapps/untether/issues/124)
 - register input for system-level auto-approved control requests (Initialize, HookCallback, McpMessage, RewindFiles, Interrupt) so `updatedInput` is included in the response — prevents ZodError in Claude Code [#123](https://github.com/littlebearapps/untether/issues/123)
 - reduce Telegram API default timeout from 120s to 30s — a single ReadTimeout on `editMessageText` could make the bot appear unresponsive for up to 2 minutes; `getUpdates` long-poll now uses a dedicated timeout of `timeout_s + 20` so network failures are detected faster [#145](https://github.com/littlebearapps/untether/issues/145)
-- OpenCode error runs now show the error message instead of an empty body — `CompletedEvent.answer` falls back to the error text when no prior `Text` events were emitted [#146](https://github.com/littlebearapps/untether/issues/146)
+- OpenCode error runs now show the error message instead of an empty body — `CompletedEvent.answer` falls back to `state.last_tool_error` when no prior `Text` events were emitted; covers both `StepFinish` and `stream_end_events` paths [#146](https://github.com/littlebearapps/untether/issues/146), [#150](https://github.com/littlebearapps/untether/issues/150)
 - Pi `/continue` now captures the session ID from `SessionHeader` — `allow_id_promotion` was `False` for continue runs, preventing the resume token from being populated [#147](https://github.com/littlebearapps/untether/issues/147)
-- post-outline approval notification no longer fails with "message to be replied not found" — `CommandResult.skip_reply` prevents the dispatch layer from replying to the just-deleted outline message [#148](https://github.com/littlebearapps/untether/issues/148)
+- post-outline approval no longer fails with "message to be replied not found" — the "Approve Plan" button on outline messages uses the real ExitPlanMode `request_id`, so the regular approve path now sets `skip_reply=True` when outline messages were just deleted; also suppresses the redundant push notification after outline cleanup [#148](https://github.com/littlebearapps/untether/issues/148)
 
 ### changes
 
@@ -47,11 +47,15 @@
 - 4 new cross-chat ask isolation tests: pending ask scoped by channel, correct channel returned, flow scoped by channel, translate registers with channel_id [#144](https://github.com/littlebearapps/untether/issues/144)
 - 99 new `/continue` tests: 46 auto-router assertions (continue token handling, engine routing) + 53 build-args assertions (continue flags for all 6 engines) [#135](https://github.com/littlebearapps/untether/issues/135)
 - 195 `/config` tests covering home page, all sub-pages, toggle actions, callback routing, button layout, engine-aware visibility [#132](https://github.com/littlebearapps/untether/issues/132)
-- 3 new OpenCode error message tests: Error event with no prior text, process_error_events, stream_end_events [#146](https://github.com/littlebearapps/untether/issues/146)
+- 7 new OpenCode error message tests: Error event with no prior text, process_error_events, stream_end_events, last_tool_error fallback on StepFinish, last_text takes priority over tool error, tool error status captures last_tool_error, stream_end_events fallback [#146](https://github.com/littlebearapps/untether/issues/146), [#150](https://github.com/littlebearapps/untether/issues/150)
 - 3 new Pi /continue tests: allow_id_promotion flag, session ID promotion from SessionHeader, normal resume no promotion [#147](https://github.com/littlebearapps/untether/issues/147)
 - 3 new timeout tests: default 30s timeout, getUpdates per-request timeout, sendMessage uses default [#145](https://github.com/littlebearapps/untether/issues/145)
-- 2 new discuss-approval skip_reply tests: approve and deny results set skip_reply=True [#148](https://github.com/littlebearapps/untether/issues/148)
+- 3 new discuss-approval skip_reply tests: approve and deny results set skip_reply=True, dispatch callback skip_reply sends without reply_to [#148](https://github.com/littlebearapps/untether/issues/148)
 - 8 new progress persistence tests: register/load roundtrip, unregister, missing file, corrupt file, non-dict, multiple entries, clear all, clear nonexistent [#149](https://github.com/littlebearapps/untether/issues/149)
+
+### docs
+
+- document OpenCode lack of auto-compaction as a known limitation — long sessions accumulate unbounded context with no automatic trimming; added to runner docs and integration testing playbook [#150](https://github.com/littlebearapps/untether/issues/150)
 
 ## v0.34.5 (2026-03-12)
 
