@@ -3350,6 +3350,92 @@ async def test_outline_not_double_deleted() -> None:
     assert transport.delete_calls == []
 
 
+@pytest.mark.anyio
+async def test_outline_resolved_does_not_suppress_next_tool_approval() -> None:
+    """After outline approval + cleanup, new tool requests get their own buttons.
+
+    Regression test for #156: after "Approve Plan" deletes outline messages,
+    _outline_sent=True + _outline_refs=[] caused ALL approval buttons to be
+    stripped, including the new Write tool's Approve/Deny. Claude blocked
+    indefinitely.
+    """
+    transport = FakeTransport()
+    presenter = _KeyboardPresenter()
+    edits = _make_edits(transport, presenter)
+
+    # Simulate: outline was sent and then externally resolved
+    # (callback handler called delete_outline_messages, which cleared refs)
+    edits._outline_sent = True
+    edits._outline_refs = []  # cleared by delete_outline_messages
+
+    # Inject a stale discuss_approve action in the tracker (never completed)
+    from untether.model import Action, ActionEvent
+
+    stale_evt = ActionEvent(
+        engine="claude",
+        action=Action(
+            id="claude.discuss_approve.1",
+            kind="warning",
+            title="Plan outlined",
+            detail={
+                "inline_keyboard": {
+                    "buttons": [
+                        [
+                            {
+                                "text": "Approve Plan",
+                                "callback_data": "ctrl:approve:old",
+                            },
+                            {"text": "Deny", "callback_data": "ctrl:deny:old"},
+                        ]
+                    ]
+                }
+            },
+        ),
+        phase="started",
+    )
+    edits.tracker.note_event(stale_evt)
+
+    # Now presenter returns NEW approval buttons (from Write tool request)
+    presenter.set_approval_buttons()
+    edits.event_seq = 1
+    with contextlib.suppress(anyio.WouldBlock):
+        edits.signal_send.send_nowait(None)
+
+    async with anyio.create_task_group() as tg:
+
+        async def run_cycle() -> None:
+            # Let the render loop process at least 2 cycles:
+            # 1st cycle: suppresses stale buttons, completes discuss_approve,
+            #            triggers re-render
+            # 2nd cycle: discuss_approve is completed, skipped by renderer,
+            #            new buttons shown
+            for _ in range(5):
+                await anyio.sleep(0.02)
+            edits.signal_send.close()
+
+        tg.start_soon(edits.run)
+        tg.start_soon(run_cycle)
+
+    # The stale discuss_approve action should be marked completed
+    stale_action = edits.tracker._actions.get("claude.discuss_approve.1")
+    assert stale_action is not None
+    assert stale_action.completed is True
+
+    # _outline_sent should be reset
+    assert edits._outline_sent is False
+
+    # The LAST edit to the progress message should have approval buttons
+    # (not just cancel-only)
+    last_edit = transport.edit_calls[-1] if transport.edit_calls else None
+    assert last_edit is not None
+    last_kb = (
+        last_edit["message"].extra.get("reply_markup", {}).get("inline_keyboard", [])
+    )
+    assert len(last_kb) > 1, (
+        f"Expected approval buttons in final render, got: {last_kb}"
+    )
+
+
 # ---------------------------------------------------------------------------
 # Outbox file delivery tests
 # ---------------------------------------------------------------------------

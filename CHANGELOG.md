@@ -29,6 +29,7 @@
 - progressive cooldown for rapid control request retries after denial — auto-denies immediate retries within cooldown window (30s base, escalating to 120s) instead of showing buttons again [#126](https://github.com/littlebearapps/untether/issues/126)
 - reply-to resume now works with emoji-prefixed footer lines — resume token extraction strips the `↩️` prefix before matching engine regexes [#134](https://github.com/littlebearapps/untether/issues/134)
 - frozen ring buffer stall escalation now fires for all stalls, not just MCP tools — `cpu_active` processes with no new JSONL events for 3+ stall checks now receive a "CPU active, no new events" notification instead of being silently suppressed indefinitely [#155](https://github.com/littlebearapps/untether/issues/155)
+- tool approval buttons no longer suppressed after outline approval — stale `discuss_approve` action with `completed=False` caused subsequent Write/Edit/Bash approval buttons to be stripped; now completed on outline resolution and re-render triggered [#156](https://github.com/littlebearapps/untether/issues/156)
 
 ### changes
 
@@ -62,6 +63,7 @@
 - 99 new `/continue` tests: 46 auto-router assertions (continue token handling, engine routing) + 53 build-args assertions (continue flags for all 6 engines) [#135](https://github.com/littlebearapps/untether/issues/135)
 - 195 `/config` tests covering home page, all sub-pages, toggle actions, callback routing, button layout, engine-aware visibility [#132](https://github.com/littlebearapps/untether/issues/132)
 - 8 new stall watchdog tests: MCP threshold suppression, MCP threshold firing, notification message format, `_has_running_mcp_tool()` unit test, MCP frozen ring buffer hung escalation, advancing ring buffer suppression, frozen counter reset on event, non-MCP frozen ring buffer escalation [#154](https://github.com/littlebearapps/untether/issues/154), [#155](https://github.com/littlebearapps/untether/issues/155)
+- 1 new outline approval test: after outline approval + cleanup, subsequent tool requests get their own Approve/Deny buttons [#156](https://github.com/littlebearapps/untether/issues/156)
 - 7 new OpenCode error message tests: Error event with no prior text, process_error_events, stream_end_events, last_tool_error fallback on StepFinish, last_text takes priority over tool error, tool error status captures last_tool_error, stream_end_events fallback [#146](https://github.com/littlebearapps/untether/issues/146), [#150](https://github.com/littlebearapps/untether/issues/150)
 - 3 new Pi /continue tests: allow_id_promotion flag, session ID promotion from SessionHeader, normal resume no promotion [#147](https://github.com/littlebearapps/untether/issues/147)
 - 3 new timeout tests: default 30s timeout, getUpdates per-request timeout, sendMessage uses default [#145](https://github.com/littlebearapps/untether/issues/145)

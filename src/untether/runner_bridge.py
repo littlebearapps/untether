@@ -16,7 +16,7 @@ from .model import ActionEvent, CompletedEvent, ResumeToken, StartedEvent, Untet
 from .presenter import Presenter
 from .markdown import format_meta_line, render_event_cli
 from .runner import Runner
-from .progress import ProgressTracker
+from .progress import ActionState, ProgressTracker
 from .transport import (
     ChannelId,
     MessageId,
@@ -990,7 +990,9 @@ class ProgressEdits:
 
             # If the callback handler already cleaned up outline messages
             # (via delete_outline_messages), the synthetic discuss_approve
-            # action still renders stale buttons. Force cancel-only keyboard.
+            # action still renders stale buttons. Force cancel-only keyboard
+            # for THIS render, then complete the stale actions and trigger a
+            # re-render so subsequent tool requests get their own buttons (#156).
             if self._outline_sent and not self._outline_refs and has_approval:
                 cancel_row = new_kb[-1:]  # keep only the cancel row
                 rendered = RenderedMessage(
@@ -1006,6 +1008,33 @@ class ProgressEdits:
                 # buttons — the user just interacted with the outline and
                 # doesn't need another "Action required" push.
                 self._outline_just_resolved = True
+                # Complete stale discuss_approve actions so the renderer
+                # skips their buttons on the next cycle.  ActionState is
+                # frozen, so we replace the entry in the tracker dict.
+                for aid, astate in self.tracker._actions.items():
+                    if (
+                        aid.startswith("claude.discuss_approve")
+                        and not astate.completed
+                    ):
+                        self.tracker._actions[aid] = ActionState(
+                            action=astate.action,
+                            phase="completed",
+                            ok=True,
+                            display_phase="completed",
+                            completed=True,
+                            first_seen=astate.first_seen,
+                            last_update=astate.last_update,
+                        )
+                self._outline_sent = False
+                # Trigger re-render so any pending tool request (e.g. Write)
+                # gets its Approve/Deny buttons on the next cycle.
+                self.event_seq += 1
+                with contextlib.suppress(
+                    anyio.WouldBlock,
+                    anyio.BrokenResourceError,
+                    anyio.ClosedResourceError,
+                ):
+                    self.signal_send.send_nowait(None)
 
             try:
                 # Send full outline as separate message(s) when approval buttons appear
