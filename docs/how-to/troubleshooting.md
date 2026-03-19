@@ -87,6 +87,33 @@ Run `untether doctor` to see which engines are detected.
 3. Check `debug.log` — the engine may have errored silently
 4. Verify the engine works standalone: run `codex "hello"` (or equivalent) directly in a terminal
 
+## Stall warnings
+
+**Symptoms:** Telegram shows "⏳ No progress for X min — session may be stuck" or "⏳ MCP tool running: server-name (X min)".
+
+The stall watchdog monitors engine subprocesses for periods of inactivity (no JSONL events on stdout). Thresholds vary by context:
+
+| Context | Threshold | Example |
+|---------|-----------|---------|
+| Normal (thinking/generation) | 5 min | Model is generating a response |
+| Local tool running (Bash, Read, etc.) | 10 min | Long test suite or build |
+| MCP tool running | 15 min | External API call (Cloudflare, GitHub, web search) |
+| Pending user approval | 30 min | Waiting for Approve/Deny click |
+
+**If the warning names an MCP tool** (e.g. "MCP tool running: cloudflare-observability"), the process is likely waiting on a slow external API. This is usually not a real stall — wait for it to complete or `/cancel` if it's taking too long.
+
+**If the warning says "MCP tool may be hung"**, the MCP tool has been running with no new events for an extended period (3+ stall checks with a frozen event buffer). This usually means the MCP server is stuck in an internal retry loop. Use `/cancel` and retry with a more targeted prompt.
+
+**If the warning says "CPU active, no new events"**, the process is using CPU but hasn't produced any new JSONL events for 3+ stall checks. This can happen when Claude Code is stuck in a long API call, extended thinking, or an internal retry loop. Use `/cancel` if the silence persists.
+
+**If the warning says "session may be stuck"**, the process may genuinely be stalled. Check:
+
+1. Look at the diagnostics in the message — CPU active, TCP connections, RSS
+2. If CPU is active and TCP connections exist, the process is likely still working
+3. If CPU is idle and no TCP connections, the process may be truly stuck — use `/cancel`
+
+**Tuning:** All thresholds are configurable via `[watchdog]` in `untether.toml`. See the [config reference](../reference/config.md#watchdog).
+
 ## Messages too long or truncated
 
 **Symptoms:** The bot's response is cut off or split across multiple messages.
