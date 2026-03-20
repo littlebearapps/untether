@@ -25,6 +25,7 @@ Untether adds interactive permission control, plan mode support, and several UX 
 - **Subscription usage footer** — configurable `[footer]` to show 5h/weekly subscription usage instead of/alongside API costs
 - **Graceful restart** — `/restart` command drains active runs before restarting; SIGTERM also triggers graceful drain
 - **Compact startup message** — version number, conditional diagnostics (only shows mode/topics/triggers/engines when they carry signal), project count instead of full list
+- **Workflow mode indicator** — startup message shows `mode: assistant`, `mode: workspace`, or `mode: handoff`; derived from `session_mode` + `topics.enabled`
 - **Model/mode footer** — final messages show model name + permission mode (e.g. `🏷 sonnet · plan`) from `StartedEvent.meta`; all engines populate model info
 - **`/verbose`** — toggle verbose progress mode per chat; shows tool details (file paths, commands, patterns) in progress messages
 - **`/config`** — inline settings menu with navigable sub-pages; toggle plan mode, ask mode, verbose, engine, trigger via buttons
@@ -106,6 +107,7 @@ Detailed protocol specs and event cheatsheets for each integration:
 | AMP stream-json | `docs/reference/runners/amp/stream-json-cheatsheet.md` | JSONL event shapes (`system`, `assistant`, `user`, `result`) |
 | AMP event mapping | `docs/reference/runners/amp/untether-events.md` | AMP JSONL → Untether event translation rules |
 | Telegram transport | `docs/reference/transports/telegram.md` | Bot API client, outbox/rate-limiting, voice transcription, forum topics |
+| Workflow modes | `docs/reference/modes.md` | Assistant, workspace, handoff — settings, commands, mode-agnostic features |
 
 ## Skills (project-scoped)
 
