@@ -156,6 +156,39 @@ def test_startup_message_shows_topics_when_enabled() -> None:
     assert "topics:" in message
 
 
+def test_startup_message_shows_mode_assistant() -> None:
+    runtime = _build_healthy_runtime()
+    message = telegram_backend._build_startup_message(
+        runtime,
+        chat_id=123,
+        topics=TelegramTopicsSettings(),
+        session_mode="chat",
+    )
+    assert "mode: `assistant`" in message
+
+
+def test_startup_message_shows_mode_workspace() -> None:
+    runtime = _build_healthy_runtime()
+    message = telegram_backend._build_startup_message(
+        runtime,
+        chat_id=123,
+        topics=TelegramTopicsSettings(enabled=True, scope="main"),
+        session_mode="chat",
+    )
+    assert "mode: `workspace`" in message
+
+
+def test_startup_message_shows_mode_handoff() -> None:
+    runtime = _build_healthy_runtime()
+    message = telegram_backend._build_startup_message(
+        runtime,
+        chat_id=123,
+        topics=TelegramTopicsSettings(),
+        session_mode="stateless",
+    )
+    assert "mode: `handoff`" in message
+
+
 def test_startup_message_shows_triggers_when_enabled() -> None:
     runtime = _build_healthy_runtime()
     message = telegram_backend._build_startup_message(

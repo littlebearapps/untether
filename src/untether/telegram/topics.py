@@ -5,11 +5,14 @@ from typing import TYPE_CHECKING
 
 from ..config import ConfigError
 from ..context import RunContext
+from ..logging import get_logger
 from ..settings import TelegramTopicsSettings
 from ..transport_runtime import TransportRuntime
 from .client import BotClient
 from .topic_state import TopicStateStore, TopicThreadSnapshot
 from .types import TelegramIncomingMessage
+
+logger = get_logger(__name__)
 
 if TYPE_CHECKING:
     from .bridge import TelegramBridgeConfig
@@ -250,7 +253,9 @@ async def _validate_topics_setup_for(
                 f"(chat_id={chat_id}); promote it and grant manage topics."
             )
         if member.can_manage_topics is not True:
-            raise ConfigError(
-                "topics enabled but bot lacks manage topics permission "
-                f"(chat_id={chat_id}); grant can_manage_topics."
+            logger.warning(
+                "topics.manage_topics.missing",
+                chat_id=chat_id,
+                hint="bot lacks can_manage_topics admin right; "
+                "topic creation/editing will fail but existing topics work fine",
             )

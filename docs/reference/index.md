@@ -13,6 +13,8 @@ If you’re trying to understand the *why*, use **[Explanation](../explanation/i
 - [Configuration](config.md)
   - `untether.toml` options and defaults
   - Telegram transport options (sessions, topics, files, voice transcription)
+- [Workflow modes](modes.md)
+  - Assistant, workspace, and handoff — what each mode configures and when to use it
 
 ## Normative behavior
 
@@ -60,6 +62,11 @@ These are “engine adapter” implementation details: JSONL formats, mapping ru
   - [runner.md](runners/pi/runner.md)
   - [stream-json-cheatsheet.md](runners/pi/stream-json-cheatsheet.md)
   - [untether-events.md](runners/pi/untether-events.md)
+
+## Quick lookup
+
+- [Glossary](glossary.md)
+  Definitions for key terms: engine, runner, directive, resume token, worktree, permission mode, and more.
 
 ## For LLM agents
 

@@ -1123,6 +1123,18 @@ async def run_main_loop(
         }
         state.reserved_commands = get_reserved_commands(cfg.runtime)
 
+    import signal as _signal
+
+    from ..shutdown import (
+        DRAIN_TIMEOUT_S,
+        is_shutting_down,
+        request_shutdown,
+        reset_shutdown,
+    )
+
+    _prev_sigterm = _signal.getsignal(_signal.SIGTERM)
+    _prev_sigint = _signal.getsignal(_signal.SIGINT)
+
     try:
         config_path = cfg.runtime.config_path
         if config_path is not None:
@@ -1188,17 +1200,6 @@ async def run_main_loop(
         else:
             logger.info("trigger_mode.bot_username.unavailable")
         # Install graceful shutdown signal handlers
-        import signal as _signal
-
-        from ..shutdown import (
-            DRAIN_TIMEOUT_S,
-            is_shutting_down,
-            request_shutdown,
-            reset_shutdown,
-        )
-
-        _prev_sigterm = _signal.getsignal(_signal.SIGTERM)
-        _prev_sigint = _signal.getsignal(_signal.SIGINT)
 
         def _shutdown_handler(signum: int, frame: object) -> None:
             request_shutdown()

@@ -89,11 +89,24 @@ def _build_versions_line(engine_ids: tuple[str, ...]) -> str | None:
     return " · ".join(parts) if len(parts) > 1 else None
 
 
+def _resolve_mode_label(
+    session_mode: str,
+    topics_enabled: bool,
+) -> str:
+    """Derive the workflow mode name from config values."""
+    if session_mode == "stateless":
+        return "handoff"
+    if topics_enabled:
+        return "workspace"
+    return "assistant"
+
+
 def _build_startup_message(
     runtime: TransportRuntime,
     *,
     chat_id: int,
     topics: TelegramTopicsSettings,
+    session_mode: str = "stateless",
     trigger_config: dict | None = None,
 ) -> str:
     project_aliases = sorted(set(runtime.project_aliases()), key=str.lower)
@@ -122,6 +135,10 @@ def _build_startup_message(
         )
     else:
         details.append(f"engine: `{runtime.default_engine}` · engines: `{engine_list}`")
+
+    # mode — derived from session_mode + topics
+    mode = _resolve_mode_label(session_mode, topics.enabled)
+    details.append(f"mode: `{mode}`")
 
     # projects — listed by name
     if project_aliases:
@@ -200,6 +217,7 @@ class TelegramBackend(TransportBackend):
             runtime,
             chat_id=chat_id,
             topics=settings.topics,
+            session_mode=settings.session_mode,
             trigger_config=trigger_config,
         )
         progress_cfg = _load_progress_settings()
