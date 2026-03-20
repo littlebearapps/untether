@@ -40,10 +40,12 @@ Integration tests are automated via Telegram MCP tools (`send_message`, `get_his
 
 Pre-release versions (`X.Y.ZrcN`) are used for staging on `@hetz_lba1_bot` before final release:
 
+- rc versions live on the `dev` branch — merged via PR from feature branches
 - rc versions do **NOT** require changelog entries — `validate_release.py` skips them
 - rc versions are **NOT** git-tagged — no `v0.35.0rc1` tags (avoids triggering `release.yml`)
 - Commit message convention: `chore: staging X.Y.ZrcN`
-- Only final releases (`X.Y.Z`) get tagged and changelog entries
+- Only final releases (`X.Y.Z`) get tagged and changelog entries on `master`
+- `dev` → TestPyPI (auto on push), `master` → PyPI (tag + manual approval)
 - See `docs/reference/dev-instance.md` for the full staging workflow
 
 ## Changelog format

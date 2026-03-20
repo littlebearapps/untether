@@ -30,7 +30,7 @@ Untether adds interactive permission control, plan mode support, and several UX 
 - **`/config`** — inline settings menu with navigable sub-pages; toggle plan mode, ask mode, verbose, engine, trigger via buttons
 - **`[progress]` config** — global verbosity and max_actions settings in `untether.toml`
 - **Pi context compaction** — `AutoCompactionStart`/`AutoCompactionEnd` events rendered as progress actions
-- **Stall diagnostics & liveness watchdog** — `/proc` process diagnostics (CPU, RSS, TCP, FDs), progressive stall warnings with Telegram notifications, liveness watchdog for alive-but-silent subprocesses, stall auto-cancel (dead process, no-PID zombie, absolute cap) with CPU-active suppression, `session.summary` structured log; `[watchdog]` config section
+- **Stall diagnostics & liveness watchdog** — `/proc` process diagnostics (CPU, RSS, TCP, FDs), progressive stall warnings with Telegram notifications, liveness watchdog for alive-but-silent subprocesses, stall auto-cancel (dead process, no-PID zombie, absolute cap) with CPU-active suppression, MCP tool-aware threshold (15 min for network-bound MCP calls vs 10 min for local tools) with contextual "MCP tool running: {server}" messaging, `session.summary` structured log; `[watchdog]` config section
 - **File upload deduplication** — auto-appends `_1`, `_2`, … when target file exists, instead of requiring `--force`; media groups without captions auto-save to `incoming/`
 - **Agent-initiated file delivery (outbox)** — agents write files to `.untether-outbox/` during a run; Untether sends them as Telegram documents on completion with `📎` captions; deny-glob security, size limits, file count cap, auto-cleanup; `[transports.telegram.files]` config
 - **Resume line formatting** — visual separation with blank line and ↩️ prefix in final message footer
@@ -126,7 +126,7 @@ Project hooks in `.claude/hooks.json` fire automatically:
 
 | Hook | Trigger | What it does |
 |------|---------|-------------|
-| release-guard | Bash: `git push`, `git tag`, `gh pr merge`, `gh release` | Blocks pushes to master/main, tag creation, PR merging, releases; allows feature branch pushes |
+| release-guard | Bash: `git push`, `git tag`, `gh pr merge`, `gh release` | Blocks pushes to master/main, tag creation, PR merging, releases; allows feature and dev branch pushes |
 | release-guard-protect | Edit/Write to guard scripts or `hooks.json` | Prevents modification of release guard infrastructure |
 | release-guard-mcp | GitHub MCP write tools | Blocks `merge_pull_request` and writes to master/main; allows feature branches |
 | dev-workflow-guard | `systemctl` with `untether` | Blocks staging restarts during dev; guides to `untether-dev`; allows `staging.sh`/`pipx upgrade` path |
@@ -156,7 +156,7 @@ Key test files:
 
 - `test_claude_control.py` — 82 tests: control requests, response routing, registry lifecycle, auto-approve/auto-deny, tool auto-approve, custom deny messages, discuss action, early toast, progressive cooldown, auto permission mode
 - `test_callback_dispatch.py` — 25 tests: callback parsing, dispatch toast/ephemeral behaviour, early answering
-- `test_exec_bridge.py` — 91 tests: ephemeral notification cleanup, approval push notifications, progressive stall warnings, stall diagnostics, stall auto-cancel with CPU-active suppression, approval-aware stall threshold, session summary, PID/stream threading
+- `test_exec_bridge.py` — 109 tests: ephemeral notification cleanup, approval push notifications, progressive stall warnings, stall diagnostics, stall auto-cancel with CPU-active suppression, approval-aware stall threshold, MCP tool stall threshold, frozen ring buffer hung escalation, session summary, PID/stream threading
 - `test_ask_user_question.py` — 25 tests: AskUserQuestion control request handling, question extraction, pending request registry, answer routing, option button rendering, multi-question flows, structured answer responses, ask mode toggle auto-deny
 - `test_diff_preview.py` — 14 tests: Edit diff display, Write content preview, Bash command display, line/char truncation
 - `test_cost_tracker.py` — 12 tests: cost accumulation, per-run/daily budget thresholds, warning levels, daily reset, auto-cancel flag
@@ -193,14 +193,16 @@ Two instances run on lba-1 — staging (PyPI/TestPyPI) and dev (local editable s
 ### 3-phase release workflow (MANDATORY)
 
 1. **Dev** — fix code, run unit tests, test via `@untether_dev_bot` (6 engine chats), run integration tests
-2. **Staging** — bump to `X.Y.ZrcN`, push master → CI publishes to TestPyPI, install on `@hetz_lba1_bot` via `scripts/staging.sh`, Nathan dogfoods for 1+ week
-3. **Release** — bump to `X.Y.Z`, write changelog, tag `vX.Y.Z`, push — `release.yml` publishes to PyPI (requires Nathan's approval in GitHub Actions UI)
+2. **Staging** — bump to `X.Y.ZrcN`, merge feature branches to `dev` → CI publishes to TestPyPI, install on `@hetz_lba1_bot` via `scripts/staging.sh`, Nathan dogfoods for 1+ week
+3. **Release** — bump to `X.Y.Z`, write changelog, PR from `dev` → `master`, tag `vX.Y.Z` on master — `release.yml` publishes to PyPI (requires Nathan's approval in GitHub Actions UI)
+
+**Branch model:** `feature/*` → PR → `dev` (TestPyPI) → PR → `master` (PyPI). Master always matches the latest PyPI release.
 
 **NEVER skip staging for minor/major releases. NEVER go directly from dev to PyPI tagging.**
 
 **Claude Code's role in each phase:**
-- **Dev**: edit code, run tests, push feature branches, create PRs, run integration tests via Telegram MCP
-- **Staging/Release**: prepare version bumps, changelog entries, and commit locally — Nathan pushes to master, creates tags, and approves PyPI deploys
+- **Dev**: edit code, run tests, push feature branches, create PRs to `dev`, run integration tests via Telegram MCP
+- **Staging/Release**: prepare version bumps, changelog entries, and commit on feature branches — Nathan merges PRs to `dev` and `master`, creates tags, and approves PyPI deploys
 
 Claude Code MUST NOT push to master, merge PRs, create version tags, or trigger releases. These are enforced by hooks and GitHub rulesets (see "Release guard" below).
 
@@ -224,13 +226,13 @@ Multi-layer protection prevents accidental merges to master and PyPI publishes. 
 - **CODEOWNERS** — `* @littlebearapps/core`
 
 **Local hooks (defense-in-depth):**
-- `release-guard.sh` — blocks `git push` to master/main, `git tag v*`, `gh release create`, `gh pr merge`; feature branch pushes allowed
+- `release-guard.sh` — blocks `git push` to master/main, `git tag v*`, `gh release create`, `gh pr merge`; feature and dev branch pushes allowed
 - `release-guard-protect.sh` — blocks Edit/Write to guard scripts and `.claude/hooks.json`
-- `release-guard-mcp.sh` — blocks GitHub MCP `merge_pull_request` and writes to master/main; feature branches allowed
+- `release-guard-mcp.sh` — blocks GitHub MCP `merge_pull_request` and writes to master/main; feature and dev branches allowed
 
 **Claude Code MUST:**
 - Push to feature branches: `git push -u origin feature/<name>`
-- Create PRs for Nathan to review: `gh pr create --title "..." --body "..."`
+- Create PRs to dev for Nathan to review: `gh pr create --base dev --title "..." --body "..."`
 - Let Nathan merge PRs, create tags, and approve PyPI deploys manually
 
 **Self-guarding:** the hook scripts, `.claude/hooks.json`, and GitHub rulesets cannot be modified by Claude Code. Only Nathan can change these by editing files manually outside Claude Code.
@@ -254,7 +256,7 @@ uv run ruff check src/
 
 ## CI Pipeline
 
-GitHub Actions CI runs on push to master and on PRs:
+GitHub Actions CI runs on push to master/dev and on PRs:
 
 | Job | What it checks |
 |-----|---------------|
@@ -265,7 +267,7 @@ GitHub Actions CI runs on push to master and on PRs:
 | build | `uv build` + `twine check` + `check-wheel-contents` validation |
 | lockfile | `uv lock --check` ensures lockfile is in sync |
 | install-test | Clean wheel install + smoke-test imports (catches undeclared deps) |
-| testpypi-publish | Publishes to TestPyPI on master push (OIDC, `skip-existing: true`) |
+| testpypi-publish | Publishes to TestPyPI on dev push (OIDC, `skip-existing: true`) |
 | release-validation | PR-only: validates changelog format, issue links, date when version changes |
 | pip-audit | Dependency vulnerability scanning (PyPA advisory DB) |
 | bandit | Python SAST (security static analysis) |

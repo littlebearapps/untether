@@ -4,6 +4,7 @@ on:
   push:
     branches:
       - "master"
+      - "dev"
   pull_request:
 
 permissions: {}
@@ -163,7 +164,7 @@ jobs:
 
   testpypi-publish:
     name: Publish to TestPyPI
-    if: github.event_name == 'push' && github.ref == 'refs/heads/master'
+    if: github.event_name == 'push' && github.ref == 'refs/heads/dev'
     needs: [build, pytest]
     runs-on: ubuntu-latest
     environment:

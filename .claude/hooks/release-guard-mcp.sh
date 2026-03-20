@@ -29,7 +29,7 @@ BRANCH=$(echo "$INPUT" | jq -r '.tool_input.branch // ""' 2>/dev/null)
 
 if [ "$BRANCH" = "master" ] || [ "$BRANCH" = "main" ] || [ -z "$BRANCH" ]; then
   DISPLAY="${BRANCH:-default}"
-  jq -n --arg reason "🛑 RELEASE GUARD: GitHub MCP write to '${DISPLAY}' branch is blocked.\n\nSpecify a feature branch instead of master/main." \
+  jq -n --arg reason "🛑 RELEASE GUARD: GitHub MCP write to '${DISPLAY}' branch is blocked.\n\nSpecify a feature branch or 'dev' branch instead of master/main." \
     '{"decision": "block", "reason": $reason}'
   exit 0
 fi

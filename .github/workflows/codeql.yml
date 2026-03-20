@@ -4,6 +4,7 @@ on:
   push:
     branches:
       - "master"
+      - "dev"
   pull_request:
   schedule:
     - cron: "0 6 * * 1" # Monday 6am UTC

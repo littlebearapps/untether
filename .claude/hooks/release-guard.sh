@@ -92,7 +92,7 @@ fi
 # ── Output ───────────────────────────────────────────────────────
 
 if [ "$BLOCKED" = true ]; then
-  jq -n --arg reason "$(printf '🛑 RELEASE GUARD: %s\n\nFeature branch pushes are allowed. Only master/main, tags, releases, and PR merges are blocked.\n\nTo push a feature branch: git push -u origin <branch>\nTo create a PR: gh pr create --title "..." --body "..."\nFor master/tags/releases: Nathan runs these manually.' "$REASON")" \
+  jq -n --arg reason "$(printf '🛑 RELEASE GUARD: %s\n\nFeature branch and dev branch pushes are allowed. Only master/main, tags, releases, and PR merges are blocked.\n\nTo push a feature branch: git push -u origin <branch>\nTo create a PR to dev: gh pr create --base dev --title "..." --body "..."\nFor master/tags/releases: Nathan runs these manually.' "$REASON")" \
     '{"decision": "block", "reason": $reason}'
 else
   echo '{}'

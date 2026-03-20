@@ -42,13 +42,20 @@ scripts/staging.sh reset    # or: pipx upgrade untether
 systemctl --user restart untether
 ```
 
+### Branch model
+
+- **Feature branches** (`feature/*`, `fix/*`) — PR to `dev`
+- **`dev` branch** — integration branch, auto-publishes to TestPyPI on merge
+- **`master` branch** — release branch, always matches latest PyPI version
+- Feature → `dev` → `master` (never feature → master directly)
+
 ### Testing before merge
 
 1. Edit code in `src/`
 2. `uv run pytest && uv run ruff check src/`
 3. `systemctl --user restart untether-dev`
 4. Test via `@untether_dev_bot` — follow `docs/reference/integration-testing.md`
-5. When satisfied: commit, push, enter staging (see `docs/reference/dev-instance.md`)
+5. When satisfied: commit, push feature branch, create PR to `dev`
 
 ### Integration testing before release (MANDATORY)
 
