@@ -65,6 +65,16 @@ The wizard creates a Telegram bot, picks your workflow, and connects your chat. 
 
 That's it. Your agent runs on your machine, streams progress to Telegram, and you can reply to continue the conversation.
 
+The wizard offers three **workflow modes** — pick the one that fits:
+
+| Mode | How it works |
+|------|-------------|
+| **Assistant** | Ongoing chat — messages auto-resume your session. `/new` to start fresh. |
+| **Workspace** | Forum topics — each topic bound to a project/branch with independent sessions. |
+| **Handoff** | Reply-to-continue — resume lines shown for copying to terminal. |
+
+[Choose a mode →](https://untether.littlebearapps.com/how-to/choose-a-mode/) · [Conversation modes tutorial →](https://untether.littlebearapps.com/tutorials/conversation-modes/)
+
 **Tip:** Already have a bot token? Pass it directly: `untether --bot-token YOUR_TOKEN`
 
 ---
