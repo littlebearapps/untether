@@ -232,8 +232,11 @@ Multi-layer protection prevents accidental merges to master and PyPI publishes. 
 
 **Claude Code MUST:**
 - Push to feature branches: `git push -u origin feature/<name>`
-- Create PRs to dev for Nathan to review: `gh pr create --base dev --title "..." --body "..."`
-- Let Nathan merge PRs, create tags, and approve PyPI deploys manually
+- Create PRs to dev: `gh pr create --base dev --title "..." --body "..."`
+- Merge PRs to dev (allowed): `gh pr merge <number> --squash` (TestPyPI/staging only)
+- Let Nathan merge PRs to master, create tags, and approve PyPI deploys manually
+
+Claude Code MUST NOT merge PRs targeting master — only dev merges are allowed.
 
 **Self-guarding:** the hook scripts, `.claude/hooks.json`, and GitHub rulesets cannot be modified by Claude Code. Only Nathan can change these by editing files manually outside Claude Code.
 

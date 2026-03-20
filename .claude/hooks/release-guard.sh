@@ -68,11 +68,22 @@ if echo "$COMMAND" | grep -qPi '\bgh\s+release\s+create\b'; then
   REASON="gh release create is blocked. Releases must be created manually by Nathan."
 fi
 
-# ── gh pr merge ──────────────────────────────────────────────────
+# ── gh pr merge — allow dev, block master/main ──────────────────
 
 if echo "$COMMAND" | grep -qPi '\bgh\s+pr\s+merge\b'; then
-  BLOCKED=true
-  REASON="gh pr merge is blocked. PR merging must be done manually by Nathan."
+  PR_NUM=$(echo "$COMMAND" | grep -oP '\bgh\s+pr\s+merge\s+\K\d+')
+  if [ -n "$PR_NUM" ]; then
+    PR_BASE=$(gh pr view "$PR_NUM" --json baseRefName -q .baseRefName 2>/dev/null || echo "unknown")
+    if [ "$PR_BASE" = "dev" ]; then
+      : # Allow merges to dev (TestPyPI/staging)
+    else
+      BLOCKED=true
+      REASON="gh pr merge to '$PR_BASE' is blocked. Only merges to dev are allowed. Master merges must be done manually by Nathan."
+    fi
+  else
+    BLOCKED=true
+    REASON="gh pr merge without a PR number is blocked. Use: gh pr merge <number>"
+  fi
 fi
 
 # ── Self-protection ──────────────────────────────────────────────
