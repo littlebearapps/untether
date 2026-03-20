@@ -29,6 +29,7 @@ nav = [
     { "Worktrees" = "how-to/worktrees.md" },
     { "Route by chat" = "how-to/route-by-chat.md" },
     { "Topics" = "how-to/topics.md" },
+    { "Choose a mode" = "how-to/choose-a-mode.md" },
     { "Chat sessions" = "how-to/chat-sessions.md" },
     { "Context binding" = "how-to/context-binding.md" },
     { "Cross-environment resume" = "how-to/cross-environment-resume.md" },

@@ -88,7 +88,7 @@ That's it. Your agent runs on your machine, streams progress to Telegram, and yo
 - 🧩 **Plugin system** — extend with custom engines, transports, and commands
 - 🔌 **Plugin-compatible** — Claude Code plugins detect Untether sessions via `UNTETHER_SESSION` env var, preventing hooks from interfering with Telegram output; works with [PitchDocs](https://github.com/littlebearapps/lba-plugins) and other Claude Code plugins
 - 📊 **Session statistics** — `/stats` shows per-engine run counts, action totals, and duration across today, this week, and all time
-- 💬 **Conversation modes** — pick the style that fits how you work: assistant (ongoing chat), workspace (forum topics per project), or handoff (reply-to-continue with terminal resume)
+- 💬 **Three workflow modes** — **assistant** (ongoing chat with auto-resume), **workspace** (forum topics bound to projects/branches), or **handoff** (reply-to-continue with terminal resume lines); [choose a mode](https://untether.littlebearapps.com/how-to/choose-a-mode/) to match your workflow
 
 ---
 

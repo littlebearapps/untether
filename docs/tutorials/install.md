@@ -285,7 +285,19 @@ untether runs these engines on your computer. switch anytime with /agent.
 
 Pick whichever you prefer. You can switch engines per-message with `/codex`, `/claude`, etc., or change the default anytime via `/config` in Telegram.
 
-## 10. Save your config
+## 10. Choose your workflow mode
+
+Untether supports three workflow modes that control how conversations continue:
+
+| Mode | Best for | How it works |
+|------|----------|-------------|
+| **Assistant** | Solo dev, private chat | Messages auto-resume your last session. Use `/new` to start fresh. *(recommended)* |
+| **Workspace** | Teams, multiple projects | Forum topics, each bound to a project/branch. Independent sessions per topic. |
+| **Handoff** | Terminal-first workflow | Every message is a new run. Resume lines shown for copying to terminal. |
+
+The onboarding wizard configures this automatically based on your setup (private chat = assistant, forum group = workspace). You can change modes later by editing three settings in your config file — see [Choose a workflow mode](../how-to/choose-a-mode.md) for details.
+
+## 11. Save your config
 
 ```
 step 5: save config

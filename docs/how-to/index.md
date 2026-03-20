@@ -5,6 +5,10 @@ How-to guides are **goal-oriented recipes**. Pick the task you're trying to acco
 If you're learning from scratch, start with **[Tutorials](../tutorials/index.md)**.
 If you need exact options and defaults, use **[Reference](../reference/index.md)**.
 
+## Getting started
+
+- [Choose a workflow mode](choose-a-mode.md) (assistant, workspace, or handoff — pick the style that fits)
+
 ## Daily use
 
 - [Switch engines](switch-engines.md) (`/codex`, `/claude`, `/opencode`, `/pi`)

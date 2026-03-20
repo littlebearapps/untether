@@ -21,11 +21,15 @@ Untether keeps running in your terminal. In Telegram, your bot will post a start
     engine: `codex` · projects: `3`<br>
     working in: /Users/you/dev/your-project
 
-The message is compact by default — diagnostic lines only appear when they carry signal (e.g. `mode: chat` when in chat mode, or engine issues). This tells you:
+The message is compact by default — diagnostic lines only appear when they carry signal. This tells you:
 
 - Which engine is the default and how many projects are registered
 - Which directory Untether will run in
+- Which **workflow mode** you're in (`assistant`, `workspace`, or `handoff`)
 - Any engine issues (missing, misconfigured) when relevant
+
+!!! tip "What mode am I in?"
+    The startup message shows `mode: assistant`, `mode: workspace`, or `mode: handoff`. This determines how conversations continue — assistant auto-resumes, workspace uses forum topics, and handoff shows resume lines for terminal use. See [Choose a workflow mode](../how-to/choose-a-mode.md) for details.
 
 !!! note "Untether runs where you start it"
     The agent will see files in your current directory. If you want to work on a different repo, stop Untether (`Ctrl+C`) and restart it in that directory—or set up [projects](projects-and-branches.md) to switch repos from chat.

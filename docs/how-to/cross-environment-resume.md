@@ -58,6 +58,36 @@ provider = "openai-codex"
 
 Or for Gemini CLI subscriptions: `provider = "google-gemini-cli"`.
 
+## Handoff mode: terminal-first workflow
+
+If you use **handoff mode** (`session_mode = "stateless"`), every Telegram message starts a fresh run and the resume line is always visible. This is designed for developers who switch between Telegram and terminal:
+
+```mermaid
+sequenceDiagram
+    participant T as Telegram
+    participant B as Bot
+    participant CLI as Terminal
+    T->>B: fix the auth bug
+    B->>T: done + codex resume abc123
+    Note over T: Copy resume line
+    CLI->>CLI: codex resume abc123
+    Note over CLI: Continue in terminal
+    CLI->>CLI: (make more changes)
+    Note over T: Later, from mobile...
+    T->>B: /continue check if tests pass
+    Note over B: Picks up latest CLI session
+    B->>T: done + codex resume def456
+```
+
+**The workflow:**
+
+1. Send a task from Telegram while away from desk
+2. Bot completes it and shows `codex resume abc123`
+3. Back at desk: paste `codex resume abc123` in terminal to continue with full IDE context
+4. Later, from mobile: use `/continue` to pick up where the terminal left off
+
+This works because resume tokens are stored per-directory, not per-transport. Both Telegram and terminal sessions use the same underlying engine session store.
+
 ## Tips
 
 - Use `/new` first if you want to clear any stored Untether session before continuing a CLI session.

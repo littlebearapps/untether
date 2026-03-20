@@ -13,9 +13,11 @@ Topics bind Telegram **forum threads** to a project/branch context. Each topic k
 
 ## Requirements checklist
 
-- The chat is a **forum-enabled supergroup**
-- **Topics are enabled** in the group settings
-- The bot is an **admin** with **Manage Topics** permission
+- The chat is a **forum-enabled supergroup** (enable Topics in group settings — this auto-converts to supergroup)
+- The bot is an **admin** in the group
+- The bot has **Manage Topics** permission (`can_manage_topics`) — needed for creating/editing topics; without it, the bot logs a warning but can still operate in existing topics
+- **Group privacy** is disabled for the bot via @BotFather (`/setprivacy` → Disable) — otherwise the bot only sees commands and @mentions, not plain text messages
+- After changing privacy, **remove and re-add** the bot to the group for the change to take effect
 - If you want topics in project chats, set `projects.<alias>.chat_id`
 
 !!! note "Setting up workspace from scratch"
