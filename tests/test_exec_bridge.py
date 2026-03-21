@@ -2906,6 +2906,76 @@ async def test_outline_not_double_deleted() -> None:
     assert transport.delete_calls == []
 
 
+@pytest.mark.anyio
+async def test_outline_sent_strips_approval_from_progress() -> None:
+    """When outline is sent, progress message should only keep cancel button (#163)."""
+    transport = FakeTransport()
+    presenter = _KeyboardPresenter()
+    edits = _make_edits(transport, presenter)
+
+    # Mark outline as sent with visible refs (simulating outline delivery)
+    edits._outline_sent = True
+    edits._outline_refs.append(MessageRef(channel_id=123, message_id=500))
+
+    # Trigger render with approval buttons from the presenter
+    presenter.set_approval_buttons()
+    edits.event_seq = 1
+    with contextlib.suppress(anyio.WouldBlock):
+        edits.signal_send.send_nowait(None)
+
+    async with anyio.create_task_group() as tg:
+
+        async def run_cycle() -> None:
+            await anyio.sleep(0)
+            await anyio.sleep(0)
+            edits.signal_send.close()
+
+        tg.start_soon(edits.run)
+        tg.start_soon(run_cycle)
+
+    # Progress message should only have cancel row (approval stripped)
+    last_edit = transport.edit_calls[-1]
+    kb = last_edit["message"].extra["reply_markup"]["inline_keyboard"]
+    assert len(kb) == 1  # Only cancel row
+    assert kb[0][0]["text"] == "Cancel"
+
+
+@pytest.mark.anyio
+async def test_outline_state_resets_on_approval_disappear() -> None:
+    """After outline cycle completes, _outline_sent resets for future requests (#163)."""
+    transport = FakeTransport()
+    presenter = _KeyboardPresenter()
+    edits = _make_edits(transport, presenter)
+
+    # Simulate: outline was sent, refs cleaned up, approval buttons visible
+    edits._outline_sent = True
+    presenter.set_approval_buttons()
+    edits.event_seq = 1
+    with contextlib.suppress(anyio.WouldBlock):
+        edits.signal_send.send_nowait(None)
+
+    async with anyio.create_task_group() as tg:
+
+        async def run_cycle() -> None:
+            # First cycle: approval with outline_sent → stripped
+            await anyio.sleep(0)
+            await anyio.sleep(0)
+            # Now buttons disappear (approval resolved)
+            presenter.set_no_approval()
+            edits.event_seq = 2
+            with contextlib.suppress(anyio.WouldBlock):
+                edits.signal_send.send_nowait(None)
+            await anyio.sleep(0)
+            await anyio.sleep(0)
+            edits.signal_send.close()
+
+        tg.start_soon(edits.run)
+        tg.start_soon(run_cycle)
+
+    # _outline_sent should be reset so future ExitPlanMode works
+    assert edits._outline_sent is False
+
+
 # ---------------------------------------------------------------------------
 # Outbox file delivery tests
 # ---------------------------------------------------------------------------

@@ -3,6 +3,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 from typing import Any
+from urllib.parse import urlparse
 
 import importlib.util
 import logging
@@ -104,7 +105,57 @@ def render_markdown(md: str) -> tuple[str, list[dict[str, Any]]]:
         if offset + length > text_utf16_len:
             ed["length"] = text_utf16_len - offset
         entities.append(ed)
+    entities = _sanitise_entities(entities)
     return text, entities
+
+
+_LOOPBACK_HOSTS = frozenset({"localhost", "127.0.0.1", "::1", "0.0.0.0"})
+
+
+def _is_telegram_safe_url(url: str) -> bool:
+    """Check if a URL is safe for Telegram ``text_link`` entities.
+
+    Telegram rejects localhost, loopback, bare hostnames, file paths,
+    and non-HTTP(S) schemes with 400 Bad Request.  (#157)
+    """
+    try:
+        parsed = urlparse(url)
+    except Exception:  # noqa: BLE001
+        return False
+    if parsed.scheme not in ("http", "https"):
+        return False
+    host = parsed.hostname or ""
+    if not host:
+        return False
+    if host in _LOOPBACK_HOSTS:
+        return False
+    # Bare hostnames (no dot) are rejected by Telegram
+    return "." in host
+
+
+def _sanitise_entities(
+    entities: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Convert ``text_link`` entities with invalid URLs to ``code``.
+
+    Telegram's sendMessage API rejects the entire request if any
+    ``text_link`` entity has a URL it considers invalid (localhost,
+    file paths, bare hostnames).  Converting to ``code`` preserves
+    the text visually while avoiding the 400 error.  (#157)
+    """
+    sanitised: list[dict[str, Any]] = []
+    for e in entities:
+        if e.get("type") == "text_link" and not _is_telegram_safe_url(e.get("url", "")):
+            sanitised.append(
+                {
+                    "type": "code",
+                    "offset": e["offset"],
+                    "length": e["length"],
+                }
+            )
+            continue
+        sanitised.append(e)
+    return sanitised
 
 
 def _split_line_ending(line: str) -> tuple[str, str]:

@@ -916,11 +916,13 @@ class ProgressEdits:
             )
             has_approval = len(new_kb) > 1
             had_approval = len(old_kb) > 1
+            # Track raw source state before stripping (#163)
+            source_has_approval = has_approval
 
-            # If the callback handler already cleaned up outline messages
-            # (via delete_outline_messages), the synthetic discuss_approve
-            # action still renders stale buttons. Force cancel-only keyboard.
-            if self._outline_sent and not self._outline_refs and has_approval:
+            # When outline has been sent (visible or already cleaned up),
+            # strip approval buttons from the progress message — the outline
+            # message has the canonical approval buttons.  (#163)
+            if self._outline_sent and has_approval:
                 cancel_row = new_kb[-1:]  # keep only the cancel row
                 rendered = RenderedMessage(
                     text=rendered.text,
@@ -943,11 +945,9 @@ class ProgressEdits:
                         outline_text = a.action.detail.get("outline_full_text")
                         if outline_text and isinstance(outline_text, str):
                             self._outline_sent = True
-                            # Pass approval rows (exclude cancel) for the last outline msg
+                            # Full keyboard (including cancel) for outline msg (#163)
                             approval_kb = (
-                                {"inline_keyboard": new_kb[:-1]}
-                                if len(new_kb) > 1
-                                else None
+                                {"inline_keyboard": new_kb} if len(new_kb) > 1 else None
                             )
                             await self._send_outline(
                                 outline_text,
@@ -957,6 +957,18 @@ class ProgressEdits:
                                     state.resume.value if state.resume else None
                                 ),
                             )
+                            # Strip approval from progress this cycle too —
+                            # outline message has the canonical buttons (#163)
+                            cancel_row = new_kb[-1:]
+                            rendered = RenderedMessage(
+                                text=rendered.text,
+                                extra={
+                                    **rendered.extra,
+                                    "reply_markup": {"inline_keyboard": cancel_row},
+                                },
+                            )
+                            new_kb = cancel_row
+                            has_approval = False
                             break
 
                 if has_approval and not had_approval and not self._approval_notified:
@@ -1033,6 +1045,11 @@ class ProgressEdits:
                                 )
 
                     bg_tg.start_soon(_delete_outlines, outline_refs)
+
+                # Reset outline state when source stops providing approval,
+                # so future ExitPlanMode can show buttons on progress (#163)
+                if self._outline_sent and not source_has_approval:
+                    self._outline_sent = False
 
                 if rendered != self.last_rendered:
                     # Log keyboard transitions at info level for #103/#104 diagnostics

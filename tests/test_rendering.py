@@ -1,6 +1,13 @@
 import re
 
-from untether.telegram.render import render_markdown, split_markdown_body
+import pytest
+
+from untether.telegram.render import (
+    _is_telegram_safe_url,
+    _sanitise_entities,
+    render_markdown,
+    split_markdown_body,
+)
 
 
 def test_render_markdown_basic_entities() -> None:
@@ -136,3 +143,95 @@ def test_render_markdown_linkifies_raw_urls() -> None:
     link_entities = [e for e in entities if e.get("type") == "text_link"]
     assert len(link_entities) == 1
     assert link_entities[0]["url"] == "https://example.com"
+
+
+# ---------------------------------------------------------------------------
+# URL safety and entity sanitisation tests (#157)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "https://example.com/path",
+        "http://example.com",
+        "https://sub.domain.co.uk/page?q=1",
+        "https://api.github.com/repos/owner/repo",
+    ],
+)
+def test_is_telegram_safe_url_accepts_valid(url: str) -> None:
+    assert _is_telegram_safe_url(url) is True
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "http://localhost:8080",
+        "http://localhost",
+        "http://127.0.0.1:3000",
+        "http://127.0.0.1",
+        "http://0.0.0.0:5000",
+        "http://::1/path",
+        "/Users/foo/docs/file.md",
+        "file:///etc/passwd",
+        "ftp://example.com/file",
+        "http://myserver/path",
+        "",
+        "not-a-url",
+    ],
+)
+def test_is_telegram_safe_url_rejects_invalid(url: str) -> None:
+    assert _is_telegram_safe_url(url) is False
+
+
+def test_sanitise_entities_preserves_valid_text_link() -> None:
+    entities = [
+        {"type": "text_link", "offset": 0, "length": 4, "url": "https://example.com"}
+    ]
+    assert _sanitise_entities(entities) == entities
+
+
+def test_sanitise_entities_converts_localhost_to_code() -> None:
+    entities = [
+        {"type": "text_link", "offset": 0, "length": 4, "url": "http://localhost:8080"}
+    ]
+    result = _sanitise_entities(entities)
+    assert result == [{"type": "code", "offset": 0, "length": 4}]
+
+
+def test_sanitise_entities_converts_file_path_to_code() -> None:
+    entities = [
+        {"type": "text_link", "offset": 0, "length": 10, "url": "/Users/foo/file.md"}
+    ]
+    result = _sanitise_entities(entities)
+    assert result == [{"type": "code", "offset": 0, "length": 10}]
+
+
+def test_sanitise_entities_leaves_non_link_entities() -> None:
+    entities = [
+        {"type": "bold", "offset": 0, "length": 4},
+        {"type": "code", "offset": 5, "length": 3},
+    ]
+    assert _sanitise_entities(entities) == entities
+
+
+def test_sanitise_entities_empty_list() -> None:
+    assert _sanitise_entities([]) == []
+
+
+def test_render_markdown_sanitises_localhost_link() -> None:
+    """Markdown link to localhost should become code, not text_link (#157)."""
+    text, entities = render_markdown("[my app](http://localhost:8080)")
+    assert "my app" in text
+    link_entities = [e for e in entities if e.get("type") == "text_link"]
+    assert len(link_entities) == 0
+    code_entities = [e for e in entities if e.get("type") == "code"]
+    assert len(code_entities) >= 1
+
+
+def test_render_markdown_keeps_valid_link() -> None:
+    """Markdown link to a valid URL should remain a text_link."""
+    text, entities = render_markdown("[docs](https://docs.example.com)")
+    link_entities = [e for e in entities if e.get("type") == "text_link"]
+    assert len(link_entities) == 1
+    assert link_entities[0]["url"] == "https://docs.example.com"
