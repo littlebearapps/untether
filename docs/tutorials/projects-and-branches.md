@@ -14,6 +14,19 @@ So far, Untether runs in whatever directory you started it. If you want to work 
 
 Projects fix this. Once you register a repo, you can target it from chat—even while Untether is running elsewhere.
 
+## Quick background: branches and worktrees
+
+!!! tip "Already familiar with git branches?"
+    Skip to [step 1](#1-register-a-project).
+
+A **branch** is a separate line of development in your code. Think of it like a draft — you can make changes on a branch without touching the main version. When the changes are ready, the branch gets merged back. Branches let your agent work on a feature (`feat/new-login`) or fix (`fix/memory-leak`) in isolation.
+
+A **worktree** is a separate folder that checks out a branch. Normally, switching branches changes the files in your project directory. With worktrees, each branch gets its own folder — so the agent can work on `feat/new-login` in one folder while your main code stays untouched in another. Untether creates and manages worktrees for you automatically.
+
+You don't need to understand git deeply to use projects and branches. The key idea: **prefixing a message with `/<project> @branch` runs the agent on that branch, in a separate folder, without disrupting anything.**
+
+See also: [glossary](../reference/glossary.md) for definitions of these and other terms.
+
 ## 1. Register a project
 
 Navigate to the repo and run `untether init`:

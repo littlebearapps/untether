@@ -2353,6 +2353,435 @@ async def test_stall_tool_threshold_suppresses_warning() -> None:
     assert edits._stall_warn_count == 0
 
 
+@pytest.mark.anyio
+async def test_stall_mcp_tool_threshold_suppresses_warning() -> None:
+    """Running MCP tool uses longer MCP threshold, suppressing premature stall warnings."""
+    transport = FakeTransport()
+    presenter = _KeyboardPresenter()
+    clock = _FakeClock(start=100.0)
+    edits = _make_edits(transport, presenter, clock=clock)
+    edits._stall_check_interval = 0.01
+    edits._STALL_THRESHOLD_SECONDS = 0.05  # normal: very short
+    edits._STALL_THRESHOLD_TOOL = 0.05  # tool: very short
+    edits._STALL_THRESHOLD_MCP_TOOL = 10.0  # MCP: very long
+    edits._STALL_THRESHOLD_APPROVAL = 10.0
+
+    from untether.model import Action, ActionEvent
+
+    evt = ActionEvent(
+        engine="claude",
+        action=Action(
+            id="a1",
+            kind="tool",
+            title="mcp__cloudflare-observability__query_worker_observability",
+            detail={
+                "name": "mcp__cloudflare-observability__query_worker_observability"
+            },
+        ),
+        phase="started",
+    )
+    await edits.on_event(evt)
+    clock.set(100.0)
+
+    async with anyio.create_task_group() as tg:
+
+        async def drive() -> None:
+            clock.set(100.1)  # past normal + tool thresholds but not MCP threshold
+            await anyio.sleep(0.05)
+            edits.signal_send.close()
+
+        tg.start_soon(edits.run)
+        tg.start_soon(drive)
+
+    # Should NOT have warned — MCP threshold is 10.0, idle only 0.1
+    assert edits._stall_warn_count == 0
+
+
+@pytest.mark.anyio
+async def test_stall_mcp_tool_threshold_fires_after_exceeded() -> None:
+    """Stall monitor fires after the MCP tool threshold is exceeded."""
+    transport = FakeTransport()
+    presenter = _KeyboardPresenter()
+    clock = _FakeClock(start=100.0)
+    edits = _make_edits(transport, presenter, clock=clock)
+    edits._stall_check_interval = 0.01
+    edits._STALL_THRESHOLD_SECONDS = 0.05
+    edits._STALL_THRESHOLD_TOOL = 0.05
+    edits._STALL_THRESHOLD_MCP_TOOL = 0.1  # short for test
+
+    from untether.model import Action, ActionEvent
+
+    evt = ActionEvent(
+        engine="claude",
+        action=Action(
+            id="a1",
+            kind="tool",
+            title="mcp__github__search_code",
+            detail={"name": "mcp__github__search_code"},
+        ),
+        phase="started",
+    )
+    await edits.on_event(evt)
+    clock.set(100.0)
+
+    async with anyio.create_task_group() as tg:
+
+        async def drive() -> None:
+            clock.set(100.2)  # past MCP threshold (0.1)
+            await anyio.sleep(0.05)
+            edits.signal_send.close()
+
+        tg.start_soon(edits.run)
+        tg.start_soon(drive)
+
+    assert edits._stall_warn_count >= 1
+
+
+@pytest.mark.anyio
+async def test_stall_mcp_tool_notification_message_format() -> None:
+    """Stall notification for MCP tools names the server, not 'session may be stuck'."""
+    transport = FakeTransport()
+    presenter = _KeyboardPresenter()
+    clock = _FakeClock(start=100.0)
+    edits = _make_edits(transport, presenter, clock=clock)
+    edits._stall_check_interval = 0.01
+    edits._STALL_THRESHOLD_SECONDS = 0.05
+    edits._STALL_THRESHOLD_TOOL = 0.05
+    edits._STALL_THRESHOLD_MCP_TOOL = 0.1  # short for test
+
+    from untether.model import Action, ActionEvent
+
+    evt = ActionEvent(
+        engine="claude",
+        action=Action(
+            id="a1",
+            kind="tool",
+            title="mcp__cloudflare-observability__query_worker_observability",
+            detail={
+                "name": "mcp__cloudflare-observability__query_worker_observability"
+            },
+        ),
+        phase="started",
+    )
+    await edits.on_event(evt)
+    clock.set(100.0)
+
+    async with anyio.create_task_group() as tg:
+
+        async def drive() -> None:
+            clock.set(100.2)  # past MCP threshold
+            await anyio.sleep(0.05)
+            edits.signal_send.close()
+
+        tg.start_soon(edits.run)
+        tg.start_soon(drive)
+
+    mcp_msgs = [
+        c for c in transport.send_calls if "MCP tool running" in c["message"].text
+    ]
+    assert len(mcp_msgs) >= 1
+    assert "cloudflare-observability" in mcp_msgs[0]["message"].text
+    # Should NOT contain the generic "stuck" message
+    stuck_msgs = [
+        c for c in transport.send_calls if "may be stuck" in c["message"].text
+    ]
+    assert len(stuck_msgs) == 0
+
+
+def test_has_running_mcp_tool_returns_server_name() -> None:
+    """_has_running_mcp_tool returns server name for MCP tools, None otherwise."""
+    transport = FakeTransport()
+    presenter = _KeyboardPresenter()
+    edits = _make_edits(transport, presenter)
+
+    from untether.model import Action, ActionEvent
+    from untether.progress import ActionState
+
+    # No actions → None
+    assert edits._has_running_mcp_tool() is None
+
+    # Running MCP tool → server name
+    edits.tracker._actions["a1"] = ActionState(
+        action=Action(
+            id="a1",
+            kind="tool",
+            title="mcp__github__search_code",
+            detail={"name": "mcp__github__search_code"},
+        ),
+        phase="started",
+        ok=None,
+        display_phase="started",
+        completed=False,
+        first_seen=0,
+        last_update=0,
+    )
+    assert edits._has_running_mcp_tool() == "github"
+
+    # Non-MCP tool → None
+    edits.tracker._actions["a2"] = ActionState(
+        action=Action(id="a2", kind="tool", title="Bash", detail={"name": "Bash"}),
+        phase="started",
+        ok=None,
+        display_phase="started",
+        completed=False,
+        first_seen=0,
+        last_update=0,
+    )
+    assert edits._has_running_mcp_tool() is None
+
+    # Completed MCP tool → None
+    edits.tracker._actions.clear()
+    edits.tracker._actions["a3"] = ActionState(
+        action=Action(
+            id="a3",
+            kind="tool",
+            title="mcp__cloudflare__list_workers",
+            detail={"name": "mcp__cloudflare__list_workers"},
+        ),
+        phase="completed",
+        ok=True,
+        display_phase="completed",
+        completed=True,
+        first_seen=0,
+        last_update=0,
+    )
+    assert edits._has_running_mcp_tool() is None
+
+
+@pytest.mark.anyio
+async def test_stall_mcp_hung_escalation_notifies_after_frozen_ring() -> None:
+    """When MCP tool is running and ring buffer is frozen for 3+ checks, notify user."""
+    transport = FakeTransport()
+    presenter = _KeyboardPresenter()
+    clock = _FakeClock(start=100.0)
+    edits = _make_edits(transport, presenter, clock=clock)
+    edits._stall_check_interval = 0.01
+    edits._STALL_THRESHOLD_SECONDS = 0.05
+    edits._STALL_THRESHOLD_TOOL = 0.05
+    edits._STALL_THRESHOLD_MCP_TOOL = 0.05  # short so it fires quickly
+    edits._stall_repeat_seconds = 0.0  # no delay between warnings
+
+    # Provide a fake stream with a frozen ring buffer
+    from collections import deque
+    from types import SimpleNamespace
+
+    fake_stream = SimpleNamespace(
+        recent_events=deque([(1.0, "system"), (2.0, "assistant")], maxlen=10),
+        last_event_type="user",
+        stderr_capture=[],
+    )
+    edits.stream = fake_stream
+
+    from untether.model import Action, ActionEvent
+
+    evt = ActionEvent(
+        engine="claude",
+        action=Action(
+            id="a1",
+            kind="tool",
+            title="mcp__cloudflare__query_workers",
+            detail={"name": "mcp__cloudflare__query_workers"},
+        ),
+        phase="started",
+    )
+    await edits.on_event(evt)
+    clock.set(100.0)
+
+    async with anyio.create_task_group() as tg:
+
+        async def drive() -> None:
+            # Advance past threshold, let 5 stall checks fire (all with frozen ring)
+            clock.set(100.5)
+            await anyio.sleep(0.15)
+            edits.signal_send.close()
+
+        tg.start_soon(edits.run)
+        tg.start_soon(drive)
+
+    # Should have fired multiple stall warnings
+    assert edits._stall_warn_count >= 4
+    # After 3+ frozen checks, should have sent a "may be hung" notification
+    hung_msgs = [c for c in transport.send_calls if "may be hung" in c["message"].text]
+    assert len(hung_msgs) >= 1
+    assert "cloudflare" in hung_msgs[0]["message"].text
+    assert "no new events" in hung_msgs[0]["message"].text
+
+
+@pytest.mark.anyio
+async def test_stall_mcp_not_hung_when_ring_buffer_advances() -> None:
+    """When MCP tool is running but ring buffer changes, suppress notification normally."""
+    transport = FakeTransport()
+    presenter = _KeyboardPresenter()
+    clock = _FakeClock(start=100.0)
+    edits = _make_edits(transport, presenter, clock=clock)
+    edits._stall_check_interval = 0.01
+    edits._STALL_THRESHOLD_SECONDS = 0.05
+    edits._STALL_THRESHOLD_TOOL = 0.05
+    edits._STALL_THRESHOLD_MCP_TOOL = 0.05
+    edits._stall_repeat_seconds = 0.0
+
+    from collections import deque
+    from types import SimpleNamespace
+
+    ring = deque([(1.0, "system"), (2.0, "assistant")], maxlen=10)
+    fake_stream = SimpleNamespace(
+        recent_events=ring,
+        last_event_type="user",
+        stderr_capture=[],
+    )
+    edits.stream = fake_stream
+
+    from untether.model import Action, ActionEvent
+
+    evt = ActionEvent(
+        engine="claude",
+        action=Action(
+            id="a1",
+            kind="tool",
+            title="mcp__github__search_code",
+            detail={"name": "mcp__github__search_code"},
+        ),
+        phase="started",
+    )
+    await edits.on_event(evt)
+    clock.set(100.0)
+
+    async with anyio.create_task_group() as tg:
+
+        async def drive() -> None:
+            clock.set(100.5)
+            for i in range(5):
+                # Advance the ring buffer each iteration to simulate progress
+                ring.append((100.0 + i, "user"))
+                await anyio.sleep(0.03)
+            edits.signal_send.close()
+
+        tg.start_soon(edits.run)
+        tg.start_soon(drive)
+
+    # Should NOT have sent any "may be hung" messages — ring buffer was advancing
+    hung_msgs = [c for c in transport.send_calls if "may be hung" in c["message"].text]
+    assert len(hung_msgs) == 0
+    # Frozen ring count should be 0 or very low since events kept coming
+    assert edits._frozen_ring_count <= 1
+
+
+@pytest.mark.anyio
+async def test_stall_frozen_ring_escalates_without_mcp_tool() -> None:
+    """When no MCP tool is running but ring buffer is frozen for 3+ checks, notify user.
+
+    Regression test for #155: frozen ring buffer escalation was gated on
+    mcp_server being set, so general stalls with cpu_active=True were
+    suppressed indefinitely.
+    """
+    from collections import deque
+    from types import SimpleNamespace
+    from unittest.mock import patch
+
+    from untether.utils.proc_diag import ProcessDiag
+
+    transport = FakeTransport()
+    presenter = _KeyboardPresenter()
+    clock = _FakeClock(start=100.0)
+    edits = _make_edits(transport, presenter, clock=clock)
+    edits._stall_check_interval = 0.01
+    edits._STALL_THRESHOLD_SECONDS = 0.05
+    edits._stall_repeat_seconds = 0.0  # no delay between warnings
+    edits._STALL_MAX_WARNINGS = 100  # don't hit auto-cancel
+    edits.pid = 12345
+    edits.event_seq = 5
+
+    # Provide a fake stream with a frozen ring buffer — NO MCP tool
+    fake_stream = SimpleNamespace(
+        recent_events=deque([(1.0, "assistant"), (2.0, "result")], maxlen=10),
+        last_event_type="result",
+        stderr_capture=[],
+    )
+    edits.stream = fake_stream
+
+    # No tool action — just a completed run that went silent
+    clock.set(100.0)
+
+    call_count = 0
+
+    def active_cpu_diag(pid: int) -> ProcessDiag:
+        nonlocal call_count
+        call_count += 1
+        return ProcessDiag(
+            pid=pid,
+            alive=True,
+            cpu_utime=1000 + call_count * 300,
+            cpu_stime=200 + call_count * 50,
+        )
+
+    with patch(
+        "untether.utils.proc_diag.collect_proc_diag",
+        side_effect=active_cpu_diag,
+    ):
+        async with anyio.create_task_group() as tg:
+
+            async def drive() -> None:
+                # Advance past threshold, let enough stall checks fire
+                for i in range(8):
+                    clock.set(100.1 + i * 0.1)
+                    await anyio.sleep(0.03)
+                edits.signal_send.close()
+
+            tg.start_soon(edits.run)
+            tg.start_soon(drive)
+
+    # After 3+ frozen checks, should have sent a notification despite cpu_active
+    notify_msgs = [
+        c
+        for c in transport.send_calls
+        if "no new events" in c["message"].text.lower()
+        or (
+            "no progress" in c["message"].text.lower()
+            and "cpu active" in c["message"].text.lower()
+        )
+    ]
+    assert len(notify_msgs) >= 1, (
+        f"Expected frozen ring escalation notification, got: "
+        f"{[c['message'].text for c in transport.send_calls]}"
+    )
+    # Should NOT mention MCP
+    assert "mcp" not in notify_msgs[0]["message"].text.lower()
+    # Should mention CPU active context
+    assert "cpu active" in notify_msgs[0]["message"].text.lower()
+
+
+def test_frozen_ring_count_resets_on_event() -> None:
+    """_frozen_ring_count and _prev_recent_events reset when a real event arrives."""
+    transport = FakeTransport()
+    presenter = _KeyboardPresenter()
+    edits = _make_edits(transport, presenter)
+
+    # Simulate frozen state
+    edits._frozen_ring_count = 5
+    edits._prev_recent_events = [(1.0, "system")]
+    edits._stall_warned = True
+    edits._stall_warn_count = 3
+
+    from untether.model import Action, ActionEvent
+
+    import asyncio
+
+    asyncio.run(
+        edits.on_event(
+            ActionEvent(
+                engine="claude",
+                action=Action(id="a1", kind="tool", title="Bash"),
+                phase="started",
+            )
+        )
+    )
+
+    assert edits._frozen_ring_count == 0
+    assert edits._prev_recent_events is None
+    assert edits._stall_warned is False
+    assert edits._stall_warn_count == 0
+
+
 # ===========================================================================
 # Phase 2b: Edit-fail fallback in _send_or_edit_message (#103)
 # ===========================================================================
@@ -2528,9 +2957,13 @@ async def test_stall_auto_cancel_suppressed_by_cpu_activity() -> None:
         c for c in transport.send_calls if "Auto-cancelled" in c["message"].text
     ]
     assert len(auto_cancel_msgs) == 0
-    # First stall fires (cpu_active=None, no baseline), subsequent suppressed
+    # First stall fires (cpu_active=None, no baseline). Subsequent are suppressed
+    # until frozen ring buffer escalation kicks in after 3+ frozen checks (#155).
     stall_msgs = [c for c in transport.send_calls if "No progress" in c["message"].text]
-    assert len(stall_msgs) <= 1
+    assert len(stall_msgs) >= 1  # at least the initial notification
+    # After frozen escalation, messages mention "CPU active, no new events"
+    frozen_msgs = [c for c in stall_msgs if "CPU active" in c["message"].text]
+    assert len(frozen_msgs) >= 1  # frozen ring buffer escalation fired
 
 
 @pytest.mark.anyio
@@ -2641,10 +3074,11 @@ async def test_stall_notification_suppressed_when_cpu_active() -> None:
             tg.start_soon(edits.run)
             tg.start_soon(drive)
 
-    # First stall fires (cpu_active=None, no baseline), subsequent suppressed
+    # First stall fires (cpu_active=None, no baseline). Subsequent are suppressed
+    # until frozen ring buffer escalation kicks in after 3+ frozen checks (#155).
     stall_msgs = [c for c in transport.send_calls if "No progress" in c["message"].text]
-    assert len(stall_msgs) <= 1
-
+    assert len(stall_msgs) >= 1  # at least the initial notification
+    # Early stalls (before frozen threshold) should be suppressed via heartbeat
     # Heartbeat should have bumped event_seq (re-renders via edit)
     assert edits.event_seq > initial_seq
 
