@@ -109,7 +109,7 @@ def render_markdown(md: str) -> tuple[str, list[dict[str, Any]]]:
     return text, entities
 
 
-_LOOPBACK_HOSTS = frozenset({"localhost", "127.0.0.1", "::1", "0.0.0.0"})
+_LOOPBACK_HOSTS = frozenset({"localhost", "127.0.0.1", "::1", "0.0.0.0"})  # nosec B104
 
 
 def _is_telegram_safe_url(url: str) -> bool:

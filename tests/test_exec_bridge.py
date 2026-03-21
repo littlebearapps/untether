@@ -2494,7 +2494,7 @@ def test_has_running_mcp_tool_returns_server_name() -> None:
     presenter = _KeyboardPresenter()
     edits = _make_edits(transport, presenter)
 
-    from untether.model import Action, ActionEvent
+    from untether.model import Action
     from untether.progress import ActionState
 
     # No actions → None
