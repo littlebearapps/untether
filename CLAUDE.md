@@ -152,31 +152,31 @@ Rules in `.claude/rules/` auto-load when editing matching files:
 
 ## Tests
 
-1578 unit tests, 80% coverage threshold. Integration testing against `@untether_dev_bot` is **mandatory before every release** — see `docs/reference/integration-testing.md` for the full playbook with per-release-type tier requirements (patch/minor/major). All integration test tiers are fully automated by Claude Code via Telegram MCP tools and Bash.
+1743 unit tests, 80% coverage threshold. Integration testing against `@untether_dev_bot` is **mandatory before every release** — see `docs/reference/integration-testing.md` for the full playbook with per-release-type tier requirements (patch/minor/major). All integration test tiers are fully automated by Claude Code via Telegram MCP tools and Bash.
 
 Key test files:
 
-- `test_claude_control.py` — 82 tests: control requests, response routing, registry lifecycle, auto-approve/auto-deny, tool auto-approve, custom deny messages, discuss action, early toast, progressive cooldown, auto permission mode
-- `test_callback_dispatch.py` — 25 tests: callback parsing, dispatch toast/ephemeral behaviour, early answering
-- `test_exec_bridge.py` — 109 tests: ephemeral notification cleanup, approval push notifications, progressive stall warnings, stall diagnostics, stall auto-cancel with CPU-active suppression, approval-aware stall threshold, MCP tool stall threshold, frozen ring buffer hung escalation, session summary, PID/stream threading
-- `test_ask_user_question.py` — 25 tests: AskUserQuestion control request handling, question extraction, pending request registry, answer routing, option button rendering, multi-question flows, structured answer responses, ask mode toggle auto-deny
+- `test_claude_control.py` — 89 tests: control requests, response routing, registry lifecycle, auto-approve/auto-deny, tool auto-approve, custom deny messages, discuss action, early toast, progressive cooldown, auto permission mode
+- `test_callback_dispatch.py` — 26 tests: callback parsing, dispatch toast/ephemeral behaviour, early answering
+- `test_exec_bridge.py` — 112 tests: ephemeral notification cleanup, approval push notifications, progressive stall warnings, stall diagnostics, stall auto-cancel with CPU-active suppression, approval-aware stall threshold, MCP tool stall threshold, frozen ring buffer hung escalation, session summary, PID/stream threading
+- `test_ask_user_question.py` — 29 tests: AskUserQuestion control request handling, question extraction, pending request registry, answer routing, option button rendering, multi-question flows, structured answer responses, ask mode toggle auto-deny
 - `test_diff_preview.py` — 14 tests: Edit diff display, Write content preview, Bash command display, line/char truncation
 - `test_cost_tracker.py` — 12 tests: cost accumulation, per-run/daily budget thresholds, warning levels, daily reset, auto-cancel flag
 - `test_export_command.py` — 15 tests: session event recording, markdown/JSON export formatting, usage integration, session trimming
 - `test_browse_command.py` — 39 tests: path registry, directory listing, file preview, inline keyboard buttons, project-aware root resolution, security (path traversal)
-- `test_meta_line.py` — 43 tests: model name shortening, meta line formatting, ProgressTracker meta storage/snapshot, footer ordering (context/meta/resume)
+- `test_meta_line.py` — 54 tests: model name shortening, meta line formatting, ProgressTracker meta storage/snapshot, footer ordering (context/meta/resume)
 - `test_runner_utils.py` — 34 tests: error formatting helpers, drain_stderr capture, enriched error messages, stderr sanitisation
 - `test_shutdown.py` — 4 tests: shutdown state transitions, idempotency, reset
-- `test_preamble.py` — 5 tests: default preamble injection, disabled preamble, custom text override, empty text disables, settings defaults
+- `test_preamble.py` — 6 tests: default preamble injection, disabled preamble, custom text override, empty text disables, settings defaults
 - `test_restart_command.py` — 3 tests: command triggers shutdown, idempotent response, command id
 - `test_cooldown_bypass.py` — 19 tests: outline bypass, rapid retry auto-deny, no-text auto-deny, cooldown escalation, hold-open outline flow
 - `test_verbose_progress.py` — 21 tests: format_verbose_detail() for each tool type, MarkdownFormatter verbose mode, compact regression
 - `test_verbose_command.py` — 7 tests: /verbose toggle on/off/clear, backend id
-- `test_config_command.py` — 195 tests: home page, plan mode/ask mode/verbose/engine/trigger/model/reasoning sub-pages, toggle actions, callback vs command routing, button layout, engine-aware visibility, default resolution
+- `test_config_command.py` — 218 tests: home page, plan mode/ask mode/verbose/engine/trigger/model/reasoning sub-pages, toggle actions, callback vs command routing, button layout, engine-aware visibility, default resolution
 - `test_pi_compaction.py` — 6 tests: compaction start/end, aborted, no tokens, sequence
 - `test_proc_diag.py` — 24 tests: format_diag, is_cpu_active, collect_proc_diag (Linux /proc reads), ProcessDiag defaults
 - `test_exec_runner.py` — 28 tests: event tracking (event_count, recent_events ring buffer, PID in StartedEvent meta), JsonlStreamState defaults
-- `test_build_args.py` — 33 tests: CLI argument construction for all 6 engines, model/reasoning/permission flags
+- `test_build_args.py` — 39 tests: CLI argument construction for all 6 engines, model/reasoning/permission flags
 - `test_telegram_files.py` — 17 tests: file helpers, deduplication, deny globs, default upload paths
 - `test_telegram_file_transfer_helpers.py` — 48 tests: `/file put` and `/file get` command handling, media groups, force overwrite
 - `test_loop_coverage.py` — 29 tests: update loop edge cases, message routing, callback dispatch, shutdown integration
