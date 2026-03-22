@@ -145,8 +145,8 @@ def test_outline_ready_buttons_use_real_request_id():
     # Only 1 row with 2 buttons: Approve Plan, Deny
     assert len(buttons) == 1
     assert len(buttons[0]) == 2
-    assert buttons[0][0]["text"] == "Approve Plan"
-    assert buttons[0][1]["text"] == "Deny"
+    assert buttons[0][0]["text"] == "✅ Approve Plan"
+    assert buttons[0][1]["text"] == "❌ Deny"
     # Callback data uses REAL request_id (not da: prefix)
     assert buttons[0][0]["callback_data"] == f"claude_control:approve:{request_id}"
     assert buttons[0][1]["callback_data"] == f"claude_control:deny:{request_id}"
@@ -532,8 +532,8 @@ def test_hold_open_after_cooldown_expires_with_outline():
     buttons = detail["inline_keyboard"]["buttons"]
     assert len(buttons) == 1
     assert len(buttons[0]) == 2
-    assert buttons[0][0]["text"] == "Approve Plan"
-    assert buttons[0][1]["text"] == "Deny"
+    assert buttons[0][0]["text"] == "✅ Approve Plan"
+    assert buttons[0][1]["text"] == "❌ Deny"
     # Request should be held open (not auto-denied)
     assert len(state.auto_deny_queue) == 0
     assert request_id in state.pending_control_requests

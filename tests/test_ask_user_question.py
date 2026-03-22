@@ -175,8 +175,8 @@ def test_ask_user_question_has_inline_keyboard() -> None:
     assert "buttons" in kb
     # Should have approve/deny buttons
     button_texts = [b["text"] for row in kb["buttons"] for b in row]
-    assert "Approve" in button_texts
-    assert "Deny" in button_texts
+    assert "✅ Approve" in button_texts
+    assert "❌ Deny" in button_texts
 
 
 # ===========================================================================

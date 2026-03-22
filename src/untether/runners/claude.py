@@ -729,11 +729,11 @@ def translate_claude_event(
                                         "buttons": [
                                             [
                                                 {
-                                                    "text": "Approve Plan",
+                                                    "text": "✅ Approve Plan",
                                                     "callback_data": f"claude_control:approve:{button_request_id}",
                                                 },
                                                 {
-                                                    "text": "Deny",
+                                                    "text": "❌ Deny",
                                                     "callback_data": f"claude_control:deny:{button_request_id}",
                                                 },
                                             ],
@@ -839,11 +839,11 @@ def translate_claude_event(
             button_rows: list[list[dict[str, str]]] = [
                 [
                     {
-                        "text": "Approve",
+                        "text": "✅ Approve",
                         "callback_data": f"claude_control:approve:{request_id}",
                     },
                     {
-                        "text": "Deny",
+                        "text": "❌ Deny",
                         "callback_data": f"claude_control:deny:{request_id}",
                     },
                 ],
@@ -855,7 +855,7 @@ def translate_claude_event(
                     button_rows.append(
                         [
                             {
-                                "text": "Pause & Outline Plan",
+                                "text": "📋 Pause & Outline Plan",
                                 "callback_data": f"claude_control:discuss:{request_id}",
                             },
                         ]
@@ -1937,6 +1937,11 @@ def _cleanup_session_registries(session_id: str) -> None:
     if session_id in _OUTLINE_PENDING:
         cleaned.append("outline_pending")
     _OUTLINE_PENDING.discard(session_id)
+    # Clean up discuss feedback ref (post-outline edit-instead-of-send tracking)
+    from ..telegram.commands.claude_control import _DISCUSS_FEEDBACK_REFS
+
+    if _DISCUSS_FEEDBACK_REFS.pop(session_id, None) is not None:
+        cleaned.append("discuss_feedback_ref")
     stale = [k for k, v in _REQUEST_TO_SESSION.items() if v == session_id]
     if stale:
         cleaned.append(f"requests({len(stale)})")
