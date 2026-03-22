@@ -13,6 +13,7 @@ Session IDs use the format: ses_XXXX (e.g., ses_494719016ffe85dkDMj0FPRbHK)
 
 from __future__ import annotations
 
+import json
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -53,6 +54,23 @@ ENGINE: EngineId = "opencode"
 _RESUME_RE = re.compile(
     r"(?im)^\s*`?opencode(?:\s+run)?\s+(?:--session|-s)\s+(?P<token>ses_[A-Za-z0-9]+)`?\s*$"
 )
+
+
+def _extract_event_type(raw: str) -> str | None:
+    """Extract the ``type`` field from raw JSON for diagnostics.
+
+    Used when msgspec raises DecodeError (unrecognised event type) to provide
+    visible feedback instead of silently dropping the event.
+    """
+    try:
+        obj = json.loads(raw)
+        if isinstance(obj, dict):
+            t = obj.get("type")
+            if isinstance(t, str):
+                return t
+    except (json.JSONDecodeError, ValueError):
+        pass
+    return None
 
 
 @dataclass(slots=True)
@@ -494,6 +512,19 @@ class OpenCodeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
         state: OpenCodeStreamState,
     ) -> list[UntetherEvent]:
         if isinstance(error, msgspec.DecodeError):
+            event_type = _extract_event_type(raw)
+            if event_type:
+                self.get_logger().warning(
+                    "opencode.event.unsupported",
+                    event_type=event_type,
+                    tag=self.tag(),
+                )
+                return [
+                    self.note_event(
+                        f"opencode emitted unsupported event: {event_type}",
+                        state=state,
+                    )
+                ]
             self.get_logger().warning(
                 "jsonl.msgspec.invalid",
                 tag=self.tag(),

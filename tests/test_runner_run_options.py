@@ -19,6 +19,8 @@ def test_codex_run_options_override_model_and_reasoning() -> None:
         "gpt-4.1-mini",
         "-c",
         "model_reasoning_effort=low",
+        "--ask-for-approval",
+        "never",
         "exec",
         "--json",
         "--skip-git-repo-check",

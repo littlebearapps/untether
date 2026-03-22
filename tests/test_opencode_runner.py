@@ -2,6 +2,7 @@ import json
 from pathlib import Path
 
 import anyio
+import msgspec
 import pytest
 
 from untether.model import ActionEvent, CompletedEvent, ResumeToken, StartedEvent
@@ -606,3 +607,77 @@ def test_stream_end_saw_step_finish_no_text_falls_back_to_tool_error() -> None:
     events = runner.stream_end_events(resume=None, found_session=session, state=state)
     completed = next(e for e in events if isinstance(e, CompletedEvent))
     assert completed.answer == "permission denied"
+
+
+# ---------------------------------------------------------------------------
+# decode_error_events: unsupported event type visibility (#183)
+# ---------------------------------------------------------------------------
+
+
+class TestDecodeErrorEvents:
+    """Verify that unsupported OpenCode event types produce visible warnings."""
+
+    def _runner(self) -> OpenCodeRunner:
+        return OpenCodeRunner(opencode_cmd="opencode")
+
+    def test_unsupported_type_emits_warning_event(self) -> None:
+        """DecodeError with extractable type produces a visible ActionEvent."""
+        runner = self._runner()
+        state = OpenCodeStreamState()
+        raw = '{"type": "question", "sessionID": "ses_test"}'
+        error = msgspec.DecodeError("Invalid type")
+        events = runner.decode_error_events(raw=raw, line=raw, error=error, state=state)
+        assert len(events) == 1
+        event = events[0]
+        assert isinstance(event, ActionEvent)
+        assert "question" in event.message
+
+    def test_unsupported_type_permission(self) -> None:
+        """Permission event type also surfaces as warning."""
+        runner = self._runner()
+        state = OpenCodeStreamState()
+        raw = '{"type": "permission", "sessionID": "ses_test"}'
+        error = msgspec.DecodeError("Invalid type")
+        events = runner.decode_error_events(raw=raw, line=raw, error=error, state=state)
+        assert len(events) == 1
+        assert "permission" in events[0].message
+
+    def test_unextractable_type_returns_empty(self) -> None:
+        """DecodeError with no extractable type returns [] (existing behaviour)."""
+        runner = self._runner()
+        state = OpenCodeStreamState()
+        raw = "not valid json at all"
+        error = msgspec.DecodeError("Invalid JSON")
+        events = runner.decode_error_events(raw=raw, line=raw, error=error, state=state)
+        assert events == []
+
+    def test_missing_type_field_returns_empty(self) -> None:
+        """Valid JSON but no 'type' field returns []."""
+        runner = self._runner()
+        state = OpenCodeStreamState()
+        raw = '{"sessionID": "ses_test", "data": "something"}'
+        error = msgspec.DecodeError("Missing type tag")
+        events = runner.decode_error_events(raw=raw, line=raw, error=error, state=state)
+        assert events == []
+
+    def test_non_decode_error_delegates_to_super(self) -> None:
+        """Non-DecodeError exceptions use the base class handler."""
+        runner = self._runner()
+        state = OpenCodeStreamState()
+        raw = '{"type": "step_start"}'
+        error = ValueError("something else")
+        events = runner.decode_error_events(raw=raw, line=raw, error=error, state=state)
+        assert len(events) == 1
+        assert isinstance(events[0], ActionEvent)
+
+    def test_note_seq_increments(self) -> None:
+        """Each unsupported event increments note_seq for unique IDs."""
+        runner = self._runner()
+        state = OpenCodeStreamState()
+        raw1 = '{"type": "question"}'
+        raw2 = '{"type": "reasoning"}'
+        error = msgspec.DecodeError("Invalid")
+        e1 = runner.decode_error_events(raw=raw1, line=raw1, error=error, state=state)
+        e2 = runner.decode_error_events(raw=raw2, line=raw2, error=error, state=state)
+        assert e1[0].action.id != e2[0].action.id
+        assert state.note_seq == 2

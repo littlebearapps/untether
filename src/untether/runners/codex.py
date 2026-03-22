@@ -500,6 +500,8 @@ class CodexRunner(ResumeTokenMixin, JsonlSubprocessRunner):
                 )
         if run_options is not None and run_options.permission_mode == "safe":
             args.extend(["--ask-for-approval", "untrusted"])
+        else:
+            args.extend(["--ask-for-approval", "never"])
         args.extend(
             [
                 "exec",
