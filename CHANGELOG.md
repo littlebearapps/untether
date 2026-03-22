@@ -61,6 +61,7 @@
   - detection based on protocol invariant: normal sessions always end with `last_event_type=result`
   - sends "⚠️ Auto-continuing — Claude stopped before processing tool results" notification before resuming
 - emoji button labels and edit-in-place for outline approval — ExitPlanMode buttons now show ✅/❌/📋 emoji prefixes; post-outline "Approve Plan"/"Deny" edits the "Asked Claude Code to outline the plan" message in-place instead of creating a second message [#186](https://github.com/littlebearapps/untether/issues/186)
+- redesign startup message layout — version in parentheses, split engine info into "default engine" and "installed engines" lines, italic subheadings, renamed "projects" to "directories" (matching `dir:` footer label), added bug report link [#187](https://github.com/littlebearapps/untether/issues/187)
 
 ### tests
 

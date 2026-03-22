@@ -47,9 +47,9 @@ def test_build_startup_message_includes_missing_engines(tmp_path: Path) -> None:
         topics=TelegramTopicsSettings(),
     )
 
-    assert "untether" in message and "is ready" in message
+    assert "untether is ready" in message
     assert "not installed: pi" in message
-    assert "projects: `none`" in message
+    assert "_directories:_ `none`" in message
 
 
 def test_build_startup_message_surfaces_unavailable_engine_reasons(
@@ -87,7 +87,7 @@ def test_build_startup_message_surfaces_unavailable_engine_reasons(
         topics=TelegramTopicsSettings(),
     )
 
-    assert "engines:" in message and "codex" in message
+    assert "_installed engines:_" in message and "codex" in message
     assert "misconfigured: pi" in message
     assert "failed to load: claude" in message
 
@@ -135,15 +135,16 @@ def test_startup_message_core_fields() -> None:
         chat_id=123,
         topics=TelegramTopicsSettings(),
     )
-    assert "engine: `claude`" in message
-    assert "engines: `claude`" in message
-    assert "projects: `none`" in message
+    assert "_default engine:_ `claude`" in message
+    assert "_installed engines:_ `claude`" in message
+    assert "_directories:_ `none`" in message
     # Disabled topics/triggers should NOT appear
-    assert "topics:" not in message
-    assert "triggers:" not in message
+    assert "_topics:_" not in message
+    assert "_triggers:_" not in message
     # Quick-start hint and help link
     assert "/config" in message
     assert "littlebearapps.com" in message
+    assert "report a bug" in message
 
 
 def test_startup_message_shows_topics_when_enabled() -> None:
@@ -153,7 +154,7 @@ def test_startup_message_shows_topics_when_enabled() -> None:
         chat_id=123,
         topics=TelegramTopicsSettings(enabled=True, scope="main"),
     )
-    assert "topics:" in message
+    assert "_topics:_" in message
 
 
 def test_startup_message_shows_mode_assistant() -> None:
@@ -164,7 +165,7 @@ def test_startup_message_shows_mode_assistant() -> None:
         topics=TelegramTopicsSettings(),
         session_mode="chat",
     )
-    assert "mode: `assistant`" in message
+    assert "_mode:_ `assistant`" in message
 
 
 def test_startup_message_shows_mode_workspace() -> None:
@@ -175,7 +176,7 @@ def test_startup_message_shows_mode_workspace() -> None:
         topics=TelegramTopicsSettings(enabled=True, scope="main"),
         session_mode="chat",
     )
-    assert "mode: `workspace`" in message
+    assert "_mode:_ `workspace`" in message
 
 
 def test_startup_message_shows_mode_handoff() -> None:
@@ -186,7 +187,7 @@ def test_startup_message_shows_mode_handoff() -> None:
         topics=TelegramTopicsSettings(),
         session_mode="stateless",
     )
-    assert "mode: `handoff`" in message
+    assert "_mode:_ `handoff`" in message
 
 
 def test_startup_message_shows_triggers_when_enabled() -> None:
@@ -197,7 +198,7 @@ def test_startup_message_shows_triggers_when_enabled() -> None:
         topics=TelegramTopicsSettings(),
         trigger_config={"enabled": True, "webhooks": [{}], "crons": []},
     )
-    assert "triggers:" in message
+    assert "_triggers:_" in message
     assert "1 webhooks" in message
 
 
@@ -233,7 +234,7 @@ def test_startup_message_project_count(tmp_path: Path) -> None:
         chat_id=123,
         topics=TelegramTopicsSettings(),
     )
-    assert "projects: `proj-a, proj-b`" in message
+    assert "_directories:_ `proj-a, proj-b`" in message
 
 
 def test_telegram_backend_build_and_run_wires_config(

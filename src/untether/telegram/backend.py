@@ -111,9 +111,9 @@ def _build_startup_message(
 ) -> str:
     project_aliases = sorted(set(runtime.project_aliases()), key=str.lower)
 
-    header = f"\N{DOG} **untether v{__version__} is ready**"
+    header = f"\N{DOG} **untether is ready** (v{__version__})"
 
-    # engine — merged default + available on one line
+    # engines — separate default and installed lines
     available_engines = list(runtime.available_engine_ids())
     missing_engines = list(runtime.missing_engine_ids())
     misconfigured_engines = list(runtime.engine_ids_with_status("bad_config"))
@@ -128,23 +128,23 @@ def _build_startup_message(
     engine_list = ", ".join(available_engines) if available_engines else "none"
 
     details: list[str] = []
+    details.append(f"_default engine:_ `{runtime.default_engine}`")
     if engine_notes:
         details.append(
-            f"engine: `{runtime.default_engine}`"
-            f" · engines: `{engine_list} ({'; '.join(engine_notes)})`"
+            f"_installed engines:_ `{engine_list}` ({'; '.join(engine_notes)})"
         )
     else:
-        details.append(f"engine: `{runtime.default_engine}` · engines: `{engine_list}`")
+        details.append(f"_installed engines:_ `{engine_list}`")
 
     # mode — derived from session_mode + topics
     mode = _resolve_mode_label(session_mode, topics.enabled)
-    details.append(f"mode: `{mode}`")
+    details.append(f"_mode:_ `{mode}`")
 
-    # projects — listed by name
+    # directories — listed by name
     if project_aliases:
-        details.append(f"projects: `{', '.join(project_aliases)}`")
+        details.append(f"_directories:_ `{', '.join(project_aliases)}`")
     else:
-        details.append("projects: `none`")
+        details.append("_directories:_ `none`")
 
     # topics — only shown when enabled
     if topics.enabled:
@@ -154,18 +154,20 @@ def _build_startup_message(
         scope_label = (
             f"auto ({resolved_scope})" if topics.scope == "auto" else resolved_scope
         )
-        details.append(f"topics: `enabled (scope={scope_label})`")
+        details.append(f"_topics:_ `enabled (scope={scope_label})`")
 
     # triggers — only shown when enabled
     if trigger_config and trigger_config.get("enabled"):
         n_wh = len(trigger_config.get("webhooks", []))
         n_cr = len(trigger_config.get("crons", []))
-        details.append(f"triggers: `enabled ({n_wh} webhooks, {n_cr} crons)`")
+        details.append(f"_triggers:_ `enabled ({n_wh} webhooks, {n_cr} crons)`")
 
     _DOCS_URL = "https://littlebearapps.com/tools/untether/"
+    _ISSUES_URL = "https://github.com/littlebearapps/untether/issues"
     footer = (
         f"\n\nSend a message to start, or /config for settings."
-        f"\n\N{OPEN BOOK} [Click here for help guide]({_DOCS_URL})"
+        f"\n\N{OPEN BOOK} [Click here for help]({_DOCS_URL})"
+        f" | \N{BUG} [Click here to report a bug]({_ISSUES_URL})"
     )
 
     return header + "\n\n" + "\n\n".join(details) + footer
