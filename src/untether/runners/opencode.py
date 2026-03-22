@@ -532,7 +532,10 @@ class OpenCodeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
                 error_type=error.__class__.__name__,
             )
             return []
-        return super().decode_error_events(
+        # Explicit parent ref: zero-arg super() breaks in @dataclass(slots=True)
+        # on Python <3.14 because the __class__ cell references the pre-slot class.
+        return JsonlSubprocessRunner.decode_error_events(
+            self,
             raw=raw,
             line=line,
             error=error,
