@@ -241,7 +241,7 @@ async def _handle_new_command(
         await reply(text="this command only works inside a topic.")
         return
     await store.clear_sessions(*tkey)
-    await reply(text="cleared stored sessions for this topic.")
+    await reply(text="\N{BROOM} cleared stored sessions for this topic.")
 
 
 async def _handle_chat_new_command(
@@ -256,9 +256,9 @@ async def _handle_chat_new_command(
         return
     await store.clear_sessions(session_key[0], session_key[1])
     if msg.chat_type == "private":
-        text = "cleared stored sessions for this chat."
+        text = "\N{BROOM} cleared stored sessions for this chat."
     else:
-        text = "cleared stored sessions for you in this chat."
+        text = "\N{BROOM} cleared stored sessions for you in this chat."
     await reply(text=text)
 
 
