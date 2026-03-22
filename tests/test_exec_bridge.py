@@ -3657,19 +3657,26 @@ async def test_outbox_not_scanned_on_error(tmp_path) -> None:
 class TestShouldAutoContinue:
     """Tests for the auto-continue detection function."""
 
-    def _call(self, **overrides):
+    def _call(
+        self,
+        *,
+        last_event_type: str | None = "user",
+        engine: str = "claude",
+        cancelled: bool = False,
+        resume_value: str | None = "c3f20b1d-58f9-4173-a68e-8735256cf9ae",
+        auto_continued_count: int = 0,
+        max_retries: int = 1,
+    ) -> bool:
         from untether.runner_bridge import _should_auto_continue
 
-        defaults = {
-            "last_event_type": "user",
-            "engine": "claude",
-            "cancelled": False,
-            "resume_value": "c3f20b1d-58f9-4173-a68e-8735256cf9ae",
-            "auto_continued_count": 0,
-            "max_retries": 1,
-        }
-        defaults.update(overrides)
-        return _should_auto_continue(**defaults)
+        return _should_auto_continue(
+            last_event_type=last_event_type,
+            engine=engine,
+            cancelled=cancelled,
+            resume_value=resume_value,
+            auto_continued_count=auto_continued_count,
+            max_retries=max_retries,
+        )
 
     def test_detects_bug_scenario(self):
         assert self._call() is True

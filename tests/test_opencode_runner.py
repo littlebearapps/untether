@@ -640,6 +640,7 @@ class TestDecodeErrorEvents:
         error = msgspec.DecodeError("Invalid type")
         events = runner.decode_error_events(raw=raw, line=raw, error=error, state=state)
         assert len(events) == 1
+        assert isinstance(events[0], ActionEvent)
         assert "permission" in events[0].message
 
     def test_unextractable_type_returns_empty(self) -> None:
@@ -679,5 +680,7 @@ class TestDecodeErrorEvents:
         error = msgspec.DecodeError("Invalid")
         e1 = runner.decode_error_events(raw=raw1, line=raw1, error=error, state=state)
         e2 = runner.decode_error_events(raw=raw2, line=raw2, error=error, state=state)
+        assert isinstance(e1[0], ActionEvent)
+        assert isinstance(e2[0], ActionEvent)
         assert e1[0].action.id != e2[0].action.id
         assert state.note_seq == 2
