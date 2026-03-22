@@ -68,7 +68,7 @@ This is useful when you want to review the approach before Claude Code starts ma
 
 Outlines render as **formatted Telegram text** — headings, bold, code blocks, and lists display properly instead of raw markdown. This makes long outlines much easier to read on a phone.
 
-For long outlines that span multiple messages, **Approve Plan / Deny buttons appear on the last message** so you don't need to scroll back up to find them. After you tap Approve or Deny, the outline messages and their notification are **automatically deleted**, keeping the chat clean.
+For long outlines that span multiple messages, **Approve Plan / Let's discuss / Deny buttons appear on the last message** so you don't need to scroll back up to find them. After you act, the outline messages and their notification are **automatically deleted**, keeping the chat clean.
 
 <img src="../assets/screenshots/post-outline-buttons.jpg" alt="Written outline with Approve Plan / Deny buttons on the last message" width="360" loading="lazy" />
 
@@ -85,8 +85,15 @@ For long outlines that span multiple messages, **Approve Plan / Deny buttons app
 <span class="tg-btn">Approve Plan</span>
 <span class="tg-btn">Deny</span>
 </div>
+<div class="tg-buttons">
+<span class="tg-btn">Let's discuss</span>
+</div>
 
 </div>
+
+- Tap **Approve Plan** to let Claude Code proceed with implementation
+- Tap **Deny** to stop Claude Code and provide different direction
+- Tap **Let's discuss** to talk about the plan before deciding — Claude Code will ask what you'd like to change and wait for your reply
 
 ## Progressive cooldown
 
@@ -99,7 +106,7 @@ After you tap "Pause & Outline Plan", the ExitPlanMode request is held open — 
 | 3rd | 90 seconds |
 | 4th+ | 120 seconds (maximum) |
 
-During the cooldown, any ExitPlanMode attempt is automatically denied, but **Approve Plan / Deny buttons** are shown in Telegram so you can approve the plan as soon as you've read it. The cooldown resets when you explicitly Approve or Deny.
+During the cooldown, any ExitPlanMode attempt is automatically denied, but **Approve Plan / Let's discuss / Deny buttons** are shown in Telegram so you can act as soon as you've read the outline. The cooldown resets when you explicitly Approve or Deny.
 
 This prevents the agent from bulldozing through when you've asked it to slow down and explain its approach, while still giving you a one-tap way to approve once you're satisfied.
 
@@ -113,6 +120,9 @@ This prevents the agent from bulldozing through when you've asked it to slow dow
 <div class="tg-buttons">
 <span class="tg-btn">Approve Plan</span>
 <span class="tg-btn">Deny</span>
+</div>
+<div class="tg-buttons">
+<span class="tg-btn">Let's discuss</span>
 </div>
 
 </div>

@@ -56,7 +56,7 @@ Untether supports two modes:
 Key control channel features:
 * Session registries (`_SESSION_STDIN`, `_REQUEST_TO_SESSION`) for concurrent session support
 * Auto-approve for routine tools (Grep, Glob, Read, Bash, etc.)
-* `ExitPlanMode` requests shown as Telegram inline buttons (Approve / Deny / Pause & Outline Plan) in `plan` mode
+* `ExitPlanMode` requests shown as Telegram inline buttons (Approve / Deny / Pause & Outline Plan) in `plan` mode; post-outline buttons add **Let's discuss** for plan discussion before approval
 * `ExitPlanMode` requests silently auto-approved in `auto` mode (no buttons shown)
 * Progressive cooldown on rapid ExitPlanMode retries (30s → 60s → 90s → 120s) — only applies in `plan` mode
 

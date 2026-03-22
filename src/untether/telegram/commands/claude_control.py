@@ -57,10 +57,19 @@ _EXIT_PLAN_DENY_MESSAGE = (
     "what they'd like changed, as a visible message in the chat."
 )
 
+_CHAT_DENY_MESSAGE = (
+    "The user clicked 'Let's discuss' on your plan outline in Telegram. "
+    "They want to talk about the plan before deciding.\n\n"
+    "Ask the user what they'd like to discuss or change about the plan, "
+    "as a visible message in the chat. Do NOT call ExitPlanMode — "
+    "wait for the user to respond first."
+)
+
 _EARLY_TOASTS: dict[str, str] = {
     "approve": "Approved",
     "deny": "Denied",
     "discuss": "Outlining plan...",
+    "chat": "Let's discuss...",
 }
 
 
@@ -78,11 +87,12 @@ class ClaudeControlCommand:
         return _EARLY_TOASTS.get(action)
 
     async def handle(self, ctx: CommandContext) -> CommandResult | None:
-        """Handle callback from approve/deny/discuss buttons.
+        """Handle callback from approve/deny/discuss/chat buttons.
 
         Args:
             ctx: Command context with args_text="approve:request_id",
-                 "deny:request_id", or "discuss:request_id"
+                 "deny:request_id", "discuss:request_id",
+                 or "chat:request_id"
 
         Returns:
             CommandResult with feedback message, or None
@@ -102,7 +112,7 @@ class ClaudeControlCommand:
         action, request_id = parts
         action = action.lower()
 
-        if action not in ("approve", "deny", "discuss"):
+        if action not in ("approve", "deny", "discuss", "chat"):
             logger.warning(
                 "claude_control.unknown_action",
                 action=action,
@@ -154,6 +164,9 @@ class ClaudeControlCommand:
                     ctx.message.channel_id, ctx.message.message_id, ref
                 )
             return None
+
+        if action == "chat":
+            return await self._handle_chat(ctx, request_id)
 
         approved = action == "approve"
 
@@ -295,6 +308,103 @@ class ClaudeControlCommand:
             text=f"{action_text} permission request",
             notify=True,
             skip_reply=had_outline,
+        )
+
+    async def _handle_chat(
+        self, ctx: CommandContext, request_id: str
+    ) -> CommandResult | None:
+        """Handle 'Let's discuss' button on post-outline approval."""
+        action_text = "💬 Let's discuss — type your feedback"
+
+        # Synthetic da: prefix path (request already auto-denied)
+        if request_id.startswith("da:"):
+            session_id = request_id.removeprefix("da:")
+            _REQUEST_TO_SESSION.pop(request_id, None)
+
+            if session_id not in _ACTIVE_RUNNERS:
+                logger.warning(
+                    "claude_control.discuss_plan_session_ended",
+                    session_id=session_id,
+                )
+                _DISCUSS_FEEDBACK_REFS.pop(session_id, None)
+                return CommandResult(
+                    text=(
+                        "⚠️ Session has ended — start a new run"
+                        " or resume with /claude continue"
+                    ),
+                    notify=True,
+                )
+
+            await delete_outline_messages(session_id)
+            _OUTLINE_PENDING.discard(session_id)
+            clear_discuss_cooldown(session_id)
+            logger.info(
+                "claude_control.discuss_plan_chat",
+                session_id=session_id,
+            )
+
+            existing_ref = _DISCUSS_FEEDBACK_REFS.pop(session_id, None)
+            if existing_ref:
+                try:
+                    await ctx.executor.edit(existing_ref, action_text)
+                    return None
+                except Exception:  # noqa: BLE001
+                    logger.debug(
+                        "claude_control.discuss_feedback_edit_failed",
+                        session_id=session_id,
+                        exc_info=True,
+                    )
+            return CommandResult(
+                text=action_text,
+                notify=True,
+                skip_reply=True,
+            )
+
+        # Hold-open path (real request_id, control request still pending)
+        session_id = _REQUEST_TO_SESSION.get(request_id)
+
+        success = await send_claude_control_response(
+            request_id, approved=False, deny_message=_CHAT_DENY_MESSAGE
+        )
+        if not success:
+            logger.warning(
+                "claude_control.failed",
+                request_id=request_id,
+                action="chat",
+            )
+            return CommandResult(
+                text="⚠️ Control request not found or session ended",
+                notify=True,
+            )
+
+        if session_id:
+            clear_discuss_cooldown(session_id)
+            _OUTLINE_PENDING.discard(session_id)
+            await delete_outline_messages(session_id)
+
+        logger.info(
+            "claude_control.sent",
+            request_id=request_id,
+            action="chat",
+        )
+
+        existing_ref = (
+            _DISCUSS_FEEDBACK_REFS.pop(session_id, None) if session_id else None
+        )
+        if existing_ref:
+            try:
+                await ctx.executor.edit(existing_ref, action_text)
+                return None
+            except Exception:  # noqa: BLE001
+                logger.debug(
+                    "claude_control.discuss_feedback_edit_failed",
+                    session_id=session_id,
+                    exc_info=True,
+                )
+        return CommandResult(
+            text=action_text,
+            notify=True,
+            skip_reply=True,
         )
 
 

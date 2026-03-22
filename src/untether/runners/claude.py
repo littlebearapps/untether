@@ -737,6 +737,12 @@ def translate_claude_event(
                                                     "callback_data": f"claude_control:deny:{button_request_id}",
                                                 },
                                             ],
+                                            [
+                                                {
+                                                    "text": "💬 Let's discuss",
+                                                    "callback_data": f"claude_control:chat:{button_request_id}",
+                                                },
+                                            ],
                                         ]
                                     },
                                 },

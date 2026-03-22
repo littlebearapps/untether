@@ -194,7 +194,9 @@ AUTO_APPROVE_TOOLS = {"Grep", "Glob", "Read", "LS", "Bash", "BashOutput",
 When Claude requests `ExitPlanMode`:
 1. Inline keyboard shown: **Approve** / **Deny** / **Pause & Outline Plan**
 2. "Pause & Outline Plan" sends a deny with a detailed message asking Claude to write a step-by-step plan
-3. Progressive cooldown on rapid retries: 30s, 60s, 90s, 120s (capped)
+3. After outline is written, post-outline buttons appear: **Approve Plan** / **Deny** / **Let's discuss**
+4. "Let's discuss" sends a deny asking Claude to discuss the plan (action: `chat`)
+5. Progressive cooldown on rapid retries: 30s, 60s, 90s, 120s (capped)
 
 ### Progressive cooldown
 

@@ -123,17 +123,21 @@ The outline renders as **formatted Telegram text** — headings, bold, code bloc
 
 <img src="../assets/screenshots/plan-outline-text.jpg" alt="Claude's written outline/plan appearing as formatted text in chat" width="360" loading="lazy" />
 
-After Claude Code writes the outline, **Approve Plan** and **Deny** buttons appear automatically on the last message of the outline — no need to scroll back up or type "approved":
+After Claude Code writes the outline, **Approve Plan**, **Deny**, and **Let's discuss** buttons appear automatically on the last message of the outline — no need to scroll back up or type "approved":
 
 <div class="tg-buttons">
 <span class="tg-btn">Approve Plan</span>
 <span class="tg-btn">Deny</span>
 </div>
+<div class="tg-buttons">
+<span class="tg-btn">Let's discuss</span>
+</div>
 
-<img src="../assets/screenshots/post-outline-buttons.jpg" alt="Post-outline Approve Plan / Deny buttons" width="360" loading="lazy" />
+<img src="../assets/screenshots/post-outline-buttons.jpg" alt="Post-outline Approve Plan / Deny / Let's discuss buttons" width="360" loading="lazy" />
 
 - Tap **Approve Plan** to let Claude Code proceed with implementation
 - Tap **Deny** to stop Claude Code and provide different direction
+- Tap **Let's discuss** to talk about the plan before deciding — Claude Code will ask what you'd like to change and wait for your reply
 
 !!! tip "Progressive cooldown"
     After tapping "Pause & Outline Plan", a cooldown prevents Claude Code from immediately retrying. The cooldown starts at 30 seconds and escalates up to 120 seconds if Claude Code keeps retrying. This ensures the agent pauses long enough for you to read the outline.
@@ -219,7 +223,7 @@ To check your current mode at any time:
 Key concepts:
 
 - **Permission modes** control the level of oversight: plan (full control), auto (hands-off with plans), off (fully autonomous)
-- **Approval buttons** appear inline in Telegram when Claude Code needs permission — Approve, Deny, or Pause & Outline Plan
+- **Approval buttons** appear inline in Telegram when Claude Code needs permission — Approve, Deny, or Pause & Outline Plan; after an outline is written, you also get **Let's discuss** to talk about the plan
 - **Diff previews** show you exactly what will change before you approve
 - **"Pause & Outline Plan"** forces Claude Code to write a visible plan before executing
 - **Outline formatting** — plans render as proper Telegram text with headings, bold, and lists; buttons appear on the last message; outline messages are cleaned up after you act on them
@@ -239,7 +243,7 @@ Check your internet connection. If the tap doesn't register, try again — Untet
 
 **Claude Code keeps retrying after I tap "Pause & Outline Plan"**
 
-This is the progressive cooldown at work. Claude Code may retry ExitPlanMode during the cooldown window, but each retry is auto-denied. Wait for Claude Code to write the outline, then use the Approve Plan / Deny buttons that appear.
+This is the progressive cooldown at work. Claude Code may retry ExitPlanMode during the cooldown window, but each retry is auto-denied. Wait for Claude Code to write the outline, then use the Approve Plan / Let's discuss / Deny buttons that appear.
 
 **I don't get push notifications for approval requests**
 

@@ -10,7 +10,7 @@ Untether adds interactive permission control, plan mode support, and several UX 
 ## Features (vs upstream takopi)
 
 - **Interactive permission control** — bidirectional Telegram buttons for tool approval, plan mode, and clarifying questions
-- **Pause & Outline Plan** — third button on plan approval; after Claude writes the outline, Approve/Deny buttons appear automatically (hold-open keeps session alive while user reads)
+- **Pause & Outline Plan** — third button on plan approval; after Claude writes the outline, Approve/Deny/Let's discuss buttons appear automatically (hold-open keeps session alive while user reads)
 - **Agent context preamble** — configurable prompt preamble tells agents they're on Telegram and requests structured end-of-task summaries; `[preamble]` config section
 - **`/planmode`** — toggle permission mode per chat (on/off/auto)
 - **Ask mode** — interactive AskUserQuestion with option buttons, sequential multi-question flows, and `/config` toggle; Claude-only

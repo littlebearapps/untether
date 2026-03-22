@@ -22,6 +22,7 @@ When a permission request arrives, you see a message with the tool name and a co
 | **Approve** | Let Claude Code proceed with the action |
 | **Deny** | Block the action and ask Claude Code to explain what it was about to do |
 | **Pause & Outline Plan** | Stop Claude Code and require a written plan before continuing (only appears for ExitPlanMode) |
+| **Let's discuss** | Talk about the plan before approving or denying (only appears after outline is written) |
 
 Buttons clear immediately when you tap them — no waiting for a spinner.
 

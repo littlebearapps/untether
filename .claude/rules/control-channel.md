@@ -66,9 +66,10 @@ After "Pause & Outline Plan" click:
 
 ## Post-outline approval
 
-After cooldown auto-deny, synthetic Approve/Deny buttons appear in Telegram:
+After cooldown auto-deny, synthetic Approve/Deny/Let's discuss buttons appear in Telegram:
 - User clicks "Approve Plan" → session added to `_DISCUSS_APPROVED`, cooldown cleared
 - User clicks "Deny" → cooldown cleared, no auto-approve flag set
+- User clicks "Let's discuss" → cooldown cleared, Claude asked to discuss the plan (hold-open: deny with `_CHAT_DENY_MESSAGE`; da: prefix: no control response, just clears state)
 - Next `ExitPlanMode` checks `_DISCUSS_APPROVED` → auto-approves if present
 - Synthetic callback_data prefix: `da:` (fits 64-byte Telegram limit)
 - Handled in `claude_control.py` before the normal approve/deny flow

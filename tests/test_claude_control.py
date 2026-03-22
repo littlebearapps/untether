@@ -750,6 +750,7 @@ def test_early_answer_toast_values() -> None:
     assert cmd.early_answer_toast("approve:req-1") == "Approved"
     assert cmd.early_answer_toast("deny:req-1") == "Denied"
     assert cmd.early_answer_toast("discuss:req-1") == "Outlining plan..."
+    assert cmd.early_answer_toast("chat:req-1") == "Let's discuss..."
     assert cmd.early_answer_toast("unknown:req-1") is None
     assert cmd.early_answer_toast("") is None
 
@@ -915,9 +916,10 @@ def test_exit_plan_mode_auto_denied_during_cooldown() -> None:
     assert "approve to proceed" in evt.action.title.lower()
     assert evt.action.detail["request_id"] == "da:sess-cooldown"
     buttons = evt.action.detail["inline_keyboard"]["buttons"]
-    assert len(buttons) == 1  # One row with Approve + Deny
+    assert len(buttons) == 2  # [Approve + Deny], [Let's discuss]
     assert len(buttons[0]) == 2
     assert "Approve" in buttons[0][0]["text"]  # "✅ Approve Plan"
+    assert buttons[1][0]["text"] == "💬 Let's discuss"
 
 
 def test_exit_plan_mode_blocked_after_cooldown_expires_without_outline() -> None:
@@ -994,12 +996,13 @@ def test_exit_plan_mode_after_cooldown_expires_with_outline_shows_synthetic_butt
     detail = events[0].action.detail
     assert detail["request_type"] == "DiscussApproval"
     buttons = detail["inline_keyboard"]["buttons"]
-    assert len(buttons) == 1
+    assert len(buttons) == 2  # [Approve + Deny], [Let's discuss]
     assert len(buttons[0]) == 2
     assert buttons[0][0]["text"] == "✅ Approve Plan"
     assert buttons[0][1]["text"] == "❌ Deny"
     # Outline-ready uses real request_id (not da: prefix)
     assert buttons[0][0]["callback_data"] == "claude_control:approve:req-cd-outline"
+    assert buttons[1][0]["text"] == "💬 Let's discuss"
 
 
 @pytest.mark.anyio
@@ -1074,6 +1077,63 @@ async def test_discuss_handler_sets_cooldown() -> None:
 
     # Cooldown should be set for the session
     assert session_id in _DISCUSS_COOLDOWN
+
+
+@pytest.mark.anyio
+async def test_chat_action_hold_open_sends_deny() -> None:
+    """Chat action on hold-open request sends deny with chat message."""
+    from untether.telegram.commands.claude_control import (
+        ClaudeControlCommand,
+        _CHAT_DENY_MESSAGE,
+    )
+
+    runner = ClaudeRunner(claude_cmd="claude")
+    session_id = "sess-chat-hold"
+
+    _ACTIVE_RUNNERS[session_id] = (runner, 0.0)
+    fake_stdin = AsyncMock()
+    _SESSION_STDIN[session_id] = fake_stdin
+    _REQUEST_TO_SESSION["req-chat"] = session_id
+    _REQUEST_TO_INPUT["req-chat"] = {}
+    set_discuss_cooldown(session_id)
+    _OUTLINE_PENDING.add(session_id)
+
+    from untether.commands import CommandContext
+    from untether.transport import MessageRef
+
+    ctx = CommandContext(
+        command="claude_control",
+        text="claude_control:chat:req-chat",
+        args_text="chat:req-chat",
+        args=("chat:req-chat",),
+        message=MessageRef(channel_id=123, message_id=1),
+        reply_to=None,
+        reply_text=None,
+        config_path=None,
+        plugin_config=None,  # type: ignore[arg-type]
+        runtime=None,  # type: ignore[arg-type]
+        executor=AsyncMock(send=AsyncMock(return_value=None)),
+    )
+
+    cmd = ClaudeControlCommand()
+    result = await cmd.handle(ctx)
+
+    # Should send deny response with chat deny message
+    import json
+
+    fake_stdin.send.assert_awaited_once()
+    payload = json.loads(fake_stdin.send.call_args[0][0].decode())
+    inner = payload["response"]["response"]
+    assert inner["behavior"] == "deny"
+    assert "discuss" in inner["message"].lower()
+
+    # Should clear cooldown and outline_pending
+    assert session_id not in _DISCUSS_COOLDOWN
+    assert session_id not in _OUTLINE_PENDING
+
+    # Result should mention discuss
+    assert result is not None
+    assert "discuss" in result.text.lower()
 
 
 @pytest.mark.anyio

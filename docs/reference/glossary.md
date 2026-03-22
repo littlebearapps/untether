@@ -42,7 +42,7 @@ Quick definitions for terms used throughout the Untether documentation.
 :   The level of oversight Untether applies to Claude Code's actions. **Plan** shows Approve/Deny buttons for every tool call. **Auto** auto-approves tools and plan transitions. **Accept edits** (`off`) runs fully autonomously with no buttons.
 
 **Approval buttons**
-:   Inline Telegram buttons that appear when Claude Code wants to perform an action in plan mode. You tap **Approve** to allow the action, **Deny** to block it, or **Pause & Outline Plan** to require a written plan first.
+:   Inline Telegram buttons that appear when Claude Code wants to perform an action in plan mode. You tap **Approve** to allow the action, **Deny** to block it, or **Pause & Outline Plan** to require a written plan first. After an outline is written, you can also tap **Let's discuss** to talk about the plan before deciding.
 
 **Progress message**
 :   The Telegram message that Untether updates in real time as the agent works. It shows the engine, elapsed time, step count, and a list of recent tool calls. When the run finishes, it's replaced by the final answer.

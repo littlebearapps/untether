@@ -142,14 +142,18 @@ def test_outline_ready_buttons_use_real_request_id():
     detail = action_events[0].action.detail
     assert detail["request_type"] == "DiscussApproval"
     buttons = detail["inline_keyboard"]["buttons"]
-    # Only 1 row with 2 buttons: Approve Plan, Deny
-    assert len(buttons) == 1
+    # 2 rows: [Approve Plan, Deny], [Let's discuss]
+    assert len(buttons) == 2
     assert len(buttons[0]) == 2
     assert buttons[0][0]["text"] == "✅ Approve Plan"
     assert buttons[0][1]["text"] == "❌ Deny"
     # Callback data uses REAL request_id (not da: prefix)
     assert buttons[0][0]["callback_data"] == f"claude_control:approve:{request_id}"
     assert buttons[0][1]["callback_data"] == f"claude_control:deny:{request_id}"
+    # Second row: Let's discuss button
+    assert len(buttons[1]) == 1
+    assert buttons[1][0]["text"] == "💬 Let's discuss"
+    assert buttons[1][0]["callback_data"] == f"claude_control:chat:{request_id}"
 
 
 def test_bypass_clears_outline_pending():
@@ -262,6 +266,10 @@ def test_escalation_path_uses_da_prefix():
     # Escalation path uses da: prefix
     assert buttons[0][0]["callback_data"].startswith("claude_control:approve:da:")
     assert buttons[0][1]["callback_data"].startswith("claude_control:deny:da:")
+    # Second row: Let's discuss button with da: prefix
+    assert len(buttons) == 2
+    assert buttons[1][0]["text"] == "💬 Let's discuss"
+    assert buttons[1][0]["callback_data"].startswith("claude_control:chat:da:")
     # Should have auto-denied
     assert len(state.auto_deny_queue) == 1
 
@@ -524,13 +532,13 @@ def test_hold_open_after_cooldown_expires_with_outline():
             event, title="claude", state=state, factory=state.factory
         )
 
-    # Should still produce synthetic 2-button action (not 3-button)
+    # Should still produce synthetic action (not 3-button ExitPlanMode)
     action_events = [e for e in events if isinstance(e, ActionEvent)]
     assert len(action_events) == 1
     detail = action_events[0].action.detail
     assert detail["request_type"] == "DiscussApproval"
     buttons = detail["inline_keyboard"]["buttons"]
-    assert len(buttons) == 1
+    assert len(buttons) == 2  # [Approve Plan, Deny], [Let's discuss]
     assert len(buttons[0]) == 2
     assert buttons[0][0]["text"] == "✅ Approve Plan"
     assert buttons[0][1]["text"] == "❌ Deny"
@@ -541,6 +549,81 @@ def test_hold_open_after_cooldown_expires_with_outline():
     assert buttons[0][0]["callback_data"] == f"claude_control:approve:{request_id}"
     # _OUTLINE_PENDING should be cleared
     assert "sess-expired" not in _OUTLINE_PENDING
+
+
+@pytest.mark.anyio
+async def test_chat_on_synthetic_after_session_ends():
+    """Clicking 'Let's discuss' on da: prefix after session ends should return error."""
+    from untether.commands import CommandContext
+    from untether.telegram.commands.claude_control import ClaudeControlCommand
+    from untether.transport import MessageRef
+
+    session_id = "sess-dead-chat"
+    synth_request_id = f"da:{session_id}"
+
+    _REQUEST_TO_SESSION[synth_request_id] = session_id
+    # No _ACTIVE_RUNNERS entry — session ended
+
+    ctx = CommandContext(
+        command="claude_control",
+        text=f"claude_control:chat:{synth_request_id}",
+        args_text=f"chat:{synth_request_id}",
+        args=(f"chat:{synth_request_id}",),
+        message=MessageRef(channel_id=123, message_id=1),
+        reply_to=None,
+        reply_text=None,
+        config_path=None,
+        plugin_config=None,  # type: ignore[arg-type]
+        runtime=None,  # type: ignore[arg-type]
+        executor=None,  # type: ignore[arg-type]
+    )
+
+    cmd = ClaudeControlCommand()
+    result = await cmd.handle(ctx)
+
+    assert result is not None
+    assert "Session has ended" in result.text
+
+
+@pytest.mark.anyio
+async def test_chat_on_synthetic_with_active_session():
+    """Clicking 'Let's discuss' on da: prefix with active session should succeed."""
+    from untether.commands import CommandContext
+    from untether.telegram.commands.claude_control import ClaudeControlCommand
+    from untether.transport import MessageRef
+
+    runner = ClaudeRunner(claude_cmd="claude")
+    session_id = "sess-alive-chat"
+    synth_request_id = f"da:{session_id}"
+
+    _ACTIVE_RUNNERS[session_id] = (runner, 0.0)
+    _SESSION_STDIN[session_id] = AsyncMock()
+    _REQUEST_TO_SESSION[synth_request_id] = session_id
+    _OUTLINE_PENDING.add(session_id)
+    set_discuss_cooldown(session_id)
+
+    ctx = CommandContext(
+        command="claude_control",
+        text=f"claude_control:chat:{synth_request_id}",
+        args_text=f"chat:{synth_request_id}",
+        args=(f"chat:{synth_request_id}",),
+        message=MessageRef(channel_id=123, message_id=1),
+        reply_to=None,
+        reply_text=None,
+        config_path=None,
+        plugin_config=None,  # type: ignore[arg-type]
+        runtime=None,  # type: ignore[arg-type]
+        executor=None,  # type: ignore[arg-type]
+    )
+
+    cmd = ClaudeControlCommand()
+    result = await cmd.handle(ctx)
+
+    assert result is not None
+    assert "discuss" in result.text.lower()
+    # Should clear cooldown and outline_pending
+    assert session_id not in _DISCUSS_COOLDOWN
+    assert session_id not in _OUTLINE_PENDING
 
 
 def test_session_cleanup_removes_synthetic_requests():
