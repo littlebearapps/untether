@@ -727,7 +727,7 @@ class ProgressEdits:
 
     async def _stall_monitor(self) -> None:
         """Periodically check for event stalls, log diagnostics, and notify."""
-        from .utils.proc_diag import collect_proc_diag, format_diag, is_cpu_active
+        from .utils.proc_diag import collect_proc_diag, is_cpu_active
 
         while True:
             await anyio.sleep(self._stall_check_interval)
@@ -934,34 +934,50 @@ class ProgressEdits:
                     parts = [f"⏳ MCP tool running: {mcp_server} ({mins} min)"]
                 else:
                     # Extract tool name from last running action for
-                    # actionable stall messages ("Bash tool may be stuck"
+                    # actionable stall messages ("Bash command still running"
                     # instead of generic "session may be stuck").
                     _tool_name = None
                     if last_action:
-                        for _prefix in ("tool:", "note:"):
+                        for _prefix in ("tool:", "note:", "command:"):
                             if last_action.startswith(_prefix):
                                 _rest = last_action[len(_prefix) :]
-                                _tool_name = _rest.split(" ", 1)[0].split(":", 1)[0]
+                                _raw = _rest.split(" ", 1)[0].split(":", 1)[0]
+                                # Map kind prefix to user-friendly name
+                                _tool_name = "Bash" if _prefix == "command:" else _raw
                                 break
                     if _tool_name and main_sleeping:
-                        parts = [
-                            f"⏳ {_tool_name} tool may be stuck ({mins} min, process waiting)"
-                        ]
+                        if cpu_active is True:
+                            parts = [
+                                f"⏳ {_tool_name} command still running ({mins} min)"
+                            ]
+                        else:
+                            parts = [
+                                f"⏳ {_tool_name} tool may be stuck ({mins} min, no CPU activity)"
+                            ]
+                    elif cpu_active is True:
+                        parts = [f"⏳ Still working ({mins} min, CPU active)"]
                     else:
                         parts = [f"⏳ No progress for {mins} min"]
                 if self._stall_warn_count > 1:
                     parts[0] += f" (warned {self._stall_warn_count}x)"
-                if (
+                # "session may be stuck" — only when genuinely stuck
+                # (no tool identified, cpu not active, not MCP/frozen)
+                _genuinely_stuck = (
                     not mcp_hung
                     and not frozen_escalate
                     and mcp_server is None
                     and not (_tool_name and main_sleeping)
-                ):
+                    and cpu_active is not True
+                )
+                if _genuinely_stuck:
                     parts.append("— session may be stuck.")
                 if last_action:
-                    parts.append(f"Last: {last_action}")
-                if diag:
-                    parts.append(f"PID {diag.pid}: {format_diag(diag)}")
+                    _summary = (
+                        last_action
+                        if len(last_action) <= 80
+                        else last_action[:77] + "..."
+                    )
+                    parts.append(f"Last: {_summary}")
                 parts.append("/cancel to stop.")
                 text = "\n".join(parts)
                 try:

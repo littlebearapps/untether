@@ -28,6 +28,7 @@
 - clarify /config default labels and remove redundant "Works with" lines [#119](https://github.com/littlebearapps/untether/issues/119)
 - Codex: always pass `--ask-for-approval` in headless mode — default to `never` (auto-approve all) so Codex never blocks on terminal input; `safe` permission mode still uses `untrusted` [#184](https://github.com/littlebearapps/untether/issues/184)
 - OpenCode: surface unsupported JSONL event types as visible Telegram warnings instead of silently dropping them — prevents silent 5-minute hangs when OpenCode emits new event types (e.g. `question`, `permission`) [#183](https://github.com/littlebearapps/untether/issues/183)
+- stall warnings now succinct and accurate for long-running tools — truncate "Last:" to 80 chars, recognise `command:` prefix (Bash tools), reassuring "still running" message when CPU active, drop PID diagnostics from Telegram messages, only say "may be stuck" when genuinely stuck [#188](https://github.com/littlebearapps/untether/issues/188)
 
 ### changes
 
