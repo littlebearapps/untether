@@ -134,6 +134,49 @@ def _load_watchdog_settings():
         return None
 
 
+def _load_auto_continue_settings():
+    """Load auto-continue settings from config, returning defaults if unavailable."""
+    try:
+        from .settings import AutoContinueSettings, load_settings_if_exists
+
+        result = load_settings_if_exists()
+        if result is None:
+            return AutoContinueSettings()
+        settings, _ = result
+        return settings.auto_continue
+    except Exception:  # noqa: BLE001
+        logger.debug("auto_continue_settings.load_failed", exc_info=True)
+        from .settings import AutoContinueSettings
+
+        return AutoContinueSettings()
+
+
+def _should_auto_continue(
+    *,
+    last_event_type: str | None,
+    engine: str,
+    cancelled: bool,
+    resume_value: str | None,
+    auto_continued_count: int,
+    max_retries: int,
+) -> bool:
+    """Detect Claude Code silent session termination bug (#34142, #30333).
+
+    Returns True when the last raw JSONL event was a tool_result ("user")
+    meaning Claude never got a turn to process the results before the CLI
+    exited.
+    """
+    if cancelled:
+        return False
+    if engine != "claude":
+        return False
+    if last_event_type != "user":
+        return False
+    if not resume_value:
+        return False
+    return auto_continued_count < max_retries
+
+
 _DEFAULT_PREAMBLE = (
     "[Untether] You are running via Untether, a Telegram bridge for coding agents. "
     "The user is interacting through Telegram on a mobile device.\n\n"
@@ -831,12 +874,16 @@ class ProgressEdits:
             # (extended thinking, background agents). Instead, trigger a
             # heartbeat re-render so the elapsed time counter keeps ticking.
             #
-            # Exception: if the ring buffer has been frozen for 3+ checks,
+            # Exception 1: if the ring buffer has been frozen for 3+ checks,
             # the process is likely stuck (retry loop, hung API call, dead
             # thinking) — escalate to a notification despite CPU activity.
+            # Exception 2: if the main process is sleeping (state=S), CPU
+            # activity is from child processes (hung Bash tool, stuck curl),
+            # not from Claude doing extended thinking — notify the user.
             _FROZEN_ESCALATION_THRESHOLD = 3
             frozen_escalate = self._frozen_ring_count >= _FROZEN_ESCALATION_THRESHOLD
-            if cpu_active is True and not frozen_escalate:
+            main_sleeping = diag is not None and diag.state == "S"
+            if cpu_active is True and not frozen_escalate and not main_sleeping:
                 logger.info(
                     "progress_edits.stall_suppressed_notification",
                     channel_id=self.channel_id,
@@ -886,10 +933,30 @@ class ProgressEdits:
                 elif mcp_server is not None:
                     parts = [f"⏳ MCP tool running: {mcp_server} ({mins} min)"]
                 else:
-                    parts = [f"⏳ No progress for {mins} min"]
+                    # Extract tool name from last running action for
+                    # actionable stall messages ("Bash tool may be stuck"
+                    # instead of generic "session may be stuck").
+                    _tool_name = None
+                    if last_action:
+                        for _prefix in ("tool:", "note:"):
+                            if last_action.startswith(_prefix):
+                                _rest = last_action[len(_prefix) :]
+                                _tool_name = _rest.split(" ", 1)[0].split(":", 1)[0]
+                                break
+                    if _tool_name and main_sleeping:
+                        parts = [
+                            f"⏳ {_tool_name} tool may be stuck ({mins} min, process waiting)"
+                        ]
+                    else:
+                        parts = [f"⏳ No progress for {mins} min"]
                 if self._stall_warn_count > 1:
                     parts[0] += f" (warned {self._stall_warn_count}x)"
-                if not mcp_hung and not frozen_escalate and mcp_server is None:
+                if (
+                    not mcp_hung
+                    and not frozen_escalate
+                    and mcp_server is None
+                    and not (_tool_name and main_sleeping)
+                ):
                     parts.append("— session may be stuck.")
                 if last_action:
                     parts.append(f"Last: {last_action}")
@@ -1547,6 +1614,7 @@ async def handle_message(
     on_resume_failed: Callable[[ResumeToken], Awaitable[None]] | None = None,
     progress_ref: MessageRef | None = None,
     clock: Callable[[], float] = time.monotonic,
+    _auto_continued_count: int = 0,
 ) -> None:
     logger.info(
         "handle.incoming",
@@ -1749,6 +1817,68 @@ async def handle_message(
     completed = outcome.completed
     run_ok = completed.ok
     run_error = completed.error
+
+    # --- Auto-continue: mitigate Claude Code bug #34142/#30333 ---
+    # When Claude Code's turn state machine incorrectly ends a session
+    # after receiving tool results (last JSONL event is "user" type),
+    # auto-resume so the user doesn't have to manually continue.
+    ac_settings = _load_auto_continue_settings()
+    _ac_resume = completed.resume or outcome.resume
+    _ac_last_event = edits.stream.last_event_type if edits.stream else None
+    if ac_settings.enabled and _should_auto_continue(
+        last_event_type=_ac_last_event,
+        engine=runner.engine,
+        cancelled=outcome.cancelled,
+        resume_value=_ac_resume.value if _ac_resume else None,
+        auto_continued_count=_auto_continued_count,
+        max_retries=ac_settings.max_retries,
+    ):
+        logger.warning(
+            "session.auto_continue",
+            session_id=_ac_resume.value if _ac_resume else None,
+            engine=runner.engine,
+            last_event_type=_ac_last_event,
+            attempt=_auto_continued_count + 1,
+            max_retries=ac_settings.max_retries,
+        )
+        notice = (
+            "\u26a0\ufe0f Auto-continuing \u2014 "
+            "Claude stopped before processing tool results"
+        )
+        if _auto_continued_count > 0:
+            notice += f" (attempt {_auto_continued_count + 1})"
+        notice_msg = RenderedMessage(text=notice, extra={})
+        await cfg.transport.send(
+            channel_id=incoming.channel_id,
+            message=notice_msg,
+            options=SendOptions(
+                reply_to=user_ref,
+                notify=True,
+                thread_id=incoming.thread_id,
+            ),
+        )
+        await handle_message(
+            cfg,
+            runner=runner,
+            incoming=IncomingMessage(
+                channel_id=incoming.channel_id,
+                message_id=incoming.message_id,
+                text="continue",
+                reply_to=incoming.reply_to,
+                thread_id=incoming.thread_id,
+            ),
+            resume_token=_ac_resume,
+            context=context,
+            context_line=context_line,
+            strip_resume_line=strip_resume_line,
+            running_tasks=running_tasks,
+            on_thread_known=on_thread_known,
+            on_resume_failed=on_resume_failed,
+            clock=clock,
+            _auto_continued_count=_auto_continued_count + 1,
+        )
+        return
+    # --- End auto-continue ---
 
     final_answer = completed.answer
 

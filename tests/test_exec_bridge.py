@@ -3132,6 +3132,146 @@ async def test_stall_notification_fires_when_cpu_inactive() -> None:
     assert len(stall_msgs) >= 1
 
 
+@pytest.mark.anyio
+async def test_stall_not_suppressed_when_main_sleeping() -> None:
+    """Stall notification should fire when cpu_active=True but main process is
+    sleeping (state=S) — CPU activity is from child processes (hung Bash tool),
+    not from Claude doing extended thinking."""
+    from unittest.mock import patch
+    from untether.utils.proc_diag import ProcessDiag
+
+    transport = FakeTransport()
+    presenter = _KeyboardPresenter()
+    clock = _FakeClock(start=100.0)
+    edits = _make_edits(transport, presenter, clock=clock)
+    edits._stall_check_interval = 0.01
+    edits._STALL_THRESHOLD_SECONDS = 0.05
+    edits._stall_repeat_seconds = 0.01
+    edits._STALL_MAX_WARNINGS = 100
+    edits.pid = 12345
+    edits.event_seq = 5
+    cancel_event = anyio.Event()
+    edits.cancel_event = cancel_event
+
+    call_count = 0
+
+    def sleeping_cpu_diag(pid: int) -> ProcessDiag:
+        nonlocal call_count
+        call_count += 1
+        return ProcessDiag(
+            pid=pid,
+            alive=True,
+            state="S",  # sleeping — waiting for child process
+            cpu_utime=1000 + call_count * 300,
+            cpu_stime=200 + call_count * 50,
+        )
+
+    with patch(
+        "untether.utils.proc_diag.collect_proc_diag",
+        side_effect=sleeping_cpu_diag,
+    ):
+        async with anyio.create_task_group() as tg:
+
+            async def drive() -> None:
+                for i in range(6):
+                    clock.set(100.1 + i * 0.1)
+                    await anyio.sleep(0.03)
+                    if cancel_event.is_set():
+                        break
+                edits.signal_send.close()
+
+            tg.start_soon(edits.run)
+            tg.start_soon(drive)
+
+    # Despite cpu_active=True, notifications should NOT be suppressed because
+    # the main process is sleeping (state=S) — child processes are active.
+    stall_msgs = [
+        c
+        for c in transport.send_calls
+        if "progress" in c["message"].text.lower()
+        or "stuck" in c["message"].text.lower()
+        or "tool" in c["message"].text.lower()
+    ]
+    assert len(stall_msgs) >= 2, (
+        f"Expected multiple stall notifications when main sleeping, got {len(stall_msgs)}"
+    )
+
+
+@pytest.mark.anyio
+async def test_stall_message_includes_tool_name_when_sleeping() -> None:
+    """Stall message should mention the tool name when main process is sleeping."""
+    from unittest.mock import patch
+    from untether.utils.proc_diag import ProcessDiag
+
+    transport = FakeTransport()
+    presenter = _KeyboardPresenter()
+    clock = _FakeClock(start=100.0)
+    edits = _make_edits(transport, presenter, clock=clock)
+    edits._stall_check_interval = 0.01
+    edits._STALL_THRESHOLD_SECONDS = 0.05
+    edits._stall_repeat_seconds = 0.01
+    edits._STALL_MAX_WARNINGS = 100
+    edits.pid = 12345
+    edits.event_seq = 5
+    cancel_event = anyio.Event()
+    edits.cancel_event = cancel_event
+
+    # Set the last action to simulate a Bash tool running
+    from untether.model import Action, ActionEvent
+
+    evt = ActionEvent(
+        engine="claude",
+        action=Action(id="a1", kind="tool", title="Bash"),
+        phase="started",
+    )
+    await edits.on_event(evt)
+    # Complete the action so last_action shows it
+    evt2 = ActionEvent(
+        engine="claude",
+        action=Action(id="a1", kind="tool", title="Bash"),
+        phase="completed",
+        ok=True,
+    )
+    await edits.on_event(evt2)
+
+    call_count = 0
+
+    def sleeping_diag(pid: int) -> ProcessDiag:
+        nonlocal call_count
+        call_count += 1
+        return ProcessDiag(
+            pid=pid,
+            alive=True,
+            state="S",
+            cpu_utime=1000 + call_count * 300,
+            cpu_stime=200 + call_count * 50,
+        )
+
+    with patch(
+        "untether.utils.proc_diag.collect_proc_diag",
+        side_effect=sleeping_diag,
+    ):
+        async with anyio.create_task_group() as tg:
+
+            async def drive() -> None:
+                for i in range(4):
+                    clock.set(100.1 + i * 0.1)
+                    await anyio.sleep(0.03)
+                    if cancel_event.is_set():
+                        break
+                edits.signal_send.close()
+
+            tg.start_soon(edits.run)
+            tg.start_soon(drive)
+
+    # At least one stall message should mention "Bash tool"
+    tool_msgs = [c for c in transport.send_calls if "Bash tool" in c["message"].text]
+    assert len(tool_msgs) >= 1, (
+        f"Expected stall message mentioning 'Bash tool', got messages: "
+        f"{[c['message'].text for c in transport.send_calls]}"
+    )
+
+
 # ---------------------------------------------------------------------------
 # Plan outline rendering, keyboard, and cleanup tests
 # ---------------------------------------------------------------------------
@@ -3509,3 +3649,57 @@ async def test_outbox_not_scanned_on_error(tmp_path) -> None:
         reset_run_base_dir(token)
 
     send_file.assert_not_called()
+
+
+# ── _should_auto_continue detection (#34142/#30333) ──
+
+
+class TestShouldAutoContinue:
+    """Tests for the auto-continue detection function."""
+
+    def _call(self, **overrides):
+        from untether.runner_bridge import _should_auto_continue
+
+        defaults = {
+            "last_event_type": "user",
+            "engine": "claude",
+            "cancelled": False,
+            "resume_value": "c3f20b1d-58f9-4173-a68e-8735256cf9ae",
+            "auto_continued_count": 0,
+            "max_retries": 1,
+        }
+        defaults.update(overrides)
+        return _should_auto_continue(**defaults)
+
+    def test_detects_bug_scenario(self):
+        assert self._call() is True
+
+    def test_skips_non_claude_engine(self):
+        assert self._call(engine="codex") is False
+
+    def test_skips_cancelled(self):
+        assert self._call(cancelled=True) is False
+
+    def test_skips_result_event_type(self):
+        assert self._call(last_event_type="result") is False
+
+    def test_skips_assistant_event_type(self):
+        assert self._call(last_event_type="assistant") is False
+
+    def test_skips_none_event_type(self):
+        assert self._call(last_event_type=None) is False
+
+    def test_skips_no_resume(self):
+        assert self._call(resume_value=None) is False
+
+    def test_skips_empty_resume(self):
+        assert self._call(resume_value="") is False
+
+    def test_respects_max_retries(self):
+        assert self._call(auto_continued_count=0, max_retries=1) is True
+        assert self._call(auto_continued_count=1, max_retries=1) is False
+        assert self._call(auto_continued_count=2, max_retries=3) is True
+        assert self._call(auto_continued_count=3, max_retries=3) is False
+
+    def test_disabled_when_max_retries_zero(self):
+        assert self._call(auto_continued_count=0, max_retries=0) is False

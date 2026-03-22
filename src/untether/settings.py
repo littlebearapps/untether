@@ -156,6 +156,17 @@ class PreambleSettings(BaseModel):
     text: str | None = None
 
 
+class AutoContinueSettings(BaseModel):
+    """Mitigate Claude Code bug #34142/#30333: session exits after receiving
+    tool results without letting Claude process them.  When detected, Untether
+    auto-resumes the session so the user doesn't have to manually continue."""
+
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    enabled: bool = True
+    max_retries: int = Field(default=1, ge=0, le=3)
+
+
 class WatchdogSettings(BaseModel):
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
 
@@ -196,6 +207,7 @@ class UntetherSettings(BaseSettings):
     preamble: PreambleSettings = Field(default_factory=PreambleSettings)
     progress: ProgressSettings = Field(default_factory=ProgressSettings)
     watchdog: WatchdogSettings = Field(default_factory=WatchdogSettings)
+    auto_continue: AutoContinueSettings = Field(default_factory=AutoContinueSettings)
 
     @model_validator(mode="before")
     @classmethod

@@ -23,6 +23,7 @@
   - buttons use real `request_id` from `pending_control_requests` for direct callback routing
   - 5-minute safety timeout cleans up stale held requests
 - suppress stall auto-cancel when CPU is active — extended thinking phases produce no JSONL events but the process is alive and busy; `is_cpu_active()` check prevents false-positive kills [#114](https://github.com/littlebearapps/untether/issues/114)
+- fix stall notification suppression when main process sleeping — CPU-active suppression now checks `process_state`; when main process is sleeping (state=S) but children are CPU-active (hung Bash tool), notifications fire instead of being suppressed; stall message now shows tool name ("Bash tool may be stuck") instead of generic "session may be stuck" [#168](https://github.com/littlebearapps/untether/issues/168)
 - suppress redundant cost footer on error runs — diagnostic context line already contains cost data, footer no longer duplicates it [#120](https://github.com/littlebearapps/untether/issues/120)
 - clarify /config default labels and remove redundant "Works with" lines [#119](https://github.com/littlebearapps/untether/issues/119)
 - Codex: always pass `--ask-for-approval` in headless mode — default to `never` (auto-approve all) so Codex never blocks on terminal input; `safe` permission mode still uses `untrusted` [#184](https://github.com/littlebearapps/untether/issues/184)
@@ -55,6 +56,10 @@
   - both engines show "Agent controls" section on `/config` home page with engine-specific labels
 - suppress stall Telegram notifications when CPU-active; heartbeat re-render keeps elapsed time counter ticking during extended thinking phases [#121](https://github.com/littlebearapps/untether/issues/121)
 - temporary debug logging for hold-open callback routing — will be removed after dogfooding confirms [#118](https://github.com/littlebearapps/untether/issues/118) is resolved
+- auto-continue mitigation for Claude Code bug — when Claude Code exits after receiving tool results without processing them (bugs [#34142](https://github.com/anthropics/claude-code/issues/34142), [#30333](https://github.com/anthropics/claude-code/issues/30333)), Untether detects via `last_event_type=user` and auto-resumes the session [#167](https://github.com/littlebearapps/untether/issues/167)
+  - `AutoContinueSettings` with `enabled` (default true) and `max_retries` (default 1) in `[auto_continue]` config section
+  - detection based on protocol invariant: normal sessions always end with `last_event_type=result`
+  - sends "⚠️ Auto-continuing — Claude stopped before processing tool results" notification before resuming
 
 ### tests
 
@@ -72,6 +77,8 @@
 - hold-open outline flow: new tests for hold-open path, real request_id buttons, pending cleanup, approval routing [#114](https://github.com/littlebearapps/untether/issues/114)
 - stall suppression: tests for CPU-active auto-cancel, notification suppression when cpu_active=True, notification fires when cpu_active=False [#114](https://github.com/littlebearapps/untether/issues/114), [#121](https://github.com/littlebearapps/untether/issues/121)
 - cost footer: tests for suppression on error runs, display on success runs [#120](https://github.com/littlebearapps/untether/issues/120)
+- 10 new auto-continue tests: detection function (bug scenario, non-claude engine, cancelled session, normal result, no resume, max retries) + settings validation (defaults, bounds) [#167](https://github.com/littlebearapps/untether/issues/167)
+- 2 new stall sleeping-process tests: notification not suppressed when main process sleeping (state=S), stall message includes tool name [#168](https://github.com/littlebearapps/untether/issues/168)
 
 ### docs
 

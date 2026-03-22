@@ -417,3 +417,28 @@ def test_files_outbox_max_files_range() -> None:
         TelegramFilesSettings(outbox_max_files=0)
     with pytest.raises(ValidationError):
         TelegramFilesSettings(outbox_max_files=51)
+
+
+# ── AutoContinueSettings ──
+
+
+def test_auto_continue_settings_defaults() -> None:
+    from untether.settings import AutoContinueSettings
+
+    s = AutoContinueSettings()
+    assert s.enabled is True
+    assert s.max_retries == 1
+
+
+def test_auto_continue_max_retries_bounds() -> None:
+    from pydantic import ValidationError
+
+    from untether.settings import AutoContinueSettings
+
+    with pytest.raises(ValidationError):
+        AutoContinueSettings(max_retries=-1)
+    with pytest.raises(ValidationError):
+        AutoContinueSettings(max_retries=4)
+    # Boundary values should pass
+    assert AutoContinueSettings(max_retries=0).max_retries == 0
+    assert AutoContinueSettings(max_retries=3).max_retries == 3

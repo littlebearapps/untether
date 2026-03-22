@@ -120,6 +120,8 @@ The stall watchdog monitors engine subprocesses for periods of inactivity (no JS
 
 **If the warning says "CPU active, no new events"**, the process is using CPU but hasn't produced any new JSONL events for 3+ stall checks. This can happen when Claude Code is stuck in a long API call, extended thinking, or an internal retry loop. Use `/cancel` if the silence persists.
 
+**If the warning says "X tool may be stuck (N min, process waiting)"**, Claude Code's main process is sleeping while waiting for a child process (e.g. a Bash command running `curl` or a long build). The CPU activity shown in the diagnostics is from the child process, not from Claude thinking. Common cause: a network request to a slow or unresponsive API endpoint. Use `/cancel` and resume, asking Claude to skip the hung command — or wait if the command is legitimately long-running.
+
 **If the warning says "session may be stuck"**, the process may genuinely be stalled. Check:
 
 1. Look at the diagnostics in the message — CPU active, TCP connections, RSS
