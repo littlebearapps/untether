@@ -927,9 +927,28 @@ class ProgressEdits:
                         seconds_since_last_event=round(elapsed, 1),
                         pid=self.pid,
                     )
-                    parts = [
-                        f"⏳ No progress for {mins} min (CPU active, no new events)"
-                    ]
+                    # When a known tool is running and main process is sleeping
+                    # (waiting for child), use reassuring message instead of
+                    # alarming "No progress" — the tool subprocess is working.
+                    _frozen_tool = None
+                    if last_action:
+                        for _pfx in ("tool:", "note:", "command:"):
+                            if last_action.startswith(_pfx):
+                                _rest = last_action[len(_pfx) :]
+                                _frozen_tool = (
+                                    "Bash"
+                                    if _pfx == "command:"
+                                    else _rest.split(" ", 1)[0].split(":", 1)[0]
+                                )
+                                break
+                    if _frozen_tool and main_sleeping and cpu_active is True:
+                        parts = [
+                            f"⏳ {_frozen_tool} command still running ({mins} min)"
+                        ]
+                    else:
+                        parts = [
+                            f"⏳ No progress for {mins} min (CPU active, no new events)"
+                        ]
                 elif mcp_server is not None:
                     parts = [f"⏳ MCP tool running: {mcp_server} ({mins} min)"]
                 else:

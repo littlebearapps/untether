@@ -2750,6 +2750,96 @@ async def test_stall_frozen_ring_escalates_without_mcp_tool() -> None:
     assert "cpu active" in notify_msgs[0]["message"].text.lower()
 
 
+@pytest.mark.anyio
+async def test_stall_frozen_ring_uses_tool_message_when_bash_running() -> None:
+    """When ring buffer is frozen but a Bash command is running (main sleeping,
+    CPU active on children), show reassuring 'still running' instead of 'No progress'.
+
+    Regression test for #188: frozen_escalate branch fired alarming 'No progress'
+    message even when Claude was legitimately waiting for a long Bash command.
+    """
+    from collections import deque
+    from types import SimpleNamespace
+    from unittest.mock import patch
+
+    from untether.model import Action, ActionEvent
+    from untether.utils.proc_diag import ProcessDiag
+
+    transport = FakeTransport()
+    presenter = _KeyboardPresenter()
+    clock = _FakeClock(start=100.0)
+    edits = _make_edits(transport, presenter, clock=clock)
+    edits._stall_check_interval = 0.01
+    edits._STALL_THRESHOLD_SECONDS = 0.05
+    edits._STALL_THRESHOLD_TOOL = 0.05  # override 600s tool threshold
+    edits._stall_repeat_seconds = 0.0
+    edits._STALL_MAX_WARNINGS = 100
+    edits.pid = 12345
+    edits.event_seq = 5
+
+    # Simulate a running Bash command action
+    await edits.on_event(
+        ActionEvent(
+            engine="claude",
+            action=Action(
+                id="a1",
+                kind="command",
+                title='echo "running benchmarks"',
+            ),
+            phase="started",
+        )
+    )
+
+    # Provide a frozen ring buffer
+    fake_stream = SimpleNamespace(
+        recent_events=deque([(1.0, "assistant"), (2.0, "result")], maxlen=10),
+        last_event_type="result",
+        stderr_capture=[],
+    )
+    edits.stream = fake_stream
+
+    clock.set(100.0)
+    call_count = 0
+
+    def sleeping_cpu_diag(pid: int) -> ProcessDiag:
+        nonlocal call_count
+        call_count += 1
+        return ProcessDiag(
+            pid=pid,
+            alive=True,
+            state="S",  # main process sleeping (waiting for child)
+            cpu_utime=1000 + call_count * 300,
+            cpu_stime=200 + call_count * 50,
+        )
+
+    with patch(
+        "untether.utils.proc_diag.collect_proc_diag",
+        side_effect=sleeping_cpu_diag,
+    ):
+        async with anyio.create_task_group() as tg:
+
+            async def drive() -> None:
+                for i in range(8):
+                    clock.set(100.1 + i * 0.1)
+                    await anyio.sleep(0.03)
+                edits.signal_send.close()
+
+            tg.start_soon(edits.run)
+            tg.start_soon(drive)
+
+    # Should have sent notification with reassuring tool-aware message
+    notify_msgs = [
+        c for c in transport.send_calls if "still running" in c["message"].text.lower()
+    ]
+    assert len(notify_msgs) >= 1, (
+        f"Expected 'Bash command still running' message, got: "
+        f"{[c['message'].text for c in transport.send_calls]}"
+    )
+    # Should mention Bash, NOT "No progress"
+    assert "bash" in notify_msgs[0]["message"].text.lower()
+    assert "no progress" not in notify_msgs[0]["message"].text.lower()
+
+
 def test_frozen_ring_count_resets_on_event() -> None:
     """_frozen_ring_count and _prev_recent_events reset when a real event arrives."""
     transport = FakeTransport()
