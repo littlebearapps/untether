@@ -38,6 +38,7 @@
 - `/export` showed duplicate "Session Started" headers for resumed sessions — deduplicated so only the first `StartedEvent` renders [#218](https://github.com/littlebearapps/untether/issues/218)
 - Gemini CLI prompt injection — prompts starting with `-` were parsed as flags when passed via `-p <value>`; now uses `--prompt=<value>` to bind the value directly [#219](https://github.com/littlebearapps/untether/issues/219)
 - `/new` command now cancels running processes before clearing sessions — previously only cleared resume tokens, leaving old Claude/Codex/OpenCode processes running (~400 MB each), worsening memory pressure and triggering earlyoom kills [#222](https://github.com/littlebearapps/untether/issues/222)
+- auto-continue no longer triggers on signal deaths (rc=143/SIGTERM, rc=137/SIGKILL) — earlyoom kills have `last_event_type=user` which matched the upstream bug detection, causing a death spiral where 4 killed sessions were immediately respawned into the same memory pressure [#222](https://github.com/littlebearapps/untether/issues/222)
 
 ### changes
 
@@ -96,6 +97,7 @@
 - export dedup test: duplicate started events deduplicated in markdown export [#218](https://github.com/littlebearapps/untether/issues/218)
 - Gemini `--prompt=` build_args test [#219](https://github.com/littlebearapps/untether/issues/219)
 - 10 new `/new` cancellation tests: `_cancel_chat_tasks` helper (None, empty, matching, other chats, already cancelled, multiple), chat `/new` with running task, cancel-only no sessions, no tasks no sessions, topic `/new` with running task [#222](https://github.com/littlebearapps/untether/issues/222)
+- 12 new auto-continue signal death tests: `_is_signal_death` (SIGTERM, SIGKILL, negative, normal, None), `_should_auto_continue` (rc=143, rc=137, rc=-9, rc=-15 blocked; rc=0, rc=None, rc=1 allowed), `proc_returncode` default on `JsonlStreamState` [#222](https://github.com/littlebearapps/untether/issues/222)
 
 ### docs
 
