@@ -3,7 +3,9 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from ...context import RunContext
+from ...logging import get_logger
 from ...markdown import MarkdownParts
+from ...runner_bridge import RunningTasks
 from ...transport_runtime import TransportRuntime
 from ...transport import RenderedMessage, SendOptions
 from ..chat_prefs import ChatPrefsStore
@@ -31,6 +33,25 @@ from .reply import make_reply
 
 if TYPE_CHECKING:
     from ..bridge import TelegramBridgeConfig
+
+logger = get_logger(__name__)
+
+
+def _cancel_chat_tasks(
+    chat_id: int,
+    running_tasks: RunningTasks | None,
+) -> int:
+    """Cancel all running tasks for a chat.
+
+    Returns the number of tasks cancelled.
+    """
+    cancelled = 0
+    if running_tasks:
+        for ref, task in running_tasks.items():
+            if ref.channel_id == chat_id and not task.cancel_requested.is_set():
+                task.cancel_requested.set()
+                cancelled += 1
+    return cancelled
 
 
 async def _handle_ctx_command(
@@ -225,6 +246,7 @@ async def _handle_new_command(
     *,
     resolved_scope: str | None = None,
     scope_chat_ids: frozenset[int] | None = None,
+    running_tasks: RunningTasks | None = None,
 ) -> None:
     reply = make_reply(cfg, msg)
     error = _topics_command_error(
@@ -240,8 +262,12 @@ async def _handle_new_command(
     if tkey is None:
         await reply(text="this command only works inside a topic.")
         return
+    cancelled = _cancel_chat_tasks(msg.chat_id, running_tasks)
+    if cancelled:
+        logger.info("new.cancelled_running", chat_id=msg.chat_id, count=cancelled)
     await store.clear_sessions(*tkey)
-    await reply(text="\N{BROOM} cleared stored sessions for this topic.")
+    label = "cancelled run and cleared" if cancelled else "cleared"
+    await reply(text=f"\N{BROOM} {label} stored sessions for this topic.")
 
 
 async def _handle_chat_new_command(
@@ -249,16 +275,22 @@ async def _handle_chat_new_command(
     msg: TelegramIncomingMessage,
     store: ChatSessionStore,
     session_key: tuple[int, int | None] | None,
+    running_tasks: RunningTasks | None = None,
 ) -> None:
     reply = make_reply(cfg, msg)
-    if session_key is None:
+    cancelled = _cancel_chat_tasks(msg.chat_id, running_tasks)
+    if cancelled:
+        logger.info("new.cancelled_running", chat_id=msg.chat_id, count=cancelled)
+    if session_key is None and not cancelled:
         await reply(text="no stored sessions to clear for this chat.")
         return
-    await store.clear_sessions(session_key[0], session_key[1])
+    if session_key is not None:
+        await store.clear_sessions(session_key[0], session_key[1])
+    label = "cancelled run and cleared" if cancelled else "cleared"
     if msg.chat_type == "private":
-        text = "\N{BROOM} cleared stored sessions for this chat."
+        text = f"\N{BROOM} {label} stored sessions for this chat."
     else:
-        text = "\N{BROOM} cleared stored sessions for you in this chat."
+        text = f"\N{BROOM} {label} stored sessions for you in this chat."
     await reply(text=text)
 
 

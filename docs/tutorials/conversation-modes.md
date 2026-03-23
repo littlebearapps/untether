@@ -38,7 +38,7 @@ To pin a project or branch for the chat, use:
 !!! user "You"
     /ctx set <project> [@branch]
 
-`/new` clears the session but keeps the bound context.
+`/new` cancels any running task and clears the session, but keeps the bound context.
 
 Tip: set a default engine for this chat with `/agent set claude`.
 

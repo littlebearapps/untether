@@ -55,14 +55,14 @@ This line is parsed from replies and takes precedence over new directives. For b
 | `/config` | Interactive settings menu — plan mode, ask mode, verbose, engine, model, reasoning, trigger toggles with inline buttons. |
 | `/stats` | Per-engine session statistics — runs, actions, and duration for today, this week, and all time. Pass an engine name to filter (e.g. `/stats claude`). |
 | `/auth` | Headless device re-authentication for Codex — runs `codex login --device-auth` and sends the verification URL + device code. `/auth status` checks CLI availability. Codex-only. |
-| `/new` | Clear stored sessions for the current scope (topic/chat). |
+| `/new` | Cancel any running task and clear stored sessions for the current scope (topic/chat). |
 | `/continue [prompt]` | Resume the most recent session in the project directory. Picks up CLI-started sessions from Telegram. Optional prompt appended. Not supported for AMP. |
 
 Notes:
 
 - Outside topics, `/ctx` binds the chat context.
 - In topics, `/ctx` binds the topic context.
-- `/new` clears sessions but does **not** clear a bound context.
+- `/new` cancels running tasks and clears sessions but does **not** clear a bound context.
 - `/continue` uses the engine's native "continue" flag: `--continue` (Claude, OpenCode, Pi), `resume --last` (Codex), or `--resume latest` (Gemini).
 
 ## CLI

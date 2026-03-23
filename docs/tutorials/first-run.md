@@ -105,7 +105,7 @@ Untether extracts the resume token from the message you replied to and continues
     Use `show_resume_line = true` if you want this behavior all the time.
 
 !!! tip "Reset with /new"
-    `/new` clears stored sessions for the current chat or topic.
+    `/new` cancels any running task and clears stored sessions for the current chat or topic.
 
 ## 6. Cancel a run
 

@@ -225,6 +225,7 @@ def _dispatch_builtin_command(
                 topic_store,
                 resolved_scope=resolved_scope,
                 scope_chat_ids=scope_chat_ids,
+                running_tasks=ctx.running_tasks,
             )
         elif command_id == "topic":
             handler = partial(
@@ -442,6 +443,7 @@ class TelegramCommandContext:
     scope_chat_ids: frozenset[int]
     reply: Callable[..., Awaitable[None]]
     task_group: TaskGroup
+    running_tasks: RunningTasks | None = None
 
 
 def _classify_message(
@@ -1877,16 +1879,20 @@ async def run_main_loop(
                                 state.topic_store,
                                 resolved_scope=state.resolved_topics_scope,
                                 scope_chat_ids=state.topics_chat_ids,
+                                running_tasks=state.running_tasks,
                             )
                         )
                         return
                     if state.chat_session_store is not None:
                         tg.start_soon(
-                            handle_chat_new_command,
-                            cfg,
-                            msg,
-                            state.chat_session_store,
-                            chat_session_key,
+                            partial(
+                                handle_chat_new_command,
+                                cfg,
+                                msg,
+                                state.chat_session_store,
+                                chat_session_key,
+                                running_tasks=state.running_tasks,
+                            )
                         )
                         return
                     if state.topic_store is not None:
@@ -1898,6 +1904,7 @@ async def run_main_loop(
                                 state.topic_store,
                                 resolved_scope=state.resolved_topics_scope,
                                 scope_chat_ids=state.topics_chat_ids,
+                                running_tasks=state.running_tasks,
                             )
                         )
                         return
@@ -1949,6 +1956,7 @@ async def run_main_loop(
                         scope_chat_ids=state.topics_chat_ids,
                         reply=reply,
                         task_group=tg,
+                        running_tasks=state.running_tasks,
                     ),
                     command_id=command_id,
                 ):

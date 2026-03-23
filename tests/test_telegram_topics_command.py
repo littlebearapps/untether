@@ -3,12 +3,14 @@ from pathlib import Path
 
 import pytest
 
+from untether.runner_bridge import RunningTask
 from untether.settings import TelegramTopicsSettings
 from untether.config import ProjectConfig, ProjectsConfig
 from untether.runners.mock import Return, ScriptRunner
 from untether.telegram.chat_sessions import ChatSessionStore
 from untether.telegram.chat_prefs import ChatPrefsStore, resolve_prefs_path
 from untether.telegram.commands.topics import (
+    _cancel_chat_tasks,
     _handle_chat_ctx_command,
     _handle_chat_new_command,
     _handle_ctx_command,
@@ -17,6 +19,7 @@ from untether.telegram.commands.topics import (
 )
 from untether.telegram.topic_state import TopicStateStore
 from untether.telegram.types import TelegramIncomingMessage
+from untether.transport import MessageRef
 from tests.telegram_fakes import (
     DEFAULT_ENGINE_ID,
     FakeTransport,
@@ -187,3 +190,154 @@ async def test_topic_command_requires_args(tmp_path: Path) -> None:
 
     text = transport.send_calls[-1]["message"].text
     assert "usage: /topic" in text
+
+
+# --- /new cancellation tests ---
+
+
+def test_cancel_chat_tasks_none() -> None:
+    """No-op when running_tasks is None."""
+    assert _cancel_chat_tasks(123, None) == 0
+
+
+def test_cancel_chat_tasks_empty() -> None:
+    """No-op when no tasks running."""
+    assert _cancel_chat_tasks(123, {}) == 0
+
+
+def test_cancel_chat_tasks_cancels_matching() -> None:
+    """Cancels tasks matching the chat_id."""
+    task = RunningTask()
+    ref = MessageRef(channel_id=123, message_id=1)
+    running_tasks = {ref: task}
+
+    cancelled = _cancel_chat_tasks(123, running_tasks)
+
+    assert cancelled == 1
+    assert task.cancel_requested.is_set()
+
+
+def test_cancel_chat_tasks_skips_other_chats() -> None:
+    """Does not cancel tasks in other chats."""
+    task = RunningTask()
+    ref = MessageRef(channel_id=999, message_id=1)
+    running_tasks = {ref: task}
+
+    cancelled = _cancel_chat_tasks(123, running_tasks)
+
+    assert cancelled == 0
+    assert not task.cancel_requested.is_set()
+
+
+def test_cancel_chat_tasks_skips_already_cancelled() -> None:
+    """Does not double-cancel already-cancelled tasks."""
+    task = RunningTask()
+    task.cancel_requested.set()
+    ref = MessageRef(channel_id=123, message_id=1)
+    running_tasks = {ref: task}
+
+    cancelled = _cancel_chat_tasks(123, running_tasks)
+
+    assert cancelled == 0
+
+
+def test_cancel_chat_tasks_multiple() -> None:
+    """Cancels multiple tasks in the same chat."""
+    task1 = RunningTask()
+    task2 = RunningTask()
+    ref1 = MessageRef(channel_id=123, message_id=1)
+    ref2 = MessageRef(channel_id=123, message_id=2)
+    running_tasks = {ref1: task1, ref2: task2}
+
+    cancelled = _cancel_chat_tasks(123, running_tasks)
+
+    assert cancelled == 2
+    assert task1.cancel_requested.is_set()
+    assert task2.cancel_requested.is_set()
+
+
+@pytest.mark.anyio
+async def test_chat_new_command_cancels_running(tmp_path: Path) -> None:
+    """'/new' cancels a running task and mentions it in the reply."""
+    transport = FakeTransport()
+    cfg = make_cfg(transport)
+    store = ChatSessionStore(tmp_path / "sessions.json")
+    msg = _msg("/new", chat_type="private")
+
+    task = RunningTask()
+    ref = MessageRef(channel_id=msg.chat_id, message_id=42)
+    running_tasks = {ref: task}
+
+    await _handle_chat_new_command(
+        cfg, msg, store, session_key=(msg.chat_id, None), running_tasks=running_tasks
+    )
+
+    assert task.cancel_requested.is_set()
+    text = transport.send_calls[-1]["message"].text
+    assert "cancelled run" in text
+    assert "cleared" in text
+
+
+@pytest.mark.anyio
+async def test_chat_new_command_cancel_only_no_sessions(tmp_path: Path) -> None:
+    """'/new' with running task but no stored sessions still succeeds."""
+    transport = FakeTransport()
+    cfg = make_cfg(transport)
+    store = ChatSessionStore(tmp_path / "sessions.json")
+    msg = _msg("/new", chat_type="private")
+
+    task = RunningTask()
+    ref = MessageRef(channel_id=msg.chat_id, message_id=42)
+    running_tasks = {ref: task}
+
+    await _handle_chat_new_command(
+        cfg, msg, store, session_key=None, running_tasks=running_tasks
+    )
+
+    assert task.cancel_requested.is_set()
+    text = transport.send_calls[-1]["message"].text
+    assert "cancelled run" in text
+
+
+@pytest.mark.anyio
+async def test_chat_new_command_no_tasks_no_sessions(tmp_path: Path) -> None:
+    """'/new' with no running tasks and no sessions shows 'no stored sessions'."""
+    transport = FakeTransport()
+    cfg = make_cfg(transport)
+    store = ChatSessionStore(tmp_path / "sessions.json")
+    msg = _msg("/new", chat_type="private")
+
+    await _handle_chat_new_command(cfg, msg, store, session_key=None, running_tasks={})
+
+    text = transport.send_calls[-1]["message"].text
+    assert "no stored sessions" in text
+
+
+@pytest.mark.anyio
+async def test_new_command_cancels_running_in_topic(tmp_path: Path) -> None:
+    """'/new' in topic mode cancels running tasks."""
+    transport = FakeTransport()
+    cfg = replace(
+        make_cfg(transport),
+        topics=TelegramTopicsSettings(enabled=True, scope="all"),
+    )
+    store = TopicStateStore(tmp_path / "topics.json")
+    msg = _msg("/new", thread_id=10, chat_type="supergroup")
+
+    task = RunningTask()
+    ref = MessageRef(channel_id=msg.chat_id, message_id=42)
+    running_tasks = {ref: task}
+
+    await _handle_new_command(
+        cfg,
+        msg,
+        store=store,
+        resolved_scope="all",
+        scope_chat_ids=frozenset({msg.chat_id}),
+        running_tasks=running_tasks,
+    )
+
+    assert task.cancel_requested.is_set()
+    text = transport.send_calls[-1]["message"].text
+    assert "cancelled run" in text
+    assert "cleared" in text

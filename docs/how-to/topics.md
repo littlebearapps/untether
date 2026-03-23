@@ -84,7 +84,7 @@ Note: Outside topics (private chats or main group chats), `/ctx` binds the chat 
 
 ## Reset a topic session
 
-Use `/new` inside the topic to clear stored sessions for that thread.
+Use `/new` inside the topic to cancel any running task and clear stored sessions for that thread.
 
 ## Set a default engine per topic
 

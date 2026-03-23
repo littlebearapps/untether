@@ -37,6 +37,7 @@
 - `/usage` showed Claude subscription data in non-Claude engine chats — now gated to subscription-supported engines with an engine-specific error message [#215](https://github.com/littlebearapps/untether/issues/215)
 - `/export` showed duplicate "Session Started" headers for resumed sessions — deduplicated so only the first `StartedEvent` renders [#218](https://github.com/littlebearapps/untether/issues/218)
 - Gemini CLI prompt injection — prompts starting with `-` were parsed as flags when passed via `-p <value>`; now uses `--prompt=<value>` to bind the value directly [#219](https://github.com/littlebearapps/untether/issues/219)
+- `/new` command now cancels running processes before clearing sessions — previously only cleared resume tokens, leaving old Claude/Codex/OpenCode processes running (~400 MB each), worsening memory pressure and triggering earlyoom kills [#222](https://github.com/littlebearapps/untether/issues/222)
 
 ### changes
 
@@ -94,6 +95,7 @@
 - engine command gate tests: `/planmode` Claude-only, `/usage` subscription-engine-only [#215](https://github.com/littlebearapps/untether/issues/215), [#216](https://github.com/littlebearapps/untether/issues/216)
 - export dedup test: duplicate started events deduplicated in markdown export [#218](https://github.com/littlebearapps/untether/issues/218)
 - Gemini `--prompt=` build_args test [#219](https://github.com/littlebearapps/untether/issues/219)
+- 10 new `/new` cancellation tests: `_cancel_chat_tasks` helper (None, empty, matching, other chats, already cancelled, multiple), chat `/new` with running task, cancel-only no sessions, no tasks no sessions, topic `/new` with running task [#222](https://github.com/littlebearapps/untether/issues/222)
 
 ### docs
 

@@ -249,7 +249,7 @@ Commands:
   project chats.
 - `/ctx` shows the bound context and stored session engines inside topics.
   Outside topics, `/ctx set ...` and `/ctx clear` bind the chat context.
-- `/new` inside a topic clears stored resume tokens for that topic.
+- `/new` inside a topic cancels any running task and clears stored resume tokens for that topic.
 
 State is stored in `telegram_topics_state.json` alongside the config file.
 Delete it to reset all topic bindings and stored sessions.
