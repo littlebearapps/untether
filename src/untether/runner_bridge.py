@@ -151,6 +151,19 @@ def _load_auto_continue_settings():
         return AutoContinueSettings()
 
 
+def _is_signal_death(rc: int | None) -> bool:
+    """Return True if the return code indicates the process was killed by a signal.
+
+    rc=143 (SIGTERM/128+15), rc=137 (SIGKILL/128+9), or negative values
+    (Python's representation of signal death, e.g. -9 for SIGKILL).
+    """
+    if rc is None:
+        return False
+    if rc < 0:
+        return True  # negative = killed by signal (Python convention)
+    return rc > 128  # 128+N = killed by signal N (shell convention)
+
+
 def _should_auto_continue(
     *,
     last_event_type: str | None,
@@ -159,12 +172,17 @@ def _should_auto_continue(
     resume_value: str | None,
     auto_continued_count: int,
     max_retries: int,
+    proc_returncode: int | None = None,
 ) -> bool:
     """Detect Claude Code silent session termination bug (#34142, #30333).
 
     Returns True when the last raw JSONL event was a tool_result ("user")
     meaning Claude never got a turn to process the results before the CLI
     exited.
+
+    Does NOT trigger on signal deaths (SIGTERM/SIGKILL from earlyoom or
+    other external killers) — those have rc>128 or rc<0.  The upstream bug
+    exits with rc=0.
     """
     if cancelled:
         return False
@@ -173,6 +191,8 @@ def _should_auto_continue(
     if last_event_type != "user":
         return False
     if not resume_value:
+        return False
+    if _is_signal_death(proc_returncode):
         return False
     return auto_continued_count < max_retries
 
@@ -1890,6 +1910,7 @@ async def handle_message(
     ac_settings = _load_auto_continue_settings()
     _ac_resume = completed.resume or outcome.resume
     _ac_last_event = edits.stream.last_event_type if edits.stream else None
+    _ac_proc_rc = edits.stream.proc_returncode if edits.stream else None
     if ac_settings.enabled and _should_auto_continue(
         last_event_type=_ac_last_event,
         engine=runner.engine,
@@ -1897,6 +1918,7 @@ async def handle_message(
         resume_value=_ac_resume.value if _ac_resume else None,
         auto_continued_count=_auto_continued_count,
         max_retries=ac_settings.max_retries,
+        proc_returncode=_ac_proc_rc,
     ):
         logger.warning(
             "session.auto_continue",

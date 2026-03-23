@@ -4002,6 +4002,7 @@ class TestShouldAutoContinue:
         resume_value: str | None = "c3f20b1d-58f9-4173-a68e-8735256cf9ae",
         auto_continued_count: int = 0,
         max_retries: int = 1,
+        proc_returncode: int | None = 0,
     ) -> bool:
         from untether.runner_bridge import _should_auto_continue
 
@@ -4012,6 +4013,7 @@ class TestShouldAutoContinue:
             resume_value=resume_value,
             auto_continued_count=auto_continued_count,
             max_retries=max_retries,
+            proc_returncode=proc_returncode,
         )
 
     def test_detects_bug_scenario(self):
@@ -4046,3 +4048,63 @@ class TestShouldAutoContinue:
 
     def test_disabled_when_max_retries_zero(self):
         assert self._call(auto_continued_count=0, max_retries=0) is False
+
+    def test_skips_sigterm_death(self):
+        """rc=143 (SIGTERM/earlyoom) — do NOT auto-continue."""
+        assert self._call(proc_returncode=143) is False
+
+    def test_skips_sigkill_death(self):
+        """rc=137 (SIGKILL) — do NOT auto-continue."""
+        assert self._call(proc_returncode=137) is False
+
+    def test_skips_negative_signal(self):
+        """rc=-9 (Python SIGKILL) — do NOT auto-continue."""
+        assert self._call(proc_returncode=-9) is False
+
+    def test_skips_negative_sigterm(self):
+        """rc=-15 (Python SIGTERM) — do NOT auto-continue."""
+        assert self._call(proc_returncode=-15) is False
+
+    def test_allows_rc_zero(self):
+        """rc=0 (upstream bug #34142) — DO auto-continue."""
+        assert self._call(proc_returncode=0) is True
+
+    def test_allows_rc_none(self):
+        """rc=None (unknown) — DO auto-continue (conservative)."""
+        assert self._call(proc_returncode=None) is True
+
+    def test_allows_rc_one(self):
+        """rc=1 (generic error) — DO auto-continue."""
+        assert self._call(proc_returncode=1) is True
+
+
+class TestIsSignalDeath:
+    """Tests for _is_signal_death helper."""
+
+    def test_sigterm(self):
+        from untether.runner_bridge import _is_signal_death
+
+        assert _is_signal_death(143) is True  # 128 + 15
+
+    def test_sigkill(self):
+        from untether.runner_bridge import _is_signal_death
+
+        assert _is_signal_death(137) is True  # 128 + 9
+
+    def test_negative_signal(self):
+        from untether.runner_bridge import _is_signal_death
+
+        assert _is_signal_death(-9) is True
+        assert _is_signal_death(-15) is True
+
+    def test_normal_exit(self):
+        from untether.runner_bridge import _is_signal_death
+
+        assert _is_signal_death(0) is False
+        assert _is_signal_death(1) is False
+        assert _is_signal_death(2) is False
+
+    def test_none(self):
+        from untether.runner_bridge import _is_signal_death
+
+        assert _is_signal_death(None) is False

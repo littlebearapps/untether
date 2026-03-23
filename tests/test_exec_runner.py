@@ -637,6 +637,7 @@ def test_jsonl_stream_state_defaults() -> None:
     assert stream.event_count == 0
     assert len(stream.recent_events) == 0
     assert stream.stderr_capture == []
+    assert stream.proc_returncode is None
 
 
 def test_jsonl_stream_state_recent_events_ring_buffer() -> None:

@@ -206,6 +206,7 @@ class JsonlStreamState:
         default_factory=lambda: deque(maxlen=10)
     )
     stderr_capture: list[str] = field(default_factory=list)
+    proc_returncode: int | None = None
 
 
 class JsonlSubprocessRunner(BaseRunner):
@@ -926,6 +927,7 @@ class JsonlSubprocessRunner(BaseRunner):
                 reader_done.set()
 
             rc = await proc.wait()
+            stream.proc_returncode = rc
             logger.info("subprocess.exit", pid=proc.pid, rc=rc)
             if stream.did_emit_completed:
                 return
