@@ -1082,10 +1082,7 @@ async def test_discuss_handler_sets_cooldown() -> None:
 @pytest.mark.anyio
 async def test_chat_action_hold_open_sends_deny() -> None:
     """Chat action on hold-open request sends deny with chat message."""
-    from untether.telegram.commands.claude_control import (
-        ClaudeControlCommand,
-        _CHAT_DENY_MESSAGE,
-    )
+    from untether.telegram.commands.claude_control import ClaudeControlCommand
 
     runner = ClaudeRunner(claude_cmd="claude")
     session_id = "sess-chat-hold"
