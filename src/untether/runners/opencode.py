@@ -629,6 +629,25 @@ class OpenCodeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
         ]
 
 
+def _read_opencode_default_model() -> str | None:
+    """Read the default model from OpenCode's own config file.
+
+    OpenCode stores its config at ``~/.config/opencode/opencode.json`` with a
+    top-level ``"model"`` key (e.g. ``"openai/gpt-5.2"``).  We read this at
+    runner construction time so the model appears in the Telegram footer even
+    when no override is set in ``untether.toml``.
+    """
+    oc_config = Path.home() / ".config" / "opencode" / "opencode.json"
+    try:
+        data = json.loads(oc_config.read_text(encoding="utf-8"))
+        model = data.get("model")
+        if isinstance(model, str) and model:
+            return model
+    except (OSError, json.JSONDecodeError, TypeError):
+        pass
+    return None
+
+
 def build_runner(config: EngineConfig, config_path: Path) -> Runner:
     """Build an OpenCodeRunner from configuration."""
     opencode_cmd = "opencode"
@@ -638,6 +657,13 @@ def build_runner(config: EngineConfig, config_path: Path) -> Runner:
         raise ConfigError(
             f"Invalid `opencode.model` in {config_path}; expected a string."
         )
+
+    # Fall back to OpenCode's own config for the default model so it appears
+    # in the Telegram footer even without an untether.toml override.
+    if model is None:
+        model = _read_opencode_default_model()
+        if model is not None:
+            logger.debug("opencode.default_model.detected", model=model)
 
     title = str(model) if model is not None else "opencode"
 

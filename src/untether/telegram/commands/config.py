@@ -135,7 +135,7 @@ _ENGINE_MODEL_HINTS: dict[str, str] = {
     "codex": "codex-mini-latest",
     "gemini": "auto (routes Flash ↔ Pro)",
     "amp": "smart mode (Opus 4.6)",
-    "opencode": "from provider config",
+    "opencode": "provider/model (e.g. openai/gpt-4o)",
     "pi": "from provider config",
 }
 

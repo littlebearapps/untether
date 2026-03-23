@@ -18,6 +18,11 @@ PERMISSION_MODES = {
     "off": "acceptEdits",
 }
 
+# Engines that support the /planmode command (Claude-style permission modes).
+# Codex and Gemini have approval policies but use different semantics —
+# they should use /config → Approval policy instead.
+_PLANMODE_ENGINES = frozenset({"claude"})
+
 
 class PlanModeCommand:
     """Command backend for toggling Claude Code permission mode."""
@@ -28,6 +33,7 @@ class PlanModeCommand:
     async def handle(self, ctx: CommandContext) -> CommandResult | None:
         from ..chat_prefs import ChatPrefsStore, resolve_prefs_path
         from ..engine_overrides import EngineOverrides
+        from ._resolve_engine import resolve_effective_engine
 
         config_path = ctx.config_path
         if config_path is None:
@@ -36,9 +42,23 @@ class PlanModeCommand:
                 notify=True,
             )
 
+        current_engine = await resolve_effective_engine(ctx)
+        if current_engine not in _PLANMODE_ENGINES:
+            hint = ""
+            if current_engine in {"codex", "gemini"}:
+                hint = " Use /config → Approval policy instead."
+            return CommandResult(
+                text=(
+                    f"Plan mode is only available for Claude Code."
+                    f" Current engine: <b>{current_engine}</b>.{hint}"
+                ),
+                notify=True,
+                parse_mode="HTML",
+            )
+
         chat_prefs = ChatPrefsStore(resolve_prefs_path(config_path))
         chat_id = ctx.message.channel_id
-        engine = "claude"
+        engine = current_engine
         args = ctx.args_text.strip().lower()
 
         if args == "show":

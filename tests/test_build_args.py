@@ -261,9 +261,7 @@ class TestGeminiBuildArgs:
         args = runner.build_args("hello", None, state=state)
         assert "--output-format" in args
         assert "stream-json" in args
-        assert "-p" in args
-        idx = args.index("-p")
-        assert args[idx + 1] == "hello"
+        assert "--prompt=hello" in args
 
     def test_resume(self) -> None:
         runner = self._runner()

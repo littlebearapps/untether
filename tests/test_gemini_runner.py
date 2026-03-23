@@ -255,9 +255,8 @@ def test_build_args_new_session() -> None:
     assert "--output-format" in args
     assert "stream-json" in args
     assert "--resume" not in args
-    # -p takes the prompt as its argument (Gemini CLI >= 0.32.0)
-    p_idx = args.index("-p")
-    assert args[p_idx + 1] == "hello world"
+    # --prompt= binds the value directly to avoid yargs flag injection
+    assert "--prompt=hello world" in args
 
 
 def test_build_args_with_resume() -> None:

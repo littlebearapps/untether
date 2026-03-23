@@ -1,4 +1,8 @@
-"""Command backend for Claude Code subscription usage reporting."""
+"""Command backend for Claude Code subscription usage reporting.
+
+Only available when the current chat's engine is Claude — other engines
+do not use Anthropic OAuth credentials.
+"""
 
 from __future__ import annotations
 
@@ -206,6 +210,20 @@ class UsageCommand:
     description = "Show Claude Code subscription usage"
 
     async def handle(self, ctx: CommandContext) -> CommandResult | None:
+        from ..engine_overrides import SUBSCRIPTION_USAGE_SUPPORTED_ENGINES
+        from ._resolve_engine import resolve_effective_engine
+
+        current_engine = await resolve_effective_engine(ctx)
+        if current_engine not in SUBSCRIPTION_USAGE_SUPPORTED_ENGINES:
+            return CommandResult(
+                text=(
+                    f"Usage tracking is not available for the"
+                    f" <b>{current_engine}</b> engine."
+                ),
+                notify=True,
+                parse_mode="HTML",
+            )
+
         try:
             data = await fetch_claude_usage()
         except FileNotFoundError:

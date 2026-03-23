@@ -85,9 +85,13 @@ def _format_export_markdown(
 
     lines.append("---\n")
 
+    started_rendered = False
     for evt in events:
         evt_type = evt.get("type", "unknown")
         if evt_type == "started":
+            if started_rendered:
+                continue
+            started_rendered = True
             engine = evt.get("engine", "unknown")
             title = evt.get("title", "")
             lines.append(f"## Session Started ({engine})")

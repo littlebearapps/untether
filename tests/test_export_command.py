@@ -206,6 +206,29 @@ class TestFormatExportMarkdown:
         assert "3000 in tokens" in md
         assert "out" not in md
 
+    def test_duplicate_started_events_deduplicated(self):
+        """Resume runs with same session_id produce duplicate started events;
+        only the first should be rendered."""
+        events = [
+            {"type": "started", "engine": "codex", "title": "Codex"},
+            {
+                "type": "action",
+                "phase": "started",
+                "ok": None,
+                "action": {"id": "t0", "kind": "turn", "title": "turn started"},
+            },
+            {"type": "started", "engine": "codex", "title": "Codex"},
+            {
+                "type": "action",
+                "phase": "started",
+                "ok": None,
+                "action": {"id": "t1", "kind": "turn", "title": "turn started"},
+            },
+            {"type": "completed", "ok": True, "answer": "done", "error": None},
+        ]
+        md = _format_export_markdown("codex-sess", events, None)
+        assert md.count("Session Started") == 1
+
     def test_error_export(self):
         events = [
             {

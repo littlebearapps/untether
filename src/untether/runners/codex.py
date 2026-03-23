@@ -630,14 +630,16 @@ class CodexRunner(ResumeTokenMixin, JsonlSubprocessRunner):
             case _:
                 pass
 
-        # Build meta from runner config + run options
+        # Build meta from runner config + run options.
+        # Always include a model name — use override, runner config, or CLI default.
         meta: dict[str, Any] | None = None
         model = self.model
         run_options = get_run_options()
         if run_options is not None and run_options.model:
             model = run_options.model
-        if model is not None:
-            meta = {"model": str(model)}
+        if model is None:
+            model = "codex-mini-latest"
+        meta = {"model": str(model)}
         if run_options is not None and run_options.reasoning:
             if meta is None:
                 meta = {}

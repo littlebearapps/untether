@@ -7,9 +7,11 @@ import pytest
 
 from untether.model import ActionEvent, CompletedEvent, ResumeToken, StartedEvent
 from untether.runners.opencode import (
+    ENGINE,
     OpenCodeRunner,
     OpenCodeStreamState,
-    ENGINE,
+    _read_opencode_default_model,
+    build_runner,
     translate_opencode_event,
 )
 from untether.schemas import opencode as opencode_schema
@@ -684,3 +686,87 @@ class TestDecodeErrorEvents:
         assert isinstance(e2[0], ActionEvent)
         assert e1[0].action.id != e2[0].action.id
         assert state.note_seq == 2
+
+
+# --- _read_opencode_default_model tests ---
+
+
+def test_read_opencode_default_model_valid(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config = tmp_path / ".config" / "opencode" / "opencode.json"
+    config.parent.mkdir(parents=True)
+    config.write_text(json.dumps({"model": "openai/gpt-5.2"}))
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    assert _read_opencode_default_model() == "openai/gpt-5.2"
+
+
+def test_read_opencode_default_model_missing_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    assert _read_opencode_default_model() is None
+
+
+def test_read_opencode_default_model_invalid_json(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config = tmp_path / ".config" / "opencode" / "opencode.json"
+    config.parent.mkdir(parents=True)
+    config.write_text("not valid json")
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    assert _read_opencode_default_model() is None
+
+
+def test_read_opencode_default_model_empty_model(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config = tmp_path / ".config" / "opencode" / "opencode.json"
+    config.parent.mkdir(parents=True)
+    config.write_text(json.dumps({"model": ""}))
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    assert _read_opencode_default_model() is None
+
+
+def test_read_opencode_default_model_no_model_key(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config = tmp_path / ".config" / "opencode" / "opencode.json"
+    config.parent.mkdir(parents=True)
+    config.write_text(json.dumps({"other": "value"}))
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    assert _read_opencode_default_model() is None
+
+
+def test_build_runner_falls_back_to_opencode_config(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config = tmp_path / ".config" / "opencode" / "opencode.json"
+    config.parent.mkdir(parents=True)
+    config.write_text(json.dumps({"model": "openai/gpt-4o"}))
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    runner = build_runner({}, tmp_path / "untether.toml")
+    assert runner.model == "openai/gpt-4o"
+    assert runner.session_title == "openai/gpt-4o"
+
+
+def test_build_runner_prefers_untether_config(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config = tmp_path / ".config" / "opencode" / "opencode.json"
+    config.parent.mkdir(parents=True)
+    config.write_text(json.dumps({"model": "openai/gpt-4o"}))
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    runner = build_runner(
+        {"model": "anthropic/claude-sonnet"}, tmp_path / "untether.toml"
+    )
+    assert runner.model == "anthropic/claude-sonnet"
+
+
+def test_build_runner_no_opencode_config(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    runner = build_runner({}, tmp_path / "untether.toml")
+    assert runner.model is None
+    assert runner.session_title == "opencode"
