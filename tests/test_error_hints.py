@@ -78,7 +78,7 @@ class TestGetErrorHint:
         )
         hint = get_error_hint(msg)
         assert hint is not None
-        assert "failed to load" in hint.lower()
+        assert "could not be loaded" in hint.lower()
 
     # --- Subscription / billing limits ---
 
