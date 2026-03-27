@@ -143,8 +143,8 @@ _HINT_PATTERNS: list[tuple[str, str]] = [
     # --- Execution errors ---
     (
         "error_during_execution",
-        "The session failed to load \N{EM DASH} it may have been"
-        " corrupted during a restart. Send /new to start a fresh session.",
+        "The session could not be loaded \N{EM DASH} Claude Code may have"
+        " archived or expired it. Send /new to start a fresh session.",
     ),
     # --- Process / session errors ---
     (
