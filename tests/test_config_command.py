@@ -1659,8 +1659,8 @@ class TestAskQuestions:
         await cmd.handle(ctx)
         msg = _last_edit_msg(ctx)
         assert "Ask mode" in msg.text
-        # Toggle row: default off -> shows toggle-on button and clear
-        assert "config:aq:on" in _buttons_data(msg)
+        # Toggle row: default on -> shows toggle-off button and clear
+        assert "config:aq:off" in _buttons_data(msg)
         assert "config:aq:clr" in _buttons_data(msg)
 
     @pytest.mark.anyio

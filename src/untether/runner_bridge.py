@@ -1144,7 +1144,14 @@ class ProgressEdits:
             # When outline has been sent (visible or already cleaned up),
             # strip approval buttons from the progress message — the outline
             # message has the canonical approval buttons.  (#163)
-            if self._outline_sent and has_approval:
+            # Only strip for outline-related approvals (DiscussApproval),
+            # not for regular tool approvals (e.g. Write with diff preview).
+            _current_is_outline = any(
+                a.action.detail.get("request_type") == "DiscussApproval"
+                for a in state.actions
+                if not a.completed
+            )
+            if self._outline_sent and has_approval and _current_is_outline:
                 cancel_row = new_kb[-1:]  # keep only the cancel row
                 rendered = RenderedMessage(
                     text=rendered.text,

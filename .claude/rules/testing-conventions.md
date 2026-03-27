@@ -68,12 +68,12 @@ Integration tests are automated via Telegram MCP tools by Claude Code during the
 
 | Chat | Chat ID |
 |------|---------|
-| `ut-dev: claude` | 5284581592 |
-| `ut-dev: codex` | 4929463515 |
-| `ut-dev: opencode` | 5200822877 |
-| `ut-dev: pi` | 5156256333 |
-| `ut-dev: gemini` | 5207762142 |
-| `ut-dev: amp` | 5230875989 |
+| `ut-dev-hf: claude` | 5171122044 |
+| `ut-dev-hf: codex` | 5116709786 |
+| `ut-dev-hf: opencode` | 5020138767 |
+| `ut-dev-hf: pi` | 5276373372 |
+| `ut-dev-hf: gemini` | 5152406011 |
+| `ut-dev-hf: amp` | 5064468679 |
 
 ### Pattern
 

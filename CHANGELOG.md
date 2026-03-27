@@ -39,6 +39,14 @@
 - Gemini CLI prompt injection — prompts starting with `-` were parsed as flags when passed via `-p <value>`; now uses `--prompt=<value>` to bind the value directly [#219](https://github.com/littlebearapps/untether/issues/219)
 - `/new` command now cancels running processes before clearing sessions — previously only cleared resume tokens, leaving old Claude/Codex/OpenCode processes running (~400 MB each), worsening memory pressure and triggering earlyoom kills [#222](https://github.com/littlebearapps/untether/issues/222)
 - auto-continue no longer triggers on signal deaths (rc=143/SIGTERM, rc=137/SIGKILL) — earlyoom kills have `last_event_type=user` which matched the upstream bug detection, causing a death spiral where 4 killed sessions were immediately respawned into the same memory pressure [#222](https://github.com/littlebearapps/untether/issues/222)
+- Gemini engine stuck at "starting · 0s" — Gemini CLI outputs a non-JSON warning (`MCP issues detected...`) on stdout before the first JSONL event, corrupting the line; `decode_jsonl()` now strips non-JSON prefixes by finding the first `{` and retrying parse [#231](https://github.com/littlebearapps/untether/issues/231)
+- `/config` Ask mode toggle inverted — `_toggle_row` default was `False` but display default was "on", causing the button to show "Ask: off" when the effective state was on; pressing it appeared to do nothing [#232](https://github.com/littlebearapps/untether/issues/232)
+- diff preview approval buttons not rendered after outline flow — `_outline_sent` flag in `ProgressEdits` stripped ALL subsequent approval buttons, not just outline-related ones; now only strips buttons for `DiscussApproval` actions [#233](https://github.com/littlebearapps/untether/issues/233)
+- prevent duplicate control response for already-handled requests [#229](https://github.com/littlebearapps/untether/issues/229) ([#230](https://github.com/littlebearapps/untether/issues/230))
+
+### docs
+
+- update integration test chat IDs from stale `ut-dev:` to current `ut-dev-hf:` chats [#238](https://github.com/littlebearapps/untether/issues/238)
 
 ### changes
 

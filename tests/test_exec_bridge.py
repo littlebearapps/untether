@@ -3827,6 +3827,21 @@ async def test_outline_sent_strips_approval_from_progress() -> None:
     edits._outline_sent = True
     edits._outline_refs.append(MessageRef(channel_id=123, message_id=500))
 
+    # Add a DiscussApproval action to the tracker (outline-related approval)
+    from untether.model import Action, ActionEvent
+
+    outline_evt = ActionEvent(
+        engine="claude",
+        action=Action(
+            id="claude.discuss_approve.1",
+            kind="warning",
+            title="Plan outlined",
+            detail={"request_type": "DiscussApproval"},
+        ),
+        phase="started",
+    )
+    edits.tracker.note_event(outline_evt)
+
     # Trigger render with approval buttons from the presenter
     presenter.set_approval_buttons()
     edits.event_seq = 1

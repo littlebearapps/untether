@@ -308,6 +308,14 @@ class JsonlSubprocessRunner(BaseRunner):
         try:
             return cast(dict[str, Any], json.loads(text))
         except json.JSONDecodeError:
+            # Some CLIs (e.g. Gemini) mix non-JSON warnings with JSONL on
+            # stdout.  Try to extract the first JSON object from the line.
+            brace = text.find("{")
+            if brace > 0:
+                try:
+                    return cast(dict[str, Any], json.loads(text[brace:]))
+                except json.JSONDecodeError:
+                    pass
             self.get_logger().warning(
                 "runner.jsonl.decode_failed",
                 engine=self.engine,

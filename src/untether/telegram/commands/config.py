@@ -1296,7 +1296,7 @@ async def _page_ask_questions(ctx: CommandContext, action: str | None = None) ->
         _toggle_row(
             "Ask",
             current=aq,
-            default=False,
+            default=True,
             on_data="config:aq:on",
             off_data="config:aq:off",
             clr_data="config:aq:clr",
