@@ -1369,6 +1369,141 @@ def test_expired_control_request_queues_auto_deny() -> None:
     assert "req-new" in state.pending_control_requests
 
 
+def test_handled_request_not_auto_denied_on_expiry() -> None:
+    """Requests already handled via Telegram callback must NOT be auto-denied.
+
+    When send_claude_control_response() handles a request, it adds it to
+    _HANDLED_REQUESTS but can't clean up state.pending_control_requests.
+    The reconciliation in translate() should catch this and prevent the
+    5-minute expiry from sending a duplicate deny.
+    See: https://github.com/littlebearapps/untether/issues/229
+    """
+    import time as _time
+
+    state, factory = _make_state_with_session("sess-229")
+
+    # Create and register a control request
+    old_event = _decode_event(
+        {
+            "type": "control_request",
+            "request_id": "req-handled",
+            "request": {
+                "subtype": "can_use_tool",
+                "tool_name": "ExitPlanMode",
+                "input": {},
+            },
+        }
+    )
+    translate_claude_event(old_event, title="claude", state=state, factory=factory)
+    assert "req-handled" in state.pending_control_requests
+
+    # Simulate what send_claude_control_response does: mark as handled
+    # but leave it in pending_control_requests (the bug scenario)
+    _HANDLED_REQUESTS.add("req-handled")
+    _REQUEST_TO_SESSION.pop("req-handled", None)
+
+    # Backdate it past the 5-minute timeout
+    evt_data, _ = state.pending_control_requests["req-handled"]
+    state.pending_control_requests["req-handled"] = (evt_data, _time.time() - 301.0)
+
+    # Trigger a new control request — reconciliation should run
+    new_event = _decode_event(
+        {
+            "type": "control_request",
+            "request_id": "req-next",
+            "request": {
+                "subtype": "can_use_tool",
+                "tool_name": "ExitPlanMode",
+                "input": {},
+            },
+        }
+    )
+    events = translate_claude_event(
+        new_event, title="claude", state=state, factory=factory
+    )
+
+    # The handled request should be removed from pending (reconciled)
+    assert "req-handled" not in state.pending_control_requests
+
+    # CRITICAL: It must NOT be in the auto_deny_queue
+    deny_ids = [rid for rid, _ in state.auto_deny_queue]
+    assert "req-handled" not in deny_ids, (
+        "Already-handled request must not be auto-denied (#229)"
+    )
+
+    # Should have emitted action_completed for the old keyboard + action_started for new
+    action_completed = [
+        e for e in events if isinstance(e, ActionEvent) and e.phase == "completed"
+    ]
+    assert len(action_completed) == 1
+    assert action_completed[0].action.title == "Permission resolved"
+
+
+def test_reconciliation_emits_action_completed_for_stale_keyboard() -> None:
+    """Reconciliation should emit action_completed to clear stale inline keyboards.
+
+    When a control request is handled via callback, the action_started event's
+    inline keyboard persists on the progress message. Reconciliation emits
+    action_completed to signal the progress renderer to remove the keyboard.
+    See: https://github.com/littlebearapps/untether/issues/229
+    """
+    state, factory = _make_state_with_session("sess-keyboard")
+
+    # Create a control request (this generates an action_started with keyboard)
+    event = _decode_event(
+        {
+            "type": "control_request",
+            "request_id": "req-kb",
+            "request": {
+                "subtype": "can_use_tool",
+                "tool_name": "ExitPlanMode",
+                "input": {},
+            },
+        }
+    )
+    started_events = translate_claude_event(
+        event, title="claude", state=state, factory=factory
+    )
+    assert len(started_events) == 1
+    action_id = started_events[0].action.id
+
+    # Verify the request_to_action mapping was created
+    assert "req-kb" in state.request_to_action
+    assert state.request_to_action["req-kb"] == action_id
+
+    # Simulate callback handling
+    _HANDLED_REQUESTS.add("req-kb")
+
+    # Trigger another control request to run reconciliation
+    new_event = _decode_event(
+        {
+            "type": "control_request",
+            "request_id": "req-kb-2",
+            "request": {
+                "subtype": "can_use_tool",
+                "tool_name": "ExitPlanMode",
+                "input": {},
+            },
+        }
+    )
+    events = translate_claude_event(
+        new_event, title="claude", state=state, factory=factory
+    )
+
+    # Should include action_completed for the old action + action_started for new
+    completed = [
+        e for e in events if isinstance(e, ActionEvent) and e.phase == "completed"
+    ]
+    started = [e for e in events if isinstance(e, ActionEvent) and e.phase == "started"]
+    assert len(completed) == 1
+    assert completed[0].action.id == action_id
+    assert len(started) == 1
+
+    # Mapping should be cleaned up
+    assert "req-kb" not in state.request_to_action
+    assert "req-kb" not in state.pending_control_requests
+
+
 # ── Diff preview gate tests ────────────────────────────────────────────────
 
 
