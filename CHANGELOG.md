@@ -1,6 +1,6 @@
 # changelog
 
-## v0.35.0 (unreleased)
+## v0.35.0 (2026-03-29)
 
 ### fixes
 
@@ -124,11 +124,6 @@
 ### docs
 
 - document OpenCode lack of auto-compaction as a known limitation — long sessions accumulate unbounded context with no automatic trimming; added to runner docs and integration testing playbook [#150](https://github.com/littlebearapps/untether/issues/150)
-
-### ci
-
-- add CODEOWNERS (`* @littlebearapps/core`), update third-party action SHA pins, add permission comments
-- add release guard hooks and document protection in CLAUDE.md
 
 ## v0.34.4 (2026-03-09)
 
