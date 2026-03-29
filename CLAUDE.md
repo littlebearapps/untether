@@ -35,6 +35,7 @@ Untether adds interactive permission control, plan mode support, and several UX 
 - **Auto-continue** — detects Claude Code sessions that exit after receiving tool results without processing them (upstream bugs #34142, #30333) and auto-resumes; suppressed on signal deaths (rc=143/SIGTERM, rc=137/SIGKILL) to prevent death spirals under memory pressure; configurable via `[auto_continue]` with `enabled` (default true) and `max_retries` (default 1)
 - **File upload deduplication** — auto-appends `_1`, `_2`, … when target file exists, instead of requiring `--force`; media groups without captions auto-save to `incoming/`
 - **Agent-initiated file delivery (outbox)** — agents write files to `.untether-outbox/` during a run; Untether sends them as Telegram documents on completion with `📎` captions; deny-glob security, size limits, file count cap, auto-cleanup; `[transports.telegram.files]` config
+- **Progress persistence** — active progress messages persisted to `active_progress.json`; on restart, orphan messages edited to "⚠️ interrupted by restart" with keyboard removed
 - **Resume line formatting** — visual separation with blank line and ↩️ prefix in final message footer
 - **`/continue`** — cross-environment resume; pick up the most recent CLI session from Telegram using each engine's native continue flag (`--continue`, `resume --last`, `--resume latest`); supported for Claude, Codex, OpenCode, Pi, Gemini (not AMP)
 
@@ -324,7 +325,7 @@ Before tagging a release:
 
 ## Documentation screenshots
 
-47 screenshots in `docs/assets/screenshots/` with a tracking checklist in `CAPTURES.md`. README uses a composite hero collage (`hero-collage.jpg`) built with ImageMagick for mobile responsiveness. Doc files use HTML `<img>` tags with `width="360"` and `loading="lazy"` (works in both GitHub and MkDocs). 14 screenshots are still missing and commented out with `<!-- TODO: capture screenshot -->` markers.
+48 screenshots in `docs/assets/screenshots/` with a tracking checklist in `CAPTURES.md`. README uses a composite hero collage (`hero-collage.jpg`) built with ImageMagick for mobile responsiveness. Doc files use HTML `<img>` tags with `width="360"` and `loading="lazy"` (works in both GitHub and MkDocs). 14 screenshots are still missing and commented out with `<!-- TODO: capture screenshot -->` markers.
 
 ## Conventions
 
