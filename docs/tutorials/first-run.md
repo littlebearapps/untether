@@ -16,10 +16,12 @@ untether
 Untether keeps running in your terminal. In Telegram, your bot will post a startup message like:
 
 !!! untether "Untether"
-    🐕 untether v0.34.0 is ready
+    🐕 untether (v0.35.0)
 
-    engine: `codex` · projects: `3`<br>
-    working in: /Users/you/dev/your-project
+    *default engine:* `codex`<br>
+    *installed engines:* claude, codex, opencode<br>
+    *directories:* 3<br>
+    mode: assistant
 
 The message is compact by default — diagnostic lines only appear when they carry signal. This tells you:
 

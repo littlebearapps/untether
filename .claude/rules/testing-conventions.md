@@ -52,13 +52,7 @@ assert all(isinstance(e, ActionEvent) for e in events[1:-1])
 
 ## Integration testing (MANDATORY before releases)
 
-Unit tests cover code paths but NOT live Telegram interaction. Before every version bump, run the structured integration test suite against `@untether_dev_bot`. See `docs/reference/integration-testing.md` for the full playbook.
-
-- **Patch**: Tier 7 (command smoke) + Tier 1 (affected engine + Claude) + relevant Tier 6
-- **Minor**: Tier 7 + Tier 1 (all 6 engines) + Tier 2 (Claude interactive) + relevant Tier 3-4 + Tier 6 + upgrade path
-- **Major**: ALL tiers (1-7), ALL engines, full upgrade path
-
-**NEVER use `@hetz_lba1_bot` (staging) for initial dev testing. ALWAYS use `@untether_dev_bot` first.** Stage rc versions on `@hetz_lba1_bot` only after dev integration tests pass.
+Unit tests cover code paths but NOT live Telegram interaction. Before every version bump, run integration tests against `@untether_dev_bot`. See `docs/reference/integration-testing.md` for the full playbook and `.claude/rules/release-discipline.md` for tier requirements per release type.
 
 ## Integration testing via Telegram MCP
 

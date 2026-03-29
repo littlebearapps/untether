@@ -89,7 +89,9 @@ The wizard offers three **workflow modes** — pick the one that fits:
 - 💡 **Actionable error hints** — friendly messages for API outages, rate limits, billing errors, and network failures with resume guidance
 - 🏷 **Model and mode metadata** — every completed message shows model with version, effort level, and permission mode (e.g. `🏷 opus 4.6 · medium · plan`) across all engines
 - 🎙️ **Voice notes** — hands full? Dictate tasks instead of typing; Untether transcribes via a configurable Whisper-compatible endpoint
-- 📎 **File transfer** — upload files to your repo, download results back, or let agents send files to you automatically via `.untether-outbox/`
+- 🔄 **Cross-environment resume** — start a session in your terminal, pick it up from Telegram with `/continue`; works with Claude Code, Codex, OpenCode, Pi, and Gemini ([guide](docs/how-to/cross-environment-resume.md))
+- 📎 **File transfer** — upload files to your repo with `/file put`, download with `/file get`; agents can also deliver files automatically by writing to `.untether-outbox/` during a run — sent as Telegram documents on completion
+- 🛡️ **Graceful recovery** — orphan progress messages cleaned up on restart; stall detection with CPU-aware diagnostics; auto-continue for Claude Code sessions that exit prematurely
 - ⏰ **Scheduled tasks** — cron expressions and webhook triggers
 - 💬 **Forum topics** — map Telegram topics to projects and branches
 - 📤 **Session export** — `/export` for markdown or JSON transcripts
@@ -122,7 +124,7 @@ The wizard offers three **workflow modes** — pick the one that fits:
 | **Progress streaming** | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | **Session resume** | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | **Model override** | ✅ | ✅ | ✅ | ✅ | ✅ | ✅¹ |
-| **Model in footer** | ✅ | — | — | — | ✅ | — |
+| **Model in footer** | ✅ | ✅ | ✅ | — | ✅ | — |
 | **Approval mode in footer** | ✅ | ~⁴ | — | — | ~² | — |
 | **Voice input** | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | **Verbose progress** | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
@@ -162,7 +164,7 @@ The wizard offers three **workflow modes** — pick the one that fits:
 | `/usage` | Show API costs for the current session |
 | `/export` | Export session transcript |
 | `/browse` | Browse project files |
-| `/new` | Clear stored sessions |
+| `/new` | Cancel running tasks and clear stored sessions |
 | `/continue` | Resume the most recent CLI session in this project ([guide](docs/how-to/cross-environment-resume.md)) |
 | `/file put/get` | Transfer files |
 | `/topic` | Create or bind forum topics |

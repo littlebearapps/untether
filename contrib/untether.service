@@ -6,8 +6,9 @@
 #   systemctl --user enable --now untether
 #
 # Key settings:
-#   KillMode=process     — only SIGTERM the main process; let the drain
-#                          mechanism gracefully finish active Claude runs
+#   KillMode=mixed       — SIGTERM only the main process first (drain logic
+#                          waits for active runs); then SIGKILL all remaining
+#                          cgroup processes (orphaned MCP servers, containers)
 #   TimeoutStopSec=150   — give the 120s drain timeout room to complete
 #                          before systemd sends SIGKILL
 
@@ -22,10 +23,12 @@ ExecStart=%h/.local/bin/untether
 Restart=always
 RestartSec=10
 
-# Graceful shutdown: only signal the main process, not child engines.
-# Without this, systemd sends SIGTERM to ALL processes in the cgroup
-# (including active Claude Code sessions), bypassing the drain mechanism.
-KillMode=process
+# Graceful shutdown: SIGTERM the main process first, then SIGKILL the rest.
+#   - process:       SIGTERM main only, but orphaned children (MCP servers,
+#                    containers) survive indefinitely across restarts
+#   - control-group: SIGTERM ALL at once, bypassing drain entirely
+#   - mixed:         SIGTERM main → drain finishes → SIGKILL remaining cgroup
+KillMode=mixed
 TimeoutStopSec=150
 
 Environment=HOME=%h

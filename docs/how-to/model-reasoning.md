@@ -30,6 +30,9 @@ To target a specific engine, include the engine name:
 
 The override applies to the current chat (or topic, if you're in a forum thread).
 
+!!! note "OpenCode: use provider/model format"
+    OpenCode requires the `provider/model` format for model overrides (e.g. `openai/gpt-4o`, `anthropic/claude-sonnet-4-5`). Using just the model name will fail. Example: `/model set opencode openai/gpt-4o`.
+
 ## Clear model override
 
 Remove the override to revert to the default:

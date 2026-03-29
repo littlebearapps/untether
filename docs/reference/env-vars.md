@@ -17,6 +17,7 @@ Untether supports a small set of environment variables for logging and runtime b
 | Variable | Description |
 |----------|-------------|
 | `TAKOPI_NO_INTERACTIVE` | Disable interactive prompts (useful for CI / non-TTY). |
+| `UNTETHER_CONFIG_PATH` | Override config file location (default `~/.untether/untether.toml`). Useful for running multiple instances or testing with alternate configs. |
 
 ## Engine-specific
 

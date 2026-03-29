@@ -43,6 +43,18 @@
 - `/config` Ask mode toggle inverted — `_toggle_row` default was `False` but display default was "on", causing the button to show "Ask: off" when the effective state was on; pressing it appeared to do nothing [#232](https://github.com/littlebearapps/untether/issues/232)
 - diff preview approval buttons not rendered after outline flow — `_outline_sent` flag in `ProgressEdits` stripped ALL subsequent approval buttons, not just outline-related ones; now only strips buttons for `DiscussApproval` actions [#233](https://github.com/littlebearapps/untether/issues/233)
 - prevent duplicate control response for already-handled requests [#229](https://github.com/littlebearapps/untether/issues/229) ([#230](https://github.com/littlebearapps/untether/issues/230))
+- fix `render_markdown` entity overflow when text ends with a fenced code block — entity offsets now clamped to the UTF-16 text length after trailing newline stripping, preventing Telegram 400 errors [#59](https://github.com/littlebearapps/untether/issues/59)
+- `/config` now reflects project-level `default_engine` — previously showed Claude-specific buttons (Plan mode, Ask mode, etc.) for chats routed to Codex/Pi via project config [#60](https://github.com/littlebearapps/untether/issues/60)
+- non-Claude runners (Codex, Pi) now populate model name in `StartedEvent.meta` — footer previously showed permission mode only (e.g. `🏷 plan`) without the model [#62](https://github.com/littlebearapps/untether/issues/62)
+- fix liveness watchdog false positive auto-cancel on long-running sessions — actively working sessions with CPU activity and TCP connections were being killed during extended thinking/processing phases [#115](https://github.com/littlebearapps/untether/issues/115)
+- fix reply-to resume when emoji prefix is present — the `↩️` prefix on resume footer lines broke all 6 engine regexes; `extract_resume()` now strips emoji prefixes before matching [#134](https://github.com/littlebearapps/untether/issues/134)
+- `/config` sub-pages now show resolved on/off values instead of "default" — body text now matches the toggle button state using `_resolve_default()`, removing the confusing mismatch [#152](https://github.com/littlebearapps/untether/issues/152)
+- expired control requests now auto-denied after 5-minute timeout — previously the timeout cleanup removed local tracking but did not send a deny response, leaving the Claude subprocess blocked indefinitely on stdin [#32](https://github.com/littlebearapps/untether/issues/32)
+- `/export` no longer returns sessions from wrong chat — session recording was not scoped by channel_id, so `/export` in one chat could return another engine's session data [#33](https://github.com/littlebearapps/untether/issues/33)
+- fix `KillMode=control-group` bypassing drain and causing 150s restart delay — `contrib/untether.service` now uses `KillMode=mixed` which sends SIGTERM to the main process first (drain works), then SIGKILL to remaining cgroup processes (orphaned MCP servers, containers cleaned up instantly) [#166](https://github.com/littlebearapps/untether/issues/166)
+  - `process`: orphaned children survive across restarts, accumulating memory (#88)
+  - `control-group`: kills all processes simultaneously, bypassing drain (#166)
+  - `mixed`: best of both — graceful drain then forced cleanup
 
 ### docs
 
@@ -81,6 +93,8 @@
   - sends "⚠️ Auto-continuing — Claude stopped before processing tool results" notification before resuming
 - emoji button labels and edit-in-place for outline approval — ExitPlanMode buttons now show ✅/❌/📋 emoji prefixes; post-outline "Approve Plan"/"Deny" edits the "Asked Claude Code to outline the plan" message in-place instead of creating a second message [#186](https://github.com/littlebearapps/untether/issues/186)
 - redesign startup message layout — version in parentheses, split engine info into "default engine" and "installed engines" lines, italic subheadings, renamed "projects" to "directories" (matching `dir:` footer label), added bug report link [#187](https://github.com/littlebearapps/untether/issues/187)
+- show token usage counts for non-Claude engines — completion footer now displays `💰 26.0k in / 71 out` for Codex, OpenCode, Pi, Gemini, and Amp when token data is available [#36](https://github.com/littlebearapps/untether/issues/36)
+- include CLI versions in startup diagnostics — startup message now shows detected engine CLI versions for easier debugging of outdated or mismatched tools [#38](https://github.com/littlebearapps/untether/issues/38)
 
 ### tests
 

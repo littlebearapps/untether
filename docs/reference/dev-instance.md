@@ -177,13 +177,21 @@ An example service file lives at `contrib/untether.service`. Two settings are
 critical for graceful shutdown:
 
 ```ini
-KillMode=process        # Only SIGTERM the main process, not child engines
+KillMode=mixed          # SIGTERM main process first, then SIGKILL remaining cgroup
 TimeoutStopSec=150      # Give the 120s drain timeout room to complete
 ```
 
-Without `KillMode=process`, systemd sends SIGTERM to **all** processes in the
-cgroup (including active Claude Code sessions), bypassing the drain mechanism
-entirely. Without `TimeoutStopSec=150`, systemd's default 90s timeout may kill
+`KillMode=mixed` sends SIGTERM only to the main Untether process first, allowing
+the drain mechanism to gracefully finish active runs. After the main process
+exits, systemd sends SIGKILL to all remaining processes in the cgroup — cleaning
+up orphaned MCP servers, containers, or other long-lived children instantly.
+
+Other modes have drawbacks:
+
+- `process` — SIGTERM main only, but orphaned children (MCP servers, Podman containers) survive across restarts, accumulating memory
+- `control-group` — SIGTERM **all** processes simultaneously, bypassing the drain mechanism entirely and killing active engine sessions (rc=143); long-lived children with restart policies can cause a 150s restart delay
+
+Without `TimeoutStopSec=150`, systemd's default 90s timeout may kill
 the process before the 120s drain finishes.
 
 To apply:

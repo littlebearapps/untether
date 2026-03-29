@@ -132,6 +132,22 @@ The stall watchdog monitors engine subprocesses for periods of inactivity (no JS
 
 **Tuning:** All thresholds are configurable via `[watchdog]` in `untether.toml`. Use `tool_timeout` to increase the initial threshold for local tools (default 10 min), and `mcp_tool_timeout` for MCP tools (default 15 min). See the [config reference](../reference/config.md#watchdog).
 
+## Claude Code exits without finishing (auto-continue)
+
+**Symptoms:** Claude Code exits after receiving tool results without processing them. You see "⚠️ Auto-continuing" in the chat, or the session ends prematurely with no final answer.
+
+This is an upstream Claude Code bug ([#34142](https://github.com/anthropics/claude-code/issues/34142), [#30333](https://github.com/anthropics/claude-code/issues/30333)). Untether detects it automatically and resumes the session.
+
+**How it works:** Normal sessions end with `last_event_type=result`. When Claude Code exits with `last_event_type=user` (tool results sent but never processed), Untether sends a "⚠️ Auto-continuing" notification and resumes the session.
+
+**If auto-continue keeps firing:**
+
+1. Check if the upstream bug is fixed in a newer Claude Code version: `npm i -g @anthropic-ai/claude-code@latest`
+2. Disable auto-continue if it causes issues: set `enabled = false` in `[auto_continue]`
+3. Increase max retries if a single retry isn't enough: set `max_retries = 2` (max 5)
+
+**Auto-continue is suppressed for signal deaths** (rc=143/SIGTERM, rc=137/SIGKILL) to prevent death spirals under memory pressure. See the [config reference](../reference/config.md#auto_continue).
+
 ## Messages too long or truncated
 
 **Symptoms:** The bot's response is cut off or split across multiple messages.

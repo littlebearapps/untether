@@ -51,6 +51,18 @@ Messages that should auto-delete when a run finishes:
 - Approval buttons: detect transitions via keyboard length changes
 - Push notification: sent separately (`notify=True`) when approval buttons appear
 
+## Outbox file delivery
+
+Agents write files to `.untether-outbox/` during a run. On completion, `outbox_delivery.py` scans, validates (deny-glob, size limit, file count cap), sends as Telegram documents with `📎` captions, and cleans up. Configure via `[transports.telegram.files]`: `outbox_enabled`, `outbox_dir`, `outbox_max_files`, `outbox_cleanup`.
+
+## Progress persistence
+
+`progress_persistence.py` tracks active progress messages in `active_progress.json`. On startup, orphan messages from a prior instance are edited to "⚠️ interrupted by restart" with keyboard removed.
+
+## Plan outline rendering
+
+Plan outlines render as formatted Telegram text via `render_markdown()` + `split_markdown_body()`. Approval buttons (✅/❌/📋) appear on the last outline message. Outline and notification messages are cleaned up on approve/deny via `_OUTLINE_REGISTRY`.
+
 ## /new command
 
 `/new` cancels all running tasks for the chat via `_cancel_chat_tasks()` (in `commands/topics.py`) before clearing stored sessions. This prevents process leaks from orphaned Claude/engine subprocesses.

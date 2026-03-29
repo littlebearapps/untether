@@ -59,6 +59,21 @@ The cleanup happens before the startup message is sent, so by the time you see "
 
 <!-- TODO: capture screenshot: orphan-cleanup — progress message showing "interrupted by restart" -->
 
+## Auto-continue (Claude Code)
+
+When Claude Code exits after receiving tool results without processing them (an upstream bug), Untether detects the premature exit and automatically resumes the session. You'll see a "⚠️ Auto-continuing" notification in the chat.
+
+Auto-continue is enabled by default. It is suppressed for signal deaths (SIGTERM, SIGKILL) to prevent death spirals under memory pressure.
+
+Configure via `[auto_continue]` in `untether.toml`:
+
+| Key | Default | Notes |
+|-----|---------|-------|
+| `enabled` | `true` | Enable automatic session resumption. |
+| `max_retries` | `1` | Maximum consecutive retries per run (1–5). |
+
+See [troubleshooting](troubleshooting.md#claude-code-exits-without-finishing-auto-continue) for details on when this triggers and how to tune it.
+
 ## Run diagnostics
 
 Run the built-in preflight check to validate your configuration:

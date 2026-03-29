@@ -52,7 +52,7 @@ If you send a file **without a caption**, Untether saves it to `incoming/<origin
 !!! note "iOS: captions on documents"
     Telegram on iOS doesn't always show a caption field when sending files via the "File" picker — the file sends immediately. To add a `/file put <path>` caption on iOS, send photos (which always show the caption field) or use **Telegram Desktop / macOS**, which shows a caption field for all file types. Alternatively, skip the caption and let files auto-save to `incoming/`.
 
-Use `--force` to overwrite:
+If the target file already exists, Untether auto-appends a numeric suffix (`_1`, `_2`, etc.) to avoid collisions — so `spec.pdf` becomes `spec_1.pdf`. Use `--force` to overwrite instead:
 
 ```
 /file put --force docs/spec.pdf
