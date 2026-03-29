@@ -216,9 +216,14 @@ def _dispatch_builtin_command(
         task_group.start_soon(handler)
         return True
 
-    if cfg.topics.enabled and topic_store is not None:
-        if command_id == "new":
-            handler = partial(
+    if command_id == "new":
+        topic_key = (
+            _topic_key(msg, cfg, scope_chat_ids=scope_chat_ids)
+            if cfg.topics.enabled and topic_store is not None
+            else None
+        )
+        if topic_key is not None:
+            handler: Callable[..., Awaitable[None]] = partial(
                 handle_new_command,
                 cfg,
                 msg,
@@ -227,7 +232,30 @@ def _dispatch_builtin_command(
                 scope_chat_ids=scope_chat_ids,
                 running_tasks=ctx.running_tasks,
             )
-        elif command_id == "topic":
+        elif ctx.chat_session_store is not None:
+            handler = partial(
+                handle_chat_new_command,
+                cfg,
+                msg,
+                ctx.chat_session_store,
+                ctx.chat_session_key,
+                running_tasks=ctx.running_tasks,
+            )
+        else:
+            # Stateless mode: just cancel running tasks and reply
+            async def _stateless_new() -> None:
+                from .commands.topics import _cancel_chat_tasks
+
+                cancelled = _cancel_chat_tasks(msg.chat_id, ctx.running_tasks)
+                label = "cancelled run" if cancelled else "no stored sessions to clear"
+                await reply(text=f"{label} for this chat.")
+
+            handler = _stateless_new
+        task_group.start_soon(handler)
+        return True
+
+    if cfg.topics.enabled and topic_store is not None:
+        if command_id == "topic":
             handler = partial(
                 handle_topic_command,
                 cfg,
@@ -444,6 +472,8 @@ class TelegramCommandContext:
     reply: Callable[..., Awaitable[None]]
     task_group: TaskGroup
     running_tasks: RunningTasks | None = None
+    chat_session_store: ChatSessionStore | None = None
+    chat_session_key: tuple[int, int | None] | None = None
 
 
 def _classify_message(
@@ -1868,46 +1898,6 @@ async def run_main_loop(
 
                 command_id = classification.command_id
                 args_text = classification.args_text
-                if command_id == "new":
-                    forward_coalescer.cancel(forward_key)
-                    if state.topic_store is not None and topic_key is not None:
-                        tg.start_soon(
-                            partial(
-                                handle_new_command,
-                                cfg,
-                                msg,
-                                state.topic_store,
-                                resolved_scope=state.resolved_topics_scope,
-                                scope_chat_ids=state.topics_chat_ids,
-                                running_tasks=state.running_tasks,
-                            )
-                        )
-                        return
-                    if state.chat_session_store is not None:
-                        tg.start_soon(
-                            partial(
-                                handle_chat_new_command,
-                                cfg,
-                                msg,
-                                state.chat_session_store,
-                                chat_session_key,
-                                running_tasks=state.running_tasks,
-                            )
-                        )
-                        return
-                    if state.topic_store is not None:
-                        tg.start_soon(
-                            partial(
-                                handle_new_command,
-                                cfg,
-                                msg,
-                                state.topic_store,
-                                resolved_scope=state.resolved_topics_scope,
-                                scope_chat_ids=state.topics_chat_ids,
-                                running_tasks=state.running_tasks,
-                            )
-                        )
-                        return
                 if command_id == "continue":
                     forward_coalescer.cancel(forward_key)
                     prompt_text = args_text.strip() if args_text else ""
@@ -1957,6 +1947,8 @@ async def run_main_loop(
                         reply=reply,
                         task_group=tg,
                         running_tasks=state.running_tasks,
+                        chat_session_store=state.chat_session_store,
+                        chat_session_key=chat_session_key,
                     ),
                     command_id=command_id,
                 ):
