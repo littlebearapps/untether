@@ -200,7 +200,7 @@ jobs:
         include:
           - task: pip-audit
             do_sync: true
-            command: uv run --no-sync pip-audit --skip-editable --progress-spinner=off
+            command: uv run --no-sync pip-audit --skip-editable --progress-spinner=off --ignore-vuln CVE-2026-4539  # pygments 2.19.2, no fix available
             sync_args: ""
           - task: bandit
             do_sync: true
