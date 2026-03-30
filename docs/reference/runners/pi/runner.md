@@ -144,3 +144,7 @@ set up credentials before using Untether.
 
 If you want, I can also add a sample `untether.toml` snippet to the README or
 include a small quickstart section for Pi in the onboarding panel.
+
+## See also
+
+- [Error Reference](../../errors.md) — actionable hints for common engine errors

@@ -65,3 +65,7 @@ OpenCode does not support automatic context compaction. Unlike Pi (which emits `
 **Workaround:** Start a fresh session with `/new` when response times degrade noticeably.
 
 If OpenCode adds compaction events in the future, Untether will need schema and runner updates following the Pi compaction pattern.
+
+## See also
+
+- [Error Reference](../../errors.md) — actionable hints for common engine errors

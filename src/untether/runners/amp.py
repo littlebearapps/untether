@@ -352,7 +352,6 @@ class AmpRunner(ResumeTokenMixin, JsonlSubprocessRunner):
         args.append("--stream-json")
         if self.stream_json_input:
             args.append("--stream-json-input")
-        args.append("--")
         args.extend(["-x", prompt])
         return args
 

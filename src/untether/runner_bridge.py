@@ -342,7 +342,10 @@ async def _maybe_append_usage_footer(
             compact = format_usage_compact(data)
             if compact:
                 footer = f"\n\u26a1 {compact}"
-                return RenderedMessage(text=msg.text + footer, extra=msg.extra)
+                return RenderedMessage(
+                    text=_insert_before_resume(msg.text, footer),
+                    extra=msg.extra,
+                )
             return msg
 
         # Threshold-based warning (existing behaviour)
@@ -367,7 +370,9 @@ async def _maybe_append_usage_footer(
             _7d_part = f" | 7d: {pct_7d:.0f}%" if pct_7d else ""
             footer = f"\n\u26a15h: {pct_5h:.0f}% ({reset}){_7d_part}"
 
-        return RenderedMessage(text=msg.text + footer, extra=msg.extra)
+        return RenderedMessage(
+            text=_insert_before_resume(msg.text, footer), extra=msg.extra
+        )
     except Exception:  # noqa: BLE001 — cosmetic footer must never block final message
         logger.debug("usage_footer.failed", exc_info=True)
         return msg
@@ -566,6 +571,17 @@ def _flatten_exception_group(error: BaseException) -> list[BaseException]:
             flattened.extend(_flatten_exception_group(exc))
         return flattened
     return [error]
+
+
+_RESUME_LINE_MARKER = "\n\n\u21a9\ufe0f "  # ↩️ with variation selector
+
+
+def _insert_before_resume(text: str, insertion: str) -> str:
+    """Insert text before the resume line, or append at end if no resume line."""
+    if _RESUME_LINE_MARKER in text:
+        idx = text.index(_RESUME_LINE_MARKER)
+        return text[:idx] + insertion + text[idx:]
+    return text + insertion
 
 
 def _format_error(error: BaseException) -> str:
@@ -1827,7 +1843,9 @@ async def handle_message(
         err_body = _format_error(error)
         hint = _get_error_hint(err_body)
         if hint:
-            err_body = f"{err_body}\n\n\N{ELECTRIC LIGHT BULB} {hint}"
+            err_body = f"\N{ELECTRIC LIGHT BULB} {hint}\n\n```\n{err_body}\n```"
+        else:
+            err_body = f"```\n{err_body}\n```"
         state = progress_tracker.snapshot(
             resume_formatter=runner.format_resume,
             context_line=context_line,
@@ -2012,25 +2030,38 @@ async def handle_message(
                 logger.debug("session.auto_clear_failed", exc_info=True)
 
     if run_ok is False and run_error:
-        error_text = str(run_error)
-        hint = _get_error_hint(error_text)
-        if hint:
-            error_text = f"{error_text}\n\n\N{ELECTRIC LIGHT BULB} {hint}"
+        raw_error = str(run_error)
+        hint = _get_error_hint(raw_error)
         if final_answer.strip():
             # Deduplicate: if the answer already starts with the error's first
             # line (common when runner sets both answer and error from the same
             # source, e.g. Claude Code subscription limits), only append the
             # diagnostic context and hint — not the repeated summary.
-            error_head = error_text.split("\n", 1)[0].strip()
+            error_head = raw_error.split("\n", 1)[0].strip()
             answer_head = final_answer.strip().split("\n", 1)[0].strip()
             if error_head and error_head == answer_head:
-                _, _, remainder = error_text.partition("\n")
+                _, _, remainder = raw_error.partition("\n")
+                parts: list[str] = [final_answer]
+                if hint:
+                    parts.append(f"\N{ELECTRIC LIGHT BULB} {hint}")
                 if remainder.strip():
-                    final_answer = f"{final_answer}\n\n{remainder.strip()}"
+                    parts.append(f"```\n{remainder.strip()}\n```")
+                final_answer = "\n\n".join(parts)
             else:
+                if hint:
+                    error_text = (
+                        f"\N{ELECTRIC LIGHT BULB} {hint}\n\n```\n{raw_error}\n```"
+                    )
+                else:
+                    error_text = f"```\n{raw_error}\n```"
                 final_answer = f"{final_answer}\n\n{error_text}"
         else:
-            final_answer = error_text
+            if hint:
+                final_answer = (
+                    f"\N{ELECTRIC LIGHT BULB} {hint}\n\n```\n{raw_error}\n```"
+                )
+            else:
+                final_answer = f"```\n{raw_error}\n```"
 
     status = (
         "error" if run_ok is False else ("done" if final_answer.strip() else "error")
@@ -2110,13 +2141,16 @@ async def handle_message(
                 else ""
             )
             final_rendered = RenderedMessage(
-                text=final_rendered.text + f"\n\U0001f4b0{cost_line}{budget_suffix}",
+                text=_insert_before_resume(
+                    final_rendered.text,
+                    f"\n\U0001f4b0{cost_line}{budget_suffix}",
+                ),
                 extra=final_rendered.extra,
             )
     elif _cost_alert_text:
         # Budget exceeded but cost display is off — show standalone alert
         final_rendered = RenderedMessage(
-            text=final_rendered.text + f"\n{_cost_alert_text}",
+            text=_insert_before_resume(final_rendered.text, f"\n{_cost_alert_text}"),
             extra=final_rendered.extra,
         )
 

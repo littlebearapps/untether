@@ -23,6 +23,10 @@ Untether keeps running in your terminal. In Telegram, your bot will post a start
     *directories:* 3<br>
     mode: assistant
 
+    Send a message to start, or /config for settings.
+
+    📖 Click here for help | 🐛 Click here to report a bug
+
 The message is compact by default — diagnostic lines only appear when they carry signal. This tells you:
 
 - Which engine is the default and how many projects are registered

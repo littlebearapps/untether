@@ -343,3 +343,7 @@ If you want a compact UI, the following is usually enough:
   primary source of `item.updated`.
 - `file_change` and `web_search` items are emitted only as `item.completed`
   in the current `codex exec --json` stream.
+
+## See also
+
+- [Error Reference](../../errors.md) — actionable hints for common engine errors

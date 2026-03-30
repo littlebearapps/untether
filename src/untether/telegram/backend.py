@@ -166,7 +166,7 @@ def _build_startup_message(
     _ISSUES_URL = "https://github.com/littlebearapps/untether/issues"
     footer = (
         f"\n\nSend a message to start, or /config for settings."
-        f"\n\N{OPEN BOOK} [Click here for help]({_DOCS_URL})"
+        f"\n\n\N{OPEN BOOK} [Click here for help]({_DOCS_URL})"
         f" | \N{BUG} [Click here to report a bug]({_ISSUES_URL})"
     )
 

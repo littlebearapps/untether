@@ -460,3 +460,7 @@ The preview is appended to the `warning_text` in the progress message. Only appl
 [3]: https://code.claude.com/docs/en/sdk/sdk-typescript "Agent SDK reference - TypeScript - Claude Docs"
 [4]: https://code.claude.com/docs/en/quickstart "Quickstart - Claude Code Docs"
 [5]: https://platform.claude.com/docs/en/agent-sdk/quickstart "Quickstart - Claude Docs"
+
+## See also
+
+- [Error Reference](../../errors.md) — actionable hints for common engine errors

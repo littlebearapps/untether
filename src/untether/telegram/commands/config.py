@@ -349,10 +349,20 @@ async def _page_home(ctx: CommandContext) -> None:
 
     _DOCS_SETTINGS = f"{_DOCS_BASE}inline-settings/"
     _DOCS_TROUBLE = f"{_DOCS_BASE}troubleshooting/"
+    _HELP_URL = (
+        "https://github.com/littlebearapps/untether?tab=readme-ov-file#-help-guides"
+    )
+    _BUG_URL = (
+        "https://github.com/littlebearapps/untether?tab=readme-ov-file#-contributing"
+    )
     lines.append("")
     lines.append(
         f'📖 <a href="{_DOCS_SETTINGS}">Settings guide</a>'
         f' · <a href="{_DOCS_TROUBLE}">Troubleshooting</a>'
+    )
+    lines.append(
+        f'📖 <a href="{_HELP_URL}">Help guides</a>'
+        f' · 🐛 <a href="{_BUG_URL}">Report a bug</a>'
     )
 
     buttons: list[list[dict[str, str]]] = []

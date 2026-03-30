@@ -32,6 +32,9 @@ Trigger: all
 [💰 Cost & usage]  [↩️ Resume line]
 [📡 Trigger]       [⚙️ Engine & model]
 [🧠 Reasoning]     [ℹ️ About]
+
+📖 Settings guide · Troubleshooting
+📖 Help guides · 🐛 Report a bug
 ```
 
 <!-- TODO: capture screenshot: config-menu-v035 — /config home page with 2-column toggle layout -->

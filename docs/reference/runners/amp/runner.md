@@ -146,3 +146,7 @@ Run `amp login` to authenticate with Sourcegraph.
 * Thread IDs use the format `T-<uuid>` (e.g., `T-2775dc92-90ed-4f85-8b73-8f9766029e83`).
 * `--stream-json-input` is passed when `stream_json_input = true` in config. The interactive control flow (approve/deny buttons in Telegram) is not yet wired — this is preliminary plumbing.
 * AMP's `--model` flag may have no effect when using hosted models (model is controlled server-side by `--mode`).
+
+## See also
+
+- [Error Reference](../../errors.md) — actionable hints for common engine errors

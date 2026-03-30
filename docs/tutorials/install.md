@@ -314,10 +314,15 @@ Press **y** or **Enter** to save. You'll see:
 Untether is now running and listening for messages!
 
 !!! untether "Untether"
-    🐕 untether v0.34.0 is ready
+    🐕 untether is ready (v0.35.0)
 
-    engine: `codex` · projects: `0`<br>
-    working in: /Users/you/dev/your-project
+    *default engine:* `codex`<br>
+    *installed engines:* codex<br>
+    mode: assistant
+
+    Send a message to start, or /config for settings.
+
+    📖 Click here for help | 🐛 Click here to report a bug
 
 <img src="../assets/screenshots/startup-message.jpg" alt="Telegram startup message showing version and engine info" width="360" loading="lazy" />
 

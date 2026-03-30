@@ -24,7 +24,7 @@ bars, no keyboard, no notification tray.
 ## Tier 2: Tutorial screenshots (12 images)
 
 - [x] `progress-streaming.jpg` — Progress message showing "working · codex · 12s" with action list.
-- [x] `final-answer-footer.jpg` — Final answer with model/cost footer and resume line.
+- [ ] `final-answer-footer.jpg` — Final answer with model/cost footer and resume line. **RECAPTURE: resume line now below cost/subscription footer.**
 - [x] `cancel-button.jpg` — Cancel button on progress and the resulting "cancelled" status.
 - [x] `deny-response.jpg` — Claude acknowledging a denial and explaining intent.
 - [x] `plan-outline-text.jpg` — Claude's written outline/plan as visible text in chat.
@@ -50,7 +50,7 @@ bars, no keyboard, no notification tray.
 - [x] `file-get.jpg` — `/file get` response with fetched file as document. (iPhone)
 - [ ] `session-auto-resume.jpg` — Chat session auto-resume. (iPhone)
 - [ ] `forum-topic-context.jpg` — Forum topic bound to project/branch with context footer. (MacBook)
-- [x] `config-menu.jpg` — `/config` home page with inline keyboard buttons. (MacBook)
+- [ ] `config-menu.jpg` — `/config` home page with inline keyboard buttons. (MacBook) **RECAPTURE: now includes help/bug links in footer.**
 - [ ] `verbose-vs-compact.jpg` — Side-by-side or sequential compact vs verbose for same action. (MacBook)
 - [ ] `webhook-notification.jpg` — Webhook-triggered run with rendered prompt and progress. (MacBook)
 - [ ] `scheduled-message.jpg` — Telegram scheduled message picker for a task. (iPhone)
@@ -65,7 +65,7 @@ bars, no keyboard, no notification tray.
 - [x] `agent-resolution.jpg` — `/agent` command output showing engine resolution layers. (MacBook)
 - [x] `engine-footer.jpg` — Engine directive in progress footer (e.g. /codex). (iPhone)
 - [ ] `route-by-chat.jpg` — Chat bound to project, message routed with project context in footer. (iPhone)
-- [x] `startup-message.jpg` — Bot startup message showing version and engine info.
+- [ ] `startup-message.jpg` — Bot startup message showing version and engine info. **RECAPTURE: now includes help/bug links on separate line.**
 - [ ] `project-init.jpg` — Terminal `untether init` showing project registration.
 - [ ] `doctor-output.jpg` — `untether doctor` output with check results.
 - [ ] `doctor-all-passing.jpg` — `untether doctor` with all checks passing.
@@ -74,7 +74,7 @@ bars, no keyboard, no notification tray.
 
 ## Tier 5: v0.35.0 features (7 images)
 
-- [ ] `config-menu-v035.jpg` — `/config` home page with 2-column toggle layout (replaces old `config-menu.jpg` when captured).
+- [ ] `config-menu-v035.jpg` — `/config` home page with 2-column toggle layout and help/bug links footer (replaces old `config-menu.jpg` when captured).
 - [ ] `outline-formatted.jpg` — Formatted plan outline with headings/bold/code blocks in Telegram.
 - [ ] `outline-buttons-bottom.jpg` — Approve/Deny buttons on the last chunk of a multi-message outline.
 - [x] `outbox-delivery.jpg` — Agent-sent files appearing as Telegram documents with `📎` captions.
