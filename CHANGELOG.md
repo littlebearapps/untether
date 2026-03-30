@@ -63,6 +63,7 @@
 
 ### changes
 
+- Gemini: default to `--approval-mode yolo` (full access) when no override is set — headless mode has no interactive approval path, so the CLI's read-only default disabled write tools entirely, causing multi-minute stalls as Gemini cascaded through sub-agents [#244](https://github.com/littlebearapps/untether/issues/244)
 - `/continue` command — cross-environment resume; pick up the most recent CLI session from Telegram using each engine's native continue flag (`--continue`, `resume --last`, `--resume latest`); supported for Claude, Codex, OpenCode, Pi, Gemini (not AMP) [#135](https://github.com/littlebearapps/untether/issues/135)
   - `ResumeToken` extended with `is_continue: bool = False`
   - all 6 runners' `build_args()` updated to handle continue tokens
@@ -119,6 +120,7 @@
 - engine command gate tests: `/planmode` Claude-only, `/usage` subscription-engine-only [#215](https://github.com/littlebearapps/untether/issues/215), [#216](https://github.com/littlebearapps/untether/issues/216)
 - export dedup test: duplicate started events deduplicated in markdown export [#218](https://github.com/littlebearapps/untether/issues/218)
 - Gemini `--prompt=` build_args test [#219](https://github.com/littlebearapps/untether/issues/219)
+- Gemini integration test stall diagnosed — root cause was missing `--approval-mode yolo` in test chat config; Gemini CLI defaults to read-only mode with write tools disabled; set full access via `/config` for `ut-dev-hf: gemini` test chat; U1 now passes in 56s (was 8–18 min stall) [#244](https://github.com/littlebearapps/untether/issues/244)
 - 10 new `/new` cancellation tests: `_cancel_chat_tasks` helper (None, empty, matching, other chats, already cancelled, multiple), chat `/new` with running task, cancel-only no sessions, no tasks no sessions, topic `/new` with running task [#222](https://github.com/littlebearapps/untether/issues/222)
 - 12 new auto-continue signal death tests: `_is_signal_death` (SIGTERM, SIGKILL, negative, normal, None), `_should_auto_continue` (rc=143, rc=137, rc=-9, rc=-15 blocked; rc=0, rc=None, rc=1 allowed), `proc_returncode` default on `JsonlStreamState` [#222](https://github.com/littlebearapps/untether/issues/222)
 

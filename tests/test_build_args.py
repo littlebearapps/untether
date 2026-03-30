@@ -320,6 +320,25 @@ class TestGeminiBuildArgs:
         idx = args.index("--approval-mode")
         assert args[idx + 1] == "auto_edit"
 
+    def test_permission_mode_none_defaults_to_yolo(self) -> None:
+        runner = self._runner()
+        state = runner.new_state("hello", None)
+        opts = RunOptions(permission_mode=None)
+        with patch("untether.runners.gemini.get_run_options", return_value=opts):
+            args = runner.build_args("hello", None, state=state)
+        assert "--approval-mode" in args
+        idx = args.index("--approval-mode")
+        assert args[idx + 1] == "yolo"
+
+    def test_run_options_none_defaults_to_yolo(self) -> None:
+        runner = self._runner()
+        state = runner.new_state("hello", None)
+        with patch("untether.runners.gemini.get_run_options", return_value=None):
+            args = runner.build_args("hello", None, state=state)
+        assert "--approval-mode" in args
+        idx = args.index("--approval-mode")
+        assert args[idx + 1] == "yolo"
+
 
 # ---------------------------------------------------------------------------
 # AMP

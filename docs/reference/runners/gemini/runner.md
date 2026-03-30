@@ -138,7 +138,7 @@ Run `gemini` once interactively to authenticate with Google AI Studio or Vertex 
 ## Known pitfalls
 
 * Gemini has no `--stream-json-input` mode, so interactive features (approve/deny, plan mode toggle) are not possible in headless mode.
-* `--approval-mode` is passed through from `permission_mode` run options and **does affect tool access** in headless mode: `auto_edit` blocks shell commands while allowing file reads/writes; `yolo` auto-approves everything; the default mode denies most tool calls. Untether exposes three tiers via `/config`: read-only (default), edit files (`auto_edit`), and full access (`yolo`).
+* `--approval-mode` controls tool access in headless mode. Untether defaults to `yolo` (full access — all tools auto-approved) when no override is set, since headless mode has no interactive approval path. Without this default, Gemini's CLI read-only mode disables write tools (`run_shell_command`, `write_file`, `edit_file`), causing most tasks to stall as the agent cascades through sub-agents. Users can restrict via `/config` → Approval mode: edit files (`auto_edit`, blocks shell but allows file operations) or read-only (denies most tool calls).
 * Tool names are snake_case (e.g., `read_file`) unlike Claude Code's PascalCase — the runner normalises these.
 
 ## See also

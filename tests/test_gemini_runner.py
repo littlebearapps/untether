@@ -351,11 +351,13 @@ def test_build_args_approval_mode_from_run_options() -> None:
     assert "plan" in args
 
 
-def test_build_args_no_approval_mode_by_default() -> None:
+def test_build_args_defaults_to_yolo_approval_mode() -> None:
     runner = GeminiRunner()
     state = GeminiStreamState()
     args = runner.build_args("hello", None, state=state)
-    assert "--approval-mode" not in args
+    assert "--approval-mode" in args
+    idx = args.index("--approval-mode")
+    assert args[idx + 1] == "yolo"
 
 
 def test_orphan_tool_result_ignored() -> None:

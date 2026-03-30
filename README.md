@@ -147,7 +147,7 @@ The wizard offers three **workflow modes** — pick the one that fits:
 | **Cross-env resume (`/continue`)** | ✅ | ✅ | ✅ | ✅⁵ | ✅ | —⁶ |
 
 ¹ Amp model override maps to `--mode` (deep/free/rush/smart).
-² Toggle via `/config` between read-only (default), edit files (`--approval-mode=auto_edit`, files OK but no shell), and full access (`--approval-mode=yolo`); pre-run policy, not interactive mid-run approval.
+² Defaults to full access (`--approval-mode=yolo`, all tools auto-approved); toggle via `/config` to edit files (`auto_edit`, files OK but no shell) or read-only; pre-run policy, not interactive mid-run approval.
 ³ Token usage counts only — no USD cost reporting.
 ⁴ Toggle via `/config` between full auto (default) and safe (`--ask-for-approval=untrusted`, untrusted tools blocked); pre-run policy, not interactive mid-run approval.
 ⁵ Pi requires `provider = "openai-codex"` in engine config for OAuth subscriptions in headless mode.
