@@ -162,8 +162,8 @@ def _build_startup_message(
         n_cr = len(trigger_config.get("crons", []))
         details.append(f"_triggers:_ `enabled ({n_wh} webhooks, {n_cr} crons)`")
 
-    _DOCS_URL = "https://littlebearapps.com/tools/untether/"
-    _ISSUES_URL = "https://github.com/littlebearapps/untether/issues"
+    _DOCS_URL = "https://github.com/littlebearapps/untether?tab=readme-ov-file#-help-guides"
+    _ISSUES_URL = "https://github.com/littlebearapps/untether?tab=readme-ov-file#-contributing"
     footer = (
         f"\n\nSend a message to start, or /config for settings."
         f"\n\n\N{OPEN BOOK} [Click here for help]({_DOCS_URL})"

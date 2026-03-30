@@ -143,7 +143,7 @@ def test_startup_message_core_fields() -> None:
     assert "_triggers:_" not in message
     # Quick-start hint and help link
     assert "/config" in message
-    assert "littlebearapps.com" in message
+    assert "help-guides" in message
     assert "report a bug" in message
 
 
