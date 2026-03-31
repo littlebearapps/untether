@@ -11,7 +11,6 @@ from untether.markdown import (
 from untether.model import Action, ActionKind
 from untether.progress import ActionState, ProgressState
 
-
 # --- format_verbose_detail tests ---
 
 

@@ -1,8 +1,8 @@
 import pytest
 
+from tests.plugin_fixtures import FakeEntryPoint, install_entrypoints
 from untether import plugins, transports
 from untether.config import ConfigError
-from tests.plugin_fixtures import FakeEntryPoint, install_entrypoints
 
 
 class DummyTransport:

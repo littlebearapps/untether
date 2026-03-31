@@ -10,8 +10,8 @@ import typer
 from pydantic import BaseModel
 
 from ..config import (
-    ConfigError,
     HOME_CONFIG_PATH,
+    ConfigError,
     dump_toml,
     read_config,
     write_config,

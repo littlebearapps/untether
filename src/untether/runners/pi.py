@@ -4,7 +4,7 @@ import os
 import re
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
-from datetime import datetime, UTC
+from datetime import UTC, datetime
 from pathlib import Path, PurePath
 from typing import Any
 from uuid import uuid4
@@ -34,9 +34,9 @@ from ..runner import (
     _session_label,
     _stderr_excerpt,
 )
-from .run_options import get_run_options
 from ..schemas import pi as pi_schema
 from ..utils.paths import get_run_base_dir
+from .run_options import get_run_options
 from .tool_actions import tool_kind_and_title
 
 logger = get_logger(__name__)

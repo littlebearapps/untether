@@ -1,9 +1,9 @@
 from __future__ import annotations
 
 import time
-from dataclasses import dataclass, field
-from typing import Any, TYPE_CHECKING
 from collections.abc import Awaitable, Callable, Hashable
+from dataclasses import dataclass, field
+from typing import TYPE_CHECKING, Any
 
 import anyio
 
@@ -142,7 +142,7 @@ class TelegramOutbox:
     async def execute_op(self, op: OutboxOp) -> Any:
         try:
             return await op.execute()
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             if isinstance(exc, RetryAfter):
                 logger.info(
                     "outbox.op.retry_after",

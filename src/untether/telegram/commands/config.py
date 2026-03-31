@@ -256,7 +256,8 @@ async def _page_home(ctx: CommandContext) -> None:
 
     # Resolve cost & usage label to effective values
     if show_cost_usage:
-        from ...settings import FooterSettings, load_settings_if_exists as _load_cu_cfg
+        from ...settings import FooterSettings
+        from ...settings import load_settings_if_exists as _load_cu_cfg
 
         try:
             _cu_result = _load_cu_cfg()
@@ -480,8 +481,8 @@ _GEMINI_AM_MODES: dict[str, str] = {"ya": "yolo", "ae": "auto_edit"}
 async def _page_planmode(ctx: CommandContext, action: str | None = None) -> None:
     from ..chat_prefs import ChatPrefsStore, resolve_prefs_path
     from ..engine_overrides import (
-        EngineOverrides,
         PERMISSION_MODE_SUPPORTED_ENGINES,
+        EngineOverrides,
     )
 
     config_path = ctx.config_path
@@ -1453,8 +1454,8 @@ async def _page_cost_usage(ctx: CommandContext, action: str | None = None) -> No
     from ..chat_prefs import ChatPrefsStore, resolve_prefs_path
     from ..engine_overrides import (
         API_COST_SUPPORTED_ENGINES,
-        EngineOverrides,
         SUBSCRIPTION_USAGE_SUPPORTED_ENGINES,
+        EngineOverrides,
     )
 
     config_path = ctx.config_path
@@ -1542,7 +1543,7 @@ async def _page_cost_usage(ctx: CommandContext, action: str | None = None) -> No
         lines.append("")
 
     if has_sub_usage:
-        su_label = "on" if su is True else ("off" if su is False else "off")
+        su_label = "on" if su is True else "off"
         lines.append(f"<b>Subscription usage</b>: {su_label}")
         lines.append("  Show how much of your 5h/weekly quota is used.")
         lines.append("")
@@ -1581,8 +1582,8 @@ async def _page_cost_usage(ctx: CommandContext, action: str | None = None) -> No
         )
         lines.append(f"  Auto-cancel: {bc_label}")
     else:
-        bg_label = "on" if bg is True else ("off" if bg is False else "off")
-        bc_label = "on" if bc is True else ("off" if bc is False else "off")
+        bg_label = "on" if bg is True else "off"
+        bc_label = "on" if bc is True else "off"
         lines.append(f"  Enabled: {bg_label}")
         lines.append(f"  Auto-cancel: {bc_label}")
     lines.append("  Set limits in untether.toml [cost_budget] section.")

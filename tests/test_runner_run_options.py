@@ -2,7 +2,8 @@ from untether.model import ResumeToken
 from untether.runners.claude import ClaudeRunner
 from untether.runners.codex import CodexRunner
 from untether.runners.opencode import OpenCodeRunner, OpenCodeStreamState
-from untether.runners.pi import ENGINE as PI_ENGINE, PiRunner, PiStreamState
+from untether.runners.pi import ENGINE as PI_ENGINE
+from untether.runners.pi import PiRunner, PiStreamState
 from untether.runners.run_options import EngineRunOptions, apply_run_options
 
 

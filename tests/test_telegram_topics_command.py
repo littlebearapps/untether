@@ -3,12 +3,18 @@ from pathlib import Path
 
 import pytest
 
-from untether.runner_bridge import RunningTask
-from untether.settings import TelegramTopicsSettings
+from tests.telegram_fakes import (
+    DEFAULT_ENGINE_ID,
+    FakeTransport,
+    _make_router,
+    make_cfg,
+)
 from untether.config import ProjectConfig, ProjectsConfig
+from untether.runner_bridge import RunningTask
 from untether.runners.mock import Return, ScriptRunner
-from untether.telegram.chat_sessions import ChatSessionStore
+from untether.settings import TelegramTopicsSettings
 from untether.telegram.chat_prefs import ChatPrefsStore, resolve_prefs_path
+from untether.telegram.chat_sessions import ChatSessionStore
 from untether.telegram.commands.topics import (
     _cancel_chat_tasks,
     _handle_chat_ctx_command,
@@ -20,12 +26,6 @@ from untether.telegram.commands.topics import (
 from untether.telegram.topic_state import TopicStateStore
 from untether.telegram.types import TelegramIncomingMessage
 from untether.transport import MessageRef
-from tests.telegram_fakes import (
-    DEFAULT_ENGINE_ID,
-    FakeTransport,
-    _make_router,
-    make_cfg,
-)
 from untether.transport_runtime import TransportRuntime
 
 

@@ -1,33 +1,26 @@
 from __future__ import annotations
 
-# ruff: noqa: F401
-
-from collections.abc import Callable
 import sys
+
+# ruff: noqa: F401
+from collections.abc import Callable
 from pathlib import Path
 
 import typer
 
 from .. import __version__
+from ..commands import get_command
 from ..config import (
-    ConfigError,
     HOME_CONFIG_PATH,
+    ConfigError,
     load_or_init_config,
     write_config,
 )
 from ..config_migrations import migrate_config
-from ..commands import get_command
 from ..engines import get_backend, list_backend_ids
 from ..ids import RESERVED_CHAT_COMMANDS, RESERVED_COMMAND_IDS, RESERVED_ENGINE_IDS
 from ..lockfile import LockError, LockHandle, acquire_lock, token_fingerprint
 from ..logging import setup_logging
-from ..runtime_loader import build_runtime_spec, resolve_plugins_allowlist
-from ..settings import (
-    UntetherSettings,
-    load_settings,
-    load_settings_if_exists,
-    validate_settings_data,
-)
 from ..plugins import (
     COMMAND_GROUP,
     ENGINE_GROUP,
@@ -38,11 +31,36 @@ from ..plugins import (
     list_entrypoints,
     normalize_allowlist,
 )
-from ..transports import get_transport
-from ..utils.git import resolve_default_base, resolve_main_worktree_root
+from ..runtime_loader import build_runtime_spec, resolve_plugins_allowlist
+from ..settings import (
+    UntetherSettings,
+    load_settings,
+    load_settings_if_exists,
+    validate_settings_data,
+)
 from ..telegram import onboarding
 from ..telegram.client import TelegramClient
 from ..telegram.topics import _validate_topics_setup_for
+from ..transports import get_transport
+from ..utils.git import resolve_default_base, resolve_main_worktree_root
+from .config import (
+    _CONFIG_PATH_OPTION,
+    _config_path_display,
+    _exit_config_error,
+    _fail_missing_config,
+    _flatten_config,
+    _load_config_or_exit,
+    _normalized_value_from_settings,
+    _parse_key_path,
+    _parse_value,
+    _resolve_config_path_override,
+    _toml_literal,
+    config_get,
+    config_list,
+    config_path_cmd,
+    config_set,
+    config_unset,
+)
 from .doctor import (
     DoctorCheck,
     DoctorStatus,
@@ -71,24 +89,6 @@ from .run import (
     acquire_config_lock,
     app_main,
     make_engine_cmd,
-)
-from .config import (
-    _CONFIG_PATH_OPTION,
-    _config_path_display,
-    _exit_config_error,
-    _fail_missing_config,
-    _flatten_config,
-    _load_config_or_exit,
-    _normalized_value_from_settings,
-    _parse_key_path,
-    _parse_value,
-    _resolve_config_path_override,
-    _toml_literal,
-    config_get,
-    config_list,
-    config_path_cmd,
-    config_set,
-    config_unset,
 )
 
 

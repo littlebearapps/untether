@@ -41,8 +41,8 @@ from ..runner import (
     _session_label,
     _stderr_excerpt,
 )
-from .run_options import get_run_options
 from ..schemas import amp as amp_schema
+from .run_options import get_run_options
 from .tool_actions import tool_input_path, tool_kind_and_title
 
 logger = get_logger(__name__)

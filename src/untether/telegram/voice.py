@@ -4,9 +4,9 @@ import io
 from collections.abc import Awaitable, Callable
 from typing import Protocol
 
-from ..logging import get_logger
 from openai import AsyncOpenAI, OpenAIError
 
+from ..logging import get_logger
 from .client import BotClient
 from .types import TelegramIncomingMessage
 

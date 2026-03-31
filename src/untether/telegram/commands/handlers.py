@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-# ruff: noqa: F401
-
 from .agent import _handle_agent_command as handle_agent_command
 from .dispatch import _dispatch_callback as dispatch_callback
 from .dispatch import _dispatch_command as dispatch_command
@@ -17,8 +15,8 @@ from .menu import _set_command_menu as set_command_menu
 from .model import _handle_model_command as handle_model_command
 from .parse import _parse_slash_command as parse_slash_command
 from .reasoning import _handle_reasoning_command as handle_reasoning_command
-from .topics import _handle_chat_new_command as handle_chat_new_command
 from .topics import _handle_chat_ctx_command as handle_chat_ctx_command
+from .topics import _handle_chat_new_command as handle_chat_new_command
 from .topics import _handle_ctx_command as handle_ctx_command
 from .topics import _handle_new_command as handle_new_command
 from .topics import _handle_topic_command as handle_topic_command
@@ -28,7 +26,6 @@ __all__ = [
     "dispatch_callback",
     "dispatch_command",
     "get_reserved_commands",
-    "parse_callback_data",
     "handle_agent_command",
     "handle_chat_ctx_command",
     "handle_chat_new_command",
@@ -41,6 +38,7 @@ __all__ = [
     "handle_reasoning_command",
     "handle_topic_command",
     "handle_trigger_command",
+    "parse_callback_data",
     "parse_slash_command",
     "run_engine",
     "save_file_put",

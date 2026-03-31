@@ -10,7 +10,6 @@ from untether.commands import CommandContext, CommandResult
 from untether.telegram.commands.ping import BACKEND, _format_uptime
 from untether.transport import MessageRef
 
-
 # ---------------------------------------------------------------------------
 # _format_uptime
 # ---------------------------------------------------------------------------

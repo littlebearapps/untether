@@ -362,7 +362,7 @@ async def test_edits_coalesce_latest() -> None:
 
     with anyio.fail_after(1):
         while len(bot.edit_calls) < 2:
-            await anyio.sleep(0)
+            await anyio.lowlevel.checkpoint()
 
     assert bot.edit_calls == ["first", "third"]
 
@@ -390,7 +390,7 @@ async def test_send_preempts_pending_edit() -> None:
 
     with anyio.fail_after(1):
         while len(bot.calls) < 3:
-            await anyio.sleep(0)
+            await anyio.lowlevel.checkpoint()
     assert bot.calls[0] == "edit_message_text"
     assert bot.calls[1] == "send_message"
     assert bot.calls[-1] == "edit_message_text"
@@ -422,7 +422,7 @@ async def test_delete_drops_pending_edits() -> None:
 
     with anyio.fail_after(1):
         while not bot.delete_calls:
-            await anyio.sleep(0)
+            await anyio.lowlevel.checkpoint()
     assert bot.delete_calls == [(1, 1)]
     assert bot.edit_calls == ["first"]
 
@@ -546,7 +546,7 @@ async def test_per_chat_pacing_independent() -> None:
 
     with anyio.fail_after(2):
         while len(results) < 2:
-            await anyio.sleep(0)
+            await anyio.lowlevel.checkpoint()
 
     assert len(results) == 2
     assert "chat_100" in results
@@ -590,7 +590,7 @@ async def test_private_not_blocked_by_group_interval() -> None:
 
     with anyio.fail_after(2):
         while len(executed) < 2:
-            await anyio.sleep(0)
+            await anyio.lowlevel.checkpoint()
 
     assert len(executed) == 2
     # Private chat should NOT have waited 3s for the group interval
@@ -639,7 +639,7 @@ async def test_retry_after_blocks_all_chats() -> None:
 
     with anyio.fail_after(5):
         while len(executed) < 2:
-            await anyio.sleep(0)
+            await anyio.lowlevel.checkpoint()
 
     # retry_at should have caused a sleep of 5.0s for all chats
     assert 5.0 in sleep_log
@@ -683,7 +683,7 @@ async def test_cross_chat_priority() -> None:
 
     with anyio.fail_after(2):
         while len(order) < 2:
-            await anyio.sleep(0)
+            await anyio.lowlevel.checkpoint()
 
     assert order == ["send_A", "edit_B"]
     # No sleep between them: different chats
@@ -725,7 +725,7 @@ async def test_same_chat_pacing_preserved() -> None:
 
     with anyio.fail_after(5):
         while len(executed) < 2:
-            await anyio.sleep(0)
+            await anyio.lowlevel.checkpoint()
 
     assert executed == [1, 2]
     # Should have slept 1.0s (private interval) between the two ops
@@ -757,7 +757,7 @@ async def test_many_concurrent_chats() -> None:
 
     with anyio.fail_after(5):
         while len(executed) < 7:
-            await anyio.sleep(0)
+            await anyio.lowlevel.checkpoint()
 
     assert len(executed) == 7
     assert set(executed) == set(chat_ids)
@@ -802,7 +802,7 @@ async def test_none_chat_id_independent() -> None:
 
     with anyio.fail_after(2):
         while len(executed) < 2:
-            await anyio.sleep(0)
+            await anyio.lowlevel.checkpoint()
 
     assert len(executed) == 2
     assert "none" in executed

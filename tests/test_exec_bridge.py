@@ -5,19 +5,19 @@ import uuid
 import anyio
 import pytest
 
+from tests.factories import action_completed, action_started
+from untether.markdown import MarkdownParts, MarkdownPresenter
+from untether.model import ResumeToken, UntetherEvent
 from untether.progress import ProgressTracker
 from untether.runner_bridge import (
+    _EPHEMERAL_MSGS,
     ExecBridgeConfig,
     IncomingMessage,
     ProgressEdits,
-    _EPHEMERAL_MSGS,
     _format_run_cost,
     handle_message,
     register_ephemeral_message,
 )
-from untether.markdown import MarkdownParts, MarkdownPresenter
-from untether.model import ResumeToken, UntetherEvent
-from untether.telegram.render import prepare_telegram
 from untether.runners.codex import CodexRunner
 from untether.runners.mock import (
     Advance,
@@ -29,8 +29,8 @@ from untether.runners.mock import (
     Wait,
 )
 from untether.settings import load_settings, require_telegram
+from untether.telegram.render import prepare_telegram
 from untether.transport import MessageRef, RenderedMessage, SendOptions
-from tests.factories import action_completed, action_started
 
 CODEX_ENGINE = "codex"
 
@@ -419,7 +419,7 @@ async def test_handle_message_cancelled_renders_cancelled_state() -> None:
         for _ in range(100):
             if running_tasks:
                 break
-            await anyio.sleep(0)
+            await anyio.lowlevel.checkpoint()
         assert running_tasks
         running_task = running_tasks[next(iter(running_tasks))]
         with anyio.fail_after(1):
@@ -532,15 +532,15 @@ async def test_progress_edits_deletes_approval_notification_on_button_disappear(
 
         async def run_one_cycle() -> None:
             # Let the edit loop run one iteration
-            await anyio.sleep(0)
-            await anyio.sleep(0)
+            await anyio.lowlevel.checkpoint()
+            await anyio.lowlevel.checkpoint()
             # Now remove approval buttons and trigger another iteration
             presenter.set_no_approval()
             edits.event_seq = 2
             with contextlib.suppress(anyio.WouldBlock):
                 edits.signal_send.send_nowait(None)
-            await anyio.sleep(0)
-            await anyio.sleep(0)
+            await anyio.lowlevel.checkpoint()
+            await anyio.lowlevel.checkpoint()
             # Close the signal to end the loop
             edits.signal_send.close()
 
@@ -1093,16 +1093,16 @@ async def test_progress_edits_survives_transport_error() -> None:
             edits.event_seq = 1
             with contextlib.suppress(anyio.WouldBlock):
                 edits.signal_send.send_nowait(None)
-            await anyio.sleep(0)
-            await anyio.sleep(0)
+            await anyio.lowlevel.checkpoint()
+            await anyio.lowlevel.checkpoint()
 
             # Second edit — transport succeeds this time
             presenter.set_no_approval()  # change rendered text to trigger an edit
             edits.event_seq = 2
             with contextlib.suppress(anyio.WouldBlock):
                 edits.signal_send.send_nowait(None)
-            await anyio.sleep(0)
-            await anyio.sleep(0)
+            await anyio.lowlevel.checkpoint()
+            await anyio.lowlevel.checkpoint()
 
             edits.signal_send.close()
 
@@ -1495,8 +1495,8 @@ async def test_progress_edits_debounce_skips_first_render() -> None:
             edits.event_seq = 1
             with contextlib.suppress(anyio.WouldBlock):
                 edits.signal_send.send_nowait(None)
-            await anyio.sleep(0)
-            await anyio.sleep(0)
+            await anyio.lowlevel.checkpoint()
+            await anyio.lowlevel.checkpoint()
             edits.signal_send.close()
 
         tg.start_soon(edits.run)
@@ -1531,8 +1531,8 @@ async def test_progress_edits_debounce_delays_second_render() -> None:
             edits.event_seq = 1
             with contextlib.suppress(anyio.WouldBlock):
                 edits.signal_send.send_nowait(None)
-            await anyio.sleep(0)
-            await anyio.sleep(0)
+            await anyio.lowlevel.checkpoint()
+            await anyio.lowlevel.checkpoint()
 
             # Advance clock by 0.5s — less than the 2.0s interval
             clock.set(0.5)
@@ -1540,8 +1540,8 @@ async def test_progress_edits_debounce_delays_second_render() -> None:
             edits.event_seq = 2
             with contextlib.suppress(anyio.WouldBlock):
                 edits.signal_send.send_nowait(None)
-            await anyio.sleep(0)
-            await anyio.sleep(0)
+            await anyio.lowlevel.checkpoint()
+            await anyio.lowlevel.checkpoint()
 
             edits.signal_send.close()
 
@@ -1575,16 +1575,16 @@ async def test_progress_edits_debounce_zero_interval_no_delay() -> None:
             edits.event_seq = 1
             with contextlib.suppress(anyio.WouldBlock):
                 edits.signal_send.send_nowait(None)
-            await anyio.sleep(0)
-            await anyio.sleep(0)
+            await anyio.lowlevel.checkpoint()
+            await anyio.lowlevel.checkpoint()
 
             # Advance clock so the rendered text changes (elapsed_s differs)
             clock.set(5.0)
             edits.event_seq = 2
             with contextlib.suppress(anyio.WouldBlock):
                 edits.signal_send.send_nowait(None)
-            await anyio.sleep(0)
-            await anyio.sleep(0)
+            await anyio.lowlevel.checkpoint()
+            await anyio.lowlevel.checkpoint()
 
             edits.signal_send.close()
 
@@ -1635,12 +1635,12 @@ async def test_progress_edits_notification_does_not_block_render() -> None:
             edits.event_seq = 2
             with contextlib.suppress(anyio.WouldBlock):
                 edits.signal_send.send_nowait(None)
-            await anyio.sleep(0)
-            await anyio.sleep(0)
+            await anyio.lowlevel.checkpoint()
+            await anyio.lowlevel.checkpoint()
 
             # Unblock the slow send and close
             send_proceed.set()
-            await anyio.sleep(0)
+            await anyio.lowlevel.checkpoint()
             edits.signal_send.close()
 
         tg.start_soon(edits.run)
@@ -1672,16 +1672,16 @@ async def test_progress_edits_debounce_no_delay_when_interval_elapsed() -> None:
             edits.event_seq = 1
             with contextlib.suppress(anyio.WouldBlock):
                 edits.signal_send.send_nowait(None)
-            await anyio.sleep(0)
-            await anyio.sleep(0)
+            await anyio.lowlevel.checkpoint()
+            await anyio.lowlevel.checkpoint()
 
             # Advance clock well past the interval
             clock.set(10.0)
             edits.event_seq = 2
             with contextlib.suppress(anyio.WouldBlock):
                 edits.signal_send.send_nowait(None)
-            await anyio.sleep(0)
-            await anyio.sleep(0)
+            await anyio.lowlevel.checkpoint()
+            await anyio.lowlevel.checkpoint()
 
             edits.signal_send.close()
 
@@ -1716,14 +1716,14 @@ async def test_progress_edits_end_of_stream_exits_during_debounce() -> None:
             edits.event_seq = 1
             with contextlib.suppress(anyio.WouldBlock):
                 edits.signal_send.send_nowait(None)
-            await anyio.sleep(0)
-            await anyio.sleep(0)
+            await anyio.lowlevel.checkpoint()
+            await anyio.lowlevel.checkpoint()
 
             # Second event, then immediately cancel the scope
             edits.event_seq = 2
             with contextlib.suppress(anyio.WouldBlock):
                 edits.signal_send.send_nowait(None)
-            await anyio.sleep(0)
+            await anyio.lowlevel.checkpoint()
             edits_scope.cancel()
 
         tg.start_soon(run_edits)
@@ -1754,9 +1754,9 @@ async def test_progress_edits_notification_failure_does_not_crash() -> None:
             edits.event_seq = 1
             with contextlib.suppress(anyio.WouldBlock):
                 edits.signal_send.send_nowait(None)
-            await anyio.sleep(0)
-            await anyio.sleep(0)
-            await anyio.sleep(0)
+            await anyio.lowlevel.checkpoint()
+            await anyio.lowlevel.checkpoint()
+            await anyio.lowlevel.checkpoint()
 
             edits.signal_send.close()
 
@@ -1915,7 +1915,7 @@ async def test_progress_edits_stall_recovery_clears_warning() -> None:
 
     # Receive a new event
     clock.set(200.0)
-    from untether.model import ActionEvent, Action
+    from untether.model import Action, ActionEvent
 
     evt = ActionEvent(
         engine="codex",
@@ -2045,6 +2045,7 @@ async def test_stall_auto_cancel_dead_process() -> None:
 
     # Patch collect_proc_diag to return dead process
     from unittest.mock import patch
+
     from untether.utils.proc_diag import ProcessDiag
 
     dead_diag = ProcessDiag(pid=99999, alive=False)
@@ -2114,6 +2115,7 @@ async def test_stall_auto_cancel_no_pid_no_events() -> None:
 async def test_stall_auto_cancel_max_warnings() -> None:
     """Stall monitor auto-cancels after _STALL_MAX_WARNINGS absolute cap."""
     from unittest.mock import patch
+
     from untether.utils.proc_diag import ProcessDiag
 
     transport = FakeTransport()
@@ -2158,6 +2160,7 @@ async def test_stall_auto_cancel_max_warnings() -> None:
 async def test_stall_no_auto_cancel_without_cancel_event() -> None:
     """Stall auto-cancel logs but doesn't crash when cancel_event is None."""
     from unittest.mock import patch
+
     from untether.utils.proc_diag import ProcessDiag
 
     transport = FakeTransport()
@@ -2865,9 +2868,9 @@ def test_frozen_ring_count_resets_on_event() -> None:
     edits._stall_warned = True
     edits._stall_warn_count = 3
 
-    from untether.model import Action, ActionEvent
-
     import asyncio
+
+    from untether.model import Action, ActionEvent
 
     asyncio.run(
         edits.on_event(
@@ -2898,7 +2901,7 @@ async def test_send_or_edit_message_edit_fail_fallback() -> None:
     class _FailEditTransport(FakeTransport):
         async def edit(self, *, ref, message, wait=True):
             self.edit_calls.append({"ref": ref, "message": message, "wait": wait})
-            return None  # simulate edit failure
+            return  # simulate edit failure
 
     transport = _FailEditTransport()
     edit_ref = MessageRef(channel_id=123, message_id=99)
@@ -2968,8 +2971,8 @@ async def test_keyboard_edit_failure_logged() -> None:
     async with anyio.create_task_group() as tg:
 
         async def drive() -> None:
-            await anyio.sleep(0)
-            await anyio.sleep(0)
+            await anyio.lowlevel.checkpoint()
+            await anyio.lowlevel.checkpoint()
             edits.signal_send.close()
 
         tg.start_soon(edits.run)
@@ -3007,6 +3010,7 @@ async def test_stall_auto_cancel_suppressed_by_cpu_activity() -> None:
     (extended thinking) should not be auto-cancelled at max_warnings.
     """
     from unittest.mock import patch
+
     from untether.utils.proc_diag import ProcessDiag
 
     transport = FakeTransport()
@@ -3077,6 +3081,7 @@ async def test_stall_auto_cancel_fires_with_flat_cpu() -> None:
     ensure the guard only suppresses when CPU is genuinely active.
     """
     from unittest.mock import patch
+
     from untether.utils.proc_diag import ProcessDiag
 
     transport = FakeTransport()
@@ -3130,6 +3135,7 @@ async def test_stall_auto_cancel_fires_with_flat_cpu() -> None:
 async def test_stall_notification_suppressed_when_cpu_active() -> None:
     """Stall notifications suppressed when cpu_active=True; heartbeat re-renders fire."""
     from unittest.mock import patch
+
     from untether.utils.proc_diag import ProcessDiag
 
     transport = FakeTransport()
@@ -3190,6 +3196,7 @@ async def test_stall_notification_suppressed_when_cpu_active() -> None:
 async def test_stall_notification_fires_when_cpu_inactive() -> None:
     """Stall notifications should fire when cpu_active=False (flat CPU)."""
     from unittest.mock import patch
+
     from untether.utils.proc_diag import ProcessDiag
 
     transport = FakeTransport()
@@ -3241,6 +3248,7 @@ async def test_stall_not_suppressed_when_main_sleeping() -> None:
     sleeping (state=S) — CPU activity is from child processes (hung Bash tool),
     not from Claude doing extended thinking."""
     from unittest.mock import patch
+
     from untether.utils.proc_diag import ProcessDiag
 
     transport = FakeTransport()
@@ -3304,6 +3312,7 @@ async def test_stall_not_suppressed_when_main_sleeping() -> None:
 async def test_stall_message_includes_tool_name_when_sleeping() -> None:
     """Stall message should mention the tool name when main process is sleeping."""
     from unittest.mock import patch
+
     from untether.utils.proc_diag import ProcessDiag
 
     transport = FakeTransport()
@@ -3380,6 +3389,7 @@ async def test_stall_tool_active_suppressed_after_first_warning() -> None:
     """When main sleeping + cpu active + tool running, the first stall warning
     fires but repeats are suppressed (heartbeat only)."""
     from unittest.mock import patch
+
     from untether.utils.proc_diag import ProcessDiag
 
     transport = FakeTransport()
@@ -3460,6 +3470,7 @@ async def test_stall_tool_active_not_suppressed_when_cpu_idle() -> None:
     """When main sleeping + cpu NOT active + tool running, stall warnings
     should continue firing (tool may be genuinely stuck)."""
     from unittest.mock import patch
+
     from untether.utils.proc_diag import ProcessDiag
 
     transport = FakeTransport()
@@ -3531,6 +3542,7 @@ async def test_stall_tool_active_suppressed_even_with_frozen_ring() -> None:
     are suppressed even if the ring buffer is frozen — because no JSONL events
     during tool execution is expected (the child process is working)."""
     from unittest.mock import patch
+
     from untether.utils.proc_diag import ProcessDiag
 
     transport = FakeTransport()
@@ -3624,7 +3636,7 @@ async def test_outline_messages_rendered_with_entities() -> None:
     async with anyio.create_task_group() as tg:
         await edits._send_outline(outline, tg)
         # Let the background task complete
-        await anyio.sleep(0)
+        await anyio.lowlevel.checkpoint()
 
     # Should have sent one message (short text)
     outline_sends = [
@@ -3650,7 +3662,7 @@ async def test_outline_last_message_has_approval_keyboard() -> None:
     outline = "## Plan\n\nStep 1.\n\nStep 2."
     async with anyio.create_task_group() as tg:
         await edits._send_outline(outline, tg, approval_keyboard=approval_kb)
-        await anyio.sleep(0)
+        await anyio.lowlevel.checkpoint()
 
     # The last sent message should have the approval keyboard
     last_send = transport.send_calls[-1]
@@ -3669,7 +3681,7 @@ async def test_outline_multi_chunk_keyboard_only_on_last() -> None:
     outline = "## Section\n\n" + "x" * 3000 + "\n\n## Section 2\n\n" + "y" * 3000
     async with anyio.create_task_group() as tg:
         await edits._send_outline(outline, tg, approval_keyboard=approval_kb)
-        await anyio.sleep(0)
+        await anyio.lowlevel.checkpoint()
 
     outline_sends = list(transport.send_calls)
     assert len(outline_sends) >= 2
@@ -3689,7 +3701,7 @@ async def test_outline_refs_tracked() -> None:
     outline = "## Plan\n\nDo things."
     async with anyio.create_task_group() as tg:
         await edits._send_outline(outline, tg)
-        await anyio.sleep(0)
+        await anyio.lowlevel.checkpoint()
 
     assert len(edits._outline_refs) == 1
     assert edits._outline_refs[0] == transport.send_calls[-1]["ref"]
@@ -3712,8 +3724,8 @@ async def test_outline_messages_deleted_on_approval_transition() -> None:
 
         async def run_cycle() -> None:
             # Let first render (with approval) complete
-            await anyio.sleep(0)
-            await anyio.sleep(0)
+            await anyio.lowlevel.checkpoint()
+            await anyio.lowlevel.checkpoint()
             # Manually inject outline refs (simulating _send_outline)
             outline_ref = MessageRef(channel_id=123, message_id=999)
             edits._outline_refs.append(outline_ref)
@@ -3722,8 +3734,8 @@ async def test_outline_messages_deleted_on_approval_transition() -> None:
             edits.event_seq = 2
             with contextlib.suppress(anyio.WouldBlock):
                 edits.signal_send.send_nowait(None)
-            await anyio.sleep(0)
-            await anyio.sleep(0)
+            await anyio.lowlevel.checkpoint()
+            await anyio.lowlevel.checkpoint()
             edits.signal_send.close()
 
         tg.start_soon(edits.run)
@@ -3752,8 +3764,8 @@ async def test_outline_deleted_on_keyboard_change() -> None:
 
         async def run_cycle() -> None:
             # Let first render (with approval) complete
-            await anyio.sleep(0)
-            await anyio.sleep(0)
+            await anyio.lowlevel.checkpoint()
+            await anyio.lowlevel.checkpoint()
             # Inject outline refs
             outline_ref = MessageRef(channel_id=123, message_id=888)
             edits._outline_refs.append(outline_ref)
@@ -3766,8 +3778,8 @@ async def test_outline_deleted_on_keyboard_change() -> None:
             edits.event_seq = 2
             with contextlib.suppress(anyio.WouldBlock):
                 edits.signal_send.send_nowait(None)
-            await anyio.sleep(0)
-            await anyio.sleep(0)
+            await anyio.lowlevel.checkpoint()
+            await anyio.lowlevel.checkpoint()
             edits.signal_send.close()
 
         tg.start_soon(edits.run)
@@ -3851,8 +3863,8 @@ async def test_outline_sent_strips_approval_from_progress() -> None:
     async with anyio.create_task_group() as tg:
 
         async def run_cycle() -> None:
-            await anyio.sleep(0)
-            await anyio.sleep(0)
+            await anyio.lowlevel.checkpoint()
+            await anyio.lowlevel.checkpoint()
             edits.signal_send.close()
 
         tg.start_soon(edits.run)
@@ -3883,15 +3895,15 @@ async def test_outline_state_resets_on_approval_disappear() -> None:
 
         async def run_cycle() -> None:
             # First cycle: approval with outline_sent → stripped
-            await anyio.sleep(0)
-            await anyio.sleep(0)
+            await anyio.lowlevel.checkpoint()
+            await anyio.lowlevel.checkpoint()
             # Now buttons disappear (approval resolved)
             presenter.set_no_approval()
             edits.event_seq = 2
             with contextlib.suppress(anyio.WouldBlock):
                 edits.signal_send.send_nowait(None)
-            await anyio.sleep(0)
-            await anyio.sleep(0)
+            await anyio.lowlevel.checkpoint()
+            await anyio.lowlevel.checkpoint()
             edits.signal_send.close()
 
         tg.start_soon(edits.run)
@@ -3912,7 +3924,7 @@ async def test_outbox_files_sent_after_completion(tmp_path) -> None:
     from unittest.mock import AsyncMock
 
     from untether.settings import TelegramFilesSettings
-    from untether.utils.paths import set_run_base_dir, reset_run_base_dir
+    from untether.utils.paths import reset_run_base_dir, set_run_base_dir
 
     outbox = tmp_path / ".untether-outbox"
     outbox.mkdir()
@@ -3944,7 +3956,7 @@ async def test_outbox_files_sent_after_completion(tmp_path) -> None:
 @pytest.mark.anyio
 async def test_outbox_not_scanned_when_disabled(tmp_path) -> None:
     """Outbox is not scanned when send_file callback is None."""
-    from untether.utils.paths import set_run_base_dir, reset_run_base_dir
+    from untether.utils.paths import reset_run_base_dir, set_run_base_dir
 
     outbox = tmp_path / ".untether-outbox"
     outbox.mkdir()
@@ -3975,7 +3987,7 @@ async def test_outbox_not_scanned_on_error(tmp_path) -> None:
     from unittest.mock import AsyncMock
 
     from untether.settings import TelegramFilesSettings
-    from untether.utils.paths import set_run_base_dir, reset_run_base_dir
+    from untether.utils.paths import reset_run_base_dir, set_run_base_dir
 
     outbox = tmp_path / ".untether-outbox"
     outbox.mkdir()

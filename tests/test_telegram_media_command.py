@@ -3,13 +3,13 @@ from pathlib import Path
 
 import pytest
 
+from tests.telegram_fakes import FakeTransport, make_cfg
 from untether.context import RunContext
 from untether.settings import TelegramFilesSettings
 from untether.telegram.commands import media as media_commands
 from untether.telegram.commands.file_transfer import _FilePutResult, _SavedFilePutGroup
 from untether.telegram.types import TelegramDocument, TelegramIncomingMessage
 from untether.transport_runtime import ResolvedMessage
-from tests.telegram_fakes import FakeTransport, make_cfg
 
 
 def _msg(

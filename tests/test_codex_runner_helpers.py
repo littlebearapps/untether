@@ -9,8 +9,8 @@ from untether.config import ConfigError
 from untether.events import EventFactory
 from untether.model import ActionEvent, CompletedEvent, StartedEvent
 from untether.runners.codex import (
-    _AgentMessageSummary,
     CodexRunner,
+    _AgentMessageSummary,
     _format_change_summary,
     _normalize_change_list,
     _parse_reconnect_message,

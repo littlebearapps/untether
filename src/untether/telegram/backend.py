@@ -10,8 +10,8 @@ from .. import __version__
 from ..backends import EngineBackend
 from ..config import read_config
 from ..logging import get_logger
-from ..runner_bridge import ExecBridgeConfig
 from ..markdown import MarkdownFormatter
+from ..runner_bridge import ExecBridgeConfig
 from ..settings import (
     ProgressSettings,
     TelegramTopicsSettings,

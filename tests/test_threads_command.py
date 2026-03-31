@@ -10,12 +10,12 @@ import pytest
 
 from untether.commands import CommandContext
 from untether.telegram.commands.threads import (
+    _THREAD_REGISTRY,
     ThreadsCommand,
     _format_thread_detail,
     _format_thread_list,
     _register_thread,
     _resolve_thread,
-    _THREAD_REGISTRY,
 )
 from untether.transport import MessageRef, RenderedMessage
 

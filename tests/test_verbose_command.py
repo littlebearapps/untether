@@ -7,9 +7,9 @@ from typing import Any
 import pytest
 
 from untether.telegram.commands.verbose import (
+    _VERBOSE_OVERRIDES,
     BACKEND,
     VerboseCommand,
-    _VERBOSE_OVERRIDES,
     get_verbosity_override,
 )
 

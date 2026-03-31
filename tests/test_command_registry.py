@@ -1,8 +1,8 @@
 import pytest
 
+from tests.plugin_fixtures import FakeEntryPoint, install_entrypoints
 from untether import commands, plugins
 from untether.config import ConfigError
-from tests.plugin_fixtures import FakeEntryPoint, install_entrypoints
 
 
 class DummyCommand:
@@ -11,7 +11,7 @@ class DummyCommand:
 
     async def handle(self, ctx):
         _ = ctx
-        return None
+        return
 
 
 @pytest.fixture

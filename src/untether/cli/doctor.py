@@ -14,7 +14,7 @@ from ..config import ConfigError
 from ..engines import list_backend_ids
 from ..ids import RESERVED_CHAT_COMMANDS
 from ..runtime_loader import resolve_plugins_allowlist
-from ..settings import UntetherSettings, TelegramTopicsSettings
+from ..settings import TelegramTopicsSettings, UntetherSettings
 from ..telegram.client import TelegramClient
 from ..telegram.topics import _validate_topics_setup_for
 

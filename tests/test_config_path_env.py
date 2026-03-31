@@ -7,7 +7,6 @@ from pathlib import Path
 from untether.config import HOME_CONFIG_PATH, load_or_init_config
 from untether.settings import _resolve_config_path, load_settings
 
-
 ENV_VAR = "UNTETHER_CONFIG_PATH"
 
 

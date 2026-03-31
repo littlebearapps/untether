@@ -8,9 +8,9 @@ import pytest
 import untether.runners.claude as claude_runner
 from untether.model import ActionEvent, CompletedEvent, ResumeToken, StartedEvent
 from untether.runners.claude import (
+    ENGINE,
     ClaudeRunner,
     ClaudeStreamState,
-    ENGINE,
     translate_claude_event,
 )
 from untether.schemas import claude as claude_schema
@@ -264,7 +264,7 @@ async def test_run_serializes_same_session() -> None:
     async with anyio.create_task_group() as tg:
         tg.start_soon(drain, "a", token)
         tg.start_soon(drain, "b", token)
-        await anyio.sleep(0)
+        await anyio.lowlevel.checkpoint()
         gate.set()
     assert max_in_flight == 1
 

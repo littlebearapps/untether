@@ -1,11 +1,10 @@
 from __future__ import annotations
 
-from collections.abc import Iterable
+import re
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from importlib.metadata import EntryPoint, entry_points
-import re
 from typing import Any
-from collections.abc import Callable
 
 from .ids import ID_PATTERN, is_valid_id
 from .logging import get_logger

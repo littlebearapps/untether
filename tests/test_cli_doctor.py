@@ -5,8 +5,7 @@ from typer.testing import CliRunner
 
 from untether import cli
 from untether.config import ConfigError
-from untether.settings import UntetherSettings
-from untether.settings import TelegramTopicsSettings
+from untether.settings import TelegramTopicsSettings, UntetherSettings
 from untether.telegram.api_models import Chat, User
 
 

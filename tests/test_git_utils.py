@@ -1,8 +1,14 @@
-from pathlib import Path
 import subprocess
+from pathlib import Path
 
-from untether.utils.git import git_is_worktree, git_ok, git_run, git_stdout
-from untether.utils.git import resolve_default_base, resolve_main_worktree_root
+from untether.utils.git import (
+    git_is_worktree,
+    git_ok,
+    git_run,
+    git_stdout,
+    resolve_default_base,
+    resolve_main_worktree_root,
+)
 
 
 def test_resolve_main_worktree_root_returns_none_when_no_git(monkeypatch) -> None:
@@ -41,10 +47,10 @@ def test_resolve_main_worktree_root_returns_cwd_for_bare_repo(monkeypatch) -> No
 def test_resolve_default_base_prefers_master_over_main(monkeypatch) -> None:
     def _fake_stdout(args, **kwargs):
         if args[:2] == ["symbolic-ref", "-q"]:
-            return None
+            return
         if args == ["branch", "--show-current"]:
-            return None
-        return None
+            return
+        return
 
     def _fake_ok(args, **kwargs):
         return args in (

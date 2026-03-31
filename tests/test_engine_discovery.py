@@ -1,12 +1,11 @@
 from typing import cast
 
-import pytest
-
 import click
+import pytest
 import typer
 
-from untether import cli, engines, plugins
 from tests.plugin_fixtures import FakeEntryPoint, install_entrypoints
+from untether import cli, engines, plugins
 
 
 @pytest.fixture

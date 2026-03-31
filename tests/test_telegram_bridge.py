@@ -5,17 +5,29 @@ from typing import Any, cast
 import anyio
 import pytest
 
-from untether import commands, plugins
-from untether.telegram.commands.executor import _CaptureTransport, _run_engine
-from untether.telegram.commands.file_transfer import _handle_file_get, _handle_file_put
-from untether.telegram.commands.model import _handle_model_command
-from untether.telegram.commands.reasoning import _handle_reasoning_command
-from untether.telegram.commands.topics import _handle_topic_command
 import untether.telegram.loop as telegram_loop
 import untether.telegram.topics as telegram_topics
+from tests.plugin_fixtures import FakeEntryPoint, install_entrypoints
+from tests.telegram_fakes import (
+    FakeBot,
+    FakeTransport,
+    _empty_projects,
+    _make_router,
+    make_cfg,
+)
+from untether import commands, plugins
+from untether.config import ProjectConfig, ProjectsConfig
+from untether.context import RunContext
 from untether.directives import parse_directives
-from untether.telegram.api_models import Chat, File, ForumTopic, Message, Update, User
+from untether.markdown import MarkdownPresenter
+from untether.model import ResumeToken
+from untether.progress import ProgressTracker
+from untether.router import AutoRouter, RunnerEntry
+from untether.runner_bridge import ExecBridgeConfig, RunningTask
+from untether.runners.mock import Return, ScriptRunner, Sleep, Wait
+from untether.scheduler import ThreadScheduler
 from untether.settings import TelegramFilesSettings, TelegramTopicsSettings
+from untether.telegram.api_models import Chat, File, ForumTopic, Message, Update, User
 from untether.telegram.bridge import (
     TelegramBridgeConfig,
     TelegramPresenter,
@@ -27,22 +39,17 @@ from untether.telegram.bridge import (
     run_main_loop,
     send_with_resume,
 )
+from untether.telegram.chat_prefs import ChatPrefsStore, resolve_prefs_path
+from untether.telegram.chat_sessions import ChatSessionStore, resolve_sessions_path
 from untether.telegram.client import BotClient
+from untether.telegram.commands.executor import _CaptureTransport, _run_engine
+from untether.telegram.commands.file_transfer import _handle_file_get, _handle_file_put
+from untether.telegram.commands.model import _handle_model_command
+from untether.telegram.commands.reasoning import _handle_reasoning_command
+from untether.telegram.commands.topics import _handle_topic_command
+from untether.telegram.engine_overrides import EngineOverrides
 from untether.telegram.render import MAX_BODY_CHARS
 from untether.telegram.topic_state import TopicStateStore, resolve_state_path
-from untether.telegram.chat_sessions import ChatSessionStore, resolve_sessions_path
-from untether.telegram.chat_prefs import ChatPrefsStore, resolve_prefs_path
-from untether.telegram.engine_overrides import EngineOverrides
-from untether.context import RunContext
-from untether.config import ProjectConfig, ProjectsConfig
-from untether.runner_bridge import ExecBridgeConfig, RunningTask
-from untether.markdown import MarkdownPresenter
-from untether.model import ResumeToken
-from untether.progress import ProgressTracker
-from untether.router import AutoRouter, RunnerEntry
-from untether.scheduler import ThreadScheduler
-from untether.transport_runtime import TransportRuntime
-from untether.runners.mock import Return, ScriptRunner, Sleep, Wait
 from untether.telegram.types import (
     TelegramCallbackQuery,
     TelegramDocument,
@@ -50,14 +57,7 @@ from untether.telegram.types import (
     TelegramVoice,
 )
 from untether.transport import MessageRef, RenderedMessage, SendOptions
-from tests.plugin_fixtures import FakeEntryPoint, install_entrypoints
-from tests.telegram_fakes import (
-    FakeBot,
-    FakeTransport,
-    _empty_projects,
-    make_cfg,
-    _make_router,
-)
+from untether.transport_runtime import TransportRuntime
 
 CODEX_ENGINE = "codex"
 FAST_FORWARD_COALESCE_S = 0.0
@@ -69,7 +69,7 @@ DEBOUNCE_FORWARD_COALESCE_S = 0.05
 class _NoopTaskGroup:
     def start_soon(self, func, *args: Any) -> None:
         _ = func, args
-        return None
+        return
 
 
 def test_parse_directives_inline_engine() -> None:
@@ -190,7 +190,7 @@ def test_build_bot_commands_includes_command_plugins(monkeypatch) -> None:
 
         async def handle(self, ctx):
             _ = ctx
-            return None
+            return
 
     entrypoints = [
         FakeEntryPoint(
@@ -1538,7 +1538,7 @@ async def test_send_with_resume_waits_for_token() -> None:
     running_task = RunningTask()
 
     async def trigger_resume() -> None:
-        await anyio.sleep(0)
+        await anyio.lowlevel.checkpoint()
         running_task.resume = ResumeToken(engine=CODEX_ENGINE, value="abc123")
         running_task.resume_ready.set()
 
@@ -1732,11 +1732,11 @@ async def test_run_main_loop_routes_reply_to_running_resume() -> None:
         try:
             with anyio.fail_after(2):
                 await reply_ready.wait()
-            await anyio.sleep(0)
+            await anyio.lowlevel.checkpoint()
             hold.set()
             with anyio.fail_after(2):
                 while len(runner.calls) < 2:
-                    await anyio.sleep(0)
+                    await anyio.lowlevel.checkpoint()
             assert runner.calls[1][1] == ResumeToken(
                 engine=CODEX_ENGINE, value=resume_value
             )
@@ -3724,7 +3724,7 @@ async def test_run_main_loop_mentions_only_skips_voice_and_files(
     async def fake_handle_file_put_default(*args, **kwargs):
         _ = args, kwargs
         calls["file"] += 1
-        return None
+        return
 
     monkeypatch.setattr(telegram_loop, "transcribe_voice", fake_transcribe_voice)
     monkeypatch.setattr(

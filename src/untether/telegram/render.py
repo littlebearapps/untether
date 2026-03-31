@@ -1,12 +1,11 @@
 from __future__ import annotations
 
+import importlib.util
+import logging
 import re
 from dataclasses import dataclass
 from typing import Any
 from urllib.parse import urlparse
-
-import importlib.util
-import logging
 
 from markdown_it import MarkdownIt
 from sulguk import transform_html
@@ -224,7 +223,7 @@ def _scan_fence_state(text: str, state: _FenceState | None) -> _FenceState | Non
 
 
 def _ensure_trailing_newline(text: str) -> str:
-    if text.endswith("\n") or text.endswith("\r"):
+    if text.endswith(("\n", "\r")):
         return text
     return text + "\n"
 

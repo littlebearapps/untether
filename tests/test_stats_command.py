@@ -15,7 +15,6 @@ from untether.telegram.commands.stats import (
     format_stats_message,
 )
 
-
 # ── Duration formatting ────────────────────────────────────────────────────
 
 

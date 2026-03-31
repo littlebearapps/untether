@@ -14,6 +14,12 @@ from pathlib import Path
 import anyio
 import pytest
 
+from tests.telegram_fakes import (
+    FakeBot,
+    FakeTransport,
+    _empty_projects,
+    _make_router,
+)
 from untether.markdown import MarkdownPresenter
 from untether.model import ResumeToken
 from untether.runner_bridge import ExecBridgeConfig
@@ -30,12 +36,6 @@ from untether.telegram.commands.executor import (
 from untether.telegram.loop import ResumeResolver, _chat_session_key
 from untether.telegram.types import TelegramIncomingMessage
 from untether.transport_runtime import TransportRuntime
-from tests.telegram_fakes import (
-    FakeBot,
-    FakeTransport,
-    _empty_projects,
-    _make_router,
-)
 
 CODEX_ENGINE = "codex"
 FAST_FORWARD_COALESCE_S = 0.0

@@ -4,20 +4,20 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from typing import Literal, cast
 
+from ..context import RunContext
 from ..logging import get_logger
 from ..markdown import MarkdownFormatter, MarkdownParts
+from ..model import ResumeToken
 from ..progress import ProgressState
 from ..runner_bridge import ExecBridgeConfig, RunningTask, RunningTasks
-from ..transport import MessageRef, RenderedMessage, SendOptions, Transport
-from ..transport_runtime import TransportRuntime
-from ..context import RunContext
-from ..model import ResumeToken
 from ..scheduler import ThreadScheduler
 from ..settings import (
     TelegramFilesSettings,
     TelegramTopicsSettings,
     TelegramTransportSettings,
 )
+from ..transport import MessageRef, RenderedMessage, SendOptions, Transport
+from ..transport_runtime import TransportRuntime
 from .client import BotClient
 from .render import MAX_BODY_CHARS, prepare_telegram, prepare_telegram_multi
 from .types import TelegramCallbackQuery, TelegramIncomingMessage

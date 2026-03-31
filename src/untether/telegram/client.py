@@ -2,8 +2,8 @@ from __future__ import annotations
 
 import itertools
 import time
-from typing import Any
 from collections.abc import Awaitable, Callable, Hashable
+from typing import Any
 
 import anyio
 import httpx

@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 # Headless JSONL schema derived from tag rust-v0.77.0 (git 112f40e91c12af0f7146d7e03f20283516a8af0b).
-
 from typing import Any, Literal
 
 import msgspec

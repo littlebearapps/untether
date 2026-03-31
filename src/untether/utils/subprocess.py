@@ -14,7 +14,7 @@ from ..logging import get_logger
 logger = get_logger(__name__)
 
 
-async def wait_for_process(proc: Process, timeout: float) -> bool:
+async def wait_for_process(proc: Process, timeout: float) -> bool:  # noqa: ASYNC109
     with anyio.move_on_after(timeout) as scope:
         await proc.wait()
     return scope.cancel_called

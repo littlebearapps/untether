@@ -9,8 +9,8 @@ from ...commands import CommandContext, get_command
 from ...config import ConfigError
 from ...logging import get_logger
 from ...model import EngineId, ResumeToken
-from ...runners.run_options import EngineRunOptions
 from ...runner_bridge import RunningTasks, register_ephemeral_message
+from ...runners.run_options import EngineRunOptions
 from ...scheduler import ThreadScheduler
 from ...transport import MessageRef, RenderedMessage, SendOptions
 from ..files import split_command_args

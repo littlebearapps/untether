@@ -2,9 +2,10 @@ from collections.abc import Callable
 
 import pytest
 
-from untether.telegram.bridge import TelegramBridgeConfig
+from tests.telegram_fakes import FakeBot, FakeTransport
+from tests.telegram_fakes import make_cfg as build_cfg
 from untether.runners.mock import ScriptRunner
-from tests.telegram_fakes import FakeBot, FakeTransport, make_cfg as build_cfg
+from untether.telegram.bridge import TelegramBridgeConfig
 
 
 @pytest.fixture

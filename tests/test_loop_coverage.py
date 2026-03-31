@@ -19,13 +19,12 @@ from untether.telegram.engine_overrides import EngineOverrides
 from untether.telegram.loop import (
     ForwardCoalescer,
     ForwardKey,
-    _PendingPrompt,
     _drain_backlog,
     _forward_key,
+    _PendingPrompt,
     _resolve_engine_run_options,
 )
 from untether.telegram.types import TelegramIncomingMessage
-
 
 # ---------------------------------------------------------------------------
 # Helpers

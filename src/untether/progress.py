@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
 from collections.abc import Callable
+from dataclasses import dataclass
 from typing import Any
 
 from .model import Action, ActionEvent, ResumeToken, StartedEvent, UntetherEvent

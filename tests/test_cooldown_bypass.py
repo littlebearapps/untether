@@ -10,23 +10,23 @@ whether Claude Code has written substantial outline text (>= 200 chars):
 
 from __future__ import annotations
 
-import pytest
-
 from unittest.mock import AsyncMock
+
+import pytest
 
 from untether.model import ActionEvent, ResumeToken
 from untether.runners.claude import (
-    ClaudeRunner,
-    ClaudeStreamState,
     _ACTIVE_RUNNERS,
     _DISCUSS_APPROVED,
     _DISCUSS_COOLDOWN,
+    _OUTLINE_MIN_CHARS,
     _OUTLINE_PENDING,
     _REQUEST_TO_INPUT,
     _REQUEST_TO_SESSION,
     _REQUEST_TO_TOOL_NAME,
     _SESSION_STDIN,
-    _OUTLINE_MIN_CHARS,
+    ClaudeRunner,
+    ClaudeStreamState,
     set_discuss_cooldown,
     translate_claude_event,
 )

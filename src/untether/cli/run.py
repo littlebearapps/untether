@@ -207,10 +207,10 @@ def _run_auto_router(
     lock_handle: LockHandle | None = None
     try:
         (
-            settings_hint,
-            config_hint,
+            _settings_hint,
+            _config_hint,
             allowlist,
-            default_engine,
+            _default_engine,
             engine_backend,
         ) = resolve_setup_engine_fn(default_engine_override)
         transport_id = resolve_transport_id_fn(transport_override)
@@ -225,10 +225,10 @@ def _run_auto_router(
         if not anyio.run(partial(transport_backend.interactive_setup, force=True)):
             raise typer.Exit(code=1)
         (
-            settings_hint,
-            config_hint,
+            _settings_hint,
+            _config_hint,
             allowlist,
-            default_engine,
+            _default_engine,
             engine_backend,
         ) = resolve_setup_engine_fn(default_engine_override)
     setup = transport_backend.check_setup(
@@ -248,10 +248,10 @@ def _run_auto_router(
                     partial(transport_backend.interactive_setup, force=True)
                 ):
                     (
-                        settings_hint,
-                        config_hint,
+                        _settings_hint,
+                        _config_hint,
                         allowlist,
-                        default_engine,
+                        _default_engine,
                         engine_backend,
                     ) = resolve_setup_engine_fn(default_engine_override)
                     setup = transport_backend.check_setup(
@@ -260,10 +260,10 @@ def _run_auto_router(
                     )
             elif anyio.run(partial(transport_backend.interactive_setup, force=False)):
                 (
-                    settings_hint,
-                    config_hint,
+                    _settings_hint,
+                    _config_hint,
                     allowlist,
-                    default_engine,
+                    _default_engine,
                     engine_backend,
                 ) = resolve_setup_engine_fn(default_engine_override)
                 setup = transport_backend.check_setup(

@@ -2,9 +2,8 @@
 
 from __future__ import annotations
 
-from untether.model import ActionEvent
+from untether.model import ActionEvent, ResumeToken
 from untether.runners.pi import PiStreamState, translate_pi_event
-from untether.model import ResumeToken
 from untether.schemas import pi as pi_schema
 
 

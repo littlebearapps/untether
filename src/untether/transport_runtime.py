@@ -47,11 +47,11 @@ class ResolvedRunner:
 
 class TransportRuntime:
     __slots__ = (
-        "_router",
-        "_projects",
         "_allowlist",
         "_config_path",
         "_plugin_configs",
+        "_projects",
+        "_router",
         "_watch_config",
     )
 

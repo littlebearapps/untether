@@ -13,10 +13,6 @@ import pytest
 from untether.events import EventFactory
 from untether.model import ActionEvent, ResumeToken
 from untether.runners.claude import (
-    DISCUSS_COOLDOWN_BASE_SECONDS,
-    ClaudeRunner,
-    ClaudeStreamState,
-    ENGINE,
     _ACTIVE_RUNNERS,
     _DISCUSS_APPROVED,
     _DISCUSS_COOLDOWN,
@@ -26,6 +22,10 @@ from untether.runners.claude import (
     _REQUEST_TO_SESSION,
     _REQUEST_TO_TOOL_NAME,
     _SESSION_STDIN,
+    DISCUSS_COOLDOWN_BASE_SECONDS,
+    ENGINE,
+    ClaudeRunner,
+    ClaudeStreamState,
     _cleanup_session_registries,
     check_discuss_cooldown,
     clear_discuss_cooldown,
@@ -34,7 +34,6 @@ from untether.runners.claude import (
     translate_claude_event,
 )
 from untether.schemas import claude as claude_schema
-
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -759,9 +758,9 @@ def test_early_answer_toast_values() -> None:
 async def test_discuss_action_sends_deny_with_custom_message() -> None:
     """Discuss action sends a deny with the outline-plan deny message."""
     from untether.telegram.commands.claude_control import (
-        ClaudeControlCommand,
         _DISCUSS_DENY_MESSAGE,
         _DISCUSS_FEEDBACK_REFS,
+        ClaudeControlCommand,
     )
 
     runner = ClaudeRunner(claude_cmd="claude")
@@ -1655,8 +1654,8 @@ def test_diff_preview_edit_shows_diff_text() -> None:
 async def test_deny_exit_plan_mode_uses_specific_message() -> None:
     """Denying ExitPlanMode sends the specific 'do not retry' deny message."""
     from untether.telegram.commands.claude_control import (
-        ClaudeControlCommand,
         _EXIT_PLAN_DENY_MESSAGE,
+        ClaudeControlCommand,
     )
 
     runner = ClaudeRunner(claude_cmd="claude")
@@ -1703,8 +1702,8 @@ async def test_deny_exit_plan_mode_uses_specific_message() -> None:
 async def test_deny_non_exit_plan_mode_uses_generic_message() -> None:
     """Denying a non-ExitPlanMode tool uses the generic deny message."""
     from untether.telegram.commands.claude_control import (
-        ClaudeControlCommand,
         _DENY_MESSAGE,
+        ClaudeControlCommand,
     )
 
     runner = ClaudeRunner(claude_cmd="claude")
@@ -1829,8 +1828,8 @@ async def test_discuss_approve_edits_feedback_message() -> None:
     """Post-outline 'Approve Plan' edits the discuss feedback message."""
     from untether.commands import CommandContext
     from untether.telegram.commands.claude_control import (
-        ClaudeControlCommand,
         _DISCUSS_FEEDBACK_REFS,
+        ClaudeControlCommand,
     )
     from untether.transport import MessageRef
 
@@ -1875,8 +1874,8 @@ async def test_discuss_deny_edits_feedback_message() -> None:
     """Post-outline 'Deny' edits the discuss feedback message."""
     from untether.commands import CommandContext
     from untether.telegram.commands.claude_control import (
-        ClaudeControlCommand,
         _DISCUSS_FEEDBACK_REFS,
+        ClaudeControlCommand,
     )
     from untether.transport import MessageRef
 
@@ -1955,8 +1954,8 @@ async def test_normal_approve_edits_feedback_when_outline_ref_exists() -> None:
     """Normal approve (real request_id, not da:) edits discuss feedback if ref stored."""
     from untether.commands import CommandContext
     from untether.telegram.commands.claude_control import (
-        ClaudeControlCommand,
         _DISCUSS_FEEDBACK_REFS,
+        ClaudeControlCommand,
     )
     from untether.transport import MessageRef
 

@@ -7,8 +7,8 @@ from dataclasses import dataclass, field
 import pytest
 
 from untether.runner_bridge import RunningTask
-from untether.transport import MessageRef, RenderedMessage, SendOptions
 from untether.telegram.loop import _notify_drain_start, _notify_drain_timeout
+from untether.transport import MessageRef, RenderedMessage, SendOptions
 
 
 @dataclass

@@ -2,8 +2,8 @@ from __future__ import annotations
 
 import os
 import shutil
-from contextlib import contextmanager
 from collections.abc import Awaitable, Callable
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal, Protocol, cast
@@ -55,9 +55,9 @@ __all__ = [
     "ChatInfo",
     "check_setup",
     "debug_onboarding_paths",
+    "get_bot_info",
     "interactive_setup",
     "mask_token",
-    "get_bot_info",
     "wait_for_chat",
 ]
 

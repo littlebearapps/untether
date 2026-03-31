@@ -1,16 +1,16 @@
 from __future__ import annotations
 
 import os
+from collections.abc import Iterable
 from pathlib import Path
 from typing import Annotated, Any, ClassVar, Literal
-from collections.abc import Iterable
 
 from pydantic import (
     BaseModel,
     ConfigDict,
     Field,
-    ValidationError,
     StringConstraints,
+    ValidationError,
     field_validator,
     model_validator,
 )
@@ -19,8 +19,8 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 from pydantic_settings.sources import TomlConfigSettingsSource
 
 from .config import (
-    ConfigError,
     HOME_CONFIG_PATH,
+    ConfigError,
     ProjectConfig,
     ProjectsConfig,
 )

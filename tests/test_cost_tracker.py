@@ -2,10 +2,9 @@
 
 from __future__ import annotations
 
-
 from untether.cost_tracker import (
-    CostBudget,
     CostAlert,
+    CostBudget,
     check_run_budget,
     format_cost_alert,
     get_daily_cost,

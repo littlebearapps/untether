@@ -21,7 +21,7 @@ logger = get_logger(__name__)
 
 
 class EventFactory:
-    __slots__ = ("engine", "_resume")
+    __slots__ = ("_resume", "engine")
 
     def __init__(self, engine: EngineId) -> None:
         self.engine = engine

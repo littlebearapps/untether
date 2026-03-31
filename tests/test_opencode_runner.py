@@ -497,7 +497,7 @@ async def test_run_serializes_same_session() -> None:
     async with anyio.create_task_group() as tg:
         tg.start_soon(drain, "a", token)
         tg.start_soon(drain, "b", token)
-        await anyio.sleep(0)
+        await anyio.lowlevel.checkpoint()
         gate.set()
     assert max_in_flight == 1
 

@@ -3,16 +3,16 @@ from pathlib import Path
 
 import pytest
 
+from tests.telegram_fakes import DEFAULT_ENGINE_ID, FakeBot, FakeTransport, make_cfg
 from untether.config import ProjectConfig, ProjectsConfig
 from untether.context import RunContext
 from untether.router import AutoRouter, RunnerEntry
 from untether.runners.mock import Return, ScriptRunner
-from untether.telegram.api_models import ChatMember, File
 from untether.settings import TelegramFilesSettings
+from untether.telegram.api_models import ChatMember, File
 from untether.telegram.commands import file_transfer as transfer
 from untether.telegram.types import TelegramDocument, TelegramIncomingMessage
 from untether.transport_runtime import ResolvedMessage, TransportRuntime
-from tests.telegram_fakes import DEFAULT_ENGINE_ID, FakeBot, FakeTransport, make_cfg
 
 
 class _FileBot(FakeBot):
@@ -820,7 +820,7 @@ async def test_check_file_permissions_missing_member(tmp_path: Path) -> None:
         async def get_chat_member(self, chat_id: int, user_id: int):
             _ = chat_id
             _ = user_id
-            return None
+            return
 
     transport = FakeTransport()
     cfg = replace(make_cfg(transport), bot=_NoMemberBot())
@@ -975,7 +975,7 @@ async def test_handle_file_get_send_failure(tmp_path: Path) -> None:
         async def send_document(self, *args, **kwargs):
             _ = args
             _ = kwargs
-            return None
+            return
 
     transport = FakeTransport()
     cfg = replace(make_cfg(transport), runtime=_runtime(tmp_path), bot=_NoSendBot())

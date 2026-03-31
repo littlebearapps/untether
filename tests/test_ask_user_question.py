@@ -10,17 +10,17 @@ import pytest
 from untether.events import EventFactory
 from untether.model import ActionEvent, ResumeToken
 from untether.runners.claude import (
+    _ACTIVE_RUNNERS,
+    _ASK_QUESTION_FLOWS,
+    _DISCUSS_COOLDOWN,
+    _HANDLED_REQUESTS,
+    _PENDING_ASK_REQUESTS,
+    _REQUEST_TO_INPUT,
+    _REQUEST_TO_SESSION,
+    _SESSION_STDIN,
+    ENGINE,
     AskQuestionState,
     ClaudeStreamState,
-    ENGINE,
-    _ASK_QUESTION_FLOWS,
-    _PENDING_ASK_REQUESTS,
-    _REQUEST_TO_SESSION,
-    _REQUEST_TO_INPUT,
-    _HANDLED_REQUESTS,
-    _ACTIVE_RUNNERS,
-    _SESSION_STDIN,
-    _DISCUSS_COOLDOWN,
     answer_ask_question,
     answer_ask_question_with_options,
     format_question_message,
@@ -30,7 +30,6 @@ from untether.runners.claude import (
     translate_claude_event,
 )
 from untether.schemas import claude as claude_schema
-
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -72,7 +71,7 @@ CHAT_B = -100002
 
 @pytest.fixture(autouse=True)
 def _clear_registries():
-    from untether.utils.paths import set_run_channel_id, reset_run_channel_id
+    from untether.utils.paths import reset_run_channel_id, set_run_channel_id
 
     token = set_run_channel_id(CHAT_A)
     yield
@@ -591,9 +590,9 @@ async def test_answer_with_options_missing_flow_returns_false() -> None:
 def test_ask_question_auto_denied_when_off() -> None:
     """AskUserQuestion should be auto-denied when ask_questions toggle is OFF."""
     from untether.runners.run_options import (
-        set_run_options,
-        reset_run_options,
         EngineRunOptions,
+        reset_run_options,
+        set_run_options,
     )
 
     state, factory = _make_state_with_session()
@@ -626,9 +625,9 @@ def test_ask_question_auto_denied_when_off() -> None:
 def test_ask_question_not_denied_when_on() -> None:
     """AskUserQuestion should NOT be auto-denied when toggle is ON."""
     from untether.runners.run_options import (
-        set_run_options,
-        reset_run_options,
         EngineRunOptions,
+        reset_run_options,
+        set_run_options,
     )
 
     state, factory = _make_state_with_session()

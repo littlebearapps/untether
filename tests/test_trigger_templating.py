@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from untether.triggers.templating import render_prompt, _UNTRUSTED_PREFIX
+from untether.triggers.templating import _UNTRUSTED_PREFIX, render_prompt
 
 
 class TestRenderPrompt:

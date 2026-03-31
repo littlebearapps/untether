@@ -10,8 +10,8 @@ from aiohttp.test_utils import TestClient, TestServer
 
 from untether.transport import MessageRef
 from untether.triggers.dispatcher import TriggerDispatcher
-from untether.triggers.settings import TriggersSettings, parse_trigger_config
 from untether.triggers.server import build_webhook_app
+from untether.triggers.settings import TriggersSettings, parse_trigger_config
 
 
 @dataclass

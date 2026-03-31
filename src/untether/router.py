@@ -1,9 +1,9 @@
 from __future__ import annotations
 
 import re
+from collections.abc import Iterable
 from dataclasses import dataclass
 from typing import Literal
-from collections.abc import Iterable
 
 from .model import EngineId, ResumeToken
 from .runner import Runner

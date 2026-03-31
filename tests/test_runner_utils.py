@@ -368,7 +368,7 @@ async def test_jsonl_run_impl_smoke(monkeypatch: pytest.MonkeyPatch) -> None:
 
     async def fake_drain_stderr(*args: Any, **kwargs: Any) -> None:
         _ = args, kwargs
-        return None
+        return
 
     monkeypatch.setattr(runner_module, "manage_subprocess", fake_manage_subprocess)
     monkeypatch.setattr(runner_module, "drain_stderr", fake_drain_stderr)
@@ -408,7 +408,7 @@ async def test_jsonl_run_impl_branches(monkeypatch: pytest.MonkeyPatch) -> None:
 
     async def fake_drain_stderr(*args: Any, **kwargs: Any) -> None:
         _ = args, kwargs
-        return None
+        return
 
     monkeypatch.setattr(runner_module, "manage_subprocess", fake_manage_subprocess)
     monkeypatch.setattr(runner_module, "drain_stderr", fake_drain_stderr)
@@ -517,7 +517,8 @@ def test_stream_end_events_enriched_message() -> None:
 async def test_drain_stderr_capture() -> None:
     """drain_stderr collects lines into capture list."""
     import anyio
-    from untether.utils.streams import drain_stderr, _STDERR_CAPTURE_MAX
+
+    from untether.utils.streams import _STDERR_CAPTURE_MAX, drain_stderr
 
     send, receive = anyio.create_memory_object_stream[bytes](32)
     capture: list[str] = []
@@ -545,6 +546,7 @@ async def test_drain_stderr_capture() -> None:
 async def test_drain_stderr_no_capture() -> None:
     """drain_stderr works without capture param."""
     import anyio
+
     from untether.utils.streams import drain_stderr
 
     send, receive = anyio.create_memory_object_stream[bytes](8)

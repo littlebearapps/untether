@@ -1,7 +1,8 @@
 from __future__ import annotations
 
-import anyio
 from functools import partial
+
+import anyio
 
 from untether.backends import EngineBackend
 from untether.config import dump_toml

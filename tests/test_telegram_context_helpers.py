@@ -1,6 +1,7 @@
 from dataclasses import replace
 from pathlib import Path
 
+from tests.telegram_fakes import DEFAULT_ENGINE_ID, FakeTransport, make_cfg
 from untether.config import ProjectConfig, ProjectsConfig
 from untether.context import RunContext
 from untether.router import AutoRouter, RunnerEntry
@@ -8,7 +9,6 @@ from untether.runners.mock import Return, ScriptRunner
 from untether.telegram import context as tg_context
 from untether.telegram.topic_state import TopicThreadSnapshot
 from untether.transport_runtime import TransportRuntime
-from tests.telegram_fakes import DEFAULT_ENGINE_ID, FakeTransport, make_cfg
 
 
 def _runtime(tmp_path: Path) -> TransportRuntime:

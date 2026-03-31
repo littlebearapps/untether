@@ -1,8 +1,10 @@
-import anyio
-import pytest
 from collections.abc import AsyncGenerator
 from typing import cast
 
+import anyio
+import pytest
+
+from tests.factories import action_started
 from untether.model import (
     Action,
     ActionEvent,
@@ -12,7 +14,6 @@ from untether.model import (
     UntetherEvent,
 )
 from untether.runners.mock import Emit, Return, ScriptRunner, Wait
-from tests.factories import action_started
 
 CODEX_ENGINE = "codex"
 

@@ -1,8 +1,8 @@
 import pytest
 
+from tests.telegram_fakes import FakeBot
 from untether.telegram.api_models import Chat, Message, Update, User
 from untether.telegram.parsing import poll_incoming
-from tests.telegram_fakes import FakeBot
 
 
 class _Bot(FakeBot):

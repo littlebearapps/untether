@@ -13,6 +13,7 @@ import os
 import pty
 import re
 import shutil
+import subprocess as subprocess_module
 import time
 import tty
 from collections.abc import AsyncIterator
@@ -29,29 +30,27 @@ from ..logging import get_logger
 from ..model import (
     Action,
     ActionKind,
+    CompletedEvent,
     EngineId,
     ResumeToken,
     StartedEvent,
     UntetherEvent,
-    CompletedEvent,
 )
 from ..runner import (
+    JsonlStreamState,
     JsonlSubprocessRunner,
     ResumeTokenMixin,
     Runner,
-    JsonlStreamState,
     _rc_label,
     _session_label,
     _stderr_excerpt,
 )
-from .run_options import get_run_options
 from ..schemas import claude as claude_schema
-from .tool_actions import tool_input_path, tool_kind_and_title
 from ..utils.paths import get_run_base_dir
 from ..utils.streams import drain_stderr
 from ..utils.subprocess import manage_subprocess
-
-import subprocess as subprocess_module
+from .run_options import get_run_options
+from .tool_actions import tool_input_path, tool_kind_and_title
 
 logger = get_logger(__name__)
 

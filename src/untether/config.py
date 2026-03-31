@@ -1,10 +1,10 @@
 from __future__ import annotations
 
+import os
+import tempfile
 import tomllib
 from dataclasses import dataclass, field
-import os
 from pathlib import Path
-import tempfile
 from typing import Any
 
 import tomli_w

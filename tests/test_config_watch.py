@@ -4,11 +4,11 @@ import anyio
 import pytest
 
 import untether.config_watch as config_watch
-from untether.config_watch import ConfigReload, config_status, watch_config
 from untether.config import ProjectsConfig
+from untether.config_watch import ConfigReload, config_status, watch_config
 from untether.router import AutoRouter, RunnerEntry
-from untether.runtime_loader import RuntimeSpec
 from untether.runners.mock import Return, ScriptRunner
+from untether.runtime_loader import RuntimeSpec
 from untether.settings import UntetherSettings
 from untether.transport_runtime import TransportRuntime
 

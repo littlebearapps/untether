@@ -3,14 +3,14 @@ from pathlib import Path
 
 import pytest
 
+from tests.telegram_fakes import FakeBot, FakeTransport, make_cfg
+from untether.settings import TelegramTopicsSettings
 from untether.telegram.api_models import ChatMember
+from untether.telegram.chat_prefs import ChatPrefsStore
 from untether.telegram.commands.agent import _handle_agent_command
 from untether.telegram.commands.trigger import _handle_trigger_command
-from untether.telegram.chat_prefs import ChatPrefsStore
 from untether.telegram.topic_state import TopicStateStore
 from untether.telegram.types import TelegramIncomingMessage
-from untether.settings import TelegramTopicsSettings
-from tests.telegram_fakes import FakeBot, FakeTransport, make_cfg
 
 
 def _msg(

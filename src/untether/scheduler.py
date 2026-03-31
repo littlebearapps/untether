@@ -1,9 +1,9 @@
 from __future__ import annotations
 
 from collections import deque
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import Any, Protocol
-from collections.abc import Awaitable, Callable
 
 import anyio
 
@@ -152,7 +152,7 @@ class ThreadScheduler:
 
                 try:
                     await self._run_job(job)
-                except Exception as exc:  # noqa: BLE001
+                except Exception as exc:
                     logger.exception(
                         "scheduler.job_failed",
                         key=key,

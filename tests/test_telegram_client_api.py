@@ -1,12 +1,12 @@
 import httpx
 import pytest
 
+from untether.telegram.api_models import User
 from untether.telegram.client_api import (
     HttpBotClient,
     TelegramRetryAfter,
     retry_after_from_payload,
 )
-from untether.telegram.api_models import User
 
 
 def _response() -> httpx.Response:

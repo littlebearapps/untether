@@ -12,7 +12,6 @@ from untether.telegram.commands.auth import (
     strip_ansi,
 )
 
-
 # ── ANSI stripping ─────────────────────────────────────────────────────────
 
 

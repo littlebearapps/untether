@@ -1,9 +1,9 @@
 from __future__ import annotations
 
 import os
+from collections.abc import Awaitable, Callable, Iterable
 from dataclasses import dataclass
 from pathlib import Path
-from collections.abc import Awaitable, Callable, Iterable
 
 from watchfiles import awatch
 

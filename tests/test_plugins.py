@@ -2,8 +2,8 @@ from collections.abc import Iterator
 
 import pytest
 
-from untether import plugins
 from tests.plugin_fixtures import FakeEntryPoint, install_entrypoints
+from untether import plugins
 
 
 @pytest.fixture(autouse=True)

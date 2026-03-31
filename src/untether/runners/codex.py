@@ -20,9 +20,9 @@ from ..runner import (
     _session_label,
     _stderr_excerpt,
 )
-from .run_options import get_run_options
 from ..schemas import codex as codex_schema
 from ..utils.paths import relativize_command
+from .run_options import get_run_options
 
 logger = get_logger(__name__)
 

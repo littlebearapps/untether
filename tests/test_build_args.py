@@ -13,7 +13,6 @@ from unittest.mock import patch
 from untether.model import ResumeToken
 from untether.runners.run_options import EngineRunOptions as RunOptions
 
-
 # ---------------------------------------------------------------------------
 # Claude
 # ---------------------------------------------------------------------------

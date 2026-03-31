@@ -8,9 +8,9 @@ from unittest.mock import patch
 import pytest
 
 from untether.telegram.commands.browse import (
-    BrowseCommand,
     _MAX_ENTRIES,
     _PATH_REGISTRY,
+    BrowseCommand,
     _format_listing,
     _format_size,
     _get_project_root,
@@ -198,7 +198,7 @@ class TestFormatListingTruncation:
 
 
 class TestBrowseCommandHandle:
-    @pytest.fixture()
+    @pytest.fixture
     def cmd(self):
         return BrowseCommand()
 

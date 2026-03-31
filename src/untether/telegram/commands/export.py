@@ -177,7 +177,7 @@ class ExportCommand:
         # Get the most recent session for this chat
         key = max(chat_sessions, key=lambda k: chat_sessions[k][0])
         session_id = key[1]
-        ts, events, usage = chat_sessions[key]
+        _ts, events, usage = chat_sessions[key]
 
         if not events:
             return CommandResult(

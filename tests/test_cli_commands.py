@@ -1,10 +1,11 @@
 from __future__ import annotations
 
-from pathlib import Path
 import tomllib
+from pathlib import Path
 
 from typer.testing import CliRunner
 
+from tests.plugin_fixtures import FakeEntryPoint
 from untether import cli
 from untether.config import ConfigError
 from untether.plugins import (
@@ -14,7 +15,6 @@ from untether.plugins import (
     PluginLoadError,
 )
 from untether.settings import UntetherSettings
-from tests.plugin_fixtures import FakeEntryPoint
 
 
 def _min_config() -> dict:

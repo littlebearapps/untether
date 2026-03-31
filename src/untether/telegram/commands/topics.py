@@ -6,8 +6,8 @@ from ...context import RunContext
 from ...logging import get_logger
 from ...markdown import MarkdownParts
 from ...runner_bridge import RunningTasks
-from ...transport_runtime import TransportRuntime
 from ...transport import RenderedMessage, SendOptions
+from ...transport_runtime import TransportRuntime
 from ..chat_prefs import ChatPrefsStore
 from ..chat_sessions import ChatSessionStore
 from ..context import (

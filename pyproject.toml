@@ -2,7 +2,7 @@
 name = "untether"
 authors = [{name = "Little Bear Apps", email = "hello@littlebearapps.com"}]
 maintainers = [{name = "Little Bear Apps", email = "hello@littlebearapps.com"}]
-version = "0.35.0rc15"
+version = "0.35.0rc16"
 keywords = ["telegram", "claude-code", "codex", "opencode", "pi", "gemini-cli", "amp", "ai-agents", "coding-assistant", "remote-control", "cli-bridge"]
 description = "Run AI coding agents from your phone. Bridges Claude Code, Codex, OpenCode, Pi, Gemini CLI, and Amp to Telegram with interactive permissions, voice input, cost tracking, and live progress."
 readme = {file = "README.md", content-type = "text/markdown"}
@@ -110,7 +110,49 @@ pytest_add_cli_args = ["-q", "--no-cov"]
 do_not_mutate = ["src/untether/cli/*"]
 
 [tool.ruff.lint]
-extend-select = ["B", "BLE001", "C4", "PERF", "RUF043", "S110", "SIM", "UP"]
+extend-select = [
+    "ASYNC",   # async/await best practices (anyio-aware)
+    "B",       # bugbear — common Python anti-patterns
+    "BLE001",  # bare except with noqa
+    "C4",      # comprehension improvements
+    "FA",      # future annotations consistency
+    "FLY",     # prefer f-strings over str.join on literals
+    "FURB",    # refurb — modern Python idioms
+    "I",       # isort — import sorting
+    "ISC",     # implicit string concatenation
+    "LOG",     # logging best practices
+    "PERF",    # performance anti-patterns
+    "PIE",     # miscellaneous lints (startswith/endswith tuples, etc.)
+    "PT",      # pytest style conventions
+    "RET",     # return statement consistency
+    "RUF",     # ruff-specific rules
+    "S110",    # try-except-pass (security)
+    "SIM",     # code simplification
+    "UP",      # pyupgrade — modernise syntax for target Python
+]
+ignore = [
+    "FLY002",  # static join to f-string — "\n\n".join([...]) is clearer for multi-paragraph text
+    "RET504",  # unnecessary assign before return — pipeline-style `text = ...; return text` is clearer
+    "RUF001",  # ambiguous unicode — intentional emoji in Telegram UI strings
+    "RUF005",  # collection concat — `list + [item]` is clearer than `[*list, item]` in some contexts
+    "RUF009",  # dataclass mutable default — false positives with dataclass(slots=True)
+    "PT018",   # pytest composite assertion — sometimes clearer as one assert
+    "RET505",  # superfluous else after return — sometimes aids readability
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = [
+    "ASYNC109",  # timeout params in test fakes mirror production signatures
+    "ASYNC110",  # busy-wait polling acceptable in tests
+    "ASYNC251",  # time.sleep acceptable in tests for ordering
+    "PT006",     # parametrize names tuple vs list — not worth enforcing
+    "PT012",     # multiple statements in raises block — sometimes clearer
+    "RUF059",    # unused unpacked vars common in test fixture helpers
+    "S110",      # try-except-pass acceptable in test helpers
+]
+
+[tool.ruff.lint.isort]
+known-first-party = ["untether"]
 
 [tool.bandit]
 # Untether is a subprocess manager — these are expected patterns

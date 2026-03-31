@@ -1,11 +1,16 @@
-from typing import cast
-from types import SimpleNamespace
 from pathlib import Path
+from types import SimpleNamespace
+from typing import cast
 
+from tests.factories import (
+    action_completed,
+    action_started,
+    session_started,
+)
 from untether.markdown import (
     HARD_BREAK,
-    MarkdownFormatter,
     STATUS,
+    MarkdownFormatter,
     action_status,
     assemble_markdown_parts,
     format_elapsed,
@@ -17,11 +22,6 @@ from untether.model import Action, ActionEvent, ResumeToken, StartedEvent, Untet
 from untether.progress import ProgressTracker
 from untether.telegram.render import render_markdown
 from untether.utils.paths import reset_run_base_dir, set_run_base_dir
-from tests.factories import (
-    action_completed,
-    action_started,
-    session_started,
-)
 
 
 def _format_resume(token) -> str:
