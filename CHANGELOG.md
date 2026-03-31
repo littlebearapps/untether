@@ -60,6 +60,7 @@
 ### docs
 
 - update integration test chat IDs from stale `ut-dev:` to current `ut-dev-hf:` chats [#238](https://github.com/littlebearapps/untether/issues/238)
+- investigation: orphaned `workerd` processes from Bash tool children are upstream Claude Code bug — Untether's process group cleanup is correct; Claude Code spawns Bash tool shells in their own session group which Untether cannot reach; no TTY/SIGHUP cascade in headless mode [#257](https://github.com/littlebearapps/untether/issues/257)
 
 ### changes
 
