@@ -15,13 +15,15 @@ from ...model import Action, ActionEvent, EngineId, ResumeToken, UntetherEvent
 from ...progress import ProgressTracker
 from ...router import RunnerUnavailableError
 from ...runner import Runner
-from ...runners.run_options import EngineRunOptions, apply_run_options
 from ...runner_bridge import (
     ExecBridgeConfig,
-    IncomingMessage as RunnerIncomingMessage,
     RunningTasks,
     handle_message,
 )
+from ...runner_bridge import (
+    IncomingMessage as RunnerIncomingMessage,
+)
+from ...runners.run_options import EngineRunOptions, apply_run_options
 from ...scheduler import ThreadScheduler
 from ...transport import MessageRef, RenderedMessage, SendOptions
 from ...transport_runtime import TransportRuntime
@@ -230,6 +232,12 @@ async def _run_engine(
         except ConfigError as exc:
             await reply(text=f"error:\n{exc}")
             return
+        logger.info(
+            "handle.engine_resolved",
+            engine=runner.engine,
+            resume=resume_token.value if resume_token else None,
+            cwd=str(cwd) if cwd is not None else None,
+        )
         run_base_token = set_run_base_dir(cwd)
         run_channel_token = set_run_channel_id(chat_id)
         try:

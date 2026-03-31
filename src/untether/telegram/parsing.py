@@ -99,6 +99,9 @@ def _parse_incoming_message(
     if allowed is None and chat_id is not None:
         allowed = {chat_id}
     if allowed is not None and msg_chat_id not in allowed:
+        logger.debug(
+            "message.dropped", chat_id=msg_chat_id, reason="not_in_allowed_chats"
+        )
         return None
     reply = msg.reply_to_message
     reply_to_message_id = reply.message_id if reply is not None else None
@@ -156,6 +159,9 @@ def _parse_callback_query(
     if allowed is None and chat_id is not None:
         allowed = {chat_id}
     if allowed is not None and msg_chat_id not in allowed:
+        logger.debug(
+            "callback.dropped", chat_id=msg_chat_id, reason="not_in_allowed_chats"
+        )
         return None
     data = query.data
     sender_id = query.from_.id if query.from_ is not None else None

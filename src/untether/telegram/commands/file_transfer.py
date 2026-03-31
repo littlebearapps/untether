@@ -7,11 +7,12 @@ from typing import TYPE_CHECKING
 
 from ...config import ConfigError
 from ...context import RunContext
-from ...logging import get_logger
 from ...directives import DirectiveError
+from ...logging import get_logger
 from ...transport_runtime import ResolvedMessage
 from ..context import _format_context
 from ..files import (
+    ZipTooLargeError,
     deduplicate_target,
     default_upload_name,
     default_upload_path,
@@ -22,7 +23,6 @@ from ..files import (
     parse_file_prompt,
     resolve_path_within_root,
     write_bytes_atomic,
-    ZipTooLargeError,
     zip_directory,
 )
 from ..topic_state import TopicStateStore
@@ -294,6 +294,12 @@ async def _save_document_payload(
             size=None,
             error=f"failed to write file: {exc}",
         )
+    logger.info(
+        "file_transfer.saved",
+        name=name,
+        path=str(resolved_path),
+        size=len(payload),
+    )
     return _FilePutResult(
         name=name,
         rel_path=resolved_path,
@@ -604,3 +610,9 @@ async def _handle_file_get(
     if sent is None:
         await reply(text="failed to send file.")
         return
+    logger.info(
+        "file_transfer.sent",
+        chat_id=msg.chat_id,
+        filename=filename,
+        size=len(payload),
+    )

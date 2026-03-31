@@ -12,11 +12,11 @@ import anyio
 from .context import RunContext
 from .error_hints import get_error_hint as _get_error_hint
 from .logging import bind_run_context, get_logger
+from .markdown import format_meta_line, render_event_cli
 from .model import ActionEvent, CompletedEvent, ResumeToken, StartedEvent, UntetherEvent
 from .presenter import Presenter
-from .markdown import format_meta_line, render_event_cli
-from .runner import Runner
 from .progress import ProgressTracker
+from .runner import Runner
 from .transport import (
     ChannelId,
     MessageId,
@@ -80,7 +80,7 @@ async def delete_outline_messages(session_id: str) -> None:
         try:
             await transport.delete(ref=ref)
         except Exception:  # noqa: BLE001
-            logger.debug("outline_cleanup.delete_failed", exc_info=True)
+            logger.warning("outline_cleanup.delete_failed", exc_info=True)
     refs.clear()
 
 
@@ -93,7 +93,7 @@ _PROGRESS_PERSISTENCE_PATH: Path | None = None
 
 def set_progress_persistence_path(path: Path | None) -> None:
     """Set the path for progress message persistence (called from loop.py)."""
-    global _PROGRESS_PERSISTENCE_PATH  # noqa: PLW0603
+    global _PROGRESS_PERSISTENCE_PATH
     _PROGRESS_PERSISTENCE_PATH = path
 
 
@@ -113,7 +113,7 @@ def _load_footer_settings():
         settings, _ = result
         return settings.footer
     except Exception:  # noqa: BLE001
-        logger.debug("footer_settings.load_failed", exc_info=True)
+        logger.warning("footer_settings.load_failed", exc_info=True)
         from .settings import FooterSettings
 
         return FooterSettings()
@@ -130,7 +130,7 @@ def _load_watchdog_settings():
         settings, _ = result
         return settings.watchdog
     except Exception:  # noqa: BLE001
-        logger.debug("watchdog_settings.load_failed", exc_info=True)
+        logger.warning("watchdog_settings.load_failed", exc_info=True)
         return None
 
 
@@ -145,7 +145,7 @@ def _load_auto_continue_settings():
         settings, _ = result
         return settings.auto_continue
     except Exception:  # noqa: BLE001
-        logger.debug("auto_continue_settings.load_failed", exc_info=True)
+        logger.warning("auto_continue_settings.load_failed", exc_info=True)
         from .settings import AutoContinueSettings
 
         return AutoContinueSettings()
@@ -238,7 +238,7 @@ def _load_preamble_settings():
         settings, _ = result
         return settings.preamble
     except Exception:  # noqa: BLE001
-        logger.debug("preamble_settings.load_failed", exc_info=True)
+        logger.warning("preamble_settings.load_failed", exc_info=True)
         from .settings import PreambleSettings
 
         return PreambleSettings()
@@ -291,9 +291,9 @@ def _resolve_presenter(
     overridden verbosity. Otherwise returns the default.
     """
     try:
-        from .telegram.commands.verbose import get_verbosity_override
-        from .telegram.bridge import TelegramPresenter
         from .markdown import MarkdownFormatter
+        from .telegram.bridge import TelegramPresenter
+        from .telegram.commands.verbose import get_verbosity_override
 
         override = get_verbosity_override(channel_id)
         if override is None:
@@ -1571,7 +1571,10 @@ async def run_runner_with_cancel(
                         _log_runner_event(evt)
                         if isinstance(evt, StartedEvent):
                             outcome.resume = evt.resume
-                            bind_run_context(resume=evt.resume.value)
+                            bind_run_context(
+                                resume=evt.resume.value,
+                                session_id=evt.resume.value,
+                            )
                             # Thread PID and stream to ProgressEdits
                             if evt.meta:
                                 pid = evt.meta.get("pid")
@@ -1831,7 +1834,7 @@ async def handle_message(
                     running_tasks.pop(progress_ref, None)
             if not outcome.cancelled and error is None:
                 # Give pending progress edits a chance to flush if they're ready.
-                await anyio.sleep(0)
+                await anyio.lowlevel.checkpoint()
             # Clean up any remaining ephemeral notification messages.
             await edits.delete_ephemeral()
             edits_scope.cancel()

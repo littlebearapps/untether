@@ -42,6 +42,7 @@ async def handle_cancel(
             task.cancel_requested.set()
             return
         if len(matches) > 1:
+            logger.debug("cancel.ambiguous", chat_id=chat_id, active_runs=len(matches))
             await reply(
                 text="multiple runs active — reply to the progress message to cancel a specific one."
             )
@@ -57,10 +58,14 @@ async def handle_cancel(
                     await _edit_cancelled_message(cfg, queued[0].progress_ref, job)
                     return
             if len(queued) > 1:
+                logger.debug(
+                    "cancel.ambiguous", chat_id=chat_id, queued_jobs=len(queued)
+                )
                 await reply(
                     text="multiple jobs queued — reply to the progress message to cancel a specific one."
                 )
                 return
+        logger.debug("cancel.nothing_running", chat_id=chat_id)
         await reply(text="nothing running in this chat.")
         return
 

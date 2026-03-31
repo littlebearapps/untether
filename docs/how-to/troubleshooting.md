@@ -366,6 +366,28 @@ all checks passed
 
 Look for `handle.worker_failed`, `handle.runner_failed`, or `config.read.toml_error` entries.
 
+### Key log events
+
+| Event | Level | Meaning |
+|-------|-------|---------|
+| `handle.worker_failed` | ERROR | Engine run crashed |
+| `handle.runner_failed` | ERROR | Runner subprocess failed |
+| `config.read.toml_error` | ERROR | Config file couldn't be parsed |
+| `footer_settings.load_failed` | WARNING | Footer config fell back to defaults |
+| `watchdog_settings.load_failed` | WARNING | Watchdog config fell back to defaults |
+| `auto_continue_settings.load_failed` | WARNING | Auto-continue config fell back to defaults |
+| `preamble_settings.load_failed` | WARNING | Preamble config fell back to defaults |
+| `outline_cleanup.delete_failed` | WARNING | Stale plan outline message couldn't be deleted |
+| `handle.engine_resolved` | INFO | Engine and CWD successfully resolved for a run |
+| `file_transfer.saved` | INFO | File uploaded and written to disk |
+| `file_transfer.denied` | WARNING | File transfer blocked (permissions, deny glob) |
+| `message.dropped` | DEBUG | Message from unrecognised chat silently dropped |
+| `cost_budget.exceeded` | ERROR | Run or daily cost exceeded budget |
+
+All logs include `session_id` once a session starts, enabling per-session filtering with `grep` or `jq`.
+
+Telegram bot tokens, OpenAI API keys (`sk-...`), and GitHub tokens (`ghp_`, `ghs_`, `github_pat_`) are automatically redacted in all log output.
+
 ## Error hints
 
 When an engine fails, Untether scans the error message and shows an actionable recovery hint above the raw error. The raw error is wrapped in a code block for visual separation. Hints are case-insensitive and pattern-matched — the first match wins. Your session is automatically saved in most cases, so you can resume after resolving the issue.

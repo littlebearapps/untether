@@ -63,6 +63,12 @@ def check_run_budget(
 
     Returns a CostAlert if a threshold is crossed, or None.
     """
+    logger.debug(
+        "cost_budget.check",
+        run_cost=run_cost,
+        has_per_run=budget.max_cost_per_run is not None,
+        has_per_day=budget.max_cost_per_day is not None,
+    )
     if budget.max_cost_per_run is not None and run_cost > 0:
         if run_cost >= budget.max_cost_per_run:
             logger.error(

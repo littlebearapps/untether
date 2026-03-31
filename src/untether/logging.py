@@ -14,6 +14,9 @@ from structlog.types import Processor
 
 TELEGRAM_TOKEN_RE = re.compile(r"bot\d+:[A-Za-z0-9_-]+")
 TELEGRAM_BARE_TOKEN_RE = re.compile(r"\b\d+:[A-Za-z0-9_-]{10,}\b")
+# Common API key patterns (OpenAI, GitHub, generic bearer tokens)
+OPENAI_KEY_RE = re.compile(r"\bsk-[A-Za-z0-9]{20,}\b")
+GITHUB_TOKEN_RE = re.compile(r"\b(ghp_|ghs_|gho_|github_pat_)[A-Za-z0-9_]{10,}\b")
 
 _LEVELS: dict[str, int] = {
     "debug": 10,
@@ -71,7 +74,9 @@ def _drop_below_level(
 
 def _redact_text(value: str) -> str:
     redacted = TELEGRAM_TOKEN_RE.sub("bot[REDACTED]", value)
-    return TELEGRAM_BARE_TOKEN_RE.sub("[REDACTED_TOKEN]", redacted)
+    redacted = TELEGRAM_BARE_TOKEN_RE.sub("[REDACTED_TOKEN]", redacted)
+    redacted = OPENAI_KEY_RE.sub("[REDACTED_KEY]", redacted)
+    return GITHUB_TOKEN_RE.sub("[REDACTED_TOKEN]", redacted)
 
 
 def _redact_value(value: Any, memo: dict[int, Any]) -> Any:
