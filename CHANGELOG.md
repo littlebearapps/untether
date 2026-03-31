@@ -63,6 +63,8 @@
 
 ### changes
 
+- logging audit: fill gaps in structlog coverage — elevate settings loader failures from DEBUG to WARNING (footer, watchdog, auto-continue, preamble), add access control drop logging, add executor `handle.engine_resolved` info log, elevate outline cleanup failures to WARNING, add credential redaction for OpenAI/GitHub API keys, add file transfer success logging, bind `session_id` in structlog context vars, add media group/cost tracker/cancel debug logging [#254](https://github.com/littlebearapps/untether/issues/254)
+- CI: expand ruff lint rules from 7 to 18 — add ASYNC, LOG, I (isort), PT, RET, RUF (full), FURB, PIE, FLY, FA, ISC rule sets; auto-fix 42 import sorts, clean 73 stale noqa directives, fix unused vars and useless conditionals; per-file ignores for test-specific patterns [#255](https://github.com/littlebearapps/untether/issues/255)
 - Gemini: default to `--approval-mode yolo` (full access) when no override is set — headless mode has no interactive approval path, so the CLI's read-only default disabled write tools entirely, causing multi-minute stalls as Gemini cascaded through sub-agents [#244](https://github.com/littlebearapps/untether/issues/244)
 - `/continue` command — cross-environment resume; pick up the most recent CLI session from Telegram using each engine's native continue flag (`--continue`, `resume --last`, `--resume latest`); supported for Claude, Codex, OpenCode, Pi, Gemini (not AMP) [#135](https://github.com/littlebearapps/untether/issues/135)
   - `ResumeToken` extended with `is_continue: bool = False`
