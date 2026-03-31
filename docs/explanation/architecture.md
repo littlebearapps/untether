@@ -216,7 +216,7 @@ flowchart TD
     D -->|Codex| D2["codex exec --json<br/>[resume &lt;token&gt;] -"]
     D -->|Pi| D3["pi --print --mode json<br/>--session &lt;id&gt; &lt;prompt&gt;"]
     D -->|OpenCode| D4["opencode run --format json<br/>[--session id] -- &lt;prompt&gt;"]
-    D -->|Gemini| D5["gemini --output-format stream-json<br/>[--resume id] -p &lt;prompt&gt;"]
+    D -->|Gemini| D5["gemini --output-format stream-json<br/>[--resume id] --prompt=&lt;prompt&gt;"]
     D -->|Amp| D6["amp --stream-json<br/>-x &lt;prompt&gt;"]
 
     D1 --> E[Spawn Subprocess<br/>anyio.open_process]
