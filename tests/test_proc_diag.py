@@ -9,9 +9,11 @@ import pytest
 
 from untether.utils.proc_diag import (
     ProcessDiag,
+    _find_descendants,
     collect_proc_diag,
     format_diag,
     is_cpu_active,
+    is_tree_cpu_active,
 )
 
 # ---------------------------------------------------------------------------
@@ -185,6 +187,81 @@ def test_collect_self_format_roundtrip() -> None:
     result = format_diag(diag)
     assert "alive" in result
     assert len(result) > 10
+
+
+# ---------------------------------------------------------------------------
+# is_tree_cpu_active tests
+# ---------------------------------------------------------------------------
+
+
+def test_is_tree_cpu_active_increasing() -> None:
+    prev = ProcessDiag(pid=1, alive=True, tree_cpu_utime=1000, tree_cpu_stime=500)
+    curr = ProcessDiag(pid=1, alive=True, tree_cpu_utime=1200, tree_cpu_stime=500)
+    assert is_tree_cpu_active(prev, curr) is True
+
+
+def test_is_tree_cpu_active_flat() -> None:
+    prev = ProcessDiag(pid=1, alive=True, tree_cpu_utime=1000, tree_cpu_stime=500)
+    curr = ProcessDiag(pid=1, alive=True, tree_cpu_utime=1000, tree_cpu_stime=500)
+    assert is_tree_cpu_active(prev, curr) is False
+
+
+def test_is_tree_cpu_active_none_prev() -> None:
+    curr = ProcessDiag(pid=1, alive=True, tree_cpu_utime=1000, tree_cpu_stime=500)
+    assert is_tree_cpu_active(None, curr) is None
+
+
+def test_is_tree_cpu_active_none_fields() -> None:
+    prev = ProcessDiag(pid=1, alive=True, tree_cpu_utime=None, tree_cpu_stime=None)
+    curr = ProcessDiag(pid=1, alive=True, tree_cpu_utime=1000, tree_cpu_stime=500)
+    assert is_tree_cpu_active(prev, curr) is None
+
+
+def test_is_tree_cpu_active_child_activity_only() -> None:
+    """Tree CPU increases even when main process CPU is flat (child work)."""
+    prev = ProcessDiag(
+        pid=1,
+        alive=True,
+        cpu_utime=100,
+        cpu_stime=50,
+        tree_cpu_utime=1000,
+        tree_cpu_stime=500,
+    )
+    curr = ProcessDiag(
+        pid=1,
+        alive=True,
+        cpu_utime=100,
+        cpu_stime=50,
+        tree_cpu_utime=1200,
+        tree_cpu_stime=600,
+    )
+    assert is_cpu_active(prev, curr) is False  # main process flat
+    assert is_tree_cpu_active(prev, curr) is True  # tree active from children
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="requires /proc")
+def test_collect_self_tree_cpu_populated() -> None:
+    """collect_proc_diag should populate tree CPU fields for live process."""
+    diag = collect_proc_diag(os.getpid())
+    assert diag is not None
+    assert diag.tree_cpu_utime is not None
+    assert diag.tree_cpu_stime is not None
+    # Tree CPU >= main process CPU (includes children)
+    assert diag.tree_cpu_utime >= (diag.cpu_utime or 0)
+    assert diag.tree_cpu_stime >= (diag.cpu_stime or 0)
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="requires /proc")
+def test_find_descendants_self() -> None:
+    """_find_descendants for our own process should return a list."""
+    descendants = _find_descendants(os.getpid())
+    assert isinstance(descendants, list)
+
+
+def test_find_descendants_nonexistent() -> None:
+    """_find_descendants for a non-existent PID returns empty."""
+    descendants = _find_descendants(99999999)
+    assert descendants == []
 
 
 @pytest.mark.skipif(sys.platform == "linux", reason="tests non-Linux path")
