@@ -352,7 +352,7 @@ class AmpRunner(ResumeTokenMixin, JsonlSubprocessRunner):
         args.append("--stream-json")
         if self.stream_json_input:
             args.append("--stream-json-input")
-        args.extend(["-x", prompt])
+        args.extend(["-x", self.sanitize_prompt(prompt)])
         return args
 
     def stdin_payload(

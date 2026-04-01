@@ -348,7 +348,7 @@ class GeminiRunner(ResumeTokenMixin, JsonlSubprocessRunner):
             args.extend(["--approval-mode", run_options.permission_mode])
         else:
             args.extend(["--approval-mode", "yolo"])
-        args.append(f"--prompt={prompt}")
+        args.append(f"--prompt={self.sanitize_prompt(prompt)}")
         return args
 
     def stdin_payload(

@@ -1247,6 +1247,12 @@ async def run_main_loop(
         _signal.signal(_signal.SIGINT, _shutdown_handler)
         logger.info("signal.handler.installed", signals=["SIGTERM", "SIGINT"])
 
+        # Reset uptime counter so /ping reports time since this start, not
+        # since the module was first imported (#234).
+        from .commands.ping import reset_uptime
+
+        reset_uptime()
+
         async with anyio.create_task_group() as tg:
             poller_fn: Callable[
                 [TelegramBridgeConfig], AsyncIterator[TelegramIncomingUpdate]

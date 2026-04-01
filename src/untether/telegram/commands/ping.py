@@ -6,7 +6,18 @@ import time
 
 from ...commands import CommandBackend, CommandContext, CommandResult
 
-_STARTED_AT = time.monotonic()
+_STARTED_AT: float = 0.0
+
+
+def reset_uptime() -> None:
+    """Reset the uptime counter (called on service start)."""
+    global _STARTED_AT
+    _STARTED_AT = time.monotonic()
+
+
+# Set initial value at import time; reset_uptime() is called again from
+# the Telegram loop on each service start to handle /restart correctly.
+reset_uptime()
 
 
 def _format_uptime(seconds: float) -> str:
