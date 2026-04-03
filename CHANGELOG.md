@@ -5,6 +5,7 @@
 ### security
 
 - validate callback query sender in group chats — reject button presses from unauthorised users; prevents malicious group members from approving/denying other users' tool requests [#192](https://github.com/littlebearapps/untether/issues/192)
+  - also validate sender on cancel button callback — the cancel handler was routed directly, bypassing the dispatch validation
 - escape release tag name in notify-website CI workflow — use `jq` for proper JSON encoding instead of direct interpolation, preventing JSON injection from crafted tag names [#193](https://github.com/littlebearapps/untether/issues/193)
 - sanitise flag-like prompts in Gemini and AMP runners — prompts starting with `-` are space-prefixed to prevent CLI flag injection; moved `sanitize_prompt()` to base runner class for all engines [#194](https://github.com/littlebearapps/untether/issues/194)
 
