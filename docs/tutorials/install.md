@@ -430,6 +430,16 @@ This config file controls all of Untether's behavior. You can edit it directly o
 
 [Full config reference →](../reference/config.md)
 
+## Updating and uninstalling
+
+To update Untether to the latest version:
+
+```sh
+uv tool upgrade untether
+```
+
+To uninstall completely (CLI, config, and state), see the [uninstall guide](../how-to/uninstall.md). To learn more about updates, see [Update Untether](../how-to/update.md).
+
 ## Re-running onboarding
 
 If you ever need to reconfigure:

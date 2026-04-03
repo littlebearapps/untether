@@ -9,9 +9,14 @@ import pytest
 from tests.telegram_fakes import FakeBot, FakeTransport, make_cfg
 from untether.commands import CommandContext, CommandResult
 from untether.runner_bridge import _EPHEMERAL_MSGS
+from untether.telegram.bridge import TelegramBridgeConfig
 from untether.telegram.commands import dispatch as dispatch_mod
 from untether.telegram.commands.dispatch import _dispatch_callback, _parse_callback_data
 from untether.telegram.types import TelegramCallbackQuery
+
+
+class _StubScheduler:
+    """Minimal scheduler stub for dispatch tests."""
 
 
 class TestParseCallbackData:
@@ -148,8 +153,10 @@ class _StubBackend:
     ):
         self._result = result
         self._raise_exc = raise_exc
+        self._handle_called = 0
 
     async def handle(self, ctx: CommandContext) -> CommandResult | None:
+        self._handle_called += 1
         if self._raise_exc is not None:
             raise self._raise_exc
         return self._result
@@ -448,3 +455,120 @@ async def test_dispatch_callback_skip_reply_sends_without_reply_to(
     options = call["options"]
     assert options is not None
     assert options.reply_to is None
+
+
+# ---------------------------------------------------------------------------
+# Callback sender validation (#192)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.anyio
+async def test_callback_rejected_for_unauthorised_sender() -> None:
+    """In groups, callback from a user not in allowed_user_ids is rejected."""
+    transport = FakeTransport()
+    cfg = make_cfg(transport)
+    cfg = TelegramBridgeConfig(
+        bot=cfg.bot,
+        runtime=cfg.runtime,
+        chat_id=cfg.chat_id,
+        startup_msg="",
+        exec_cfg=cfg.exec_cfg,
+        allowed_user_ids=(999,),  # only user 999 allowed
+    )
+    bot: FakeBot = cfg.bot  # type: ignore[assignment]
+    backend = _StubBackend(CommandResult(text="Should not reach"))
+
+    # sender_id=1 is NOT in allowed_user_ids=(999,)
+    query = _make_callback_query("test_cmd:args")
+
+    from unittest.mock import patch
+
+    with patch("untether.telegram.commands.dispatch.get_command", return_value=backend):
+        await _dispatch_callback(
+            cfg,
+            query,
+            "test_cmd",
+            "args",
+            thread_id=None,
+            running_tasks={},
+            scheduler=_StubScheduler(),
+            on_thread_known=None,
+            stateful_mode=False,
+            default_engine_override=None,
+            callback_query_id="cb-123",
+        )
+
+    # Backend should NOT have been called
+    assert backend._handle_called == 0
+    # Callback should be answered with rejection
+    assert len(bot.callback_calls) == 1
+    assert bot.callback_calls[0]["text"] == "Not authorised"
+    # No messages sent
+    assert len(transport.send_calls) == 0
+
+
+@pytest.mark.anyio
+async def test_callback_allowed_for_authorised_sender() -> None:
+    """Callback from a user in allowed_user_ids proceeds normally."""
+    transport = FakeTransport()
+    cfg = make_cfg(transport)
+    cfg = TelegramBridgeConfig(
+        bot=cfg.bot,
+        runtime=cfg.runtime,
+        chat_id=cfg.chat_id,
+        startup_msg="",
+        exec_cfg=cfg.exec_cfg,
+        allowed_user_ids=(1,),  # sender_id=1 IS allowed
+    )
+    backend = _StubBackend(CommandResult(text="Approved"))
+
+    query = _make_callback_query("test_cmd:args")
+
+    from unittest.mock import patch
+
+    with patch("untether.telegram.commands.dispatch.get_command", return_value=backend):
+        await _dispatch_callback(
+            cfg,
+            query,
+            "test_cmd",
+            "args",
+            thread_id=None,
+            running_tasks={},
+            scheduler=_StubScheduler(),
+            on_thread_known=None,
+            stateful_mode=False,
+            default_engine_override=None,
+            callback_query_id="cb-123",
+        )
+
+    # Backend should have been called
+    assert backend._handle_called == 1
+
+
+@pytest.mark.anyio
+async def test_callback_allowed_when_no_user_restriction() -> None:
+    """When allowed_user_ids is empty, all senders are allowed (default)."""
+    transport = FakeTransport()
+    cfg = make_cfg(transport)  # default: allowed_user_ids=()
+    backend = _StubBackend(CommandResult(text="OK"))
+
+    query = _make_callback_query("test_cmd:args")
+
+    from unittest.mock import patch
+
+    with patch("untether.telegram.commands.dispatch.get_command", return_value=backend):
+        await _dispatch_callback(
+            cfg,
+            query,
+            "test_cmd",
+            "args",
+            thread_id=None,
+            running_tasks={},
+            scheduler=_StubScheduler(),
+            on_thread_known=None,
+            stateful_mode=False,
+            default_engine_override=None,
+            callback_query_id="cb-123",
+        )
+
+    assert backend._handle_called == 1

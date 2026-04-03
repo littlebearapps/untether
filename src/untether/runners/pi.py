@@ -412,7 +412,7 @@ class PiRunner(ResumeTokenMixin, JsonlSubprocessRunner):
             args.append("--continue")
         else:
             args.extend(["--session", state.resume.value])
-        args.append(self._sanitize_prompt(prompt))
+        args.append(self.sanitize_prompt(prompt))
         return args
 
     def stdin_payload(
@@ -559,11 +559,6 @@ class PiRunner(ResumeTokenMixin, JsonlSubprocessRunner):
         token = uuid4().hex
         filename = f"{safe_timestamp}_{token}.jsonl"
         return str(session_dir / filename)
-
-    def _sanitize_prompt(self, prompt: str) -> str:
-        if prompt.startswith("-"):
-            return f" {prompt}"
-        return prompt
 
     def _quote_token(self, token: str) -> str:
         if not token:

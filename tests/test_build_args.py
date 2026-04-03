@@ -409,6 +409,44 @@ class TestAmpBuildArgs:
         args = runner.build_args("hello", None, state=state)
         assert "--dangerously-allow-all" not in args
 
+    def test_flag_like_prompt_sanitised(self) -> None:
+        """Prompts starting with - are sanitised to prevent flag injection (#194)."""
+        runner = self._runner()
+        state = runner.new_state("--help", None)
+        args = runner.build_args("--help", None, state=state)
+        idx = args.index("-x")
+        assert args[idx + 1] == " --help"
+
+
+# ---------------------------------------------------------------------------
+# Gemini prompt sanitisation (#194)
+# ---------------------------------------------------------------------------
+
+
+class TestGeminiPromptSanitisation:
+    def _runner(self, **kwargs: Any):
+        from untether.runners.gemini import GeminiRunner
+
+        return GeminiRunner(**kwargs)
+
+    def test_flag_like_prompt_sanitised(self) -> None:
+        """Prompts starting with - are sanitised in --prompt= value (#194)."""
+        runner = self._runner()
+        state = runner.new_state("--help", None)
+        with patch("untether.runners.gemini.get_run_options", return_value=None):
+            args = runner.build_args("--help", None, state=state)
+        prompt_arg = [a for a in args if a.startswith("--prompt=")]
+        assert len(prompt_arg) == 1
+        assert prompt_arg[0] == "--prompt= --help"
+
+    def test_normal_prompt_unchanged(self) -> None:
+        runner = self._runner()
+        state = runner.new_state("hello world", None)
+        with patch("untether.runners.gemini.get_run_options", return_value=None):
+            args = runner.build_args("hello world", None, state=state)
+        prompt_arg = [a for a in args if a.startswith("--prompt=")]
+        assert prompt_arg[0] == "--prompt=hello world"
+
 
 # ---------------------------------------------------------------------------
 # Pi
