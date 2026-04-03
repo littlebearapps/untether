@@ -60,6 +60,8 @@ pipx install untether            # alternative
 untether                        # run setup wizard
 ```
 
+Update: `uv tool upgrade untether` · Uninstall: `uv tool uninstall untether && rm -rf ~/.untether/`
+
 The wizard creates a Telegram bot, picks your workflow, and connects your chat. Then send a message to your bot:
 
 > fix the failing tests in src/auth
@@ -273,6 +275,8 @@ Full documentation is available in the [`docs/`](https://github.com/littlebearap
 - [Group chats](https://github.com/littlebearapps/untether/blob/master/docs/how-to/group-chat.md) — multi-user and trigger modes
 - [Context binding](https://github.com/littlebearapps/untether/blob/master/docs/how-to/context-binding.md) — per-chat project/branch binding
 - [Webhooks and cron](https://github.com/littlebearapps/untether/blob/master/docs/how-to/webhooks-and-cron.md) — automated runs from external events
+- [Update Untether](https://github.com/littlebearapps/untether/blob/master/docs/how-to/update.md) — upgrade to the latest version
+- [Uninstall Untether](https://github.com/littlebearapps/untether/blob/master/docs/how-to/uninstall.md) — remove CLI, config, and state files
 
 ### Engine Guides
 
@@ -288,6 +292,26 @@ Full documentation is available in the [`docs/`](https://github.com/littlebearap
 - [Configuration reference](https://github.com/littlebearapps/untether/blob/master/docs/reference/config.md) — full walkthrough of `untether.toml`
 - [Troubleshooting](https://github.com/littlebearapps/untether/blob/master/docs/how-to/troubleshooting.md) — common issues and solutions
 - [Architecture](https://github.com/littlebearapps/untether/blob/master/docs/explanation/architecture.md) — how the pieces fit together
+
+---
+
+## 🔒 What Untether accesses
+
+Untether runs on your machine and bridges your agents to Telegram. Here's exactly what it touches:
+
+| Category | What | Details |
+|----------|------|---------|
+| **Network** | Telegram Bot API (`api.telegram.org`) | Core transport — always active during operation |
+| **Network** | Whisper-compatible endpoint | Voice transcription — **disabled by default**, opt-in via config |
+| **Network** | Agent APIs (Anthropic, OpenAI, etc.) | Called by agent subprocesses, not by Untether directly |
+| **Filesystem** | `~/.untether/untether.toml` | Config file containing bot token — protect with `chmod 600` |
+| **Filesystem** | `~/.untether/*.json` | Chat preferences, session state, usage stats |
+| **Filesystem** | `.untether-outbox/` | Agent-delivered files (optional, per-project) |
+| **Processes** | Agent CLIs (claude, codex, etc.) | Spawned as subprocesses with your user permissions |
+| **Credentials** | Telegram bot token | Stored in config file (plaintext TOML) |
+| **Credentials** | API keys | Read from environment variables, never stored by Untether |
+
+**What Untether does NOT do:** no telemetry, no analytics, no phone-home, no auto-updates, no root access, no system file modifications outside `~/.untether/`. Sensitive tokens are automatically [redacted from logs](https://github.com/littlebearapps/untether/blob/master/docs/how-to/security.md).
 
 ---
 
