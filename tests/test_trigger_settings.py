@@ -161,6 +161,28 @@ class TestCronConfig:
         assert c.project == "infra"
         assert c.engine == "codex"
 
+    def test_with_timezone(self):
+        c = CronConfig(
+            id="melb",
+            schedule="0 8 * * *",
+            timezone="Australia/Melbourne",
+            prompt="Good morning",
+        )
+        assert c.timezone == "Australia/Melbourne"
+
+    def test_timezone_none_by_default(self):
+        c = CronConfig(id="x", schedule="* * * * *", prompt="Hi")
+        assert c.timezone is None
+
+    def test_invalid_timezone_rejected(self):
+        with pytest.raises(ValidationError, match="unknown timezone"):
+            CronConfig(
+                id="bad",
+                schedule="* * * * *",
+                timezone="Australia/Melborne",
+                prompt="Nope",
+            )
+
 
 class TestTriggersSettings:
     def test_disabled_by_default(self):
@@ -223,6 +245,18 @@ class TestTriggersSettings:
                     ),
                 ],
             )
+
+    def test_default_timezone(self):
+        s = TriggersSettings(default_timezone="Australia/Melbourne")
+        assert s.default_timezone == "Australia/Melbourne"
+
+    def test_default_timezone_none_by_default(self):
+        s = TriggersSettings()
+        assert s.default_timezone is None
+
+    def test_invalid_default_timezone_rejected(self):
+        with pytest.raises(ValidationError, match="unknown timezone"):
+            TriggersSettings(default_timezone="Not/A/Timezone")
 
     def test_duplicate_cron_ids_rejected(self):
         with pytest.raises(ValidationError, match="cron ids must be unique"):

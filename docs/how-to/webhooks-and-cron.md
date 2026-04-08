@@ -110,7 +110,38 @@ Cron triggers fire on a schedule using standard 5-field cron syntax.
     prompt = "Review open PRs and summarise their status."
     ```
 
-This runs every weekday at 9:00 AM.
+This runs every weekday at 9:00 AM in the server's local time (usually UTC).
+
+### Timezone
+
+By default, cron schedules use the server's system time. Set `timezone` to
+evaluate in a specific timezone:
+
+=== "toml"
+
+    ```toml
+    [[triggers.crons]]
+    id = "morning-review"
+    schedule = "0 8 * * 1-5"
+    timezone = "Australia/Melbourne"
+    project = "myapp"
+    engine = "claude"
+    prompt = "Review overnight changes."
+    ```
+
+This fires at 8:00 AM Melbourne time (AEST/AEDT), adjusting automatically for
+daylight saving. Use [IANA timezone names](https://en.wikipedia.org/wiki/List_of_tz_database_time_zones).
+
+Set `default_timezone` in `[triggers]` to apply to all crons without repeating it:
+
+```toml
+[triggers]
+enabled = true
+default_timezone = "Australia/Melbourne"
+```
+
+Per-cron `timezone` overrides the global default. See the
+[triggers reference](../reference/triggers/triggers.md#timezone-support) for details.
 
 ### Cron syntax
 

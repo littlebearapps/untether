@@ -34,7 +34,10 @@ For more control, use Untether's built-in cron system. Cron triggers fire on a s
     prompt = "Review open PRs and summarise their status."
     ```
 
-This runs every weekday at 9:00 AM in the `myapp` project using Claude Code.
+This runs every weekday at 9:00 AM (server time) in the `myapp` project using
+Claude Code. Add `timezone = "Australia/Melbourne"` to evaluate in a specific
+timezone, or set `default_timezone` in `[triggers]` for all crons. See
+[Webhooks and cron](webhooks-and-cron.md#timezone) for details.
 
 Common schedules:
 

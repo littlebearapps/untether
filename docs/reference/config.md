@@ -450,6 +450,7 @@ routing details.
 | Key | Type | Default | Notes |
 |-----|------|---------|-------|
 | `enabled` | bool | `false` | Master switch. No server or cron loop starts when `false`. |
+| `default_timezone` | string\|null | `null` | Default IANA timezone for all crons (e.g. `"Australia/Melbourne"`). Per-cron `timezone` overrides. |
 
 ### `[triggers.server]`
 
@@ -484,3 +485,4 @@ routing details.
 | `engine` | string\|null | `null` | Engine override. |
 | `chat_id` | int\|null | `null` | Telegram chat. Falls back to transport default. |
 | `prompt` | string | (required) | Prompt sent to the engine. |
+| `timezone` | string\|null | `null` | IANA timezone (e.g. `"Australia/Melbourne"`). Overrides `default_timezone`. |

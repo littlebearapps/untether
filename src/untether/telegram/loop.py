@@ -1508,9 +1508,12 @@ async def run_main_loop(
                         )
                     if trigger_settings.crons:
                         tg.start_soon(
-                            run_cron_scheduler,
-                            trigger_settings.crons,
-                            trigger_dispatcher,
+                            partial(
+                                run_cron_scheduler,
+                                trigger_settings.crons,
+                                trigger_dispatcher,
+                                default_timezone=trigger_settings.default_timezone,
+                            ),
                         )
                     logger.info(
                         "triggers.enabled",

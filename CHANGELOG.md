@@ -12,6 +12,14 @@
 - reduce stall warning false positives during Agent subagent work — tree CPU tracking across process descendants, child-aware 15 min threshold when child processes or elevated TCP detected, early diagnostic collection for CPU baseline, total stall warning counter that persists through recovery, improved "Waiting for child processes" notification messages [#264](https://github.com/littlebearapps/untether/issues/264)
 - `/ping` uptime now resets on service restart — previously the module-level start time was cached across `/restart` commands; now `reset_uptime()` is called on each service start [#234](https://github.com/littlebearapps/untether/issues/234)
 
+### changes
+
+- **timezone support for cron triggers** — cron schedules can now be evaluated in a specific timezone instead of the server's system time (usually UTC) [#270](https://github.com/littlebearapps/untether/issues/270)
+  - per-cron `timezone` field with IANA timezone names (e.g. `"Australia/Melbourne"`)
+  - global `default_timezone` in `[triggers]` — per-cron `timezone` overrides it
+  - DST-aware via Python's `zoneinfo` module (zero new dependencies)
+  - invalid timezone names rejected at config parse time with clear error messages
+
 ## v0.35.0 (2026-03-31)
 
 ### fixes

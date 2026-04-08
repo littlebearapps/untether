@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 import datetime
+from zoneinfo import ZoneInfo
 
-from untether.triggers.cron import _parse_field, cron_matches
+from untether.triggers.cron import _parse_field, _resolve_now, cron_matches
 
 
 class TestCronMatches:
@@ -67,6 +68,50 @@ class TestCronMatches:
         assert cron_matches("0,30 * * * *", now) is True
         now2 = datetime.datetime(2026, 2, 24, 10, 15)
         assert cron_matches("0,30 * * * *", now2) is False
+
+
+class TestResolveNow:
+    """Timezone-aware now resolution for cron matching."""
+
+    def test_melbourne_converts_utc(self):
+        # 2026-02-24 22:00 UTC = 2026-02-25 09:00 AEDT (+11)
+        utc_now = datetime.datetime(2026, 2, 24, 22, 0, tzinfo=datetime.UTC)
+        local_now = _resolve_now(utc_now, "Australia/Melbourne", None)
+        assert local_now.hour == 9
+        assert local_now.day == 25
+        assert cron_matches("0 9 * * *", local_now) is True
+
+    def test_no_timezone_returns_naive_local(self):
+        utc_now = datetime.datetime(2026, 2, 24, 10, 0, tzinfo=datetime.UTC)
+        local_now = _resolve_now(utc_now, None, None)
+        assert local_now.tzinfo is None
+
+    def test_per_cron_overrides_default(self):
+        utc_now = datetime.datetime(2026, 2, 24, 22, 0, tzinfo=datetime.UTC)
+        mel = _resolve_now(utc_now, "Australia/Melbourne", "US/Eastern")
+        expected = utc_now.astimezone(ZoneInfo("Australia/Melbourne"))
+        assert mel.hour == expected.hour
+        assert mel.day == expected.day
+
+    def test_default_used_when_cron_none(self):
+        utc_now = datetime.datetime(2026, 2, 24, 22, 0, tzinfo=datetime.UTC)
+        local_now = _resolve_now(utc_now, None, "Australia/Melbourne")
+        expected = utc_now.astimezone(ZoneInfo("Australia/Melbourne"))
+        assert local_now.hour == expected.hour
+
+    def test_dst_transition(self):
+        # 2025-10-05 01:30 UTC — Melbourne is AEDT (+11) after spring forward
+        utc_now = datetime.datetime(2025, 10, 5, 1, 30, tzinfo=datetime.UTC)
+        local_now = _resolve_now(utc_now, "Australia/Melbourne", None)
+        expected = utc_now.astimezone(ZoneInfo("Australia/Melbourne"))
+        assert local_now.hour == expected.hour
+        assert local_now.minute == 30
+
+    def test_different_timezones_different_hours(self):
+        utc_now = datetime.datetime(2026, 2, 24, 22, 0, tzinfo=datetime.UTC)
+        mel = _resolve_now(utc_now, "Australia/Melbourne", None)
+        nyc = _resolve_now(utc_now, "America/New_York", None)
+        assert mel.hour != nyc.hour
 
 
 class TestCronStepValidation:

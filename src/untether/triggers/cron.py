@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import datetime
+from zoneinfo import ZoneInfo
 
 import anyio
 
@@ -63,24 +64,44 @@ def cron_matches(expression: str, now: datetime.datetime) -> bool:
     )
 
 
+def _resolve_now(
+    utc_now: datetime.datetime,
+    cron_tz: str | None,
+    default_tz: str | None,
+) -> datetime.datetime:
+    """Return the wall-clock datetime for cron matching.
+
+    If a timezone is configured (per-cron or global default), converts UTC *now*
+    to that timezone.  Otherwise falls back to system local time (backward compat).
+    """
+    tz_name = cron_tz or default_tz
+    if tz_name is not None:
+        return utc_now.astimezone(ZoneInfo(tz_name))
+    # No timezone configured — use system local time (strip tzinfo for compat).
+    return utc_now.astimezone().replace(tzinfo=None)
+
+
 async def run_cron_scheduler(
     crons: list[CronConfig],
     dispatcher: TriggerDispatcher,
+    *,
+    default_timezone: str | None = None,
 ) -> None:
     """Tick every minute and dispatch crons whose schedule matches."""
     logger.info("triggers.cron.started", crons=len(crons))
     last_fired: dict[str, tuple[int, int]] = {}  # cron_id -> (hour, minute)
 
     while True:
-        now = datetime.datetime.now()
+        utc_now = datetime.datetime.now(datetime.UTC)
         for cron in crons:
             try:
-                matched = cron_matches(cron.schedule, now)
+                local_now = _resolve_now(utc_now, cron.timezone, default_timezone)
+                matched = cron_matches(cron.schedule, local_now)
             except Exception:
                 logger.exception("triggers.cron.match_failed", cron_id=cron.id)
                 continue
             if matched:
-                key = (now.hour, now.minute)
+                key = (local_now.hour, local_now.minute)
                 if last_fired.get(cron.id) == key:
                     continue  # already fired this minute
                 last_fired[cron.id] = key
@@ -88,6 +109,6 @@ async def run_cron_scheduler(
                 await dispatcher.dispatch_cron(cron)
 
         # Sleep until next minute boundary (+ small buffer).
-        now = datetime.datetime.now()
-        sleep_s = 60 - now.second + 0.1
+        utc_now = datetime.datetime.now(datetime.UTC)
+        sleep_s = 60 - utc_now.second + 0.1
         await anyio.sleep(sleep_s)

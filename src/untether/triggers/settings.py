@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import re
 from typing import Annotated, Any, Literal
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from pydantic import (
     BaseModel,
@@ -79,6 +80,19 @@ class CronConfig(BaseModel):
     engine: NonEmptyStr | None = None
     chat_id: StrictInt | None = None
     prompt: NonEmptyStr
+    timezone: NonEmptyStr | None = None
+
+    @field_validator("timezone")
+    @classmethod
+    def _validate_timezone(cls, v: str | None) -> str | None:
+        if v is not None:
+            try:
+                ZoneInfo(v)
+            except (ZoneInfoNotFoundError, KeyError):
+                raise ValueError(
+                    f"unknown timezone {v!r}; use IANA names like 'Australia/Melbourne'"
+                ) from None
+        return v
 
 
 class TriggersSettings(BaseModel):
@@ -87,7 +101,21 @@ class TriggersSettings(BaseModel):
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
 
     enabled: bool = False
+    default_timezone: NonEmptyStr | None = None
     server: TriggerServerSettings = Field(default_factory=TriggerServerSettings)
+
+    @field_validator("default_timezone")
+    @classmethod
+    def _validate_default_timezone(cls, v: str | None) -> str | None:
+        if v is not None:
+            try:
+                ZoneInfo(v)
+            except (ZoneInfoNotFoundError, KeyError):
+                raise ValueError(
+                    f"unknown timezone {v!r}; use IANA names like 'Australia/Melbourne'"
+                ) from None
+        return v
+
     webhooks: list[WebhookConfig] = Field(default_factory=list)
     crons: list[CronConfig] = Field(default_factory=list)
 

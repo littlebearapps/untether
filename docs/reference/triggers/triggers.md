@@ -54,6 +54,7 @@ passes its `message_id` to `run_job()` so the engine reply threads under it.
 | Key | Type | Default | Notes |
 |-----|------|---------|-------|
 | `enabled` | bool | `false` | Master switch. When `false`, no server or cron loop starts. |
+| `default_timezone` | string\|null | `null` | Default IANA timezone for all crons (e.g. `"Australia/Melbourne"`). Per-cron `timezone` overrides this. |
 
 ### `[triggers.server]`
 
@@ -131,6 +132,7 @@ Webhook IDs must be unique across all configured webhooks.
 | `engine` | string\|null | `null` | Engine override. Uses default engine if unset. |
 | `chat_id` | int\|null | `null` | Telegram chat to post in. Falls back to the transport's default `chat_id`. |
 | `prompt` | string | (required) | The prompt sent to the engine. |
+| `timezone` | string\|null | `null` | IANA timezone name (e.g. `"Australia/Melbourne"`). Overrides `default_timezone`. |
 
 Cron IDs must be unique across all configured crons.
 
@@ -234,6 +236,35 @@ Supported syntax:
 
 The scheduler ticks once per minute. Each cron fires at most once per minute
 (deduplication prevents double-firing if the tick loop runs fast).
+
+### Timezone support
+
+By default, cron schedules are evaluated in the system's local time (usually UTC
+on servers). Set `timezone` on individual crons or `default_timezone` at the
+`[triggers]` level to use a specific timezone:
+
+```toml
+[triggers]
+enabled = true
+default_timezone = "Australia/Melbourne"
+
+[[triggers.crons]]
+id = "morning-check"
+schedule = "0 8 * * 1-5"
+prompt = "Check status."
+# Uses default_timezone (Melbourne) — fires at 8:00 AM AEST/AEDT
+
+[[triggers.crons]]
+id = "london-check"
+schedule = "0 9 * * 1-5"
+timezone = "Europe/London"
+prompt = "Check London status."
+# Per-cron timezone overrides default — fires at 9:00 AM GMT/BST
+```
+
+Timezones use [IANA names](https://en.wikipedia.org/wiki/List_of_tz_database_time_zones)
+and handle DST transitions automatically via Python's `zoneinfo` module. Invalid
+timezone names are rejected at config parse time.
 
 ## Event filtering
 
