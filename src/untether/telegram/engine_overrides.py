@@ -211,6 +211,18 @@ def supports_reasoning(engine: str) -> bool:
     return engine in REASONING_SUPPORTED_ENGINES
 
 
+_ENGINE_REASONING_LABEL: dict[str, str] = {
+    "claude": "Effort",
+    "codex": "Reasoning",
+    "pi": "Thinking",
+}
+
+
+def get_reasoning_label(engine: str) -> str:
+    """Return the engine's own term for reasoning depth (e.g. Effort, Thinking)."""
+    return _ENGINE_REASONING_LABEL.get(engine, "Reasoning")
+
+
 def get_engine_default_reasoning(engine: str) -> str | None:
     """Read the engine's own default reasoning/effort level from its settings file.
 

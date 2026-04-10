@@ -1631,7 +1631,7 @@ class TestReasoning:
 
     @pytest.mark.anyio
     async def test_home_shows_reasoning_for_claude(self, tmp_path):
-        """Reasoning label and button visible when engine is claude."""
+        """Effort label and button visible when engine is claude."""
         state_path = tmp_path / "prefs.json"
         cmd = ConfigCommand()
         ctx = _make_ctx(
@@ -1640,7 +1640,7 @@ class TestReasoning:
         )
         await cmd.handle(ctx)
         msg = _last_send_msg(ctx)
-        assert "Reasoning" in msg.text
+        assert "Effort" in msg.text
         assert "config:rs" in _buttons_data(msg)
 
     @pytest.mark.anyio
@@ -2108,7 +2108,7 @@ class TestDiffPreview:
         await cmd.handle(ctx)
         msg = _last_edit_msg(ctx)
         labels = _buttons_labels(msg)
-        assert "✓ Diff: on" in labels
+        assert "✓ On" in labels
 
     @pytest.mark.anyio
     async def test_diff_preview_default_label_on_page(self, tmp_path):

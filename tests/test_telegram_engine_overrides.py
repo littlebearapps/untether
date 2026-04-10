@@ -159,3 +159,14 @@ def test_get_engine_default_reasoning_unsupported_engine() -> None:
 
     assert get_engine_default_reasoning("codex") is None
     assert get_engine_default_reasoning("gemini") is None
+
+
+def test_get_reasoning_label() -> None:
+    """Engine-specific reasoning labels."""
+    from untether.telegram.engine_overrides import get_reasoning_label
+
+    assert get_reasoning_label("claude") == "Effort"
+    assert get_reasoning_label("codex") == "Reasoning"
+    assert get_reasoning_label("pi") == "Thinking"
+    assert get_reasoning_label("gemini") == "Reasoning"
+    assert get_reasoning_label("amp") == "Reasoning"
