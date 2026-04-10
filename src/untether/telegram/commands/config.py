@@ -169,6 +169,7 @@ async def _page_home(ctx: CommandContext) -> None:
         DIFF_PREVIEW_SUPPORTED_ENGINES,
         PERMISSION_MODE_SUPPORTED_ENGINES,
         SUBSCRIPTION_USAGE_SUPPORTED_ENGINES,
+        get_engine_default_reasoning,
         supports_reasoning,
     )
     from .verbose import get_verbosity_override
@@ -344,12 +345,13 @@ async def _page_home(ctx: CommandContext) -> None:
     lines.append(f"Model: <b>{model_label}</b>{model_hint}")
     lines.append(f"Trigger: <b>{trigger_label}</b>{_home_hint('tr', trigger_label)}")
     if show_reasoning:
-        lines.append(
-            f"Reasoning: <b>{reasoning_label}</b>{_home_hint('rs', reasoning_label)}"
-        )
+        if reasoning_label == "default":
+            engine_default = get_engine_default_reasoning(current_engine)
+            rs_hint = f"  · {engine_default}" if engine_default else ""
+        else:
+            rs_hint = _home_hint("rs", reasoning_label)
+        lines.append(f"Reasoning: <b>{reasoning_label}</b>{rs_hint}")
 
-    _DOCS_SETTINGS = f"{_DOCS_BASE}inline-settings/"
-    _DOCS_TROUBLE = f"{_DOCS_BASE}troubleshooting/"
     _HELP_URL = (
         "https://github.com/littlebearapps/untether?tab=readme-ov-file#-help-guides"
     )
@@ -357,10 +359,6 @@ async def _page_home(ctx: CommandContext) -> None:
         "https://github.com/littlebearapps/untether?tab=readme-ov-file#-contributing"
     )
     lines.append("")
-    lines.append(
-        f'📖 <a href="{_DOCS_SETTINGS}">Settings guide</a>'
-        f' · <a href="{_DOCS_TROUBLE}">Troubleshooting</a>'
-    )
     lines.append(
         f'📖 <a href="{_HELP_URL}">Help guides</a>'
         f' · 🐛 <a href="{_BUG_URL}">Report a bug</a>'
@@ -1042,6 +1040,7 @@ _RS_ACTIONS: dict[str, str] = {
     "med": "medium",
     "hi": "high",
     "xhi": "xhigh",
+    "max": "max",
 }
 
 _RS_LABELS: dict[str, str] = {v: k for k, v in _RS_ACTIONS.items()}
@@ -1124,9 +1123,15 @@ async def _page_reasoning(ctx: CommandContext, action: str | None = None) -> Non
         await _page_home(ctx)
         return
 
+    from ..engine_overrides import get_engine_default_reasoning
+
     override = await prefs.get_engine_override(chat_id, current_engine)
     reasoning = override.reasoning if override else None
-    current_label = reasoning or "default (from CLI settings)"
+    if reasoning:
+        current_label = reasoning
+    else:
+        engine_default = get_engine_default_reasoning(current_engine)
+        current_label = f"default ({engine_default})" if engine_default else "default"
 
     levels = allowed_reasoning_levels(current_engine)
 
@@ -1138,6 +1143,10 @@ async def _page_reasoning(ctx: CommandContext, action: str | None = None) -> Non
         level_descriptions.append(f"• {' · '.join(present)} — balanced options")
     if "xhigh" in levels:
         level_descriptions.append("• <b>xhigh</b> — most thorough (slowest)")
+    if "max" in levels:
+        level_descriptions.append(
+            "• <b>max</b> — deepest thinking (slowest, costliest)"
+        )
 
     lines = [
         "<b>🧠 Reasoning</b>",
@@ -1162,6 +1171,7 @@ async def _page_reasoning(ctx: CommandContext, action: str | None = None) -> Non
         "medium": ("Medium", "med"),
         "high": ("High", "hi"),
         "xhigh": ("Xhigh", "xhi"),
+        "max": ("Max", "max"),
     }
     level_buttons: list[dict[str, str]] = []
     for level in levels:

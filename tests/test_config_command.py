@@ -195,7 +195,7 @@ class TestHomePage:
         cmd = ConfigCommand()
         ctx = _make_ctx(config_path=state_path)
         await cmd.handle(ctx)
-        assert "Settings" in _last_send_msg(ctx).text
+        assert "settings" in _last_send_msg(ctx).text.lower()
 
     @pytest.mark.anyio
     async def test_home_shows_plan_mode_when_claude(self, tmp_path):
@@ -261,7 +261,7 @@ class TestHomePage:
         ctx = _make_ctx(config_path=None)
         await cmd.handle(ctx)
         ctx.executor.send.assert_called_once()
-        assert "Settings" in _last_send_msg(ctx).text
+        assert "settings" in _last_send_msg(ctx).text.lower()
 
     @pytest.mark.anyio
     async def test_home_shows_verbose_state(self, tmp_path):
@@ -309,7 +309,7 @@ class TestPlanMode:
         )
         await cmd.handle(ctx)
         msg = _last_edit_msg(ctx)
-        assert "Settings" in msg.text  # Home page header
+        assert "settings" in msg.text.lower()  # Home page header
         assert "on" in msg.text.lower()
 
     @pytest.mark.anyio
@@ -332,7 +332,7 @@ class TestPlanMode:
         )
         await cmd.handle(ctx)
         msg = _last_edit_msg(ctx)
-        assert "Settings" in msg.text
+        assert "settings" in msg.text.lower()
         assert "default" in msg.text.lower()
 
     @pytest.mark.anyio
@@ -518,7 +518,7 @@ class TestGeminiApprovalMode:
         )
         await cmd.handle(ctx)
         msg = _last_edit_msg(ctx)
-        assert "Settings" in msg.text  # Returns to home
+        assert "settings" in msg.text.lower()  # Returns to home
         assert "full access" in msg.text.lower()
 
         prefs = ChatPrefsStore(resolve_prefs_path(state_path))
@@ -547,7 +547,7 @@ class TestGeminiApprovalMode:
         )
         await cmd.handle(ctx)
         msg = _last_edit_msg(ctx)
-        assert "Settings" in msg.text
+        assert "settings" in msg.text.lower()
         assert "read-only" in msg.text.lower()
 
     @pytest.mark.anyio
@@ -570,7 +570,7 @@ class TestGeminiApprovalMode:
         )
         await cmd.handle(ctx)
         msg = _last_edit_msg(ctx)
-        assert "Settings" in msg.text
+        assert "settings" in msg.text.lower()
 
     @pytest.mark.anyio
     async def test_home_shows_approval_mode_for_gemini(self, tmp_path):
@@ -703,7 +703,7 @@ class TestVerbose:
         await cmd.handle(ctx)
         assert _VERBOSE_OVERRIDES.get(123) == "verbose"
         msg = _last_edit_msg(ctx)
-        assert "Settings" in msg.text  # Home page
+        assert "settings" in msg.text.lower()  # Home page
 
     @pytest.mark.anyio
     async def test_verbose_set_off(self):
@@ -771,7 +771,7 @@ class TestEngine:
         )
         await cmd.handle(ctx)
         msg = _last_edit_msg(ctx)
-        assert "Settings" in msg.text  # Home page
+        assert "settings" in msg.text.lower()  # Home page
 
     @pytest.mark.anyio
     async def test_engine_clear_returns_home(self, tmp_path):
@@ -790,7 +790,7 @@ class TestEngine:
         )
         await cmd.handle(ctx)
         msg = _last_edit_msg(ctx)
-        assert "Settings" in msg.text
+        assert "settings" in msg.text.lower()
 
     @pytest.mark.anyio
     async def test_engine_invalid_shows_sub_page(self, tmp_path):
@@ -859,7 +859,7 @@ class TestTrigger:
         )
         await cmd.handle(ctx)
         msg = _last_edit_msg(ctx)
-        assert "Settings" in msg.text  # Home page
+        assert "settings" in msg.text.lower()  # Home page
 
     @pytest.mark.anyio
     async def test_trigger_set_all_returns_home(self, tmp_path):
@@ -877,7 +877,7 @@ class TestTrigger:
             config_path=state_path,
         )
         await cmd.handle(ctx)
-        assert "Settings" in _last_edit_msg(ctx).text
+        assert "settings" in _last_edit_msg(ctx).text.lower()
 
     @pytest.mark.anyio
     async def test_trigger_clear_returns_home(self, tmp_path):
@@ -895,7 +895,7 @@ class TestTrigger:
             config_path=state_path,
         )
         await cmd.handle(ctx)
-        assert "Settings" in _last_edit_msg(ctx).text
+        assert "settings" in _last_edit_msg(ctx).text.lower()
 
     @pytest.mark.anyio
     async def test_trigger_no_config_path(self):
@@ -925,7 +925,7 @@ class TestRouting:
         cmd = ConfigCommand()
         ctx = _make_ctx(args_text="xyz", text="config:xyz", config_path=state_path)
         await cmd.handle(ctx)
-        assert "Settings" in _last_edit_msg(ctx).text
+        assert "settings" in _last_edit_msg(ctx).text.lower()
 
     @pytest.mark.anyio
     async def test_returns_none(self, tmp_path):
@@ -1361,7 +1361,7 @@ class TestReasoning:
 
     @pytest.mark.anyio
     async def test_reasoning_shows_claude_levels(self, tmp_path):
-        """Claude Code engine shows only low/medium/high (no minimal/xhigh)."""
+        """Claude Code engine shows low/medium/high/max (no minimal/xhigh)."""
         state_path = tmp_path / "prefs.json"
         cmd = ConfigCommand()
         ctx = _make_ctx(
@@ -1375,6 +1375,7 @@ class TestReasoning:
         assert "config:rs:low" in data
         assert "config:rs:med" in data
         assert "config:rs:hi" in data
+        assert "config:rs:max" in data
         assert "config:rs:min" not in data
         assert "config:rs:xhi" not in data
 
@@ -1390,7 +1391,7 @@ class TestReasoning:
         )
         await cmd.handle(ctx)
         msg = _last_edit_msg(ctx)
-        assert "Settings" in msg.text
+        assert "settings" in msg.text.lower()
 
     @pytest.mark.anyio
     async def test_reasoning_set_persists(self, tmp_path):
@@ -1413,7 +1414,7 @@ class TestReasoning:
 
     @pytest.mark.anyio
     async def test_reasoning_set_all_levels(self, tmp_path):
-        """All 5 reasoning levels map correctly."""
+        """All 6 reasoning levels map correctly."""
         from untether.telegram.chat_prefs import ChatPrefsStore, resolve_prefs_path
 
         expected = {
@@ -1422,6 +1423,7 @@ class TestReasoning:
             "med": "medium",
             "hi": "high",
             "xhi": "xhigh",
+            "max": "max",
         }
         state_path = tmp_path / "prefs.json"
 
@@ -1457,7 +1459,7 @@ class TestReasoning:
         )
         await cmd.handle(ctx)
         msg = _last_edit_msg(ctx)
-        assert "Settings" in msg.text
+        assert "settings" in msg.text.lower()
 
     @pytest.mark.anyio
     async def test_reasoning_clear_removes_override(self, tmp_path):
@@ -1565,6 +1567,53 @@ class TestReasoning:
         await cmd.handle(ctx)
         labels = _buttons_labels(_last_edit_msg(ctx))
         assert any("✓" in label and "High" in label for label in labels)
+
+    @pytest.mark.anyio
+    async def test_reasoning_default_label_shows_engine_level(self, tmp_path):
+        """When no override is set, shows resolved default from engine settings."""
+        import json
+
+        state_path = tmp_path / "prefs.json"
+        fake_claude_dir = tmp_path / ".claude"
+        fake_claude_dir.mkdir()
+        (fake_claude_dir / "settings.json").write_text(
+            json.dumps({"effortLevel": "high"})
+        )
+
+        from unittest.mock import patch
+
+        cmd = ConfigCommand()
+        ctx = _make_ctx(
+            args_text="rs",
+            text="config:rs",
+            config_path=state_path,
+            default_engine="claude",
+        )
+        with patch("pathlib.Path.home", return_value=tmp_path):
+            await cmd.handle(ctx)
+        msg = _last_edit_msg(ctx)
+        assert "default (high)" in msg.text
+
+    @pytest.mark.anyio
+    async def test_reasoning_default_label_fallback(self, tmp_path):
+        """When engine default is unreadable, shows plain 'default'."""
+        state_path = tmp_path / "prefs.json"
+
+        from unittest.mock import patch
+
+        cmd = ConfigCommand()
+        ctx = _make_ctx(
+            args_text="rs",
+            text="config:rs",
+            config_path=state_path,
+            default_engine="claude",
+        )
+        # No settings file exists at tmp_path/.claude/settings.json
+        with patch("pathlib.Path.home", return_value=tmp_path):
+            await cmd.handle(ctx)
+        msg = _last_edit_msg(ctx)
+        assert "default" in msg.text
+        assert "default (" not in msg.text
 
     @pytest.mark.anyio
     async def test_home_shows_reasoning_for_codex(self, tmp_path):
@@ -1677,7 +1726,7 @@ class TestAskQuestions:
         )
         await cmd.handle(ctx)
         msg = _last_edit_msg(ctx)
-        assert "Settings" in msg.text
+        assert "settings" in msg.text.lower()
 
         prefs = ChatPrefsStore(resolve_prefs_path(state_path))
         override = await prefs.get_engine_override(123, "claude")
@@ -1848,7 +1897,7 @@ class TestDiffPreview:
         )
         await cmd.handle(ctx)
         msg = _last_edit_msg(ctx)
-        assert "Settings" in msg.text
+        assert "settings" in msg.text.lower()
 
         prefs = ChatPrefsStore(resolve_prefs_path(state_path))
         override = await prefs.get_engine_override(123, "claude")
@@ -2485,9 +2534,10 @@ class TestDocsLinks:
         ctx = _make_ctx(config_path=state_path, default_engine="claude")
         await cmd.handle(ctx)
         text = _last_send_msg(ctx).text
-        assert "Settings guide" in text
-        assert "Troubleshooting" in text
-        assert self._DOCS_BASE in text
+        assert "Help guides" in text
+        assert "Report a bug" in text
+        assert "Settings guide" not in text
+        assert "Troubleshooting" not in text
 
 
 # ---------------------------------------------------------------------------
@@ -2689,7 +2739,7 @@ class TestResumeLine:
         )
         await cmd.handle(ctx)
         msg = _last_edit_msg(ctx)
-        assert "Settings" in msg.text
+        assert "settings" in msg.text.lower()
 
         prefs = ChatPrefsStore(resolve_prefs_path(state_path))
         override = await prefs.get_engine_override(123, "claude")

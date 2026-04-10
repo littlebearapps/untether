@@ -111,3 +111,51 @@ def test_merge_overrides_diff_preview_chat_fallback() -> None:
     merged = merge_overrides(topic, chat)
     assert merged is not None
     assert merged.diff_preview is True
+
+
+def test_get_engine_default_reasoning_claude(tmp_path) -> None:
+    """Reads effortLevel from Claude settings.json."""
+    import json
+    from unittest.mock import patch
+
+    from untether.telegram.engine_overrides import get_engine_default_reasoning
+
+    claude_dir = tmp_path / ".claude"
+    claude_dir.mkdir()
+    (claude_dir / "settings.json").write_text(json.dumps({"effortLevel": "high"}))
+
+    with patch("pathlib.Path.home", return_value=tmp_path):
+        assert get_engine_default_reasoning("claude") == "high"
+
+
+def test_get_engine_default_reasoning_claude_max(tmp_path) -> None:
+    """Reads max effort level from Claude settings.json."""
+    import json
+    from unittest.mock import patch
+
+    from untether.telegram.engine_overrides import get_engine_default_reasoning
+
+    claude_dir = tmp_path / ".claude"
+    claude_dir.mkdir()
+    (claude_dir / "settings.json").write_text(json.dumps({"effortLevel": "max"}))
+
+    with patch("pathlib.Path.home", return_value=tmp_path):
+        assert get_engine_default_reasoning("claude") == "max"
+
+
+def test_get_engine_default_reasoning_no_file(tmp_path) -> None:
+    """Returns None when settings file doesn't exist."""
+    from unittest.mock import patch
+
+    from untether.telegram.engine_overrides import get_engine_default_reasoning
+
+    with patch("pathlib.Path.home", return_value=tmp_path):
+        assert get_engine_default_reasoning("claude") is None
+
+
+def test_get_engine_default_reasoning_unsupported_engine() -> None:
+    """Returns None for engines without config file support."""
+    from untether.telegram.engine_overrides import get_engine_default_reasoning
+
+    assert get_engine_default_reasoning("codex") is None
+    assert get_engine_default_reasoning("gemini") is None

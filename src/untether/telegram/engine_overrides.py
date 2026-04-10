@@ -7,11 +7,11 @@ import msgspec
 
 OverrideSource = Literal["topic_override", "chat_default", "default"]
 
-REASONING_LEVELS: tuple[str, ...] = ("minimal", "low", "medium", "high", "xhigh")
+REASONING_LEVELS: tuple[str, ...] = ("minimal", "low", "medium", "high", "xhigh", "max")
 REASONING_SUPPORTED_ENGINES = frozenset({"claude", "codex"})
 
 _ENGINE_REASONING_LEVELS: dict[str, tuple[str, ...]] = {
-    "claude": ("low", "medium", "high"),
+    "claude": ("low", "medium", "high", "max"),
     "codex": ("minimal", "low", "medium", "high", "xhigh"),
 }
 
@@ -209,3 +209,23 @@ def allowed_reasoning_levels(engine: str) -> tuple[str, ...]:
 
 def supports_reasoning(engine: str) -> bool:
     return engine in REASONING_SUPPORTED_ENGINES
+
+
+def get_engine_default_reasoning(engine: str) -> str | None:
+    """Read the engine's own default reasoning/effort level from its settings file.
+
+    Returns the level string (e.g. "high") or None if unknown.
+    """
+    import json
+    from pathlib import Path
+
+    if engine == "claude":
+        settings_path = Path.home() / ".claude" / "settings.json"
+        try:
+            data = json.loads(settings_path.read_text())
+            level = data.get("effortLevel")
+            if isinstance(level, str) and level:
+                return level
+        except (OSError, json.JSONDecodeError, KeyError, TypeError):
+            return None
+    return None
