@@ -86,8 +86,10 @@ Telegram <-> TelegramPresenter <-> RunnerBridge <-> Runner (claude/codex/opencod
 | `scripts/validate_release.py` | Release validation (changelog format, issue links, version match) |
 | `scripts/healthcheck.sh` | Post-deploy health check (systemd, version, logs, Bot API) |
 | `triggers/cron.py` | Cron expression parser, timezone-aware scheduler loop |
-| `triggers/settings.py` | CronConfig/WebhookConfig/TriggersSettings models, timezone validation |
+| `triggers/settings.py` | CronConfig/WebhookConfig/CronFetchConfig/TriggersSettings models, timezone validation |
 | `triggers/ssrf.py` | SSRF protection for outbound HTTP requests (IP blocking, DNS validation, URL scheme check) |
+| `triggers/actions.py` | Non-agent webhook actions: file_write, http_forward, notify_only |
+| `triggers/fetch.py` | Cron data-fetch: HTTP GET/POST, file read, response parsing, prompt building |
 | `cliff.toml` | git-cliff config for changelog drafting |
 
 ## Reference docs

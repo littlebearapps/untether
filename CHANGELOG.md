@@ -33,6 +33,19 @@
   - `notify_on_success` / `notify_on_failure` flags for Telegram visibility on all action types
   - default `action = "agent_run"` preserves full backward compatibility
 
+- **multipart form data support for webhooks** — webhooks can now accept `multipart/form-data` POSTs with file uploads [#278](https://github.com/littlebearapps/untether/issues/278)
+  - file parts saved with sanitised filenames, atomic writes, deny-glob and path traversal protection
+  - configurable `file_destination` with template variables, `max_file_size_bytes` (default 50 MB)
+  - form fields available as template variables alongside file metadata
+
+- **data-fetch cron triggers** — cron triggers can now pull data from external sources before rendering the prompt [#279](https://github.com/littlebearapps/untether/issues/279)
+  - `fetch.type = "http_get"` / `"http_post"` — fetch URL with SSRF protection, configurable timeout and headers
+  - `fetch.type = "file_read"` — read local file with path traversal protection and deny-globs
+  - `fetch.parse_as` — parse response as `json`, `text`, or `lines`
+  - fetched data injected into `prompt_template` via `store_as` variable (default `fetch_result`)
+  - `on_failure = "abort"` (default) sends failure notification; `"run_with_error"` injects error into prompt
+  - all fetched data prefixed with untrusted-data marker
+
 ## v0.35.0 (2026-03-31)
 
 ### fixes

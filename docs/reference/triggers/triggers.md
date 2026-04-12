@@ -140,10 +140,40 @@ Webhook IDs must be unique across all configured webhooks.
 | `project` | string\|null | `null` | Project alias. Sets the working directory for the run. |
 | `engine` | string\|null | `null` | Engine override. Uses default engine if unset. |
 | `chat_id` | int\|null | `null` | Telegram chat to post in. Falls back to the transport's default `chat_id`. |
-| `prompt` | string | (required) | The prompt sent to the engine. |
+| `prompt` | string\|null | (required if no `prompt_template`) | Static prompt sent to the engine. |
+| `prompt_template` | string\|null | `null` | Template prompt with `{{field}}` substitution (used with fetch data). |
 | `timezone` | string\|null | `null` | IANA timezone name (e.g. `"Australia/Melbourne"`). Overrides `default_timezone`. |
+| `fetch` | object\|null | `null` | Pre-fetch step configuration (see [Data-fetch crons](#data-fetch-crons)). |
 
-Cron IDs must be unique across all configured crons.
+Either `prompt` or `prompt_template` is required. Cron IDs must be unique across all configured crons.
+
+### `[triggers.crons.fetch]`
+
+=== "toml"
+
+    ```toml
+    [triggers.crons.fetch]
+    type = "http_get"
+    url = "https://api.github.com/repos/myorg/myapp/issues?state=open"
+    headers = { "Authorization" = "Bearer {{env.GITHUB_TOKEN}}" }
+    timeout_seconds = 15
+    parse_as = "json"
+    store_as = "issues"
+    on_failure = "abort"
+    ```
+
+| Key | Type | Default | Notes |
+|-----|------|---------|-------|
+| `type` | string | (required) | Fetch type: `"http_get"`, `"http_post"`, or `"file_read"`. |
+| `url` | string\|null | `null` | URL for HTTP fetch types. Required when type is `http_get` or `http_post`. |
+| `headers` | dict\|null | `null` | HTTP headers. Values support `{{field}}` templates. |
+| `body` | string\|null | `null` | Request body for `http_post`. |
+| `file_path` | string\|null | `null` | File path for `file_read`. Required when type is `file_read`. |
+| `timeout_seconds` | int | `15` | Fetch timeout (1--60 seconds). |
+| `parse_as` | string | `"text"` | Parse mode: `"json"`, `"text"`, or `"lines"`. |
+| `store_as` | string | `"fetch_result"` | Template variable name for the fetched data. |
+| `on_failure` | string | `"abort"` | Failure handling: `"abort"` (notify + skip run) or `"run_with_error"` (inject error into prompt). |
+| `max_bytes` | int | `10485760` | Maximum response size (1 KB--100 MB). |
 
 ## Authentication
 
@@ -358,6 +388,71 @@ action = "notify_only"
 message_template = "📈 {{ticker}} hit {{price}}"
 ```
 
+## Multipart file uploads
+
+Webhooks can accept `multipart/form-data` POSTs when `accept_multipart = true`.
+File parts are saved to disk; form fields are available as template variables.
+
+```toml
+[[triggers.webhooks]]
+id = "batch-upload"
+path = "/hooks/batch"
+auth = "bearer"
+secret = "whsec_..."
+accept_multipart = true
+file_destination = "~/data/uploads/{{form.date}}/{{file.filename}}"
+max_file_size_bytes = 52428800
+action = "agent_run"
+prompt_template = "Batch {{form.batch_id}} uploaded: {{file.saved_path}}. Validate."
+```
+
+- Filenames are sanitised (only `a-zA-Z0-9._-` allowed).
+- File writes use atomic writes with deny-glob and path traversal protection.
+- Form fields are available as `{{field_name}}` in templates.
+- `max_file_size_bytes` defaults to 50 MB (max 100 MB).
+
+## Data-fetch crons
+
+Cron triggers can pull data from external sources before rendering the prompt.
+Add a `fetch` block to the cron config:
+
+```toml
+[[triggers.crons]]
+id = "daily-issue-triage"
+schedule = "0 9 * * 1-5"
+engine = "claude"
+project = "my-app"
+
+[triggers.crons.fetch]
+type = "http_get"
+url = "https://api.github.com/repos/myorg/myapp/issues?state=open&labels=triage"
+headers = { "Authorization" = "Bearer {{env.GITHUB_TOKEN}}" }
+timeout_seconds = 15
+parse_as = "json"
+store_as = "issues"
+
+prompt_template = "Open issues for triage:\n{{issues}}\n\nReview and propose labels."
+```
+
+### Fetch types
+
+- **`http_get`** / **`http_post`** -- fetch a URL with optional headers.
+  SSRF-protected (private IP ranges blocked). Response parsed per `parse_as`.
+- **`file_read`** -- read a local file. Path traversal and deny-glob protected.
+
+### Parse modes
+
+- `"json"` -- parse as JSON; injected as a formatted JSON string.
+- `"text"` -- raw text string.
+- `"lines"` -- split by newlines into a list (empty lines removed).
+
+### Failure handling
+
+- `on_failure = "abort"` (default) -- skip the agent run and send a failure
+  notification to Telegram.
+- `on_failure = "run_with_error"` -- inject the error message into the prompt
+  and run the agent anyway.
+
 ## Chat routing
 
 Each webhook and cron can specify a `chat_id` to post in a specific Telegram
@@ -463,5 +558,6 @@ Expected responses:
 | `src/untether/triggers/rate_limit.py` | Token-bucket rate limiter (per-webhook + global). |
 | `src/untether/triggers/server.py` | aiohttp webhook server (`build_webhook_app`, `run_webhook_server`). |
 | `src/untether/triggers/cron.py` | 5-field cron expression parser and tick-per-minute scheduler. |
+| `src/untether/triggers/fetch.py` | Cron data-fetch step: HTTP GET/POST, file read, response parsing, prompt building. |
 | `src/untether/triggers/dispatcher.py` | Bridge between trigger sources and `run_job()`. Sends notification, then starts run. |
 | `src/untether/triggers/ssrf.py` | SSRF protection for outbound HTTP requests. Blocks private/reserved IP ranges, validates URL schemes and DNS resolution. |
