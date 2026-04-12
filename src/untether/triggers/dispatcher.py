@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
+from typing import Any
 
 from anyio.abc import TaskGroup
 
@@ -82,4 +83,68 @@ class TriggerDispatcher:
             None,  # on_thread_known
             engine_override,
             None,  # progress_ref
+        )
+
+    async def dispatch_action(
+        self,
+        webhook: WebhookConfig,
+        payload: dict[str, Any],
+        raw_body: bytes,
+    ) -> None:
+        """Execute a non-agent webhook action (file_write, http_forward, notify_only)."""
+        from .actions import (
+            execute_file_write,
+            execute_http_forward,
+            execute_notify_message,
+        )
+
+        chat_id = webhook.chat_id or self.default_chat_id
+        action = webhook.action
+
+        logger.info(
+            "triggers.action.start",
+            webhook_id=webhook.id,
+            action=action,
+        )
+
+        if action == "file_write":
+            ok, msg = await execute_file_write(webhook, payload, raw_body)
+        elif action == "http_forward":
+            ok, msg = await execute_http_forward(webhook, payload, raw_body)
+        elif action == "notify_only":
+            msg = execute_notify_message(webhook, payload)
+            ok = True
+        else:
+            logger.error(
+                "triggers.action.unknown", action=action, webhook_id=webhook.id
+            )
+            return
+
+        # Send notification to Telegram if configured.
+        should_notify = (ok and webhook.notify_on_success) or (
+            not ok and webhook.notify_on_failure
+        )
+
+        if action == "notify_only":
+            # notify_only always sends the message.
+            await self.transport.send(
+                channel_id=chat_id,
+                message=RenderedMessage(text=msg),
+                options=SendOptions(notify=True),
+            )
+        elif should_notify:
+            icon = "\u2705" if ok else "\u274c"
+            label = f"{icon} webhook:{webhook.id} ({action}): {msg}"
+            await self.transport.send(
+                channel_id=chat_id,
+                message=RenderedMessage(text=label),
+                options=SendOptions(notify=not ok),
+            )
+
+        logger.info(
+            "triggers.action.done",
+            webhook_id=webhook.id,
+            action=action,
+            ok=ok,
+            message=msg,
         )

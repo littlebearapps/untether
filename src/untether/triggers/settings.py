@@ -59,13 +59,38 @@ class WebhookConfig(BaseModel):
     chat_id: StrictInt | None = None
     auth: Literal["bearer", "hmac-sha256", "hmac-sha1", "none"] = "bearer"
     secret: NonEmptyStr | None = None
-    prompt_template: NonEmptyStr
+    prompt_template: NonEmptyStr | None = None
     event_filter: NonEmptyStr | None = None
+
+    # --- Non-agent action fields ---
+    action: Literal["agent_run", "file_write", "http_forward", "notify_only"] = (
+        "agent_run"
+    )
+    file_path: NonEmptyStr | None = None
+    on_conflict: Literal["overwrite", "append_timestamp", "error"] = "overwrite"
+    forward_url: NonEmptyStr | None = None
+    forward_headers: dict[str, str] | None = None
+    forward_method: Literal["POST", "PUT", "PATCH"] = "POST"
+    message_template: NonEmptyStr | None = None
+    notify_on_success: bool = False
+    notify_on_failure: bool = False
 
     @model_validator(mode="after")
     def _require_secret_for_auth(self) -> WebhookConfig:
         if self.auth != "none" and not self.secret:
             raise ValueError(f"secret is required when auth={self.auth!r}")
+        return self
+
+    @model_validator(mode="after")
+    def _validate_action_fields(self) -> WebhookConfig:
+        if self.action == "agent_run" and not self.prompt_template:
+            raise ValueError("prompt_template is required when action='agent_run'")
+        if self.action == "file_write" and not self.file_path:
+            raise ValueError("file_path is required when action='file_write'")
+        if self.action == "http_forward" and not self.forward_url:
+            raise ValueError("forward_url is required when action='http_forward'")
+        if self.action == "notify_only" and not self.message_template:
+            raise ValueError("message_template is required when action='notify_only'")
         return self
 
 

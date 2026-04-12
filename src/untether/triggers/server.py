@@ -103,10 +103,14 @@ def build_webhook_app(
             if event_type != webhook.event_filter:
                 return web.Response(status=200, text="filtered")
 
-        # Template and dispatch
-        prompt = render_prompt(webhook.prompt_template, payload)
-        await dispatcher.dispatch_webhook(webhook, prompt)
+        # Route by action type.
+        if webhook.action == "agent_run":
+            prompt = render_prompt(webhook.prompt_template, payload)
+            await dispatcher.dispatch_webhook(webhook, prompt)
+            return web.Response(status=202, text="accepted")
 
+        # Non-agent actions.
+        await dispatcher.dispatch_action(webhook, payload, raw_body)
         return web.Response(status=202, text="accepted")
 
     app = web.Application(client_max_size=max_body)
