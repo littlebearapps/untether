@@ -106,8 +106,17 @@ passes its `message_id` to `run_job()` so the engine reply threads under it.
 | `chat_id` | int\|null | `null` | Telegram chat to post in. Falls back to the transport's default `chat_id`. |
 | `auth` | string | `"bearer"` | Auth mode: `"bearer"`, `"hmac-sha256"`, `"hmac-sha1"`, or `"none"`. |
 | `secret` | string\|null | `null` | Auth secret. Required when `auth` is not `"none"`. |
-| `prompt_template` | string | (required) | Prompt template with `{{field.path}}` substitutions. |
+| `prompt_template` | string\|null | (required for `agent_run`) | Prompt template with `{{field.path}}` substitutions. |
 | `event_filter` | string\|null | `null` | Only process requests matching this event type header. |
+| `action` | string | `"agent_run"` | Action type: `"agent_run"`, `"file_write"`, `"http_forward"`, or `"notify_only"`. |
+| `file_path` | string\|null | `null` | File path for `file_write` action. Supports `{{field.path}}` templates. Required when `action = "file_write"`. |
+| `on_conflict` | string | `"overwrite"` | Conflict handling for `file_write`: `"overwrite"`, `"append_timestamp"`, or `"error"`. |
+| `forward_url` | string\|null | `null` | URL to forward payload to. Required when `action = "http_forward"`. SSRF-protected. |
+| `forward_headers` | dict\|null | `null` | Extra headers for `http_forward`. Values support `{{field.path}}` templates. |
+| `forward_method` | string | `"POST"` | HTTP method for `http_forward`: `"POST"`, `"PUT"`, or `"PATCH"`. |
+| `message_template` | string\|null | `null` | Message template for `notify_only`. Required when `action = "notify_only"`. |
+| `notify_on_success` | bool | `false` | Send Telegram notification on successful non-agent action. |
+| `notify_on_failure` | bool | `false` | Send Telegram notification on failed non-agent action. |
 
 Webhook IDs must be unique across all configured webhooks.
 
@@ -286,6 +295,69 @@ prompt_template = "Review push to {{ref}} by {{pusher.name}}"
 This is useful for GitHub webhooks configured with multiple event types -- only
 the matching events trigger a run.
 
+## Non-agent actions
+
+Webhooks can perform lightweight actions without spawning an agent run by
+setting the `action` field. All actions still go through auth, rate limiting,
+and event filtering.
+
+### `file_write`
+
+Write the POST body to a file path on disk:
+
+```toml
+[[triggers.webhooks]]
+id = "data-ingest"
+path = "/hooks/ingest"
+auth = "bearer"
+secret = "whsec_..."
+action = "file_write"
+file_path = "~/data/incoming/batch-{{date}}.json"
+on_conflict = "append_timestamp"
+notify_on_success = true
+```
+
+- Atomic writes (temp file + rename) prevent partial writes.
+- Path traversal protection blocks `..` sequences and symlink escapes.
+- Deny globs block writes to `.git/`, `.env`, `.pem` files, `.ssh/`.
+- `on_conflict = "append_timestamp"` appends a Unix timestamp to avoid
+  overwriting existing files.
+
+### `http_forward`
+
+Forward the payload to another URL:
+
+```toml
+[[triggers.webhooks]]
+id = "forward-sentry"
+path = "/hooks/sentry"
+auth = "hmac-sha256"
+secret = "whsec_..."
+action = "http_forward"
+forward_url = "https://my-api.example.com/events"
+forward_headers = { "Authorization" = "Bearer {{env.API_TOKEN}}" }
+notify_on_failure = true
+```
+
+- SSRF-protected -- private IP ranges, link-local, and cloud metadata
+  endpoints are blocked by default.
+- Exponential backoff on 5xx responses (max 3 retries).
+- Header values are validated for control character injection.
+
+### `notify_only`
+
+Send a Telegram message with no agent run:
+
+```toml
+[[triggers.webhooks]]
+id = "stock-alert"
+path = "/hooks/stock"
+auth = "bearer"
+secret = "whsec_..."
+action = "notify_only"
+message_template = "📈 {{ticker}} hit {{price}}"
+```
+
 ## Chat routing
 
 Each webhook and cron can specify a `chat_id` to post in a specific Telegram
@@ -371,7 +443,7 @@ Expected responses:
 
 | Status | Meaning |
 |--------|---------|
-| `202 Accepted` | Webhook processed, run dispatched. |
+| `202 Accepted` | Webhook processed, run or action dispatched. |
 | `200 OK` (`"filtered"`) | Event filter didn't match; no run started. |
 | `400 Bad Request` | Invalid JSON body. |
 | `401 Unauthorized` | Auth verification failed. |
@@ -384,6 +456,7 @@ Expected responses:
 | File | Purpose |
 |------|---------|
 | `src/untether/triggers/__init__.py` | Package init, re-exports settings models. |
+| `src/untether/triggers/actions.py` | Non-agent action handlers: `file_write`, `http_forward`, `notify_only`. |
 | `src/untether/triggers/settings.py` | Pydantic models: `TriggersSettings`, `WebhookConfig`, `CronConfig`, `TriggerServerSettings`. |
 | `src/untether/triggers/auth.py` | Bearer and HMAC-SHA256/SHA1 verification with timing-safe comparison. |
 | `src/untether/triggers/templating.py` | `{{field.path}}` prompt substitution with untrusted prefix. |

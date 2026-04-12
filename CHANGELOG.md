@@ -26,6 +26,13 @@
   - configurable allowlist for admins who need to hit local services
   - timeout and response-size clamping utilities
 
+- **non-agent webhook actions** — webhooks can now perform lightweight actions without spawning an agent run [#277](https://github.com/littlebearapps/untether/issues/277)
+  - `action = "file_write"` — write POST body to disk with atomic writes, path traversal protection, deny-glob enforcement, and on-conflict handling
+  - `action = "http_forward"` — forward payload to another URL with SSRF protection, exponential backoff on 5xx, and header template rendering
+  - `action = "notify_only"` — send a templated Telegram message with no agent run
+  - `notify_on_success` / `notify_on_failure` flags for Telegram visibility on all action types
+  - default `action = "agent_run"` preserves full backward compatibility
+
 ## v0.35.0 (2026-03-31)
 
 ### fixes
