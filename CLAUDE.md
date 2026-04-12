@@ -87,6 +87,7 @@ Telegram <-> TelegramPresenter <-> RunnerBridge <-> Runner (claude/codex/opencod
 | `scripts/healthcheck.sh` | Post-deploy health check (systemd, version, logs, Bot API) |
 | `triggers/cron.py` | Cron expression parser, timezone-aware scheduler loop |
 | `triggers/settings.py` | CronConfig/WebhookConfig/TriggersSettings models, timezone validation |
+| `triggers/ssrf.py` | SSRF protection for outbound HTTP requests (IP blocking, DNS validation, URL scheme check) |
 | `cliff.toml` | git-cliff config for changelog drafting |
 
 ## Reference docs

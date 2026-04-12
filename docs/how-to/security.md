@@ -120,6 +120,20 @@ The webhook server should only listen on localhost. Put it behind a reverse prox
 
 The server includes rate limiting (token-bucket, per-webhook and global) and timing-safe secret comparison by default.
 
+## SSRF protection for outbound requests
+
+Trigger features that make outbound HTTP requests (webhook forwarding, cron data fetching) include SSRF (Server-Side Request Forgery) protection. All outbound URLs are validated against blocked IP ranges:
+
+- Loopback (`127.0.0.0/8`, `::1`)
+- Private networks (`10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`)
+- Link-local (`169.254.0.0/16`, including cloud metadata endpoints)
+- IPv6 unique-local and link-local
+- IPv4-mapped IPv6 addresses (prevents bypass via `::ffff:127.0.0.1`)
+
+DNS resolution is checked after hostname lookup to prevent DNS rebinding attacks (hostname resolves to a private IP).
+
+If you need triggers to reach local services, you can configure an allowlist (see the [triggers reference](../reference/triggers/triggers.md)).
+
 ## Run untether doctor
 
 After any configuration change, run the built-in preflight check:

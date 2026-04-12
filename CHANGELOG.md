@@ -20,6 +20,12 @@
   - DST-aware via Python's `zoneinfo` module (zero new dependencies)
   - invalid timezone names rejected at config parse time with clear error messages
 
+- **SSRF protection for trigger outbound requests** — shared utility at `triggers/ssrf.py` blocks private/reserved IP ranges, validates URL schemes, and checks DNS resolution to prevent server-side request forgery in upcoming webhook forwarding and cron data-fetch features [#276](https://github.com/littlebearapps/untether/issues/276)
+  - blocks loopback, RFC 1918, link-local, CGN, multicast, reserved, IPv6 equivalents, and IPv4-mapped IPv6 bypass
+  - DNS resolution validation catches DNS rebinding attacks (hostname → private IP)
+  - configurable allowlist for admins who need to hit local services
+  - timeout and response-size clamping utilities
+
 ## v0.35.0 (2026-03-31)
 
 ### fixes

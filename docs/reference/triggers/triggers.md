@@ -312,6 +312,9 @@ the filesystem context.
 - **Untrusted prefix**: All webhook prompts are prefixed with a marker so agents
   know the content is external.
 - **No secrets in logs**: Auth secrets are not included in structured log output.
+- **SSRF protection**: Outbound HTTP requests (forwarding, fetching) are validated
+  against blocked IP ranges (loopback, RFC 1918, link-local, CGN, multicast) and
+  DNS resolution is checked to prevent rebinding attacks. See `triggers/ssrf.py`.
 
 ## Startup message
 
@@ -388,3 +391,4 @@ Expected responses:
 | `src/untether/triggers/server.py` | aiohttp webhook server (`build_webhook_app`, `run_webhook_server`). |
 | `src/untether/triggers/cron.py` | 5-field cron expression parser and tick-per-minute scheduler. |
 | `src/untether/triggers/dispatcher.py` | Bridge between trigger sources and `run_job()`. Sends notification, then starts run. |
+| `src/untether/triggers/ssrf.py` | SSRF protection for outbound HTTP requests. Blocks private/reserved IP ranges, validates URL schemes and DNS resolution. |
