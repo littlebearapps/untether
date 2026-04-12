@@ -42,7 +42,58 @@ class TriggerDispatcher:
         engine_override = cron.engine
         label = f"\N{ALARM CLOCK} Scheduled: cron:{cron.id}"
 
-        await self._dispatch(chat_id, label, cron.prompt, context, engine_override)
+        # If cron has a fetch step, execute it before rendering the prompt.
+        if cron.fetch is not None:
+            prompt = await self._fetch_and_render(cron)
+            if prompt is None:
+                return  # fetch failed with on_failure=abort
+        elif cron.prompt_template:
+            # prompt_template without fetch — render with empty payload.
+            from .templating import render_template_fields
+
+            prompt = render_template_fields(cron.prompt_template, {})
+        else:
+            prompt = cron.prompt or ""
+
+        await self._dispatch(chat_id, label, prompt, context, engine_override)
+
+    async def _fetch_and_render(self, cron: CronConfig) -> str | None:
+        """Execute cron fetch step and build the prompt.
+
+        Returns the rendered prompt, or ``None`` if fetch failed and
+        ``on_failure`` is ``"abort"``.
+        """
+        from .fetch import build_fetch_prompt, execute_fetch
+
+        assert cron.fetch is not None
+        chat_id = cron.chat_id or self.default_chat_id
+
+        ok, error_msg, data = await execute_fetch(cron.fetch)
+
+        if not ok:
+            logger.warning(
+                "triggers.cron.fetch_failed",
+                cron_id=cron.id,
+                error=error_msg,
+            )
+            if cron.fetch.on_failure == "abort":
+                # Notify user of the failure.
+                fail_label = f"\u274c cron:{cron.id} fetch failed: {error_msg}"
+                await self.transport.send(
+                    channel_id=chat_id,
+                    message=RenderedMessage(text=fail_label),
+                    options=SendOptions(notify=True),
+                )
+                return None
+            # on_failure=run_with_error — inject error into prompt.
+            data = f"[FETCH ERROR: {error_msg}]"
+
+        return build_fetch_prompt(
+            cron.prompt,
+            cron.prompt_template,
+            data,
+            cron.fetch.store_as,
+        )
 
     async def _dispatch(
         self,

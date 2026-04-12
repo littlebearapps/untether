@@ -425,3 +425,72 @@ class TestWebhookActionValidation:
         )
         assert w.notify_on_success is True
         assert w.notify_on_failure is True
+
+    def test_multipart_defaults(self):
+        w = WebhookConfig(
+            id="test",
+            path="/hooks/test",
+            auth="none",
+            action="file_write",
+            file_path="/tmp/out.json",
+        )
+        assert w.accept_multipart is False
+        assert w.file_destination is None
+        assert w.max_file_size_bytes == 52_428_800
+
+    def test_multipart_enabled(self):
+        w = WebhookConfig(
+            id="test",
+            path="/hooks/test",
+            auth="none",
+            prompt_template="Process {{form.batch_id}}",
+            accept_multipart=True,
+            file_destination="~/uploads/{{form.date}}/{{file.filename}}",
+            max_file_size_bytes=10_000_000,
+        )
+        assert w.accept_multipart is True
+        assert w.file_destination is not None
+        assert w.max_file_size_bytes == 10_000_000
+
+
+class TestCronConfigFetch:
+    """Tests for CronConfig with fetch block."""
+
+    def test_cron_with_fetch(self):
+        c = CronConfig(
+            id="daily",
+            schedule="0 9 * * 1-5",
+            prompt_template="Issues: {{fetch_result}}",
+            fetch={
+                "type": "http_get",
+                "url": "https://api.github.com/issues",
+            },
+        )
+        assert c.fetch is not None
+        assert c.fetch.type == "http_get"
+        assert c.fetch.url == "https://api.github.com/issues"
+
+    def test_cron_prompt_or_template_required(self):
+        with pytest.raises(ValidationError, match="either prompt or prompt_template"):
+            CronConfig(
+                id="bad",
+                schedule="* * * * *",
+            )
+
+    def test_cron_prompt_template_without_fetch(self):
+        c = CronConfig(
+            id="test",
+            schedule="* * * * *",
+            prompt_template="Static template",
+        )
+        assert c.prompt is None
+        assert c.prompt_template == "Static template"
+
+    def test_cron_backward_compat_prompt_only(self):
+        c = CronConfig(
+            id="legacy",
+            schedule="0 9 * * *",
+            prompt="Review PRs",
+        )
+        assert c.prompt == "Review PRs"
+        assert c.fetch is None

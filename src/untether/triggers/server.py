@@ -8,6 +8,7 @@ import anyio
 from aiohttp import web
 
 from ..logging import get_logger
+from .actions import _deny_reason, _resolve_file_path
 from .auth import verify_auth
 from .dispatcher import TriggerDispatcher
 from .rate_limit import TokenBucketLimiter
@@ -15,6 +16,106 @@ from .settings import TriggersSettings, WebhookConfig
 from .templating import render_prompt
 
 logger = get_logger(__name__)
+
+_SAFE_FILENAME_RE = __import__("re").compile(r"^[a-zA-Z0-9._-]+$")
+
+
+class _MultipartError(Exception):
+    """Raised during multipart parsing to return an HTTP error."""
+
+    def __init__(self, status: int, message: str) -> None:
+        self.status = status
+        self.message = message
+        super().__init__(message)
+
+
+async def _parse_multipart(
+    request: web.Request,
+    webhook: WebhookConfig,
+) -> tuple[dict, str | None]:
+    """Parse a multipart/form-data request.
+
+    Returns ``(form_fields_dict, saved_file_path_or_none)``.
+    Raises ``_MultipartError`` on validation failure.
+    """
+    import tempfile
+    from pathlib import Path
+
+    from .templating import render_template_fields
+
+    form_fields: dict[str, str] = {}
+    saved_path: str | None = None
+
+    reader = await request.multipart()
+
+    async for part in reader:
+        if part.filename:
+            # File part — sanitise filename and save.
+            raw_name = part.filename or "upload.bin"
+            safe_name = raw_name.replace("/", "_").replace("\\", "_")
+            if not _SAFE_FILENAME_RE.match(safe_name):
+                safe_name = "upload.bin"
+
+            # Read file content with size limit.
+            max_file = webhook.max_file_size_bytes
+            chunks: list[bytes] = []
+            total = 0
+            while True:
+                chunk = await part.read_chunk(8192)
+                if not chunk:
+                    break
+                total += len(chunk)
+                if total > max_file:
+                    raise _MultipartError(413, "file too large")
+                chunks.append(chunk)
+            file_data = b"".join(chunks)
+
+            # Build destination path.
+            form_fields["file"] = {"filename": safe_name}
+            if webhook.file_destination:
+                dest_template = webhook.file_destination
+                template_ctx = {**form_fields, "file": {"filename": safe_name}}
+                dest_str = render_template_fields(dest_template, template_ctx)
+            else:
+                dest_str = f"/tmp/untether-uploads/{safe_name}"
+
+            target = _resolve_file_path(dest_str)
+            if target is None:
+                raise _MultipartError(400, "invalid file destination path")
+
+            reason = _deny_reason(target)
+            if reason is not None:
+                raise _MultipartError(
+                    400, f"file destination blocked by deny glob: {reason}"
+                )
+
+            # Atomic write.
+            target.parent.mkdir(parents=True, exist_ok=True)
+            with tempfile.NamedTemporaryFile(
+                mode="wb",
+                delete=False,
+                dir=target.parent,
+                prefix=".untether-upload-",
+            ) as handle:
+                handle.write(file_data)
+                temp_name = handle.name
+            Path(temp_name).replace(target)
+            saved_path = str(target)
+
+            logger.info(
+                "triggers.multipart.file_saved",
+                webhook_id=webhook.id,
+                filename=safe_name,
+                path=saved_path,
+                size=len(file_data),
+            )
+        else:
+            # Form field.
+            name = part.name or "_unnamed"
+            value = (await part.read()).decode("utf-8", errors="replace")
+            form_fields[name] = value
+
+    return form_fields, saved_path
 
 
 def build_webhook_app(
@@ -84,16 +185,29 @@ def build_webhook_app(
         if not rate_limiter.allow(webhook.id) or not rate_limiter.allow("__global__"):
             return web.Response(status=429, text="rate limited")
 
-        # Parse payload
-        if raw_body:
+        # Parse payload — multipart or JSON.
+        payload: dict = {}
+        file_saved_path: str | None = None
+
+        content_type = request.content_type or ""
+        if webhook.accept_multipart and content_type.startswith("multipart/"):
+            try:
+                payload, file_saved_path = await _parse_multipart(request, webhook)
+            except _MultipartError as exc:
+                return web.Response(status=exc.status, text=exc.message)
+        elif raw_body:
             try:
                 payload = json.loads(raw_body)
                 if not isinstance(payload, dict):
                     payload = {"_body": payload}
             except json.JSONDecodeError:
                 return web.Response(status=400, text="invalid json")
-        else:
-            payload = {}
+
+        if file_saved_path is not None:
+            payload["file"] = {
+                "saved_path": file_saved_path,
+                "filename": payload.get("file", {}).get("filename", ""),
+            }
 
         # Event filter (e.g. GitHub X-GitHub-Event header)
         if webhook.event_filter:
