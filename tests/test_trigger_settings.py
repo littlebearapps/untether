@@ -295,3 +295,133 @@ class TestParseTriggerConfig:
     def test_parse_invalid_raises(self):
         with pytest.raises(ValidationError):
             parse_trigger_config({"server": {"port": "not_a_number"}})
+
+
+class TestWebhookActionValidation:
+    """Validate action-specific required fields."""
+
+    def test_default_action_is_agent_run(self):
+        w = WebhookConfig(
+            id="test",
+            path="/hooks/test",
+            auth="none",
+            prompt_template="Hello",
+        )
+        assert w.action == "agent_run"
+
+    def test_agent_run_requires_prompt_template(self):
+        with pytest.raises(ValidationError, match="prompt_template is required"):
+            WebhookConfig(
+                id="test",
+                path="/hooks/test",
+                auth="none",
+                action="agent_run",
+            )
+
+    def test_file_write_requires_file_path(self):
+        with pytest.raises(ValidationError, match="file_path is required"):
+            WebhookConfig(
+                id="test",
+                path="/hooks/test",
+                auth="none",
+                action="file_write",
+            )
+
+    def test_file_write_valid(self):
+        w = WebhookConfig(
+            id="test",
+            path="/hooks/test",
+            auth="none",
+            action="file_write",
+            file_path="/tmp/output.json",
+        )
+        assert w.action == "file_write"
+        assert w.file_path == "/tmp/output.json"
+
+    def test_http_forward_requires_forward_url(self):
+        with pytest.raises(ValidationError, match="forward_url is required"):
+            WebhookConfig(
+                id="test",
+                path="/hooks/test",
+                auth="none",
+                action="http_forward",
+            )
+
+    def test_http_forward_valid(self):
+        w = WebhookConfig(
+            id="test",
+            path="/hooks/test",
+            auth="none",
+            action="http_forward",
+            forward_url="https://example.com/events",
+        )
+        assert w.action == "http_forward"
+        assert w.forward_url == "https://example.com/events"
+
+    def test_notify_only_requires_message_template(self):
+        with pytest.raises(ValidationError, match="message_template is required"):
+            WebhookConfig(
+                id="test",
+                path="/hooks/test",
+                auth="none",
+                action="notify_only",
+            )
+
+    def test_notify_only_valid(self):
+        w = WebhookConfig(
+            id="test",
+            path="/hooks/test",
+            auth="none",
+            action="notify_only",
+            message_template="Alert: {{event}}",
+        )
+        assert w.action == "notify_only"
+        assert w.message_template == "Alert: {{event}}"
+
+    def test_backward_compat_existing_config(self):
+        """Existing configs without action field still work."""
+        w = WebhookConfig(
+            id="legacy",
+            path="/hooks/legacy",
+            auth="bearer",
+            secret="tok_123",
+            prompt_template="Hello {{name}}",
+        )
+        assert w.action == "agent_run"
+        assert w.prompt_template == "Hello {{name}}"
+
+    def test_forward_headers_accepted(self):
+        w = WebhookConfig(
+            id="test",
+            path="/hooks/test",
+            auth="none",
+            action="http_forward",
+            forward_url="https://example.com",
+            forward_headers={"Authorization": "Bearer tok_123"},
+        )
+        assert w.forward_headers == {"Authorization": "Bearer tok_123"}
+
+    def test_on_conflict_values(self):
+        for conflict in ("overwrite", "append_timestamp", "error"):
+            w = WebhookConfig(
+                id="test",
+                path="/hooks/test",
+                auth="none",
+                action="file_write",
+                file_path="/tmp/out.json",
+                on_conflict=conflict,
+            )
+            assert w.on_conflict == conflict
+
+    def test_notify_flags(self):
+        w = WebhookConfig(
+            id="test",
+            path="/hooks/test",
+            auth="none",
+            action="file_write",
+            file_path="/tmp/out.json",
+            notify_on_success=True,
+            notify_on_failure=True,
+        )
+        assert w.notify_on_success is True
+        assert w.notify_on_failure is True
