@@ -173,13 +173,17 @@ To add another test route:
 
 ## Systemd service configuration
 
-An example service file lives at `contrib/untether.service`. Two settings are
-critical for graceful shutdown:
+An example service file lives at `contrib/untether.service`. Four settings are
+critical — two for graceful shutdown, two for OOM (out-of-memory) behaviour:
 
 ```ini
 KillMode=mixed          # SIGTERM main process first, then SIGKILL remaining cgroup
 TimeoutStopSec=150      # Give the 120s drain timeout room to complete
+OOMScoreAdjust=-100     # Don't be earlyoom's preferred victim
+OOMPolicy=continue      # Don't tear down the whole unit on a single OOM kill
 ```
+
+### Graceful shutdown
 
 `KillMode=mixed` sends SIGTERM only to the main Untether process first, allowing
 the drain mechanism to gracefully finish active runs. After the main process
@@ -194,7 +198,46 @@ Other modes have drawbacks:
 Without `TimeoutStopSec=150`, systemd's default 90s timeout may kill
 the process before the 120s drain finishes.
 
-To apply:
+### OOM (out-of-memory) behaviour
+
+By default, systemd user services inherit `OOMScoreAdjust=100` or `200` from
+`user@UID.service` and use `OOMPolicy=stop`. Without overrides, this makes
+Untether's Claude subprocesses **preferred victims** for earlyoom and the
+kernel OOM killer — ahead of CLI `claude` running in tmux (`oom_score_adj=0`)
+and any orphaned grandchildren the user has spawned from a shell session. When
+RAM exhaustion hits, the result is that live Telegram chats die with rc=143
+(SIGTERM) while the processes actually eating the RAM survive.
+
+`OOMScoreAdjust=-100` lowers Untether's OOM priority. Unprivileged user
+processes can only raise their own `oom_score_adj`, not lower it below the
+parent's baseline — so the kernel silently clamps the effective value at the
+parent's setting (typically 100 on default installs). The `-100` request is
+still worth keeping: it documents intent and takes effect if the parent
+`user@UID.service` is ever overridden to a lower baseline. See `#275` and
+`#222` for the full diagnosis.
+
+`OOMPolicy=continue` tells systemd **not** to tear down the entire unit when
+a single child process is OOM-killed. The default (`stop`) cascades SIGTERM
+to all active engine subprocesses, breaking every live chat at once. With
+`continue`, a single dead MCP server or a single killed engine subprocess is
+reported as a clean failure on that one run; the bridge and other active
+chats keep running.
+
+Optional system-wide companion override (requires root) — lowers the baseline
+for *all* user services to `-200`, which lets Untether's `-100` actually take
+effect. Only apply if you want Untether's children to live *longer* than
+other unprivileged user processes, including CLI claude:
+
+```bash
+sudo systemctl edit user@1000.service   # adjust UID for your host
+# add:
+[Service]
+OOMScoreAdjust=-200
+```
+
+This affects every user service on the host — use judgment.
+
+### To apply:
 
 ```bash
 cp contrib/untether.service ~/.config/systemd/user/untether.service

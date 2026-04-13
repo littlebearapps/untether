@@ -11,6 +11,17 @@
 #                          cgroup processes (orphaned MCP servers, containers)
 #   TimeoutStopSec=150   — give the 120s drain timeout room to complete
 #                          before systemd sends SIGKILL
+#   OOMScoreAdjust=-100  — lower than CLI/tmux processes (oom_score_adj=0);
+#                          prevents earlyoom/kernel OOM killer from picking
+#                          Untether's Claude subprocesses first under memory
+#                          pressure. Silently clamped by the kernel to the
+#                          parent's baseline for unprivileged users (typically
+#                          user@UID.service's OOMScoreAdjust, often 100), but
+#                          the -100 request future-proofs the unit. See #275.
+#   OOMPolicy=continue   — do NOT tear down the whole unit when one child
+#                          process is OOM-killed. Default is `stop`, which
+#                          cascades SIGTERM to all active engine subprocesses
+#                          and breaks every live chat at once.
 
 [Unit]
 Description=Untether - Telegram bridge for Claude Code/OpenCode
@@ -30,6 +41,18 @@ RestartSec=10
 #   - mixed:         SIGTERM main → drain finishes → SIGKILL remaining cgroup
 KillMode=mixed
 TimeoutStopSec=150
+
+# OOM victim ordering — see littlebearapps/untether#275 (and closed #222).
+# Without these, systemd defaults (OOMScoreAdjust=200 inherited via
+# user@UID.service, OOMPolicy=stop) make Untether's Claude subprocesses
+# preferred OOM victims over CLI claude (oom_score_adj=0) and the
+# orphaned workerd grandchildren that are actually consuming the RAM.
+# -100 brings Untether below typical CLI/tmux processes (subject to the
+# kernel's clamp at the parent baseline for unprivileged users);
+# `continue` prevents tearing down the whole unit when a single child
+# (e.g. an MCP server) gets killed.
+OOMScoreAdjust=-100
+OOMPolicy=continue
 
 Environment=HOME=%h
 Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin
