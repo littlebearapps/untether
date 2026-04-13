@@ -16,14 +16,16 @@ and no cron loop runs.
 ```
 HTTP POST ─► aiohttp server (port 9876)
   ├─ Route by path ─► WebhookConfig
+  ├─ Read raw body (size check + cached for auth/multipart)
   ├─ verify_auth(config, headers, raw_body)
   ├─ rate_limit.allow(webhook_id)
-  ├─ Parse JSON body
+  ├─ Parse payload (multipart form-data OR JSON)
   ├─ Event filter (optional)
-  ├─ render_prompt(template, payload) ─► prefixed prompt
-  └─ dispatcher.dispatch_webhook(config, prompt)
-       ├─ transport.send(chat_id, "⚡ Trigger: webhook:slack-alerts")
-       └─ run_job(chat_id, msg_id, prompt, context, engine)
+  ├─ Return HTTP 202 ─► dispatcher scheduled fire-and-forget
+  │    └─ render_prompt(template, payload) ─► prefixed prompt
+  │    └─ dispatcher.dispatch_webhook(config, prompt)
+  │         ├─ transport.send(chat_id, "⚡ Trigger: webhook:slack-alerts")
+  │         └─ run_job(chat_id, msg_id, prompt, context, engine)
 
 Cron tick (every minute) ─► cron_matches(schedule, now)
   └─ dispatcher.dispatch_cron(cron)
@@ -72,7 +74,7 @@ passes its `message_id` to `run_job()` so the engine reply threads under it.
 |-----|------|---------|-------|
 | `host` | string | `"127.0.0.1"` | Bind address. Localhost by default; use a reverse proxy for internet exposure. |
 | `port` | int | `9876` | Listen port (1--65535). |
-| `rate_limit` | int | `60` | Max requests per minute (global + per-webhook). |
+| `rate_limit` | int | `60` | Max requests per minute (global + per-webhook). Exceeding this returns HTTP 429. Dispatch runs fire-and-forget after the 202 response, so bursts are rate-limited at ingress rather than at the downstream outbox. |
 | `max_body_bytes` | int | `1048576` | Max request body size in bytes (1 KB--10 MB). |
 
 ### `[[triggers.webhooks]]`
@@ -106,8 +108,17 @@ passes its `message_id` to `run_job()` so the engine reply threads under it.
 | `chat_id` | int\|null | `null` | Telegram chat to post in. Falls back to the transport's default `chat_id`. |
 | `auth` | string | `"bearer"` | Auth mode: `"bearer"`, `"hmac-sha256"`, `"hmac-sha1"`, or `"none"`. |
 | `secret` | string\|null | `null` | Auth secret. Required when `auth` is not `"none"`. |
-| `prompt_template` | string | (required) | Prompt template with `{{field.path}}` substitutions. |
+| `prompt_template` | string\|null | (required for `agent_run`) | Prompt template with `{{field.path}}` substitutions. |
 | `event_filter` | string\|null | `null` | Only process requests matching this event type header. |
+| `action` | string | `"agent_run"` | Action type: `"agent_run"`, `"file_write"`, `"http_forward"`, or `"notify_only"`. |
+| `file_path` | string\|null | `null` | File path for `file_write` action. Supports `{{field.path}}` templates. Required when `action = "file_write"`. |
+| `on_conflict` | string | `"overwrite"` | Conflict handling for `file_write`: `"overwrite"`, `"append_timestamp"`, or `"error"`. |
+| `forward_url` | string\|null | `null` | URL to forward payload to. Required when `action = "http_forward"`. SSRF-protected. |
+| `forward_headers` | dict\|null | `null` | Extra headers for `http_forward`. Values support `{{field.path}}` templates. |
+| `forward_method` | string | `"POST"` | HTTP method for `http_forward`: `"POST"`, `"PUT"`, or `"PATCH"`. |
+| `message_template` | string\|null | `null` | Message template for `notify_only`. Required when `action = "notify_only"`. |
+| `notify_on_success` | bool | `false` | Send Telegram notification on successful non-agent action. |
+| `notify_on_failure` | bool | `false` | Send Telegram notification on failed non-agent action. |
 
 Webhook IDs must be unique across all configured webhooks.
 
@@ -131,10 +142,40 @@ Webhook IDs must be unique across all configured webhooks.
 | `project` | string\|null | `null` | Project alias. Sets the working directory for the run. |
 | `engine` | string\|null | `null` | Engine override. Uses default engine if unset. |
 | `chat_id` | int\|null | `null` | Telegram chat to post in. Falls back to the transport's default `chat_id`. |
-| `prompt` | string | (required) | The prompt sent to the engine. |
+| `prompt` | string\|null | (required if no `prompt_template`) | Static prompt sent to the engine. |
+| `prompt_template` | string\|null | `null` | Template prompt with `{{field}}` substitution (used with fetch data). |
 | `timezone` | string\|null | `null` | IANA timezone name (e.g. `"Australia/Melbourne"`). Overrides `default_timezone`. |
+| `fetch` | object\|null | `null` | Pre-fetch step configuration (see [Data-fetch crons](#data-fetch-crons)). |
 
-Cron IDs must be unique across all configured crons.
+Either `prompt` or `prompt_template` is required. Cron IDs must be unique across all configured crons.
+
+### `[triggers.crons.fetch]`
+
+=== "toml"
+
+    ```toml
+    [triggers.crons.fetch]
+    type = "http_get"
+    url = "https://api.github.com/repos/myorg/myapp/issues?state=open"
+    headers = { "Authorization" = "Bearer {{env.GITHUB_TOKEN}}" }
+    timeout_seconds = 15
+    parse_as = "json"
+    store_as = "issues"
+    on_failure = "abort"
+    ```
+
+| Key | Type | Default | Notes |
+|-----|------|---------|-------|
+| `type` | string | (required) | Fetch type: `"http_get"`, `"http_post"`, or `"file_read"`. |
+| `url` | string\|null | `null` | URL for HTTP fetch types. Required when type is `http_get` or `http_post`. |
+| `headers` | dict\|null | `null` | HTTP headers. Values support `{{field}}` templates. |
+| `body` | string\|null | `null` | Request body for `http_post`. |
+| `file_path` | string\|null | `null` | File path for `file_read`. Required when type is `file_read`. |
+| `timeout_seconds` | int | `15` | Fetch timeout (1--60 seconds). |
+| `parse_as` | string | `"text"` | Parse mode: `"json"`, `"text"`, or `"lines"`. |
+| `store_as` | string | `"fetch_result"` | Template variable name for the fetched data. |
+| `on_failure` | string | `"abort"` | Failure handling: `"abort"` (notify + skip run) or `"run_with_error"` (inject error into prompt). |
+| `max_bytes` | int | `10485760` | Maximum response size (1 KB--100 MB). |
 
 ## Authentication
 
@@ -286,6 +327,137 @@ prompt_template = "Review push to {{ref}} by {{pusher.name}}"
 This is useful for GitHub webhooks configured with multiple event types -- only
 the matching events trigger a run.
 
+## Non-agent actions
+
+Webhooks can perform lightweight actions without spawning an agent run by
+setting the `action` field. All actions still go through auth, rate limiting,
+and event filtering.
+
+### `file_write`
+
+Write the POST body to a file path on disk:
+
+```toml
+[[triggers.webhooks]]
+id = "data-ingest"
+path = "/hooks/ingest"
+auth = "bearer"
+secret = "whsec_..."
+action = "file_write"
+file_path = "~/data/incoming/batch-{{date}}.json"
+on_conflict = "append_timestamp"
+notify_on_success = true
+```
+
+- Atomic writes (temp file + rename) prevent partial writes.
+- Path traversal protection blocks `..` sequences and symlink escapes.
+- Deny globs block writes to `.git/`, `.env`, `.pem` files, `.ssh/`.
+- `on_conflict = "append_timestamp"` appends a Unix timestamp to avoid
+  overwriting existing files.
+
+### `http_forward`
+
+Forward the payload to another URL:
+
+```toml
+[[triggers.webhooks]]
+id = "forward-sentry"
+path = "/hooks/sentry"
+auth = "hmac-sha256"
+secret = "whsec_..."
+action = "http_forward"
+forward_url = "https://my-api.example.com/events"
+forward_headers = { "Authorization" = "Bearer {{env.API_TOKEN}}" }
+notify_on_failure = true
+```
+
+- SSRF-protected -- private IP ranges, link-local, and cloud metadata
+  endpoints are blocked by default.
+- Exponential backoff on 5xx responses (max 3 retries).
+- Header values are validated for control character injection.
+
+### `notify_only`
+
+Send a Telegram message with no agent run:
+
+```toml
+[[triggers.webhooks]]
+id = "stock-alert"
+path = "/hooks/stock"
+auth = "bearer"
+secret = "whsec_..."
+action = "notify_only"
+message_template = "📈 {{ticker}} hit {{price}}"
+```
+
+## Multipart file uploads
+
+Webhooks can accept `multipart/form-data` POSTs when `accept_multipart = true`.
+File parts are saved to disk; form fields are available as template variables.
+
+```toml
+[[triggers.webhooks]]
+id = "batch-upload"
+path = "/hooks/batch"
+auth = "bearer"
+secret = "whsec_..."
+accept_multipart = true
+file_destination = "~/data/uploads/{{form.date}}/{{file.filename}}"
+max_file_size_bytes = 52428800
+action = "agent_run"
+prompt_template = "Batch {{form.batch_id}} uploaded: {{file.saved_path}}. Validate."
+```
+
+- Filenames are sanitised (only `a-zA-Z0-9._-` allowed).
+- File writes use atomic writes with deny-glob and path traversal protection.
+- Form fields are available as `{{field_name}}` in templates.
+- `max_file_size_bytes` defaults to 50 MB (max 100 MB).
+- When combined with `action = "file_write"`, the extracted file part is
+  saved to `file_destination` and the raw MIME body is *not* additionally
+  written to `file_path` — `file_path` only applies to non-multipart requests.
+
+## Data-fetch crons
+
+Cron triggers can pull data from external sources before rendering the prompt.
+Add a `fetch` block to the cron config:
+
+```toml
+[[triggers.crons]]
+id = "daily-issue-triage"
+schedule = "0 9 * * 1-5"
+engine = "claude"
+project = "my-app"
+
+[triggers.crons.fetch]
+type = "http_get"
+url = "https://api.github.com/repos/myorg/myapp/issues?state=open&labels=triage"
+headers = { "Authorization" = "Bearer {{env.GITHUB_TOKEN}}" }
+timeout_seconds = 15
+parse_as = "json"
+store_as = "issues"
+
+prompt_template = "Open issues for triage:\n{{issues}}\n\nReview and propose labels."
+```
+
+### Fetch types
+
+- **`http_get`** / **`http_post`** -- fetch a URL with optional headers.
+  SSRF-protected (private IP ranges blocked). Response parsed per `parse_as`.
+- **`file_read`** -- read a local file. Path traversal and deny-glob protected.
+
+### Parse modes
+
+- `"json"` -- parse as JSON; injected as a formatted JSON string.
+- `"text"` -- raw text string.
+- `"lines"` -- split by newlines into a list (empty lines removed).
+
+### Failure handling
+
+- `on_failure = "abort"` (default) -- skip the agent run and send a failure
+  notification to Telegram.
+- `on_failure = "run_with_error"` -- inject the error message into the prompt
+  and run the agent anyway.
+
 ## Chat routing
 
 Each webhook and cron can specify a `chat_id` to post in a specific Telegram
@@ -312,6 +484,9 @@ the filesystem context.
 - **Untrusted prefix**: All webhook prompts are prefixed with a marker so agents
   know the content is external.
 - **No secrets in logs**: Auth secrets are not included in structured log output.
+- **SSRF protection**: Outbound HTTP requests (forwarding, fetching) are validated
+  against blocked IP ranges (loopback, RFC 1918, link-local, CGN, multicast) and
+  DNS resolution is checked to prevent rebinding attacks. See `triggers/ssrf.py`.
 
 ## Startup message
 
@@ -368,7 +543,7 @@ Expected responses:
 
 | Status | Meaning |
 |--------|---------|
-| `202 Accepted` | Webhook processed, run dispatched. |
+| `202 Accepted` | Webhook processed, run or action dispatched. |
 | `200 OK` (`"filtered"`) | Event filter didn't match; no run started. |
 | `400 Bad Request` | Invalid JSON body. |
 | `401 Unauthorized` | Auth verification failed. |
@@ -381,10 +556,13 @@ Expected responses:
 | File | Purpose |
 |------|---------|
 | `src/untether/triggers/__init__.py` | Package init, re-exports settings models. |
+| `src/untether/triggers/actions.py` | Non-agent action handlers: `file_write`, `http_forward`, `notify_only`. |
 | `src/untether/triggers/settings.py` | Pydantic models: `TriggersSettings`, `WebhookConfig`, `CronConfig`, `TriggerServerSettings`. |
 | `src/untether/triggers/auth.py` | Bearer and HMAC-SHA256/SHA1 verification with timing-safe comparison. |
 | `src/untether/triggers/templating.py` | `{{field.path}}` prompt substitution with untrusted prefix. |
 | `src/untether/triggers/rate_limit.py` | Token-bucket rate limiter (per-webhook + global). |
 | `src/untether/triggers/server.py` | aiohttp webhook server (`build_webhook_app`, `run_webhook_server`). |
 | `src/untether/triggers/cron.py` | 5-field cron expression parser and tick-per-minute scheduler. |
+| `src/untether/triggers/fetch.py` | Cron data-fetch step: HTTP GET/POST, file read, response parsing, prompt building. |
 | `src/untether/triggers/dispatcher.py` | Bridge between trigger sources and `run_job()`. Sends notification, then starts run. |
+| `src/untether/triggers/ssrf.py` | SSRF protection for outbound HTTP requests. Blocks private/reserved IP ranges, validates URL schemes and DNS resolution. |

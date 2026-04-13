@@ -4,6 +4,8 @@
 
 ### fixes
 
+- fix multipart webhooks returning HTTP 500 — `_process_webhook` pre-read the request body for size/auth/rate-limit checks, leaving the stream empty when `_parse_multipart` called `request.multipart()`. Now the multipart reader is constructed from the cached raw body, so multipart uploads work end-to-end; also short-circuits the post-parse raw-body write so the MIME envelope isn't duplicated at `file_path` alongside the extracted file at `file_destination` [#280](https://github.com/littlebearapps/untether/issues/280)
+- fix webhook rate limiter never returning 429 — `_process_webhook` awaited the downstream dispatch (Telegram outbox send, `http_forward` network call, etc.) before returning 202, which capped request throughput at the dispatch rate (~1/sec for private Telegram chats) and meant the `TokenBucketLimiter` never saw a real burst. Dispatch is now fire-and-forget with exception logging, so the rate limiter drains the bucket correctly and a burst of 80 requests against `rate_limit = 60` now yields 60 × 202 + 20 × 429 [#281](https://github.com/littlebearapps/untether/issues/281)
 - **security:** validate callback query sender in group chats — reject button presses from unauthorised users; prevents malicious group members from approving/denying other users' tool requests [#192](https://github.com/littlebearapps/untether/issues/192)
   - also validate sender on cancel button callback — the cancel handler was routed directly, bypassing the dispatch validation
 - **security:** escape release tag name in notify-website CI workflow — use `jq` for proper JSON encoding instead of direct interpolation, preventing JSON injection from crafted tag names [#193](https://github.com/littlebearapps/untether/issues/193)
@@ -19,6 +21,32 @@
   - global `default_timezone` in `[triggers]` — per-cron `timezone` overrides it
   - DST-aware via Python's `zoneinfo` module (zero new dependencies)
   - invalid timezone names rejected at config parse time with clear error messages
+
+- **SSRF protection for trigger outbound requests** — shared utility at `triggers/ssrf.py` blocks private/reserved IP ranges, validates URL schemes, and checks DNS resolution to prevent server-side request forgery in upcoming webhook forwarding and cron data-fetch features [#276](https://github.com/littlebearapps/untether/issues/276)
+  - blocks loopback, RFC 1918, link-local, CGN, multicast, reserved, IPv6 equivalents, and IPv4-mapped IPv6 bypass
+  - DNS resolution validation catches DNS rebinding attacks (hostname → private IP)
+  - configurable allowlist for admins who need to hit local services
+  - timeout and response-size clamping utilities
+
+- **non-agent webhook actions** — webhooks can now perform lightweight actions without spawning an agent run [#277](https://github.com/littlebearapps/untether/issues/277)
+  - `action = "file_write"` — write POST body to disk with atomic writes, path traversal protection, deny-glob enforcement, and on-conflict handling
+  - `action = "http_forward"` — forward payload to another URL with SSRF protection, exponential backoff on 5xx, and header template rendering
+  - `action = "notify_only"` — send a templated Telegram message with no agent run
+  - `notify_on_success` / `notify_on_failure` flags for Telegram visibility on all action types
+  - default `action = "agent_run"` preserves full backward compatibility
+
+- **multipart form data support for webhooks** — webhooks can now accept `multipart/form-data` POSTs with file uploads [#278](https://github.com/littlebearapps/untether/issues/278)
+  - file parts saved with sanitised filenames, atomic writes, deny-glob and path traversal protection
+  - configurable `file_destination` with template variables, `max_file_size_bytes` (default 50 MB)
+  - form fields available as template variables alongside file metadata
+
+- **data-fetch cron triggers** — cron triggers can now pull data from external sources before rendering the prompt [#279](https://github.com/littlebearapps/untether/issues/279)
+  - `fetch.type = "http_get"` / `"http_post"` — fetch URL with SSRF protection, configurable timeout and headers
+  - `fetch.type = "file_read"` — read local file with path traversal protection and deny-globs
+  - `fetch.parse_as` — parse response as `json`, `text`, or `lines`
+  - fetched data injected into `prompt_template` via `store_as` variable (default `fetch_result`)
+  - `on_failure = "abort"` (default) sends failure notification; `"run_with_error"` injects error into prompt
+  - all fetched data prefixed with untrusted-data marker
 
 ## v0.35.0 (2026-03-31)
 

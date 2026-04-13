@@ -164,6 +164,64 @@ Common patterns:
 | `0 */2 * * *` | Every 2 hours |
 | `0 9,17 * * *` | At 9:00 AM and 5:00 PM |
 
+### Data-fetch crons
+
+Crons can pull data from external sources before rendering the prompt:
+
+=== "toml"
+
+    ```toml
+    [[triggers.crons]]
+    id = "daily-issue-triage"
+    schedule = "0 9 * * 1-5"
+    engine = "claude"
+    project = "my-app"
+
+    [triggers.crons.fetch]
+    type = "http_get"
+    url = "https://api.github.com/repos/myorg/myapp/issues?state=open"
+    headers = { "Authorization" = "Bearer {{env.GITHUB_TOKEN}}" }
+    parse_as = "json"
+    store_as = "issues"
+
+    prompt_template = "Open issues:\n{{issues}}\n\nReview and propose labels."
+    ```
+
+The fetch step runs before prompt rendering. Fetched data is injected into `prompt_template` via the `store_as` variable name. If the fetch fails, the default behaviour (`on_failure = "abort"`) sends a failure notification to Telegram and skips the agent run.
+
+Fetch types: `http_get`, `http_post`, `file_read`. See the
+[triggers reference](../reference/triggers/triggers.md#data-fetch-crons) for all options.
+
+## Non-agent webhook actions
+
+Webhooks can perform lightweight actions without spawning an agent:
+
+=== "toml"
+
+    ```toml
+    # Archive webhook payloads to disk
+    [[triggers.webhooks]]
+    id = "data-ingest"
+    path = "/hooks/ingest"
+    auth = "bearer"
+    secret = "whsec_..."
+    action = "file_write"
+    file_path = "~/data/incoming/batch-{{date}}.json"
+    notify_on_success = true
+
+    # Send a Telegram notification
+    [[triggers.webhooks]]
+    id = "stock-alert"
+    path = "/hooks/stock"
+    auth = "bearer"
+    secret = "whsec_..."
+    action = "notify_only"
+    message_template = "📈 {{ticker}} hit {{price}}"
+    ```
+
+Action types: `agent_run` (default), `file_write`, `http_forward`, `notify_only`. See the
+[triggers reference](../reference/triggers/triggers.md#non-agent-actions) for details.
+
 ## Chat routing
 
 Each webhook and cron can specify where the Telegram notification appears:

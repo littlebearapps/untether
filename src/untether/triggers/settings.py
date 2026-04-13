@@ -59,13 +59,68 @@ class WebhookConfig(BaseModel):
     chat_id: StrictInt | None = None
     auth: Literal["bearer", "hmac-sha256", "hmac-sha1", "none"] = "bearer"
     secret: NonEmptyStr | None = None
-    prompt_template: NonEmptyStr
+    prompt_template: NonEmptyStr | None = None
     event_filter: NonEmptyStr | None = None
+
+    # --- Multipart file upload fields ---
+    accept_multipart: bool = False
+    file_destination: NonEmptyStr | None = None
+    max_file_size_bytes: StrictInt = Field(default=52_428_800, ge=1024, le=104_857_600)
+
+    # --- Non-agent action fields ---
+    action: Literal["agent_run", "file_write", "http_forward", "notify_only"] = (
+        "agent_run"
+    )
+    file_path: NonEmptyStr | None = None
+    on_conflict: Literal["overwrite", "append_timestamp", "error"] = "overwrite"
+    forward_url: NonEmptyStr | None = None
+    forward_headers: dict[str, str] | None = None
+    forward_method: Literal["POST", "PUT", "PATCH"] = "POST"
+    message_template: NonEmptyStr | None = None
+    notify_on_success: bool = False
+    notify_on_failure: bool = False
 
     @model_validator(mode="after")
     def _require_secret_for_auth(self) -> WebhookConfig:
         if self.auth != "none" and not self.secret:
             raise ValueError(f"secret is required when auth={self.auth!r}")
+        return self
+
+    @model_validator(mode="after")
+    def _validate_action_fields(self) -> WebhookConfig:
+        if self.action == "agent_run" and not self.prompt_template:
+            raise ValueError("prompt_template is required when action='agent_run'")
+        if self.action == "file_write" and not self.file_path:
+            raise ValueError("file_path is required when action='file_write'")
+        if self.action == "http_forward" and not self.forward_url:
+            raise ValueError("forward_url is required when action='http_forward'")
+        if self.action == "notify_only" and not self.message_template:
+            raise ValueError("message_template is required when action='notify_only'")
+        return self
+
+
+class CronFetchConfig(BaseModel):
+    """Configuration for a cron pre-fetch step."""
+
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    type: Literal["http_get", "http_post", "file_read"]
+    url: NonEmptyStr | None = None
+    headers: dict[str, str] | None = None
+    body: NonEmptyStr | None = None
+    file_path: NonEmptyStr | None = None
+    timeout_seconds: StrictInt = Field(default=15, ge=1, le=60)
+    parse_as: Literal["json", "text", "lines"] = "text"
+    store_as: NonEmptyStr = "fetch_result"
+    on_failure: Literal["abort", "run_with_error"] = "abort"
+    max_bytes: StrictInt = Field(default=10_485_760, ge=1024, le=104_857_600)
+
+    @model_validator(mode="after")
+    def _validate_fetch_fields(self) -> CronFetchConfig:
+        if self.type in ("http_get", "http_post") and not self.url:
+            raise ValueError(f"url is required when fetch type={self.type!r}")
+        if self.type == "file_read" and not self.file_path:
+            raise ValueError("file_path is required when fetch type='file_read'")
         return self
 
 
@@ -79,8 +134,10 @@ class CronConfig(BaseModel):
     project: NonEmptyStr | None = None
     engine: NonEmptyStr | None = None
     chat_id: StrictInt | None = None
-    prompt: NonEmptyStr
+    prompt: NonEmptyStr | None = None
+    prompt_template: NonEmptyStr | None = None
     timezone: NonEmptyStr | None = None
+    fetch: CronFetchConfig | None = None
 
     @field_validator("timezone")
     @classmethod
@@ -93,6 +150,12 @@ class CronConfig(BaseModel):
                     f"unknown timezone {v!r}; use IANA names like 'Australia/Melbourne'"
                 ) from None
         return v
+
+    @model_validator(mode="after")
+    def _validate_prompt(self) -> CronConfig:
+        if not self.prompt and not self.prompt_template:
+            raise ValueError("either prompt or prompt_template is required")
+        return self
 
 
 class TriggersSettings(BaseModel):

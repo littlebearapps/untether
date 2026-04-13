@@ -2,6 +2,6 @@
 
 from __future__ import annotations
 
-from .settings import CronConfig, TriggersSettings, WebhookConfig
+from .settings import CronConfig, CronFetchConfig, TriggersSettings, WebhookConfig
 
-__all__ = ["CronConfig", "TriggersSettings", "WebhookConfig"]
+__all__ = ["CronConfig", "CronFetchConfig", "TriggersSettings", "WebhookConfig"]
