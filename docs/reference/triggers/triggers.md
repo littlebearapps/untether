@@ -16,14 +16,16 @@ and no cron loop runs.
 ```
 HTTP POST ─► aiohttp server (port 9876)
   ├─ Route by path ─► WebhookConfig
+  ├─ Read raw body (size check + cached for auth/multipart)
   ├─ verify_auth(config, headers, raw_body)
   ├─ rate_limit.allow(webhook_id)
-  ├─ Parse JSON body
+  ├─ Parse payload (multipart form-data OR JSON)
   ├─ Event filter (optional)
-  ├─ render_prompt(template, payload) ─► prefixed prompt
-  └─ dispatcher.dispatch_webhook(config, prompt)
-       ├─ transport.send(chat_id, "⚡ Trigger: webhook:slack-alerts")
-       └─ run_job(chat_id, msg_id, prompt, context, engine)
+  ├─ Return HTTP 202 ─► dispatcher scheduled fire-and-forget
+  │    └─ render_prompt(template, payload) ─► prefixed prompt
+  │    └─ dispatcher.dispatch_webhook(config, prompt)
+  │         ├─ transport.send(chat_id, "⚡ Trigger: webhook:slack-alerts")
+  │         └─ run_job(chat_id, msg_id, prompt, context, engine)
 
 Cron tick (every minute) ─► cron_matches(schedule, now)
   └─ dispatcher.dispatch_cron(cron)
@@ -72,7 +74,7 @@ passes its `message_id` to `run_job()` so the engine reply threads under it.
 |-----|------|---------|-------|
 | `host` | string | `"127.0.0.1"` | Bind address. Localhost by default; use a reverse proxy for internet exposure. |
 | `port` | int | `9876` | Listen port (1--65535). |
-| `rate_limit` | int | `60` | Max requests per minute (global + per-webhook). |
+| `rate_limit` | int | `60` | Max requests per minute (global + per-webhook). Exceeding this returns HTTP 429. Dispatch runs fire-and-forget after the 202 response, so bursts are rate-limited at ingress rather than at the downstream outbox. |
 | `max_body_bytes` | int | `1048576` | Max request body size in bytes (1 KB--10 MB). |
 
 ### `[[triggers.webhooks]]`
@@ -410,6 +412,9 @@ prompt_template = "Batch {{form.batch_id}} uploaded: {{file.saved_path}}. Valida
 - File writes use atomic writes with deny-glob and path traversal protection.
 - Form fields are available as `{{field_name}}` in templates.
 - `max_file_size_bytes` defaults to 50 MB (max 100 MB).
+- When combined with `action = "file_write"`, the extracted file part is
+  saved to `file_destination` and the raw MIME body is *not* additionally
+  written to `file_path` — `file_path` only applies to non-multipart requests.
 
 ## Data-fetch crons
 
