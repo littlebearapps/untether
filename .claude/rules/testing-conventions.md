@@ -113,5 +113,9 @@ All integration test tiers are fully automatable by Claude Code.
 | `test_loop_coverage.py` | Update loop edge cases, message routing, shutdown |
 | `test_exec_runner.py` | Event tracking, ring buffer, PID in StartedEvent meta |
 | `test_runner_utils.py` | Error formatting, drain_stderr, stderr sanitisation |
+| `test_trigger_server.py` | Webhook HTTP server, multipart, rate limit burst, fire-and-forget dispatch |
+| `test_trigger_actions.py` | file_write (multipart short-circuit), http_forward (SSRF), notify_only |
 | `test_trigger_cron.py` | Cron expression matching, timezone conversion, step validation |
 | `test_trigger_settings.py` | CronConfig/WebhookConfig/TriggersSettings validation, timezone |
+| `test_trigger_ssrf.py` | SSRF blocking (IPv4/IPv6, DNS rebinding, allowlist) |
+| `test_trigger_fetch.py` | Cron data-fetch (HTTP, file read, parse modes, failure) |

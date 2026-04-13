@@ -44,9 +44,12 @@ flowchart TB
     end
 
     subgraph Triggers["Triggers Layer"]
-        trigger_server[triggers/server.py<br/>webhook HTTP server]
+        trigger_server[triggers/server.py<br/>webhook HTTP server<br/>multipart, rate limit]
         trigger_cron[triggers/cron.py<br/>cron scheduler]
         trigger_dispatch[triggers/dispatcher.py<br/>dispatch to run_job]
+        trigger_actions[triggers/actions.py<br/>file_write, http_forward, notify_only]
+        trigger_fetch[triggers/fetch.py<br/>cron data-fetch]
+        trigger_ssrf[triggers/ssrf.py<br/>SSRF protection]
     end
 
     subgraph External["External"]
@@ -83,8 +86,11 @@ flowchart TB
     tg_client --> telegram_api
     webhook_sources --> trigger_server
     trigger_server --> trigger_dispatch
+    trigger_server --> trigger_actions
     trigger_cron --> trigger_dispatch
+    trigger_cron --> trigger_fetch
     trigger_dispatch --> runner_bridge
+    trigger_actions --> trigger_ssrf
 ```
 
 ---
@@ -413,6 +419,6 @@ flowchart TD
 | **Bridge** | `telegram/bridge.py`, `runner_bridge.py` | Message handling, execution coordination |
 | **Runner** | `runner.py`, `runners/*.py`, `schemas/*.py` | Agent CLI subprocess, JSONL parsing, event translation |
 | **Transport** | `transport.py`, `presenter.py`, `telegram/client.py` | Telegram API, message rendering |
-| **Triggers** | `triggers/server.py`, `triggers/cron.py`, `triggers/dispatcher.py` | Webhook server, cron scheduler, run dispatch |
+| **Triggers** | `triggers/server.py`, `triggers/cron.py`, `triggers/dispatcher.py`, `triggers/actions.py`, `triggers/fetch.py`, `triggers/ssrf.py` | Webhook server (multipart, rate limit), cron scheduler (data-fetch), non-agent actions, SSRF protection |
 | **Domain** | `model.py`, `progress.py`, `events.py` | Event types, action tracking |
 | **Utils** | `worktrees.py`, `utils/*.py`, `markdown.py` | Git worktrees, formatting, paths |

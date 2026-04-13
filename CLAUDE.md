@@ -85,11 +85,15 @@ Telegram <-> TelegramPresenter <-> RunnerBridge <-> Runner (claude/codex/opencod
 | `commands.py` | Command result types |
 | `scripts/validate_release.py` | Release validation (changelog format, issue links, version match) |
 | `scripts/healthcheck.sh` | Post-deploy health check (systemd, version, logs, Bot API) |
+| `triggers/server.py` | Webhook HTTP server (aiohttp); multipart parsing from cached body, fire-and-forget dispatch |
+| `triggers/dispatcher.py` | Routes webhooks/crons to `run_job()` or non-agent action handlers |
 | `triggers/cron.py` | Cron expression parser, timezone-aware scheduler loop |
-| `triggers/settings.py` | CronConfig/WebhookConfig/CronFetchConfig/TriggersSettings models, timezone validation |
-| `triggers/ssrf.py` | SSRF protection for outbound HTTP requests (IP blocking, DNS validation, URL scheme check) |
-| `triggers/actions.py` | Non-agent webhook actions: file_write, http_forward, notify_only |
+| `triggers/actions.py` | Non-agent webhook actions: file_write (multipart short-circuit), http_forward, notify_only |
 | `triggers/fetch.py` | Cron data-fetch: HTTP GET/POST, file read, response parsing, prompt building |
+| `triggers/rate_limit.py` | Token-bucket rate limiter (per-webhook + global) |
+| `triggers/ssrf.py` | SSRF protection for outbound HTTP requests (IP blocking, DNS validation, URL scheme check) |
+| `triggers/auth.py` | Bearer token and HMAC-SHA256/SHA1 webhook auth verification |
+| `triggers/settings.py` | CronConfig/WebhookConfig/CronFetchConfig/TriggersSettings models, timezone validation |
 | `cliff.toml` | git-cliff config for changelog drafting |
 
 ## Reference docs
@@ -162,7 +166,7 @@ Rules in `.claude/rules/` auto-load when editing matching files:
 
 ## Tests
 
-1856 unit tests, 80% coverage threshold. Integration testing against `@untether_dev_bot` is **mandatory before every release** — see `docs/reference/integration-testing.md` for the full playbook with per-release-type tier requirements (patch/minor/major). All integration test tiers are fully automated by Claude Code via Telegram MCP tools and Bash.
+2020 unit tests, 80% coverage threshold. Integration testing against `@untether_dev_bot` is **mandatory before every release** — see `docs/reference/integration-testing.md` for the full playbook with per-release-type tier requirements (patch/minor/major). All integration test tiers are fully automated by Claude Code via Telegram MCP tools and Bash.
 
 Key test files:
 
@@ -191,8 +195,14 @@ Key test files:
 - `test_telegram_file_transfer_helpers.py` — 48 tests: `/file put` and `/file get` command handling, media groups, force overwrite
 - `test_loop_coverage.py` — 29 tests: update loop edge cases, message routing, callback dispatch, shutdown integration
 - `test_telegram_topics_command.py` — 16 tests: `/new` cancellation (cancel helper, chat/topic modes, running task cleanup), `/ctx` binding, `/topic` command
+- `test_trigger_server.py` — 18 tests: health, auth, event filter, multipart (file upload, form fields, size limit, filename sanitisation, auth rejection), rate limit burst 429, fire-and-forget dispatch
+- `test_trigger_actions.py` — 29 tests: file_write (traversal, deny globs, size, conflicts, multipart short-circuit), http_forward (SSRF, retries, headers), notify_only
 - `test_trigger_cron.py` — 21 tests: 5-field cron matching, timezone conversion (Melbourne, DST, per-cron/default override), step validation
-- `test_trigger_settings.py` — 29 tests: CronConfig/WebhookConfig/TriggersSettings validation, timezone field validation, IANA name rejection
+- `test_trigger_settings.py` — 41 tests: CronConfig/WebhookConfig/CronFetchConfig/TriggersSettings validation, action fields, multipart defaults, timezone
+- `test_trigger_ssrf.py` — 73 tests: IPv4/IPv6 blocking, URL validation, DNS resolution, allowlist overrides
+- `test_trigger_fetch.py` — 12 tests: HTTP GET/POST, file read, parse modes, failure handling, prompt building
+- `test_trigger_auth.py` — 12 tests: bearer token, HMAC-SHA256/SHA1, timing-safe comparison
+- `test_trigger_rate_limit.py` — 5 tests: token bucket fill/drain, per-key isolation, refill timing
 
 ## Development
 
