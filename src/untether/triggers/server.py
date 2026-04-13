@@ -119,7 +119,12 @@ async def _parse_multipart(
                 template_ctx = {**form_fields, "file": {"filename": safe_name}}
                 dest_str = render_template_fields(dest_template, template_ctx)
             else:
-                dest_str = f"/tmp/untether-uploads/{safe_name}"
+                # No destination configured — use the platform temp dir rather
+                # than a hardcoded /tmp (portable across macOS/Linux; avoids
+                # bandit B108 on predictable locations).
+                dest_str = str(
+                    Path(tempfile.gettempdir()) / "untether-uploads" / safe_name
+                )
 
             target = _resolve_file_path(dest_str)
             if target is None:
