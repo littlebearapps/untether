@@ -99,6 +99,23 @@ class TestExecuteFileWrite:
         assert target.read_bytes() == b'{"data": "test"}'
 
     @pytest.mark.anyio
+    async def test_multipart_saved_path_short_circuits(self, tmp_path: Path) -> None:
+        """Regression #280: multipart already saved the file; don't write raw body again."""
+        target = tmp_path / "should_not_be_created.bin"
+        wh = _make_webhook(file_path=str(target))
+        saved = tmp_path / "uploads" / "hello.txt"
+        saved.parent.mkdir()
+        saved.write_text("real content")
+        payload = {"file": {"saved_path": str(saved), "filename": "hello.txt"}}
+        ok, msg = await execute_file_write(wh, payload, b"--MIME-BOUNDARY-junk--")
+        assert ok is True
+        assert str(saved) in msg
+        # Raw body must NOT have been written to webhook.file_path.
+        assert not target.exists()
+        # Multipart-saved file is untouched.
+        assert saved.read_text() == "real content"
+
+    @pytest.mark.anyio
     async def test_creates_parent_directories(self, tmp_path: Path) -> None:
         target = tmp_path / "deep" / "nested" / "output.json"
         wh = _make_webhook(file_path=str(target))

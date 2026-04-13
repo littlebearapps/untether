@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 
 import anyio
-from aiohttp import web
+from aiohttp import streams, web
+from aiohttp.multipart import MultipartReader
 
 from ..logging import get_logger
 from .actions import _deny_reason, _resolve_file_path
@@ -29,8 +31,48 @@ class _MultipartError(Exception):
         super().__init__(message)
 
 
+def _multipart_reader_from_bytes(
+    raw_body: bytes,
+    content_type: str,
+) -> MultipartReader:
+    """Build a MultipartReader that streams from an in-memory body.
+
+    The request body is pre-read by ``_process_webhook`` for size check and
+    auth verification, so we can't use ``request.multipart()`` (that stream
+    is already exhausted).  Instead, feed the bytes into a fresh
+    :class:`aiohttp.streams.StreamReader` and construct the reader manually.
+    """
+    loop = asyncio.get_event_loop()
+    stream = streams.StreamReader(
+        _NullProtocol(),  # type: ignore[arg-type]
+        limit=2**16,
+        loop=loop,
+    )
+    stream.feed_data(raw_body)
+    stream.feed_eof()
+    return MultipartReader({"Content-Type": content_type}, stream)
+
+
+class _NullProtocol:
+    """Minimal stand-in for a transport protocol used by StreamReader.
+
+    StreamReader only needs ``_reading_paused`` bookkeeping to be callable;
+    it never flushes to a real transport when we feed bytes directly.
+    """
+
+    def __init__(self) -> None:
+        self._reading_paused = False
+
+    def pause_reading(self) -> None:  # pragma: no cover - no-op
+        self._reading_paused = True
+
+    def resume_reading(self) -> None:  # pragma: no cover - no-op
+        self._reading_paused = False
+
+
 async def _parse_multipart(
-    request: web.Request,
+    raw_body: bytes,
+    content_type: str,
     webhook: WebhookConfig,
 ) -> tuple[dict, str | None]:
     """Parse a multipart/form-data request.
@@ -46,7 +88,7 @@ async def _parse_multipart(
     form_fields: dict[str, str] = {}
     saved_path: str | None = None
 
-    reader = await request.multipart()
+    reader = _multipart_reader_from_bytes(raw_body, content_type)
 
     async for part in reader:
         if part.filename:
@@ -130,6 +172,11 @@ def build_webhook_app(
     )
     max_body = settings.server.max_body_bytes
 
+    # Strong references to in-flight dispatch tasks (#281).  Without this,
+    # asyncio can garbage-collect the task mid-flight and the dispatch is
+    # silently dropped.  Tasks remove themselves on completion.
+    _dispatch_tasks: set[asyncio.Task[None]] = set()
+
     # Warn about unauthenticated webhooks at build time.
     for wh in settings.webhooks:
         if wh.auth == "none":
@@ -191,10 +238,22 @@ def build_webhook_app(
 
         content_type = request.content_type or ""
         if webhook.accept_multipart and content_type.startswith("multipart/"):
+            # Pass the full header value (including the ``boundary=`` param)
+            # so MultipartReader can locate the delimiter.
+            full_ct = request.headers.get("Content-Type", content_type)
             try:
-                payload, file_saved_path = await _parse_multipart(request, webhook)
+                payload, file_saved_path = await _parse_multipart(
+                    raw_body, full_ct, webhook
+                )
             except _MultipartError as exc:
                 return web.Response(status=exc.status, text=exc.message)
+            except ValueError as exc:
+                logger.warning(
+                    "triggers.webhook.multipart_parse_failed",
+                    webhook_id=webhook.id,
+                    error=str(exc),
+                )
+                return web.Response(status=400, text="invalid multipart body")
         elif raw_body:
             try:
                 payload = json.loads(raw_body)
@@ -217,14 +276,39 @@ def build_webhook_app(
             if event_type != webhook.event_filter:
                 return web.Response(status=200, text="filtered")
 
-        # Route by action type.
+        # Route by action type — fire-and-forget so HTTP response (and
+        # therefore the rate limiter, #281) isn't gated on slow downstream
+        # work like Telegram outbox pacing or http_forward network calls.
         if webhook.action == "agent_run":
             prompt = render_prompt(webhook.prompt_template, payload)
-            await dispatcher.dispatch_webhook(webhook, prompt)
+
+            async def _run_agent() -> None:
+                try:
+                    await dispatcher.dispatch_webhook(webhook, prompt)
+                except Exception:
+                    logger.exception(
+                        "triggers.webhook.dispatch_failed",
+                        webhook_id=webhook.id,
+                    )
+
+            task = asyncio.create_task(_run_agent())
+            _dispatch_tasks.add(task)
+            task.add_done_callback(_dispatch_tasks.discard)
             return web.Response(status=202, text="accepted")
 
         # Non-agent actions.
-        await dispatcher.dispatch_action(webhook, payload, raw_body)
+        async def _run_action() -> None:
+            try:
+                await dispatcher.dispatch_action(webhook, payload, raw_body)
+            except Exception:
+                logger.exception(
+                    "triggers.webhook.dispatch_failed",
+                    webhook_id=webhook.id,
+                )
+
+        task = asyncio.create_task(_run_action())
+        _dispatch_tasks.add(task)
+        task.add_done_callback(_dispatch_tasks.discard)
         return web.Response(status=202, text="accepted")
 
     app = web.Application(client_max_size=max_body)

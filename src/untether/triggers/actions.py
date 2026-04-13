@@ -76,6 +76,23 @@ async def execute_file_write(
     """
     assert webhook.file_path is not None  # validated by config model
 
+    # Multipart short-circuit (#280): when a file part was already saved
+    # via the multipart parser, skip the raw-body write — otherwise we
+    # end up with the full MIME envelope written to ``file_path`` in
+    # addition to the extracted file at ``file_destination``.
+    saved = (
+        payload.get("file", {}).get("saved_path")
+        if isinstance(payload.get("file"), dict)
+        else None
+    )
+    if saved:
+        logger.info(
+            "triggers.action.file_write.multipart_short_circuit",
+            path=saved,
+            webhook_id=webhook.id,
+        )
+        return True, f"written to {saved}"
+
     # Render template variables in file_path.
     rendered_path = render_template_fields(webhook.file_path, payload)
     target = _resolve_file_path(rendered_path)
