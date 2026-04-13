@@ -9,7 +9,7 @@ import anyio
 
 from ..logging import get_logger
 from .dispatcher import TriggerDispatcher
-from .settings import CronConfig
+from .manager import TriggerManager
 
 logger = get_logger(__name__)
 
@@ -82,17 +82,23 @@ def _resolve_now(
 
 
 async def run_cron_scheduler(
-    crons: list[CronConfig],
+    manager: TriggerManager,
     dispatcher: TriggerDispatcher,
-    *,
-    default_timezone: str | None = None,
 ) -> None:
-    """Tick every minute and dispatch crons whose schedule matches."""
-    logger.info("triggers.cron.started", crons=len(crons))
+    """Tick every minute and dispatch crons whose schedule matches.
+
+    Reads ``manager.crons`` and ``manager.default_timezone`` on each tick
+    so that config hot-reloads take effect immediately.
+    """
+    logger.info("triggers.cron.started", crons=len(manager.crons))
     last_fired: dict[str, tuple[int, int]] = {}  # cron_id -> (hour, minute)
 
     while True:
         utc_now = datetime.datetime.now(datetime.UTC)
+        # Snapshot the cron list for this tick — safe even if update()
+        # replaces manager._crons mid-iteration (new list, old ref valid).
+        crons = manager.crons
+        default_timezone = manager.default_timezone
         for cron in crons:
             try:
                 local_now = _resolve_now(utc_now, cron.timezone, default_timezone)

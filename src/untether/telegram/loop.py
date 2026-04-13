@@ -527,6 +527,7 @@ class TelegramLoopState:
 
 if TYPE_CHECKING:
     from ..runner_bridge import RunningTasks
+    from ..triggers.manager import TriggerManager
 
 
 _FORWARD_FIELDS = (
@@ -1296,6 +1297,31 @@ async def run_main_loop(
                     )
                     state.transport_id = reload.settings.transport
 
+                # --- Hot-reload trigger configuration ---
+                if trigger_manager is not None:
+                    try:
+                        from ..config import read_config
+                        from ..triggers.settings import (
+                            TriggersSettings,
+                            parse_trigger_config,
+                        )
+
+                        raw_toml = read_config(reload.config_path)
+                        raw_triggers = raw_toml.get("triggers")
+                        if isinstance(raw_triggers, dict) and raw_triggers.get(
+                            "enabled"
+                        ):
+                            new_settings = parse_trigger_config(raw_triggers)
+                            trigger_manager.update(new_settings)
+                        else:
+                            # Triggers disabled or removed — clear all.
+                            trigger_manager.update(TriggersSettings())
+                    except (ValueError, TypeError, OSError) as exc:
+                        logger.warning(
+                            "config.reload.triggers_failed",
+                            error=str(exc),
+                        )
+
             if watch_enabled and config_path is not None:
 
                 async def run_config_watch() -> None:
@@ -1486,34 +1512,34 @@ async def run_main_loop(
             scheduler = ThreadScheduler(task_group=tg, run_job=run_thread_job)
 
             # --- Trigger system (webhooks + cron) ---
+            trigger_manager: TriggerManager | None = None
             if cfg.trigger_config and cfg.trigger_config.get("enabled"):
                 from ..triggers.cron import run_cron_scheduler
                 from ..triggers.dispatcher import TriggerDispatcher
+                from ..triggers.manager import TriggerManager
                 from ..triggers.server import run_webhook_server
                 from ..triggers.settings import parse_trigger_config
 
                 try:
                     trigger_settings = parse_trigger_config(cfg.trigger_config)
+                    trigger_manager = TriggerManager(trigger_settings)
                     trigger_dispatcher = TriggerDispatcher(
                         run_job=run_job,
                         transport=cfg.exec_cfg.transport,
                         default_chat_id=cfg.chat_id,
                         task_group=tg,
                     )
-                    if trigger_settings.webhooks:
+                    # Always start the cron scheduler — it idles when the
+                    # cron list is empty and picks up new crons on reload.
+                    tg.start_soon(
+                        run_cron_scheduler, trigger_manager, trigger_dispatcher
+                    )
+                    if trigger_settings.webhooks or trigger_settings.server:
                         tg.start_soon(
                             run_webhook_server,
                             trigger_settings,
                             trigger_dispatcher,
-                        )
-                    if trigger_settings.crons:
-                        tg.start_soon(
-                            partial(
-                                run_cron_scheduler,
-                                trigger_settings.crons,
-                                trigger_dispatcher,
-                                default_timezone=trigger_settings.default_timezone,
-                            ),
+                            trigger_manager,
                         )
                     logger.info(
                         "triggers.enabled",

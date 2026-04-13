@@ -13,6 +13,7 @@ from ..logging import get_logger
 from .actions import _deny_reason, _resolve_file_path
 from .auth import verify_auth
 from .dispatcher import TriggerDispatcher
+from .manager import TriggerManager
 from .rate_limit import TokenBucketLimiter
 from .settings import TriggersSettings, WebhookConfig
 from .templating import render_prompt
@@ -168,9 +169,31 @@ async def _parse_multipart(
 def build_webhook_app(
     settings: TriggersSettings,
     dispatcher: TriggerDispatcher,
+    manager: TriggerManager | None = None,
 ) -> web.Application:
-    """Build the aiohttp application for webhook handling."""
-    routes_by_path: dict[str, WebhookConfig] = {wh.path: wh for wh in settings.webhooks}
+    """Build the aiohttp application for webhook handling.
+
+    If *manager* is provided, webhook lookups use ``manager.webhook_for_path()``
+    so that config hot-reloads take effect on the next request.  When *manager*
+    is ``None`` (backwards compat / tests), a static lookup table is used.
+    """
+    # Static fallback when no manager is provided.
+    _static_routes: dict[str, WebhookConfig] | None = (
+        None if manager is not None else {wh.path: wh for wh in settings.webhooks}
+    )
+
+    def _lookup(path: str) -> WebhookConfig | None:
+        if manager is not None:
+            return manager.webhook_for_path(path)
+        assert _static_routes is not None
+        return _static_routes.get(path)
+
+    def _webhook_count() -> int:
+        if manager is not None:
+            return manager.webhook_count
+        assert _static_routes is not None
+        return len(_static_routes)
+
     rate_limiter = TokenBucketLimiter(
         rate=settings.server.rate_limit,
         window=60.0,
@@ -182,24 +205,26 @@ def build_webhook_app(
     # silently dropped.  Tasks remove themselves on completion.
     _dispatch_tasks: set[asyncio.Task[None]] = set()
 
-    # Warn about unauthenticated webhooks at build time.
-    for wh in settings.webhooks:
-        if wh.auth == "none":
-            logger.warning(
-                "triggers.webhook.no_auth",
-                webhook_id=wh.id,
-                path=wh.path,
-            )
+    # Warn about unauthenticated webhooks at build time (only when no manager;
+    # TriggerManager.update() handles this for hot-reload).
+    if manager is None:
+        for wh in settings.webhooks:
+            if wh.auth == "none":
+                logger.warning(
+                    "triggers.webhook.no_auth",
+                    webhook_id=wh.id,
+                    path=wh.path,
+                )
 
     async def handle_health(request: web.Request) -> web.Response:
         return web.Response(
-            text=json.dumps({"status": "ok", "webhooks": len(routes_by_path)}),
+            text=json.dumps({"status": "ok", "webhooks": _webhook_count()}),
             content_type="application/json",
         )
 
     async def handle_webhook(request: web.Request) -> web.Response:
         path = request.path
-        webhook = routes_by_path.get(path)
+        webhook = _lookup(path)
         if webhook is None:
             return web.Response(status=404, text="not found")
 
@@ -325,9 +350,10 @@ def build_webhook_app(
 async def run_webhook_server(
     settings: TriggersSettings,
     dispatcher: TriggerDispatcher,
+    manager: TriggerManager | None = None,
 ) -> None:
     """Run the webhook HTTP server until cancelled."""
-    app = build_webhook_app(settings, dispatcher)
+    app = build_webhook_app(settings, dispatcher, manager=manager)
 
     runner = web.AppRunner(app, access_log=None)
     await runner.setup()
