@@ -18,6 +18,7 @@ from untether.runners.claude import (
     _DISCUSS_COOLDOWN,
     _HANDLED_REQUESTS,
     _OUTLINE_PENDING,
+    _PLAN_EXIT_APPROVED,
     _REQUEST_TO_INPUT,
     _REQUEST_TO_SESSION,
     _REQUEST_TO_TOOL_NAME,
@@ -84,6 +85,7 @@ def _clear_registries():
     _REQUEST_TO_INPUT.clear()
     _HANDLED_REQUESTS.clear()
     _DISCUSS_COOLDOWN.clear()
+    _PLAN_EXIT_APPROVED.clear()
     from untether.telegram.commands.claude_control import _DISCUSS_FEEDBACK_REFS
 
     _DISCUSS_FEEDBACK_REFS.clear()
@@ -1610,6 +1612,75 @@ def test_diff_preview_enabled_non_previewable_still_auto_approved(
 
     assert events == []
     assert f"req-np-{tool_name}" in state.auto_approve_queue
+
+
+@pytest.mark.parametrize("tool_name", ["Edit", "Write", "Bash"])
+def test_diff_preview_bypassed_after_plan_exit_approved(tool_name: str) -> None:
+    """After ExitPlanMode is approved, diff_preview tools auto-approve (#283)."""
+    from untether.runners.run_options import EngineRunOptions, apply_run_options
+
+    state, factory = _make_state_with_session()
+    session_id = factory.resume.value
+    # Simulate plan exit approval
+    _PLAN_EXIT_APPROVED.add(session_id)
+
+    event = _decode_event(
+        {
+            "type": "control_request",
+            "request_id": f"req-pea-{tool_name}",
+            "request": {
+                "subtype": "can_use_tool",
+                "tool_name": tool_name,
+                "input": {},
+            },
+        }
+    )
+    with apply_run_options(EngineRunOptions(diff_preview=True)):
+        events = translate_claude_event(
+            event, title="claude", state=state, factory=factory
+        )
+
+    # Should be auto-approved despite diff_preview=True
+    assert events == []
+    assert f"req-pea-{tool_name}" in state.auto_approve_queue
+
+
+def test_diff_preview_not_bypassed_without_plan_exit() -> None:
+    """Without ExitPlanMode approval, diff_preview gate still applies (#283)."""
+    from untether.runners.run_options import EngineRunOptions, apply_run_options
+
+    state, factory = _make_state_with_session()
+    # _PLAN_EXIT_APPROVED is empty — no plan exit approved
+
+    event = _decode_event(
+        {
+            "type": "control_request",
+            "request_id": "req-nopea",
+            "request": {
+                "subtype": "can_use_tool",
+                "tool_name": "Edit",
+                "input": {"file_path": "/tmp/x", "old_string": "a", "new_string": "b"},
+            },
+        }
+    )
+    with apply_run_options(EngineRunOptions(diff_preview=True)):
+        events = translate_claude_event(
+            event, title="claude", state=state, factory=factory
+        )
+
+    # Should NOT be auto-approved — diff_preview gate still active
+    assert "req-nopea" not in state.auto_approve_queue
+    assert len(events) >= 1
+
+
+def test_plan_exit_approved_cleaned_up_on_session_end() -> None:
+    """_PLAN_EXIT_APPROVED is cleaned up when session ends (#283)."""
+    session_id = "sess-cleanup-283"
+    _PLAN_EXIT_APPROVED.add(session_id)
+    assert session_id in _PLAN_EXIT_APPROVED
+
+    _cleanup_session_registries(session_id)
+    assert session_id not in _PLAN_EXIT_APPROVED
 
 
 def test_diff_preview_edit_shows_diff_text() -> None:
