@@ -244,6 +244,30 @@ Each webhook and cron can specify where the Telegram notification appears:
 
 The server includes a health endpoint at `GET /health` for uptime monitoring.
 
+## Hot-reload configuration
+
+When `watch_config = true` is set in your top-level config, you can add, remove, or modify
+webhooks and crons by editing `untether.toml` — changes are applied automatically without
+restarting Untether. Active runs are not interrupted.
+
+For example, to add a new cron, just edit the TOML and save:
+
+```toml
+[[triggers.crons]]
+id = "new-task"
+schedule = "0 14 * * 1-5"
+prompt = "Check the deployment status"
+timezone = "Australia/Melbourne"
+```
+
+The new cron will start firing on the next minute tick. Similarly, new webhooks become
+accessible immediately, and removed webhooks start returning 404.
+
+!!! note
+    Server settings (`host`, `port`, `rate_limit`) and the `enabled` toggle still
+    require a restart. See the [Triggers reference — Hot-reload](../reference/triggers/triggers.md#hot-reload)
+    for the full list.
+
 ## Security notes
 
 - The server binds to localhost by default. Use a reverse proxy (nginx, Caddy) with TLS to expose it to the internet.

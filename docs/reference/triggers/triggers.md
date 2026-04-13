@@ -551,11 +551,49 @@ Expected responses:
 | `413 Payload Too Large` | Body exceeds `max_body_bytes`. |
 | `429 Too Many Requests` | Rate limit exceeded. |
 
+## Hot-reload
+
+When `watch_config = true` is set in the top-level config, changes to the `[triggers]` section
+of `untether.toml` are detected automatically and applied without restarting Untether. This means
+you can add, remove, or modify crons and webhooks by editing the TOML file — changes take effect
+within seconds, and active runs are not interrupted.
+
+### What reloads without restart
+
+| Change | When it takes effect |
+|--------|---------------------|
+| Add/remove/modify cron schedules | Next minute tick |
+| Add new webhooks | Immediately (next HTTP request) |
+| Remove webhooks | Immediately (returns 404) |
+| Change webhook auth/secrets | Next HTTP request |
+| Change webhook action type | Next HTTP request |
+| Change multipart/file upload settings | Next HTTP request |
+| Change cron fetch config | Next cron fire |
+| Change cron timezone | Next minute tick |
+| Change `default_timezone` | Next minute tick |
+
+### What requires a restart
+
+| Change | Why |
+|--------|-----|
+| `triggers.enabled` (off to on) | Webhook server and cron scheduler must be started |
+| `triggers.server.host` or `port` | aiohttp binds once at startup |
+| `triggers.server.rate_limit` | Rate limiter initialised at startup |
+
+### How it works
+
+A `TriggerManager` holds the current cron list and webhook lookup table. The cron scheduler
+reads `manager.crons` on each tick, and the webhook server calls `manager.webhook_for_path()`
+on each request. When the config file changes, `handle_reload()` re-parses the `[triggers]`
+TOML section and calls `manager.update()`, which atomically swaps the configuration. In-flight
+iterations over the old cron list are unaffected because `update()` creates new container objects.
+
 ## Key files
 
 | File | Purpose |
 |------|---------|
 | `src/untether/triggers/__init__.py` | Package init, re-exports settings models. |
+| `src/untether/triggers/manager.py` | `TriggerManager`: mutable cron/webhook holder for hot-reload. Atomic config swap on TOML change. |
 | `src/untether/triggers/actions.py` | Non-agent action handlers: `file_write`, `http_forward`, `notify_only`. |
 | `src/untether/triggers/settings.py` | Pydantic models: `TriggersSettings`, `WebhookConfig`, `CronConfig`, `TriggerServerSettings`. |
 | `src/untether/triggers/auth.py` | Bearer and HMAC-SHA256/SHA1 verification with timing-safe comparison. |

@@ -452,6 +452,12 @@ routing details.
 | `enabled` | bool | `false` | Master switch. No server or cron loop starts when `false`. |
 | `default_timezone` | string\|null | `null` | Default IANA timezone for all crons (e.g. `"Australia/Melbourne"`). Per-cron `timezone` overrides. |
 
+!!! tip "Hot-reload"
+    When `watch_config = true`, changes to webhooks, crons, schedules, and timezones
+    are applied automatically without restart. Server settings (`host`, `port`,
+    `rate_limit`) and the `enabled` toggle still require a restart.
+    See the [Triggers reference — Hot-reload](triggers/triggers.md#hot-reload) for details.
+
 ### `[triggers.server]`
 
 | Key | Type | Default | Notes |
