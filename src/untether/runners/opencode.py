@@ -654,6 +654,11 @@ def build_runner(config: EngineConfig, config_path: Path) -> Runner:
 
     model = config.get("model")
     if model is not None and not isinstance(model, str):
+        logger.warning(
+            "opencode.config.invalid",
+            error="model must be a string",
+            config_path=str(config_path),
+        )
         raise ConfigError(
             f"Invalid `opencode.model` in {config_path}; expected a string."
         )

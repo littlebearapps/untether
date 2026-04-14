@@ -151,6 +151,12 @@ class TopicStateStore(JsonStateStore[_TopicState]):
             if topic_title is not None:
                 thread.topic_title = topic_title
             self._save_locked()
+            logger.debug(
+                "topic_state.context.set",
+                chat_id=chat_id,
+                thread_id=thread_id,
+                project=context.project,
+            )
 
     async def clear_context(self, chat_id: int, thread_id: int) -> None:
         async with self._lock:
@@ -263,6 +269,12 @@ class TopicStateStore(JsonStateStore[_TopicState]):
             thread = self._ensure_thread_locked(chat_id, thread_id)
             thread.sessions[token.engine] = _SessionState(resume=token.value)
             self._save_locked()
+            logger.debug(
+                "topic_state.session.saved",
+                chat_id=chat_id,
+                thread_id=thread_id,
+                engine=token.engine,
+            )
 
     async def clear_sessions(self, chat_id: int, thread_id: int) -> None:
         async with self._lock:
@@ -272,6 +284,11 @@ class TopicStateStore(JsonStateStore[_TopicState]):
                 return
             thread.sessions = {}
             self._save_locked()
+            logger.debug(
+                "topic_state.sessions.cleared",
+                chat_id=chat_id,
+                thread_id=thread_id,
+            )
 
     async def clear_engine_session(
         self, chat_id: int, thread_id: int, engine: str
@@ -294,6 +311,11 @@ class TopicStateStore(JsonStateStore[_TopicState]):
                 return
             self._state.threads.pop(key, None)
             self._save_locked()
+            logger.debug(
+                "topic_state.thread.deleted",
+                chat_id=chat_id,
+                thread_id=thread_id,
+            )
 
     async def find_thread_for_context(
         self, chat_id: int, context: RunContext

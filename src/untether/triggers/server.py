@@ -260,6 +260,11 @@ def build_webhook_app(
 
         # Rate limit (per-webhook + global)
         if not rate_limiter.allow(webhook.id) or not rate_limiter.allow("__global__"):
+            logger.warning(
+                "triggers.webhook.rate_limited",
+                webhook_id=webhook.id,
+                path=path,
+            )
             return web.Response(status=429, text="rate limited")
 
         # Parse payload — multipart or JSON.
