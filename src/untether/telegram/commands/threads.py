@@ -229,6 +229,7 @@ class ThreadsCommand:
         try:
             tid = int(tid_str)
         except ValueError:
+            logger.debug("threads.parse.invalid_tid", tid_str=tid_str, action="view")
             return CommandResult(text="Invalid thread reference.", notify=True)
         thread_id = _resolve_thread(tid)
         if thread_id is None:
@@ -255,6 +256,7 @@ class ThreadsCommand:
         try:
             tid = int(tid_str)
         except ValueError:
+            logger.debug("threads.parse.invalid_tid", tid_str=tid_str, action="resume")
             return CommandResult(text="Invalid thread reference.", notify=True)
         thread_id = _resolve_thread(tid)
         if thread_id is None:
@@ -273,6 +275,7 @@ class ThreadsCommand:
         try:
             tid = int(tid_str)
         except ValueError:
+            logger.debug("threads.parse.invalid_tid", tid_str=tid_str, action="archive")
             return CommandResult(text="Invalid thread reference.", notify=True)
         thread_id = _resolve_thread(tid)
         if thread_id is None:

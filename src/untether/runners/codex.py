@@ -433,7 +433,7 @@ def translate_codex_event(
 ) -> list[UntetherEvent]:
     match event:
         case codex_schema.ThreadStarted(thread_id=thread_id):
-            logger.debug("codex.session.extracted", session_id=thread_id)
+            logger.info("codex.session.started", session_id=thread_id)
             token = ResumeToken(engine=ENGINE, value=thread_id)
             return [factory.started(token, title=title, meta=meta)]
         case codex_schema.ItemStarted(item=item):
@@ -673,6 +673,11 @@ class CodexRunner(ResumeTokenMixin, JsonlSubprocessRunner):
         if excerpt:
             parts.append(excerpt)
         message = "\n".join(parts)
+        logger.error(
+            "codex.process.failed",
+            rc=rc,
+            session_id=found_session.value if found_session else None,
+        )
         resume_for_completed = found_session or resume
         return [
             self.note_event(
@@ -695,6 +700,7 @@ class CodexRunner(ResumeTokenMixin, JsonlSubprocessRunner):
         state: CodexRunState,
     ) -> list[UntetherEvent]:
         if not found_session:
+            logger.warning("codex.stream.no_session")
             parts = ["codex exec finished but no session_id/thread_id was captured"]
             session = _session_label(None, resume)
             if session:
@@ -728,12 +734,22 @@ def build_runner(config: EngineConfig, config_path: Path) -> Runner:
     ):
         extra_args = list(extra_args_value)
     else:
+        logger.warning(
+            "codex.config.invalid",
+            error="extra_args must be a list of strings",
+            config_path=str(config_path),
+        )
         raise ConfigError(
             f"Invalid `codex.extra_args` in {config_path}; expected a list of strings."
         )
 
     exec_only_flag = find_exec_only_flag(extra_args)
     if exec_only_flag:
+        logger.warning(
+            "codex.config.invalid",
+            error=f"exec-only flag {exec_only_flag!r} is managed by Untether",
+            config_path=str(config_path),
+        )
         raise ConfigError(
             f"Invalid `codex.extra_args` in {config_path}; exec-only flag "
             f"{exec_only_flag!r} is managed by Untether."
@@ -743,6 +759,11 @@ def build_runner(config: EngineConfig, config_path: Path) -> Runner:
     profile_value = config.get("profile")
     if profile_value:
         if not isinstance(profile_value, str):
+            logger.warning(
+                "codex.config.invalid",
+                error="profile must be a string",
+                config_path=str(config_path),
+            )
             raise ConfigError(
                 f"Invalid `codex.profile` in {config_path}; expected a string."
             )

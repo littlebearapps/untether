@@ -4,6 +4,10 @@ from __future__ import annotations
 
 import time
 
+from ..logging import get_logger
+
+logger = get_logger(__name__)
+
 
 class TokenBucketLimiter:
     """Simple token-bucket rate limiter.
@@ -26,4 +30,5 @@ class TokenBucketLimiter:
             self._buckets[key] = (tokens - 1.0, now)
             return True
         self._buckets[key] = (tokens, now)
+        logger.warning("rate_limit.denied", key=key, tokens=tokens)
         return False
