@@ -134,6 +134,10 @@ DNS resolution is checked after hostname lookup to prevent DNS rebinding attacks
 
 If you need triggers to reach local services, you can configure an allowlist (see the [triggers reference](../reference/triggers/triggers.md)).
 
+## Untrusted payload marking
+
+All webhook payloads and cron-fetched data are automatically prefixed with `#-- EXTERNAL WEBHOOK PAYLOAD --#` before being injected into the agent prompt. This signals to AI agents that the content is untrusted external input and should not be treated as instructions. The same prefix is applied to fetched cron data (`#-- EXTERNAL FETCHED DATA --#`).
+
 ## Run untether doctor
 
 After any configuration change, run the built-in preflight check:

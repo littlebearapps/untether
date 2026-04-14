@@ -489,29 +489,6 @@ the filesystem context.
   against blocked IP ranges (loopback, RFC 1918, link-local, CGN, multicast) and
   DNS resolution is checked to prevent rebinding attacks. See `triggers/ssrf.py`.
 
-## Hot-reload
-
-!!! info "New in v0.35.1"
-
-Editing `untether.toml` `[triggers]` applies changes immediately without restarting Untether or killing active runs. `handle_reload()` re-parses the `[triggers]` section on every config file change and atomically updates the `TriggerManager`.
-
-Reloadable without restart:
-
-- Cron schedules (add / remove / modify)
-- Webhook routes (add / remove / modify)
-- Webhook auth type and secret
-- Webhook actions (`agent_run`, `file_write`, `http_forward`, `notify_only`)
-- Multipart / file upload settings
-- Cron fetch configuration
-- Cron timezone (per-cron or `default_timezone`)
-
-Requires a restart:
-
-- Toggling `triggers.enabled` from `false` → `true` (webhook server and cron scheduler need to start)
-- `triggers.server.host` / `port` (aiohttp binds once at startup)
-
-When a cron or webhook is added by the reload, the `triggers.manager.updated` log line lists it. `last_fired` state is preserved across reloads so the same cron won't fire twice in the same minute.
-
 ## Trigger visibility
 
 !!! info "New in v0.35.1"
@@ -651,11 +628,16 @@ within seconds, and active runs are not interrupted.
 
 ### How it works
 
+Requires `watch_config = true` in the top-level config.
+
 A `TriggerManager` holds the current cron list and webhook lookup table. The cron scheduler
 reads `manager.crons` on each tick, and the webhook server calls `manager.webhook_for_path()`
 on each request. When the config file changes, `handle_reload()` re-parses the `[triggers]`
 TOML section and calls `manager.update()`, which atomically swaps the configuration. In-flight
 iterations over the old cron list are unaffected because `update()` creates new container objects.
+
+The `triggers.manager.updated` log line lists added/removed crons and webhooks after each reload.
+`last_fired` state is preserved across reloads so the same cron won't fire twice in the same minute.
 
 ## Key files
 

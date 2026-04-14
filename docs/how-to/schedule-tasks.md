@@ -1,6 +1,29 @@
 # Schedule tasks
 
-There are two ways to run tasks on a schedule: Telegram's built-in message scheduling (no config needed) and Untether's trigger system (webhooks and cron).
+There are several ways to run tasks on a schedule: the `/at` command for quick one-shot delays, Telegram's built-in message scheduling, and Untether's trigger system (webhooks and cron).
+
+## One-shot delays with /at
+
+The `/at` command schedules a prompt to run after a delay — useful for reminders, follow-ups, or "run this in 30 minutes":
+
+```
+/at 30m Check the build
+/at 2h Review the PR feedback
+/at 60s Say hello
+```
+
+**Duration format:** `Ns` (seconds), `Nm` (minutes), or `Nh` (hours). Minimum 60 seconds, maximum 24 hours.
+
+After scheduling, you'll see a confirmation:
+
+!!! untether "Untether"
+    ⏳ Scheduled: will run in 30m
+    Cancel with /cancel.
+
+When the delay expires, the prompt runs as a normal agent session. Use `/cancel` to cancel all pending delays in the current chat.
+
+!!! note "Not persistent"
+    Pending `/at` delays are held in memory. They are lost if Untether restarts. For persistent scheduled tasks, use [cron triggers](#cron-triggers) instead.
 
 ## Telegram scheduling
 
@@ -47,6 +70,8 @@ Common schedules:
 | `0 9 * * 1-5` | Weekdays at 9:00 AM |
 | `*/30 * * * *` | Every 30 minutes |
 | `0 */4 * * *` | Every 4 hours |
+
+Add `run_once = true` to fire a cron exactly once, then auto-disable. It re-activates on config reload or restart — useful for one-off tasks that shouldn't repeat.
 
 ## Webhook triggers
 

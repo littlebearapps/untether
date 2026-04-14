@@ -45,6 +45,7 @@ Untether adds interactive permission control, plan mode support, and several UX 
 - **`run_once` cron flag** — `[[triggers.crons]]` entries can set `run_once = true` to fire once then auto-disable; cron stays in TOML and re-activates on config reload or restart
 - **Trigger visibility (Tier 1)** — `/ping` shows per-chat trigger summary (`⏰ triggers: 1 cron (id, 9:00 AM daily (Melbourne))`); run footer shows `⏰ cron:<id>` / `⚡ webhook:<id>` for trigger-initiated runs; new `describe_cron()` utility renders common patterns in plain English
 - **Graceful restart improvements (Tier 1)** — persists Telegram `update_id` to `last_update_id.json` so restarts don't drop/duplicate messages; `Type=notify` systemd integration via stdlib `sd_notify` (`READY=1` + `STOPPING=1`); `RestartSec=2`
+- **`diff_preview` plan bypass (#283)** — after user approves a plan outline via "Pause & Outline Plan", the `_discuss_approved` flag short-circuits diff preview for subsequent Edit/Write tools so no second approval is needed
 
 See `.claude/skills/claude-stream-json/` and `.claude/rules/control-channel.md` for implementation details.
 
