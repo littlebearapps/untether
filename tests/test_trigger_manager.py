@@ -332,3 +332,93 @@ class TestCronSchedulerWithManager:
 
         mgr.update(_settings())
         assert mgr.default_timezone is None
+
+
+# ── Helper methods added for rc4: id lists, per-chat filters, remove_cron ──
+
+
+class TestTriggerManagerHelpers:
+    def test_cron_ids_and_webhook_ids_snapshots(self):
+        mgr = TriggerManager(
+            _settings(
+                crons=[_cron("a"), _cron("b")],
+                webhooks=[_webhook("h1"), _webhook("h2", path="/hooks/other")],
+            )
+        )
+        assert sorted(mgr.cron_ids()) == ["a", "b"]
+        assert sorted(mgr.webhook_ids()) == ["h1", "h2"]
+
+    def test_cron_ids_empty_when_no_crons(self):
+        mgr = TriggerManager(_settings())
+        assert mgr.cron_ids() == []
+        assert mgr.webhook_ids() == []
+
+    def test_crons_for_chat_uses_cron_chat_id(self):
+        mgr = TriggerManager(
+            _settings(
+                crons=[
+                    _cron("a", chat_id=111),
+                    _cron("b", chat_id=222),
+                    _cron("c", chat_id=111),
+                ]
+            )
+        )
+        matching = mgr.crons_for_chat(111)
+        assert sorted(c.id for c in matching) == ["a", "c"]
+
+    def test_crons_for_chat_falls_back_to_default(self):
+        mgr = TriggerManager(_settings(crons=[_cron("a"), _cron("b", chat_id=999)]))
+        # Default chat catches crons without chat_id.
+        matching = mgr.crons_for_chat(555, default_chat_id=555)
+        assert [c.id for c in matching] == ["a"]
+        # Non-default chat only sees its explicit match.
+        matching = mgr.crons_for_chat(999, default_chat_id=555)
+        assert [c.id for c in matching] == ["b"]
+
+    def test_crons_for_chat_no_default_excludes_unset(self):
+        """When no default_chat_id is passed, crons with chat_id=None are excluded."""
+        mgr = TriggerManager(_settings(crons=[_cron("a"), _cron("b", chat_id=555)]))
+        matching = mgr.crons_for_chat(555)
+        assert [c.id for c in matching] == ["b"]
+
+    def test_webhooks_for_chat_filters_by_chat_id(self):
+        mgr = TriggerManager(
+            _settings(
+                webhooks=[
+                    _webhook("h1", chat_id=111),
+                    _webhook("h2", path="/hooks/other", chat_id=222),
+                    _webhook("h3", path="/hooks/third", chat_id=111),
+                ]
+            )
+        )
+        matching = mgr.webhooks_for_chat(111)
+        assert sorted(wh.id for wh in matching) == ["h1", "h3"]
+
+    def test_remove_cron_removes_and_returns_true(self):
+        mgr = TriggerManager(_settings(crons=[_cron("a"), _cron("b"), _cron("c")]))
+        assert mgr.remove_cron("b") is True
+        assert [c.id for c in mgr.crons] == ["a", "c"]
+
+    def test_remove_cron_missing_returns_false(self):
+        mgr = TriggerManager(_settings(crons=[_cron("a")]))
+        assert mgr.remove_cron("missing") is False
+        assert [c.id for c in mgr.crons] == ["a"]
+
+    def test_remove_cron_atomic_during_iteration(self):
+        """Iterators over the old list keep all entries even after a remove_cron."""
+        mgr = TriggerManager(_settings(crons=[_cron("a"), _cron("b"), _cron("c")]))
+        snapshot = mgr.crons  # iterator captures this reference
+        assert mgr.remove_cron("b") is True
+        # Old snapshot still shows all three — list replacement is safe.
+        assert [c.id for c in snapshot] == ["a", "b", "c"]
+        # New reference reflects the removal.
+        assert [c.id for c in mgr.crons] == ["a", "c"]
+
+    def test_remove_cron_then_update_rehydrates(self):
+        """Config reload re-adds run_once crons that were previously removed."""
+        mgr = TriggerManager(_settings(crons=[_cron("a", run_once=True)]))
+        assert mgr.remove_cron("a") is True
+        assert mgr.cron_ids() == []
+        # Simulate a config reload with the same cron still in TOML.
+        mgr.update(_settings(crons=[_cron("a", run_once=True)]))
+        assert mgr.cron_ids() == ["a"]

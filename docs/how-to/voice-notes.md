@@ -33,6 +33,9 @@ requests on their own base URL without relying on `OPENAI_BASE_URL`. If your ser
 requires a specific model name, set `voice_transcription_model` (for example,
 `whisper-1`).
 
+!!! tip "Hot-reload"
+    Voice transcription settings (`voice_transcription`, model, base URL, API key) can be toggled by editing `untether.toml` — changes take effect immediately without restarting (requires `watch_config = true`).
+
 ## Behavior
 
 When you send a voice note, Untether transcribes it and runs the result as a normal text message.

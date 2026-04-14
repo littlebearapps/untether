@@ -268,6 +268,49 @@ accessible immediately, and removed webhooks start returning 404.
     require a restart. See the [Triggers reference — Hot-reload](../reference/triggers/triggers.md#hot-reload)
     for the full list.
 
+## One-shot crons with `run_once`
+
+Set `run_once = true` on a cron to fire once then auto-disable. The cron stays in the TOML but is skipped until the next reload or restart:
+
+```toml
+[[triggers.crons]]
+id = "deploy-check"
+schedule = "0 15 * * *"
+prompt = "Check today's deployment status"
+run_once = true
+```
+
+After the cron fires, the `triggers.cron.run_once_completed` log line confirms the removal. To re-enable, save the TOML again (triggers a reload) or restart the service.
+
+## Delayed runs with `/at`
+
+For ad-hoc one-shot delays, use the `/at` command directly in Telegram — no TOML edit required:
+
+```
+/at 30m Check the build status
+/at 2h Review open PRs
+/at 90s Run the test suite
+```
+
+Duration supports `Ns` / `Nm` / `Nh` with a 60s minimum and 24h maximum. Pending delays are cancelled via `/cancel` and lost on restart. Per-chat cap of 20 pending delays.
+
+## Discovering configured triggers
+
+Once triggers are configured, `/ping` in the targeted chat shows a summary:
+
+```
+🏓 pong — up 2d 4h 12m 3s
+⏰ triggers: 1 cron (daily-review, 9:00 AM daily (Melbourne))
+```
+
+Runs initiated by a trigger show their provenance in the meta footer:
+
+```
+🏷 opus 4.6 · plan · ⏰ cron:daily-review
+```
+
+See the [Triggers reference — Trigger visibility](../reference/triggers/triggers.md#trigger-visibility) for details.
+
 ## Security notes
 
 - The server binds to localhost by default. Use a reverse proxy (nginx, Caddy) with TLS to expose it to the internet.

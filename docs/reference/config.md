@@ -20,7 +20,7 @@ If you expect to edit config while Untether is running, set:
 
 | Key | Type | Default | Notes |
 |-----|------|---------|-------|
-| `watch_config` | bool | `false` | Hot-reload config changes (transport excluded). |
+| `watch_config` | bool | `false` | Watch config file for changes; applies most settings immediately. Restart-only: `bot_token`, `chat_id`, `session_mode`, `topics`, `message_overflow`. |
 | `default_engine` | string | `"codex"` | Default engine id for new threads. |
 | `default_project` | string\|null | `null` | Default project alias. |
 | `transport` | string | `"telegram"` | Transport backend id. |
@@ -492,3 +492,4 @@ routing details.
 | `chat_id` | int\|null | `null` | Telegram chat. Falls back to transport default. |
 | `prompt` | string | (required) | Prompt sent to the engine. |
 | `timezone` | string\|null | `null` | IANA timezone (e.g. `"Australia/Melbourne"`). Overrides `default_timezone`. |
+| `run_once` | bool | `false` | Fire once then auto-disable in-memory. Re-activates on config reload or restart. |

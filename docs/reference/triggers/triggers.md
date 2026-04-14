@@ -146,6 +146,7 @@ Webhook IDs must be unique across all configured webhooks.
 | `prompt_template` | string\|null | `null` | Template prompt with `{{field}}` substitution (used with fetch data). |
 | `timezone` | string\|null | `null` | IANA timezone name (e.g. `"Australia/Melbourne"`). Overrides `default_timezone`. |
 | `fetch` | object\|null | `null` | Pre-fetch step configuration (see [Data-fetch crons](#data-fetch-crons)). |
+| `run_once` | bool | `false` | Fire once then auto-disable in-memory. The cron stays in the TOML; it re-enters the active list on the next config reload or restart. Useful for scheduled one-off tasks. |
 
 Either `prompt` or `prompt_template` is required. Cron IDs must be unique across all configured crons.
 
@@ -488,6 +489,51 @@ the filesystem context.
   against blocked IP ranges (loopback, RFC 1918, link-local, CGN, multicast) and
   DNS resolution is checked to prevent rebinding attacks. See `triggers/ssrf.py`.
 
+## Trigger visibility
+
+!!! info "New in v0.35.1"
+
+### Per-chat `/ping` indicator
+
+Running `/ping` in a chat with configured triggers appends a summary line:
+
+```
+🏓 pong — up 2d 4h 12m 3s
+⏰ triggers: 1 cron (daily-review, 9:00 AM daily (Melbourne))
+```
+
+If multiple triggers target the chat, the indicator shows counts instead of the single-cron detail:
+
+```
+⏰ triggers: 2 crons, 1 webhook
+```
+
+The indicator is per-chat — only triggers whose `chat_id` matches the current chat appear. Triggers that omit `chat_id` (and therefore fall back to the transport's default `chat_id`) show for that chat only.
+
+### Meta footer
+
+Runs initiated by a cron or webhook show provenance in the meta footer alongside model and mode:
+
+```
+🏷 opus 4.6 · plan · ⏰ cron:daily-review
+```
+
+- `⏰ cron:<id>` for cron-initiated runs
+- `⚡ webhook:<id>` for webhook-initiated runs
+
+### Human-friendly cron descriptions
+
+Common patterns render in plain English via `describe_cron(schedule, timezone)`:
+
+| Schedule | Timezone | Rendered |
+|----------|----------|----------|
+| `0 9 * * *` | `Australia/Melbourne` | `9:00 AM daily (Melbourne)` |
+| `0 8 * * 1-5` | `Australia/Melbourne` | `8:00 AM Mon-Fri (Melbourne)` |
+| `30 14 * * 0,6` | — | `2:30 PM Sat,Sun` |
+| `*/15 * * * *` | — | `*/15 * * * *` (raw, fallback) |
+
+Complex patterns (stepped fields, specific day-of-month, multi-month) fall back to the raw expression.
+
 ## Startup message
 
 When triggers are enabled, the startup message includes a triggers line:
@@ -582,11 +628,16 @@ within seconds, and active runs are not interrupted.
 
 ### How it works
 
+Requires `watch_config = true` in the top-level config.
+
 A `TriggerManager` holds the current cron list and webhook lookup table. The cron scheduler
 reads `manager.crons` on each tick, and the webhook server calls `manager.webhook_for_path()`
 on each request. When the config file changes, `handle_reload()` re-parses the `[triggers]`
 TOML section and calls `manager.update()`, which atomically swaps the configuration. In-flight
 iterations over the old cron list are unaffected because `update()` creates new container objects.
+
+The `triggers.manager.updated` log line lists added/removed crons and webhooks after each reload.
+`last_fired` state is preserved across reloads so the same cron won't fire twice in the same minute.
 
 ## Key files
 

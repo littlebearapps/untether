@@ -34,6 +34,10 @@ factory.completed_ok(answer=..., resume=token, usage=...)
 
 Do NOT construct `StartedEvent`, `ActionEvent`, `CompletedEvent` dataclasses directly.
 
+## RunContext trigger_source (#271)
+
+`RunContext` has a `trigger_source: str | None` field. Dispatchers set it to `"cron:<id>"` or `"webhook:<id>"`; `runner_bridge.handle_message` seeds `progress_tracker.meta["trigger"] = "<icon> <source>"`. Engine `StartedEvent.meta` merges over (not replaces) the trigger key via `ProgressTracker.note_event`. Runners themselves should NOT set `meta["trigger"]`; that's reserved for dispatchers.
+
 ## Session locking
 
 - `SessionLockMixin` provides `lock_for(token) -> anyio.Semaphore`

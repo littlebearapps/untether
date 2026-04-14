@@ -30,7 +30,12 @@ class TriggerDispatcher:
 
     async def dispatch_webhook(self, webhook: WebhookConfig, prompt: str) -> None:
         chat_id = webhook.chat_id or self.default_chat_id
-        context = RunContext(project=webhook.project) if webhook.project else None
+        # rc4 (#271): always set trigger_source so the meta footer can render
+        # provenance even when no project is configured.
+        context = RunContext(
+            project=webhook.project,
+            trigger_source=f"webhook:{webhook.id}",
+        )
         engine_override = webhook.engine
         label = f"\N{HIGH VOLTAGE SIGN} Trigger: webhook:{webhook.id}"
 
@@ -38,7 +43,10 @@ class TriggerDispatcher:
 
     async def dispatch_cron(self, cron: CronConfig) -> None:
         chat_id = cron.chat_id or self.default_chat_id
-        context = RunContext(project=cron.project) if cron.project else None
+        context = RunContext(
+            project=cron.project,
+            trigger_source=f"cron:{cron.id}",
+        )
         engine_override = cron.engine
         label = f"\N{ALARM CLOCK} Scheduled: cron:{cron.id}"
 

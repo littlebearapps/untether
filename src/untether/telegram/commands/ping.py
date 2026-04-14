@@ -36,6 +36,40 @@ def _format_uptime(seconds: float) -> str:
     return " ".join(parts)
 
 
+def _trigger_indicator(ctx: CommandContext) -> str | None:
+    """Render a per-chat trigger summary line for ``/ping`` (#271).
+
+    Returns ``None`` if the chat has no triggers targeting it. Formats:
+    - Single cron: ``\u23f0 triggers: 1 cron (daily-review, 9:00 AM daily (Melbourne))``
+    - Multiple: ``\u23f0 triggers: 2 crons, 1 webhook``
+    """
+    mgr = ctx.trigger_manager
+    if mgr is None:
+        return None
+    chat_id = ctx.message.channel_id
+    if not isinstance(chat_id, int):
+        return None
+    crons = mgr.crons_for_chat(chat_id, default_chat_id=ctx.default_chat_id)
+    webhooks = mgr.webhooks_for_chat(chat_id, default_chat_id=ctx.default_chat_id)
+    if not crons and not webhooks:
+        return None
+
+    parts: list[str] = []
+    if crons:
+        from ...triggers.describe import describe_cron
+
+        if len(crons) == 1:
+            c = crons[0]
+            desc = describe_cron(c.schedule, c.timezone or mgr.default_timezone)
+            parts.append(f"1 cron ({c.id}, {desc})")
+        else:
+            parts.append(f"{len(crons)} crons")
+    if webhooks:
+        suffix = "s" if len(webhooks) != 1 else ""
+        parts.append(f"{len(webhooks)} webhook{suffix}")
+    return "\u23f0 triggers: " + ", ".join(parts)
+
+
 class PingCommand:
     """Command backend for bot health check and uptime."""
 
@@ -44,7 +78,11 @@ class PingCommand:
 
     async def handle(self, ctx: CommandContext) -> CommandResult:
         uptime = _format_uptime(time.monotonic() - _STARTED_AT)
-        return CommandResult(text=f"\U0001f3d3 pong \u2014 up {uptime}", notify=True)
+        lines = [f"\U0001f3d3 pong \u2014 up {uptime}"]
+        indicator = _trigger_indicator(ctx)
+        if indicator is not None:
+            lines.append(indicator)
+        return CommandResult(text="\n".join(lines), notify=True)
 
 
 BACKEND: CommandBackend = PingCommand()

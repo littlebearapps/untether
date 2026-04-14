@@ -113,6 +113,11 @@ async def run_cron_scheduler(
                 last_fired[cron.id] = key
                 logger.info("triggers.cron.firing", cron_id=cron.id)
                 await dispatcher.dispatch_cron(cron)
+                # #288: one-shot crons are removed from the active list
+                # after firing; they stay in the TOML and re-activate on
+                # the next config reload or restart.
+                if cron.run_once:
+                    manager.remove_cron(cron.id)
 
         # Sleep until next minute boundary (+ small buffer).
         utc_now = datetime.datetime.now(datetime.UTC)

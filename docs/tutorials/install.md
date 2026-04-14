@@ -30,7 +30,7 @@ Verify it's installed:
 untether --version
 ```
 
-You should see the installed version number (e.g. `0.35.0`).
+You should see the installed version number (e.g. `0.35.1`).
 
 ## 3. Install agent CLIs
 
@@ -314,7 +314,7 @@ Press **y** or **Enter** to save. You'll see:
 Untether is now running and listening for messages!
 
 !!! untether "Untether"
-    🐕 untether is ready (v0.35.0)
+    🐕 untether is ready (v0.35.1)
 
     *default engine:* `codex`<br>
     *installed engines:* codex<br>

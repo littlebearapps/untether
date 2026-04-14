@@ -65,6 +65,18 @@ async def handle_cancel(
                     text="multiple jobs queued — reply to the progress message to cancel a specific one."
                 )
                 return
+        # Check pending /at delays for this chat (#288).
+        from .. import at_scheduler
+
+        pending_at = at_scheduler.cancel_pending_for_chat(chat_id)
+        if pending_at:
+            await reply(
+                text=(
+                    f"\u274c cancelled {pending_at} pending /at run"
+                    f"{'s' if pending_at != 1 else ''}."
+                )
+            )
+            return
         logger.debug("cancel.nothing_running", chat_id=chat_id)
         await reply(text="nothing running in this chat.")
         return

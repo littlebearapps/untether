@@ -231,6 +231,24 @@ Run `untether doctor` to validate voice configuration.
 5. Check firewall rules if the webhook server is behind NAT
 6. Look at `debug.log` for incoming request logs
 
+## Config change didn't take effect
+
+**Symptoms:** You edited `untether.toml` but the change doesn't seem to apply.
+
+1. **Check `watch_config`:** Hot-reload requires `watch_config = true` in the top-level config. Without it, changes only apply on restart.
+2. **Hot-reloadable settings** apply immediately: `voice_transcription`, `[files]`, `allowed_user_ids`, `show_resume_line`, trigger crons/webhooks/auth/timezones.
+3. **Restart-only settings** require `/restart` or `systemctl restart`: `bot_token`, `chat_id`, `session_mode`, `topics.enabled`, `message_overflow`, `triggers.server.host`/`port`.
+4. Check the log for `config.reload.applied` (success) or `config.reload.transport_config_changed restart_required=True` (restart needed).
+
+## /at delay not firing
+
+**Symptoms:** You scheduled `/at 30m Check the build` but the prompt never runs.
+
+- Pending `/at` delays are held in memory — they are **lost on restart**. If Untether restarted after you scheduled, the delay was cancelled.
+- Use `/cancel` to see how many pending delays exist. If it says "nothing running", there are no pending delays.
+- Minimum duration: 60 seconds. Maximum: 24 hours. Values outside this range are rejected.
+- Per-chat cap: 20 pending delays. The 21st is rejected with an error message.
+
 ## Session not resuming
 
 **Symptoms:** Sending a follow-up message starts a new session instead of continuing.

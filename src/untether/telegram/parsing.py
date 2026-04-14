@@ -228,6 +228,7 @@ async def poll_incoming(
     chat_ids: Iterable[int] | Callable[[], Iterable[int]] | None = None,
     offset: int | None = None,
     sleep: Callable[[float], Awaitable[None]] = anyio.sleep,
+    on_offset_advanced: Callable[[int], None] | None = None,
 ) -> AsyncIterator[TelegramIncomingUpdate]:
     while True:
         updates = await bot.get_updates(
@@ -246,6 +247,8 @@ async def poll_incoming(
             allowed = {chat_id}
         for upd in updates:
             offset = upd.update_id + 1
+            if on_offset_advanced is not None:
+                on_offset_advanced(upd.update_id)
             msg = parse_incoming_update(upd, chat_ids=allowed)
             if msg is not None:
                 yield msg

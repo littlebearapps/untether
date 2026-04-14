@@ -250,7 +250,8 @@ async def test_cron_dispatch_calls_run_job():
 
 
 @pytest.mark.anyio
-async def test_no_project_means_no_context():
+async def test_no_project_still_sets_trigger_source():
+    """rc4 (#271): RunContext is always created so trigger_source flows through."""
     transport = FakeTransport()
     run_job = RunJobCapture()
 
@@ -265,4 +266,32 @@ async def test_no_project_means_no_context():
         await anyio.sleep(0.01)
         tg.cancel_scope.cancel()
 
-    assert run_job.calls[0]["context"] is None
+    ctx = run_job.calls[0]["context"]
+    assert ctx is not None
+    assert ctx.project is None
+    assert ctx.trigger_source == "webhook:test-wh"
+
+
+@pytest.mark.anyio
+async def test_dispatch_cron_sets_trigger_source():
+    """rc4 (#271): cron dispatches tag context with cron:<id>."""
+    from untether.triggers.settings import CronConfig
+
+    transport = FakeTransport()
+    run_job = RunJobCapture()
+
+    async with anyio.create_task_group() as tg:
+        dispatcher = TriggerDispatcher(
+            run_job=run_job,
+            transport=transport,
+            default_chat_id=100,
+            task_group=tg,
+        )
+        cron = CronConfig(id="daily-review", schedule="0 9 * * *", prompt="hi")
+        await dispatcher.dispatch_cron(cron)
+        await anyio.sleep(0.01)
+        tg.cancel_scope.cancel()
+
+    ctx = run_job.calls[0]["context"]
+    assert ctx is not None
+    assert ctx.trigger_source == "cron:daily-review"

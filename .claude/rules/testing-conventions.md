@@ -60,14 +60,14 @@ Integration tests are automated via Telegram MCP tools by Claude Code during the
 
 ### Test chats
 
-| Chat | Chat ID |
-|------|---------|
-| `ut-dev-hf: claude` | 5171122044 |
-| `ut-dev-hf: codex` | 5116709786 |
-| `ut-dev-hf: opencode` | 5020138767 |
-| `ut-dev-hf: pi` | 5276373372 |
-| `ut-dev-hf: gemini` | 5152406011 |
-| `ut-dev-hf: amp` | 5064468679 |
+| Chat | Chat ID | Bot API chat_id |
+|------|---------|-----------------|
+| Claude Code | `5284581592` | `-5284581592` |
+| Codex CLI | `4929463515` | `-4929463515` |
+| OpenCode | `5200822877` | `-5200822877` |
+| Pi | `5156256333` | `-5156256333` |
+| Gemini CLI | `5207762142` | `-5207762142` |
+| AMP CLI | `5230875989` | `-5230875989` |
 
 ### Pattern
 

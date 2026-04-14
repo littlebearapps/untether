@@ -3,9 +3,21 @@
 from __future__ import annotations
 
 import datetime
+from dataclasses import dataclass, field
+from typing import Any
 from zoneinfo import ZoneInfo
 
-from untether.triggers.cron import _parse_field, _resolve_now, cron_matches
+import anyio
+import pytest
+
+from untether.triggers.cron import (
+    _parse_field,
+    _resolve_now,
+    cron_matches,
+    run_cron_scheduler,
+)
+from untether.triggers.manager import TriggerManager
+from untether.triggers.settings import parse_trigger_config
 
 
 class TestCronMatches:
@@ -129,3 +141,118 @@ class TestCronStepValidation:
         now = datetime.datetime(2026, 2, 24, 10, 0)
         # Expression with step=0 should not match (returns empty set)
         assert cron_matches("*/0 * * * *", now) is False
+
+
+# ── run_once cron flag (#288) ─────────────────────────────────────────
+
+
+@dataclass
+class FakeDispatcher:
+    fired: list[str] = field(default_factory=list)
+
+    async def dispatch_cron(self, cron: Any) -> None:
+        self.fired.append(cron.id)
+
+
+pytestmark_runonce = pytest.mark.anyio
+
+
+@pytest.mark.anyio
+async def test_run_once_removes_after_fire(monkeypatch):
+    """A run_once cron removes itself from TriggerManager after firing."""
+    settings = parse_trigger_config(
+        {
+            "enabled": True,
+            "crons": [
+                {
+                    "id": "once",
+                    "schedule": "* * * * *",
+                    "prompt": "hi",
+                    "run_once": True,
+                },
+            ],
+        }
+    )
+    manager = TriggerManager(settings)
+    dispatcher = FakeDispatcher()
+
+    # Patch scheduler's sleep to yield immediately so the tick fires fast.
+    _real_sleep = anyio.sleep
+
+    async def fast_sleep(s: float) -> None:
+        await _real_sleep(0)
+
+    monkeypatch.setattr("untether.triggers.cron.anyio.sleep", fast_sleep)
+
+    async with anyio.create_task_group() as tg:
+        tg.start_soon(run_cron_scheduler, manager, dispatcher)
+        # Give scheduler one tick to fire, then cancel.
+        await _real_sleep(0)
+        for _ in range(3):
+            await _real_sleep(0)
+        # Cancel the scheduler.
+        tg.cancel_scope.cancel()
+
+    assert dispatcher.fired == ["once"]
+    assert manager.cron_ids() == []
+
+
+@pytest.mark.anyio
+async def test_run_once_false_keeps_cron_active(monkeypatch):
+    """A normal cron (run_once=False) stays in the manager after firing."""
+    settings = parse_trigger_config(
+        {
+            "enabled": True,
+            "crons": [
+                {
+                    "id": "repeating",
+                    "schedule": "* * * * *",
+                    "prompt": "hi",
+                },
+            ],
+        }
+    )
+    manager = TriggerManager(settings)
+    dispatcher = FakeDispatcher()
+
+    _real_sleep = anyio.sleep
+
+    async def fast_sleep(s: float) -> None:
+        await _real_sleep(0)
+
+    monkeypatch.setattr("untether.triggers.cron.anyio.sleep", fast_sleep)
+
+    async with anyio.create_task_group() as tg:
+        tg.start_soon(run_cron_scheduler, manager, dispatcher)
+        for _ in range(3):
+            await _real_sleep(0)
+        tg.cancel_scope.cancel()
+
+    # Fired at least once, cron still active.
+    assert "repeating" in dispatcher.fired
+    assert manager.cron_ids() == ["repeating"]
+
+
+def test_run_once_survives_reload_via_config():
+    """A reload with the same TOML re-adds a run_once cron that was removed."""
+    settings = parse_trigger_config(
+        {
+            "enabled": True,
+            "crons": [
+                {
+                    "id": "once",
+                    "schedule": "0 9 * * *",
+                    "prompt": "hi",
+                    "run_once": True,
+                },
+            ],
+        }
+    )
+    mgr = TriggerManager(settings)
+    assert mgr.cron_ids() == ["once"]
+    # Simulate firing: remove it.
+    assert mgr.remove_cron("once") is True
+    assert mgr.cron_ids() == []
+    # Config reload (TOML unchanged) re-adds the cron.
+    mgr.update(settings)
+    assert mgr.cron_ids() == ["once"]

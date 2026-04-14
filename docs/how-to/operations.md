@@ -11,6 +11,12 @@ Send `/ping` in Telegram to verify the bot is running:
 
 The response includes the bot's uptime since last restart. Use this as a quick liveness check.
 
+If triggers (crons or webhooks) target the current chat, `/ping` also shows a trigger summary:
+
+!!! untether "Untether"
+    pong — up 3d 14h 22m
+    ⏰ triggers: 1 cron (daily-review, 9:00 AM daily (Melbourne)), 1 webhook
+
 If [webhooks and cron](webhooks-and-cron.md) are enabled, the webhook server also exposes a health endpoint:
 
 ```
@@ -41,6 +47,10 @@ Sending SIGTERM to the Untether process triggers the same graceful drain as `/re
 
 This means `systemctl --user stop untether` (Linux) also drains gracefully, as systemd sends SIGTERM first. Pressing Ctrl+C in a terminal sends SIGINT, which triggers the same graceful drain.
 
+### Message continuity across restarts
+
+Untether persists the last Telegram `update_id` to `last_update_id.json` in the config directory. On startup, polling resumes from the saved offset — no messages are dropped or re-processed within Telegram's 24-hour retention window. Pending `/at` delays are cancelled during drain and not persisted (they are lost on restart).
+
 !!! note "Drain timeout"
     The default drain timeout is 120 seconds. If active runs don't complete within this window, they are cancelled and a timeout notification is sent to Telegram.
 
@@ -58,6 +68,29 @@ This replaces the stale progress text and removes any inline keyboards (approval
 The cleanup happens before the startup message is sent, so by the time you see "Untether started", all orphan messages are already resolved.
 
 <!-- TODO: capture screenshot: orphan-cleanup — progress message showing "interrupted by restart" -->
+
+## Systemd service (Linux)
+
+The recommended systemd unit file is provided at `contrib/untether.service`. Key settings:
+
+| Setting | Value | Purpose |
+|---------|-------|---------|
+| `Type=notify` | — | Untether sends `READY=1` after startup completes; systemd knows the service is ready |
+| `NotifyAccess=main` | — | Only the main process can send sd_notify signals |
+| `RestartSec=2` | — | Wait 2 seconds before auto-restarting on failure |
+| `OOMScoreAdjust=-100` | — | Makes Untether less likely to be OOM-killed than default processes |
+| `OOMPolicy=continue` | — | Don't stop the service if a child process is OOM-killed |
+| `KillMode=mixed` | — | Sends SIGTERM to main process, SIGKILL to remaining children after timeout |
+
+Copy the unit file and reload:
+
+```bash
+cp contrib/untether.service ~/.config/systemd/user/untether.service
+systemctl --user daemon-reload
+systemctl --user enable --now untether
+```
+
+See the [dev instance reference](../reference/dev-instance.md) for full service file documentation.
 
 ## Auto-continue (Claude Code)
 
@@ -127,7 +160,19 @@ Enable config watching so Untether picks up changes without a restart:
     watch_config = true
     ```
 
-When enabled, Untether watches the config file for changes and reloads most settings automatically. Transport settings (bot token, chat ID) are excluded — those require a full restart.
+When enabled, Untether watches the config file for changes and reloads most settings automatically.
+
+**Hot-reloadable** (applied immediately):
+
+- Trigger system: `triggers.enabled`, crons, webhooks, auth, rate limits, timezones
+- Telegram bridge: `voice_transcription`, `[files]`, `allowed_user_ids`, `show_resume_line`, timing
+- Engine defaults, budget, cost/usage display flags
+
+**Restart-only** (require `/restart` or `systemctl restart`):
+
+- `bot_token`, `chat_id` (Telegram connectivity)
+- `session_mode`, `topics.enabled` (structural)
+- `message_overflow` (message splitting strategy)
 
 ## Process management
 

@@ -3,7 +3,7 @@ from __future__ import annotations
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Literal, Protocol, overload, runtime_checkable
+from typing import TYPE_CHECKING, Any, Literal, Protocol, overload, runtime_checkable
 
 from .config import ConfigError
 from .context import RunContext
@@ -12,6 +12,9 @@ from .model import EngineId
 from .plugins import COMMAND_GROUP, list_ids, load_plugin_backend
 from .transport import MessageRef, RenderedMessage
 from .transport_runtime import TransportRuntime
+
+if TYPE_CHECKING:
+    from .triggers.manager import TriggerManager
 
 RunMode = Literal["emit", "capture"]
 
@@ -70,6 +73,12 @@ class CommandContext:
     plugin_config: dict[str, Any]
     runtime: TransportRuntime
     executor: CommandExecutor
+    # rc4 (#271): exposed to commands so /ping can render per-chat trigger
+    # indicators. Transports without triggers pass None.
+    trigger_manager: TriggerManager | None = None
+    # rc4 (#271): the default chat_id that unscoped triggers fall back to
+    # (Telegram transport: cfg.chat_id).
+    default_chat_id: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
