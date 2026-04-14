@@ -67,6 +67,7 @@ def acquire_config_lock(config_path: Path, token: str | None) -> LockHandle:
             token_fingerprint=fingerprint,
         )
     except LockError as exc:
+        logger.error("cli.lock_error", error=str(exc), config_path=str(config_path))
         lines = str(exc).splitlines()
         if lines:
             typer.echo(lines[0], err=True)
@@ -216,6 +217,7 @@ def _run_auto_router(
         transport_id = resolve_transport_id_fn(transport_override)
         transport_backend = get_transport_fn(transport_id, allowlist=allowlist)
     except ConfigError as exc:
+        logger.error("cli.config_error", error=str(exc))
         typer.echo(f"error: {exc}", err=True)
         raise typer.Exit(code=1) from exc
     if onboard:
@@ -307,6 +309,7 @@ def _run_auto_router(
             runtime=runtime,
         )
     except ConfigError as exc:
+        logger.error("cli.config_error", error=str(exc))
         typer.echo(f"error: {exc}", err=True)
         raise typer.Exit(code=1) from exc
     except KeyboardInterrupt:

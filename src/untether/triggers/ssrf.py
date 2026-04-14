@@ -107,12 +107,14 @@ def validate_url(
         raise SSRFError(f"Invalid URL: {exc}") from exc
 
     if parsed.scheme not in ALLOWED_SCHEMES:
+        logger.warning("ssrf.scheme_blocked", url=url, scheme=parsed.scheme)
         raise SSRFError(
             f"Scheme {parsed.scheme!r} not allowed; "
             f"permitted: {', '.join(sorted(ALLOWED_SCHEMES))}"
         )
 
     if not parsed.hostname:
+        logger.warning("ssrf.no_hostname", url=url)
         raise SSRFError("URL has no hostname")
 
     # If the host is an IP literal, check it immediately.
@@ -123,6 +125,7 @@ def validate_url(
         pass
     else:
         if _is_blocked_ip(addr, allowlist=allowlist):
+            logger.warning("ssrf.ip_blocked", hostname=parsed.hostname)
             raise SSRFError(
                 f"Blocked: {parsed.hostname} resolves to private/reserved range"
             )
