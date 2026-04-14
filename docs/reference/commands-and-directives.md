@@ -57,6 +57,7 @@ This line is parsed from replies and takes precedence over new directives. For b
 | `/auth` | Headless device re-authentication for Codex — runs `codex login --device-auth` and sends the verification URL + device code. `/auth status` checks CLI availability. Codex-only. |
 | `/new` | Cancel any running task and clear stored sessions for the current scope (topic/chat). |
 | `/continue [prompt]` | Resume the most recent session in the project directory. Picks up CLI-started sessions from Telegram. Optional prompt appended. Not supported for AMP. |
+| `/at <duration> <prompt>` | Schedule a one-shot delayed run. Duration: `Ns` (60-9999s), `Nm`, or `Nh` (up to 24h). Pending delays are cancelled via `/cancel` and lost on restart. Per-chat cap of 20 pending delays. |
 
 Notes:
 

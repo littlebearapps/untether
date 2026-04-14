@@ -138,6 +138,7 @@ class CronConfig(BaseModel):
     prompt_template: NonEmptyStr | None = None
     timezone: NonEmptyStr | None = None
     fetch: CronFetchConfig | None = None
+    run_once: bool = False
 
     @field_validator("timezone")
     @classmethod

@@ -310,7 +310,7 @@ def _short_model_name(model: str) -> str:
 
 
 def format_meta_line(meta: dict[str, Any]) -> str | None:
-    """Format model + effort + permission mode into a compact footer line."""
+    """Format model + effort + permission mode (+ trigger source) as a footer line."""
     parts: list[str] = []
     model = meta.get("model")
     if isinstance(model, str) and model:
@@ -321,6 +321,10 @@ def format_meta_line(meta: dict[str, Any]) -> str | None:
     perm = meta.get("permissionMode")
     if isinstance(perm, str) and perm:
         parts.append(perm)
+    # rc4 (#271): show trigger provenance when set by the dispatcher.
+    trigger = meta.get("trigger")
+    if isinstance(trigger, str) and trigger:
+        parts.append(trigger)
     return HEADER_SEP.join(parts) if parts else None
 
 

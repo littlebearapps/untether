@@ -402,18 +402,51 @@ async def poll_updates(
     *,
     sleep: Callable[[float], Awaitable[None]] = anyio.sleep,
 ) -> AsyncIterator[TelegramIncomingUpdate]:
+    from .. import sdnotify
+    from .offset_persistence import (
+        DebouncedOffsetWriter,
+        load_last_update_id,
+        resolve_offset_path,
+    )
+
+    config_path = cfg.runtime.config_path
     offset: int | None = None
+    offset_writer: DebouncedOffsetWriter | None = None
+    if config_path is not None:
+        offset_path = resolve_offset_path(config_path)
+        saved = load_last_update_id(offset_path)
+        if saved is not None:
+            offset = saved + 1
+            logger.info(
+                "startup.offset.resumed",
+                last_update_id=saved,
+                path=str(offset_path),
+            )
+        offset_writer = DebouncedOffsetWriter(offset_path)
+
     offset = await _drain_backlog(cfg, offset)
     await _cleanup_orphan_progress(cfg)
     await _send_startup(cfg)
 
-    async for msg in poll_incoming(
-        cfg.bot,
-        chat_ids=lambda: _allowed_chat_ids(cfg),
-        offset=offset,
-        sleep=sleep,
-    ):
-        yield msg
+    # Signal systemd that Untether is ready to receive traffic. No-op on
+    # non-systemd runs (NOTIFY_SOCKET absent). See #287.
+    if sdnotify.notify("READY=1"):
+        logger.debug("sdnotify.ready")
+
+    try:
+        async for msg in poll_incoming(
+            cfg.bot,
+            chat_ids=lambda: _allowed_chat_ids(cfg),
+            offset=offset,
+            sleep=sleep,
+            on_offset_advanced=(
+                offset_writer.note if offset_writer is not None else None
+            ),
+        ):
+            yield msg
+    finally:
+        if offset_writer is not None:
+            offset_writer.flush()
 
 
 @dataclass(slots=True)
@@ -1278,12 +1311,38 @@ async def run_main_loop(
                     new_snapshot = reload.settings.transports.telegram.model_dump()
                     changed = _diff_keys(state.transport_snapshot, new_snapshot)
                     if changed:
-                        logger.warning(
-                            "config.reload.transport_config_changed",
-                            transport="telegram",
-                            keys=changed,
-                            restart_required=True,
-                        )
+                        # rc4 (#286): unfrozen TelegramBridgeConfig allows most
+                        # settings to hot-reload. Only a handful still require a
+                        # restart — everything else is applied via update_from().
+                        RESTART_ONLY_KEYS = {
+                            "bot_token",
+                            "chat_id",
+                            "session_mode",
+                            "topics",
+                            "message_overflow",
+                        }
+                        restart_keys = [k for k in changed if k in RESTART_ONLY_KEYS]
+                        hot_keys = [k for k in changed if k not in RESTART_ONLY_KEYS]
+                        if restart_keys:
+                            logger.warning(
+                                "config.reload.transport_config_changed",
+                                transport="telegram",
+                                keys=restart_keys,
+                                restart_required=True,
+                            )
+                        if hot_keys:
+                            cfg.update_from(reload.settings.transports.telegram)
+                            state.forward_coalesce_s = max(
+                                0.0, float(cfg.forward_coalesce_s)
+                            )
+                            state.media_group_debounce_s = max(
+                                0.0, float(cfg.media_group_debounce_s)
+                            )
+                            logger.info(
+                                "config.reload.transport_config_hot_reloaded",
+                                transport="telegram",
+                                keys=hot_keys,
+                            )
                         state.transport_snapshot = new_snapshot
                 if (
                     state.transport_id is not None
@@ -1341,15 +1400,28 @@ async def run_main_loop(
                 while not is_shutting_down():
                     await sleep(0.5)
 
+                # Signal systemd that we've entered drain (Deactivating state).
+                from .. import sdnotify
+
+                if sdnotify.notify("STOPPING=1"):
+                    logger.debug("sdnotify.stopping")
+
                 active = len(state.running_tasks)
-                logger.info("shutdown.draining", active_runs=active)
+                pending_at = at_scheduler.active_count()
+                logger.info(
+                    "shutdown.draining",
+                    active_runs=active,
+                    pending_at=pending_at,
+                )
 
                 if active > 0:
                     await _notify_drain_start(
                         cfg.exec_cfg.transport, state.running_tasks
                     )
 
-                    # Wait for all runs to complete (up to drain timeout)
+                    # Wait for all runs to complete (up to drain timeout).
+                    # Pending /at delays that have not yet fired are cancelled
+                    # via the task-group cancel below; no need to wait on them.
                     _drain_tick = 0
                     with anyio.move_on_after(DRAIN_TIMEOUT_S):
                         while state.running_tasks:
@@ -1511,6 +1583,16 @@ async def run_main_loop(
 
             scheduler = ThreadScheduler(task_group=tg, run_job=run_thread_job)
 
+            # --- /at one-shot delayed runs (#288) ---
+            from . import at_scheduler
+
+            at_scheduler.install(
+                tg,
+                run_job,
+                cfg.exec_cfg.transport,
+                cfg.chat_id,
+            )
+
             # --- Trigger system (webhooks + cron) ---
             trigger_manager: TriggerManager | None = None
             if cfg.trigger_config and cfg.trigger_config.get("enabled"):
@@ -1523,6 +1605,9 @@ async def run_main_loop(
                 try:
                     trigger_settings = parse_trigger_config(cfg.trigger_config)
                     trigger_manager = TriggerManager(trigger_settings)
+                    # rc4 (#271): expose trigger_manager to commands via cfg so
+                    # /ping and /config can render per-chat trigger indicators.
+                    cfg.trigger_manager = trigger_manager
                     trigger_dispatcher = TriggerDispatcher(
                         run_job=run_job,
                         transport=cfg.exec_cfg.transport,
@@ -2194,8 +2279,9 @@ async def run_main_loop(
                     return
                 forward_coalescer.schedule(pending)
 
-            allowed_user_ids = set(cfg.allowed_user_ids)
-            if not allowed_user_ids:
+            # rc4 (#286): read allowed_user_ids from cfg on each update so
+            # hot-reload of the allowlist takes effect immediately.
+            if not cfg.allowed_user_ids:
                 logger.warning(
                     "security.no_allowed_users",
                     hint="allowed_user_ids is empty — any user in the chat can run commands. "
@@ -2214,9 +2300,10 @@ async def run_main_loop(
                     )
 
             async def route_update(update: TelegramIncomingUpdate) -> None:
-                if allowed_user_ids:
+                current_allowed = frozenset(cfg.allowed_user_ids)
+                if current_allowed:
                     sender_id = update.sender_id
-                    if sender_id is None or sender_id not in allowed_user_ids:
+                    if sender_id is None or sender_id not in current_allowed:
                         logger.debug(
                             "update.ignored",
                             reason="sender_not_allowed",

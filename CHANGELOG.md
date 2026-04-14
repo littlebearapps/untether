@@ -1,8 +1,10 @@
 # changelog
 
-## v0.35.1 (2026-04-03)
+## v0.35.1 (2026-04-14)
 
 ### fixes
+
+- diff preview approval gate no longer blocks edits after a plan is approved — the `_discuss_approved` flag now short-circuits diff preview as well as `ExitPlanMode`, so once the user approves a plan outline the next `Edit`/`Write` runs without a second approval prompt [#283](https://github.com/littlebearapps/untether/issues/283)
 
 - fix multipart webhooks returning HTTP 500 — `_process_webhook` pre-read the request body for size/auth/rate-limit checks, leaving the stream empty when `_parse_multipart` called `request.multipart()`. Now the multipart reader is constructed from the cached raw body, so multipart uploads work end-to-end; also short-circuits the post-parse raw-body write so the MIME envelope isn't duplicated at `file_path` alongside the extracted file at `file_destination` [#280](https://github.com/littlebearapps/untether/issues/280)
 - fix webhook rate limiter never returning 429 — `_process_webhook` awaited the downstream dispatch (Telegram outbox send, `http_forward` network call, etc.) before returning 202, which capped request throughput at the dispatch rate (~1/sec for private Telegram chats) and meant the `TokenBucketLimiter` never saw a real burst. Dispatch is now fire-and-forget with exception logging, so the rate limiter drains the bucket correctly and a burst of 80 requests against `rate_limit = 60` now yields 60 × 202 + 20 × 429 [#281](https://github.com/littlebearapps/untether/issues/281)
@@ -48,6 +50,39 @@
   - fetched data injected into `prompt_template` via `store_as` variable (default `fetch_result`)
   - `on_failure = "abort"` (default) sends failure notification; `"run_with_error"` injects error into prompt
   - all fetched data prefixed with untrusted-data marker
+
+- **hot-reload for trigger configuration** — editing `untether.toml` `[triggers]` applies changes immediately without restarting Untether or killing active runs [#269](https://github.com/littlebearapps/untether/issues/269) ([#285](https://github.com/littlebearapps/untether/pull/285))
+  - new `TriggerManager` class holds cron and webhook config; scheduler reads `manager.crons` each tick; webhook server resolves routes per-request via `manager.webhook_for_path()`
+  - supports add/remove/modify of crons and webhooks, auth/secret changes, action type, multipart/file settings, cron fetch, and timezones
+  - `last_fired` dict preserved across swaps to prevent double-firing within the same minute
+  - unauthenticated webhooks logged at `WARNING` on reload (previously only at startup)
+  - 13 new tests in `test_trigger_manager.py`; 2038 existing tests still pass
+
+- **hot-reload for Telegram bridge settings** — `voice_transcription`, file transfer, `allowed_user_ids`, `show_resume_line`, and message-timing settings now reload without a restart [#286](https://github.com/littlebearapps/untether/issues/286)
+  - `TelegramBridgeConfig` unfrozen (keeps `slots=True`) and gains an `update_from(settings)` method
+  - `handle_reload()` now applies changes in-place and refreshes cached loop-state copies; restart-only keys (`bot_token`, `chat_id`, `session_mode`, `topics`, `message_overflow`) still warn with `restart_required=true`
+  - `route_update()` reads `cfg.allowed_user_ids` live so allowlist changes take effect on the next message
+
+- **`/at` command for one-shot delayed runs** — schedule a prompt to run between 60s and 24h in the future with `/at 30m Check the build`; accepts `Ns`/`Nm`/`Nh` suffixes [#288](https://github.com/littlebearapps/untether/issues/288)
+  - pending delays tracked in-memory (lost on restart — acceptable for one-shot use)
+  - `/cancel` drops pending `/at` timers before they fire
+  - per-chat cap of 20 pending delays; graceful drain cancels pending scopes on shutdown
+  - new module `telegram/at_scheduler.py`; command registered as `at` entry point
+
+- **`run_once` cron flag** — `[[triggers.crons]]` entries can set `run_once = true` to fire once then auto-disable; the cron stays in the TOML and re-activates on the next config reload or restart [#288](https://github.com/littlebearapps/untether/issues/288)
+
+- **trigger visibility improvements (Tier 1)** — surface configured triggers in the Telegram UI [#271](https://github.com/littlebearapps/untether/issues/271)
+  - `/ping` in a chat with active triggers appends `⏰ triggers: 1 cron (daily-review, 9:00 AM daily (Melbourne))`
+  - trigger-initiated runs show provenance in the meta footer: `🏷 opus 4.6 · plan · ⏰ cron:daily-review`
+  - new `describe_cron(schedule, timezone)` utility renders common cron patterns in plain English; falls back to the raw expression for complex schedules
+  - `RunContext` gains `trigger_source` field; `ProgressTracker.note_event` merges engine meta over the dispatcher-seeded trigger so it survives
+  - `TriggerManager` exposes `crons_for_chat()`, `webhooks_for_chat()`, `cron_ids()`, `webhook_ids()` helpers
+
+- **faster, cleaner restarts (Tier 1)** — restart gap reduced from ~15-30s to ~5s with no lost messages [#287](https://github.com/littlebearapps/untether/issues/287)
+  - persist last Telegram `update_id` to `last_update_id.json` and resume polling from the saved offset on startup; Telegram retains undelivered updates for 24h, so the polling gap no longer drops or re-processes messages
+  - `Type=notify` systemd integration via stdlib `sd_notify` (`socket.AF_UNIX`, no dependency) — `READY=1` is sent after the first `getUpdates` succeeds, `STOPPING=1` at the start of drain
+  - `RestartSec=2` in `contrib/untether.service` (was `10`) — faster restart after drain completes
+  - `contrib/untether.service` also adds `NotifyAccess=main`; existing installs must copy the unit file and `systemctl --user daemon-reload`
 
 ## v0.35.0 (2026-03-31)
 

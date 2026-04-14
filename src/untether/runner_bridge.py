@@ -1810,6 +1810,15 @@ async def handle_message(
     runner_text = _apply_preamble(runner_text)
 
     progress_tracker = ProgressTracker(engine=runner.engine)
+    # rc4 (#271): seed trigger source into meta so the footer renders it.
+    # The engine's own StartedEvent.meta merges onto this via note_event.
+    if context is not None and context.trigger_source:
+        icon = (
+            "\N{ALARM CLOCK}"
+            if context.trigger_source.startswith("cron:")
+            else "\N{HIGH VOLTAGE SIGN}"
+        )
+        progress_tracker.meta = {"trigger": f"{icon} {context.trigger_source}"}
 
     # Resolve effective presenter: check for per-chat verbose override
     effective_presenter = _resolve_presenter(cfg.presenter, incoming.channel_id)

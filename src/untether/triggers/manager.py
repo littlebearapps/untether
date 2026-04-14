@@ -92,3 +92,53 @@ class TriggerManager:
     @property
     def webhook_count(self) -> int:
         return len(self._webhooks_by_path)
+
+    def cron_ids(self) -> list[str]:
+        """Return a snapshot list of all configured cron ids."""
+        return [c.id for c in self._crons]
+
+    def webhook_ids(self) -> list[str]:
+        """Return a snapshot list of all configured webhook ids."""
+        return [wh.id for wh in self._webhooks_by_path.values()]
+
+    def crons_for_chat(
+        self, chat_id: int, default_chat_id: int | None = None
+    ) -> list[CronConfig]:
+        """Return crons that target the given chat.
+
+        A cron with ``chat_id=None`` falls back to ``default_chat_id``; when
+        ``default_chat_id`` is also ``None``, such crons are excluded.
+        """
+        return [
+            c
+            for c in self._crons
+            if (c.chat_id if c.chat_id is not None else default_chat_id) == chat_id
+        ]
+
+    def webhooks_for_chat(
+        self, chat_id: int, default_chat_id: int | None = None
+    ) -> list[WebhookConfig]:
+        """Return webhooks that target the given chat (same fallback as ``crons_for_chat``)."""
+        return [
+            wh
+            for wh in self._webhooks_by_path.values()
+            if (wh.chat_id if wh.chat_id is not None else default_chat_id) == chat_id
+        ]
+
+    def remove_cron(self, cron_id: str) -> bool:
+        """Atomically remove a cron by id; returns ``True`` if found.
+
+        Used by the ``run_once`` flag to disable a cron after its first fire.
+        Replaces ``self._crons`` with a new list so that in-flight iterations
+        see a consistent snapshot (same pattern as ``update()``).
+        """
+        for i, c in enumerate(self._crons):
+            if c.id == cron_id:
+                self._crons = [*self._crons[:i], *self._crons[i + 1 :]]
+                logger.info(
+                    "triggers.cron.run_once_completed",
+                    cron_id=cron_id,
+                    remaining_crons=len(self._crons),
+                )
+                return True
+        return False

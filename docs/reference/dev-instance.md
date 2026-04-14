@@ -173,15 +173,44 @@ To add another test route:
 
 ## Systemd service configuration
 
-An example service file lives at `contrib/untether.service`. Four settings are
-critical — two for graceful shutdown, two for OOM (out-of-memory) behaviour:
+An example service file lives at `contrib/untether.service`. Seven settings are
+critical — two for systemd readiness notification, two for graceful shutdown,
+two for OOM (out-of-memory) behaviour, plus `RestartSec`:
 
 ```ini
+Type=notify             # Untether sends READY=1 after first getUpdates succeeds
+NotifyAccess=main       # Only the main process can send sd_notify messages
 KillMode=mixed          # SIGTERM main process first, then SIGKILL remaining cgroup
 TimeoutStopSec=150      # Give the 120s drain timeout room to complete
+RestartSec=2            # Restart quickly after drain completes
 OOMScoreAdjust=-100     # Don't be earlyoom's preferred victim
 OOMPolicy=continue      # Don't tear down the whole unit on a single OOM kill
 ```
+
+### Readiness (`Type=notify`)
+
+!!! info "New in v0.35.1"
+
+`Type=notify` tells systemd the bot is "activating" until Untether sends a
+`READY=1` datagram to `$NOTIFY_SOCKET` — which only happens after the first
+`getUpdates` call succeeds. This prevents the previous race where `systemctl
+start` returned "active" before the bot was actually polling. On shutdown,
+Untether sends `STOPPING=1` at the start of drain so `systemctl status` shows
+"Deactivating" rather than "Active" during the drain window.
+
+The `sd_notify` integration uses the standard library only (no external
+dependency). Missing `NOTIFY_SOCKET` (e.g. running outside systemd) is a
+silent no-op. See `src/untether/sdnotify.py` and issue #287.
+
+### Restart timing
+
+!!! info "New in v0.35.1"
+
+`RestartSec=2` (down from systemd's default) lets Untether resume polling
+within a few seconds of drain completion. The Telegram `update_id` offset is
+persisted to `last_update_id.json` on shutdown, so no messages are dropped
+or re-processed across the restart window (Telegram retains undelivered
+updates for 24 hours). See issue #287.
 
 ### Graceful shutdown
 

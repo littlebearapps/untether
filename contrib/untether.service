@@ -6,11 +6,20 @@
 #   systemctl --user enable --now untether
 #
 # Key settings:
+#   Type=notify          — Untether sends READY=1 via sd_notify after the
+#                          first getUpdates succeeds, so systemd knows the
+#                          bot is actually healthy (not just "PID exists").
+#                          STOPPING=1 is sent during drain. See #287.
+#   NotifyAccess=main    — only the main process can send sd_notify messages
+#                          (defence in depth).
 #   KillMode=mixed       — SIGTERM only the main process first (drain logic
 #                          waits for active runs); then SIGKILL all remaining
 #                          cgroup processes (orphaned MCP servers, containers)
 #   TimeoutStopSec=150   — give the 120s drain timeout room to complete
 #                          before systemd sends SIGKILL
+#   RestartSec=2         — resume quickly after drain completes; Telegram
+#                          update_id persistence (#287) means no lost
+#                          messages across the restart gap.
 #   OOMScoreAdjust=-100  — lower than CLI/tmux processes (oom_score_adj=0);
 #                          prevents earlyoom/kernel OOM killer from picking
 #                          Untether's Claude subprocesses first under memory
@@ -29,10 +38,11 @@ After=network-online.target
 Wants=network-online.target
 
 [Service]
-Type=simple
+Type=notify
+NotifyAccess=main
 ExecStart=%h/.local/bin/untether
 Restart=always
-RestartSec=10
+RestartSec=2
 
 # Graceful shutdown: SIGTERM the main process first, then SIGKILL the rest.
 #   - process:       SIGTERM main only, but orphaned children (MCP servers,

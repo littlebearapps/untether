@@ -174,6 +174,16 @@ class TestCronConfig:
         c = CronConfig(id="x", schedule="* * * * *", prompt="Hi")
         assert c.timezone is None
 
+    def test_run_once_default_false(self):
+        c = CronConfig(id="x", schedule="* * * * *", prompt="Hi")
+        assert c.run_once is False
+
+    def test_run_once_true_accepted(self):
+        c = CronConfig(
+            id="deploy-check", schedule="0 15 * * *", prompt="Hi", run_once=True
+        )
+        assert c.run_once is True
+
     def test_invalid_timezone_rejected(self):
         with pytest.raises(ValidationError, match="unknown timezone"):
             CronConfig(

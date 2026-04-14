@@ -113,6 +113,8 @@ async def _dispatch_command(
         plugin_config=plugin_config,
         runtime=cfg.runtime,
         executor=executor,
+        trigger_manager=cfg.trigger_manager,
+        default_chat_id=cfg.chat_id,
     )
     try:
         result = await backend.handle(ctx)
@@ -250,6 +252,8 @@ async def _dispatch_callback(
             plugin_config=plugin_config,
             runtime=cfg.runtime,
             executor=executor,
+            trigger_manager=cfg.trigger_manager,
+            default_chat_id=cfg.chat_id,
         )
         try:
             result = await backend.handle(ctx)

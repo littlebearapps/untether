@@ -40,6 +40,11 @@ Untether adds interactive permission control, plan mode support, and several UX 
 - **`/continue`** — cross-environment resume; pick up the most recent CLI session from Telegram using each engine's native continue flag (`--continue`, `resume --last`, `--resume latest`); supported for Claude, Codex, OpenCode, Pi, Gemini (not AMP)
 - **Timezone-aware cron triggers** — per-cron `timezone` or global `default_timezone` with IANA names (e.g. `Australia/Melbourne`); DST-aware via `zoneinfo`; invalid names rejected at config parse time
 - **Hot-reload trigger configuration** — editing `untether.toml` applies cron/webhook changes immediately without restart; `TriggerManager` holds mutable state that the cron scheduler and webhook server reference at runtime; `handle_reload()` re-parses `[triggers]` on config file change
+- **Hot-reload Telegram bridge settings** — `voice_transcription`, file transfer, `allowed_user_ids`, timing, and `show_resume_line` settings reload without restart; `TelegramBridgeConfig` unfrozen (slots kept) with `update_from()` wired into `handle_reload()`; restart-only keys (`bot_token`, `chat_id`, `session_mode`, `topics`, `message_overflow`) still warn
+- **`/at` command** — one-shot delayed runs: `/at 30m <prompt>` schedules a prompt to run in 60s–24h; `/cancel` drops pending delays before firing; lost on restart (documented) with a per-chat cap of 20 pending delays; `telegram/at_scheduler.py` holds task-group + run_job refs
+- **`run_once` cron flag** — `[[triggers.crons]]` entries can set `run_once = true` to fire once then auto-disable; cron stays in TOML and re-activates on config reload or restart
+- **Trigger visibility (Tier 1)** — `/ping` shows per-chat trigger summary (`⏰ triggers: 1 cron (id, 9:00 AM daily (Melbourne))`); run footer shows `⏰ cron:<id>` / `⚡ webhook:<id>` for trigger-initiated runs; new `describe_cron()` utility renders common patterns in plain English
+- **Graceful restart improvements (Tier 1)** — persists Telegram `update_id` to `last_update_id.json` so restarts don't drop/duplicate messages; `Type=notify` systemd integration via stdlib `sd_notify` (`READY=1` + `STOPPING=1`); `RestartSec=2`
 
 See `.claude/skills/claude-stream-json/` and `.claude/rules/control-channel.md` for implementation details.
 
@@ -86,7 +91,12 @@ Telegram <-> TelegramPresenter <-> RunnerBridge <-> Runner (claude/codex/opencod
 | `commands.py` | Command result types |
 | `scripts/validate_release.py` | Release validation (changelog format, issue links, version match) |
 | `scripts/healthcheck.sh` | Post-deploy health check (systemd, version, logs, Bot API) |
-| `triggers/manager.py` | TriggerManager: mutable cron/webhook holder for hot-reload; atomic config swap on TOML change |
+| `triggers/manager.py` | TriggerManager: mutable cron/webhook holder for hot-reload; atomic config swap on TOML change; `crons_for_chat`, `webhooks_for_chat`, `remove_cron` helpers |
+| `triggers/describe.py` | `describe_cron(schedule, timezone)` utility for human-friendly cron rendering |
+| `telegram/at_scheduler.py` | `/at` command state: pending one-shot delays with cancel scopes, install/uninstall, cancel per chat |
+| `telegram/commands/at.py` | `/at` command backend — parses Ns/Nm/Nh, schedules delayed run |
+| `telegram/offset_persistence.py` | Persist Telegram `update_id` across restarts; `DebouncedOffsetWriter` |
+| `sdnotify.py` | Stdlib `sd_notify` client for `READY=1`/`STOPPING=1` systemd signals |
 | `triggers/server.py` | Webhook HTTP server (aiohttp); multipart parsing from cached body, fire-and-forget dispatch |
 | `triggers/dispatcher.py` | Routes webhooks/crons to `run_job()` or non-agent action handlers |
 | `triggers/cron.py` | Cron expression parser, timezone-aware scheduler loop |
@@ -205,7 +215,13 @@ Key test files:
 - `test_trigger_fetch.py` — 12 tests: HTTP GET/POST, file read, parse modes, failure handling, prompt building
 - `test_trigger_auth.py` — 12 tests: bearer token, HMAC-SHA256/SHA1, timing-safe comparison
 - `test_trigger_rate_limit.py` — 5 tests: token bucket fill/drain, per-key isolation, refill timing
-- `test_trigger_manager.py` — 13 tests: TriggerManager init/update/clear, webhook server hot-reload (add/remove/update routes, secret changes, health count), cron schedule swapping, timezone updates
+- `test_trigger_manager.py` — 23 tests: TriggerManager init/update/clear, webhook server hot-reload (add/remove/update routes, secret changes, health count), cron schedule swapping, timezone updates; rc4 helpers (crons_for_chat, webhooks_for_chat, cron_ids, webhook_ids, remove_cron, atomic iteration)
+- `test_describe_cron.py` — 31 tests: human-friendly cron rendering (daily, weekday ranges, weekday lists, single day, timezone suffix, fallback to raw, AM/PM boundaries)
+- `test_trigger_meta_line.py` — 6 tests: trigger source rendering in `format_meta_line()`, ordering relative to model/effort/permission
+- `test_bridge_config_reload.py` — 11 tests: TelegramBridgeConfig unfrozen (slots preserved), `update_from()` copies all 11 fields, files swap, chat_ids/voice_transcription_api_key edge cases, trigger_manager field default
+- `test_at_command.py` — 34 tests: `/at` parse (valid/invalid suffixes, bounds, case-insensitive), `_format_delay`, schedule/cancel, per-chat cap, scheduler install/uninstall
+- `test_offset_persistence.py` — 15 tests: Telegram update_id round-trip, corrupt JSON handling, atomic write, `DebouncedOffsetWriter` interval/max-pending semantics, explicit flush
+- `test_sdnotify.py` — 7 tests: NOTIFY_SOCKET handling (absent/empty/filesystem/abstract-namespace), send error swallowing, UTF-8 encoding
 
 ## Development
 

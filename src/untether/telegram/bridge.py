@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
-from typing import Literal, cast
+from typing import TYPE_CHECKING, Literal, cast
 
 from ..context import RunContext
 from ..logging import get_logger
@@ -21,6 +21,9 @@ from ..transport_runtime import TransportRuntime
 from .client import BotClient
 from .render import MAX_BODY_CHARS, prepare_telegram, prepare_telegram_multi
 from .types import TelegramCallbackQuery, TelegramIncomingMessage
+
+if TYPE_CHECKING:
+    from ..triggers.manager import TriggerManager
 
 logger = get_logger(__name__)
 
@@ -131,8 +134,17 @@ def _is_cancelled_label(label: str) -> bool:
     return stripped.lower() == "cancelled"
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(slots=True)
 class TelegramBridgeConfig:
+    """Runtime Telegram-bridge configuration.
+
+    Unfrozen as of rc4 (#286) so that hot-reload can update voice, files,
+    chat_ids, allowed_user_ids, and timing settings without a restart.
+    Fields that remain architectural (``bot``, ``runtime``, ``chat_id``,
+    ``session_mode``, ``topics``, ``exec_cfg``) keep their initial values.
+    Use :meth:`update_from` to apply reloaded transport settings.
+    """
+
     bot: BotClient
     runtime: TransportRuntime
     chat_id: int
@@ -153,6 +165,30 @@ class TelegramBridgeConfig:
     chat_ids: tuple[int, ...] | None = None
     topics: TelegramTopicsSettings = field(default_factory=TelegramTopicsSettings)
     trigger_config: dict | None = None
+    # rc4 (#269/#285): trigger_manager is assigned after construction once the
+    # trigger settings have been parsed; commands read it via CommandContext.
+    trigger_manager: TriggerManager | None = None
+
+    def update_from(self, settings: TelegramTransportSettings) -> None:
+        """Apply a reloaded Transport settings object to this config.
+
+        Only fields that are safe to hot-reload are updated. Architectural
+        fields (``bot``, ``runtime``, ``chat_id``, ``session_mode``,
+        ``topics``, ``exec_cfg``) stay at their initial values. ``topics``
+        specifically cannot change at runtime because it affects state
+        store initialisation.
+        """
+        self.show_resume_line = bool(settings.show_resume_line)
+        self.voice_transcription = bool(settings.voice_transcription)
+        self.voice_max_bytes = int(settings.voice_max_bytes)
+        self.voice_transcription_model = settings.voice_transcription_model
+        self.voice_transcription_base_url = settings.voice_transcription_base_url
+        self.voice_transcription_api_key = settings.voice_transcription_api_key
+        self.voice_show_transcription = bool(settings.voice_show_transcription)
+        self.forward_coalesce_s = float(settings.forward_coalesce_s)
+        self.media_group_debounce_s = float(settings.media_group_debounce_s)
+        self.allowed_user_ids = tuple(settings.allowed_user_ids)
+        self.files = settings.files
 
 
 class TelegramTransport:

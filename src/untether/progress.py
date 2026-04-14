@@ -43,7 +43,13 @@ class ProgressTracker:
             case StartedEvent(resume=resume, meta=meta):
                 self.resume = resume
                 if meta:
-                    self.meta = meta
+                    # Merge rather than replace so that dispatcher-seeded
+                    # keys (e.g. "trigger" from RunContext, #271) survive
+                    # the engine's own StartedEvent.meta.
+                    if self.meta is None:
+                        self.meta = dict(meta)
+                    else:
+                        self.meta = {**self.meta, **meta}
                 return True
             case ActionEvent(action=action, phase=phase, ok=ok):
                 if action.kind == "turn":
