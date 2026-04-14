@@ -23,16 +23,21 @@ All integration test tiers are fully automated by Claude Code using Telegram MCP
 
 ### Test chats
 
-Tests are sent to 6 dedicated `ut-dev-hf:` engine chats via `@untether_dev_bot`:
+Tests are sent to 6 dedicated engine chats via `@untether_dev_bot` (bot ID `8678330610`).
+For DM-only tests (commands, `/at`, `/cancel`), use the Nathan DM chat ID `8678330610`.
 
-| Chat | Chat ID |
-|------|---------|
-| `ut-dev-hf: claude` | 5171122044 |
-| `ut-dev-hf: codex` | 5116709786 |
-| `ut-dev-hf: opencode` | 5020138767 |
-| `ut-dev-hf: pi` | 5276373372 |
-| `ut-dev-hf: gemini` | 5152406011 |
-| `ut-dev-hf: amp` | 5064468679 |
+| Chat | Chat ID | Bot API chat_id |
+|------|---------|-----------------|
+| Claude Code | `5284581592` | `-5284581592` |
+| Codex CLI | `4929463515` | `-4929463515` |
+| OpenCode | `5200822877` | `-5200822877` |
+| Pi | `5156256333` | `-5156256333` |
+| Gemini CLI | `5207762142` | `-5207762142` |
+| AMP CLI | `5230875989` | `-5230875989` |
+
+> **Note:** The Telegram MCP (Telethon) accepts both positive and negative chat IDs.
+> If a positive ID fails with `GEN-ERR-582` (PeerUser lookup), use the negative Bot API form.
+> A local fix in `resolve_entity()` auto-retries with the negative form (applied 2026-04-14).
 
 ### Workflow
 
