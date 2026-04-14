@@ -23,8 +23,10 @@ EXPECTED_VERSION=""
 CHECKS_PASSED=0
 CHECKS_FAILED=0
 
-pass() { echo "OK: $1"; ((CHECKS_PASSED++)); }
-fail() { echo "FAIL: $1"; ((CHECKS_FAILED++)); }
+# Use explicit assignment (not `((var++))`) — post-increment returns the
+# old value, which is 0 on first call and trips `set -e`.
+pass() { echo "OK: $1"; CHECKS_PASSED=$((CHECKS_PASSED + 1)); }
+fail() { echo "FAIL: $1"; CHECKS_FAILED=$((CHECKS_FAILED + 1)); }
 
 # Parse arguments
 while [[ $# -gt 0 ]]; do
@@ -73,7 +75,9 @@ if [[ -n "$EXPECTED_VERSION" ]]; then
 fi
 
 # 4. Recent errors (last 60 seconds)
-ERROR_COUNT=$(journalctl --user -u "$SERVICE" -S "-60s" --no-pager -p err 2>/dev/null | grep -c . || true)
+# `grep -v '^-- '` drops journalctl meta lines like "-- No entries --";
+# `|| true` keeps the pipeline's exit 1 (no matches) from tripping set -e.
+ERROR_COUNT=$(journalctl --user -u "$SERVICE" -S "-60s" --no-pager -p err 2>/dev/null | grep -vc '^-- ' || true)
 if [[ "$ERROR_COUNT" -eq 0 ]]; then
     pass "no ERROR-level log entries in last 60s"
 else
