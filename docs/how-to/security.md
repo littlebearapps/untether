@@ -19,7 +19,7 @@ By default, anyone who can message your bot can start agent runs. To restrict ac
     allowed_user_ids = [12345, 67890]
     ```
 
-When this list is non-empty, only the listed user IDs can interact with the bot. Messages from everyone else are silently ignored.
+When this list is non-empty, only the listed user IDs can interact with the bot. Messages from everyone else are silently ignored. In group chats, `allowed_user_ids` also governs button press validation — unauthorised users cannot tap Approve/Deny buttons on another user's tool requests. See [Group chat](group-chat.md#button-press-validation) for details.
 
 To find your Telegram user ID:
 
@@ -49,6 +49,9 @@ If you store your config in a non-standard location, set the `UNTETHER_CONFIG_PA
 ```bash
 export UNTETHER_CONFIG_PATH=/path/to/untether.toml
 ```
+
+!!! tip "Automatic log redaction"
+    Untether automatically redacts bot tokens, OpenAI API keys (`sk-...`), and GitHub tokens (`ghp_`, `ghs_`, `github_pat_`) from all structured log output. Even if a token appears in engine output or error messages, it is replaced with `[REDACTED]` before being written to logs.
 
 ## File transfer deny globs
 
@@ -132,7 +135,7 @@ Trigger features that make outbound HTTP requests (webhook forwarding, cron data
 
 DNS resolution is checked after hostname lookup to prevent DNS rebinding attacks (hostname resolves to a private IP).
 
-If you need triggers to reach local services, you can configure an allowlist (see the [triggers reference](../reference/triggers/triggers.md)).
+If you need triggers to reach local services, route traffic through a reverse proxy on a non-private address. The SSRF allowlist is available as a code-level parameter in `triggers/ssrf.py` but is not currently exposed as a TOML setting.
 
 ## Untrusted payload marking
 

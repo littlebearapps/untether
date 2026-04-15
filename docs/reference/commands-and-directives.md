@@ -49,7 +49,7 @@ This line is parsed from replies and takes precedence over new directives. For b
 | `/usage` | Show Claude Code subscription usage (5h window, weekly, per-model). Claude Code only. Requires Claude Code OAuth credentials (see [troubleshooting](../how-to/troubleshooting.md#claude-code-credentials)). |
 | `/export` | Export last session transcript as Markdown or JSON. |
 | `/browse` | Browse project files with inline keyboard navigation. |
-| `/ping` | Health check — replies with uptime. |
+| `/ping` | Health check — replies with uptime since last (re)start. Shows trigger summary if triggers target the current chat. |
 | `/restart` | Gracefully drain active runs and restart Untether. |
 | `/verbose` | Toggle verbose progress mode (on/off/clear). Shows tool details in progress messages. |
 | `/config` | Interactive settings menu — plan mode, ask mode, verbose, engine, model, reasoning, trigger toggles with inline buttons. |

@@ -55,6 +55,8 @@ Flags:
 * `--stream-json` — JSONL output
 * `--stream-json-input` — optional; enables stdin streaming (preliminary support, configurable)
 
+Prompts starting with `-` are space-prefixed via `sanitize_prompt()` (base runner method) to prevent the CLI from interpreting the prompt as a flag.
+
 For resumed sessions:
 
 ```text

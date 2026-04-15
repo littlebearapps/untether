@@ -101,6 +101,10 @@ If OpenCode emits a JSONL event type that Untether doesn't recognise (e.g. a `qu
 
 If you see this warning, check for an Untether update that adds support for the new event type. OpenCode's `run` command auto-denies questions via permission rules, so this should be rare — it most likely indicates an OpenCode protocol change.
 
+## Engine output line cap
+
+Individual engine stdout lines are capped at 10 MB. If an engine emits a single JSONL line exceeding this limit (e.g. a very large base64 image in a tool result), the line is truncated and a warning is logged. This prevents unbounded memory growth from malformed engine output.
+
 ## Stall warnings
 
 **Symptoms:** Telegram shows "⏳ No progress for X min — session may be stuck" or "⏳ MCP tool running: server-name (X min)".
