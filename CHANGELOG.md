@@ -1,10 +1,11 @@
 # changelog
 
-## v0.35.1 (2026-04-14)
+## v0.35.1 (2026-04-15)
 
 ### fixes
 
 - diff preview approval gate no longer blocks edits after a plan is approved — the `_discuss_approved` flag now short-circuits diff preview as well as `ExitPlanMode`, so once the user approves a plan outline the next `Edit`/`Write` runs without a second approval prompt [#283](https://github.com/littlebearapps/untether/issues/283)
+- `scripts/healthcheck.sh` exits prematurely under `set -e` — `pass()`/`fail()` used `((var++))` which returns the pre-increment value, tripping `set -e` on the first call so only the first check ever ran and the script always exited 1. Also, the error-log count piped journalctl through `grep -c .`, which counted `-- No entries --` meta lines as matches, producing false-positive log-error counts on clean systems. Now uses explicit `var=$((var+1))` assignment and filters meta lines with `grep -vc '^-- '` [#302](https://github.com/littlebearapps/untether/issues/302)
 
 - fix multipart webhooks returning HTTP 500 — `_process_webhook` pre-read the request body for size/auth/rate-limit checks, leaving the stream empty when `_parse_multipart` called `request.multipart()`. Now the multipart reader is constructed from the cached raw body, so multipart uploads work end-to-end; also short-circuits the post-parse raw-body write so the MIME envelope isn't duplicated at `file_path` alongside the extracted file at `file_destination` [#280](https://github.com/littlebearapps/untether/issues/280)
 - fix webhook rate limiter never returning 429 — `_process_webhook` awaited the downstream dispatch (Telegram outbox send, `http_forward` network call, etc.) before returning 202, which capped request throughput at the dispatch rate (~1/sec for private Telegram chats) and meant the `TokenBucketLimiter` never saw a real burst. Dispatch is now fire-and-forget with exception logging, so the rate limiter drains the bucket correctly and a burst of 80 requests against `rate_limit = 60` now yields 60 × 202 + 20 × 429 [#281](https://github.com/littlebearapps/untether/issues/281)
@@ -86,6 +87,21 @@
   - `Type=notify` systemd integration via stdlib `sd_notify` (`socket.AF_UNIX`, no dependency) — `READY=1` is sent after the first `getUpdates` succeeds, `STOPPING=1` at the start of drain
   - `RestartSec=2` in `contrib/untether.service` (was `10`) — faster restart after drain completes
   - `contrib/untether.service` also adds `NotifyAccess=main`; existing installs must copy the unit file and `systemctl --user daemon-reload`
+
+### docs
+
+- add update and uninstall guides + README transparency section [#305](https://github.com/littlebearapps/untether/issues/305)
+  - new `docs/how-to/update.md` and `docs/how-to/uninstall.md` covering pipx, pip, and source installs, plus config/data/systemd cleanup
+  - README: "What Untether accesses" section (network, filesystem, process, credentials), update/uninstall one-liners in Quick Start, and cross-links throughout install/how-to pages
+- comprehensive v0.35.1 documentation audit — 8 gap fills across 121 files [#306](https://github.com/littlebearapps/untether/issues/306)
+  - `group-chat.md`: document callback sender validation in groups (#192)
+  - `security.md`: cross-reference button validation, fix misleading SSRF allowlist claim, add bot token auto-redaction tip (#190)
+  - `plan-mode.md`: document auto-approval after plan approval (#283)
+  - `interactive-approval.md`: admonition linking to plan bypass behaviour
+  - `commands-and-directives.md`: `/ping` description now mentions uptime reset and trigger summary (#234)
+  - `runners/amp/runner.md`: add `sanitize_prompt()` note matching Pi/Gemini runners (#194)
+  - `troubleshooting.md`: document 10 MB engine output line cap (#191)
+  - `glossary.md`: add delayed run, webhook action, and hot-reload entries
 
 ## v0.35.0 (2026-03-31)
 
