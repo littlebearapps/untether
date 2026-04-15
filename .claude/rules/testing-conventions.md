@@ -87,35 +87,12 @@ Watch for phantom responses (substantive output from empty input), session cross
 
 ### Additional MCP tools
 
-- `send_voice` — OGG/Opus voice files for T1 (voice message test)
-- `send_file` — file upload/media group tests (T2, T5)
-- Bash tool — `kill -TERM` for B4 (SIGTERM), `journalctl` for B5 (log inspection)
+- `send_voice` — OGG/Opus voice files for voice message tests
+- `send_file` — file upload/media group tests
+- Bash tool — `kill -TERM` for SIGTERM tests, `journalctl` for log inspection
 
 All integration test tiers are fully automatable by Claude Code.
 
 ## Key test files
 
-| File | Covers |
-|------|--------|
-| `test_claude_control.py` | Control channel, session registries, auto-approve, cooldown |
-| `test_callback_dispatch.py` | Callback parsing, dispatch, early answering |
-| `test_exec_bridge.py` | Ephemeral cleanup, approval notifications |
-| `test_ask_user_question.py` | AskUserQuestion handling, question extraction, answer routing |
-| `test_diff_preview.py` | Edit/Write/Bash diff preview formatting and truncation |
-| `test_cost_tracker.py` | Per-run/daily cost tracking, budget alerts, daily reset |
-| `test_export_command.py` | Session export (markdown/JSON), event recording, trimming |
-| `test_browse_command.py` | File browser, path registry, inline keyboards, project root |
-| `test_codex_runner.py` | Codex event translation, session locking |
-| `test_opencode_runner.py` | OpenCode event translation |
-| `test_pi_runner.py` | Pi event translation, session ID promotion |
-| `test_settings.py` | Config validation, engine config parsing |
-| `test_build_args.py` | CLI argument construction for all 6 engines |
-| `test_loop_coverage.py` | Update loop edge cases, message routing, shutdown |
-| `test_exec_runner.py` | Event tracking, ring buffer, PID in StartedEvent meta |
-| `test_runner_utils.py` | Error formatting, drain_stderr, stderr sanitisation |
-| `test_trigger_server.py` | Webhook HTTP server, multipart, rate limit burst, fire-and-forget dispatch |
-| `test_trigger_actions.py` | file_write (multipart short-circuit), http_forward (SSRF), notify_only |
-| `test_trigger_cron.py` | Cron expression matching, timezone conversion, step validation |
-| `test_trigger_settings.py` | CronConfig/WebhookConfig/TriggersSettings validation, timezone |
-| `test_trigger_ssrf.py` | SSRF blocking (IPv4/IPv6, DNS rebinding, allowlist) |
-| `test_trigger_fetch.py` | Cron data-fetch (HTTP, file read, parse modes, failure) |
+The full coverage matrix lives in [`docs/reference/integration-testing.md`](../../docs/reference/integration-testing.md) (per-tier playbook) and the README `## Tests` section in [`CLAUDE.md`](../../CLAUDE.md) (per-file coverage list, kept in sync with the test suite). When adding a new test file, update that list — not this rule.
