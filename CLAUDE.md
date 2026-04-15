@@ -264,24 +264,30 @@ See `.claude/rules/dev-workflow.md` for full rules.
 
 Multi-layer protection prevents accidental merges to master and PyPI publishes. Claude Code cannot circumvent these protections.
 
-**GitHub server-side (unbyppassable):**
+**GitHub server-side (unbypassable):**
 - **Branch ruleset** "Protect master — no direct push" — all changes to master require a PR, no admin bypass
-- **`pypi` environment** — required reviewer (Nathan), admin bypass OFF; PyPI publish pauses until Nathan approves in GitHub Actions UI
-- **`testpypi` environment** — no reviewer required (staging deploys automatically)
-- **CODEOWNERS** — `* @littlebearapps/core`
+- **CODEOWNERS** — `* @littlebearapps/core` ensures Nathan reviews every PR to master
 
 **Local hooks (defense-in-depth):**
-- `release-guard.sh` — blocks `git push` to master/main, `git tag v*`, `gh release create`, `gh pr merge`; feature and dev branch pushes allowed
+- `release-guard.sh` — blocks `git push` to master/main, `git tag v*`, `gh release create`, `gh pr merge` to non-dev; feature and dev branch pushes allowed
 - `release-guard-protect.sh` — blocks Edit/Write to guard scripts and `.claude/hooks.json`
 - `release-guard-mcp.sh` — blocks GitHub MCP `merge_pull_request` and writes to master/main; feature and dev branches allowed
+
+All three guard scripts use the current Claude Code PreToolUse output schema (`hookSpecificOutput` / `permissionDecision: "deny"`). Earlier versions used the legacy `{"decision":"block"}` shape, which Claude Code silently ignored — that bug is fixed.
 
 **Claude Code MUST:**
 - Push to feature branches: `git push -u origin feature/<name>`
 - Create PRs to dev: `gh pr create --base dev --title "..." --body "..."`
 - Merge PRs to dev (allowed): `gh pr merge <number> --squash` (TestPyPI/staging only)
-- Let Nathan merge PRs to master, create tags, and approve PyPI deploys manually
+- Let Nathan merge PRs to master — that merge is now the **single release gate**
 
 Claude Code MUST NOT merge PRs targeting master — only dev merges are allowed.
+
+**Single-gate release flow:** Once Nathan squash-merges a PR with a stable version (e.g. `0.35.2`, no `rc`/`a`/`b`/`dev` suffix) to master:
+1. `auto-tag-on-master.yml` detects the version bump and pushes `v0.35.2`
+2. `release.yml` fires on the tag, runs full CI (validate version, pytest, build, twine check), publishes to PyPI via OIDC trusted publishing, and creates the GitHub Release with wheel + sdist
+
+No further manual approval is needed. The PR merge IS the release approval. Pre-release versions (e.g. `0.35.2rc1`) are skipped by `auto-tag-on-master.yml` so staging-PR merges don't accidentally publish.
 
 **Self-guarding:** the hook scripts, `.claude/hooks.json`, and GitHub rulesets cannot be modified by Claude Code. Only Nathan can change these by editing files manually outside Claude Code.
 
@@ -316,6 +322,7 @@ GitHub Actions CI runs on push to master/dev and on PRs:
 | lockfile | `uv lock --check` ensures lockfile is in sync |
 | install-test | Clean wheel install + smoke-test imports (catches undeclared deps) |
 | testpypi-publish | Publishes to TestPyPI on dev push (OIDC, `skip-existing: true`) |
+| auto-tag-on-master | On master push: detects stable version bump in `pyproject.toml`, creates and pushes `vX.Y.Z` tag (skips pre-releases) |
 | release-validation | PR-only: validates changelog format, issue links, date when version changes |
 | pip-audit | Dependency vulnerability scanning (PyPA advisory DB) |
 | bandit | Python SAST (security static analysis) |
@@ -327,7 +334,7 @@ All third-party actions are pinned to commit SHAs (supply chain protection). Top
 
 Dependabot auto-merge (`dependabot-auto-merge.yml`) auto-squash-merges dependency updates after CI passes. GitHub Actions deps (CI-only, never shipped) are auto-merged for all version bumps including major. Python deps (shipped in wheel) are auto-merged for patch/minor only; major bumps get flagged for manual review.
 
-Release pipeline (`release.yml`) uses PyPI trusted publishing with OIDC. The `pypi` GitHub Environment requires Nathan's approval (admin bypass OFF) before publishing. The `testpypi` environment deploys automatically (no reviewer). `scripts/validate_release.py` enforces changelog/version consistency. `CODEOWNERS` (`* @littlebearapps/core`) requires team review on all PRs.
+Release pipeline (`release.yml`) uses PyPI trusted publishing with OIDC. The `pypi` GitHub Environment publishes automatically once `auto-tag-on-master.yml` creates a `vX.Y.Z` tag — the PR review on master IS the release approval, so no second reviewer prompt is needed. (Earlier versions had a manual `pypi` environment reviewer gate; that gate was removed in favour of the single-gate flow described under "Release guard".) The `testpypi` environment deploys automatically on dev push. `scripts/validate_release.py` enforces changelog/version consistency. `CODEOWNERS` (`* @littlebearapps/core`) requires team review on all PRs.
 
 ## Issue tracking & releases
 

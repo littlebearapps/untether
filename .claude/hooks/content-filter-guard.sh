@@ -24,34 +24,31 @@ FILE_PATH=$(echo "$INPUT" | jq -r '.tool_input.file_path // empty' 2>/dev/null)
 # Extract just the filename for matching
 FILENAME=$(basename "$FILE_PATH")
 
+# Helper: emit current Claude Code PreToolUse deny shape (2026+).
+# Legacy {"decision":"block",...} is silently ignored by Claude Code, so we
+# use the hookSpecificOutput / permissionDecision schema. See:
+# https://code.claude.com/docs/en/hooks
+deny() {
+  jq -n --arg r "$1" '{
+    hookSpecificOutput: {
+      hookEventName: "PreToolUse",
+      permissionDecision: "deny",
+      permissionDecisionReason: $r
+    }
+  }'
+  exit 0
+}
+
 # HIGH-risk files: BLOCK the write
 case "$FILENAME" in
   CODE_OF_CONDUCT.md|CODE_OF_CONDUCT.MD)
-    cat << 'EOF'
-{
-  "decision": "block",
-  "reason": "CODE_OF_CONDUCT.md is HIGH risk for content filter errors (HTTP 400). Fetch from the canonical URL instead:\n\ncurl -sL \"https://www.contributor-covenant.org/version/3/0/code_of_conduct/code_of_conduct.md\" -o CODE_OF_CONDUCT.md\n\nThen use Edit to replace [INSERT CONTACT METHOD] with the project's contact details."
-}
-EOF
-    exit 1
+    deny "CODE_OF_CONDUCT.md is HIGH risk for content filter errors (HTTP 400). Fetch from the canonical URL instead:\n\ncurl -sL \"https://www.contributor-covenant.org/version/3/0/code_of_conduct/code_of_conduct.md\" -o CODE_OF_CONDUCT.md\n\nThen use Edit to replace [INSERT CONTACT METHOD] with the project's contact details."
     ;;
   LICENSE|LICENSE.md|LICENSE.txt|LICENCE|LICENCE.md|LICENCE.txt)
-    cat << 'EOF'
-{
-  "decision": "block",
-  "reason": "LICENSE is HIGH risk for content filter errors (HTTP 400). Fetch from SPDX instead:\n\ncurl -sL \"https://raw.githubusercontent.com/spdx/license-list-data/main/text/MIT.txt\" -o LICENSE\n\nReplace MIT with the appropriate SPDX identifier. Then use Edit to fill in [year] and [fullname]."
-}
-EOF
-    exit 1
+    deny "LICENSE is HIGH risk for content filter errors (HTTP 400). Fetch from SPDX instead:\n\ncurl -sL \"https://raw.githubusercontent.com/spdx/license-list-data/main/text/MIT.txt\" -o LICENSE\n\nReplace MIT with the appropriate SPDX identifier. Then use Edit to fill in [year] and [fullname]."
     ;;
   SECURITY.md|SECURITY.MD)
-    cat << 'EOF'
-{
-  "decision": "block",
-  "reason": "SECURITY.md is MEDIUM-HIGH risk for content filter errors (HTTP 400). Fetch a template first:\n\ncurl -sL \"https://raw.githubusercontent.com/github/.github/main/SECURITY.md\" -o SECURITY.md\n\nNote: This fetches GitHub's own security policy. Use Edit to replace all GitHub-specific references with the project's details, including reporting method, response timeline, and supported versions."
-}
-EOF
-    exit 1
+    deny "SECURITY.md is MEDIUM-HIGH risk for content filter errors (HTTP 400). Fetch a template first:\n\ncurl -sL \"https://raw.githubusercontent.com/github/.github/main/SECURITY.md\" -o SECURITY.md\n\nNote: This fetches GitHub's own security policy. Use Edit to replace all GitHub-specific references with the project's details, including reporting method, response timeline, and supported versions."
     ;;
 esac
 

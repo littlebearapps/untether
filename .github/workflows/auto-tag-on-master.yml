@@ -1,0 +1,95 @@
+name: Auto-tag on master
+
+# When a push lands on master that bumps the version in pyproject.toml,
+# automatically create and push the matching `vX.Y.Z` tag. The tag push
+# triggers `release.yml`, which builds, validates, and publishes to PyPI.
+#
+# This collapses the previous two-gate release flow (PR merge + manual tag
+# creation + PyPI environment approval) into a single gate: the master PR
+# review. See docs/reference/release-process.md for the full rationale.
+#
+# Only fires when:
+#   1. The push is to master
+#   2. pyproject.toml's version is NOT a pre-release (no rc/a/b/dev suffix)
+#   3. A `vX.Y.Z` tag for that version doesn't already exist
+#
+# Security note: this workflow only consumes its own step outputs and the
+# repo's pyproject.toml — it never interpolates untrusted user input
+# (commit messages, PR titles, issue bodies). All shell variables are
+# passed via `env:` and quoted properly.
+
+on:
+  push:
+    branches:
+      - master
+
+permissions: {}
+
+jobs:
+  auto-tag:
+    name: Detect version bump and tag
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write  # create + push tags
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          fetch-depth: 0  # need full history to check existing tags
+
+      - name: Read pyproject.toml version
+        id: version
+        run: |
+          python3 - <<'PY' >> "$GITHUB_OUTPUT"
+          import re
+          import tomllib
+          from pathlib import Path
+
+          data = tomllib.loads(Path("pyproject.toml").read_text(encoding="utf-8"))
+          version = data["project"]["version"]
+
+          # PEP 440 pre-release detection: rc, a, b, dev, post (any suffix
+          # after the X.Y.Z core). A "stable" version is exactly N.N.N.
+          stable = bool(re.fullmatch(r"\d+\.\d+\.\d+", version))
+
+          print(f"version={version}")
+          print(f"tag=v{version}")
+          print(f"stable={'true' if stable else 'false'}")
+          PY
+
+      - name: Skip pre-release versions
+        if: steps.version.outputs.stable != 'true'
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          echo "::notice::Version $VERSION is a pre-release (rc/a/b/dev/post). No tag will be created."
+          exit 0
+
+      - name: Check whether tag already exists
+        if: steps.version.outputs.stable == 'true'
+        id: existing
+        env:
+          TAG: ${{ steps.version.outputs.tag }}
+        run: |
+          if git rev-parse -q --verify "refs/tags/$TAG" >/dev/null; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+            echo "::notice::Tag $TAG already exists locally. No action."
+          elif git ls-remote --tags origin "$TAG" | grep -q "$TAG"; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+            echo "::notice::Tag $TAG already exists on origin. No action."
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Create and push tag
+        if: steps.version.outputs.stable == 'true' && steps.existing.outputs.exists == 'false'
+        env:
+          TAG: ${{ steps.version.outputs.tag }}
+        run: |
+          # Tag the merge commit (HEAD on master). Annotated tag so it
+          # carries the release version for audit purposes.
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag -a "$TAG" -m "Release $TAG"
+          git push origin "$TAG"
+          echo "::notice::Created and pushed $TAG. release.yml will fire next."

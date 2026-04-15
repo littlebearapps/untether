@@ -9,6 +9,22 @@ set -euo pipefail
 
 INPUT=$(cat)
 
+# Helper: emit the current Claude Code PreToolUse deny shape (2026+).
+# Legacy {"decision":"block",...} is silently ignored, so we use the
+# hookSpecificOutput / permissionDecision schema. See:
+# https://code.claude.com/docs/en/hooks
+deny() {
+  local reason="$1"
+  jq -n --arg r "$reason" '{
+    hookSpecificOutput: {
+      hookEventName: "PreToolUse",
+      permissionDecision: "deny",
+      permissionDecisionReason: $r
+    }
+  }'
+  exit 0
+}
+
 # ── merge_pull_request — allow dev, block master/main ────────────
 
 TOOL_NAME=$(echo "$INPUT" | jq -r '.tool_name // ""' 2>/dev/null)
@@ -21,14 +37,12 @@ if [ "$TOOL_NAME" = "mcp__github__merge_pull_request" ]; then
       exit 0
     fi
   fi
-  echo '{"decision":"block","reason":"🛑 RELEASE GUARD: PR merging to master/main via GitHub MCP is blocked.\n\nOnly merges to dev are allowed via Claude Code. Master merges must be done manually by Nathan."}'
-  exit 0
+  deny "🛑 RELEASE GUARD: PR merging to master/main via GitHub MCP is blocked.\n\nOnly merges to dev are allowed via Claude Code. Master merges must be done manually by Nathan."
 fi
 
 # Fallback: detect merge by input fields (block if not already handled above)
 if echo "$INPUT" | jq -e '.tool_input.pull_number // .tool_input.merge_method' > /dev/null 2>&1; then
-  echo '{"decision":"block","reason":"🛑 RELEASE GUARD: PR merging via GitHub MCP is blocked.\n\nUse gh pr merge <number> for dev-targeting PRs, or merge manually in GitHub UI."}'
-  exit 0
+  deny "🛑 RELEASE GUARD: PR merging via GitHub MCP is blocked.\n\nUse gh pr merge <number> for dev-targeting PRs, or merge manually in GitHub UI."
 fi
 
 # ── push_files / create_or_update_file / delete_file — check branch ──
@@ -37,9 +51,7 @@ BRANCH=$(echo "$INPUT" | jq -r '.tool_input.branch // ""' 2>/dev/null)
 
 if [ "$BRANCH" = "master" ] || [ "$BRANCH" = "main" ] || [ -z "$BRANCH" ]; then
   DISPLAY="${BRANCH:-default}"
-  jq -n --arg reason "🛑 RELEASE GUARD: GitHub MCP write to '${DISPLAY}' branch is blocked.\n\nSpecify a feature branch or 'dev' branch instead of master/main." \
-    '{"decision": "block", "reason": $reason}'
-  exit 0
+  deny "🛑 RELEASE GUARD: GitHub MCP write to '${DISPLAY}' branch is blocked.\n\nSpecify a feature branch or 'dev' branch instead of master/main."
 fi
 
 # Feature branch — allow
