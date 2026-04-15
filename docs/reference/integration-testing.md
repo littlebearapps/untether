@@ -24,7 +24,7 @@ All integration test tiers are fully automated by Claude Code using Telegram MCP
 ### Test chats
 
 Tests are sent to 6 dedicated engine chats via `@untether_dev_bot` (bot ID `8678330610`).
-For DM-only tests (commands, `/at`, `/cancel`), use the Nathan DM chat ID `8678330610`.
+For DM-only tests (commands, `/at`, `/cancel`), use Nathan's personal DM chat ID with the bot — **not** the bot ID itself. The bot ID identifies the bot account; private chats are addressed by the user's chat ID. Resolve via the Telegram MCP `resolve_username` or by inspecting incoming `update.message.from.id` in the dev logs.
 
 | Chat | Chat ID | Bot API chat_id |
 |------|---------|-----------------|

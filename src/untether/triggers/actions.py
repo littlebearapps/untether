@@ -135,10 +135,18 @@ async def execute_file_write(
             logger.warning("triggers.action.file_write.exists", path=str(target))
             return False, msg
         if webhook.on_conflict == "append_timestamp":
+            # Nanosecond resolution + collision probe so two requests in the
+            # same second/millisecond don't clobber each other (the entire
+            # point of append_timestamp). #309 CodeRabbit feedback.
             stem = target.stem
             suffix = target.suffix
-            ts = str(int(time.time()))
-            target = target.parent / f"{stem}_{ts}{suffix}"
+            ts_ns = time.time_ns()
+            candidate = target.parent / f"{stem}_{ts_ns}{suffix}"
+            probe = 0
+            while candidate.exists():
+                probe += 1
+                candidate = target.parent / f"{stem}_{ts_ns}_{probe}{suffix}"
+            target = candidate
 
     # Atomic write.
     try:

@@ -247,8 +247,12 @@ async def poll_incoming(
             allowed = {chat_id}
         for upd in updates:
             offset = upd.update_id + 1
-            if on_offset_advanced is not None:
-                on_offset_advanced(upd.update_id)
             msg = parse_incoming_update(upd, chat_ids=allowed)
             if msg is not None:
                 yield msg
+            # Record offset *after* the consumer has handled (or skipped)
+            # the update, so a crash between yield and persist replays the
+            # update on next start instead of swallowing it. #309 CodeRabbit
+            # feedback (#287). The debounced writer batches these anyway.
+            if on_offset_advanced is not None:
+                on_offset_advanced(upd.update_id)

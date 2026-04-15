@@ -307,11 +307,16 @@ Untether runs on your machine and bridges your agents to Telegram. Here's exactl
 | **Filesystem** | `~/.untether/untether.toml` | Config file containing bot token — protect with `chmod 600` |
 | **Filesystem** | `~/.untether/*.json` | Chat preferences, session state, usage stats |
 | **Filesystem** | `.untether-outbox/` | Agent-delivered files (optional, per-project) |
-| **Processes** | Agent CLIs (claude, codex, etc.) | Spawned as subprocesses with your user permissions |
+| **Filesystem** | `/file put` upload paths | User-initiated file uploads from Telegram, written to configured destinations (default: project working dir) |
+| **Filesystem** | Webhook `file_write` action | When configured, webhooks can write POST bodies to disk at admin-defined paths (deny-globs apply) |
+| **Network** | Webhook `http_forward` action | When configured, webhooks can forward payloads to admin-defined URLs (SSRF-protected) |
+| **Processes** | Agent CLIs (claude, codex, etc.) | Spawned as subprocesses with your user permissions; agents have full filesystem access in their working directory |
 | **Credentials** | Telegram bot token | Stored in config file (plaintext TOML) |
 | **Credentials** | API keys | Read from environment variables, never stored by Untether |
 
-**What Untether does NOT do:** no telemetry, no analytics, no phone-home, no auto-updates, no root access, no system file modifications outside `~/.untether/`. Sensitive tokens are automatically [redacted from logs](https://github.com/littlebearapps/untether/blob/master/docs/how-to/security.md).
+**What Untether does NOT do:** no telemetry, no analytics, no phone-home, no auto-updates, no root access. Sensitive tokens (bot token, OpenAI keys, GitHub tokens) are automatically [redacted from logs](https://github.com/littlebearapps/untether/blob/master/docs/how-to/security.md).
+
+**What Untether *can* do at your direction:** spawned agents, `/file put`, the outbox, and webhook actions can all touch paths outside `~/.untether/` — that's the whole point. Use [`allowed_user_ids`](https://github.com/littlebearapps/untether/blob/master/docs/how-to/security.md), file deny-globs, and webhook auth to control who can trigger these flows.
 
 ---
 

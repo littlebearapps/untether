@@ -106,3 +106,29 @@ class TestDefaults:
     def test_timezone_none_explicit(self):
         """Explicit None ≡ default."""
         assert describe_cron("0 9 * * *") == describe_cron("0 9 * * *", None)
+
+
+class TestRegression309:
+    """Regression tests for #309 CodeRabbit findings on describe.py."""
+
+    def test_stepped_dom_falls_back_to_raw(self):
+        """`*/2` in day-of-month — must NOT render as 'daily' (#309)."""
+        assert describe_cron("0 9 */2 * *", None) == "0 9 */2 * *"
+
+    def test_stepped_month_falls_back_to_raw(self):
+        """`*/2` in month — must NOT render as 'daily' (#309)."""
+        assert describe_cron("0 9 * */2 *", None) == "0 9 * */2 *"
+
+    def test_dow_out_of_range_falls_back(self):
+        """`8` is invalid for day-of-week — must NOT silently % 7 → 'Mon' (#309)."""
+        assert describe_cron("0 9 * * 8", None) == "0 9 * * 8"
+
+    def test_dow_range_with_invalid_end_falls_back(self):
+        assert describe_cron("0 9 * * 1-9", None) == "0 9 * * 1-9"
+
+    def test_dow_list_with_invalid_value_falls_back(self):
+        assert describe_cron("0 9 * * 1,8", None) == "0 9 * * 1,8"
+
+    def test_dow_seven_normalises_to_sunday(self):
+        """`7` is the canonical-form Sunday in cron; should still render."""
+        assert describe_cron("0 9 * * 7", None) == "9:00 AM Sun"

@@ -1087,6 +1087,20 @@ async def _page_reasoning(ctx: CommandContext, action: str | None = None) -> Non
 
     if action in _RS_ACTIONS:
         level = _RS_ACTIONS[action]
+        # Defensive: only render-time UI exposes engine-allowed levels, but
+        # crafted callback_data could try to persist e.g. `max` on Codex.
+        # Reject anything outside the engine's allow list. #309 CodeRabbit.
+        allowed = allowed_reasoning_levels(current_engine)
+        if level not in allowed:
+            logger.warning(
+                "config.reasoning.unsupported_level",
+                chat_id=chat_id,
+                engine=current_engine,
+                level=level,
+                allowed=sorted(allowed),
+            )
+            await _page_home(ctx)
+            return
         current = await prefs.get_engine_override(chat_id, current_engine)
         updated = EngineOverrides(
             model=current.model if current else None,
@@ -1862,6 +1876,7 @@ class ConfigCommand:
                 "med": "Reasoning: medium",
                 "hi": "Reasoning: high",
                 "xhi": "Reasoning: xhigh",
+                "max": "Reasoning: max",
                 "clr": "Reasoning: cleared",
             },
             "aq": {

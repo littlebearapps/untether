@@ -611,6 +611,13 @@ def translate_claude_event(
                         "control_request.auto_approve_exit_plan_mode",
                         request_id=request_id,
                     )
+                    # #283: also bypass diff_preview gate for subsequent tools
+                    # — same as interactive approval. Without this, users in
+                    # auto permission mode + diff_preview enabled still see
+                    # individual tool gates after plan approval (#309).
+                    auto_session = factory.resume.value if factory.resume else None
+                    if auto_session is not None:
+                        _PLAN_EXIT_APPROVED.add(auto_session)
                     _REQUEST_TO_INPUT[request_id] = getattr(request, "input", {})
                     state.auto_approve_queue.append(request_id)
                     return []
@@ -624,6 +631,9 @@ def translate_claude_event(
                         _DISCUSS_APPROVED.discard(session_id)
                         _OUTLINE_PENDING.discard(session_id)
                         clear_discuss_cooldown(session_id)
+                        # #283: bypass diff_preview gate for subsequent tools
+                        # in this session (#309).
+                        _PLAN_EXIT_APPROVED.add(session_id)
                         logger.info(
                             "control_request.discuss_approved",
                             request_id=request_id,
