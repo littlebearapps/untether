@@ -233,6 +233,79 @@ async def test_run_once_false_keeps_cron_active(monkeypatch):
     assert manager.cron_ids() == ["repeating"]
 
 
+@pytest.mark.anyio
+async def test_daily_cron_fires_on_consecutive_days(monkeypatch):
+    """Regression: #309 — cron last_fired key must include date.
+
+    A bug in v0.35.1rc1-rc6 keyed last_fired by (hour, minute) only, so a daily
+    cron at 09:00 would fire today and then be suppressed forever (tomorrow's
+    09:00 looks identical). Verify the scheduler fires on each calendar day.
+    """
+    settings = parse_trigger_config(
+        {
+            "enabled": True,
+            "crons": [
+                {
+                    "id": "daily",
+                    "schedule": "0 9 * * *",
+                    "prompt": "hi",
+                    "timezone": "UTC",
+                },
+            ],
+        }
+    )
+    manager = TriggerManager(settings)
+    dispatcher = FakeDispatcher()
+
+    # Fake clock — advance one day per scheduler tick.
+    base_utc = datetime.datetime(2026, 4, 15, 9, 0, tzinfo=datetime.UTC)
+    clock = [base_utc, base_utc + datetime.timedelta(days=1)]
+    tick = [0]
+
+    def fake_now(tz: Any = None) -> datetime.datetime:
+        if tick[0] >= len(clock):
+            return clock[-1]
+        return clock[tick[0]]
+
+    monkeypatch.setattr("untether.triggers.cron.datetime.datetime", _NowStub(fake_now))
+
+    _real_sleep = anyio.sleep
+
+    async def fast_sleep(s: float) -> None:
+        tick[0] += 1
+        await _real_sleep(0)
+
+    monkeypatch.setattr("untether.triggers.cron.anyio.sleep", fast_sleep)
+
+    async with anyio.create_task_group() as tg:
+        tg.start_soon(run_cron_scheduler, manager, dispatcher)
+        for _ in range(6):
+            await _real_sleep(0)
+        tg.cancel_scope.cancel()
+
+    # Must have fired on day 1 AND day 2 (both at 09:00).
+    assert dispatcher.fired.count("daily") >= 2, (
+        f"Expected ≥2 fires across 2 days, got {dispatcher.fired}"
+    )
+
+
+class _NowStub:
+    """Minimal datetime replacement that overrides .now() and .UTC."""
+
+    UTC = datetime.UTC
+
+    def __init__(self, now_fn):
+        self._now = now_fn
+
+    def now(self, tz: Any = None) -> datetime.datetime:
+        n = self._now(tz)
+        if tz is not None and n.tzinfo is None:
+            return n.replace(tzinfo=tz)
+        if tz is not None:
+            return n.astimezone(tz)
+        return n
+
+
 def test_run_once_survives_reload_via_config():
     """A reload with the same TOML re-adds a run_once cron that was removed."""
     settings = parse_trigger_config(

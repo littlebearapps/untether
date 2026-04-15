@@ -1414,32 +1414,65 @@ class TestReasoning:
 
     @pytest.mark.anyio
     async def test_reasoning_set_all_levels(self, tmp_path):
-        """All 6 reasoning levels map correctly."""
+        """Reasoning levels persist correctly for each engine. Codex and
+        Claude support different level sets; the validator (#309) rejects
+        cross-engine mismatches like `rs:max` on codex."""
         from untether.telegram.chat_prefs import ChatPrefsStore, resolve_prefs_path
 
-        expected = {
-            "min": "minimal",
-            "low": "low",
-            "med": "medium",
-            "hi": "high",
-            "xhi": "xhigh",
-            "max": "max",
+        per_engine: dict[str, dict[str, str]] = {
+            "codex": {
+                "min": "minimal",
+                "low": "low",
+                "med": "medium",
+                "hi": "high",
+                "xhi": "xhigh",
+            },
+            "claude": {
+                "low": "low",
+                "med": "medium",
+                "hi": "high",
+                "max": "max",
+            },
         }
-        state_path = tmp_path / "prefs.json"
 
-        for action, level in expected.items():
-            cmd = ConfigCommand()
-            ctx = _make_ctx(
-                args_text=f"rs:{action}",
-                text=f"config:rs:{action}",
-                config_path=state_path,
-                default_engine="codex",
-            )
-            await cmd.handle(ctx)
-            prefs = ChatPrefsStore(resolve_prefs_path(state_path))
-            override = await prefs.get_engine_override(123, "codex")
-            assert override is not None
-            assert override.reasoning == level, f"rs:{action} should set {level}"
+        for engine, expected in per_engine.items():
+            state_path = tmp_path / f"prefs-{engine}.json"
+            for action, level in expected.items():
+                cmd = ConfigCommand()
+                ctx = _make_ctx(
+                    args_text=f"rs:{action}",
+                    text=f"config:rs:{action}",
+                    config_path=state_path,
+                    default_engine=engine,
+                )
+                await cmd.handle(ctx)
+                prefs = ChatPrefsStore(resolve_prefs_path(state_path))
+                override = await prefs.get_engine_override(123, engine)
+                assert override is not None, f"{engine}/rs:{action} did not persist"
+                assert override.reasoning == level, (
+                    f"{engine}/rs:{action} should set {level}"
+                )
+
+    @pytest.mark.anyio
+    async def test_reasoning_set_max_rejected_for_codex(self, tmp_path):
+        """#309 regression: codex does not support `max`; manual callback_data
+        attempting `rs:max` against codex must be rejected, not silently
+        persisted."""
+        from untether.telegram.chat_prefs import ChatPrefsStore, resolve_prefs_path
+
+        state_path = tmp_path / "prefs.json"
+        cmd = ConfigCommand()
+        ctx = _make_ctx(
+            args_text="rs:max",
+            text="config:rs:max",
+            config_path=state_path,
+            default_engine="codex",
+        )
+        await cmd.handle(ctx)
+        prefs = ChatPrefsStore(resolve_prefs_path(state_path))
+        override = await prefs.get_engine_override(123, "codex")
+        # Either no override at all, or reasoning is None — but never `max`.
+        assert override is None or override.reasoning != "max"
 
     @pytest.mark.anyio
     async def test_reasoning_clear_returns_home(self, tmp_path):

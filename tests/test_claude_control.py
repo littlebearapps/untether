@@ -78,17 +78,23 @@ def _make_state_with_session(
 
 @pytest.fixture(autouse=True)
 def _clear_registries():
-    yield
-    _ACTIVE_RUNNERS.clear()
-    _SESSION_STDIN.clear()
-    _REQUEST_TO_SESSION.clear()
-    _REQUEST_TO_INPUT.clear()
-    _HANDLED_REQUESTS.clear()
-    _DISCUSS_COOLDOWN.clear()
-    _PLAN_EXIT_APPROVED.clear()
+    # Clear before and after each test — module-level registries can leak
+    # state from a prior module's first test if we only clear post-yield (#309).
     from untether.telegram.commands.claude_control import _DISCUSS_FEEDBACK_REFS
 
-    _DISCUSS_FEEDBACK_REFS.clear()
+    def _wipe() -> None:
+        _ACTIVE_RUNNERS.clear()
+        _SESSION_STDIN.clear()
+        _REQUEST_TO_SESSION.clear()
+        _REQUEST_TO_INPUT.clear()
+        _HANDLED_REQUESTS.clear()
+        _DISCUSS_COOLDOWN.clear()
+        _PLAN_EXIT_APPROVED.clear()
+        _DISCUSS_FEEDBACK_REFS.clear()
+
+    _wipe()
+    yield
+    _wipe()
 
 
 # ===========================================================================

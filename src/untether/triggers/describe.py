@@ -22,34 +22,54 @@ __all__ = ["describe_cron"]
 _DAY_NAMES = ("Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat")
 
 
-def _format_dow(dow: str) -> str:
-    """Turn a day-of-week field into a label like 'Mon-Fri' or 'Sat,Sun'."""
+def _normalise_dow(value: int) -> int | None:
+    """Cron day-of-week 0 and 7 both mean Sunday. Anything else (including
+    out-of-range like 8) is invalid and the caller should fall back to raw."""
+    if value == 7:
+        return 0
+    if 0 <= value <= 6:
+        return value
+    return None
+
+
+def _format_dow(dow: str) -> str | None:
+    """Turn a day-of-week field into a label like 'Mon-Fri' or 'Sat,Sun'.
+
+    Returns ``None`` if the field uses an unsupported pattern or
+    out-of-range day. Caller falls back to the raw schedule string. (#309)
+    """
     if dow == "*":
         return ""
     # Range, e.g. "1-5"
     if "-" in dow and "," not in dow and "/" not in dow:
         try:
             start_s, end_s = dow.split("-", 1)
-            start = int(start_s) % 7
-            end = int(end_s) % 7
-            # Cron day-of-week: 0 or 7 = Sunday. Normalise 7→0.
+            start = _normalise_dow(int(start_s))
+            end = _normalise_dow(int(end_s))
+            if start is None or end is None:
+                return None
             return f"{_DAY_NAMES[start]}\u2013{_DAY_NAMES[end]}"
-        except (ValueError, IndexError):
-            return dow
+        except ValueError:
+            return None
     # Comma list, e.g. "0,6"
     if "," in dow and "-" not in dow and "/" not in dow:
         try:
-            parts = [_DAY_NAMES[int(p) % 7] for p in dow.split(",")]
-            return ",".join(parts)
-        except (ValueError, IndexError):
-            return dow
+            normalised = [_normalise_dow(int(p)) for p in dow.split(",")]
+            if any(n is None for n in normalised):
+                return None
+            return ",".join(_DAY_NAMES[n] for n in normalised)  # type: ignore[index]
+        except ValueError:
+            return None
     # Single day
     if dow.isdigit():
         try:
-            return _DAY_NAMES[int(dow) % 7]
-        except IndexError:
-            return dow
-    return dow
+            n = _normalise_dow(int(dow))
+            if n is None:
+                return None
+            return _DAY_NAMES[n]
+        except ValueError:
+            return None
+    return None
 
 
 def _format_timezone_suffix(timezone: str | None) -> str:
@@ -81,9 +101,11 @@ def describe_cron(schedule: str, timezone: str | None = None) -> str:
     minute, hour, dom, mon, dow = fields
 
     # Bail out on patterns we don't try to translate.
-    if "*" not in mon and mon != "*":
+    # `*` must be exact: `*/2` is a stepped wildcard and should NOT render as
+    # "daily" (#309). Use exact equality, not substring.
+    if mon != "*":
         return schedule
-    if "*" not in dom and dom != "*":
+    if dom != "*":
         return schedule
     if "/" in minute or "," in minute or "-" in minute:
         return schedule
@@ -100,6 +122,9 @@ def describe_cron(schedule: str, timezone: str | None = None) -> str:
 
     time_part = _format_time_12h(h, m)
     dow_part = _format_dow(dow)
+    if dow_part is None:
+        # Unsupported / out-of-range day-of-week — fall back to raw.
+        return schedule
     if dow_part == "":
         # Every day
         suffix_dow = " daily"

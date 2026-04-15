@@ -1,10 +1,10 @@
-# Untether Specification v0.35.1 [2026-04-14]
+# Untether Specification v0.35.1 [2026-04-15]
 
 This document is **normative**. The words **MUST**, **SHOULD**, and **MAY** express requirements.
 
 ## 1. Scope
 
-Untether v0.35.0 specifies:
+Untether v0.35.1 specifies:
 
 - A **Telegram** bot bridge that runs an agent **Runner** and posts:
   - a throttled, edited **progress message**

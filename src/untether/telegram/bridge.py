@@ -139,10 +139,13 @@ class TelegramBridgeConfig:
     """Runtime Telegram-bridge configuration.
 
     Unfrozen as of rc4 (#286) so that hot-reload can update voice, files,
-    chat_ids, allowed_user_ids, and timing settings without a restart.
-    Fields that remain architectural (``bot``, ``runtime``, ``chat_id``,
-    ``session_mode``, ``topics``, ``exec_cfg``) keep their initial values.
-    Use :meth:`update_from` to apply reloaded transport settings.
+    ``allowed_user_ids``, ``show_resume_line``, and timing settings without
+    a restart. Fields that remain architectural (``bot``, ``runtime``,
+    ``chat_id``, ``session_mode``, ``topics``, ``chat_ids``, ``exec_cfg``)
+    keep their initial values; ``chat_ids`` in particular is populated from
+    the projects table at startup and is not exposed via the transport
+    settings hot-reload path. Use :meth:`update_from` to apply reloaded
+    transport settings.
     """
 
     bot: BotClient

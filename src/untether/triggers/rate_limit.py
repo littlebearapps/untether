@@ -30,5 +30,9 @@ class TokenBucketLimiter:
             self._buckets[key] = (tokens - 1.0, now)
             return True
         self._buckets[key] = (tokens, now)
-        logger.warning("rate_limit.denied", key=key, tokens=tokens)
+        # Logged at debug to avoid flooding logs (and feeding the issue
+        # watcher) on persistent burst attempts. Per-request denial visibility
+        # is not actionable; the HTTP 429 response carries the signal that
+        # matters. #309 CodeRabbit feedback.
+        logger.debug("rate_limit.denied", key=key, tokens=tokens)
         return False

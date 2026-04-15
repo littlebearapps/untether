@@ -876,12 +876,26 @@ class ProgressEdits:
                 # (CPU ticks incrementing between diagnostic snapshots).
                 # Extended thinking phases produce no JSONL events but the
                 # process is alive and busy — killing it is a false positive.
+                #
+                # tree_active covers the case where the main process is
+                # sleeping but child processes (subagents, tool subprocesses)
+                # are burning CPU. Without this branch, long subagent runs are
+                # killed after MAX_WARNINGS even though the child tree is
+                # making progress (#309 CodeRabbit feedback).
                 if cpu_active is True:
                     logger.info(
                         "progress_edits.stall_suppressed_by_activity",
                         channel_id=self.channel_id,
                         stall_warn_count=self._stall_warn_count,
                         pid=self.pid,
+                    )
+                elif tree_active is True and self._has_active_children(diag):
+                    logger.info(
+                        "progress_edits.stall_suppressed_by_tree_activity",
+                        channel_id=self.channel_id,
+                        stall_warn_count=self._stall_warn_count,
+                        pid=self.pid,
+                        child_pids=diag.child_pids if diag else [],
                     )
                 else:
                     auto_cancel_reason = "max_warnings"

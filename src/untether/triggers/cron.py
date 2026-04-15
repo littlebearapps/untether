@@ -91,7 +91,10 @@ async def run_cron_scheduler(
     so that config hot-reloads take effect immediately.
     """
     logger.info("triggers.cron.started", crons=len(manager.crons))
-    last_fired: dict[str, tuple[int, int]] = {}  # cron_id -> (hour, minute)
+    # Key the minute fully (year, month, day, hour, minute). A bare (hour, minute)
+    # key would suppress every subsequent day's run because tomorrow's 09:00 looks
+    # identical to today's. See #309 CodeRabbit feedback (Critical).
+    last_fired: dict[str, tuple[int, int, int, int, int]] = {}
 
     while True:
         utc_now = datetime.datetime.now(datetime.UTC)
@@ -107,7 +110,13 @@ async def run_cron_scheduler(
                 logger.exception("triggers.cron.match_failed", cron_id=cron.id)
                 continue
             if matched:
-                key = (local_now.hour, local_now.minute)
+                key = (
+                    local_now.year,
+                    local_now.month,
+                    local_now.day,
+                    local_now.hour,
+                    local_now.minute,
+                )
                 if last_fired.get(cron.id) == key:
                     continue  # already fired this minute
                 last_fired[cron.id] = key
