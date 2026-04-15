@@ -730,6 +730,7 @@ class ProgressEdits:
         self._last_event_at: float = clock()
         self._stall_warned: bool = False
         self._stall_warn_count: int = 0
+        self._total_stall_warn_count: int = 0
         self._last_stall_warn_at: float = 0.0
         self._peak_idle: float = 0.0
         self._prev_diag: Any = None
@@ -763,14 +764,36 @@ class ProgressEdits:
 
     async def _stall_monitor(self) -> None:
         """Periodically check for event stalls, log diagnostics, and notify."""
-        from .utils.proc_diag import collect_proc_diag, is_cpu_active
+        from .utils.proc_diag import (
+            collect_proc_diag,
+            is_cpu_active,
+            is_tree_cpu_active,
+        )
 
         while True:
             await anyio.sleep(self._stall_check_interval)
             elapsed = self.clock() - self._last_event_at
             self._peak_idle = max(self._peak_idle, elapsed)
 
-            # Use longer threshold when waiting for user approval or running a tool
+            # Collect diagnostics on every cycle so we always have a CPU
+            # baseline for the next check (fixes cpu_active=None on first
+            # stall warning) and can use child/TCP info for threshold
+            # selection.
+            diag = collect_proc_diag(self.pid) if self.pid else None
+            cpu_active = (
+                is_cpu_active(self._prev_diag, diag)
+                if self._prev_diag and diag
+                else None
+            )
+            tree_active = (
+                is_tree_cpu_active(self._prev_diag, diag)
+                if self._prev_diag and diag
+                else None
+            )
+            self._prev_diag = diag
+
+            # Use longer threshold when waiting for user approval, running a
+            # tool, or when child processes are active (Agent subagents).
             mcp_server = self._has_running_mcp_tool()
             if self._has_pending_approval():
                 threshold = self._STALL_THRESHOLD_APPROVAL
@@ -778,6 +801,9 @@ class ProgressEdits:
             elif mcp_server is not None:
                 threshold = self._STALL_THRESHOLD_MCP_TOOL
                 threshold_reason = "running_mcp_tool"
+            elif self._has_active_children(diag):
+                threshold = self._STALL_THRESHOLD_SUBAGENT
+                threshold_reason = "active_children"
             elif self._has_running_tool():
                 threshold = self._STALL_THRESHOLD_TOOL
                 threshold_reason = "running_tool"
@@ -802,23 +828,15 @@ class ProgressEdits:
 
             self._stall_warned = True
             self._stall_warn_count += 1
+            self._total_stall_warn_count += 1
             self._last_stall_warn_at = now
 
-            diag = collect_proc_diag(self.pid) if self.pid else None
             last_action = self._last_action_summary()
 
             recent = list(self.stream.recent_events) if self.stream else []
             stderr_hint = (
                 self.stream.stderr_capture[-3:]
                 if self.stream and self.stream.stderr_capture
-                else None
-            )
-
-            # Compute CPU activity before updating _prev_diag (needs both
-            # the previous and current snapshots to compare ticks).
-            cpu_active = (
-                is_cpu_active(self._prev_diag, diag)
-                if self._prev_diag and diag
                 else None
             )
 
@@ -838,10 +856,10 @@ class ProgressEdits:
                 rss_kb=diag.rss_kb if diag else None,
                 fd_count=diag.fd_count if diag else None,
                 cpu_active=cpu_active,
+                tree_active=tree_active,
                 recent_events=[(round(t, 1), lbl) for t, lbl in recent[-5:]],
                 stderr_hint=stderr_hint,
             )
-            self._prev_diag = diag
 
             # Auto-cancel: dead process, no-PID zombie, or absolute cap
             auto_cancel_reason: str | None = None
@@ -858,12 +876,26 @@ class ProgressEdits:
                 # (CPU ticks incrementing between diagnostic snapshots).
                 # Extended thinking phases produce no JSONL events but the
                 # process is alive and busy — killing it is a false positive.
+                #
+                # tree_active covers the case where the main process is
+                # sleeping but child processes (subagents, tool subprocesses)
+                # are burning CPU. Without this branch, long subagent runs are
+                # killed after MAX_WARNINGS even though the child tree is
+                # making progress (#309 CodeRabbit feedback).
                 if cpu_active is True:
                     logger.info(
                         "progress_edits.stall_suppressed_by_activity",
                         channel_id=self.channel_id,
                         stall_warn_count=self._stall_warn_count,
                         pid=self.pid,
+                    )
+                elif tree_active is True and self._has_active_children(diag):
+                    logger.info(
+                        "progress_edits.stall_suppressed_by_tree_activity",
+                        channel_id=self.channel_id,
+                        stall_warn_count=self._stall_warn_count,
+                        pid=self.pid,
+                        child_pids=diag.child_pids if diag else [],
                     )
                 else:
                     auto_cancel_reason = "max_warnings"
@@ -967,6 +999,32 @@ class ProgressEdits:
                     anyio.ClosedResourceError,
                 ):
                     self.signal_send.send_nowait(None)
+            elif (
+                tree_active is True
+                and main_sleeping
+                and self._has_active_children(diag)
+                and self._stall_warn_count > 1
+            ):
+                # Subagent child processes actively working — first warning
+                # already sent, suppress repeats.  Similar to tool-active
+                # suppression but triggered by tree CPU (child processes)
+                # instead of tracked tool state.
+                logger.info(
+                    "progress_edits.stall_children_active_suppressed",
+                    channel_id=self.channel_id,
+                    seconds_since_last_event=round(elapsed, 1),
+                    stall_warn_count=self._stall_warn_count,
+                    pid=self.pid,
+                    child_pids=diag.child_pids if diag else [],
+                    tcp_total=diag.tcp_total if diag else 0,
+                )
+                self.event_seq += 1
+                with contextlib.suppress(
+                    anyio.WouldBlock,
+                    anyio.BrokenResourceError,
+                    anyio.ClosedResourceError,
+                ):
+                    self.signal_send.send_nowait(None)
             else:
                 # Telegram notification (cpu_active=False/None, or frozen
                 # ring buffer escalation despite CPU activity)
@@ -1016,6 +1074,16 @@ class ProgressEdits:
                         ]
                 elif mcp_server is not None:
                     parts = [f"⏳ MCP tool running: {mcp_server} ({mins} min)"]
+                elif threshold_reason == "active_children":
+                    n_children = len(diag.child_pids) if diag else 0
+                    if tree_active is True:
+                        parts = [
+                            f"⏳ Waiting for child processes ({n_children} children, {mins} min)"
+                        ]
+                    else:
+                        parts = [
+                            f"⏳ Child processes idle ({n_children} children, {mins} min)"
+                        ]
                 else:
                     # Extract tool name from last running action for
                     # actionable stall messages ("Bash command still running"
@@ -1050,6 +1118,7 @@ class ProgressEdits:
                     not mcp_hung
                     and not frozen_escalate
                     and mcp_server is None
+                    and threshold_reason != "active_children"
                     and not (_tool_name and main_sleeping)
                     and cpu_active is not True
                 )
@@ -1110,6 +1179,19 @@ class ProgressEdits:
                     return parts[1] if len(parts) >= 2 else name
             break  # only check the most recent
         return None
+
+    def _has_active_children(self, diag: Any) -> bool:
+        """True if the process has active child processes or elevated TCP.
+
+        Detects Agent subagent work that runs in child processes after the
+        tracked action event has completed.  Uses child PIDs and TCP
+        connection count as signals.
+        """
+        if diag is None or not diag.alive:
+            return False
+        if diag.child_pids:
+            return True
+        return diag.tcp_total > self._TCP_ACTIVE_THRESHOLD
 
     def _last_action_summary(self) -> str | None:
         """Return a short description of the most recent action."""
@@ -1337,9 +1419,11 @@ class ProgressEdits:
     _STALL_THRESHOLD_SECONDS: float = 300.0  # 5 minutes
     _STALL_THRESHOLD_TOOL: float = 600.0  # 10 minutes when a tool is actively running
     _STALL_THRESHOLD_MCP_TOOL: float = 900.0  # 15 min for MCP tools (network-bound)
+    _STALL_THRESHOLD_SUBAGENT: float = 900.0  # 15 min for child process / subagent work
     _STALL_THRESHOLD_APPROVAL: float = 1800.0  # 30 minutes when waiting for approval
     _STALL_MAX_WARNINGS: int = 10  # absolute cap
     _STALL_MAX_WARNINGS_NO_PID: int = 3  # aggressive cap when pid=None + no events
+    _TCP_ACTIVE_THRESHOLD: int = 20  # TCP connections above this suggest active work
 
     async def on_event(self, evt: UntetherEvent) -> None:
         if not self.tracker.note_event(evt):
@@ -1357,7 +1441,7 @@ class ProgressEdits:
             )
             self._stall_warned = False
             self._stall_warn_count = 0
-            self._prev_diag = None
+            # Keep _prev_diag so next stall episode has a CPU baseline
             self._frozen_ring_count = 0
             self._prev_recent_events = None
         self._last_event_at = now
@@ -1645,7 +1729,7 @@ async def run_runner_with_cancel(
         engine=runner.engine,
         duration_seconds=round(duration, 1),
         event_count=event_count,
-        stall_warnings=edits._stall_warn_count,
+        stall_warnings=edits._total_stall_warn_count,
         peak_idle_seconds=round(edits._peak_idle, 1),
         last_event_type=edits.stream.last_event_type if edits.stream else None,
         cancelled=outcome.cancelled,
@@ -1740,6 +1824,15 @@ async def handle_message(
     runner_text = _apply_preamble(runner_text)
 
     progress_tracker = ProgressTracker(engine=runner.engine)
+    # rc4 (#271): seed trigger source into meta so the footer renders it.
+    # The engine's own StartedEvent.meta merges onto this via note_event.
+    if context is not None and context.trigger_source:
+        icon = (
+            "\N{ALARM CLOCK}"
+            if context.trigger_source.startswith("cron:")
+            else "\N{HIGH VOLTAGE SIGN}"
+        )
+        progress_tracker.meta = {"trigger": f"{icon} {context.trigger_source}"}
 
     # Resolve effective presenter: check for per-chat verbose override
     effective_presenter = _resolve_presenter(cfg.presenter, incoming.channel_id)
@@ -1782,6 +1875,7 @@ async def handle_message(
         edits._stall_repeat_seconds = watchdog.stall_repeat_seconds
         edits._STALL_THRESHOLD_TOOL = watchdog.tool_timeout
         edits._STALL_THRESHOLD_MCP_TOOL = watchdog.mcp_tool_timeout
+        edits._STALL_THRESHOLD_SUBAGENT = watchdog.subagent_timeout
         if hasattr(runner, "_LIVENESS_TIMEOUT_SECONDS"):
             runner._LIVENESS_TIMEOUT_SECONDS = watchdog.liveness_timeout
         if hasattr(runner, "_stall_auto_kill"):

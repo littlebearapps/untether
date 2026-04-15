@@ -33,7 +33,6 @@ Trigger: all
 [📡 Trigger]       [⚙️ Engine & model]
 [🧠 Reasoning]     [ℹ️ About]
 
-📖 Settings guide · Troubleshooting
 📖 Help guides · 🐛 Report a bug
 ```
 
@@ -54,7 +53,7 @@ Tap any button to open that setting's page. Each sub-page shows:
 
 ## Toggle behaviour
 
-Most settings use a **single toggle button** pattern: `[✓ Feature: on]` paired with `[Clear]`. Tapping the toggle flips it between on and off. Tapping **Clear** removes the per-chat override and falls back to the global setting.
+Most settings use a **two-button selection** pattern: `[On] [Off] [Clear]` with a ✓ on the active option. Tap either button to set the value. Tapping **Clear** removes the per-chat override and falls back to the global setting.
 
 When you tap a setting button:
 
@@ -67,7 +66,8 @@ Some settings have more than two states and use a different layout:
 
 - **Plan mode** — three options (off / on / auto) shown as separate buttons in a 2+1 split: `[Off] [On]` on the first row, `[Auto] [Clear override]` on the second
 - **Approval mode** (Gemini) — three options (read-only / edit files / full access)
-- **Reasoning** — five levels (minimal / low / medium / high / xhigh)
+- **Effort** (Claude Code) — low / medium / high / max
+- **Reasoning** (Codex) — minimal / low / medium / high / xhigh
 
 The active option is marked with a ✓ prefix. Tap a different option to switch.
 
@@ -95,7 +95,7 @@ When you switch engines via the Engine & model page, the home page automatically
 | Verbose | off, on | Yes (chat prefs) |
 | Diff preview | off, on | Yes (chat prefs) |
 | Engine & model | any configured engine + model | Yes (chat prefs) |
-| Reasoning | minimal, low, medium, high, xhigh | Yes (chat prefs) |
+| Effort / Reasoning | Claude: low, medium, high, max; Codex: minimal, low, medium, high, xhigh | Yes (chat prefs) |
 | Cost & usage | API cost, subscription usage, budget, auto-cancel | Yes (chat prefs) |
 | Resume line | off, on | Yes (chat prefs) |
 | Trigger | all, mentions | Yes (chat prefs) |
@@ -113,7 +113,7 @@ The Cost & Usage sub-page merges cost display and budget controls into a unified
 - **Budget enabled** — turn budget tracking on or off for this chat (overrides global `[cost_budget]` setting)
 - **Budget auto-cancel** — enable or disable automatic run cancellation when a budget is exceeded
 
-Each toggle uses the `[✓ Feature: on] [Clear]` pattern. Clear removes the per-chat override and falls back to the global config.
+Each toggle uses the `[✓ Label: on] [Label: off] [Clear]` compact pattern (labels distinguish the four toggles). Clear removes the per-chat override and falls back to the global config.
 
 For historical cost data across sessions, use the [`/stats`](../reference/commands-and-directives.md) command.
 

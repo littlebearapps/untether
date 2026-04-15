@@ -94,6 +94,11 @@ _DISCUSS_COOLDOWN: dict[str, tuple[float, int]] = {}
 # When Claude Code next calls ExitPlanMode, it will be auto-approved.
 _DISCUSS_APPROVED: set[str] = set()
 
+# Plan exit approved: session_ids where ExitPlanMode was manually approved.
+# After plan approval, diff_preview tools (Edit/Write/Bash) auto-approve instead
+# of requiring per-tool manual approval — the user already reviewed the plan (#283).
+_PLAN_EXIT_APPROVED: set[str] = set()
+
 # Sessions where "Pause & Outline Plan" was clicked and we're waiting for outline text.
 # StreamTextBlock handler checks this to emit visible note events in the progress message.
 _OUTLINE_PENDING: set[str] = set()
@@ -548,12 +553,19 @@ def translate_claude_event(
                 tool_name = getattr(request, "tool_name", "unknown")
                 if tool_name not in _TOOLS_REQUIRING_APPROVAL:
                     # When diff_preview is enabled, route previewable tools
-                    # through interactive approval so users see the diff
+                    # through interactive approval so users see the diff.
+                    # Bypass after ExitPlanMode approval — the user already
+                    # reviewed the plan, per-tool approval is redundant (#283).
                     run_opts = get_run_options()
+                    session_id = factory.resume.value if factory.resume else None
+                    plan_approved = (
+                        session_id is not None and session_id in _PLAN_EXIT_APPROVED
+                    )
                     if (
                         run_opts
                         and run_opts.diff_preview is True
                         and tool_name in _DIFF_PREVIEW_TOOLS
+                        and not plan_approved
                     ):
                         logger.debug(
                             "control_request.diff_preview_gate",
@@ -599,6 +611,13 @@ def translate_claude_event(
                         "control_request.auto_approve_exit_plan_mode",
                         request_id=request_id,
                     )
+                    # #283: also bypass diff_preview gate for subsequent tools
+                    # — same as interactive approval. Without this, users in
+                    # auto permission mode + diff_preview enabled still see
+                    # individual tool gates after plan approval (#309).
+                    auto_session = factory.resume.value if factory.resume else None
+                    if auto_session is not None:
+                        _PLAN_EXIT_APPROVED.add(auto_session)
                     _REQUEST_TO_INPUT[request_id] = getattr(request, "input", {})
                     state.auto_approve_queue.append(request_id)
                     return []
@@ -612,6 +631,9 @@ def translate_claude_event(
                         _DISCUSS_APPROVED.discard(session_id)
                         _OUTLINE_PENDING.discard(session_id)
                         clear_discuss_cooldown(session_id)
+                        # #283: bypass diff_preview gate for subsequent tools
+                        # in this session (#309).
+                        _PLAN_EXIT_APPROVED.add(session_id)
                         logger.info(
                             "control_request.discuss_approved",
                             request_id=request_id,
@@ -1069,7 +1091,12 @@ class ClaudeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
             # Claude Code CLI requires updatedInput for can_use_tool responses
             if request_id in _REQUEST_TO_INPUT:
                 inner["updatedInput"] = _REQUEST_TO_INPUT.pop(request_id)
-            _REQUEST_TO_TOOL_NAME.pop(request_id, None)
+            tool_name = _REQUEST_TO_TOOL_NAME.pop(request_id, None)
+            # After plan approval, bypass diff_preview gate for subsequent
+            # tools — user already reviewed the plan (#283)
+            session_id_for_plan = _REQUEST_TO_SESSION.get(request_id)
+            if tool_name == "ExitPlanMode" and session_id_for_plan:
+                _PLAN_EXIT_APPROVED.add(session_id_for_plan)
         else:
             inner = {"behavior": "deny", "message": deny_message or "User denied"}
             # Clean up stored input on denial too
@@ -1983,6 +2010,9 @@ def _cleanup_session_registries(session_id: str) -> None:
     if session_id in _DISCUSS_APPROVED:
         cleaned.append("discuss_approved")
     _DISCUSS_APPROVED.discard(session_id)
+    if session_id in _PLAN_EXIT_APPROVED:
+        cleaned.append("plan_exit_approved")
+    _PLAN_EXIT_APPROVED.discard(session_id)
     if session_id in _OUTLINE_PENDING:
         cleaned.append("outline_pending")
     _OUTLINE_PENDING.discard(session_id)

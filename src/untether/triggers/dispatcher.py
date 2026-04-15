@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
+from typing import Any
 
 from anyio.abc import TaskGroup
 
@@ -29,7 +30,12 @@ class TriggerDispatcher:
 
     async def dispatch_webhook(self, webhook: WebhookConfig, prompt: str) -> None:
         chat_id = webhook.chat_id or self.default_chat_id
-        context = RunContext(project=webhook.project) if webhook.project else None
+        # rc4 (#271): always set trigger_source so the meta footer can render
+        # provenance even when no project is configured.
+        context = RunContext(
+            project=webhook.project,
+            trigger_source=f"webhook:{webhook.id}",
+        )
         engine_override = webhook.engine
         label = f"\N{HIGH VOLTAGE SIGN} Trigger: webhook:{webhook.id}"
 
@@ -37,11 +43,65 @@ class TriggerDispatcher:
 
     async def dispatch_cron(self, cron: CronConfig) -> None:
         chat_id = cron.chat_id or self.default_chat_id
-        context = RunContext(project=cron.project) if cron.project else None
+        context = RunContext(
+            project=cron.project,
+            trigger_source=f"cron:{cron.id}",
+        )
         engine_override = cron.engine
         label = f"\N{ALARM CLOCK} Scheduled: cron:{cron.id}"
 
-        await self._dispatch(chat_id, label, cron.prompt, context, engine_override)
+        # If cron has a fetch step, execute it before rendering the prompt.
+        if cron.fetch is not None:
+            prompt = await self._fetch_and_render(cron)
+            if prompt is None:
+                return  # fetch failed with on_failure=abort
+        elif cron.prompt_template:
+            # prompt_template without fetch — render with empty payload.
+            from .templating import render_template_fields
+
+            prompt = render_template_fields(cron.prompt_template, {})
+        else:
+            prompt = cron.prompt or ""
+
+        await self._dispatch(chat_id, label, prompt, context, engine_override)
+
+    async def _fetch_and_render(self, cron: CronConfig) -> str | None:
+        """Execute cron fetch step and build the prompt.
+
+        Returns the rendered prompt, or ``None`` if fetch failed and
+        ``on_failure`` is ``"abort"``.
+        """
+        from .fetch import build_fetch_prompt, execute_fetch
+
+        assert cron.fetch is not None
+        chat_id = cron.chat_id or self.default_chat_id
+
+        ok, error_msg, data = await execute_fetch(cron.fetch)
+
+        if not ok:
+            logger.warning(
+                "triggers.cron.fetch_failed",
+                cron_id=cron.id,
+                error=error_msg,
+            )
+            if cron.fetch.on_failure == "abort":
+                # Notify user of the failure.
+                fail_label = f"\u274c cron:{cron.id} fetch failed: {error_msg}"
+                await self.transport.send(
+                    channel_id=chat_id,
+                    message=RenderedMessage(text=fail_label),
+                    options=SendOptions(notify=True),
+                )
+                return None
+            # on_failure=run_with_error — inject error into prompt.
+            data = f"[FETCH ERROR: {error_msg}]"
+
+        return build_fetch_prompt(
+            cron.prompt,
+            cron.prompt_template,
+            data,
+            cron.fetch.store_as,
+        )
 
     async def _dispatch(
         self,
@@ -82,4 +142,68 @@ class TriggerDispatcher:
             None,  # on_thread_known
             engine_override,
             None,  # progress_ref
+        )
+
+    async def dispatch_action(
+        self,
+        webhook: WebhookConfig,
+        payload: dict[str, Any],
+        raw_body: bytes,
+    ) -> None:
+        """Execute a non-agent webhook action (file_write, http_forward, notify_only)."""
+        from .actions import (
+            execute_file_write,
+            execute_http_forward,
+            execute_notify_message,
+        )
+
+        chat_id = webhook.chat_id or self.default_chat_id
+        action = webhook.action
+
+        logger.info(
+            "triggers.action.start",
+            webhook_id=webhook.id,
+            action=action,
+        )
+
+        if action == "file_write":
+            ok, msg = await execute_file_write(webhook, payload, raw_body)
+        elif action == "http_forward":
+            ok, msg = await execute_http_forward(webhook, payload, raw_body)
+        elif action == "notify_only":
+            msg = execute_notify_message(webhook, payload)
+            ok = True
+        else:
+            logger.error(
+                "triggers.action.unknown", action=action, webhook_id=webhook.id
+            )
+            return
+
+        # Send notification to Telegram if configured.
+        should_notify = (ok and webhook.notify_on_success) or (
+            not ok and webhook.notify_on_failure
+        )
+
+        if action == "notify_only":
+            # notify_only always sends the message.
+            await self.transport.send(
+                channel_id=chat_id,
+                message=RenderedMessage(text=msg),
+                options=SendOptions(notify=True),
+            )
+        elif should_notify:
+            icon = "\u2705" if ok else "\u274c"
+            label = f"{icon} webhook:{webhook.id} ({action}): {msg}"
+            await self.transport.send(
+                channel_id=chat_id,
+                message=RenderedMessage(text=label),
+                options=SendOptions(notify=not ok),
+            )
+
+        logger.info(
+            "triggers.action.done",
+            webhook_id=webhook.id,
+            action=action,
+            ok=ok,
+            message=msg,
         )

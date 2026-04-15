@@ -43,7 +43,7 @@ Notes:
 The runner invokes:
 
 ```text
-gemini -p --output-format stream-json --model <model> <prompt>
+gemini -p --output-format stream-json --model <model> --prompt=<prompt>
 ```
 
 Flags:
@@ -51,8 +51,9 @@ Flags:
 * `-p` — non-interactive (print mode)
 * `--output-format stream-json` — JSONL output
 * `--model <model>` — optional, from config or `/config` override
+* `--prompt=<value>` — prompt bound directly to flag (prevents injection when prompt starts with `-`)
 * `--resume <session_id>` — when resuming a session
-* `--approval-mode <mode>` — optional, passed from `permission_mode` run option (see limitation below)
+* `--approval-mode <mode>` — defaults to `yolo` (full access) when no override is set; configurable via `/config` or `permission_mode` run option
 
 ---
 
@@ -92,7 +93,7 @@ Exposes `BACKEND = EngineBackend(id="gemini", build_runner=build_runner, install
 #### Runner invocation
 
 ```text
-gemini -p --output-format stream-json [--resume <session_id>] [--model <model>] [--approval-mode <mode>] <prompt>
+gemini -p --output-format stream-json [--resume <session_id>] [--model <model>] [--approval-mode <mode>] --prompt=<prompt>
 ```
 
 #### Event translation

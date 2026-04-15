@@ -352,7 +352,7 @@ class AmpRunner(ResumeTokenMixin, JsonlSubprocessRunner):
         args.append("--stream-json")
         if self.stream_json_input:
             args.append("--stream-json-input")
-        args.extend(["-x", prompt])
+        args.extend(["-x", self.sanitize_prompt(prompt)])
         return args
 
     def stdin_payload(
@@ -522,16 +522,31 @@ def build_runner(config: EngineConfig, config_path: Path) -> Runner:
     """Build an AmpRunner from configuration."""
     model = config.get("model")
     if model is not None and not isinstance(model, str):
+        logger.warning(
+            "amp.config.invalid",
+            error="model must be a string",
+            config_path=str(config_path),
+        )
         raise ConfigError(f"Invalid `amp.model` in {config_path}; expected a string.")
 
     mode = config.get("mode")
     if mode is not None and not isinstance(mode, str):
+        logger.warning(
+            "amp.config.invalid",
+            error="mode must be a string",
+            config_path=str(config_path),
+        )
         raise ConfigError(f"Invalid `amp.mode` in {config_path}; expected a string.")
 
     dangerously_allow_all = config.get("dangerously_allow_all")
     if dangerously_allow_all is None:
         dangerously_allow_all = True
     elif not isinstance(dangerously_allow_all, bool):
+        logger.warning(
+            "amp.config.invalid",
+            error="dangerously_allow_all must be a boolean",
+            config_path=str(config_path),
+        )
         raise ConfigError(
             f"Invalid `amp.dangerously_allow_all` in {config_path}; expected a boolean."
         )
@@ -540,6 +555,11 @@ def build_runner(config: EngineConfig, config_path: Path) -> Runner:
     if stream_json_input is None:
         stream_json_input = False
     elif not isinstance(stream_json_input, bool):
+        logger.warning(
+            "amp.config.invalid",
+            error="stream_json_input must be a boolean",
+            config_path=str(config_path),
+        )
         raise ConfigError(
             f"Invalid `amp.stream_json_input` in {config_path}; expected a boolean."
         )

@@ -23,16 +23,21 @@ All integration test tiers are fully automated by Claude Code using Telegram MCP
 
 ### Test chats
 
-Tests are sent to 6 dedicated `ut-dev-hf:` engine chats via `@untether_dev_bot`:
+Tests are sent to 6 dedicated engine chats via `@untether_dev_bot` (bot ID `8678330610`).
+For DM-only tests (commands, `/at`, `/cancel`), use Nathan's personal DM chat ID with the bot — **not** the bot ID itself. The bot ID identifies the bot account; private chats are addressed by the user's chat ID. Resolve via the Telegram MCP `resolve_username` or by inspecting incoming `update.message.from.id` in the dev logs.
 
-| Chat | Chat ID |
-|------|---------|
-| `ut-dev-hf: claude` | 5171122044 |
-| `ut-dev-hf: codex` | 5116709786 |
-| `ut-dev-hf: opencode` | 5020138767 |
-| `ut-dev-hf: pi` | 5276373372 |
-| `ut-dev-hf: gemini` | 5152406011 |
-| `ut-dev-hf: amp` | 5064468679 |
+| Chat | Chat ID | Bot API chat_id |
+|------|---------|-----------------|
+| Claude Code | `5284581592` | `-5284581592` |
+| Codex CLI | `4929463515` | `-4929463515` |
+| OpenCode | `5200822877` | `-5200822877` |
+| Pi | `5156256333` | `-5156256333` |
+| Gemini CLI | `5207762142` | `-5207762142` |
+| AMP CLI | `5230875989` | `-5230875989` |
+
+> **Note:** The Telegram MCP (Telethon) accepts both positive and negative chat IDs.
+> If a positive ID fails with `GEN-ERR-582` (PeerUser lookup), use the negative Bot API form.
+> A local fix in `resolve_entity()` auto-retries with the negative form (applied 2026-04-14).
 
 ### Workflow
 
@@ -194,6 +199,28 @@ Run quickly to verify all commands respond.
 | Q11 | `/agent` | Current engine override or default | 1s |
 | Q12 | `/trigger` | Current trigger mode | 1s |
 | Q13 | `/file` | Usage help or file browser | 1s |
+| Q14 | `/at 60s smoke test` | "⏳ Scheduled" confirmation; run fires after ~60s | 70s |
+| Q15 | `/at 5m test` then `/cancel` | Scheduling confirmation; cancel drops pending; no run after 5m | 10s (skip 5m wait) |
+| Q16 | `/ping` in chat with cron | Pong + `⏰ triggers: ... cron (...)` line appears | 1s |
+
+---
+
+## rc4 scenarios (v0.35.1rc4)
+
+Run these in addition to the standard tiers for rc4.
+
+| # | Scenario | Expected |
+|---|----------|----------|
+| R1 | **Hot-reload cron add** | Edit `~/.untether-dev/untether.toml` to add a `* * * * *` cron; no restart; wait 60s | New cron fires at next minute; `triggers.manager.updated` log line present |
+| R2 | **Hot-reload webhook add** | Add a new `[[triggers.webhooks]]` entry; curl the new path | Returns 202; run dispatched to the configured chat |
+| R3 | **Hot-reload webhook secret change** | Change `secret` on existing webhook; curl with old secret | 401; new secret returns 202 |
+| R4 | **`run_once` cron** | Add `run_once = true` cron with `* * * * *` | Fires once, skips next minute, `triggers.cron.run_once_completed` log line |
+| R5 | **Trigger source in footer** | Trigger a cron run | Final message footer shows `⏰ cron:<id>` next to model |
+| R6 | **Bridge voice hot-reload** | Toggle `voice_transcription = false` in TOML; send a voice note | Not transcribed; `config.reload.transport_config_hot_reloaded` log line with `keys=['voice_transcription']` |
+| R7 | **Bridge allowed_user_ids hot-reload** | Add a new user id to `allowed_user_ids`; have that user send a message | Message routed on the next message (no restart) |
+| R8 | **update_id persistence** | `systemctl --user restart untether-dev` mid-conversation | Startup log `startup.offset.resumed`; no duplicate processing of pre-restart messages |
+| R9 | **sd_notify READY=1** | `systemctl --user status untether-dev` after start | "Active: active (running)" only appears after READY=1 |
+| R10 | **sd_notify STOPPING=1 during drain** | `systemctl --user restart untether-dev` while a run is active | journalctl shows `sdnotify.stopping` before `shutdown.draining` |
 
 ---
 

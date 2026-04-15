@@ -14,6 +14,7 @@
 <p align="center">
   <a href="https://github.com/littlebearapps/untether/actions/workflows/ci.yml"><img src="https://github.com/littlebearapps/untether/actions/workflows/ci.yml/badge.svg" alt="CI" /></a>
   <a href="https://pypi.org/project/untether/"><img src="https://img.shields.io/pypi/v/untether" alt="PyPI" /></a>
+  <a href="https://pypi.org/project/untether/"><img src="https://img.shields.io/pypi/dm/untether" alt="PyPI Downloads" /></a>
   <a href="https://pypi.org/project/untether/"><img src="https://img.shields.io/pypi/pyversions/untether" alt="Python" /></a>
   <a href="https://github.com/littlebearapps/untether/blob/master/LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue" alt="License" /></a>
 </p>
@@ -59,6 +60,8 @@ pipx install untether            # alternative
 untether                        # run setup wizard
 ```
 
+Update: `uv tool upgrade untether` · Uninstall: `uv tool uninstall untether && rm -rf ~/.untether/`
+
 The wizard creates a Telegram bot, picks your workflow, and connects your chat. Then send a message to your bot:
 
 > fix the failing tests in src/auth
@@ -94,7 +97,7 @@ The wizard offers three **workflow modes** — pick the one that fits:
 - 🔄 **Cross-environment resume** — start a session in your terminal, pick it up from Telegram with `/continue`; works with Claude Code, Codex, OpenCode, Pi, and Gemini ([guide](docs/how-to/cross-environment-resume.md))
 - 📎 **File transfer** — upload files to your repo with `/file put`, download with `/file get`; agents can also deliver files automatically by writing to `.untether-outbox/` during a run — sent as Telegram documents on completion
 - 🛡️ **Graceful recovery** — orphan progress messages cleaned up on restart; stall detection with CPU-aware diagnostics; auto-continue for Claude Code sessions that exit prematurely
-- ⏰ **Scheduled tasks** — cron expressions and webhook triggers
+- ⏰ **Scheduled tasks** — cron expressions with timezone support, webhook triggers, one-shot delays (`/at 30m <prompt>`), `run_once` crons, and hot-reload configuration (no restart required). `/ping` shows per-chat trigger summary; trigger-initiated runs show provenance in the footer
 - 💬 **Forum topics** — map Telegram topics to projects and branches
 - 📤 **Session export** — `/export` for markdown or JSON transcripts
 - 🗂️ **File browser** — `/browse` to navigate project files with inline buttons
@@ -178,7 +181,8 @@ The wizard offers three **workflow modes** — pick the one that fits:
 | `/trigger` | Set group chat trigger mode |
 | `/stats` | Per-engine session statistics (today/week/all-time) |
 | `/auth` | Codex device re-authentication |
-| `/ping` | Health check / uptime |
+| `/at 30m <prompt>` | Schedule a one-shot delayed run (60s–24h; `/cancel` to drop) |
+| `/ping` | Health check / uptime (shows per-chat trigger summary if any) |
 
 Prefix any message with `/<engine>` to pick an engine for that task, or `/<project>` to target a repo:
 
@@ -271,6 +275,8 @@ Full documentation is available in the [`docs/`](https://github.com/littlebearap
 - [Group chats](https://github.com/littlebearapps/untether/blob/master/docs/how-to/group-chat.md) — multi-user and trigger modes
 - [Context binding](https://github.com/littlebearapps/untether/blob/master/docs/how-to/context-binding.md) — per-chat project/branch binding
 - [Webhooks and cron](https://github.com/littlebearapps/untether/blob/master/docs/how-to/webhooks-and-cron.md) — automated runs from external events
+- [Update Untether](https://github.com/littlebearapps/untether/blob/master/docs/how-to/update.md) — upgrade to the latest version
+- [Uninstall Untether](https://github.com/littlebearapps/untether/blob/master/docs/how-to/uninstall.md) — remove CLI, config, and state files
 
 ### Engine Guides
 
@@ -286,6 +292,31 @@ Full documentation is available in the [`docs/`](https://github.com/littlebearap
 - [Configuration reference](https://github.com/littlebearapps/untether/blob/master/docs/reference/config.md) — full walkthrough of `untether.toml`
 - [Troubleshooting](https://github.com/littlebearapps/untether/blob/master/docs/how-to/troubleshooting.md) — common issues and solutions
 - [Architecture](https://github.com/littlebearapps/untether/blob/master/docs/explanation/architecture.md) — how the pieces fit together
+
+---
+
+## 🔒 What Untether accesses
+
+Untether runs on your machine and bridges your agents to Telegram. Here's exactly what it touches:
+
+| Category | What | Details |
+|----------|------|---------|
+| **Network** | Telegram Bot API (`api.telegram.org`) | Core transport — always active during operation |
+| **Network** | Whisper-compatible endpoint | Voice transcription — **disabled by default**, opt-in via config |
+| **Network** | Agent APIs (Anthropic, OpenAI, etc.) | Called by agent subprocesses, not by Untether directly |
+| **Filesystem** | `~/.untether/untether.toml` | Config file containing bot token — protect with `chmod 600` |
+| **Filesystem** | `~/.untether/*.json` | Chat preferences, session state, usage stats |
+| **Filesystem** | `.untether-outbox/` | Agent-delivered files (optional, per-project) |
+| **Filesystem** | `/file put` upload paths | User-initiated file uploads from Telegram, written to configured destinations (default: project working dir) |
+| **Filesystem** | Webhook `file_write` action | When configured, webhooks can write POST bodies to disk at admin-defined paths (deny-globs apply) |
+| **Network** | Webhook `http_forward` action | When configured, webhooks can forward payloads to admin-defined URLs (SSRF-protected) |
+| **Processes** | Agent CLIs (claude, codex, etc.) | Spawned as subprocesses with your user permissions; agents have full filesystem access in their working directory |
+| **Credentials** | Telegram bot token | Stored in config file (plaintext TOML) |
+| **Credentials** | API keys | Read from environment variables, never stored by Untether |
+
+**What Untether does NOT do:** no telemetry, no analytics, no phone-home, no auto-updates, no root access. Sensitive tokens (bot token, OpenAI keys, GitHub tokens) are automatically [redacted from logs](https://github.com/littlebearapps/untether/blob/master/docs/how-to/security.md).
+
+**What Untether *can* do at your direction:** spawned agents, `/file put`, the outbox, and webhook actions can all touch paths outside `~/.untether/` — that's the whole point. Use [`allowed_user_ids`](https://github.com/littlebearapps/untether/blob/master/docs/how-to/security.md), file deny-globs, and webhook auth to control who can trigger these flows.
 
 ---
 

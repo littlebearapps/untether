@@ -7,7 +7,10 @@ import hmac
 from collections.abc import Mapping
 from typing import Any
 
+from ..logging import get_logger
 from .settings import WebhookConfig
+
+logger = get_logger(__name__)
 
 # HMAC signature headers scoped by algorithm.
 _ALGO_HEADERS: dict[str, tuple[str, ...]] = {
@@ -23,8 +26,10 @@ def verify_auth(
 ) -> bool:
     """Verify a webhook request against its configured auth mode."""
     if config.auth == "none":
+        logger.debug("auth.skipped", auth="none")
         return True
     if not config.secret:
+        logger.warning("auth.no_secret", auth=config.auth)
         return False
 
     if config.auth == "bearer":
@@ -35,6 +40,7 @@ def verify_auth(
         sig_headers = _ALGO_HEADERS[config.auth]
         return _verify_hmac(config.secret, body, headers, algo, sig_headers)
 
+    logger.warning("auth.unknown_mode", auth=config.auth)
     return False
 
 
@@ -42,6 +48,7 @@ def _verify_bearer(secret: str, headers: Mapping[str, str]) -> bool:
     auth_header = headers.get("authorization", "")
     # RFC 6750: scheme keyword is case-insensitive.
     if len(auth_header) < 7 or auth_header[:7].lower() != "bearer ":
+        logger.debug("auth.bearer.missing_header")
         return False
     token = auth_header[7:]
     return hmac.compare_digest(token, secret)
@@ -66,4 +73,5 @@ def _verify_hmac(
             sig = sig.split("=", 1)[1]
         if hmac.compare_digest(sig, expected):
             return True
+    logger.debug("auth.hmac.no_match", algo=algo.__name__)
     return False

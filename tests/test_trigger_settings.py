@@ -161,6 +161,38 @@ class TestCronConfig:
         assert c.project == "infra"
         assert c.engine == "codex"
 
+    def test_with_timezone(self):
+        c = CronConfig(
+            id="melb",
+            schedule="0 8 * * *",
+            timezone="Australia/Melbourne",
+            prompt="Good morning",
+        )
+        assert c.timezone == "Australia/Melbourne"
+
+    def test_timezone_none_by_default(self):
+        c = CronConfig(id="x", schedule="* * * * *", prompt="Hi")
+        assert c.timezone is None
+
+    def test_run_once_default_false(self):
+        c = CronConfig(id="x", schedule="* * * * *", prompt="Hi")
+        assert c.run_once is False
+
+    def test_run_once_true_accepted(self):
+        c = CronConfig(
+            id="deploy-check", schedule="0 15 * * *", prompt="Hi", run_once=True
+        )
+        assert c.run_once is True
+
+    def test_invalid_timezone_rejected(self):
+        with pytest.raises(ValidationError, match="unknown timezone"):
+            CronConfig(
+                id="bad",
+                schedule="* * * * *",
+                timezone="Australia/Melborne",
+                prompt="Nope",
+            )
+
 
 class TestTriggersSettings:
     def test_disabled_by_default(self):
@@ -224,6 +256,18 @@ class TestTriggersSettings:
                 ],
             )
 
+    def test_default_timezone(self):
+        s = TriggersSettings(default_timezone="Australia/Melbourne")
+        assert s.default_timezone == "Australia/Melbourne"
+
+    def test_default_timezone_none_by_default(self):
+        s = TriggersSettings()
+        assert s.default_timezone is None
+
+    def test_invalid_default_timezone_rejected(self):
+        with pytest.raises(ValidationError, match="unknown timezone"):
+            TriggersSettings(default_timezone="Not/A/Timezone")
+
     def test_duplicate_cron_ids_rejected(self):
         with pytest.raises(ValidationError, match="cron ids must be unique"):
             TriggersSettings(
@@ -261,3 +305,202 @@ class TestParseTriggerConfig:
     def test_parse_invalid_raises(self):
         with pytest.raises(ValidationError):
             parse_trigger_config({"server": {"port": "not_a_number"}})
+
+
+class TestWebhookActionValidation:
+    """Validate action-specific required fields."""
+
+    def test_default_action_is_agent_run(self):
+        w = WebhookConfig(
+            id="test",
+            path="/hooks/test",
+            auth="none",
+            prompt_template="Hello",
+        )
+        assert w.action == "agent_run"
+
+    def test_agent_run_requires_prompt_template(self):
+        with pytest.raises(ValidationError, match="prompt_template is required"):
+            WebhookConfig(
+                id="test",
+                path="/hooks/test",
+                auth="none",
+                action="agent_run",
+            )
+
+    def test_file_write_requires_file_path(self):
+        with pytest.raises(ValidationError, match="file_path is required"):
+            WebhookConfig(
+                id="test",
+                path="/hooks/test",
+                auth="none",
+                action="file_write",
+            )
+
+    def test_file_write_valid(self):
+        w = WebhookConfig(
+            id="test",
+            path="/hooks/test",
+            auth="none",
+            action="file_write",
+            file_path="/tmp/output.json",
+        )
+        assert w.action == "file_write"
+        assert w.file_path == "/tmp/output.json"
+
+    def test_http_forward_requires_forward_url(self):
+        with pytest.raises(ValidationError, match="forward_url is required"):
+            WebhookConfig(
+                id="test",
+                path="/hooks/test",
+                auth="none",
+                action="http_forward",
+            )
+
+    def test_http_forward_valid(self):
+        w = WebhookConfig(
+            id="test",
+            path="/hooks/test",
+            auth="none",
+            action="http_forward",
+            forward_url="https://example.com/events",
+        )
+        assert w.action == "http_forward"
+        assert w.forward_url == "https://example.com/events"
+
+    def test_notify_only_requires_message_template(self):
+        with pytest.raises(ValidationError, match="message_template is required"):
+            WebhookConfig(
+                id="test",
+                path="/hooks/test",
+                auth="none",
+                action="notify_only",
+            )
+
+    def test_notify_only_valid(self):
+        w = WebhookConfig(
+            id="test",
+            path="/hooks/test",
+            auth="none",
+            action="notify_only",
+            message_template="Alert: {{event}}",
+        )
+        assert w.action == "notify_only"
+        assert w.message_template == "Alert: {{event}}"
+
+    def test_backward_compat_existing_config(self):
+        """Existing configs without action field still work."""
+        w = WebhookConfig(
+            id="legacy",
+            path="/hooks/legacy",
+            auth="bearer",
+            secret="tok_123",
+            prompt_template="Hello {{name}}",
+        )
+        assert w.action == "agent_run"
+        assert w.prompt_template == "Hello {{name}}"
+
+    def test_forward_headers_accepted(self):
+        w = WebhookConfig(
+            id="test",
+            path="/hooks/test",
+            auth="none",
+            action="http_forward",
+            forward_url="https://example.com",
+            forward_headers={"Authorization": "Bearer tok_123"},
+        )
+        assert w.forward_headers == {"Authorization": "Bearer tok_123"}
+
+    def test_on_conflict_values(self):
+        for conflict in ("overwrite", "append_timestamp", "error"):
+            w = WebhookConfig(
+                id="test",
+                path="/hooks/test",
+                auth="none",
+                action="file_write",
+                file_path="/tmp/out.json",
+                on_conflict=conflict,
+            )
+            assert w.on_conflict == conflict
+
+    def test_notify_flags(self):
+        w = WebhookConfig(
+            id="test",
+            path="/hooks/test",
+            auth="none",
+            action="file_write",
+            file_path="/tmp/out.json",
+            notify_on_success=True,
+            notify_on_failure=True,
+        )
+        assert w.notify_on_success is True
+        assert w.notify_on_failure is True
+
+    def test_multipart_defaults(self):
+        w = WebhookConfig(
+            id="test",
+            path="/hooks/test",
+            auth="none",
+            action="file_write",
+            file_path="/tmp/out.json",
+        )
+        assert w.accept_multipart is False
+        assert w.file_destination is None
+        assert w.max_file_size_bytes == 52_428_800
+
+    def test_multipart_enabled(self):
+        w = WebhookConfig(
+            id="test",
+            path="/hooks/test",
+            auth="none",
+            prompt_template="Process {{form.batch_id}}",
+            accept_multipart=True,
+            file_destination="~/uploads/{{form.date}}/{{file.filename}}",
+            max_file_size_bytes=10_000_000,
+        )
+        assert w.accept_multipart is True
+        assert w.file_destination is not None
+        assert w.max_file_size_bytes == 10_000_000
+
+
+class TestCronConfigFetch:
+    """Tests for CronConfig with fetch block."""
+
+    def test_cron_with_fetch(self):
+        c = CronConfig(
+            id="daily",
+            schedule="0 9 * * 1-5",
+            prompt_template="Issues: {{fetch_result}}",
+            fetch={
+                "type": "http_get",
+                "url": "https://api.github.com/issues",
+            },
+        )
+        assert c.fetch is not None
+        assert c.fetch.type == "http_get"
+        assert c.fetch.url == "https://api.github.com/issues"
+
+    def test_cron_prompt_or_template_required(self):
+        with pytest.raises(ValidationError, match="either prompt or prompt_template"):
+            CronConfig(
+                id="bad",
+                schedule="* * * * *",
+            )
+
+    def test_cron_prompt_template_without_fetch(self):
+        c = CronConfig(
+            id="test",
+            schedule="* * * * *",
+            prompt_template="Static template",
+        )
+        assert c.prompt is None
+        assert c.prompt_template == "Static template"
+
+    def test_cron_backward_compat_prompt_only(self):
+        c = CronConfig(
+            id="legacy",
+            schedule="0 9 * * *",
+            prompt="Review PRs",
+        )
+        assert c.prompt == "Review PRs"
+        assert c.fetch is None

@@ -57,7 +57,7 @@ Some engines support reasoning levels that control how much thinking the model d
 
 Valid levels depend on the engine:
 
-- **Claude Code**: `low`, `medium`, `high` (passed as `--effort`)
+- **Claude Code**: `low`, `medium`, `high`, `max` (passed as `--effort`)
 - **Codex CLI**: `minimal`, `low`, `medium`, `high`, `xhigh`
 
 Other engines (OpenCode, Pi, Gemini, Amp) ignore this setting.

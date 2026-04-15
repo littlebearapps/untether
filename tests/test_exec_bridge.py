@@ -3621,6 +3621,465 @@ async def test_stall_tool_active_suppressed_even_with_frozen_ring() -> None:
 
 
 # ---------------------------------------------------------------------------
+# Active children / subagent stall tests (#264)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.anyio
+async def test_stall_threshold_elevated_with_active_children() -> None:
+    """When child processes exist, use the subagent threshold (900s) instead of normal (300s)."""
+    from unittest.mock import patch
+
+    from untether.utils.proc_diag import ProcessDiag
+
+    transport = FakeTransport()
+    presenter = _KeyboardPresenter()
+    clock = _FakeClock(start=100.0)
+    edits = _make_edits(transport, presenter, clock=clock)
+    edits._stall_check_interval = 0.01
+    edits._STALL_THRESHOLD_SECONDS = 0.05  # 50ms
+    edits._STALL_THRESHOLD_SUBAGENT = 0.5  # 500ms
+    edits._stall_repeat_seconds = 0.02
+    edits.pid = 12345
+    edits.event_seq = 5
+
+    def diag_with_children(pid: int) -> ProcessDiag:
+        return ProcessDiag(
+            pid=pid,
+            alive=True,
+            state="S",
+            cpu_utime=1000,
+            cpu_stime=200,
+            child_pids=[5001, 5002],
+            tree_cpu_utime=3000,
+            tree_cpu_stime=600,
+        )
+
+    with patch(
+        "untether.utils.proc_diag.collect_proc_diag",
+        side_effect=diag_with_children,
+    ):
+        async with anyio.create_task_group() as tg:
+
+            async def drive() -> None:
+                # Advance past normal threshold but under subagent threshold
+                clock.set(100.1)  # 100ms elapsed — past normal 50ms
+                await anyio.sleep(0.05)
+                edits.signal_send.close()
+
+            tg.start_soon(edits.run)
+            tg.start_soon(drive)
+
+    # Should NOT have triggered a stall warning (under subagent threshold)
+    stall_msgs = [
+        c
+        for c in transport.send_calls
+        if "progress" in c["message"].text.lower()
+        or "stuck" in c["message"].text.lower()
+        or "waiting" in c["message"].text.lower()
+    ]
+    assert len(stall_msgs) == 0, (
+        f"Expected no stall warnings (under subagent threshold), got: "
+        f"{[c['message'].text for c in stall_msgs]}"
+    )
+
+
+@pytest.mark.anyio
+async def test_stall_threshold_elevated_with_high_tcp() -> None:
+    """When TCP count exceeds threshold, use subagent threshold even without child_pids."""
+    from unittest.mock import patch
+
+    from untether.utils.proc_diag import ProcessDiag
+
+    transport = FakeTransport()
+    presenter = _KeyboardPresenter()
+    clock = _FakeClock(start=100.0)
+    edits = _make_edits(transport, presenter, clock=clock)
+    edits._stall_check_interval = 0.01
+    edits._STALL_THRESHOLD_SECONDS = 0.05
+    edits._STALL_THRESHOLD_SUBAGENT = 0.5
+    edits._TCP_ACTIVE_THRESHOLD = 20
+    edits._stall_repeat_seconds = 0.02
+    edits.pid = 12345
+    edits.event_seq = 5
+
+    def diag_high_tcp(pid: int) -> ProcessDiag:
+        return ProcessDiag(
+            pid=pid,
+            alive=True,
+            state="S",
+            cpu_utime=1000,
+            cpu_stime=200,
+            child_pids=[],  # no direct children
+            tcp_established=50,
+            tcp_total=100,  # well above threshold
+            tree_cpu_utime=1000,
+            tree_cpu_stime=200,
+        )
+
+    with patch(
+        "untether.utils.proc_diag.collect_proc_diag",
+        side_effect=diag_high_tcp,
+    ):
+        async with anyio.create_task_group() as tg:
+
+            async def drive() -> None:
+                clock.set(100.1)  # past normal, under subagent
+                await anyio.sleep(0.05)
+                edits.signal_send.close()
+
+            tg.start_soon(edits.run)
+            tg.start_soon(drive)
+
+    stall_msgs = [
+        c
+        for c in transport.send_calls
+        if "progress" in c["message"].text.lower()
+        or "stuck" in c["message"].text.lower()
+        or "waiting" in c["message"].text.lower()
+    ]
+    assert len(stall_msgs) == 0
+
+
+@pytest.mark.anyio
+async def test_stall_children_suppressed_with_tree_cpu_active() -> None:
+    """When tree CPU is active + children exist, repeat warnings are suppressed."""
+    from unittest.mock import patch
+
+    from untether.utils.proc_diag import ProcessDiag
+
+    transport = FakeTransport()
+    presenter = _KeyboardPresenter()
+    clock = _FakeClock(start=100.0)
+    edits = _make_edits(transport, presenter, clock=clock)
+    edits._stall_check_interval = 0.01
+    edits._STALL_THRESHOLD_SECONDS = 0.05
+    edits._STALL_THRESHOLD_SUBAGENT = 0.05  # same as normal for this test
+    edits._stall_repeat_seconds = 0.01
+    edits._STALL_MAX_WARNINGS = 100
+    edits.pid = 12345
+    edits.event_seq = 5
+
+    call_count = 0
+
+    def diag_tree_active(pid: int) -> ProcessDiag:
+        nonlocal call_count
+        call_count += 1
+        return ProcessDiag(
+            pid=pid,
+            alive=True,
+            state="S",
+            cpu_utime=1000,  # main CPU flat
+            cpu_stime=200,
+            child_pids=[5001, 5002],
+            tree_cpu_utime=1000 + call_count * 300,  # tree CPU increasing
+            tree_cpu_stime=200 + call_count * 50,
+        )
+
+    initial_seq = edits.event_seq
+
+    with patch(
+        "untether.utils.proc_diag.collect_proc_diag",
+        side_effect=diag_tree_active,
+    ):
+        async with anyio.create_task_group() as tg:
+
+            async def drive() -> None:
+                for i in range(6):
+                    clock.set(100.1 + i * 0.1)
+                    await anyio.sleep(0.03)
+                edits.signal_send.close()
+
+            tg.start_soon(edits.run)
+            tg.start_soon(drive)
+
+    # First warning fires, repeats suppressed by child-active
+    stall_msgs = [
+        c
+        for c in transport.send_calls
+        if "child processes" in c["message"].text.lower()
+        or "progress" in c["message"].text.lower()
+        or "stuck" in c["message"].text.lower()
+    ]
+    assert len(stall_msgs) == 1, (
+        f"Expected 1 stall notification (repeats suppressed), got {len(stall_msgs)}: "
+        f"{[c['message'].text for c in stall_msgs]}"
+    )
+    # Heartbeat re-render should have bumped event_seq
+    assert edits.event_seq > initial_seq
+
+
+@pytest.mark.anyio
+async def test_stall_children_not_suppressed_with_tree_cpu_idle() -> None:
+    """When tree CPU is flat (idle children), warnings keep firing."""
+    from unittest.mock import patch
+
+    from untether.utils.proc_diag import ProcessDiag
+
+    transport = FakeTransport()
+    presenter = _KeyboardPresenter()
+    clock = _FakeClock(start=100.0)
+    edits = _make_edits(transport, presenter, clock=clock)
+    edits._stall_check_interval = 0.01
+    edits._STALL_THRESHOLD_SECONDS = 0.05
+    edits._STALL_THRESHOLD_SUBAGENT = 0.05
+    edits._stall_repeat_seconds = 0.01
+    edits._STALL_MAX_WARNINGS = 100
+    edits.pid = 12345
+    edits.event_seq = 5
+    cancel_event = anyio.Event()
+    edits.cancel_event = cancel_event
+
+    def diag_tree_idle(pid: int) -> ProcessDiag:
+        return ProcessDiag(
+            pid=pid,
+            alive=True,
+            state="S",
+            cpu_utime=1000,
+            cpu_stime=200,
+            child_pids=[5001],
+            tree_cpu_utime=1000,  # flat — no child CPU activity
+            tree_cpu_stime=200,
+        )
+
+    with patch(
+        "untether.utils.proc_diag.collect_proc_diag",
+        side_effect=diag_tree_idle,
+    ):
+        async with anyio.create_task_group() as tg:
+
+            async def drive() -> None:
+                for i in range(5):
+                    clock.set(100.1 + i * 0.1)
+                    await anyio.sleep(0.03)
+                edits.signal_send.close()
+
+            tg.start_soon(edits.run)
+            tg.start_soon(drive)
+
+    stall_msgs = [
+        c
+        for c in transport.send_calls
+        if "child processes" in c["message"].text.lower()
+        or "progress" in c["message"].text.lower()
+        or "stuck" in c["message"].text.lower()
+    ]
+    # Multiple warnings fire because tree CPU is idle (no suppression)
+    assert len(stall_msgs) >= 2, (
+        f"Expected >=2 stall warnings (tree idle), got {len(stall_msgs)}"
+    )
+
+
+@pytest.mark.anyio
+async def test_stall_first_warning_has_cpu_baseline() -> None:
+    """After early diagnostic collection, first stall warning has cpu_active != None."""
+    from unittest.mock import patch
+
+    from untether.utils.proc_diag import ProcessDiag
+
+    transport = FakeTransport()
+    presenter = _KeyboardPresenter()
+    clock = _FakeClock(start=100.0)
+    edits = _make_edits(transport, presenter, clock=clock)
+    edits._stall_check_interval = 0.01
+    edits._STALL_THRESHOLD_SECONDS = 0.03  # triggers after ~3 cycles
+    edits._stall_repeat_seconds = 0.5
+    edits.pid = 12345
+    edits.event_seq = 5
+    cancel_event = anyio.Event()
+    edits.cancel_event = cancel_event
+
+    call_count = 0
+
+    def active_cpu_diag(pid: int) -> ProcessDiag:
+        nonlocal call_count
+        call_count += 1
+        return ProcessDiag(
+            pid=pid,
+            alive=True,
+            state="R",
+            cpu_utime=1000 + call_count * 100,
+            cpu_stime=200 + call_count * 20,
+            tree_cpu_utime=1000 + call_count * 100,
+            tree_cpu_stime=200 + call_count * 20,
+        )
+
+    with patch(
+        "untether.utils.proc_diag.collect_proc_diag",
+        side_effect=active_cpu_diag,
+    ):
+        async with anyio.create_task_group() as tg:
+
+            async def drive() -> None:
+                # Wait enough for 2+ cycles before threshold
+                await anyio.sleep(0.02)
+                clock.set(100.05)  # past threshold
+                await anyio.sleep(0.03)
+                edits.signal_send.close()
+
+            tg.start_soon(edits.run)
+            tg.start_soon(drive)
+
+    # With early collection, _prev_diag was set before threshold crossing,
+    # so cpu_active should not be None.  CPU-active + running state = suppression
+    # (heartbeat only, no Telegram notification).
+    stall_msgs = [
+        c
+        for c in transport.send_calls
+        if "progress" in c["message"].text.lower()
+        or "stuck" in c["message"].text.lower()
+    ]
+    # Active CPU + running state → suppressed (heartbeat only)
+    assert len(stall_msgs) == 0, (
+        f"Expected 0 stall notifications (CPU active + running → suppressed), "
+        f"got: {[c['message'].text for c in stall_msgs]}"
+    )
+
+
+@pytest.mark.anyio
+async def test_stall_total_warn_count_survives_recovery() -> None:
+    """_total_stall_warn_count persists through recovery (unlike _stall_warn_count)."""
+    transport = FakeTransport()
+    presenter = _KeyboardPresenter()
+    clock = _FakeClock(start=100.0)
+    edits = _make_edits(transport, presenter, clock=clock)
+
+    # Simulate first stall episode
+    edits._stall_warned = True
+    edits._stall_warn_count = 3
+    edits._total_stall_warn_count = 3
+
+    # Recovery via new event
+    from untether.model import Action, ActionEvent
+
+    clock.set(101.0)
+    evt = ActionEvent(
+        engine="claude",
+        action=Action(id="a1", kind="tool", title="Read"),
+        phase="started",
+    )
+    await edits.on_event(evt)
+
+    # Per-episode count resets, total persists
+    assert edits._stall_warn_count == 0
+    assert edits._total_stall_warn_count == 3
+
+    # Simulate second stall episode
+    edits._stall_warned = True
+    edits._stall_warn_count = 2
+    edits._total_stall_warn_count = 5
+
+    clock.set(102.0)
+    evt2 = ActionEvent(
+        engine="claude",
+        action=Action(id="a2", kind="tool", title="Grep"),
+        phase="started",
+    )
+    await edits.on_event(evt2)
+
+    assert edits._stall_warn_count == 0
+    assert edits._total_stall_warn_count == 5
+
+
+@pytest.mark.anyio
+async def test_stall_message_active_children() -> None:
+    """When active_children threshold fires, message says 'child processes'."""
+    from unittest.mock import patch
+
+    from untether.utils.proc_diag import ProcessDiag
+
+    transport = FakeTransport()
+    presenter = _KeyboardPresenter()
+    clock = _FakeClock(start=100.0)
+    edits = _make_edits(transport, presenter, clock=clock)
+    edits._stall_check_interval = 0.01
+    edits._STALL_THRESHOLD_SECONDS = 0.05
+    edits._STALL_THRESHOLD_SUBAGENT = 0.05  # match so it triggers
+    edits._stall_repeat_seconds = 0.5
+    edits._STALL_MAX_WARNINGS = 100
+    edits.pid = 12345
+    edits.event_seq = 5
+
+    # No tracked tool running, but children exist
+    def diag_children_idle_cpu(pid: int) -> ProcessDiag:
+        return ProcessDiag(
+            pid=pid,
+            alive=True,
+            state="S",
+            cpu_utime=1000,
+            cpu_stime=200,
+            child_pids=[5001, 5002, 5003],
+            tree_cpu_utime=1000,
+            tree_cpu_stime=200,
+        )
+
+    with patch(
+        "untether.utils.proc_diag.collect_proc_diag",
+        side_effect=diag_children_idle_cpu,
+    ):
+        async with anyio.create_task_group() as tg:
+
+            async def drive() -> None:
+                clock.set(100.1)
+                await anyio.sleep(0.05)
+                edits.signal_send.close()
+
+            tg.start_soon(edits.run)
+            tg.start_soon(drive)
+
+    stall_msgs = [
+        c
+        for c in transport.send_calls
+        if "child processes" in c["message"].text.lower()
+    ]
+    assert len(stall_msgs) == 1, (
+        f"Expected 'child processes' message, got: "
+        f"{[c['message'].text for c in transport.send_calls]}"
+    )
+    assert "3 children" in stall_msgs[0]["message"].text
+
+
+@pytest.mark.anyio
+async def test_stall_prev_diag_persists_across_recovery() -> None:
+    """_prev_diag is NOT reset on recovery (provides baseline for next stall)."""
+    from untether.utils.proc_diag import ProcessDiag
+
+    transport = FakeTransport()
+    presenter = _KeyboardPresenter()
+    clock = _FakeClock(start=100.0)
+    edits = _make_edits(transport, presenter, clock=clock)
+
+    # Set up as if a stall was warned with diagnostic
+    fake_diag = ProcessDiag(
+        pid=12345,
+        alive=True,
+        state="S",
+        cpu_utime=1000,
+        cpu_stime=200,
+        tree_cpu_utime=2000,
+        tree_cpu_stime=400,
+    )
+    edits._stall_warned = True
+    edits._stall_warn_count = 2
+    edits._prev_diag = fake_diag
+
+    # Recovery via event
+    from untether.model import Action, ActionEvent
+
+    clock.set(101.0)
+    evt = ActionEvent(
+        engine="claude",
+        action=Action(id="a1", kind="tool", title="Read"),
+        phase="started",
+    )
+    await edits.on_event(evt)
+
+    # _prev_diag should persist (NOT reset to None)
+    assert edits._prev_diag is fake_diag
+    assert edits._stall_warned is False  # other flags still reset
+
+
+# ---------------------------------------------------------------------------
 # Plan outline rendering, keyboard, and cleanup tests
 # ---------------------------------------------------------------------------
 

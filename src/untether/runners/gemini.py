@@ -348,7 +348,7 @@ class GeminiRunner(ResumeTokenMixin, JsonlSubprocessRunner):
             args.extend(["--approval-mode", run_options.permission_mode])
         else:
             args.extend(["--approval-mode", "yolo"])
-        args.append(f"--prompt={prompt}")
+        args.append(f"--prompt={self.sanitize_prompt(prompt)}")
         return args
 
     def stdin_payload(
@@ -526,6 +526,11 @@ def build_runner(config: EngineConfig, config_path: Path) -> Runner:
     """Build a GeminiRunner from configuration."""
     model = config.get("model")
     if model is not None and not isinstance(model, str):
+        logger.warning(
+            "gemini.config.invalid",
+            error="model must be a string",
+            config_path=str(config_path),
+        )
         raise ConfigError(
             f"Invalid `gemini.model` in {config_path}; expected a string."
         )

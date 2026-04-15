@@ -30,7 +30,7 @@ Verify it's installed:
 untether --version
 ```
 
-You should see the installed version number (e.g. `0.35.0`).
+You should see the installed version number (e.g. `0.35.1`).
 
 ## 3. Install agent CLIs
 
@@ -314,7 +314,7 @@ Press **y** or **Enter** to save. You'll see:
 Untether is now running and listening for messages!
 
 !!! untether "Untether"
-    🐕 untether is ready (v0.35.0)
+    🐕 untether is ready (v0.35.1)
 
     *default engine:* `codex`<br>
     *installed engines:* codex<br>
@@ -429,6 +429,16 @@ Your config file lives at `~/.untether/untether.toml`. The exact contents depend
 This config file controls all of Untether's behavior. You can edit it directly or change most settings from Telegram using the `/config` inline menu — no file editing needed.
 
 [Full config reference →](../reference/config.md)
+
+## Updating and uninstalling
+
+To update Untether to the latest version:
+
+```sh
+uv tool upgrade untether
+```
+
+To uninstall completely (CLI, config, and state), see the [uninstall guide](../how-to/uninstall.md). To learn more about updates, see [Update Untether](../how-to/update.md).
 
 ## Re-running onboarding
 

@@ -270,6 +270,31 @@ chat_id = -1001234567890   # optional per-project chat
 - `/ctx set <project>` binds a chat context
 - Project alias used as directive prefix: `/untether fix the bug`
 
+## Trigger system
+
+Triggers let external events or schedules start agent runs automatically. Opt-in via `[triggers] enabled = true`.
+
+### Cron
+
+`run_cron_scheduler()` ticks every minute, checking each `[[triggers.crons]]` entry against the current time via `cron_matches()` (5-field standard syntax). Per-cron `timezone` or global `default_timezone` converts UTC to local wall-clock time via `_resolve_now()` + `zoneinfo.ZoneInfo`. DST transitions handled automatically. `last_fired` dict prevents double-firing within the same minute.
+
+### Webhooks
+
+`run_webhook_server()` runs an aiohttp server. Each `[[triggers.webhooks]]` maps a URL path to auth (bearer/HMAC-SHA256/SHA1) + prompt template with `{{field.path}}` substitutions. Rate-limited per-webhook and globally.
+
+### Dispatch
+
+Both crons and webhooks feed into `TriggerDispatcher.dispatch_cron()`/`dispatch_webhook()` → sends a notification message to Telegram (`⏰`/`⚡`) → calls `run_job()` with the prompt, threading under the notification.
+
+### Key files
+
+- `triggers/cron.py` — cron parser, timezone-aware scheduler
+- `triggers/settings.py` — `CronConfig`, `WebhookConfig`, `TriggersSettings` (pydantic)
+- `triggers/dispatcher.py` — notification + `run_job()` bridge
+- `triggers/server.py` — aiohttp webhook server
+- `triggers/auth.py` — bearer/HMAC verification
+- `triggers/templating.py` — `{{field.path}}` prompt substitution
+
 ## Key conventions
 
 - Python 3.12+, anyio for async, msgspec for JSONL parsing, structlog for logging

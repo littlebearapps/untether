@@ -42,3 +42,16 @@ def render_prompt(template: str, payload: dict[str, Any]) -> str:
 
     rendered = _TEMPLATE_RE.sub(replacer, template)
     return f"{_UNTRUSTED_PREFIX}{rendered}"
+
+
+def render_template_fields(template: str, payload: dict[str, Any]) -> str:
+    """Render ``{{field.path}}`` substitutions without the untrusted prefix.
+
+    Used for non-prompt fields like file paths, URLs, and message templates
+    where the untrusted-payload marker would be incorrect.
+    """
+
+    def replacer(match: re.Match[str]) -> str:
+        return _resolve_path(payload, match.group(1))
+
+    return _TEMPLATE_RE.sub(replacer, template)

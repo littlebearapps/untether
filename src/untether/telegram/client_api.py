@@ -496,6 +496,12 @@ class HttpBotClient:
             "deleteMessage",
             {"chat_id": chat_id, "message_id": message_id},
         )
+        logger.debug(
+            "telegram.message.deleted",
+            chat_id=chat_id,
+            message_id=message_id,
+            success=bool(result),
+        )
         return bool(result)
 
     async def set_my_commands(

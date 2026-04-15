@@ -40,6 +40,12 @@ Then send a message — Untether prints the chat ID and your user ID.
 
 In group chats, each user gets their own independent session. User A's conversation history and context are completely separate from User B's — there is no cross-talk between sessions.
 
+## Button press validation
+
+In group chats, approval buttons (Approve, Deny, Pause & Outline Plan) are validated against `allowed_user_ids`. If a group member who is not in the allowed list taps another user's approval buttons, the press is rejected — they cannot approve or deny tool calls on someone else's behalf.
+
+This also applies to cancel buttons. When `allowed_user_ids` is empty (the default), all group members can interact with any buttons.
+
 ## Set trigger mode for groups
 
 By default, the bot responds to every message (`all` mode). In busy groups, switch to `mentions` mode so the bot only responds when @mentioned:

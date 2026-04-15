@@ -110,7 +110,38 @@ Cron triggers fire on a schedule using standard 5-field cron syntax.
     prompt = "Review open PRs and summarise their status."
     ```
 
-This runs every weekday at 9:00 AM.
+This runs every weekday at 9:00 AM in the server's local time (usually UTC).
+
+### Timezone
+
+By default, cron schedules use the server's system time. Set `timezone` to
+evaluate in a specific timezone:
+
+=== "toml"
+
+    ```toml
+    [[triggers.crons]]
+    id = "morning-review"
+    schedule = "0 8 * * 1-5"
+    timezone = "Australia/Melbourne"
+    project = "myapp"
+    engine = "claude"
+    prompt = "Review overnight changes."
+    ```
+
+This fires at 8:00 AM Melbourne time (AEST/AEDT), adjusting automatically for
+daylight saving. Use [IANA timezone names](https://en.wikipedia.org/wiki/List_of_tz_database_time_zones).
+
+Set `default_timezone` in `[triggers]` to apply to all crons without repeating it:
+
+```toml
+[triggers]
+enabled = true
+default_timezone = "Australia/Melbourne"
+```
+
+Per-cron `timezone` overrides the global default. See the
+[triggers reference](../reference/triggers/triggers.md#timezone-support) for details.
 
 ### Cron syntax
 
@@ -133,6 +164,64 @@ Common patterns:
 | `0 */2 * * *` | Every 2 hours |
 | `0 9,17 * * *` | At 9:00 AM and 5:00 PM |
 
+### Data-fetch crons
+
+Crons can pull data from external sources before rendering the prompt:
+
+=== "toml"
+
+    ```toml
+    [[triggers.crons]]
+    id = "daily-issue-triage"
+    schedule = "0 9 * * 1-5"
+    engine = "claude"
+    project = "my-app"
+
+    [triggers.crons.fetch]
+    type = "http_get"
+    url = "https://api.github.com/repos/myorg/myapp/issues?state=open"
+    headers = { "Authorization" = "Bearer {{env.GITHUB_TOKEN}}" }
+    parse_as = "json"
+    store_as = "issues"
+
+    prompt_template = "Open issues:\n{{issues}}\n\nReview and propose labels."
+    ```
+
+The fetch step runs before prompt rendering. Fetched data is injected into `prompt_template` via the `store_as` variable name. If the fetch fails, the default behaviour (`on_failure = "abort"`) sends a failure notification to Telegram and skips the agent run.
+
+Fetch types: `http_get`, `http_post`, `file_read`. See the
+[triggers reference](../reference/triggers/triggers.md#data-fetch-crons) for all options.
+
+## Non-agent webhook actions
+
+Webhooks can perform lightweight actions without spawning an agent:
+
+=== "toml"
+
+    ```toml
+    # Archive webhook payloads to disk
+    [[triggers.webhooks]]
+    id = "data-ingest"
+    path = "/hooks/ingest"
+    auth = "bearer"
+    secret = "whsec_..."
+    action = "file_write"
+    file_path = "~/data/incoming/batch-{{date}}.json"
+    notify_on_success = true
+
+    # Send a Telegram notification
+    [[triggers.webhooks]]
+    id = "stock-alert"
+    path = "/hooks/stock"
+    auth = "bearer"
+    secret = "whsec_..."
+    action = "notify_only"
+    message_template = "📈 {{ticker}} hit {{price}}"
+    ```
+
+Action types: `agent_run` (default), `file_write`, `http_forward`, `notify_only`. See the
+[triggers reference](../reference/triggers/triggers.md#non-agent-actions) for details.
+
 ## Chat routing
 
 Each webhook and cron can specify where the Telegram notification appears:
@@ -154,6 +243,73 @@ Each webhook and cron can specify where the Telegram notification appears:
     ```
 
 The server includes a health endpoint at `GET /health` for uptime monitoring.
+
+## Hot-reload configuration
+
+When `watch_config = true` is set in your top-level config, you can add, remove, or modify
+webhooks and crons by editing `untether.toml` — changes are applied automatically without
+restarting Untether. Active runs are not interrupted.
+
+For example, to add a new cron, just edit the TOML and save:
+
+```toml
+[[triggers.crons]]
+id = "new-task"
+schedule = "0 14 * * 1-5"
+prompt = "Check the deployment status"
+timezone = "Australia/Melbourne"
+```
+
+The new cron will start firing on the next minute tick. Similarly, new webhooks become
+accessible immediately, and removed webhooks start returning 404.
+
+!!! note
+    Server settings (`host`, `port`, `rate_limit`) and the `enabled` toggle still
+    require a restart. See the [Triggers reference — Hot-reload](../reference/triggers/triggers.md#hot-reload)
+    for the full list.
+
+## One-shot crons with `run_once`
+
+Set `run_once = true` on a cron to fire once then auto-disable. The cron stays in the TOML but is skipped until the next reload or restart:
+
+```toml
+[[triggers.crons]]
+id = "deploy-check"
+schedule = "0 15 * * *"
+prompt = "Check today's deployment status"
+run_once = true
+```
+
+After the cron fires, the `triggers.cron.run_once_completed` log line confirms the removal. To re-enable, save the TOML again (triggers a reload) or restart the service.
+
+## Delayed runs with `/at`
+
+For ad-hoc one-shot delays, use the `/at` command directly in Telegram — no TOML edit required:
+
+```
+/at 30m Check the build status
+/at 2h Review open PRs
+/at 90s Run the test suite
+```
+
+Duration supports `Ns` / `Nm` / `Nh` with a 60s minimum and 24h maximum. Pending delays are cancelled via `/cancel` and lost on restart. Per-chat cap of 20 pending delays.
+
+## Discovering configured triggers
+
+Once triggers are configured, `/ping` in the targeted chat shows a summary:
+
+```
+🏓 pong — up 2d 4h 12m 3s
+⏰ triggers: 1 cron (daily-review, 9:00 AM daily (Melbourne))
+```
+
+Runs initiated by a trigger show their provenance in the meta footer:
+
+```
+🏷 opus 4.6 · plan · ⏰ cron:daily-review
+```
+
+See the [Triggers reference — Trigger visibility](../reference/triggers/triggers.md#trigger-visibility) for details.
 
 ## Security notes
 

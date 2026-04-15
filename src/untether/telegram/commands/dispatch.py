@@ -113,6 +113,8 @@ async def _dispatch_command(
         plugin_config=plugin_config,
         runtime=cfg.runtime,
         executor=executor,
+        trigger_manager=cfg.trigger_manager,
+        default_chat_id=cfg.chat_id,
     )
     try:
         result = await backend.handle(ctx)
@@ -155,6 +157,25 @@ async def _dispatch_callback(
     callback_query_id: str | None = None,
 ) -> None:
     """Dispatch a callback query to a command backend."""
+    # Validate sender in group chats — prevent unauthorised users pressing
+    # another user's approval buttons (#192).
+    if (
+        cfg.allowed_user_ids
+        and msg.sender_id is not None
+        and msg.sender_id not in cfg.allowed_user_ids
+    ):
+        logger.warning(
+            "callback.sender_not_allowed",
+            chat_id=msg.chat_id,
+            sender_id=msg.sender_id,
+            command=command_id,
+        )
+        if callback_query_id is not None:
+            await cfg.bot.answer_callback_query(
+                callback_query_id, text="Not authorised"
+            )
+        return
+
     allowlist = cfg.runtime.allowlist
     chat_id = msg.chat_id
     user_msg_id = msg.message_id
@@ -231,6 +252,8 @@ async def _dispatch_callback(
             plugin_config=plugin_config,
             runtime=cfg.runtime,
             executor=executor,
+            trigger_manager=cfg.trigger_manager,
+            default_chat_id=cfg.chat_id,
         )
         try:
             result = await backend.handle(ctx)

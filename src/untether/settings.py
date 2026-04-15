@@ -175,6 +175,7 @@ class WatchdogSettings(BaseModel):
     stall_repeat_seconds: float = Field(default=180.0, ge=30, le=600)
     tool_timeout: float = Field(default=600.0, ge=60, le=7200)
     mcp_tool_timeout: float = Field(default=900.0, ge=60, le=7200)
+    subagent_timeout: float = Field(default=900.0, ge=60, le=7200)
 
 
 class ProgressSettings(BaseModel):

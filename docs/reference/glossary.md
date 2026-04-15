@@ -82,3 +82,14 @@ Quick definitions for terms used throughout the Untether documentation.
 
 **Trigger**
 :   A webhook or cron rule that starts a run without a Telegram message. Triggers let external systems (GitHub, CI, schedulers) send tasks to Untether.
+
+**Hot-reload**
+:   Applying configuration changes without restarting Untether. Requires `watch_config = true`. Hot-reloadable settings include trigger crons/webhooks, voice transcription, file transfer, and `allowed_user_ids`. Structural settings like `bot_token`, `chat_id`, and `session_mode` require a restart.
+
+## Scheduling & triggers
+
+**Delayed run**
+:   A one-shot run scheduled via `/at <duration> <prompt>`. The prompt executes after the specified delay (60 seconds to 24 hours). Pending delays are held in memory and lost on restart. Per-chat cap of 20.
+
+**Webhook action**
+:   A lightweight action a webhook performs without spawning an agent run. Available actions: `file_write` (save POST body to disk), `http_forward` (relay payload to another URL), and `notify_only` (send a Telegram message). The default action (`agent_run`) starts a full agent session.

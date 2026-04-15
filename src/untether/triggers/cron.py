@@ -3,12 +3,13 @@
 from __future__ import annotations
 
 import datetime
+from zoneinfo import ZoneInfo
 
 import anyio
 
 from ..logging import get_logger
 from .dispatcher import TriggerDispatcher
-from .settings import CronConfig
+from .manager import TriggerManager
 
 logger = get_logger(__name__)
 
@@ -63,31 +64,71 @@ def cron_matches(expression: str, now: datetime.datetime) -> bool:
     )
 
 
+def _resolve_now(
+    utc_now: datetime.datetime,
+    cron_tz: str | None,
+    default_tz: str | None,
+) -> datetime.datetime:
+    """Return the wall-clock datetime for cron matching.
+
+    If a timezone is configured (per-cron or global default), converts UTC *now*
+    to that timezone.  Otherwise falls back to system local time (backward compat).
+    """
+    tz_name = cron_tz or default_tz
+    if tz_name is not None:
+        return utc_now.astimezone(ZoneInfo(tz_name))
+    # No timezone configured — use system local time (strip tzinfo for compat).
+    return utc_now.astimezone().replace(tzinfo=None)
+
+
 async def run_cron_scheduler(
-    crons: list[CronConfig],
+    manager: TriggerManager,
     dispatcher: TriggerDispatcher,
 ) -> None:
-    """Tick every minute and dispatch crons whose schedule matches."""
-    logger.info("triggers.cron.started", crons=len(crons))
-    last_fired: dict[str, tuple[int, int]] = {}  # cron_id -> (hour, minute)
+    """Tick every minute and dispatch crons whose schedule matches.
+
+    Reads ``manager.crons`` and ``manager.default_timezone`` on each tick
+    so that config hot-reloads take effect immediately.
+    """
+    logger.info("triggers.cron.started", crons=len(manager.crons))
+    # Key the minute fully (year, month, day, hour, minute). A bare (hour, minute)
+    # key would suppress every subsequent day's run because tomorrow's 09:00 looks
+    # identical to today's. See #309 CodeRabbit feedback (Critical).
+    last_fired: dict[str, tuple[int, int, int, int, int]] = {}
 
     while True:
-        now = datetime.datetime.now()
+        utc_now = datetime.datetime.now(datetime.UTC)
+        # Snapshot the cron list for this tick — safe even if update()
+        # replaces manager._crons mid-iteration (new list, old ref valid).
+        crons = manager.crons
+        default_timezone = manager.default_timezone
         for cron in crons:
             try:
-                matched = cron_matches(cron.schedule, now)
+                local_now = _resolve_now(utc_now, cron.timezone, default_timezone)
+                matched = cron_matches(cron.schedule, local_now)
             except Exception:
                 logger.exception("triggers.cron.match_failed", cron_id=cron.id)
                 continue
             if matched:
-                key = (now.hour, now.minute)
+                key = (
+                    local_now.year,
+                    local_now.month,
+                    local_now.day,
+                    local_now.hour,
+                    local_now.minute,
+                )
                 if last_fired.get(cron.id) == key:
                     continue  # already fired this minute
                 last_fired[cron.id] = key
                 logger.info("triggers.cron.firing", cron_id=cron.id)
                 await dispatcher.dispatch_cron(cron)
+                # #288: one-shot crons are removed from the active list
+                # after firing; they stay in the TOML and re-activate on
+                # the next config reload or restart.
+                if cron.run_once:
+                    manager.remove_cron(cron.id)
 
         # Sleep until next minute boundary (+ small buffer).
-        now = datetime.datetime.now()
-        sleep_s = 60 - now.second + 0.1
+        utc_now = datetime.datetime.now(datetime.UTC)
+        sleep_s = 60 - utc_now.second + 0.1
         await anyio.sleep(sleep_s)

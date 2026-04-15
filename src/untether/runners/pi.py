@@ -412,7 +412,7 @@ class PiRunner(ResumeTokenMixin, JsonlSubprocessRunner):
             args.append("--continue")
         else:
             args.extend(["--session", state.resume.value])
-        args.append(self._sanitize_prompt(prompt))
+        args.append(self.sanitize_prompt(prompt))
         return args
 
     def stdin_payload(
@@ -560,11 +560,6 @@ class PiRunner(ResumeTokenMixin, JsonlSubprocessRunner):
         filename = f"{safe_timestamp}_{token}.jsonl"
         return str(session_dir / filename)
 
-    def _sanitize_prompt(self, prompt: str) -> str:
-        if prompt.startswith("-"):
-            return f" {prompt}"
-        return prompt
-
     def _quote_token(self, token: str) -> str:
         if not token:
             return token
@@ -593,16 +588,31 @@ def build_runner(config: EngineConfig, config_path: Path) -> Runner:
     ):
         extra_args = list(extra_args_value)
     else:
+        logger.warning(
+            "pi.config.invalid",
+            error="extra_args must be a list of strings",
+            config_path=str(config_path),
+        )
         raise ConfigError(
             f"Invalid `pi.extra_args` in {config_path}; expected a list of strings."
         )
 
     model = config.get("model")
     if model is not None and not isinstance(model, str):
+        logger.warning(
+            "pi.config.invalid",
+            error="model must be a string",
+            config_path=str(config_path),
+        )
         raise ConfigError(f"Invalid `pi.model` in {config_path}; expected a string.")
 
     provider = config.get("provider")
     if provider is not None and not isinstance(provider, str):
+        logger.warning(
+            "pi.config.invalid",
+            error="provider must be a string",
+            config_path=str(config_path),
+        )
         raise ConfigError(f"Invalid `pi.provider` in {config_path}; expected a string.")
 
     return PiRunner(

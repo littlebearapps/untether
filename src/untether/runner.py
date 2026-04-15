@@ -303,6 +303,18 @@ class JsonlSubprocessRunner(BaseRunner):
         message = f"invalid JSON from {self.tag()}; ignoring line"
         return [self.note_event(message, state=state, detail={"line": line})]
 
+    @staticmethod
+    def sanitize_prompt(prompt: str) -> str:
+        """Prevent flag injection by prepending a space to flag-like prompts.
+
+        If a user prompt starts with ``-``, CLI argument parsers may interpret
+        it as a flag.  Prepending a space neutralises this without altering the
+        prompt semantics for the engine.
+        """
+        if prompt.startswith("-"):
+            return f" {prompt}"
+        return prompt
+
     def decode_jsonl(self, *, line: bytes) -> Any | None:
         text = line.decode("utf-8", errors="replace")
         try:

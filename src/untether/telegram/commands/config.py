@@ -48,17 +48,23 @@ def _toggle_row(
     on_data: str,
     off_data: str,
     clr_data: str,
+    compact: bool = False,
 ) -> list[dict[str, str]]:
-    """Build a 2-button toggle row: [Label: state checkmark] [Clear]."""
+    """Build a 3-button selection row: [On] [Off] [Clear] with ✓ on active.
+
+    When *compact* is False (single-toggle pages), buttons show just On/Off.
+    When *compact* is True (multi-toggle pages), buttons include the label.
+    """
     effective = current if current is not None else default
-    if effective:
-        toggle_text = f"✓ {label}: on"
-        toggle_data = off_data  # clicking toggles OFF
+    if compact:
+        on_text = _check(f"{label}: on", active=effective)
+        off_text = _check(f"{label}: off", active=not effective)
     else:
-        toggle_text = f"{label}: off"
-        toggle_data = on_data  # clicking toggles ON
+        on_text = _check("On", active=effective)
+        off_text = _check("Off", active=not effective)
     return [
-        {"text": toggle_text, "callback_data": toggle_data},
+        {"text": on_text, "callback_data": on_data},
+        {"text": off_text, "callback_data": off_data},
         {"text": "Clear", "callback_data": clr_data},
     ]
 
@@ -169,6 +175,8 @@ async def _page_home(ctx: CommandContext) -> None:
         DIFF_PREVIEW_SUPPORTED_ENGINES,
         PERMISSION_MODE_SUPPORTED_ENGINES,
         SUBSCRIPTION_USAGE_SUPPORTED_ENGINES,
+        get_engine_default_reasoning,
+        get_reasoning_label,
         supports_reasoning,
     )
     from .verbose import get_verbosity_override
@@ -344,12 +352,14 @@ async def _page_home(ctx: CommandContext) -> None:
     lines.append(f"Model: <b>{model_label}</b>{model_hint}")
     lines.append(f"Trigger: <b>{trigger_label}</b>{_home_hint('tr', trigger_label)}")
     if show_reasoning:
-        lines.append(
-            f"Reasoning: <b>{reasoning_label}</b>{_home_hint('rs', reasoning_label)}"
-        )
+        home_rs_label = get_reasoning_label(current_engine)
+        if reasoning_label == "default":
+            engine_default = get_engine_default_reasoning(current_engine)
+            rs_hint = f"  · {engine_default}" if engine_default else ""
+        else:
+            rs_hint = _home_hint("rs", reasoning_label)
+        lines.append(f"{home_rs_label}: <b>{reasoning_label}</b>{rs_hint}")
 
-    _DOCS_SETTINGS = f"{_DOCS_BASE}inline-settings/"
-    _DOCS_TROUBLE = f"{_DOCS_BASE}troubleshooting/"
     _HELP_URL = (
         "https://github.com/littlebearapps/untether?tab=readme-ov-file#-help-guides"
     )
@@ -357,10 +367,6 @@ async def _page_home(ctx: CommandContext) -> None:
         "https://github.com/littlebearapps/untether?tab=readme-ov-file#-contributing"
     )
     lines.append("")
-    lines.append(
-        f'📖 <a href="{_DOCS_SETTINGS}">Settings guide</a>'
-        f' · <a href="{_DOCS_TROUBLE}">Troubleshooting</a>'
-    )
     lines.append(
         f'📖 <a href="{_HELP_URL}">Help guides</a>'
         f' · 🐛 <a href="{_BUG_URL}">Report a bug</a>'
@@ -396,7 +402,7 @@ async def _page_home(ctx: CommandContext) -> None:
         )
         buttons.append(
             [
-                {"text": "🧠 Reasoning", "callback_data": "config:rs"},
+                {"text": f"🧠 {home_rs_label}", "callback_data": "config:rs"},
                 {"text": "ℹ️ About", "callback_data": "config:ab"},
             ]
         )
@@ -420,7 +426,7 @@ async def _page_home(ctx: CommandContext) -> None:
         )
         buttons.append(
             [
-                {"text": "🧠 Reasoning", "callback_data": "config:rs"},
+                {"text": f"🧠 {home_rs_label}", "callback_data": "config:rs"},
                 {"text": "ℹ️ About", "callback_data": "config:ab"},
             ]
         )
@@ -460,7 +466,7 @@ async def _page_home(ctx: CommandContext) -> None:
         )
         row3 = [{"text": "📡 Trigger", "callback_data": "config:tr"}]
         if show_reasoning:
-            row3.append({"text": "🧠 Reasoning", "callback_data": "config:rs"})
+            row3.append({"text": f"🧠 {home_rs_label}", "callback_data": "config:rs"})
         buttons.append(row3)
         buttons.append([{"text": "ℹ️ About", "callback_data": "config:ab"}])
 
@@ -1042,6 +1048,7 @@ _RS_ACTIONS: dict[str, str] = {
     "med": "medium",
     "hi": "high",
     "xhi": "xhigh",
+    "max": "max",
 }
 
 _RS_LABELS: dict[str, str] = {v: k for k, v in _RS_ACTIONS.items()}
@@ -1052,6 +1059,7 @@ async def _page_reasoning(ctx: CommandContext, action: str | None = None) -> Non
     from ..engine_overrides import (
         EngineOverrides,
         allowed_reasoning_levels,
+        get_reasoning_label,
         supports_reasoning,
     )
 
@@ -1079,6 +1087,20 @@ async def _page_reasoning(ctx: CommandContext, action: str | None = None) -> Non
 
     if action in _RS_ACTIONS:
         level = _RS_ACTIONS[action]
+        # Defensive: only render-time UI exposes engine-allowed levels, but
+        # crafted callback_data could try to persist e.g. `max` on Codex.
+        # Reject anything outside the engine's allow list. #309 CodeRabbit.
+        allowed = allowed_reasoning_levels(current_engine)
+        if level not in allowed:
+            logger.warning(
+                "config.reasoning.unsupported_level",
+                chat_id=chat_id,
+                engine=current_engine,
+                level=level,
+                allowed=sorted(allowed),
+            )
+            await _page_home(ctx)
+            return
         current = await prefs.get_engine_override(chat_id, current_engine)
         updated = EngineOverrides(
             model=current.model if current else None,
@@ -1124,9 +1146,15 @@ async def _page_reasoning(ctx: CommandContext, action: str | None = None) -> Non
         await _page_home(ctx)
         return
 
+    from ..engine_overrides import get_engine_default_reasoning
+
     override = await prefs.get_engine_override(chat_id, current_engine)
     reasoning = override.reasoning if override else None
-    current_label = reasoning or "default (from CLI settings)"
+    if reasoning:
+        current_label = reasoning
+    else:
+        engine_default = get_engine_default_reasoning(current_engine)
+        current_label = f"default ({engine_default})" if engine_default else "default"
 
     levels = allowed_reasoning_levels(current_engine)
 
@@ -1138,16 +1166,23 @@ async def _page_reasoning(ctx: CommandContext, action: str | None = None) -> Non
         level_descriptions.append(f"• {' · '.join(present)} — balanced options")
     if "xhigh" in levels:
         level_descriptions.append("• <b>xhigh</b> — most thorough (slowest)")
+    if "max" in levels:
+        level_descriptions.append(
+            "• <b>max</b> — deepest thinking (slowest, costliest)"
+        )
+
+    rs_label = get_reasoning_label(current_engine)
+    rs_label_lower = rs_label.lower()
 
     lines = [
-        "<b>🧠 Reasoning</b>",
+        f"<b>🧠 {rs_label}</b>",
         "",
         "How deeply the model thinks before answering.",
         "Higher = more thorough but slower and costlier.",
         "",
         *level_descriptions,
         "",
-        "ℹ️ <i>Default: uses engine's own reasoning level</i>",
+        f"ℹ️ <i>Default: uses engine's own {rs_label_lower} level</i>",
         "",
         f"Engine: <b>{current_engine}</b>",
         f"Current: <b>{current_label}</b>",
@@ -1162,6 +1197,7 @@ async def _page_reasoning(ctx: CommandContext, action: str | None = None) -> Non
         "medium": ("Medium", "med"),
         "high": ("High", "hi"),
         "xhigh": ("Xhigh", "xhi"),
+        "max": ("Max", "max"),
     }
     level_buttons: list[dict[str, str]] = []
     for level in levels:
@@ -1606,6 +1642,7 @@ async def _page_cost_usage(ctx: CommandContext, action: str | None = None) -> No
                 on_data="config:cu:ac_on",
                 off_data="config:cu:ac_off",
                 clr_data="config:cu:ac_clr",
+                compact=True,
             )
         )
 
@@ -1618,6 +1655,7 @@ async def _page_cost_usage(ctx: CommandContext, action: str | None = None) -> No
                 on_data="config:cu:su_on",
                 off_data="config:cu:su_off",
                 clr_data="config:cu:su_clr",
+                compact=True,
             )
         )
 
@@ -1629,6 +1667,7 @@ async def _page_cost_usage(ctx: CommandContext, action: str | None = None) -> No
             on_data="config:cu:bg_on",
             off_data="config:cu:bg_off",
             clr_data="config:cu:bg_clr",
+            compact=True,
         )
     )
     buttons.append(
@@ -1639,6 +1678,7 @@ async def _page_cost_usage(ctx: CommandContext, action: str | None = None) -> No
             on_data="config:cu:bc_on",
             off_data="config:cu:bc_off",
             clr_data="config:cu:bc_clr",
+            compact=True,
         )
     )
 
@@ -1836,6 +1876,7 @@ class ConfigCommand:
                 "med": "Reasoning: medium",
                 "hi": "Reasoning: high",
                 "xhi": "Reasoning: xhigh",
+                "max": "Reasoning: max",
                 "clr": "Reasoning: cleared",
             },
             "aq": {

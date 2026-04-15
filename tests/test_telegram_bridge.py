@@ -969,6 +969,54 @@ async def test_handle_callback_cancel_without_task_acknowledges() -> None:
     assert "nothing is currently running" in bot.callback_calls[-1]["text"].lower()
 
 
+@pytest.mark.anyio
+async def test_handle_callback_cancel_rejected_for_unauthorised_sender() -> None:
+    """Cancel callback from an unauthorised user is rejected (#192)."""
+    transport = FakeTransport()
+    cfg = replace(make_cfg(transport), allowed_user_ids=(999,))
+    progress_id = 42
+    running_task = RunningTask()
+    running_tasks = {MessageRef(channel_id=123, message_id=progress_id): running_task}
+    query = TelegramCallbackQuery(
+        transport="telegram",
+        chat_id=123,
+        message_id=progress_id,
+        callback_query_id="cbq-unauth",
+        data="untether:cancel",
+        sender_id=123,  # NOT in allowed_user_ids
+    )
+
+    await handle_callback_cancel(cfg, query, running_tasks)
+
+    assert running_task.cancel_requested.is_set() is False
+    bot = cast(FakeBot, cfg.bot)
+    assert bot.callback_calls
+    assert bot.callback_calls[-1]["text"] == "Not authorised"
+
+
+@pytest.mark.anyio
+async def test_handle_callback_cancel_allowed_when_no_restriction() -> None:
+    """Cancel callback works when allowed_user_ids is empty (default)."""
+    transport = FakeTransport()
+    cfg = make_cfg(transport)
+    assert cfg.allowed_user_ids == ()
+    progress_id = 42
+    running_task = RunningTask()
+    running_tasks = {MessageRef(channel_id=123, message_id=progress_id): running_task}
+    query = TelegramCallbackQuery(
+        transport="telegram",
+        chat_id=123,
+        message_id=progress_id,
+        callback_query_id="cbq-open",
+        data="untether:cancel",
+        sender_id=123,
+    )
+
+    await handle_callback_cancel(cfg, query, running_tasks)
+
+    assert running_task.cancel_requested.is_set() is True
+
+
 def test_allowed_chat_ids_include_allowed_user_ids() -> None:
     cfg = replace(make_cfg(FakeTransport()), allowed_user_ids=(42,))
     allowed = telegram_loop._allowed_chat_ids(cfg)

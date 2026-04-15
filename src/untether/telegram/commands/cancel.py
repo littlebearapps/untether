@@ -65,6 +65,18 @@ async def handle_cancel(
                     text="multiple jobs queued — reply to the progress message to cancel a specific one."
                 )
                 return
+        # Check pending /at delays for this chat (#288).
+        from .. import at_scheduler
+
+        pending_at = at_scheduler.cancel_pending_for_chat(chat_id)
+        if pending_at:
+            await reply(
+                text=(
+                    f"\u274c cancelled {pending_at} pending /at run"
+                    f"{'s' if pending_at != 1 else ''}."
+                )
+            )
+            return
         logger.debug("cancel.nothing_running", chat_id=chat_id)
         await reply(text="nothing running in this chat.")
         return
@@ -100,6 +112,24 @@ async def handle_callback_cancel(
     running_tasks: RunningTasks,
     scheduler: ThreadScheduler | None = None,
 ) -> None:
+    # Validate sender in group chats — prevent unauthorised users cancelling
+    # another user's running task (#192).
+    if (
+        cfg.allowed_user_ids
+        and query.sender_id is not None
+        and query.sender_id not in cfg.allowed_user_ids
+    ):
+        logger.warning(
+            "cancel.sender_not_allowed",
+            chat_id=query.chat_id,
+            sender_id=query.sender_id,
+        )
+        await cfg.bot.answer_callback_query(
+            callback_query_id=query.callback_query_id,
+            text="Not authorised",
+        )
+        return
+
     progress_ref = MessageRef(channel_id=query.chat_id, message_id=query.message_id)
     running_task = running_tasks.get(progress_ref)
     if running_task is None:

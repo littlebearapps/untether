@@ -4,6 +4,10 @@ from __future__ import annotations
 
 import time
 
+from ..logging import get_logger
+
+logger = get_logger(__name__)
+
 
 class TokenBucketLimiter:
     """Simple token-bucket rate limiter.
@@ -26,4 +30,9 @@ class TokenBucketLimiter:
             self._buckets[key] = (tokens - 1.0, now)
             return True
         self._buckets[key] = (tokens, now)
+        # Logged at debug to avoid flooding logs (and feeding the issue
+        # watcher) on persistent burst attempts. Per-request denial visibility
+        # is not actionable; the HTTP 429 response carries the signal that
+        # matters. #309 CodeRabbit feedback.
+        logger.debug("rate_limit.denied", key=key, tokens=tokens)
         return False

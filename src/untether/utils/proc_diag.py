@@ -25,6 +25,8 @@ class ProcessDiag:
     tcp_established: int = 0
     tcp_total: int = 0
     child_pids: list[int] = field(default_factory=list)
+    tree_cpu_utime: int | None = None  # sum of utime for pid + descendants
+    tree_cpu_stime: int | None = None  # sum of stime for pid + descendants
 
 
 def _is_alive(pid: int) -> bool:
@@ -119,6 +121,36 @@ def _find_children(pid: int) -> list[int]:
     return children
 
 
+def _find_descendants(pid: int, *, _depth: int = 0, _max_depth: int = 4) -> list[int]:
+    """Find all descendant PIDs recursively (depth-limited)."""
+    if _depth >= _max_depth:
+        return []
+    children = _find_children(pid)
+    descendants = list(children)
+    for child in children:
+        descendants.extend(
+            _find_descendants(child, _depth=_depth + 1, _max_depth=_max_depth)
+        )
+    return descendants
+
+
+def _collect_tree_cpu(
+    utime: int | None, stime: int | None, descendants: list[int]
+) -> tuple[int | None, int | None]:
+    """Sum CPU ticks across process + all descendants."""
+    if utime is None or stime is None:
+        return None, None
+    tree_utime = utime
+    tree_stime = stime
+    for desc_pid in descendants:
+        _, d_utime, d_stime = _read_stat(desc_pid)
+        if d_utime is not None:
+            tree_utime += d_utime
+        if d_stime is not None:
+            tree_stime += d_stime
+    return tree_utime, tree_stime
+
+
 def collect_proc_diag(pid: int) -> ProcessDiag | None:
     """Collect process diagnostics from /proc. Returns None on non-Linux."""
     if sys.platform != "linux":
@@ -133,6 +165,8 @@ def collect_proc_diag(pid: int) -> ProcessDiag | None:
     fd_count = _count_fds(pid)
     tcp_est, tcp_total = _count_tcp(pid)
     children = _find_children(pid)
+    descendants = _find_descendants(pid)
+    tree_utime, tree_stime = _collect_tree_cpu(utime, stime, descendants)
 
     return ProcessDiag(
         pid=pid,
@@ -146,6 +180,8 @@ def collect_proc_diag(pid: int) -> ProcessDiag | None:
         tcp_established=tcp_est,
         tcp_total=tcp_total,
         child_pids=children,
+        tree_cpu_utime=tree_utime,
+        tree_cpu_stime=tree_stime,
     )
 
 
@@ -195,4 +231,25 @@ def is_cpu_active(prev: ProcessDiag | None, curr: ProcessDiag | None) -> bool | 
         return None
     prev_total = prev.cpu_utime + prev.cpu_stime
     curr_total = curr.cpu_utime + curr.cpu_stime
+    return curr_total > prev_total
+
+
+def is_tree_cpu_active(
+    prev: ProcessDiag | None, curr: ProcessDiag | None
+) -> bool | None:
+    """True if aggregate CPU ticks across pid + descendants increased.
+
+    Returns None if either snapshot lacks tree CPU data.
+    """
+    if prev is None or curr is None:
+        return None
+    if (
+        prev.tree_cpu_utime is None
+        or prev.tree_cpu_stime is None
+        or curr.tree_cpu_utime is None
+        or curr.tree_cpu_stime is None
+    ):
+        return None
+    prev_total = prev.tree_cpu_utime + prev.tree_cpu_stime
+    curr_total = curr.tree_cpu_utime + curr.tree_cpu_stime
     return curr_total > prev_total

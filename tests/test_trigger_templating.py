@@ -2,7 +2,11 @@
 
 from __future__ import annotations
 
-from untether.triggers.templating import _UNTRUSTED_PREFIX, render_prompt
+from untether.triggers.templating import (
+    _UNTRUSTED_PREFIX,
+    render_prompt,
+    render_template_fields,
+)
 
 
 class TestRenderPrompt:
@@ -58,3 +62,25 @@ class TestRenderPrompt:
         payload = {"nested": {"key": "val"}}
         result = render_prompt("{{nested}}", payload)
         assert "key" in result
+
+
+class TestRenderTemplateFields:
+    """Tests for render_template_fields (no untrusted prefix)."""
+
+    def test_substitution(self):
+        result = render_template_fields("batch-{{id}}.json", {"id": "42"})
+        assert result == "batch-42.json"
+
+    def test_no_untrusted_prefix(self):
+        result = render_template_fields("Hello {{name}}", {"name": "World"})
+        assert not result.startswith(_UNTRUSTED_PREFIX)
+        assert result == "Hello World"
+
+    def test_nested_path(self):
+        payload = {"data": {"batch": "b1"}}
+        result = render_template_fields("{{data.batch}}", payload)
+        assert result == "b1"
+
+    def test_missing_field_renders_empty(self):
+        result = render_template_fields("pre-{{missing}}-post", {})
+        assert result == "pre--post"

@@ -38,6 +38,14 @@ Untether adds interactive permission control, plan mode support, and several UX 
 - **Progress persistence** — active progress messages persisted to `active_progress.json`; on restart, orphan messages edited to "⚠️ interrupted by restart" with keyboard removed
 - **Resume line formatting** — visual separation with blank line and ↩️ prefix in final message footer
 - **`/continue`** — cross-environment resume; pick up the most recent CLI session from Telegram using each engine's native continue flag (`--continue`, `resume --last`, `--resume latest`); supported for Claude, Codex, OpenCode, Pi, Gemini (not AMP)
+- **Timezone-aware cron triggers** — per-cron `timezone` or global `default_timezone` with IANA names (e.g. `Australia/Melbourne`); DST-aware via `zoneinfo`; invalid names rejected at config parse time
+- **Hot-reload trigger configuration** — editing `untether.toml` applies cron/webhook changes immediately without restart; `TriggerManager` holds mutable state that the cron scheduler and webhook server reference at runtime; `handle_reload()` re-parses `[triggers]` on config file change
+- **Hot-reload Telegram bridge settings** — `voice_transcription`, file transfer, `allowed_user_ids`, timing, and `show_resume_line` settings reload without restart; `TelegramBridgeConfig` unfrozen (slots kept) with `update_from()` wired into `handle_reload()`; restart-only keys (`bot_token`, `chat_id`, `session_mode`, `topics`, `message_overflow`) still warn
+- **`/at` command** — one-shot delayed runs: `/at 30m <prompt>` schedules a prompt to run in 60s–24h; `/cancel` drops pending delays before firing; lost on restart (documented) with a per-chat cap of 20 pending delays; `telegram/at_scheduler.py` holds task-group + run_job refs
+- **`run_once` cron flag** — `[[triggers.crons]]` entries can set `run_once = true` to fire once then auto-disable; cron stays in TOML and re-activates on config reload or restart
+- **Trigger visibility (Tier 1)** — `/ping` shows per-chat trigger summary (`⏰ triggers: 1 cron (id, 9:00 AM daily (Melbourne))`); run footer shows `⏰ cron:<id>` / `⚡ webhook:<id>` for trigger-initiated runs; new `describe_cron()` utility renders common patterns in plain English
+- **Graceful restart improvements (Tier 1)** — persists Telegram `update_id` to `last_update_id.json` so restarts don't drop/duplicate messages; `Type=notify` systemd integration via stdlib `sd_notify` (`READY=1` + `STOPPING=1`); `RestartSec=2`
+- **`diff_preview` plan bypass (#283)** — after user approves a plan outline via "Pause & Outline Plan", the `_discuss_approved` flag short-circuits diff preview for subsequent Edit/Write tools so no second approval is needed
 
 See `.claude/skills/claude-stream-json/` and `.claude/rules/control-channel.md` for implementation details.
 
@@ -84,6 +92,21 @@ Telegram <-> TelegramPresenter <-> RunnerBridge <-> Runner (claude/codex/opencod
 | `commands.py` | Command result types |
 | `scripts/validate_release.py` | Release validation (changelog format, issue links, version match) |
 | `scripts/healthcheck.sh` | Post-deploy health check (systemd, version, logs, Bot API) |
+| `triggers/manager.py` | TriggerManager: mutable cron/webhook holder for hot-reload; atomic config swap on TOML change; `crons_for_chat`, `webhooks_for_chat`, `remove_cron` helpers |
+| `triggers/describe.py` | `describe_cron(schedule, timezone)` utility for human-friendly cron rendering |
+| `telegram/at_scheduler.py` | `/at` command state: pending one-shot delays with cancel scopes, install/uninstall, cancel per chat |
+| `telegram/commands/at.py` | `/at` command backend — parses Ns/Nm/Nh, schedules delayed run |
+| `telegram/offset_persistence.py` | Persist Telegram `update_id` across restarts; `DebouncedOffsetWriter` |
+| `sdnotify.py` | Stdlib `sd_notify` client for `READY=1`/`STOPPING=1` systemd signals |
+| `triggers/server.py` | Webhook HTTP server (aiohttp); multipart parsing from cached body, fire-and-forget dispatch |
+| `triggers/dispatcher.py` | Routes webhooks/crons to `run_job()` or non-agent action handlers |
+| `triggers/cron.py` | Cron expression parser, timezone-aware scheduler loop |
+| `triggers/actions.py` | Non-agent webhook actions: file_write (multipart short-circuit), http_forward, notify_only |
+| `triggers/fetch.py` | Cron data-fetch: HTTP GET/POST, file read, response parsing, prompt building |
+| `triggers/rate_limit.py` | Token-bucket rate limiter (per-webhook + global) |
+| `triggers/ssrf.py` | SSRF protection for outbound HTTP requests (IP blocking, DNS validation, URL scheme check) |
+| `triggers/auth.py` | Bearer token and HMAC-SHA256/SHA1 webhook auth verification |
+| `triggers/settings.py` | CronConfig/WebhookConfig/CronFetchConfig/TriggersSettings models, timezone validation |
 | `cliff.toml` | git-cliff config for changelog drafting |
 
 ## Reference docs
@@ -152,14 +175,15 @@ Rules in `.claude/rules/` auto-load when editing matching files:
 | `testing-conventions.md` | `tests/**` | pytest+anyio, stub patterns, 80% coverage threshold |
 | `release-discipline.md` | `CHANGELOG.md`, `pyproject.toml` | GitHub issue linking, changelog format, semantic versioning |
 | `dev-workflow.md` | `src/untether/**` | Dev vs staging separation, never restart staging for testing, always use untether-dev |
+| `context-quality.md` | AI context files (`CLAUDE.md`, `AGENTS.md`, etc.) | Cross-file consistency, path verification, version accuracy, command accuracy |
 
 ## Tests
 
-1818 unit tests, 80% coverage threshold. Integration testing against `@untether_dev_bot` is **mandatory before every release** — see `docs/reference/integration-testing.md` for the full playbook with per-release-type tier requirements (patch/minor/major). All integration test tiers are fully automated by Claude Code via Telegram MCP tools and Bash.
+2165 unit tests, 80% coverage threshold. Integration testing against `@untether_dev_bot` is **mandatory before every release** — see `docs/reference/integration-testing.md` for the full playbook with per-release-type tier requirements (patch/minor/major). All integration test tiers are fully automated by Claude Code via Telegram MCP tools and Bash.
 
 Key test files:
 
-- `test_claude_control.py` — 94 tests: control requests, response routing, registry lifecycle, auto-approve/auto-deny, tool auto-approve, custom deny messages, discuss action, early toast, progressive cooldown, auto permission mode
+- `test_claude_control.py` — 99 tests: control requests, response routing, registry lifecycle, auto-approve/auto-deny, tool auto-approve, custom deny messages, discuss action, early toast, progressive cooldown, auto permission mode, diff_preview plan bypass
 - `test_callback_dispatch.py` — 26 tests: callback parsing, dispatch toast/ephemeral behaviour, early answering
 - `test_exec_bridge.py` — 140 tests: ephemeral notification cleanup, approval push notifications, progressive stall warnings, stall diagnostics, stall auto-cancel with CPU-active suppression (sleeping-process aware), tool-active repeat suppression, approval-aware stall threshold, MCP tool stall threshold, frozen ring buffer hung escalation, session summary, PID/stream threading, auto-continue detection, signal death suppression
 - `test_ask_user_question.py` — 29 tests: AskUserQuestion control request handling, question extraction, pending request registry, answer routing, option button rendering, multi-question flows, structured answer responses, ask mode toggle auto-deny
@@ -178,12 +202,27 @@ Key test files:
 - `test_config_command.py` — 218 tests: home page, plan mode/ask mode/verbose/engine/trigger/model/reasoning sub-pages, toggle actions, callback vs command routing, button layout, engine-aware visibility, default resolution
 - `test_pi_compaction.py` — 6 tests: compaction start/end, aborted, no tokens, sequence
 - `test_proc_diag.py` — 24 tests: format_diag, is_cpu_active, collect_proc_diag (Linux /proc reads), ProcessDiag defaults
-- `test_exec_runner.py` — 28 tests: event tracking (event_count, recent_events ring buffer, PID in StartedEvent meta), JsonlStreamState defaults
-- `test_build_args.py` — 40 tests: CLI argument construction for all 6 engines, model/reasoning/permission flags
+- `test_exec_runner.py` — 22 tests: event tracking (event_count, recent_events ring buffer, PID in StartedEvent meta), JsonlStreamState defaults
+- `test_build_args.py` — 42 tests: CLI argument construction for all 6 engines, model/reasoning/permission flags
 - `test_telegram_files.py` — 17 tests: file helpers, deduplication, deny globs, default upload paths
 - `test_telegram_file_transfer_helpers.py` — 48 tests: `/file put` and `/file get` command handling, media groups, force overwrite
 - `test_loop_coverage.py` — 29 tests: update loop edge cases, message routing, callback dispatch, shutdown integration
 - `test_telegram_topics_command.py` — 16 tests: `/new` cancellation (cancel helper, chat/topic modes, running task cleanup), `/ctx` binding, `/topic` command
+- `test_trigger_server.py` — 18 tests: health, auth, event filter, multipart (file upload, form fields, size limit, filename sanitisation, auth rejection), rate limit burst 429, fire-and-forget dispatch
+- `test_trigger_actions.py` — 29 tests: file_write (traversal, deny globs, size, conflicts, multipart short-circuit), http_forward (SSRF, retries, headers), notify_only
+- `test_trigger_cron.py` — 21 tests: 5-field cron matching, timezone conversion (Melbourne, DST, per-cron/default override), step validation
+- `test_trigger_settings.py` — 41 tests: CronConfig/WebhookConfig/CronFetchConfig/TriggersSettings validation, action fields, multipart defaults, timezone
+- `test_trigger_ssrf.py` — 73 tests: IPv4/IPv6 blocking, URL validation, DNS resolution, allowlist overrides
+- `test_trigger_fetch.py` — 12 tests: HTTP GET/POST, file read, parse modes, failure handling, prompt building
+- `test_trigger_auth.py` — 12 tests: bearer token, HMAC-SHA256/SHA1, timing-safe comparison
+- `test_trigger_rate_limit.py` — 5 tests: token bucket fill/drain, per-key isolation, refill timing
+- `test_trigger_manager.py` — 23 tests: TriggerManager init/update/clear, webhook server hot-reload (add/remove/update routes, secret changes, health count), cron schedule swapping, timezone updates; rc4 helpers (crons_for_chat, webhooks_for_chat, cron_ids, webhook_ids, remove_cron, atomic iteration)
+- `test_describe_cron.py` — 31 tests: human-friendly cron rendering (daily, weekday ranges, weekday lists, single day, timezone suffix, fallback to raw, AM/PM boundaries)
+- `test_trigger_meta_line.py` — 6 tests: trigger source rendering in `format_meta_line()`, ordering relative to model/effort/permission
+- `test_bridge_config_reload.py` — 11 tests: TelegramBridgeConfig unfrozen (slots preserved), `update_from()` copies all 11 fields, files swap, chat_ids/voice_transcription_api_key edge cases, trigger_manager field default
+- `test_at_command.py` — 34 tests: `/at` parse (valid/invalid suffixes, bounds, case-insensitive), `_format_delay`, schedule/cancel, per-chat cap, scheduler install/uninstall
+- `test_offset_persistence.py` — 15 tests: Telegram update_id round-trip, corrupt JSON handling, atomic write, `DebouncedOffsetWriter` interval/max-pending semantics, explicit flush
+- `test_sdnotify.py` — 7 tests: NOTIFY_SOCKET handling (absent/empty/filesystem/abstract-namespace), send error swallowing, UTF-8 encoding
 
 ## Development
 

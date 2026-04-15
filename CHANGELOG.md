@@ -1,5 +1,108 @@
 # changelog
 
+## v0.35.1 (2026-04-15)
+
+### fixes
+
+- diff preview approval gate no longer blocks edits after a plan is approved — the `_discuss_approved` flag now short-circuits diff preview as well as `ExitPlanMode`, so once the user approves a plan outline the next `Edit`/`Write` runs without a second approval prompt [#283](https://github.com/littlebearapps/untether/issues/283)
+- `scripts/healthcheck.sh` exits prematurely under `set -e` — `pass()`/`fail()` used `((var++))` which returns the pre-increment value, tripping `set -e` on the first call so only the first check ever ran and the script always exited 1. Also, the error-log count piped journalctl through `grep -c .`, which counted `-- No entries --` meta lines as matches, producing false-positive log-error counts on clean systems. Now uses explicit `var=$((var+1))` assignment and filters meta lines with `grep -vc '^-- '` [#302](https://github.com/littlebearapps/untether/issues/302)
+
+- fix multipart webhooks returning HTTP 500 — `_process_webhook` pre-read the request body for size/auth/rate-limit checks, leaving the stream empty when `_parse_multipart` called `request.multipart()`. Now the multipart reader is constructed from the cached raw body, so multipart uploads work end-to-end; also short-circuits the post-parse raw-body write so the MIME envelope isn't duplicated at `file_path` alongside the extracted file at `file_destination` [#280](https://github.com/littlebearapps/untether/issues/280)
+- fix webhook rate limiter never returning 429 — `_process_webhook` awaited the downstream dispatch (Telegram outbox send, `http_forward` network call, etc.) before returning 202, which capped request throughput at the dispatch rate (~1/sec for private Telegram chats) and meant the `TokenBucketLimiter` never saw a real burst. Dispatch is now fire-and-forget with exception logging, so the rate limiter drains the bucket correctly and a burst of 80 requests against `rate_limit = 60` now yields 60 × 202 + 20 × 429 [#281](https://github.com/littlebearapps/untether/issues/281)
+- **security:** validate callback query sender in group chats — reject button presses from unauthorised users; prevents malicious group members from approving/denying other users' tool requests [#192](https://github.com/littlebearapps/untether/issues/192)
+  - also validate sender on cancel button callback — the cancel handler was routed directly, bypassing the dispatch validation
+- **security:** escape release tag name in notify-website CI workflow — use `jq` for proper JSON encoding instead of direct interpolation, preventing JSON injection from crafted tag names [#193](https://github.com/littlebearapps/untether/issues/193)
+- **security:** sanitise flag-like prompts in Gemini and AMP runners — prompts starting with `-` are space-prefixed to prevent CLI flag injection; moved `sanitize_prompt()` to base runner class for all engines [#194](https://github.com/littlebearapps/untether/issues/194)
+- **security:** redact bot token from structured log URLs — `_redact_event_dict` now strips bot tokens embedded in Telegram API endpoint strings, preventing credential leakage to log files and aggregation systems [#190](https://github.com/littlebearapps/untether/issues/190)
+- **security:** cap JSONL line buffer at 10 MB — unbounded `readline()` on engine stdout could consume all available memory if an engine emitted a single very long line (e.g. base64 image in a tool result); now truncates and logs a warning [#191](https://github.com/littlebearapps/untether/issues/191)
+
+- reduce stall warning false positives during Agent subagent work — tree CPU tracking across process descendants, child-aware 15 min threshold when child processes or elevated TCP detected, early diagnostic collection for CPU baseline, total stall warning counter that persists through recovery, improved "Waiting for child processes" notification messages [#264](https://github.com/littlebearapps/untether/issues/264)
+- `/ping` uptime now resets on service restart — previously the module-level start time was cached across `/restart` commands; now `reset_uptime()` is called on each service start [#234](https://github.com/littlebearapps/untether/issues/234)
+- add 38 missing structlog calls across 13 files — comprehensive logging audit covering auth verification, rate limiting, SSRF validation, codex runner lifecycle, topic state mutations, CLI error paths, and config validation in all engine runners [#299](https://github.com/littlebearapps/untether/issues/299)
+- **systemd:** stop Untether being the preferred OOM victim — systemd user services inherit `OOMScoreAdjust=200` and `OOMPolicy=stop` defaults, which made Untether's engine subprocesses preferred earlyoom/kernel OOM killer targets ahead of CLI `claude` (`oom_score_adj=0`) and orphaned grandchildren actually consuming the RAM. `contrib/untether.service` now sets `OOMScoreAdjust=-100` (documents intent; the kernel clamps to the parent baseline for unprivileged users, typically 100) and `OOMPolicy=continue` (a single OOM-killed child no longer tears down the whole unit cgroup, which previously broke every live chat at once). Docs in `docs/reference/dev-instance.md` updated. Existing installs need to copy the unit file and `systemctl --user daemon-reload`; staging picks up the change on the next `scripts/staging.sh install` cycle [#275](https://github.com/littlebearapps/untether/issues/275)
+
+### changes
+
+- **timezone support for cron triggers** — cron schedules can now be evaluated in a specific timezone instead of the server's system time (usually UTC) [#270](https://github.com/littlebearapps/untether/issues/270)
+  - per-cron `timezone` field with IANA timezone names (e.g. `"Australia/Melbourne"`)
+  - global `default_timezone` in `[triggers]` — per-cron `timezone` overrides it
+  - DST-aware via Python's `zoneinfo` module (zero new dependencies)
+  - invalid timezone names rejected at config parse time with clear error messages
+
+- **SSRF protection for trigger outbound requests** — shared utility at `triggers/ssrf.py` blocks private/reserved IP ranges, validates URL schemes, and checks DNS resolution to prevent server-side request forgery in upcoming webhook forwarding and cron data-fetch features [#276](https://github.com/littlebearapps/untether/issues/276)
+  - blocks loopback, RFC 1918, link-local, CGN, multicast, reserved, IPv6 equivalents, and IPv4-mapped IPv6 bypass
+  - DNS resolution validation catches DNS rebinding attacks (hostname → private IP)
+  - configurable allowlist for admins who need to hit local services
+  - timeout and response-size clamping utilities
+
+- **non-agent webhook actions** — webhooks can now perform lightweight actions without spawning an agent run [#277](https://github.com/littlebearapps/untether/issues/277)
+  - `action = "file_write"` — write POST body to disk with atomic writes, path traversal protection, deny-glob enforcement, and on-conflict handling
+  - `action = "http_forward"` — forward payload to another URL with SSRF protection, exponential backoff on 5xx, and header template rendering
+  - `action = "notify_only"` — send a templated Telegram message with no agent run
+  - `notify_on_success` / `notify_on_failure` flags for Telegram visibility on all action types
+  - default `action = "agent_run"` preserves full backward compatibility
+
+- **multipart form data support for webhooks** — webhooks can now accept `multipart/form-data` POSTs with file uploads [#278](https://github.com/littlebearapps/untether/issues/278)
+  - file parts saved with sanitised filenames, atomic writes, deny-glob and path traversal protection
+  - configurable `file_destination` with template variables, `max_file_size_bytes` (default 50 MB)
+  - form fields available as template variables alongside file metadata
+
+- **data-fetch cron triggers** — cron triggers can now pull data from external sources before rendering the prompt [#279](https://github.com/littlebearapps/untether/issues/279)
+  - `fetch.type = "http_get"` / `"http_post"` — fetch URL with SSRF protection, configurable timeout and headers
+  - `fetch.type = "file_read"` — read local file with path traversal protection and deny-globs
+  - `fetch.parse_as` — parse response as `json`, `text`, or `lines`
+  - fetched data injected into `prompt_template` via `store_as` variable (default `fetch_result`)
+  - `on_failure = "abort"` (default) sends failure notification; `"run_with_error"` injects error into prompt
+  - all fetched data prefixed with untrusted-data marker
+
+- **hot-reload for trigger configuration** — editing `untether.toml` `[triggers]` applies changes immediately without restarting Untether or killing active runs [#269](https://github.com/littlebearapps/untether/issues/269) ([#285](https://github.com/littlebearapps/untether/pull/285))
+  - new `TriggerManager` class holds cron and webhook config; scheduler reads `manager.crons` each tick; webhook server resolves routes per-request via `manager.webhook_for_path()`
+  - supports add/remove/modify of crons and webhooks, auth/secret changes, action type, multipart/file settings, cron fetch, and timezones
+  - `last_fired` dict preserved across swaps to prevent double-firing within the same minute
+  - unauthenticated webhooks logged at `WARNING` on reload (previously only at startup)
+  - 13 new tests in `test_trigger_manager.py`; 2038 existing tests still pass
+
+- **hot-reload for Telegram bridge settings** — `voice_transcription`, file transfer, `allowed_user_ids`, `show_resume_line`, and message-timing settings now reload without a restart [#286](https://github.com/littlebearapps/untether/issues/286)
+  - `TelegramBridgeConfig` unfrozen (keeps `slots=True`) and gains an `update_from(settings)` method
+  - `handle_reload()` now applies changes in-place and refreshes cached loop-state copies; restart-only keys (`bot_token`, `chat_id`, `session_mode`, `topics`, `message_overflow`) still warn with `restart_required=true`
+  - `route_update()` reads `cfg.allowed_user_ids` live so allowlist changes take effect on the next message
+
+- **`/at` command for one-shot delayed runs** — schedule a prompt to run between 60s and 24h in the future with `/at 30m Check the build`; accepts `Ns`/`Nm`/`Nh` suffixes [#288](https://github.com/littlebearapps/untether/issues/288)
+  - pending delays tracked in-memory (lost on restart — acceptable for one-shot use)
+  - `/cancel` drops pending `/at` timers before they fire
+  - per-chat cap of 20 pending delays; graceful drain cancels pending scopes on shutdown
+  - new module `telegram/at_scheduler.py`; command registered as `at` entry point
+
+- **`run_once` cron flag** — `[[triggers.crons]]` entries can set `run_once = true` to fire once then auto-disable; the cron stays in the TOML and re-activates on the next config reload or restart [#288](https://github.com/littlebearapps/untether/issues/288)
+
+- **trigger visibility improvements (Tier 1)** — surface configured triggers in the Telegram UI [#271](https://github.com/littlebearapps/untether/issues/271)
+  - `/ping` in a chat with active triggers appends `⏰ triggers: 1 cron (daily-review, 9:00 AM daily (Melbourne))`
+  - trigger-initiated runs show provenance in the meta footer: `🏷 opus 4.6 · plan · ⏰ cron:daily-review`
+  - new `describe_cron(schedule, timezone)` utility renders common cron patterns in plain English; falls back to the raw expression for complex schedules
+  - `RunContext` gains `trigger_source` field; `ProgressTracker.note_event` merges engine meta over the dispatcher-seeded trigger so it survives
+  - `TriggerManager` exposes `crons_for_chat()`, `webhooks_for_chat()`, `cron_ids()`, `webhook_ids()` helpers
+
+- **faster, cleaner restarts (Tier 1)** — restart gap reduced from ~15-30s to ~5s with no lost messages [#287](https://github.com/littlebearapps/untether/issues/287)
+  - persist last Telegram `update_id` to `last_update_id.json` and resume polling from the saved offset on startup; Telegram retains undelivered updates for 24h, so the polling gap no longer drops or re-processes messages
+  - `Type=notify` systemd integration via stdlib `sd_notify` (`socket.AF_UNIX`, no dependency) — `READY=1` is sent after the first `getUpdates` succeeds, `STOPPING=1` at the start of drain
+  - `RestartSec=2` in `contrib/untether.service` (was `10`) — faster restart after drain completes
+  - `contrib/untether.service` also adds `NotifyAccess=main`; existing installs must copy the unit file and `systemctl --user daemon-reload`
+
+### docs
+
+- add update and uninstall guides + README transparency section [#305](https://github.com/littlebearapps/untether/issues/305)
+  - new `docs/how-to/update.md` and `docs/how-to/uninstall.md` covering pipx, pip, and source installs, plus config/data/systemd cleanup
+  - README: "What Untether accesses" section (network, filesystem, process, credentials), update/uninstall one-liners in Quick Start, and cross-links throughout install/how-to pages
+- comprehensive v0.35.1 documentation audit — 8 gap fills across 121 files [#306](https://github.com/littlebearapps/untether/issues/306)
+  - `group-chat.md`: document callback sender validation in groups (#192)
+  - `security.md`: cross-reference button validation, fix misleading SSRF allowlist claim, add bot token auto-redaction tip (#190)
+  - `plan-mode.md`: document auto-approval after plan approval (#283)
+  - `interactive-approval.md`: admonition linking to plan bypass behaviour
+  - `commands-and-directives.md`: `/ping` description now mentions uptime reset and trigger summary (#234)
+  - `runners/amp/runner.md`: add `sanitize_prompt()` note matching Pi/Gemini runners (#194)
+  - `troubleshooting.md`: document 10 MB engine output line cap (#191)
+  - `glossary.md`: add delayed run, webhook action, and hot-reload entries
+
 ## v0.35.0 (2026-03-31)
 
 ### fixes

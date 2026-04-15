@@ -173,13 +173,46 @@ To add another test route:
 
 ## Systemd service configuration
 
-An example service file lives at `contrib/untether.service`. Two settings are
-critical for graceful shutdown:
+An example service file lives at `contrib/untether.service`. Seven settings are
+critical — two for systemd readiness notification, two for graceful shutdown,
+two for OOM (out-of-memory) behaviour, plus `RestartSec`:
 
 ```ini
+Type=notify             # Untether sends READY=1 after first getUpdates succeeds
+NotifyAccess=main       # Only the main process can send sd_notify messages
 KillMode=mixed          # SIGTERM main process first, then SIGKILL remaining cgroup
 TimeoutStopSec=150      # Give the 120s drain timeout room to complete
+RestartSec=2            # Restart quickly after drain completes
+OOMScoreAdjust=-100     # Don't be earlyoom's preferred victim
+OOMPolicy=continue      # Don't tear down the whole unit on a single OOM kill
 ```
+
+### Readiness (`Type=notify`)
+
+!!! info "New in v0.35.1"
+
+`Type=notify` tells systemd the bot is "activating" until Untether sends a
+`READY=1` datagram to `$NOTIFY_SOCKET` — which only happens after the first
+`getUpdates` call succeeds. This prevents the previous race where `systemctl
+start` returned "active" before the bot was actually polling. On shutdown,
+Untether sends `STOPPING=1` at the start of drain so `systemctl status` shows
+"Deactivating" rather than "Active" during the drain window.
+
+The `sd_notify` integration uses the standard library only (no external
+dependency). Missing `NOTIFY_SOCKET` (e.g. running outside systemd) is a
+silent no-op. See `src/untether/sdnotify.py` and issue #287.
+
+### Restart timing
+
+!!! info "New in v0.35.1"
+
+`RestartSec=2` (down from systemd's default) lets Untether resume polling
+within a few seconds of drain completion. The Telegram `update_id` offset is
+persisted to `last_update_id.json` on shutdown, so no messages are dropped
+or re-processed across the restart window (Telegram retains undelivered
+updates for 24 hours). See issue #287.
+
+### Graceful shutdown
 
 `KillMode=mixed` sends SIGTERM only to the main Untether process first, allowing
 the drain mechanism to gracefully finish active runs. After the main process
@@ -194,7 +227,46 @@ Other modes have drawbacks:
 Without `TimeoutStopSec=150`, systemd's default 90s timeout may kill
 the process before the 120s drain finishes.
 
-To apply:
+### OOM (out-of-memory) behaviour
+
+By default, systemd user services inherit `OOMScoreAdjust=100` or `200` from
+`user@UID.service` and use `OOMPolicy=stop`. Without overrides, this makes
+Untether's Claude subprocesses **preferred victims** for earlyoom and the
+kernel OOM killer — ahead of CLI `claude` running in tmux (`oom_score_adj=0`)
+and any orphaned grandchildren the user has spawned from a shell session. When
+RAM exhaustion hits, the result is that live Telegram chats die with rc=143
+(SIGTERM) while the processes actually eating the RAM survive.
+
+`OOMScoreAdjust=-100` lowers Untether's OOM priority. Unprivileged user
+processes can only raise their own `oom_score_adj`, not lower it below the
+parent's baseline — so the kernel silently clamps the effective value at the
+parent's setting (typically 100 on default installs). The `-100` request is
+still worth keeping: it documents intent and takes effect if the parent
+`user@UID.service` is ever overridden to a lower baseline. See `#275` and
+`#222` for the full diagnosis.
+
+`OOMPolicy=continue` tells systemd **not** to tear down the entire unit when
+a single child process is OOM-killed. The default (`stop`) cascades SIGTERM
+to all active engine subprocesses, breaking every live chat at once. With
+`continue`, a single dead MCP server or a single killed engine subprocess is
+reported as a clean failure on that one run; the bridge and other active
+chats keep running.
+
+Optional system-wide companion override (requires root) — lowers the baseline
+for *all* user services to `-200`, which lets Untether's `-100` actually take
+effect. Only apply if you want Untether's children to live *longer* than
+other unprivileged user processes, including CLI claude:
+
+```bash
+sudo systemctl edit user@1000.service   # adjust UID for your host
+# add:
+[Service]
+OOMScoreAdjust=-200
+```
+
+This affects every user service on the host — use judgment.
+
+### To apply:
 
 ```bash
 cp contrib/untether.service ~/.config/systemd/user/untether.service
