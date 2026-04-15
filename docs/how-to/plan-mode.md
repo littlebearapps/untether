@@ -127,6 +127,12 @@ This prevents the agent from bulldozing through when you've asked it to slow dow
 
 </div>
 
+## Auto-approval after plan approval
+
+Once you approve a plan outline (via "Approve Plan"), subsequent tool calls in the same session — Edit, Write, Bash — are auto-approved without showing individual diff preview buttons. You have already reviewed the plan, so per-tool approval is skipped.
+
+This applies whether you approve via "Approve Plan" after an outline or by directly approving an ExitPlanMode request. Starting a new session (via `/new` or a new message) restores normal approval behaviour.
+
 ## Related
 
 - [Interactive approval](interactive-approval.md) — how approval buttons and diff previews work

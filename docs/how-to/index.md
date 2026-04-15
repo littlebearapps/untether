@@ -8,6 +8,8 @@ If you need exact options and defaults, use **[Reference](../reference/index.md)
 ## Getting started
 
 - [Choose a workflow mode](choose-a-mode.md) (assistant, workspace, or handoff — pick the style that fits)
+- [Update Untether](update.md) (upgrade to the latest version)
+- [Uninstall Untether](uninstall.md) (remove CLI, config, and state)
 
 ## Daily use
 
