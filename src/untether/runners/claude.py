@@ -1297,6 +1297,14 @@ class ClaudeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
         # Let Claude Code hooks detect Untether sessions (e.g. PitchDocs
         # context-guard skips blocking Stop hooks in Telegram).
         env["UNTETHER_SESSION"] = "1"
+        # Reinforcements for upstream claude-code#39700 / #41086 / #38437 —
+        # stream-json mode hangs after MCP tool_result. Shell env is honoured
+        # by Claude Code 2.1.110+ for the sdk-cli stdio path. Use setdefault
+        # so user overrides (shell rc, per-project env) always win. See #322.
+        env.setdefault("CLAUDE_ENABLE_STREAM_WATCHDOG", "1")
+        env.setdefault("CLAUDE_STREAM_IDLE_TIMEOUT_MS", "60000")
+        env.setdefault("MCP_TOOL_TIMEOUT", "120000")
+        env.setdefault("MAX_MCP_OUTPUT_TOKENS", "12000")
         if self.use_api_billing is not True:
             env.pop("ANTHROPIC_API_KEY", None)
         return env

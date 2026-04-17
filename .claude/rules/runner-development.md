@@ -45,6 +45,10 @@ Do NOT construct `StartedEvent`, `ActionEvent`, `CompletedEvent` dataclasses dir
 - Resume runs: acquire lock before spawning subprocess
 - New runs: acquire lock when session ID first appears, before yielding `StartedEvent`
 
+## Tool-result classification (engine-agnostic)
+
+`runner.py:_classify_jsonl_event()` peeks at every raw JSONL dict and classifies it as `"tool_result"`, `"assistant"`, or `"other"` for the stuck-after-tool_result detector (#322). This happens inside `_handle_jsonl_line` before `translate()`, so runners DO NOT need to call it. If a new engine is added, extend `_classify_jsonl_event()` with the engine's tool_result-equivalent event shape and assistant-turn-start shape — keep runner-side code (`translate()`, schema) untouched. The classifier is conservative: unknown shapes return `"other"` and the detector stays silent.
+
 ## Adding a new engine
 
 1. Create `src/untether/runners/myengine.py` extending `JsonlSubprocessRunner`
