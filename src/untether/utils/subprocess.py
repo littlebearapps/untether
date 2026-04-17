@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import contextlib
 import os
 import signal
+import sys
 from collections.abc import AsyncIterator, Callable, Sequence
 from contextlib import asynccontextmanager
 from typing import Any
@@ -10,6 +12,7 @@ import anyio
 from anyio.abc import Process
 
 from ..logging import get_logger
+from .proc_diag import find_descendants
 
 logger = get_logger(__name__)
 
@@ -47,12 +50,27 @@ def _signal_process(
 ) -> None:
     if proc.returncode is not None:
         return
+
+    # Snapshot descendants BEFORE signalling the parent (#275).  Once the
+    # parent dies, /proc/<pid>/task/*/children entries disappear and any
+    # grandchildren in separate process groups (e.g. vitest → workerd, which
+    # node spawns with fresh sessions) become invisible to `killpg`.  On
+    # non-Linux hosts or /proc read errors the snapshot is empty and
+    # behaviour falls back to the legacy pgroup-only path.
+    descendants: list[int] = []
+    if os.name == "posix" and proc.pid is not None and sys.platform == "linux":
+        try:
+            descendants = find_descendants(proc.pid)
+        except OSError:
+            descendants = []
+
+    used_posix = False
     if os.name == "posix" and proc.pid is not None:
+        used_posix = True
         try:
             os.killpg(proc.pid, sig)
-            return
         except ProcessLookupError:
-            return
+            pass  # Parent already gone; still deliver to captured descendants.
         except OSError as exc:
             logger.debug(
                 log_event,
@@ -60,10 +78,39 @@ def _signal_process(
                 error_type=exc.__class__.__name__,
                 pid=proc.pid,
             )
-    try:
-        fallback()
-    except ProcessLookupError:
+            used_posix = False  # Fall through to the anyio fallback.
+
+    if not used_posix:
+        with contextlib.suppress(ProcessLookupError):
+            fallback()
+
+    # Best-effort signal to orphan descendants in separate process groups.
+    # Ignored when the snapshot is empty (non-Linux, /proc error, or parent
+    # had no grandchildren).  #275.
+    _signal_descendants(descendants, sig, log_event)
+
+
+def _signal_descendants(pids: list[int], sig: signal.Signals, log_event: str) -> None:
+    """Deliver *sig* to each captured descendant PID, best-effort.
+
+    Swallows ``ProcessLookupError`` (already exited since the snapshot) and
+    ``PermissionError`` (process reparented to a different user's systemd).
+    Other ``OSError``s are logged at debug level and skipped.  #275.
+    """
+    if not pids:
         return
+    for pid in pids:
+        try:
+            os.kill(pid, sig)
+        except (ProcessLookupError, PermissionError):
+            continue
+        except OSError as exc:
+            logger.debug(
+                log_event,
+                error=str(exc),
+                error_type=exc.__class__.__name__,
+                pid=pid,
+            )
 
 
 @asynccontextmanager
