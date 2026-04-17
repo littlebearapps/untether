@@ -87,6 +87,52 @@ def test_translate_success_fixture() -> None:
     assert completed.answer == "Done. Added notes.md."
 
 
+def test_started_event_gains_model_from_message_end_when_no_config_override() -> None:
+    """#225: when no --model override and no pi.model in untether.toml,
+    meta["model"] was empty and the footer showed only 'dir: pi-test'.
+    Pi's message_end event carries the actual model (e.g. 'gpt-4o-mini');
+    the runner now emits a supplementary StartedEvent so the footer picks
+    it up via ProgressTracker.note_event's meta merge.
+    """
+    state = PiStreamState(resume=ResumeToken(engine=ENGINE, value="session.jsonl"))
+    events: list = []
+    # Simulate the default-config path: meta=None (no model available yet).
+    for event in _load_fixture("pi_stream_success.jsonl"):
+        events.extend(translate_pi_event(event, title="pi", meta=None, state=state))
+
+    started_events = [evt for evt in events if isinstance(evt, StartedEvent)]
+    # Two StartedEvents: the initial (from SessionHeader, meta=None) and the
+    # supplementary (from message_end, meta={"model": ...}).
+    assert len(started_events) == 2, f"got {len(started_events)}: {started_events!r}"
+    assert started_events[0].meta is None
+    assert started_events[1].meta is not None
+    assert started_events[1].meta["model"] == "gpt-4o-mini"
+    assert started_events[1].meta.get("provider") == "openai"
+    # Same resume token on both — this is the same session.
+    assert started_events[0].resume == started_events[1].resume
+    # Latch prevents further supplementary StartedEvents on subsequent message_ends.
+    assert state.jsonl_model_emitted is True
+
+
+def test_started_event_skips_jsonl_model_when_config_model_present() -> None:
+    """#225: when the user has set pi.model in config, meta already carries
+    the model at SessionHeader time. Don't override with the JSONL-reported
+    value (user-configured > engine-reported)."""
+    state = PiStreamState(resume=ResumeToken(engine=ENGINE, value="session.jsonl"))
+    events: list = []
+    config_meta: dict = {"model": "user-configured-model", "provider": "openai"}
+    for event in _load_fixture("pi_stream_success.jsonl"):
+        events.extend(
+            translate_pi_event(event, title="pi", meta=config_meta, state=state)
+        )
+
+    started_events = [evt for evt in events if isinstance(evt, StartedEvent)]
+    # Only the initial StartedEvent — no supplementary emission.
+    assert len(started_events) == 1
+    assert started_events[0].meta == config_meta
+    assert state.jsonl_model_emitted is False
+
+
 def test_translate_error_fixture() -> None:
     state = PiStreamState(resume=ResumeToken(engine=ENGINE, value="session.jsonl"))
     events: list = []

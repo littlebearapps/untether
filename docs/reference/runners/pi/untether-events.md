@@ -60,7 +60,14 @@ Untether requires **serialization per session token**:
 
 Pi emits `AgentSessionEvent` objects. Only a subset is required for Untether.
 
-**StartedEvent meta:** The Pi runner populates `meta` with `cwd`, and optionally `model` (from `--model` config) and `provider` (from `--provider` config). The `meta.model` field is used for the `🏷` footer line on final messages. Pi JSONL does not include model info in its event stream, so this comes from runner config.
+**StartedEvent meta:** The Pi runner populates `meta` with `cwd`, and optionally `model` (from `--model` config) and `provider` (from `--provider` config). The `meta.model` field is used for the `🏷` footer line on final messages.
+
+Priority order for `meta["model"]` (#225):
+1. `run_options.model` — per-run override set via `/model set`
+2. `self.model` — `pi.model` in `untether.toml`
+3. `message.model` from Pi's `message_end` event — extracted when 1 and 2 are both unset, via a supplementary `StartedEvent` emitted once per session. `ProgressTracker.note_event` merges this meta onto the initial tracker state.
+
+`message.model` is populated by the `pi` CLI itself (e.g. `"model": "gpt-4o-mini"` alongside `"api"`, `"provider"`, `"usage"` in every `message_end` payload). Earlier versions of this doc stated "Pi JSONL does not include model info" — that was incorrect.
 
 ### 4.1 `tool_execution_start`
 
