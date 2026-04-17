@@ -62,6 +62,13 @@ _MCP_ADAPTER_CMDLINE_HINTS = ("mcp-remote", "@modelcontextprotocol")
 
 _EPHEMERAL_MSGS: dict[tuple[ChannelId, MessageId], list[MessageRef]] = {}
 
+# #203: companion timestamp map so stale entries from crashed/abnormally-
+# exited runs can be swept after _REGISTRY_TTL_SECONDS.  Kept parallel to
+# avoid changing the value shape consumed by read paths.
+_EPHEMERAL_MSGS_TS: dict[tuple[ChannelId, MessageId], float] = {}
+
+_REGISTRY_TTL_SECONDS = 3600.0  # 1 hour
+
 
 def register_ephemeral_message(
     channel_id: ChannelId,
@@ -69,8 +76,11 @@ def register_ephemeral_message(
     ref: MessageRef,
 ) -> None:
     """Register a message for deletion when the anchored run finishes."""
+    import time as _time
+
     key = (channel_id, anchor_message_id)
     _EPHEMERAL_MSGS.setdefault(key, []).append(ref)
+    _EPHEMERAL_MSGS_TS[key] = _time.monotonic()
 
 
 # Outline message cleanup registry.
@@ -79,6 +89,8 @@ def register_ephemeral_message(
 # delete_outline_messages() which the callback handler calls.
 
 _OUTLINE_REGISTRY: dict[str, tuple[Any, list[MessageRef]]] = {}
+# #203: companion timestamp map (see _EPHEMERAL_MSGS_TS).
+_OUTLINE_REGISTRY_TS: dict[str, float] = {}
 
 
 def register_outline_cleanup(
@@ -87,7 +99,10 @@ def register_outline_cleanup(
     refs: list[MessageRef],
 ) -> None:
     """Register outline refs for a session so the callback handler can delete them."""
+    import time as _time
+
     _OUTLINE_REGISTRY[session_id] = (transport, refs)
+    _OUTLINE_REGISTRY_TS[session_id] = _time.monotonic()
 
 
 async def delete_outline_messages(session_id: str) -> None:
@@ -97,6 +112,7 @@ async def delete_outline_messages(session_id: str) -> None:
     and removes the stale keyboard on its next render cycle.
     """
     entry = _OUTLINE_REGISTRY.pop(session_id, None)
+    _OUTLINE_REGISTRY_TS.pop(session_id, None)
     if entry is None:
         return
     transport, refs = entry
@@ -106,6 +122,35 @@ async def delete_outline_messages(session_id: str) -> None:
         except Exception:  # noqa: BLE001
             logger.warning("outline_cleanup.delete_failed", exc_info=True)
     refs.clear()
+
+
+def sweep_stale_registries(now: float | None = None) -> int:
+    """Drop ephemeral/outline entries older than _REGISTRY_TTL_SECONDS.
+
+    Runs in-process every time any ProgressEdits._stall_monitor tick fires
+    (via the caller) — handles the case where a run crashes or exits
+    abnormally without the usual delete_ephemeral/delete_outline_messages
+    cleanup path firing.  Returns the number of entries pruned.  #203.
+    """
+    import time as _time
+
+    if now is None:
+        now = _time.monotonic()
+
+    pruned = 0
+    for key, ts in list(_EPHEMERAL_MSGS_TS.items()):
+        if now - ts > _REGISTRY_TTL_SECONDS:
+            _EPHEMERAL_MSGS.pop(key, None)
+            _EPHEMERAL_MSGS_TS.pop(key, None)
+            pruned += 1
+    for sid, ts in list(_OUTLINE_REGISTRY_TS.items()):
+        if now - ts > _REGISTRY_TTL_SECONDS:
+            _OUTLINE_REGISTRY.pop(sid, None)
+            _OUTLINE_REGISTRY_TS.pop(sid, None)
+            pruned += 1
+    if pruned:
+        logger.info("runner_bridge.registries_swept", pruned=pruned)
+    return pruned
 
 
 # ---------------------------------------------------------------------------
@@ -804,6 +849,9 @@ class ProgressEdits:
 
         while True:
             await anyio.sleep(self._stall_check_interval)
+            # #203: piggy-back a TTL sweep of module-level registries on this
+            # periodic tick.  Cheap when idle (empty dicts → early return).
+            sweep_stale_registries()
             elapsed = self.clock() - self._last_event_at
             self._peak_idle = max(self._peak_idle, elapsed)
 
@@ -1776,6 +1824,7 @@ class ProgressEdits:
         ]
         for sid in stale_sessions:
             _OUTLINE_REGISTRY.pop(sid, None)
+            _OUTLINE_REGISTRY_TS.pop(sid, None)  # #203: keep ts map in sync
         for ref in self._outline_refs:
             try:
                 await self.transport.delete(ref=ref)
@@ -1792,6 +1841,7 @@ class ProgressEdits:
         if self.progress_ref is not None:
             key = (self.channel_id, self.progress_ref.message_id)
             refs = _EPHEMERAL_MSGS.pop(key, [])
+            _EPHEMERAL_MSGS_TS.pop(key, None)  # #203: keep ts map in sync
             for ref in refs:
                 try:
                     await self.transport.delete(ref=ref)

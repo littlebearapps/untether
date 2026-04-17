@@ -37,7 +37,11 @@ def test_load_settings_from_toml(tmp_path: Path) -> None:
     assert token == "token"
     assert chat_id == 123
 
-    assert settings.transports.telegram.bot_token == "token"
+    # #196: bot_token is SecretStr — unwrap to compare.
+    assert settings.transports.telegram.bot_token.get_secret_value() == "token"
+    # Verify masking: str()/repr() do not leak the token.
+    assert "token" not in str(settings.transports.telegram.bot_token)
+    assert "token" not in repr(settings.transports.telegram.bot_token)
 
 
 def test_env_overrides_toml(tmp_path: Path, monkeypatch) -> None:
@@ -149,7 +153,8 @@ def test_transport_config_telegram_and_extra(tmp_path: Path) -> None:
         }
     )
     telegram = settings.transport_config("telegram", config_path=config_path)
-    assert telegram["bot_token"] == "token"
+    # #196: model_dump() preserves SecretStr wrappers; unwrap to check value.
+    assert telegram["bot_token"].get_secret_value() == "token"
     assert telegram["chat_id"] == 123
 
     settings = UntetherSettings.model_validate(

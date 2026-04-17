@@ -7,6 +7,7 @@ engines, run their login command directly in the terminal.
 from __future__ import annotations
 
 import asyncio
+import html
 import re
 import shutil
 
@@ -162,10 +163,14 @@ class AuthCommand:
                 return CommandResult(text="\u2705 Codex auth completed successfully")
             else:
                 excerpt = "\n".join(output_lines[-5:]) if output_lines else "no output"
+                # #199: subprocess output is placed verbatim inside HTML <pre>
+                # tags — escape &, <, > so a crafted error message can't inject
+                # Telegram entities (`<b>`, `<a href=...>` etc).
+                safe_excerpt = html.escape(excerpt)
                 return CommandResult(
                     text=(
                         f"\u274c Codex auth failed (exit code {rc})\n"
-                        f"<pre>{excerpt}</pre>"
+                        f"<pre>{safe_excerpt}</pre>"
                     ),
                     parse_mode="HTML",
                 )

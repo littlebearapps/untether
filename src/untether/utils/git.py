@@ -9,7 +9,10 @@ def _run_git(
     args: Sequence[str], *, cwd: Path
 ) -> subprocess.CompletedProcess[str] | None:
     try:
-        return subprocess.run(
+        # #202: partial-path "git" is intentional — we rely on the user's
+        # PATH (homebrew, system git, etc.) just like interactive shells do.
+        # args is a fixed argv list; no shell; callers pass validated values.
+        return subprocess.run(  # nosec B603 B607
             ["git", *args],
             cwd=cwd,
             check=False,

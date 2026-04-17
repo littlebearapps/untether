@@ -57,10 +57,14 @@ jobs:
 
       - name: Install dependencies
         if: matrix.do_sync
-        run: uv sync --frozen ${{ matrix.sync_args }}
+        env:
+          SYNC_ARGS: ${{ matrix.sync_args }}
+        run: uv sync --frozen $SYNC_ARGS
 
       - name: Run check
-        run: ${{ matrix.command }}
+        env:
+          CMD: ${{ matrix.command }}
+        run: $CMD
         continue-on-error: ${{ matrix.allow_failure || false }}
 
   pytest:

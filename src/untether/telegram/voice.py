@@ -7,6 +7,7 @@ from typing import Protocol
 from openai import AsyncOpenAI, OpenAIError
 
 from ..logging import get_logger
+from ..utils.error_display import user_safe_error
 from .client import BotClient
 from .types import TelegramIncomingMessage
 
@@ -117,7 +118,9 @@ async def transcribe_voice(
             file_id=voice.file_id,
             file_size=voice.file_size,
         )
-        await reply(text=str(exc).strip() or "voice transcription failed")
+        # #200: don't leak URLs / absolute paths / internal class names back
+        # to the Telegram user. Full detail is in the structlog record above.
+        await reply(text=user_safe_error(exc, fallback="voice transcription failed"))
         return None
     except (RuntimeError, OSError, ValueError) as exc:
         logger.error(
@@ -127,7 +130,7 @@ async def transcribe_voice(
             file_id=voice.file_id,
             file_size=voice.file_size,
         )
-        await reply(text=str(exc).strip() or "voice transcription failed")
+        await reply(text=user_safe_error(exc, fallback="voice transcription failed"))
         return None
     except TimeoutError as exc:
         logger.error(
@@ -146,5 +149,5 @@ async def transcribe_voice(
             file_id=voice.file_id,
             file_size=voice.file_size,
         )
-        await reply(text=str(exc).strip() or "voice transcription failed")
+        await reply(text=user_safe_error(exc, fallback="voice transcription failed"))
         return None
