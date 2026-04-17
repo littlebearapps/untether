@@ -425,7 +425,12 @@ class PiRunner(ResumeTokenMixin, JsonlSubprocessRunner):
         return None
 
     def env(self, *, state: PiStreamState) -> dict[str, str] | None:
-        env = dict(os.environ)
+        # #198: allowlist filter — Pi subprocess no longer inherits the
+        # parent's full environment. See `utils/env_policy.py` for the
+        # canonical list + extension notes.
+        from ..utils.env_policy import filtered_env
+
+        env = filtered_env()
         env.setdefault("NO_COLOR", "1")
         env.setdefault("CI", "1")
         return env

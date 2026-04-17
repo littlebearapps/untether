@@ -1299,7 +1299,15 @@ class ClaudeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
         return None
 
     def env(self, *, state: Any) -> dict[str, str] | None:
-        env = dict(os.environ)
+        # #198: allowlist filter — Claude subprocess no longer inherits the
+        # parent's full environment. Only vars recognised by
+        # `utils.env_policy` (basic OS, AI/cloud provider keys, Claude /
+        # MCP namespaces, etc.) flow through. See env_policy.py for the
+        # canonical list + how to extend it when a new MCP or engine needs
+        # an unfamiliar variable.
+        from ..utils.env_policy import filtered_env
+
+        env = filtered_env()
         # Let Claude Code hooks detect Untether sessions (e.g. PitchDocs
         # context-guard skips blocking Stop hooks in Telegram).
         env["UNTETHER_SESSION"] = "1"
