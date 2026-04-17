@@ -336,9 +336,33 @@ async def test_send_control_response_success() -> None:
 @pytest.mark.anyio
 async def test_duplicate_request_returns_true() -> None:
     """Already-handled request_id returns True (duplicate callback)."""
-    _HANDLED_REQUESTS.add("req-dup")
+    _HANDLED_REQUESTS["req-dup"] = None
     result = await send_claude_control_response("req-dup", approved=True)
     assert result is True
+
+
+def test_handled_requests_evicts_oldest_lru() -> None:
+    """#197: _HANDLED_REQUESTS is an OrderedDict with LRU eviction at
+    _HANDLED_REQUESTS_MAX — no wholesale clear() that would open a window for
+    duplicate-callback misclassification."""
+    from untether.runners.claude import _HANDLED_REQUESTS_MAX
+
+    _HANDLED_REQUESTS.clear()
+    # Fill beyond the cap.
+    for i in range(_HANDLED_REQUESTS_MAX + 20):
+        _HANDLED_REQUESTS[f"req-{i}"] = None
+        _HANDLED_REQUESTS.move_to_end(f"req-{i}")
+        while len(_HANDLED_REQUESTS) > _HANDLED_REQUESTS_MAX:
+            _HANDLED_REQUESTS.popitem(last=False)
+
+    # Size is bounded.
+    assert len(_HANDLED_REQUESTS) == _HANDLED_REQUESTS_MAX
+    # Oldest entries evicted.
+    assert "req-0" not in _HANDLED_REQUESTS
+    assert "req-19" not in _HANDLED_REQUESTS
+    # Newest still present.
+    assert f"req-{_HANDLED_REQUESTS_MAX + 19}" in _HANDLED_REQUESTS
+    _HANDLED_REQUESTS.clear()
 
 
 @pytest.mark.anyio
@@ -1406,7 +1430,7 @@ def test_handled_request_not_auto_denied_on_expiry() -> None:
 
     # Simulate what send_claude_control_response does: mark as handled
     # but leave it in pending_control_requests (the bug scenario)
-    _HANDLED_REQUESTS.add("req-handled")
+    _HANDLED_REQUESTS["req-handled"] = None
     _REQUEST_TO_SESSION.pop("req-handled", None)
 
     # Backdate it past the 5-minute timeout
@@ -1479,7 +1503,7 @@ def test_reconciliation_emits_action_completed_for_stale_keyboard() -> None:
     assert state.request_to_action["req-kb"] == action_id
 
     # Simulate callback handling
-    _HANDLED_REQUESTS.add("req-kb")
+    _HANDLED_REQUESTS["req-kb"] = None
 
     # Trigger another control request to run reconciliation
     new_event = _decode_event(

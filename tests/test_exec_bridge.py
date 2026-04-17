@@ -609,6 +609,61 @@ async def test_progress_edits_delete_ephemeral_drains_registry() -> None:
     assert (123, 1) not in _EPHEMERAL_MSGS
 
 
+def test_sweep_stale_registries_prunes_old_entries() -> None:
+    """#203: sweep_stale_registries() drops entries older than
+    _REGISTRY_TTL_SECONDS (default 1h), so a run that crashes without firing
+    the normal cleanup path doesn't leak forever."""
+    from untether.runner_bridge import (
+        _EPHEMERAL_MSGS_TS,
+        _OUTLINE_REGISTRY,
+        _OUTLINE_REGISTRY_TS,
+        _REGISTRY_TTL_SECONDS,
+        register_outline_cleanup,
+        sweep_stale_registries,
+    )
+
+    # Snapshot + clear to keep this test isolated.
+    saved_eph = dict(_EPHEMERAL_MSGS)
+    saved_eph_ts = dict(_EPHEMERAL_MSGS_TS)
+    saved_out = dict(_OUTLINE_REGISTRY)
+    saved_out_ts = dict(_OUTLINE_REGISTRY_TS)
+    _EPHEMERAL_MSGS.clear()
+    _EPHEMERAL_MSGS_TS.clear()
+    _OUTLINE_REGISTRY.clear()
+    _OUTLINE_REGISTRY_TS.clear()
+
+    try:
+        register_ephemeral_message(777, 999, MessageRef(channel_id=777, message_id=1000))
+        register_outline_cleanup("sess-stale", object(), [])
+        # Backdate both so they're past the TTL.
+        import time as _time
+
+        past = _time.monotonic() - _REGISTRY_TTL_SECONDS - 1
+        _EPHEMERAL_MSGS_TS[(777, 999)] = past
+        _OUTLINE_REGISTRY_TS["sess-stale"] = past
+
+        # Add a fresh entry that must NOT be swept.
+        register_ephemeral_message(888, 888, MessageRef(channel_id=888, message_id=1))
+
+        pruned = sweep_stale_registries()
+        assert pruned == 2
+        assert (777, 999) not in _EPHEMERAL_MSGS
+        assert (777, 999) not in _EPHEMERAL_MSGS_TS
+        assert "sess-stale" not in _OUTLINE_REGISTRY
+        assert "sess-stale" not in _OUTLINE_REGISTRY_TS
+        # Fresh entry survives.
+        assert (888, 888) in _EPHEMERAL_MSGS
+    finally:
+        _EPHEMERAL_MSGS.clear()
+        _EPHEMERAL_MSGS_TS.clear()
+        _OUTLINE_REGISTRY.clear()
+        _OUTLINE_REGISTRY_TS.clear()
+        _EPHEMERAL_MSGS.update(saved_eph)
+        _EPHEMERAL_MSGS_TS.update(saved_eph_ts)
+        _OUTLINE_REGISTRY.update(saved_out)
+        _OUTLINE_REGISTRY_TS.update(saved_out_ts)
+
+
 # ---------------------------------------------------------------------------
 # _format_run_cost tests
 # ---------------------------------------------------------------------------
