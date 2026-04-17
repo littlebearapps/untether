@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import time
 from collections.abc import Awaitable, Callable
 from typing import TYPE_CHECKING
 
@@ -217,14 +218,33 @@ async def _dispatch_callback(
         sender_id=msg.sender_id,
         raw=msg.raw,
     )
+    dispatch_start = time.monotonic()
     logger.info("callback.dispatch", command=command_id, chat_id=chat_id)
     _answered = False
 
+    # #247: instrument the early-answer path so we can observe actual latency
+    # to Telegram's answerCallbackQuery in the field. `BotResponseTimeoutError`
+    # on the caller's client happens when we don't answer inside Telegram's
+    # 30-second window; the early-answer branch is intended to cover this by
+    # firing before backend.handle() runs its slow work (e.g. claude_control
+    # writes to the Claude PTY stdin). Log the measured HTTP round-trip as
+    # INFO so staging grep can distinguish "we were fast, Telegram was slow"
+    # from "we were slow."
     async def _answer_callback(text: str | None = None) -> None:
         nonlocal _answered
         if callback_query_id is not None and not _answered:
+            start = time.monotonic()
             await cfg.bot.answer_callback_query(callback_query_id, text=text)
             _answered = True
+            logger.info(
+                "callback.answered",
+                command=command_id,
+                chat_id=chat_id,
+                latency_ms=round((time.monotonic() - start) * 1000, 1),
+                total_ms=round((time.monotonic() - dispatch_start) * 1000, 1),
+                early=False,
+                has_toast=text is not None,
+            )
 
     try:
         try:
@@ -246,15 +266,27 @@ async def _dispatch_callback(
         except ConfigError as exc:
             await _answer_callback(user_safe_error(exc, fallback="plugin config error"))
             return
-        # Early callback answering: clear the Telegram spinner immediately
-        if getattr(backend, "answer_early", False):
+        # Early callback answering: clear the Telegram spinner immediately.
+        # #247: the early-answer branch MUST run before backend.handle() so
+        # answerCallbackQuery reaches Telegram before any blocking control-
+        # response work. The instrumentation inside _answer_callback records
+        # latency_ms (HTTP round-trip) and total_ms (time since dispatch
+        # entry); the `early=True` flag lets us split the metric by branch
+        # when grepping.
+        if getattr(backend, "answer_early", False) and callback_query_id is not None:
             toast = backend.early_answer_toast(args_text)  # type: ignore[attr-defined]
             if toast is not None:
-                await _answer_callback(toast)
-                logger.debug(
-                    "callback.early_answered",
+                _early_start = time.monotonic()
+                await cfg.bot.answer_callback_query(callback_query_id, text=toast)
+                _answered = True
+                logger.info(
+                    "callback.answered",
                     command=command_id,
-                    toast=toast,
+                    chat_id=chat_id,
+                    latency_ms=round((time.monotonic() - _early_start) * 1000, 1),
+                    total_ms=round((time.monotonic() - dispatch_start) * 1000, 1),
+                    early=True,
+                    has_toast=True,
                 )
 
         # For callbacks, text is the full callback data and args come from parsing
