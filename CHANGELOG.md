@@ -27,6 +27,10 @@
   - four new `[watchdog]` config fields: `detect_stuck_after_tool_result` (default `false` for this release, will default `true` once validated), `stuck_after_tool_result_timeout`, `stuck_after_tool_result_recovery_enabled`, `stuck_after_tool_result_recovery_delay`
   - `utils/proc_diag.py:read_cmdline()` helper for identifying adapter children; 17 new tests across engine-matrix classifier, detector gates, and tier-1/2/3 state machine
 
+### docs
+
+- document `[triggers.server]` port-conflict troubleshooting in `docs/reference/triggers/triggers.md` with `ss -tlnp` diagnosis step and the `port = <N>` remediation [#320](https://github.com/littlebearapps/untether/issues/320)
+
 ## v0.35.1 (2026-04-15)
 
 ### fixes

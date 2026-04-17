@@ -600,6 +600,33 @@ Expected responses:
 | `413 Payload Too Large` | Body exceeds `max_body_bytes`. |
 | `429 Too Many Requests` | Rate limit exceeded. |
 
+## Troubleshooting
+
+### Port conflict: `triggers.server.bind_failed`
+
+**Symptom.** On startup the log shows:
+
+```
+triggers.server.bind_failed  host=127.0.0.1  port=9876  error='[Errno 98] Address already in use'
+```
+
+The webhook server stays disabled for the session, but polling, commands, and crons keep working. Previously (before #320) this crashed the entire bot in a systemd restart loop.
+
+**Diagnosis.** Find the process holding the port:
+
+```bash
+ss -tlnp | grep 9876
+```
+
+**Fix.** Either stop the conflicting process, or move Untether's webhook server to a free port by setting `[triggers.server] port` in `untether.toml`:
+
+```toml
+[triggers.server]
+port = 9877
+```
+
+Changing `port` requires a restart (`systemctl --user restart untether`); it is not hot-reloadable.
+
 ## Hot-reload
 
 When `watch_config = true` is set in the top-level config, changes to the `[triggers]` section
