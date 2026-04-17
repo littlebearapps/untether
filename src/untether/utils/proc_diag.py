@@ -138,17 +138,30 @@ def _find_children(pid: int) -> list[int]:
     return children
 
 
-def _find_descendants(pid: int, *, _depth: int = 0, _max_depth: int = 4) -> list[int]:
-    """Find all descendant PIDs recursively (depth-limited)."""
+def find_descendants(pid: int, *, _depth: int = 0, _max_depth: int = 4) -> list[int]:
+    """Find all descendant PIDs recursively (depth-limited).
+
+    Public helper used by subprocess cleanup (#275) to capture a snapshot of
+    the process tree before signalling the parent — grandchildren in separate
+    process groups (e.g. vitest → workerd) are only reachable this way.
+
+    Depth-limited to 4 levels to bound the recursion on pathological trees;
+    the typical Claude Code → Bash → vitest → workerd chain is 3 deep with
+    margin.
+    """
     if _depth >= _max_depth:
         return []
     children = _find_children(pid)
     descendants = list(children)
     for child in children:
         descendants.extend(
-            _find_descendants(child, _depth=_depth + 1, _max_depth=_max_depth)
+            find_descendants(child, _depth=_depth + 1, _max_depth=_max_depth)
         )
     return descendants
+
+
+# Private alias kept for back-compat with existing test imports.
+_find_descendants = find_descendants
 
 
 def _collect_tree_cpu(
@@ -182,7 +195,7 @@ def collect_proc_diag(pid: int) -> ProcessDiag | None:
     fd_count = _count_fds(pid)
     tcp_est, tcp_total = _count_tcp(pid)
     children = _find_children(pid)
-    descendants = _find_descendants(pid)
+    descendants = find_descendants(pid)
     tree_utime, tree_stime = _collect_tree_cpu(utime, stime, descendants)
 
     return ProcessDiag(
