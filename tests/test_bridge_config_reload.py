@@ -158,3 +158,59 @@ class TestTriggerManagerField:
         mgr = TriggerManager()
         cfg.trigger_manager = mgr
         assert cfg.trigger_manager is mgr
+
+
+# ── #318: RESTART_REQUIRED_FIELDS on settings models ───────────────────
+
+
+class TestRestartRequiredFields:
+    """#318: the set of fields that require a process restart is authoritative
+    on the settings model, not scattered across loop.py / /config / docs. This
+    locks the invariant in so future edits to the model stay in sync."""
+
+    def test_classvar_exists_and_is_frozen(self):
+        assert hasattr(TelegramTransportSettings, "RESTART_REQUIRED_FIELDS")
+        assert isinstance(TelegramTransportSettings.RESTART_REQUIRED_FIELDS, frozenset)
+
+    def test_expected_members(self):
+        """v0.35.2 baseline — update with care. Additions need matching
+        handle_reload() logic, config.md docs, and `/config` 🔄 annotations.
+        Removals need hot-reload wiring in TelegramBridgeConfig.update_from."""
+        assert (
+            frozenset(
+                {
+                    "bot_token",
+                    "chat_id",
+                    "session_mode",
+                    "topics",
+                    "message_overflow",
+                }
+            )
+            == TelegramTransportSettings.RESTART_REQUIRED_FIELDS
+        )
+
+    def test_every_listed_field_exists_on_model(self):
+        """Every entry must be a real field. Typos would silently neuter the
+        restart warning (membership test would never hit)."""
+        field_names = set(TelegramTransportSettings.model_fields.keys())
+        stray = TelegramTransportSettings.RESTART_REQUIRED_FIELDS - field_names
+        assert stray == set(), (
+            f"RESTART_REQUIRED_FIELDS references unknown fields: {stray}"
+        )
+
+    def test_loop_consumes_the_classvar(self):
+        """loop.py:handle_reload should read the ClassVar, not inline a copy.
+        This grep-style test prevents silent drift between the two."""
+        from pathlib import Path
+
+        loop_src = Path("src/untether/telegram/loop.py").read_text()
+        # The legacy inline set is gone
+        assert "RESTART_ONLY_KEYS" not in loop_src, (
+            "handle_reload still has an inline RESTART_ONLY_KEYS set — "
+            "consume TelegramTransportSettings.RESTART_REQUIRED_FIELDS instead"
+        )
+        # The ClassVar is actually referenced
+        assert "TelegramTransportSettings.RESTART_REQUIRED_FIELDS" in loop_src, (
+            "handle_reload should reference "
+            "TelegramTransportSettings.RESTART_REQUIRED_FIELDS"
+        )

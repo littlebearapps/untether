@@ -93,6 +93,22 @@ class TelegramFilesSettings(BaseModel):
 class TelegramTransportSettings(BaseModel):
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
 
+    # #318: fields in this set require a process restart to take effect.
+    # Everything else hot-reloads via `TelegramBridgeConfig.update_from()`
+    # (#286).  The hot-reload path in `telegram/loop.py:handle_reload` reads
+    # this ClassVar rather than duplicating the list inline, and the
+    # `/config` menu suffixes restart-required settings with 🔄 so agents
+    # and users can tell which edits need a restart before they try them.
+    RESTART_REQUIRED_FIELDS: ClassVar[frozenset[str]] = frozenset(
+        {
+            "bot_token",
+            "chat_id",
+            "session_mode",
+            "topics",
+            "message_overflow",
+        }
+    )
+
     # #196: SecretStr masks the value in repr()/str()/tracebacks and any
     # accidental structlog serialisation.  Access the raw value via
     # bot_token.get_secret_value() at the transport boundary.  The token is

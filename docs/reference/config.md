@@ -20,10 +20,42 @@ If you expect to edit config while Untether is running, set:
 
 | Key | Type | Default | Notes |
 |-----|------|---------|-------|
-| `watch_config` | bool | `false` | Watch config file for changes; applies most settings immediately. Restart-only: `bot_token`, `chat_id`, `session_mode`, `topics`, `message_overflow`. |
+| `watch_config` | bool | `false` | Watch config file for changes; applies most settings immediately. See [Hot-reload vs restart-required](#hot-reload-vs-restart-required) below. |
 | `default_engine` | string | `"codex"` | Default engine id for new threads. |
 | `default_project` | string\|null | `null` | Default project alias. |
 | `transport` | string | `"telegram"` | Transport backend id. |
+
+## Hot-reload vs restart-required
+
+When `watch_config = true`, Untether watches `untether.toml` and applies most
+changes immediately. A handful of settings require a process restart because
+they're bound to resources (network sockets, bot token, session-mode machinery)
+that can't be swapped live.
+
+Fields listed as **restart-required** trigger a warning in the Telegram chat
+(🔄 prefix) AND a structlog `config.reload.transport_config_changed` record
+when edited. Everything else hot-reloads silently with a matching
+`config.reload.transport_config_hot_reloaded` INFO event.
+
+The authoritative list lives on each settings model as `RESTART_REQUIRED_FIELDS`
+(see `src/untether/settings.py`) so code, docs, and UI can't drift. Editing
+`untether.toml` to update one of these while the service runs logs the warning
+and sends the Telegram notice, but the new value won't take effect until you
+restart.
+
+| Section | Restart-required fields | Hot-reload |
+|---|---|---|
+| `transports.telegram` | `bot_token`, `chat_id`, `session_mode`, `topics`, `message_overflow` | everything else (`voice_*`, `show_resume_line`, `forward_coalesce_s`, `media_group_debounce_s`, `allowed_user_ids`, `files.*`) |
+| `transports.telegram.topics` | whole section (treated as one unit) | — |
+| top-level `transport` | changing transport id | — |
+| `triggers` | `enabled` (master switch initialises the cron scheduler + webhook server at startup); `server.host`, `server.port` (socket bind at startup) | cron add/remove/edit, webhook add/remove/edit, `rate_limit`, `max_body_bytes`, `default_timezone`, per-cron `timezone`/`run_once`/`permission_mode` |
+
+To restart:
+
+```sh
+systemctl --user restart untether        # staging
+systemctl --user restart untether-dev    # dev
+```
 
 ## `transports.telegram`
 
@@ -44,27 +76,29 @@ If you expect to edit config while Untether is running, set:
 
 | Key | Type | Default | Notes |
 |-----|------|---------|-------|
-| `bot_token` | string | (required) | Telegram bot token from @BotFather. |
-| `chat_id` | int | (required) | Default chat id. |
+| `bot_token` | string | (required) | 🔄 Telegram bot token from @BotFather. Restart-required. |
+| `chat_id` | int | (required) | 🔄 Default chat id. Restart-required. |
 | `allowed_user_ids` | int[] | `[]` | Allowed sender user ids. Empty disables sender filtering; when set, only these users can interact (including DMs). |
-| `message_overflow` | `"trim"`\|`"split"` | `"split"` | How to handle long final responses. |
+| `message_overflow` | `"trim"`\|`"split"` | `"split"` | 🔄 How to handle long final responses. Restart-required. |
 | `forward_coalesce_s` | float | `1.0` | Quiet window for combining a prompt with immediately-following forwarded messages; set `0` to disable. |
 | `voice_transcription` | bool | `false` | Enable voice note transcription. |
 | `voice_max_bytes` | int | `10485760` | Max voice note size (bytes). |
 | `voice_transcription_model` | string | `"gpt-4o-mini-transcribe"` | OpenAI transcription model name. |
 | `voice_transcription_base_url` | string\|null | `null` | Override base URL for voice transcription only. |
 | `voice_transcription_api_key` | string\|null | `null` | Override API key for voice transcription only. |
-| `session_mode` | `"stateless"`\|`"chat"` | `"stateless"` | Auto-resume mode. See [workflow modes](modes.md) — `"chat"` for assistant/workspace, `"stateless"` for handoff. |
+| `session_mode` | `"stateless"`\|`"chat"` | `"stateless"` | 🔄 Auto-resume mode. See [workflow modes](modes.md) — `"chat"` for assistant/workspace, `"stateless"` for handoff. Restart-required. |
 | `show_resume_line` | bool | `true` | Show resume line in message footer. See [workflow modes](modes.md) — `false` for assistant/workspace, `true` for handoff. |
 
 When `allowed_user_ids` is set, updates without a sender id (for example, some channel posts) are ignored.
 
 ### `transports.telegram.topics`
 
+🔄 **Restart-required as a whole section** — changes to either key only take effect after a restart because topic initialisation runs at startup.
+
 | Key | Type | Default | Notes |
 |-----|------|---------|-------|
-| `enabled` | bool | `false` | Enable forum-topic features. |
-| `scope` | `"auto"`\|`"main"`\|`"projects"`\|`"all"` | `"auto"` | Where topics are managed. |
+| `enabled` | bool | `false` | 🔄 Enable forum-topic features. Restart-required. |
+| `scope` | `"auto"`\|`"main"`\|`"projects"`\|`"all"` | `"auto"` | 🔄 Where topics are managed. Restart-required. |
 
 ### `transports.telegram.files`
 

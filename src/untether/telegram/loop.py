@@ -23,7 +23,7 @@ from ..progress import ProgressTracker
 from ..runners.run_options import EngineRunOptions
 from ..scheduler import ThreadJob, ThreadScheduler
 from ..settings import TelegramTransportSettings
-from ..transport import MessageRef, SendOptions
+from ..transport import MessageRef, RenderedMessage, SendOptions
 from ..transport_runtime import ResolvedMessage
 from .bridge import CANCEL_CALLBACK_DATA, TelegramBridgeConfig, send_plain
 from .chat_prefs import ChatPrefsStore, resolve_prefs_path
@@ -1348,15 +1348,11 @@ async def run_main_loop(
                         # rc4 (#286): unfrozen TelegramBridgeConfig allows most
                         # settings to hot-reload. Only a handful still require a
                         # restart — everything else is applied via update_from().
-                        RESTART_ONLY_KEYS = {
-                            "bot_token",
-                            "chat_id",
-                            "session_mode",
-                            "topics",
-                            "message_overflow",
-                        }
-                        restart_keys = [k for k in changed if k in RESTART_ONLY_KEYS]
-                        hot_keys = [k for k in changed if k not in RESTART_ONLY_KEYS]
+                        # #318: authoritative set lives on the settings model
+                        # so /config, docs, and this reload path agree.
+                        restart_only = TelegramTransportSettings.RESTART_REQUIRED_FIELDS
+                        restart_keys = [k for k in changed if k in restart_only]
+                        hot_keys = [k for k in changed if k not in restart_only]
                         if restart_keys:
                             logger.warning(
                                 "config.reload.transport_config_changed",
@@ -1364,6 +1360,32 @@ async def run_main_loop(
                                 keys=restart_keys,
                                 restart_required=True,
                             )
+                            # #318: surface the restart-required change in
+                            # Telegram so the user doesn't silently run on
+                            # stale settings.  Best-effort — swallow send
+                            # errors so a hot-reload doesn't crash the bot.
+                            try:
+                                keys_text = ", ".join(f"`{k}`" for k in restart_keys)
+                                msg = (
+                                    "\N{CLOCKWISE GAPPED CIRCLE ARROW} "
+                                    f"Setting {keys_text} changed — restart "
+                                    "required to take effect.\n"
+                                    "Run: `systemctl --user restart untether`"
+                                )
+                                await cfg.exec_cfg.transport.send(
+                                    channel_id=cfg.chat_id,
+                                    message=RenderedMessage(
+                                        text=msg,
+                                        extra={"parse_mode": "Markdown"},
+                                    ),
+                                    options=SendOptions(notify=True),
+                                )
+                            except Exception as exc:  # noqa: BLE001
+                                logger.warning(
+                                    "config.reload.restart_notify_failed",
+                                    error=str(exc),
+                                    keys=restart_keys,
+                                )
                         if hot_keys:
                             cfg.update_from(reload.settings.transports.telegram)
                             state.forward_coalesce_s = max(
