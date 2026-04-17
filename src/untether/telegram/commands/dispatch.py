@@ -13,6 +13,7 @@ from ...runner_bridge import RunningTasks, register_ephemeral_message
 from ...runners.run_options import EngineRunOptions
 from ...scheduler import ThreadScheduler
 from ...transport import MessageRef, RenderedMessage, SendOptions
+from ...utils.error_display import user_safe_error
 from ..files import split_command_args
 from ..types import TelegramCallbackQuery, TelegramIncomingMessage
 from .executor import _TelegramCommandExecutor
@@ -87,7 +88,13 @@ async def _dispatch_command(
     try:
         backend = get_command(command_id, allowlist=allowlist, required=False)
     except ConfigError as exc:
-        await executor.send(f"error:\n{exc}", reply_to=message_ref, notify=True)
+        # #201: don't send raw exception text to Telegram (may include paths,
+        # URLs, or exception class names).
+        await executor.send(
+            f"error: {user_safe_error(exc, fallback='command lookup failed')}",
+            reply_to=message_ref,
+            notify=True,
+        )
         return
     if backend is None:
         logger.warning(
@@ -99,7 +106,11 @@ async def _dispatch_command(
     try:
         plugin_config = cfg.runtime.plugin_config(command_id)
     except ConfigError as exc:
-        await executor.send(f"error:\n{exc}", reply_to=message_ref, notify=True)
+        await executor.send(
+            f"error: {user_safe_error(exc, fallback='plugin config error')}",
+            reply_to=message_ref,
+            notify=True,
+        )
         return
     ctx = CommandContext(
         command=command_id,
@@ -125,7 +136,13 @@ async def _dispatch_command(
             error=str(exc),
             error_type=exc.__class__.__name__,
         )
-        await executor.send(f"error:\n{exc}", reply_to=message_ref, notify=True)
+        # #201: user sees a sanitised summary; full exception is in the
+        # structlog record above (including error_type).
+        await executor.send(
+            f"error: {user_safe_error(exc, fallback='command failed')}",
+            reply_to=message_ref,
+            notify=True,
+        )
         return
     logger.debug("command.executed", command=command_id, chat_id=chat_id)
     if result is not None:
@@ -213,7 +230,9 @@ async def _dispatch_callback(
         try:
             backend = get_command(command_id, allowlist=allowlist, required=False)
         except ConfigError as exc:
-            await _answer_callback(str(exc)[:200])
+            await _answer_callback(
+                user_safe_error(exc, fallback="callback lookup failed")
+            )
             return
         if backend is None:
             logger.warning(
@@ -225,7 +244,7 @@ async def _dispatch_callback(
         try:
             plugin_config = cfg.runtime.plugin_config(command_id)
         except ConfigError as exc:
-            await _answer_callback(str(exc)[:200])
+            await _answer_callback(user_safe_error(exc, fallback="plugin config error"))
             return
         # Early callback answering: clear the Telegram spinner immediately
         if getattr(backend, "answer_early", False):
@@ -264,7 +283,7 @@ async def _dispatch_callback(
                 error=str(exc),
                 error_type=exc.__class__.__name__,
             )
-            await _answer_callback(str(exc)[:200])
+            await _answer_callback(user_safe_error(exc, fallback="callback failed"))
             return
         logger.debug("callback.executed", command=command_id, chat_id=chat_id)
         if result is not None:

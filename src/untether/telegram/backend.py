@@ -56,7 +56,10 @@ def _expect_transport_settings(transport_config: object) -> TelegramTransportSet
 def _detect_cli_version(cmd: str) -> str | None:
     """Run ``<cmd> --version`` and return the version string, or None."""
     try:
-        result = subprocess.run(
+        # #202: cmd comes from EngineBackend.cli_cmd (e.g. "claude", "codex"),
+        # a fixed table of engine entrypoints configured in pyproject.toml.
+        # No shell, fixed argv, 3-second timeout.
+        result = subprocess.run(  # nosec B603
             [cmd, "--version"],
             capture_output=True,
             text=True,
@@ -194,7 +197,8 @@ class TelegramBackend(TransportBackend):
 
     def lock_token(self, *, transport_config: object, _config_path: Path) -> str | None:
         settings = _expect_transport_settings(transport_config)
-        return settings.bot_token
+        # #196: unwrap SecretStr at the transport boundary.
+        return settings.bot_token.get_secret_value()
 
     def build_and_run(
         self,
@@ -206,7 +210,8 @@ class TelegramBackend(TransportBackend):
         default_engine_override: str | None,
     ) -> None:
         settings = _expect_transport_settings(transport_config)
-        token = settings.bot_token
+        # #196: unwrap SecretStr at the transport boundary.
+        token = settings.bot_token.get_secret_value()
         chat_id = settings.chat_id
 
         # Extract trigger config from the raw TOML (optional section).

@@ -16,6 +16,7 @@ import shutil
 import subprocess as subprocess_module
 import time
 import tty
+from collections import OrderedDict
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -82,8 +83,13 @@ _REQUEST_TO_INPUT: dict[str, dict[str, Any]] = {}
 # Used by claude_control.py to send tool-specific deny messages
 _REQUEST_TO_TOOL_NAME: dict[str, str] = {}
 
-# Recently handled request_ids (prevents duplicate callback warnings)
-_HANDLED_REQUESTS: set[str] = set()
+# Recently handled request_ids (prevents duplicate callback warnings).
+# #197: previously a plain set cleared wholesale when len > 100, which opened
+# a small window where duplicate callbacks could slip through as "not found"
+# rather than being recognised as duplicates.  Now an LRU OrderedDict that
+# evicts oldest-first at _HANDLED_REQUESTS_MAX entries.
+_HANDLED_REQUESTS_MAX = 200
+_HANDLED_REQUESTS: OrderedDict[str, None] = OrderedDict()
 
 # Discuss cooldown: session_id -> (timestamp, deny_count)
 # When user clicks "Pause & Outline Plan", this tracks when the denial was sent
@@ -1941,11 +1947,11 @@ async def send_claude_control_response(
 
     # Clean up the mapping after use
     del _REQUEST_TO_SESSION[request_id]
-    _HANDLED_REQUESTS.add(request_id)
-
-    # Cap the set size to prevent unbounded growth
-    if len(_HANDLED_REQUESTS) > 100:
-        _HANDLED_REQUESTS.clear()
+    # #197: LRU-evict oldest entries instead of clear()-ing the whole set.
+    _HANDLED_REQUESTS[request_id] = None
+    _HANDLED_REQUESTS.move_to_end(request_id)
+    while len(_HANDLED_REQUESTS) > _HANDLED_REQUESTS_MAX:
+        _HANDLED_REQUESTS.popitem(last=False)
 
     return success
 
