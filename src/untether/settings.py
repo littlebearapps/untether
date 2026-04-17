@@ -177,6 +177,15 @@ class WatchdogSettings(BaseModel):
     mcp_tool_timeout: float = Field(default=900.0, ge=60, le=7200)
     subagent_timeout: float = Field(default=900.0, ge=60, le=7200)
 
+    # Engine-agnostic "stuck after tool_result" detector (issue #322).
+    # Default threshold of 300s matches undici's non-configurable 5-min
+    # idle-body timeout, which is the root-cause mechanism behind mcp-remote
+    # wedges talking to Cloudflare MCPs.
+    detect_stuck_after_tool_result: bool = False
+    stuck_after_tool_result_timeout: float = Field(default=300.0, ge=60, le=1800)
+    stuck_after_tool_result_recovery_enabled: bool = True
+    stuck_after_tool_result_recovery_delay: float = Field(default=60.0, ge=10, le=600)
+
 
 class ProgressSettings(BaseModel):
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)

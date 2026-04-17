@@ -112,6 +112,86 @@ _ABS_PATH_RE = re.compile(r"(/[\w./-]{3,}/[\w.-]+)")
 _URL_RE = re.compile(r"https?://[^\s\"'<>]+")
 
 
+_TOOL_RESULT_EVENT_KIND = "tool_result"
+_ASSISTANT_EVENT_KIND = "assistant"
+_OTHER_EVENT_KIND = "other"
+
+# Engine-agnostic classification of raw JSONL events for the
+# stuck-after-tool_result detector (#322). See docs/reference/runners/*/
+# for each engine's event shape.
+_CODEX_TOOL_ITEM_TYPES = frozenset(
+    {"mcp_tool_call", "command_execution", "file_change", "web_search"}
+)
+_OPENCODE_TOOL_STATUSES = frozenset({"completed", "error"})
+
+
+def _classify_jsonl_event(raw: Any) -> str:
+    """Return "tool_result" | "assistant" | "other" for a decoded JSONL event.
+
+    Engine-agnostic: handles Claude, Codex, OpenCode, Pi, Gemini, AMP.
+    Conservative — unknown shapes return "other".
+    """
+    if not isinstance(raw, dict):
+        return _OTHER_EVENT_KIND
+    t = raw.get("type")
+    if not isinstance(t, str):
+        return _OTHER_EVENT_KIND
+    # Claude / AMP: role=user message whose content contains a tool_result block
+    if t == "user":
+        msg = raw.get("message")
+        if isinstance(msg, dict):
+            content = msg.get("content")
+            if isinstance(content, list):
+                for block in content:
+                    if isinstance(block, dict) and block.get("type") == "tool_result":
+                        return _TOOL_RESULT_EVENT_KIND
+        return _OTHER_EVENT_KIND
+    # Pi direct tool_result events
+    if t in {"tool_result", "ToolExecutionEnd"}:
+        return _TOOL_RESULT_EVENT_KIND
+    # Codex: item.completed (and item.updated with terminal status) for tool items
+    if t in {"item.completed", "item.updated"}:
+        item = raw.get("item")
+        if isinstance(item, dict) and item.get("type") in _CODEX_TOOL_ITEM_TYPES:
+            status = item.get("status")
+            if t == "item.completed" or status in {"completed", "failed"}:
+                return _TOOL_RESULT_EVENT_KIND
+        # Codex agent_message completion is an assistant signal
+        if (
+            isinstance(item, dict)
+            and item.get("type") == "agent_message"
+            and t == "item.completed"
+        ):
+            return _ASSISTANT_EVENT_KIND
+        return _OTHER_EVENT_KIND
+    # OpenCode: ToolUse event (or message.part.updated) carrying a part with
+    # terminal status. Normalised ToolUse shape first, then raw shape.
+    if t == "ToolUse":
+        state_block = raw.get("state")
+        if (
+            isinstance(state_block, dict)
+            and state_block.get("status") in _OPENCODE_TOOL_STATUSES
+        ):
+            return _TOOL_RESULT_EVENT_KIND
+        return _OTHER_EVENT_KIND
+    if t == "message.part.updated":
+        props = raw.get("properties")
+        part = props.get("part") if isinstance(props, dict) else raw.get("part")
+        if isinstance(part, dict) and part.get("type") == "tool":
+            state_block = part.get("state")
+            if (
+                isinstance(state_block, dict)
+                and state_block.get("status") in _OPENCODE_TOOL_STATUSES
+            ):
+                return _TOOL_RESULT_EVENT_KIND
+        return _OTHER_EVENT_KIND
+    # Assistant-turn signals (clear the tool_result latch so the detector
+    # correctly sees "recovered" if the engine resumes).
+    if t in {"assistant", "message.updated", "agent_message"}:
+        return _ASSISTANT_EVENT_KIND
+    return _OTHER_EVENT_KIND
+
+
 def _sanitise_stderr(text: str) -> str:
     """Redact absolute paths and URLs from stderr before exposing to users."""
     text = _ABS_PATH_RE.sub("[path]", text)
@@ -207,6 +287,13 @@ class JsonlStreamState:
     )
     stderr_capture: list[str] = field(default_factory=list)
     proc_returncode: int | None = None
+    # Stuck-after-tool_result detector (#322). Engine-agnostic signal:
+    # set when a tool_result-equivalent event arrives, cleared when an
+    # assistant-turn-start event arrives. When non-zero and elapsed > threshold,
+    # indicates Claude (or any engine) received a tool result but has not
+    # emitted a follow-up assistant turn.
+    last_event_kind: str = "other"
+    last_tool_result_at: float = 0.0
 
 
 class JsonlSubprocessRunner(BaseRunner):
@@ -688,6 +775,16 @@ class JsonlSubprocessRunner(BaseRunner):
             stream.last_event_tool = etool
             label = f"tool:{etool}" if etool else etype
             stream.recent_events.append((now, label))
+            # Stuck-after-tool_result tracking (#322). The latch persists across
+            # intervening "other" events (attachments, system hooks) and is
+            # cleared only by an assistant-turn-start event so the detector
+            # sees a true "tool_result arrived, no follow-up" signal.
+            kind = _classify_jsonl_event(raw_dict)
+            stream.last_event_kind = kind
+            if kind == _TOOL_RESULT_EVENT_KIND:
+                stream.last_tool_result_at = now
+            elif kind == _ASSISTANT_EVENT_KIND:
+                stream.last_tool_result_at = 0.0
         output: list[UntetherEvent] = []
         for evt in events:
             if isinstance(evt, StartedEvent):

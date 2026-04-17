@@ -101,6 +101,23 @@ def _count_tcp(pid: int) -> tuple[int, int]:
     return established, total
 
 
+def read_cmdline(pid: int) -> str | None:
+    """Return /proc/<pid>/cmdline as a space-separated string, or None.
+
+    Used by the stuck-after-tool_result recovery path (#322) to identify
+    MCP-adapter child processes like `npx mcp-remote`. Returns None on
+    non-Linux platforms, missing PIDs, or permission errors.
+    """
+    try:
+        with open(f"/proc/{pid}/cmdline", "rb") as f:
+            raw = f.read()
+    except (OSError, FileNotFoundError, PermissionError):
+        return None
+    if not raw:
+        return None
+    return raw.replace(b"\x00", b" ").decode("utf-8", errors="replace").strip()
+
+
 def _find_children(pid: int) -> list[int]:
     """Find child PIDs via /proc/pid/task/*/children."""
     children: list[int] = []

@@ -1,5 +1,17 @@
 # changelog
 
+## v0.35.3 (unreleased)
+
+### fixes
+
+- detect and recover from Claude Code hanging after an MCP `tool_result` via stream-json / sdk-cli — root cause is upstream [claude-code#39700](https://github.com/anthropics/claude-code/issues/39700) / [#41086](https://github.com/anthropics/claude-code/issues/41086) combined with the undici idle-body timeout in `mcp-remote` ([geelen/mcp-remote#226](https://github.com/geelen/mcp-remote/issues/226), [#107](https://github.com/geelen/mcp-remote/issues/107)) talking to Cloudflare's remote MCP servers. The symptom "MCP tool may be hung: cloudflare-observability" was misleading — the MCP had already returned its result; the engine was silent after ingesting it [#322](https://github.com/littlebearapps/untether/issues/322)
+  - new engine-agnostic `_classify_jsonl_event()` in `runner.py` recognises tool_result-equivalent events across all six engines (Claude, Codex, OpenCode, Pi, Gemini, AMP); `JsonlStreamState` gains a `last_tool_result_at` latch cleared only on an assistant-turn event
+  - new `ProgressEdits._detect_stuck_after_tool_result()` fires when the latch has been set for ≥ `stuck_after_tool_result_timeout` (default 300 s, matches undici's 5-minute idle-body timeout) with `cpu_active=True`, frozen ring buffer ≥ 3, and no pending approval — ExitPlanMode-, Bash-, and subagent-safe
+  - tiered recovery in `ProgressEdits._handle_stuck_after_tool_result()`: Tier 1 logs `progress_edits.stuck_after_tool_result` with diag; Tier 2 SIGTERMs MCP-adapter children whose `/proc/<pid>/cmdline` contains `mcp-remote` or `@modelcontextprotocol` (forces the SSE reader to error out and unblocks the parent engine); Tier 3 cancels via `cancel_event` after `stuck_after_tool_result_recovery_delay` (default 60 s) with a specific Telegram notice
+  - `runners/claude.py:env()` now sets `CLAUDE_ENABLE_STREAM_WATCHDOG=1`, `CLAUDE_STREAM_IDLE_TIMEOUT_MS=60000`, `MCP_TOOL_TIMEOUT=120000`, and `MAX_MCP_OUTPUT_TOKENS=12000` via `setdefault` — reduces incidence while the detector is the safety net; user overrides via shell env or `~/.claude/settings.json` still win
+  - four new `[watchdog]` config fields: `detect_stuck_after_tool_result` (default `false` for this release, will default `true` once validated), `stuck_after_tool_result_timeout`, `stuck_after_tool_result_recovery_enabled`, `stuck_after_tool_result_recovery_delay`
+  - `utils/proc_diag.py:read_cmdline()` helper for identifying adapter children; 17 new tests across engine-matrix classifier, detector gates, and tier-1/2/3 state machine
+
 ## v0.35.1 (2026-04-15)
 
 ### fixes
