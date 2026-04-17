@@ -132,6 +132,40 @@ async def _resolve_engine_run_options(
     )
 
 
+def _apply_trigger_permission_override(
+    run_options: EngineRunOptions | None,
+    context: RunContext | None,
+    *,
+    engine: EngineId | None = None,
+) -> EngineRunOptions | None:
+    """#330: apply a trigger-level `permission_mode` on top of resolved run_options.
+
+    Dispatchers populate ``RunContext.permission_mode`` from
+    ``CronConfig.permission_mode``; this helper overrides the resolved
+    per-chat/topic ``EngineRunOptions.permission_mode`` when a trigger
+    override is present. Logs once when the override actually changes the
+    effective value so staging debug is greppable.
+    """
+    if context is None or context.permission_mode is None:
+        return run_options
+    previous_mode = run_options.permission_mode if run_options is not None else None
+    if run_options is None:
+        new_options = EngineRunOptions(permission_mode=context.permission_mode)
+    else:
+        from dataclasses import replace
+
+        new_options = replace(run_options, permission_mode=context.permission_mode)
+    if previous_mode != context.permission_mode:
+        logger.info(
+            "trigger.cron.permission_mode_override",
+            trigger_source=context.trigger_source,
+            chat_permission_mode=previous_mode,
+            trigger_permission_mode=context.permission_mode,
+            engine=engine,
+        )
+    return new_options
+
+
 def _allowed_chat_ids(cfg: TelegramBridgeConfig) -> set[int]:
     allowed = set(cfg.chat_ids or ())
     allowed.add(cfg.chat_id)
@@ -1544,6 +1578,14 @@ async def run_main_loop(
                     engine_for_overrides,
                     chat_prefs=state.chat_prefs,
                     topic_store=state.topic_store,
+                )
+                # #330: cron-level permission_mode override wins over the
+                # resolved chat/topic preference. Dispatchers populate
+                # RunContext.permission_mode from CronConfig.permission_mode;
+                # here we apply it to the per-run EngineRunOptions so the
+                # runner's _effective_permission_mode() picks it up.
+                run_options = _apply_trigger_permission_override(
+                    run_options, context, engine=engine_for_overrides
                 )
                 await run_engine(
                     exec_cfg=cfg.exec_cfg,

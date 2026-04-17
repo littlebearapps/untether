@@ -147,8 +147,11 @@ Webhook IDs must be unique across all configured webhooks.
 | `timezone` | string\|null | `null` | IANA timezone name (e.g. `"Australia/Melbourne"`). Overrides `default_timezone`. |
 | `fetch` | object\|null | `null` | Pre-fetch step configuration (see [Data-fetch crons](#data-fetch-crons)). |
 | `run_once` | bool | `false` | Fire once then auto-disable in-memory. The cron stays in the TOML; it re-enters the active list on the next config reload or restart. Useful for scheduled one-off tasks. |
+| `permission_mode` | string\|null | `null` | **Claude only.** Per-cron permission-mode override. One of `default`, `plan`, `auto`, `acceptEdits`, `bypassPermissions`. Wins over the chat's `/planmode` and the engine config default for this cron's run only. Lets a cron fire autonomously (`permission_mode = "auto"`) into a chat whose interactive mode is `plan`. Other engines (Codex, Gemini, OpenCode, Pi, AMP) silently ignore the field — full coverage is tracked in [#332](https://github.com/littlebearapps/untether/issues/332). |
 
 Either `prompt` or `prompt_template` is required. Cron IDs must be unique across all configured crons.
+
+**Permission-mode precedence (Claude):** cron `permission_mode` > per-chat `/planmode` > engine config default. Setting `permission_mode = "auto"` on a cron makes that scheduled run autonomous without affecting the chat's interactive behaviour. The rest of that chat's traffic continues to honour whatever `/planmode` the user set.
 
 ### `[triggers.crons.fetch]`
 

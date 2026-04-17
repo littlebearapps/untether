@@ -2,6 +2,10 @@
 
 ## v0.35.2 (unreleased)
 
+### changes
+
+- **feat:** `[[triggers.crons]]` now accepts an optional `permission_mode` field (`default` | `plan` | `auto` | `acceptEdits` | `bypassPermissions`) that overrides the chat / engine default for that cron's run only. Crons firing into plan-mode chats can now declare themselves autonomous via `permission_mode = "auto"` without flipping the whole chat to auto. Precedence: cron `permission_mode` > per-chat `/planmode` > engine config default. Claude-only for this release; Codex + Gemini completion is tracked in [#331](https://github.com/littlebearapps/untether/issues/331), and the broader all-engines + webhooks extension in [#332](https://github.com/littlebearapps/untether/issues/332) (v0.35.5). New `VALID_PERMISSION_MODES_BY_ENGINE` dict in `runners/run_options.py` lets the `CronConfig` validator reject typos for engines with known value sets while staying forward-compatible for engines whose permission wiring is pending. A new `trigger.cron.permission_mode_override` structlog INFO entry fires when the override actually changes the resolved value, for staging observability. [#330](https://github.com/littlebearapps/untether/issues/330)
+
 ### fixes
 
 - detect and recover from Claude Code hanging after an MCP `tool_result` via stream-json / sdk-cli — root cause is upstream [claude-code#39700](https://github.com/anthropics/claude-code/issues/39700) / [#41086](https://github.com/anthropics/claude-code/issues/41086) combined with the undici idle-body timeout in `mcp-remote` ([geelen/mcp-remote#226](https://github.com/geelen/mcp-remote/issues/226), [#107](https://github.com/geelen/mcp-remote/issues/107)) talking to Cloudflare's remote MCP servers. The symptom "MCP tool may be hung: cloudflare-observability" was misleading — the MCP had already returned its result; the engine was silent after ingesting it [#322](https://github.com/littlebearapps/untether/issues/322)

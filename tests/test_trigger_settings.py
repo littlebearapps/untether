@@ -193,6 +193,57 @@ class TestCronConfig:
                 prompt="Nope",
             )
 
+    # #330: per-cron permission_mode override
+    def test_permission_mode_default_none(self):
+        c = CronConfig(id="x", schedule="* * * * *", prompt="Hi")
+        assert c.permission_mode is None
+
+    @pytest.mark.parametrize(
+        "mode", ["default", "plan", "auto", "acceptEdits", "bypassPermissions"]
+    )
+    def test_permission_mode_accepts_valid_claude_values(self, mode: str):
+        c = CronConfig(
+            id="cr",
+            schedule="* * * * *",
+            engine="claude",
+            prompt="Hi",
+            permission_mode=mode,
+        )
+        assert c.permission_mode == mode
+
+    def test_permission_mode_rejects_unknown_value_for_claude(self):
+        with pytest.raises(ValidationError, match="unknown permission_mode"):
+            CronConfig(
+                id="cr",
+                schedule="* * * * *",
+                engine="claude",
+                prompt="Hi",
+                permission_mode="yoloMode",
+            )
+
+    def test_permission_mode_accepts_anything_for_unknown_engine(self):
+        # Forward-compatible behaviour: engines not in
+        # VALID_PERMISSION_MODES_BY_ENGINE accept any non-empty string; the
+        # runner silently no-ops. See #331 / #332 for the path to strict
+        # validation on Codex/Gemini/OpenCode/Pi/AMP.
+        c = CronConfig(
+            id="cr",
+            schedule="* * * * *",
+            engine="opencode",
+            prompt="Hi",
+            permission_mode="anything-goes",
+        )
+        assert c.permission_mode == "anything-goes"
+
+    def test_permission_mode_accepts_anything_when_engine_unset(self):
+        c = CronConfig(
+            id="cr",
+            schedule="* * * * *",
+            prompt="Hi",
+            permission_mode="anything",
+        )
+        assert c.permission_mode == "anything"
+
 
 class TestTriggersSettings:
     def test_disabled_by_default(self):

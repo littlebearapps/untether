@@ -295,3 +295,56 @@ async def test_dispatch_cron_sets_trigger_source():
     ctx = run_job.calls[0]["context"]
     assert ctx is not None
     assert ctx.trigger_source == "cron:daily-review"
+
+
+@pytest.mark.anyio
+async def test_dispatch_cron_passes_permission_mode_to_run_context():
+    """#330: CronConfig.permission_mode must flow to RunContext.permission_mode."""
+    transport = FakeTransport()
+    run_job = RunJobCapture()
+
+    async with anyio.create_task_group() as tg:
+        dispatcher = TriggerDispatcher(
+            run_job=run_job,
+            transport=transport,
+            default_chat_id=100,
+            task_group=tg,
+        )
+        cron = CronConfig(
+            id="autonomous-weekly",
+            schedule="0 9 * * 1",
+            engine="claude",
+            prompt="weekly report",
+            permission_mode="auto",
+        )
+        await dispatcher.dispatch_cron(cron)
+        await anyio.sleep(0.01)
+        tg.cancel_scope.cancel()
+
+    ctx = run_job.calls[0]["context"]
+    assert ctx is not None
+    assert ctx.permission_mode == "auto"
+    assert ctx.trigger_source == "cron:autonomous-weekly"
+
+
+@pytest.mark.anyio
+async def test_dispatch_cron_omits_permission_mode_when_unset():
+    """Crons without permission_mode leave the context field as None."""
+    transport = FakeTransport()
+    run_job = RunJobCapture()
+
+    async with anyio.create_task_group() as tg:
+        dispatcher = TriggerDispatcher(
+            run_job=run_job,
+            transport=transport,
+            default_chat_id=100,
+            task_group=tg,
+        )
+        cron = CronConfig(id="plain", schedule="* * * * *", prompt="hello")
+        await dispatcher.dispatch_cron(cron)
+        await anyio.sleep(0.01)
+        tg.cancel_scope.cancel()
+
+    ctx = run_job.calls[0]["context"]
+    assert ctx is not None
+    assert ctx.permission_mode is None

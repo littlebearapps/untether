@@ -46,6 +46,7 @@ class TriggerDispatcher:
         context = RunContext(
             project=cron.project,
             trigger_source=f"cron:{cron.id}",
+            permission_mode=cron.permission_mode,
         )
         engine_override = cron.engine
         label = f"\N{ALARM CLOCK} Scheduled: cron:{cron.id}"
