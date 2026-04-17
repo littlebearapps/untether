@@ -731,6 +731,17 @@ class TestFormatRunCost:
         assert result is not None
         assert "2m 5s" in result
 
+    def test_zero_turns_renders_count(self):
+        """Regression for #316: `if turns:` dropped zero-turn completions."""
+        result = _format_run_cost(
+            {
+                "total_cost_usd": 0.02,
+                "num_turns": 0,
+            }
+        )
+        assert result is not None
+        assert "0 tn" in result
+
 
 # ---------------------------------------------------------------------------
 # format_usage_compact tests
@@ -801,6 +812,20 @@ class TestFormatUsageCompact:
 
 
 class TestMaybeAppendUsageFooterAlwaysShow:
+    @pytest.fixture(autouse=True)
+    def _reset_usage_cache(self):
+        """Keep usage-cache state out of each test (fetcher is now cached)."""
+        from untether.utils import usage_cache
+
+        usage_cache.reset_cache()
+        # Also reset the schema-warning latch so tests can exercise it more than once.
+        import untether.runner_bridge as rb
+
+        rb._USAGE_SCHEMA_WARNED = False
+        yield
+        usage_cache.reset_cache()
+        rb._USAGE_SCHEMA_WARNED = False
+
     @pytest.mark.anyio
     async def test_always_show_appends_compact(self, monkeypatch):
         from untether.runner_bridge import _maybe_append_usage_footer
@@ -826,6 +851,37 @@ class TestMaybeAppendUsageFooterAlwaysShow:
         assert "5h: 25%" in result.text
         assert "7d: 10%" in result.text
         assert "\u26a1" in result.text
+
+    @pytest.mark.anyio
+    async def test_schema_mismatch_warning_fires_once(self, monkeypatch):
+        """Missing expected fields in the usage payload log a one-shot warning."""
+        from untether import runner_bridge as rb
+
+        async def _fake_fetch():
+            # Missing `resets_at` in both windows.
+            return {
+                "five_hour": {"utilization": 25.0},
+                "seven_day": {"utilization": 10.0},
+            }
+
+        monkeypatch.setattr(
+            "untether.telegram.commands.usage.fetch_claude_usage", _fake_fetch
+        )
+
+        warn_calls: list[tuple[str, dict]] = []
+
+        def _warn(event: str, **kwargs) -> None:
+            warn_calls.append((event, kwargs))
+
+        monkeypatch.setattr(rb.logger, "warning", _warn)
+
+        msg = RenderedMessage(text="Done.", extra={})
+        await rb._maybe_append_usage_footer(msg, always_show=True)
+        await rb._maybe_append_usage_footer(msg, always_show=True)
+
+        mismatch = [c for c in warn_calls if c[0] == "claude_usage.schema_mismatch"]
+        assert len(mismatch) == 1  # fires exactly once
+        assert mismatch[0][1]["missing"]  # has a non-empty list
 
     @pytest.mark.anyio
     async def test_always_show_false_hides_below_threshold(self, monkeypatch):
