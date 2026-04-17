@@ -633,7 +633,9 @@ def test_sweep_stale_registries_prunes_old_entries() -> None:
     _OUTLINE_REGISTRY_TS.clear()
 
     try:
-        register_ephemeral_message(777, 999, MessageRef(channel_id=777, message_id=1000))
+        register_ephemeral_message(
+            777, 999, MessageRef(channel_id=777, message_id=1000)
+        )
         register_outline_cleanup("sess-stale", object(), [])
         # Backdate both so they're past the TTL.
         import time as _time

@@ -9,6 +9,7 @@ from pydantic import (
     BaseModel,
     ConfigDict,
     Field,
+    SecretStr,
     StringConstraints,
     ValidationError,
     field_validator,
@@ -92,7 +93,11 @@ class TelegramFilesSettings(BaseModel):
 class TelegramTransportSettings(BaseModel):
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
 
-    bot_token: NonEmptyStr
+    # #196: SecretStr masks the value in repr()/str()/tracebacks and any
+    # accidental structlog serialisation.  Access the raw value via
+    # bot_token.get_secret_value() at the transport boundary.  The token is
+    # additionally redacted from log URLs by _redact_event_dict (#190).
+    bot_token: SecretStr
     chat_id: StrictInt
     allowed_user_ids: list[StrictInt] = Field(default_factory=list)
     message_overflow: Literal["trim", "split"] = "split"
@@ -108,6 +113,16 @@ class TelegramTransportSettings(BaseModel):
     media_group_debounce_s: float = Field(default=1.0, ge=0)
     topics: TelegramTopicsSettings = Field(default_factory=TelegramTopicsSettings)
     files: TelegramFilesSettings = Field(default_factory=TelegramFilesSettings)
+
+    @field_validator("bot_token", mode="after")
+    @classmethod
+    def _validate_bot_token_not_empty(cls, v: SecretStr) -> SecretStr:
+        """Preserve the pre-#196 NonEmptyStr contract.  SecretStr bypasses
+        str_strip_whitespace, so whitespace-only values would otherwise pass
+        the schema and fail at connect time with a less-helpful error."""
+        if not v.get_secret_value().strip():
+            raise ValueError("bot_token must not be empty")
+        return v
 
 
 class TransportsSettings(BaseModel):
@@ -438,7 +453,8 @@ def require_telegram(settings: UntetherSettings, config_path: Path) -> tuple[str
             "(telegram only for now)."
         )
     tg = settings.transports.telegram
-    return tg.bot_token, tg.chat_id
+    # #196: unwrap SecretStr at the transport boundary.
+    return tg.bot_token.get_secret_value(), tg.chat_id
 
 
 def _resolve_config_path(path: str | Path | None) -> Path:

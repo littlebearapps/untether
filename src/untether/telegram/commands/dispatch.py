@@ -244,9 +244,7 @@ async def _dispatch_callback(
         try:
             plugin_config = cfg.runtime.plugin_config(command_id)
         except ConfigError as exc:
-            await _answer_callback(
-                user_safe_error(exc, fallback="plugin config error")
-            )
+            await _answer_callback(user_safe_error(exc, fallback="plugin config error"))
             return
         # Early callback answering: clear the Telegram spinner immediately
         if getattr(backend, "answer_early", False):
@@ -285,9 +283,7 @@ async def _dispatch_callback(
                 error=str(exc),
                 error_type=exc.__class__.__name__,
             )
-            await _answer_callback(
-                user_safe_error(exc, fallback="callback failed")
-            )
+            await _answer_callback(user_safe_error(exc, fallback="callback failed"))
             return
         logger.debug("callback.executed", command=command_id, chat_id=chat_id)
         if result is not None:

@@ -156,8 +156,16 @@ ignore = [
 known-first-party = ["untether"]
 
 [tool.bandit]
-# Untether is a subprocess manager — these are expected patterns
-skips = ["B101", "B105", "B404", "B603", "B607"]
+# Retained skips:
+#   B101 — asserts are used for type-narrowing and invariant checks
+#   B105 — "hardcoded password" false-positives on string literals like
+#          "--force" that aren't passwords
+#   B404 — "consider security of subprocess module"; Untether is a subprocess
+#          manager, flagging every `import subprocess` adds no signal
+# Removed in #202: B603/B607 global skips.  Each remaining subprocess call
+# site is now annotated inline with `# nosec` + justification, so new
+# subprocess usage is flagged by CI by default.
+skips = ["B101", "B105", "B404"]
 
 [tool.ty.src]
 include = ["src", "tests"]

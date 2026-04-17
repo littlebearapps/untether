@@ -80,7 +80,10 @@ def _read_access_token(
     # macOS: try Keychain
     if raw is None and sys.platform == "darwin":
         try:
-            result = subprocess.run(
+            # #202: `security` is the system Keychain CLI (/usr/bin/security).
+            # Partial path is intentional — we rely on the macOS default PATH.
+            # No shell, fixed argv, no untrusted input.
+            result = subprocess.run(  # nosec B603 B607
                 [
                     "security",
                     "find-generic-password",

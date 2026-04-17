@@ -147,7 +147,8 @@ def run_doctor(
     project_chat_ids = projects_cfg.project_chat_ids()
     telegram_checks_result = anyio.run(
         telegram_checks,
-        tg.bot_token,
+        # #196: unwrap SecretStr at the transport boundary.
+        tg.bot_token.get_secret_value(),
         tg.chat_id,
         tg.topics,
         project_chat_ids,
