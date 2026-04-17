@@ -246,6 +246,37 @@ def test_translate_no_cost_produces_no_usage() -> None:
     assert completed.usage is None
 
 
+def test_translate_zero_cost_with_tokens_renders_usage() -> None:
+    """#316: OpenCode must not hide token usage when cost is zero (free tier)."""
+    state = OpenCodeStreamState()
+    state.session_id = "ses_freetier"
+    state.emitted_started = True
+
+    events = translate_opencode_event(
+        _decode_event(
+            {
+                "type": "step_finish",
+                "sessionID": "ses_freetier",
+                "part": {
+                    "reason": "stop",
+                    "tokens": {"input": 100, "output": 10},
+                    "cost": 0.0,
+                },
+            }
+        ),
+        title="opencode",
+        state=state,
+    )
+
+    completed = events[0]
+    assert isinstance(completed, CompletedEvent)
+    assert completed.usage is not None
+    # Cost omitted when zero, but tokens must still render.
+    assert "total_cost_usd" not in completed.usage
+    assert completed.usage["usage"]["input_tokens"] == 100
+    assert completed.usage["usage"]["output_tokens"] == 10
+
+
 def test_translate_tool_use_completed() -> None:
     state = OpenCodeStreamState()
     state.session_id = "ses_test123"

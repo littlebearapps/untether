@@ -388,6 +388,36 @@ def _resolve_presenter(
     return default_presenter
 
 
+_USAGE_SCHEMA_WARNED = False
+_USAGE_EXPECTED_WINDOW_FIELDS = frozenset({"utilization", "resets_at"})
+
+
+def _validate_usage_schema(data: dict[str, Any]) -> None:
+    """Log a one-shot warning if the subscription-usage payload is missing
+    expected fields. Does not mutate `data` — downstream code already handles
+    missing sections defensively; this is purely an observability signal so
+    API-shape drift is noticed instead of silently ignored."""
+    global _USAGE_SCHEMA_WARNED
+    if _USAGE_SCHEMA_WARNED:
+        return
+    missing: list[str] = []
+    for window in ("five_hour", "seven_day"):
+        section = data.get(window)
+        if section is None:
+            continue
+        if not isinstance(section, dict):
+            missing.append(f"{window}:not_a_dict")
+            continue
+        missing.extend(
+            f"{window}.{field_name}"
+            for field_name in _USAGE_EXPECTED_WINDOW_FIELDS
+            if field_name not in section
+        )
+    if missing:
+        _USAGE_SCHEMA_WARNED = True
+        logger.warning("claude_usage.schema_mismatch", missing=missing)
+
+
 async def _maybe_append_usage_footer(
     msg: RenderedMessage,
     *,
@@ -399,13 +429,11 @@ async def _maybe_append_usage_footer(
     When False (default), only appends warnings at >=70% threshold.
     """
     try:
-        from .telegram.commands.usage import (
-            _time_until,
-            fetch_claude_usage,
-            format_usage_compact,
-        )
+        from .telegram.commands.usage import _time_until, format_usage_compact
+        from .utils.usage_cache import fetch_claude_usage_cached
 
-        data = await fetch_claude_usage()
+        data = await fetch_claude_usage_cached()
+        _validate_usage_schema(data)
 
         if always_show:
             compact = format_usage_compact(data)
@@ -465,7 +493,7 @@ def _format_run_cost(usage: dict[str, Any] | None) -> str | None:
         else:
             parts.append(f"${cost:.4f}")
     turns = usage.get("num_turns")
-    if turns:
+    if turns is not None:
         parts.append(f"{turns} tn")
     duration_ms = usage.get("duration_ms")
     if duration_ms:

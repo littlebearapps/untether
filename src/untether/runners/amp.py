@@ -65,6 +65,7 @@ class AmpStreamState:
     emitted_started: bool = False
     saw_result: bool = False
     accumulated_usage: dict[str, int] = field(default_factory=dict)
+    total_cost_usd: float | None = None
 
 
 def _action_event(
@@ -127,18 +128,23 @@ def _accumulate_usage(state: AmpStreamState, message: dict[str, Any] | None) -> 
 
 def _build_usage(state: AmpStreamState) -> dict[str, Any] | None:
     """Build a usage dict from accumulated token data."""
-    if not state.accumulated_usage:
+    if not state.accumulated_usage and state.total_cost_usd is None:
         return None
-    token_usage: dict[str, Any] = {
-        "input_tokens": state.accumulated_usage.get("input_tokens", 0),
-        "output_tokens": state.accumulated_usage.get("output_tokens", 0),
-    }
-    cache_create = state.accumulated_usage.get("cache_creation_input_tokens", 0)
-    cache_read = state.accumulated_usage.get("cache_read_input_tokens", 0)
-    if cache_create or cache_read:
-        token_usage["cache_write_tokens"] = cache_create
-        token_usage["cache_read_tokens"] = cache_read
-    return {"usage": token_usage}
+    usage: dict[str, Any] = {}
+    if state.accumulated_usage:
+        token_usage: dict[str, Any] = {
+            "input_tokens": state.accumulated_usage.get("input_tokens", 0),
+            "output_tokens": state.accumulated_usage.get("output_tokens", 0),
+        }
+        cache_create = state.accumulated_usage.get("cache_creation_input_tokens", 0)
+        cache_read = state.accumulated_usage.get("cache_read_input_tokens", 0)
+        if cache_create or cache_read:
+            token_usage["cache_write_tokens"] = cache_create
+            token_usage["cache_read_tokens"] = cache_read
+        usage["usage"] = token_usage
+    if state.total_cost_usd is not None:
+        usage["total_cost_usd"] = state.total_cost_usd
+    return usage or None
 
 
 def translate_amp_event(
@@ -274,6 +280,8 @@ def translate_amp_event(
         state.saw_result = True
         is_error = event.is_error
         error_text = event.error
+        if event.total_cost_usd is not None:
+            state.total_cost_usd = float(event.total_cost_usd)
         resume = None
         if state.session_id:
             resume = ResumeToken(engine=ENGINE, value=state.session_id)
