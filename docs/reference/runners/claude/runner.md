@@ -179,7 +179,7 @@ Model:
 
 Effort (reasoning depth):
 
-* add `--effort <level>` if a reasoning override is set (low/medium/high/max).
+* add `--effort <level>` if a reasoning override is set (low/medium/high/xhigh/max).
 
 Permissions:
 

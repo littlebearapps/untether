@@ -1,159 +1,414 @@
 # changelog
 
-## v0.35.1 (2026-04-14)
-
-### security
-
-- validate callback query sender in group chats — reject button presses from unauthorised users [#192](https://github.com/littlebearapps/untether/issues/192)
-- escape release tag name in notify-website CI workflow — prevent JSON injection from crafted tag names [#193](https://github.com/littlebearapps/untether/issues/193)
-- sanitise flag-like prompts in Gemini and AMP runners — prompts starting with `-` are space-prefixed to prevent CLI flag injection; `sanitize_prompt()` moved to base runner class [#194](https://github.com/littlebearapps/untether/issues/194)
-- redact bot token from structured log URLs [#190](https://github.com/littlebearapps/untether/issues/190)
-- cap JSONL line buffer to prevent unbounded memory growth from malformed engine output [#191](https://github.com/littlebearapps/untether/issues/191)
-
-### fixes
-
-- diff preview approval gate no longer blocks edits after a plan is approved [#283](https://github.com/littlebearapps/untether/issues/283)
-- multipart webhooks no longer return HTTP 500 — multipart reader now uses cached body [#280](https://github.com/littlebearapps/untether/issues/280)
-- webhook rate limiter correctly returns 429 — dispatch is now fire-and-forget [#281](https://github.com/littlebearapps/untether/issues/281)
-- reduce stall warning false positives during Agent subagent work — tree CPU tracking, child-aware 15 min threshold [#264](https://github.com/littlebearapps/untether/issues/264)
-- `/ping` uptime now resets on service restart [#234](https://github.com/littlebearapps/untether/issues/234)
-- stop Untether being the preferred OOM victim — `OOMScoreAdjust=-100` and `OOMPolicy=continue` in systemd unit [#275](https://github.com/littlebearapps/untether/issues/275)
-- add 38 missing structlog calls across 13 files (logging audit) [#299](https://github.com/littlebearapps/untether/issues/299)
+## v0.35.2 (unreleased)
 
 ### changes
 
-- **timezone support for cron triggers** — per-cron `timezone` field and global `default_timezone` with IANA names; DST-aware [#270](https://github.com/littlebearapps/untether/issues/270)
-- **SSRF protection** — blocks private/reserved IP ranges, validates URL schemes, checks DNS resolution [#276](https://github.com/littlebearapps/untether/issues/276)
-- **non-agent webhook actions** — `file_write`, `http_forward`, `notify_only` actions without spawning an agent [#277](https://github.com/littlebearapps/untether/issues/277)
-- **multipart form data for webhooks** — file uploads with sanitised filenames, atomic writes, deny-glob protection [#278](https://github.com/littlebearapps/untether/issues/278)
-- **data-fetch cron triggers** — pull data from HTTP endpoints or local files before rendering prompts [#279](https://github.com/littlebearapps/untether/issues/279)
-- **hot-reload for trigger config** — editing `untether.toml` `[triggers]` applies changes immediately [#269](https://github.com/littlebearapps/untether/issues/269)
-- **hot-reload for bridge settings** — voice, file transfer, allowed_user_ids, timing reload without restart [#286](https://github.com/littlebearapps/untether/issues/286)
-- **`/at` command** — one-shot delayed runs: `/at 30m <prompt>` schedules 60s–24h delays [#288](https://github.com/littlebearapps/untether/issues/288)
-- **`run_once` cron flag** — fire once then auto-disable; re-activates on config reload [#288](https://github.com/littlebearapps/untether/issues/288)
-- **trigger visibility (Tier 1)** — `/ping` shows trigger summary, run footer shows provenance, human-friendly cron descriptions [#271](https://github.com/littlebearapps/untether/issues/271)
-- **faster restarts** — persist Telegram `update_id`, `sd_notify` systemd integration, `RestartSec=2` [#287](https://github.com/littlebearapps/untether/issues/287)
-- **max effort level** for Claude Code + show resolved defaults in `/config` [#272](https://github.com/littlebearapps/untether/issues/272)
+- **feat:** add `xhigh` effort level for Claude Code. Opus 4.7 (Claude Code CLI v2.1.114+) introduces an `xhigh` rank between `high` and `max`; Untether now exposes it via `/config > Reasoning` on Claude chats and via `/reasoning set claude xhigh`. Single-line change in `src/untether/telegram/engine_overrides.py:14` — the button scaffolding, action-key reverse map, and descriptive text for `xhigh` already existed from #272's Codex work. Precedent mirrors #272 (the `max` level add). Tests in `tests/test_config_command.py` updated to assert `xhigh` appears for Claude and persists across the override round-trip [#351](https://github.com/littlebearapps/untether/issues/351)
+- **feat:** restart-required vs hot-reloadable settings are now structurally surfaced. `TelegramTransportSettings.RESTART_REQUIRED_FIELDS` (new `ClassVar[frozenset[str]]` in `src/untether/settings.py`) is the single source of truth for which transport fields need a process restart (`bot_token`, `chat_id`, `session_mode`, `topics`, `message_overflow`); `telegram/loop.py:handle_reload()` now consumes that ClassVar instead of the previously-inlined `RESTART_ONLY_KEYS` set. When a restart-required key changes during hot-reload, the bot now posts a 🔄 notice ("Setting `X` changed — restart required to take effect; run: `systemctl --user restart untether`") in addition to the existing `config.reload.transport_config_changed` structlog warning, so the operator doesn't silently run on stale values. `docs/reference/config.md` gains a comprehensive "Hot-reload vs restart-required" section and per-field 🔄 markers in the transport / topics tables [#318](https://github.com/littlebearapps/untether/issues/318)
+  - follow-up: `_notify_restart_required` broadcasts to every `runtime.project_chat_ids()` plus any `allowed_user_ids` admin DM instead of a single `cfg.chat_id` send — in project-routed deployments `cfg.chat_id` is the placeholder sentinel and every send failed with `chat not found`, so the user-visible warning never arrived. Per-chat failures are logged via `config.reload.restart_notify.failed` and skipped; `config.reload.restart_notify.sent` emits `targets` + `sent_count` for observability. Falls back to `cfg.chat_id` only when no routed targets exist.
+- **feat:** `[[triggers.crons]]` now accepts an optional `permission_mode` field (`default` | `plan` | `auto` | `acceptEdits` | `bypassPermissions`) that overrides the chat / engine default for that cron's run only. Crons firing into plan-mode chats can now declare themselves autonomous via `permission_mode = "auto"` without flipping the whole chat to auto. Precedence: cron `permission_mode` > per-chat `/planmode` > engine config default. Claude-only for this release; Codex + Gemini completion is tracked in [#331](https://github.com/littlebearapps/untether/issues/331), and the broader all-engines + webhooks extension in [#332](https://github.com/littlebearapps/untether/issues/332) (v0.35.5). New `VALID_PERMISSION_MODES_BY_ENGINE` dict in `runners/run_options.py` lets the `CronConfig` validator reject typos for engines with known value sets while staying forward-compatible for engines whose permission wiring is pending. A new `trigger.cron.permission_mode_override` structlog INFO entry fires when the override actually changes the resolved value, for staging observability. [#330](https://github.com/littlebearapps/untether/issues/330)
+- callback-answer instrumentation for inline-keyboard presses — every `answerCallbackQuery` now emits a `callback.answered` INFO event with `latency_ms` (HTTP round-trip), `total_ms` (since dispatcher entry), `early=true|false`, and `has_toast`. Lets staging greps distinguish "we were fast, Telegram was slow" from "we were slow" when `BotResponseTimeoutError` is reported client-side. Investigation of the existing `answer_early` path confirmed it already fires before any `backend.handle()` work; added a regression test (`test_early_answer_fires_before_slow_handle`) locking the ordering invariant in so future refactors can't reintroduce the timeout window. Telegram-transport reference docs gained a callback-answering section with the structured-log schema and triage guidance [#247](https://github.com/littlebearapps/untether/issues/247)
 
-See [CHANGELOG.md](https://github.com/littlebearapps/untether/blob/dev/CHANGELOG.md#v0351-2026-04-14) for full implementation details.
+### fixes
+
+- **security:** Claude and Pi engine subprocesses no longer inherit the parent's full environment — only allowlisted variables (basic OS essentials, AI/cloud provider keys, Claude/MCP namespaces, Node/Python/UV/NPM runtime vars) pass through via the new `utils/env_policy.filtered_env()` helper. Random third-party tokens that happen to live in the parent env (AWS, Stripe, DigitalOcean, DATABASE_URL, personal app tokens, etc.) are no longer available to engine subprocesses or their MCP servers — reduces the blast radius of any tool-call or MCP that exfiltrates process env. PR #323's four `setdefault` reinforcements for the stuck-after-tool_result watchdog are preserved on top of the filtered env. Other engines (Codex, Gemini, OpenCode, AMP) keep the default inherit-everything behaviour for this release; extending to them is tracked as part of [#332](https://github.com/littlebearapps/untether/issues/332) (v0.35.5). Adding a new engine or MCP that relies on an unfamiliar variable is documented at the top of `utils/env_policy.py` [#198](https://github.com/littlebearapps/untether/issues/198)
+- **security:** CI matrix values (`matrix.command`, `matrix.sync_args`) now pass through `env:` instead of direct `${{ }}` interpolation in `run:` blocks, eliminating a theoretical shell-injection vector should matrix values ever become dynamic (e.g. from PR labels) [#195](https://github.com/littlebearapps/untether/issues/195)
+- **security:** `bot_token` is now `pydantic.SecretStr` in `TelegramTransportSettings` — masks the value in `repr()`, `str()`, tracebacks, and any accidental structlog serialisation. Raw value is unwrapped via `.get_secret_value()` at the transport boundary (`require_telegram`, `backend.lock_token`/`build_and_run`, `cli/doctor`, `cli/onboarding_cmd`). A field_validator preserves the pre-change NonEmptyStr contract (whitespace-only tokens still rejected, since SecretStr bypasses `str_strip_whitespace`) [#196](https://github.com/littlebearapps/untether/issues/196)
+- **security:** `_HANDLED_REQUESTS` in `runners/claude.py` switched from a `set` cleared wholesale at 100 entries to an LRU `OrderedDict` (max 200, oldest-first eviction) — closes the small window where a duplicate Telegram callback delivered just after a `.clear()` would be misclassified as "request not found" rather than "duplicate" [#197](https://github.com/littlebearapps/untether/issues/197)
+- **security:** Codex auth subprocess output is now `html.escape()`'d before being wrapped in `<pre>` in the HTML-mode Telegram reply — prevents a crafted error message from injecting Telegram entities (`<b>`, `<a>`, etc) into the rendered response [#199](https://github.com/littlebearapps/untether/issues/199)
+- **security:** voice transcription error paths (`telegram/voice.py`) and command-dispatch error paths (`telegram/commands/dispatch.py`) now send sanitised text via shared `utils/error_display.user_safe_error()` — strips URLs and absolute paths, caps length, and falls back when sanitised text is empty. Full exception detail still goes to structlog [#200](https://github.com/littlebearapps/untether/issues/200) [#201](https://github.com/littlebearapps/untether/issues/201)
+- **security:** removed global bandit skips for B603/B607 in `pyproject.toml`; the three remaining subprocess sites (`telegram/backend.py:_detect_cli_version`, `telegram/commands/usage.py` macOS Keychain lookup, `utils/git.py:_run_git`) are annotated inline with `# nosec` + per-site justification — CI now flags any NEW subprocess call site by default [#202](https://github.com/littlebearapps/untether/issues/202)
+- **security:** `_EPHEMERAL_MSGS` and `_OUTLINE_REGISTRY` in `runner_bridge.py` gain companion timestamp maps and a `sweep_stale_registries()` helper that prunes entries older than 1 hour. Sweep piggy-backs on `ProgressEdits._stall_monitor`'s existing 60-second tick — handles runs that crash or exit abnormally without firing the normal cleanup path [#203](https://github.com/littlebearapps/untether/issues/203)
+- **security:** `telegram/client_api.py:download_file` validates `file_path` (from Telegram `getFile`) against `://`, `..`, and leading `/` before URL construction — a tampered or spoofed getFile response that returned an attacker-controlled URL as `file_path` could otherwise redirect the subsequent HTTP GET away from `api.telegram.org` [#204](https://github.com/littlebearapps/untether/issues/204)
+- engine subprocess cleanup now walks the process tree and signals descendants in separate process groups — previously `os.killpg(proc.pid, SIGTERM)` only reached the parent's direct pgroup, so grandchildren spawned with fresh sessions (Node's `child_process.spawn()` pattern, used by `workerd` via `@cloudflare/vitest-pool-workers`) survived a SIGTERM'd Claude Code session. On lba-1 this orphaned 316 `workerd` processes consuming 37 GB of RAM after 6 cascading Claude Code signal deaths. `_signal_process` now snapshots descendants via `proc_diag.find_descendants()` **before** `killpg` (so `/proc/<pid>/task/*/children` is still readable), runs the existing pgroup kill, then `os.kill(pid, sig)` on each captured PID best-effort (swallowing `ProcessLookupError`/`PermissionError`). SIGKILL escalation walks the tree again. Graceful fallback to legacy pgroup-only behaviour on non-Linux hosts or `/proc` read errors. Related upstream: [anthropics/claude-code#43944](https://github.com/anthropics/claude-code/issues/43944), [cloudflare/workers-sdk#8837](https://github.com/cloudflare/workers-sdk/issues/8837) [#275](https://github.com/littlebearapps/untether/issues/275)
+  - `proc_diag._find_descendants` renamed to public `find_descendants` (private alias kept for back-compat with existing test imports)
+- webhook server now degrades gracefully when it can't bind its port — previously a port conflict (e.g. another process on the default 9876) crashed the entire bot (polling, commands, crons included) via an uncaught `OSError` propagating through the `anyio` task group, triggering a systemd restart loop. `run_webhook_server` now catches `OSError` from `TCPSite.start()`, logs a structured `triggers.server.bind_failed` event with `host`/`port`/`hint`/`fix` fields, and returns normally so the rest of the bot stays up [#320](https://github.com/littlebearapps/untether/issues/320)
+- cost footer accuracy and engine cost parity — 60-second TTL cache on the Claude subscription-usage fetch (`utils/usage_cache.py`) with stale-while-error fallback smooths transient 429s and rate-limit windows; a one-shot `claude_usage.schema_mismatch` warning logs missing expected fields so upstream API drift is noticed instead of silently dropping the footer; `_format_run_cost` now renders zero-turn completions (`if turns is not None:` instead of `if turns:`); Gemini runner extracts `stats.total_cost_usd` into usage when present; AMP `AmpResult` schema gains a `total_cost_usd` field and the runner surfaces it through the usage dict when AMP emits one; added an OpenCode regression test locking in that token counts still render when cost is zero (free-tier runs) [#316](https://github.com/littlebearapps/untether/issues/316)
+  - persisting the daily cost accumulator across restarts was part of the issue's "nice-to-have" scope and is deferred to a follow-up to keep this change focused on accuracy + parity
+- `run_once = true` crons now persist their fired state to `run_once_fired.json` (sibling of `untether.toml`) — no longer re-fire on config hot-reload or process restart. Previously the TOML entry re-entered the active list on every reload because `remove_cron()` was in-memory only; editing any unrelated config setting would cause every already-fired one-shot to run again. `TriggerManager` now takes an optional `config_path` argument, loads the fired set on init, persists on `remove_cron()`, and auto-cleans fired-state entries whose cron id no longer appears in the TOML so ids can be safely reused. Related: #269 (hot-reload), #294 (master pause toggle) [#317](https://github.com/littlebearapps/untether/issues/317)
+- Pi footer now shows the model name when the user relies on the default config model (no `/model set` override and no `pi.model` in `untether.toml`). The Pi CLI's `message_end` event carries `"model": "..."` alongside provider/usage; the runner now extracts this and emits a supplementary `StartedEvent` once per session so `ProgressTracker.note_event` merges it into the tracker meta. Priority preserved: `run_options.model` > `self.model` > JSONL fallback. Completes the work begun in #235 [#225](https://github.com/littlebearapps/untether/issues/225)
+  - follow-up: `JsonlSubprocessRunner.handle_started_event` was silently dropping the supplementary `StartedEvent` as a same-session duplicate, so the extracted model never reached `ProgressTracker.note_event`. The filter now emits duplicates through when the event carries `meta`; true duplicates (no meta) are still dropped. Unit tests in `tests/test_runner_utils.py` previously passed because they called `translate_pi_event` directly, bypassing the base-runner filter — added a regression test covering the duplicate-with-meta path.
+- detect and recover from Claude Code hanging after an MCP `tool_result` via stream-json / sdk-cli — root cause is upstream [claude-code#39700](https://github.com/anthropics/claude-code/issues/39700) / [#41086](https://github.com/anthropics/claude-code/issues/41086) combined with the undici idle-body timeout in `mcp-remote` ([geelen/mcp-remote#226](https://github.com/geelen/mcp-remote/issues/226), [#107](https://github.com/geelen/mcp-remote/issues/107)) talking to Cloudflare's remote MCP servers. The symptom "MCP tool may be hung: cloudflare-observability" was misleading — the MCP had already returned its result; the engine was silent after ingesting it [#322](https://github.com/littlebearapps/untether/issues/322)
+  - new engine-agnostic `_classify_jsonl_event()` in `runner.py` recognises tool_result-equivalent events across all six engines (Claude, Codex, OpenCode, Pi, Gemini, AMP); `JsonlStreamState` gains a `last_tool_result_at` latch cleared only on an assistant-turn event
+  - new `ProgressEdits._detect_stuck_after_tool_result()` fires when the latch has been set for ≥ `stuck_after_tool_result_timeout` (default 300 s, matches undici's 5-minute idle-body timeout) with `cpu_active=True`, frozen ring buffer ≥ 3, and no pending approval — ExitPlanMode-, Bash-, and subagent-safe
+  - tiered recovery in `ProgressEdits._handle_stuck_after_tool_result()`: Tier 1 logs `progress_edits.stuck_after_tool_result` with diag; Tier 2 SIGTERMs MCP-adapter children whose `/proc/<pid>/cmdline` contains `mcp-remote` or `@modelcontextprotocol` (forces the SSE reader to error out and unblocks the parent engine); Tier 3 cancels via `cancel_event` after `stuck_after_tool_result_recovery_delay` (default 60 s) with a specific Telegram notice
+  - `runners/claude.py:env()` now sets `CLAUDE_ENABLE_STREAM_WATCHDOG=1`, `CLAUDE_STREAM_IDLE_TIMEOUT_MS=60000`, `MCP_TOOL_TIMEOUT=120000`, and `MAX_MCP_OUTPUT_TOKENS=12000` via `setdefault` — reduces incidence while the detector is the safety net; user overrides via shell env or `~/.claude/settings.json` still win
+  - four new `[watchdog]` config fields: `detect_stuck_after_tool_result` (default `false` for this release, will default `true` once validated), `stuck_after_tool_result_timeout`, `stuck_after_tool_result_recovery_enabled`, `stuck_after_tool_result_recovery_delay`
+  - `utils/proc_diag.py:read_cmdline()` helper for identifying adapter children; 17 new tests across engine-matrix classifier, detector gates, and tier-1/2/3 state machine
+
+### docs
+
+- document `[triggers.server]` port-conflict troubleshooting in `docs/reference/triggers/triggers.md` with `ss -tlnp` diagnosis step and the `port = <N>` remediation [#320](https://github.com/littlebearapps/untether/issues/320)
+
+## v0.35.1 (2026-04-15)
+
+### fixes
+
+- diff preview approval gate no longer blocks edits after a plan is approved — the `_discuss_approved` flag now short-circuits diff preview as well as `ExitPlanMode`, so once the user approves a plan outline the next `Edit`/`Write` runs without a second approval prompt [#283](https://github.com/littlebearapps/untether/issues/283)
+- `scripts/healthcheck.sh` exits prematurely under `set -e` — `pass()`/`fail()` used `((var++))` which returns the pre-increment value, tripping `set -e` on the first call so only the first check ever ran and the script always exited 1. Also, the error-log count piped journalctl through `grep -c .`, which counted `-- No entries --` meta lines as matches, producing false-positive log-error counts on clean systems. Now uses explicit `var=$((var+1))` assignment and filters meta lines with `grep -vc '^-- '` [#302](https://github.com/littlebearapps/untether/issues/302)
+
+- fix multipart webhooks returning HTTP 500 — `_process_webhook` pre-read the request body for size/auth/rate-limit checks, leaving the stream empty when `_parse_multipart` called `request.multipart()`. Now the multipart reader is constructed from the cached raw body, so multipart uploads work end-to-end; also short-circuits the post-parse raw-body write so the MIME envelope isn't duplicated at `file_path` alongside the extracted file at `file_destination` [#280](https://github.com/littlebearapps/untether/issues/280)
+- fix webhook rate limiter never returning 429 — `_process_webhook` awaited the downstream dispatch (Telegram outbox send, `http_forward` network call, etc.) before returning 202, which capped request throughput at the dispatch rate (~1/sec for private Telegram chats) and meant the `TokenBucketLimiter` never saw a real burst. Dispatch is now fire-and-forget with exception logging, so the rate limiter drains the bucket correctly and a burst of 80 requests against `rate_limit = 60` now yields 60 × 202 + 20 × 429 [#281](https://github.com/littlebearapps/untether/issues/281)
+- **security:** validate callback query sender in group chats — reject button presses from unauthorised users; prevents malicious group members from approving/denying other users' tool requests [#192](https://github.com/littlebearapps/untether/issues/192)
+  - also validate sender on cancel button callback — the cancel handler was routed directly, bypassing the dispatch validation
+- **security:** escape release tag name in notify-website CI workflow — use `jq` for proper JSON encoding instead of direct interpolation, preventing JSON injection from crafted tag names [#193](https://github.com/littlebearapps/untether/issues/193)
+- **security:** sanitise flag-like prompts in Gemini and AMP runners — prompts starting with `-` are space-prefixed to prevent CLI flag injection; moved `sanitize_prompt()` to base runner class for all engines [#194](https://github.com/littlebearapps/untether/issues/194)
+- **security:** redact bot token from structured log URLs — `_redact_event_dict` now strips bot tokens embedded in Telegram API endpoint strings, preventing credential leakage to log files and aggregation systems [#190](https://github.com/littlebearapps/untether/issues/190)
+- **security:** cap JSONL line buffer at 10 MB — unbounded `readline()` on engine stdout could consume all available memory if an engine emitted a single very long line (e.g. base64 image in a tool result); now truncates and logs a warning [#191](https://github.com/littlebearapps/untether/issues/191)
+
+- reduce stall warning false positives during Agent subagent work — tree CPU tracking across process descendants, child-aware 15 min threshold when child processes or elevated TCP detected, early diagnostic collection for CPU baseline, total stall warning counter that persists through recovery, improved "Waiting for child processes" notification messages [#264](https://github.com/littlebearapps/untether/issues/264)
+- `/ping` uptime now resets on service restart — previously the module-level start time was cached across `/restart` commands; now `reset_uptime()` is called on each service start [#234](https://github.com/littlebearapps/untether/issues/234)
+- add 38 missing structlog calls across 13 files — comprehensive logging audit covering auth verification, rate limiting, SSRF validation, codex runner lifecycle, topic state mutations, CLI error paths, and config validation in all engine runners [#299](https://github.com/littlebearapps/untether/issues/299)
+- **systemd:** stop Untether being the preferred OOM victim — systemd user services inherit `OOMScoreAdjust=200` and `OOMPolicy=stop` defaults, which made Untether's engine subprocesses preferred earlyoom/kernel OOM killer targets ahead of CLI `claude` (`oom_score_adj=0`) and orphaned grandchildren actually consuming the RAM. `contrib/untether.service` now sets `OOMScoreAdjust=-100` (documents intent; the kernel clamps to the parent baseline for unprivileged users, typically 100) and `OOMPolicy=continue` (a single OOM-killed child no longer tears down the whole unit cgroup, which previously broke every live chat at once). Docs in `docs/reference/dev-instance.md` updated. Existing installs need to copy the unit file and `systemctl --user daemon-reload`; staging picks up the change on the next `scripts/staging.sh install` cycle [#275](https://github.com/littlebearapps/untether/issues/275)
+
+### changes
+
+- **timezone support for cron triggers** — cron schedules can now be evaluated in a specific timezone instead of the server's system time (usually UTC) [#270](https://github.com/littlebearapps/untether/issues/270)
+  - per-cron `timezone` field with IANA timezone names (e.g. `"Australia/Melbourne"`)
+  - global `default_timezone` in `[triggers]` — per-cron `timezone` overrides it
+  - DST-aware via Python's `zoneinfo` module (zero new dependencies)
+  - invalid timezone names rejected at config parse time with clear error messages
+
+- **SSRF protection for trigger outbound requests** — shared utility at `triggers/ssrf.py` blocks private/reserved IP ranges, validates URL schemes, and checks DNS resolution to prevent server-side request forgery in upcoming webhook forwarding and cron data-fetch features [#276](https://github.com/littlebearapps/untether/issues/276)
+  - blocks loopback, RFC 1918, link-local, CGN, multicast, reserved, IPv6 equivalents, and IPv4-mapped IPv6 bypass
+  - DNS resolution validation catches DNS rebinding attacks (hostname → private IP)
+  - configurable allowlist for admins who need to hit local services
+  - timeout and response-size clamping utilities
+
+- **non-agent webhook actions** — webhooks can now perform lightweight actions without spawning an agent run [#277](https://github.com/littlebearapps/untether/issues/277)
+  - `action = "file_write"` — write POST body to disk with atomic writes, path traversal protection, deny-glob enforcement, and on-conflict handling
+  - `action = "http_forward"` — forward payload to another URL with SSRF protection, exponential backoff on 5xx, and header template rendering
+  - `action = "notify_only"` — send a templated Telegram message with no agent run
+  - `notify_on_success` / `notify_on_failure` flags for Telegram visibility on all action types
+  - default `action = "agent_run"` preserves full backward compatibility
+
+- **multipart form data support for webhooks** — webhooks can now accept `multipart/form-data` POSTs with file uploads [#278](https://github.com/littlebearapps/untether/issues/278)
+  - file parts saved with sanitised filenames, atomic writes, deny-glob and path traversal protection
+  - configurable `file_destination` with template variables, `max_file_size_bytes` (default 50 MB)
+  - form fields available as template variables alongside file metadata
+
+- **data-fetch cron triggers** — cron triggers can now pull data from external sources before rendering the prompt [#279](https://github.com/littlebearapps/untether/issues/279)
+  - `fetch.type = "http_get"` / `"http_post"` — fetch URL with SSRF protection, configurable timeout and headers
+  - `fetch.type = "file_read"` — read local file with path traversal protection and deny-globs
+  - `fetch.parse_as` — parse response as `json`, `text`, or `lines`
+  - fetched data injected into `prompt_template` via `store_as` variable (default `fetch_result`)
+  - `on_failure = "abort"` (default) sends failure notification; `"run_with_error"` injects error into prompt
+  - all fetched data prefixed with untrusted-data marker
+
+- **hot-reload for trigger configuration** — editing `untether.toml` `[triggers]` applies changes immediately without restarting Untether or killing active runs [#269](https://github.com/littlebearapps/untether/issues/269) ([#285](https://github.com/littlebearapps/untether/pull/285))
+  - new `TriggerManager` class holds cron and webhook config; scheduler reads `manager.crons` each tick; webhook server resolves routes per-request via `manager.webhook_for_path()`
+  - supports add/remove/modify of crons and webhooks, auth/secret changes, action type, multipart/file settings, cron fetch, and timezones
+  - `last_fired` dict preserved across swaps to prevent double-firing within the same minute
+  - unauthenticated webhooks logged at `WARNING` on reload (previously only at startup)
+  - 13 new tests in `test_trigger_manager.py`; 2038 existing tests still pass
+
+- **hot-reload for Telegram bridge settings** — `voice_transcription`, file transfer, `allowed_user_ids`, `show_resume_line`, and message-timing settings now reload without a restart [#286](https://github.com/littlebearapps/untether/issues/286)
+  - `TelegramBridgeConfig` unfrozen (keeps `slots=True`) and gains an `update_from(settings)` method
+  - `handle_reload()` now applies changes in-place and refreshes cached loop-state copies; restart-only keys (`bot_token`, `chat_id`, `session_mode`, `topics`, `message_overflow`) still warn with `restart_required=true`
+  - `route_update()` reads `cfg.allowed_user_ids` live so allowlist changes take effect on the next message
+
+- **`/at` command for one-shot delayed runs** — schedule a prompt to run between 60s and 24h in the future with `/at 30m Check the build`; accepts `Ns`/`Nm`/`Nh` suffixes [#288](https://github.com/littlebearapps/untether/issues/288)
+  - pending delays tracked in-memory (lost on restart — acceptable for one-shot use)
+  - `/cancel` drops pending `/at` timers before they fire
+  - per-chat cap of 20 pending delays; graceful drain cancels pending scopes on shutdown
+  - new module `telegram/at_scheduler.py`; command registered as `at` entry point
+
+- **`run_once` cron flag** — `[[triggers.crons]]` entries can set `run_once = true` to fire once then auto-disable; the cron stays in the TOML and re-activates on the next config reload or restart [#288](https://github.com/littlebearapps/untether/issues/288)
+
+- **trigger visibility improvements (Tier 1)** — surface configured triggers in the Telegram UI [#271](https://github.com/littlebearapps/untether/issues/271)
+  - `/ping` in a chat with active triggers appends `⏰ triggers: 1 cron (daily-review, 9:00 AM daily (Melbourne))`
+  - trigger-initiated runs show provenance in the meta footer: `🏷 opus 4.6 · plan · ⏰ cron:daily-review`
+  - new `describe_cron(schedule, timezone)` utility renders common cron patterns in plain English; falls back to the raw expression for complex schedules
+  - `RunContext` gains `trigger_source` field; `ProgressTracker.note_event` merges engine meta over the dispatcher-seeded trigger so it survives
+  - `TriggerManager` exposes `crons_for_chat()`, `webhooks_for_chat()`, `cron_ids()`, `webhook_ids()` helpers
+
+- **faster, cleaner restarts (Tier 1)** — restart gap reduced from ~15-30s to ~5s with no lost messages [#287](https://github.com/littlebearapps/untether/issues/287)
+  - persist last Telegram `update_id` to `last_update_id.json` and resume polling from the saved offset on startup; Telegram retains undelivered updates for 24h, so the polling gap no longer drops or re-processes messages
+  - `Type=notify` systemd integration via stdlib `sd_notify` (`socket.AF_UNIX`, no dependency) — `READY=1` is sent after the first `getUpdates` succeeds, `STOPPING=1` at the start of drain
+  - `RestartSec=2` in `contrib/untether.service` (was `10`) — faster restart after drain completes
+  - `contrib/untether.service` also adds `NotifyAccess=main`; existing installs must copy the unit file and `systemctl --user daemon-reload`
+
+### docs
+
+- add update and uninstall guides + README transparency section [#305](https://github.com/littlebearapps/untether/issues/305)
+  - new `docs/how-to/update.md` and `docs/how-to/uninstall.md` covering pipx, pip, and source installs, plus config/data/systemd cleanup
+  - README: "What Untether accesses" section (network, filesystem, process, credentials), update/uninstall one-liners in Quick Start, and cross-links throughout install/how-to pages
+- comprehensive v0.35.1 documentation audit — 8 gap fills across 121 files [#306](https://github.com/littlebearapps/untether/issues/306)
+  - `group-chat.md`: document callback sender validation in groups (#192)
+  - `security.md`: cross-reference button validation, fix misleading SSRF allowlist claim, add bot token auto-redaction tip (#190)
+  - `plan-mode.md`: document auto-approval after plan approval (#283)
+  - `interactive-approval.md`: admonition linking to plan bypass behaviour
+  - `commands-and-directives.md`: `/ping` description now mentions uptime reset and trigger summary (#234)
+  - `runners/amp/runner.md`: add `sanitize_prompt()` note matching Pi/Gemini runners (#194)
+  - `troubleshooting.md`: document 10 MB engine output line cap (#191)
+  - `glossary.md`: add delayed run, webhook action, and hot-reload entries
 
 ## v0.35.0 (2026-03-31)
 
 ### fixes
 
-- render plan outline as formatted text instead of raw markdown — headings, bold, code, and lists display properly in Telegram [#139](https://github.com/littlebearapps/untether/issues/139)
-- add approve/deny buttons to the last outline message — users no longer need to scroll back up past long outlines [#140](https://github.com/littlebearapps/untether/issues/140)
-- delete outline messages on approve/deny — outline and notification messages are cleaned up immediately [#141](https://github.com/littlebearapps/untether/issues/141)
-- scope AskUserQuestion pending requests by channel_id — prevents cross-chat contamination [#144](https://github.com/littlebearapps/untether/issues/144)
-- standalone override commands (`/planmode`, `/model`, `/reasoning`) now preserve all EngineOverrides fields [#124](https://github.com/littlebearapps/untether/issues/124)
-- register input for system-level auto-approved control requests — prevents ZodError in Claude Code [#123](https://github.com/littlebearapps/untether/issues/123)
-- reduce Telegram API default timeout from 120s to 30s [#145](https://github.com/littlebearapps/untether/issues/145)
-- OpenCode error runs now show the error message instead of an empty body [#146](https://github.com/littlebearapps/untether/issues/146), [#150](https://github.com/littlebearapps/untether/issues/150)
-- Pi `/continue` now captures the session ID from SessionHeader [#147](https://github.com/littlebearapps/untether/issues/147)
-- post-outline approval no longer fails with "message to be replied not found" [#148](https://github.com/littlebearapps/untether/issues/148)
-- `/config` sub-pages now show resolved on/off values instead of "default" [#152](https://github.com/littlebearapps/untether/issues/152)
-
-### changes
-
-- `/continue` command — cross-environment resume using each engine's native continue flag; supported for Claude, Codex, OpenCode, Pi, Gemini (not AMP) [#135](https://github.com/littlebearapps/untether/issues/135)
-- `/config` UX overhaul — 2-column toggle pattern, merged Engine + Model page, mobile-friendly layout [#132](https://github.com/littlebearapps/untether/issues/132)
-- resume line toggle — per-chat `show_resume_line` override via `/config` [#128](https://github.com/littlebearapps/untether/issues/128)
-- cost budget settings — per-chat budget overrides on Cost & Usage page [#129](https://github.com/littlebearapps/untether/issues/129)
-- model metadata improvements — shortened display names (e.g. `opus 4.6 (1M)`) [#132](https://github.com/littlebearapps/untether/issues/132)
-- resume line formatting — blank line and `↩️` prefix in final message footer [#127](https://github.com/littlebearapps/untether/issues/127)
-- agent-initiated file delivery — agents write files to `.untether-outbox/`; Untether sends them as Telegram documents [#143](https://github.com/littlebearapps/untether/issues/143)
-- orphan progress message cleanup on restart — orphan messages edited to show "interrupted by restart" [#149](https://github.com/littlebearapps/untether/issues/149)
-
-## v0.34.5 (2026-03-12)
-
-### changes
-
-- expand pre-run permission policies for Codex CLI and Gemini CLI in `/config` [#131](https://github.com/littlebearapps/untether/issues/131)
-  - Codex: new "Approval policy" page — full auto (default) or safe
-  - Gemini: expanded approval mode from 2 to 3 tiers — read-only, edit files, full access
-
-### fixes
-
-- hold ExitPlanMode request open after outline so post-outline buttons persist [#114](https://github.com/littlebearapps/untether/issues/114), [#117](https://github.com/littlebearapps/untether/issues/117)
-- suppress stall auto-cancel when CPU is active [#114](https://github.com/littlebearapps/untether/issues/114)
-- suppress redundant cost footer on error runs [#120](https://github.com/littlebearapps/untether/issues/120)
+- render plan outline as formatted text instead of raw markdown — outline messages now use `render_markdown()` + `split_markdown_body()` so headings, bold, code, and lists display properly in Telegram [#139](https://github.com/littlebearapps/untether/issues/139)
+- add approve/deny buttons to the last outline message — users no longer need to scroll back up past long outlines to find the buttons [#140](https://github.com/littlebearapps/untether/issues/140)
+- delete outline messages on approve/deny — outline and notification messages are cleaned up immediately via module-level `_OUTLINE_REGISTRY`, and stale approval keyboard on the progress message is suppressed [#141](https://github.com/littlebearapps/untether/issues/141)
+- scope AskUserQuestion pending requests by channel_id — `_PENDING_ASK_REQUESTS` and `_ASK_QUESTION_FLOWS` were global dicts with no chat scoping; a pending ask in one chat would steal the next message from any other chat, causing cross-chat contamination and lost messages [#144](https://github.com/littlebearapps/untether/issues/144)
+  - added `channel_id` contextvar (`get_run_channel_id`/`set_run_channel_id`) to `utils/paths.py`
+  - `get_pending_ask_request()` and `get_ask_question_flow()` now accept `channel_id` and filter by it
+  - session cleanup now also clears stale pending asks and flows
+- standalone override commands (`/planmode`, `/model`, `/reasoning`) now preserve all `EngineOverrides` fields instead of resetting unrelated overrides [#124](https://github.com/littlebearapps/untether/issues/124)
+- register input for system-level auto-approved control requests (Initialize, HookCallback, McpMessage, RewindFiles, Interrupt) so `updatedInput` is included in the response — prevents ZodError in Claude Code [#123](https://github.com/littlebearapps/untether/issues/123)
+- reduce Telegram API default timeout from 120s to 30s — a single ReadTimeout on `editMessageText` could make the bot appear unresponsive for up to 2 minutes; `getUpdates` long-poll now uses a dedicated timeout of `timeout_s + 20` so network failures are detected faster [#145](https://github.com/littlebearapps/untether/issues/145)
+- OpenCode error runs now show the error message instead of an empty body — `CompletedEvent.answer` falls back to `state.last_tool_error` when no prior `Text` events were emitted; covers both `StepFinish` and `stream_end_events` paths [#146](https://github.com/littlebearapps/untether/issues/146), [#150](https://github.com/littlebearapps/untether/issues/150)
+- Pi `/continue` now captures the session ID from `SessionHeader` — `allow_id_promotion` was `False` for continue runs, preventing the resume token from being populated [#147](https://github.com/littlebearapps/untether/issues/147)
+- post-outline approval no longer fails with "message to be replied not found" — the "Approve Plan" button on outline messages uses the real ExitPlanMode `request_id`, so the regular approve path now sets `skip_reply=True` when outline messages were just deleted; also suppresses the redundant push notification after outline cleanup [#148](https://github.com/littlebearapps/untether/issues/148)
+- sanitise `text_link` entities with invalid URLs before sending to Telegram — localhost, loopback, file paths, and bare hostnames are converted to `code` entities instead, preventing silent 400 errors that drop the entire final message [#157](https://github.com/littlebearapps/untether/issues/157)
+- fix duplicate approval buttons after "Pause & Outline Plan" — both the progress message and outline message showed approve/deny buttons simultaneously; now only the outline message has approval buttons (with Cancel), progress keeps cancel-only; outline state resets properly for future ExitPlanMode requests [#163](https://github.com/littlebearapps/untether/issues/163)
+- hold ExitPlanMode request open after outline so post-outline Approve/Deny buttons persist — instead of auto-denying (which caused Claude to exit ~7s later), the control request is never responded to, keeping Claude alive while the user reads the outline [#114](https://github.com/littlebearapps/untether/issues/114), [#117](https://github.com/littlebearapps/untether/issues/117)
+  - buttons use real `request_id` from `pending_control_requests` for direct callback routing
+  - 5-minute safety timeout cleans up stale held requests
+- suppress stall auto-cancel when CPU is active — extended thinking phases produce no JSONL events but the process is alive and busy; `is_cpu_active()` check prevents false-positive kills [#114](https://github.com/littlebearapps/untether/issues/114)
+- fix stall notification suppression when main process sleeping — CPU-active suppression now checks `process_state`; when main process is sleeping (state=S) but children are CPU-active (hung Bash tool), notifications fire instead of being suppressed; stall message now shows tool name ("Bash tool may be stuck") instead of generic "session may be stuck" [#168](https://github.com/littlebearapps/untether/issues/168)
+- suppress redundant cost footer on error runs — diagnostic context line already contains cost data, footer no longer duplicates it [#120](https://github.com/littlebearapps/untether/issues/120)
 - clarify /config default labels and remove redundant "Works with" lines [#119](https://github.com/littlebearapps/untether/issues/119)
+- Codex: always pass `--ask-for-approval` in headless mode — default to `never` (auto-approve all) so Codex never blocks on terminal input; `safe` permission mode still uses `untrusted` [#184](https://github.com/littlebearapps/untether/issues/184)
+- OpenCode: surface unsupported JSONL event types as visible Telegram warnings instead of silently dropping them — prevents silent 5-minute hangs when OpenCode emits new event types (e.g. `question`, `permission`) [#183](https://github.com/littlebearapps/untether/issues/183)
+- stall warnings now succinct and accurate for long-running tools — truncate "Last:" to 80 chars, recognise `command:` prefix (Bash tools), reassuring "still running" message when CPU active, drop PID diagnostics from Telegram messages, only say "may be stuck" when genuinely stuck [#188](https://github.com/littlebearapps/untether/issues/188)
+  - frozen ring buffer escalation now uses tool-aware "still running" message when a known tool is actively running (main sleeping, CPU active on children), instead of alarming "No progress" message
+- OpenCode model name missing from footer when using default model — `build_runner()` now reads `~/.config/opencode/opencode.json` to detect the configured default model so the `🏷` footer always shows the model (e.g. `openai/gpt-5.2`) even without an `untether.toml` override [#221](https://github.com/littlebearapps/untether/issues/221)
+- OpenCode model override hint — `/config` and engine model sub-page now show `provider/model (e.g. openai/gpt-4o)` instead of the unhelpful "from provider config", guiding users to use the required provider-prefixed format [#220](https://github.com/littlebearapps/untether/issues/220)
+- Codex footer missing model name — Codex runner always includes model in `StartedEvent.meta` so the footer shows the model even when no override is set [#217](https://github.com/littlebearapps/untether/issues/217)
+- `/planmode` command worked in non-Claude engine chats — now gated to Claude-only with a helpful message; Codex/Gemini users are directed to `/config` → Approval policy [#216](https://github.com/littlebearapps/untether/issues/216)
+- `/usage` showed Claude subscription data in non-Claude engine chats — now gated to subscription-supported engines with an engine-specific error message [#215](https://github.com/littlebearapps/untether/issues/215)
+- `/export` showed duplicate "Session Started" headers for resumed sessions — deduplicated so only the first `StartedEvent` renders [#218](https://github.com/littlebearapps/untether/issues/218)
+- Gemini CLI prompt injection — prompts starting with `-` were parsed as flags when passed via `-p <value>`; now uses `--prompt=<value>` to bind the value directly [#219](https://github.com/littlebearapps/untether/issues/219)
+- `/new` command now cancels running processes before clearing sessions — previously only cleared resume tokens, leaving old Claude/Codex/OpenCode processes running (~400 MB each), worsening memory pressure and triggering earlyoom kills [#222](https://github.com/littlebearapps/untether/issues/222)
+- auto-continue no longer triggers on signal deaths (rc=143/SIGTERM, rc=137/SIGKILL) — earlyoom kills have `last_event_type=user` which matched the upstream bug detection, causing a death spiral where 4 killed sessions were immediately respawned into the same memory pressure [#222](https://github.com/littlebearapps/untether/issues/222)
+- `/new` command triggers engine run instead of clearing sessions when `topics.enabled=false` — `/new` was only handled in `_dispatch_builtin_command` when topics were enabled; moved `/new` out of the `topics.enabled` gate to handle all modes (topic, chat session, stateless), mirroring how `/ctx` already works; also removed unreachable early routing code [#236](https://github.com/littlebearapps/untether/issues/236)
+- Gemini engine stuck at "starting · 0s" — Gemini CLI outputs a non-JSON warning (`MCP issues detected...`) on stdout before the first JSONL event, corrupting the line; `decode_jsonl()` now strips non-JSON prefixes by finding the first `{` and retrying parse [#231](https://github.com/littlebearapps/untether/issues/231)
+- `/config` Ask mode toggle inverted — `_toggle_row` default was `False` but display default was "on", causing the button to show "Ask: off" when the effective state was on; pressing it appeared to do nothing [#232](https://github.com/littlebearapps/untether/issues/232)
+- diff preview approval buttons not rendered after outline flow — `_outline_sent` flag in `ProgressEdits` stripped ALL subsequent approval buttons, not just outline-related ones; now only strips buttons for `DiscussApproval` actions [#233](https://github.com/littlebearapps/untether/issues/233)
+- prevent duplicate control response for already-handled requests [#229](https://github.com/littlebearapps/untether/issues/229) ([#230](https://github.com/littlebearapps/untether/issues/230))
+- fix `render_markdown` entity overflow when text ends with a fenced code block — entity offsets now clamped to the UTF-16 text length after trailing newline stripping, preventing Telegram 400 errors [#59](https://github.com/littlebearapps/untether/issues/59)
+- `/config` now reflects project-level `default_engine` — previously showed Claude-specific buttons (Plan mode, Ask mode, etc.) for chats routed to Codex/Pi via project config [#60](https://github.com/littlebearapps/untether/issues/60)
+- non-Claude runners (Codex, Pi) now populate model name in `StartedEvent.meta` — footer previously showed permission mode only (e.g. `🏷 plan`) without the model [#62](https://github.com/littlebearapps/untether/issues/62)
+- fix liveness watchdog false positive auto-cancel on long-running sessions — actively working sessions with CPU activity and TCP connections were being killed during extended thinking/processing phases [#115](https://github.com/littlebearapps/untether/issues/115)
+- fix reply-to resume when emoji prefix is present — the `↩️` prefix on resume footer lines broke all 6 engine regexes; `extract_resume()` now strips emoji prefixes before matching [#134](https://github.com/littlebearapps/untether/issues/134)
+- `/config` sub-pages now show resolved on/off values instead of "default" — body text now matches the toggle button state using `_resolve_default()`, removing the confusing mismatch [#152](https://github.com/littlebearapps/untether/issues/152)
+- expired control requests now auto-denied after 5-minute timeout — previously the timeout cleanup removed local tracking but did not send a deny response, leaving the Claude subprocess blocked indefinitely on stdin [#32](https://github.com/littlebearapps/untether/issues/32)
+- `/export` no longer returns sessions from wrong chat — session recording was not scoped by channel_id, so `/export` in one chat could return another engine's session data [#33](https://github.com/littlebearapps/untether/issues/33)
+- fix `KillMode=control-group` bypassing drain and causing 150s restart delay — `contrib/untether.service` now uses `KillMode=mixed` which sends SIGTERM to the main process first (drain works), then SIGKILL to remaining cgroup processes (orphaned MCP servers, containers cleaned up instantly) [#166](https://github.com/littlebearapps/untether/issues/166)
+  - `process`: orphaned children survive across restarts, accumulating memory (#88)
+  - `control-group`: kills all processes simultaneously, bypassing drain (#166)
+  - `mixed`: best of both — graceful drain then forced cleanup
+- AMP CLI `-x` flag regression — double-dash separator in `build_args()` caused AMP to interpret `-x` as a subcommand name instead of a flag, breaking execute mode for all prompts [#245](https://github.com/littlebearapps/untether/issues/245)
+
+### docs
+
+- update integration test chat IDs from stale `ut-dev:` to current `ut-dev-hf:` chats [#238](https://github.com/littlebearapps/untether/issues/238)
+- investigation: orphaned `workerd` processes from Bash tool children are upstream Claude Code bug — Untether's process group cleanup is correct; Claude Code spawns Bash tool shells in their own session group which Untether cannot reach; no TTY/SIGHUP cascade in headless mode [#257](https://github.com/littlebearapps/untether/issues/257)
+
+### changes
+
+- logging audit: fill gaps in structlog coverage — elevate settings loader failures from DEBUG to WARNING (footer, watchdog, auto-continue, preamble), add access control drop logging, add executor `handle.engine_resolved` info log, elevate outline cleanup failures to WARNING, add credential redaction for OpenAI/GitHub API keys, add file transfer success logging, bind `session_id` in structlog context vars, add media group/cost tracker/cancel debug logging [#254](https://github.com/littlebearapps/untether/issues/254)
+- CI: expand ruff lint rules from 7 to 18 — add ASYNC, LOG, I (isort), PT, RET, RUF (full), FURB, PIE, FLY, FA, ISC rule sets; auto-fix 42 import sorts, clean 73 stale noqa directives, fix unused vars and useless conditionals; per-file ignores for test-specific patterns [#255](https://github.com/littlebearapps/untether/issues/255)
+- Gemini: default to `--approval-mode yolo` (full access) when no override is set — headless mode has no interactive approval path, so the CLI's read-only default disabled write tools entirely, causing multi-minute stalls as Gemini cascaded through sub-agents [#244](https://github.com/littlebearapps/untether/issues/244), [#248](https://github.com/littlebearapps/untether/issues/248)
+- expand error hints coverage — add model not found, context length exceeded, authentication, content safety, CLI not installed, SSL/TLS, invalid request, disk/permission, AMP-specific auth, Gemini result status, and account suspension error categories [#246](https://github.com/littlebearapps/untether/issues/246)
+- `/continue` command — cross-environment resume; pick up the most recent CLI session from Telegram using each engine's native continue flag (`--continue`, `resume --last`, `--resume latest`); supported for Claude, Codex, OpenCode, Pi, Gemini (not AMP) [#135](https://github.com/littlebearapps/untether/issues/135)
+  - `ResumeToken` extended with `is_continue: bool = False`
+  - all 6 runners' `build_args()` updated to handle continue tokens
+  - `/continue` handled as reserved command in Telegram loop
+  - new how-to guide: `docs/how-to/cross-environment-resume.md`
+- `/config` UX overhaul — 2-column toggle pattern replaces all 3-button rows with single `[✓ Feature: on]` toggle + `[Clear]` for better mobile tap targets; merged Engine + Model into single page; max 2 buttons per row on home page; plan mode 2+1 split layout [#132](https://github.com/littlebearapps/untether/issues/132)
+- resume line toggle — per-chat `show_resume_line` override via `/config` settings; configurable via EngineOverrides [#128](https://github.com/littlebearapps/untether/issues/128)
+- cost budget settings — per-chat `budget_enabled` and `budget_auto_cancel` overrides on Cost & Usage page in `/config` [#129](https://github.com/littlebearapps/untether/issues/129)
+- model metadata improvements — shorten model display names in footer: `claude-opus-4-6[1m]` → `opus 4.6 (1M)`, `auto-gemini-3` → `gemini-3`; all engines populate model info from `StartedEvent.meta` [#132](https://github.com/littlebearapps/untether/issues/132)
+- resume line formatting — visual separation with blank line and `↩️` prefix in final message footer [#127](https://github.com/littlebearapps/untether/issues/127)
+- agent-initiated file delivery — agents write files to `.untether-outbox/` during a run; Untether sends them as Telegram documents on completion with `📎 filename (size)` captions; flat scan, deny-glob security, size limits, auto-cleanup [#143](https://github.com/littlebearapps/untether/issues/143)
+  - new module `telegram/outbox_delivery.py` with `scan_outbox()`, `cleanup_outbox()`, `deliver_outbox_files()`
+  - `ExecBridgeConfig` gains `send_file` callback + `outbox_config` (transport-agnostic)
+  - preamble updated with outbox instructions for all 6 engines
+  - config: `outbox_enabled`, `outbox_dir`, `outbox_max_files`, `outbox_cleanup` in `[transports.telegram.files]`
+- orphan progress message cleanup on restart — active progress messages are persisted to `active_progress.json`; on startup, orphan messages from a prior instance are edited to show "⚠️ interrupted by restart" with no keyboard [#149](https://github.com/littlebearapps/untether/issues/149)
+  - new module `telegram/progress_persistence.py` with `register_progress()`, `unregister_progress()`, `load_active_progress()`, `clear_all_progress()`
+  - `runner_bridge.py` registers on progress send, unregisters on ephemeral cleanup
+  - `telegram/loop.py` cleans up orphans before sending startup message
+- expand pre-run permission policies for Codex CLI and Gemini CLI in `/config` [#131](https://github.com/littlebearapps/untether/issues/131)
+  - Codex: new "Approval policy" page — full auto (default) or safe (`--ask-for-approval untrusted`)
+  - Gemini: expanded approval mode from 2 to 3 tiers — read-only, edit files (`--approval-mode auto_edit`), full access
+  - both engines show "Agent controls" section on `/config` home page with engine-specific labels
+- suppress stall Telegram notifications when CPU-active; heartbeat re-render keeps elapsed time counter ticking during extended thinking phases [#121](https://github.com/littlebearapps/untether/issues/121)
+- temporary debug logging for hold-open callback routing — will be removed after dogfooding confirms [#118](https://github.com/littlebearapps/untether/issues/118) is resolved
+- auto-continue mitigation for Claude Code bug — when Claude Code exits after receiving tool results without processing them (bugs [#34142](https://github.com/anthropics/claude-code/issues/34142), [#30333](https://github.com/anthropics/claude-code/issues/30333)), Untether detects via `last_event_type=user` and auto-resumes the session [#167](https://github.com/littlebearapps/untether/issues/167)
+  - `AutoContinueSettings` with `enabled` (default true) and `max_retries` (default 1) in `[auto_continue]` config section
+  - detection based on protocol invariant: normal sessions always end with `last_event_type=result`
+  - sends "⚠️ Auto-continuing — Claude stopped before processing tool results" notification before resuming
+- emoji button labels and edit-in-place for outline approval — ExitPlanMode buttons now show ✅/❌/📋 emoji prefixes; post-outline "Approve Plan"/"Deny" edits the "Asked Claude Code to outline the plan" message in-place instead of creating a second message [#186](https://github.com/littlebearapps/untether/issues/186)
+- redesign startup message layout — version in parentheses, split engine info into "default engine" and "installed engines" lines, italic subheadings, renamed "projects" to "directories" (matching `dir:` footer label), added bug report link [#187](https://github.com/littlebearapps/untether/issues/187)
+- show token usage counts for non-Claude engines — completion footer now displays `💰 26.0k in / 71 out` for Codex, OpenCode, Pi, Gemini, and Amp when token data is available [#36](https://github.com/littlebearapps/untether/issues/36)
+- include CLI versions in startup diagnostics — startup message now shows detected engine CLI versions for easier debugging of outdated or mismatched tools [#38](https://github.com/littlebearapps/untether/issues/38)
+
+### tests
+
+- 8 new outline UX tests: markdown rendering with entities, approval keyboard on last chunk, multi-chunk keyboard placement, ref tracking, deletion on approval transition, deletion on keyboard change, safety-net cleanup, no double-deletion [#139](https://github.com/littlebearapps/untether/issues/139), [#140](https://github.com/littlebearapps/untether/issues/140), [#141](https://github.com/littlebearapps/untether/issues/141)
+- 22 new outbox delivery tests: scan (empty, single, sorted, max_files, deny globs, size limit, empty file, symlink, subdir), cleanup (delete, keep unsent, already gone), delivery (send, cleanup, no-cleanup, empty, send failure), integration (after completion, disabled, error run) [#143](https://github.com/littlebearapps/untether/issues/143)
+- 4 new cross-chat ask isolation tests: pending ask scoped by channel, correct channel returned, flow scoped by channel, translate registers with channel_id [#144](https://github.com/littlebearapps/untether/issues/144)
+- 99 new `/continue` tests: 46 auto-router assertions (continue token handling, engine routing) + 53 build-args assertions (continue flags for all 6 engines) [#135](https://github.com/littlebearapps/untether/issues/135)
+- 195 `/config` tests covering home page, all sub-pages, toggle actions, callback routing, button layout, engine-aware visibility [#132](https://github.com/littlebearapps/untether/issues/132)
+- 7 new OpenCode error message tests: Error event with no prior text, process_error_events, stream_end_events, last_tool_error fallback on StepFinish, last_text takes priority over tool error, tool error status captures last_tool_error, stream_end_events fallback [#146](https://github.com/littlebearapps/untether/issues/146), [#150](https://github.com/littlebearapps/untether/issues/150)
+- 3 new Pi /continue tests: allow_id_promotion flag, session ID promotion from SessionHeader, normal resume no promotion [#147](https://github.com/littlebearapps/untether/issues/147)
+- 3 new timeout tests: default 30s timeout, getUpdates per-request timeout, sendMessage uses default [#145](https://github.com/littlebearapps/untether/issues/145)
+- 3 new discuss-approval skip_reply tests: approve and deny results set skip_reply=True, dispatch callback skip_reply sends without reply_to [#148](https://github.com/littlebearapps/untether/issues/148)
+- 8 new progress persistence tests: register/load roundtrip, unregister, missing file, corrupt file, non-dict, multiple entries, clear all, clear nonexistent [#149](https://github.com/littlebearapps/untether/issues/149)
+- 2 new dual-button tests: outline strips approval from progress, outline state resets on approval disappear [#163](https://github.com/littlebearapps/untether/issues/163)
+- hold-open outline flow: new tests for hold-open path, real request_id buttons, pending cleanup, approval routing [#114](https://github.com/littlebearapps/untether/issues/114)
+- stall suppression: tests for CPU-active auto-cancel, notification suppression when cpu_active=True, notification fires when cpu_active=False [#114](https://github.com/littlebearapps/untether/issues/114), [#121](https://github.com/littlebearapps/untether/issues/121)
+- cost footer: tests for suppression on error runs, display on success runs [#120](https://github.com/littlebearapps/untether/issues/120)
+- 10 new auto-continue tests: detection function (bug scenario, non-claude engine, cancelled session, normal result, no resume, max retries) + settings validation (defaults, bounds) [#167](https://github.com/littlebearapps/untether/issues/167)
+- 2 new stall sleeping-process tests: notification not suppressed when main process sleeping (state=S), stall message includes tool name [#168](https://github.com/littlebearapps/untether/issues/168)
+- 8 new `_read_opencode_default_model` tests: valid config, missing file, invalid JSON, empty model, no model key, build_runner fallback, untether config priority, no OC config [#221](https://github.com/littlebearapps/untether/issues/221)
+- engine command gate tests: `/planmode` Claude-only, `/usage` subscription-engine-only [#215](https://github.com/littlebearapps/untether/issues/215), [#216](https://github.com/littlebearapps/untether/issues/216)
+- export dedup test: duplicate started events deduplicated in markdown export [#218](https://github.com/littlebearapps/untether/issues/218)
+- Gemini `--prompt=` build_args test [#219](https://github.com/littlebearapps/untether/issues/219)
+- Gemini integration test stall diagnosed — root cause was missing `--approval-mode yolo` in test chat config; Gemini CLI defaults to read-only mode with write tools disabled; set full access via `/config` for `ut-dev-hf: gemini` test chat; U1 now passes in 56s (was 8–18 min stall) [#244](https://github.com/littlebearapps/untether/issues/244)
+- 10 new `/new` cancellation tests: `_cancel_chat_tasks` helper (None, empty, matching, other chats, already cancelled, multiple), chat `/new` with running task, cancel-only no sessions, no tasks no sessions, topic `/new` with running task [#222](https://github.com/littlebearapps/untether/issues/222)
+- 12 new auto-continue signal death tests: `_is_signal_death` (SIGTERM, SIGKILL, negative, normal, None), `_should_auto_continue` (rc=143, rc=137, rc=-9, rc=-15 blocked; rc=0, rc=None, rc=1 allowed), `proc_returncode` default on `JsonlStreamState` [#222](https://github.com/littlebearapps/untether/issues/222)
+
+### docs
+
+- document OpenCode lack of auto-compaction as a known limitation — long sessions accumulate unbounded context with no automatic trimming; added to runner docs and integration testing playbook [#150](https://github.com/littlebearapps/untether/issues/150)
 
 ## v0.34.4 (2026-03-09)
 
 ### fixes
 
-- preamble hook awareness: final response must contain user-requested content, not just hook output [#107](https://github.com/littlebearapps/untether/issues/107)
-- `UNTETHER_SESSION` env var: Claude runner sets `UNTETHER_SESSION=1` in subprocess environment [#107](https://github.com/littlebearapps/untether/issues/107)
+- preamble hook awareness: add constraint to default preamble instructing Claude that if hooks fire at session end, the final response must still contain the user's requested content — hook concerns are secondary and should be noted after main content, never instead of it [#107](https://github.com/littlebearapps/untether/issues/107)
+  - addresses content displacement when Claude Code plugin Stop hooks (e.g. PitchDocs context-guard) consume the final Telegram message with meta-commentary instead of user-requested content
+- `UNTETHER_SESSION` env var: Claude runner now sets `UNTETHER_SESSION=1` in subprocess environment, enabling Claude Code hooks to detect Untether sessions and adjust behaviour (e.g. PitchDocs context-guard skips blocking Stop hooks in Telegram) [#107](https://github.com/littlebearapps/untether/issues/107)
+
+### docs
+
+- audit: PitchDocs context-guard interference analysis — root cause (false positive from `git status --porcelain` on untracked hook infrastructure), cross-project comparison (BIP/Scout/Brand Copilot/littlebearapps.com), recommendations for both Untether and PitchDocs [#107](https://github.com/littlebearapps/untether/issues/107)
 
 ## v0.34.3 (2026-03-08)
 
 ### fixes
 
-- tool-aware stall threshold: 10-minute threshold when a tool action is running [#105](https://github.com/littlebearapps/untether/issues/105)
-- progress message edit failure fallback to new message [#103](https://github.com/littlebearapps/untether/issues/103)
-- approval keyboard edit failure handling [#104](https://github.com/littlebearapps/untether/issues/104)
-- `/usage` 429 rate limit downgraded from error to warning [#89](https://github.com/littlebearapps/untether/issues/89)
+- tool-aware stall threshold: 10-minute threshold (`_STALL_THRESHOLD_TOOL = 600s`) when a tool action is started but not completed, preventing false stall warnings during long-running Bash commands, Agent tasks, and TaskOutput waits [#105](https://github.com/littlebearapps/untether/issues/105)
+  - three-tier system: normal (5 min), running tool (10 min), pending approval (30 min)
+  - `_has_running_tool()` checks most recent action state
+  - stall threshold selection logged at info level with reason
+- progress message edit failure: log warning and fall back to sending a new message when the initial "queued" → "starting" edit fails, preventing stuck "queued" messages [#103](https://github.com/littlebearapps/untether/issues/103)
+- approval keyboard edit failure: use `wait=True` for keyboard transitions (approval buttons appearing), log keyboard attach at info level and edit failures at warning level for diagnostics [#104](https://github.com/littlebearapps/untether/issues/104)
+  - `transport.edit.failed` warning in `TelegramTransport.edit()` when `wait=True` edit returns `None`
+  - `progress_edits.keyboard_attach` info log on keyboard transitions
+  - `progress_edits.keyboard_edit_failed` warning when keyboard edit fails
+  - transport errors upgraded from debug to warning level
+- `/usage` 429 rate limit: downgrade from error to warning level, preventing untether-issue-watcher noise for transient rate limits [#89](https://github.com/littlebearapps/untether/issues/89)
+
+### changes
+
+- session cleanup structured reporting: `_cleanup_session_registries()` now logs cleaned registry names at info level for post-mortem analysis [#93](https://github.com/littlebearapps/untether/issues/93)
+  - session registration (`claude_runner.registered`, `session_stdin.registered`) upgraded to info level
+- JSONL decode failure logged at warning level with truncated line content (first 200 chars)
+- runner spawn now logs CLI args in `runner.start` event
+- no-events session warning: `session.summary.no_events` logged when a non-cancelled session completes with zero events
+
+### tests
+
+- new test coverage for tool-aware stall threshold, keyboard edit failure recovery, edit-fail fallback send, session cleanup tracking, stderr sanitisation [#85](https://github.com/littlebearapps/untether/issues/85), build args validation, loop coverage
 
 ## v0.34.2 (2026-03-08)
 
 ### fixes
 
-- stall monitor loops forever after laptop sleep — added stall auto-cancel, standalone `/cancel` fallback, approval-aware stall threshold [#99](https://github.com/littlebearapps/untether/issues/99)
+- stall monitor loops forever after laptop sleep — no auto-cancel, `/cancel` requires reply [#99](https://github.com/littlebearapps/untether/issues/99)
+  - stall auto-cancel: dead process detection (immediate), no-PID zombie cap (3 warnings), absolute cap (10 warnings)
+  - early PID threading: `last_pid` set at subprocess spawn, polled by `run_runner_with_cancel` before `StartedEvent`
+  - standalone `/cancel` fallback: cancels single active run without requiring reply; prompts when multiple runs active
+  - `queued_for_chat()` method on `ThreadScheduler` for standalone cancel of queued jobs
+  - approval-aware stall threshold: 30 min when waiting for user approval (inline keyboard detected), 5 min otherwise
 
 ## v0.34.1 (2026-03-07)
 
 ### fixes
 
-- session stall diagnostics: `/proc` process diagnostics, progressive stall warnings, liveness watchdog, session summary [#97](https://github.com/littlebearapps/untether/issues/97)
-- stream threading fix: `_ResumeLineProxy` now exposes `current_stream` to `ProgressEdits` [#98](https://github.com/littlebearapps/untether/issues/98)
+- session stall diagnostics: add `/proc` process diagnostics (CPU, RSS, TCP, FDs, children), progressive stall warnings, liveness watchdog, event timeline tracking, and session completion summary [#97](https://github.com/littlebearapps/untether/issues/97)
+  - new `utils/proc_diag.py` module: `collect_proc_diag()`, `format_diag()`, `is_cpu_active()`
+  - `JsonlStreamState` tracks `last_stdout_at`, `event_count`, `last_event_type`, `recent_events` ring buffer, `stderr_capture`
+  - PID auto-injected into `StartedEvent.meta` via base class (all engines)
+  - progressive `_stall_monitor`: repeating warnings every 3 min with fresh `/proc` snapshots and Telegram notifications
+  - liveness watchdog: detects alive-but-silent subprocesses after 10 min with diagnostics; optional auto-kill (off by default, triple safety gate)
+  - `session.summary` structured log on every session completion
+  - `[watchdog]` config section: `liveness_timeout`, `stall_auto_kill`, `stall_repeat_seconds`
+- stream threading broken: `_ResumeLineProxy` hides `current_stream` from `ProgressEdits`, causing `event_count=0` and `last_event_type=None` for all engines [#98](https://github.com/littlebearapps/untether/issues/98)
+  - add `current_stream` property to `_ResumeLineProxy` and `_PreludeRunner`
+  - set `self.current_stream = stream` in Claude's overridden `run_impl`
+  - use `stream.stderr_capture` instead of separate `stderr_lines` in Claude's `run_impl`
 
 ## v0.34.0 (2026-03-07)
 
 ### fixes
 
 - ExitPlanMode stuck after cancel + resume: stale outline_guard not cleaned up [#93](https://github.com/littlebearapps/untether/issues/93)
-- stall monitor fails to detect stalls when no events arrive after session start [#95](https://github.com/littlebearapps/untether/issues/95)
+  - extract `_cleanup_session_registries()` helper, call from `run_impl` finally block
+- stall monitor fails to detect stalls when no events arrive after session start; no Telegram notification [#95](https://github.com/littlebearapps/untether/issues/95)
+  - initialise `_last_event_at` from `clock()` instead of `0.0` so threshold works from session start
+  - send `⏳ No progress for N min` Telegram notification on stall detection (previously journal-only)
 
 ### changes
 
-- show token-only cost footer for Gemini and AMP [#94](https://github.com/littlebearapps/untether/issues/94)
-- add Gemini CLI approval mode toggle in `/config` [#90](https://github.com/littlebearapps/untether/issues/90)
+- show token-only cost footer for Gemini and AMP — `_format_run_cost()` no longer requires `total_cost_usd`; renders `💰 26.0k in / 71 out` when only token data is available [#94](https://github.com/littlebearapps/untether/issues/94)
+  - Gemini `_build_usage()`: extract `cached` → `cache_read_tokens` and `duration_ms` from StreamStats
+  - AMP `_accumulate_usage()`: accumulate `cache_creation_input_tokens` and `cache_read_input_tokens`
+- add Gemini CLI approval mode toggle in `/config` — "read-only" (default, write tools blocked) or "full access" (`--approval-mode=yolo`); tied into existing plan mode infrastructure via shared `permission_mode` field [#90](https://github.com/littlebearapps/untether/issues/90)
+  - home page shows "Approval mode" label and button when engine is Gemini
+  - sub-page with Read-only/Full access toggle
+  - `PERMISSION_MODE_SUPPORTED_ENGINES` constant for engine-aware gating
 
 ## v0.33.5 (2026-03-07)
 
 ### fixes
 
-- downgrade `control_response.failed` ClosedResourceError from error to warning [#61](https://github.com/littlebearapps/untether/issues/61)
-- add subprocess watchdog for orphaned child processes [#91](https://github.com/littlebearapps/untether/issues/91)
-- add stall monitor — warns when no progress events arrive for 5 minutes [#92](https://github.com/littlebearapps/untether/issues/92)
+- downgrade `control_response.failed` ClosedResourceError from error to warning — race condition when Telegram callback arrives after session stdin closes; `write_control_response()` now returns `bool` and `send_claude_control_response()` propagates it [#61](https://github.com/littlebearapps/untether/issues/61)
+  - also downgrade `auto_approve_failed` and `auto_deny_failed` for consistency
+- add subprocess watchdog — detects orphaned child processes (e.g. MCP servers) holding stdout pipes open after parent exits; kills process group after grace period [#91](https://github.com/littlebearapps/untether/issues/91)
+- add stall monitor — warns when no progress events arrive for 5 minutes; clears on recovery [#92](https://github.com/littlebearapps/untether/issues/92)
+- handle `ClosedResourceError` in `iter_bytes_lines()` on abrupt pipe close
 
 ## v0.33.4 (2026-03-06)
 
 ### fixes
 
-- add render debouncing to batch rapid progress events [#88](https://github.com/littlebearapps/untether/issues/88)
-- make approval notification sends non-blocking [#88](https://github.com/littlebearapps/untether/issues/88)
+- add render debouncing to batch rapid progress events — configurable `min_render_interval` (default 2.0s) prevents flooding Telegram edits [#88](https://github.com/littlebearapps/untether/issues/88)
+  - first render is never debounced; subsequent renders sleep for remaining interval
+  - `group_chat_rps` now configurable in `[progress]` (default 20/60, matching Telegram limit)
+- make approval notification sends non-blocking — `transport.send()` for push notifications runs in a background task instead of stalling the render loop [#88](https://github.com/littlebearapps/untether/issues/88)
+
+### docs
+
+- document `KillMode=process` → `KillMode=control-group` fix for systemd service files — orphaned MCP servers accumulate across restarts, consuming 10+ GB [#88](https://github.com/littlebearapps/untether/issues/88)
 
 ## v0.33.3 (2026-03-06)
 
 ### fixes
 
-- block ExitPlanMode after cooldown expires when no outline has been written [#87](https://github.com/littlebearapps/untether/issues/87)
+- block ExitPlanMode after cooldown expires when no outline has been written — adds outline guard check before time-based cooldown [#87](https://github.com/littlebearapps/untether/issues/87)
+  - `_OUTLINE_PENDING` + `max_text_len_since_cooldown < 200` guard fires regardless of cooldown expiry
+  - strengthened deny/escalation messages with consequence warnings and concrete framing
 
 ## v0.33.2 (2026-03-06)
 
 ### fixes
 
-- warn at startup when `allowed_user_ids` is empty [#84](https://github.com/littlebearapps/untether/issues/84)
-- sanitise subprocess stderr before exposing to Telegram [#85](https://github.com/littlebearapps/untether/issues/85)
-- truncate prompts to 100 chars in INFO logs [#86](https://github.com/littlebearapps/untether/issues/86)
+- warn at startup when `allowed_user_ids` is empty — any chat member can run commands without filtering [#84](https://github.com/littlebearapps/untether/issues/84)
+- sanitise subprocess stderr before exposing to Telegram — redact absolute file paths and URLs [#85](https://github.com/littlebearapps/untether/issues/85)
+- truncate prompts to 100 chars in INFO logs to reduce sensitive data exposure [#86](https://github.com/littlebearapps/untether/issues/86)
 
 ## v0.33.1 (2026-03-06)
 
 ### fixes
 
-- fall back to plain commonmark renderer when `linkify-it-py` is missing [#83](https://github.com/littlebearapps/untether/issues/83)
+- fall back to plain commonmark renderer when `linkify-it-py` is missing instead of crash-looping on startup [#83](https://github.com/littlebearapps/untether/issues/83)
 
 ## v0.33.0 (2026-03-06)
 

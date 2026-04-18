@@ -1361,7 +1361,11 @@ class TestReasoning:
 
     @pytest.mark.anyio
     async def test_reasoning_shows_claude_levels(self, tmp_path):
-        """Claude Code engine shows low/medium/high/max (no minimal/xhigh)."""
+        """Claude Code engine shows low/medium/high/xhigh/max (no minimal).
+
+        `xhigh` was added alongside Opus 4.7 — see #351. Codex already
+        supported `xhigh` since #272; Claude picks it up here.
+        """
         state_path = tmp_path / "prefs.json"
         cmd = ConfigCommand()
         ctx = _make_ctx(
@@ -1375,9 +1379,9 @@ class TestReasoning:
         assert "config:rs:low" in data
         assert "config:rs:med" in data
         assert "config:rs:hi" in data
+        assert "config:rs:xhi" in data
         assert "config:rs:max" in data
         assert "config:rs:min" not in data
-        assert "config:rs:xhi" not in data
 
     @pytest.mark.anyio
     async def test_reasoning_set_returns_home(self, tmp_path):
@@ -1431,6 +1435,7 @@ class TestReasoning:
                 "low": "low",
                 "med": "medium",
                 "hi": "high",
+                "xhi": "xhigh",
                 "max": "max",
             },
         }
