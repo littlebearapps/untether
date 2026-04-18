@@ -270,7 +270,7 @@ accessible immediately, and removed webhooks start returning 404.
 
 ## One-shot crons with `run_once`
 
-Set `run_once = true` on a cron to fire once then auto-disable. The cron stays in the TOML but is skipped until the next reload or restart:
+Set `run_once = true` on a cron to fire once then auto-disable:
 
 ```toml
 [[triggers.crons]]
@@ -280,7 +280,7 @@ prompt = "Check today's deployment status"
 run_once = true
 ```
 
-After the cron fires, the `triggers.cron.run_once_completed` log line confirms the removal. To re-enable, save the TOML again (triggers a reload) or restart the service.
+After the cron fires, the `triggers.cron.run_once_completed` log line confirms the removal. Fired state is persisted to `run_once_fired.json` (sibling of `untether.toml`), so the cron is skipped across config reloads and process restarts — the TOML entry is kept for history but won't refire. To re-enable a one-shot, change its `id` or remove both the TOML entry and its record in `run_once_fired.json`.
 
 ## Delayed runs with `/at`
 
