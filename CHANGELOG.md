@@ -9,6 +9,7 @@
 
 ### fixes
 
+- **security:** Claude and Pi engine subprocesses no longer inherit the parent's full environment — only allowlisted variables (basic OS essentials, AI/cloud provider keys, Claude/MCP namespaces, Node/Python/UV/NPM runtime vars) pass through via the new `utils/env_policy.filtered_env()` helper. Random third-party tokens that happen to live in the parent env (AWS, Stripe, DigitalOcean, DATABASE_URL, personal app tokens, etc.) are no longer available to engine subprocesses or their MCP servers — reduces the blast radius of any tool-call or MCP that exfiltrates process env. PR #323's four `setdefault` reinforcements for the stuck-after-tool_result watchdog are preserved on top of the filtered env. Other engines (Codex, Gemini, OpenCode, AMP) keep the default inherit-everything behaviour for this release; extending to them is tracked as part of [#332](https://github.com/littlebearapps/untether/issues/332) (v0.35.5). Adding a new engine or MCP that relies on an unfamiliar variable is documented at the top of `utils/env_policy.py` [#198](https://github.com/littlebearapps/untether/issues/198)
 - **security:** CI matrix values (`matrix.command`, `matrix.sync_args`) now pass through `env:` instead of direct `${{ }}` interpolation in `run:` blocks, eliminating a theoretical shell-injection vector should matrix values ever become dynamic (e.g. from PR labels) [#195](https://github.com/littlebearapps/untether/issues/195)
 - **security:** `bot_token` is now `pydantic.SecretStr` in `TelegramTransportSettings` — masks the value in `repr()`, `str()`, tracebacks, and any accidental structlog serialisation. Raw value is unwrapped via `.get_secret_value()` at the transport boundary (`require_telegram`, `backend.lock_token`/`build_and_run`, `cli/doctor`, `cli/onboarding_cmd`). A field_validator preserves the pre-change NonEmptyStr contract (whitespace-only tokens still rejected, since SecretStr bypasses `str_strip_whitespace`) [#196](https://github.com/littlebearapps/untether/issues/196)
 - **security:** `_HANDLED_REQUESTS` in `runners/claude.py` switched from a `set` cleared wholesale at 100 entries to an LRU `OrderedDict` (max 200, oldest-first eviction) — closes the small window where a duplicate Telegram callback delivered just after a `.clear()` would be misclassified as "request not found" rather than "duplicate" [#197](https://github.com/littlebearapps/untether/issues/197)
@@ -30,6 +31,10 @@
   - `runners/claude.py:env()` now sets `CLAUDE_ENABLE_STREAM_WATCHDOG=1`, `CLAUDE_STREAM_IDLE_TIMEOUT_MS=60000`, `MCP_TOOL_TIMEOUT=120000`, and `MAX_MCP_OUTPUT_TOKENS=12000` via `setdefault` — reduces incidence while the detector is the safety net; user overrides via shell env or `~/.claude/settings.json` still win
   - four new `[watchdog]` config fields: `detect_stuck_after_tool_result` (default `false` for this release, will default `true` once validated), `stuck_after_tool_result_timeout`, `stuck_after_tool_result_recovery_enabled`, `stuck_after_tool_result_recovery_delay`
   - `utils/proc_diag.py:read_cmdline()` helper for identifying adapter children; 17 new tests across engine-matrix classifier, detector gates, and tier-1/2/3 state machine
+
+### docs
+
+- document `[triggers.server]` port-conflict troubleshooting in `docs/reference/triggers/triggers.md` with `ss -tlnp` diagnosis step and the `port = <N>` remediation [#320](https://github.com/littlebearapps/untether/issues/320)
 
 ## v0.35.1 (2026-04-15)
 
