@@ -4899,6 +4899,66 @@ class TestStuckAfterToolResultDetector:
         edits, _ = self._prepare(last_tool_result_at=600.0, frozen_ring_count=2)
         assert edits._detect_stuck_after_tool_result(cpu_active=True) is False
 
+    # ------------------------------------------------------------------
+    # #346 — suppress when session has live background work
+    # ------------------------------------------------------------------
+
+    def test_silent_when_live_monitor_armed(self) -> None:
+        """#346: a session with an armed Monitor must NOT be flagged as hung.
+
+        Claude Code v2.1.72+ primitives (Monitor, Bash-bg, ScheduleWakeup) emit
+        `result` and then park the subprocess waiting for the deadline to fire.
+        The wedge detector needs to distinguish that from a real hang — it
+        duck-types against `stream.engine_state.has_live_background_work()`.
+        """
+        import time
+
+        from untether.runners.claude import ClaudeStreamState
+
+        edits, clock = self._prepare(last_tool_result_at=600.0, frozen_ring_count=3)
+        clock.set(1000.0)
+        # Arm a monitor with a deadline 60s in the future (real time here is
+        # fine because has_live_background_work uses time.monotonic()).
+        claude_state = ClaudeStreamState()
+        claude_state.live_monitors["toolu_M1"] = time.monotonic() + 60.0
+        edits.stream.engine_state = claude_state  # type: ignore[attr-defined]
+
+        assert edits._detect_stuck_after_tool_result(cpu_active=True) is False
+
+    def test_fires_when_monitor_expired(self) -> None:
+        """After all monitor deadlines expire, the detector runs as usual."""
+        import time
+
+        from untether.runners.claude import ClaudeStreamState
+
+        edits, clock = self._prepare(last_tool_result_at=600.0, frozen_ring_count=3)
+        clock.set(1000.0)
+        claude_state = ClaudeStreamState()
+        # deadline 10s in the past → no longer live
+        claude_state.live_monitors["toolu_M1"] = time.monotonic() - 10.0
+        edits.stream.engine_state = claude_state  # type: ignore[attr-defined]
+
+        assert edits._detect_stuck_after_tool_result(cpu_active=True) is True
+
+    def test_fires_when_engine_state_absent(self) -> None:
+        """Engines without engine_state (Codex, Pi, etc.) keep the original behaviour."""
+        edits, clock = self._prepare(last_tool_result_at=600.0, frozen_ring_count=3)
+        clock.set(1000.0)
+        # stream doesn't have engine_state attr — detector still fires
+        assert edits._detect_stuck_after_tool_result(cpu_active=True) is True
+
+    def test_silent_when_bg_bash_active(self) -> None:
+        """Session with Bash run_in_background=True → suppress wedge detection."""
+        from untether.runners.claude import ClaudeStreamState
+
+        edits, clock = self._prepare(last_tool_result_at=600.0, frozen_ring_count=3)
+        clock.set(1000.0)
+        claude_state = ClaudeStreamState()
+        claude_state.live_bg_bashes.add("toolu_B1")
+        edits.stream.engine_state = claude_state  # type: ignore[attr-defined]
+
+        assert edits._detect_stuck_after_tool_result(cpu_active=True) is False
+
 
 class TestHandleStuckAfterToolResult:
     """Behaviour of the tiered recovery state machine (#322)."""

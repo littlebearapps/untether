@@ -294,6 +294,12 @@ class JsonlStreamState:
     # emitted a follow-up assistant turn.
     last_event_kind: str = "other"
     last_tool_result_at: float = 0.0
+    # #346 Engine-specific state handle for detectors that need deeper
+    # signals (e.g. Claude's background-task tracking from #347). The
+    # wedge detector duck-types against this — if the engine state exposes
+    # `has_live_background_work()`-style info it can gate SIGTERM. Engines
+    # without background-task awareness leave this None.
+    engine_state: Any = None
 
 
 class JsonlSubprocessRunner(BaseRunner):

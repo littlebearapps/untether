@@ -1885,6 +1885,10 @@ class ClaudeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
                     await proc.stdin.aclose()
 
                 stream = JsonlStreamState(expected_session=resume)
+                # #346 thread the ClaudeStreamState into the generic stream
+                # so the wedge detector in runner_bridge can duck-type against
+                # background-task helpers without importing claude-specific code.
+                stream.engine_state = state
                 self.current_stream = stream
                 reader_done = anyio.Event()
 

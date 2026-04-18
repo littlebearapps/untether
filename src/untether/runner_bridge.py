@@ -1366,6 +1366,29 @@ class ProgressEdits:
             return False
         if self._has_pending_approval():
             return False
+        # #346: skip the detector when the session has legitimate background
+        # work armed (Monitor, Bash run_in_background, ScheduleWakeup, etc.).
+        # These primitives emit `result` and then park the subprocess waiting
+        # for the background deadline/completion — which *looks* identical to
+        # a wedge from the detector's POV. Duck-types against the engine_state
+        # so this stays engine-agnostic; Claude populates it via #347. Engines
+        # without background-task awareness leave engine_state=None and this
+        # check no-ops.
+        engine_state = getattr(stream, "engine_state", None)
+        if engine_state is not None:
+            try:
+                from .runners.claude import has_live_background_work
+            except ImportError:
+                has_live_background_work = None  # type: ignore[assignment]
+            if has_live_background_work is not None and has_live_background_work(
+                engine_state
+            ):
+                logger.info(
+                    "progress_edits.stuck_after_tool_result.suppressed",
+                    reason="live_background_work",
+                    tr_elapsed=tr_elapsed,
+                )
+                return False
         # Reuse the existing frozen-ring-buffer escalation threshold (3) so
         # this detector never fires before the user has seen the generic
         # frozen-ring warning it escalates from.
