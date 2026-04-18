@@ -178,6 +178,25 @@ class ClaudeStreamState:
     # Store outline text for embedding in synthetic approve/deny action
     outline_text: str | None = None
 
+    # #347 per-session background-task tracking. Claude Code v2.1.72+ has
+    # primitives that arm long-running work and return the subprocess to
+    # "ready" state while the primitive continues in the background:
+    # `Monitor`, `Bash run_in_background=true`, `Agent run_in_background=true`,
+    # `ScheduleWakeup`, `RemoteTrigger`. Untether tracks them so (a) #346's
+    # wedge detector can gate SIGTERM on "do we still have armed work?",
+    # (b) progress footers can show "⏳ N watchers · M bg tasks", and (c)
+    # a future `/background` command can enumerate the handles.
+    #
+    # Each dict keys on `tool_use_id` → deadline `time.monotonic()` seconds;
+    # sets hold tool_use_ids without deadlines. Entries are cleared either
+    # when the matching `tool_result` arrives (explicit completion) or, for
+    # Monitor/ScheduleWakeup, when the deadline passes.
+    live_monitors: dict[str, float] = field(default_factory=dict)
+    live_bg_bashes: set[str] = field(default_factory=set)
+    live_bg_agents: set[str] = field(default_factory=set)
+    live_wakeups: dict[str, float] = field(default_factory=dict)
+    live_remote_triggers: set[str] = field(default_factory=set)
+
 
 def _normalize_tool_result(content: Any) -> str:
     if content is None:
@@ -242,6 +261,102 @@ def _tool_action(
             detail["changes"] = [{"path": path, "kind": "update"}]
 
     return Action(id=tool_id, kind=kind, title=title, detail=detail)
+
+
+def _register_background_handle(
+    state: ClaudeStreamState,
+    content: claude_schema.StreamToolUseBlock,
+) -> None:
+    """Track long-running primitives that outlive the tool_result (#347).
+
+    Monitor / Bash-bg / Agent-bg / ScheduleWakeup / RemoteTrigger can arm
+    work that continues after Claude Code emits `result`. Untether records
+    the handle so downstream consumers (#346 wedge detector, progress
+    footer, `/background` command) know the subprocess is legitimately
+    parked rather than hung. Entries are removed in
+    `_clear_background_handle` when the matching tool_result arrives.
+
+    Deliberately lenient with the `input` shape — Claude Code's schema
+    forbids unknown fields at the outer level but the tool-specific `input`
+    is free-form, so we defensively coerce to dict.
+    """
+    tool_name = str(content.name or "")
+    tool_id = content.id
+    raw_input = content.input if isinstance(content.input, dict) else {}
+
+    if tool_name == "Monitor":
+        timeout_ms = raw_input.get("timeout_ms")
+        if isinstance(timeout_ms, (int, float)) and timeout_ms > 0:
+            state.live_monitors[tool_id] = time.monotonic() + (timeout_ms / 1000.0)
+        else:
+            # Unknown deadline → store 0.0 so membership tests still work
+            state.live_monitors[tool_id] = 0.0
+    elif tool_name == "Bash" and bool(raw_input.get("run_in_background")):
+        state.live_bg_bashes.add(tool_id)
+    elif tool_name == "Agent" and bool(raw_input.get("run_in_background")):
+        state.live_bg_agents.add(tool_id)
+    elif tool_name == "ScheduleWakeup":
+        delay_ms = raw_input.get("delay_ms") or raw_input.get("timeout_ms")
+        if isinstance(delay_ms, (int, float)) and delay_ms > 0:
+            state.live_wakeups[tool_id] = time.monotonic() + (delay_ms / 1000.0)
+        else:
+            state.live_wakeups[tool_id] = 0.0
+    elif tool_name == "RemoteTrigger":
+        state.live_remote_triggers.add(tool_id)
+
+
+def _clear_background_handle(state: ClaudeStreamState, tool_use_id: str) -> None:
+    """Remove a background-task entry when its tool_result arrives (#347)."""
+    state.live_monitors.pop(tool_use_id, None)
+    state.live_bg_bashes.discard(tool_use_id)
+    state.live_bg_agents.discard(tool_use_id)
+    state.live_wakeups.pop(tool_use_id, None)
+    state.live_remote_triggers.discard(tool_use_id)
+
+
+def has_live_background_work(state: ClaudeStreamState) -> bool:
+    """Return True when the session has any background handle whose deadline
+    (if any) is still in the future (#346 gate).
+
+    Monitors + wakeups with expired deadlines are treated as "no longer
+    live" — the primitive should have fired and emitted its result by then.
+    Sets (bg bashes, bg agents, remote triggers) have no deadline so any
+    entry counts as live.
+    """
+    now = time.monotonic()
+    for deadline in state.live_monitors.values():
+        if deadline == 0.0 or deadline > now:
+            return True
+    for deadline in state.live_wakeups.values():
+        if deadline == 0.0 or deadline > now:
+            return True
+    return bool(
+        state.live_bg_bashes or state.live_bg_agents or state.live_remote_triggers
+    )
+
+
+def background_task_summary(state: ClaudeStreamState) -> str | None:
+    """Return a compact "⏳ 2 watchers · 1 bg task" summary or None if empty.
+
+    Used by progress footer rendering (#347 v2) and the `/background`
+    command. v1 of this PR only computes it; the footer wiring lands in
+    a follow-up once meta-threading from ClaudeStreamState to
+    `ProgressTracker.meta` is confirmed safe for the other 5 engines.
+    """
+    watchers = len(state.live_monitors) + len(state.live_wakeups)
+    bg_tasks = (
+        len(state.live_bg_bashes)
+        + len(state.live_bg_agents)
+        + len(state.live_remote_triggers)
+    )
+    if watchers == 0 and bg_tasks == 0:
+        return None
+    parts: list[str] = []
+    if watchers:
+        parts.append(f"{watchers} watcher{'s' if watchers != 1 else ''}")
+    if bg_tasks:
+        parts.append(f"{bg_tasks} bg task{'s' if bg_tasks != 1 else ''}")
+    return "⏳ " + " · ".join(parts)
 
 
 def _tool_result_event(
@@ -429,6 +544,9 @@ def translate_claude_event(
                         )
                         state.pending_actions[action.id] = action
                         state.last_tool_use_id = content.id
+                        # #347 track long-running primitives that outlive
+                        # this tool_use → tool_result cycle
+                        _register_background_handle(state, content)
                         out.append(
                             factory.action_started(
                                 action_id=action.id,
@@ -484,6 +602,8 @@ def translate_claude_event(
                 if not isinstance(content, claude_schema.StreamToolResultBlock):
                     continue
                 tool_use_id = content.tool_use_id
+                # #347 clear any background-task entry for this tool_use_id
+                _clear_background_handle(state, tool_use_id)
                 action = state.pending_actions.pop(tool_use_id, None)
                 if action is None:
                     action = Action(
