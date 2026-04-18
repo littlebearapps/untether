@@ -71,7 +71,7 @@ Common schedules:
 | `*/30 * * * *` | Every 30 minutes |
 | `0 */4 * * *` | Every 4 hours |
 
-Add `run_once = true` to fire a cron exactly once, then auto-disable. It re-activates on config reload or restart — useful for one-off tasks that shouldn't repeat.
+Add `run_once = true` to fire a cron exactly once, then auto-disable. Fired state persists to `run_once_fired.json` (sibling of your `untether.toml`), so a reload or restart will **not** re-fire it. Remove the cron from your TOML to clean up.
 
 ## Webhook triggers
 

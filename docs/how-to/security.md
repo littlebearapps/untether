@@ -53,6 +53,12 @@ export UNTETHER_CONFIG_PATH=/path/to/untether.toml
 !!! tip "Automatic log redaction"
     Untether automatically redacts bot tokens, OpenAI API keys (`sk-...`), and GitHub tokens (`ghp_`, `ghs_`, `github_pat_`) from all structured log output. Even if a token appears in engine output or error messages, it is replaced with `[REDACTED]` before being written to logs.
 
+## Engine subprocess env allowlist
+
+Claude and Pi engine subprocesses do **not** inherit Untether's full environment. Only allowlisted variables (OS essentials, AI/cloud provider keys, Claude/MCP/Node/Python/UV/NPM namespaces, git/ssh auth) pass through — random third-party tokens that happen to live in your shell (`AWS_*`, `STRIPE_*`, `DATABASE_URL`, personal app tokens, etc.) are **not** available to the engine or its MCP servers. This reduces the blast radius of any tool call or MCP that exfiltrates process env.
+
+If a new engine or MCP genuinely needs a variable that isn't allowlisted (symptom: hangs at init, silent `KeyError` in logs), add it to `_EXACT_ALLOW` / `_PREFIX_ALLOW` in `src/untether/utils/env_policy.py`. Other engines (Codex, Gemini, OpenCode, AMP) still inherit the full parent env — extending the allowlist to them is tracked in [#332](https://github.com/littlebearapps/untether/issues/332).
+
 ## File transfer deny globs
 
 File transfer includes a deny list that blocks access to sensitive paths. The defaults are:
