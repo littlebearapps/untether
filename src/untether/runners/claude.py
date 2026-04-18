@@ -1316,7 +1316,14 @@ class ClaudeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
         # by Claude Code 2.1.110+ for the sdk-cli stdio path. Use setdefault
         # so user overrides (shell rc, per-project env) always win. See #322.
         env.setdefault("CLAUDE_ENABLE_STREAM_WATCHDOG", "1")
-        env.setdefault("CLAUDE_STREAM_IDLE_TIMEOUT_MS", "60000")
+        # #342: opus on `max` reasoning can legitimately idle its SSE stream
+        # for 60-120s while chain-of-thought expands between output deltas; a
+        # 60s watchdog trips and aborts the run mid-reasoning ("API Error:
+        # Stream idle timeout - partial response received"). 300000ms (5 min)
+        # matches the undici idle-body timeout that motivated #322 *and*
+        # Untether's own `stuck_after_tool_result_timeout` default, so the
+        # upstream CLI watchdog and our detector fire in the same window.
+        env.setdefault("CLAUDE_STREAM_IDLE_TIMEOUT_MS", "300000")
         env.setdefault("MCP_TOOL_TIMEOUT", "120000")
         env.setdefault("MAX_MCP_OUTPUT_TOKENS", "12000")
         if self.use_api_billing is not True:
