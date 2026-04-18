@@ -439,6 +439,35 @@ def test_env_sets_untether_session() -> None:
     assert env_api["UNTETHER_SESSION"] == "1"
 
 
+def test_env_stream_idle_timeout_default_is_300s(monkeypatch) -> None:
+    """#342: the default CLAUDE_STREAM_IDLE_TIMEOUT_MS must be 300000ms (5 min).
+
+    60000ms (the value shipped in #322 / PR #323) tripped the upstream
+    stream watchdog mid-reasoning on opus/max runs, aborting the run with
+    "API Error: Stream idle timeout". 300000ms matches the undici idle-body
+    timeout that motivated #322 and Untether's own
+    stuck_after_tool_result_timeout default, so legitimate long-thinking
+    windows no longer false-positive.
+    """
+    # Clear any shell-set value so we measure setdefault behaviour.
+    monkeypatch.delenv("CLAUDE_STREAM_IDLE_TIMEOUT_MS", raising=False)
+    runner = ClaudeRunner(claude_cmd="claude")
+    env = runner.env(state=None)
+    assert env is not None
+    assert env["CLAUDE_STREAM_IDLE_TIMEOUT_MS"] == "300000"
+    # Watchdog stays on; only the idle threshold changed.
+    assert env["CLAUDE_ENABLE_STREAM_WATCHDOG"] == "1"
+
+
+def test_env_stream_idle_timeout_user_override_wins(monkeypatch) -> None:
+    """Shell-set CLAUDE_STREAM_IDLE_TIMEOUT_MS wins over the Untether default."""
+    monkeypatch.setenv("CLAUDE_STREAM_IDLE_TIMEOUT_MS", "600000")
+    runner = ClaudeRunner(claude_cmd="claude")
+    env = runner.env(state=None)
+    assert env is not None
+    assert env["CLAUDE_STREAM_IDLE_TIMEOUT_MS"] == "600000"
+
+
 def test_rate_limit_event_returns_empty() -> None:
     """rate_limit_event should decode and translate to no Untether events."""
     event = _decode_event({"type": "rate_limit_event"})
