@@ -52,6 +52,126 @@ def _decode_event(payload: dict) -> claude_schema.StreamJsonMessage:
     return claude_schema.decode_stream_json_line(data)
 
 
+# ---------------------------------------------------------------------------
+# #350 — pre-spawn RAM guard on the shared JsonlSubprocessRunner base class
+# ---------------------------------------------------------------------------
+
+
+def test_prespawn_ram_guard_blocks_when_below_threshold(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+) -> None:
+    """When MemAvailable < block_mb, _check_prespawn_ram_guard returns a
+    CompletedEvent(ok=False) so run_impl yields it and returns early before
+    spawning the subprocess."""
+    runner = ClaudeRunner(claude_cmd="claude")
+
+    # Stub mem_available_kb to return 100 MB (well below the 500 MB block)
+    from untether.utils import proc_diag
+
+    monkeypatch.setattr(proc_diag, "mem_available_kb", lambda: 100 * 1024)
+
+    # Stub load_settings_if_exists to return default watchdog settings
+    from untether import settings as settings_module
+    from untether.settings import WatchdogSettings
+
+    class _Fake:
+        watchdog = WatchdogSettings()  # defaults: warn=2000, block=500
+
+    monkeypatch.setattr(
+        settings_module,
+        "load_settings_if_exists",
+        lambda: (_Fake(), tmp_path / "untether.toml"),
+    )
+
+    result = runner._check_prespawn_ram_guard(resume=None)
+    assert result is not None
+    assert result.ok is False
+    assert "Insufficient RAM" in (result.error or "")
+    assert "100 MB" in (result.error or "")
+    assert "500 MB" in (result.error or "")
+
+
+def test_prespawn_ram_guard_allows_when_above_threshold(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+) -> None:
+    """Healthy host → guard returns None → normal spawn proceeds."""
+    runner = ClaudeRunner(claude_cmd="claude")
+
+    from untether import settings as settings_module
+    from untether.settings import WatchdogSettings
+    from untether.utils import proc_diag
+
+    monkeypatch.setattr(proc_diag, "mem_available_kb", lambda: 8 * 1024 * 1024)
+
+    class _Fake:
+        watchdog = WatchdogSettings()
+
+    monkeypatch.setattr(
+        settings_module,
+        "load_settings_if_exists",
+        lambda: (_Fake(), tmp_path / "untether.toml"),
+    )
+
+    assert runner._check_prespawn_ram_guard(resume=None) is None
+
+
+def test_prespawn_ram_guard_disabled_when_both_zero(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+) -> None:
+    """warn=0 and block=0 disables the guard entirely — no /proc read."""
+    runner = ClaudeRunner(claude_cmd="claude")
+
+    from untether import settings as settings_module
+    from untether.settings import WatchdogSettings
+    from untether.utils import proc_diag
+
+    called = {"mem": False}
+
+    def _fail_if_called() -> int | None:
+        called["mem"] = True
+        return 10
+
+    monkeypatch.setattr(proc_diag, "mem_available_kb", _fail_if_called)
+
+    class _Fake:
+        watchdog = WatchdogSettings(prespawn_ram_warn_mb=0, prespawn_ram_block_mb=0)
+
+    monkeypatch.setattr(
+        settings_module,
+        "load_settings_if_exists",
+        lambda: (_Fake(), tmp_path / "untether.toml"),
+    )
+
+    assert runner._check_prespawn_ram_guard(resume=None) is None
+    assert called["mem"] is False  # guard short-circuited before proc read
+
+
+def test_prespawn_ram_guard_warn_only_does_not_block(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+) -> None:
+    """Between block and warn thresholds → logged warning but guard returns
+    None so the spawn proceeds."""
+    runner = ClaudeRunner(claude_cmd="claude")
+
+    from untether import settings as settings_module
+    from untether.settings import WatchdogSettings
+    from untether.utils import proc_diag
+
+    monkeypatch.setattr(proc_diag, "mem_available_kb", lambda: 1500 * 1024)
+
+    class _Fake:
+        watchdog = WatchdogSettings()  # warn=2000, block=500
+
+    monkeypatch.setattr(
+        settings_module,
+        "load_settings_if_exists",
+        lambda: (_Fake(), tmp_path / "untether.toml"),
+    )
+
+    # 1500 < 2000 warn threshold, but >= 500 block — should warn, not block
+    assert runner._check_prespawn_ram_guard(resume=None) is None
+
+
 def test_claude_resume_format_and_extract() -> None:
     runner = ClaudeRunner(claude_cmd="claude")
     token = ResumeToken(engine=ENGINE, value="sid")
