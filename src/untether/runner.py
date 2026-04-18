@@ -851,6 +851,80 @@ class JsonlSubprocessRunner(BaseRunner):
 
     _stall_auto_kill: bool = False
 
+    def _check_prespawn_ram_guard(
+        self, resume: ResumeToken | None
+    ) -> CompletedEvent | None:
+        """Check host MemAvailable before spawning a new engine subprocess (#350).
+
+        Returns `None` to allow the spawn (either above the warn threshold
+        or disabled by config), or a `CompletedEvent(ok=False)` to block it.
+
+        A non-blocking low-RAM state logs a `subprocess.prespawn.ram_warning`
+        structured log entry so staging greps can surface "we were close to
+        blocking" even when the spawn succeeded — deliberately does not emit
+        a user-visible action event in this v1 because doing so would
+        require threading an `EventFactory` through the guard, which
+        complicates per-engine runners. A follow-up PR can add the
+        user-visible warning once #347's telemetry wiring lands.
+        """
+        try:
+            from .settings import load_settings_if_exists
+            from .utils.proc_diag import mem_available_kb
+        except ImportError:
+            return None
+
+        try:
+            result = load_settings_if_exists()
+        except Exception:  # noqa: BLE001 — config failures must NEVER block a run
+            return None
+        if result is None:
+            return None
+        settings, _ = result
+        watchdog = settings.watchdog
+
+        warn_mb = watchdog.prespawn_ram_warn_mb
+        block_mb = watchdog.prespawn_ram_block_mb
+        if warn_mb <= 0 and block_mb <= 0:
+            return None  # guard fully disabled
+
+        avail_kb = mem_available_kb()
+        if avail_kb is None:
+            return None  # non-Linux / /proc unreadable — treat as ALLOW
+        avail_mb = avail_kb // 1024
+
+        logger = self.get_logger()
+
+        if block_mb > 0 and avail_mb < block_mb:
+            logger.error(
+                "subprocess.prespawn.ram_blocked",
+                engine=self.engine,
+                avail_mb=avail_mb,
+                block_mb=block_mb,
+                warn_mb=warn_mb,
+            )
+            msg = (
+                f"🛑 Insufficient RAM to start engine ({avail_mb} MB free, "
+                f"threshold {block_mb} MB). Cancel an active run or restart "
+                f"the service."
+            )
+            return CompletedEvent(
+                engine=self.engine,
+                ok=False,
+                answer="",
+                resume=resume,
+                error=msg,
+            )
+
+        if warn_mb > 0 and avail_mb < warn_mb:
+            logger.warning(
+                "subprocess.prespawn.ram_warning",
+                engine=self.engine,
+                avail_mb=avail_mb,
+                warn_mb=warn_mb,
+                block_mb=block_mb,
+            )
+        return None
+
     async def _subprocess_watchdog(
         self,
         proc: Any,
@@ -981,6 +1055,15 @@ class JsonlSubprocessRunner(BaseRunner):
             prompt_len=len(prompt),
             args=cmd[1:],
         )
+
+        # #350 pre-spawn RAM guard — refuse or warn when the host is
+        # near-OOM. Runs BEFORE manage_subprocess so a blocked spawn costs
+        # nothing. A WARN emits a visible note; a BLOCK yields a
+        # CompletedEvent(ok=False) and returns early without forking.
+        block_result = self._check_prespawn_ram_guard(resume)
+        if block_result is not None:
+            yield block_result
+            return
 
         cwd = get_run_base_dir()
 
