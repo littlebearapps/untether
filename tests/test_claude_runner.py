@@ -52,6 +52,211 @@ def _decode_event(payload: dict) -> claude_schema.StreamJsonMessage:
     return claude_schema.decode_stream_json_line(data)
 
 
+# ---------------------------------------------------------------------------
+# #347 — background-task tracking (Monitor / Bash-bg / Agent-bg /
+# ScheduleWakeup / RemoteTrigger)
+# ---------------------------------------------------------------------------
+
+
+def _make_tool_use_event(
+    name: str, tool_id: str, tool_input: dict | None = None
+) -> dict:
+    return {
+        "type": "assistant",
+        "message": {
+            "id": "msg_1",
+            "content": [
+                {
+                    "type": "tool_use",
+                    "id": tool_id,
+                    "name": name,
+                    "input": tool_input or {},
+                }
+            ],
+        },
+    }
+
+
+def _make_tool_result_event(tool_use_id: str) -> dict:
+    return {
+        "type": "user",
+        "message": {
+            "id": "msg_r",
+            "content": [
+                {
+                    "type": "tool_result",
+                    "tool_use_id": tool_use_id,
+                    "content": "ok",
+                    "is_error": False,
+                }
+            ],
+        },
+    }
+
+
+def test_monitor_tool_registers_live_monitor() -> None:
+    """Monitor with timeout_ms registers a dated entry in live_monitors."""
+    state = ClaudeStreamState()
+    translate_claude_event(
+        _decode_event(
+            _make_tool_use_event("Monitor", "toolu_M1", {"timeout_ms": 60_000})
+        ),
+        title="claude",
+        state=state,
+        factory=state.factory,
+    )
+    assert "toolu_M1" in state.live_monitors
+    # Deadline should be in the future by ~60s
+    assert state.live_monitors["toolu_M1"] > 0
+
+
+def test_monitor_tool_clears_on_tool_result() -> None:
+    state = ClaudeStreamState()
+    translate_claude_event(
+        _decode_event(
+            _make_tool_use_event("Monitor", "toolu_M1", {"timeout_ms": 60_000})
+        ),
+        title="claude",
+        state=state,
+        factory=state.factory,
+    )
+    assert "toolu_M1" in state.live_monitors
+
+    translate_claude_event(
+        _decode_event(_make_tool_result_event("toolu_M1")),
+        title="claude",
+        state=state,
+        factory=state.factory,
+    )
+    assert "toolu_M1" not in state.live_monitors
+
+
+def test_bash_bg_registers_when_run_in_background_true() -> None:
+    state = ClaudeStreamState()
+    translate_claude_event(
+        _decode_event(
+            _make_tool_use_event(
+                "Bash", "toolu_B1", {"command": "sleep 60", "run_in_background": True}
+            )
+        ),
+        title="claude",
+        state=state,
+        factory=state.factory,
+    )
+    assert "toolu_B1" in state.live_bg_bashes
+
+
+def test_bash_without_run_in_background_is_not_tracked() -> None:
+    """A foreground Bash call must NOT land in live_bg_bashes — otherwise
+    every Claude command would pollute the background set."""
+    state = ClaudeStreamState()
+    translate_claude_event(
+        _decode_event(_make_tool_use_event("Bash", "toolu_B2", {"command": "ls"})),
+        title="claude",
+        state=state,
+        factory=state.factory,
+    )
+    assert "toolu_B2" not in state.live_bg_bashes
+
+
+def test_agent_bg_tracked_only_when_run_in_background() -> None:
+    state = ClaudeStreamState()
+    translate_claude_event(
+        _decode_event(
+            _make_tool_use_event(
+                "Agent", "toolu_A1", {"task": "...", "run_in_background": True}
+            )
+        ),
+        title="claude",
+        state=state,
+        factory=state.factory,
+    )
+    assert "toolu_A1" in state.live_bg_agents
+
+    state2 = ClaudeStreamState()
+    translate_claude_event(
+        _decode_event(_make_tool_use_event("Agent", "toolu_A2", {"task": "..."})),
+        title="claude",
+        state=state2,
+        factory=state2.factory,
+    )
+    assert "toolu_A2" not in state2.live_bg_agents
+
+
+def test_schedule_wakeup_tracked_with_deadline() -> None:
+    state = ClaudeStreamState()
+    translate_claude_event(
+        _decode_event(
+            _make_tool_use_event("ScheduleWakeup", "toolu_W1", {"delay_ms": 120_000})
+        ),
+        title="claude",
+        state=state,
+        factory=state.factory,
+    )
+    assert "toolu_W1" in state.live_wakeups
+
+
+def test_remote_trigger_tracked_as_set_member() -> None:
+    state = ClaudeStreamState()
+    translate_claude_event(
+        _decode_event(
+            _make_tool_use_event("RemoteTrigger", "toolu_R1", {"target": "other-chat"})
+        ),
+        title="claude",
+        state=state,
+        factory=state.factory,
+    )
+    assert "toolu_R1" in state.live_remote_triggers
+
+
+def test_has_live_background_work_empty() -> None:
+    from untether.runners.claude import has_live_background_work
+
+    state = ClaudeStreamState()
+    assert has_live_background_work(state) is False
+
+
+def test_has_live_background_work_with_bg_bash() -> None:
+    from untether.runners.claude import has_live_background_work
+
+    state = ClaudeStreamState()
+    state.live_bg_bashes.add("toolu_X")
+    assert has_live_background_work(state) is True
+
+
+def test_has_live_background_work_expired_monitor() -> None:
+    """A monitor whose deadline has passed should be treated as no longer live."""
+    import time
+
+    from untether.runners.claude import has_live_background_work
+
+    state = ClaudeStreamState()
+    # deadline 10s in the past
+    state.live_monitors["toolu_expired"] = time.monotonic() - 10.0
+    assert has_live_background_work(state) is False
+
+
+def test_background_task_summary_formatting() -> None:
+    from untether.runners.claude import background_task_summary
+
+    state = ClaudeStreamState()
+    assert background_task_summary(state) is None
+
+    state.live_monitors["a"] = 0.0
+    state.live_bg_bashes.add("b")
+    summary = background_task_summary(state)
+    assert summary is not None
+    assert "⏳" in summary
+    assert "1 watcher" in summary
+    assert "1 bg task" in summary
+
+    state.live_monitors["c"] = 0.0
+    state.live_bg_agents.add("d")
+    summary = background_task_summary(state)
+    assert "2 watchers" in summary
+    assert "2 bg tasks" in summary
+
+
 def test_claude_resume_format_and_extract() -> None:
     runner = ClaudeRunner(claude_cmd="claude")
     token = ResumeToken(engine=ENGINE, value="sid")
