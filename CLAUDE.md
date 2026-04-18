@@ -179,7 +179,7 @@ Rules in `.claude/rules/` auto-load when editing matching files:
 
 ## Tests
 
-2165 unit tests, 80% coverage threshold. Integration testing against `@untether_dev_bot` is **mandatory before every release** — see `docs/reference/integration-testing.md` for the full playbook with per-release-type tier requirements (patch/minor/major). All integration test tiers are fully automated by Claude Code via Telegram MCP tools and Bash.
+2288 unit tests, 80% coverage threshold. Integration testing against `@untether_dev_bot` is **mandatory before every release** — see `docs/reference/integration-testing.md` for the full playbook with per-release-type tier requirements (patch/minor/major). All integration test tiers are fully automated by Claude Code via Telegram MCP tools and Bash.
 
 Key test files:
 
@@ -219,7 +219,7 @@ Key test files:
 - `test_trigger_manager.py` — 23 tests: TriggerManager init/update/clear, webhook server hot-reload (add/remove/update routes, secret changes, health count), cron schedule swapping, timezone updates; rc4 helpers (crons_for_chat, webhooks_for_chat, cron_ids, webhook_ids, remove_cron, atomic iteration)
 - `test_describe_cron.py` — 31 tests: human-friendly cron rendering (daily, weekday ranges, weekday lists, single day, timezone suffix, fallback to raw, AM/PM boundaries)
 - `test_trigger_meta_line.py` — 6 tests: trigger source rendering in `format_meta_line()`, ordering relative to model/effort/permission
-- `test_bridge_config_reload.py` — 11 tests: TelegramBridgeConfig unfrozen (slots preserved), `update_from()` copies all 11 fields, files swap, chat_ids/voice_transcription_api_key edge cases, trigger_manager field default
+- `test_bridge_config_reload.py` — 20 tests: TelegramBridgeConfig unfrozen (slots preserved), `update_from()` copies all 11 fields, files swap, chat_ids/voice_transcription_api_key edge cases, trigger_manager field default, `RESTART_REQUIRED_FIELDS` ClassVar invariants (#318), `_notify_restart_required` broadcast to project chats + admin DMs with per-chat failure isolation (#318 follow-up)
 - `test_at_command.py` — 34 tests: `/at` parse (valid/invalid suffixes, bounds, case-insensitive), `_format_delay`, schedule/cancel, per-chat cap, scheduler install/uninstall
 - `test_offset_persistence.py` — 15 tests: Telegram update_id round-trip, corrupt JSON handling, atomic write, `DebouncedOffsetWriter` interval/max-pending semantics, explicit flush
 - `test_sdnotify.py` — 7 tests: NOTIFY_SOCKET handling (absent/empty/filesystem/abstract-namespace), send error swallowing, UTF-8 encoding

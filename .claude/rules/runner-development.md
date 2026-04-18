@@ -7,7 +7,7 @@ applies_to: "src/untether/runners/**,src/untether/runner.py"
 ## 3-event contract
 
 Every run MUST emit exactly this sequence:
-1. `StartedEvent` — once, when session ID is known
+1. `StartedEvent` — first, when session ID is known; additional `StartedEvent`s with the same resume but new `meta` are allowed for late-arriving metadata (e.g. pi.py ships the model from `message_end` via a supplementary event; #225). The base runner's `handle_started_event` emits duplicates through when `event.meta` is truthy; `ProgressTracker.note_event` merges meta idempotently. True duplicates (no meta) are still dropped.
 2. `ActionEvent(s)` — zero or more, phase: started/updated/completed
 3. `CompletedEvent` — exactly once, always the final event
 
