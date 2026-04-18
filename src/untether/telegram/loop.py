@@ -191,6 +191,55 @@ async def _send_startup(cfg: TelegramBridgeConfig) -> None:
         logger.info("startup.sent", chat_id=cfg.chat_id)
 
 
+async def _notify_restart_required(cfg: TelegramBridgeConfig, keys: list[str]) -> None:
+    """#318 follow-up: broadcast restart-required warning to project chats + admin DMs.
+
+    PR #336 wired the warning to ``cfg.chat_id`` alone; in project-routed
+    deployments that value is the placeholder sentinel and every send
+    fails with "chat not found". This helper instead targets every active
+    project chat plus any ``allowed_user_ids`` admin DM, falling back to
+    ``cfg.chat_id`` only when no routed targets exist. Per-chat failures
+    are logged and skipped so one bad chat can't mask the warning from
+    the rest.
+    """
+    keys_text = ", ".join(f"`{k}`" for k in keys)
+    text = (
+        "\N{CLOCKWISE GAPPED CIRCLE ARROW} "
+        f"Setting {keys_text} changed — restart required to take effect.\n"
+        "Run: `systemctl --user restart untether`"
+    )
+    targets: set[int] = set()
+    targets.update(cfg.runtime.project_chat_ids())
+    targets.update(cfg.allowed_user_ids or ())
+    if not targets:
+        targets.add(cfg.chat_id)
+    sent_count = 0
+    for chat_id in sorted(targets):
+        try:
+            sent = await cfg.exec_cfg.transport.send(
+                channel_id=chat_id,
+                message=RenderedMessage(
+                    text=text,
+                    extra={"parse_mode": "Markdown"},
+                ),
+                options=SendOptions(notify=True),
+            )
+            if sent is not None:
+                sent_count += 1
+        except Exception as exc:  # noqa: BLE001 — logged then continue
+            logger.warning(
+                "config.reload.restart_notify.failed",
+                chat_id=chat_id,
+                error=str(exc),
+            )
+    logger.info(
+        "config.reload.restart_notify.sent",
+        keys=keys,
+        targets=sorted(targets),
+        sent_count=sent_count,
+    )
+
+
 def _dispatch_builtin_command(
     *,
     ctx: TelegramCommandContext,
@@ -1360,32 +1409,14 @@ async def run_main_loop(
                                 keys=restart_keys,
                                 restart_required=True,
                             )
-                            # #318: surface the restart-required change in
-                            # Telegram so the user doesn't silently run on
-                            # stale settings.  Best-effort — swallow send
-                            # errors so a hot-reload doesn't crash the bot.
-                            try:
-                                keys_text = ", ".join(f"`{k}`" for k in restart_keys)
-                                msg = (
-                                    "\N{CLOCKWISE GAPPED CIRCLE ARROW} "
-                                    f"Setting {keys_text} changed — restart "
-                                    "required to take effect.\n"
-                                    "Run: `systemctl --user restart untether`"
-                                )
-                                await cfg.exec_cfg.transport.send(
-                                    channel_id=cfg.chat_id,
-                                    message=RenderedMessage(
-                                        text=msg,
-                                        extra={"parse_mode": "Markdown"},
-                                    ),
-                                    options=SendOptions(notify=True),
-                                )
-                            except Exception as exc:  # noqa: BLE001
-                                logger.warning(
-                                    "config.reload.restart_notify_failed",
-                                    error=str(exc),
-                                    keys=restart_keys,
-                                )
+                            # #318 (follow-up): PR #336 sent to cfg.chat_id,
+                            # but in project-routed deployments that is the
+                            # placeholder sentinel and every send fails with
+                            # "chat not found". Broadcast to every project
+                            # chat plus admin DMs so the warning actually
+                            # reaches whoever's driving the bot. Per-chat
+                            # failures are logged and skipped.
+                            await _notify_restart_required(cfg, restart_keys)
                         if hot_keys:
                             cfg.update_from(reload.settings.transports.telegram)
                             state.forward_coalesce_s = max(

@@ -13,6 +13,7 @@ from untether.settings import (
     TelegramTransportSettings,
 )
 from untether.telegram.bridge import TelegramBridgeConfig
+from untether.telegram.loop import _notify_restart_required
 
 
 def _settings(**overrides) -> TelegramTransportSettings:
@@ -214,3 +215,69 @@ class TestRestartRequiredFields:
             "handle_reload should reference "
             "TelegramTransportSettings.RESTART_REQUIRED_FIELDS"
         )
+
+
+# ── #318 follow-up: broadcast to project chats + admin DMs ───────────
+
+
+class TestNotifyRestartRequired:
+    """PR #336 sent the warning to cfg.chat_id; in project-routed deployments
+    that's the placeholder sentinel and every send fails. This batch of tests
+    locks in the broader broadcast behaviour so the fix doesn't regress."""
+
+    @pytest.mark.anyio
+    async def test_sends_to_allowed_user_ids(self):
+        transport = FakeTransport()
+        cfg = make_cfg(transport)
+        cfg.allowed_user_ids = (555, 777)
+        await _notify_restart_required(cfg, ["session_mode"])
+        chat_ids = sorted(call["channel_id"] for call in transport.send_calls)
+        assert chat_ids == [555, 777]
+        for call in transport.send_calls:
+            assert "`session_mode`" in call["message"].text
+            assert "restart required" in call["message"].text
+            assert "systemctl" in call["message"].text
+
+    @pytest.mark.anyio
+    async def test_falls_back_to_transport_chat_id_when_no_targets(self):
+        transport = FakeTransport()
+        cfg = make_cfg(transport)
+        cfg.allowed_user_ids = ()
+        await _notify_restart_required(cfg, ["bot_token"])
+        chat_ids = [call["channel_id"] for call in transport.send_calls]
+        assert chat_ids == [cfg.chat_id]
+
+    @pytest.mark.anyio
+    async def test_message_lists_all_changed_keys(self):
+        transport = FakeTransport()
+        cfg = make_cfg(transport)
+        cfg.allowed_user_ids = (1,)
+        await _notify_restart_required(cfg, ["session_mode", "topics"])
+        call = transport.send_calls[0]
+        assert "`session_mode`" in call["message"].text
+        assert "`topics`" in call["message"].text
+
+    @pytest.mark.anyio
+    async def test_continues_past_send_failures(self):
+        class FlakyTransport(FakeTransport):
+            async def send(self, **kw):  # type: ignore[override]
+                if kw["channel_id"] == 1:
+                    raise RuntimeError("telegram api error")
+                return await super().send(**kw)
+
+        transport = FlakyTransport()
+        cfg = make_cfg(transport)
+        cfg.allowed_user_ids = (1, 2, 3)
+        # Must not raise — per-chat failures are logged and skipped.
+        await _notify_restart_required(cfg, ["session_mode"])
+        chat_ids = sorted(call["channel_id"] for call in transport.send_calls)
+        assert chat_ids == [2, 3]
+
+    @pytest.mark.anyio
+    async def test_markdown_parse_mode_set(self):
+        transport = FakeTransport()
+        cfg = make_cfg(transport)
+        cfg.allowed_user_ids = (1,)
+        await _notify_restart_required(cfg, ["session_mode"])
+        msg = transport.send_calls[0]["message"]
+        assert msg.extra.get("parse_mode") == "Markdown"
