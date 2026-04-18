@@ -133,7 +133,24 @@ Once you approve a plan outline (via "Approve Plan"), subsequent tool calls in t
 
 This applies whether you approve via "Approve Plan" after an outline or by directly approving an ExitPlanMode request. Starting a new session (via `/new` or a new message) restores normal approval behaviour.
 
+## Per-cron override (scheduled runs) {#cron-override}
+
+When a scheduled cron fires into a plan-mode chat, the default behaviour is to inherit the chat's plan mode — which means the cron run pauses for an approval nobody's awake to give. Set `permission_mode = "auto"` on the cron itself to override just that run:
+
+```toml
+[[triggers.crons]]
+id = "daily-summary"
+schedule = "0 8 * * *"
+chat_id = -1001234567890
+engine = "claude"
+prompt = "Post yesterday's key events."
+permission_mode = "auto"
+```
+
+Precedence: cron `permission_mode` > per-chat `/planmode` > engine config default. The rest of the chat's interactive traffic continues to honour plan mode. See [Schedule tasks — Autonomous crons](schedule-tasks.md#autonomous-crons) for the full reference.
+
 ## Related
 
 - [Interactive approval](interactive-approval.md) — how approval buttons and diff previews work
+- [Schedule tasks](schedule-tasks.md#autonomous-crons) — per-cron permission override
 - [Configuration](../reference/config.md) — setting default permission mode in `untether.toml`
