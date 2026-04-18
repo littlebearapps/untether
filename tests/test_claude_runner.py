@@ -201,6 +201,83 @@ def test_tool_results_pop_pending_actions() -> None:
     assert not state.pending_actions
 
 
+def test_translate_rate_limit_event_surfaces_as_action() -> None:
+    """#349: rate_limit_event JSONL translates to a visible action event.
+
+    Previously this event fell through to the empty-list default, so the user
+    saw silent inactivity on Telegram while Claude Code waited for the
+    Anthropic API to unthrottle. Now it renders as a progress note with a
+    ⏳ prefix and the retry-after hint.
+    """
+    state = ClaudeStreamState()
+    event = {
+        "type": "rate_limit_event",
+        "rate_limit_info": {
+            "tokens_limit": 1_000_000,
+            "tokens_remaining": 0,
+            "retry_after_ms": 47_000,
+        },
+    }
+    events = translate_claude_event(
+        _decode_event(event),
+        title="claude",
+        state=state,
+        factory=state.factory,
+    )
+    # started + completed so the progress bar shows a finished note
+    assert len(events) == 2
+    assert all(isinstance(e, ActionEvent) for e in events)
+    assert events[0].phase == "started"
+    assert events[1].phase == "completed"
+    assert events[0].action.kind == "note"
+    assert "⏳" in events[0].action.title
+    assert "retrying in 47s" in events[0].action.title
+    assert events[1].ok is True
+    assert events[1].level == "info"
+    # Cumulative counter feeds the future footer annotation / /stats surface
+    assert state.rate_limit_count == 1
+    assert state.rate_limit_total_s == 47.0
+    # Detail dict preserves the raw retry_after_ms for callers that want it
+    assert events[0].action.detail.get("retry_after_ms") == 47_000
+    assert events[0].action.detail.get("tokens_remaining") == 0
+
+
+def test_translate_rate_limit_event_accumulates_across_throttles() -> None:
+    """Multiple rate_limit_events in one session accumulate into a single total."""
+    state = ClaudeStreamState()
+    for retry_ms in (10_000, 30_000, 5_000):
+        translate_claude_event(
+            _decode_event(
+                {
+                    "type": "rate_limit_event",
+                    "rate_limit_info": {"retry_after_ms": retry_ms},
+                }
+            ),
+            title="claude",
+            state=state,
+            factory=state.factory,
+        )
+    assert state.rate_limit_count == 3
+    assert state.rate_limit_total_s == 45.0
+
+
+def test_translate_rate_limit_event_handles_missing_retry() -> None:
+    """Rate-limit without a retry hint still surfaces, just without the seconds."""
+    state = ClaudeStreamState()
+    events = translate_claude_event(
+        _decode_event({"type": "rate_limit_event"}),
+        title="claude",
+        state=state,
+        factory=state.factory,
+    )
+    assert len(events) == 2
+    assert "⏳" in events[0].action.title
+    assert "waiting to retry" in events[0].action.title
+    # cumulative stays at 0 when we have no retry_after_ms to accrue
+    assert state.rate_limit_count == 1
+    assert state.rate_limit_total_s == 0.0
+
+
 def test_translate_thinking_block() -> None:
     state = ClaudeStreamState()
     event = {
@@ -468,16 +545,18 @@ def test_env_stream_idle_timeout_user_override_wins(monkeypatch) -> None:
     assert env["CLAUDE_STREAM_IDLE_TIMEOUT_MS"] == "600000"
 
 
-def test_rate_limit_event_returns_empty() -> None:
-    """rate_limit_event should decode and translate to no Untether events."""
+def test_rate_limit_event_decodes_correctly() -> None:
+    """rate_limit_event decodes to StreamRateLimitMessage.
+
+    Translation behaviour is covered in detail by
+    test_translate_rate_limit_event_* — this test only locks in the
+    msgspec schema tag mapping. Prior to #349 this function also
+    asserted that translation returned an empty list; that behaviour
+    was a UX bug (silent API-wait) and has been replaced with a
+    visible ⏳ action note.
+    """
     event = _decode_event({"type": "rate_limit_event"})
     assert isinstance(event, claude_schema.StreamRateLimitMessage)
-
-    state = ClaudeStreamState()
-    result = translate_claude_event(
-        event, title="claude", state=state, factory=state.factory
-    )
-    assert result == []
 
 
 # ===========================================================================
