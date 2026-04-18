@@ -7,7 +7,15 @@ so that subsequent ticks/requests see the new configuration immediately.
 
 from __future__ import annotations
 
+from pathlib import Path
+
 from ..logging import get_logger
+from .run_once_state import (
+    iso_now,
+    load_fired_state,
+    resolve_state_path,
+    save_fired_state,
+)
 from .settings import CronConfig, TriggersSettings, WebhookConfig
 
 logger = get_logger(__name__)
@@ -25,12 +33,35 @@ class TriggerManager:
     at ``await`` points.
     """
 
-    __slots__ = ("_crons", "_default_timezone", "_webhooks_by_path")
+    __slots__ = (
+        "_crons",
+        "_default_timezone",
+        "_fired_run_once",
+        "_run_once_state_path",
+        "_webhooks_by_path",
+    )
 
-    def __init__(self, settings: TriggersSettings | None = None) -> None:
+    def __init__(
+        self,
+        settings: TriggersSettings | None = None,
+        *,
+        config_path: Path | None = None,
+    ) -> None:
         self._crons: list[CronConfig] = []
         self._webhooks_by_path: dict[str, WebhookConfig] = {}
         self._default_timezone: str | None = None
+        # #317: persistent fired-state for ``run_once`` crons so restarts
+        # and config hot-reloads don't re-fire already-completed one-shots.
+        # ``config_path=None`` keeps the old in-memory-only behaviour (used
+        # by the large existing test suite where persistence is irrelevant).
+        self._run_once_state_path: Path | None = (
+            resolve_state_path(config_path) if config_path is not None else None
+        )
+        self._fired_run_once: dict[str, str] = (
+            load_fired_state(self._run_once_state_path)
+            if self._run_once_state_path is not None
+            else {}
+        )
         if settings is not None:
             self.update(settings)
 
@@ -43,7 +74,23 @@ class TriggerManager:
         old_cron_ids = {c.id for c in self._crons}
         old_webhook_ids = {wh.id for wh in self._webhooks_by_path.values()}
 
-        self._crons = list(settings.crons)
+        # #317: filter out crons whose id is in the fired-once set so
+        # reloads don't re-activate one-shots.
+        incoming_cron_ids = {c.id for c in settings.crons}
+        self._crons = [c for c in settings.crons if c.id not in self._fired_run_once]
+        # Clean fired-state entries for crons that are no longer in the
+        # TOML at all — lets the user re-add the same id later under a
+        # fresh schedule.
+        stale_fired = set(self._fired_run_once) - incoming_cron_ids
+        if stale_fired:
+            for cron_id in stale_fired:
+                self._fired_run_once.pop(cron_id, None)
+            self._persist_fired_state()
+            logger.info(
+                "triggers.cron.run_once_state_cleaned",
+                dropped=sorted(stale_fired),
+            )
+
         self._webhooks_by_path = {wh.path: wh for wh in settings.webhooks}
         self._default_timezone = settings.default_timezone
 
@@ -131,10 +178,15 @@ class TriggerManager:
         Used by the ``run_once`` flag to disable a cron after its first fire.
         Replaces ``self._crons`` with a new list so that in-flight iterations
         see a consistent snapshot (same pattern as ``update()``).
+
+        #317: also records ``cron_id`` in the persistent fired-state so the
+        one-shot doesn't re-fire on the next config reload or restart.
         """
         for i, c in enumerate(self._crons):
             if c.id == cron_id:
                 self._crons = [*self._crons[:i], *self._crons[i + 1 :]]
+                self._fired_run_once[cron_id] = iso_now()
+                self._persist_fired_state()
                 logger.info(
                     "triggers.cron.run_once_completed",
                     cron_id=cron_id,
@@ -142,3 +194,12 @@ class TriggerManager:
                 )
                 return True
         return False
+
+    def _persist_fired_state(self) -> None:
+        """Write the fired-once set to disk if a state path is configured."""
+        if self._run_once_state_path is not None:
+            save_fired_state(self._run_once_state_path, self._fired_run_once)
+
+    def fired_run_once_ids(self) -> list[str]:
+        """Return a snapshot of cron ids that have already fired (#317)."""
+        return sorted(self._fired_run_once)

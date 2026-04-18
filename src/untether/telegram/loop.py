@@ -1668,7 +1668,12 @@ async def run_main_loop(
 
                 try:
                     trigger_settings = parse_trigger_config(cfg.trigger_config)
-                    trigger_manager = TriggerManager(trigger_settings)
+                    # #317: pass config_path so the manager can load/save
+                    # the run_once fired-state alongside untether.toml.
+                    trigger_manager = TriggerManager(
+                        trigger_settings,
+                        config_path=cfg.runtime.config_path,
+                    )
                     # rc4 (#271): expose trigger_manager to commands via cfg so
                     # /ping and /config can render per-chat trigger indicators.
                     cfg.trigger_manager = trigger_manager

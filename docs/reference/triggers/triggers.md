@@ -146,7 +146,7 @@ Webhook IDs must be unique across all configured webhooks.
 | `prompt_template` | string\|null | `null` | Template prompt with `{{field}}` substitution (used with fetch data). |
 | `timezone` | string\|null | `null` | IANA timezone name (e.g. `"Australia/Melbourne"`). Overrides `default_timezone`. |
 | `fetch` | object\|null | `null` | Pre-fetch step configuration (see [Data-fetch crons](#data-fetch-crons)). |
-| `run_once` | bool | `false` | Fire once then auto-disable in-memory. The cron stays in the TOML; it re-enters the active list on the next config reload or restart. Useful for scheduled one-off tasks. |
+| `run_once` | bool | `false` | Fire once then auto-disable. The cron stays in the TOML for history, but its fired state persists to `run_once_fired.json` (sibling of `untether.toml`) so it is filtered out on every subsequent config reload and restart until you remove it from the TOML entirely. Removing the cron from the TOML cleans its fired-state entry on the next reload. |
 | `permission_mode` | string\|null | `null` | **Claude only.** Per-cron permission-mode override. One of `default`, `plan`, `auto`, `acceptEdits`, `bypassPermissions`. Wins over the chat's `/planmode` and the engine config default for this cron's run only. Lets a cron fire autonomously (`permission_mode = "auto"`) into a chat whose interactive mode is `plan`. Other engines (Codex, Gemini, OpenCode, Pi, AMP) silently ignore the field — full coverage is tracked in [#332](https://github.com/littlebearapps/untether/issues/332). |
 
 Either `prompt` or `prompt_template` is required. Cron IDs must be unique across all configured crons.
@@ -599,6 +599,33 @@ Expected responses:
 | `404 Not Found` | No webhook configured for this path. |
 | `413 Payload Too Large` | Body exceeds `max_body_bytes`. |
 | `429 Too Many Requests` | Rate limit exceeded. |
+
+## Troubleshooting
+
+### Port conflict: `triggers.server.bind_failed`
+
+**Symptom.** On startup the log shows:
+
+```
+triggers.server.bind_failed  host=127.0.0.1  port=9876  error='[Errno 98] Address already in use'
+```
+
+The webhook server stays disabled for the session, but polling, commands, and crons keep working. Previously (before #320) this crashed the entire bot in a systemd restart loop.
+
+**Diagnosis.** Find the process holding the port:
+
+```bash
+ss -tlnp | grep 9876
+```
+
+**Fix.** Either stop the conflicting process, or move Untether's webhook server to a free port by setting `[triggers.server] port` in `untether.toml`:
+
+```toml
+[triggers.server]
+port = 9877
+```
+
+Changing `port` requires a restart (`systemctl --user restart untether`); it is not hot-reloadable.
 
 ## Hot-reload
 
