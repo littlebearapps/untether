@@ -296,6 +296,21 @@ def test_jsonl_helpers() -> None:
     assert found == resume
     assert emit is False
 
+    # #225: duplicate StartedEvents with meta (supplementary events used to
+    # propagate late-arriving metadata like Pi's model from message_end)
+    # must emit so note_event can merge the new meta into the footer.
+    supplementary = StartedEvent(
+        engine=runner.engine,
+        resume=resume,
+        title="t",
+        meta={"model": "gpt-5.4"},
+    )
+    found, emit = runner.handle_started_event(
+        supplementary, expected_session=None, found_session=resume
+    )
+    assert found == resume
+    assert emit is True
+
     mismatch = StartedEvent(engine="other", resume=resume, title="t")
     with pytest.raises(RuntimeError):
         runner.handle_started_event(mismatch, expected_session=None, found_session=None)

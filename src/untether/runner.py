@@ -548,6 +548,13 @@ class JsonlSubprocessRunner(BaseRunner):
                 f"but expected {found_session.value}"
             )
             raise RuntimeError(message)
+        # #225: when the event carries meta, treat it as a supplementary
+        # StartedEvent — engines emit these to propagate late-arriving
+        # metadata (e.g. pi.py ships the model from message_end once known).
+        # ProgressTracker.note_event merges meta idempotently, so re-emission
+        # is safe. True duplicates (no meta) continue to be dropped.
+        if event.meta:
+            return found_session, True
         return found_session, False
 
     async def _send_payload(
