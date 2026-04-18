@@ -60,6 +60,10 @@ class PiStreamState:
     note_seq: int = 0
     compaction_seq: int = 0
     compaction_action_id: str | None = None
+    # #225: latch once the runner has emitted the JSONL-derived model into
+    # meta. Prevents us from re-emitting supplementary StartedEvents on every
+    # subsequent message_end when the default-config model path is in use.
+    jsonl_model_emitted: bool = False
 
 
 def _looks_like_session_path(token: str) -> bool:
@@ -254,6 +258,30 @@ def translate_pi_event(
                 error = _assistant_error(message)
                 if error:
                     state.last_assistant_error = error
+                # #225: when the user relies on Pi's default config model (no
+                # /model override and no pi.model in untether.toml), SessionHeader
+                # was emitted without a model in meta. Pi's message_end carries
+                # the actual model used (e.g. "gpt-5.4"); extract it once per
+                # session and emit a supplementary StartedEvent so the footer
+                # picks it up via ProgressTracker.note_event's meta merge.
+                if not state.jsonl_model_emitted and (
+                    meta is None or not meta.get("model")
+                ):
+                    jsonl_model = message.get("model")
+                    if isinstance(jsonl_model, str) and jsonl_model:
+                        jsonl_meta: dict[str, Any] = {"model": jsonl_model}
+                        jsonl_provider = message.get("provider")
+                        if isinstance(jsonl_provider, str) and jsonl_provider:
+                            jsonl_meta.setdefault("provider", jsonl_provider)
+                        out.append(
+                            StartedEvent(
+                                engine=ENGINE,
+                                resume=state.resume,
+                                title=title,
+                                meta=jsonl_meta,
+                            )
+                        )
+                        state.jsonl_model_emitted = True
             return out
 
         case pi_schema.AgentEnd(messages=messages):
@@ -425,7 +453,12 @@ class PiRunner(ResumeTokenMixin, JsonlSubprocessRunner):
         return None
 
     def env(self, *, state: PiStreamState) -> dict[str, str] | None:
-        env = dict(os.environ)
+        # #198: allowlist filter — Pi subprocess no longer inherits the
+        # parent's full environment. See `utils/env_policy.py` for the
+        # canonical list + extension notes.
+        from ..utils.env_policy import filtered_env
+
+        env = filtered_env()
         env.setdefault("NO_COLOR", "1")
         env.setdefault("CI", "1")
         return env
