@@ -377,6 +377,291 @@ def test_background_task_summary_formatting() -> None:
     assert "2 bg tasks" in summary
 
 
+# ---------------------------------------------------------------------------
+# #365 MCP catalog observability + proactive refresh
+# ---------------------------------------------------------------------------
+
+
+def _make_system_init_event(
+    session_id: str,
+    *,
+    mcp_servers: list[dict] | None = None,
+    tools: list[str] | None = None,
+) -> dict:
+    payload: dict = {
+        "type": "system",
+        "subtype": "init",
+        "session_id": session_id,
+        "uuid": "uuid",
+        "cwd": "/tmp",
+        "model": "claude-sonnet",
+        "tools": tools or ["Bash", "Read"],
+        "permissionMode": "default",
+        "apiKeySource": "none",
+    }
+    if mcp_servers is not None:
+        payload["mcp_servers"] = mcp_servers
+    return payload
+
+
+def test_catalog_init_snapshots_mcp_servers_when_all_connected() -> None:
+    """All-connected system.init captures the snapshot but emits no warning."""
+    from structlog.testing import capture_logs
+
+    state = ClaudeStreamState()
+    state.factory._resume = ResumeToken(engine=ENGINE, value="sess-1")
+    event = _decode_event(
+        _make_system_init_event(
+            "sess-1",
+            mcp_servers=[
+                {"name": "pal", "status": "connected"},
+                {"name": "github", "status": "connected"},
+            ],
+        )
+    )
+    with capture_logs() as logs:
+        translate_claude_event(
+            event, title="claude", state=state, factory=state.factory
+        )
+
+    assert state.initial_mcp_servers == [
+        {"name": "pal", "status": "connected"},
+        {"name": "github", "status": "connected"},
+    ]
+    assert state.catalog_staleness_logged == set()
+    assert [r for r in logs if r.get("event") == "catalog_staleness.detected"] == []
+
+
+def test_catalog_init_logs_staleness_warning_for_non_connected() -> None:
+    """Any non-``connected`` MCP at init emits a catalog_staleness WARNING."""
+    from structlog.testing import capture_logs
+
+    state = ClaudeStreamState()
+    state.factory._resume = ResumeToken(engine=ENGINE, value="sess-2")
+    event = _decode_event(
+        _make_system_init_event(
+            "sess-2",
+            mcp_servers=[
+                {"name": "pal", "status": "connected"},
+                {"name": "github", "status": "failed"},
+                {"name": "jina", "status": "pending"},
+            ],
+        )
+    )
+    with capture_logs() as logs:
+        translate_claude_event(
+            event, title="claude", state=state, factory=state.factory
+        )
+
+    warnings = [r for r in logs if r.get("event") == "catalog_staleness.detected"]
+    assert len(warnings) == 2
+    by_server = {r["server"]: r for r in warnings}
+    assert by_server["github"]["status"] == "failed"
+    assert by_server["github"]["session_id"] == "sess-2"
+    assert by_server["github"]["source"] == "system.init"
+    assert by_server["jina"]["status"] == "pending"
+    # "pal" connected must NOT appear
+    assert "pal" not in by_server
+    # Dedup set mirrors the emitted warnings
+    assert ("sess-2", "github", "failed") in state.catalog_staleness_logged
+    assert ("sess-2", "jina", "pending") in state.catalog_staleness_logged
+    assert ("sess-2", "pal", "connected") not in state.catalog_staleness_logged
+
+
+def test_catalog_staleness_dedups_repeated_init() -> None:
+    """Re-fired init with same server+status only logs once per session."""
+    from structlog.testing import capture_logs
+
+    state = ClaudeStreamState()
+    state.factory._resume = ResumeToken(engine=ENGINE, value="sess-3")
+    event = _decode_event(
+        _make_system_init_event(
+            "sess-3", mcp_servers=[{"name": "pal", "status": "error"}]
+        )
+    )
+    with capture_logs() as logs:
+        translate_claude_event(
+            event, title="claude", state=state, factory=state.factory
+        )
+        translate_claude_event(
+            event, title="claude", state=state, factory=state.factory
+        )
+
+    matches = [r for r in logs if r.get("event") == "catalog_staleness.detected"]
+    assert len(matches) == 1
+
+
+def test_catalog_staleness_disabled_emits_no_warning() -> None:
+    """detect_catalog_staleness=False suppresses the warning entirely."""
+    from structlog.testing import capture_logs
+
+    state = ClaudeStreamState()
+    state.detect_catalog_staleness = False
+    state.factory._resume = ResumeToken(engine=ENGINE, value="sess-4")
+    event = _decode_event(
+        _make_system_init_event(
+            "sess-4", mcp_servers=[{"name": "pal", "status": "failed"}]
+        )
+    )
+    with capture_logs() as logs:
+        translate_claude_event(
+            event, title="claude", state=state, factory=state.factory
+        )
+
+    assert [r for r in logs if r.get("event") == "catalog_staleness.detected"] == []
+    # Snapshot still captured — it's free and future-useful
+    assert state.initial_mcp_servers == [{"name": "pal", "status": "failed"}]
+
+
+def test_tool_result_queues_mcp_status_when_notify_enabled() -> None:
+    """With notify_catalog_refresh on, each tool_result batch queues one request."""
+    state = ClaudeStreamState()
+    state.notify_catalog_refresh = True
+    state.factory._resume = ResumeToken(engine=ENGINE, value="sess-5")
+
+    translate_claude_event(
+        _decode_event(_make_tool_result_event("toolu_1")),
+        title="claude",
+        state=state,
+        factory=state.factory,
+    )
+    assert len(state.pending_catalog_refresh_ids) == 1
+    assert state.pending_catalog_refresh_ids[0].startswith("ut_catalog_refresh_sess-5_")
+
+    translate_claude_event(
+        _decode_event(_make_tool_result_event("toolu_2")),
+        title="claude",
+        state=state,
+        factory=state.factory,
+    )
+    # Second batch queues a second distinct ID
+    assert len(state.pending_catalog_refresh_ids) == 2
+    assert state.pending_catalog_refresh_ids[0] != state.pending_catalog_refresh_ids[1]
+
+
+def test_tool_result_does_not_queue_when_notify_disabled() -> None:
+    """Default notify_catalog_refresh=False produces no queued requests."""
+    state = ClaudeStreamState()
+    state.factory._resume = ResumeToken(engine=ENGINE, value="sess-6")
+
+    translate_claude_event(
+        _decode_event(_make_tool_result_event("toolu_1")),
+        title="claude",
+        state=state,
+        factory=state.factory,
+    )
+    assert state.pending_catalog_refresh_ids == []
+
+
+def test_tool_result_without_resume_skips_queue() -> None:
+    """Factory with no resume → no request_id can be minted → queue stays empty."""
+    state = ClaudeStreamState()
+    state.notify_catalog_refresh = True
+    # factory.resume deliberately None — defensive: tool_result before init
+
+    translate_claude_event(
+        _decode_event(_make_tool_result_event("toolu_1")),
+        title="claude",
+        state=state,
+        factory=state.factory,
+    )
+    assert state.pending_catalog_refresh_ids == []
+
+
+@pytest.mark.anyio
+async def test_drain_catalog_refresh_sends_mcp_status_jsonl() -> None:
+    """_drain_catalog_refresh serialises one control_request per queued ID."""
+
+    class _FakeStdin:
+        def __init__(self) -> None:
+            self.sent: list[bytes] = []
+
+        async def send(self, payload: bytes) -> None:
+            self.sent.append(payload)
+
+    runner = ClaudeRunner(claude_cmd="claude")
+    state = ClaudeStreamState()
+    state.pending_catalog_refresh_ids = [
+        "ut_catalog_refresh_s_1",
+        "ut_catalog_refresh_s_2",
+    ]
+
+    fake_stdin = _FakeStdin()
+    await runner._drain_catalog_refresh(state, stdin=fake_stdin)
+
+    assert len(fake_stdin.sent) == 2
+    for payload in fake_stdin.sent:
+        msg = json.loads(payload.decode().rstrip("\n"))
+        assert msg["type"] == "control_request"
+        assert msg["request"]["subtype"] == "mcp_status"
+        assert msg["request_id"].startswith("ut_catalog_refresh_")
+    # Queue is cleared after drain
+    assert state.pending_catalog_refresh_ids == []
+
+
+@pytest.mark.anyio
+async def test_drain_catalog_refresh_no_op_when_queue_empty() -> None:
+    """Empty queue → no stdin writes, no log calls."""
+
+    class _FakeStdin:
+        def __init__(self) -> None:
+            self.send_count = 0
+
+        async def send(self, payload: bytes) -> None:
+            self.send_count += 1
+
+    runner = ClaudeRunner(claude_cmd="claude")
+    state = ClaudeStreamState()
+    fake_stdin = _FakeStdin()
+    await runner._drain_catalog_refresh(state, stdin=fake_stdin)
+    assert fake_stdin.send_count == 0
+
+
+@pytest.mark.anyio
+async def test_drain_catalog_refresh_handles_closed_pipe() -> None:
+    """Closed stdin logs a warning and clears the queue instead of crashing."""
+
+    class _ClosedStdin:
+        async def send(self, payload: bytes) -> None:
+            raise anyio.ClosedResourceError()
+
+    runner = ClaudeRunner(claude_cmd="claude")
+    state = ClaudeStreamState()
+    state.pending_catalog_refresh_ids = ["ut_catalog_refresh_s_1"]
+
+    await runner._drain_catalog_refresh(state, stdin=_ClosedStdin())
+    # Queue cleared (drain doesn't retry); no exception propagates
+    assert state.pending_catalog_refresh_ids == []
+
+
+def test_new_state_propagates_watchdog_settings(monkeypatch) -> None:
+    """ClaudeRunner.new_state pulls catalog settings from WatchdogSettings."""
+    from untether import settings as settings_module
+    from untether.settings import WatchdogSettings
+
+    class _Fake:
+        watchdog = WatchdogSettings(
+            detect_catalog_staleness=False,
+            notify_catalog_refresh=True,
+        )
+
+    monkeypatch.setattr(
+        settings_module,
+        "load_settings_if_exists",
+        lambda: (_Fake(), Path("untether.toml")),
+    )
+    monkeypatch.setattr(
+        claude_runner,
+        "load_settings_if_exists",
+        lambda: (_Fake(), Path("untether.toml")),
+    )
+
+    runner = ClaudeRunner(claude_cmd="claude")
+    state = runner.new_state("prompt", None)
+    assert state.detect_catalog_staleness is False
+    assert state.notify_catalog_refresh is True
+
+
 def test_claude_resume_format_and_extract() -> None:
     runner = ClaudeRunner(claude_cmd="claude")
     token = ResumeToken(engine=ENGINE, value="sid")

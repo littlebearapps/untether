@@ -217,6 +217,22 @@ class WatchdogSettings(BaseModel):
     stuck_after_tool_result_recovery_enabled: bool = True
     stuck_after_tool_result_recovery_delay: float = Field(default=60.0, ge=10, le=600)
 
+    # MCP catalog observability + proactive refresh (#365).
+    # ``detect_catalog_staleness`` is a zero-risk logging hook: when Claude
+    # Code's ``system.init`` event reports any configured MCP server with a
+    # non-``connected`` status, Untether emits a ``catalog_staleness.detected``
+    # structlog warning once per (session, server) pair so operators can
+    # measure the "MCPs flapping" UX independent of real #322 watchdog fires.
+    # Default ON — observability only, no recovery action.
+    detect_catalog_staleness: bool = True
+    # ``notify_catalog_refresh`` is opt-in experimental: after each
+    # ``tool_result`` Untether posts an ``mcp_status`` control_request to
+    # Claude Code's stdin. This is the parent→CLI primitive documented in
+    # Anthropic's ``claude-agent-sdk-python`` (``get_mcp_status()``); whether
+    # it causes Claude Code to re-probe its catalog is empirical, so default
+    # OFF until staging measurement confirms the UX benefit.
+    notify_catalog_refresh: bool = False
+
     # Pre-spawn RAM guard (#350) — refuse or warn on new engine subprocesses
     # when the host is near-OOM. 0 disables that tier; set both to 0 to
     # disable the guard entirely. Warn threshold MUST be > block threshold

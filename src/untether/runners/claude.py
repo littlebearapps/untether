@@ -214,6 +214,34 @@ class ClaudeStreamState:
     audited: bool = False
     audited_leaks: set[str] = field(default_factory=set)
 
+    # #365 MCP catalog observability + proactive refresh. Settings
+    # populated by ClaudeRunner.new_state() from WatchdogSettings so
+    # translate_claude_event() can gate its behaviour without re-reading
+    # config per-line. ``detect_catalog_staleness`` gates the
+    # ``catalog_staleness.detected`` WARNING emitted from the system.init
+    # handler when any configured MCP server reports a non-"connected"
+    # status; ``notify_catalog_refresh`` gates the fire-and-forget
+    # ``mcp_status`` control_request appended to
+    # ``pending_catalog_refresh_ids`` after every tool_result and drained
+    # on the runner's stdin by _drain_catalog_refresh().
+    detect_catalog_staleness: bool = True
+    notify_catalog_refresh: bool = False
+    # Snapshot of ``mcp_servers`` from the session's first system.init
+    # event: list of ``{name, status}`` dicts. Used only for the
+    # init-time staleness log today; could feed mid-session comparison
+    # in a future follow-up.
+    initial_mcp_servers: list[Any] | None = None
+    # Dedup set for catalog_staleness warnings — holds
+    # (session_id, server_name, status) tuples so re-fired init events
+    # (rare: only on Claude Code internal resume) don't spam the log.
+    catalog_staleness_logged: set[tuple[str, str, str]] = field(default_factory=set)
+    # Pending mcp_status control_request IDs queued by tool_result,
+    # drained on stdin by ClaudeRunner._drain_catalog_refresh. Names
+    # allocated as ``ut_catalog_refresh_<session_id>_<seq>`` to avoid
+    # colliding with Claude Code's own ``req_*`` namespace.
+    pending_catalog_refresh_ids: list[str] = field(default_factory=list)
+    catalog_refresh_seq: int = 0
+
 
 def _normalize_tool_result(content: Any) -> str:
     if content is None:
@@ -529,6 +557,54 @@ def _maybe_audit_env(state: ClaudeStreamState, session_id: str) -> None:
         )
 
 
+def _capture_mcp_catalog(
+    state: ClaudeStreamState,
+    session_id: str,
+    mcp_servers: list[Any] | None,
+) -> None:
+    """Snapshot ``mcp_servers`` from system.init and log init-time staleness (#365).
+
+    Claude Code's ``system.init`` event reports each configured MCP
+    server as ``{"name": "...", "status": "connected"|"pending"|"error"|"failed"}``.
+    A non-``connected`` status at init time is the clearest indicator we
+    have that the MCP catalog is stale from the user's perspective —
+    without waiting for a mid-session reminder from Claude.
+
+    Gated by ``WatchdogSettings.detect_catalog_staleness`` (default on;
+    observability only — no recovery action). Logs once per
+    (session, server, status) tuple so re-fired init events don't spam.
+    """
+    if not mcp_servers:
+        return
+    # Preserve the raw list for downstream tooling (future follow-ups may
+    # compare mid-session state against this snapshot).
+    if state.initial_mcp_servers is None:
+        state.initial_mcp_servers = list(mcp_servers)
+    if not state.detect_catalog_staleness:
+        return
+    for server in mcp_servers:
+        if not isinstance(server, dict):
+            continue
+        name = server.get("name")
+        status = server.get("status")
+        if not isinstance(name, str) or not isinstance(status, str):
+            continue
+        if status == "connected":
+            continue
+        key = (session_id, name, status)
+        if key in state.catalog_staleness_logged:
+            continue
+        state.catalog_staleness_logged.add(key)
+        logger.warning(
+            "catalog_staleness.detected",
+            session_id=session_id,
+            pid=state.pid,
+            server=name,
+            status=status,
+            source="system.init",
+        )
+
+
 def _usage_payload(event: claude_schema.StreamResultMessage) -> dict[str, Any]:
     usage: dict[str, Any] = {}
     for key in (
@@ -567,6 +643,8 @@ def translate_claude_event(
             # #361 sample child env on first init; no-op if PID missing,
             # audit disabled, /proc unreadable, or non-Linux.
             _maybe_audit_env(state, session_id)
+            # #365 capture MCP catalog snapshot + log init-time staleness.
+            _capture_mcp_catalog(state, session_id, event.mcp_servers)
             meta: dict[str, Any] = {}
             for key in (
                 "cwd",
@@ -654,9 +732,11 @@ def translate_claude_event(
             if not isinstance(message.content, list):
                 return []
             out: list[UntetherEvent] = []
+            saw_tool_result = False
             for content in message.content:
                 if not isinstance(content, claude_schema.StreamToolResultBlock):
                     continue
+                saw_tool_result = True
                 tool_use_id = content.tool_use_id
                 # #347 clear any background-task entry for this tool_use_id
                 _clear_background_handle(state, tool_use_id)
@@ -686,6 +766,18 @@ def translate_claude_event(
                             ok=True,
                         )
                     )
+            # #365 queue a proactive mcp_status nudge once per tool_result
+            # batch. Opt-in via WatchdogSettings.notify_catalog_refresh.
+            # Drained from stdin by ClaudeRunner._drain_catalog_refresh so
+            # the send is fire-and-forget and cannot block translate().
+            if saw_tool_result and state.notify_catalog_refresh:
+                resume_val = factory.resume.value if factory.resume else None
+                if resume_val:
+                    state.catalog_refresh_seq += 1
+                    request_id = (
+                        f"ut_catalog_refresh_{resume_val}_{state.catalog_refresh_seq}"
+                    )
+                    state.pending_catalog_refresh_ids.append(request_id)
             return out
         case claude_schema.StreamResultMessage():
             ok = not event.is_error
@@ -1557,6 +1649,19 @@ class ClaudeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
         state = ClaudeStreamState()
         state.auto_approve_exit_plan_mode = self._effective_permission_mode() == "auto"
         state.resumed = resume is not None
+        # #365 propagate MCP catalog observability knobs from WatchdogSettings.
+        # Defaults on the dataclass already mirror WatchdogSettings defaults,
+        # so a load failure is a safe no-op.
+        try:
+            result = load_settings_if_exists()
+            if result is not None:
+                settings, _ = result
+                state.detect_catalog_staleness = (
+                    settings.watchdog.detect_catalog_staleness
+                )
+                state.notify_catalog_refresh = settings.watchdog.notify_catalog_refresh
+        except Exception:  # noqa: BLE001 — settings errors must not block a run
+            logger.warning("catalog_settings.load_failed", exc_info=True)
         return state
 
     def start_run(
@@ -1669,6 +1774,11 @@ class ClaudeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
             # were yielded.  This prevents deadlock when auto-handled requests produce no events.
             await self._drain_auto_approve(state, stdin=session_stdin)
             await self._drain_auto_deny(state, stdin=session_stdin)
+            # #365 fire-and-forget mcp_status control_requests queued by
+            # translate_claude_event on tool_result. Drain last so the
+            # response (if any) arrives after Claude has processed the
+            # tool_result itself.
+            await self._drain_catalog_refresh(state, stdin=session_stdin)
             # After CompletedEvent, stop reading stdout immediately.
             # Claude Code's MCP server child processes may inherit the stdout pipe FD,
             # keeping it open even after Claude Code exits. Without this break,
@@ -1767,6 +1877,69 @@ class ClaudeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
                     error=str(e),
                 )
         state.auto_deny_queue.clear()
+
+    async def _drain_catalog_refresh(
+        self, state: ClaudeStreamState, *, stdin: Any = None
+    ) -> None:
+        """Send queued mcp_status control_requests to Claude Code (#365).
+
+        Fire-and-forget: Untether does not register a pending response for
+        these IDs and does not wait on the eventual ``control_response``
+        (Claude Code will emit one with ``request_id`` matching; our
+        existing JSONL decoder treats unknown control_response events as
+        a no-op at present). The goal is to nudge Claude Code's MCP
+        catalog state, per P0#1 of #365.
+
+        Logs ``catalog.refresh_sent`` per request on success and
+        ``catalog.refresh_failed`` on write errors so staging can observe
+        frequency + failure modes independently.
+        """
+        if not state.pending_catalog_refresh_ids:
+            return
+        pipe = stdin or self._proc_stdin
+        for req_id in state.pending_catalog_refresh_ids:
+            request = {
+                "type": "control_request",
+                "request_id": req_id,
+                "request": {"subtype": "mcp_status"},
+            }
+            payload = (json.dumps(request) + "\n").encode()
+            try:
+                if pipe is not None:
+                    await pipe.send(payload)
+                    logger.info(
+                        "catalog.refresh_sent",
+                        request_id=req_id,
+                        channel="pipe",
+                    )
+                elif self._pty_master_fd is not None:
+                    os.write(self._pty_master_fd, payload)
+                    logger.info(
+                        "catalog.refresh_sent",
+                        request_id=req_id,
+                        channel="pty",
+                    )
+                else:
+                    logger.warning(
+                        "catalog.refresh_failed",
+                        request_id=req_id,
+                        reason="no_channel",
+                    )
+            except (OSError, anyio.ClosedResourceError) as e:
+                logger.warning(
+                    "catalog.refresh_failed",
+                    request_id=req_id,
+                    error=str(e),
+                    error_type=e.__class__.__name__,
+                )
+            except Exception as e:  # noqa: BLE001
+                logger.error(
+                    "catalog.refresh_failed",
+                    request_id=req_id,
+                    error=str(e),
+                    error_type=e.__class__.__name__,
+                )
+        state.pending_catalog_refresh_ids.clear()
 
     def translate(
         self,
