@@ -1104,3 +1104,42 @@ def test_wrap_with_env_i_passes_only_provided_env() -> None:
     # Only one KEY=VAL between "-i" and "claude".
     kv_pairs = [a for a in wrapped[2:-1] if "=" in a]
     assert kv_pairs == ["PATH=/usr/bin"]
+
+
+def test_redact_env_i_args_masks_values_between_i_and_program() -> None:
+    """Spawn-log redaction hides KEY=VALUE secrets after env -i but keeps
+    the actual program args visible (#361 follow-up — without this,
+    `subprocess.spawn` would leak OPENAI_API_KEY etc. into journald).
+    """
+    from untether.utils.subprocess import redact_env_i_args
+
+    cmd = [
+        "/usr/bin/env",
+        "-i",
+        "PATH=/usr/bin",
+        "OPENAI_API_KEY=sk-secret",
+        "/home/nathan/.local/bin/claude",
+        "--output-format",
+        "stream-json",
+        "--effort",
+        "xhigh",
+    ]
+    redacted = redact_env_i_args(cmd)
+    assert redacted[0] == "/usr/bin/env"
+    assert redacted[1] == "-i"
+    assert "PATH=***" in redacted
+    assert "OPENAI_API_KEY=***" in redacted
+    # Program path + args are preserved verbatim
+    assert "/home/nathan/.local/bin/claude" in redacted
+    assert "--effort" in redacted
+    assert "xhigh" in redacted
+    # No raw secret value made it through
+    assert all("sk-secret" not in arg for arg in redacted)
+
+
+def test_redact_env_i_args_passthrough_when_not_env_wrapped() -> None:
+    """When cmd doesn't start with `env -i`, no redaction happens."""
+    from untether.utils.subprocess import redact_env_i_args
+
+    cmd = ["claude", "--output-format", "stream-json", "--effort", "xhigh"]
+    assert redact_env_i_args(cmd) == cmd

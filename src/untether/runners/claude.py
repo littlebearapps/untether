@@ -51,7 +51,7 @@ from ..settings import load_settings_if_exists
 from ..utils.env_audit import audit_proc_env
 from ..utils.paths import get_run_base_dir
 from ..utils.streams import drain_stderr
-from ..utils.subprocess import manage_subprocess, wrap_with_env_i
+from ..utils.subprocess import manage_subprocess, redact_env_i_args, wrap_with_env_i
 from .run_options import get_run_options
 from .tool_actions import tool_input_path, tool_kind_and_title
 
@@ -1960,10 +1960,13 @@ class ClaudeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
                 if proc.stdout is None or proc.stderr is None:
                     raise RuntimeError(self.pipes_error_message())
 
+                # #361: redact env -i KEY=VAL pairs so secrets passed via
+                # the env-wrap don't leak into journald.
+                logged_args = redact_env_i_args(cmd)[1:]
                 run_logger.info(
                     "subprocess.spawn",
                     cmd=cmd[0] if cmd else None,
-                    args=cmd[1:],
+                    args=logged_args,
                     pid=proc.pid,
                     use_control_channel=use_control_channel,
                 )

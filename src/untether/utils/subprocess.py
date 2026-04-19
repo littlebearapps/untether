@@ -32,6 +32,30 @@ def wrap_with_env_i(cmd: Sequence[str], env: Mapping[str, str]) -> list[str]:
     return [env_path, "-i", *(f"{k}={v}" for k, v in env.items()), *cmd]
 
 
+def redact_env_i_args(cmd: Sequence[str]) -> list[str]:
+    """Return ``cmd`` with ``KEY=VALUE`` pairs after ``env -i`` redacted.
+
+    Used by structured logs that want to record the spawned cmdline
+    without leaking the API keys / tokens that ``wrap_with_env_i`` puts
+    into argv (#361 follow-up). Detects ``[env_path, "-i", "K=V", "K=V",
+    ..., program, args...]`` shape; for any element matching ``KEY=…``
+    between ``-i`` and the first non-``KEY=…`` element, replaces the value
+    with ``***``. Returns the input unchanged if the pattern doesn't match.
+    """
+    if len(cmd) < 2 or cmd[1] != "-i":
+        return list(cmd)
+    out: list[str] = [cmd[0], cmd[1]]
+    in_env_block = True
+    for arg in cmd[2:]:
+        if in_env_block and "=" in arg and not arg.startswith(("-", "/")):
+            key, _, _ = arg.partition("=")
+            out.append(f"{key}=***")
+        else:
+            in_env_block = False
+            out.append(arg)
+    return out
+
+
 async def wait_for_process(proc: Process, timeout: float) -> bool:  # noqa: ASYNC109
     with anyio.move_on_after(timeout) as scope:
         await proc.wait()
