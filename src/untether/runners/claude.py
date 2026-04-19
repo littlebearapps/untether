@@ -177,6 +177,13 @@ class ClaudeStreamState:
     max_text_len_since_cooldown: int = 0
     # Store outline text for embedding in synthetic approve/deny action
     outline_text: str | None = None
+    # Cumulative seconds the session spent in Anthropic-side rate-limit waits (#349).
+    # Sum of every rate_limit_event's retry_after_ms, so the cost footer can annotate
+    # "(incl. Xm Ys rate-limited)" when a run finishes after one or more throttles.
+    rate_limit_total_s: float = 0.0
+    # Count of rate_limit_event emissions in this session — feeds a unit-test hook
+    # and future /stats surfacing (#349 v2).
+    rate_limit_count: int = 0
 
 
 def _normalize_tool_result(content: Any) -> str:
@@ -1040,6 +1047,53 @@ def translate_claude_event(
                     action_id=action_id,
                     kind="warning",  # Use warning kind for visibility
                     title=warning_text,
+                    detail=detail,
+                ),
+            ]
+        case claude_schema.StreamRateLimitMessage(rate_limit_info=info):
+            # #349: surface rate_limit_event as a visible "waiting for API" note
+            # so the user sees a clear "Anthropic is throttling us, we're waiting"
+            # status instead of silent inactivity + eventual mystery cancel.
+            retry_ms = info.retry_after_ms if info is not None else None
+            retry_s = retry_ms / 1000.0 if retry_ms is not None else None
+            if retry_s is not None:
+                state.rate_limit_total_s += retry_s
+            state.rate_limit_count += 1
+            state.note_seq += 1
+            action_id = f"rate_limit_{state.note_seq}"
+            if retry_s is not None:
+                # Round to nearest second for display but show fractional when < 1s
+                display_s = int(retry_s) if retry_s >= 1 else f"{retry_s:.1f}"
+                title = f"⏳ Rate limited — retrying in {display_s}s"
+            else:
+                title = "⏳ Rate limited — waiting to retry"
+            detail: dict[str, Any] = {}
+            if info is not None:
+                if info.tokens_remaining is not None:
+                    detail["tokens_remaining"] = info.tokens_remaining
+                if info.requests_remaining is not None:
+                    detail["requests_remaining"] = info.requests_remaining
+                if retry_ms is not None:
+                    detail["retry_after_ms"] = retry_ms
+            logger.info(
+                "claude.rate_limit_event",
+                retry_after_s=retry_s,
+                count=state.rate_limit_count,
+                cumulative_s=state.rate_limit_total_s,
+            )
+            return [
+                factory.action_started(
+                    action_id=action_id,
+                    kind="note",
+                    title=title,
+                    detail=detail,
+                ),
+                factory.action_completed(
+                    action_id=action_id,
+                    kind="note",
+                    title=title,
+                    ok=True,
+                    level="info",
                     detail=detail,
                 ),
             ]
