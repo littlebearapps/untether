@@ -93,6 +93,17 @@ Denial with message:
 {"type":"control_response","request_id":"req_1","approved":false,"denial_message":"..."}
 ```
 
+## Parent-initiated control_requests (Untether → Claude)
+
+Untether can also *initiate* control_requests on stdin, following the wire format documented in Anthropic's [`claude-agent-sdk-python`](https://github.com/anthropics/claude-agent-sdk-python). Subtypes accepted by Claude Code include: `mcp_status`, `mcp_reconnect` (`serverName`), `mcp_toggle` (`serverName` + `enabled`), `set_permission_mode`, `interrupt`, `set_model`, `stop_task` (`task_id`).
+
+Untether uses this direction in [#365](https://github.com/littlebearapps/untether/issues/365):
+```json
+{"type":"control_request","request_id":"ut_catalog_refresh_<sid>_<seq>","request":{"subtype":"mcp_status"}}
+```
+
+Drained via `ClaudeRunner._drain_catalog_refresh` alongside `_drain_auto_approve` / `_drain_auto_deny`. **Fire-and-forget** — Untether does not register a pending response entry or parse the eventual `control_response` today. Request IDs use the `ut_<feature>_<session_id>_<seq>` namespace so they can't collide with Claude Code's own `req_*` IDs. If you add another parent-initiated subtype, reuse this namespace convention and extend this section.
+
 ## After changes
 
 ```bash
