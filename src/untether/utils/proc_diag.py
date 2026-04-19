@@ -101,6 +101,30 @@ def _count_tcp(pid: int) -> tuple[int, int]:
     return established, total
 
 
+def mem_available_kb() -> int | None:
+    """Return /proc/meminfo MemAvailable in KB, or None on non-Linux / parse fail.
+
+    Used by the pre-spawn RAM guard (#350) to decide whether to allow, warn
+    on, or refuse spawning a new engine subprocess. Deliberately uncached —
+    callers must read a fresh value on each spawn to catch the near-OOM
+    window where a prior heavy run is still consuming memory. Cheap: one
+    file open and a single-line grep.
+    """
+    if not sys.platform.startswith("linux"):
+        return None
+    try:
+        with open("/proc/meminfo", encoding="utf-8") as fh:
+            for line in fh:
+                if line.startswith("MemAvailable:"):
+                    parts = line.split()
+                    if len(parts) >= 2:
+                        return int(parts[1])
+                    return None
+    except (OSError, FileNotFoundError, PermissionError, ValueError):
+        return None
+    return None
+
+
 def read_cmdline(pid: int) -> str | None:
     """Return /proc/<pid>/cmdline as a space-separated string, or None.
 

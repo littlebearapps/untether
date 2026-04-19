@@ -217,6 +217,29 @@ class WatchdogSettings(BaseModel):
     stuck_after_tool_result_recovery_enabled: bool = True
     stuck_after_tool_result_recovery_delay: float = Field(default=60.0, ge=10, le=600)
 
+    # Pre-spawn RAM guard (#350) — refuse or warn on new engine subprocesses
+    # when the host is near-OOM. 0 disables that tier; set both to 0 to
+    # disable the guard entirely. Warn threshold MUST be > block threshold
+    # when both are set, enforced by a model_validator below (see #350).
+    prespawn_ram_warn_mb: int = Field(default=2000, ge=0, le=65536)
+    prespawn_ram_block_mb: int = Field(default=500, ge=0, le=65536)
+
+    @model_validator(mode="after")
+    def _validate_prespawn_ram_ordering(self) -> WatchdogSettings:
+        # When both tiers are active, warn must sit above block — otherwise
+        # the warn tier is unreachable (spawn would hit block first).
+        # Using 0 disables a tier, which is a legitimate config.
+        if (
+            self.prespawn_ram_warn_mb > 0
+            and self.prespawn_ram_block_mb > 0
+            and self.prespawn_ram_warn_mb <= self.prespawn_ram_block_mb
+        ):
+            raise ValueError(
+                "prespawn_ram_warn_mb must be > prespawn_ram_block_mb when both are active "
+                f"(got warn={self.prespawn_ram_warn_mb}, block={self.prespawn_ram_block_mb})"
+            )
+        return self
+
 
 class ProgressSettings(BaseModel):
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
