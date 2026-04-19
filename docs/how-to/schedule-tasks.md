@@ -25,6 +25,9 @@ When the delay expires, the prompt runs as a normal agent session. Use `/cancel`
 !!! note "Not persistent"
     Pending `/at` delays are held in memory. They are lost if Untether restarts. For persistent scheduled tasks, use [cron triggers](#cron-triggers) instead.
 
+!!! note "Engine and project frozen at schedule time"
+    When you run `/at`, Untether snapshots the chat's current project mapping and engine at that moment. That snapshot is what fires when the delay expires — changing `/agent`, `/ctx`, or `/planmode` afterwards does **not** affect already-scheduled delays. Cancel with `/cancel` and re-schedule if you change your mind. ([#362](https://github.com/littlebearapps/untether/issues/362))
+
 ## Telegram scheduling
 
 Telegram's native message scheduling works with Untether out of the box.

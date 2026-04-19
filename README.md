@@ -156,6 +156,8 @@ The wizard offers three **workflow modes** — pick the one that fits:
 ⁵ Pi requires `provider = "openai-codex"` in engine config for OAuth subscriptions in headless mode.
 ⁶ AMP requires an explicit thread ID; no "most recent" mode.
 
+Claude effort levels: `low`, `medium`, `high`, `xhigh`, `max` (`xhigh` requires Claude Code v2.1.114+).
+
 ---
 
 ## 🤖 Commands
@@ -183,6 +185,7 @@ The wizard offers three **workflow modes** — pick the one that fits:
 | `/auth` | Codex device re-authentication |
 | `/at 30m <prompt>` | Schedule a one-shot delayed run (60s–24h; `/cancel` to drop) |
 | `/ping` | Health check / uptime (shows per-chat trigger summary if any) |
+| `/health` | System snapshot: RAM/swap, process diagnostics, trigger counts, today's API cost, uptime |
 
 Prefix any message with `/<engine>` to pick an engine for that task, or `/<project>` to target a repo:
 
