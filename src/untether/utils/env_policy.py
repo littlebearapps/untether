@@ -145,10 +145,21 @@ _PREFIX_ALLOW: tuple[str, ...] = (
 )
 
 
-def _is_allowed(name: str) -> bool:
+def is_allowed(name: str) -> bool:
+    """Return True if ``name`` is in the engine-subprocess env allowlist.
+
+    Public predicate shared by :func:`filtered_env` and
+    :mod:`untether.utils.env_audit` so the allowlist remains a single
+    source of truth. Promoted from the previous private ``_is_allowed``.
+    """
     if name in _EXACT_ALLOW:
         return True
     return any(name.startswith(prefix) for prefix in _PREFIX_ALLOW)
+
+
+# Back-compat alias for any external importers that depended on the
+# previously-private name. Safe to remove once we've audited all consumers.
+_is_allowed = is_allowed
 
 
 def filtered_env(
@@ -174,7 +185,7 @@ def filtered_env(
     if source is None:
         source = os.environ
     extras = frozenset(extra_allow)
-    return {k: v for k, v in source.items() if _is_allowed(k) or k in extras}
+    return {k: v for k, v in source.items() if is_allowed(k) or k in extras}
 
 
-__all__ = ["filtered_env"]
+__all__ = ["filtered_env", "is_allowed"]

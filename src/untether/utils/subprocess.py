@@ -2,9 +2,10 @@ from __future__ import annotations
 
 import contextlib
 import os
+import shutil
 import signal
 import sys
-from collections.abc import AsyncIterator, Callable, Sequence
+from collections.abc import AsyncIterator, Callable, Mapping, Sequence
 from contextlib import asynccontextmanager
 from typing import Any
 
@@ -15,6 +16,44 @@ from ..logging import get_logger
 from .proc_diag import find_descendants
 
 logger = get_logger(__name__)
+
+
+def wrap_with_env_i(cmd: Sequence[str], env: Mapping[str, str]) -> list[str]:
+    """Return ``cmd`` wrapped with ``env -i KEY=VAL ...`` so the resolved
+    environment at exec time is exactly ``env`` — even if the child later
+    reads ``/etc/environment``, sources rc files, or otherwise re-introduces
+    host vars (#361).
+
+    Locates ``env`` via ``shutil.which`` with a ``/usr/bin/env`` fallback.
+    Caller should pass ``env=None`` to ``manage_subprocess`` when using this
+    wrap, so subprocess.exec doesn't double-set the environment.
+    """
+    env_path = shutil.which("env") or "/usr/bin/env"
+    return [env_path, "-i", *(f"{k}={v}" for k, v in env.items()), *cmd]
+
+
+def redact_env_i_args(cmd: Sequence[str]) -> list[str]:
+    """Return ``cmd`` with ``KEY=VALUE`` pairs after ``env -i`` redacted.
+
+    Used by structured logs that want to record the spawned cmdline
+    without leaking the API keys / tokens that ``wrap_with_env_i`` puts
+    into argv (#361 follow-up). Detects ``[env_path, "-i", "K=V", "K=V",
+    ..., program, args...]`` shape; for any element matching ``KEY=…``
+    between ``-i`` and the first non-``KEY=…`` element, replaces the value
+    with ``***``. Returns the input unchanged if the pattern doesn't match.
+    """
+    if len(cmd) < 2 or cmd[1] != "-i":
+        return list(cmd)
+    out: list[str] = [cmd[0], cmd[1]]
+    in_env_block = True
+    for arg in cmd[2:]:
+        if in_env_block and "=" in arg and not arg.startswith(("-", "/")):
+            key, _, _ = arg.partition("=")
+            out.append(f"{key}=***")
+        else:
+            in_env_block = False
+            out.append(arg)
+    return out
 
 
 async def wait_for_process(proc: Process, timeout: float) -> bool:  # noqa: ASYNC109

@@ -961,3 +961,185 @@ def test_extract_error_with_result_text() -> None:
     result = _extract_error(event, resumed=False)
     assert result is not None
     assert result.startswith("Context window limit reached")
+
+
+# ===========================================================================
+# #361 — runtime env audit hook on system.init
+# ===========================================================================
+
+
+def test_env_audit_emits_warning_on_leaked_var(monkeypatch) -> None:
+    """`_maybe_audit_env` warns once per leaked name when /proc shows it."""
+    from structlog.testing import capture_logs
+
+    from untether.runners.claude import _maybe_audit_env
+
+    monkeypatch.setattr(
+        claude_runner, "audit_proc_env", lambda pid, **kw: ["BWS_ACCESS_TOKEN"]
+    )
+    monkeypatch.setattr(claude_runner, "load_settings_if_exists", lambda: None)
+
+    state = ClaudeStreamState()
+    state.pid = 4242
+    with capture_logs() as logs:
+        _maybe_audit_env(state, "session-abc")
+
+    leaked = [
+        record
+        for record in logs
+        if record.get("event") == "claude.env_audit.leaked_var"
+    ]
+    assert len(leaked) == 1
+    assert leaked[0]["name"] == "BWS_ACCESS_TOKEN"
+    assert leaked[0]["pid"] == 4242
+    assert leaked[0]["session_id"] == "session-abc"
+    assert state.audited is True
+    assert "BWS_ACCESS_TOKEN" in state.audited_leaks
+
+
+def test_env_audit_dedups_per_session(monkeypatch) -> None:
+    """Repeat calls don't re-warn for the same (session, name) pair."""
+    from structlog.testing import capture_logs
+
+    from untether.runners.claude import _maybe_audit_env
+
+    monkeypatch.setattr(
+        claude_runner, "audit_proc_env", lambda pid, **kw: ["BWS_ACCESS_TOKEN"]
+    )
+    monkeypatch.setattr(claude_runner, "load_settings_if_exists", lambda: None)
+
+    state = ClaudeStreamState()
+    state.pid = 4242
+    with capture_logs() as logs:
+        _maybe_audit_env(state, "session-abc")
+        # Second call is a no-op because state.audited is True.
+        _maybe_audit_env(state, "session-abc")
+
+    leaked = [
+        record
+        for record in logs
+        if record.get("event") == "claude.env_audit.leaked_var"
+    ]
+    assert len(leaked) == 1
+
+
+def test_env_audit_skipped_when_pid_missing(monkeypatch) -> None:
+    """No PID → silent no-op (audit_proc_env never called)."""
+    from untether.runners.claude import _maybe_audit_env
+
+    called = {"n": 0}
+
+    def fake_audit(pid, **kw):
+        called["n"] += 1
+        return []
+
+    monkeypatch.setattr(claude_runner, "audit_proc_env", fake_audit)
+    monkeypatch.setattr(claude_runner, "load_settings_if_exists", lambda: None)
+
+    state = ClaudeStreamState()  # pid=None by default
+    _maybe_audit_env(state, "session-abc")
+    assert called["n"] == 0
+
+
+def test_env_audit_disabled_via_settings(monkeypatch) -> None:
+    """`security.env_audit = False` skips the audit even when PID is set."""
+    from untether.runners.claude import _maybe_audit_env
+
+    called = {"n": 0}
+
+    def fake_audit(pid, **kw):
+        called["n"] += 1
+        return ["BWS_ACCESS_TOKEN"]
+
+    class _Sec:
+        env_audit = False
+
+    class _Settings:
+        security = _Sec()
+
+    monkeypatch.setattr(claude_runner, "audit_proc_env", fake_audit)
+    monkeypatch.setattr(
+        claude_runner,
+        "load_settings_if_exists",
+        lambda: (_Settings(), Path("/tmp/none")),
+    )
+
+    state = ClaudeStreamState()
+    state.pid = 4242
+    _maybe_audit_env(state, "session-abc")
+    assert called["n"] == 0
+    # state.audited still flips to True so we don't keep retrying.
+    assert state.audited is True
+
+
+# ===========================================================================
+# #361 — env -i wrap helper
+# ===========================================================================
+
+
+def test_wrap_with_env_i_prefixes_cmd_with_env_i_kvs() -> None:
+    from untether.utils.subprocess import wrap_with_env_i
+
+    cmd = ["claude", "-p", "hello"]
+    env = {"PATH": "/usr/bin", "HOME": "/home/u"}
+    wrapped = wrap_with_env_i(cmd, env)
+
+    # First arg is path to env, second is "-i", then KEY=VAL pairs, then cmd.
+    assert wrapped[0].endswith("env")
+    assert wrapped[1] == "-i"
+    assert "PATH=/usr/bin" in wrapped[2:4]
+    assert "HOME=/home/u" in wrapped[2:4]
+    assert wrapped[-3:] == ["claude", "-p", "hello"]
+
+
+def test_wrap_with_env_i_passes_only_provided_env() -> None:
+    """The env wrap only forwards keys present in the env dict — host vars
+    stripped at the boundary even if upstream tries to read /etc/environment.
+    """
+    from untether.utils.subprocess import wrap_with_env_i
+
+    env = {"PATH": "/usr/bin"}
+    wrapped = wrap_with_env_i(["claude"], env)
+
+    # Only one KEY=VAL between "-i" and "claude".
+    kv_pairs = [a for a in wrapped[2:-1] if "=" in a]
+    assert kv_pairs == ["PATH=/usr/bin"]
+
+
+def test_redact_env_i_args_masks_values_between_i_and_program() -> None:
+    """Spawn-log redaction hides KEY=VALUE secrets after env -i but keeps
+    the actual program args visible (#361 follow-up — without this,
+    `subprocess.spawn` would leak OPENAI_API_KEY etc. into journald).
+    """
+    from untether.utils.subprocess import redact_env_i_args
+
+    cmd = [
+        "/usr/bin/env",
+        "-i",
+        "PATH=/usr/bin",
+        "OPENAI_API_KEY=sk-secret",
+        "/home/nathan/.local/bin/claude",
+        "--output-format",
+        "stream-json",
+        "--effort",
+        "xhigh",
+    ]
+    redacted = redact_env_i_args(cmd)
+    assert redacted[0] == "/usr/bin/env"
+    assert redacted[1] == "-i"
+    assert "PATH=***" in redacted
+    assert "OPENAI_API_KEY=***" in redacted
+    # Program path + args are preserved verbatim
+    assert "/home/nathan/.local/bin/claude" in redacted
+    assert "--effort" in redacted
+    assert "xhigh" in redacted
+    # No raw secret value made it through
+    assert all("sk-secret" not in arg for arg in redacted)
+
+
+def test_redact_env_i_args_passthrough_when_not_env_wrapped() -> None:
+    """When cmd doesn't start with `env -i`, no redaction happens."""
+    from untether.utils.subprocess import redact_env_i_args
+
+    cmd = ["claude", "--output-format", "stream-json", "--effort", "xhigh"]
+    assert redact_env_i_args(cmd) == cmd

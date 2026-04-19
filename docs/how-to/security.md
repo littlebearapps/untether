@@ -59,6 +59,20 @@ Claude and Pi engine subprocesses do **not** inherit Untether's full environment
 
 If a new engine or MCP genuinely needs a variable that isn't allowlisted (symptom: hangs at init, silent `KeyError` in logs), add it to `_EXACT_ALLOW` / `_PREFIX_ALLOW` in `src/untether/utils/env_policy.py`. Other engines (Codex, Gemini, OpenCode, AMP) still inherit the full parent env — extending the allowlist to them is tracked in [#332](https://github.com/littlebearapps/untether/issues/332).
 
+### Boundary enforcement on Claude exec ([#361](https://github.com/littlebearapps/untether/issues/361))
+
+The Claude runner additionally wraps its exec with `env -i KEY=VAL …` so the resolved environment at exec time is **exactly** the allowlist — even if upstream Claude Code, a wrapper script, or PAM `/etc/environment` would otherwise inject host vars after the parent's `env=` kwarg is honoured. The wrap is always on and not configurable. Allowlisted KEY=VALUE pairs are redacted (`KEY=***`) in the `subprocess.spawn` structured log so the wrap doesn't itself leak provider keys into journald.
+
+### Runtime env audit ([#361](https://github.com/littlebearapps/untether/issues/361))
+
+`[security] env_audit = true` (default) enables a one-shot `/proc/<claude_pid>/environ` sample on first `system.init`. Any non-allowlisted name observed emits a `claude.env_audit.leaked_var` structured WARNING (dedup per session per name). On a clean host the audit is silent. See [config: `[security]`](../reference/config.md#security) to disable.
+
+### Known upstream limitation
+
+The boundary fix and audit confirm Untether's spawn env is clean. **However, Claude Code itself can re-introduce host vars at the Bash-tool subprocess level** — for example, if Claude invokes Bash via `bash -l` or `bash -i`, host shell rc files (`~/.profile`, `~/.bashrc`) get sourced, and any `export FOO=…` lines in those files leak into the Bash-tool subprocess. Untether's audit only samples Claude's process env, not its descendants.
+
+Operator mitigation: keep host-level secrets out of `~/.bashrc` / `~/.profile`. Move them into project-scoped tools that only activate when you opt in (e.g. [direnv](https://direnv.net/) `.envrc`, [bws](https://bitwarden.com/help/secrets-manager-cli/) on demand, per-project `.env` files loaded by your editor's run config). The blast radius is then bounded to projects you explicitly opted into.
+
 ## File transfer deny globs
 
 File transfer includes a deny list that blocks access to sensitive paths. The defaults are:

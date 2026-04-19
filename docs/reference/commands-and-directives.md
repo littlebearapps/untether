@@ -50,6 +50,7 @@ This line is parsed from replies and takes precedence over new directives. For b
 | `/export` | Export last session transcript as Markdown or JSON. |
 | `/browse` | Browse project files with inline keyboard navigation. |
 | `/ping` | Health check — replies with uptime since last (re)start. Shows trigger summary if triggers target the current chat. |
+| `/health` | System + triggers + cost snapshot — RAM/swap, Untether process (PID, RSS, FDs, children), trigger counts, today's API cost, uptime. Compact 6-line HTML message; sections degrade gracefully when sources are unavailable. See [operations](../how-to/operations.md#health-snapshot). |
 | `/restart` | Gracefully drain active runs and restart Untether. |
 | `/verbose` | Toggle verbose progress mode (on/off/clear). Shows tool details in progress messages. |
 | `/config` | Interactive settings menu — plan mode, ask mode, verbose, engine, model, reasoning, trigger toggles with inline buttons. |
@@ -57,7 +58,7 @@ This line is parsed from replies and takes precedence over new directives. For b
 | `/auth` | Headless device re-authentication for Codex — runs `codex login --device-auth` and sends the verification URL + device code. `/auth status` checks CLI availability. Codex-only. |
 | `/new` | Cancel any running task and clear stored sessions for the current scope (topic/chat). |
 | `/continue [prompt]` | Resume the most recent session in the project directory. Picks up CLI-started sessions from Telegram. Optional prompt appended. Not supported for AMP. |
-| `/at <duration> <prompt>` | Schedule a one-shot delayed run. Duration: `Ns` (60-9999s), `Nm`, or `Nh` (up to 24h). Pending delays are cancelled via `/cancel` and lost on restart. Per-chat cap of 20 pending delays. |
+| `/at <duration> <prompt>` | Schedule a one-shot delayed run. Duration: `Ns` (60-9999s), `Nm`, or `Nh` (up to 24h). The chat's project mapping and engine are captured at schedule time and used at fire time (mirrors cron freeze-at-dispatch behaviour). Pending delays are cancelled via `/cancel` and lost on restart. Per-chat cap of 20 pending delays. |
 
 Notes:
 

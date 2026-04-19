@@ -21,7 +21,9 @@ from dataclasses import dataclass, field
 import anyio
 from anyio.abc import TaskGroup
 
+from ..context import RunContext
 from ..logging import get_logger
+from ..model import EngineId
 from ..transport import ChannelId, RenderedMessage, SendOptions, Transport
 
 logger = get_logger(__name__)
@@ -59,6 +61,11 @@ class _PendingAt:
     fire_at: float  # monotonic time when the run will fire
     cancel_scope: anyio.CancelScope
     fired: bool = field(default=False)
+    # #362 freeze chat→project + engine at schedule time so the fire path
+    # uses the same defaults that an interactive message in this chat would.
+    # Mirrors TriggerDispatcher.dispatch_cron's freeze-at-dispatch behaviour.
+    context: RunContext | None = None
+    engine_override: EngineId | None = None
 
 
 _TASK_GROUP: TaskGroup | None = None
@@ -106,12 +113,20 @@ def schedule_delayed_run(
     thread_id: int | None,
     delay_s: int,
     prompt: str,
+    *,
+    context: RunContext | None = None,
+    engine_override: EngineId | None = None,
 ) -> str:
     """Start a background task that fires a run after ``delay_s`` seconds.
 
     Returns a token identifying the pending delay so callers can record or
     cancel it. Raises :class:`AtSchedulerError` if the scheduler is not
     installed, the delay is out of range, or the per-chat cap is reached.
+
+    ``context`` and ``engine_override`` are captured at schedule time and
+    threaded to the fire-time ``run_job`` call so the delayed run uses the
+    chat's project mapping and engine instead of falling back to the
+    global default (#362). Both default to ``None`` for back-compat.
     """
     if _TASK_GROUP is None or _RUN_JOB is None or _TRANSPORT is None:
         logger.error(
@@ -142,10 +157,19 @@ def schedule_delayed_run(
         scheduled_at=now,
         fire_at=now + delay_s,
         cancel_scope=scope,
+        context=context,
+        engine_override=engine_override,
     )
     _PENDING[token] = entry
     _TASK_GROUP.start_soon(_run_delayed, token)
-    logger.info("at.scheduled", chat_id=chat_id, token=token, delay_s=delay_s)
+    logger.info(
+        "at.scheduled",
+        chat_id=chat_id,
+        token=token,
+        delay_s=delay_s,
+        engine=engine_override,
+        project=context.project if context is not None else None,
+    )
     return token
 
 
@@ -200,6 +224,8 @@ async def _run_delayed(token: str) -> None:
         chat_id=entry.chat_id,
         token=token,
         delay_s=entry.delay_s,
+        engine=entry.engine_override,
+        project=entry.context.project if entry.context is not None else None,
     )
     try:
         await _RUN_JOB(
@@ -207,12 +233,12 @@ async def _run_delayed(token: str) -> None:
             notify_ref.message_id,
             entry.prompt,
             None,  # resume_token
-            None,  # context
+            entry.context,  # #362 frozen at schedule time
             entry.thread_id,
             None,  # chat_session_key
             None,  # reply_ref
             None,  # on_thread_known
-            None,  # engine_override
+            entry.engine_override,  # #362 frozen at schedule time
             None,  # progress_ref
         )
     except Exception as exc:  # noqa: BLE001
