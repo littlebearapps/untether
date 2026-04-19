@@ -250,6 +250,20 @@ class ProgressSettings(BaseModel):
     group_chat_rps: float = Field(default=20.0 / 60.0, gt=0, le=10)
 
 
+class SecuritySettings(BaseModel):
+    """Runtime security knobs (#361).
+
+    ``env_audit`` enables a one-shot ``/proc/<pid>/environ`` sample on
+    Claude session start. Disallowed names emit a structured warning so
+    the operator can see when host env leaks past
+    :func:`utils.env_policy.filtered_env`.
+    """
+
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    env_audit: bool = True
+
+
 class UntetherSettings(BaseSettings):
     model_config = SettingsConfigDict(
         extra="allow",
@@ -273,6 +287,7 @@ class UntetherSettings(BaseSettings):
     progress: ProgressSettings = Field(default_factory=ProgressSettings)
     watchdog: WatchdogSettings = Field(default_factory=WatchdogSettings)
     auto_continue: AutoContinueSettings = Field(default_factory=AutoContinueSettings)
+    security: SecuritySettings = Field(default_factory=SecuritySettings)
 
     @model_validator(mode="before")
     @classmethod

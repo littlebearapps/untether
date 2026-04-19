@@ -2,9 +2,10 @@ from __future__ import annotations
 
 import contextlib
 import os
+import shutil
 import signal
 import sys
-from collections.abc import AsyncIterator, Callable, Sequence
+from collections.abc import AsyncIterator, Callable, Mapping, Sequence
 from contextlib import asynccontextmanager
 from typing import Any
 
@@ -15,6 +16,20 @@ from ..logging import get_logger
 from .proc_diag import find_descendants
 
 logger = get_logger(__name__)
+
+
+def wrap_with_env_i(cmd: Sequence[str], env: Mapping[str, str]) -> list[str]:
+    """Return ``cmd`` wrapped with ``env -i KEY=VAL ...`` so the resolved
+    environment at exec time is exactly ``env`` — even if the child later
+    reads ``/etc/environment``, sources rc files, or otherwise re-introduces
+    host vars (#361).
+
+    Locates ``env`` via ``shutil.which`` with a ``/usr/bin/env`` fallback.
+    Caller should pass ``env=None`` to ``manage_subprocess`` when using this
+    wrap, so subprocess.exec doesn't double-set the environment.
+    """
+    env_path = shutil.which("env") or "/usr/bin/env"
+    return [env_path, "-i", *(f"{k}={v}" for k, v in env.items()), *cmd]
 
 
 async def wait_for_process(proc: Process, timeout: float) -> bool:  # noqa: ASYNC109

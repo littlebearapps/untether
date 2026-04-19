@@ -47,9 +47,11 @@ from ..runner import (
     _stderr_excerpt,
 )
 from ..schemas import claude as claude_schema
+from ..settings import load_settings_if_exists
+from ..utils.env_audit import audit_proc_env
 from ..utils.paths import get_run_base_dir
 from ..utils.streams import drain_stderr
-from ..utils.subprocess import manage_subprocess
+from ..utils.subprocess import manage_subprocess, wrap_with_env_i
 from .run_options import get_run_options
 from .tool_actions import tool_input_path, tool_kind_and_title
 
@@ -203,6 +205,14 @@ class ClaudeStreamState:
     live_bg_agents: set[str] = field(default_factory=set)
     live_wakeups: dict[str, float] = field(default_factory=dict)
     live_remote_triggers: set[str] = field(default_factory=set)
+
+    # #361 env-leak audit: pid populated by ClaudeRunner.run_impl after
+    # spawn so translate_claude_event can sample /proc/<pid>/environ in
+    # the system.init handler. audited flips to True after the first
+    # sample; audited_leaks dedups warnings per (session, leaked_name).
+    pid: int | None = None
+    audited: bool = False
+    audited_leaks: set[str] = field(default_factory=set)
 
 
 def _normalize_tool_result(content: Any) -> str:
@@ -483,6 +493,42 @@ def _extract_error(
     return f"{first}\n{' · '.join(parts)}"
 
 
+def _maybe_audit_env(state: ClaudeStreamState, session_id: str) -> None:
+    """One-shot ``/proc/<pid>/environ`` audit on first system.init (#361).
+
+    Best-effort: skips silently when no PID is recorded, when audit is
+    disabled in config, when settings can't be loaded, or when /proc is
+    unreadable. Emits one ``claude.env_audit.leaked_var`` warning per
+    (session, leaked_name).
+    """
+    if state.audited or state.pid is None:
+        return
+    state.audited = True
+
+    enabled = True
+    try:
+        result = load_settings_if_exists()
+        if result is not None:
+            settings, _ = result
+            enabled = settings.security.env_audit
+    except Exception:  # noqa: BLE001 — never let config errors block a run
+        enabled = True
+    if not enabled:
+        return
+
+    leaked = audit_proc_env(state.pid, expected_extras=("UNTETHER_SESSION",))
+    for name in leaked:
+        if name in state.audited_leaks:
+            continue
+        state.audited_leaks.add(name)
+        logger.warning(
+            "claude.env_audit.leaked_var",
+            session_id=session_id,
+            pid=state.pid,
+            name=name,
+        )
+
+
 def _usage_payload(event: claude_schema.StreamResultMessage) -> dict[str, Any]:
     usage: dict[str, Any] = {}
     for key in (
@@ -518,6 +564,9 @@ def translate_claude_event(
             session_id = event.session_id
             if not session_id:
                 return []
+            # #361 sample child env on first init; no-op if PID missing,
+            # audit disabled, /proc unreadable, or non-Linux.
+            _maybe_audit_env(state, session_id)
             meta: dict[str, Any] = {}
             for key in (
                 "cwd",
@@ -1848,6 +1897,14 @@ class ClaudeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
         cmd = [self.command(), *self.build_args(prompt, resume, state=state)]
         payload = self.stdin_payload(prompt, resume, state=state)
         env = self.env(state=state)
+        # #361 wrap with `env -i KEY=VAL ...` so Claude exec resolves with
+        # exactly the allowlisted env. Blocks re-introduction from upstream
+        # rc-file sourcing, /etc/environment, or wrapper scripts that the
+        # filtered env passed to manage_subprocess can't prevent post-exec.
+        # Pass env=None to subprocess so we don't double-set.
+        if env is not None:
+            cmd = wrap_with_env_i(cmd, env)
+            env = None
         run_logger.info(
             "runner.start",
             engine=self.engine,
@@ -1943,6 +2000,9 @@ class ClaudeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
                 # so the wedge detector in runner_bridge can duck-type against
                 # background-task helpers without importing claude-specific code.
                 stream.engine_state = state
+                # #361 stash PID so the env audit in translate_claude_event
+                # can sample /proc/<pid>/environ on system.init.
+                state.pid = proc.pid
                 self.current_stream = stream
                 reader_done = anyio.Event()
 

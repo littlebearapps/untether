@@ -1,4 +1,4 @@
-"""Tests for the /at delayed-run command and at_scheduler (#288)."""
+"""Tests for the /at delayed-run command and at_scheduler (#288, #362)."""
 
 from __future__ import annotations
 
@@ -9,6 +9,7 @@ import anyio
 import pytest
 
 from untether.commands import CommandContext
+from untether.context import RunContext
 from untether.telegram import at_scheduler
 from untether.telegram.commands.at import AtCommand, _format_delay, _parse_args
 from untether.transport import MessageRef
@@ -107,10 +108,45 @@ class RunJobRecorder:
         self.calls.append(args)
 
 
+# ── Fake TransportRuntime for /at engine resolution (#362) ──────────────
+
+
+class _FakeRuntime:
+    """Minimal stand-in for TransportRuntime exposing the two methods
+    AtCommand.handle calls: default_context_for_chat + resolve_engine.
+    """
+
+    def __init__(
+        self,
+        *,
+        chat_to_context: dict[int, RunContext] | None = None,
+        engine_for_context: dict[str | None, str] | None = None,
+        global_default: str = "codex",
+    ):
+        self._chat_to_context = chat_to_context or {}
+        self._engine_for_context = engine_for_context or {}
+        self._global_default = global_default
+
+    def default_context_for_chat(self, chat_id):
+        return self._chat_to_context.get(chat_id)
+
+    def resolve_engine(self, *, engine_override, context):
+        if engine_override is not None:
+            return engine_override
+        if context is None or context.project is None:
+            return self._global_default
+        return self._engine_for_context.get(context.project, self._global_default)
+
+
 # ── AtCommand.handle tests ──────────────────────────────────────────────
 
 
-def _make_ctx(args_text: str, chat_id: int = 12345) -> CommandContext:
+def _make_ctx(
+    args_text: str,
+    chat_id: int = 12345,
+    *,
+    runtime: Any = None,
+) -> CommandContext:
     message = MessageRef(channel_id=chat_id, message_id=1)
     return CommandContext(
         command="at",
@@ -122,7 +158,7 @@ def _make_ctx(args_text: str, chat_id: int = 12345) -> CommandContext:
         reply_text=None,
         config_path=None,
         plugin_config={},
-        runtime=None,  # type: ignore[arg-type]
+        runtime=runtime if runtime is not None else _FakeRuntime(),
         executor=None,  # type: ignore[arg-type]
     )
 
@@ -172,6 +208,53 @@ class TestAtCommand:
                 pending = at_scheduler.pending_for_chat(12345)
                 assert len(pending) == 1
                 assert pending[0].prompt == "test prompt"
+            finally:
+                tg.cancel_scope.cancel()
+
+    async def test_handle_captures_project_engine_for_mapped_chat(self):
+        """#362 — /at on a project-bound chat captures project + engine."""
+        runtime = _FakeRuntime(
+            chat_to_context={12345: RunContext(project="acme", branch=None)},
+            engine_for_context={"acme": "pi"},
+            global_default="codex",
+        )
+        run_recorder = RunJobRecorder()
+        transport = FakeTransport()
+        async with anyio.create_task_group() as tg:
+            at_scheduler.install(tg, run_recorder, transport, 12345)
+            try:
+                result = await AtCommand().handle(
+                    _make_ctx("60s do something", runtime=runtime)
+                )
+                assert result is not None
+                assert "Scheduled" in result.text
+                pending = at_scheduler.pending_for_chat(12345)
+                assert len(pending) == 1
+                assert pending[0].context is not None
+                assert pending[0].context.project == "acme"
+                assert pending[0].engine_override == "pi"
+            finally:
+                tg.cancel_scope.cancel()
+
+    async def test_handle_captures_global_default_when_unmapped(self):
+        """#362 — /at on an unmapped chat captures the global default engine."""
+        runtime = _FakeRuntime(global_default="codex")  # no project mapping
+        run_recorder = RunJobRecorder()
+        transport = FakeTransport()
+        async with anyio.create_task_group() as tg:
+            at_scheduler.install(tg, run_recorder, transport, 99999)
+            try:
+                result = await AtCommand().handle(
+                    _make_ctx("60s probe", chat_id=99999, runtime=runtime)
+                )
+                assert result is not None
+                pending = at_scheduler.pending_for_chat(99999)
+                assert len(pending) == 1
+                assert pending[0].context is None
+                # Resolved engine is captured even when context is None so a
+                # later config change to the global default can't drift the
+                # frozen run (mirrors cron.engine).
+                assert pending[0].engine_override == "codex"
             finally:
                 tg.cancel_scope.cancel()
 
@@ -240,6 +323,43 @@ class TestAtScheduler:
             tg.cancel_scope.cancel()
         at_scheduler.uninstall()
         assert at_scheduler.active_count() == 0
+
+    async def test_run_delayed_forwards_captured_context_and_engine(self):
+        """#362 — _run_delayed passes the frozen context+engine to run_job."""
+        recorder = RunJobRecorder()
+        transport = FakeTransport()
+        captured_context = RunContext(project="pi-test", branch=None)
+
+        # Patch MIN_DELAY_SECONDS to allow a 1s schedule for fast firing.
+        original_min = at_scheduler.MIN_DELAY_SECONDS
+        at_scheduler.MIN_DELAY_SECONDS = 1
+        try:
+            async with anyio.create_task_group() as tg:
+                at_scheduler.install(tg, recorder, transport, 555)
+                at_scheduler.schedule_delayed_run(
+                    555,
+                    None,
+                    1,
+                    "go",
+                    context=captured_context,
+                    engine_override="pi",
+                )
+                # Wait for fire (1s sleep + a small buffer).
+                await anyio.sleep(2.0)
+                tg.cancel_scope.cancel()
+        finally:
+            at_scheduler.MIN_DELAY_SECONDS = original_min
+
+        assert len(recorder.calls) == 1
+        args = recorder.calls[0]
+        # _RUN_JOB positional layout per at_scheduler._run_delayed:
+        #   (chat_id, message_id, prompt, resume_token, context, thread_id,
+        #    chat_session_key, reply_ref, on_thread_known, engine_override,
+        #    progress_ref)
+        assert args[0] == 555
+        assert args[2] == "go"
+        assert args[4] == captured_context  # context (was None pre-#362)
+        assert args[9] == "pi"  # engine_override (was None pre-#362)
 
 
 async def _fake_run_job(*args, **kwargs):

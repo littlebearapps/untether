@@ -2,7 +2,30 @@
 
 from __future__ import annotations
 
-from untether.utils.env_policy import filtered_env
+from untether.utils.env_policy import _is_allowed, filtered_env, is_allowed
+
+
+class TestIsAllowed:
+    """Public predicate exposed for utils.env_audit (#361)."""
+
+    def test_exact_allow_returns_true(self):
+        assert is_allowed("PATH") is True
+        assert is_allowed("ANTHROPIC_API_KEY") is True
+        assert is_allowed("UNTETHER_SESSION") is True
+
+    def test_prefix_allow_returns_true(self):
+        assert is_allowed("CLAUDE_CODE_FOO") is True
+        assert is_allowed("MCP_SERVER_BAR") is True
+
+    def test_disallowed_returns_false(self):
+        assert is_allowed("BWS_ACCESS_TOKEN") is False
+        assert is_allowed("AWS_SECRET_ACCESS_KEY") is False
+        assert is_allowed("STRIPE_SECRET_KEY") is False
+
+    def test_underscore_alias_back_compat(self):
+        # _is_allowed is preserved as a deprecation alias for any
+        # external importers; verify it points to the same callable.
+        assert _is_allowed is is_allowed
 
 
 class TestExactAllowlist:
