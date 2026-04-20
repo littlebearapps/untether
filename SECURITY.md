@@ -50,7 +50,8 @@ Include:
 v0.35.2 ships a security hardening bundle. Upgrade notes:
 
 - **Env allowlist for Claude/Pi subprocesses** — only approved variables pass through; unrelated process env no longer leaks to agent CLIs. ([#198](https://github.com/littlebearapps/untether/issues/198))
-- **Runtime env audit** — leaks log `claude.env_audit.leaked_var` WARNING and subprocesses spawn with `env -i KEY=VAL …` when `[security] env_audit = true` (default). Disable in `untether.toml` if legacy behaviour is required. ([#361](https://github.com/littlebearapps/untether/issues/361))
+- **Runtime env hardening (always on)** — Claude exec is wrapped with `env -i KEY=VAL …` so the resolved environment is exactly the allowlist from `utils/env_policy.filtered_env()`, even if an upstream rc-file source or wrapper script would otherwise re-introduce host vars after `subprocess.spawn(env=…)` is honoured. This hardening is **not** controlled by any config setting.
+- **Runtime env audit** — gated by `[security] env_audit = true` (default). Samples `/proc/<claude_pid>/environ` once per session and emits a `claude.env_audit.leaked_var` WARNING for every non-allowlisted variable observed. Disabling the audit only silences the warning sampler — it does **not** disable the `env -i` hardening above. ([#361](https://github.com/littlebearapps/untether/issues/361))
 - **`bot_token` stored as `SecretStr`** — masked in repr/str/tracebacks; unwrapped only at the transport boundary. ([#196](https://github.com/littlebearapps/untether/issues/196))
 - **User-safe error messages** — voice transcription and command-dispatch failures route through `user_safe_error()` (strips URLs/paths, caps length, fallback on empty). ([#200](https://github.com/littlebearapps/untether/issues/200), [#201](https://github.com/littlebearapps/untether/issues/201))
 - **Codex auth output HTML-escaped** — prevents entity injection before `<pre>` wrapping. ([#199](https://github.com/littlebearapps/untether/issues/199))

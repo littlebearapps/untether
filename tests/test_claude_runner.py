@@ -373,6 +373,7 @@ def test_background_task_summary_formatting() -> None:
     state.live_monitors["c"] = 0.0
     state.live_bg_agents.add("d")
     summary = background_task_summary(state)
+    assert summary is not None
     assert "2 watchers" in summary
     assert "2 bg tasks" in summary
 

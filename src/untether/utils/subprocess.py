@@ -27,6 +27,18 @@ def wrap_with_env_i(cmd: Sequence[str], env: Mapping[str, str]) -> list[str]:
     Locates ``env`` via ``shutil.which`` with a ``/usr/bin/env`` fallback.
     Caller should pass ``env=None`` to ``manage_subprocess`` when using this
     wrap, so subprocess.exec doesn't double-set the environment.
+
+    Security trade-off: ``KEY=VALUE`` pairs sit in ``env``'s argv during the
+    fork/exec window before ``env`` exec's into the wrapped program. After
+    exec, ``/proc/<pid>/cmdline`` reports the *new* program's argv (verified:
+    ``env -i FOO=bar sleep 5`` shows ``sleep 5`` post-exec), so the only
+    exposure is a microsecond window on ``env``'s own PID. The secrets remain
+    in the spawned program's ``/proc/<pid>/environ`` which is per-user
+    permission-protected. We accept this over the alternative of relying
+    solely on ``subprocess.spawn(env=…)`` because v0.35.2rc3 testing on
+    ``@untether_dev_bot`` proved that an upstream rc-file source / wrapper
+    script can re-introduce host vars after Python's ``execve`` honoured the
+    env dict — ``env -i`` is the only mechanism that survives that path.
     """
     env_path = shutil.which("env") or "/usr/bin/env"
     return [env_path, "-i", *(f"{k}={v}" for k, v in env.items()), *cmd]

@@ -135,10 +135,13 @@ class TelegramTransportSettings(BaseModel):
     def _validate_bot_token_not_empty(cls, v: SecretStr) -> SecretStr:
         """Preserve the pre-#196 NonEmptyStr contract.  SecretStr bypasses
         str_strip_whitespace, so whitespace-only values would otherwise pass
-        the schema and fail at connect time with a less-helpful error."""
-        if not v.get_secret_value().strip():
+        the schema and fail at connect time with a less-helpful error.
+        Returns the *stripped* value so accidental padding (`" token "`) doesn't
+        reach the Telegram API as `https://api.telegram.org/bot %20token%20/`."""
+        token = v.get_secret_value().strip()
+        if not token:
             raise ValueError("bot_token must not be empty")
-        return v
+        return SecretStr(token)
 
 
 class TransportsSettings(BaseModel):

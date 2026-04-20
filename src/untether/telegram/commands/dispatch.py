@@ -230,7 +230,7 @@ async def _dispatch_callback(
     # writes to the Claude PTY stdin). Log the measured HTTP round-trip as
     # INFO so staging grep can distinguish "we were fast, Telegram was slow"
     # from "we were slow."
-    async def _answer_callback(text: str | None = None) -> None:
+    async def _answer_callback(text: str | None = None, *, early: bool = False) -> None:
         nonlocal _answered
         if callback_query_id is not None and not _answered:
             start = time.monotonic()
@@ -242,7 +242,7 @@ async def _dispatch_callback(
                 chat_id=chat_id,
                 latency_ms=round((time.monotonic() - start) * 1000, 1),
                 total_ms=round((time.monotonic() - dispatch_start) * 1000, 1),
-                early=False,
+                early=early,
                 has_toast=text is not None,
             )
 
@@ -275,19 +275,10 @@ async def _dispatch_callback(
         # when grepping.
         if getattr(backend, "answer_early", False) and callback_query_id is not None:
             toast = backend.early_answer_toast(args_text)  # type: ignore[attr-defined]
-            if toast is not None:
-                _early_start = time.monotonic()
-                await cfg.bot.answer_callback_query(callback_query_id, text=toast)
-                _answered = True
-                logger.info(
-                    "callback.answered",
-                    command=command_id,
-                    chat_id=chat_id,
-                    latency_ms=round((time.monotonic() - _early_start) * 1000, 1),
-                    total_ms=round((time.monotonic() - dispatch_start) * 1000, 1),
-                    early=True,
-                    has_toast=True,
-                )
+            # Always answer early when the backend opts in, even if the toast
+            # is None — clearing the spinner before backend.handle() is the
+            # whole point. A None toast just means no toast text will appear.
+            await _answer_callback(toast, early=True)
 
         # For callbacks, text is the full callback data and args come from parsing
         text = msg.data or ""

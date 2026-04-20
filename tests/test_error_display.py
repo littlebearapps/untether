@@ -72,3 +72,25 @@ def test_bare_openai_auth_error_scrubbed() -> None:
     # No URLs or paths in this message — should pass through trimmed.
     assert "Incorrect API key" in out
     assert len(out) <= 200
+
+
+def test_strips_long_sk_secret() -> None:
+    """sk- prefixed keys with realistic length should be redacted."""
+    msg = "Auth failed for sk-proj-abcdef0123456789ZYXWvutsrqpo"
+    out = user_safe_error(msg, fallback="x")
+    assert "sk-proj-abcdef" not in out
+    assert "[secret]" in out
+
+
+def test_strips_bearer_token() -> None:
+    msg = "request rejected: Authorization: Bearer ey0.aBcDeFgHiJkLmNoP"
+    out = user_safe_error(msg, fallback="x")
+    assert "ey0.aBcDeFgHiJkLmNoP" not in out
+    assert "[secret]" in out
+
+
+def test_strips_inline_token_assignment() -> None:
+    msg = "config error: api_key=ABCDEF123456 is invalid"
+    out = user_safe_error(msg, fallback="x")
+    assert "ABCDEF123456" not in out
+    assert "[secret]" in out

@@ -23,6 +23,20 @@ _ABS_PATH_RE = re.compile(r"(/[\w./-]{3,}/[\w.-]+)")
 # Match URLs. Replaced with ``[url]``. Lifted from runner._URL_RE.
 _URL_RE = re.compile(r"https?://[^\s\"'<>]+")
 
+# Match credential-shaped tokens that may appear in third-party error messages
+# (OpenAI/Anthropic/Stripe-style ``sk-…`` keys, ``Bearer …`` headers, and
+# generic ``api_key=… / token: …`` style assignments). Replaced with
+# ``[secret]``. Order matters — runs after URL/path stripping so the bearer
+# regex doesn't swallow URL-encoded paths.
+_SECRET_RE = re.compile(
+    r"(?i)\b(?:"
+    r"sk-[A-Za-z0-9_-]{16,}"
+    r"|bearer\s+[A-Za-z0-9._~+/=-]{8,}"
+    r"|(?:api[_-]?key|access[_-]?token|auth[_-]?token|secret|token|password)"
+    r"\s*[:=]\s*[^\s,'\"}\]]+"
+    r")"
+)
+
 # Default character cap for user-facing error bodies. Telegram callback
 # toasts are capped at ~200 chars by Bot API; we use the same budget for
 # consistency across send() and answer_callback_query.
@@ -46,6 +60,7 @@ def user_safe_error(
     # URL regex first — the path regex would otherwise match the URL's own
     # path segment (``https://host/a/b`` → ``https:[path]``).
     text = _URL_RE.sub("[url]", text)
+    text = _SECRET_RE.sub("[secret]", text)
     text = _ABS_PATH_RE.sub("[path]", text)
     text = text.strip()
     if not text:

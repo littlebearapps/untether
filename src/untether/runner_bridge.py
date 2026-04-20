@@ -1463,12 +1463,16 @@ class ProgressEdits:
             )
             return "logged"
 
-        # Tier 2: adapter-kill recovery (once per episode)
-        if (
-            self._stuck_after_tool_result_recovery_enabled
-            and not state.recovery_attempted
-        ):
-            killed = await self._try_recover_mcp_adapter(diag)
+        # Tier 2: adapter-kill recovery (once per episode). When recovery is
+        # disabled we still mark the attempt so Tier 3 can fire after the
+        # configured delay — otherwise the wedge would suppress notifications
+        # forever without ever cancelling.
+        if not state.recovery_attempted:
+            killed = (
+                await self._try_recover_mcp_adapter(diag)
+                if self._stuck_after_tool_result_recovery_enabled
+                else []
+            )
             state.recovery_attempted = True
             state.recovery_attempted_at = now
             logger.warning(
@@ -1477,6 +1481,7 @@ class ProgressEdits:
                 pid=self.pid,
                 killed_pids=killed,
                 mcp_server=mcp_server,
+                recovery_enabled=self._stuck_after_tool_result_recovery_enabled,
             )
             return "recovery"
 
