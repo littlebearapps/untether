@@ -116,8 +116,32 @@ The Claude runner modifies the subprocess environment before spawning `claude`:
 |----------|-----------|
 | `UNTETHER_SESSION` | Set to `1`. Signals to Claude Code plugins (hooks, rules, agents) that the session is running via Untether/Telegram. Plugins can check `[ -n "${UNTETHER_SESSION:-}" ]` in shell hooks to adjust behaviour — e.g. skip blocking Stop hooks that would displace the user's requested content in Telegram's single-message output. See [PitchDocs](https://github.com/littlebearapps/lba-plugins) for a reference implementation. |
 | `ANTHROPIC_API_KEY` | Stripped from the environment by default so Claude Code uses subscription billing. Set `use_api_billing = true` in `[claude]` config to keep the key and use API billing instead. |
+| `CLAUDE_ENABLE_STREAM_WATCHDOG` | Set to `1` via `setdefault` ([#322](https://github.com/littlebearapps/untether/issues/322)). Enables the upstream stream watchdog so Claude Code aborts cleanly on SSE idle timeout instead of hanging. User overrides via shell env still win. |
+| `CLAUDE_STREAM_IDLE_TIMEOUT_MS` | Set to `300000` (5 min) via `setdefault` ([#342](https://github.com/littlebearapps/untether/issues/342)). Matches the undici idle-body timeout that motivated [#322](https://github.com/littlebearapps/untether/issues/322) and Untether's `[watchdog] stuck_after_tool_result_timeout` default. The earlier 60s value tripped on `opus · max` legitimate chain-of-thought windows. |
+| `MCP_TOOL_TIMEOUT` | Set to `120000` (2 min) via `setdefault` ([#322](https://github.com/littlebearapps/untether/issues/322)). |
+| `MAX_MCP_OUTPUT_TOKENS` | Set to `12000` via `setdefault` ([#322](https://github.com/littlebearapps/untether/issues/322)). |
 
 This is not a security mechanism — `UNTETHER_SESSION` is a simple presence flag. It carries no credentials and poses no risk if set outside Untether. See the [environment variables reference](../../env-vars.md) for all variables.
+
+### Boundary: `env -i` wrap and runtime audit ([#361](https://github.com/littlebearapps/untether/issues/361))
+
+After `[claude].env()` returns the filtered allowlist, the runner wraps the resolved cmd with `env -i KEY=VAL …` so the resolved environment at exec time is exactly that allowlist — even if upstream Claude Code, a wrapper script, or PAM `/etc/environment` would otherwise inject host vars after the parent's `env=` kwarg is honoured. The structured `subprocess.spawn` log redacts each KV value (`KEY=***`) so allowlisted provider keys aren't logged verbatim into journald.
+
+A companion runtime audit (gated by `[security] env_audit = true`, default true) samples `/proc/<claude_pid>/environ` on first `system.init` and emits one `claude.env_audit.leaked_var` WARNING per non-allowlisted name observed (dedup per session per name). Linux-only; non-Linux silently no-ops.
+
+**Known upstream limitation:** Claude Code itself can re-introduce host vars at the Bash-tool subprocess level (e.g. when Bash is invoked with `-l` or `-i` it sources `~/.profile` / `~/.bashrc`). The audit only covers Claude's own process env, not its descendants. See [security how-to](../../../how-to/security.md#known-upstream-limitation) for operator mitigation guidance.
+
+### Reasoning levels (`--effort`)
+
+`--effort` accepts `low`, `medium`, `high`, `xhigh`, `max`. The `xhigh` level was added in v0.35.2 ([#351](https://github.com/littlebearapps/untether/issues/351)) for Claude Code CLI v2.1.114+ — it sits between `high` and `max` and is exposed in `/config → 🧠 Effort`. Set per-chat via the inline menu or pin per-engine via `[engines.claude] reasoning = "xhigh"`.
+
+### `rate_limit_event` surfacing ([#349](https://github.com/littlebearapps/untether/issues/349))
+
+When Anthropic throttles the API, Claude Code emits a `rate_limit_event` JSONL message. The runner translates this to a visible `note`-kind action rendered as `⏳ Rate limited — retrying in Xs` in Telegram (previously the runner returned an empty list and the session appeared to hang). `ClaudeStreamState.rate_limit_total_s` accumulates wait time across the session for future cost-footer annotation; structured `claude.rate_limit_event` logs `retry_after_s`, `count`, and `cumulative_s` for triage.
+
+### Per-session background-task tracking ([#346](https://github.com/littlebearapps/untether/issues/346) / [#347](https://github.com/littlebearapps/untether/issues/347))
+
+Claude Code v2.1.72+ has primitives that arm long-running work and return the subprocess to "ready" while the primitive continues in the background: `Monitor`, `Bash run_in_background=true`, `Agent run_in_background=true`, `ScheduleWakeup`, `RemoteTrigger`. The runner tracks each by `tool_use_id` in `ClaudeStreamState.live_monitors` / `live_bg_bashes` / `live_bg_agents` / `live_wakeups` / `live_remote_triggers`. The wedge detector (`_detect_stuck_after_tool_result` from [#322](https://github.com/littlebearapps/untether/issues/322)) gates on `has_live_background_work()` so legitimate background primitives don't trip the SIGTERM path.
 
 ---
 
@@ -179,7 +203,7 @@ Model:
 
 Effort (reasoning depth):
 
-* add `--effort <level>` if a reasoning override is set (low/medium/high/max).
+* add `--effort <level>` if a reasoning override is set (low/medium/high/xhigh/max).
 
 Permissions:
 

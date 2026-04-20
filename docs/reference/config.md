@@ -20,10 +20,42 @@ If you expect to edit config while Untether is running, set:
 
 | Key | Type | Default | Notes |
 |-----|------|---------|-------|
-| `watch_config` | bool | `false` | Watch config file for changes; applies most settings immediately. Restart-only: `bot_token`, `chat_id`, `session_mode`, `topics`, `message_overflow`. |
+| `watch_config` | bool | `false` | Watch config file for changes; applies most settings immediately. See [Hot-reload vs restart-required](#hot-reload-vs-restart-required) below. |
 | `default_engine` | string | `"codex"` | Default engine id for new threads. |
 | `default_project` | string\|null | `null` | Default project alias. |
 | `transport` | string | `"telegram"` | Transport backend id. |
+
+## Hot-reload vs restart-required
+
+When `watch_config = true`, Untether watches `untether.toml` and applies most
+changes immediately. A handful of settings require a process restart because
+they're bound to resources (network sockets, bot token, session-mode machinery)
+that can't be swapped live.
+
+Fields listed as **restart-required** trigger a warning in the Telegram chat
+(🔄 prefix) AND a structlog `config.reload.transport_config_changed` record
+when edited. Everything else hot-reloads silently with a matching
+`config.reload.transport_config_hot_reloaded` INFO event.
+
+The authoritative list lives on each settings model as `RESTART_REQUIRED_FIELDS`
+(see `src/untether/settings.py`) so code, docs, and UI can't drift. Editing
+`untether.toml` to update one of these while the service runs logs the warning
+and sends the Telegram notice, but the new value won't take effect until you
+restart.
+
+| Section | Restart-required fields | Hot-reload |
+|---|---|---|
+| `transports.telegram` | `bot_token`, `chat_id`, `session_mode`, `topics`, `message_overflow` | everything else (`voice_*`, `show_resume_line`, `forward_coalesce_s`, `media_group_debounce_s`, `allowed_user_ids`, `files.*`) |
+| `transports.telegram.topics` | whole section (treated as one unit) | — |
+| top-level `transport` | changing transport id | — |
+| `triggers` | `enabled` (master switch initialises the cron scheduler + webhook server at startup); `server.host`, `server.port` (socket bind at startup) | cron add/remove/edit, webhook add/remove/edit, `rate_limit`, `max_body_bytes`, `default_timezone`, per-cron `timezone`/`run_once`/`permission_mode` |
+
+To restart:
+
+```sh
+systemctl --user restart untether        # staging
+systemctl --user restart untether-dev    # dev
+```
 
 ## `transports.telegram`
 
@@ -44,27 +76,29 @@ If you expect to edit config while Untether is running, set:
 
 | Key | Type | Default | Notes |
 |-----|------|---------|-------|
-| `bot_token` | string | (required) | Telegram bot token from @BotFather. |
-| `chat_id` | int | (required) | Default chat id. |
+| `bot_token` | string | (required) | 🔄 Telegram bot token from @BotFather. Restart-required. |
+| `chat_id` | int | (required) | 🔄 Default chat id. Restart-required. |
 | `allowed_user_ids` | int[] | `[]` | Allowed sender user ids. Empty disables sender filtering; when set, only these users can interact (including DMs). |
-| `message_overflow` | `"trim"`\|`"split"` | `"split"` | How to handle long final responses. |
+| `message_overflow` | `"trim"`\|`"split"` | `"split"` | 🔄 How to handle long final responses. Restart-required. |
 | `forward_coalesce_s` | float | `1.0` | Quiet window for combining a prompt with immediately-following forwarded messages; set `0` to disable. |
 | `voice_transcription` | bool | `false` | Enable voice note transcription. |
 | `voice_max_bytes` | int | `10485760` | Max voice note size (bytes). |
 | `voice_transcription_model` | string | `"gpt-4o-mini-transcribe"` | OpenAI transcription model name. |
 | `voice_transcription_base_url` | string\|null | `null` | Override base URL for voice transcription only. |
 | `voice_transcription_api_key` | string\|null | `null` | Override API key for voice transcription only. |
-| `session_mode` | `"stateless"`\|`"chat"` | `"stateless"` | Auto-resume mode. See [workflow modes](modes.md) — `"chat"` for assistant/workspace, `"stateless"` for handoff. |
+| `session_mode` | `"stateless"`\|`"chat"` | `"stateless"` | 🔄 Auto-resume mode. See [workflow modes](modes.md) — `"chat"` for assistant/workspace, `"stateless"` for handoff. Restart-required. |
 | `show_resume_line` | bool | `true` | Show resume line in message footer. See [workflow modes](modes.md) — `false` for assistant/workspace, `true` for handoff. |
 
 When `allowed_user_ids` is set, updates without a sender id (for example, some channel posts) are ignored.
 
 ### `transports.telegram.topics`
 
+🔄 **Restart-required as a whole section** — changes to either key only take effect after a restart because topic initialisation runs at startup.
+
 | Key | Type | Default | Notes |
 |-----|------|---------|-------|
-| `enabled` | bool | `false` | Enable forum-topic features. |
-| `scope` | `"auto"`\|`"main"`\|`"projects"`\|`"all"` | `"auto"` | Where topics are managed. |
+| `enabled` | bool | `false` | 🔄 Enable forum-topic features. Restart-required. |
+| `scope` | `"auto"`\|`"main"`\|`"projects"`\|`"all"` | `"auto"` | 🔄 Where topics are managed. Restart-required. |
 
 ### `transports.telegram.files`
 
@@ -234,6 +268,14 @@ Budget alerts always appear regardless of `[footer]` settings.
     stall_repeat_seconds = 180.0
     tool_timeout = 600.0
     mcp_tool_timeout = 900.0
+    detect_stuck_after_tool_result = false
+    stuck_after_tool_result_timeout = 300.0
+    stuck_after_tool_result_recovery_enabled = true
+    stuck_after_tool_result_recovery_delay = 60.0
+    detect_catalog_staleness = true
+    notify_catalog_refresh = false
+    prespawn_ram_warn_mb = 2000
+    prespawn_ram_block_mb = 500
     ```
 
 | Key | Type | Default | Notes |
@@ -243,6 +285,14 @@ Budget alerts always appear regardless of `[footer]` settings.
 | `stall_repeat_seconds` | float | `180.0` | Interval between repeat stall warnings in Telegram (30–600). |
 | `tool_timeout` | float | `600.0` | Stall threshold (seconds) for running local tool calls like Bash, Read, Write (60–7200). Increase for long builds or benchmarks. |
 | `mcp_tool_timeout` | float | `900.0` | Stall threshold (seconds) for running MCP tool calls (60–7200). MCP tools are network-bound and may legitimately run for 10–20+ minutes. |
+| `detect_stuck_after_tool_result` | bool | `false` | Enable the stuck-after-tool_result detector ([#322](https://github.com/littlebearapps/untether/issues/322)) — fires when a `tool_result` arrives and the engine goes silent for `stuck_after_tool_result_timeout` seconds while CPU-active (matches the upstream Claude-code / `mcp-remote` / undici wedge). Opt-in this release; will default `true` once the recovery path has more staging soak time. The detector is suppressed during legitimate long-running background primitives (`Monitor`, `Bash run_in_background=true`, `Agent run_in_background=true`, `ScheduleWakeup`, `RemoteTrigger`) via the per-session tracking infrastructure ([#346](https://github.com/littlebearapps/untether/issues/346) / [#347](https://github.com/littlebearapps/untether/issues/347)). |
+| `stuck_after_tool_result_timeout` | float | `300.0` | Seconds of silence after a `tool_result` before the detector fires (60–1800). Matches undici's default idle-body timeout. |
+| `stuck_after_tool_result_recovery_enabled` | bool | `true` | When the detector fires, attempt tiered recovery: Tier 2 SIGTERMs `mcp-remote`/`@modelcontextprotocol` adapter children (forces the SSE reader to error out and unblocks the parent engine); Tier 3 cancels the run via `cancel_event`. Set `false` to log only. Has no effect if `detect_stuck_after_tool_result = false`. |
+| `stuck_after_tool_result_recovery_delay` | float | `60.0` | Seconds between Tier 2 MCP-adapter SIGTERM and Tier 3 cancel escalation (10–600). |
+| `detect_catalog_staleness` | bool | `true` | MCP catalog observability ([#365](https://github.com/littlebearapps/untether/issues/365)) — emit `catalog_staleness.detected` structlog WARNING once per `(session, server, status)` tuple when Claude Code's `system.init` reports any MCP server with a non-`connected` status (e.g. `pending`, `failed`, `needs-auth`). Observability only — no kill or recovery action. Set `false` to silence the warning. Claude runner only. |
+| `notify_catalog_refresh` | bool | `false` | Opt-in experimental ([#365](https://github.com/littlebearapps/untether/issues/365)) — after each `tool_result` batch, send an `mcp_status` control_request on Claude's stdin to nudge the catalog. Documented parent→CLI primitive from Anthropic's `claude-agent-sdk-python` (`get_mcp_status`). Logs `catalog.refresh_sent` INFO on success. Default `false` because the upstream refresh effect on the catalog UI is empirical; enable on staging to measure. Claude runner only. |
+| `prespawn_ram_warn_mb` | int | `2000` | Pre-spawn RAM guard ([#350](https://github.com/littlebearapps/untether/issues/350)) — emit `subprocess.prespawn.ram_warning` when free RAM is below this threshold (MB) at engine spawn. `0` disables the warn tier. |
+| `prespawn_ram_block_mb` | int | `500` | Refuse to spawn the engine subprocess (yields `CompletedEvent(ok=False, error="🛑 Insufficient RAM…")`) when free RAM is below this threshold (MB). `0` disables the block tier; `0` for both fully disables the guard. Must be strictly less than `prespawn_ram_warn_mb` when both are set. |
 
 The stall monitor in `ProgressEdits` fires at 5 min (300s) idle, 10 min for local tools, 15 min for MCP tools, and 30 min for pending approvals. When a local tool is running and the child process is CPU-active, the first stall warning fires but repeat warnings are suppressed — they resume if CPU goes idle (indicating a genuinely stuck tool). The liveness watchdog in the subprocess layer fires at `liveness_timeout` with `/proc` diagnostics. When `stall_auto_kill` is enabled, auto-kill requires a triple safety gate: timeout exceeded + zero TCP connections + CPU ticks not increasing between snapshots.
 
@@ -264,6 +314,21 @@ Auto-continue is suppressed on signal deaths (rc=143/SIGTERM, rc=137/SIGKILL) to
 |-----|------|---------|-------|
 | `enabled` | bool | `true` | Enable automatic session continuation for Claude Code. |
 | `max_retries` | int | `1` | Maximum consecutive auto-continue attempts per run (1–5). |
+
+### `[security]`
+
+Runtime security knobs. Defaults are safe — operators only flip these when investigating a leak or opting out of a probe.
+
+=== "toml"
+
+    ```toml
+    [security]
+    env_audit = true
+    ```
+
+| Key | Type | Default | Notes |
+|-----|------|---------|-------|
+| `env_audit` | bool | `true` | One-shot `/proc/<claude_pid>/environ` sample on first `system.init` ([#361](https://github.com/littlebearapps/untether/issues/361)). Emits `claude.env_audit.leaked_var` WARNING per non-allowlisted name observed (dedup per session per name). Reuses `utils/env_policy.is_allowed`. Linux-only — silently no-ops elsewhere or when /proc is unreadable. Set `false` to opt out (e.g. on hardened hosts where `/proc/<pid>/environ` reads are sensitive). The companion `env -i` wrap on Claude exec ([#361](https://github.com/littlebearapps/untether/issues/361)) is always on and not configurable. |
 
 ## Engine-specific config tables
 

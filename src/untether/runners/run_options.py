@@ -20,6 +20,19 @@ class EngineRunOptions:
     budget_auto_cancel: bool | None = None
 
 
+# Canonical per-engine permission_mode value sets. Used by trigger config
+# validators to reject typos at parse time while staying forward-compatible for
+# engines not yet listed (the validator accepts any non-empty string for those).
+# Extending this dict requires auditing the runner to ensure each value maps to
+# a defined CLI / protocol outcome — see issues #331 (Codex + Gemini completion)
+# and #332 (full cross-engine extension).
+VALID_PERMISSION_MODES_BY_ENGINE: dict[str, frozenset[str]] = {
+    "claude": frozenset(
+        {"default", "plan", "auto", "acceptEdits", "bypassPermissions"}
+    ),
+}
+
+
 _RUN_OPTIONS: ContextVar[EngineRunOptions | None] = ContextVar(
     "untether.engine_run_options", default=None
 )

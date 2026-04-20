@@ -9,6 +9,7 @@ from pydantic import (
     BaseModel,
     ConfigDict,
     Field,
+    SecretStr,
     StringConstraints,
     ValidationError,
     field_validator,
@@ -92,7 +93,27 @@ class TelegramFilesSettings(BaseModel):
 class TelegramTransportSettings(BaseModel):
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
 
-    bot_token: NonEmptyStr
+    # #318: fields in this set require a process restart to take effect.
+    # Everything else hot-reloads via `TelegramBridgeConfig.update_from()`
+    # (#286).  The hot-reload path in `telegram/loop.py:handle_reload` reads
+    # this ClassVar rather than duplicating the list inline, and the
+    # `/config` menu suffixes restart-required settings with 🔄 so agents
+    # and users can tell which edits need a restart before they try them.
+    RESTART_REQUIRED_FIELDS: ClassVar[frozenset[str]] = frozenset(
+        {
+            "bot_token",
+            "chat_id",
+            "session_mode",
+            "topics",
+            "message_overflow",
+        }
+    )
+
+    # #196: SecretStr masks the value in repr()/str()/tracebacks and any
+    # accidental structlog serialisation.  Access the raw value via
+    # bot_token.get_secret_value() at the transport boundary.  The token is
+    # additionally redacted from log URLs by _redact_event_dict (#190).
+    bot_token: SecretStr
     chat_id: StrictInt
     allowed_user_ids: list[StrictInt] = Field(default_factory=list)
     message_overflow: Literal["trim", "split"] = "split"
@@ -108,6 +129,19 @@ class TelegramTransportSettings(BaseModel):
     media_group_debounce_s: float = Field(default=1.0, ge=0)
     topics: TelegramTopicsSettings = Field(default_factory=TelegramTopicsSettings)
     files: TelegramFilesSettings = Field(default_factory=TelegramFilesSettings)
+
+    @field_validator("bot_token", mode="after")
+    @classmethod
+    def _validate_bot_token_not_empty(cls, v: SecretStr) -> SecretStr:
+        """Preserve the pre-#196 NonEmptyStr contract.  SecretStr bypasses
+        str_strip_whitespace, so whitespace-only values would otherwise pass
+        the schema and fail at connect time with a less-helpful error.
+        Returns the *stripped* value so accidental padding (`" token "`) doesn't
+        reach the Telegram API as `https://api.telegram.org/bot %20token%20/`."""
+        token = v.get_secret_value().strip()
+        if not token:
+            raise ValueError("bot_token must not be empty")
+        return SecretStr(token)
 
 
 class TransportsSettings(BaseModel):
@@ -177,6 +211,54 @@ class WatchdogSettings(BaseModel):
     mcp_tool_timeout: float = Field(default=900.0, ge=60, le=7200)
     subagent_timeout: float = Field(default=900.0, ge=60, le=7200)
 
+    # Engine-agnostic "stuck after tool_result" detector (issue #322).
+    # Default threshold of 300s matches undici's non-configurable 5-min
+    # idle-body timeout, which is the root-cause mechanism behind mcp-remote
+    # wedges talking to Cloudflare MCPs.
+    detect_stuck_after_tool_result: bool = False
+    stuck_after_tool_result_timeout: float = Field(default=300.0, ge=60, le=1800)
+    stuck_after_tool_result_recovery_enabled: bool = True
+    stuck_after_tool_result_recovery_delay: float = Field(default=60.0, ge=10, le=600)
+
+    # MCP catalog observability + proactive refresh (#365).
+    # ``detect_catalog_staleness`` is a zero-risk logging hook: when Claude
+    # Code's ``system.init`` event reports any configured MCP server with a
+    # non-``connected`` status, Untether emits a ``catalog_staleness.detected``
+    # structlog warning once per (session, server) pair so operators can
+    # measure the "MCPs flapping" UX independent of real #322 watchdog fires.
+    # Default ON — observability only, no recovery action.
+    detect_catalog_staleness: bool = True
+    # ``notify_catalog_refresh`` is opt-in experimental: after each
+    # ``tool_result`` Untether posts an ``mcp_status`` control_request to
+    # Claude Code's stdin. This is the parent→CLI primitive documented in
+    # Anthropic's ``claude-agent-sdk-python`` (``get_mcp_status()``); whether
+    # it causes Claude Code to re-probe its catalog is empirical, so default
+    # OFF until staging measurement confirms the UX benefit.
+    notify_catalog_refresh: bool = False
+
+    # Pre-spawn RAM guard (#350) — refuse or warn on new engine subprocesses
+    # when the host is near-OOM. 0 disables that tier; set both to 0 to
+    # disable the guard entirely. Warn threshold MUST be > block threshold
+    # when both are set, enforced by a model_validator below (see #350).
+    prespawn_ram_warn_mb: int = Field(default=2000, ge=0, le=65536)
+    prespawn_ram_block_mb: int = Field(default=500, ge=0, le=65536)
+
+    @model_validator(mode="after")
+    def _validate_prespawn_ram_ordering(self) -> WatchdogSettings:
+        # When both tiers are active, warn must sit above block — otherwise
+        # the warn tier is unreachable (spawn would hit block first).
+        # Using 0 disables a tier, which is a legitimate config.
+        if (
+            self.prespawn_ram_warn_mb > 0
+            and self.prespawn_ram_block_mb > 0
+            and self.prespawn_ram_warn_mb <= self.prespawn_ram_block_mb
+        ):
+            raise ValueError(
+                "prespawn_ram_warn_mb must be > prespawn_ram_block_mb when both are active "
+                f"(got warn={self.prespawn_ram_warn_mb}, block={self.prespawn_ram_block_mb})"
+            )
+        return self
+
 
 class ProgressSettings(BaseModel):
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
@@ -185,6 +267,20 @@ class ProgressSettings(BaseModel):
     max_actions: int = Field(default=5, ge=0, le=50)
     min_render_interval: float = Field(default=2.0, ge=0, le=30)
     group_chat_rps: float = Field(default=20.0 / 60.0, gt=0, le=10)
+
+
+class SecuritySettings(BaseModel):
+    """Runtime security knobs (#361).
+
+    ``env_audit`` enables a one-shot ``/proc/<pid>/environ`` sample on
+    Claude session start. Disallowed names emit a structured warning so
+    the operator can see when host env leaks past
+    :func:`utils.env_policy.filtered_env`.
+    """
+
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    env_audit: bool = True
 
 
 class UntetherSettings(BaseSettings):
@@ -210,6 +306,7 @@ class UntetherSettings(BaseSettings):
     progress: ProgressSettings = Field(default_factory=ProgressSettings)
     watchdog: WatchdogSettings = Field(default_factory=WatchdogSettings)
     auto_continue: AutoContinueSettings = Field(default_factory=AutoContinueSettings)
+    security: SecuritySettings = Field(default_factory=SecuritySettings)
 
     @model_validator(mode="before")
     @classmethod
@@ -429,7 +526,8 @@ def require_telegram(settings: UntetherSettings, config_path: Path) -> tuple[str
             "(telegram only for now)."
         )
     tg = settings.transports.telegram
-    return tg.bot_token, tg.chat_id
+    # #196: unwrap SecretStr at the transport boundary.
+    return tg.bot_token.get_secret_value(), tg.chat_id
 
 
 def _resolve_config_path(path: str | Path | None) -> Path:

@@ -23,7 +23,7 @@ from ..progress import ProgressTracker
 from ..runners.run_options import EngineRunOptions
 from ..scheduler import ThreadJob, ThreadScheduler
 from ..settings import TelegramTransportSettings
-from ..transport import MessageRef, SendOptions
+from ..transport import MessageRef, RenderedMessage, SendOptions
 from ..transport_runtime import ResolvedMessage
 from .bridge import CANCEL_CALLBACK_DATA, TelegramBridgeConfig, send_plain
 from .chat_prefs import ChatPrefsStore, resolve_prefs_path
@@ -132,6 +132,40 @@ async def _resolve_engine_run_options(
     )
 
 
+def _apply_trigger_permission_override(
+    run_options: EngineRunOptions | None,
+    context: RunContext | None,
+    *,
+    engine: EngineId | None = None,
+) -> EngineRunOptions | None:
+    """#330: apply a trigger-level `permission_mode` on top of resolved run_options.
+
+    Dispatchers populate ``RunContext.permission_mode`` from
+    ``CronConfig.permission_mode``; this helper overrides the resolved
+    per-chat/topic ``EngineRunOptions.permission_mode`` when a trigger
+    override is present. Logs once when the override actually changes the
+    effective value so staging debug is greppable.
+    """
+    if context is None or context.permission_mode is None:
+        return run_options
+    previous_mode = run_options.permission_mode if run_options is not None else None
+    if run_options is None:
+        new_options = EngineRunOptions(permission_mode=context.permission_mode)
+    else:
+        from dataclasses import replace
+
+        new_options = replace(run_options, permission_mode=context.permission_mode)
+    if previous_mode != context.permission_mode:
+        logger.info(
+            "trigger.cron.permission_mode_override",
+            trigger_source=context.trigger_source,
+            chat_permission_mode=previous_mode,
+            trigger_permission_mode=context.permission_mode,
+            engine=engine,
+        )
+    return new_options
+
+
 def _allowed_chat_ids(cfg: TelegramBridgeConfig) -> set[int]:
     allowed = set(cfg.chat_ids or ())
     allowed.add(cfg.chat_id)
@@ -155,6 +189,55 @@ async def _send_startup(cfg: TelegramBridgeConfig) -> None:
     )
     if sent is not None:
         logger.info("startup.sent", chat_id=cfg.chat_id)
+
+
+async def _notify_restart_required(cfg: TelegramBridgeConfig, keys: list[str]) -> None:
+    """#318 follow-up: broadcast restart-required warning to project chats + admin DMs.
+
+    PR #336 wired the warning to ``cfg.chat_id`` alone; in project-routed
+    deployments that value is the placeholder sentinel and every send
+    fails with "chat not found". This helper instead targets every active
+    project chat plus any ``allowed_user_ids`` admin DM, falling back to
+    ``cfg.chat_id`` only when no routed targets exist. Per-chat failures
+    are logged and skipped so one bad chat can't mask the warning from
+    the rest.
+    """
+    keys_text = ", ".join(f"`{k}`" for k in keys)
+    text = (
+        "\N{CLOCKWISE GAPPED CIRCLE ARROW} "
+        f"Setting {keys_text} changed — restart required to take effect.\n"
+        "Run: `systemctl --user restart untether`"
+    )
+    targets: set[int] = set()
+    targets.update(cfg.runtime.project_chat_ids())
+    targets.update(cfg.allowed_user_ids or ())
+    if not targets:
+        targets.add(cfg.chat_id)
+    sent_count = 0
+    for chat_id in sorted(targets):
+        try:
+            sent = await cfg.exec_cfg.transport.send(
+                channel_id=chat_id,
+                message=RenderedMessage(
+                    text=text,
+                    extra={"parse_mode": "Markdown"},
+                ),
+                options=SendOptions(notify=True),
+            )
+            if sent is not None:
+                sent_count += 1
+        except Exception as exc:  # noqa: BLE001 — logged then continue
+            logger.warning(
+                "config.reload.restart_notify.failed",
+                chat_id=chat_id,
+                error=str(exc),
+            )
+    logger.info(
+        "config.reload.restart_notify.sent",
+        keys=keys,
+        targets=sorted(targets),
+        sent_count=sent_count,
+    )
 
 
 def _dispatch_builtin_command(
@@ -1314,15 +1397,11 @@ async def run_main_loop(
                         # rc4 (#286): unfrozen TelegramBridgeConfig allows most
                         # settings to hot-reload. Only a handful still require a
                         # restart — everything else is applied via update_from().
-                        RESTART_ONLY_KEYS = {
-                            "bot_token",
-                            "chat_id",
-                            "session_mode",
-                            "topics",
-                            "message_overflow",
-                        }
-                        restart_keys = [k for k in changed if k in RESTART_ONLY_KEYS]
-                        hot_keys = [k for k in changed if k not in RESTART_ONLY_KEYS]
+                        # #318: authoritative set lives on the settings model
+                        # so /config, docs, and this reload path agree.
+                        restart_only = TelegramTransportSettings.RESTART_REQUIRED_FIELDS
+                        restart_keys = [k for k in changed if k in restart_only]
+                        hot_keys = [k for k in changed if k not in restart_only]
                         if restart_keys:
                             logger.warning(
                                 "config.reload.transport_config_changed",
@@ -1330,6 +1409,14 @@ async def run_main_loop(
                                 keys=restart_keys,
                                 restart_required=True,
                             )
+                            # #318 (follow-up): PR #336 sent to cfg.chat_id,
+                            # but in project-routed deployments that is the
+                            # placeholder sentinel and every send fails with
+                            # "chat not found". Broadcast to every project
+                            # chat plus admin DMs so the warning actually
+                            # reaches whoever's driving the bot. Per-chat
+                            # failures are logged and skipped.
+                            await _notify_restart_required(cfg, restart_keys)
                         if hot_keys:
                             cfg.update_from(reload.settings.transports.telegram)
                             state.forward_coalesce_s = max(
@@ -1545,6 +1632,14 @@ async def run_main_loop(
                     chat_prefs=state.chat_prefs,
                     topic_store=state.topic_store,
                 )
+                # #330: cron-level permission_mode override wins over the
+                # resolved chat/topic preference. Dispatchers populate
+                # RunContext.permission_mode from CronConfig.permission_mode;
+                # here we apply it to the per-run EngineRunOptions so the
+                # runner's _effective_permission_mode() picks it up.
+                run_options = _apply_trigger_permission_override(
+                    run_options, context, engine=engine_for_overrides
+                )
                 await run_engine(
                     exec_cfg=cfg.exec_cfg,
                     runtime=cfg.runtime,
@@ -1604,7 +1699,12 @@ async def run_main_loop(
 
                 try:
                     trigger_settings = parse_trigger_config(cfg.trigger_config)
-                    trigger_manager = TriggerManager(trigger_settings)
+                    # #317: pass config_path so the manager can load/save
+                    # the run_once fired-state alongside untether.toml.
+                    trigger_manager = TriggerManager(
+                        trigger_settings,
+                        config_path=cfg.runtime.config_path,
+                    )
                     # rc4 (#271): expose trigger_manager to commands via cfg so
                     # /ping and /config can render per-chat trigger indicators.
                     cfg.trigger_manager = trigger_manager

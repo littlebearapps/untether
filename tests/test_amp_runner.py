@@ -285,6 +285,61 @@ def test_translate_result_error() -> None:
     assert completed.ok is False
 
 
+def test_translate_result_extracts_total_cost_usd() -> None:
+    """#316: when AMP's result event carries total_cost_usd, surface it in usage."""
+    state = AmpStreamState(session_id="T-ses1", emitted_started=True, last_text="done")
+    # Simulate an accumulated token usage from prior assistant messages.
+    state.accumulated_usage = {"input_tokens": 100, "output_tokens": 40}
+    events = translate_amp_event(
+        _decode_event(
+            {
+                "type": "result",
+                "subtype": "success",
+                "is_error": False,
+                "result": "done",
+                "duration_ms": 1000,
+                "session_id": "T-ses1",
+                "total_cost_usd": 0.015,
+            }
+        ),
+        title="amp",
+        state=state,
+        meta=None,
+    )
+    completed = events[0]
+    assert isinstance(completed, CompletedEvent)
+    assert completed.usage is not None
+    assert completed.usage["total_cost_usd"] == 0.015
+    assert completed.usage["usage"]["input_tokens"] == 100
+    assert completed.usage["usage"]["output_tokens"] == 40
+
+
+def test_translate_result_without_cost_still_returns_tokens() -> None:
+    """Absent total_cost_usd leaves the token usage intact (and no cost key)."""
+    state = AmpStreamState(session_id="T-ses1", emitted_started=True, last_text="done")
+    state.accumulated_usage = {"input_tokens": 20, "output_tokens": 5}
+    events = translate_amp_event(
+        _decode_event(
+            {
+                "type": "result",
+                "subtype": "success",
+                "is_error": False,
+                "result": "done",
+                "duration_ms": 500,
+                "session_id": "T-ses1",
+            }
+        ),
+        title="amp",
+        state=state,
+        meta=None,
+    )
+    completed = events[0]
+    assert isinstance(completed, CompletedEvent)
+    assert completed.usage is not None
+    assert "total_cost_usd" not in completed.usage
+    assert completed.usage["usage"]["input_tokens"] == 20
+
+
 def test_build_args_new_session() -> None:
     runner = AmpRunner()
     state = AmpStreamState()

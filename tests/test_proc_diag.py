@@ -14,6 +14,7 @@ from untether.utils.proc_diag import (
     format_diag,
     is_cpu_active,
     is_tree_cpu_active,
+    mem_available_kb,
 )
 
 # ---------------------------------------------------------------------------
@@ -293,3 +294,90 @@ def test_process_diag_frozen() -> None:
     diag = ProcessDiag(pid=1, alive=True)
     with pytest.raises(AttributeError):
         diag.pid = 2  # type: ignore[misc]
+
+
+# ---------------------------------------------------------------------------
+# mem_available_kb tests (#350)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.skipif(not sys.platform.startswith("linux"), reason="Linux only")
+def test_mem_available_kb_reads_procfs() -> None:
+    """On Linux, mem_available_kb returns a positive integer."""
+    value = mem_available_kb()
+    assert value is not None
+    assert isinstance(value, int)
+    assert value > 0  # any host we run on has some memory available
+
+
+def test_mem_available_kb_returns_none_on_non_linux(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """On non-Linux, mem_available_kb returns None without touching /proc."""
+    monkeypatch.setattr(sys, "platform", "darwin")
+    assert mem_available_kb() is None
+
+
+def test_mem_available_kb_handles_missing_meminfo(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """OSError from /proc/meminfo → None, not a crash."""
+    monkeypatch.setattr(sys, "platform", "linux")
+    import builtins
+
+    real_open = builtins.open
+
+    def fake_open(path, *args, **kwargs):  # type: ignore[no-untyped-def]
+        if isinstance(path, str) and path == "/proc/meminfo":
+            raise FileNotFoundError(path)
+        return real_open(path, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "open", fake_open)
+    assert mem_available_kb() is None
+
+
+def test_mem_available_kb_handles_malformed_line(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+) -> None:
+    """A /proc/meminfo without a parseable MemAvailable line → None."""
+    # Stage a fake meminfo without the expected second field
+    meminfo = tmp_path / "meminfo"
+    meminfo.write_text("MemTotal:        8000 kB\nMemAvailable:\n")
+    monkeypatch.setattr(sys, "platform", "linux")
+    import builtins
+
+    real_open = builtins.open
+
+    def fake_open(path, *args, **kwargs):  # type: ignore[no-untyped-def]
+        if isinstance(path, str) and path == "/proc/meminfo":
+            return real_open(meminfo, *args, **kwargs)
+        return real_open(path, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "open", fake_open)
+    # "MemAvailable:\n" → parts = ["MemAvailable:"] — len < 2 → returns None
+    assert mem_available_kb() is None
+
+
+def test_mem_available_kb_parses_valid_meminfo(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+) -> None:
+    """A well-formed /proc/meminfo → the MemAvailable KB value."""
+    meminfo = tmp_path / "meminfo"
+    meminfo.write_text(
+        "MemTotal:        8000000 kB\n"
+        "MemFree:         1000000 kB\n"
+        "MemAvailable:    4200000 kB\n"
+        "Buffers:          500000 kB\n"
+    )
+    monkeypatch.setattr(sys, "platform", "linux")
+    import builtins
+
+    real_open = builtins.open
+
+    def fake_open(path, *args, **kwargs):  # type: ignore[no-untyped-def]
+        if isinstance(path, str) and path == "/proc/meminfo":
+            return real_open(meminfo, *args, **kwargs)
+        return real_open(path, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "open", fake_open)
+    assert mem_available_kb() == 4_200_000

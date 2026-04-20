@@ -101,10 +101,28 @@ if echo "$COMMAND" | grep -qF 'hooks.json' && \
 fi
 
 # ── Output ───────────────────────────────────────────────────────
+#
+# Claude Code PreToolUse hook output schema (current as of 2026-04-15):
+#   {
+#     "hookSpecificOutput": {
+#       "hookEventName": "PreToolUse",
+#       "permissionDecision": "deny" | "ask" | "allow",
+#       "permissionDecisionReason": "<text>"
+#     }
+#   }
+# The legacy {"decision":"block","reason":...} shape is silently ignored, so
+# blocks return as no-ops. See https://code.claude.com/docs/en/hooks for the
+# spec.
 
 if [ "$BLOCKED" = true ]; then
-  jq -n --arg reason "$(printf '🛑 RELEASE GUARD: %s\n\nFeature branch and dev branch pushes are allowed. Only master/main, tags, releases, and PR merges are blocked.\n\nTo push a feature branch: git push -u origin <branch>\nTo create a PR to dev: gh pr create --base dev --title "..." --body "..."\nFor master/tags/releases: Nathan runs these manually.' "$REASON")" \
-    '{"decision": "block", "reason": $reason}'
+  REASON_FULL=$(printf '🛑 RELEASE GUARD: %s\n\nFeature branch and dev branch pushes are allowed. Only master/main, tags, releases, and PR merges are blocked.\n\nTo push a feature branch: git push -u origin <branch>\nTo create a PR to dev: gh pr create --base dev --title "..." --body "..."\nFor master/tags/releases: Nathan runs these manually.' "$REASON")
+  jq -n --arg r "$REASON_FULL" '{
+    hookSpecificOutput: {
+      hookEventName: "PreToolUse",
+      permissionDecision: "deny",
+      permissionDecisionReason: $r
+    }
+  }'
 else
   echo '{}'
 fi

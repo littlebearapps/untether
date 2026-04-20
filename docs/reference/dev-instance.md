@@ -70,8 +70,8 @@ Dev (local editable)     Staging (TestPyPI rc)           Release (PyPI)
 @untether_dev_bot        @hetz_lba1_bot                  (staging bot)
 
 Fix bugs, test locally   Bump to 0.35.0rc1               Bump to 0.35.0
-Integration tests        Push master → TestPyPI          Changelog + tag v0.35.0
-                         staging.sh install 0.35.0rc1     release.yml → PyPI
+Integration tests        Merge to dev → TestPyPI         PR dev → master, merge
+                         staging.sh install 0.35.0rc1     auto-tag-on-master.yml → release.yml → PyPI
                          Dogfood ~1 week                  staging.sh reset → restart
                          Issue watcher catches bugs
                          Fix → 0.35.0rc2 if needed
@@ -81,8 +81,8 @@ Integration tests        Push master → TestPyPI          Changelog + tag v0.35
 
 1. Bump version in `pyproject.toml` to `X.Y.Zrc1` (no changelog entry needed)
 2. Run `uv lock` to sync lockfile
-3. Commit: `chore: staging X.Y.Zrc1`
-4. Push to `master` — CI auto-publishes to TestPyPI
+3. Commit on a feature branch: `chore: staging X.Y.Zrc1`
+4. PR to `dev` and merge — push to `dev` auto-publishes to TestPyPI via CI
 5. Wait for CI to pass
 6. Install on staging bot:
    ```bash
@@ -93,19 +93,19 @@ Integration tests        Push master → TestPyPI          Changelog + tag v0.35
 
 ### Fix bugs during staging
 
-1. Fix on a branch, merge to master
-2. Bump to `X.Y.Zrc2`, run `uv lock`
-3. Commit: `chore: staging X.Y.Zrc2`
-4. Push → CI publishes to TestPyPI
-5. `scripts/staging.sh install X.Y.Zrc2 && systemctl --user restart untether`
+1. Fix on a feature branch, PR to `dev`, merge
+2. Bump to `X.Y.Zrc2`, run `uv lock`, commit, push (same dev cycle)
+3. CI publishes the new rc to TestPyPI on the dev push
+4. `scripts/staging.sh install X.Y.Zrc2 && systemctl --user restart untether`
 
-### Promote to release
+### Promote to release (single-gate flow)
 
-1. Bump to `X.Y.Z` in `pyproject.toml`
+1. Bump to `X.Y.Z` in `pyproject.toml` (drop the rc suffix)
 2. Add full changelog entry covering all changes since last stable release
-3. Run `uv lock`, commit, tag `vX.Y.Z`, push with tags
-4. `release.yml` publishes to PyPI
-5. `scripts/staging.sh reset && systemctl --user restart untether`
+3. Run `uv lock`, commit on a feature branch
+4. PR `dev` → `master`. Nathan reviews and squash-merges — **this is the single release gate**
+5. `auto-tag-on-master.yml` detects the stable version and creates `vX.Y.Z`; `release.yml` fires on the tag, runs full CI, publishes to PyPI via OIDC, and creates the GitHub Release. **No manual tag, no PyPI environment approval.**
+6. After PyPI publishes: `scripts/staging.sh reset && systemctl --user restart untether`
 
 ### Rollback from staging
 

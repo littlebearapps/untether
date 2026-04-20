@@ -57,10 +57,17 @@ jobs:
 
       - name: Install dependencies
         if: matrix.do_sync
-        run: uv sync --frozen ${{ matrix.sync_args }}
+        env:
+          SYNC_ARGS: ${{ matrix.sync_args }}
+        run: uv sync --frozen $SYNC_ARGS
 
       - name: Run check
-        run: ${{ matrix.command }}
+        env:
+          CMD: ${{ matrix.command }}
+        # Use `bash -c "$CMD"` so shell control operators in matrix commands
+        # (notably `&&` in the docs job) are interpreted by the shell rather
+        # than treated as literal argv tokens to the first word of $CMD.
+        run: bash -euo pipefail -c "$CMD"
         continue-on-error: ${{ matrix.allow_failure || false }}
 
   pytest:

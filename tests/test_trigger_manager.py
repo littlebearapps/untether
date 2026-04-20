@@ -414,11 +414,17 @@ class TestTriggerManagerHelpers:
         # New reference reflects the removal.
         assert [c.id for c in mgr.crons] == ["a", "c"]
 
-    def test_remove_cron_then_update_rehydrates(self):
-        """Config reload re-adds run_once crons that were previously removed."""
+    def test_remove_cron_then_update_does_not_rehydrate(self):
+        """#317: config reload no longer re-activates run_once crons that
+        already fired.
+
+        Prior to #317 the manager rehydrated on reload, effectively re-firing
+        every one-shot. That was the bug. Now the in-memory fired set is
+        consulted on reload regardless of whether a state file is configured,
+        so the reload does not re-activate the cron."""
         mgr = TriggerManager(_settings(crons=[_cron("a", run_once=True)]))
         assert mgr.remove_cron("a") is True
         assert mgr.cron_ids() == []
-        # Simulate a config reload with the same cron still in TOML.
         mgr.update(_settings(crons=[_cron("a", run_once=True)]))
-        assert mgr.cron_ids() == ["a"]
+        assert mgr.cron_ids() == []
+        assert mgr.fired_run_once_ids() == ["a"]

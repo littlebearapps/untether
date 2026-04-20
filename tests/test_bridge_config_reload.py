@@ -13,6 +13,7 @@ from untether.settings import (
     TelegramTransportSettings,
 )
 from untether.telegram.bridge import TelegramBridgeConfig
+from untether.telegram.loop import _notify_restart_required
 
 
 def _settings(**overrides) -> TelegramTransportSettings:
@@ -158,3 +159,125 @@ class TestTriggerManagerField:
         mgr = TriggerManager()
         cfg.trigger_manager = mgr
         assert cfg.trigger_manager is mgr
+
+
+# ── #318: RESTART_REQUIRED_FIELDS on settings models ───────────────────
+
+
+class TestRestartRequiredFields:
+    """#318: the set of fields that require a process restart is authoritative
+    on the settings model, not scattered across loop.py / /config / docs. This
+    locks the invariant in so future edits to the model stay in sync."""
+
+    def test_classvar_exists_and_is_frozen(self):
+        assert hasattr(TelegramTransportSettings, "RESTART_REQUIRED_FIELDS")
+        assert isinstance(TelegramTransportSettings.RESTART_REQUIRED_FIELDS, frozenset)
+
+    def test_expected_members(self):
+        """v0.35.2 baseline — update with care. Additions need matching
+        handle_reload() logic, config.md docs, and `/config` 🔄 annotations.
+        Removals need hot-reload wiring in TelegramBridgeConfig.update_from."""
+        assert (
+            frozenset(
+                {
+                    "bot_token",
+                    "chat_id",
+                    "session_mode",
+                    "topics",
+                    "message_overflow",
+                }
+            )
+            == TelegramTransportSettings.RESTART_REQUIRED_FIELDS
+        )
+
+    def test_every_listed_field_exists_on_model(self):
+        """Every entry must be a real field. Typos would silently neuter the
+        restart warning (membership test would never hit)."""
+        field_names = set(TelegramTransportSettings.model_fields.keys())
+        stray = TelegramTransportSettings.RESTART_REQUIRED_FIELDS - field_names
+        assert stray == set(), (
+            f"RESTART_REQUIRED_FIELDS references unknown fields: {stray}"
+        )
+
+    def test_loop_consumes_the_classvar(self):
+        """loop.py:handle_reload should read the ClassVar, not inline a copy.
+        This grep-style test prevents silent drift between the two."""
+        from pathlib import Path
+
+        loop_src = Path("src/untether/telegram/loop.py").read_text()
+        # The legacy inline set is gone
+        assert "RESTART_ONLY_KEYS" not in loop_src, (
+            "handle_reload still has an inline RESTART_ONLY_KEYS set — "
+            "consume TelegramTransportSettings.RESTART_REQUIRED_FIELDS instead"
+        )
+        # The ClassVar is actually referenced
+        assert "TelegramTransportSettings.RESTART_REQUIRED_FIELDS" in loop_src, (
+            "handle_reload should reference "
+            "TelegramTransportSettings.RESTART_REQUIRED_FIELDS"
+        )
+
+
+# ── #318 follow-up: broadcast to project chats + admin DMs ───────────
+
+
+class TestNotifyRestartRequired:
+    """PR #336 sent the warning to cfg.chat_id; in project-routed deployments
+    that's the placeholder sentinel and every send fails. This batch of tests
+    locks in the broader broadcast behaviour so the fix doesn't regress."""
+
+    @pytest.mark.anyio
+    async def test_sends_to_allowed_user_ids(self):
+        transport = FakeTransport()
+        cfg = make_cfg(transport)
+        cfg.allowed_user_ids = (555, 777)
+        await _notify_restart_required(cfg, ["session_mode"])
+        chat_ids = sorted(call["channel_id"] for call in transport.send_calls)
+        assert chat_ids == [555, 777]
+        for call in transport.send_calls:
+            assert "`session_mode`" in call["message"].text
+            assert "restart required" in call["message"].text
+            assert "systemctl" in call["message"].text
+
+    @pytest.mark.anyio
+    async def test_falls_back_to_transport_chat_id_when_no_targets(self):
+        transport = FakeTransport()
+        cfg = make_cfg(transport)
+        cfg.allowed_user_ids = ()
+        await _notify_restart_required(cfg, ["bot_token"])
+        chat_ids = [call["channel_id"] for call in transport.send_calls]
+        assert chat_ids == [cfg.chat_id]
+
+    @pytest.mark.anyio
+    async def test_message_lists_all_changed_keys(self):
+        transport = FakeTransport()
+        cfg = make_cfg(transport)
+        cfg.allowed_user_ids = (1,)
+        await _notify_restart_required(cfg, ["session_mode", "topics"])
+        call = transport.send_calls[0]
+        assert "`session_mode`" in call["message"].text
+        assert "`topics`" in call["message"].text
+
+    @pytest.mark.anyio
+    async def test_continues_past_send_failures(self):
+        class FlakyTransport(FakeTransport):
+            async def send(self, **kw):  # type: ignore[override]
+                if kw["channel_id"] == 1:
+                    raise RuntimeError("telegram api error")
+                return await super().send(**kw)
+
+        transport = FlakyTransport()
+        cfg = make_cfg(transport)
+        cfg.allowed_user_ids = (1, 2, 3)
+        # Must not raise — per-chat failures are logged and skipped.
+        await _notify_restart_required(cfg, ["session_mode"])
+        chat_ids = sorted(call["channel_id"] for call in transport.send_calls)
+        assert chat_ids == [2, 3]
+
+    @pytest.mark.anyio
+    async def test_markdown_parse_mode_set(self):
+        transport = FakeTransport()
+        cfg = make_cfg(transport)
+        cfg.allowed_user_ids = (1,)
+        await _notify_restart_required(cfg, ["session_mode"])
+        msg = transport.send_calls[0]["message"]
+        assert msg.extra.get("parse_mode") == "Markdown"

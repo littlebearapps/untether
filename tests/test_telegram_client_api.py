@@ -239,3 +239,39 @@ async def test_decode_result_invalid_payload_returns_none() -> None:
     client = HttpBotClient("token", http_client=httpx.AsyncClient())
     assert client._decode_result(method="getMe", payload=["bad"], model=User) is None
     await client.close()
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    "bogus_path",
+    [
+        "https://evil.example.com/exfil",  # absolute URL
+        "//evil.example.com/x",  # scheme-relative
+        "../../../etc/passwd",  # traversal
+        "documents/../../secret",  # embedded traversal
+        "/absolute/unix/path",  # absolute path
+    ],
+)
+async def test_download_file_rejects_path_with_scheme_or_traversal(
+    bogus_path: str,
+) -> None:
+    """#204: a spoofed/tampered getFile response that returns a file_path
+    containing a URL scheme or '..' must not cause download_file to issue a
+    request to an arbitrary host."""
+
+    class _NoNetworkClient(HttpBotClient):
+        def __init__(self) -> None:
+            super().__init__("token", http_client=httpx.AsyncClient())
+            self.got_called = False
+
+        async def _request(self, *args, **kwargs):  # pragma: no cover
+            self.got_called = True
+            raise AssertionError("network request must not be attempted")
+
+    client = _NoNetworkClient()
+    try:
+        result = await client.download_file(bogus_path)
+        assert result is None
+        assert client.got_called is False
+    finally:
+        await client.close()

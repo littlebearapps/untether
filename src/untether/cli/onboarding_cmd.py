@@ -65,7 +65,8 @@ def chat_id(
         settings, _ = load_settings_optional_fn()
         if settings is not None:
             tg = settings.transports.telegram
-            token = tg.bot_token or None
+            # #196: unwrap SecretStr and fall back to None on empty string.
+            token = tg.bot_token.get_secret_value() or None
     chat = anyio.run(partial(onboarding_mod.capture_chat_id, token=token))
     if chat is None:
         raise typer.Exit(code=1)

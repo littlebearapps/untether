@@ -136,6 +136,21 @@ The stall watchdog monitors engine subprocesses for periods of inactivity (no JS
 
 **Tuning:** All thresholds are configurable via `[watchdog]` in `untether.toml`. Use `tool_timeout` to increase the initial threshold for local tools (default 10 min), and `mcp_tool_timeout` for MCP tools (default 15 min). See the [config reference](../reference/config.md#watchdog).
 
+## Claude Code hangs after an MCP tool_result
+
+**Symptoms:** Claude Code goes silent immediately after an MCP tool returns — the `tool_result` arrives in the JSONL stream but the assistant never responds. Ring buffer fills with `user`/`tool_result` events and stays there. Often hits Cloudflare's remote MCP servers via `mcp-remote`.
+
+Root cause is upstream — [claude-code#39700](https://github.com/anthropics/claude-code/issues/39700) combined with undici's idle-body timeout in `mcp-remote` ([geelen/mcp-remote#226](https://github.com/geelen/mcp-remote/issues/226)) — but Untether ships an opt-in detector plus a tiered workaround ([#322](https://github.com/littlebearapps/untether/issues/322)).
+
+Enable in `~/.untether/untether.toml`:
+
+```toml
+[watchdog]
+detect_stuck_after_tool_result = true
+```
+
+On detection (default 5 min after `tool_result` arrives with no assistant follow-up), Untether logs `progress_edits.stuck_after_tool_result`, SIGTERMs any `mcp-remote` / `@modelcontextprotocol` adapter children to force the SSE reader to error out, and finally cancels the run if the engine stays silent for another 60 seconds. Tune via `stuck_after_tool_result_timeout` and `stuck_after_tool_result_recovery_delay`. See the [config reference](../reference/config.md#watchdog).
+
 ## Claude Code exits without finishing (auto-continue)
 
 **Symptoms:** Claude Code exits after receiving tool results without processing them. You see "⚠️ Auto-continuing" in the chat, or the session ends prematurely with no final answer.
@@ -230,10 +245,11 @@ Run `untether doctor` to validate voice configuration.
 
 1. Check that triggers are enabled: `[triggers] enabled = true`
 2. Verify the server is running: `curl http://127.0.0.1:9876/health` (adjust host/port)
-3. Check auth — if using HMAC, the sending service must sign requests with the same secret
-4. Check `event_filter` — if set, only matching event types are processed
-5. Check firewall rules if the webhook server is behind NAT
-6. Look at `debug.log` for incoming request logs
+3. **Port already in use?** As of [#320](https://github.com/littlebearapps/untether/issues/320), a port conflict degrades gracefully — the rest of the bot (polling, commands, crons) stays up, but webhook delivery is disabled. Look for `triggers.server.bind_failed` in the log (`journalctl --user -u untether \| grep bind_failed`); the entry includes the occupied port and a `fix` suggestion. Free the port or set `[triggers.server] port = <N>` in `untether.toml`.
+4. Check auth — if using HMAC, the sending service must sign requests with the same secret
+5. Check `event_filter` — if set, only matching event types are processed
+6. Check firewall rules if the webhook server is behind NAT
+7. Look at `debug.log` for incoming request logs
 
 ## Config change didn't take effect
 
@@ -241,8 +257,8 @@ Run `untether doctor` to validate voice configuration.
 
 1. **Check `watch_config`:** Hot-reload requires `watch_config = true` in the top-level config. Without it, changes only apply on restart.
 2. **Hot-reloadable settings** apply immediately: `voice_transcription`, `[files]`, `allowed_user_ids`, `show_resume_line`, trigger crons/webhooks/auth/timezones.
-3. **Restart-only settings** require `/restart` or `systemctl restart`: `bot_token`, `chat_id`, `session_mode`, `topics.enabled`, `message_overflow`, `triggers.server.host`/`port`.
-4. Check the log for `config.reload.applied` (success) or `config.reload.transport_config_changed restart_required=True` (restart needed).
+3. **Restart-only settings** require `/restart` or `systemctl restart`: `bot_token`, `chat_id`, `session_mode`, `topics.enabled`, `message_overflow`, `triggers.server.host`/`port`. Editing one of these in a running bot triggers a Telegram 🔄 warning to every project chat plus any `allowed_user_ids` admin DM ([#318](https://github.com/littlebearapps/untether/issues/318)) so you won't silently keep running on the stale value.
+4. Check the log for `config.reload.applied` (success), `config.reload.transport_config_changed restart_required=True` (restart needed), or `config.reload.restart_notify.sent` (Telegram warning broadcast).
 
 ## /at delay not firing
 

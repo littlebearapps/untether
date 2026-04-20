@@ -44,6 +44,7 @@ class AmpResult(_Event, tag="result"):
     session_id: str | None = None
     error: str | None = None
     usage: dict[str, Any] | None = None
+    total_cost_usd: float | None = None
 
 
 type AmpEvent = SystemInit | UserMessage | AssistantMessage | AmpResult

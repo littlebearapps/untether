@@ -285,29 +285,54 @@ systemctl --user restart untether
 - rc versions do **NOT** require changelog entries (`validate_release.py` skips them)
 - Commit message: `chore: staging X.Y.ZrcN`
 
-## Phase 7: Tag and publish
+## Phase 7: Merge to master (single-gate release)
+
+The release flow uses a single approval gate: **the master PR review IS the release approval**. Once Nathan squash-merges a PR with a stable version (e.g. `0.35.2`, no rc/a/b/dev suffix) to master, everything else is automatic.
+
+### Claude Code's role
+
+- Prepare the version bump on a feature branch (`pyproject.toml`, `CHANGELOG.md`, `uv.lock`)
+- Open a PR from `dev` → `master` with a release summary
+- Wait for CI to go green
+- Hand off to Nathan with a one-line instruction: "merge PR #N when ready"
+
+### Nathan's role
+
+- Review the PR on GitHub
+- Squash-merge to master in the GitHub UI
+
+That's it. No tag creation, no PyPI environment approval. The git tag and PyPI publish happen automatically:
+
+1. **`auto-tag-on-master.yml`** fires on the master push, reads `pyproject.toml`, and pushes a `vX.Y.Z` tag (skips pre-release versions like `0.35.2rc1`)
+2. **`release.yml`** fires on the tag push:
+   - Validates the tag matches `pyproject.toml` version
+   - Runs the full pytest suite (Python 3.12/3.13/3.14)
+   - Builds wheel + sdist via `uv build`, validates with `twine check` and `check-wheel-contents`
+   - Publishes to PyPI via OIDC trusted publishing (no manual approval — the PR merge was the approval)
+   - Creates a GitHub Release with auto-generated notes and uploads the dist artifacts
+
+### Why the single gate is safe
+
+The defenses that the legacy `pypi` environment reviewer was providing are already covered upstream:
+
+- Branch protection on master: only Nathan can merge via PR
+- `validate_release.py` runs in CI on version-bump PRs (changelog format, issue links, date)
+- All CI checks must pass before the PR can merge
+- `release.yml` re-validates tag-vs-version match
+- PyPI trusted publishing via OIDC (no static API token to leak)
+- The release-guard hooks block Claude Code from creating tags or pushing master directly
+
+### Manual override (rare)
+
+If `auto-tag-on-master.yml` fails or you need to tag manually:
 
 ```bash
-# Commit release changes (version bump, changelog, lockfile)
-git add pyproject.toml CHANGELOG.md uv.lock
-git commit -m "chore: release vX.Y.Z"
-
-# Tag
+git checkout master && git pull
 git tag vX.Y.Z
-
-# Push commit and tag
-git push origin master --tags
+git push origin vX.Y.Z   # triggers release.yml directly
 ```
 
-The `release.yml` workflow triggers automatically on `v*` tags:
-
-1. Validates tag matches `pyproject.toml` version
-2. Runs full pytest suite
-3. Builds wheel + sdist via `uv build`, validates with `twine check` and `check-wheel-contents`
-4. Publishes to PyPI via trusted publishing (OIDC) — requires reviewer approval on the `pypi` GitHub Environment
-5. Creates a GitHub Release with auto-generated notes and uploads dist artifacts
-
-**Do not push the tag until the commit is on `master`.**
+Both Claude Code and Nathan can do this. The release-guard hook blocks Claude Code from `git tag v*`, so this path is Nathan-only by design.
 
 ## Post-release verification
 

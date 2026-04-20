@@ -2,7 +2,7 @@
 name = "untether"
 authors = [{name = "Little Bear Apps", email = "hello@littlebearapps.com"}]
 maintainers = [{name = "Little Bear Apps", email = "hello@littlebearapps.com"}]
-version = "0.35.1"
+version = "0.35.2"
 keywords = ["telegram", "claude-code", "codex", "opencode", "pi", "gemini-cli", "amp", "ai-agents", "coding-assistant", "remote-control", "cli-bridge"]
 description = "Run AI coding agents from your phone. Bridges Claude Code, Codex, OpenCode, Pi, Gemini CLI, and Amp to Telegram with interactive permissions, voice input, cost tracking, and live progress."
 readme = {file = "README.md", content-type = "text/markdown"}
@@ -79,6 +79,7 @@ stats = "untether.telegram.commands.stats:BACKEND"
 auth = "untether.telegram.commands.auth:BACKEND"
 threads = "untether.telegram.commands.threads:BACKEND"
 at = "untether.telegram.commands.at:BACKEND"
+health = "untether.telegram.commands.health:BACKEND"
 
 [build-system]
 requires = ["uv_build>=0.9.18,<0.11.0"]
@@ -156,8 +157,16 @@ ignore = [
 known-first-party = ["untether"]
 
 [tool.bandit]
-# Untether is a subprocess manager — these are expected patterns
-skips = ["B101", "B105", "B404", "B603", "B607"]
+# Retained skips:
+#   B101 — asserts are used for type-narrowing and invariant checks
+#   B105 — "hardcoded password" false-positives on string literals like
+#          "--force" that aren't passwords
+#   B404 — "consider security of subprocess module"; Untether is a subprocess
+#          manager, flagging every `import subprocess` adds no signal
+# Removed in #202: B603/B607 global skips.  Each remaining subprocess call
+# site is now annotated inline with `# nosec` + justification, so new
+# subprocess usage is flagged by CI by default.
+skips = ["B101", "B105", "B404"]
 
 [tool.ty.src]
 include = ["src", "tests"]

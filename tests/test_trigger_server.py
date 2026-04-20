@@ -10,7 +10,7 @@ from aiohttp.test_utils import TestClient, TestServer
 
 from untether.transport import MessageRef
 from untether.triggers.dispatcher import TriggerDispatcher
-from untether.triggers.server import build_webhook_app
+from untether.triggers.server import build_webhook_app, run_webhook_server
 from untether.triggers.settings import TriggersSettings, parse_trigger_config
 
 
@@ -607,3 +607,51 @@ async def test_event_filter_allows_matching():
             json={"ref": "refs/heads/main"},
         )
         assert resp.status == 202
+
+
+@pytest.mark.anyio
+async def test_bind_failure_degrades_gracefully(monkeypatch):
+    """#320: an OSError on TCPSite.start() must not propagate.
+
+    Port conflicts (another process on the configured port) previously crashed
+    the bot via an unhandled OSError propagating through the anyio task group.
+    Now the webhook server logs a structured `triggers.server.bind_failed` and
+    returns, so polling/commands/crons stay up.
+    """
+    from aiohttp.web import TCPSite
+
+    from untether.triggers import server as server_module
+
+    async def _raise_addr_in_use(self):  # type: ignore[no-untyped-def]
+        raise OSError(98, "Address already in use")
+
+    monkeypatch.setattr(TCPSite, "start", _raise_addr_in_use)
+
+    # Intercept the module-level structlog logger directly — more robust than
+    # stdout/stderr capture, which depends on how structlog was configured by
+    # earlier tests in the session.
+    recorded: list[tuple[str, dict]] = []
+
+    class _RecordingLogger:
+        def info(self, event, **fields):
+            recorded.append((event, fields))
+
+        def error(self, event, **fields):
+            recorded.append((event, fields))
+
+    monkeypatch.setattr(server_module, "logger", _RecordingLogger())
+
+    settings = _make_settings()
+    dispatcher, _, _ = _make_dispatcher()
+
+    # Must return normally — no exception propagates.
+    await run_webhook_server(settings, dispatcher)
+
+    events = [name for name, _ in recorded]
+    assert "triggers.server.bind_failed" in events, (
+        f"expected triggers.server.bind_failed in {events!r}"
+    )
+    fields = next(f for name, f in recorded if name == "triggers.server.bind_failed")
+    assert fields["port"] == settings.server.port
+    assert "ss -tlnp" in fields["hint"]
+    assert "untether.toml" in fields["fix"]

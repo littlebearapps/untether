@@ -17,7 +17,8 @@ def test_settings_strips_and_expands_transport_config(tmp_path: Path) -> None:
 
     assert settings.transport == "telegram"
     assert settings.plugins.enabled == ["foo"]
-    assert settings.transports.telegram.bot_token == "token"
+    # #196: bot_token is SecretStr
+    assert settings.transports.telegram.bot_token.get_secret_value() == "token"
 
 
 def test_settings_rejects_bool_chat_id(tmp_path: Path) -> None:

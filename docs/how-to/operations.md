@@ -25,6 +25,24 @@ GET http://127.0.0.1:9876/health
 
 Returns `{"status": "ok", "webhooks": N}` where N is the number of configured webhooks. Useful for external monitoring tools.
 
+### Health snapshot
+
+`/health` consolidates RAM, the Untether process, triggers, and today's API cost into a single message — handy as a one-shot diagnostic when a chat suddenly stops responding.
+
+!!! untether "Untether"
+    💚 health
+    🧠 RAM: 18.2 / 32.0 GB · swap: 0 / 4.0 GB
+    🐍 untether: pid 1543657 · 70 MB RSS · 13 FDs · 1 child
+    ⏰ triggers: 2 crons, 1 webhook
+    💰 today: $1.42
+    ⏱ uptime: 3d 14h 22m
+
+Each section degrades gracefully when its source is unavailable (non-Linux, no `trigger_manager`, no cost tracker). `/health` is project-aware — `children` reflects the current Untether process tree (Claude Code subprocesses, MCP servers, workerd grandchildren under #275-style cleanup). When triggers are disabled in config, the line reads `triggers: disabled`.
+
+## RAM guard (#350)
+
+Untether refuses to spawn a new engine subprocess when free RAM is below `[watchdog] prespawn_ram_block_mb` (default 500 MB), and warns at `prespawn_ram_warn_mb` (default 2000 MB). On block the run completes early with `🛑 Insufficient RAM` instead of spawning a doomed subprocess that would leak memory under OOM. Set either threshold to `0` to disable that tier; `0 / 0` disables the guard entirely. See [config: `[watchdog]`](../reference/config.md#watchdog).
+
 ## Graceful restart
 
 Send `/restart` in Telegram to initiate a graceful shutdown:

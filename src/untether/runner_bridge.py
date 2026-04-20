@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import contextlib
+import os
+import signal as _signal
 import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
@@ -29,6 +31,28 @@ from .transport import (
 
 logger = get_logger(__name__)
 
+
+@dataclass
+class _StuckAfterToolResultState:
+    """Per-episode state for the stuck-after-tool_result detector (#322).
+
+    Created on first detection; reset when the stream emits any event (which
+    clears `_stuck_state` in on_event). Tracks whether Tier 2 adapter-kill
+    recovery has been attempted and whether Tier 3 final cancel fired.
+    """
+
+    first_detected_at: float
+    recovery_attempted: bool = False
+    recovery_attempted_at: float = 0.0
+    cancelled: bool = False
+
+
+# Child-process cmdline substrings that identify MCP adapter subprocesses
+# we're willing to SIGTERM during Tier 2 recovery.  `mcp-remote` (geelen's
+# npm bridge) is the specific adapter implicated in #322; other
+# `@modelcontextprotocol/*` stdio bridges share the same failure mode.
+_MCP_ADAPTER_CMDLINE_HINTS = ("mcp-remote", "@modelcontextprotocol")
+
 # ---------------------------------------------------------------------------
 # Ephemeral message registry
 # ---------------------------------------------------------------------------
@@ -38,6 +62,13 @@ logger = get_logger(__name__)
 
 _EPHEMERAL_MSGS: dict[tuple[ChannelId, MessageId], list[MessageRef]] = {}
 
+# #203: companion timestamp map so stale entries from crashed/abnormally-
+# exited runs can be swept after _REGISTRY_TTL_SECONDS.  Kept parallel to
+# avoid changing the value shape consumed by read paths.
+_EPHEMERAL_MSGS_TS: dict[tuple[ChannelId, MessageId], float] = {}
+
+_REGISTRY_TTL_SECONDS = 3600.0  # 1 hour
+
 
 def register_ephemeral_message(
     channel_id: ChannelId,
@@ -45,8 +76,11 @@ def register_ephemeral_message(
     ref: MessageRef,
 ) -> None:
     """Register a message for deletion when the anchored run finishes."""
+    import time as _time
+
     key = (channel_id, anchor_message_id)
     _EPHEMERAL_MSGS.setdefault(key, []).append(ref)
+    _EPHEMERAL_MSGS_TS[key] = _time.monotonic()
 
 
 # Outline message cleanup registry.
@@ -55,6 +89,8 @@ def register_ephemeral_message(
 # delete_outline_messages() which the callback handler calls.
 
 _OUTLINE_REGISTRY: dict[str, tuple[Any, list[MessageRef]]] = {}
+# #203: companion timestamp map (see _EPHEMERAL_MSGS_TS).
+_OUTLINE_REGISTRY_TS: dict[str, float] = {}
 
 
 def register_outline_cleanup(
@@ -63,7 +99,10 @@ def register_outline_cleanup(
     refs: list[MessageRef],
 ) -> None:
     """Register outline refs for a session so the callback handler can delete them."""
+    import time as _time
+
     _OUTLINE_REGISTRY[session_id] = (transport, refs)
+    _OUTLINE_REGISTRY_TS[session_id] = _time.monotonic()
 
 
 async def delete_outline_messages(session_id: str) -> None:
@@ -73,6 +112,7 @@ async def delete_outline_messages(session_id: str) -> None:
     and removes the stale keyboard on its next render cycle.
     """
     entry = _OUTLINE_REGISTRY.pop(session_id, None)
+    _OUTLINE_REGISTRY_TS.pop(session_id, None)
     if entry is None:
         return
     transport, refs = entry
@@ -82,6 +122,35 @@ async def delete_outline_messages(session_id: str) -> None:
         except Exception:  # noqa: BLE001
             logger.warning("outline_cleanup.delete_failed", exc_info=True)
     refs.clear()
+
+
+def sweep_stale_registries(now: float | None = None) -> int:
+    """Drop ephemeral/outline entries older than _REGISTRY_TTL_SECONDS.
+
+    Runs in-process every time any ProgressEdits._stall_monitor tick fires
+    (via the caller) — handles the case where a run crashes or exits
+    abnormally without the usual delete_ephemeral/delete_outline_messages
+    cleanup path firing.  Returns the number of entries pruned.  #203.
+    """
+    import time as _time
+
+    if now is None:
+        now = _time.monotonic()
+
+    pruned = 0
+    for key, ts in list(_EPHEMERAL_MSGS_TS.items()):
+        if now - ts > _REGISTRY_TTL_SECONDS:
+            _EPHEMERAL_MSGS.pop(key, None)
+            _EPHEMERAL_MSGS_TS.pop(key, None)
+            pruned += 1
+    for sid, ts in list(_OUTLINE_REGISTRY_TS.items()):
+        if now - ts > _REGISTRY_TTL_SECONDS:
+            _OUTLINE_REGISTRY.pop(sid, None)
+            _OUTLINE_REGISTRY_TS.pop(sid, None)
+            pruned += 1
+    if pruned:
+        logger.info("runner_bridge.registries_swept", pruned=pruned)
+    return pruned
 
 
 # ---------------------------------------------------------------------------
@@ -319,6 +388,36 @@ def _resolve_presenter(
     return default_presenter
 
 
+_USAGE_SCHEMA_WARNED = False
+_USAGE_EXPECTED_WINDOW_FIELDS = frozenset({"utilization", "resets_at"})
+
+
+def _validate_usage_schema(data: dict[str, Any]) -> None:
+    """Log a one-shot warning if the subscription-usage payload is missing
+    expected fields. Does not mutate `data` — downstream code already handles
+    missing sections defensively; this is purely an observability signal so
+    API-shape drift is noticed instead of silently ignored."""
+    global _USAGE_SCHEMA_WARNED
+    if _USAGE_SCHEMA_WARNED:
+        return
+    missing: list[str] = []
+    for window in ("five_hour", "seven_day"):
+        section = data.get(window)
+        if section is None:
+            continue
+        if not isinstance(section, dict):
+            missing.append(f"{window}:not_a_dict")
+            continue
+        missing.extend(
+            f"{window}.{field_name}"
+            for field_name in _USAGE_EXPECTED_WINDOW_FIELDS
+            if field_name not in section
+        )
+    if missing:
+        _USAGE_SCHEMA_WARNED = True
+        logger.warning("claude_usage.schema_mismatch", missing=missing)
+
+
 async def _maybe_append_usage_footer(
     msg: RenderedMessage,
     *,
@@ -330,13 +429,11 @@ async def _maybe_append_usage_footer(
     When False (default), only appends warnings at >=70% threshold.
     """
     try:
-        from .telegram.commands.usage import (
-            _time_until,
-            fetch_claude_usage,
-            format_usage_compact,
-        )
+        from .telegram.commands.usage import _time_until, format_usage_compact
+        from .utils.usage_cache import fetch_claude_usage_cached
 
-        data = await fetch_claude_usage()
+        data = await fetch_claude_usage_cached()
+        _validate_usage_schema(data)
 
         if always_show:
             compact = format_usage_compact(data)
@@ -396,7 +493,7 @@ def _format_run_cost(usage: dict[str, Any] | None) -> str | None:
         else:
             parts.append(f"${cost:.4f}")
     turns = usage.get("num_turns")
-    if turns:
+    if turns is not None:
         parts.append(f"{turns} tn")
     duration_ms = usage.get("duration_ms")
     if duration_ms:
@@ -738,6 +835,14 @@ class ProgressEdits:
         self._stall_repeat_seconds: float = 180.0
         self._prev_recent_events: list[tuple[float, str]] | None = None
         self._frozen_ring_count: int = 0
+        # Stuck-after-tool_result detector (#322). Instance overrides of the
+        # class-level defaults, populated from WatchdogSettings in
+        # handle_message.
+        self._stuck_after_tool_result_enabled: bool = False
+        self._stuck_after_tool_result_timeout: float = 300.0
+        self._stuck_after_tool_result_recovery_enabled: bool = True
+        self._stuck_after_tool_result_recovery_delay: float = 60.0
+        self._stuck_state: _StuckAfterToolResultState | None = None
         self.pid: int | None = None
         self.stream: Any = None  # JsonlStreamState, set from run_runner_with_cancel
         self.cancel_event: anyio.Event | None = None  # threaded from RunningTask
@@ -772,6 +877,9 @@ class ProgressEdits:
 
         while True:
             await anyio.sleep(self._stall_check_interval)
+            # #203: piggy-back a TTL sweep of module-level registries on this
+            # periodic tick.  Cheap when idle (empty dicts → early return).
+            sweep_stale_registries()
             elapsed = self.clock() - self._last_event_at
             self._peak_idle = max(self._peak_idle, elapsed)
 
@@ -952,6 +1060,33 @@ class ProgressEdits:
             frozen_escalate = self._frozen_ring_count >= _FROZEN_ESCALATION_THRESHOLD
             main_sleeping = diag is not None and diag.state == "S"
             _tool_running = self._has_running_tool() or mcp_server is not None
+
+            # Stuck-after-tool_result detector (#322) runs BEFORE the generic
+            # notification branches so its specific message + recovery path
+            # wins when the pattern matches. Tier 1 logs, Tier 2 SIGTERMs MCP
+            # adapters, Tier 3 cancels. Non-matching cases fall through to
+            # the existing generic handling.
+            if self._detect_stuck_after_tool_result(cpu_active=cpu_active):
+                result = await self._handle_stuck_after_tool_result(
+                    diag=diag,
+                    mcp_server=mcp_server,
+                    last_action=last_action,
+                )
+                if result == "cancelled":
+                    # Tier 3: signal_send closed, run_loop will exit
+                    return
+                # Tier 1/2: suppress generic notification this tick, bump the
+                # render loop so the user sees the "hung" message render with
+                # updated elapsed time, then continue to next stall check.
+                self.event_seq += 1
+                with contextlib.suppress(
+                    anyio.WouldBlock,
+                    anyio.BrokenResourceError,
+                    anyio.ClosedResourceError,
+                ):
+                    self.signal_send.send_nowait(None)
+                continue
+
             if cpu_active is True and not frozen_escalate and not main_sleeping:
                 logger.info(
                     "progress_edits.stall_suppressed_notification",
@@ -1192,6 +1327,202 @@ class ProgressEdits:
         if diag.child_pids:
             return True
         return diag.tcp_total > self._TCP_ACTIVE_THRESHOLD
+
+    def _detect_stuck_after_tool_result(
+        self,
+        *,
+        cpu_active: bool | None,
+    ) -> bool:
+        """Return True if the "tool_result received, engine silent" pattern matches.
+
+        Engine-agnostic detector for upstream claude-code#39700 / #41086 /
+        #38437 and the mcp-remote undici-idle-body wedge root cause
+        (geelen/mcp-remote#226, #107).
+
+        Fires only when ALL of:
+          1. Feature flag is on
+          2. stream.last_tool_result_at > 0 (a tool_result arrived and has not
+             been cleared by a subsequent assistant-turn event — the latch)
+          3. Elapsed since tool_result >= stuck_after_tool_result_timeout
+          4. cpu_active is True (main process burning cycles, not sleeping on
+             I/O cleanly — distinguishes Node event-loop spin from a legitimate
+             sleeping process waiting on a child subprocess's work)
+          5. No pending approval in action tracker (ExitPlanMode-safe)
+          6. Ring buffer frozen for >= 3 checks (reuses the existing signal;
+             no new stdout activity)
+        """
+        if not self._stuck_after_tool_result_enabled:
+            return False
+        stream = self.stream
+        if stream is None:
+            return False
+        last_tr = getattr(stream, "last_tool_result_at", 0.0) or 0.0
+        if last_tr <= 0:
+            return False
+        tr_elapsed = self.clock() - last_tr
+        if tr_elapsed < self._stuck_after_tool_result_timeout:
+            return False
+        if cpu_active is not True:
+            return False
+        if self._has_pending_approval():
+            return False
+        # #346: skip the detector when the session has legitimate background
+        # work armed (Monitor, Bash run_in_background, ScheduleWakeup, etc.).
+        # These primitives emit `result` and then park the subprocess waiting
+        # for the background deadline/completion — which *looks* identical to
+        # a wedge from the detector's POV. Duck-types against the engine_state
+        # so this stays engine-agnostic; Claude populates it via #347. Engines
+        # without background-task awareness leave engine_state=None and this
+        # check no-ops.
+        engine_state = getattr(stream, "engine_state", None)
+        if engine_state is not None:
+            try:
+                from .runners.claude import has_live_background_work
+            except ImportError:
+                has_live_background_work = None  # type: ignore[assignment]
+            if has_live_background_work is not None and has_live_background_work(
+                engine_state
+            ):
+                logger.info(
+                    "progress_edits.stuck_after_tool_result.suppressed",
+                    reason="live_background_work",
+                    tr_elapsed=tr_elapsed,
+                )
+                return False
+        # Reuse the existing frozen-ring-buffer escalation threshold (3) so
+        # this detector never fires before the user has seen the generic
+        # frozen-ring warning it escalates from.
+        return self._frozen_ring_count >= 3
+
+    async def _try_recover_mcp_adapter(self, diag: Any) -> list[int]:
+        """SIGTERM known MCP adapter child processes.
+
+        Returns the list of PIDs signalled. Conservative: only targets
+        children whose /proc/<pid>/cmdline matches a known MCP adapter
+        substring (see _MCP_ADAPTER_CMDLINE_HINTS). SIGTERM (not SIGKILL)
+        so the adapter closes its SSE connection cleanly, which is what
+        unblocks the parent engine's reader.
+        """
+        if diag is None or not getattr(diag, "child_pids", None):
+            return []
+        from .utils.proc_diag import read_cmdline
+
+        victims: list[int] = []
+        for child_pid in diag.child_pids:
+            cmd = read_cmdline(child_pid)
+            if cmd is None:
+                continue
+            low = cmd.lower()
+            if any(h in low for h in _MCP_ADAPTER_CMDLINE_HINTS):
+                try:
+                    os.kill(child_pid, _signal.SIGTERM)
+                    victims.append(child_pid)
+                except (ProcessLookupError, PermissionError):
+                    continue
+        return victims
+
+    async def _handle_stuck_after_tool_result(
+        self,
+        *,
+        diag: Any,
+        mcp_server: str | None,
+        last_action: str | None,
+    ) -> str:
+        """Tiered recovery for stuck-after-tool_result.
+
+        Returns:
+            "logged"     - Tier 1 only, first detection this episode
+            "recovery"   - Tier 2 attempted, waiting to see if engine recovers
+            "cancelled"  - Tier 3 fired, cancel_event set, signal_send closed
+        """
+        now = self.clock()
+        state = self._stuck_state
+        stream = self.stream
+        last_tr = getattr(stream, "last_tool_result_at", 0.0) if stream else 0.0
+
+        # Tier 1: log on first detection
+        if state is None:
+            state = _StuckAfterToolResultState(first_detected_at=now)
+            self._stuck_state = state
+            logger.warning(
+                "progress_edits.stuck_after_tool_result",
+                channel_id=self.channel_id,
+                pid=self.pid,
+                mcp_server=mcp_server,
+                seconds_since_tool_result=round(now - last_tr, 1)
+                if last_tr > 0
+                else None,
+                last_action=last_action,
+                last_event_type=(
+                    getattr(stream, "last_event_type", None) if stream else None
+                ),
+                frozen_ring_count=self._frozen_ring_count,
+                child_pids=list(diag.child_pids) if diag and diag.child_pids else [],
+                tcp_established=diag.tcp_established if diag else None,
+                upstream_issue="claude-code#39700",
+            )
+            return "logged"
+
+        # Tier 2: adapter-kill recovery (once per episode). When recovery is
+        # disabled we still mark the attempt so Tier 3 can fire after the
+        # configured delay — otherwise the wedge would suppress notifications
+        # forever without ever cancelling.
+        if not state.recovery_attempted:
+            killed = (
+                await self._try_recover_mcp_adapter(diag)
+                if self._stuck_after_tool_result_recovery_enabled
+                else []
+            )
+            state.recovery_attempted = True
+            state.recovery_attempted_at = now
+            logger.warning(
+                "progress_edits.stuck_after_tool_result.recovery_attempt",
+                channel_id=self.channel_id,
+                pid=self.pid,
+                killed_pids=killed,
+                mcp_server=mcp_server,
+                recovery_enabled=self._stuck_after_tool_result_recovery_enabled,
+            )
+            return "recovery"
+
+        # Tier 3: final cancel if recovery did not restore the engine
+        since_recovery = now - state.recovery_attempted_at
+        if (
+            state.recovery_attempted
+            and since_recovery >= self._stuck_after_tool_result_recovery_delay
+            and not state.cancelled
+        ):
+            state.cancelled = True
+            logger.warning(
+                "progress_edits.stuck_after_tool_result.cancel",
+                channel_id=self.channel_id,
+                pid=self.pid,
+                since_recovery_s=round(since_recovery, 1),
+                mcp_server=mcp_server,
+            )
+            if self.cancel_event is not None:
+                self.cancel_event.set()
+            try:
+                await self.transport.send(
+                    channel_id=self.channel_id,
+                    message=RenderedMessage(
+                        text=(
+                            "Auto-cancelled: stuck after tool_result "
+                            "(see untether#322 / claude-code#39700)."
+                        )
+                    ),
+                    options=SendOptions(thread_id=self.thread_id),
+                )
+            except Exception:  # noqa: BLE001
+                logger.debug(
+                    "progress_edits.stuck_after_tool_result.notify_failed",
+                    exc_info=True,
+                )
+            self.signal_send.close()
+            return "cancelled"
+
+        # Still within recovery_delay — wait for next tick.
+        return "recovery"
 
     def _last_action_summary(self) -> str | None:
         """Return a short description of the most recent action."""
@@ -1444,6 +1775,22 @@ class ProgressEdits:
             # Keep _prev_diag so next stall episode has a CPU baseline
             self._frozen_ring_count = 0
             self._prev_recent_events = None
+        # Clear stuck-after-tool_result episode state (#322) on any event —
+        # covers both organic recovery and Tier 2 recovery where SIGTERM'ing
+        # the adapter lets the engine resume. Outside the stall-recovered
+        # branch because a stuck-state can exist without _stall_warned=True
+        # when the detector fired before a generic stall warning did.
+        if self._stuck_state is not None:
+            logger.info(
+                "progress_edits.stuck_after_tool_result.recovered",
+                channel_id=self.channel_id,
+                pid=self.pid,
+                seconds_since_first_detected=round(
+                    now - self._stuck_state.first_detected_at, 1
+                ),
+                recovery_was_attempted=self._stuck_state.recovery_attempted,
+            )
+            self._stuck_state = None
         self._last_event_at = now
         self.event_seq += 1
         try:
@@ -1533,6 +1880,7 @@ class ProgressEdits:
         ]
         for sid in stale_sessions:
             _OUTLINE_REGISTRY.pop(sid, None)
+            _OUTLINE_REGISTRY_TS.pop(sid, None)  # #203: keep ts map in sync
         for ref in self._outline_refs:
             try:
                 await self.transport.delete(ref=ref)
@@ -1549,6 +1897,7 @@ class ProgressEdits:
         if self.progress_ref is not None:
             key = (self.channel_id, self.progress_ref.message_id)
             refs = _EPHEMERAL_MSGS.pop(key, [])
+            _EPHEMERAL_MSGS_TS.pop(key, None)  # #203: keep ts map in sync
             for ref in refs:
                 try:
                     await self.transport.delete(ref=ref)
@@ -1876,6 +2225,17 @@ async def handle_message(
         edits._STALL_THRESHOLD_TOOL = watchdog.tool_timeout
         edits._STALL_THRESHOLD_MCP_TOOL = watchdog.mcp_tool_timeout
         edits._STALL_THRESHOLD_SUBAGENT = watchdog.subagent_timeout
+        # Stuck-after-tool_result detector (#322)
+        edits._stuck_after_tool_result_enabled = watchdog.detect_stuck_after_tool_result
+        edits._stuck_after_tool_result_timeout = (
+            watchdog.stuck_after_tool_result_timeout
+        )
+        edits._stuck_after_tool_result_recovery_enabled = (
+            watchdog.stuck_after_tool_result_recovery_enabled
+        )
+        edits._stuck_after_tool_result_recovery_delay = (
+            watchdog.stuck_after_tool_result_recovery_delay
+        )
         if hasattr(runner, "_LIVENESS_TIMEOUT_SECONDS"):
             runner._LIVENESS_TIMEOUT_SECONDS = watchdog.liveness_timeout
         if hasattr(runner, "_stall_auto_kill"):

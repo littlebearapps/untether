@@ -219,6 +219,52 @@ def test_translate_result_success() -> None:
     assert completed.answer == "done"
 
 
+def test_translate_result_extracts_total_cost_usd() -> None:
+    """#316: Gemini result.stats.total_cost_usd should propagate into usage."""
+    state = GeminiStreamState(session_id="ses1", emitted_started=True, last_text="ok")
+    events = translate_gemini_event(
+        _decode_event(
+            {
+                "type": "result",
+                "status": "success",
+                "stats": {
+                    "input_tokens": 100,
+                    "output_tokens": 50,
+                    "total_cost_usd": 0.0025,
+                },
+            }
+        ),
+        title="gemini",
+        state=state,
+        meta=None,
+    )
+    completed = events[0]
+    assert isinstance(completed, CompletedEvent)
+    assert completed.usage is not None
+    assert completed.usage["total_cost_usd"] == 0.0025
+
+
+def test_translate_result_without_cost_omits_field() -> None:
+    """Stats without total_cost_usd must not synthesise a cost key."""
+    state = GeminiStreamState(session_id="ses1", emitted_started=True, last_text="ok")
+    events = translate_gemini_event(
+        _decode_event(
+            {
+                "type": "result",
+                "status": "success",
+                "stats": {"input_tokens": 100, "output_tokens": 50},
+            }
+        ),
+        title="gemini",
+        state=state,
+        meta=None,
+    )
+    completed = events[0]
+    assert isinstance(completed, CompletedEvent)
+    assert completed.usage is not None
+    assert "total_cost_usd" not in completed.usage
+
+
 def test_translate_result_error() -> None:
     state = GeminiStreamState(session_id="ses1", emitted_started=True)
     events = translate_gemini_event(

@@ -1,4 +1,5 @@
 import contextlib
+import os
 import sys
 import uuid
 
@@ -608,6 +609,63 @@ async def test_progress_edits_delete_ephemeral_drains_registry() -> None:
     assert (123, 1) not in _EPHEMERAL_MSGS
 
 
+def test_sweep_stale_registries_prunes_old_entries() -> None:
+    """#203: sweep_stale_registries() drops entries older than
+    _REGISTRY_TTL_SECONDS (default 1h), so a run that crashes without firing
+    the normal cleanup path doesn't leak forever."""
+    from untether.runner_bridge import (
+        _EPHEMERAL_MSGS_TS,
+        _OUTLINE_REGISTRY,
+        _OUTLINE_REGISTRY_TS,
+        _REGISTRY_TTL_SECONDS,
+        register_outline_cleanup,
+        sweep_stale_registries,
+    )
+
+    # Snapshot + clear to keep this test isolated.
+    saved_eph = dict(_EPHEMERAL_MSGS)
+    saved_eph_ts = dict(_EPHEMERAL_MSGS_TS)
+    saved_out = dict(_OUTLINE_REGISTRY)
+    saved_out_ts = dict(_OUTLINE_REGISTRY_TS)
+    _EPHEMERAL_MSGS.clear()
+    _EPHEMERAL_MSGS_TS.clear()
+    _OUTLINE_REGISTRY.clear()
+    _OUTLINE_REGISTRY_TS.clear()
+
+    try:
+        register_ephemeral_message(
+            777, 999, MessageRef(channel_id=777, message_id=1000)
+        )
+        register_outline_cleanup("sess-stale", object(), [])
+        # Backdate both so they're past the TTL.
+        import time as _time
+
+        past = _time.monotonic() - _REGISTRY_TTL_SECONDS - 1
+        _EPHEMERAL_MSGS_TS[(777, 999)] = past
+        _OUTLINE_REGISTRY_TS["sess-stale"] = past
+
+        # Add a fresh entry that must NOT be swept.
+        register_ephemeral_message(888, 888, MessageRef(channel_id=888, message_id=1))
+
+        pruned = sweep_stale_registries()
+        assert pruned == 2
+        assert (777, 999) not in _EPHEMERAL_MSGS
+        assert (777, 999) not in _EPHEMERAL_MSGS_TS
+        assert "sess-stale" not in _OUTLINE_REGISTRY
+        assert "sess-stale" not in _OUTLINE_REGISTRY_TS
+        # Fresh entry survives.
+        assert (888, 888) in _EPHEMERAL_MSGS
+    finally:
+        _EPHEMERAL_MSGS.clear()
+        _EPHEMERAL_MSGS_TS.clear()
+        _OUTLINE_REGISTRY.clear()
+        _OUTLINE_REGISTRY_TS.clear()
+        _EPHEMERAL_MSGS.update(saved_eph)
+        _EPHEMERAL_MSGS_TS.update(saved_eph_ts)
+        _OUTLINE_REGISTRY.update(saved_out)
+        _OUTLINE_REGISTRY_TS.update(saved_out_ts)
+
+
 # ---------------------------------------------------------------------------
 # _format_run_cost tests
 # ---------------------------------------------------------------------------
@@ -672,6 +730,17 @@ class TestFormatRunCost:
         )
         assert result is not None
         assert "2m 5s" in result
+
+    def test_zero_turns_renders_count(self):
+        """Regression for #316: `if turns:` dropped zero-turn completions."""
+        result = _format_run_cost(
+            {
+                "total_cost_usd": 0.02,
+                "num_turns": 0,
+            }
+        )
+        assert result is not None
+        assert "0 tn" in result
 
 
 # ---------------------------------------------------------------------------
@@ -743,6 +812,20 @@ class TestFormatUsageCompact:
 
 
 class TestMaybeAppendUsageFooterAlwaysShow:
+    @pytest.fixture(autouse=True)
+    def _reset_usage_cache(self):
+        """Keep usage-cache state out of each test (fetcher is now cached)."""
+        from untether.utils import usage_cache
+
+        usage_cache.reset_cache()
+        # Also reset the schema-warning latch so tests can exercise it more than once.
+        import untether.runner_bridge as rb
+
+        rb._USAGE_SCHEMA_WARNED = False
+        yield
+        usage_cache.reset_cache()
+        rb._USAGE_SCHEMA_WARNED = False
+
     @pytest.mark.anyio
     async def test_always_show_appends_compact(self, monkeypatch):
         from untether.runner_bridge import _maybe_append_usage_footer
@@ -768,6 +851,37 @@ class TestMaybeAppendUsageFooterAlwaysShow:
         assert "5h: 25%" in result.text
         assert "7d: 10%" in result.text
         assert "\u26a1" in result.text
+
+    @pytest.mark.anyio
+    async def test_schema_mismatch_warning_fires_once(self, monkeypatch):
+        """Missing expected fields in the usage payload log a one-shot warning."""
+        from untether import runner_bridge as rb
+
+        async def _fake_fetch():
+            # Missing `resets_at` in both windows.
+            return {
+                "five_hour": {"utilization": 25.0},
+                "seven_day": {"utilization": 10.0},
+            }
+
+        monkeypatch.setattr(
+            "untether.telegram.commands.usage.fetch_claude_usage", _fake_fetch
+        )
+
+        warn_calls: list[tuple[str, dict]] = []
+
+        def _warn(event: str, **kwargs) -> None:
+            warn_calls.append((event, kwargs))
+
+        monkeypatch.setattr(rb.logger, "warning", _warn)
+
+        msg = RenderedMessage(text="Done.", extra={})
+        await rb._maybe_append_usage_footer(msg, always_show=True)
+        await rb._maybe_append_usage_footer(msg, always_show=True)
+
+        mismatch = [c for c in warn_calls if c[0] == "claude_usage.schema_mismatch"]
+        assert len(mismatch) == 1  # fires exactly once
+        assert mismatch[0][1]["missing"]  # has a non-empty list
 
     @pytest.mark.anyio
     async def test_always_show_false_hides_below_threshold(self, monkeypatch):
@@ -4594,3 +4708,373 @@ class TestIsSignalDeath:
         from untether.runner_bridge import _is_signal_death
 
         assert _is_signal_death(None) is False
+
+
+# ---------------------------------------------------------------------------
+# Stuck-after-tool_result detector (#322)
+# ---------------------------------------------------------------------------
+
+
+class TestClassifyJsonlEvent:
+    """_classify_jsonl_event should recognise tool_result shapes across engines."""
+
+    def test_claude_user_with_tool_result_block(self) -> None:
+        from untether.runner import _classify_jsonl_event
+
+        evt = {
+            "type": "user",
+            "message": {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": "toolu_xyz",
+                        "content": [{"type": "text", "text": "ok"}],
+                    }
+                ],
+            },
+        }
+        assert _classify_jsonl_event(evt) == "tool_result"
+
+    def test_claude_user_without_tool_result_block(self) -> None:
+        from untether.runner import _classify_jsonl_event
+
+        evt = {"type": "user", "message": {"content": [{"type": "text"}]}}
+        assert _classify_jsonl_event(evt) == "other"
+
+    def test_claude_assistant_clears_latch(self) -> None:
+        from untether.runner import _classify_jsonl_event
+
+        assert _classify_jsonl_event({"type": "assistant"}) == "assistant"
+
+    def test_codex_mcp_tool_call_completed(self) -> None:
+        from untether.runner import _classify_jsonl_event
+
+        evt = {
+            "type": "item.completed",
+            "item": {"type": "mcp_tool_call", "status": "completed"},
+        }
+        assert _classify_jsonl_event(evt) == "tool_result"
+
+    def test_codex_command_execution_completed(self) -> None:
+        from untether.runner import _classify_jsonl_event
+
+        evt = {
+            "type": "item.completed",
+            "item": {"type": "command_execution", "status": "completed"},
+        }
+        assert _classify_jsonl_event(evt) == "tool_result"
+
+    def test_codex_agent_message_is_assistant(self) -> None:
+        from untether.runner import _classify_jsonl_event
+
+        evt = {"type": "item.completed", "item": {"type": "agent_message"}}
+        assert _classify_jsonl_event(evt) == "assistant"
+
+    def test_opencode_tooluse_completed(self) -> None:
+        from untether.runner import _classify_jsonl_event
+
+        evt = {"type": "ToolUse", "state": {"status": "completed"}}
+        assert _classify_jsonl_event(evt) == "tool_result"
+
+    def test_opencode_message_part_updated_tool_completed(self) -> None:
+        from untether.runner import _classify_jsonl_event
+
+        evt = {
+            "type": "message.part.updated",
+            "properties": {"part": {"type": "tool", "state": {"status": "completed"}}},
+        }
+        assert _classify_jsonl_event(evt) == "tool_result"
+
+    def test_pi_tool_execution_end(self) -> None:
+        from untether.runner import _classify_jsonl_event
+
+        assert _classify_jsonl_event({"type": "ToolExecutionEnd"}) == "tool_result"
+
+    def test_gemini_tool_result_direct(self) -> None:
+        from untether.runner import _classify_jsonl_event
+
+        assert _classify_jsonl_event({"type": "tool_result"}) == "tool_result"
+
+    def test_unknown_shape_is_other(self) -> None:
+        from untether.runner import _classify_jsonl_event
+
+        assert _classify_jsonl_event({"type": "attachment"}) == "other"
+        assert _classify_jsonl_event({}) == "other"
+        assert _classify_jsonl_event(None) == "other"
+        assert _classify_jsonl_event("not a dict") == "other"
+
+
+class TestReadCmdline:
+    def test_returns_none_for_missing_pid(self) -> None:
+        from untether.utils.proc_diag import read_cmdline
+
+        # PID 0 is reserved and never a real process; guaranteed missing file.
+        assert read_cmdline(0) is None
+
+    def test_returns_own_cmdline(self) -> None:
+        from untether.utils.proc_diag import read_cmdline
+
+        cmd = read_cmdline(os.getpid()) if sys.platform == "linux" else None
+        if sys.platform == "linux":
+            assert cmd is not None
+            assert len(cmd) > 0
+
+
+class TestStuckAfterToolResultDetector:
+    """Unit tests for ProgressEdits._detect_stuck_after_tool_result (#322)."""
+
+    @staticmethod
+    def _prepare(
+        *,
+        last_tool_result_at: float,
+        frozen_ring_count: int,
+        clock_start: float = 1000.0,
+        enabled: bool = True,
+        approval: bool = False,
+    ) -> tuple[ProgressEdits, _FakeClock]:
+        from types import SimpleNamespace
+
+        transport = FakeTransport()
+        presenter = _KeyboardPresenter()
+        clock = _FakeClock(start=clock_start)
+        edits = _make_edits(transport, presenter, clock=clock)
+        edits._stuck_after_tool_result_enabled = enabled
+        edits._stuck_after_tool_result_timeout = 300.0
+        edits._frozen_ring_count = frozen_ring_count
+        edits.stream = SimpleNamespace(
+            last_tool_result_at=last_tool_result_at,
+            last_event_type="user",
+            recent_events=[],
+            stderr_capture=[],
+        )
+        if approval:
+            from untether.model import Action, ActionEvent
+
+            evt = ActionEvent(
+                engine="claude",
+                action=Action(
+                    id="plan1",
+                    kind="warning",
+                    title="ExitPlanMode",
+                    detail={"inline_keyboard": [[{"text": "Approve"}]]},
+                ),
+                phase="started",
+            )
+            edits.tracker.note_event(evt)
+        return edits, clock
+
+    def test_fires_on_hung_pattern(self) -> None:
+        edits, clock = self._prepare(last_tool_result_at=600.0, frozen_ring_count=3)
+        clock.set(1000.0)  # 400s after tool_result => past 300s threshold
+        assert edits._detect_stuck_after_tool_result(cpu_active=True) is True
+
+    def test_silent_when_disabled(self) -> None:
+        edits, _ = self._prepare(
+            last_tool_result_at=600.0, frozen_ring_count=3, enabled=False
+        )
+        assert edits._detect_stuck_after_tool_result(cpu_active=True) is False
+
+    def test_silent_when_cpu_idle(self) -> None:
+        edits, _ = self._prepare(last_tool_result_at=600.0, frozen_ring_count=3)
+        assert edits._detect_stuck_after_tool_result(cpu_active=False) is False
+        assert edits._detect_stuck_after_tool_result(cpu_active=None) is False
+
+    def test_silent_without_tool_result_latch(self) -> None:
+        edits, _ = self._prepare(last_tool_result_at=0.0, frozen_ring_count=3)
+        assert edits._detect_stuck_after_tool_result(cpu_active=True) is False
+
+    def test_silent_during_approval(self) -> None:
+        edits, _ = self._prepare(
+            last_tool_result_at=600.0, frozen_ring_count=3, approval=True
+        )
+        assert edits._detect_stuck_after_tool_result(cpu_active=True) is False
+
+    def test_silent_before_timeout(self) -> None:
+        edits, clock = self._prepare(last_tool_result_at=900.0, frozen_ring_count=3)
+        clock.set(1000.0)  # only 100s elapsed, below 300s default
+        assert edits._detect_stuck_after_tool_result(cpu_active=True) is False
+
+    def test_silent_before_frozen_ring(self) -> None:
+        edits, _ = self._prepare(last_tool_result_at=600.0, frozen_ring_count=2)
+        assert edits._detect_stuck_after_tool_result(cpu_active=True) is False
+
+    # ------------------------------------------------------------------
+    # #346 — suppress when session has live background work
+    # ------------------------------------------------------------------
+
+    def test_silent_when_live_monitor_armed(self) -> None:
+        """#346: a session with an armed Monitor must NOT be flagged as hung.
+
+        Claude Code v2.1.72+ primitives (Monitor, Bash-bg, ScheduleWakeup) emit
+        `result` and then park the subprocess waiting for the deadline to fire.
+        The wedge detector needs to distinguish that from a real hang — it
+        duck-types against `stream.engine_state.has_live_background_work()`.
+        """
+        import time
+
+        from untether.runners.claude import ClaudeStreamState
+
+        edits, clock = self._prepare(last_tool_result_at=600.0, frozen_ring_count=3)
+        clock.set(1000.0)
+        # Arm a monitor with a deadline 60s in the future (real time here is
+        # fine because has_live_background_work uses time.monotonic()).
+        claude_state = ClaudeStreamState()
+        claude_state.live_monitors["toolu_M1"] = time.monotonic() + 60.0
+        edits.stream.engine_state = claude_state  # type: ignore[attr-defined]
+
+        assert edits._detect_stuck_after_tool_result(cpu_active=True) is False
+
+    def test_fires_when_monitor_expired(self) -> None:
+        """After all monitor deadlines expire, the detector runs as usual."""
+        import time
+
+        from untether.runners.claude import ClaudeStreamState
+
+        edits, clock = self._prepare(last_tool_result_at=600.0, frozen_ring_count=3)
+        clock.set(1000.0)
+        claude_state = ClaudeStreamState()
+        # deadline 10s in the past → no longer live
+        claude_state.live_monitors["toolu_M1"] = time.monotonic() - 10.0
+        edits.stream.engine_state = claude_state  # type: ignore[attr-defined]
+
+        assert edits._detect_stuck_after_tool_result(cpu_active=True) is True
+
+    def test_fires_when_engine_state_absent(self) -> None:
+        """Engines without engine_state (Codex, Pi, etc.) keep the original behaviour."""
+        edits, clock = self._prepare(last_tool_result_at=600.0, frozen_ring_count=3)
+        clock.set(1000.0)
+        # stream doesn't have engine_state attr — detector still fires
+        assert edits._detect_stuck_after_tool_result(cpu_active=True) is True
+
+    def test_silent_when_bg_bash_active(self) -> None:
+        """Session with Bash run_in_background=True → suppress wedge detection."""
+        from untether.runners.claude import ClaudeStreamState
+
+        edits, clock = self._prepare(last_tool_result_at=600.0, frozen_ring_count=3)
+        clock.set(1000.0)
+        claude_state = ClaudeStreamState()
+        claude_state.live_bg_bashes.add("toolu_B1")
+        edits.stream.engine_state = claude_state  # type: ignore[attr-defined]
+
+        assert edits._detect_stuck_after_tool_result(cpu_active=True) is False
+
+
+class TestHandleStuckAfterToolResult:
+    """Behaviour of the tiered recovery state machine (#322)."""
+
+    @staticmethod
+    def _prepare() -> tuple[ProgressEdits, _FakeClock]:
+        from types import SimpleNamespace
+
+        transport = FakeTransport()
+        presenter = _KeyboardPresenter()
+        clock = _FakeClock(start=1000.0)
+        edits = _make_edits(transport, presenter, clock=clock)
+        edits._stuck_after_tool_result_enabled = True
+        edits._stuck_after_tool_result_timeout = 300.0
+        edits._stuck_after_tool_result_recovery_delay = 60.0
+        edits._frozen_ring_count = 3
+        edits.stream = SimpleNamespace(
+            last_tool_result_at=600.0,
+            last_event_type="user",
+            recent_events=[],
+            stderr_capture=[],
+        )
+        edits.cancel_event = anyio.Event()
+        return edits, clock
+
+    @pytest.mark.anyio
+    async def test_tier1_logs_on_first_detection(self) -> None:
+        edits, _ = self._prepare()
+        result = await edits._handle_stuck_after_tool_result(
+            diag=None, mcp_server="cloudflare-observability", last_action=None
+        )
+        assert result == "logged"
+        assert edits._stuck_state is not None
+        assert edits._stuck_state.recovery_attempted is False
+        assert edits._stuck_state.cancelled is False
+        assert not edits.cancel_event.is_set()
+
+    @pytest.mark.anyio
+    async def test_tier2_attempts_recovery_on_second_call(self, monkeypatch) -> None:
+        edits, _ = self._prepare()
+        # First call: Tier 1 log
+        await edits._handle_stuck_after_tool_result(
+            diag=None, mcp_server=None, last_action=None
+        )
+
+        # Fake diag with MCP adapter child, fake /proc lookup, and capture SIGTERMs
+        killed: list[int] = []
+
+        def fake_kill(pid, sig):
+            killed.append(pid)
+
+        monkeypatch.setattr("untether.runner_bridge.os.kill", fake_kill)
+        monkeypatch.setattr(
+            "untether.utils.proc_diag.read_cmdline",
+            lambda pid: "node /tmp/x/mcp-remote https://observability.mcp.cloudflare.com/mcp",
+        )
+
+        from types import SimpleNamespace
+
+        diag = SimpleNamespace(child_pids=[99999], alive=True, tcp_total=0)
+
+        result = await edits._handle_stuck_after_tool_result(
+            diag=diag, mcp_server="cloudflare-observability", last_action=None
+        )
+        assert result == "recovery"
+        assert edits._stuck_state.recovery_attempted is True
+        assert killed == [99999]
+        assert not edits.cancel_event.is_set()
+
+    @pytest.mark.anyio
+    async def test_tier3_cancels_after_recovery_delay(self, monkeypatch) -> None:
+        edits, clock = self._prepare()
+        monkeypatch.setattr("untether.runner_bridge.os.kill", lambda pid, sig: None)
+
+        # Tier 1
+        await edits._handle_stuck_after_tool_result(
+            diag=None, mcp_server=None, last_action=None
+        )
+        # Tier 2 (with empty child list so no SIGTERM fires)
+        from types import SimpleNamespace
+
+        diag = SimpleNamespace(child_pids=[], alive=True, tcp_total=0)
+        await edits._handle_stuck_after_tool_result(
+            diag=diag, mcp_server=None, last_action=None
+        )
+        assert edits._stuck_state.recovery_attempted is True
+
+        # Advance clock past recovery_delay; Tier 3 should cancel.
+        clock.set(1000.0 + 120.0)
+        result = await edits._handle_stuck_after_tool_result(
+            diag=diag, mcp_server="cloudflare-observability", last_action=None
+        )
+        assert result == "cancelled"
+        assert edits._stuck_state.cancelled is True
+        assert edits.cancel_event.is_set()
+        # The cancellation message was sent to the transport
+        texts = [c["message"].text for c in edits.transport.send_calls]
+        assert any("stuck after tool_result" in t for t in texts)
+        assert any("#322" in t for t in texts)
+
+    @pytest.mark.anyio
+    async def test_on_event_clears_stuck_state(self) -> None:
+        edits, _ = self._prepare()
+        # Seed a stuck state as if Tier 1 had fired
+        await edits._handle_stuck_after_tool_result(
+            diag=None, mcp_server=None, last_action=None
+        )
+        assert edits._stuck_state is not None
+
+        # An assistant-turn event arrives → on_event should clear it
+        from untether.model import Action, ActionEvent
+
+        evt = ActionEvent(
+            engine="claude",
+            action=Action(id="a1", kind="note", title="continued"),
+            phase="started",
+        )
+        await edits.on_event(evt)
+        assert edits._stuck_state is None

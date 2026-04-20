@@ -33,6 +33,7 @@ Untether adds interactive permission control, plan mode support, and several UX 
 - **Pi context compaction** — `AutoCompactionStart`/`AutoCompactionEnd` events rendered as progress actions
 - **Stall diagnostics & liveness watchdog** — `/proc` process diagnostics (CPU, RSS, TCP, FDs), progressive stall warnings with Telegram notifications, liveness watchdog for alive-but-silent subprocesses, stall auto-cancel (dead process, no-PID zombie, absolute cap) with CPU-active suppression (sleeping-process aware — shows tool name when main process waiting on child), tool-active repeat suppression (first warning fires, repeats suppressed while child CPU-active), MCP tool-aware threshold (15 min for network-bound MCP calls vs 10 min for local tools) with contextual "MCP tool running: {server}" messaging, `session.summary` structured log; `[watchdog]` config section with configurable `tool_timeout` and `mcp_tool_timeout`
 - **Auto-continue** — detects Claude Code sessions that exit after receiving tool results without processing them (upstream bugs #34142, #30333) and auto-resumes; suppressed on signal deaths (rc=143/SIGTERM, rc=137/SIGKILL) to prevent death spirals under memory pressure; configurable via `[auto_continue]` with `enabled` (default true) and `max_retries` (default 1)
+- **MCP catalog observability + proactive refresh** (#365) — `catalog_staleness.detected` structlog WARNING once per `(session, server, status)` tuple when Claude's `system.init` reports a non-`connected` MCP status (`detect_catalog_staleness`, default **on**); opt-in fire-and-forget `mcp_status` control_request after each `tool_result` to nudge Claude Code's catalog (`notify_catalog_refresh`, default **off**). Request IDs use the `ut_catalog_refresh_<session_id>_<seq>` namespace; drained via `ClaudeRunner._drain_catalog_refresh`. Logs `catalog.refresh_sent` INFO / `catalog.refresh_failed` WARN/ERROR. Claude runner only
 - **File upload deduplication** — auto-appends `_1`, `_2`, … when target file exists, instead of requiring `--force`; media groups without captions auto-save to `incoming/`
 - **Agent-initiated file delivery (outbox)** — agents write files to `.untether-outbox/` during a run; Untether sends them as Telegram documents on completion with `📎` captions; deny-glob security, size limits, file count cap, auto-cleanup; `[transports.telegram.files]` config
 - **Progress persistence** — active progress messages persisted to `active_progress.json`; on restart, orphan messages edited to "⚠️ interrupted by restart" with keyboard removed
@@ -179,7 +180,7 @@ Rules in `.claude/rules/` auto-load when editing matching files:
 
 ## Tests
 
-2165 unit tests, 80% coverage threshold. Integration testing against `@untether_dev_bot` is **mandatory before every release** — see `docs/reference/integration-testing.md` for the full playbook with per-release-type tier requirements (patch/minor/major). All integration test tiers are fully automated by Claude Code via Telegram MCP tools and Bash.
+2372 unit tests, 80% coverage threshold. Integration testing against `@untether_dev_bot` is **mandatory before every release** — see `docs/reference/integration-testing.md` for the full playbook with per-release-type tier requirements (patch/minor/major). All integration test tiers are fully automated by Claude Code via Telegram MCP tools and Bash.
 
 Key test files:
 
@@ -219,7 +220,7 @@ Key test files:
 - `test_trigger_manager.py` — 23 tests: TriggerManager init/update/clear, webhook server hot-reload (add/remove/update routes, secret changes, health count), cron schedule swapping, timezone updates; rc4 helpers (crons_for_chat, webhooks_for_chat, cron_ids, webhook_ids, remove_cron, atomic iteration)
 - `test_describe_cron.py` — 31 tests: human-friendly cron rendering (daily, weekday ranges, weekday lists, single day, timezone suffix, fallback to raw, AM/PM boundaries)
 - `test_trigger_meta_line.py` — 6 tests: trigger source rendering in `format_meta_line()`, ordering relative to model/effort/permission
-- `test_bridge_config_reload.py` — 11 tests: TelegramBridgeConfig unfrozen (slots preserved), `update_from()` copies all 11 fields, files swap, chat_ids/voice_transcription_api_key edge cases, trigger_manager field default
+- `test_bridge_config_reload.py` — 20 tests: TelegramBridgeConfig unfrozen (slots preserved), `update_from()` copies all 11 fields, files swap, chat_ids/voice_transcription_api_key edge cases, trigger_manager field default, `RESTART_REQUIRED_FIELDS` ClassVar invariants (#318), `_notify_restart_required` broadcast to project chats + admin DMs with per-chat failure isolation (#318 follow-up)
 - `test_at_command.py` — 34 tests: `/at` parse (valid/invalid suffixes, bounds, case-insensitive), `_format_delay`, schedule/cancel, per-chat cap, scheduler install/uninstall
 - `test_offset_persistence.py` — 15 tests: Telegram update_id round-trip, corrupt JSON handling, atomic write, `DebouncedOffsetWriter` interval/max-pending semantics, explicit flush
 - `test_sdnotify.py` — 7 tests: NOTIFY_SOCKET handling (absent/empty/filesystem/abstract-namespace), send error swallowing, UTF-8 encoding
@@ -264,24 +265,30 @@ See `.claude/rules/dev-workflow.md` for full rules.
 
 Multi-layer protection prevents accidental merges to master and PyPI publishes. Claude Code cannot circumvent these protections.
 
-**GitHub server-side (unbyppassable):**
+**GitHub server-side (unbypassable):**
 - **Branch ruleset** "Protect master — no direct push" — all changes to master require a PR, no admin bypass
-- **`pypi` environment** — required reviewer (Nathan), admin bypass OFF; PyPI publish pauses until Nathan approves in GitHub Actions UI
-- **`testpypi` environment** — no reviewer required (staging deploys automatically)
-- **CODEOWNERS** — `* @littlebearapps/core`
+- **CODEOWNERS** — `* @littlebearapps/core` ensures Nathan reviews every PR to master
 
 **Local hooks (defense-in-depth):**
-- `release-guard.sh` — blocks `git push` to master/main, `git tag v*`, `gh release create`, `gh pr merge`; feature and dev branch pushes allowed
+- `release-guard.sh` — blocks `git push` to master/main, `git tag v*`, `gh release create`, `gh pr merge` to non-dev; feature and dev branch pushes allowed
 - `release-guard-protect.sh` — blocks Edit/Write to guard scripts and `.claude/hooks.json`
 - `release-guard-mcp.sh` — blocks GitHub MCP `merge_pull_request` and writes to master/main; feature and dev branches allowed
+
+All three guard scripts use the current Claude Code PreToolUse output schema (`hookSpecificOutput` / `permissionDecision: "deny"`). Earlier versions used the legacy `{"decision":"block"}` shape, which Claude Code silently ignored — that bug is fixed.
 
 **Claude Code MUST:**
 - Push to feature branches: `git push -u origin feature/<name>`
 - Create PRs to dev: `gh pr create --base dev --title "..." --body "..."`
 - Merge PRs to dev (allowed): `gh pr merge <number> --squash` (TestPyPI/staging only)
-- Let Nathan merge PRs to master, create tags, and approve PyPI deploys manually
+- Let Nathan merge PRs to master — that merge is now the **single release gate**
 
 Claude Code MUST NOT merge PRs targeting master — only dev merges are allowed.
+
+**Single-gate release flow:** Once Nathan squash-merges a PR with a stable version (e.g. `0.35.2`, no `rc`/`a`/`b`/`dev` suffix) to master:
+1. `auto-tag-on-master.yml` detects the version bump and pushes `v0.35.2`
+2. `release.yml` fires on the tag, runs full CI (validate version, pytest, build, twine check), publishes to PyPI via OIDC trusted publishing, and creates the GitHub Release with wheel + sdist
+
+No further manual approval is needed. The PR merge IS the release approval. Pre-release versions (e.g. `0.35.2rc1`) are skipped by `auto-tag-on-master.yml` so staging-PR merges don't accidentally publish.
 
 **Self-guarding:** the hook scripts, `.claude/hooks.json`, and GitHub rulesets cannot be modified by Claude Code. Only Nathan can change these by editing files manually outside Claude Code.
 
@@ -316,6 +323,7 @@ GitHub Actions CI runs on push to master/dev and on PRs:
 | lockfile | `uv lock --check` ensures lockfile is in sync |
 | install-test | Clean wheel install + smoke-test imports (catches undeclared deps) |
 | testpypi-publish | Publishes to TestPyPI on dev push (OIDC, `skip-existing: true`) |
+| auto-tag-on-master | On master push: detects stable version bump in `pyproject.toml`, creates and pushes `vX.Y.Z` tag (skips pre-releases) |
 | release-validation | PR-only: validates changelog format, issue links, date when version changes |
 | pip-audit | Dependency vulnerability scanning (PyPA advisory DB) |
 | bandit | Python SAST (security static analysis) |
@@ -327,7 +335,7 @@ All third-party actions are pinned to commit SHAs (supply chain protection). Top
 
 Dependabot auto-merge (`dependabot-auto-merge.yml`) auto-squash-merges dependency updates after CI passes. GitHub Actions deps (CI-only, never shipped) are auto-merged for all version bumps including major. Python deps (shipped in wheel) are auto-merged for patch/minor only; major bumps get flagged for manual review.
 
-Release pipeline (`release.yml`) uses PyPI trusted publishing with OIDC. The `pypi` GitHub Environment requires Nathan's approval (admin bypass OFF) before publishing. The `testpypi` environment deploys automatically (no reviewer). `scripts/validate_release.py` enforces changelog/version consistency. `CODEOWNERS` (`* @littlebearapps/core`) requires team review on all PRs.
+Release pipeline (`release.yml`) uses PyPI trusted publishing with OIDC. The `pypi` GitHub Environment publishes automatically once `auto-tag-on-master.yml` creates a `vX.Y.Z` tag — the PR review on master IS the release approval, so no second reviewer prompt is needed. (Earlier versions had a manual `pypi` environment reviewer gate; that gate was removed in favour of the single-gate flow described under "Release guard".) The `testpypi` environment deploys automatically on dev push. `scripts/validate_release.py` enforces changelog/version consistency. `CODEOWNERS` (`* @littlebearapps/core`) requires team review on all PRs.
 
 ## Issue tracking & releases
 

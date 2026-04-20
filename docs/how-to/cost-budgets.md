@@ -47,7 +47,7 @@ After each run completes, Untether checks the reported cost against your budgets
 3. **Warning threshold**: at `warn_at_pct` (default 70%) of either budget, you get an early warning
 
 !!! note "Token-only engines"
-    Engines that don't report USD costs (Codex, Pi, Gemini CLI, Amp) show token counts in the footer instead (e.g. `💰 26.0k in / 71 out`). Budget alerts only apply to engines that report USD costs.
+    Engines that don't report USD costs (Codex, Pi, and OpenCode on its free tier) show token counts in the footer instead (e.g. `💰 26.0k in / 71 out`). Gemini CLI and AMP surface `total_cost_usd` when their CLI reports one; on the free tier they render tokens only. Budget alerts apply only to the USD-reporting path.
 
 ### Alert levels
 

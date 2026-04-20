@@ -131,6 +131,9 @@ def _build_usage(stats: dict[str, Any] | None) -> dict[str, Any] | None:
     duration_ms = stats.get("duration_ms")
     if isinstance(duration_ms, (int, float)):
         usage["duration_ms"] = duration_ms
+    total_cost_usd = stats.get("total_cost_usd")
+    if isinstance(total_cost_usd, (int, float)):
+        usage["total_cost_usd"] = float(total_cost_usd)
     return usage or None
 
 

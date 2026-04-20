@@ -37,7 +37,11 @@ def test_load_settings_from_toml(tmp_path: Path) -> None:
     assert token == "token"
     assert chat_id == 123
 
-    assert settings.transports.telegram.bot_token == "token"
+    # #196: bot_token is SecretStr — unwrap to compare.
+    assert settings.transports.telegram.bot_token.get_secret_value() == "token"
+    # Verify masking: str()/repr() do not leak the token.
+    assert "token" not in str(settings.transports.telegram.bot_token)
+    assert "token" not in repr(settings.transports.telegram.bot_token)
 
 
 def test_env_overrides_toml(tmp_path: Path, monkeypatch) -> None:
@@ -149,7 +153,8 @@ def test_transport_config_telegram_and_extra(tmp_path: Path) -> None:
         }
     )
     telegram = settings.transport_config("telegram", config_path=config_path)
-    assert telegram["bot_token"] == "token"
+    # #196: model_dump() preserves SecretStr wrappers; unwrap to check value.
+    assert telegram["bot_token"].get_secret_value() == "token"
     assert telegram["chat_id"] == 123
 
     settings = UntetherSettings.model_validate(
@@ -442,3 +447,56 @@ def test_auto_continue_max_retries_bounds() -> None:
     # Boundary values should pass
     assert AutoContinueSettings(max_retries=0).max_retries == 0
     assert AutoContinueSettings(max_retries=3).max_retries == 3
+
+
+# ---------------------------------------------------------------------------
+# #350 — pre-spawn RAM guard settings
+# ---------------------------------------------------------------------------
+
+
+def test_watchdog_prespawn_ram_defaults() -> None:
+    from untether.settings import WatchdogSettings
+
+    ws = WatchdogSettings()
+    assert ws.prespawn_ram_warn_mb == 2000
+    assert ws.prespawn_ram_block_mb == 500
+
+
+def test_watchdog_prespawn_ram_ordering_enforced() -> None:
+    """warn must sit above block when both are active — otherwise the warn
+    tier is unreachable and the config is ambiguous."""
+    from pydantic import ValidationError
+
+    from untether.settings import WatchdogSettings
+
+    # warn == block → invalid
+    with pytest.raises(ValidationError, match="prespawn_ram_warn_mb must be > "):
+        WatchdogSettings(prespawn_ram_warn_mb=500, prespawn_ram_block_mb=500)
+
+    # warn < block → invalid
+    with pytest.raises(ValidationError, match="prespawn_ram_warn_mb must be > "):
+        WatchdogSettings(prespawn_ram_warn_mb=100, prespawn_ram_block_mb=1000)
+
+    # warn > block → valid
+    ws = WatchdogSettings(prespawn_ram_warn_mb=3000, prespawn_ram_block_mb=1000)
+    assert ws.prespawn_ram_warn_mb == 3000
+    assert ws.prespawn_ram_block_mb == 1000
+
+    # either tier = 0 disables that tier → ordering check skipped
+    ws = WatchdogSettings(prespawn_ram_warn_mb=0, prespawn_ram_block_mb=1000)
+    assert ws.prespawn_ram_warn_mb == 0
+    ws = WatchdogSettings(prespawn_ram_warn_mb=1000, prespawn_ram_block_mb=0)
+    assert ws.prespawn_ram_block_mb == 0
+    ws = WatchdogSettings(prespawn_ram_warn_mb=0, prespawn_ram_block_mb=0)
+    assert ws.prespawn_ram_warn_mb == 0  # both zero = guard disabled
+
+
+def test_watchdog_prespawn_ram_bounds() -> None:
+    from pydantic import ValidationError
+
+    from untether.settings import WatchdogSettings
+
+    with pytest.raises(ValidationError):
+        WatchdogSettings(prespawn_ram_warn_mb=-1)
+    with pytest.raises(ValidationError):
+        WatchdogSettings(prespawn_ram_block_mb=65537)

@@ -101,6 +101,47 @@ def _count_tcp(pid: int) -> tuple[int, int]:
     return established, total
 
 
+def mem_available_kb() -> int | None:
+    """Return /proc/meminfo MemAvailable in KB, or None on non-Linux / parse fail.
+
+    Used by the pre-spawn RAM guard (#350) to decide whether to allow, warn
+    on, or refuse spawning a new engine subprocess. Deliberately uncached —
+    callers must read a fresh value on each spawn to catch the near-OOM
+    window where a prior heavy run is still consuming memory. Cheap: one
+    file open and a single-line grep.
+    """
+    if not sys.platform.startswith("linux"):
+        return None
+    try:
+        with open("/proc/meminfo", encoding="utf-8") as fh:
+            for line in fh:
+                if line.startswith("MemAvailable:"):
+                    parts = line.split()
+                    if len(parts) >= 2:
+                        return int(parts[1])
+                    return None
+    except (OSError, FileNotFoundError, PermissionError, ValueError):
+        return None
+    return None
+
+
+def read_cmdline(pid: int) -> str | None:
+    """Return /proc/<pid>/cmdline as a space-separated string, or None.
+
+    Used by the stuck-after-tool_result recovery path (#322) to identify
+    MCP-adapter child processes like `npx mcp-remote`. Returns None on
+    non-Linux platforms, missing PIDs, or permission errors.
+    """
+    try:
+        with open(f"/proc/{pid}/cmdline", "rb") as f:
+            raw = f.read()
+    except (OSError, FileNotFoundError, PermissionError):
+        return None
+    if not raw:
+        return None
+    return raw.replace(b"\x00", b" ").decode("utf-8", errors="replace").strip()
+
+
 def _find_children(pid: int) -> list[int]:
     """Find child PIDs via /proc/pid/task/*/children."""
     children: list[int] = []
@@ -121,17 +162,30 @@ def _find_children(pid: int) -> list[int]:
     return children
 
 
-def _find_descendants(pid: int, *, _depth: int = 0, _max_depth: int = 4) -> list[int]:
-    """Find all descendant PIDs recursively (depth-limited)."""
+def find_descendants(pid: int, *, _depth: int = 0, _max_depth: int = 4) -> list[int]:
+    """Find all descendant PIDs recursively (depth-limited).
+
+    Public helper used by subprocess cleanup (#275) to capture a snapshot of
+    the process tree before signalling the parent — grandchildren in separate
+    process groups (e.g. vitest → workerd) are only reachable this way.
+
+    Depth-limited to 4 levels to bound the recursion on pathological trees;
+    the typical Claude Code → Bash → vitest → workerd chain is 3 deep with
+    margin.
+    """
     if _depth >= _max_depth:
         return []
     children = _find_children(pid)
     descendants = list(children)
     for child in children:
         descendants.extend(
-            _find_descendants(child, _depth=_depth + 1, _max_depth=_max_depth)
+            find_descendants(child, _depth=_depth + 1, _max_depth=_max_depth)
         )
     return descendants
+
+
+# Private alias kept for back-compat with existing test imports.
+_find_descendants = find_descendants
 
 
 def _collect_tree_cpu(
@@ -165,7 +219,7 @@ def collect_proc_diag(pid: int) -> ProcessDiag | None:
     fd_count = _count_fds(pid)
     tcp_est, tcp_total = _count_tcp(pid)
     children = _find_children(pid)
-    descendants = _find_descendants(pid)
+    descendants = find_descendants(pid)
     tree_utime, tree_stime = _collect_tree_cpu(utime, stime, descendants)
 
     return ProcessDiag(

@@ -270,7 +270,7 @@ accessible immediately, and removed webhooks start returning 404.
 
 ## One-shot crons with `run_once`
 
-Set `run_once = true` on a cron to fire once then auto-disable. The cron stays in the TOML but is skipped until the next reload or restart:
+Set `run_once = true` on a cron to fire once then auto-disable:
 
 ```toml
 [[triggers.crons]]
@@ -280,7 +280,23 @@ prompt = "Check today's deployment status"
 run_once = true
 ```
 
-After the cron fires, the `triggers.cron.run_once_completed` log line confirms the removal. To re-enable, save the TOML again (triggers a reload) or restart the service.
+After the cron fires, the `triggers.cron.run_once_completed` log line confirms the removal. Fired state is persisted to `run_once_fired.json` (sibling of `untether.toml`), so the cron is skipped across config reloads and process restarts — the TOML entry is kept for history but won't refire. To re-enable a one-shot, change its `id` or remove both the TOML entry and its record in `run_once_fired.json`.
+
+## Autonomous crons in plan-mode chats (Claude)
+
+A cron normally inherits the chat's permission mode, which means a scheduled run fires into a plan-mode chat and stops for your approval — not useful for a cron that runs at 6 AM. Set `permission_mode = "auto"` on the cron to override:
+
+```toml
+[[triggers.crons]]
+id = "overnight-review"
+schedule = "0 6 * * *"
+chat_id = -1001234567890
+engine = "claude"
+prompt = "Review overnight PRs and reply with a summary."
+permission_mode = "auto"
+```
+
+Precedence (Claude only): cron `permission_mode` > per-chat `/planmode` > engine config default. Every run that actually changes the resolved value logs `trigger.cron.permission_mode_override` for staging observability. Valid values: `default`, `plan`, `auto`, `acceptEdits`, `bypassPermissions`. Other engines (Codex, Gemini, OpenCode, Pi, AMP) silently ignore this field — full coverage is tracked in [#332](https://github.com/littlebearapps/untether/issues/332). See [Schedule tasks — Autonomous crons](schedule-tasks.md#autonomous-crons) for the everyday framing.
 
 ## Delayed runs with `/at`
 

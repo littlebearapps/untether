@@ -72,6 +72,14 @@ Untether automatically records statistics after each run completes:
 
 Data is stored in `stats.json` in the Untether config directory (`~/.untether/` by default). Records older than 90 days are automatically pruned on startup.
 
+## Background-task telemetry
+
+v0.35.2 adds per-session tracking for Claude Code's long-running primitives. Counts and outstanding deadlines are recorded for: `Monitor`, `Bash` (`run_in_background`), `Agent` (`run_in_background`), `ScheduleWakeup`, and `RemoteTrigger`. These feed into `/health` and the stall detector so background work isn't mistaken for a wedged session. ([#347](https://github.com/littlebearapps/untether/issues/347))
+
+## Cost footer accuracy
+
+Run and session cost footers were tightened in v0.35.2. Claude usage queries use a 60 s TTL cache (stale-while-error), Gemini pulls from `stats.total_cost_usd`, and AMP now reports `total_cost_usd`. Zero-turn sessions render `$0.00` instead of a blank. ([#316](https://github.com/littlebearapps/untether/issues/316))
+
 ## Related
 
 - [Cost budgets](cost-budgets.md) — per-run and daily cost limits

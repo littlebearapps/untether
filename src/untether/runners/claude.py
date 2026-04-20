@@ -16,6 +16,7 @@ import shutil
 import subprocess as subprocess_module
 import time
 import tty
+from collections import OrderedDict
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -46,9 +47,11 @@ from ..runner import (
     _stderr_excerpt,
 )
 from ..schemas import claude as claude_schema
+from ..settings import load_settings_if_exists
+from ..utils.env_audit import audit_proc_env
 from ..utils.paths import get_run_base_dir
 from ..utils.streams import drain_stderr
-from ..utils.subprocess import manage_subprocess
+from ..utils.subprocess import manage_subprocess, redact_env_i_args, wrap_with_env_i
 from .run_options import get_run_options
 from .tool_actions import tool_input_path, tool_kind_and_title
 
@@ -82,8 +85,13 @@ _REQUEST_TO_INPUT: dict[str, dict[str, Any]] = {}
 # Used by claude_control.py to send tool-specific deny messages
 _REQUEST_TO_TOOL_NAME: dict[str, str] = {}
 
-# Recently handled request_ids (prevents duplicate callback warnings)
-_HANDLED_REQUESTS: set[str] = set()
+# Recently handled request_ids (prevents duplicate callback warnings).
+# #197: previously a plain set cleared wholesale when len > 100, which opened
+# a small window where duplicate callbacks could slip through as "not found"
+# rather than being recognised as duplicates.  Now an LRU OrderedDict that
+# evicts oldest-first at _HANDLED_REQUESTS_MAX entries.
+_HANDLED_REQUESTS_MAX = 200
+_HANDLED_REQUESTS: OrderedDict[str, None] = OrderedDict()
 
 # Discuss cooldown: session_id -> (timestamp, deny_count)
 # When user clicks "Pause & Outline Plan", this tracks when the denial was sent
@@ -94,10 +102,16 @@ _DISCUSS_COOLDOWN: dict[str, tuple[float, int]] = {}
 # When Claude Code next calls ExitPlanMode, it will be auto-approved.
 _DISCUSS_APPROVED: set[str] = set()
 
-# Plan exit approved: session_ids where ExitPlanMode was manually approved.
-# After plan approval, diff_preview tools (Edit/Write/Bash) auto-approve instead
-# of requiring per-tool manual approval — the user already reviewed the plan (#283).
+# Plan-bypass set: session_ids where the user has approved at least one
+# plan-gated tool (ExitPlanMode, Edit, Write, or Bash). After the first
+# approval, subsequent diff_preview tools auto-approve instead of re-prompting
+# — the user has already reviewed code for this session (#283, #369).
 _PLAN_EXIT_APPROVED: set[str] = set()
+
+# Tools guarded by the diff_preview approval gate. Mirrors the tools an
+# approved plan unlocks: approving any of these populates _PLAN_EXIT_APPROVED
+# for the session so subsequent diff_preview tools auto-approve (#369).
+_DIFF_PREVIEW_TOOLS: frozenset[str] = frozenset({"Edit", "Write", "Bash"})
 
 # Sessions where "Pause & Outline Plan" was clicked and we're waiting for outline text.
 # StreamTextBlock handler checks this to emit visible note events in the progress message.
@@ -171,6 +185,68 @@ class ClaudeStreamState:
     max_text_len_since_cooldown: int = 0
     # Store outline text for embedding in synthetic approve/deny action
     outline_text: str | None = None
+    # Cumulative seconds the session spent in Anthropic-side rate-limit waits (#349).
+    # Sum of every rate_limit_event's retry_after_ms, so the cost footer can annotate
+    # "(incl. Xm Ys rate-limited)" when a run finishes after one or more throttles.
+    rate_limit_total_s: float = 0.0
+    # Count of rate_limit_event emissions in this session — feeds a unit-test hook
+    # and future /stats surfacing (#349 v2).
+    rate_limit_count: int = 0
+
+    # #347 per-session background-task tracking. Claude Code v2.1.72+ has
+    # primitives that arm long-running work and return the subprocess to
+    # "ready" state while the primitive continues in the background:
+    # `Monitor`, `Bash run_in_background=true`, `Agent run_in_background=true`,
+    # `ScheduleWakeup`, `RemoteTrigger`. Untether tracks them so (a) #346's
+    # wedge detector can gate SIGTERM on "do we still have armed work?",
+    # (b) progress footers can show "⏳ N watchers · M bg tasks", and (c)
+    # a future `/background` command can enumerate the handles.
+    #
+    # Each dict keys on `tool_use_id` → deadline `time.monotonic()` seconds;
+    # sets hold tool_use_ids without deadlines. Entries are cleared either
+    # when the matching `tool_result` arrives (explicit completion) or, for
+    # Monitor/ScheduleWakeup, when the deadline passes.
+    live_monitors: dict[str, float] = field(default_factory=dict)
+    live_bg_bashes: set[str] = field(default_factory=set)
+    live_bg_agents: set[str] = field(default_factory=set)
+    live_wakeups: dict[str, float] = field(default_factory=dict)
+    live_remote_triggers: set[str] = field(default_factory=set)
+
+    # #361 env-leak audit: pid populated by ClaudeRunner.run_impl after
+    # spawn so translate_claude_event can sample /proc/<pid>/environ in
+    # the system.init handler. audited flips to True after the first
+    # sample; audited_leaks dedups warnings per (session, leaked_name).
+    pid: int | None = None
+    audited: bool = False
+    audited_leaks: set[str] = field(default_factory=set)
+
+    # #365 MCP catalog observability + proactive refresh. Settings
+    # populated by ClaudeRunner.new_state() from WatchdogSettings so
+    # translate_claude_event() can gate its behaviour without re-reading
+    # config per-line. ``detect_catalog_staleness`` gates the
+    # ``catalog_staleness.detected`` WARNING emitted from the system.init
+    # handler when any configured MCP server reports a non-"connected"
+    # status; ``notify_catalog_refresh`` gates the fire-and-forget
+    # ``mcp_status`` control_request appended to
+    # ``pending_catalog_refresh_ids`` after every tool_result and drained
+    # on the runner's stdin by _drain_catalog_refresh().
+    detect_catalog_staleness: bool = True
+    notify_catalog_refresh: bool = False
+    # Snapshot of ``mcp_servers`` from the session's first system.init
+    # event: list of ``{name, status}`` dicts. Used only for the
+    # init-time staleness log today; could feed mid-session comparison
+    # in a future follow-up.
+    initial_mcp_servers: list[Any] | None = None
+    # Dedup set for catalog_staleness warnings — holds
+    # (session_id, server_name, status) tuples so re-fired init events
+    # (rare: only on Claude Code internal resume) don't spam the log.
+    catalog_staleness_logged: set[tuple[str, str, str]] = field(default_factory=set)
+    # Pending mcp_status control_request IDs queued by tool_result,
+    # drained on stdin by ClaudeRunner._drain_catalog_refresh. Names
+    # allocated as ``ut_catalog_refresh_<session_id>_<seq>`` to avoid
+    # colliding with Claude Code's own ``req_*`` namespace.
+    pending_catalog_refresh_ids: list[str] = field(default_factory=list)
+    catalog_refresh_seq: int = 0
 
 
 def _normalize_tool_result(content: Any) -> str:
@@ -236,6 +312,102 @@ def _tool_action(
             detail["changes"] = [{"path": path, "kind": "update"}]
 
     return Action(id=tool_id, kind=kind, title=title, detail=detail)
+
+
+def _register_background_handle(
+    state: ClaudeStreamState,
+    content: claude_schema.StreamToolUseBlock,
+) -> None:
+    """Track long-running primitives that outlive the tool_result (#347).
+
+    Monitor / Bash-bg / Agent-bg / ScheduleWakeup / RemoteTrigger can arm
+    work that continues after Claude Code emits `result`. Untether records
+    the handle so downstream consumers (#346 wedge detector, progress
+    footer, `/background` command) know the subprocess is legitimately
+    parked rather than hung. Entries are removed in
+    `_clear_background_handle` when the matching tool_result arrives.
+
+    Deliberately lenient with the `input` shape — Claude Code's schema
+    forbids unknown fields at the outer level but the tool-specific `input`
+    is free-form, so we defensively coerce to dict.
+    """
+    tool_name = str(content.name or "")
+    tool_id = content.id
+    raw_input = content.input if isinstance(content.input, dict) else {}
+
+    if tool_name == "Monitor":
+        timeout_ms = raw_input.get("timeout_ms")
+        if isinstance(timeout_ms, (int, float)) and timeout_ms > 0:
+            state.live_monitors[tool_id] = time.monotonic() + (timeout_ms / 1000.0)
+        else:
+            # Unknown deadline → store 0.0 so membership tests still work
+            state.live_monitors[tool_id] = 0.0
+    elif tool_name == "Bash" and bool(raw_input.get("run_in_background")):
+        state.live_bg_bashes.add(tool_id)
+    elif tool_name == "Agent" and bool(raw_input.get("run_in_background")):
+        state.live_bg_agents.add(tool_id)
+    elif tool_name == "ScheduleWakeup":
+        delay_ms = raw_input.get("delay_ms") or raw_input.get("timeout_ms")
+        if isinstance(delay_ms, (int, float)) and delay_ms > 0:
+            state.live_wakeups[tool_id] = time.monotonic() + (delay_ms / 1000.0)
+        else:
+            state.live_wakeups[tool_id] = 0.0
+    elif tool_name == "RemoteTrigger":
+        state.live_remote_triggers.add(tool_id)
+
+
+def _clear_background_handle(state: ClaudeStreamState, tool_use_id: str) -> None:
+    """Remove a background-task entry when its tool_result arrives (#347)."""
+    state.live_monitors.pop(tool_use_id, None)
+    state.live_bg_bashes.discard(tool_use_id)
+    state.live_bg_agents.discard(tool_use_id)
+    state.live_wakeups.pop(tool_use_id, None)
+    state.live_remote_triggers.discard(tool_use_id)
+
+
+def has_live_background_work(state: ClaudeStreamState) -> bool:
+    """Return True when the session has any background handle whose deadline
+    (if any) is still in the future (#346 gate).
+
+    Monitors + wakeups with expired deadlines are treated as "no longer
+    live" — the primitive should have fired and emitted its result by then.
+    Sets (bg bashes, bg agents, remote triggers) have no deadline so any
+    entry counts as live.
+    """
+    now = time.monotonic()
+    for deadline in state.live_monitors.values():
+        if deadline == 0.0 or deadline > now:
+            return True
+    for deadline in state.live_wakeups.values():
+        if deadline == 0.0 or deadline > now:
+            return True
+    return bool(
+        state.live_bg_bashes or state.live_bg_agents or state.live_remote_triggers
+    )
+
+
+def background_task_summary(state: ClaudeStreamState) -> str | None:
+    """Return a compact "⏳ 2 watchers · 1 bg task" summary or None if empty.
+
+    Used by progress footer rendering (#347 v2) and the `/background`
+    command. v1 of this PR only computes it; the footer wiring lands in
+    a follow-up once meta-threading from ClaudeStreamState to
+    `ProgressTracker.meta` is confirmed safe for the other 5 engines.
+    """
+    watchers = len(state.live_monitors) + len(state.live_wakeups)
+    bg_tasks = (
+        len(state.live_bg_bashes)
+        + len(state.live_bg_agents)
+        + len(state.live_remote_triggers)
+    )
+    if watchers == 0 and bg_tasks == 0:
+        return None
+    parts: list[str] = []
+    if watchers:
+        parts.append(f"{watchers} watcher{'s' if watchers != 1 else ''}")
+    if bg_tasks:
+        parts.append(f"{bg_tasks} bg task{'s' if bg_tasks != 1 else ''}")
+    return "⏳ " + " · ".join(parts)
 
 
 def _tool_result_event(
@@ -355,6 +527,90 @@ def _extract_error(
     return f"{first}\n{' · '.join(parts)}"
 
 
+def _maybe_audit_env(state: ClaudeStreamState, session_id: str) -> None:
+    """One-shot ``/proc/<pid>/environ`` audit on first system.init (#361).
+
+    Best-effort: skips silently when no PID is recorded, when audit is
+    disabled in config, when settings can't be loaded, or when /proc is
+    unreadable. Emits one ``claude.env_audit.leaked_var`` warning per
+    (session, leaked_name).
+    """
+    if state.audited or state.pid is None:
+        return
+    state.audited = True
+
+    enabled = True
+    try:
+        result = load_settings_if_exists()
+        if result is not None:
+            settings, _ = result
+            enabled = settings.security.env_audit
+    except Exception:  # noqa: BLE001 — never let config errors block a run
+        enabled = True
+    if not enabled:
+        return
+
+    leaked = audit_proc_env(state.pid, expected_extras=("UNTETHER_SESSION",))
+    for name in leaked:
+        if name in state.audited_leaks:
+            continue
+        state.audited_leaks.add(name)
+        logger.warning(
+            "claude.env_audit.leaked_var",
+            session_id=session_id,
+            pid=state.pid,
+            name=name,
+        )
+
+
+def _capture_mcp_catalog(
+    state: ClaudeStreamState,
+    session_id: str,
+    mcp_servers: list[Any] | None,
+) -> None:
+    """Snapshot ``mcp_servers`` from system.init and log init-time staleness (#365).
+
+    Claude Code's ``system.init`` event reports each configured MCP
+    server as ``{"name": "...", "status": "connected"|"pending"|"error"|"failed"}``.
+    A non-``connected`` status at init time is the clearest indicator we
+    have that the MCP catalog is stale from the user's perspective —
+    without waiting for a mid-session reminder from Claude.
+
+    Gated by ``WatchdogSettings.detect_catalog_staleness`` (default on;
+    observability only — no recovery action). Logs once per
+    (session, server, status) tuple so re-fired init events don't spam.
+    """
+    if not mcp_servers:
+        return
+    # Preserve the raw list for downstream tooling (future follow-ups may
+    # compare mid-session state against this snapshot).
+    if state.initial_mcp_servers is None:
+        state.initial_mcp_servers = list(mcp_servers)
+    if not state.detect_catalog_staleness:
+        return
+    for server in mcp_servers:
+        if not isinstance(server, dict):
+            continue
+        name = server.get("name")
+        status = server.get("status")
+        if not isinstance(name, str) or not isinstance(status, str):
+            continue
+        if status == "connected":
+            continue
+        key = (session_id, name, status)
+        if key in state.catalog_staleness_logged:
+            continue
+        state.catalog_staleness_logged.add(key)
+        logger.warning(
+            "catalog_staleness.detected",
+            session_id=session_id,
+            pid=state.pid,
+            server=name,
+            status=status,
+            source="system.init",
+        )
+
+
 def _usage_payload(event: claude_schema.StreamResultMessage) -> dict[str, Any]:
     usage: dict[str, Any] = {}
     for key in (
@@ -390,6 +646,11 @@ def translate_claude_event(
             session_id = event.session_id
             if not session_id:
                 return []
+            # #361 sample child env on first init; no-op if PID missing,
+            # audit disabled, /proc unreadable, or non-Linux.
+            _maybe_audit_env(state, session_id)
+            # #365 capture MCP catalog snapshot + log init-time staleness.
+            _capture_mcp_catalog(state, session_id, event.mcp_servers)
             meta: dict[str, Any] = {}
             for key in (
                 "cwd",
@@ -423,6 +684,9 @@ def translate_claude_event(
                         )
                         state.pending_actions[action.id] = action
                         state.last_tool_use_id = content.id
+                        # #347 track long-running primitives that outlive
+                        # this tool_use → tool_result cycle
+                        _register_background_handle(state, content)
                         out.append(
                             factory.action_started(
                                 action_id=action.id,
@@ -474,10 +738,14 @@ def translate_claude_event(
             if not isinstance(message.content, list):
                 return []
             out: list[UntetherEvent] = []
+            saw_tool_result = False
             for content in message.content:
                 if not isinstance(content, claude_schema.StreamToolResultBlock):
                     continue
+                saw_tool_result = True
                 tool_use_id = content.tool_use_id
+                # #347 clear any background-task entry for this tool_use_id
+                _clear_background_handle(state, tool_use_id)
                 action = state.pending_actions.pop(tool_use_id, None)
                 if action is None:
                     action = Action(
@@ -504,6 +772,18 @@ def translate_claude_event(
                             ok=True,
                         )
                     )
+            # #365 queue a proactive mcp_status nudge once per tool_result
+            # batch. Opt-in via WatchdogSettings.notify_catalog_refresh.
+            # Drained from stdin by ClaudeRunner._drain_catalog_refresh so
+            # the send is fire-and-forget and cannot block translate().
+            if saw_tool_result and state.notify_catalog_refresh:
+                resume_val = factory.resume.value if factory.resume else None
+                if resume_val:
+                    state.catalog_refresh_seq += 1
+                    request_id = (
+                        f"ut_catalog_refresh_{resume_val}_{state.catalog_refresh_seq}"
+                    )
+                    state.pending_catalog_refresh_ids.append(request_id)
             return out
         case claude_schema.StreamResultMessage():
             ok = not event.is_error
@@ -546,9 +826,9 @@ def translate_claude_event(
                 state.auto_approve_queue.append(request_id)
                 return []
 
-            # Auto-approve tool requests that don't need user interaction
+            # Auto-approve tool requests that don't need user interaction.
+            # _DIFF_PREVIEW_TOOLS is module-scoped — see top of file.
             _TOOLS_REQUIRING_APPROVAL = {"ExitPlanMode", "AskUserQuestion"}
-            _DIFF_PREVIEW_TOOLS = frozenset({"Edit", "Write", "Bash"})
             if isinstance(request, claude_schema.ControlCanUseToolRequest):
                 tool_name = getattr(request, "tool_name", "unknown")
                 if tool_name not in _TOOLS_REQUIRING_APPROVAL:
@@ -1037,6 +1317,53 @@ def translate_claude_event(
                     detail=detail,
                 ),
             ]
+        case claude_schema.StreamRateLimitMessage(rate_limit_info=info):
+            # #349: surface rate_limit_event as a visible "waiting for API" note
+            # so the user sees a clear "Anthropic is throttling us, we're waiting"
+            # status instead of silent inactivity + eventual mystery cancel.
+            retry_ms = info.retry_after_ms if info is not None else None
+            retry_s = retry_ms / 1000.0 if retry_ms is not None else None
+            if retry_s is not None:
+                state.rate_limit_total_s += retry_s
+            state.rate_limit_count += 1
+            state.note_seq += 1
+            action_id = f"rate_limit_{state.note_seq}"
+            if retry_s is not None:
+                # Round to nearest second for display but show fractional when < 1s
+                display_s = int(retry_s) if retry_s >= 1 else f"{retry_s:.1f}"
+                title = f"⏳ Rate limited — retrying in {display_s}s"
+            else:
+                title = "⏳ Rate limited — waiting to retry"
+            detail: dict[str, Any] = {}
+            if info is not None:
+                if info.tokens_remaining is not None:
+                    detail["tokens_remaining"] = info.tokens_remaining
+                if info.requests_remaining is not None:
+                    detail["requests_remaining"] = info.requests_remaining
+                if retry_ms is not None:
+                    detail["retry_after_ms"] = retry_ms
+            logger.info(
+                "claude.rate_limit_event",
+                retry_after_s=retry_s,
+                count=state.rate_limit_count,
+                cumulative_s=state.rate_limit_total_s,
+            )
+            return [
+                factory.action_started(
+                    action_id=action_id,
+                    kind="note",
+                    title=title,
+                    detail=detail,
+                ),
+                factory.action_completed(
+                    action_id=action_id,
+                    kind="note",
+                    title=title,
+                    ok=True,
+                    level="info",
+                    detail=detail,
+                ),
+            ]
         case _:
             logger.debug(
                 "claude.event.unrecognised",
@@ -1092,10 +1419,15 @@ class ClaudeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
             if request_id in _REQUEST_TO_INPUT:
                 inner["updatedInput"] = _REQUEST_TO_INPUT.pop(request_id)
             tool_name = _REQUEST_TO_TOOL_NAME.pop(request_id, None)
-            # After plan approval, bypass diff_preview gate for subsequent
-            # tools — user already reviewed the plan (#283)
+            # After approving any plan-gated tool, bypass the diff_preview
+            # gate for subsequent tools in the same session — the user has
+            # already reviewed code, repeating the prompt per-tool is
+            # redundant (#283 for ExitPlanMode; #369 extended to diff_preview
+            # tools so plan-mode sessions that skip ExitPlanMode also bypass).
             session_id_for_plan = _REQUEST_TO_SESSION.get(request_id)
-            if tool_name == "ExitPlanMode" and session_id_for_plan:
+            if session_id_for_plan and (
+                tool_name == "ExitPlanMode" or tool_name in _DIFF_PREVIEW_TOOLS
+            ):
                 _PLAN_EXIT_APPROVED.add(session_id_for_plan)
         else:
             inner = {"behavior": "deny", "message": deny_message or "User denied"}
@@ -1293,10 +1625,33 @@ class ClaudeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
         return None
 
     def env(self, *, state: Any) -> dict[str, str] | None:
-        env = dict(os.environ)
+        # #198: allowlist filter — Claude subprocess no longer inherits the
+        # parent's full environment. Only vars recognised by
+        # `utils.env_policy` (basic OS, AI/cloud provider keys, Claude /
+        # MCP namespaces, etc.) flow through. See env_policy.py for the
+        # canonical list + how to extend it when a new MCP or engine needs
+        # an unfamiliar variable.
+        from ..utils.env_policy import filtered_env
+
+        env = filtered_env()
         # Let Claude Code hooks detect Untether sessions (e.g. PitchDocs
         # context-guard skips blocking Stop hooks in Telegram).
         env["UNTETHER_SESSION"] = "1"
+        # Reinforcements for upstream claude-code#39700 / #41086 / #38437 —
+        # stream-json mode hangs after MCP tool_result. Shell env is honoured
+        # by Claude Code 2.1.110+ for the sdk-cli stdio path. Use setdefault
+        # so user overrides (shell rc, per-project env) always win. See #322.
+        env.setdefault("CLAUDE_ENABLE_STREAM_WATCHDOG", "1")
+        # #342: opus on `max` reasoning can legitimately idle its SSE stream
+        # for 60-120s while chain-of-thought expands between output deltas; a
+        # 60s watchdog trips and aborts the run mid-reasoning ("API Error:
+        # Stream idle timeout - partial response received"). 300000ms (5 min)
+        # matches the undici idle-body timeout that motivated #322 *and*
+        # Untether's own `stuck_after_tool_result_timeout` default, so the
+        # upstream CLI watchdog and our detector fire in the same window.
+        env.setdefault("CLAUDE_STREAM_IDLE_TIMEOUT_MS", "300000")
+        env.setdefault("MCP_TOOL_TIMEOUT", "120000")
+        env.setdefault("MAX_MCP_OUTPUT_TOKENS", "12000")
         if self.use_api_billing is not True:
             env.pop("ANTHROPIC_API_KEY", None)
         return env
@@ -1305,6 +1660,19 @@ class ClaudeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
         state = ClaudeStreamState()
         state.auto_approve_exit_plan_mode = self._effective_permission_mode() == "auto"
         state.resumed = resume is not None
+        # #365 propagate MCP catalog observability knobs from WatchdogSettings.
+        # Defaults on the dataclass already mirror WatchdogSettings defaults,
+        # so a load failure is a safe no-op.
+        try:
+            result = load_settings_if_exists()
+            if result is not None:
+                settings, _ = result
+                state.detect_catalog_staleness = (
+                    settings.watchdog.detect_catalog_staleness
+                )
+                state.notify_catalog_refresh = settings.watchdog.notify_catalog_refresh
+        except Exception:  # noqa: BLE001 — settings errors must not block a run
+            logger.warning("catalog_settings.load_failed", exc_info=True)
         return state
 
     def start_run(
@@ -1417,6 +1785,11 @@ class ClaudeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
             # were yielded.  This prevents deadlock when auto-handled requests produce no events.
             await self._drain_auto_approve(state, stdin=session_stdin)
             await self._drain_auto_deny(state, stdin=session_stdin)
+            # #365 fire-and-forget mcp_status control_requests queued by
+            # translate_claude_event on tool_result. Drain last so the
+            # response (if any) arrives after Claude has processed the
+            # tool_result itself.
+            await self._drain_catalog_refresh(state, stdin=session_stdin)
             # After CompletedEvent, stop reading stdout immediately.
             # Claude Code's MCP server child processes may inherit the stdout pipe FD,
             # keeping it open even after Claude Code exits. Without this break,
@@ -1515,6 +1888,69 @@ class ClaudeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
                     error=str(e),
                 )
         state.auto_deny_queue.clear()
+
+    async def _drain_catalog_refresh(
+        self, state: ClaudeStreamState, *, stdin: Any = None
+    ) -> None:
+        """Send queued mcp_status control_requests to Claude Code (#365).
+
+        Fire-and-forget: Untether does not register a pending response for
+        these IDs and does not wait on the eventual ``control_response``
+        (Claude Code will emit one with ``request_id`` matching; our
+        existing JSONL decoder treats unknown control_response events as
+        a no-op at present). The goal is to nudge Claude Code's MCP
+        catalog state, per P0#1 of #365.
+
+        Logs ``catalog.refresh_sent`` per request on success and
+        ``catalog.refresh_failed`` on write errors so staging can observe
+        frequency + failure modes independently.
+        """
+        if not state.pending_catalog_refresh_ids:
+            return
+        pipe = stdin or self._proc_stdin
+        for req_id in state.pending_catalog_refresh_ids:
+            request = {
+                "type": "control_request",
+                "request_id": req_id,
+                "request": {"subtype": "mcp_status"},
+            }
+            payload = (json.dumps(request) + "\n").encode()
+            try:
+                if pipe is not None:
+                    await pipe.send(payload)
+                    logger.info(
+                        "catalog.refresh_sent",
+                        request_id=req_id,
+                        channel="pipe",
+                    )
+                elif self._pty_master_fd is not None:
+                    os.write(self._pty_master_fd, payload)
+                    logger.info(
+                        "catalog.refresh_sent",
+                        request_id=req_id,
+                        channel="pty",
+                    )
+                else:
+                    logger.warning(
+                        "catalog.refresh_failed",
+                        request_id=req_id,
+                        reason="no_channel",
+                    )
+            except (OSError, anyio.ClosedResourceError) as e:
+                logger.warning(
+                    "catalog.refresh_failed",
+                    request_id=req_id,
+                    error=str(e),
+                    error_type=e.__class__.__name__,
+                )
+            except Exception as e:  # noqa: BLE001
+                logger.error(
+                    "catalog.refresh_failed",
+                    request_id=req_id,
+                    error=str(e),
+                    error_type=e.__class__.__name__,
+                )
+        state.pending_catalog_refresh_ids.clear()
 
     def translate(
         self,
@@ -1645,6 +2081,14 @@ class ClaudeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
         cmd = [self.command(), *self.build_args(prompt, resume, state=state)]
         payload = self.stdin_payload(prompt, resume, state=state)
         env = self.env(state=state)
+        # #361 wrap with `env -i KEY=VAL ...` so Claude exec resolves with
+        # exactly the allowlisted env. Blocks re-introduction from upstream
+        # rc-file sourcing, /etc/environment, or wrapper scripts that the
+        # filtered env passed to manage_subprocess can't prevent post-exec.
+        # Pass env=None to subprocess so we don't double-set.
+        if env is not None:
+            cmd = wrap_with_env_i(cmd, env)
+            env = None
         run_logger.info(
             "runner.start",
             engine=self.engine,
@@ -1700,10 +2144,13 @@ class ClaudeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
                 if proc.stdout is None or proc.stderr is None:
                     raise RuntimeError(self.pipes_error_message())
 
+                # #361: redact env -i KEY=VAL pairs so secrets passed via
+                # the env-wrap don't leak into journald.
+                logged_args = redact_env_i_args(cmd)[1:]
                 run_logger.info(
                     "subprocess.spawn",
                     cmd=cmd[0] if cmd else None,
-                    args=cmd[1:],
+                    args=logged_args,
                     pid=proc.pid,
                     use_control_channel=use_control_channel,
                 )
@@ -1736,6 +2183,13 @@ class ClaudeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
                     await proc.stdin.aclose()
 
                 stream = JsonlStreamState(expected_session=resume)
+                # #346 thread the ClaudeStreamState into the generic stream
+                # so the wedge detector in runner_bridge can duck-type against
+                # background-task helpers without importing claude-specific code.
+                stream.engine_state = state
+                # #361 stash PID so the env audit in translate_claude_event
+                # can sample /proc/<pid>/environ on system.init.
+                state.pid = proc.pid
                 self.current_stream = stream
                 reader_done = anyio.Event()
 
@@ -1933,11 +2387,11 @@ async def send_claude_control_response(
 
     # Clean up the mapping after use
     del _REQUEST_TO_SESSION[request_id]
-    _HANDLED_REQUESTS.add(request_id)
-
-    # Cap the set size to prevent unbounded growth
-    if len(_HANDLED_REQUESTS) > 100:
-        _HANDLED_REQUESTS.clear()
+    # #197: LRU-evict oldest entries instead of clear()-ing the whole set.
+    _HANDLED_REQUESTS[request_id] = None
+    _HANDLED_REQUESTS.move_to_end(request_id)
+    while len(_HANDLED_REQUESTS) > _HANDLED_REQUESTS_MAX:
+        _HANDLED_REQUESTS.popitem(last=False)
 
     return success
 

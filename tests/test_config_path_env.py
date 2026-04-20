@@ -112,7 +112,9 @@ class TestLoadSettingsEnv:
         settings, cfg_path = load_settings()
 
         assert cfg_path == env_config
-        assert settings.transports.telegram.bot_token == "devtoken"
+        assert (
+            settings.transports.telegram.bot_token.get_secret_value() == "devtoken"
+        )  # #196
         assert settings.transports.telegram.chat_id == 999
 
 

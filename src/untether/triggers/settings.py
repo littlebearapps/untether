@@ -139,6 +139,7 @@ class CronConfig(BaseModel):
     timezone: NonEmptyStr | None = None
     fetch: CronFetchConfig | None = None
     run_once: bool = False
+    permission_mode: NonEmptyStr | None = None
 
     @field_validator("timezone")
     @classmethod
@@ -156,6 +157,27 @@ class CronConfig(BaseModel):
     def _validate_prompt(self) -> CronConfig:
         if not self.prompt and not self.prompt_template:
             raise ValueError("either prompt or prompt_template is required")
+        return self
+
+    @model_validator(mode="after")
+    def _validate_permission_mode(self) -> CronConfig:
+        # Import lazily to avoid circular import at module load.
+        from ..runners.run_options import VALID_PERMISSION_MODES_BY_ENGINE
+
+        if self.permission_mode is None:
+            return self
+        allowed = VALID_PERMISSION_MODES_BY_ENGINE.get(self.engine or "")
+        if allowed is None:
+            # Engine absent from the dict (pi/opencode/amp, or engine unset) —
+            # accept any non-empty string; the runner will silently no-op if
+            # it doesn't recognise the value. Forward-compatible for engines
+            # whose permission wiring is still pending (#331, #332).
+            return self
+        if self.permission_mode not in allowed:
+            raise ValueError(
+                f"unknown permission_mode {self.permission_mode!r} for engine "
+                f"{self.engine!r}; allowed values: {sorted(allowed)}"
+            )
         return self
 
 

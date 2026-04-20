@@ -88,8 +88,26 @@ class AtCommand:
             )
         thread_int = int(thread_id) if isinstance(thread_id, int) else None
 
+        # #362 freeze the chat's project + engine at schedule time so the
+        # delayed run uses the same defaults that an interactive message in
+        # this chat would. Mirrors TriggerDispatcher.dispatch_cron's
+        # freeze-at-dispatch behaviour. Capture the *resolved* engine (not
+        # None) so a later config change to the global default doesn't
+        # drift the frozen run.
+        context = ctx.runtime.default_context_for_chat(chat_id)
+        engine_override = ctx.runtime.resolve_engine(
+            engine_override=None, context=context
+        )
+
         try:
-            schedule_delayed_run(chat_id, thread_int, delay_s, prompt)
+            schedule_delayed_run(
+                chat_id,
+                thread_int,
+                delay_s,
+                prompt,
+                context=context,
+                engine_override=engine_override,
+            )
         except AtSchedulerError as exc:
             return CommandResult(text=f"\u274c {exc}", notify=True)
 

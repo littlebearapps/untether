@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from unittest.mock import AsyncMock
 
+import anyio
 import pytest
 
 from tests.telegram_fakes import FakeBot, FakeTransport, make_cfg
@@ -351,6 +352,71 @@ async def test_early_answer_clears_spinner_before_handle(monkeypatch) -> None:
     )
 
     # Should be answered exactly once (early answer, not double-answered in finally)
+    assert len(bot.callback_calls) == 1
+    assert bot.callback_calls[0]["text"] == "Approved"
+
+
+@pytest.mark.anyio
+async def test_early_answer_fires_before_slow_handle(monkeypatch) -> None:
+    """#247: early-answer must reach answerCallbackQuery before backend.handle()
+    does any blocking work. Telegram's 30 s callback window starts when the user
+    presses the button; if handle() writes slowly to a PTY before we answer,
+    the client sees BotResponseTimeoutError. This regression test asserts the
+    ordering invariant (answer call happens at a monotonic timestamp strictly
+    earlier than the first instant handle() observes)."""
+    import time as _time
+
+    transport = FakeTransport()
+    cfg = make_cfg(transport)
+    bot: FakeBot = cfg.bot  # type: ignore[assignment]
+    handle_entered_at: dict[str, float] = {}
+    answer_called_at: dict[str, float] = {}
+
+    class _SlowHandleBackend:
+        id = "slow_cmd"
+        description = "slow handle stub"
+        answer_early = True
+
+        def early_answer_toast(self, args_text: str) -> str | None:
+            return "Approved"
+
+        async def handle(self, ctx: CommandContext) -> CommandResult | None:
+            handle_entered_at["t"] = _time.monotonic()
+            await anyio.sleep(0.05)
+            return CommandResult(text="ok")
+
+    backend = _SlowHandleBackend()
+
+    orig_answer = bot.answer_callback_query
+
+    async def _timed_answer(query_id, text=None):
+        answer_called_at.setdefault("t", _time.monotonic())
+        return await orig_answer(query_id, text=text)
+
+    bot.answer_callback_query = _timed_answer  # type: ignore[assignment]
+    monkeypatch.setattr(dispatch_mod, "get_command", lambda *a, **kw: backend)
+
+    await _dispatch_callback(
+        cfg,
+        _make_callback_query(),
+        "slow_cmd",
+        "args",
+        None,
+        {},
+        AsyncMock(),
+        None,
+        False,
+        None,
+        "cb-timing",
+    )
+
+    assert "t" in answer_called_at
+    assert "t" in handle_entered_at
+    assert answer_called_at["t"] < handle_entered_at["t"], (
+        "early-answer must call answerCallbackQuery strictly before "
+        "backend.handle() runs any code (#247)"
+    )
+    # Early answer + no second answer in finally.
     assert len(bot.callback_calls) == 1
     assert bot.callback_calls[0]["text"] == "Approved"
 

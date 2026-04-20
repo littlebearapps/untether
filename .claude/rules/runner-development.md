@@ -7,7 +7,7 @@ applies_to: "src/untether/runners/**,src/untether/runner.py"
 ## 3-event contract
 
 Every run MUST emit exactly this sequence:
-1. `StartedEvent` — once, when session ID is known
+1. `StartedEvent` — first, when session ID is known; additional `StartedEvent`s with the same resume but new `meta` are allowed for late-arriving metadata (e.g. pi.py ships the model from `message_end` via a supplementary event; #225). The base runner's `handle_started_event` emits duplicates through when `event.meta` is truthy; `ProgressTracker.note_event` merges meta idempotently. True duplicates (no meta) are still dropped.
 2. `ActionEvent(s)` — zero or more, phase: started/updated/completed
 3. `CompletedEvent` — exactly once, always the final event
 
@@ -44,6 +44,10 @@ Do NOT construct `StartedEvent`, `ActionEvent`, `CompletedEvent` dataclasses dir
 - Keys: `"engine:session_id"` in a `WeakValueDictionary` (auto-cleanup)
 - Resume runs: acquire lock before spawning subprocess
 - New runs: acquire lock when session ID first appears, before yielding `StartedEvent`
+
+## Tool-result classification (engine-agnostic)
+
+`runner.py:_classify_jsonl_event()` peeks at every raw JSONL dict and classifies it as `"tool_result"`, `"assistant"`, or `"other"` for the stuck-after-tool_result detector (#322). This happens inside `_handle_jsonl_line` before `translate()`, so runners DO NOT need to call it. If a new engine is added, extend `_classify_jsonl_event()` with the engine's tool_result-equivalent event shape and assistant-turn-start shape — keep runner-side code (`translate()`, schema) untouched. The classifier is conservative: unknown shapes return `"other"` and the detector stays silent.
 
 ## Adding a new engine
 

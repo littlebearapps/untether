@@ -277,6 +277,43 @@ Scheduling:
 - Priorities: send=0, delete=1, edit=2.
 - Within a priority tier, the oldest pending op runs first.
 
+## Callback answering
+
+Inline-keyboard button presses (Approve/Deny, plan-outline Pause, `/config`
+toggles, `AskUserQuestion` options) produce Telegram `callback_query` updates.
+The Bot API requires us to call `answerCallbackQuery` within **30 seconds** of
+the press; if we don't, the *user's* Telegram client surfaces
+`BotResponseTimeoutError`. The work Untether then performs (writing control
+responses to Claude's PTY, editing feedback messages, etc.) happens
+independently — answering just clears the spinner.
+
+Backends that want a visible toast ("Approved" / "Denied" / …) set
+`answer_early = True` and provide `early_answer_toast(args_text) -> str | None`.
+Dispatch hits `answerCallbackQuery` via that path **before** calling
+`backend.handle(ctx)` so the Telegram ack never blocks on slow downstream
+work. The invariant is covered by a regression test
+(`tests/test_callback_dispatch.py::test_early_answer_fires_before_slow_handle`).
+
+Every answer emits a structured INFO log for observability:
+
+```
+callback.answered command=<id> chat_id=<n>
+  latency_ms=<ms>   # just the answerCallbackQuery HTTP round-trip
+  total_ms=<ms>     # since the dispatcher entered handle_callback
+  early=true|false  # whether the early-answer path fired
+  has_toast=true|false
+```
+
+Use `journalctl --user -u untether --since ... | grep callback.answered` to
+tell "we were fast, Telegram was slow" (high `latency_ms`) apart from "we were
+slow before reaching Telegram" (high `total_ms` with low `latency_ms`).
+
+Client-side `BotResponseTimeoutError` reports a round-trip that exceeded the
+Bot API's 30 s window — they can still fire if Telegram itself is slow or if
+the local network is congested, even when `latency_ms` is well under 30 s.
+The ordering invariant above is what prevents *our* work from ever being
+the cause.
+
 ## Rate limiting + backoff
 
 - Per-chat pacing is computed from `private_chat_rps` and `group_chat_rps`.

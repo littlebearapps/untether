@@ -306,8 +306,14 @@ class _NowStub:
         return n
 
 
-def test_run_once_survives_reload_via_config():
-    """A reload with the same TOML re-adds a run_once cron that was removed."""
+def test_run_once_does_not_resurrect_on_reload():
+    """#317: a reload must NOT re-add a run_once cron that has already fired.
+
+    Prior to #317 the TOML entry re-entered the active list on every reload,
+    causing unexpected re-fires after the user edited any unrelated setting.
+    Now the fired-once set (in-memory, plus optionally persisted to
+    ``run_once_fired.json``) is consulted on reload and filters the cron out.
+    """
     settings = parse_trigger_config(
         {
             "enabled": True,
@@ -326,6 +332,7 @@ def test_run_once_survives_reload_via_config():
     # Simulate firing: remove it.
     assert mgr.remove_cron("once") is True
     assert mgr.cron_ids() == []
-    # Config reload (TOML unchanged) re-adds the cron.
+    # Config reload (TOML unchanged) should NOT re-activate the fired one-shot.
     mgr.update(settings)
-    assert mgr.cron_ids() == ["once"]
+    assert mgr.cron_ids() == []
+    assert mgr.fired_run_once_ids() == ["once"]

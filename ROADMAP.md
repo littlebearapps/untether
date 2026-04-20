@@ -4,8 +4,6 @@ This roadmap reflects the project's direction based on recent development and co
 
 ## Near-term
 
-- **Gemini CLI engine** — full integration with Google's Gemini CLI (runner stub exists, pending stable streaming JSON output)
-- **Amp engine** — full integration with Sourcegraph's Amp coding agent (runner stub exists, pending stable CLI release)
 - **Additional transport backends** — Discord and Slack transports via the plugin system
 - **Improved onboarding diagnostics** — expand `untether doctor` with network, permission, and engine health checks
 
@@ -18,6 +16,8 @@ This roadmap reflects the project's direction based on recent development and co
 
 ## Shipped
 
+- **Gemini CLI engine** — full integration with Google's Gemini CLI via stream-json (shipped across v0.34.x–v0.35.x)
+- **Amp engine** — full integration with Sourcegraph's Amp coding agent via stream-json (shipped across v0.34.x–v0.35.x)
 - **Webhook-driven workflows** — trigger agent runs from CI/CD events, GitHub webhooks, or external services (shipped in v0.28.0 as the triggers system with cron and webhook support)
 - **Session statistics** — `/stats` command for per-engine run counts, actions, and duration across today/week/all-time (shipped in v0.30.0)
 - **Device re-authentication** — `/auth` command for headless Codex re-auth via Telegram (shipped in v0.30.0)

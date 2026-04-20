@@ -42,11 +42,11 @@ Pre-release versions (`X.Y.ZrcN`) are used for staging on `@hetz_lba1_bot` befor
 
 - rc versions live on the `dev` branch — merged via PR from feature branches
 - rc versions do **NOT** require changelog entries — `validate_release.py` skips them
-- rc versions are **NOT** git-tagged — no `v0.35.0rc1` tags (avoids triggering `release.yml`)
+- rc versions are **NOT** tagged (`auto-tag-on-master.yml` skips pre-releases)
 - Commit message convention: `chore: staging X.Y.ZrcN`
-- Only final releases (`X.Y.Z`) get tagged and changelog entries on `master`
-- `dev` → TestPyPI (auto on push), `master` → PyPI (tag + manual approval)
-- See `docs/reference/dev-instance.md` for the full staging workflow
+- Only stable releases (`X.Y.Z`) get tagged and changelog entries on `master`
+- **Single-gate release flow**: `dev` push → TestPyPI (auto); `master` push of a stable version → `auto-tag-on-master.yml` creates `vX.Y.Z` → `release.yml` publishes to PyPI via OIDC → GitHub Release. The master PR review is the only manual approval — no PyPI environment gate, no manual tag step.
+- See `docs/reference/dev-instance.md` for the full staging workflow.
 
 ## Changelog format
 

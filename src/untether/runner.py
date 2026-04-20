@@ -112,6 +112,86 @@ _ABS_PATH_RE = re.compile(r"(/[\w./-]{3,}/[\w.-]+)")
 _URL_RE = re.compile(r"https?://[^\s\"'<>]+")
 
 
+_TOOL_RESULT_EVENT_KIND = "tool_result"
+_ASSISTANT_EVENT_KIND = "assistant"
+_OTHER_EVENT_KIND = "other"
+
+# Engine-agnostic classification of raw JSONL events for the
+# stuck-after-tool_result detector (#322). See docs/reference/runners/*/
+# for each engine's event shape.
+_CODEX_TOOL_ITEM_TYPES = frozenset(
+    {"mcp_tool_call", "command_execution", "file_change", "web_search"}
+)
+_OPENCODE_TOOL_STATUSES = frozenset({"completed", "error"})
+
+
+def _classify_jsonl_event(raw: Any) -> str:
+    """Return "tool_result" | "assistant" | "other" for a decoded JSONL event.
+
+    Engine-agnostic: handles Claude, Codex, OpenCode, Pi, Gemini, AMP.
+    Conservative — unknown shapes return "other".
+    """
+    if not isinstance(raw, dict):
+        return _OTHER_EVENT_KIND
+    t = raw.get("type")
+    if not isinstance(t, str):
+        return _OTHER_EVENT_KIND
+    # Claude / AMP: role=user message whose content contains a tool_result block
+    if t == "user":
+        msg = raw.get("message")
+        if isinstance(msg, dict):
+            content = msg.get("content")
+            if isinstance(content, list):
+                for block in content:
+                    if isinstance(block, dict) and block.get("type") == "tool_result":
+                        return _TOOL_RESULT_EVENT_KIND
+        return _OTHER_EVENT_KIND
+    # Pi direct tool_result events
+    if t in {"tool_result", "ToolExecutionEnd"}:
+        return _TOOL_RESULT_EVENT_KIND
+    # Codex: item.completed (and item.updated with terminal status) for tool items
+    if t in {"item.completed", "item.updated"}:
+        item = raw.get("item")
+        if isinstance(item, dict) and item.get("type") in _CODEX_TOOL_ITEM_TYPES:
+            status = item.get("status")
+            if t == "item.completed" or status in {"completed", "failed"}:
+                return _TOOL_RESULT_EVENT_KIND
+        # Codex agent_message completion is an assistant signal
+        if (
+            isinstance(item, dict)
+            and item.get("type") == "agent_message"
+            and t == "item.completed"
+        ):
+            return _ASSISTANT_EVENT_KIND
+        return _OTHER_EVENT_KIND
+    # OpenCode: ToolUse event (or message.part.updated) carrying a part with
+    # terminal status. Normalised ToolUse shape first, then raw shape.
+    if t == "ToolUse":
+        state_block = raw.get("state")
+        if (
+            isinstance(state_block, dict)
+            and state_block.get("status") in _OPENCODE_TOOL_STATUSES
+        ):
+            return _TOOL_RESULT_EVENT_KIND
+        return _OTHER_EVENT_KIND
+    if t == "message.part.updated":
+        props = raw.get("properties")
+        part = props.get("part") if isinstance(props, dict) else raw.get("part")
+        if isinstance(part, dict) and part.get("type") == "tool":
+            state_block = part.get("state")
+            if (
+                isinstance(state_block, dict)
+                and state_block.get("status") in _OPENCODE_TOOL_STATUSES
+            ):
+                return _TOOL_RESULT_EVENT_KIND
+        return _OTHER_EVENT_KIND
+    # Assistant-turn signals (clear the tool_result latch so the detector
+    # correctly sees "recovered" if the engine resumes).
+    if t in {"assistant", "message.updated", "agent_message"}:
+        return _ASSISTANT_EVENT_KIND
+    return _OTHER_EVENT_KIND
+
+
 def _sanitise_stderr(text: str) -> str:
     """Redact absolute paths and URLs from stderr before exposing to users."""
     text = _ABS_PATH_RE.sub("[path]", text)
@@ -207,6 +287,19 @@ class JsonlStreamState:
     )
     stderr_capture: list[str] = field(default_factory=list)
     proc_returncode: int | None = None
+    # Stuck-after-tool_result detector (#322). Engine-agnostic signal:
+    # set when a tool_result-equivalent event arrives, cleared when an
+    # assistant-turn-start event arrives. When non-zero and elapsed > threshold,
+    # indicates Claude (or any engine) received a tool result but has not
+    # emitted a follow-up assistant turn.
+    last_event_kind: str = "other"
+    last_tool_result_at: float = 0.0
+    # #346 Engine-specific state handle for detectors that need deeper
+    # signals (e.g. Claude's background-task tracking from #347). The
+    # wedge detector duck-types against this — if the engine state exposes
+    # `has_live_background_work()`-style info it can gate SIGTERM. Engines
+    # without background-task awareness leave this None.
+    engine_state: Any = None
 
 
 class JsonlSubprocessRunner(BaseRunner):
@@ -461,6 +554,13 @@ class JsonlSubprocessRunner(BaseRunner):
                 f"but expected {found_session.value}"
             )
             raise RuntimeError(message)
+        # #225: when the event carries meta, treat it as a supplementary
+        # StartedEvent — engines emit these to propagate late-arriving
+        # metadata (e.g. pi.py ships the model from message_end once known).
+        # ProgressTracker.note_event merges meta idempotently, so re-emission
+        # is safe. True duplicates (no meta) continue to be dropped.
+        if event.meta:
+            return found_session, True
         return found_session, False
 
     async def _send_payload(
@@ -688,6 +788,16 @@ class JsonlSubprocessRunner(BaseRunner):
             stream.last_event_tool = etool
             label = f"tool:{etool}" if etool else etype
             stream.recent_events.append((now, label))
+            # Stuck-after-tool_result tracking (#322). The latch persists across
+            # intervening "other" events (attachments, system hooks) and is
+            # cleared only by an assistant-turn-start event so the detector
+            # sees a true "tool_result arrived, no follow-up" signal.
+            kind = _classify_jsonl_event(raw_dict)
+            stream.last_event_kind = kind
+            if kind == _TOOL_RESULT_EVENT_KIND:
+                stream.last_tool_result_at = now
+            elif kind == _ASSISTANT_EVENT_KIND:
+                stream.last_tool_result_at = 0.0
         output: list[UntetherEvent] = []
         for evt in events:
             if isinstance(evt, StartedEvent):
@@ -746,6 +856,80 @@ class JsonlSubprocessRunner(BaseRunner):
     _LIVENESS_TIMEOUT_SECONDS: float = 600.0
 
     _stall_auto_kill: bool = False
+
+    def _check_prespawn_ram_guard(
+        self, resume: ResumeToken | None
+    ) -> CompletedEvent | None:
+        """Check host MemAvailable before spawning a new engine subprocess (#350).
+
+        Returns `None` to allow the spawn (either above the warn threshold
+        or disabled by config), or a `CompletedEvent(ok=False)` to block it.
+
+        A non-blocking low-RAM state logs a `subprocess.prespawn.ram_warning`
+        structured log entry so staging greps can surface "we were close to
+        blocking" even when the spawn succeeded — deliberately does not emit
+        a user-visible action event in this v1 because doing so would
+        require threading an `EventFactory` through the guard, which
+        complicates per-engine runners. A follow-up PR can add the
+        user-visible warning once #347's telemetry wiring lands.
+        """
+        try:
+            from .settings import load_settings_if_exists
+            from .utils.proc_diag import mem_available_kb
+        except ImportError:
+            return None
+
+        try:
+            result = load_settings_if_exists()
+        except Exception:  # noqa: BLE001 — config failures must NEVER block a run
+            return None
+        if result is None:
+            return None
+        settings, _ = result
+        watchdog = settings.watchdog
+
+        warn_mb = watchdog.prespawn_ram_warn_mb
+        block_mb = watchdog.prespawn_ram_block_mb
+        if warn_mb <= 0 and block_mb <= 0:
+            return None  # guard fully disabled
+
+        avail_kb = mem_available_kb()
+        if avail_kb is None:
+            return None  # non-Linux / /proc unreadable — treat as ALLOW
+        avail_mb = avail_kb // 1024
+
+        logger = self.get_logger()
+
+        if block_mb > 0 and avail_mb < block_mb:
+            logger.error(
+                "subprocess.prespawn.ram_blocked",
+                engine=self.engine,
+                avail_mb=avail_mb,
+                block_mb=block_mb,
+                warn_mb=warn_mb,
+            )
+            msg = (
+                f"🛑 Insufficient RAM to start engine ({avail_mb} MB free, "
+                f"threshold {block_mb} MB). Cancel an active run or restart "
+                f"the service."
+            )
+            return CompletedEvent(
+                engine=self.engine,
+                ok=False,
+                answer="",
+                resume=resume,
+                error=msg,
+            )
+
+        if warn_mb > 0 and avail_mb < warn_mb:
+            logger.warning(
+                "subprocess.prespawn.ram_warning",
+                engine=self.engine,
+                avail_mb=avail_mb,
+                warn_mb=warn_mb,
+                block_mb=block_mb,
+            )
+        return None
 
     async def _subprocess_watchdog(
         self,
@@ -877,6 +1061,15 @@ class JsonlSubprocessRunner(BaseRunner):
             prompt_len=len(prompt),
             args=cmd[1:],
         )
+
+        # #350 pre-spawn RAM guard — refuse or warn when the host is
+        # near-OOM. Runs BEFORE manage_subprocess so a blocked spawn costs
+        # nothing. A WARN emits a visible note; a BLOCK yields a
+        # CompletedEvent(ok=False) and returns early without forking.
+        block_result = self._check_prespawn_ram_guard(resume)
+        if block_result is not None:
+            yield block_result
+            return
 
         cwd = get_run_base_dir()
 

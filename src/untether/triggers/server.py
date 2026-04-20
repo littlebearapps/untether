@@ -357,7 +357,12 @@ async def run_webhook_server(
     dispatcher: TriggerDispatcher,
     manager: TriggerManager | None = None,
 ) -> None:
-    """Run the webhook HTTP server until cancelled."""
+    """Run the webhook HTTP server until cancelled.
+
+    Degrades gracefully when the configured port cannot be bound: logs
+    ``triggers.server.bind_failed`` with remediation hints and returns without
+    raising, so the rest of the bot (polling, commands, crons) stays up.
+    """
     app = build_webhook_app(settings, dispatcher, manager=manager)
 
     runner = web.AppRunner(app, access_log=None)
@@ -368,7 +373,28 @@ async def run_webhook_server(
             settings.server.host,
             settings.server.port,
         )
-        await site.start()
+        try:
+            await site.start()
+        except OSError as exc:
+            # #320: another process holds the port (or similar bind failure).
+            # Don't crash the bot — log an actionable error and disable
+            # webhooks for this session.  Polling, commands, and crons are
+            # unaffected.
+            logger.error(
+                "triggers.server.bind_failed",
+                host=settings.server.host,
+                port=settings.server.port,
+                error=str(exc),
+                hint=(
+                    f"Another process may be using this port. "
+                    f"Check with: ss -tlnp | grep {settings.server.port}"
+                ),
+                fix=(
+                    "Set [triggers.server] port = <N> in untether.toml "
+                    f"(current: {settings.server.port})"
+                ),
+            )
+            return
         logger.info(
             "triggers.server.started",
             host=settings.server.host,

@@ -353,6 +353,18 @@ class HttpBotClient:
         return self._decode_result(method="getFile", payload=result, model=File)
 
     async def download_file(self, file_path: str) -> bytes | None:
+        # #204: reject file_path values that could redirect the request away
+        # from api.telegram.org.  Telegram's documented shape is a relative
+        # path ("documents/file_123.txt") — any scheme marker or parent-dir
+        # reference indicates a tampered/spoofed getFile response and we
+        # should not construct the URL.
+        if "://" in file_path or ".." in file_path or file_path.startswith("/"):
+            logger.error(
+                "telegram.file_path_rejected",
+                file_path_prefix=file_path[:32],
+                reason="scheme_or_traversal",
+            )
+            return None
         url = f"{self._file_base}/{file_path}"
         try:
             resp = await self._http_client.get(url)
