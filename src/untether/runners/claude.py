@@ -102,10 +102,16 @@ _DISCUSS_COOLDOWN: dict[str, tuple[float, int]] = {}
 # When Claude Code next calls ExitPlanMode, it will be auto-approved.
 _DISCUSS_APPROVED: set[str] = set()
 
-# Plan exit approved: session_ids where ExitPlanMode was manually approved.
-# After plan approval, diff_preview tools (Edit/Write/Bash) auto-approve instead
-# of requiring per-tool manual approval — the user already reviewed the plan (#283).
+# Plan-bypass set: session_ids where the user has approved at least one
+# plan-gated tool (ExitPlanMode, Edit, Write, or Bash). After the first
+# approval, subsequent diff_preview tools auto-approve instead of re-prompting
+# — the user has already reviewed code for this session (#283, #369).
 _PLAN_EXIT_APPROVED: set[str] = set()
+
+# Tools guarded by the diff_preview approval gate. Mirrors the tools an
+# approved plan unlocks: approving any of these populates _PLAN_EXIT_APPROVED
+# for the session so subsequent diff_preview tools auto-approve (#369).
+_DIFF_PREVIEW_TOOLS: frozenset[str] = frozenset({"Edit", "Write", "Bash"})
 
 # Sessions where "Pause & Outline Plan" was clicked and we're waiting for outline text.
 # StreamTextBlock handler checks this to emit visible note events in the progress message.
@@ -820,9 +826,9 @@ def translate_claude_event(
                 state.auto_approve_queue.append(request_id)
                 return []
 
-            # Auto-approve tool requests that don't need user interaction
+            # Auto-approve tool requests that don't need user interaction.
+            # _DIFF_PREVIEW_TOOLS is module-scoped — see top of file.
             _TOOLS_REQUIRING_APPROVAL = {"ExitPlanMode", "AskUserQuestion"}
-            _DIFF_PREVIEW_TOOLS = frozenset({"Edit", "Write", "Bash"})
             if isinstance(request, claude_schema.ControlCanUseToolRequest):
                 tool_name = getattr(request, "tool_name", "unknown")
                 if tool_name not in _TOOLS_REQUIRING_APPROVAL:
@@ -1413,10 +1419,15 @@ class ClaudeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
             if request_id in _REQUEST_TO_INPUT:
                 inner["updatedInput"] = _REQUEST_TO_INPUT.pop(request_id)
             tool_name = _REQUEST_TO_TOOL_NAME.pop(request_id, None)
-            # After plan approval, bypass diff_preview gate for subsequent
-            # tools — user already reviewed the plan (#283)
+            # After approving any plan-gated tool, bypass the diff_preview
+            # gate for subsequent tools in the same session — the user has
+            # already reviewed code, repeating the prompt per-tool is
+            # redundant (#283 for ExitPlanMode; #369 extended to diff_preview
+            # tools so plan-mode sessions that skip ExitPlanMode also bypass).
             session_id_for_plan = _REQUEST_TO_SESSION.get(request_id)
-            if tool_name == "ExitPlanMode" and session_id_for_plan:
+            if session_id_for_plan and (
+                tool_name == "ExitPlanMode" or tool_name in _DIFF_PREVIEW_TOOLS
+            ):
                 _PLAN_EXIT_APPROVED.add(session_id_for_plan)
         else:
             inner = {"behavior": "deny", "message": deny_message or "User denied"}

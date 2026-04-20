@@ -1713,6 +1713,68 @@ def test_plan_exit_approved_cleaned_up_on_session_end() -> None:
     assert session_id not in _PLAN_EXIT_APPROVED
 
 
+# ---------------------------------------------------------------------------
+# #369 — plain Approve on diff_preview tools must populate _PLAN_EXIT_APPROVED
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("tool_name", ["Edit", "Write", "Bash", "ExitPlanMode"])
+@pytest.mark.anyio
+async def test_approve_populates_plan_exit_approved_for_diff_tools(
+    tool_name: str,
+) -> None:
+    """Plain Approve on any diff_preview tool or ExitPlanMode populates
+    _PLAN_EXIT_APPROVED so subsequent Edits auto-approve (#369)."""
+    runner = ClaudeRunner(claude_cmd="claude")
+    session_id = f"sess-369-{tool_name}"
+    request_id = f"req-369-{tool_name}"
+
+    _ACTIVE_RUNNERS[session_id] = (runner, 0.0)
+    _SESSION_STDIN[session_id] = AsyncMock()
+    _REQUEST_TO_SESSION[request_id] = session_id
+    _REQUEST_TO_INPUT[request_id] = {}
+    _REQUEST_TO_TOOL_NAME[request_id] = tool_name
+
+    ok = await runner.write_control_response(request_id, approved=True)
+    assert ok is True
+    assert session_id in _PLAN_EXIT_APPROVED
+
+
+@pytest.mark.anyio
+async def test_deny_does_not_populate_plan_exit_approved() -> None:
+    """Deny click must NOT populate _PLAN_EXIT_APPROVED (#369)."""
+    runner = ClaudeRunner(claude_cmd="claude")
+    session_id = "sess-369-deny"
+    request_id = "req-369-deny"
+
+    _ACTIVE_RUNNERS[session_id] = (runner, 0.0)
+    _SESSION_STDIN[session_id] = AsyncMock()
+    _REQUEST_TO_SESSION[request_id] = session_id
+    _REQUEST_TO_INPUT[request_id] = {}
+    _REQUEST_TO_TOOL_NAME[request_id] = "Edit"
+
+    await runner.write_control_response(request_id, approved=False, deny_message="nope")
+    assert session_id not in _PLAN_EXIT_APPROVED
+
+
+@pytest.mark.anyio
+async def test_approve_non_diff_tool_does_not_populate() -> None:
+    """Approving a non-diff non-ExitPlanMode tool must NOT populate the
+    bypass set (e.g., AskUserQuestion answers don't imply code review) (#369)."""
+    runner = ClaudeRunner(claude_cmd="claude")
+    session_id = "sess-369-aq"
+    request_id = "req-369-aq"
+
+    _ACTIVE_RUNNERS[session_id] = (runner, 0.0)
+    _SESSION_STDIN[session_id] = AsyncMock()
+    _REQUEST_TO_SESSION[request_id] = session_id
+    _REQUEST_TO_INPUT[request_id] = {}
+    _REQUEST_TO_TOOL_NAME[request_id] = "AskUserQuestion"
+
+    await runner.write_control_response(request_id, approved=True)
+    assert session_id not in _PLAN_EXIT_APPROVED
+
+
 def test_diff_preview_edit_shows_diff_text() -> None:
     """When diff_preview=True, Edit approval message contains diff text."""
     from untether.runners.run_options import EngineRunOptions, apply_run_options
