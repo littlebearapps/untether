@@ -191,6 +191,17 @@ To change:
     message_overflow = "trim"    # or "split" (default)
     ```
 
+## Telegram rate limit / flood wait
+
+**Symptoms:** Progress messages briefly freeze across all active chats; logs show `TooManyRequests` or `outbox.retry_after` entries.
+
+Telegram enforces per-chat (~1 msg/sec), per-group (20/min), and global (~30 msg/sec) rate limits. When any chat hits HTTP 429, Untether currently backs off globally until the retry window expires — so one hot chat can briefly pause unrelated cold ones. ([#405](https://github.com/littlebearapps/untether/issues/405) tracks per-chat backoff that would decouple them.)
+
+- **At typical Untether volumes (<15 concurrently-streaming agents)** this is rare.
+- **If you see it regularly**, you're likely pushing more than ~25-30 msg/sec across all active progress streams. Check with `journalctl --user -u untether -f | grep -iE 'retry|flood|429'`.
+
+See [Telegram capacity & limits](../explanation/telegram-capacity.md) for the full picture — operating envelopes, where Untether breaks first, and scaling patterns.
+
 ## Voice transcription not working
 
 **Symptoms:** Sending a voice note doesn't start a run, or you get a transcription error.
