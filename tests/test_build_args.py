@@ -94,6 +94,136 @@ class TestClaudeBuildArgs:
         # Should be comma-separated list
         assert "Bash" in args[idx + 1]
 
+    def test_extra_args_default_empty(self) -> None:
+        """`extra_args=[]` produces byte-identical argv to the pre-#407
+        behaviour — no extra tokens introduced."""
+        runner_none = self._runner()
+        runner_empty = self._runner(extra_args=[])
+        from untether.runners.claude import ClaudeStreamState
+
+        state = ClaudeStreamState()
+        args_none = runner_none.build_args("hello", None, state=state)
+        args_empty = runner_empty.build_args("hello", None, state=state)
+        assert args_none == args_empty
+
+    def test_extra_args_chrome(self) -> None:
+        """`extra_args=['--chrome']` lands on argv after the managed
+        prelude and before resume/model/allowed-tools, and does not
+        displace the `-p <prompt>` suffix (#407)."""
+        runner = self._runner(extra_args=["--chrome"])
+        from untether.runners.claude import ClaudeStreamState
+
+        state = ClaudeStreamState()
+        token = ResumeToken(engine="claude", value="sess123")
+        args = runner.build_args("hello", token, state=state)
+        assert "--chrome" in args
+        chrome_idx = args.index("--chrome")
+        verbose_idx = args.index("--verbose")
+        resume_idx = args.index("--resume")
+        assert verbose_idx < chrome_idx < resume_idx
+        # Prompt still last after `--`
+        assert args[-2] == "--"
+        assert args[-1] == "hello"
+
+    def test_extra_args_chrome_permission_mode(self) -> None:
+        """`extra_args` survives the permission-mode argv path (no -p,
+        prompt sent via stdin)."""
+        runner = self._runner(extra_args=["--chrome"])
+        from untether.runners.claude import ClaudeStreamState
+
+        state = ClaudeStreamState()
+        opts = RunOptions(permission_mode="plan")
+        with patch("untether.runners.claude.get_run_options", return_value=opts):
+            args = runner.build_args("hello", None, state=state)
+        assert "--chrome" in args
+        assert "--permission-mode" in args
+        chrome_idx = args.index("--chrome")
+        perm_idx = args.index("--permission-mode")
+        assert chrome_idx < perm_idx
+        # permission-mode path sends prompt via stdin, no trailing `-- hello`
+        assert "--" not in args
+        assert "hello" not in args
+
+    def test_extra_args_multiple(self) -> None:
+        """Order between multiple user-supplied flags is preserved."""
+        runner = self._runner(extra_args=["--chrome", "--strict-mcp-config"])
+        from untether.runners.claude import ClaudeStreamState
+
+        state = ClaudeStreamState()
+        args = runner.build_args("hello", None, state=state)
+        chrome_idx = args.index("--chrome")
+        strict_idx = args.index("--strict-mcp-config")
+        assert chrome_idx < strict_idx
+
+
+class TestClaudeBuildRunner:
+    """Coverage for extra_args parsing + reserved-flag validation in
+    `build_runner` (#407)."""
+
+    def _call(self, config: dict[str, Any]):
+        from pathlib import Path
+
+        from untether.runners.claude import build_runner
+
+        return build_runner(config, Path("/tmp/untether.toml"))
+
+    def test_extra_args_missing_yields_empty(self) -> None:
+        runner = self._call({})
+        assert runner.extra_args == []
+
+    def test_extra_args_list_of_strings(self) -> None:
+        runner = self._call({"extra_args": ["--chrome"]})
+        assert runner.extra_args == ["--chrome"]
+
+    def test_extra_args_non_list_raises(self) -> None:
+        import pytest
+
+        from untether.config import ConfigError
+
+        with pytest.raises(ConfigError, match="list of strings"):
+            self._call({"extra_args": "--chrome"})
+
+    def test_extra_args_non_string_element_raises(self) -> None:
+        import pytest
+
+        from untether.config import ConfigError
+
+        with pytest.raises(ConfigError, match="list of strings"):
+            self._call({"extra_args": ["--chrome", 42]})
+
+    def test_reserved_flag_rejected(self) -> None:
+        import pytest
+
+        from untether.config import ConfigError
+
+        for reserved in (
+            "-p",
+            "--print",
+            "--output-format",
+            "--input-format",
+            "--resume",
+            "--continue",
+            "--permission-mode",
+            "--permission-prompt-tool",
+        ):
+            with pytest.raises(ConfigError, match="managed by Untether"):
+                self._call({"extra_args": [reserved]})
+
+    def test_reserved_prefix_rejected(self) -> None:
+        import pytest
+
+        from untether.config import ConfigError
+
+        with pytest.raises(ConfigError, match="managed by Untether"):
+            self._call({"extra_args": ["--output-format=text"]})
+
+    def test_non_reserved_flag_accepted(self) -> None:
+        # Sanity: `--chrome`, `--no-chrome`, `--mcp-config`, and other
+        # upstream flags Untether doesn't manage must pass through.
+        for flag in ("--chrome", "--no-chrome", "--mcp-config"):
+            runner = self._call({"extra_args": [flag]})
+            assert flag in runner.extra_args
+
 
 # ---------------------------------------------------------------------------
 # Codex

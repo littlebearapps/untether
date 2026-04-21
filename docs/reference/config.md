@@ -363,6 +363,7 @@ here; plugin engines should document their own keys.
 |-----|------|---------|-------|
 | `model` | string | (unset) | Optional model override. |
 | `allowed_tools` | string[] | `["Bash", "Read", "Edit", "Write"]` | Auto-approve tool rules. |
+| `extra_args` | string[] | `[]` | Extra CLI args passed to `claude` (e.g. `["--chrome"]` to opt into the Claude-in-Chrome extension). Flags Untether manages internally (`-p`, `--print`, `--output-format`, `--input-format`, `--resume`/`-r`, `--continue`/`-c`, `--permission-mode`, `--permission-prompt-tool`) are rejected at config-load. |
 | `dangerously_skip_permissions` | bool | `false` | Skip Claude Code permissions prompts. |
 | `use_api_billing` | bool | `false` | Keep `ANTHROPIC_API_KEY` for API billing. |
 
@@ -371,6 +372,7 @@ here; plugin engines should document their own keys.
     ```sh
     untether config set claude.model "claude-sonnet-4-5-20250929"
     untether config set claude.allowed_tools '["Bash", "Read", "Edit", "Write"]'
+    untether config set claude.extra_args '["--chrome"]'
     untether config set claude.dangerously_skip_permissions false
     untether config set claude.use_api_billing false
     ```
@@ -381,6 +383,7 @@ here; plugin engines should document their own keys.
     [claude]
     model = "claude-sonnet-4-5-20250929"
     allowed_tools = ["Bash", "Read", "Edit", "Write"]
+    extra_args = ["--chrome"]    # e.g. opt into Claude-in-Chrome
     dangerously_skip_permissions = false
     use_api_billing = false
     ```

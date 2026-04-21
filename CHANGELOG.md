@@ -1,5 +1,11 @@
 # changelog
 
+## v0.35.3 (unreleased)
+
+### changes
+
+- **feat:** `[claude]` config gains `extra_args: list[str]` — user-supplied upstream CLI flags passed through to `claude` verbatim. Mirrors `codex.extra_args` and `pi.extra_args`. Primary motivator is Claude-in-Chrome: Claude Code 2.1.x gates the `mcp__claude-in-chrome__*` tool namespace behind `--chrome` (or `CLAUDE_CODE_ENABLE_CFC=1`), so Untether-spawned sessions never saw those tools in their catalogue. Setting `extra_args = ["--chrome"]` in `~/.untether/untether.toml` now enables Claude-in-Chrome end-to-end without forking Untether or touching the LaunchAgent/systemd env. Flags Untether manages internally (`-p`, `--print`, `--output-format`, `--input-format`, `--resume`/`-r`, `--continue`/`-c`, `--permission-mode`, `--permission-prompt-tool`) are rejected at config-load with a `ConfigError` so duplicate-argv surprises fail fast instead of at runtime. The user-supplied args land on argv after Untether's managed stream-json prelude and before resume / model / effort / allowed-tools / permission flags, so the trailing `-p <prompt>` (or stdin prompt under permission-mode) is never displaced. 8 new unit tests in `tests/test_build_args.py` cover argv ordering, permission-mode argv, multi-flag order preservation, `build_runner` parsing, and reserved-flag rejection (individual flag + `key=value` prefix form) [#407](https://github.com/littlebearapps/untether/issues/407)
+
 ## v0.35.2 (2026-04-20)
 
 ### changes

@@ -78,6 +78,7 @@ Recommended v1 schema:
     untether config set default_engine "claude"
     untether config set claude.model "claude-sonnet-4-5-20250929"
     untether config set claude.allowed_tools '["Bash", "Read", "Edit", "Write"]'
+    untether config set claude.extra_args '["--chrome"]'
     untether config set claude.dangerously_skip_permissions false
     untether config set claude.use_api_billing false
     ```
@@ -93,6 +94,7 @@ Recommended v1 schema:
     model = "claude-sonnet-4-5-20250929" # optional (Claude Code supports model override in settings too)
     permission_mode = "auto"             # optional: "plan", "auto", or "acceptEdits"
     allowed_tools = ["Bash", "Read", "Edit", "Write"] # optional but strongly recommended for automation
+    extra_args = ["--chrome"]           # optional: extra upstream CLI flags (e.g. --chrome opts into Claude-in-Chrome)
     dangerously_skip_permissions = false # optional (high risk; prefer sandbox use only)
     use_api_billing = false             # optional (keep ANTHROPIC_API_KEY for API billing)
     ```
@@ -102,8 +104,9 @@ Notes:
 * `--allowedTools` exists specifically to auto-approve tools in programmatic runs. ([Claude Code][1])
 * Claude Code tools (Bash/Edit/Write/WebSearch/etc.) and whether permission is required are documented. ([Claude Code][2])
 * If `allowed_tools` is omitted, Untether defaults to `["Bash", "Read", "Edit", "Write"]`.
-* Untether reads `model`, `permission_mode`, `allowed_tools`, `dangerously_skip_permissions`, and `use_api_billing` from `[claude]`.
+* Untether reads `model`, `permission_mode`, `allowed_tools`, `extra_args`, `dangerously_skip_permissions`, and `use_api_billing` from `[claude]`.
 * `permission_mode = "auto"` uses `--permission-mode plan` on the CLI but auto-approves ExitPlanMode requests without showing Telegram buttons. Can also be set per chat via `/planmode auto`.
+* `extra_args` lets you pass additional upstream `claude` CLI flags that Untether doesn't expose directly — for example `["--chrome"]` opts into the Claude-in-Chrome extension (otherwise gated off by Claude Code 2.1.x), or `["--strict-mcp-config"]` / `["--mcp-config", "path"]` for MCP tweaks. Flags Untether manages internally (`-p`, `--print`, `--output-format`, `--input-format`, `--resume`/`-r`, `--continue`/`-c`, `--permission-mode`, `--permission-prompt-tool`) are rejected at config-load with a `ConfigError`. Mirrors `codex.extra_args` and `pi.extra_args`.
 * By default Untether strips `ANTHROPIC_API_KEY` from the subprocess environment so Claude Code uses subscription billing. Set `use_api_billing = true` to keep the key.
 
 ---
