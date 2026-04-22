@@ -26,6 +26,7 @@ import anyio
 import msgspec
 
 from ..backends import EngineBackend, EngineConfig
+from ..config import ConfigError
 from ..events import EventFactory
 from ..logging import get_logger
 from ..model import (
@@ -63,6 +64,44 @@ DEFAULT_ALLOWED_TOOLS = ["Bash", "Read", "Edit", "Write"]
 _RESUME_RE = re.compile(
     r"(?im)^\s*`?claude\s+(?:--resume|-r)\s+(?P<token>[^`\s]+)`?\s*$"
 )
+
+# Flags that Untether sets on every spawn (stream-json I/O, resume tokens,
+# permission wiring). A user-supplied copy in `[claude].extra_args` would
+# either duplicate the arg or collide with Untether's expected value, so
+# `build_runner` rejects any entry matching this set or one of the equivalent
+# `key=value` prefixes below. Mirrors `codex._EXEC_ONLY_FLAGS` (#407).
+_RESERVED_FLAGS: frozenset[str] = frozenset(
+    {
+        "-p",
+        "--print",
+        "--output-format",
+        "--input-format",
+        "--resume",
+        "-r",
+        "--continue",
+        "-c",
+        "--permission-mode",
+        "--permission-prompt-tool",
+    }
+)
+_RESERVED_PREFIXES: tuple[str, ...] = (
+    "--output-format=",
+    "--input-format=",
+    "--resume=",
+    "--permission-mode=",
+    "--permission-prompt-tool=",
+)
+
+
+def _find_reserved_flag(extra_args: list[str]) -> str | None:
+    for arg in extra_args:
+        if arg in _RESERVED_FLAGS:
+            return arg
+        for prefix in _RESERVED_PREFIXES:
+            if arg.startswith(prefix):
+                return arg
+    return None
+
 
 # Phase 2: Global registry for active ClaudeRunner instances
 # Keyed by session_id, stores (runner_instance, timestamp)
@@ -1381,6 +1420,7 @@ class ClaudeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
     model: str | None = None
     permission_mode: str | None = None
     allowed_tools: list[str] | None = None
+    extra_args: list[str] = field(default_factory=list)
     dangerously_skip_permissions: bool = False
     use_api_billing: bool = False
     session_title: str = "claude"
@@ -1550,6 +1590,12 @@ class ClaudeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
                 "stream-json",
                 "--verbose",
             ]
+
+        # User-supplied CLI flags (e.g. `--chrome` to opt into Claude-in-Chrome).
+        # Must sit after the Untether-managed I/O prelude but before
+        # resume / model / effort / allowed-tools / permission so the final
+        # prompt position (after `--`) is never displaced (#407).
+        args.extend(self.extra_args)
 
         if resume is not None:
             if resume.is_continue:
@@ -2309,7 +2355,7 @@ class ClaudeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
             self._pty_master_fd = None
 
 
-def build_runner(config: EngineConfig, _config_path: Path) -> Runner:
+def build_runner(config: EngineConfig, config_path: Path) -> Runner:
     claude_cmd = shutil.which("claude") or "claude"
 
     model = config.get("model")
@@ -2322,11 +2368,41 @@ def build_runner(config: EngineConfig, _config_path: Path) -> Runner:
     permission_mode = config.get("permission_mode")
     title = str(model) if model is not None else "claude"
 
+    extra_args_value = config.get("extra_args")
+    if extra_args_value is None:
+        extra_args: list[str] = []
+    elif isinstance(extra_args_value, list) and all(
+        isinstance(item, str) for item in extra_args_value
+    ):
+        extra_args = list(extra_args_value)
+    else:
+        logger.warning(
+            "claude.config.invalid",
+            error="extra_args must be a list of strings",
+            config_path=str(config_path),
+        )
+        raise ConfigError(
+            f"Invalid `claude.extra_args` in {config_path}; expected a list of strings."
+        )
+
+    reserved_flag = _find_reserved_flag(extra_args)
+    if reserved_flag:
+        logger.warning(
+            "claude.config.invalid",
+            error=f"reserved flag {reserved_flag!r} is managed by Untether",
+            config_path=str(config_path),
+        )
+        raise ConfigError(
+            f"Invalid `claude.extra_args` in {config_path}; flag {reserved_flag!r} "
+            f"is managed by Untether and cannot be overridden."
+        )
+
     return ClaudeRunner(
         claude_cmd=claude_cmd,
         model=model,
         permission_mode=permission_mode,
         allowed_tools=allowed_tools,
+        extra_args=extra_args,
         dangerously_skip_permissions=dangerously_skip_permissions,
         use_api_billing=use_api_billing,
         session_title=title,
