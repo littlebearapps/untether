@@ -135,6 +135,7 @@ Detailed protocol specs and event cheatsheets for each integration:
 | AMP event mapping | `docs/reference/runners/amp/untether-events.md` | AMP JSONL → Untether event translation rules |
 | Telegram transport | `docs/reference/transports/telegram.md` | Bot API client, outbox/rate-limiting, voice transcription, forum topics |
 | Workflow modes | `docs/reference/modes.md` | Assistant, workspace, handoff — settings, commands, mode-agnostic features |
+| Automated monitoring | `docs/reference/automated-monitoring.md` | Pattern + quick-ref for scheduled Claude Code observe-and-file sessions (walking-mode dog-walk QA, future daily audits / nightly digests). Shared guardrails, state layout, `/loop` invocation. |
 
 ## Skills (project-scoped)
 
@@ -148,6 +149,7 @@ Domain-specific Claude Code skills for working on Untether:
 | Codex/OpenCode/Pi | `.claude/skills/codex-opencode-pi/` | Working on non-Claude runners, comparing engine protocols |
 | Untether Architecture | `.claude/skills/untether-architecture/` | Understanding overall data flow, config system, progress tracking, project system |
 | Release Coordination | `.claude/skills/release-coordination/` | Preparing releases, version bumps, changelog drafting, issue audits, rollback procedures |
+| Walking-mode monitor | `.claude/skills/walking-mode-monitor/` | Self-paced observe-and-file session reading staging logs and filing `auto:walking-mode` issues; invoked via `claude /loop` in tmux on lba-1. See `docs/reference/automated-monitoring.md` for the shared pattern and how to add more such sessions. |
 
 ## Hooks (project-scoped)
 
