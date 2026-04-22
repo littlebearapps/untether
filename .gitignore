@@ -15,6 +15,18 @@ _site/
 docs/reference/changelog.md
 docs/plans/
 docs/promotion/
+# Internal-only docs — public repo hygiene. Plans, audits, handovers, and
+# per-release test artifacts reference production bot names, internal
+# processes, and draft design work. GitHub issues/milestones are the
+# public tracker.
+docs/handover/
+docs/audits/
+docs/tests/
+# Draft design/feedback files in incoming/ — auto-named uploads plus WIP
+# markdown that shouldn't be committed by default. Demo screenshots and
+# d1_*.* data files remain tracked individually.
+incoming/file_*.jpg
+incoming/*.md
 .envrc
 .claude/settings.json
 .claude/plans/
