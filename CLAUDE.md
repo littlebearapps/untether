@@ -47,6 +47,7 @@ Untether adds interactive permission control, plan mode support, and several UX 
 - **Trigger visibility (Tier 1)** — `/ping` shows per-chat trigger summary (`⏰ triggers: 1 cron (id, 9:00 AM daily (Melbourne))`); run footer shows `⏰ cron:<id>` / `⚡ webhook:<id>` for trigger-initiated runs; new `describe_cron()` utility renders common patterns in plain English
 - **Graceful restart improvements (Tier 1)** — persists Telegram `update_id` to `last_update_id.json` so restarts don't drop/duplicate messages; `Type=notify` systemd integration via stdlib `sd_notify` (`READY=1` + `STOPPING=1`); `RestartSec=2`
 - **`diff_preview` plan bypass (#283)** — after user approves a plan outline via "Pause & Outline Plan", the `_discuss_approved` flag short-circuits diff preview for subsequent Edit/Write tools so no second approval is needed
+- **Claude `extra_args` passthrough (#407, v0.35.3rc1)** — `[claude] extra_args = [...]` lets users supply upstream CLI flags verbatim (mirrors `codex.extra_args`, `pi.extra_args`). Primary motivator: `extra_args = ["--chrome"]` enables Claude-in-Chrome's `mcp__claude-in-chrome__*` tool namespace on a GUI Mac. Flags Untether manages internally (`-p`, `--print`, `--output-format`, `--input-format`, `--resume`/`-r`, `--continue`/`-c`, `--permission-mode`, `--permission-prompt-tool`) are rejected at config-load with a `ConfigError`. User args land on argv after the managed stream-json prelude and before resume / model / effort / allowed-tools / permission flags, preserving the trailing `-p <prompt>` (or stdin prompt under permission-mode) position
 
 See `.claude/skills/claude-stream-json/` and `.claude/rules/control-channel.md` for implementation details.
 
@@ -180,7 +181,7 @@ Rules in `.claude/rules/` auto-load when editing matching files:
 
 ## Tests
 
-2372 unit tests, 80% coverage threshold. Integration testing against `@untether_dev_bot` is **mandatory before every release** — see `docs/reference/integration-testing.md` for the full playbook with per-release-type tier requirements (patch/minor/major). All integration test tiers are fully automated by Claude Code via Telegram MCP tools and Bash.
+2387 unit tests, 80% coverage threshold. Integration testing against `@untether_dev_bot` is **mandatory before every release** — see `docs/reference/integration-testing.md` for the full playbook with per-release-type tier requirements (patch/minor/major). All integration test tiers are fully automated by Claude Code via Telegram MCP tools and Bash.
 
 Key test files:
 
@@ -204,7 +205,7 @@ Key test files:
 - `test_pi_compaction.py` — 6 tests: compaction start/end, aborted, no tokens, sequence
 - `test_proc_diag.py` — 24 tests: format_diag, is_cpu_active, collect_proc_diag (Linux /proc reads), ProcessDiag defaults
 - `test_exec_runner.py` — 22 tests: event tracking (event_count, recent_events ring buffer, PID in StartedEvent meta), JsonlStreamState defaults
-- `test_build_args.py` — 42 tests: CLI argument construction for all 6 engines, model/reasoning/permission flags
+- `test_build_args.py` — 56 tests: CLI argument construction for all 6 engines, model/reasoning/permission flags, Claude `extra_args` argv ordering, permission-mode argv, multi-flag order, `build_runner` parsing, and reserved-flag rejection (#407)
 - `test_telegram_files.py` — 17 tests: file helpers, deduplication, deny globs, default upload paths
 - `test_telegram_file_transfer_helpers.py` — 48 tests: `/file put` and `/file get` command handling, media groups, force overwrite
 - `test_loop_coverage.py` — 29 tests: update loop edge cases, message routing, callback dispatch, shutdown integration
