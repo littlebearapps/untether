@@ -135,13 +135,13 @@ section and profile picture for your bot, see /help for a
 list of commands.
 
 Use this token to access the HTTP API:
-123456789:ABCdefGHIjklMNOpqrsTUVwxyz
+<BOT_ID>:<BOT_TOKEN>
 
 Keep your token secure and store it safely, it can be used
 by anyone to control your bot.
 ```
 
-Copy the token (the `123456789:ABC...` part).
+Copy the token (the `<BOT_ID>:<BOT_TOKEN>` part).
 
 <!-- TODO: capture screenshot -->
 <!-- <img src="../assets/screenshots/botfather-newbot.jpg" alt="BotFather /newbot flow showing the generated token" width="360" loading="lazy" /> -->

@@ -322,7 +322,9 @@ class AmpRunner(ResumeTokenMixin, JsonlSubprocessRunner):
     amp_cmd: str = "amp"
     model: str | None = None
     mode: str | None = None
-    dangerously_allow_all: bool = True
+    # #206: default off — opt-in via [amp] config. Untether's permission layer
+    # is the primary control; AMP's own permission system is a defence in depth.
+    dangerously_allow_all: bool = False
     stream_json_input: bool = False
     session_title: str = "amp"
     logger = logger
@@ -548,7 +550,7 @@ def build_runner(config: EngineConfig, config_path: Path) -> Runner:
 
     dangerously_allow_all = config.get("dangerously_allow_all")
     if dangerously_allow_all is None:
-        dangerously_allow_all = True
+        dangerously_allow_all = False
     elif not isinstance(dangerously_allow_all, bool):
         logger.warning(
             "amp.config.invalid",

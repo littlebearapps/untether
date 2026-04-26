@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import contextlib
 import os
 import re
 from collections.abc import AsyncIterator
@@ -586,7 +587,12 @@ class PiRunner(ResumeTokenMixin, JsonlSubprocessRunner):
     def _new_session_path(self) -> str:
         cwd = get_run_base_dir() or Path.cwd()
         session_dir = _default_session_dir(cwd)
-        session_dir.mkdir(parents=True, exist_ok=True)
+        # #207: 0o700 keeps Pi session JSONL out of reach of other users on
+        # shared hosts. mkdir's mode arg is ignored for existing dirs, so
+        # chmod the directory after to also tighten any pre-existing one.
+        session_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+        with contextlib.suppress(OSError):
+            session_dir.chmod(0o700)
         timestamp = datetime.now(UTC).isoformat()
         safe_timestamp = timestamp.replace(":", "-").replace(".", "-")
         token = uuid4().hex

@@ -528,7 +528,14 @@ class TestAmpBuildArgs:
         assert args[idx + 1] == "rush"
 
     def test_dangerously_allow_all_default(self) -> None:
+        # #206: default is now safe — opt-in only via [amp] config.
         runner = self._runner()
+        state = runner.new_state("hello", None)
+        args = runner.build_args("hello", None, state=state)
+        assert "--dangerously-allow-all" not in args
+
+    def test_dangerously_allow_all_enabled(self) -> None:
+        runner = self._runner(dangerously_allow_all=True)
         state = runner.new_state("hello", None)
         args = runner.build_args("hello", None, state=state)
         assert "--dangerously-allow-all" in args

@@ -364,7 +364,7 @@ def render_botfather_instructions() -> Text:
     return Text.assemble(
         "  1. open telegram and message @BotFather\n",
         "  2. send /newbot and follow the prompts\n",
-        "  3. copy the token (looks like 123456789:ABCdef...)",
+        "  3. copy the token (looks like <BOT_ID>:<BOT_TOKEN>)",
     )
 
 
@@ -814,7 +814,7 @@ async def step_token_and_bot(ui: UI, svc: Services, state: OnboardingState) -> N
     if not have_token:
         ui.print(render_botfather_instructions(), markup=False)
     else:
-        ui.print("  token looks like 123456789:ABCdef...")
+        ui.print("  token looks like <BOT_ID>:<BOT_TOKEN>")
     token, info = await prompt_token(ui, svc)
     state.token = token
     state.bot_username = info.username

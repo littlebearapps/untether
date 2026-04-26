@@ -1178,3 +1178,58 @@ async def test_handle_file_get_file_too_large(tmp_path: Path, monkeypatch) -> No
 
     assert transport.send_calls
     assert "file is too large to send" in transport.send_calls[-1]["message"].text
+
+
+@pytest.mark.anyio
+async def test_handle_file_get_oversize_detected_on_read(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """#211: streaming read caps at max+1 bytes — TOCTOU between stat() and
+    read() can no longer slip an over-sized file through."""
+    transport = FakeTransport()
+    cfg = replace(make_cfg(transport), runtime=_runtime(tmp_path))
+    target = tmp_path / "notes.txt"
+    target.write_bytes(b"x" * 100)
+    msg = _msg("/file get")
+
+    monkeypatch.setattr(TelegramFilesSettings, "max_download_bytes", 50)
+
+    await transfer._handle_file_get(
+        cfg,
+        msg,
+        "notes.txt",
+        ambient_context=None,
+        topic_store=None,
+    )
+
+    # Oversize is rejected regardless of which code path detected it.
+    assert transport.send_calls
+    assert "file is too large to send" in transport.send_calls[-1]["message"].text
+
+
+@pytest.mark.anyio
+async def test_handle_file_get_at_size_limit_succeeds(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """#211: file exactly at the cap is delivered (read returns max bytes)."""
+    transport = FakeTransport()
+    cfg = replace(make_cfg(transport), runtime=_runtime(tmp_path))
+    target = tmp_path / "notes.txt"
+    target.write_bytes(b"x" * 50)
+    msg = _msg("/file get")
+
+    monkeypatch.setattr(TelegramFilesSettings, "max_download_bytes", 50)
+
+    await transfer._handle_file_get(
+        cfg,
+        msg,
+        "notes.txt",
+        ambient_context=None,
+        topic_store=None,
+    )
+
+    # Document send should fire (no "too large" reply).
+    too_large = any(
+        "file is too large" in call["message"].text for call in transport.send_calls
+    )
+    assert not too_large
