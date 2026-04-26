@@ -191,6 +191,56 @@ def test_bot_token_none_rejected(tmp_path: Path) -> None:
         validate_settings_data(data, config_path=config_path)
 
 
+def test_voice_transcription_api_key_is_secret_str(tmp_path: Path) -> None:
+    """#378: voice_transcription_api_key must be SecretStr — masks repr()/str()
+    and only yields the raw value via .get_secret_value()."""
+    config_path = tmp_path / "untether.toml"
+    config_path.write_text(
+        "[transports.telegram]\n"
+        'bot_token = "tok"\n'
+        "chat_id = 123\n"
+        "voice_transcription = true\n"
+        'voice_transcription_api_key = "sk-supersecret-1234567890ABCDEF"\n',
+        encoding="utf-8",
+    )
+    settings, _ = load_settings(config_path)
+    key = settings.transports.telegram.voice_transcription_api_key
+    assert key is not None
+    assert key.get_secret_value() == "sk-supersecret-1234567890ABCDEF"
+    # Masking: str() and repr() must not leak the value.
+    assert "supersecret" not in str(key)
+    assert "supersecret" not in repr(key)
+
+
+def test_voice_transcription_api_key_empty_string_normalised_to_none(
+    tmp_path: Path,
+) -> None:
+    """#378: empty/whitespace-only API key round-trips to None so downstream
+    truthy / `is not None` checks behave the same as with the prior
+    `NonEmptyStr | None` field type."""
+    config_path = tmp_path / "untether.toml"
+    config_path.write_text(
+        "[transports.telegram]\n"
+        'bot_token = "tok"\n'
+        "chat_id = 123\n"
+        'voice_transcription_api_key = "   "\n',
+        encoding="utf-8",
+    )
+    settings, _ = load_settings(config_path)
+    assert settings.transports.telegram.voice_transcription_api_key is None
+
+
+def test_voice_transcription_api_key_default_none(tmp_path: Path) -> None:
+    """#378: default is still None when key is omitted."""
+    config_path = tmp_path / "untether.toml"
+    config_path.write_text(
+        '[transports.telegram]\nbot_token = "tok"\nchat_id = 123\n',
+        encoding="utf-8",
+    )
+    settings, _ = load_settings(config_path)
+    assert settings.transports.telegram.voice_transcription_api_key is None
+
+
 def test_require_telegram_rejects_non_telegram_transport(tmp_path: Path) -> None:
     config_path = tmp_path / "untether.toml"
     settings = UntetherSettings.model_validate(

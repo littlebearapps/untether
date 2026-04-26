@@ -121,7 +121,10 @@ class TelegramTransportSettings(BaseModel):
     voice_max_bytes: StrictInt = 10 * 1024 * 1024
     voice_transcription_model: NonEmptyStr = "gpt-4o-mini-transcribe"
     voice_transcription_base_url: NonEmptyStr | None = None
-    voice_transcription_api_key: NonEmptyStr | None = None
+    # #378: SecretStr (parity with bot_token from #196) — masks repr()/str()/
+    # tracebacks/structlog. Access the raw value via .get_secret_value() at the
+    # transport boundary (telegram/loop.py before passing to OpenAI SDK).
+    voice_transcription_api_key: SecretStr | None = None
     voice_show_transcription: bool = True
     session_mode: Literal["stateless", "chat"] = "stateless"
     show_resume_line: bool = True
@@ -142,6 +145,19 @@ class TelegramTransportSettings(BaseModel):
         if not token:
             raise ValueError("bot_token must not be empty")
         return SecretStr(token)
+
+    @field_validator("voice_transcription_api_key", mode="after")
+    @classmethod
+    def _validate_voice_key_not_empty(cls, v: SecretStr | None) -> SecretStr | None:
+        """#378: preserve the pre-SecretStr `NonEmptyStr | None` contract.
+        Empty / whitespace-only strings round-trip to None so downstream code
+        can use a simple `is not None` (or truthy) check at the call site."""
+        if v is None:
+            return None
+        key = v.get_secret_value().strip()
+        if not key:
+            return None
+        return SecretStr(key)
 
 
 class TransportsSettings(BaseModel):

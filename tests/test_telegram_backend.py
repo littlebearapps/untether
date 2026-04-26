@@ -306,7 +306,9 @@ def test_telegram_backend_build_and_run_wires_config(
     assert cfg.voice_max_bytes == 1234
     assert cfg.voice_transcription_model == "whisper-1"
     assert cfg.voice_transcription_base_url == "http://localhost:8000/v1"
-    assert cfg.voice_transcription_api_key == "local"
+    # #378: voice_transcription_api_key is now SecretStr — compare via .get_secret_value()
+    assert cfg.voice_transcription_api_key is not None
+    assert cfg.voice_transcription_api_key.get_secret_value() == "local"
     assert cfg.voice_show_transcription is False
     assert cfg.allowed_user_ids == (7, 8)
     assert cfg.files.enabled is True

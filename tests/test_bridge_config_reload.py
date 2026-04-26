@@ -76,7 +76,10 @@ class TestUpdateFrom:
         assert cfg.voice_max_bytes == 1 * 1024 * 1024
         assert cfg.voice_transcription_model == "whisper-1"
         assert cfg.voice_transcription_base_url == "https://x/v1"
-        assert cfg.voice_transcription_api_key == "sk-new"
+        # #378: SecretStr — compare via .get_secret_value() since equality
+        # against a bare str returns False.
+        assert cfg.voice_transcription_api_key is not None
+        assert cfg.voice_transcription_api_key.get_secret_value() == "sk-new"
         assert cfg.voice_show_transcription is False
         assert cfg.show_resume_line is False
         assert cfg.forward_coalesce_s == 3.5
@@ -123,7 +126,9 @@ class TestUpdateFrom:
     def test_update_from_clears_voice_api_key(self, cfg: TelegramBridgeConfig):
         """Removing voice_transcription_api_key from config resets it to None."""
         cfg.update_from(_settings(voice_transcription_api_key="sk-before"))
-        assert cfg.voice_transcription_api_key == "sk-before"
+        # #378: SecretStr — equality is by SecretStr identity, not raw string.
+        assert cfg.voice_transcription_api_key is not None
+        assert cfg.voice_transcription_api_key.get_secret_value() == "sk-before"
         cfg.update_from(_settings())  # no voice_transcription_api_key
         assert cfg.voice_transcription_api_key is None
 
