@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import threading
 import time
 from dataclasses import dataclass
 
@@ -9,8 +10,13 @@ from .logging import get_logger
 
 logger = get_logger(__name__)
 
-# Daily cost accumulator: (date_str, total_cost)
+# Daily cost accumulator: (date_str, total_cost).
+# #379: guarded by `_daily_cost_lock` so concurrent finalize_run calls can't
+# race the read-modify-write and silently lose a run's cost. The critical
+# section is a single tuple assignment (sub-microsecond), so a `threading.Lock`
+# is fine — both async tasks (cooperative) and threaded callers are safe.
 _daily_cost: tuple[str, float] = ("", 0.0)
+_daily_cost_lock = threading.Lock()
 
 
 @dataclass(slots=True)
@@ -38,18 +44,21 @@ def record_run_cost(cost: float) -> None:
     """Record the cost of a completed run for daily tracking."""
     global _daily_cost
     today = _today()
-    date, total = _daily_cost
-    _daily_cost = (today, cost) if date != today else (today, total + cost)
+    with _daily_cost_lock:
+        date, total = _daily_cost
+        _daily_cost = (today, cost) if date != today else (today, total + cost)
+        daily_total = _daily_cost[1]
     logger.debug(
         "cost_tracker.recorded",
         cost=cost,
-        daily_total=_daily_cost[1],
+        daily_total=daily_total,
     )
 
 
 def get_daily_cost() -> float:
     """Get today's accumulated cost."""
-    date, total = _daily_cost
+    with _daily_cost_lock:
+        date, total = _daily_cost
     if date != _today():
         return 0.0
     return total
