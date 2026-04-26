@@ -96,3 +96,31 @@ class TestFormatCostAlert:
     def test_formats_message(self):
         alert = CostAlert(level="warning", message="test message")
         assert format_cost_alert(alert) == "test message"
+
+
+class TestConcurrentRecord:
+    """#379: read-modify-write under concurrent callers must not lose updates."""
+
+    def setup_method(self):
+        _reset_daily()
+
+    def test_concurrent_record_run_cost_atomic(self):
+        from concurrent.futures import ThreadPoolExecutor
+
+        n_calls = 200
+        unit_cost = 0.01
+
+        with ThreadPoolExecutor(max_workers=16) as pool:
+            futures = [pool.submit(record_run_cost, unit_cost) for _ in range(n_calls)]
+            for future in futures:
+                future.result()
+
+        # If the read-modify-write were unguarded, concurrent threads racing
+        # the (today, total + cost) assignment would lose updates and the
+        # observed total would be < n * unit. The lock makes this impossible.
+        expected = round(n_calls * unit_cost, 2)
+        observed = round(get_daily_cost(), 2)
+        assert observed == expected, (
+            f"lost cost updates under concurrency: "
+            f"expected ${expected:.2f}, got ${observed:.2f}"
+        )
