@@ -25,6 +25,29 @@ $ untether doctor
 <!-- TODO: capture screenshot -->
 <!-- <img src="../assets/screenshots/doctor-output.jpg" alt="untether doctor output showing check results" width="360" loading="lazy" /> -->
 
+## Bot fails to start: `allowed_user_ids is empty`
+
+**Symptoms:** Untether exits at startup with `ConfigError: [transports.telegram] allowed_user_ids is empty …`.
+
+This is the v0.35.3 ([#377](https://github.com/littlebearapps/untether/issues/377)) startup-block. Before v0.35.3 an empty allowlist was a silent insecure default — any Telegram user who knew the bot username could send commands. Fix by either:
+
+- **Recommended**: populate the allowlist with your Telegram user ID(s):
+
+    ```sh
+    untether config set transports.telegram.allowed_user_ids "[<your_id>]"
+    ```
+
+    Get your ID with `untether chat-id` (sends a message in your chat and prints the IDs).
+
+- **Dev/demo escape hatch**: opt in to an open bot. Logged at INFO every boot so the deviation stays visible:
+
+    ```toml title="~/.untether/untether.toml"
+    [transports.telegram]
+    allow_any_user = true
+    ```
+
+See [security.md](security.md#restrict-access) for the full discussion.
+
 ## Bot not responding
 
 **Symptoms:** You send a message but the bot doesn't reply at all.
@@ -33,7 +56,7 @@ $ untether doctor
     - **Terminal**: Look at the terminal where you ran `untether` — is it still running?
     - **Linux (systemd)**: `systemctl --user status untether`
 2. Verify your bot token: `untether doctor` will flag an invalid token
-3. Check `allowed_user_ids` — if set, only listed users can interact. An empty list means everyone is allowed.
+3. Check `allowed_user_ids` — only listed users can interact. As of v0.35.3, an empty list is rejected at startup unless `allow_any_user = true` is set ([#377](https://github.com/littlebearapps/untether/issues/377)).
 4. In a group chat, check trigger mode: if set to `mentions`, you must @mention the bot
 5. Make sure you're messaging the correct bot (not a different one)
 
@@ -323,7 +346,7 @@ This is not a security concern — `UNTETHER_SESSION` is a simple signal variabl
 
 1. Check **trigger mode**: groups default to `mentions` in many setups. Send `/trigger` to check, or `/trigger all` to respond to everything.
 2. Check **bot privacy mode** in BotFather: send `/setprivacy` to @BotFather and select your bot. Set to "Disable" so the bot can see all messages (not just commands and @mentions).
-3. Check `allowed_user_ids` — if set, group members not in the list are ignored.
+3. Check `allowed_user_ids` — group members not in the list are ignored. (As of v0.35.3 the list is required at startup unless `allow_any_user = true` is set — see [security.md](security.md#restrict-access).)
 4. If using topics, make sure the bot has "Manage Topics" permission.
 
 ## macOS and Linux credential differences

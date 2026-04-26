@@ -21,6 +21,7 @@ def test_load_settings_from_toml(tmp_path: Path) -> None:
         "[transports.telegram]\n"
         'bot_token = "token"\n'
         "chat_id = 123\n\n"
+        "allow_any_user = true\n"
         "[codex]\n"
         'model = "gpt-4"\n',
         encoding="utf-8",
@@ -51,7 +52,8 @@ def test_env_overrides_toml(tmp_path: Path, monkeypatch) -> None:
         'transport = "telegram"\n\n'
         "[transports.telegram]\n"
         'bot_token = "token"\n'
-        "chat_id = 123\n",
+        "chat_id = 123\n"
+        "allow_any_user = true\n",
         encoding="utf-8",
     )
     monkeypatch.setenv("UNTETHER__DEFAULT_ENGINE", "claude")
@@ -63,7 +65,10 @@ def test_env_overrides_toml(tmp_path: Path, monkeypatch) -> None:
 
 def test_legacy_keys_migrated(tmp_path: Path) -> None:
     config_path = tmp_path / "untether.toml"
-    config_path.write_text('bot_token = "token"\nchat_id = 123\n', encoding="utf-8")
+    config_path.write_text(
+        'bot_token = "token"\nchat_id = 123\nallow_any_user = true\n',
+        encoding="utf-8",
+    )
 
     settings, loaded_path = load_settings(config_path)
 
@@ -81,7 +86,9 @@ def test_validate_settings_data_rejects_invalid_bot_token_type(tmp_path: Path) -
     config_path = tmp_path / "untether.toml"
     data = {
         "transport": "telegram",
-        "transports": {"telegram": {"bot_token": 123, "chat_id": 123}},
+        "transports": {
+            "telegram": {"bot_token": 123, "chat_id": 123, "allow_any_user": True}
+        },
     }
 
     with pytest.raises(ConfigError, match="bot_token"):
@@ -93,7 +100,9 @@ def test_validate_settings_data_rejects_empty_default_engine(tmp_path: Path) -> 
     data = {
         "default_engine": "   ",
         "transport": "telegram",
-        "transports": {"telegram": {"bot_token": "token", "chat_id": 123}},
+        "transports": {
+            "telegram": {"bot_token": "token", "chat_id": 123, "allow_any_user": True}
+        },
     }
 
     with pytest.raises(ConfigError, match="default_engine"):
@@ -104,7 +113,9 @@ def test_validate_settings_data_rejects_empty_default_project(tmp_path: Path) ->
     config_path = tmp_path / "untether.toml"
     data = {
         "default_project": "   ",
-        "transports": {"telegram": {"bot_token": "token", "chat_id": 123}},
+        "transports": {
+            "telegram": {"bot_token": "token", "chat_id": 123, "allow_any_user": True}
+        },
     }
 
     with pytest.raises(ConfigError, match="default_project"):
@@ -115,7 +126,9 @@ def test_validate_settings_data_rejects_empty_project_path(tmp_path: Path) -> No
     config_path = tmp_path / "untether.toml"
     data = {
         "projects": {"z80": {"path": "   "}},
-        "transports": {"telegram": {"bot_token": "token", "chat_id": 123}},
+        "transports": {
+            "telegram": {"bot_token": "token", "chat_id": 123, "allow_any_user": True}
+        },
     }
 
     with pytest.raises(ConfigError, match="path"):
@@ -127,7 +140,13 @@ def test_engine_config_none_and_invalid(tmp_path: Path) -> None:
     settings = UntetherSettings.model_validate(
         {
             "transport": "telegram",
-            "transports": {"telegram": {"bot_token": "token", "chat_id": 123}},
+            "transports": {
+                "telegram": {
+                    "bot_token": "token",
+                    "chat_id": 123,
+                    "allow_any_user": True,
+                }
+            },
             "codex": None,
         }
     )
@@ -136,7 +155,13 @@ def test_engine_config_none_and_invalid(tmp_path: Path) -> None:
     settings = UntetherSettings.model_validate(
         {
             "transport": "telegram",
-            "transports": {"telegram": {"bot_token": "token", "chat_id": 123}},
+            "transports": {
+                "telegram": {
+                    "bot_token": "token",
+                    "chat_id": 123,
+                    "allow_any_user": True,
+                }
+            },
             "codex": "nope",
         }
     )
@@ -149,7 +174,13 @@ def test_transport_config_telegram_and_extra(tmp_path: Path) -> None:
     settings = UntetherSettings.model_validate(
         {
             "transport": "telegram",
-            "transports": {"telegram": {"bot_token": "token", "chat_id": 123}},
+            "transports": {
+                "telegram": {
+                    "bot_token": "token",
+                    "chat_id": 123,
+                    "allow_any_user": True,
+                }
+            },
         }
     )
     telegram = settings.transport_config("telegram", config_path=config_path)
@@ -161,7 +192,11 @@ def test_transport_config_telegram_and_extra(tmp_path: Path) -> None:
         {
             "transport": "telegram",
             "transports": {
-                "telegram": {"bot_token": "token", "chat_id": 123},
+                "telegram": {
+                    "bot_token": "token",
+                    "chat_id": 123,
+                    "allow_any_user": True,
+                },
                 "discord": None,
             },
         }
@@ -172,7 +207,11 @@ def test_transport_config_telegram_and_extra(tmp_path: Path) -> None:
         {
             "transport": "telegram",
             "transports": {
-                "telegram": {"bot_token": "token", "chat_id": 123},
+                "telegram": {
+                    "bot_token": "token",
+                    "chat_id": 123,
+                    "allow_any_user": True,
+                },
                 "discord": "nope",
             },
         }
@@ -185,7 +224,9 @@ def test_bot_token_none_rejected(tmp_path: Path) -> None:
     config_path = tmp_path / "untether.toml"
     data = {
         "transport": "telegram",
-        "transports": {"telegram": {"bot_token": None, "chat_id": 123}},
+        "transports": {
+            "telegram": {"bot_token": None, "chat_id": 123, "allow_any_user": True}
+        },
     }
     with pytest.raises(ConfigError, match="bot_token"):
         validate_settings_data(data, config_path=config_path)
@@ -199,6 +240,7 @@ def test_voice_transcription_api_key_is_secret_str(tmp_path: Path) -> None:
         "[transports.telegram]\n"
         'bot_token = "tok"\n'
         "chat_id = 123\n"
+        "allow_any_user = true\n"
         "voice_transcription = true\n"
         'voice_transcription_api_key = "sk-supersecret-1234567890ABCDEF"\n',
         encoding="utf-8",
@@ -223,6 +265,7 @@ def test_voice_transcription_api_key_empty_string_normalised_to_none(
         "[transports.telegram]\n"
         'bot_token = "tok"\n'
         "chat_id = 123\n"
+        "allow_any_user = true\n"
         'voice_transcription_api_key = "   "\n',
         encoding="utf-8",
     )
@@ -234,7 +277,8 @@ def test_voice_transcription_api_key_default_none(tmp_path: Path) -> None:
     """#378: default is still None when key is omitted."""
     config_path = tmp_path / "untether.toml"
     config_path.write_text(
-        '[transports.telegram]\nbot_token = "tok"\nchat_id = 123\n',
+        '[transports.telegram]\nbot_token = "tok"\nchat_id = 123\n'
+        "allow_any_user = true\n",
         encoding="utf-8",
     )
     settings, _ = load_settings(config_path)
@@ -249,7 +293,8 @@ def test_voice_transcription_api_key_default_none(tmp_path: Path) -> None:
 def test_env_extra_allow_round_trip(tmp_path: Path) -> None:
     config_path = tmp_path / "untether.toml"
     config_path.write_text(
-        '[transports.telegram]\nbot_token = "tok"\nchat_id = 123\n\n'
+        '[transports.telegram]\nbot_token = "tok"\nchat_id = 123\n'
+        "allow_any_user = true\n\n"
         "[security]\n"
         'env_extra_allow = ["OP_SERVICE_ACCOUNT_TOKEN", "DOPPLER_TOKEN"]\n'
         'env_extra_prefix_allow = ["VAULT_", "INFISICAL_"]\n',
@@ -266,7 +311,8 @@ def test_env_extra_allow_round_trip(tmp_path: Path) -> None:
 def test_env_extra_allow_default_empty(tmp_path: Path) -> None:
     config_path = tmp_path / "untether.toml"
     config_path.write_text(
-        '[transports.telegram]\nbot_token = "tok"\nchat_id = 123\n',
+        '[transports.telegram]\nbot_token = "tok"\nchat_id = 123\n'
+        "allow_any_user = true\n",
         encoding="utf-8",
     )
     settings, _ = load_settings(config_path)
@@ -338,7 +384,8 @@ def test_env_extra_prefix_allow_validates_names(tmp_path: Path) -> None:
     """Prefix entries must match the same env-var name shape."""
     config_path = tmp_path / "untether.toml"
     config_path.write_text(
-        '[transports.telegram]\nbot_token = "tok"\nchat_id = 123\n\n'
+        '[transports.telegram]\nbot_token = "tok"\nchat_id = 123\n'
+        "allow_any_user = true\n\n"
         "[security]\n"
         'env_extra_prefix_allow = ["bad-prefix"]\n',
         encoding="utf-8",
@@ -347,12 +394,75 @@ def test_env_extra_prefix_allow_validates_names(tmp_path: Path) -> None:
         load_settings(config_path)
 
 
+# ───────────────────────────────────────────────────────────────────────────
+# #377 — startup-block on empty `allowed_user_ids` (insecure default)
+# ───────────────────────────────────────────────────────────────────────────
+
+
+def test_empty_allowed_users_blocks_startup(tmp_path: Path) -> None:
+    """#377: empty allowlist + no opt-out is a hard ConfigError at load time."""
+    config_path = tmp_path / "untether.toml"
+    config_path.write_text(
+        '[transports.telegram]\nbot_token = "tok"\nchat_id = 123\n',
+        encoding="utf-8",
+    )
+    with pytest.raises(ConfigError, match="allowed_user_ids is empty"):
+        load_settings(config_path)
+
+
+def test_allow_any_user_overrides_block(tmp_path: Path) -> None:
+    """#377: explicit `allow_any_user = true` lets the empty allowlist load."""
+    config_path = tmp_path / "untether.toml"
+    config_path.write_text(
+        '[transports.telegram]\nbot_token = "tok"\nchat_id = 123\n'
+        "allow_any_user = true\n",
+        encoding="utf-8",
+    )
+    settings, _ = load_settings(config_path)
+    assert settings.transports.telegram.allowed_user_ids == []
+    assert settings.transports.telegram.allow_any_user is True
+
+
+def test_non_empty_allowed_users_loads(tmp_path: Path) -> None:
+    """#377: a populated allowlist loads without needing the opt-out."""
+    config_path = tmp_path / "untether.toml"
+    config_path.write_text(
+        '[transports.telegram]\nbot_token = "tok"\nchat_id = 123\n'
+        "allowed_user_ids = [42, 99]\n",
+        encoding="utf-8",
+    )
+    settings, _ = load_settings(config_path)
+    assert settings.transports.telegram.allowed_user_ids == [42, 99]
+    assert settings.transports.telegram.allow_any_user is False
+
+
+def test_allow_any_user_with_populated_allowlist_still_loads(tmp_path: Path) -> None:
+    """#377: setting both is fine — the validator is only there to prevent the
+    silent insecure default of empty + False."""
+    config_path = tmp_path / "untether.toml"
+    config_path.write_text(
+        '[transports.telegram]\nbot_token = "tok"\nchat_id = 123\n'
+        "allowed_user_ids = [42]\n"
+        "allow_any_user = true\n",
+        encoding="utf-8",
+    )
+    settings, _ = load_settings(config_path)
+    assert settings.transports.telegram.allowed_user_ids == [42]
+    assert settings.transports.telegram.allow_any_user is True
+
+
 def test_require_telegram_rejects_non_telegram_transport(tmp_path: Path) -> None:
     config_path = tmp_path / "untether.toml"
     settings = UntetherSettings.model_validate(
         {
             "transport": "discord",
-            "transports": {"telegram": {"bot_token": "token", "chat_id": 123}},
+            "transports": {
+                "telegram": {
+                    "bot_token": "token",
+                    "chat_id": 123,
+                    "allow_any_user": True,
+                }
+            },
         }
     )
     with pytest.raises(ConfigError, match="Unsupported transport"):
@@ -374,7 +484,7 @@ def test_load_settings_if_exists_loads(tmp_path: Path) -> None:
     config_path = tmp_path / "untether.toml"
     config_path.write_text(
         'transport = "telegram"\n\n[transports.telegram]\n'
-        'bot_token = "token"\nchat_id = 123\n',
+        'bot_token = "token"\nchat_id = 123\nallow_any_user = true\n',
         encoding="utf-8",
     )
 
@@ -418,6 +528,7 @@ def test_footer_from_toml(tmp_path: Path) -> None:
         "[transports.telegram]\n"
         'bot_token = "token"\n'
         "chat_id = 123\n\n"
+        "allow_any_user = true\n"
         "[footer]\n"
         "show_api_cost = false\n"
         "show_subscription_usage = true\n",
@@ -433,7 +544,9 @@ def test_footer_rejects_extra_keys(tmp_path: Path) -> None:
     config_path = tmp_path / "untether.toml"
     data = {
         "transport": "telegram",
-        "transports": {"telegram": {"bot_token": "token", "chat_id": 123}},
+        "transports": {
+            "telegram": {"bot_token": "token", "chat_id": 123, "allow_any_user": True}
+        },
         "footer": {"show_api_cost": True, "bogus_key": True},
     }
     with pytest.raises(ConfigError, match="bogus_key"):
@@ -460,6 +573,7 @@ def test_preamble_from_toml(tmp_path: Path) -> None:
         "[transports.telegram]\n"
         'bot_token = "token"\n'
         "chat_id = 123\n\n"
+        "allow_any_user = true\n"
         "[preamble]\n"
         "enabled = false\n"
         'text = "Custom preamble"\n',
@@ -475,7 +589,9 @@ def test_preamble_rejects_extra_keys(tmp_path: Path) -> None:
     config_path = tmp_path / "untether.toml"
     data = {
         "transport": "telegram",
-        "transports": {"telegram": {"bot_token": "token", "chat_id": 123}},
+        "transports": {
+            "telegram": {"bot_token": "token", "chat_id": 123, "allow_any_user": True}
+        },
         "preamble": {"enabled": True, "bogus_key": True},
     }
     with pytest.raises(ConfigError, match="bogus_key"):
@@ -490,7 +606,9 @@ def test_preamble_rejects_extra_keys(tmp_path: Path) -> None:
 def test_progress_min_render_interval_defaults(tmp_path: Path) -> None:
     data = {
         "transport": "telegram",
-        "transports": {"telegram": {"bot_token": "tok", "chat_id": 1}},
+        "transports": {
+            "telegram": {"bot_token": "tok", "chat_id": 1, "allow_any_user": True}
+        },
     }
     settings = validate_settings_data(data, config_path=tmp_path / "c.toml")
     assert settings.progress.min_render_interval == 2.0
@@ -499,7 +617,9 @@ def test_progress_min_render_interval_defaults(tmp_path: Path) -> None:
 def test_progress_group_chat_rps_defaults(tmp_path: Path) -> None:
     data = {
         "transport": "telegram",
-        "transports": {"telegram": {"bot_token": "tok", "chat_id": 1}},
+        "transports": {
+            "telegram": {"bot_token": "tok", "chat_id": 1, "allow_any_user": True}
+        },
     }
     settings = validate_settings_data(data, config_path=tmp_path / "c.toml")
     assert settings.progress.group_chat_rps == pytest.approx(20.0 / 60.0)
@@ -508,7 +628,9 @@ def test_progress_group_chat_rps_defaults(tmp_path: Path) -> None:
 def test_progress_min_render_interval_custom(tmp_path: Path) -> None:
     data = {
         "transport": "telegram",
-        "transports": {"telegram": {"bot_token": "tok", "chat_id": 1}},
+        "transports": {
+            "telegram": {"bot_token": "tok", "chat_id": 1, "allow_any_user": True}
+        },
         "progress": {"min_render_interval": 5.0},
     }
     settings = validate_settings_data(data, config_path=tmp_path / "c.toml")
@@ -518,7 +640,9 @@ def test_progress_min_render_interval_custom(tmp_path: Path) -> None:
 def test_progress_group_chat_rps_custom(tmp_path: Path) -> None:
     data = {
         "transport": "telegram",
-        "transports": {"telegram": {"bot_token": "tok", "chat_id": 1}},
+        "transports": {
+            "telegram": {"bot_token": "tok", "chat_id": 1, "allow_any_user": True}
+        },
         "progress": {"group_chat_rps": 0.5},
     }
     settings = validate_settings_data(data, config_path=tmp_path / "c.toml")
@@ -528,7 +652,9 @@ def test_progress_group_chat_rps_custom(tmp_path: Path) -> None:
 def test_progress_min_render_interval_rejects_negative(tmp_path: Path) -> None:
     data = {
         "transport": "telegram",
-        "transports": {"telegram": {"bot_token": "tok", "chat_id": 1}},
+        "transports": {
+            "telegram": {"bot_token": "tok", "chat_id": 1, "allow_any_user": True}
+        },
         "progress": {"min_render_interval": -1.0},
     }
     with pytest.raises(ConfigError):
@@ -538,7 +664,9 @@ def test_progress_min_render_interval_rejects_negative(tmp_path: Path) -> None:
 def test_progress_group_chat_rps_rejects_zero(tmp_path: Path) -> None:
     data = {
         "transport": "telegram",
-        "transports": {"telegram": {"bot_token": "tok", "chat_id": 1}},
+        "transports": {
+            "telegram": {"bot_token": "tok", "chat_id": 1, "allow_any_user": True}
+        },
         "progress": {"group_chat_rps": 0},
     }
     with pytest.raises(ConfigError):

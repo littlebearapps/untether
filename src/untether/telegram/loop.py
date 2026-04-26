@@ -2383,13 +2383,17 @@ async def run_main_loop(
                     return
                 forward_coalescer.schedule(pending)
 
-            # rc4 (#286): read allowed_user_ids from cfg on each update so
-            # hot-reload of the allowlist takes effect immediately.
-            if not cfg.allowed_user_ids:
-                logger.warning(
-                    "security.no_allowed_users",
-                    hint="allowed_user_ids is empty — any user in the chat can run commands. "
-                    "Set [transports.telegram] allowed_user_ids to restrict access.",
+            # #377: empty `allowed_user_ids` is now a startup ConfigError
+            # (see TelegramTransportSettings._validate_allowed_user_ids_or_optin).
+            # The only way to reach this hook with no allowlist is the explicit
+            # `allow_any_user = true` opt-in — log it at INFO every boot so the
+            # deviation stays visible in journalctl.
+            if getattr(cfg, "allow_any_user", False) or not cfg.allowed_user_ids:
+                logger.info(
+                    "security.allow_any_user",
+                    hint="allow_any_user=true is in effect — bot accepts "
+                    "commands from any Telegram user. Intended for "
+                    "demos/dev only.",
                 )
 
             async def _safe_answer_callback(query_id: str) -> None:

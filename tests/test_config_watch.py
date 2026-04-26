@@ -70,7 +70,13 @@ async def test_watch_config_applies_runtime(
         settings=UntetherSettings.model_validate(
             {
                 "transport": "telegram",
-                "transports": {"telegram": {"bot_token": "token", "chat_id": 123}},
+                "transports": {
+                    "telegram": {
+                        "bot_token": "token",
+                        "chat_id": 123,
+                        "allow_any_user": True,
+                    }
+                },
             }
         ),
         runtime_spec=new_spec,

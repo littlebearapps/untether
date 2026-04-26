@@ -78,7 +78,8 @@ systemctl --user restart untether-dev    # dev
 |-----|------|---------|-------|
 | `bot_token` | string | (required) | 🔄 Telegram bot token from @BotFather. Restart-required. |
 | `chat_id` | int | (required) | 🔄 Default chat id. Restart-required. |
-| `allowed_user_ids` | int[] | `[]` | Allowed sender user ids. Empty disables sender filtering; when set, only these users can interact (including DMs). |
+| `allowed_user_ids` | int[] | (required, non-empty) | Allowed sender user ids. **Required for security as of v0.35.3** ([#377](https://github.com/littlebearapps/untether/issues/377)) — set to a non-empty list of Telegram user IDs (your own user id is the typical minimum). An empty list now triggers a hard `ConfigError` at startup unless you opt in to `allow_any_user = true` (see below). |
+| `allow_any_user` | bool | `false` | **Dev/demo escape hatch** ([#377](https://github.com/littlebearapps/untether/issues/377)). Set to `true` to keep the prior insecure-default behaviour where any Telegram user who knows the bot username can send commands. Logged at INFO on every boot (`security.allow_any_user`) so the deviation is visible in `journalctl`. Use only for hackathons, demos, or local dev. |
 | `message_overflow` | `"trim"`\|`"split"` | `"split"` | 🔄 How to handle long final responses. Restart-required. |
 | `forward_coalesce_s` | float | `1.0` | Quiet window for combining a prompt with immediately-following forwarded messages; set `0` to disable. |
 | `voice_transcription` | bool | `false` | Enable voice note transcription. |
@@ -464,7 +465,7 @@ here; plugin engines should document their own keys.
 |-----|------|---------|-------|
 | `mode` | string | (unset) | Execution mode, passed as `--mode`. Values: `deep`, `free`, `rush`, `smart`. |
 | `model` | string | (unset) | Display label shown in the message footer. Overridden by `mode` if both are set. |
-| `dangerously_allow_all` | bool | `true` | Pass `--dangerously-allow-all` to skip permission prompts. |
+| `dangerously_allow_all` | bool | `false` | Pass `--dangerously-allow-all` to skip AMP's permission prompts. **Default flipped to `false` in v0.35.3** ([#206](https://github.com/littlebearapps/untether/issues/206)) — set to `true` only if you specifically want AMP runs without its built-in permission system. Untether's own permission layer (when configured) remains the primary control. |
 | `stream_json_input` | bool | `false` | Pass `--stream-json-input` for stdin-based prompt delivery. |
 
 === "untether config"

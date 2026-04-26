@@ -117,6 +117,12 @@ class TelegramTransportSettings(BaseModel):
     bot_token: SecretStr
     chat_id: StrictInt
     allowed_user_ids: list[StrictInt] = Field(default_factory=list)
+    # #377: opt-in escape hatch for demos/dev. When the allowlist is
+    # empty AND this flag is False, startup fails with a ConfigError so
+    # accidentally-public bots can't slip into production. Setting this
+    # to True is logged at INFO on every boot so the deviation is
+    # visible in journalctl.
+    allow_any_user: bool = False
     message_overflow: Literal["trim", "split"] = "split"
     voice_transcription: bool = False
     voice_max_bytes: StrictInt = 10 * 1024 * 1024
@@ -159,6 +165,29 @@ class TelegramTransportSettings(BaseModel):
         if not key:
             return None
         return SecretStr(key)
+
+    @model_validator(mode="after")
+    def _validate_allowed_user_ids_or_optin(self) -> TelegramTransportSettings:
+        """#377: refuse to start with no user allowlist unless the operator
+        explicitly opts out.
+
+        ``allowed_user_ids = []`` previously degraded to "any Telegram user
+        who knows the bot username can send commands" with only a runtime
+        warning. That's an insecure default — it shipped real production
+        bots that were silently public. The fix promotes the warning to a
+        hard ConfigError at config-load time. Operators who actually want
+        an open bot (demos, hackathons, dev) opt in by setting
+        ``allow_any_user = true``.
+        """
+        if not self.allowed_user_ids and not self.allow_any_user:
+            raise ValueError(
+                "[transports.telegram] allowed_user_ids is empty — bot would "
+                "accept commands from anyone who knows its username. Set a "
+                "non-empty list of Telegram user IDs, or pass "
+                "`allow_any_user = true` to opt in to an open bot (dev/demo "
+                "only)."
+            )
+        return self
 
 
 class TransportsSettings(BaseModel):

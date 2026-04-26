@@ -20,6 +20,10 @@ def _settings(**overrides) -> TelegramTransportSettings:
     base = {
         "bot_token": "abc",
         "chat_id": 123,
+        # #377: tests don't care about user allowlisting; opt in to the
+        # explicit "open bot" so the model_validator doesn't reject these
+        # fixtures. Tests that do care set allowed_user_ids via overrides.
+        "allow_any_user": True,
     }
     base.update(overrides)
     return TelegramTransportSettings.model_validate(base)

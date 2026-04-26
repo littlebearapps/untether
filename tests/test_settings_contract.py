@@ -11,7 +11,13 @@ def test_settings_strips_and_expands_transport_config(tmp_path: Path) -> None:
         {
             "transport": " telegram ",
             "plugins": {"enabled": [" foo "]},
-            "transports": {"telegram": {"bot_token": "  token  ", "chat_id": 123}},
+            "transports": {
+                "telegram": {
+                    "bot_token": "  token  ",
+                    "chat_id": 123,
+                    "allow_any_user": True,
+                }
+            },
         }
     )
 

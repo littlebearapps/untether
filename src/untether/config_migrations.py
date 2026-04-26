@@ -41,9 +41,15 @@ def _migrate_legacy_telegram(config: dict[str, Any], *, config_path: Path) -> bo
         telegram["bot_token"] = config["bot_token"]
     if "chat_id" in config and "chat_id" not in telegram:
         telegram["chat_id"] = config["chat_id"]
+    # #377: top-level `allow_any_user` (legacy form) migrates alongside the
+    # other telegram fields so the validator that gates an empty allowlist
+    # doesn't fire on the migrated config.
+    if "allow_any_user" in config and "allow_any_user" not in telegram:
+        telegram["allow_any_user"] = config["allow_any_user"]
 
     config.pop("bot_token", None)
     config.pop("chat_id", None)
+    config.pop("allow_any_user", None)
     config.setdefault("transport", "telegram")
     return True
 

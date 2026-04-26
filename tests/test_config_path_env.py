@@ -56,7 +56,8 @@ class TestLoadOrInitConfigEnv:
             'transport = "telegram"\n\n'
             "[transports.telegram]\n"
             'bot_token = "tok"\n'
-            "chat_id = 1\n",
+            "chat_id = 1\n"
+            "allow_any_user = true\n",
             encoding="utf-8",
         )
         monkeypatch.setenv(ENV_VAR, str(env_config))
@@ -73,7 +74,8 @@ class TestLoadOrInitConfigEnv:
             'transport = "telegram"\n\n'
             "[transports.telegram]\n"
             'bot_token = "tok"\n'
-            "chat_id = 2\n",
+            "chat_id = 2\n"
+            "allow_any_user = true\n",
             encoding="utf-8",
         )
         monkeypatch.setenv(ENV_VAR, str(env_config))
@@ -104,7 +106,8 @@ class TestLoadSettingsEnv:
             'transport = "telegram"\n\n'
             "[transports.telegram]\n"
             'bot_token = "devtoken"\n'
-            "chat_id = 999\n",
+            "chat_id = 999\n"
+            "allow_any_user = true\n",
             encoding="utf-8",
         )
         monkeypatch.setenv(ENV_VAR, str(env_config))

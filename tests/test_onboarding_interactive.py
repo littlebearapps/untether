@@ -31,6 +31,7 @@ def test_render_config_escapes() -> None:
                 "telegram": {
                     "bot_token": 'token"with\\quote',
                     "chat_id": 123,
+                    "allow_any_user": True,
                 }
             },
         }
