@@ -2205,7 +2205,11 @@ async def run_main_loop(
                         max_bytes=cfg.voice_max_bytes,
                         reply=reply,
                         base_url=cfg.voice_transcription_base_url,
-                        api_key=cfg.voice_transcription_api_key,
+                        api_key=(
+                            cfg.voice_transcription_api_key.get_secret_value()
+                            if cfg.voice_transcription_api_key is not None
+                            else None
+                        ),
                     )
                     if text is None:
                         return

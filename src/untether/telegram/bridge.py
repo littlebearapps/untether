@@ -4,6 +4,8 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Literal, cast
 
+from pydantic import SecretStr
+
 from ..context import RunContext
 from ..logging import get_logger
 from ..markdown import MarkdownFormatter, MarkdownParts
@@ -159,7 +161,8 @@ class TelegramBridgeConfig:
     voice_max_bytes: int = 10 * 1024 * 1024
     voice_transcription_model: str = "gpt-4o-mini-transcribe"
     voice_transcription_base_url: str | None = None
-    voice_transcription_api_key: str | None = None
+    # #378: SecretStr ferries the key without leaking it through repr/log.
+    voice_transcription_api_key: SecretStr | None = None
     voice_show_transcription: bool = True
     forward_coalesce_s: float = 1.0
     media_group_debounce_s: float = 1.0
