@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import re
 from collections.abc import Iterable
 from pathlib import Path
 from typing import Annotated, Any, ClassVar, Literal
@@ -285,18 +286,57 @@ class ProgressSettings(BaseModel):
     group_chat_rps: float = Field(default=20.0 / 60.0, gt=0, le=10)
 
 
+_ENV_NAME_RE = re.compile(r"^[A-Z_][A-Z0-9_]*$")
+
+
 class SecuritySettings(BaseModel):
-    """Runtime security knobs (#361).
+    """Runtime security knobs (#361, #409).
 
     ``env_audit`` enables a one-shot ``/proc/<pid>/environ`` sample on
     Claude session start. Disallowed names emit a structured warning so
     the operator can see when host env leaks past
     :func:`utils.env_policy.filtered_env`.
+
+    ``env_extra_allow`` / ``env_extra_prefix_allow`` (#409) extend the
+    built-in subprocess-env allowlist with per-deployment names so users
+    can thread credential-manager tokens (1Password, Doppler, Vault,
+    Infisical, …) without forking ``utils/env_policy.py``.
     """
 
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
 
     env_audit: bool = True
+    # #409: user-extensible engine-subprocess env allowlist. Each entry
+    # must look like a POSIX env var name (uppercase, digits, underscore;
+    # must not start with a digit). Empty/whitespace strings are rejected
+    # so a stray TOML edit doesn't silently widen the allowlist.
+    env_extra_allow: list[str] = Field(default_factory=list)
+    env_extra_prefix_allow: list[str] = Field(default_factory=list)
+
+    @field_validator("env_extra_allow", "env_extra_prefix_allow", mode="after")
+    @classmethod
+    def _validate_env_names(cls, v: list[str]) -> list[str]:
+        """Each entry must look like a POSIX env-var name.
+
+        Trailing wildcards / glob chars are NOT supported — prefix matches
+        already cover families (``VAULT_*`` is configured as ``"VAULT_"``).
+        """
+        cleaned: list[str] = []
+        for entry in v:
+            if not isinstance(entry, str):
+                raise ValueError(
+                    f"env allowlist entries must be strings (got {type(entry).__name__})"
+                )
+            stripped = entry.strip()
+            if not stripped:
+                raise ValueError("env allowlist entries must not be empty")
+            if not _ENV_NAME_RE.match(stripped):
+                raise ValueError(
+                    f"invalid env name {entry!r} — must match [A-Z_][A-Z0-9_]* "
+                    "(uppercase letters, digits, underscores; cannot start with a digit)"
+                )
+            cleaned.append(stripped)
+        return cleaned
 
 
 class UntetherSettings(BaseSettings):

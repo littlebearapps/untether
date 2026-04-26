@@ -324,11 +324,15 @@ Runtime security knobs. Defaults are safe — operators only flip these when inv
     ```toml
     [security]
     env_audit = true
+    env_extra_allow = ["OP_SERVICE_ACCOUNT_TOKEN", "DOPPLER_TOKEN"]
+    env_extra_prefix_allow = ["VAULT_", "INFISICAL_"]
     ```
 
 | Key | Type | Default | Notes |
 |-----|------|---------|-------|
 | `env_audit` | bool | `true` | One-shot `/proc/<claude_pid>/environ` sample on first `system.init` ([#361](https://github.com/littlebearapps/untether/issues/361)). Emits `claude.env_audit.leaked_var` WARNING per non-allowlisted name observed (dedup per session per name). Reuses `utils/env_policy.is_allowed`. Linux-only — silently no-ops elsewhere or when /proc is unreadable. Set `false` to opt out (e.g. on hardened hosts where `/proc/<pid>/environ` reads are sensitive). The companion `env -i` wrap on Claude exec ([#361](https://github.com/littlebearapps/untether/issues/361)) is always on and not configurable. |
+| `env_extra_allow` | list[str] | `[]` | Per-deployment exact-match additions to the engine-subprocess env allowlist ([#409](https://github.com/littlebearapps/untether/issues/409)). Use for credential-manager tokens that aren't in the global defaults — e.g. `["OP_SERVICE_ACCOUNT_TOKEN", "DOPPLER_TOKEN", "INFISICAL_TOKEN"]`. Each entry must match `[A-Z_][A-Z0-9_]*` (uppercase, digits, underscore; cannot start with a digit). Empty / whitespace / lowercase entries are rejected at config-load time. Currently honoured by the Claude and Pi runners. The audit (`env_audit`) honours these too, so user-allowed names aren't false-flagged as leaks. Untether emits one `env_policy.user_extension` INFO log per process at first runner spawn so the addition is visible in journalctl. |
+| `env_extra_prefix_allow` | list[str] | `[]` | Like `env_extra_allow` but for name *prefixes* — convenient for credential-manager families where many vars share a prefix. Examples: `["VAULT_"]` admits `VAULT_TOKEN`, `VAULT_ADDR`, `VAULT_NAMESPACE`. Each entry must match the same env-var name shape as `env_extra_allow`. |
 
 ## Engine-specific config tables
 

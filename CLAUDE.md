@@ -47,6 +47,7 @@ Untether adds interactive permission control, plan mode support, and several UX 
 - **Trigger visibility (Tier 1)** — `/ping` shows per-chat trigger summary (`⏰ triggers: 1 cron (id, 9:00 AM daily (Melbourne))`); run footer shows `⏰ cron:<id>` / `⚡ webhook:<id>` for trigger-initiated runs; new `describe_cron()` utility renders common patterns in plain English
 - **Graceful restart improvements (Tier 1)** — persists Telegram `update_id` to `last_update_id.json` so restarts don't drop/duplicate messages; `Type=notify` systemd integration via stdlib `sd_notify` (`READY=1` + `STOPPING=1`); `RestartSec=2`
 - **`diff_preview` plan bypass (#283)** — after user approves a plan outline via "Pause & Outline Plan", the `_discuss_approved` flag short-circuits diff preview for subsequent Edit/Write tools so no second approval is needed
+- **User-extensible env allowlist (#409)** — `[security] env_extra_allow` and `env_extra_prefix_allow` (in `untether.toml`) extend the engine-subprocess env allowlist with per-deployment names so users can thread credential-manager tokens (1Password, Doppler, Vault, Infisical, …) without forking `utils/env_policy.py`. Names are validated against `[A-Z_][A-Z0-9_]*`. Honoured by the Claude and Pi runners and by the `env_audit` probe. `BWS_ACCESS_TOKEN` was promoted into the built-in defaults at the same time. One `env_policy.user_extension` INFO log per process
 
 See `.claude/skills/claude-stream-json/` and `.claude/rules/control-channel.md` for implementation details.
 

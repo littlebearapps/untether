@@ -1,4 +1,4 @@
-"""Allowlist-based env filter for engine subprocesses (#198).
+"""Allowlist-based env filter for engine subprocesses (#198, #409).
 
 Background
 ----------
@@ -29,17 +29,34 @@ integration validation — see #332 for the follow-up milestone.
 Extending the allowlist
 -----------------------
 
-If a new engine or MCP needs a variable that isn't allowlisted, it
-hangs at init with no useful error. Add the variable below, ship a
-test in ``tests/test_env_policy.py``, and run the integration suite.
+There are two ways to extend the allowlist:
+
+1. **Built-in defaults** (this module). Add the variable to
+   ``_EXACT_ALLOW`` or ``_PREFIX_ALLOW``, ship a test in
+   ``tests/test_env_policy.py``, and run the integration suite. Use
+   this for vars that *every* user is likely to need.
+
+2. **Per-deployment config** (#409). Set
+   ``[security] env_extra_allow = [...]`` and
+   ``env_extra_prefix_allow = [...]`` in ``untether.toml``. The
+   runners pass these through to :func:`filtered_env` so the user
+   doesn't need to fork or vendor-patch this module to thread a
+   credential-manager token (``OP_SERVICE_ACCOUNT_TOKEN``,
+   ``DOPPLER_TOKEN``, ``VAULT_*``, etc.) to engine subprocesses.
+
 The set of NAMESPACE prefixes is deliberately narrow — add another
-prefix only when there's a clear family of vars (e.g. all ``XDG_*``).
+default prefix only when there's a clear family of vars (e.g. all
+``XDG_*``). User-defined extras are filtered to the same name shape.
 """
 
 from __future__ import annotations
 
 import os
 from collections.abc import Iterable, Mapping
+
+from ..logging import get_logger
+
+logger = get_logger(__name__)
 
 # Exact-match allowlist. One entry per variable.
 _EXACT_ALLOW: frozenset[str] = frozenset(
@@ -118,6 +135,10 @@ _EXACT_ALLOW: frozenset[str] = frozenset(
         # Cloudflare — for MCP servers accessing CF APIs.
         "CLOUDFLARE_API_TOKEN",
         "CLOUDFLARE_ACCOUNT_ID",
+        # Bitwarden Secrets Manager — used by MCP bash wrappers that
+        # call `kc_get` / `bws secret` to materialise per-project
+        # credentials (Trello, Jina, Pal, etc.). See issue #409.
+        "BWS_ACCESS_TOKEN",
         # Untether-set markers — Claude hooks look for UNTETHER_SESSION.
         "UNTETHER_SESSION",
         # direnv-provided workspace context.
@@ -157,6 +178,26 @@ def is_allowed(name: str) -> bool:
     return any(name.startswith(prefix) for prefix in _PREFIX_ALLOW)
 
 
+def is_allowed_with_extras(
+    name: str,
+    *,
+    extra_exact: Iterable[str] = (),
+    extra_prefix: Iterable[str] = (),
+) -> bool:
+    """Like :func:`is_allowed` but also honours per-deployment user extras (#409).
+
+    ``extra_exact`` and ``extra_prefix`` come from
+    ``[security] env_extra_allow`` / ``env_extra_prefix_allow`` in
+    ``untether.toml``. The audit module passes them through so live-
+    process audits don't false-flag user-allowed names as leaks.
+    """
+    if is_allowed(name):
+        return True
+    if name in frozenset(extra_exact):
+        return True
+    return any(name.startswith(prefix) for prefix in extra_prefix)
+
+
 # Back-compat alias for any external importers that depended on the
 # previously-private name. Safe to remove once we've audited all consumers.
 _is_allowed = is_allowed
@@ -166,6 +207,7 @@ def filtered_env(
     source: Mapping[str, str] | None = None,
     *,
     extra_allow: Iterable[str] = (),
+    extra_prefix: Iterable[str] = (),
 ) -> dict[str, str]:
     """Return a filtered copy of `source` containing only allowlisted keys.
 
@@ -176,6 +218,10 @@ def filtered_env(
     extra_allow : Iterable[str]
         Additional exact variable names to allow for this call (e.g.
         per-engine / per-site keys that don't belong in the global set).
+    extra_prefix : Iterable[str]
+        Additional name prefixes to allow (#409 — surfaces
+        ``[security] env_extra_prefix_allow`` so users can pass through
+        credential-manager families like ``VAULT_*``).
 
     Returns
     -------
@@ -184,8 +230,61 @@ def filtered_env(
     """
     if source is None:
         source = os.environ
-    extras = frozenset(extra_allow)
-    return {k: v for k, v in source.items() if is_allowed(k) or k in extras}
+    extras_exact = frozenset(extra_allow)
+    extras_prefix = tuple(extra_prefix)
+    return {
+        k: v
+        for k, v in source.items()
+        if is_allowed_with_extras(
+            k, extra_exact=extras_exact, extra_prefix=extras_prefix
+        )
+    }
 
 
-__all__ = ["filtered_env", "is_allowed"]
+# Module-level latch so we emit `env_policy.user_extension` at most once
+# per process even if multiple runners (Claude + Pi) call it. Reset is
+# only useful in tests; expose the underlying flag via _RESET_LOG_LATCH.
+_extension_logged = False
+
+
+def log_user_extensions_once(
+    extra_exact: Iterable[str] = (),
+    extra_prefix: Iterable[str] = (),
+) -> None:
+    """Emit a single INFO log naming user-supplied env-policy extras (#409).
+
+    Idempotent — re-invocations after the first non-empty call are
+    no-ops so journalctl shows one record per process per restart, not
+    one per spawned subprocess.
+    """
+    global _extension_logged
+    if _extension_logged:
+        return
+    exact = sorted(set(extra_exact))
+    prefix = sorted(set(extra_prefix))
+    if not exact and not prefix:
+        return
+    logger.info(
+        "env_policy.user_extension",
+        extra_exact=exact,
+        extra_prefix=prefix,
+        hint=(
+            "user-extended subprocess env allowlist via "
+            "[security] env_extra_allow / env_extra_prefix_allow"
+        ),
+    )
+    _extension_logged = True
+
+
+def _reset_log_latch_for_tests() -> None:
+    """Clear the once-per-process log latch. Tests only."""
+    global _extension_logged
+    _extension_logged = False
+
+
+__all__ = [
+    "filtered_env",
+    "is_allowed",
+    "is_allowed_with_extras",
+    "log_user_extensions_once",
+]

@@ -1,8 +1,15 @@
-"""Tests for `utils/env_policy.py` — the engine-subprocess env allowlist (#198)."""
+"""Tests for `utils/env_policy.py` — the engine-subprocess env allowlist (#198, #409)."""
 
 from __future__ import annotations
 
-from untether.utils.env_policy import _is_allowed, filtered_env, is_allowed
+from untether.utils.env_policy import (
+    _is_allowed,
+    _reset_log_latch_for_tests,
+    filtered_env,
+    is_allowed,
+    is_allowed_with_extras,
+    log_user_extensions_once,
+)
 
 
 class TestIsAllowed:
@@ -12,13 +19,13 @@ class TestIsAllowed:
         assert is_allowed("PATH") is True
         assert is_allowed("ANTHROPIC_API_KEY") is True
         assert is_allowed("UNTETHER_SESSION") is True
+        assert is_allowed("BWS_ACCESS_TOKEN") is True
 
     def test_prefix_allow_returns_true(self):
         assert is_allowed("CLAUDE_CODE_FOO") is True
         assert is_allowed("MCP_SERVER_BAR") is True
 
     def test_disallowed_returns_false(self):
-        assert is_allowed("BWS_ACCESS_TOKEN") is False
         assert is_allowed("AWS_SECRET_ACCESS_KEY") is False
         assert is_allowed("STRIPE_SECRET_KEY") is False
 
@@ -149,3 +156,107 @@ class TestMixedInput:
         out = filtered_env()
         assert out.get("ANTHROPIC_API_KEY") == "probe-value"
         assert "DEFINITELY_NOT_ALLOWED_XYZ" not in out
+
+
+class TestUserExtensions:
+    """#409: per-deployment user extras via [security] env_extra_allow /
+    env_extra_prefix_allow surface here as `extra_allow` / `extra_prefix`
+    parameters to filtered_env."""
+
+    def test_is_allowed_with_extras_falls_back_to_default(self):
+        # No extras: behaves identically to is_allowed().
+        assert is_allowed_with_extras("PATH") is True
+        assert is_allowed_with_extras("AWS_SECRET_ACCESS_KEY") is False
+
+    def test_is_allowed_with_extras_admits_user_exact(self):
+        assert (
+            is_allowed_with_extras(
+                "OP_SERVICE_ACCOUNT_TOKEN",
+                extra_exact=["OP_SERVICE_ACCOUNT_TOKEN"],
+            )
+            is True
+        )
+        # Names not in the user exacts still get rejected.
+        assert (
+            is_allowed_with_extras(
+                "OTHER_TOKEN", extra_exact=["OP_SERVICE_ACCOUNT_TOKEN"]
+            )
+            is False
+        )
+
+    def test_is_allowed_with_extras_admits_user_prefix(self):
+        assert is_allowed_with_extras("VAULT_TOKEN", extra_prefix=["VAULT_"]) is True
+        assert is_allowed_with_extras("VAULT_ADDR", extra_prefix=["VAULT_"]) is True
+        assert (
+            is_allowed_with_extras("STRIPE_VAULT_KEY", extra_prefix=["VAULT_"]) is False
+        )
+
+    def test_filtered_env_admits_extra_prefix(self):
+        src = {
+            "VAULT_TOKEN": "v-tok",
+            "VAULT_ADDR": "https://vault",
+            "STRIPE_SECRET_KEY": "sk_live_x",
+            "PATH": "/usr/bin",
+        }
+        out = filtered_env(src, extra_prefix=["VAULT_"])
+        assert out == {
+            "VAULT_TOKEN": "v-tok",
+            "VAULT_ADDR": "https://vault",
+            "PATH": "/usr/bin",
+        }
+
+    def test_filtered_env_combines_extra_allow_and_extra_prefix(self):
+        src = {
+            "DOPPLER_TOKEN": "d-tok",
+            "VAULT_TOKEN": "v-tok",
+            "STRIPE_SECRET_KEY": "leak",
+        }
+        out = filtered_env(
+            src,
+            extra_allow=["DOPPLER_TOKEN"],
+            extra_prefix=["VAULT_"],
+        )
+        assert out == {"DOPPLER_TOKEN": "d-tok", "VAULT_TOKEN": "v-tok"}
+
+    def test_default_still_blocks_random_env_vars(self):
+        """Without user extras, prior denial behaviour is preserved."""
+        src = {"AWS_SECRET_ACCESS_KEY": "leak", "STRIPE_SECRET_KEY": "leak"}
+        assert filtered_env(src) == {}
+
+
+class TestUserExtensionLogging:
+    """#409: log_user_extensions_once emits one structured INFO per process."""
+
+    def setup_method(self):
+        _reset_log_latch_for_tests()
+
+    def teardown_method(self):
+        _reset_log_latch_for_tests()
+
+    def test_logs_once_when_extras_provided(self):
+        from structlog.testing import capture_logs
+
+        with capture_logs() as logs:
+            log_user_extensions_once(
+                extra_exact=["OP_SERVICE_ACCOUNT_TOKEN"],
+                extra_prefix=["VAULT_"],
+            )
+            log_user_extensions_once(
+                extra_exact=["OP_SERVICE_ACCOUNT_TOKEN"],
+                extra_prefix=["VAULT_"],
+            )
+
+        ext_events = [r for r in logs if r.get("event") == "env_policy.user_extension"]
+        assert len(ext_events) == 1
+        assert ext_events[0]["extra_exact"] == ["OP_SERVICE_ACCOUNT_TOKEN"]
+        assert ext_events[0]["extra_prefix"] == ["VAULT_"]
+
+    def test_no_log_when_no_extras(self):
+        from structlog.testing import capture_logs
+
+        with capture_logs() as logs:
+            log_user_extensions_once()
+            log_user_extensions_once(extra_exact=[], extra_prefix=[])
+
+        ext_events = [r for r in logs if r.get("event") == "env_policy.user_extension"]
+        assert ext_events == []
