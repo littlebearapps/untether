@@ -241,6 +241,112 @@ def test_voice_transcription_api_key_default_none(tmp_path: Path) -> None:
     assert settings.transports.telegram.voice_transcription_api_key is None
 
 
+# ───────────────────────────────────────────────────────────────────────────
+# #409 — env allowlist user-extensible config (SecuritySettings extras)
+# ───────────────────────────────────────────────────────────────────────────
+
+
+def test_env_extra_allow_round_trip(tmp_path: Path) -> None:
+    config_path = tmp_path / "untether.toml"
+    config_path.write_text(
+        '[transports.telegram]\nbot_token = "tok"\nchat_id = 123\n\n'
+        "[security]\n"
+        'env_extra_allow = ["OP_SERVICE_ACCOUNT_TOKEN", "DOPPLER_TOKEN"]\n'
+        'env_extra_prefix_allow = ["VAULT_", "INFISICAL_"]\n',
+        encoding="utf-8",
+    )
+    settings, _ = load_settings(config_path)
+    assert settings.security.env_extra_allow == [
+        "OP_SERVICE_ACCOUNT_TOKEN",
+        "DOPPLER_TOKEN",
+    ]
+    assert settings.security.env_extra_prefix_allow == ["VAULT_", "INFISICAL_"]
+
+
+def test_env_extra_allow_default_empty(tmp_path: Path) -> None:
+    config_path = tmp_path / "untether.toml"
+    config_path.write_text(
+        '[transports.telegram]\nbot_token = "tok"\nchat_id = 123\n',
+        encoding="utf-8",
+    )
+    settings, _ = load_settings(config_path)
+    assert settings.security.env_extra_allow == []
+    assert settings.security.env_extra_prefix_allow == []
+
+
+def test_env_extra_allow_rejects_empty_string(tmp_path: Path) -> None:
+    config_path = tmp_path / "untether.toml"
+    config_path.write_text(
+        '[transports.telegram]\nbot_token = "tok"\nchat_id = 123\n\n'
+        "[security]\n"
+        'env_extra_allow = [""]\n',
+        encoding="utf-8",
+    )
+    with pytest.raises(ConfigError, match="env_extra_allow"):
+        load_settings(config_path)
+
+
+def test_env_extra_allow_rejects_whitespace_only(tmp_path: Path) -> None:
+    config_path = tmp_path / "untether.toml"
+    config_path.write_text(
+        '[transports.telegram]\nbot_token = "tok"\nchat_id = 123\n\n'
+        "[security]\n"
+        'env_extra_allow = ["   "]\n',
+        encoding="utf-8",
+    )
+    with pytest.raises(ConfigError, match="env_extra_allow"):
+        load_settings(config_path)
+
+
+def test_env_extra_allow_rejects_lowercase(tmp_path: Path) -> None:
+    config_path = tmp_path / "untether.toml"
+    config_path.write_text(
+        '[transports.telegram]\nbot_token = "tok"\nchat_id = 123\n\n'
+        "[security]\n"
+        'env_extra_allow = ["my_token"]\n',
+        encoding="utf-8",
+    )
+    with pytest.raises(ConfigError, match="env_extra_allow"):
+        load_settings(config_path)
+
+
+def test_env_extra_allow_rejects_leading_digit(tmp_path: Path) -> None:
+    config_path = tmp_path / "untether.toml"
+    config_path.write_text(
+        '[transports.telegram]\nbot_token = "tok"\nchat_id = 123\n\n'
+        "[security]\n"
+        'env_extra_allow = ["1_BAD"]\n',
+        encoding="utf-8",
+    )
+    with pytest.raises(ConfigError, match="env_extra_allow"):
+        load_settings(config_path)
+
+
+def test_env_extra_allow_rejects_spaces(tmp_path: Path) -> None:
+    config_path = tmp_path / "untether.toml"
+    config_path.write_text(
+        '[transports.telegram]\nbot_token = "tok"\nchat_id = 123\n\n'
+        "[security]\n"
+        'env_extra_allow = ["TOK EN"]\n',
+        encoding="utf-8",
+    )
+    with pytest.raises(ConfigError, match="env_extra_allow"):
+        load_settings(config_path)
+
+
+def test_env_extra_prefix_allow_validates_names(tmp_path: Path) -> None:
+    """Prefix entries must match the same env-var name shape."""
+    config_path = tmp_path / "untether.toml"
+    config_path.write_text(
+        '[transports.telegram]\nbot_token = "tok"\nchat_id = 123\n\n'
+        "[security]\n"
+        'env_extra_prefix_allow = ["bad-prefix"]\n',
+        encoding="utf-8",
+    )
+    with pytest.raises(ConfigError, match="env_extra_prefix_allow"):
+        load_settings(config_path)
+
+
 def test_require_telegram_rejects_non_telegram_transport(tmp_path: Path) -> None:
     config_path = tmp_path / "untether.toml"
     settings = UntetherSettings.model_validate(

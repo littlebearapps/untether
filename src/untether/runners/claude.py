@@ -103,6 +103,28 @@ def _find_reserved_flag(extra_args: list[str]) -> str | None:
     return None
 
 
+def _load_env_extras() -> tuple[tuple[str, ...], tuple[str, ...]]:
+    """#409: read [security] env_extra_allow / env_extra_prefix_allow.
+
+    Best-effort — config errors must never block a run, so we swallow
+    them and fall back to the built-in defaults. Returns
+    ``(extra_exact, extra_prefix)``.
+    """
+    from ..settings import load_settings_if_exists
+
+    try:
+        result = load_settings_if_exists()
+        if result is None:
+            return ((), ())
+        settings, _ = result
+        return (
+            tuple(settings.security.env_extra_allow),
+            tuple(settings.security.env_extra_prefix_allow),
+        )
+    except Exception:  # noqa: BLE001 — never let config errors block a run
+        return ((), ())
+
+
 # Phase 2: Global registry for active ClaudeRunner instances
 # Keyed by session_id, stores (runner_instance, timestamp)
 _ACTIVE_RUNNERS: dict[str, tuple[ClaudeRunner, float]] = {}
@@ -589,7 +611,15 @@ def _maybe_audit_env(state: ClaudeStreamState, session_id: str) -> None:
     if not enabled:
         return
 
-    leaked = audit_proc_env(state.pid, expected_extras=("UNTETHER_SESSION",))
+    # #409: pass user extras through so the audit doesn't flag names the
+    # operator explicitly opted into via [security] env_extra_allow.
+    user_exact, user_prefix = _load_env_extras()
+    leaked = audit_proc_env(
+        state.pid,
+        expected_extras=("UNTETHER_SESSION",),
+        user_extra_exact=user_exact,
+        user_extra_prefix=user_prefix,
+    )
     for name in leaked:
         if name in state.audited_leaks:
             continue
@@ -1677,9 +1707,13 @@ class ClaudeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
         # MCP namespaces, etc.) flow through. See env_policy.py for the
         # canonical list + how to extend it when a new MCP or engine needs
         # an unfamiliar variable.
-        from ..utils.env_policy import filtered_env
+        from ..utils.env_policy import filtered_env, log_user_extensions_once
 
-        env = filtered_env()
+        # #409: thread per-deployment extras from
+        # [security] env_extra_allow / env_extra_prefix_allow.
+        extra_exact, extra_prefix = _load_env_extras()
+        log_user_extensions_once(extra_exact, extra_prefix)
+        env = filtered_env(extra_allow=extra_exact, extra_prefix=extra_prefix)
         # Let Claude Code hooks detect Untether sessions (e.g. PitchDocs
         # context-guard skips blocking Stop hooks in Telegram).
         env["UNTETHER_SESSION"] = "1"

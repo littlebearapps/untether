@@ -49,6 +49,28 @@ _RESUME_RE = re.compile(r"(?im)^\s*`?pi\s+--session\s+(?P<token>.+?)`?\s*$")
 _SESSION_ID_PREFIX_LEN = 8
 
 
+def _load_env_extras() -> tuple[tuple[str, ...], tuple[str, ...]]:
+    """#409: read [security] env_extra_allow / env_extra_prefix_allow.
+
+    Best-effort — config errors must never block a run, so we swallow
+    them and fall back to the built-in defaults. Returns
+    ``(extra_exact, extra_prefix)``.
+    """
+    from ..settings import load_settings_if_exists
+
+    try:
+        result = load_settings_if_exists()
+        if result is None:
+            return ((), ())
+        settings, _ = result
+        return (
+            tuple(settings.security.env_extra_allow),
+            tuple(settings.security.env_extra_prefix_allow),
+        )
+    except Exception:  # noqa: BLE001 — never let config errors block a run
+        return ((), ())
+
+
 @dataclass(slots=True)
 class PiStreamState:
     resume: ResumeToken
@@ -456,10 +478,13 @@ class PiRunner(ResumeTokenMixin, JsonlSubprocessRunner):
     def env(self, *, state: PiStreamState) -> dict[str, str] | None:
         # #198: allowlist filter — Pi subprocess no longer inherits the
         # parent's full environment. See `utils/env_policy.py` for the
-        # canonical list + extension notes.
-        from ..utils.env_policy import filtered_env
+        # canonical list + extension notes. #409: thread per-deployment
+        # extras from [security] env_extra_allow / env_extra_prefix_allow.
+        from ..utils.env_policy import filtered_env, log_user_extensions_once
 
-        env = filtered_env()
+        extra_exact, extra_prefix = _load_env_extras()
+        log_user_extensions_once(extra_exact, extra_prefix)
+        env = filtered_env(extra_allow=extra_exact, extra_prefix=extra_prefix)
         env.setdefault("NO_COLOR", "1")
         env.setdefault("CI", "1")
         return env

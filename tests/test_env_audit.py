@@ -66,13 +66,14 @@ class TestAuditProcEnv:
             "PATH": "/usr/bin",
             "HOME": "/home/u",
             "ANTHROPIC_API_KEY": "sk-ant-",
-            "BWS_ACCESS_TOKEN": "0.f3a-...",
+            "BWS_ACCESS_TOKEN": "0.f3a-...",  # #409: now in default allowlist
             "STRIPE_SECRET_KEY": "sk-live-...",
+            "DROP_ME": "leak",
         }
         monkeypatch.setattr(env_audit, "read_proc_environ", lambda pid: fake_env)
 
         result = audit_proc_env(12345)
-        assert result == ["BWS_ACCESS_TOKEN", "STRIPE_SECRET_KEY"]
+        assert result == ["DROP_ME", "STRIPE_SECRET_KEY"]
 
     def test_empty_when_all_allowed(self, monkeypatch):
         fake_env = {"PATH": "/usr/bin", "HOME": "/home/u"}
@@ -82,15 +83,40 @@ class TestAuditProcEnv:
     def test_respects_expected_extras(self, monkeypatch):
         fake_env = {
             "PATH": "/usr/bin",
-            "BWS_ACCESS_TOKEN": "x",
+            "STRIPE_SECRET_KEY": "x",
             "CUSTOM_RUNNER_ENV": "y",
         }
         monkeypatch.setattr(env_audit, "read_proc_environ", lambda pid: fake_env)
 
         # CUSTOM_RUNNER_ENV is permitted by the caller as an extra; only
-        # BWS_ACCESS_TOKEN should be reported.
+        # STRIPE_SECRET_KEY should be reported.
         result = audit_proc_env(12345, expected_extras=("CUSTOM_RUNNER_ENV",))
-        assert result == ["BWS_ACCESS_TOKEN"]
+        assert result == ["STRIPE_SECRET_KEY"]
+
+    def test_respects_user_extra_exact(self, monkeypatch):
+        """#409: user-allowed exact names must not be flagged as leaks."""
+        fake_env = {
+            "PATH": "/usr/bin",
+            "OP_SERVICE_ACCOUNT_TOKEN": "1p-...",
+            "STRIPE_SECRET_KEY": "leak",
+        }
+        monkeypatch.setattr(env_audit, "read_proc_environ", lambda pid: fake_env)
+
+        result = audit_proc_env(12345, user_extra_exact=("OP_SERVICE_ACCOUNT_TOKEN",))
+        assert result == ["STRIPE_SECRET_KEY"]
+
+    def test_respects_user_extra_prefix(self, monkeypatch):
+        """#409: user-allowed prefix names must not be flagged as leaks."""
+        fake_env = {
+            "PATH": "/usr/bin",
+            "VAULT_TOKEN": "v",
+            "VAULT_ADDR": "https://vault",
+            "STRIPE_SECRET_KEY": "leak",
+        }
+        monkeypatch.setattr(env_audit, "read_proc_environ", lambda pid: fake_env)
+
+        result = audit_proc_env(12345, user_extra_prefix=("VAULT_",))
+        assert result == ["STRIPE_SECRET_KEY"]
 
     def test_unreadable_returns_empty(self, monkeypatch):
         monkeypatch.setattr(env_audit, "read_proc_environ", lambda pid: None)
