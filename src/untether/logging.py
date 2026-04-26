@@ -14,7 +14,11 @@ from structlog.types import Processor
 
 TELEGRAM_TOKEN_RE = re.compile(r"bot\d+:[A-Za-z0-9_-]+")
 TELEGRAM_BARE_TOKEN_RE = re.compile(r"\b\d+:[A-Za-z0-9_-]{10,}\b")
-# Common API key patterns (OpenAI, GitHub, generic bearer tokens)
+# Common API key patterns (OpenAI, GitHub, generic bearer tokens).
+# #213: sk-proj-... is the project-key variant; underscore/hyphen permitted
+# (so the generic sk- pattern with [A-Za-z0-9] alone misses them). Match
+# project keys first so the generic OPENAI_KEY_RE doesn't partially redact.
+OPENAI_PROJECT_KEY_RE = re.compile(r"\bsk-proj-[A-Za-z0-9_-]{20,}\b")
 OPENAI_KEY_RE = re.compile(r"\bsk-[A-Za-z0-9]{20,}\b")
 GITHUB_TOKEN_RE = re.compile(r"\b(ghp_|ghs_|gho_|github_pat_)[A-Za-z0-9_]{10,}\b")
 
@@ -75,6 +79,7 @@ def _drop_below_level(
 def _redact_text(value: str) -> str:
     redacted = TELEGRAM_TOKEN_RE.sub("bot[REDACTED]", value)
     redacted = TELEGRAM_BARE_TOKEN_RE.sub("[REDACTED_TOKEN]", redacted)
+    redacted = OPENAI_PROJECT_KEY_RE.sub("[REDACTED_KEY]", redacted)
     redacted = OPENAI_KEY_RE.sub("[REDACTED_KEY]", redacted)
     return GITHUB_TOKEN_RE.sub("[REDACTED_TOKEN]", redacted)
 

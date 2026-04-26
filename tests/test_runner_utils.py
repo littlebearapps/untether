@@ -394,6 +394,62 @@ async def test_jsonl_run_impl_smoke(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 @pytest.mark.anyio
+async def test_runner_start_log_has_no_prompt_content(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#205: prompt content stays at DEBUG; INFO `runner.start` carries length only."""
+    from structlog.testing import capture_logs
+
+    class _FakeProc:
+        def __init__(self) -> None:
+            self.stdout = object()
+            self.stderr = object()
+            self.stdin = None
+            self.pid = 999
+
+        async def wait(self) -> int:
+            return 0
+
+    class _FakeManager:
+        def __init__(self, proc: _FakeProc) -> None:
+            self._proc = proc
+
+        async def __aenter__(self) -> _FakeProc:
+            return self._proc
+
+        async def __aexit__(self, exc_type, exc, tb) -> None:
+            return None
+
+    proc = _FakeProc()
+
+    def fake_manage_subprocess(*args: Any, **kwargs: Any) -> _FakeManager:
+        _ = args, kwargs
+        return _FakeManager(proc)
+
+    async def fake_drain_stderr(*args: Any, **kwargs: Any) -> None:
+        _ = args, kwargs
+        return
+
+    monkeypatch.setattr(runner_module, "manage_subprocess", fake_manage_subprocess)
+    monkeypatch.setattr(runner_module, "drain_stderr", fake_drain_stderr)
+
+    runner = _RunJsonlRunner()
+    secret_prompt = "API_KEY=sk-abc1234567890ABCDEFGH and run my task"
+    with capture_logs() as logs:
+        _ = [evt async for evt in runner.run_impl(secret_prompt, None)]
+
+    start_events = [r for r in logs if r.get("event") == "runner.start"]
+    assert start_events, "runner.start event must fire"
+    for record in start_events:
+        # Prompt content must NOT appear in the INFO log under any key.
+        assert "prompt" not in record
+        assert "prompt_preview" not in record
+        # But length should be there for ops visibility.
+        assert record.get("prompt_len") == len(secret_prompt)
+        assert "API_KEY" not in str(record)
+
+
+@pytest.mark.anyio
 async def test_jsonl_run_impl_branches(monkeypatch: pytest.MonkeyPatch) -> None:
     class _FakeProc:
         def __init__(self) -> None:
@@ -665,3 +721,64 @@ class TestStderrSanitisation:
         assert result is not None
         assert "/home/user" not in result
         assert "[path]" in result
+
+    def test_redacts_macos_user_path(self) -> None:
+        # #208: macOS uses /Users/<user>/...
+        from untether.runner import _sanitise_stderr
+
+        result = _sanitise_stderr("Error at /Users/alice/Library/foo.log:42")
+        assert "/Users/alice" not in result
+        assert "[path]" in result
+        assert ":42" in result  # line marker survives
+
+    def test_redacts_macos_private_var(self) -> None:
+        # #208: macOS temp lives under /private/var/folders/...
+        from untether.runner import _sanitise_stderr
+
+        result = _sanitise_stderr("/private/var/folders/abc/T/run.log: not found")
+        assert "/private/var" not in result
+        assert "[path]" in result
+
+    def test_redacts_tmp_path(self) -> None:
+        from untether.runner import _sanitise_stderr
+
+        result = _sanitise_stderr("Failed to open /tmp/run-xyz.lock")
+        assert "/tmp" not in result
+        assert "[path]" in result
+
+    def test_redacts_var_log_path(self) -> None:
+        from untether.runner import _sanitise_stderr
+
+        result = _sanitise_stderr("See /var/log/journal/system.log for details")
+        assert "/var/log" not in result
+        assert "[path]" in result
+
+    def test_redacts_container_workspace_path(self) -> None:
+        # #208: container conventions (/app, /workspace).
+        from untether.runner import _sanitise_stderr
+
+        result = _sanitise_stderr("Crash in /app/main.py and /workspace/src/lib.py")
+        assert "/app/main.py" not in result
+        assert "/workspace" not in result
+        assert result.count("[path]") >= 2
+
+    def test_redacts_root_home(self) -> None:
+        from untether.runner import _sanitise_stderr
+
+        result = _sanitise_stderr("Permission denied at /root/.ssh/id_rsa")
+        assert "/root" not in result
+        assert "[path]" in result
+
+    def test_redacts_etc_path(self) -> None:
+        from untether.runner import _sanitise_stderr
+
+        result = _sanitise_stderr("Could not parse /etc/untether/config.toml")
+        assert "/etc/untether" not in result
+        assert "[path]" in result
+
+    def test_preserves_short_root_segments(self) -> None:
+        # Sanity: bare `/x` or `/y` (no segment) must NOT trigger [path].
+        from untether.runner import _sanitise_stderr
+
+        text = "Use option /x to enable verbose mode"
+        assert _sanitise_stderr(text) == text

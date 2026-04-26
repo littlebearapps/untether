@@ -5,6 +5,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+import anyio
+
 from ...config import ConfigError
 from ...context import RunContext
 from ...directives import DirectiveError
@@ -587,14 +589,23 @@ async def _handle_file_get(
             return
         filename = f"{rel_path.name or 'archive'}.zip"
     else:
+        # #211: read up to (max + 1) bytes in a single open() — no TOCTOU
+        # window between size check and read. If the file grew past the cap
+        # mid-read we'd still detect it via len(payload) here. The blocking
+        # read is offloaded to a worker thread to keep the event loop free.
+        max_bytes = cfg.files.max_download_bytes
+
+        def _read_capped() -> bytes:
+            with open(target, "rb") as f:
+                return f.read(max_bytes + 1)
+
         try:
-            size = target.stat().st_size
-            if size > cfg.files.max_download_bytes:
-                await reply(text="file is too large to send.")
-                return
-            payload = target.read_bytes()
+            payload = await anyio.to_thread.run_sync(_read_capped)
         except OSError as exc:
             await reply(text=f"failed to read file: {exc}")
+            return
+        if len(payload) > max_bytes:
+            await reply(text="file is too large to send.")
             return
         filename = target.name
     if len(payload) > cfg.files.max_download_bytes:

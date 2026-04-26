@@ -108,8 +108,27 @@ def _rc_label(rc: int) -> str:
     return f"rc={rc}"
 
 
-_ABS_PATH_RE = re.compile(r"(/[\w./-]{3,}/[\w.-]+)")
 _URL_RE = re.compile(r"https?://[^\s\"'<>]+")
+
+# #208: ordered list of absolute-path patterns. More specific roots first so
+# they're not partially eaten by the generic fallback. Stop chars exclude `:`
+# so `path:line` stack-trace markers survive sanitisation.
+_PATH_STOP = r"[^\s'\"<>:]"
+_PATH_PATTERNS = [
+    re.compile(rf"/home/{_PATH_STOP}+"),
+    re.compile(rf"/Users/{_PATH_STOP}+"),
+    re.compile(rf"/root/{_PATH_STOP}*"),
+    re.compile(rf"/private/var/{_PATH_STOP}+"),
+    re.compile(rf"/var/{_PATH_STOP}+"),
+    re.compile(rf"/tmp/{_PATH_STOP}+"),
+    re.compile(rf"/opt/{_PATH_STOP}+"),
+    re.compile(rf"/srv/{_PATH_STOP}+"),
+    re.compile(rf"/etc/{_PATH_STOP}+"),
+    re.compile(rf"/usr/local/{_PATH_STOP}+"),
+    re.compile(rf"/app/{_PATH_STOP}+"),
+    re.compile(rf"/workspace/{_PATH_STOP}+"),
+    re.compile(r"(/[\w./-]{3,}/[\w.-]+)"),
+]
 
 
 _TOOL_RESULT_EVENT_KIND = "tool_result"
@@ -194,7 +213,8 @@ def _classify_jsonl_event(raw: Any) -> str:
 
 def _sanitise_stderr(text: str) -> str:
     """Redact absolute paths and URLs from stderr before exposing to users."""
-    text = _ABS_PATH_RE.sub("[path]", text)
+    for pattern in _PATH_PATTERNS:
+        text = pattern.sub("[path]", text)
     text = _URL_RE.sub("[url]", text)
     return text
 
@@ -1057,9 +1077,15 @@ class JsonlSubprocessRunner(BaseRunner):
             "runner.start",
             engine=self.engine,
             resume=resume.value if resume else None,
-            prompt=prompt[:100] + "…" if len(prompt) > 100 else prompt,
             prompt_len=len(prompt),
             args=cmd[1:],
+        )
+        # #205: prompt content may carry credentials/PII; keep at DEBUG so it
+        # only surfaces with explicit operator opt-in.
+        logger.debug(
+            "runner.start_prompt",
+            engine=self.engine,
+            prompt_preview=prompt[:100] + "…" if len(prompt) > 100 else prompt,
         )
 
         # #350 pre-spawn RAM guard — refuse or warn when the host is

@@ -341,7 +341,8 @@ def test_translate_result_without_cost_still_returns_tokens() -> None:
 
 
 def test_build_args_new_session() -> None:
-    runner = AmpRunner()
+    # #206: default dangerously_allow_all is now False; explicit opt-in required.
+    runner = AmpRunner(dangerously_allow_all=True)
     state = AmpStreamState()
     args = runner.build_args("hello world", None, state=state)
     assert "--stream-json" in args
@@ -368,6 +369,21 @@ def test_build_args_dangerously_allow_all_false() -> None:
     state = AmpStreamState()
     args = runner.build_args("hello", None, state=state)
     assert "--dangerously-allow-all" not in args
+
+
+def test_build_args_default_is_safe() -> None:
+    # #206: default flipped to False; --dangerously-allow-all must be opt-in.
+    runner = AmpRunner()
+    state = AmpStreamState()
+    args = runner.build_args("hello", None, state=state)
+    assert "--dangerously-allow-all" not in args
+
+
+def test_build_args_dangerously_allow_all_true() -> None:
+    runner = AmpRunner(dangerously_allow_all=True)
+    state = AmpStreamState()
+    args = runner.build_args("hello", None, state=state)
+    assert "--dangerously-allow-all" in args
 
 
 def test_build_args_stream_json_input() -> None:
