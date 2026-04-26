@@ -120,7 +120,9 @@ _PATH_PATTERNS = [
     re.compile(rf"/root/{_PATH_STOP}*"),
     re.compile(rf"/private/var/{_PATH_STOP}+"),
     re.compile(rf"/var/{_PATH_STOP}+"),
-    re.compile(rf"/tmp/{_PATH_STOP}+"),
+    # The /tmp/ literal is part of a regex used to redact paths from stderr,
+    # not a hardcoded temp directory write — bandit B108 false positive.
+    re.compile(rf"/tmp/{_PATH_STOP}+"),  # nosec B108
     re.compile(rf"/opt/{_PATH_STOP}+"),
     re.compile(rf"/srv/{_PATH_STOP}+"),
     re.compile(rf"/etc/{_PATH_STOP}+"),
