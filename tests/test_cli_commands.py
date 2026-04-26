@@ -20,7 +20,9 @@ from untether.settings import UntetherSettings
 def _min_config() -> dict:
     return {
         "transport": "telegram",
-        "transports": {"telegram": {"bot_token": "token", "chat_id": 123}},
+        "transports": {
+            "telegram": {"bot_token": "token", "chat_id": 123, "allow_any_user": True}
+        },
     }
 
 
@@ -230,7 +232,13 @@ def test_doctor_rejects_non_telegram_transport(monkeypatch) -> None:
     settings = UntetherSettings.model_validate(
         {
             "transport": "local",
-            "transports": {"telegram": {"bot_token": "token", "chat_id": 123}},
+            "transports": {
+                "telegram": {
+                    "bot_token": "token",
+                    "chat_id": 123,
+                    "allow_any_user": True,
+                }
+            },
         }
     )
     monkeypatch.setattr(cli, "load_settings", lambda: (settings, Path("x")))

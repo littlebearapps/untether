@@ -167,6 +167,10 @@ class TelegramBridgeConfig:
     forward_coalesce_s: float = 1.0
     media_group_debounce_s: float = 1.0
     allowed_user_ids: tuple[int, ...] = ()
+    # #377: `allow_any_user=True` is the explicit opt-in for an open bot.
+    # Mirrors `TelegramTransportSettings.allow_any_user` so the loop can
+    # log on every boot (telegram/loop.py:security.allow_any_user).
+    allow_any_user: bool = False
     files: TelegramFilesSettings = field(default_factory=TelegramFilesSettings)
     chat_ids: tuple[int, ...] | None = None
     topics: TelegramTopicsSettings = field(default_factory=TelegramTopicsSettings)
@@ -194,6 +198,7 @@ class TelegramBridgeConfig:
         self.forward_coalesce_s = float(settings.forward_coalesce_s)
         self.media_group_debounce_s = float(settings.media_group_debounce_s)
         self.allowed_user_ids = tuple(settings.allowed_user_ids)
+        self.allow_any_user = bool(settings.allow_any_user)
         self.files = settings.files
 
 

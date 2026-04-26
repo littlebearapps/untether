@@ -286,6 +286,7 @@ class TelegramBackend(TransportBackend):
             forward_coalesce_s=settings.forward_coalesce_s,
             media_group_debounce_s=settings.media_group_debounce_s,
             allowed_user_ids=tuple(settings.allowed_user_ids),
+            allow_any_user=settings.allow_any_user,
             topics=settings.topics,
             files=settings.files,
             trigger_config=trigger_config,

@@ -4,7 +4,7 @@ Untether gives remote access to coding agents on your server, so locking down wh
 
 ## Restrict access
 
-By default, anyone who can message your bot can start agent runs. To restrict access to specific Telegram users, set `allowed_user_ids`:
+`allowed_user_ids` is **required** as of v0.35.3 ([#377](https://github.com/littlebearapps/untether/issues/377)). Set it to a non-empty list of Telegram user IDs:
 
 === "untether config"
 
@@ -19,7 +19,7 @@ By default, anyone who can message your bot can start agent runs. To restrict ac
     allowed_user_ids = [12345, 67890]
     ```
 
-When this list is non-empty, only the listed user IDs can interact with the bot. Messages from everyone else are silently ignored. In group chats, `allowed_user_ids` also governs button press validation — unauthorised users cannot tap Approve/Deny buttons on another user's tool requests. See [Group chat](group-chat.md#button-press-validation) for details.
+Only listed user IDs can interact with the bot. Messages from everyone else are silently ignored. In group chats, `allowed_user_ids` also governs button press validation — unauthorised users cannot tap Approve/Deny buttons on another user's tool requests. See [Group chat](group-chat.md#button-press-validation) for details.
 
 To find your Telegram user ID:
 
@@ -29,8 +29,11 @@ untether chat-id
 
 Send a message in the target chat and Untether prints the chat ID and sender ID.
 
-!!! warning "Empty list means open access"
-    If `allowed_user_ids` is empty (the default), anyone who discovers your bot's username can start runs. Always set this in production.
+!!! danger "Open-bot opt-out (dev/demo only)"
+    If you genuinely need an open bot for a hackathon, demo, or local-only dev, you can opt out with `allow_any_user = true` under `[transports.telegram]`. Untether logs this at INFO every boot (`security.allow_any_user`) so the deviation is visible in `journalctl`. Never enable this on a host reachable from production traffic — anyone who learns the bot username gains command access.
+
+!!! warning "Pre-v0.35.3 deployments"
+    Before v0.35.3 the empty default was a silent insecure default — bots ran with no allowlist filter and a single warning log line. Upgrading to v0.35.3 surfaces this as a hard `ConfigError` at startup. If your bot fails to start with `[transports.telegram] allowed_user_ids is empty`, populate the list (recommended) or set `allow_any_user = true` to keep the prior behaviour.
 
 ## Protect your bot token
 
@@ -51,13 +54,27 @@ export UNTETHER_CONFIG_PATH=/path/to/untether.toml
 ```
 
 !!! tip "Automatic log redaction"
-    Untether automatically redacts bot tokens, OpenAI API keys (`sk-...`), and GitHub tokens (`ghp_`, `ghs_`, `github_pat_`) from all structured log output. Even if a token appears in engine output or error messages, it is replaced with `[REDACTED]` before being written to logs.
+    Untether automatically redacts bot tokens, OpenAI API keys (`sk-...` and `sk-proj-...` since v0.35.3 — [#213](https://github.com/littlebearapps/untether/issues/213)), and GitHub tokens (`ghp_`, `ghs_`, `github_pat_`) from all structured log output. Even if a token appears in engine output or error messages, it is replaced with `[REDACTED]` before being written to logs. The Telegram voice transcription API key is wrapped in `SecretStr` so it never appears in `repr()`/tracebacks/structlog ([#378](https://github.com/littlebearapps/untether/issues/378)).
 
 ## Engine subprocess env allowlist
 
 Claude and Pi engine subprocesses do **not** inherit Untether's full environment. Only allowlisted variables (OS essentials, AI/cloud provider keys, Claude/MCP/Node/Python/UV/NPM namespaces, git/ssh auth) pass through — random third-party tokens that happen to live in your shell (`AWS_*`, `STRIPE_*`, `DATABASE_URL`, personal app tokens, etc.) are **not** available to the engine or its MCP servers. This reduces the blast radius of any tool call or MCP that exfiltrates process env.
 
-If a new engine or MCP genuinely needs a variable that isn't allowlisted (symptom: hangs at init, silent `KeyError` in logs), add it to `_EXACT_ALLOW` / `_PREFIX_ALLOW` in `src/untether/utils/env_policy.py`. Other engines (Codex, Gemini, OpenCode, AMP) still inherit the full parent env — extending the allowlist to them is tracked in [#332](https://github.com/littlebearapps/untether/issues/332).
+If a new engine or MCP genuinely needs a variable that isn't allowlisted (symptom: hangs at init, silent `KeyError` in logs), you have two options:
+
+1. **Recommended for most users (v0.35.3+)**: extend the allowlist via TOML config — no fork, no re-install:
+
+    ```toml title="~/.untether/untether.toml"
+    [security]
+    env_extra_allow = ["OP_SERVICE_ACCOUNT_TOKEN", "DOPPLER_TOKEN"]
+    env_extra_prefix_allow = ["VAULT_", "INFISICAL_"]
+    ```
+
+    Names must match `[A-Z_][A-Z0-9_]*`. Untether logs `env_policy.user_extension` once per process at first runner spawn so the addition is visible in `journalctl`. The runtime audit also honours these so user-allowed names aren't false-flagged as leaks. See [config: `[security]`](../reference/config.md#security) ([#409](https://github.com/littlebearapps/untether/issues/409)).
+
+2. **For names that benefit every Untether user**: add to `_EXACT_ALLOW` / `_PREFIX_ALLOW` in `src/untether/utils/env_policy.py` and submit a PR. `BWS_ACCESS_TOKEN` (Bitwarden Secrets Manager) was promoted into the built-in defaults in v0.35.3 by exactly this path.
+
+Other engines (Codex, Gemini, OpenCode, AMP) still inherit the full parent env — extending the allowlist to them is tracked in [#332](https://github.com/littlebearapps/untether/issues/332).
 
 ### Boundary enforcement on Claude exec ([#361](https://github.com/littlebearapps/untether/issues/361))
 

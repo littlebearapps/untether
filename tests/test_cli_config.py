@@ -12,7 +12,8 @@ def _write_min_config(path: Path) -> None:
         "\n"
         "[transports.telegram]\n"
         'bot_token = "token"\n'
-        "chat_id = 123\n",
+        "chat_id = 123\n"
+        "allow_any_user = true\n",
         encoding="utf-8",
     )
 
@@ -25,7 +26,8 @@ def test_config_list_outputs_flattened(tmp_path: Path) -> None:
         "\n"
         "[transports.telegram]\n"
         'bot_token = "token"\n'
-        "chat_id = 123\n",
+        "chat_id = 123\n"
+        "allow_any_user = true\n",
         encoding="utf-8",
     )
 
@@ -156,6 +158,7 @@ def test_config_unset_prunes_tables(tmp_path: Path) -> None:
         "[transports.telegram]\n"
         'bot_token = "token"\n'
         "chat_id = 123\n"
+        "allow_any_user = true\n"
         "\n"
         "[projects.foo]\n"
         'path = "/tmp/repo"\n',
@@ -181,6 +184,7 @@ def test_config_set_schema_validation_error(tmp_path: Path) -> None:
         "[transports.telegram]\n"
         'bot_token = "token"\n'
         "chat_id = 123\n"
+        "allow_any_user = true\n"
         "\n"
         "[projects.foo]\n"
         'path = "/tmp/repo"\n',

@@ -43,12 +43,12 @@ Notes:
 The runner invokes:
 
 ```text
-amp --dangerously-allow-all --mode <mode> --model <model> -x --stream-json <prompt>
+amp [--dangerously-allow-all] --mode <mode> --model <model> -x --stream-json <prompt>
 ```
 
 Flags:
 
-* `--dangerously-allow-all` — auto-approve all tool calls (default, configurable)
+* `--dangerously-allow-all` — auto-approve all of AMP's tool calls. **Default flipped to `false` in v0.35.3** ([#206](https://github.com/littlebearapps/untether/issues/206)); set `[amp] dangerously_allow_all = true` to enable.
 * `--mode <mode>` — optional (`deep|free|rush|smart`)
 * `--model <model>` — optional, from config or `/config` override
 * `-x` — execute mode (non-interactive)
@@ -60,7 +60,7 @@ Prompts starting with `-` are space-prefixed via `sanitize_prompt()` (base runne
 For resumed sessions:
 
 ```text
-amp threads continue <thread-id> --dangerously-allow-all -x --stream-json <prompt>
+amp threads continue <thread-id> [--dangerously-allow-all] -x --stream-json <prompt>
 ```
 
 ---
@@ -73,7 +73,7 @@ amp threads continue <thread-id> --dangerously-allow-all -x --stream-json <promp
     untether config set default_engine "amp"
     untether config set amp.model "claude-sonnet-4-6"
     untether config set amp.mode "smart"
-    untether config set amp.dangerously_allow_all true
+    untether config set amp.dangerously_allow_all false
     ```
 
 === "toml"
@@ -86,14 +86,14 @@ amp threads continue <thread-id> --dangerously-allow-all -x --stream-json <promp
     [amp]
     model = "claude-sonnet-4-6"       # optional; passed as --model
     mode = "smart"                     # optional; deep|free|rush|smart
-    dangerously_allow_all = true       # default: true
+    dangerously_allow_all = false      # default: false (changed in v0.35.3 #206)
     stream_json_input = false          # default: false; passes --stream-json-input
     ```
 
 Notes:
 
 * `mode` controls model selection, system prompt, and tool availability within AMP.
-* `dangerously_allow_all` defaults to `true` since Untether runs headless.
+* `dangerously_allow_all` defaults to `false` as of v0.35.3 ([#206](https://github.com/littlebearapps/untether/issues/206)) — opt in only if you specifically want AMP runs without its built-in permission system. Untether's own permission layer remains the primary control.
 * `stream_json_input` enables `--stream-json-input` for stdin streaming. This is preliminary plumbing — the interactive control flow (approve/deny via Telegram) is not yet wired.
 
 ---
@@ -107,7 +107,7 @@ Exposes `BACKEND = EngineBackend(id="amp", build_runner=build_runner, install_cm
 #### Runner invocation
 
 ```text
-amp [threads continue <thread-id>] --dangerously-allow-all [--mode <mode>] [--model <model>] -x --stream-json [--stream-json-input] <prompt>
+amp [threads continue <thread-id>] [--dangerously-allow-all] [--mode <mode>] [--model <model>] -x --stream-json [--stream-json-input] <prompt>
 ```
 
 #### Event translation

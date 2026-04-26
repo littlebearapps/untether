@@ -183,7 +183,8 @@ When enabled, Untether watches the config file for changes and reloads most sett
 **Hot-reloadable** (applied immediately):
 
 - Trigger system: `triggers.enabled`, crons, webhooks, auth, rate limits, timezones
-- Telegram bridge: `voice_transcription`, `[files]`, `allowed_user_ids`, `show_resume_line`, timing
+- Telegram bridge: `voice_transcription`, `[files]`, `allowed_user_ids`, `allow_any_user`, `show_resume_line`, timing
+- `[security]` keys: `env_extra_allow`, `env_extra_prefix_allow` (re-read on next runner spawn)
 - Engine defaults, budget, cost/usage display flags
 
 **Restart-only** (require `/restart` or `systemctl restart`):

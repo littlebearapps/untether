@@ -245,7 +245,8 @@ def test_telegram_backend_build_and_run_wires_config(
         'watch_config = true\ntransport = "telegram"\n\n'
         "[transports.telegram]\n"
         'bot_token = "token"\n'
-        "chat_id = 321\n",
+        "chat_id = 321\n"
+        "allow_any_user = true\n",
         encoding="utf-8",
     )
 

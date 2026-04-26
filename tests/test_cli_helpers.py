@@ -11,7 +11,9 @@ from untether.settings import UntetherSettings
 def _settings(overrides: dict | None = None) -> UntetherSettings:
     payload = {
         "transport": "telegram",
-        "transports": {"telegram": {"bot_token": "token", "chat_id": 123}},
+        "transports": {
+            "telegram": {"bot_token": "token", "chat_id": 123, "allow_any_user": True}
+        },
     }
     if overrides:
         payload.update(overrides)
@@ -107,6 +109,7 @@ def test_doctor_file_checks() -> None:
                 "telegram": {
                     "bot_token": "token",
                     "chat_id": 1,
+                    "allow_any_user": True,
                     "files": {"enabled": True},
                 }
             }
@@ -131,6 +134,7 @@ def test_doctor_voice_checks(monkeypatch) -> None:
                 "telegram": {
                     "bot_token": "token",
                     "chat_id": 1,
+                    "allow_any_user": True,
                     "voice_transcription": True,
                 }
             }
@@ -146,6 +150,7 @@ def test_doctor_voice_checks(monkeypatch) -> None:
                 "telegram": {
                     "bot_token": "token",
                     "chat_id": 1,
+                    "allow_any_user": True,
                     "voice_transcription": True,
                     "voice_transcription_api_key": "local",
                 }

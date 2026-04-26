@@ -13,7 +13,13 @@ def _settings() -> UntetherSettings:
     return UntetherSettings.model_validate(
         {
             "transport": "telegram",
-            "transports": {"telegram": {"bot_token": "token", "chat_id": 123}},
+            "transports": {
+                "telegram": {
+                    "bot_token": "token",
+                    "chat_id": 123,
+                    "allow_any_user": True,
+                }
+            },
         }
     )
 

@@ -9,7 +9,11 @@ from untether.settings import UntetherSettings
 
 
 def _base_config() -> dict:
-    return {"transports": {"telegram": {"bot_token": "token", "chat_id": 123}}}
+    return {
+        "transports": {
+            "telegram": {"bot_token": "token", "chat_id": 123, "allow_any_user": True}
+        }
+    }
 
 
 def test_parse_projects_skips_engine_alias() -> None:
@@ -38,7 +42,7 @@ def test_init_writes_project(monkeypatch, tmp_path) -> None:
     config_path = tmp_path / "untether.toml"
     config_path.write_text(
         'transport = "telegram"\n\n[transports.telegram]\n'
-        'bot_token = "token"\nchat_id = 123\n',
+        'bot_token = "token"\nchat_id = 123\nallow_any_user = true\n',
         encoding="utf-8",
     )
     monkeypatch.setattr("untether.config.HOME_CONFIG_PATH", config_path)
@@ -62,7 +66,10 @@ def test_init_writes_project(monkeypatch, tmp_path) -> None:
 
 def test_init_migrates_legacy_config(monkeypatch, tmp_path) -> None:
     config_path = tmp_path / "untether.toml"
-    config_path.write_text('bot_token = "token"\nchat_id = 123\n', encoding="utf-8")
+    config_path.write_text(
+        'bot_token = "token"\nchat_id = 123\nallow_any_user = true\n',
+        encoding="utf-8",
+    )
     monkeypatch.setattr("untether.config.HOME_CONFIG_PATH", config_path)
     monkeypatch.setattr(cli, "resolve_default_base", lambda _: "main")
     monkeypatch.setattr(cli, "_load_settings_optional", lambda: (None, None))
@@ -100,7 +107,9 @@ def test_projects_skips_unknown_engine() -> None:
 
 def test_projects_skips_chat_id_matching_transport() -> None:
     config = {
-        "transports": {"telegram": {"bot_token": "token", "chat_id": 123}},
+        "transports": {
+            "telegram": {"bot_token": "token", "chat_id": 123, "allow_any_user": True}
+        },
         "projects": {"z80": {"path": "/tmp/repo", "chat_id": 123}},
     }
     settings = UntetherSettings.model_validate(config)
@@ -114,7 +123,9 @@ def test_projects_skips_chat_id_matching_transport() -> None:
 
 def test_projects_skips_duplicate_chat_id() -> None:
     config = {
-        "transports": {"telegram": {"bot_token": "token", "chat_id": 123}},
+        "transports": {
+            "telegram": {"bot_token": "token", "chat_id": 123, "allow_any_user": True}
+        },
         "projects": {
             "a": {"path": "/tmp/a", "chat_id": -10},
             "b": {"path": "/tmp/b", "chat_id": -10},

@@ -17,7 +17,13 @@ def test_check_setup_marks_missing_codex(monkeypatch, tmp_path: Path) -> None:
             UntetherSettings.model_validate(
                 {
                     "transport": "telegram",
-                    "transports": {"telegram": {"bot_token": "token", "chat_id": 123}},
+                    "transports": {
+                        "telegram": {
+                            "bot_token": "token",
+                            "chat_id": 123,
+                            "allow_any_user": True,
+                        }
+                    },
                 }
             ),
             tmp_path / "untether.toml",
@@ -63,7 +69,13 @@ def test_check_setup_marks_invalid_bot_token(monkeypatch, tmp_path: Path) -> Non
             UntetherSettings.model_validate(
                 {
                     "transport": "telegram",
-                    "transports": {"telegram": {"bot_token": "token", "chat_id": 123}},
+                    "transports": {
+                        "telegram": {
+                            "bot_token": "token",
+                            "chat_id": 123,
+                            "allow_any_user": True,
+                        }
+                    },
                 }
             ),
             tmp_path / "untether.toml",

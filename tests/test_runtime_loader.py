@@ -15,7 +15,13 @@ def test_build_runtime_spec_minimal(
         {
             "transport": "telegram",
             "watch_config": True,
-            "transports": {"telegram": {"bot_token": "token", "chat_id": 123}},
+            "transports": {
+                "telegram": {
+                    "bot_token": "token",
+                    "chat_id": 123,
+                    "allow_any_user": True,
+                }
+            },
         }
     )
     config_path = tmp_path / "untether.toml"
@@ -40,7 +46,13 @@ def test_resolve_default_engine_unknown(tmp_path: Path) -> None:
     settings = UntetherSettings.model_validate(
         {
             "transport": "telegram",
-            "transports": {"telegram": {"bot_token": "token", "chat_id": 123}},
+            "transports": {
+                "telegram": {
+                    "bot_token": "token",
+                    "chat_id": 123,
+                    "allow_any_user": True,
+                }
+            },
         }
     )
     with pytest.raises(ConfigError, match="Unknown default engine"):
