@@ -1250,6 +1250,142 @@ def test_extract_error_with_result_text() -> None:
 
 
 # ===========================================================================
+# #438 — Stream idle timeout Type-A vs Type-B classification
+# ===========================================================================
+
+
+def test_extract_error_type_a_stream_idle_timeout() -> None:
+    """Mid-generation stall: num_turns >= 1 and duration_api_ms > 0.
+    Surface as Type A with hint to raise the timeout."""
+    from untether.runners.claude import _extract_error
+
+    event = claude_schema.StreamResultMessage(
+        subtype="error_during_execution",
+        duration_ms=635000,
+        duration_api_ms=261086,
+        is_error=True,
+        num_turns=19,
+        session_id="36693744aaaa0000",
+        result="API Error: Stream idle timeout - partial response received",
+    )
+    result = _extract_error(event, resumed=False)
+    assert result is not None
+    assert "Type A" in result
+    assert "Mid-generation" in result
+    assert "claude_stream_idle_timeout_ms" in result
+    # Type-B language must NOT appear.
+    assert "Type B" not in result
+    assert "no bytes" not in result.lower()
+
+
+def test_extract_error_type_b_stream_idle_timeout_zero_bytes() -> None:
+    """Cold-start zero-byte stall: num_turns <= 1 and duration_api_ms == 0.
+    Surface as Type B and tell the user raising the timeout will NOT help."""
+    from untether.runners.claude import _extract_error
+
+    event = claude_schema.StreamResultMessage(
+        subtype="error_during_execution",
+        duration_ms=350000,
+        duration_api_ms=0,
+        is_error=True,
+        num_turns=1,
+        session_id="24960feabbbb0000",
+        result="API Error: Stream idle timeout - partial response received",
+    )
+    result = _extract_error(event, resumed=True)
+    assert result is not None
+    assert "Type B" in result
+    assert "Cold-start" in result
+    assert "no bytes" in result
+    assert "will NOT help" in result
+    # Type-A language must NOT appear.
+    assert "Type A" not in result
+
+
+def test_extract_error_unrelated_failure_no_classification() -> None:
+    """Non-stall errors must not gain a Type-A/B annotation."""
+    from untether.runners.claude import _extract_error
+
+    event = claude_schema.StreamResultMessage(
+        subtype="error_during_execution",
+        duration_ms=5000,
+        duration_api_ms=3000,
+        is_error=True,
+        num_turns=2,
+        session_id="abcdef1234567890",
+        result="Tool execution failed with code 1",
+    )
+    result = _extract_error(event, resumed=False)
+    assert result is not None
+    assert "Type A" not in result
+    assert "Type B" not in result
+    assert "Tool execution failed" in result
+
+
+# ===========================================================================
+# #438 — claude_stream_idle_timeout_ms config knob
+# ===========================================================================
+
+
+def test_env_stream_idle_timeout_configured_value(monkeypatch, tmp_path) -> None:
+    """[watchdog] claude_stream_idle_timeout_ms in untether.toml is honoured."""
+    monkeypatch.delenv("CLAUDE_STREAM_IDLE_TIMEOUT_MS", raising=False)
+
+    from untether import runners as untether_runners
+    from untether.settings import (
+        TelegramTransportSettings,
+        UntetherSettings,
+        WatchdogSettings,
+    )
+
+    settings = UntetherSettings(
+        transport="telegram",
+        transports={
+            "telegram": TelegramTransportSettings(
+                bot_token="test:token",
+                chat_id=12345,
+                allow_any_user=True,
+            )
+        },
+        watchdog=WatchdogSettings(claude_stream_idle_timeout_ms=600_000),
+    )
+
+    monkeypatch.setattr(
+        untether_runners.claude,
+        "load_settings_if_exists",
+        lambda: (settings, tmp_path / "untether.toml"),
+    )
+
+    runner = ClaudeRunner(claude_cmd="claude")
+    env = runner.env(state=None)
+    assert env is not None
+    assert env["CLAUDE_STREAM_IDLE_TIMEOUT_MS"] == "600000"
+
+
+def test_env_stream_idle_timeout_settings_load_failure_falls_back(
+    monkeypatch,
+) -> None:
+    """If settings can't load, the hardcoded 300000 default still applies."""
+    monkeypatch.delenv("CLAUDE_STREAM_IDLE_TIMEOUT_MS", raising=False)
+
+    from untether import runners as untether_runners
+
+    def _boom():
+        raise RuntimeError("settings load failed")
+
+    monkeypatch.setattr(
+        untether_runners.claude,
+        "load_settings_if_exists",
+        _boom,
+    )
+
+    runner = ClaudeRunner(claude_cmd="claude")
+    env = runner.env(state=None)
+    assert env is not None
+    assert env["CLAUDE_STREAM_IDLE_TIMEOUT_MS"] == "300000"
+
+
+# ===========================================================================
 # #361 — runtime env audit hook on system.init
 # ===========================================================================
 
