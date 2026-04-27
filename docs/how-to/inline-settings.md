@@ -25,12 +25,12 @@ Cost & usage: cost on, sub off
 Resume line: on
 Engine: claude (global)
 Model: default
-Trigger: all
+Listen: all
 
 [📋 Plan mode]     [❓ Ask mode]
 [📝 Diff preview]  [🔍 Verbose]
 [💰 Cost & usage]  [↩️ Resume line]
-[📡 Trigger]       [⚙️ Engine & model]
+[📡 Listen]        [⚙️ Engine & model]
 [🧠 Reasoning]     [ℹ️ About]
 
 📖 Help guides · 🐛 Report a bug
@@ -98,7 +98,7 @@ When you switch engines via the Engine & model page, the home page automatically
 | Effort / Reasoning | Claude: low, medium, high, xhigh, max; Codex: minimal, low, medium, high, xhigh | Yes (chat prefs) |
 | Cost & usage | API cost, subscription usage, budget, auto-cancel | Yes (chat prefs) |
 | Resume line | off, on | Yes (chat prefs) |
-| Trigger | all, mentions | Yes (chat prefs) |
+| Listen | all, mentions | Yes (chat prefs) |
 | Budget enabled | off, on | Yes (chat prefs) |
 | Budget auto-cancel | off, on | Yes (chat prefs) |
 
@@ -131,4 +131,4 @@ All button interactions use early callback answering for instant feedback.
 - [Cost budgets](cost-budgets.md) — budget configuration and alerts
 - [Verbose progress](verbose-progress.md) — verbose mode details and global config
 - [Switch engines](switch-engines.md) — engine selection
-- [Group chat](group-chat.md) — trigger mode in groups
+- [Group chat](group-chat.md) — listen mode in groups

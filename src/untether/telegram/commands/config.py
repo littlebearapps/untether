@@ -187,7 +187,7 @@ async def _page_home(ctx: CommandContext) -> None:
     current_engine, engine_label = await _resolve_effective_engine(ctx)
 
     pm_label = "—"
-    trigger_label = "all"
+    listen_label = "all"
     model_label = "default"
     reasoning_label = "default"
     aq_label = "default"
@@ -220,8 +220,8 @@ async def _page_home(ctx: CommandContext) -> None:
             else:
                 pm_label = "read-only"
 
-        trig = await prefs.get_trigger_mode(chat_id)
-        trigger_label = trig or "all"
+        listen = await prefs.get_listen_mode(chat_id)
+        listen_label = listen or "all"
 
         # Model override for current engine
         if engine_override and engine_override.model:
@@ -350,7 +350,7 @@ async def _page_home(ctx: CommandContext) -> None:
         engine_hint = _ENGINE_MODEL_HINTS.get(current_engine, "from CLI settings")
         model_hint = f"  · {engine_hint}"
     lines.append(f"Model: <b>{model_label}</b>{model_hint}")
-    lines.append(f"Trigger: <b>{trigger_label}</b>{_home_hint('tr', trigger_label)}")
+    lines.append(f"Listen: <b>{listen_label}</b>{_home_hint('tr', listen_label)}")
     if show_reasoning:
         home_rs_label = get_reasoning_label(current_engine)
         if reasoning_label == "default":
@@ -396,7 +396,7 @@ async def _page_home(ctx: CommandContext) -> None:
         )
         buttons.append(
             [
-                {"text": "📡 Trigger", "callback_data": "config:tr"},
+                {"text": "📡 Listen", "callback_data": "config:tr"},
                 {"text": "⚙️ Engine & model", "callback_data": "config:ag"},
             ]
         )
@@ -420,7 +420,7 @@ async def _page_home(ctx: CommandContext) -> None:
         )
         buttons.append(
             [
-                {"text": "📡 Trigger", "callback_data": "config:tr"},
+                {"text": "📡 Listen", "callback_data": "config:tr"},
                 {"text": "⚙️ Engine & model", "callback_data": "config:ag"},
             ]
         )
@@ -446,7 +446,7 @@ async def _page_home(ctx: CommandContext) -> None:
         )
         buttons.append(
             [
-                {"text": "📡 Trigger", "callback_data": "config:tr"},
+                {"text": "📡 Listen", "callback_data": "config:tr"},
                 {"text": "⚙️ Engine & model", "callback_data": "config:ag"},
             ]
         )
@@ -464,7 +464,7 @@ async def _page_home(ctx: CommandContext) -> None:
                 {"text": "⚙️ Engine & model", "callback_data": "config:ag"},
             ]
         )
-        row3 = [{"text": "📡 Trigger", "callback_data": "config:tr"}]
+        row3 = [{"text": "📡 Listen", "callback_data": "config:tr"}]
         if show_reasoning:
             row3.append({"text": f"🧠 {home_rs_label}", "callback_data": "config:rs"})
         buttons.append(row3)
@@ -923,7 +923,8 @@ async def _page_engine(ctx: CommandContext, action: str | None = None) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Trigger mode
+# Listen mode (#297: renamed from "Trigger mode" to disambiguate from
+# webhook/cron triggers. Callback prefix `tr` kept for stable callback_data.)
 # ---------------------------------------------------------------------------
 
 
@@ -934,7 +935,7 @@ async def _page_trigger(ctx: CommandContext, action: str | None = None) -> None:
     if config_path is None:
         await _respond(
             ctx,
-            "<b>📡 Trigger mode</b>\n\nUnavailable (no config path).",
+            "<b>📡 Listen mode</b>\n\nUnavailable (no config path).",
             [[{"text": "← Back", "callback_data": "config:home"}]],
         )
         return
@@ -943,26 +944,26 @@ async def _page_trigger(ctx: CommandContext, action: str | None = None) -> None:
     chat_id = ctx.message.channel_id
 
     if action == "all":
-        await prefs.clear_trigger_mode(chat_id)
-        logger.info("config.trigger.set", chat_id=chat_id, mode="all")
+        await prefs.clear_listen_mode(chat_id)
+        logger.info("config.listen.set", chat_id=chat_id, mode="all")
         await _page_home(ctx)
         return
     elif action == "men":
-        await prefs.set_trigger_mode(chat_id, "mentions")
-        logger.info("config.trigger.set", chat_id=chat_id, mode="mentions")
+        await prefs.set_listen_mode(chat_id, "mentions")
+        logger.info("config.listen.set", chat_id=chat_id, mode="mentions")
         await _page_home(ctx)
         return
     elif action == "clr":
-        await prefs.clear_trigger_mode(chat_id)
-        logger.info("config.trigger.cleared", chat_id=chat_id)
+        await prefs.clear_listen_mode(chat_id)
+        logger.info("config.listen.cleared", chat_id=chat_id)
         await _page_home(ctx)
         return
 
-    current = await prefs.get_trigger_mode(chat_id)
+    current = await prefs.get_listen_mode(chat_id)
     current_label = current or "all"
 
     lines = [
-        "<b>📡 Trigger mode</b>",
+        "<b>📡 Listen mode</b>",
         "",
         "Control when the bot responds in group chats.",
         "",
@@ -1865,9 +1866,9 @@ class ConfigCommand:
             },
             "ag": {"clr": "Engine: cleared", "md_clr": "Model: cleared"},
             "tr": {
-                "all": "Trigger: all",
-                "men": "Trigger: mentions",
-                "clr": "Trigger: cleared",
+                "all": "Listen: all",
+                "men": "Listen: mentions",
+                "clr": "Listen: cleared",
             },
             "md": {"clr": "Model: cleared"},
             "rs": {

@@ -46,20 +46,23 @@ In group chats, approval buttons (Approve, Deny, Pause & Outline Plan) are valid
 
 This also applies to cancel buttons. (When `allow_any_user = true` is set as the dev/demo escape hatch, all group members can interact with any buttons since there's no allowlist to validate against.)
 
-## Set trigger mode for groups
+## Set listen mode for groups
 
 By default, the bot responds to every message (`all` mode). In busy groups, switch to `mentions` mode so the bot only responds when @mentioned:
 
 ```
-/trigger mentions
+/listen mentions
 ```
 
 | Command | Behaviour |
 |---------|-----------|
-| `/trigger` | Show the current trigger mode |
-| `/trigger all` | Respond to every message |
-| `/trigger mentions` | Only respond to @bot_name mentions |
-| `/trigger clear` | Reset to the default (`all`) |
+| `/listen` | Show the current listen mode |
+| `/listen all` | Respond to every message |
+| `/listen mentions` | Only respond to @bot_name mentions |
+| `/listen clear` | Reset to the default (`all`) |
+
+!!! note "Renamed from `/trigger` in v0.35.3"
+    The old `/trigger` command was renamed to `/listen` to disambiguate from the webhook/cron triggers system. `/trigger` continues to work as a deprecated alias for one release cycle and shows a one-line deprecation notice — it will be removed in a future version.
 
 !!! tip "What triggers a response in mentions mode"
     In `mentions` mode, the bot responds when any of these conditions are met:
@@ -71,7 +74,7 @@ By default, the bot responds to every message (`all` mode). In busy groups, swit
     All other messages are silently ignored.
 
 !!! note "Per-topic overrides"
-    In forum groups, you can set trigger mode per topic. A topic override takes priority over the chat-level default. For example, set `mentions` on general chat but leave coding topics on `all`. See [Topics](topics.md) for details.
+    In forum groups, you can set listen mode per topic. A topic override takes priority over the chat-level default. For example, set `mentions` on general chat but leave coding topics on `all`. See [Topics](topics.md) for details.
 
 ## Admin-only commands
 
@@ -80,7 +83,7 @@ In group chats, certain commands require admin or creator status:
 - `/model` — change the model
 - `/reasoning` — change reasoning level
 - `/agent` — change the default engine
-- `/trigger` — change trigger mode
+- `/listen` — change listen mode (also accepts the deprecated `/trigger`)
 
 In private chats, these commands are always available without restriction.
 

@@ -41,12 +41,12 @@ from .commands.handlers import (
     handle_ctx_command,
     handle_file_command,
     handle_file_put_default,
+    handle_listen_command,
     handle_media_group,
     handle_model_command,
     handle_new_command,
     handle_reasoning_command,
     handle_topic_command,
-    handle_trigger_command,
     parse_callback_data,
     parse_slash_command,
     run_engine,
@@ -59,6 +59,7 @@ from .commands.reply import make_reply
 from .context import _merge_topic_context, _usage_ctx_set, _usage_topic
 from .engine_defaults import resolve_engine_for_message
 from .engine_overrides import merge_overrides
+from .listen_mode import resolve_listen_mode, should_trigger_run
 from .topic_state import TopicStateStore, resolve_state_path
 from .topics import (
     _maybe_rename_topic,
@@ -68,7 +69,6 @@ from .topics import (
     _topics_chat_project,
     _validate_topics_setup,
 )
-from .trigger_mode import resolve_trigger_mode, should_trigger_run
 from .types import (
     TelegramCallbackQuery,
     TelegramIncomingMessage,
@@ -400,9 +400,11 @@ def _dispatch_builtin_command(
         task_group.start_soon(handler)
         return True
 
-    if command_id == "trigger":
+    if command_id in {"listen", "trigger"}:
+        # #297: /trigger is a deprecated alias for /listen. The handler
+        # prepends a deprecation notice when invoked_as="trigger".
         handler = partial(
-            handle_trigger_command,
+            handle_listen_command,
             cfg,
             msg,
             args_text,
@@ -411,6 +413,7 @@ def _dispatch_builtin_command(
             chat_prefs,
             resolved_scope=resolved_scope,
             scope_chat_ids=scope_chat_ids,
+            invoked_as=command_id,
         )
         task_group.start_soon(handler)
         return True
@@ -1003,14 +1006,14 @@ class MediaGroupBuffer:
             del self._groups[key]
             if not messages:
                 return
-            trigger_mode = await resolve_trigger_mode(
+            listen_mode = await resolve_listen_mode(
                 chat_id=messages[0].chat_id,
                 thread_id=messages[0].thread_id,
                 chat_prefs=self._chat_prefs,
                 topic_store=self._topic_store,
             )
             command_ids = self._command_ids()
-            if trigger_mode == "mentions" and not any(
+            if listen_mode == "mentions" and not any(
                 should_trigger_run(
                     msg,
                     bot_username=self._bot_username,
@@ -1346,7 +1349,7 @@ async def run_main_loop(
             me = await cfg.bot.get_me()
         except Exception as exc:  # noqa: BLE001
             logger.info(
-                "trigger_mode.bot_username.failed",
+                "listen_mode.bot_username.failed",
                 error=str(exc),
                 error_type=exc.__class__.__name__,
             )
@@ -1354,7 +1357,7 @@ async def run_main_loop(
         if me is not None and me.username:
             state.bot_username = me.username.lower()
         else:
-            logger.info("trigger_mode.bot_username.unavailable")
+            logger.info("listen_mode.bot_username.unavailable")
         # Install graceful shutdown signal handlers
 
         def _shutdown_handler(signum: int, frame: object) -> None:
@@ -2181,13 +2184,13 @@ async def run_main_loop(
                 ):
                     return
 
-                trigger_mode = await resolve_trigger_mode(
+                listen_mode = await resolve_listen_mode(
                     chat_id=chat_id,
                     thread_id=msg.thread_id,
                     chat_prefs=state.chat_prefs,
                     topic_store=state.topic_store,
                 )
-                if trigger_mode == "mentions" and not should_trigger_run(
+                if listen_mode == "mentions" and not should_trigger_run(
                     msg,
                     bot_username=state.bot_username,
                     runtime=cfg.runtime,

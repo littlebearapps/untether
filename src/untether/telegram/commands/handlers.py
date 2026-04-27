@@ -9,6 +9,7 @@ from .executor import _should_show_resume_line as should_show_resume_line
 from .file_transfer import _handle_file_command as handle_file_command
 from .file_transfer import _handle_file_put_default as handle_file_put_default
 from .file_transfer import _save_file_put as save_file_put
+from .listen import _handle_listen_command as handle_listen_command
 from .media import _handle_media_group as handle_media_group
 from .menu import _reserved_commands as get_reserved_commands
 from .menu import _set_command_menu as set_command_menu
@@ -20,7 +21,10 @@ from .topics import _handle_chat_new_command as handle_chat_new_command
 from .topics import _handle_ctx_command as handle_ctx_command
 from .topics import _handle_new_command as handle_new_command
 from .topics import _handle_topic_command as handle_topic_command
-from .trigger import _handle_trigger_command as handle_trigger_command
+
+# #297: legacy alias preserved for one release cycle. Routes /trigger to the
+# listen handler with a deprecation prefix.
+handle_trigger_command = handle_listen_command
 
 __all__ = [
     "dispatch_callback",
@@ -32,6 +36,7 @@ __all__ = [
     "handle_ctx_command",
     "handle_file_command",
     "handle_file_put_default",
+    "handle_listen_command",
     "handle_media_group",
     "handle_model_command",
     "handle_new_command",

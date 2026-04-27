@@ -65,7 +65,7 @@ def _normalize_text(value: str | None) -> str | None:
     return value or None
 
 
-def _normalize_trigger_mode(value: str | None) -> str | None:
+def _normalize_listen_mode(value: str | None) -> str | None:
     if value is None:
         return None
     value = value.strip().lower()
@@ -74,6 +74,10 @@ def _normalize_trigger_mode(value: str | None) -> str | None:
     if value == "all":
         return None
     return None
+
+
+# #297: legacy alias kept so external imports don't break in this release.
+_normalize_trigger_mode = _normalize_listen_mode
 
 
 def _normalize_engine_id(value: str | None) -> str | None:
@@ -188,13 +192,17 @@ class TopicStateStore(JsonStateStore[_TopicState]):
                 return None
             return _normalize_text(thread.default_engine)
 
-    async def get_trigger_mode(self, chat_id: int, thread_id: int) -> str | None:
+    async def get_listen_mode(self, chat_id: int, thread_id: int) -> str | None:
         async with self._lock:
             self._reload_locked_if_needed()
             thread = self._get_thread_locked(chat_id, thread_id)
             if thread is None:
                 return None
-            return _normalize_trigger_mode(thread.trigger_mode)
+            return _normalize_listen_mode(thread.trigger_mode)
+
+    # #297: legacy alias preserved for one release cycle.
+    async def get_trigger_mode(self, chat_id: int, thread_id: int) -> str | None:
+        return await self.get_listen_mode(chat_id, thread_id)
 
     async def get_engine_override(
         self, chat_id: int, thread_id: int, engine: str
@@ -223,18 +231,27 @@ class TopicStateStore(JsonStateStore[_TopicState]):
     async def clear_default_engine(self, chat_id: int, thread_id: int) -> None:
         await self.set_default_engine(chat_id, thread_id, None)
 
-    async def set_trigger_mode(
+    async def set_listen_mode(
         self, chat_id: int, thread_id: int, mode: str | None
     ) -> None:
-        normalized = _normalize_trigger_mode(mode)
+        normalized = _normalize_listen_mode(mode)
         async with self._lock:
             self._reload_locked_if_needed()
             thread = self._ensure_thread_locked(chat_id, thread_id)
             thread.trigger_mode = normalized
             self._save_locked()
 
+    async def clear_listen_mode(self, chat_id: int, thread_id: int) -> None:
+        await self.set_listen_mode(chat_id, thread_id, None)
+
+    # #297: legacy aliases preserved for one release cycle.
+    async def set_trigger_mode(
+        self, chat_id: int, thread_id: int, mode: str | None
+    ) -> None:
+        await self.set_listen_mode(chat_id, thread_id, mode)
+
     async def clear_trigger_mode(self, chat_id: int, thread_id: int) -> None:
-        await self.set_trigger_mode(chat_id, thread_id, None)
+        await self.clear_listen_mode(chat_id, thread_id)
 
     async def set_engine_override(
         self,

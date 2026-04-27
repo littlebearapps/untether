@@ -8,7 +8,9 @@ from untether.settings import TelegramTopicsSettings
 from untether.telegram.api_models import ChatMember
 from untether.telegram.chat_prefs import ChatPrefsStore
 from untether.telegram.commands.agent import _handle_agent_command
-from untether.telegram.commands.trigger import _handle_trigger_command
+from untether.telegram.commands.listen import (
+    _handle_listen_command as _handle_trigger_command,
+)
 from untether.telegram.topic_state import TopicStateStore
 from untether.telegram.types import TelegramIncomingMessage
 
@@ -178,7 +180,7 @@ async def test_trigger_show_sources(
     )
 
     text = _last_text(transport)
-    assert f"trigger: {expected_trigger} ({expected_source})" in text
+    assert f"listen: {expected_trigger} ({expected_source})" in text
     assert "available: all, mentions" in text
 
 
@@ -211,7 +213,7 @@ async def test_trigger_set_clear_permissions(tmp_path: Path) -> None:
         chat_prefs=prefs,
     )
     assert await prefs.get_trigger_mode(msg.chat_id) == "mentions"
-    assert "chat trigger mode set" in _last_text(transport)
+    assert "chat listen mode set" in _last_text(transport)
 
     await _handle_trigger_command(
         allow_cfg,
@@ -222,7 +224,7 @@ async def test_trigger_set_clear_permissions(tmp_path: Path) -> None:
         chat_prefs=prefs,
     )
     assert await prefs.get_trigger_mode(msg.chat_id) is None
-    assert "chat trigger mode reset" in _last_text(transport)
+    assert "chat listen mode reset" in _last_text(transport)
 
 
 @pytest.mark.anyio
@@ -263,7 +265,7 @@ async def test_trigger_topic_unavailable() -> None:
         chat_prefs=None,
     )
 
-    assert "topic trigger settings are unavailable" in _last_text(transport)
+    assert "topic listen settings are unavailable" in _last_text(transport)
 
 
 @pytest.mark.anyio
@@ -281,4 +283,51 @@ async def test_trigger_chat_prefs_unavailable() -> None:
         chat_prefs=None,
     )
 
-    assert "chat trigger settings are unavailable" in _last_text(transport)
+    assert "chat listen settings are unavailable" in _last_text(transport)
+
+
+@pytest.mark.anyio
+async def test_listen_invoked_as_listen_no_deprecation_notice() -> None:
+    """#297: /listen invocation should NOT show the /trigger deprecation prefix."""
+    transport = FakeTransport()
+    cfg = make_cfg(transport)
+    msg = _msg("/listen", chat_type="private")
+
+    await _handle_trigger_command(
+        cfg,
+        msg,
+        args_text="",
+        _ambient_context=None,
+        topic_store=None,
+        chat_prefs=None,
+        invoked_as="listen",
+    )
+
+    text = _last_text(transport)
+    assert "/trigger" not in text
+    assert "deprecated" not in text.lower()
+    assert "listen:" in text
+
+
+@pytest.mark.anyio
+async def test_legacy_trigger_invocation_shows_deprecation_notice() -> None:
+    """#297: /trigger invocation should show a deprecation prefix."""
+    transport = FakeTransport()
+    cfg = make_cfg(transport)
+    msg = _msg("/trigger", chat_type="private")
+
+    await _handle_trigger_command(
+        cfg,
+        msg,
+        args_text="",
+        _ambient_context=None,
+        topic_store=None,
+        chat_prefs=None,
+        invoked_as="trigger",
+    )
+
+    text = _last_text(transport)
+    # Markdown backticks may be stripped during rendering — check the
+    # human-readable substring without them.
+    assert "/trigger is now /listen" in text
+    assert "listen:" in text

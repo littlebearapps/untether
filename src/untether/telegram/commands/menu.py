@@ -77,7 +77,9 @@ def build_bot_commands(
         ("agent", "set default engine"),
         ("model", "set model override"),
         ("reasoning", "set reasoning override"),
-        ("trigger", "set trigger mode"),
+        # #297: renamed from "trigger" → "listen". /trigger still works as
+        # a deprecated alias but does not appear in the command menu.
+        ("listen", "set listen mode (all/mentions)"),
     ]:
         if cmd in seen:
             continue
