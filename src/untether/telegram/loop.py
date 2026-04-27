@@ -1308,8 +1308,10 @@ async def run_main_loop(
                 state_path=str(resolve_prefs_path(config_path)),
             )
             from ..session_stats import init_stats
+            from ..triggers.history import init_history
 
             init_stats(config_path)
+            init_history(config_path)
         if cfg.session_mode == "chat":
             if config_path is None:
                 raise ConfigError(

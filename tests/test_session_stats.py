@@ -161,3 +161,100 @@ def test_store_aggregate_all_period(tmp_path) -> None:
     assert len(stats) == 1
     assert stats[0].run_count == 3
     assert stats[0].action_count == 15
+
+
+# ── #271 Tier 3: triggered/manual breakdown ────────────────────────────────
+
+
+def test_day_bucket_record_manual_default() -> None:
+    bucket = DayBucket()
+    bucket.record(actions=1, duration_ms=100)
+    assert bucket.manual_count == 1
+    assert bucket.triggered_count == 0
+
+
+def test_day_bucket_record_triggered() -> None:
+    bucket = DayBucket()
+    bucket.record(actions=1, duration_ms=100, triggered=True)
+    assert bucket.triggered_count == 1
+    assert bucket.manual_count == 0
+
+
+def test_day_bucket_mixed_records_split() -> None:
+    bucket = DayBucket()
+    bucket.record(actions=1, duration_ms=100, triggered=True)
+    bucket.record(actions=1, duration_ms=100)
+    bucket.record(actions=1, duration_ms=100, triggered=True)
+    assert bucket.run_count == 3
+    assert bucket.triggered_count == 2
+    assert bucket.manual_count == 1
+
+
+def test_day_bucket_roundtrip_includes_breakdown() -> None:
+    bucket = DayBucket(
+        run_count=3,
+        action_count=10,
+        duration_ms=5000,
+        last_run_ts=1000.0,
+        triggered_count=2,
+        manual_count=1,
+    )
+    restored = DayBucket.from_dict(bucket.to_dict())
+    assert restored.triggered_count == 2
+    assert restored.manual_count == 1
+
+
+def test_day_bucket_from_dict_old_format_defaults_zero() -> None:
+    """Old stats.json files (pre-#271) lack triggered_count/manual_count."""
+    legacy = {
+        "run_count": 5,
+        "action_count": 25,
+        "duration_ms": 10000,
+        "last_run_ts": 1000.0,
+    }
+    restored = DayBucket.from_dict(legacy)
+    assert restored.run_count == 5
+    assert restored.triggered_count == 0
+    assert restored.manual_count == 0
+
+
+def test_store_record_run_triggered_kwarg(tmp_path) -> None:
+    store = SessionStatsStore(tmp_path / "stats.json")
+    store.record_run("claude", actions=1, duration_ms=100, triggered=True)
+    store.record_run("claude", actions=1, duration_ms=100)
+    stats = store.aggregate(period="today")
+    assert len(stats) == 1
+    assert stats[0].triggered_count == 1
+    assert stats[0].manual_count == 1
+
+
+def test_store_aggregate_sums_triggered_and_manual(tmp_path) -> None:
+    store = SessionStatsStore(tmp_path / "stats.json")
+    # Inject two days for the same engine.
+    store._data = {
+        "version": 1,
+        "engines": {
+            "claude": {
+                "2026-03-01": DayBucket(
+                    run_count=2,
+                    action_count=4,
+                    duration_ms=2000,
+                    last_run_ts=1000.0,
+                    triggered_count=1,
+                    manual_count=1,
+                ).to_dict(),
+                "2026-03-04": DayBucket(
+                    run_count=3,
+                    action_count=6,
+                    duration_ms=3000,
+                    last_run_ts=2000.0,
+                    triggered_count=2,
+                    manual_count=1,
+                ).to_dict(),
+            }
+        },
+    }
+    stats = store.aggregate(period="all")
+    assert len(stats) == 1
+    assert stats[0].triggered_count == 3
+    assert stats[0].manual_count == 2

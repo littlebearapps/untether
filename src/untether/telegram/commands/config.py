@@ -1842,18 +1842,54 @@ async def _page_about(ctx: CommandContext, action: str | None = None) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Triggers (cron + webhook) master pause toggle (#294)
+# Triggers (cron + webhook) master pause toggle (#294) + per-chat detail (#271)
 # ---------------------------------------------------------------------------
 
 
+_TRIGGER_LIST_CAP = 10
+
+
+def _format_trigger_relative(ts: float | None) -> str:
+    """Render a unix timestamp as a relative-time hint for the triggers page.
+
+    Mirrors ``stats._format_last_run`` semantics so /config and /stats agree
+    on phrasing.
+    """
+    import time
+
+    if ts is None or ts <= 0:
+        return "never"
+    diff = time.time() - ts
+    if diff < 60:
+        return "just now"
+    if diff < 3600:
+        return f"{int(diff // 60)}m ago"
+    if diff < 86400:
+        return f"{int(diff // 3600)}h ago"
+    return f"{int(diff // 86400)}d ago"
+
+
+def _truncate_field(value: str | None, limit: int = 24) -> str:
+    if not value:
+        return "—"
+    if len(value) <= limit:
+        return value
+    return value[: limit - 1] + "…"
+
+
 async def _page_triggers(ctx: CommandContext, action: str | None = None) -> None:
-    """Master pause/resume page for the trigger system (#294).
+    """Triggers control + per-chat visibility page.
 
     Lives on its own ``/config`` page distinct from ``/config → 📡 Trigger``
-    (which is the listen-mode all/mentions chat-routing setting). When no
-    triggers are configured, the page reports the absence and disables the
-    toggle.
+    (which is the listen-mode all/mentions chat-routing setting). Pause/resume
+    is the master kill-switch (#294). Below the controls, when triggers are
+    configured for the current chat, the page lists each cron and webhook
+    with its schedule/path, project, engine, and last-fired timestamp (#271
+    Tier 2 + Tier 3).
     """
+    from ...triggers.describe import describe_cron
+    from ...triggers.history import get_last_fired
+
     mgr = ctx.trigger_manager
     chat_id = ctx.message.channel_id
     chat_id_int = chat_id if isinstance(chat_id, int) else None
@@ -1913,6 +1949,54 @@ async def _page_triggers(ctx: CommandContext, action: str | None = None) -> None
                 f"<code>{cron_count}</code> cron · "
                 f"<code>{webhook_count}</code> webhook",
             ]
+
+        # #271 Tier 2: per-chat trigger list. Only render when we can scope
+        # to the current chat — without chat_id we'd risk showing another
+        # group's triggers in a private chat.
+        if chat_id_int is not None:
+            default_tz = mgr.default_timezone
+            chat_crons = mgr.crons_for_chat(
+                chat_id_int, default_chat_id=ctx.default_chat_id
+            )
+            chat_webhooks = mgr.webhooks_for_chat(
+                chat_id_int, default_chat_id=ctx.default_chat_id
+            )
+
+            if chat_crons:
+                lines += ["", "<b>Crons</b>"]
+                for cron in chat_crons[:_TRIGGER_LIST_CAP]:
+                    schedule_text = describe_cron(
+                        cron.schedule, cron.timezone or default_tz
+                    )
+                    last = _format_trigger_relative(get_last_fired(cron.id))
+                    lines.append(
+                        f"<code>{cron.id}</code> · {schedule_text} · "
+                        f"proj=<i>{_truncate_field(cron.project)}</i> · "
+                        f"eng=<i>{_truncate_field(cron.engine)}</i> · "
+                        f"last <i>{last}</i>"
+                    )
+                overflow = len(chat_crons) - _TRIGGER_LIST_CAP
+                if overflow > 0:
+                    lines.append(
+                        f"…and {overflow} more (see <code>untether.toml</code>)"
+                    )
+
+            if chat_webhooks:
+                lines += ["", "<b>Webhooks</b>"]
+                for wh in chat_webhooks[:_TRIGGER_LIST_CAP]:
+                    last = _format_trigger_relative(get_last_fired(wh.id))
+                    lines.append(
+                        f"<code>{wh.id}</code> · <code>{wh.path}</code> · "
+                        f"auth=<i>{wh.auth}</i> · "
+                        f"proj=<i>{_truncate_field(wh.project)}</i> · "
+                        f"eng=<i>{_truncate_field(wh.engine)}</i> · "
+                        f"last <i>{last}</i>"
+                    )
+                overflow = len(chat_webhooks) - _TRIGGER_LIST_CAP
+                if overflow > 0:
+                    lines.append(
+                        f"…and {overflow} more (see <code>untether.toml</code>)"
+                    )
 
     buttons: list[list[dict[str, str]]] = []
     if has_any:

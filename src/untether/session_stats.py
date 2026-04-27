@@ -22,12 +22,21 @@ class DayBucket:
     action_count: int = 0
     duration_ms: int = 0
     last_run_ts: float = 0.0
+    # #271 Tier 3: split runs by provenance for the /stats breakdown.
+    triggered_count: int = 0
+    manual_count: int = 0
 
-    def record(self, actions: int, duration_ms: int) -> None:
+    def record(
+        self, actions: int, duration_ms: int, *, triggered: bool = False
+    ) -> None:
         self.run_count += 1
         self.action_count += actions
         self.duration_ms += duration_ms
         self.last_run_ts = time.time()
+        if triggered:
+            self.triggered_count += 1
+        else:
+            self.manual_count += 1
 
     def to_dict(self) -> dict:
         return {
@@ -35,6 +44,8 @@ class DayBucket:
             "action_count": self.action_count,
             "duration_ms": self.duration_ms,
             "last_run_ts": self.last_run_ts,
+            "triggered_count": self.triggered_count,
+            "manual_count": self.manual_count,
         }
 
     @classmethod
@@ -44,6 +55,8 @@ class DayBucket:
             action_count=data.get("action_count", 0),
             duration_ms=data.get("duration_ms", 0),
             last_run_ts=data.get("last_run_ts", 0.0),
+            triggered_count=data.get("triggered_count", 0),
+            manual_count=data.get("manual_count", 0),
         )
 
 
@@ -54,6 +67,8 @@ class AggregatedStats:
     action_count: int = 0
     duration_ms: int = 0
     last_run_ts: float = 0.0
+    triggered_count: int = 0
+    manual_count: int = 0
 
 
 @dataclass
@@ -86,12 +101,19 @@ class SessionStatsStore:
     def _save(self) -> None:
         atomic_write_json(self.path, self._data)
 
-    def record_run(self, engine: str, actions: int, duration_ms: int) -> None:
+    def record_run(
+        self,
+        engine: str,
+        actions: int,
+        duration_ms: int,
+        *,
+        triggered: bool = False,
+    ) -> None:
         today = time.strftime("%Y-%m-%d")
         engines = self._data.setdefault("engines", {})
         engine_days = engines.setdefault(engine, {})
         bucket = DayBucket.from_dict(engine_days.get(today, {}))
-        bucket.record(actions, duration_ms)
+        bucket.record(actions, duration_ms, triggered=triggered)
         engine_days[today] = bucket.to_dict()
         self._save()
 
@@ -116,6 +138,8 @@ class SessionStatsStore:
             total_actions = 0
             total_duration = 0
             last_ts = 0.0
+            total_triggered = 0
+            total_manual = 0
 
             for date_str, bucket_data in days.items():
                 if period == "today" and date_str != today:
@@ -139,6 +163,8 @@ class SessionStatsStore:
                 total_actions += bucket.action_count
                 total_duration += bucket.duration_ms
                 last_ts = max(last_ts, bucket.last_run_ts)
+                total_triggered += bucket.triggered_count
+                total_manual += bucket.manual_count
 
             if total_runs > 0:
                 results.append(
@@ -148,6 +174,8 @@ class SessionStatsStore:
                         action_count=total_actions,
                         duration_ms=total_duration,
                         last_run_ts=last_ts,
+                        triggered_count=total_triggered,
+                        manual_count=total_manual,
                     )
                 )
 
@@ -182,10 +210,16 @@ def init_stats(config_path: Path) -> None:
     _store = SessionStatsStore(stats_path)
 
 
-def record_run(engine: str, actions: int, duration_ms: int) -> None:
+def record_run(
+    engine: str,
+    actions: int,
+    duration_ms: int,
+    *,
+    triggered: bool = False,
+) -> None:
     """Record a completed run. No-op if store not initialised."""
     if _store is not None:
-        _store.record_run(engine, actions, duration_ms)
+        _store.record_run(engine, actions, duration_ms, triggered=triggered)
 
 
 def get_stats(

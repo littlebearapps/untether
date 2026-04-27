@@ -48,6 +48,9 @@ def _make_ctx(
     # to None so the home page skips the triggers indicator and the new
     # `_page_triggers` shows the unavailable branch when invoked.
     ctx.trigger_manager = None
+    # #271: triggers page reads `ctx.default_chat_id`; default to None so
+    # crons_for_chat / webhooks_for_chat fall back consistently.
+    ctx.default_chat_id = None
     return ctx
 
 
@@ -3097,3 +3100,228 @@ class TestTriggersPage:
     def test_toast_pause_resume(self):
         assert ConfigCommand.early_answer_toast("tg:pause") == "⏸ Triggers paused"
         assert ConfigCommand.early_answer_toast("tg:resume") == "▶️ Triggers resumed"
+
+
+# ── #271 Tier 2 + Tier 3: per-chat trigger list + last-fired ──────────────
+
+
+class TestTriggersPagePerChat:
+    @pytest.fixture(autouse=True)
+    def _reset_history(self):
+        from untether.triggers import history
+
+        history.reset_history()
+        yield
+        history.reset_history()
+
+    @pytest.mark.anyio
+    async def test_lists_crons_for_current_chat(self, tmp_path):
+        from untether.triggers.manager import TriggerManager
+        from untether.triggers.settings import parse_trigger_config
+
+        cfg = parse_trigger_config(
+            {
+                "enabled": True,
+                "crons": [
+                    {
+                        "id": "morning",
+                        "schedule": "0 9 * * *",
+                        "prompt": "good morning",
+                        "chat_id": 123,
+                        "project": "lba-1",
+                        "engine": "claude",
+                    },
+                ],
+            }
+        )
+        cmd = ConfigCommand()
+        ctx = _make_ctx(args_text="tg", text="config:tg", chat_id=123)
+        ctx.trigger_manager = TriggerManager(cfg)
+        await cmd.handle(ctx)
+        text = _last_edit_msg(ctx).text
+        assert "<b>Crons</b>" in text
+        assert "morning" in text
+        # describe_cron output for "0 9 * * *"
+        assert "9:00" in text
+        assert "lba-1" in text
+        assert "claude" in text
+        assert "last <i>never</i>" in text
+
+    @pytest.mark.anyio
+    async def test_lists_webhooks_for_current_chat(self, tmp_path):
+        from untether.triggers.manager import TriggerManager
+        from untether.triggers.settings import parse_trigger_config
+
+        cfg = parse_trigger_config(
+            {
+                "enabled": True,
+                "webhooks": [
+                    {
+                        "id": "gh-push",
+                        "path": "/webhooks/github",
+                        "auth": "hmac-sha256",
+                        "secret": "s" * 32,
+                        "prompt_template": "push from ${repository}",
+                        "chat_id": 123,
+                        "project": "untether",
+                    },
+                ],
+            }
+        )
+        cmd = ConfigCommand()
+        ctx = _make_ctx(args_text="tg", text="config:tg", chat_id=123)
+        ctx.trigger_manager = TriggerManager(cfg)
+        await cmd.handle(ctx)
+        text = _last_edit_msg(ctx).text
+        assert "<b>Webhooks</b>" in text
+        assert "gh-push" in text
+        assert "/webhooks/github" in text
+        assert "auth=<i>hmac-sha256</i>" in text
+        assert "untether" in text
+
+    @pytest.mark.anyio
+    async def test_filters_to_current_chat(self, tmp_path):
+        from untether.triggers.manager import TriggerManager
+        from untether.triggers.settings import parse_trigger_config
+
+        cfg = parse_trigger_config(
+            {
+                "enabled": True,
+                "crons": [
+                    {
+                        "id": "mine",
+                        "schedule": "0 9 * * *",
+                        "prompt": "x",
+                        "chat_id": 123,
+                    },
+                    {
+                        "id": "other-chat",
+                        "schedule": "0 9 * * *",
+                        "prompt": "x",
+                        "chat_id": 999,
+                    },
+                ],
+            }
+        )
+        cmd = ConfigCommand()
+        ctx = _make_ctx(args_text="tg", text="config:tg", chat_id=123)
+        ctx.trigger_manager = TriggerManager(cfg)
+        await cmd.handle(ctx)
+        text = _last_edit_msg(ctx).text
+        assert "mine" in text
+        assert "other-chat" not in text
+
+    @pytest.mark.anyio
+    async def test_default_chat_id_fallback(self, tmp_path):
+        from untether.triggers.manager import TriggerManager
+        from untether.triggers.settings import parse_trigger_config
+
+        # Cron has no chat_id; should resolve via default_chat_id.
+        cfg = parse_trigger_config(
+            {
+                "enabled": True,
+                "crons": [
+                    {
+                        "id": "global",
+                        "schedule": "0 9 * * *",
+                        "prompt": "x",
+                    },
+                ],
+            }
+        )
+        cmd = ConfigCommand()
+        ctx = _make_ctx(args_text="tg", text="config:tg", chat_id=123)
+        ctx.trigger_manager = TriggerManager(cfg)
+        ctx.default_chat_id = 123
+        await cmd.handle(ctx)
+        text = _last_edit_msg(ctx).text
+        assert "global" in text
+
+    @pytest.mark.anyio
+    async def test_omits_subsection_when_no_chat_triggers(self, tmp_path):
+        from untether.triggers.manager import TriggerManager
+        from untether.triggers.settings import parse_trigger_config
+
+        # All triggers belong to a different chat.
+        cfg = parse_trigger_config(
+            {
+                "enabled": True,
+                "crons": [
+                    {
+                        "id": "elsewhere",
+                        "schedule": "0 9 * * *",
+                        "prompt": "x",
+                        "chat_id": 999,
+                    },
+                ],
+            }
+        )
+        cmd = ConfigCommand()
+        ctx = _make_ctx(args_text="tg", text="config:tg", chat_id=123)
+        ctx.trigger_manager = TriggerManager(cfg)
+        await cmd.handle(ctx)
+        text = _last_edit_msg(ctx).text
+        # Status line still shows total count, but the per-chat lists are absent.
+        assert "1" in text  # cron count in status
+        assert "<b>Crons</b>" not in text
+        assert "<b>Webhooks</b>" not in text
+
+    @pytest.mark.anyio
+    async def test_renders_last_fired_when_history_present(self, tmp_path):
+        from untether.triggers import history
+        from untether.triggers.manager import TriggerManager
+        from untether.triggers.settings import parse_trigger_config
+
+        history.init_history(tmp_path / "untether.toml")
+        history.record_fired("morning")
+
+        cfg = parse_trigger_config(
+            {
+                "enabled": True,
+                "crons": [
+                    {
+                        "id": "morning",
+                        "schedule": "0 9 * * *",
+                        "prompt": "x",
+                        "chat_id": 123,
+                    },
+                ],
+            }
+        )
+        cmd = ConfigCommand()
+        ctx = _make_ctx(args_text="tg", text="config:tg", chat_id=123)
+        ctx.trigger_manager = TriggerManager(cfg)
+        await cmd.handle(ctx)
+        text = _last_edit_msg(ctx).text
+        # Should show "just now" since we just recorded.
+        assert "last <i>just now</i>" in text
+
+    @pytest.mark.anyio
+    async def test_cron_list_caps_at_ten_with_overflow_marker(self, tmp_path):
+        from untether.triggers.manager import TriggerManager
+        from untether.triggers.settings import parse_trigger_config
+
+        cfg = parse_trigger_config(
+            {
+                "enabled": True,
+                "crons": [
+                    {
+                        "id": f"c{i:02d}",
+                        "schedule": "0 9 * * *",
+                        "prompt": "x",
+                        "chat_id": 123,
+                    }
+                    for i in range(13)
+                ],
+            }
+        )
+        cmd = ConfigCommand()
+        ctx = _make_ctx(args_text="tg", text="config:tg", chat_id=123)
+        ctx.trigger_manager = TriggerManager(cfg)
+        await cmd.handle(ctx)
+        text = _last_edit_msg(ctx).text
+        # First 10 listed; remaining 3 collapsed into the overflow marker.
+        assert "c00" in text
+        assert "c09" in text
+        assert "c10" not in text
+        assert "…and 3 more" in text

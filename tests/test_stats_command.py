@@ -116,6 +116,71 @@ def test_format_stats_all_label() -> None:
     assert "All Time" in msg
 
 
+# ── #271 Tier 3: triggered/manual breakdown ────────────────────────────────
+
+
+def test_format_stats_breakdown_omitted_when_no_counts() -> None:
+    stats = [
+        AggregatedStats(
+            engine="claude",
+            run_count=3,
+            action_count=15,
+            duration_ms=60_000,
+            last_run_ts=time.time(),
+            triggered_count=0,
+            manual_count=0,
+        )
+    ]
+    with patch("untether.telegram.commands.stats.get_stats", return_value=stats):
+        msg = format_stats_message(engine=None, period="today")
+    assert "triggered" not in msg
+    assert "manual" not in msg
+
+
+def test_format_stats_breakdown_rendered_when_present() -> None:
+    stats = [
+        AggregatedStats(
+            engine="claude",
+            run_count=4,
+            action_count=15,
+            duration_ms=60_000,
+            last_run_ts=time.time(),
+            triggered_count=2,
+            manual_count=2,
+        )
+    ]
+    with patch("untether.telegram.commands.stats.get_stats", return_value=stats):
+        msg = format_stats_message(engine=None, period="today")
+    assert "(2 triggered, 2 manual)" in msg
+
+
+def test_format_stats_total_breakdown_sums_engines() -> None:
+    stats = [
+        AggregatedStats(
+            engine="claude",
+            run_count=3,
+            action_count=15,
+            duration_ms=60_000,
+            last_run_ts=time.time(),
+            triggered_count=2,
+            manual_count=1,
+        ),
+        AggregatedStats(
+            engine="codex",
+            run_count=2,
+            action_count=10,
+            duration_ms=30_000,
+            last_run_ts=time.time(),
+            triggered_count=1,
+            manual_count=1,
+        ),
+    ]
+    with patch("untether.telegram.commands.stats.get_stats", return_value=stats):
+        msg = format_stats_message(engine=None, period="today")
+    assert "<b>Total</b>" in msg
+    assert "(3 triggered, 2 manual)" in msg
+
+
 # ── Command handle ─────────────────────────────────────────────────────────
 
 

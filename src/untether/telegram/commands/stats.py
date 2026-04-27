@@ -61,23 +61,33 @@ def format_stats_message(
     total_runs = 0
     total_actions = 0
     total_duration = 0
+    total_triggered = 0
+    total_manual = 0
 
     for s in sorted(stats, key=lambda x: x.run_count, reverse=True):
+        breakdown = ""
+        if s.triggered_count or s.manual_count:
+            breakdown = f" ({s.triggered_count} triggered, {s.manual_count} manual)"
         lines.append(
             f"<b>{s.engine}</b>: {s.run_count} runs, "
             f"{s.action_count} actions, "
             f"{_format_duration(s.duration_ms)}, "
-            f"last {_format_last_run(s.last_run_ts)}"
+            f"last {_format_last_run(s.last_run_ts)}{breakdown}"
         )
         total_runs += s.run_count
         total_actions += s.action_count
         total_duration += s.duration_ms
+        total_triggered += s.triggered_count
+        total_manual += s.manual_count
 
     if len(stats) > 1:
+        total_breakdown = ""
+        if total_triggered or total_manual:
+            total_breakdown = f" ({total_triggered} triggered, {total_manual} manual)"
         lines.append(
             f"\n<b>Total</b>: {total_runs} runs, "
             f"{total_actions} actions, "
-            f"{_format_duration(total_duration)}"
+            f"{_format_duration(total_duration)}{total_breakdown}"
         )
 
     return "\n".join(lines)

@@ -128,6 +128,14 @@ async def run_cron_scheduler(
                 last_fired[cron.id] = key
                 logger.info("triggers.cron.firing", cron_id=cron.id)
                 await dispatcher.dispatch_cron(cron)
+                # #271 Tier 3: record last-fired-at after dispatch returns.
+                # `dispatch_cron` only blocks until the notification is
+                # queued, not run completion — recording here means the
+                # `/config:tg` page reflects every dispatched cron, even if
+                # the run later fails.
+                from . import history
+
+                history.record_fired(cron.id)
                 # #288: one-shot crons are removed from the active list
                 # after firing; they stay in the TOML and re-activate on
                 # the next config reload or restart.

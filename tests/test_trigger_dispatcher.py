@@ -348,3 +348,68 @@ async def test_dispatch_cron_omits_permission_mode_when_unset():
     ctx = run_job.calls[0]["context"]
     assert ctx is not None
     assert ctx.permission_mode is None
+
+
+# ── #271 Tier 3: webhook dispatch records last_fired ───────────────────────
+
+
+@pytest.mark.anyio
+async def test_dispatch_webhook_records_last_fired(tmp_path):
+    from untether.triggers import history
+
+    history.reset_history()
+    history.init_history(tmp_path / "untether.toml")
+    try:
+        transport = FakeTransport()
+        run_job = RunJobCapture()
+
+        async with anyio.create_task_group() as tg:
+            dispatcher = TriggerDispatcher(
+                run_job=run_job,
+                transport=transport,
+                default_chat_id=100,
+                task_group=tg,
+            )
+            await dispatcher.dispatch_webhook(_make_webhook(id="gh"), "x")
+            await anyio.sleep(0.01)
+            tg.cancel_scope.cancel()
+
+        assert history.get_last_fired("gh") is not None
+    finally:
+        history.reset_history()
+
+
+@pytest.mark.anyio
+async def test_dispatch_webhook_history_failure_does_not_raise(monkeypatch, tmp_path):
+    from untether.triggers import history
+
+    history.reset_history()
+    history.init_history(tmp_path / "untether.toml")
+    try:
+
+        def boom(self, trigger_id: str) -> None:
+            raise OSError("disk full")
+
+        monkeypatch.setattr(
+            "untether.triggers.history.TriggerHistoryStore.record_fired", boom
+        )
+
+        transport = FakeTransport()
+        run_job = RunJobCapture()
+
+        async with anyio.create_task_group() as tg:
+            dispatcher = TriggerDispatcher(
+                run_job=run_job,
+                transport=transport,
+                default_chat_id=100,
+                task_group=tg,
+            )
+            # Must not raise even though the history store does.
+            await dispatcher.dispatch_webhook(_make_webhook(id="resilient"), "x")
+            await anyio.sleep(0.01)
+            tg.cancel_scope.cancel()
+
+        # Run still queued.
+        assert len(run_job.calls) == 1
+    finally:
+        history.reset_history()
