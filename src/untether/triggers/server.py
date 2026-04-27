@@ -217,8 +217,17 @@ def build_webhook_app(
                 )
 
     async def handle_health(request: web.Request) -> web.Response:
+        # #294: surface paused state on the health endpoint so external
+        # monitors can tell paused-but-up apart from healthy-and-active.
+        paused = manager is not None and manager.is_paused
         return web.Response(
-            text=json.dumps({"status": "ok", "webhooks": _webhook_count()}),
+            text=json.dumps(
+                {
+                    "status": "paused" if paused else "ok",
+                    "webhooks": _webhook_count(),
+                    "paused": paused,
+                }
+            ),
             content_type="application/json",
         )
 
@@ -227,6 +236,20 @@ def build_webhook_app(
         webhook = _lookup(path)
         if webhook is None:
             return web.Response(status=404, text="not found")
+
+        # #294: master pause — return 503 (not 404) so callers can
+        # distinguish "route exists but is paused" from "route does not exist".
+        if manager is not None and manager.is_paused:
+            logger.info(
+                "triggers.webhook.paused_skipped",
+                webhook_id=webhook.id,
+                path=path,
+            )
+            return web.Response(
+                status=503,
+                text="triggers paused",
+                headers={"Retry-After": "60"},
+            )
 
         try:
             return await _process_webhook(request, webhook, path)

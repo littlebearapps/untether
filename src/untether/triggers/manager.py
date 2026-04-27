@@ -37,6 +37,7 @@ class TriggerManager:
         "_crons",
         "_default_timezone",
         "_fired_run_once",
+        "_paused",
         "_run_once_state_path",
         "_webhooks_by_path",
     )
@@ -50,6 +51,11 @@ class TriggerManager:
         self._crons: list[CronConfig] = []
         self._webhooks_by_path: dict[str, WebhookConfig] = {}
         self._default_timezone: str | None = None
+        # #294: master pause flag — in-memory only (no persistence). Triggers
+        # auto-resume on restart, which is the safe default. Set via
+        # pause()/resume(); read by the cron scheduler each tick and by the
+        # webhook server on each request.
+        self._paused: bool = False
         # #317: persistent fired-state for ``run_once`` crons so restarts
         # and config hot-reloads don't re-fire already-completed one-shots.
         # ``config_path=None`` keeps the old in-memory-only behaviour (used
@@ -203,3 +209,36 @@ class TriggerManager:
     def fired_run_once_ids(self) -> list[str]:
         """Return a snapshot of cron ids that have already fired (#317)."""
         return sorted(self._fired_run_once)
+
+    # ------------------------------------------------------------------ #
+    # #294: master pause toggle
+    # ------------------------------------------------------------------ #
+
+    @property
+    def is_paused(self) -> bool:
+        """Whether the master trigger pause flag is set."""
+        return self._paused
+
+    def pause(self) -> bool:
+        """Pause all trigger dispatch. Returns ``True`` if state changed."""
+        if self._paused:
+            return False
+        self._paused = True
+        logger.info(
+            "triggers.manager.paused",
+            crons=len(self._crons),
+            webhooks=len(self._webhooks_by_path),
+        )
+        return True
+
+    def resume(self) -> bool:
+        """Resume trigger dispatch. Returns ``True`` if state changed."""
+        if not self._paused:
+            return False
+        self._paused = False
+        logger.info(
+            "triggers.manager.resumed",
+            crons=len(self._crons),
+            webhooks=len(self._webhooks_by_path),
+        )
+        return True

@@ -428,3 +428,75 @@ class TestTriggerManagerHelpers:
         mgr.update(_settings(crons=[_cron("a", run_once=True)]))
         assert mgr.cron_ids() == []
         assert mgr.fired_run_once_ids() == ["a"]
+
+
+# ── #294: master pause toggle ────────────────────────────────────────────
+
+
+class TestPauseToggle:
+    def test_default_is_active(self) -> None:
+        mgr = TriggerManager()
+        assert mgr.is_paused is False
+
+    def test_pause_sets_paused(self) -> None:
+        mgr = TriggerManager(_settings(crons=[_cron("a")]))
+        assert mgr.pause() is True
+        assert mgr.is_paused is True
+
+    def test_pause_idempotent(self) -> None:
+        mgr = TriggerManager(_settings(crons=[_cron("a")]))
+        mgr.pause()
+        # Second call returns False — state didn't change.
+        assert mgr.pause() is False
+        assert mgr.is_paused is True
+
+    def test_resume_clears_paused(self) -> None:
+        mgr = TriggerManager(_settings(crons=[_cron("a")]))
+        mgr.pause()
+        assert mgr.resume() is True
+        assert mgr.is_paused is False
+
+    def test_resume_idempotent(self) -> None:
+        mgr = TriggerManager(_settings(crons=[_cron("a")]))
+        # Already active.
+        assert mgr.resume() is False
+        assert mgr.is_paused is False
+
+    def test_pause_does_not_modify_crons(self) -> None:
+        mgr = TriggerManager(_settings(crons=[_cron("a"), _cron("b")]))
+        mgr.pause()
+        # Pause is a runtime gate; the cron list itself is untouched so
+        # /config can still display counts and resume restores firing.
+        assert [c.id for c in mgr.crons] == ["a", "b"]
+
+    @pytest.mark.anyio
+    async def test_paused_webhook_returns_503(self) -> None:
+        mgr = TriggerManager(_settings(webhooks=[_webhook("h1")]))
+        mgr.pause()
+
+        @dataclass
+        class _DispatcherStub:
+            calls: list[Any] = field(default_factory=list)
+
+            async def dispatch_webhook(self, *a: Any, **kw: Any) -> None:
+                self.calls.append((a, kw))
+
+        dispatcher = _DispatcherStub()
+        app = build_webhook_app(_settings(), dispatcher, manager=mgr)
+        async with TestClient(TestServer(app)) as client:
+            resp = await client.post(
+                "/hooks/test",
+                data=b"{}",
+                headers={
+                    "Authorization": "Bearer tok_123",
+                    "Content-Type": "application/json",
+                },
+            )
+            assert resp.status == 503
+            # Health endpoint reflects paused state.
+            health = await client.get("/health")
+            body = await health.json()
+            assert body["paused"] is True
+            assert body["status"] == "paused"
+        # Webhook dispatch was NOT invoked while paused.
+        assert dispatcher.calls == []
