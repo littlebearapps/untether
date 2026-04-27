@@ -346,6 +346,23 @@ class MarkdownFormatter:
         self.command_width = command_width
         self.verbosity = verbosity
 
+    def refresh_from(self, progress: Any) -> None:
+        """Update mutable formatting knobs from a ``ProgressSettings`` snapshot (#269).
+
+        Used by the runner bridge at the start of each run so edits to
+        ``[progress].max_actions`` / ``[progress].verbosity`` in
+        ``untether.toml`` apply on the next run without restarting the bot.
+        Per-chat ``/verbose`` overrides still take precedence — they're
+        rebuilt by ``runner_bridge._resolve_presenter`` from the refreshed
+        defaults each call.
+        """
+        max_actions = getattr(progress, "max_actions", None)
+        if isinstance(max_actions, int):
+            self.max_actions = max(0, max_actions)
+        verbosity = getattr(progress, "verbosity", None)
+        if verbosity in ("compact", "verbose"):
+            self.verbosity = verbosity
+
     def render_progress_parts(
         self,
         state: ProgressState,
