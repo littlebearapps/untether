@@ -309,6 +309,13 @@ class ClaudeStreamState:
     pending_catalog_refresh_ids: list[str] = field(default_factory=list)
     catalog_refresh_seq: int = 0
 
+    # #333: monotonic timestamp of the most recent ``result`` event. The
+    # post-result idle watchdog (``ClaudeRunner._post_result_idle_watchdog``)
+    # polls this to decide when to close stdin. None until the first
+    # result lands; reset on each subsequent result so that a multi-turn
+    # bidirectional session re-arms the timer on every turn boundary.
+    result_received_at: float | None = None
+
 
 def _normalize_tool_result(content: Any) -> str:
     if content is None:
@@ -917,7 +924,26 @@ def translate_claude_event(
             error = None if ok else _extract_error(event, resumed=state.resumed)
             usage = _usage_payload(event)
 
-            return [
+            # #333: arm the post-result idle watchdog. Reset on every
+            # result (multi-turn re-arms the timer per turn boundary).
+            state.result_received_at = time.monotonic()
+
+            events_out: list[UntetherEvent] = []
+            # #333 UX signal #1: append "✓ turn complete" to the meta
+            # footer so the user immediately sees the turn is done and
+            # the session is now waiting for the next prompt. A
+            # supplementary StartedEvent with new meta is the supported
+            # pattern for late-arriving metadata (see
+            # .claude/rules/runner-development.md).
+            if ok:
+                events_out.append(
+                    factory.started(
+                        resume,
+                        title=None,
+                        meta={"complete": "✓ turn complete"},
+                    )
+                )
+            events_out.append(
                 factory.completed(
                     ok=ok,
                     answer=result_text,
@@ -925,7 +951,8 @@ def translate_claude_event(
                     error=error,
                     usage=usage or None,
                 )
-            ]
+            )
+            return events_out
         case claude_schema.StreamControlRequest(request_id=request_id, request=request):
             # Auto-approve non-user-facing control requests.
             #
@@ -2139,6 +2166,88 @@ class ClaudeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
                 )
         state.pending_catalog_refresh_ids.clear()
 
+    async def _post_result_idle_watchdog(
+        self,
+        state: ClaudeStreamState,
+        this_proc_stdin: Any,
+        reader_done: anyio.Event,
+        run_logger: Any,
+        timeout_s: float,
+    ) -> None:
+        """Close stdin once the bidirectional CLI has been idle past the result.
+
+        After ``StreamResultMessage`` the Claude CLI stays alive in the
+        bidirectional/permission-mode protocol so multi-turn sessions don't
+        re-spawn. In practice (#333) this leaves a 400 MB RSS subprocess
+        plus ~200 TCP sockets idling for 30+ minutes between user prompts.
+
+        Mechanism: poll ``state.result_received_at``. When elapsed exceeds
+        ``timeout_s`` and no approval-state references the session, close
+        ``this_proc_stdin`` (same call as the normal-flow exit on line
+        2412). The CLI hits stdin EOF and exits gracefully (rc=0). The
+        auto-continue safety gate excludes ``last_event_type == "result"``
+        so the clean exit will not phantom-resume the session
+        (test_skips_result_event_type in test_exec_bridge.py locks this).
+
+        Approval-state guard: ``_REQUEST_TO_SESSION`` and
+        ``_PENDING_ASK_REQUESTS`` track in-flight callback responses. If
+        either has live entries for this session we re-arm the timer
+        rather than orphaning a button-click control_response that's
+        mid-flight.
+        """
+        # Poll often enough to react within a few seconds of the deadline,
+        # but not so often that we burn CPU on a fully idle session.
+        poll_interval = max(5.0, min(timeout_s / 20.0, 30.0))
+        while not reader_done.is_set():
+            await anyio.sleep(poll_interval)
+            if reader_done.is_set():
+                return
+            armed_at = state.result_received_at
+            if armed_at is None:
+                continue
+            elapsed = time.monotonic() - armed_at
+            if elapsed < timeout_s:
+                continue
+
+            # Locate the session id for the approval-state guard. The
+            # Claude factory's resume token is set during the very first
+            # StartedEvent, so by the time a result lands we always have
+            # one — but defend against the rare race where the watchdog
+            # ticks before that first started event.
+            sid = (
+                state.factory.resume.value if state.factory.resume is not None else None
+            )
+            pending_requests = (
+                [k for k, v in _REQUEST_TO_SESSION.items() if v == sid] if sid else []
+            )
+            pending_asks = (
+                [k for k in _PENDING_ASK_REQUESTS if _REQUEST_TO_SESSION.get(k) == sid]
+                if sid
+                else []
+            )
+            if pending_requests or pending_asks:
+                run_logger.info(
+                    "claude.post_result_idle.deferred",
+                    session_id=sid,
+                    pending_requests=len(pending_requests),
+                    pending_asks=len(pending_asks),
+                    elapsed_s=round(elapsed, 1),
+                    timeout_s=timeout_s,
+                )
+                # Re-arm: push the deadline forward by one full interval.
+                state.result_received_at = time.monotonic()
+                continue
+
+            run_logger.info(
+                "claude.post_result_idle.closing_stdin",
+                session_id=sid,
+                elapsed_s=round(elapsed, 1),
+                timeout_s=timeout_s,
+            )
+            with contextlib.suppress(Exception):
+                await this_proc_stdin.aclose()
+            return
+
     def translate(
         self,
         data: claude_schema.StreamJsonMessage,
@@ -2380,6 +2489,26 @@ class ClaudeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
                 self.current_stream = stream
                 reader_done = anyio.Event()
 
+                # #333: load post-result idle settings before the task group
+                # so the watchdog gets a snapshot. A load failure leaves the
+                # legacy "stay alive forever" behaviour in place.
+                post_result_idle_enabled = True
+                post_result_idle_timeout_s = 600.0
+                try:
+                    result = load_settings_if_exists()
+                    if result is not None:
+                        settings_obj, _ = result
+                        post_result_idle_enabled = (
+                            settings_obj.watchdog.post_result_idle_enabled
+                        )
+                        post_result_idle_timeout_s = float(
+                            settings_obj.watchdog.post_result_idle_timeout
+                        )
+                except Exception:  # noqa: BLE001 — settings errors must not block a run
+                    run_logger.debug(
+                        "post_result_idle.settings_load_failed", exc_info=True
+                    )
+
                 async with anyio.create_task_group() as tg:
                     tg.start_soon(
                         drain_stderr,
@@ -2396,6 +2525,19 @@ class ClaudeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
                         run_logger,
                         proc.pid,
                     )
+                    if (
+                        use_control_channel
+                        and this_proc_stdin is not None
+                        and post_result_idle_enabled
+                    ):
+                        tg.start_soon(
+                            self._post_result_idle_watchdog,
+                            state,
+                            this_proc_stdin,
+                            reader_done,
+                            run_logger,
+                            post_result_idle_timeout_s,
+                        )
                     async for evt in self._iter_jsonl_events(
                         stdout=proc.stdout,
                         stream=stream,

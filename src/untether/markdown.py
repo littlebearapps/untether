@@ -325,6 +325,12 @@ def format_meta_line(meta: dict[str, Any]) -> str | None:
     trigger = meta.get("trigger")
     if isinstance(trigger, str) and trigger:
         parts.append(trigger)
+    # #333: show "✓ turn complete" hint on bidirectional Claude sessions
+    # so the user knows the turn is done and the bot is waiting (rather
+    # than processing). Set by translate_claude_event on result.
+    complete = meta.get("complete")
+    if isinstance(complete, str) and complete:
+        parts.append(complete)
     return HEADER_SEP.join(parts) if parts else None
 
 
