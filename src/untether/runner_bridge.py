@@ -388,18 +388,40 @@ def _resolve_presenter(
     return default_presenter
 
 
+# #410: schema-mismatch surfacing — promoted from one-shot per-process to
+# per-call counter so the issue-watcher actually creates an issue when API-
+# shape drift starts happening (one-shot logs only fire once per restart, so
+# operators were missing ongoing drift between restarts). Counter is exposed
+# for the /usage debug section.
+_USAGE_SCHEMA_MISMATCH_COUNT = 0
+# #410: legacy boolean kept temporarily for any external code that imported
+# `_USAGE_SCHEMA_WARNED`. It now mirrors "count > 0" rather than gating
+# subsequent warnings — the new counter logs every call.
 _USAGE_SCHEMA_WARNED = False
 _USAGE_EXPECTED_WINDOW_FIELDS = frozenset({"utilization", "resets_at"})
 
 
+def get_usage_schema_mismatch_count() -> int:
+    """Return the running count of subscription-usage schema mismatches (#410).
+
+    Used by the ``/usage`` debug section. Tests reset by setting
+    ``_USAGE_SCHEMA_MISMATCH_COUNT = 0`` directly on the module.
+    """
+    return _USAGE_SCHEMA_MISMATCH_COUNT
+
+
 def _validate_usage_schema(data: dict[str, Any]) -> None:
-    """Log a one-shot warning if the subscription-usage payload is missing
+    """Log a warning every time the subscription-usage payload is missing
     expected fields. Does not mutate `data` — downstream code already handles
     missing sections defensively; this is purely an observability signal so
-    API-shape drift is noticed instead of silently ignored."""
-    global _USAGE_SCHEMA_WARNED
-    if _USAGE_SCHEMA_WARNED:
-        return
+    API-shape drift is noticed instead of silently ignored.
+
+    #410: changed from one-shot-per-process to per-call so the
+    issue-watcher fires for ongoing drift. The structlog event includes a
+    cumulative ``count`` field so callers can rate-limit on their side if
+    they want.
+    """
+    global _USAGE_SCHEMA_MISMATCH_COUNT, _USAGE_SCHEMA_WARNED
     missing: list[str] = []
     for window in ("five_hour", "seven_day"):
         section = data.get(window)
@@ -414,8 +436,13 @@ def _validate_usage_schema(data: dict[str, Any]) -> None:
             if field_name not in section
         )
     if missing:
+        _USAGE_SCHEMA_MISMATCH_COUNT += 1
         _USAGE_SCHEMA_WARNED = True
-        logger.warning("claude_usage.schema_mismatch", missing=missing)
+        logger.warning(
+            "claude_usage.schema_mismatch",
+            missing=missing,
+            count=_USAGE_SCHEMA_MISMATCH_COUNT,
+        )
 
 
 async def _maybe_append_usage_footer(

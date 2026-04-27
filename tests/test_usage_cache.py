@@ -138,3 +138,115 @@ async def test_error_without_cache_propagates(monkeypatch):
 
     with pytest.raises(RuntimeError, match="boom"):
         await usage_cache.fetch_claude_usage_cached()
+
+
+# ── #410 — observability stats + cache freshness ─────────────────────
+
+
+class TestCacheStatsObservability:
+    """The /usage debug section reads UsageCacheStats — these tests pin the
+    contract so the debug page can't silently break."""
+
+    def setup_method(self) -> None:
+        from untether.utils import usage_cache
+
+        usage_cache.reset_cache()
+
+    def teardown_method(self) -> None:
+        from untether.utils import usage_cache
+
+        usage_cache.reset_cache()
+
+    def test_get_cache_stats_initial(self) -> None:
+        from untether.utils.usage_cache import get_cache_stats
+
+        stats = get_cache_stats()
+        assert stats.last_success_wall_seconds is None
+        assert stats.cache_age_seconds is None
+        assert stats.last_error_kind is None
+        assert stats.last_error_message is None
+
+    @pytest.mark.anyio
+    async def test_successful_fetch_records_wall_time(self, monkeypatch):
+        from untether.utils.usage_cache import (
+            fetch_claude_usage_cached,
+            get_cache_stats,
+        )
+
+        async def _fake():
+            return {
+                "five_hour": {
+                    "utilization": 0.0,
+                    "resets_at": "2030-01-01T00:00:00+00:00",
+                }
+            }
+
+        monkeypatch.setattr(
+            "untether.telegram.commands.usage.fetch_claude_usage", _fake
+        )
+        await fetch_claude_usage_cached()
+        stats = get_cache_stats()
+        assert stats.last_success_wall_seconds is not None
+        assert stats.cache_age_seconds is not None
+        assert stats.cache_age_seconds < 5.0
+        assert stats.last_error_kind is None
+
+    @pytest.mark.anyio
+    async def test_failure_records_last_error(self, monkeypatch):
+        from untether.utils.usage_cache import (
+            fetch_claude_usage_cached,
+            get_cache_stats,
+        )
+
+        async def _boom():
+            raise RuntimeError("upstream 502")
+
+        monkeypatch.setattr(
+            "untether.telegram.commands.usage.fetch_claude_usage", _boom
+        )
+        with pytest.raises(RuntimeError):
+            await fetch_claude_usage_cached()
+        stats = get_cache_stats()
+        assert stats.last_error_kind == "RuntimeError"
+        assert "upstream 502" in (stats.last_error_message or "")
+        assert stats.last_success_wall_seconds is None
+
+    @pytest.mark.anyio
+    async def test_failure_after_success_keeps_success_timestamp(self, monkeypatch):
+        from untether.utils.usage_cache import (
+            fetch_claude_usage_cached,
+            get_cache_stats,
+            reset_cache,
+        )
+
+        async def _good():
+            return {
+                "five_hour": {
+                    "utilization": 0.0,
+                    "resets_at": "2030-01-01T00:00:00+00:00",
+                }
+            }
+
+        monkeypatch.setattr(
+            "untether.telegram.commands.usage.fetch_claude_usage", _good
+        )
+        await fetch_claude_usage_cached()
+        first_success = get_cache_stats().last_success_wall_seconds
+        assert first_success is not None
+
+        # Force a fresh fetch attempt past the TTL by clearing the cache,
+        # then swap the fetcher to raise.
+        reset_cache()
+
+        async def _later_boom():
+            raise ValueError("transient")
+
+        monkeypatch.setattr(
+            "untether.telegram.commands.usage.fetch_claude_usage", _later_boom
+        )
+        # No prior cache (we reset), so this re-raises.
+        with pytest.raises(ValueError, match="transient"):
+            await fetch_claude_usage_cached()
+        stats = get_cache_stats()
+        # Last error recorded.
+        assert stats.last_error_kind == "ValueError"

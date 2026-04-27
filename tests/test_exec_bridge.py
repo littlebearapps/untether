@@ -818,12 +818,15 @@ class TestMaybeAppendUsageFooterAlwaysShow:
         from untether.utils import usage_cache
 
         usage_cache.reset_cache()
-        # Also reset the schema-warning latch so tests can exercise it more than once.
+        # Reset the schema-mismatch counter (#410: per-call counter
+        # replaces the old one-shot latch).
         import untether.runner_bridge as rb
 
+        rb._USAGE_SCHEMA_MISMATCH_COUNT = 0
         rb._USAGE_SCHEMA_WARNED = False
         yield
         usage_cache.reset_cache()
+        rb._USAGE_SCHEMA_MISMATCH_COUNT = 0
         rb._USAGE_SCHEMA_WARNED = False
 
     @pytest.mark.anyio
@@ -853,8 +856,9 @@ class TestMaybeAppendUsageFooterAlwaysShow:
         assert "\u26a1" in result.text
 
     @pytest.mark.anyio
-    async def test_schema_mismatch_warning_fires_once(self, monkeypatch):
-        """Missing expected fields in the usage payload log a one-shot warning."""
+    async def test_schema_mismatch_warning_fires_every_call(self, monkeypatch):
+        """#410: schema_mismatch promotes from one-shot to per-call counter so
+        the issue-watcher fires for ongoing drift, not just the first hit."""
         from untether import runner_bridge as rb
 
         async def _fake_fetch():
@@ -875,13 +879,27 @@ class TestMaybeAppendUsageFooterAlwaysShow:
 
         monkeypatch.setattr(rb.logger, "warning", _warn)
 
-        msg = RenderedMessage(text="Done.", extra={})
-        await rb._maybe_append_usage_footer(msg, always_show=True)
-        await rb._maybe_append_usage_footer(msg, always_show=True)
+        # Call _validate_usage_schema directly to exercise per-call behaviour
+        # (the cached fetcher path memoises within the TTL window).
+        rb._validate_usage_schema(
+            {"five_hour": {"utilization": 25.0}, "seven_day": {"utilization": 10.0}}
+        )
+        rb._validate_usage_schema(
+            {"five_hour": {"utilization": 25.0}, "seven_day": {"utilization": 10.0}}
+        )
+        rb._validate_usage_schema(
+            {"five_hour": {"utilization": 25.0}, "seven_day": {"utilization": 10.0}}
+        )
 
         mismatch = [c for c in warn_calls if c[0] == "claude_usage.schema_mismatch"]
-        assert len(mismatch) == 1  # fires exactly once
+        assert len(mismatch) == 3  # one per call now, not one per process
         assert mismatch[0][1]["missing"]  # has a non-empty list
+        # #410: structured log carries a cumulative count field.
+        assert mismatch[0][1]["count"] == 1
+        assert mismatch[1][1]["count"] == 2
+        assert mismatch[2][1]["count"] == 3
+        # Public accessor reports the same count.
+        assert rb.get_usage_schema_mismatch_count() == 3
 
     @pytest.mark.anyio
     async def test_always_show_false_hides_below_threshold(self, monkeypatch):
