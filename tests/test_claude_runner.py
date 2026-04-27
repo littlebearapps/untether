@@ -1,4 +1,5 @@
 import json
+import time
 from pathlib import Path
 from typing import cast
 
@@ -1565,3 +1566,242 @@ def test_redact_env_i_args_passthrough_when_not_env_wrapped() -> None:
 
     cmd = ["claude", "--output-format", "stream-json", "--effort", "xhigh"]
     assert redact_env_i_args(cmd) == cmd
+
+
+# ── #333 — post-result idle timeout & turn-complete UX signal ─────────────
+
+
+def test_translate_result_arms_post_result_idle_timer() -> None:
+    """A `result` event sets `state.result_received_at` for the watchdog."""
+    state = ClaudeStreamState()
+    assert state.result_received_at is None
+
+    event = claude_schema.StreamResultMessage(
+        subtype="success",
+        duration_ms=100,
+        duration_api_ms=50,
+        is_error=False,
+        num_turns=1,
+        session_id="post-result-timer-session",
+        result="done",
+    )
+    translate_claude_event(
+        event,
+        title="claude",
+        state=state,
+        factory=state.factory,
+    )
+    assert state.result_received_at is not None
+    assert state.result_received_at > 0
+
+
+def test_translate_result_emits_turn_complete_meta() -> None:
+    """Successful result emits supplementary StartedEvent with complete hint."""
+    state = ClaudeStreamState()
+    event = claude_schema.StreamResultMessage(
+        subtype="success",
+        duration_ms=100,
+        duration_api_ms=50,
+        is_error=False,
+        num_turns=1,
+        session_id="turn-complete-session",
+        result="done",
+    )
+    events = translate_claude_event(
+        event,
+        title="claude",
+        state=state,
+        factory=state.factory,
+    )
+    started = [evt for evt in events if isinstance(evt, StartedEvent)]
+    completed = [evt for evt in events if isinstance(evt, CompletedEvent)]
+    assert len(started) == 1
+    assert len(completed) == 1
+    assert started[0].meta == {"complete": "✓ turn complete"}
+    # CompletedEvent must remain the LAST event for the 3-event contract.
+    assert events[-1] is completed[0]
+
+
+def test_translate_result_skips_complete_meta_on_error() -> None:
+    """Errored result does NOT add the turn-complete meta hint."""
+    state = ClaudeStreamState()
+    event = claude_schema.StreamResultMessage(
+        subtype="error_during_execution",
+        duration_ms=100,
+        duration_api_ms=50,
+        is_error=True,
+        num_turns=1,
+        session_id="errored-session",
+    )
+    events = translate_claude_event(
+        event,
+        title="claude",
+        state=state,
+        factory=state.factory,
+    )
+    started = [evt for evt in events if isinstance(evt, StartedEvent)]
+    completed = [evt for evt in events if isinstance(evt, CompletedEvent)]
+    assert len(started) == 0  # no supplementary started for failures
+    assert len(completed) == 1
+    assert completed[0].ok is False
+
+
+@pytest.mark.anyio
+async def test_post_result_idle_watchdog_fires_when_clean(monkeypatch) -> None:
+    """Past the timeout with no pending approvals → stdin is closed."""
+    import anyio
+
+    from untether.runners.claude import (
+        _PENDING_ASK_REQUESTS,
+        _REQUEST_TO_SESSION,
+        ClaudeRunner,
+    )
+
+    # Ensure registries are clean.
+    _REQUEST_TO_SESSION.clear()
+    _PENDING_ASK_REQUESTS.clear()
+
+    runner = ClaudeRunner(claude_cmd="claude")
+    state = ClaudeStreamState()
+    # Seed the factory with a resume token so the watchdog can find the sid.
+    state.factory.started(
+        ResumeToken(engine="claude", value="watchdog-clean-session"),
+    )
+    # Arm the timer: pretend the result event landed 1000s ago.
+    state.result_received_at = time.monotonic() - 1000.0
+
+    closed = anyio.Event()
+
+    class FakeStdin:
+        async def aclose(self) -> None:
+            closed.set()
+
+    fake_stdin = FakeStdin()
+    reader_done = anyio.Event()
+
+    # Patch sleep so the watchdog ticks immediately.
+    real_sleep = anyio.sleep
+
+    async def fast_sleep(s: float) -> None:
+        await real_sleep(0)
+
+    monkeypatch.setattr("untether.runners.claude.anyio.sleep", fast_sleep)
+
+    class _StubLogger:
+        def info(self, *a, **k) -> None:
+            pass
+
+        def warning(self, *a, **k) -> None:
+            pass
+
+        def debug(self, *a, **k) -> None:
+            pass
+
+    async with anyio.create_task_group() as tg:
+        tg.start_soon(
+            runner._post_result_idle_watchdog,
+            state,
+            fake_stdin,
+            reader_done,
+            _StubLogger(),
+            60.0,
+        )
+        # Give the task one tick to detect the expired timer + close.
+        with anyio.move_on_after(2.0):
+            await closed.wait()
+        tg.cancel_scope.cancel()
+
+    assert closed.is_set(), "watchdog should have closed stdin"
+
+
+@pytest.mark.anyio
+async def test_post_result_idle_watchdog_defers_when_pending_approval(
+    monkeypatch,
+) -> None:
+    """An in-flight approval suppresses the close, re-arming the timer."""
+    import anyio
+
+    from untether.runners.claude import (
+        _PENDING_ASK_REQUESTS,
+        _REQUEST_TO_SESSION,
+        ClaudeRunner,
+    )
+
+    sid = "watchdog-deferred-session"
+    _REQUEST_TO_SESSION.clear()
+    _PENDING_ASK_REQUESTS.clear()
+    _REQUEST_TO_SESSION["req_pending"] = sid
+    try:
+        runner = ClaudeRunner(claude_cmd="claude")
+        state = ClaudeStreamState()
+        state.factory.started(ResumeToken(engine="claude", value=sid))
+        original_armed = time.monotonic() - 1000.0
+        state.result_received_at = original_armed
+
+        closed = anyio.Event()
+
+        class FakeStdin:
+            async def aclose(self) -> None:
+                closed.set()
+
+        real_sleep = anyio.sleep
+
+        async def fast_sleep(s: float) -> None:
+            await real_sleep(0)
+
+        monkeypatch.setattr("untether.runners.claude.anyio.sleep", fast_sleep)
+
+        class _StubLogger:
+            def info(self, *a, **k) -> None:
+                pass
+
+            def warning(self, *a, **k) -> None:
+                pass
+
+            def debug(self, *a, **k) -> None:
+                pass
+
+        reader_done = anyio.Event()
+        async with anyio.create_task_group() as tg:
+            tg.start_soon(
+                runner._post_result_idle_watchdog,
+                state,
+                FakeStdin(),
+                reader_done,
+                _StubLogger(),
+                60.0,
+            )
+            # Let the watchdog tick a few times, then signal reader_done so
+            # the loop exits without our needing to wait.
+            for _ in range(5):
+                await real_sleep(0)
+            reader_done.set()
+            tg.cancel_scope.cancel()
+
+        assert not closed.is_set(), (
+            "watchdog must not close stdin while approval pending"
+        )
+        # The timer was re-armed (pushed forward), so result_received_at
+        # should now be more recent than the original arming.
+        assert state.result_received_at is not None
+        assert state.result_received_at > original_armed
+    finally:
+        _REQUEST_TO_SESSION.pop("req_pending", None)
+
+
+def test_meta_line_renders_turn_complete_marker() -> None:
+    """format_meta_line includes the `complete` hint when set on meta."""
+    from untether.markdown import format_meta_line
+
+    line = format_meta_line({"model": "sonnet", "complete": "✓ turn complete"})
+    assert line is not None
+    assert "✓ turn complete" in line
+
+
+def test_meta_line_omits_complete_when_absent() -> None:
+    """Absence of the `complete` key keeps the legacy footer shape."""
+    from untether.markdown import format_meta_line
+
+    line = format_meta_line({"model": "sonnet"})
+    assert line is not None
+    assert "✓ turn complete" not in line

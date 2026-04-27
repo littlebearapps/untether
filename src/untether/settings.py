@@ -299,6 +299,23 @@ class WatchdogSettings(BaseModel):
     # silences before Untether reports the run failed. Range 30s-30min.
     claude_stream_idle_timeout_ms: int = Field(default=300_000, ge=30_000, le=1_800_000)
 
+    # #333: post-result idle timeout for Claude bidirectional sessions.
+    # Claude Code in stream-json + permission-mode keeps stdin open after
+    # emitting a `result` event so multi-turn sessions don't re-spawn. In
+    # practice this leaves a 400 MB RSS subprocess + ~200 TCP sockets
+    # idling for tens of minutes between user prompts. After
+    # `post_result_idle_timeout` seconds with no new event we close the
+    # subprocess's stdin so the CLI exits gracefully (rc=0). The auto-
+    # continue safety gate already excludes ``last_event_type == "result"``
+    # so the clean exit will not phantom-resume the session. Pause/resume
+    # via Telegram is unaffected — the resume token is preserved on the
+    # progress tracker. Set ``post_result_idle_enabled = false`` to keep
+    # the legacy "stay alive forever" behaviour (e.g. for users who pipe
+    # successive turns within seconds and want to skip the spawn cost).
+    # Range 30s-1h.
+    post_result_idle_enabled: bool = True
+    post_result_idle_timeout: float = Field(default=600.0, ge=30, le=3600)
+
     @model_validator(mode="after")
     def _validate_prespawn_ram_ordering(self) -> WatchdogSettings:
         # When both tiers are active, warn must sit above block — otherwise
