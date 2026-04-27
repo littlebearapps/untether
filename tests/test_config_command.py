@@ -144,13 +144,13 @@ class TestToasts:
         assert ConfigCommand.early_answer_toast("ag:clr") == "Engine: cleared"
 
     def test_toast_trigger_all(self):
-        assert ConfigCommand.early_answer_toast("tr:all") == "Trigger: all"
+        assert ConfigCommand.early_answer_toast("tr:all") == "Listen: all"
 
     def test_toast_trigger_mentions(self):
-        assert ConfigCommand.early_answer_toast("tr:men") == "Trigger: mentions"
+        assert ConfigCommand.early_answer_toast("tr:men") == "Listen: mentions"
 
     def test_toast_trigger_clear(self):
-        assert ConfigCommand.early_answer_toast("tr:clr") == "Trigger: cleared"
+        assert ConfigCommand.early_answer_toast("tr:clr") == "Listen: cleared"
 
     def test_toast_navigation_home(self):
         """No toast for navigation to home page."""
@@ -846,7 +846,7 @@ class TestTrigger:
         cmd = ConfigCommand()
         ctx = _make_ctx(args_text="tr", text="config:tr", config_path=state_path)
         await cmd.handle(ctx)
-        assert "Trigger" in _last_edit_msg(ctx).text
+        assert "Listen" in _last_edit_msg(ctx).text
 
     @pytest.mark.anyio
     async def test_trigger_set_mentions_returns_home(self, tmp_path):

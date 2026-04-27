@@ -13,6 +13,7 @@ Untether adds interactive permission control, plan mode support, and several UX 
 - **Pause & Outline Plan** — third button on plan approval; after Claude writes the outline, Approve/Deny/Let's discuss buttons appear automatically (hold-open keeps session alive while user reads)
 - **Agent context preamble** — configurable prompt preamble tells agents they're on Telegram and requests structured end-of-task summaries; `[preamble]` config section
 - **`/planmode`** — toggle permission mode per chat (on/off/auto)
+- **`/listen`** — set listen mode (`all` / `mentions`) per chat or topic; controls when the bot responds in groups; renamed from `/trigger` in v0.35.3 (#297) to disambiguate from webhook/cron triggers — `/trigger` still works as a deprecated alias for one release cycle
 - **Ask mode** — interactive AskUserQuestion with option buttons, sequential multi-question flows, and `/config` toggle; Claude-only
 - **Early callback answering** — clears button spinners immediately instead of waiting for processing
 - **Approval push notifications** — separate notify message when approval buttons appear
@@ -85,6 +86,8 @@ Telegram <-> TelegramPresenter <-> RunnerBridge <-> Runner (claude/codex/opencod
 | `commands/config.py` | `/config` inline settings menu |
 | `commands/ask_question.py` | AskUserQuestion option button handler |
 | `commands/topics.py` | `/new`, `/ctx`, `/topic` commands; `_cancel_chat_tasks()` helper |
+| `commands/listen.py` | `/listen` command (listen-mode toggle); `/trigger` deprecated alias (#297) |
+| `listen_mode.py` | `resolve_listen_mode()` and `should_trigger_run()` for response gating |
 | `utils/proc_diag.py` | `/proc` process diagnostics for stall analysis (CPU, RSS, TCP, FDs, children) |
 | `shutdown.py` | Graceful shutdown state and drain logic |
 | `telegram/bridge.py` | Telegram message rendering |
@@ -201,7 +204,7 @@ Key test files:
 - `test_cooldown_bypass.py` — 21 tests: outline bypass, rapid retry auto-deny, no-text auto-deny, cooldown escalation, hold-open outline flow
 - `test_verbose_progress.py` — 21 tests: format_verbose_detail() for each tool type, MarkdownFormatter verbose mode, compact regression
 - `test_verbose_command.py` — 7 tests: /verbose toggle on/off/clear, backend id
-- `test_config_command.py` — 218 tests: home page, plan mode/ask mode/verbose/engine/trigger/model/reasoning sub-pages, toggle actions, callback vs command routing, button layout, engine-aware visibility, default resolution
+- `test_config_command.py` — 221 tests: home page, plan mode/ask mode/verbose/engine/listen/model/reasoning sub-pages, toggle actions, callback vs command routing, button layout, engine-aware visibility, default resolution
 - `test_pi_compaction.py` — 6 tests: compaction start/end, aborted, no tokens, sequence
 - `test_proc_diag.py` — 24 tests: format_diag, is_cpu_active, collect_proc_diag (Linux /proc reads), ProcessDiag defaults
 - `test_exec_runner.py` — 22 tests: event tracking (event_count, recent_events ring buffer, PID in StartedEvent meta), JsonlStreamState defaults

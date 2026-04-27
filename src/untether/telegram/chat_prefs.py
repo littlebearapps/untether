@@ -18,6 +18,8 @@ STATE_FILENAME = "telegram_chat_prefs_state.json"
 
 class _ChatPrefs(msgspec.Struct, forbid_unknown_fields=False):
     default_engine: str | None = None
+    # #297: storage field name preserved for backward compat with existing
+    # state files. User-facing name is "listen mode" — see listen_mode.py.
     trigger_mode: str | None = None
     context_project: str | None = None
     context_branch: str | None = None
@@ -44,7 +46,7 @@ def _normalize_text(value: str | None) -> str | None:
     return value or None
 
 
-def _normalize_trigger_mode(value: str | None) -> str | None:
+def _normalize_listen_mode(value: str | None) -> str | None:
     if value is None:
         return None
     value = value.strip().lower()
@@ -53,6 +55,10 @@ def _normalize_trigger_mode(value: str | None) -> str | None:
     if value == "all":
         return None
     return None
+
+
+# #297: legacy alias kept so external imports don't break in this release.
+_normalize_trigger_mode = _normalize_listen_mode
 
 
 def _normalize_engine_id(value: str | None) -> str | None:
@@ -107,16 +113,16 @@ class ChatPrefsStore(JsonStateStore[_ChatPrefsState]):
     async def clear_default_engine(self, chat_id: ChannelId) -> None:
         await self.set_default_engine(chat_id, None)
 
-    async def get_trigger_mode(self, chat_id: ChannelId) -> str | None:
+    async def get_listen_mode(self, chat_id: ChannelId) -> str | None:
         async with self._lock:
             self._reload_locked_if_needed()
             chat = self._get_chat_locked(chat_id)
             if chat is None:
                 return None
-            return _normalize_trigger_mode(chat.trigger_mode)
+            return _normalize_listen_mode(chat.trigger_mode)
 
-    async def set_trigger_mode(self, chat_id: ChannelId, mode: str | None) -> None:
-        normalized = _normalize_trigger_mode(mode)
+    async def set_listen_mode(self, chat_id: ChannelId, mode: str | None) -> None:
+        normalized = _normalize_listen_mode(mode)
         async with self._lock:
             self._reload_locked_if_needed()
             chat = self._get_chat_locked(chat_id)
@@ -127,15 +133,26 @@ class ChatPrefsStore(JsonStateStore[_ChatPrefsState]):
                 if self._chat_is_empty(chat):
                     self._remove_chat_locked(chat_id)
                 self._save_locked()
-                logger.info("prefs.trigger.cleared", chat_id=chat_id)
+                logger.info("prefs.listen.cleared", chat_id=chat_id)
                 return
             chat = self._ensure_chat_locked(chat_id)
             chat.trigger_mode = normalized
             self._save_locked()
-            logger.info("prefs.trigger.set", chat_id=chat_id, mode=normalized)
+            logger.info("prefs.listen.set", chat_id=chat_id, mode=normalized)
+
+    async def clear_listen_mode(self, chat_id: ChannelId) -> None:
+        await self.set_listen_mode(chat_id, None)
+
+    # #297: legacy method aliases preserved so any external/uncovered call
+    # site keeps working. Remove after one release cycle (v0.36.x).
+    async def get_trigger_mode(self, chat_id: ChannelId) -> str | None:
+        return await self.get_listen_mode(chat_id)
+
+    async def set_trigger_mode(self, chat_id: ChannelId, mode: str | None) -> None:
+        await self.set_listen_mode(chat_id, mode)
 
     async def clear_trigger_mode(self, chat_id: ChannelId) -> None:
-        await self.set_trigger_mode(chat_id, None)
+        await self.clear_listen_mode(chat_id)
 
     async def get_context(self, chat_id: ChannelId) -> RunContext | None:
         async with self._lock:
@@ -237,7 +254,7 @@ class ChatPrefsStore(JsonStateStore[_ChatPrefsState]):
     def _chat_is_empty(self, chat: _ChatPrefs) -> bool:
         return (
             _normalize_text(chat.default_engine) is None
-            and _normalize_trigger_mode(chat.trigger_mode) is None
+            and _normalize_listen_mode(chat.trigger_mode) is None
             and _normalize_text(chat.context_project) is None
             and _normalize_text(chat.context_branch) is None
             and not self._has_engine_overrides(chat.engine_overrides)

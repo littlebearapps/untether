@@ -57,7 +57,7 @@ See [security.md](security.md#restrict-access) for the full discussion.
     - **Linux (systemd)**: `systemctl --user status untether`
 2. Verify your bot token: `untether doctor` will flag an invalid token
 3. Check `allowed_user_ids` — only listed users can interact. As of v0.35.3, an empty list is rejected at startup unless `allow_any_user = true` is set ([#377](https://github.com/littlebearapps/untether/issues/377)).
-4. In a group chat, check trigger mode: if set to `mentions`, you must @mention the bot
+4. In a group chat, check listen mode (`/listen`): if set to `mentions`, you must @mention the bot
 5. Make sure you're messaging the correct bot (not a different one)
 
 ## Engine CLI not found
@@ -344,7 +344,7 @@ This is not a security concern — `UNTETHER_SESSION` is a simple signal variabl
 
 **Symptoms:** Bot works in private chat but ignores messages in a group.
 
-1. Check **trigger mode**: groups default to `mentions` in many setups. Send `/trigger` to check, or `/trigger all` to respond to everything.
+1. Check **listen mode**: groups default to `mentions` in many setups. Send `/listen` to check, or `/listen all` to respond to everything. (`/trigger` still works as a deprecated alias from v0.35.3 onward.)
 2. Check **bot privacy mode** in BotFather: send `/setprivacy` to @BotFather and select your bot. Set to "Disable" so the bot can see all messages (not just commands and @mentions).
 3. Check `allowed_user_ids` — group members not in the list are ignored. (As of v0.35.3 the list is required at startup unless `allow_any_user = true` is set — see [security.md](security.md#restrict-access).)
 4. If using topics, make sure the bot has "Manage Topics" permission.

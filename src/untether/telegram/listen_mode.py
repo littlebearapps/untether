@@ -8,22 +8,25 @@ from .commands.parse import _parse_slash_command
 from .topic_state import TopicStateStore
 from .types import TelegramIncomingMessage
 
-TriggerMode = Literal["all", "mentions"]
+# Renamed from "TriggerMode" → "ListenMode" in #297 to disambiguate from
+# webhook/cron triggers. The msgspec storage field is still named
+# `trigger_mode` for backward compat with existing state files.
+ListenMode = Literal["all", "mentions"]
 
 
-async def resolve_trigger_mode(
+async def resolve_listen_mode(
     *,
     chat_id: int,
     thread_id: int | None,
     chat_prefs: ChatPrefsStore | None,
     topic_store: TopicStateStore | None,
-) -> TriggerMode:
+) -> ListenMode:
     if topic_store is not None and thread_id is not None:
-        topic_mode = await topic_store.get_trigger_mode(chat_id, thread_id)
+        topic_mode = await topic_store.get_listen_mode(chat_id, thread_id)
         if topic_mode == "mentions":
             return "mentions"
     if chat_prefs is not None:
-        chat_mode = await chat_prefs.get_trigger_mode(chat_id)
+        chat_mode = await chat_prefs.get_listen_mode(chat_id)
         if chat_mode == "mentions":
             return "mentions"
     return "all"
