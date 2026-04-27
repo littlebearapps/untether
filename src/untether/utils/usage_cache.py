@@ -6,11 +6,17 @@ avoids beating the API during bursts of completions. On fetch failure the
 cache falls back to the last successful response if one is still held in
 memory (stale-while-error); otherwise the underlying exception propagates so
 callers can handle it like before.
+
+#410: also tracks observability state (last successful fetch wall-clock time,
+last error class+message, schema-mismatch count) for the ``/usage`` debug
+section so the next time the subscription footer goes silent the operator
+can see why without grepping ``journalctl``.
 """
 
 from __future__ import annotations
 
 import time
+from dataclasses import dataclass
 from typing import Any
 
 import anyio
@@ -25,6 +31,25 @@ _cache: tuple[float, dict[str, Any]] | None = None
 _lock: anyio.Lock | None = None
 
 
+@dataclass(frozen=True, slots=True)
+class UsageCacheStats:
+    """Snapshot of usage-cache observability state for ``/usage`` debug (#410)."""
+
+    last_success_wall_seconds: float | None
+    """``time.time()`` value of the last successful fetch, or None."""
+    cache_age_seconds: float | None
+    """Seconds since the last successful fetch (relative to wall clock), or None."""
+    last_error_kind: str | None
+    """Exception class name from the most recent fetch failure, or None."""
+    last_error_message: str | None
+    """Exception message from the most recent fetch failure, or None."""
+
+
+_last_success_wall: float | None = None
+_last_error_kind: str | None = None
+_last_error_message: str | None = None
+
+
 def _get_lock() -> anyio.Lock:
     global _lock
     if _lock is None:
@@ -34,9 +59,25 @@ def _get_lock() -> anyio.Lock:
 
 def reset_cache() -> None:
     """Clear the cache and lock. Intended for tests."""
-    global _cache, _lock
+    global _cache, _lock, _last_success_wall, _last_error_kind, _last_error_message
     _cache = None
     _lock = None
+    _last_success_wall = None
+    _last_error_kind = None
+    _last_error_message = None
+
+
+def get_cache_stats() -> UsageCacheStats:
+    """Return a snapshot of cache observability state (#410)."""
+    age: float | None = None
+    if _last_success_wall is not None:
+        age = max(0.0, time.time() - _last_success_wall)
+    return UsageCacheStats(
+        last_success_wall_seconds=_last_success_wall,
+        cache_age_seconds=age,
+        last_error_kind=_last_error_kind,
+        last_error_message=_last_error_message,
+    )
 
 
 async def fetch_claude_usage_cached() -> dict[str, Any]:
@@ -47,7 +88,7 @@ async def fetch_claude_usage_cached() -> dict[str, Any]:
     underlying fetch raises, returns the stale cached value if present;
     otherwise re-raises so the caller's existing error handling still fires.
     """
-    global _cache
+    global _cache, _last_success_wall, _last_error_kind, _last_error_message
     from ..telegram.commands.usage import fetch_claude_usage
 
     now = time.monotonic()
@@ -59,11 +100,16 @@ async def fetch_claude_usage_cached() -> dict[str, Any]:
 
         try:
             data = await fetch_claude_usage()
-        except Exception:
+        except Exception as exc:
+            _last_error_kind = type(exc).__name__
+            _last_error_message = str(exc) or repr(exc)
             if _cache is not None:
                 logger.debug("claude_usage.cache.stale_on_error")
                 return _cache[1]
             raise
 
+        _last_success_wall = time.time()
+        _last_error_kind = None
+        _last_error_message = None
         _cache = (now, data)
         return data

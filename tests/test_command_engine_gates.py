@@ -216,3 +216,53 @@ class TestPlanModeEngineGate:
         result = await cmd.handle(ctx)  # type: ignore[arg-type]
         assert result is not None
         assert "only available for claude" in result.text.lower()
+
+
+class TestUsageDebugMode:
+    """#410: ``/usage debug`` appends a debug section with cache + token info."""
+
+    @pytest.mark.anyio
+    async def test_debug_section_appended_on_success(self, monkeypatch):
+        from untether.telegram.commands.usage import UsageCommand
+        from untether.utils import usage_cache
+
+        usage_cache.reset_cache()
+
+        async def _fake_fetch(*a, **kw):
+            return {
+                "five_hour": {
+                    "utilization": 12.0,
+                    "resets_at": "2030-01-01T00:00:00+00:00",
+                },
+                "seven_day": {
+                    "utilization": 4.0,
+                    "resets_at": "2030-01-08T00:00:00+00:00",
+                },
+            }
+
+        monkeypatch.setattr(
+            "untether.telegram.commands.usage.fetch_claude_usage", _fake_fetch
+        )
+        monkeypatch.setattr(
+            "untether.telegram.commands.usage._read_token_expiry_ms",
+            lambda: 9_999_999_999_000,  # year 2286 — never expired
+        )
+
+        ctx = FakeCommandContext(
+            runtime=FakeTransportRuntime(default_engine="claude"),
+            args_text="debug",
+        )
+        cmd = UsageCommand()
+        result = await cmd.handle(ctx)  # type: ignore[arg-type]
+        assert result is not None
+        assert "debug" in result.text.lower()
+        assert "OAuth token" in result.text
+        assert "schema mismatches" in result.text
+        # Default /usage (no args) should NOT include the debug block.
+        ctx_plain = FakeCommandContext(
+            runtime=FakeTransportRuntime(default_engine="claude"),
+            args_text="",
+        )
+        result_plain = await cmd.handle(ctx_plain)  # type: ignore[arg-type]
+        assert result_plain is not None
+        assert "🔧 debug" not in result_plain.text
