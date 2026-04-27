@@ -429,3 +429,96 @@ class TestCrossEngineFooter:
     def test_neither_dir_nor_model(self) -> None:
         footer = self._render_footer("codex", meta=None, context_line=None)
         assert footer is None
+
+
+# ── #269 — MarkdownFormatter.refresh_from() hot-reload hook ───────────────
+
+
+class TestMarkdownFormatterRefresh:
+    """``MarkdownFormatter.refresh_from`` is the runner-bridge hook that
+    pushes a fresh ``ProgressSettings`` snapshot into the formatter on
+    every run, so editing ``[progress]`` in ``untether.toml`` applies on
+    the next message without restart (#269)."""
+
+    def test_refresh_updates_max_actions(self) -> None:
+        from untether.settings import ProgressSettings
+
+        formatter = MarkdownFormatter(max_actions=5)
+        formatter.refresh_from(ProgressSettings(max_actions=8))
+        assert formatter.max_actions == 8
+
+    def test_refresh_updates_verbosity(self) -> None:
+        from untether.settings import ProgressSettings
+
+        formatter = MarkdownFormatter(verbosity="compact")
+        formatter.refresh_from(ProgressSettings(verbosity="verbose"))
+        assert formatter.verbosity == "verbose"
+
+    def test_refresh_clamps_negative_max_actions_to_zero(self) -> None:
+        class _Stub:
+            max_actions = -3
+            verbosity = "compact"
+
+        formatter = MarkdownFormatter(max_actions=5)
+        formatter.refresh_from(_Stub())
+        assert formatter.max_actions == 0
+
+    def test_refresh_ignores_invalid_verbosity(self) -> None:
+        class _Stub:
+            max_actions = 5
+            verbosity = "garbage"
+
+        formatter = MarkdownFormatter(verbosity="compact")
+        formatter.refresh_from(_Stub())
+        # Stays on the original valid value rather than accepting nonsense.
+        assert formatter.verbosity == "compact"
+
+    def test_refresh_tolerates_missing_attributes(self) -> None:
+        class _Empty:
+            pass
+
+        formatter = MarkdownFormatter(max_actions=5, verbosity="compact")
+        formatter.refresh_from(_Empty())
+        assert formatter.max_actions == 5
+        assert formatter.verbosity == "compact"
+
+    def test_telegram_presenter_refresh_delegates_to_formatter(self) -> None:
+        from untether.settings import ProgressSettings
+        from untether.telegram.bridge import TelegramPresenter
+
+        formatter = MarkdownFormatter(max_actions=2, verbosity="compact")
+        presenter = TelegramPresenter(formatter=formatter)
+        presenter.refresh_progress_settings(
+            ProgressSettings(max_actions=9, verbosity="verbose")
+        )
+        assert formatter.max_actions == 9
+        assert formatter.verbosity == "verbose"
+
+
+def test_load_progress_settings_returns_defaults_when_missing(monkeypatch) -> None:
+    """``_load_progress_settings`` falls back to defaults when no config exists."""
+    from untether import runner_bridge
+    from untether.settings import ProgressSettings
+
+    monkeypatch.setattr(
+        "untether.settings.load_settings_if_exists",
+        lambda: None,
+    )
+    cfg = runner_bridge._load_progress_settings()
+    assert isinstance(cfg, ProgressSettings)
+
+
+def test_load_progress_settings_returns_defaults_on_error(monkeypatch) -> None:
+    """A settings-load exception falls back to defaults rather than raising."""
+    from untether import runner_bridge
+    from untether.settings import ProgressSettings
+
+    def _boom():
+        raise RuntimeError("disk full")
+
+    monkeypatch.setattr(
+        "untether.settings.load_settings_if_exists",
+        _boom,
+    )
+    cfg = runner_bridge._load_progress_settings()
+    assert isinstance(cfg, ProgressSettings)

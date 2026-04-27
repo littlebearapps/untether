@@ -58,6 +58,16 @@ class TelegramPresenter:
         self._formatter = formatter or MarkdownFormatter()
         self._message_overflow = message_overflow
 
+    def refresh_progress_settings(self, progress: object) -> None:
+        """Push a fresh ``ProgressSettings`` snapshot into the formatter (#269).
+
+        Called per-run from the runner bridge so editing ``[progress]``
+        in ``untether.toml`` applies on the next message. Per-chat
+        ``/verbose`` overrides take precedence (they construct an
+        override formatter on demand from the refreshed defaults).
+        """
+        self._formatter.refresh_from(progress)
+
     def render_progress(
         self,
         state: ProgressState,

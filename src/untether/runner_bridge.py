@@ -203,6 +203,28 @@ def _load_watchdog_settings():
         return None
 
 
+def _load_progress_settings():
+    """Load progress settings from config, returning defaults if unavailable.
+
+    Read fresh per-run by ``handle_message`` so edits to ``[progress]`` in
+    ``untether.toml`` apply on the next run without restarting the bot
+    (#269). Sibling of ``_load_footer_settings`` / ``_load_watchdog_settings``.
+    """
+    from .settings import ProgressSettings
+
+    try:
+        from .settings import load_settings_if_exists
+
+        result = load_settings_if_exists()
+        if result is None:
+            return ProgressSettings()
+        settings, _ = result
+        return settings.progress
+    except Exception:  # noqa: BLE001
+        logger.warning("progress_settings.load_failed", exc_info=True)
+        return ProgressSettings()
+
+
 def _load_auto_continue_settings():
     """Load auto-continue settings from config, returning defaults if unavailable."""
     try:
@@ -2210,6 +2232,19 @@ async def handle_message(
         )
         progress_tracker.meta = {"trigger": f"{icon} {context.trigger_source}"}
 
+    # #269: refresh progress settings on the default presenter so edits
+    # to [progress].max_actions / [progress].verbosity in untether.toml
+    # apply on the next run. Per-chat /verbose overrides downstream of
+    # _resolve_presenter() construct a fresh formatter from these refreshed
+    # values, so the override picks up the new defaults too.
+    progress_cfg = _load_progress_settings()
+    refresh = getattr(cfg.presenter, "refresh_progress_settings", None)
+    if callable(refresh):
+        try:
+            refresh(progress_cfg)
+        except Exception:  # noqa: BLE001
+            logger.debug("progress_settings.refresh_failed", exc_info=True)
+
     # Resolve effective presenter: check for per-chat verbose override
     effective_presenter = _resolve_presenter(cfg.presenter, incoming.channel_id)
 
@@ -2242,7 +2277,11 @@ async def handle_message(
         resume_formatter=runner.format_resume,
         context_line=context_line,
         thread_id=incoming.thread_id,
-        min_render_interval=cfg.min_render_interval,
+        # #269: read live each run so edits to [progress].min_render_interval
+        # apply on the next message without restart. cfg.min_render_interval
+        # is the startup snapshot and only used as fallback if the live load
+        # fails.
+        min_render_interval=progress_cfg.min_render_interval,
     )
 
     # Apply watchdog settings to runner and edits
