@@ -557,6 +557,51 @@ def _format_diff_preview(tool_name: str, tool_input: dict[str, Any]) -> str:
     return ""
 
 
+# #438: classify Stream idle timeout failures so the user sees actionable
+# context instead of just "API Error: Stream idle timeout - partial response
+# received". Two distinct upstream Anthropic API failure modes:
+#
+# - Type A — mid-generation stall: the model emitted some output, then went
+#   silent for >CLAUDE_STREAM_IDLE_TIMEOUT_MS. ``num_turns >= 1`` and
+#   ``duration_api_ms > 0``. Often legitimate long opus 4.7 1M plan-mode
+#   reasoning that exceeded the watchdog; raising the timeout helps.
+#
+# - Type B — cold-start zero-byte stall: zero bytes ever arrived. ``num_turns
+#   <= 1`` and ``duration_api_ms == 0``. The watchdog correctly detected an
+#   API outage from the client's perspective; raising the timeout does NOT
+#   help. Likely Anthropic API queueing / availability under load.
+#
+# See #438 for upstream tracking (consolidated `claude-code` issues
+# 2026-04-17→26).
+_STREAM_IDLE_TIMEOUT_PATTERN = "Stream idle timeout"
+
+
+def _classify_stream_idle_timeout(
+    event: claude_schema.StreamResultMessage,
+) -> str | None:
+    """Return a short Type-A / Type-B annotation, or None if not a stall."""
+    result = event.result if isinstance(event.result, str) else ""
+    if _STREAM_IDLE_TIMEOUT_PATTERN not in result:
+        return None
+    if event.num_turns <= 1 and (
+        event.duration_api_ms is None or event.duration_api_ms == 0
+    ):
+        # Type B — cold-start zero-byte stall. No bytes from API.
+        return (
+            "🌐 Cold-start API stall (Type B): Anthropic API returned no "
+            "bytes within the watchdog window. Likely upstream API "
+            "queueing/availability — raising CLAUDE_STREAM_IDLE_TIMEOUT_MS "
+            "will NOT help. Retry shortly."
+        )
+    # Type A — mid-generation stall. Model emitted output then went silent.
+    return (
+        "⏳ Mid-generation API stall (Type A): SSE stream went silent after "
+        "partial output. Often legitimate long reasoning that exceeded the "
+        "watchdog — consider raising [watchdog] claude_stream_idle_timeout_ms "
+        "in untether.toml."
+    )
+
+
 def _extract_error(
     event: claude_schema.StreamResultMessage,
     *,
@@ -572,6 +617,11 @@ def _extract_error(
     else:
         first = "Claude Code run failed"
 
+    # #438: append a Type-A / Type-B annotation when the failure is a
+    # Stream idle timeout, so the operator can tell the two failure modes
+    # apart from the visible message alone.
+    classification = _classify_stream_idle_timeout(event)
+
     # Second line: diagnostic context
     parts: list[str] = []
     sid = event.session_id[:8] if event.session_id else None
@@ -585,7 +635,10 @@ def _extract_error(
     if event.duration_api_ms:
         parts.append(f"api: {event.duration_api_ms}ms")
 
-    return f"{first}\n{' · '.join(parts)}"
+    diagnostics = " · ".join(parts)
+    if classification is not None:
+        return f"{first}\n{diagnostics}\n\n{classification}"
+    return f"{first}\n{diagnostics}"
 
 
 def _maybe_audit_env(state: ClaudeStreamState, session_id: str) -> None:
@@ -1768,7 +1821,22 @@ class ClaudeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
         # matches the undici idle-body timeout that motivated #322 *and*
         # Untether's own `stuck_after_tool_result_timeout` default, so the
         # upstream CLI watchdog and our detector fire in the same window.
-        env.setdefault("CLAUDE_STREAM_IDLE_TIMEOUT_MS", "300000")
+        # #438: now user-configurable via [watchdog] claude_stream_idle_timeout_ms
+        # so deployments hitting upstream Anthropic API stalls can ride out
+        # longer silences. setdefault still respects shell-set overrides.
+        idle_timeout_default = "300000"
+        try:
+            result = load_settings_if_exists()
+            if result is not None:
+                settings, _ = result
+                idle_timeout_default = str(
+                    settings.watchdog.claude_stream_idle_timeout_ms
+                )
+        except Exception:  # noqa: BLE001 — settings errors must not block a run
+            logger.debug(
+                "claude_stream_idle_timeout.settings_load_failed", exc_info=True
+            )
+        env.setdefault("CLAUDE_STREAM_IDLE_TIMEOUT_MS", idle_timeout_default)
         env.setdefault("MCP_TOOL_TIMEOUT", "120000")
         env.setdefault("MAX_MCP_OUTPUT_TOKENS", "12000")
         if self.use_api_billing is not True:

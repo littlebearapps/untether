@@ -289,6 +289,16 @@ class WatchdogSettings(BaseModel):
     prespawn_ram_warn_mb: int = Field(default=2000, ge=0, le=65536)
     prespawn_ram_block_mb: int = Field(default=500, ge=0, le=65536)
 
+    # #438: user-configurable Claude SSE-stream watchdog. Sets
+    # ``CLAUDE_STREAM_IDLE_TIMEOUT_MS`` for the Claude subprocess (via
+    # ``setdefault`` — shell-set values still win). Default 300000 ms (5 min)
+    # matches the upstream undici idle-body timeout and #342's reasoning.
+    # Long-form opus 4.7 1M plan-mode generations can legitimately idle the
+    # SSE stream past 5 min; deployments that hit upstream Anthropic API
+    # stalls (#438) can raise this to 600000-900000 to ride out longer
+    # silences before Untether reports the run failed. Range 30s-30min.
+    claude_stream_idle_timeout_ms: int = Field(default=300_000, ge=30_000, le=1_800_000)
+
     @model_validator(mode="after")
     def _validate_prespawn_ram_ordering(self) -> WatchdogSettings:
         # When both tiers are active, warn must sit above block — otherwise
