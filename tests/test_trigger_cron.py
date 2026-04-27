@@ -336,3 +336,92 @@ def test_run_once_does_not_resurrect_on_reload():
     mgr.update(settings)
     assert mgr.cron_ids() == []
     assert mgr.fired_run_once_ids() == ["once"]
+
+
+# ── #271 Tier 3: cron firing records last_fired_at ─────────────────────────
+
+
+@pytest.mark.anyio
+async def test_cron_firing_records_last_fired(monkeypatch, tmp_path):
+    """A successful cron dispatch records the trigger id in the history store."""
+    from untether.triggers import history
+
+    history.reset_history()
+    history.init_history(tmp_path / "untether.toml")
+
+    settings = parse_trigger_config(
+        {
+            "enabled": True,
+            "crons": [
+                {
+                    "id": "daily-job",
+                    "schedule": "* * * * *",
+                    "prompt": "hi",
+                },
+            ],
+        }
+    )
+    manager = TriggerManager(settings)
+    dispatcher = FakeDispatcher()
+
+    _real_sleep = anyio.sleep
+
+    async def fast_sleep(s: float) -> None:
+        await _real_sleep(0)
+
+    monkeypatch.setattr("untether.triggers.cron.anyio.sleep", fast_sleep)
+
+    async with anyio.create_task_group() as tg:
+        tg.start_soon(run_cron_scheduler, manager, dispatcher)
+        for _ in range(3):
+            await _real_sleep(0)
+        tg.cancel_scope.cancel()
+
+    assert "daily-job" in dispatcher.fired
+    assert history.get_last_fired("daily-job") is not None
+    history.reset_history()
+
+
+@pytest.mark.anyio
+async def test_cron_history_failure_does_not_break_scheduler(monkeypatch, tmp_path):
+    """A history-store write failure must not propagate out of the scheduler."""
+    from untether.triggers import history
+
+    history.reset_history()
+    history.init_history(tmp_path / "untether.toml")
+
+    # Make the underlying store raise on every record_fired.
+    def boom(self, trigger_id: str) -> None:
+        raise OSError("disk full")
+
+    monkeypatch.setattr(
+        "untether.triggers.history.TriggerHistoryStore.record_fired", boom
+    )
+
+    settings = parse_trigger_config(
+        {
+            "enabled": True,
+            "crons": [
+                {"id": "robust", "schedule": "* * * * *", "prompt": "hi"},
+            ],
+        }
+    )
+    manager = TriggerManager(settings)
+    dispatcher = FakeDispatcher()
+
+    _real_sleep = anyio.sleep
+
+    async def fast_sleep(s: float) -> None:
+        await _real_sleep(0)
+
+    monkeypatch.setattr("untether.triggers.cron.anyio.sleep", fast_sleep)
+
+    async with anyio.create_task_group() as tg:
+        tg.start_soon(run_cron_scheduler, manager, dispatcher)
+        for _ in range(3):
+            await _real_sleep(0)
+        tg.cancel_scope.cancel()
+
+    # Cron still fired even though history write failed.
+    assert "robust" in dispatcher.fired
+    history.reset_history()

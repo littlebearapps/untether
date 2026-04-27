@@ -2577,6 +2577,7 @@ async def handle_message(
         engine=runner.engine,
         actions=progress_tracker.action_count,
         duration_ms=int(elapsed * 1000),
+        triggered=bool(context and context.trigger_source),
     )
     sync_resume_token(progress_tracker, completed.resume or outcome.resume)
 

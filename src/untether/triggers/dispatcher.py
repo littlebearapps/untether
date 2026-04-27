@@ -40,6 +40,12 @@ class TriggerDispatcher:
         label = f"\N{HIGH VOLTAGE SIGN} Trigger: webhook:{webhook.id}"
 
         await self._dispatch(chat_id, label, prompt, context, engine_override)
+        # #271 Tier 3: record last-fired-at for the /config:tg page. Recorded
+        # after dispatch so a transport-send failure (logged inside _dispatch)
+        # doesn't pollute the history with a phantom entry.
+        from . import history
+
+        history.record_fired(webhook.id)
 
     async def dispatch_cron(self, cron: CronConfig) -> None:
         chat_id = cron.chat_id or self.default_chat_id
@@ -208,3 +214,8 @@ class TriggerDispatcher:
             ok=ok,
             message=msg,
         )
+        # #271 Tier 3: record last-fired-at for non-agent actions too — the
+        # webhook still fired even if it didn't spawn a run.
+        from . import history
+
+        history.record_fired(webhook.id)
