@@ -153,3 +153,33 @@ async def test_ping_default_chat_fallback_matches_unscoped_triggers() -> None:
         _make_ctx(chat_id=555, trigger_manager=mgr, default_chat_id=555)
     )
     assert "\u23f0 triggers: 1 cron (any," in result.text
+
+
+# ── #294: master pause indicator ──────────────────────────────────────
+
+
+@pytest.mark.anyio
+async def test_ping_paused_indicator() -> None:
+    """When the trigger manager is paused, /ping uses the ⏸ prefix."""
+    mgr = _make_manager(
+        crons=[{"id": "a", "schedule": "0 9 * * *", "prompt": "x", "chat_id": 10}]
+    )
+    mgr.pause()
+    result = await BACKEND.handle(_make_ctx(chat_id=10, trigger_manager=mgr))
+    assert "⏸ triggers paused" in result.text
+    assert "(suspended)" in result.text
+    # Active prefix must NOT appear (no double-rendering).
+    assert "⏰ triggers:" not in result.text
+
+
+@pytest.mark.anyio
+async def test_ping_resumed_indicator() -> None:
+    """After resume, /ping returns to the active prefix."""
+    mgr = _make_manager(
+        crons=[{"id": "a", "schedule": "0 9 * * *", "prompt": "x", "chat_id": 10}]
+    )
+    mgr.pause()
+    mgr.resume()
+    result = await BACKEND.handle(_make_ctx(chat_id=10, trigger_manager=mgr))
+    assert "⏰ triggers:" in result.text
+    assert "⏸ triggers paused" not in result.text

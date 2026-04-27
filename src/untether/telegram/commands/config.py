@@ -351,6 +351,24 @@ async def _page_home(ctx: CommandContext) -> None:
         model_hint = f"  · {engine_hint}"
     lines.append(f"Model: <b>{model_label}</b>{model_hint}")
     lines.append(f"Listen: <b>{listen_label}</b>{_home_hint('tr', listen_label)}")
+    # #294: master trigger pause indicator on the home page when there's a
+    # trigger manager with configured crons/webhooks. Sits below the chat
+    # "Listen" line to keep the two senses of "trigger" visually distinct
+    # (cron/webhook system vs the renamed-from-trigger listen mode, #297).
+    triggers_indicator: str | None = None
+    triggers_paused = False
+    triggers_has_any = False
+    if ctx.trigger_manager is not None:
+        triggers_paused = ctx.trigger_manager.is_paused
+        triggers_has_any = (
+            len(ctx.trigger_manager.cron_ids()) > 0
+            or ctx.trigger_manager.webhook_count > 0
+        )
+        if triggers_has_any:
+            state = "⏸ paused" if triggers_paused else "active"
+            triggers_indicator = f"Triggers (cron/webhook): <b>{state}</b>"
+    if triggers_indicator is not None:
+        lines.append(triggers_indicator)
     if show_reasoning:
         home_rs_label = get_reasoning_label(current_engine)
         if reasoning_label == "default":
@@ -469,6 +487,18 @@ async def _page_home(ctx: CommandContext) -> None:
             row3.append({"text": f"🧠 {home_rs_label}", "callback_data": "config:rs"})
         buttons.append(row3)
         buttons.append([{"text": "ℹ️ About", "callback_data": "config:ab"}])
+
+    # #294: master trigger pause toggle row — only when triggers are configured
+    # for this transport. Sits below the per-engine layout so it doesn't
+    # crowd the existing rows. Label reflects current state.
+    if triggers_has_any:
+        if triggers_paused:
+            tg_label = "▶️ Resume triggers"
+            tg_action = "config:tg:resume"
+        else:
+            tg_label = "⏸ Pause triggers"
+            tg_action = "config:tg:pause"
+        buttons.append([{"text": tg_label, "callback_data": tg_action}])
 
     await _respond(ctx, "\n".join(lines), buttons)
 
@@ -1812,6 +1842,104 @@ async def _page_about(ctx: CommandContext, action: str | None = None) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Triggers (cron + webhook) master pause toggle (#294)
+# ---------------------------------------------------------------------------
+
+
+async def _page_triggers(ctx: CommandContext, action: str | None = None) -> None:
+    """Master pause/resume page for the trigger system (#294).
+
+    Lives on its own ``/config`` page distinct from ``/config → 📡 Trigger``
+    (which is the listen-mode all/mentions chat-routing setting). When no
+    triggers are configured, the page reports the absence and disables the
+    toggle.
+    """
+    mgr = ctx.trigger_manager
+    chat_id = ctx.message.channel_id
+    chat_id_int = chat_id if isinstance(chat_id, int) else None
+
+    if mgr is None:
+        await _respond(
+            ctx,
+            "<b>⏰ Triggers</b>\n\nUnavailable (transport has no trigger support).",
+            [[{"text": "← Back", "callback_data": "config:home"}]],
+        )
+        return
+
+    cron_count = len(mgr.cron_ids())
+    webhook_count = mgr.webhook_count
+    has_any = cron_count > 0 or webhook_count > 0
+
+    if action == "pause" and has_any and mgr.pause():
+        logger.info(
+            "config.triggers.paused",
+            chat_id=chat_id_int,
+            crons=cron_count,
+            webhooks=webhook_count,
+        )
+    elif action == "resume" and mgr.resume():
+        logger.info(
+            "config.triggers.resumed",
+            chat_id=chat_id_int,
+            crons=cron_count,
+            webhooks=webhook_count,
+        )
+
+    is_paused = mgr.is_paused
+
+    lines = ["<b>⏰ Triggers</b>", ""]
+    if not has_any:
+        lines += [
+            "No crons or webhooks configured.",
+            "",
+            "Add <code>[[triggers.crons]]</code> or <code>[[triggers.webhooks]]</code> "
+            "entries to <code>untether.toml</code> — see the trigger docs.",
+        ]
+    else:
+        if is_paused:
+            lines += [
+                "Status: <b>⏸ paused</b>",
+                "",
+                "Crons and webhooks are temporarily suspended.",
+                f"<code>{cron_count}</code> cron · "
+                f"<code>{webhook_count}</code> webhook",
+                "",
+                "Pause is in-memory only — triggers auto-resume on restart.",
+            ]
+        else:
+            lines += [
+                "Status: <b>active</b>",
+                "",
+                f"<code>{cron_count}</code> cron · "
+                f"<code>{webhook_count}</code> webhook",
+            ]
+
+    buttons: list[list[dict[str, str]]] = []
+    if has_any:
+        if is_paused:
+            buttons.append(
+                [
+                    {
+                        "text": "▶️ Resume triggers",
+                        "callback_data": "config:tg:resume",
+                    }
+                ]
+            )
+        else:
+            buttons.append(
+                [
+                    {
+                        "text": "⏸ Pause triggers",
+                        "callback_data": "config:tg:pause",
+                    }
+                ]
+            )
+    buttons.append([{"text": "← Back", "callback_data": "config:home"}])
+
+    await _respond(ctx, "\n".join(lines), buttons)
+
+
+# ---------------------------------------------------------------------------
 # Routing
 # ---------------------------------------------------------------------------
 
@@ -1820,6 +1948,7 @@ _PAGES: dict[str, object] = {
     "vb": _page_verbose,
     "ag": _page_engine,
     "tr": _page_trigger,
+    "tg": _page_triggers,
     "md": _page_model,
     "rs": _page_reasoning,
     "aq": _page_ask_questions,
@@ -1869,6 +1998,10 @@ class ConfigCommand:
                 "all": "Listen: all",
                 "men": "Listen: mentions",
                 "clr": "Listen: cleared",
+            },
+            "tg": {
+                "pause": "⏸ Triggers paused",
+                "resume": "▶️ Triggers resumed",
             },
             "md": {"clr": "Model: cleared"},
             "rs": {

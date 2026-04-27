@@ -44,6 +44,10 @@ def _make_ctx(
     ctx.executor = AsyncMock()
     ctx.executor.send = AsyncMock(return_value=None)
     ctx.executor.edit = AsyncMock(return_value=None)
+    # #294: most config tests don't exercise the trigger manager. Default
+    # to None so the home page skips the triggers indicator and the new
+    # `_page_triggers` shows the unavailable branch when invoked.
+    ctx.trigger_manager = None
     return ctx
 
 
@@ -3016,3 +3020,80 @@ class TestBudgetToasts:
 
     def test_toast_bc_clr(self):
         assert ConfigCommand.early_answer_toast("cu:bc_clr") == "Auto-cancel: cleared"
+
+
+# ── #294: /config triggers (tg) page ────────────────────────────────────
+
+
+class TestTriggersPage:
+    @pytest.mark.anyio
+    async def test_no_trigger_manager_shows_unavailable(self, tmp_path):
+        cmd = ConfigCommand()
+        ctx = _make_ctx(args_text="tg", text="config:tg")
+        ctx.trigger_manager = None
+        await cmd.handle(ctx)
+        text = _last_edit_msg(ctx).text
+        assert "Triggers" in text
+        assert "Unavailable" in text
+
+    @pytest.mark.anyio
+    async def test_no_triggers_configured_shows_empty_message(self, tmp_path):
+        from untether.triggers.manager import TriggerManager
+
+        cmd = ConfigCommand()
+        ctx = _make_ctx(args_text="tg", text="config:tg")
+        ctx.trigger_manager = TriggerManager()
+        await cmd.handle(ctx)
+        text = _last_edit_msg(ctx).text
+        assert "Triggers" in text
+        assert "No crons or webhooks configured" in text
+
+    @pytest.mark.anyio
+    async def test_pause_action_pauses_manager(self, tmp_path):
+        from untether.triggers.manager import TriggerManager
+        from untether.triggers.settings import parse_trigger_config
+
+        mgr = TriggerManager(
+            parse_trigger_config(
+                {
+                    "enabled": True,
+                    "crons": [
+                        {"id": "a", "schedule": "0 9 * * *", "prompt": "x"},
+                    ],
+                }
+            )
+        )
+        cmd = ConfigCommand()
+        ctx = _make_ctx(args_text="tg:pause", text="config:tg:pause")
+        ctx.trigger_manager = mgr
+        await cmd.handle(ctx)
+        assert mgr.is_paused is True
+        text = _last_edit_msg(ctx).text
+        # Status reflects the new paused state.
+        assert "paused" in text
+
+    @pytest.mark.anyio
+    async def test_resume_action_resumes_manager(self, tmp_path):
+        from untether.triggers.manager import TriggerManager
+        from untether.triggers.settings import parse_trigger_config
+
+        mgr = TriggerManager(
+            parse_trigger_config(
+                {
+                    "enabled": True,
+                    "crons": [
+                        {"id": "a", "schedule": "0 9 * * *", "prompt": "x"},
+                    ],
+                }
+            )
+        )
+        mgr.pause()
+        cmd = ConfigCommand()
+        ctx = _make_ctx(args_text="tg:resume", text="config:tg:resume")
+        ctx.trigger_manager = mgr
+        await cmd.handle(ctx)
+        assert mgr.is_paused is False
+
+    def test_toast_pause_resume(self):
+        assert ConfigCommand.early_answer_toast("tg:pause") == "⏸ Triggers paused"
+        assert ConfigCommand.early_answer_toast("tg:resume") == "▶️ Triggers resumed"

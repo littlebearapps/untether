@@ -42,6 +42,7 @@ def _trigger_indicator(ctx: CommandContext) -> str | None:
     Returns ``None`` if the chat has no triggers targeting it. Formats:
     - Single cron: ``\u23f0 triggers: 1 cron (daily-review, 9:00 AM daily (Melbourne))``
     - Multiple: ``\u23f0 triggers: 2 crons, 1 webhook``
+    - Paused (#294): prefix with ``\u23f8`` and append ``(paused)``
     """
     mgr = ctx.trigger_manager
     if mgr is None:
@@ -67,7 +68,10 @@ def _trigger_indicator(ctx: CommandContext) -> str | None:
     if webhooks:
         suffix = "s" if len(webhooks) != 1 else ""
         parts.append(f"{len(webhooks)} webhook{suffix}")
-    return "\u23f0 triggers: " + ", ".join(parts)
+    line = "\u23f0 triggers: " + ", ".join(parts)
+    if mgr.is_paused:
+        line = "\u23f8 triggers paused: " + ", ".join(parts) + " (suspended)"
+    return line
 
 
 class PingCommand:

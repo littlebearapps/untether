@@ -98,6 +98,12 @@ async def run_cron_scheduler(
 
     while True:
         utc_now = datetime.datetime.now(datetime.UTC)
+        # #294: master pause flag — skip every cron's tick when set.
+        # `run_once` crons that would have fired during the pause are NOT
+        # consumed; they fire on the next matching tick after resume.
+        if manager.is_paused:
+            await anyio.sleep(60 - utc_now.second + 0.1)
+            continue
         # Snapshot the cron list for this tick — safe even if update()
         # replaces manager._crons mid-iteration (new list, old ref valid).
         crons = manager.crons
