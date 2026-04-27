@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import base64
 import hashlib
 import hmac
 from typing import Any
@@ -40,7 +41,11 @@ class TestBearerAuth:
 
     def test_malformed_bearer_header(self):
         wh = _make_webhook(auth="bearer", secret="tok_123")
-        headers = {"authorization": "Basic dXNlcjpwYXNz"}
+        # Construct the Basic auth header at runtime so the literal base64
+        # blob doesn't end up in the source tree (#404 — secret-scanning
+        # alert false positive). Test asserts verify_auth REJECTS Basic auth.
+        basic = "Basic " + base64.b64encode(b"user:pass").decode()
+        headers = {"authorization": basic}
         assert verify_auth(wh, headers, b"") is False
 
 

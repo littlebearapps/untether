@@ -874,7 +874,46 @@ def translate_claude_event(
                 )
             ]
         case claude_schema.StreamControlRequest(request_id=request_id, request=request):
-            # Auto-approve non-user-facing control requests
+            # Auto-approve non-user-facing control requests.
+            #
+            # #380 — security audit (2026-04-27) verified the safety invariant
+            # for the two subtypes that look superficially scary:
+            #
+            # * `ControlMcpMessageRequest` (subtype=mcp_message). Carries
+            #   `server_name: str` + `message: Any`. Untether NEVER inspects
+            #   or executes the `message` payload — it auto-acknowledges and
+            #   the payload flows through Claude Code to the model, where
+            #   model-initiated tool calls still pass through the standard
+            #   `ControlCanUseToolRequest` gate (and ExitPlanMode / interactive
+            #   approval where applicable). A compromised MCP server CAN send
+            #   tainted prompts via this channel, but that's the inherent
+            #   threat model of any MCP server — not specific to auto-approve.
+            #   Routing this through Telegram approval would not block the
+            #   payload (it's already in-flight) — it would just delay the
+            #   acknowledgement, with no security gain.
+            #
+            # * `ControlRewindFilesRequest` (subtype=rewind_files). Carries
+            #   `user_message_id: str`. Rewind is initiated by the user via
+            #   the Claude CLI's `/rewind` slash command (or programmatic
+            #   equivalent) — the model cannot autonomously trigger rewind
+            #   in upstream Claude Code 2.1.x. Untether currently has no UI
+            #   that issues `/rewind`, so this control_request only fires
+            #   when the user types `/rewind` themselves in a chat; the user
+            #   has already consented. If a future release exposes rewind
+            #   via Telegram UI, that UI's command handler should provide
+            #   the gate, not this control-channel layer. The denial state
+            #   that drove a prior approval/deny decision lives on the
+            #   parent (Untether) side in `_HANDLED_REQUESTS` /
+            #   `_PLAN_EXIT_APPROVED` — those are NOT mutated by rewind.
+            #
+            # The other three (initialize, hook_callback, interrupt) are
+            # protocol housekeeping with no payload that Untether interprets.
+            #
+            # Acceptance: changes to either subtype's semantics in upstream
+            # Claude Code MUST trigger a re-audit. Tests in
+            # tests/test_claude_control.py::TestAutoApproveSafetyInvariant
+            # lock in the expectation that auto-approve runs without
+            # invoking any callback that observes the payload.
             _AUTO_APPROVE_TYPES = (
                 claude_schema.ControlInitializeRequest,
                 claude_schema.ControlHookCallbackRequest,
