@@ -129,7 +129,7 @@ The wizard offers three **workflow modes** — pick the one that fits:
 | **Progress streaming** | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | **Session resume** | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | **Model override** | ✅ | ✅ | ✅ | ✅ | ✅ | ✅¹ |
-| **Model in footer** | ✅ | ✅ | ✅ | — | ✅ | — |
+| **Model in footer** | ✅ | ✅ | ✅ | ✅⁷ | ✅ | — |
 | **Approval mode in footer** | ✅ | ~⁴ | — | — | ~² | — |
 | **Voice input** | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | **Verbose progress** | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
@@ -155,6 +155,7 @@ The wizard offers three **workflow modes** — pick the one that fits:
 ⁴ Toggle via `/config` between full auto (default) and safe (`--ask-for-approval=untrusted`, untrusted tools blocked); pre-run policy, not interactive mid-run approval.
 ⁵ Pi requires `provider = "openai-codex"` in engine config for OAuth subscriptions in headless mode.
 ⁶ AMP requires an explicit thread ID; no "most recent" mode.
+⁷ Pi populates the footer model from a supplementary `StartedEvent` carrying the model name extracted from `message_end` ([#225](https://github.com/littlebearapps/untether/issues/225)) — works only when no engine config / per-run override is set.
 
 Claude effort levels: `low`, `medium`, `high`, `xhigh`, `max` (`xhigh` requires Claude Code v2.1.114+).
 
