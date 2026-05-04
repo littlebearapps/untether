@@ -2224,10 +2224,12 @@ async def handle_message(
     progress_tracker = ProgressTracker(engine=runner.engine)
     # rc4 (#271): seed trigger source into meta so the footer renders it.
     # The engine's own StartedEvent.meta merges onto this via note_event.
+    # rc6 (#271 follow-up): also render `at:<token>` from /at-scheduled runs
+    # with the alarm-clock icon — semantically a one-shot delayed cron.
     if context is not None and context.trigger_source:
         icon = (
             "\N{ALARM CLOCK}"
-            if context.trigger_source.startswith("cron:")
+            if context.trigger_source.startswith(("cron:", "at:"))
             else "\N{HIGH VOLTAGE SIGN}"
         )
         progress_tracker.meta = {"trigger": f"{icon} {context.trigger_source}"}

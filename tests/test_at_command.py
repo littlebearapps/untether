@@ -250,11 +250,41 @@ class TestAtCommand:
                 assert result is not None
                 pending = at_scheduler.pending_for_chat(99999)
                 assert len(pending) == 1
-                assert pending[0].context is None
-                # Resolved engine is captured even when context is None so a
+                # #271 follow-up: even unmapped chats now get a fresh
+                # RunContext carrying just the trigger_source so the footer
+                # renders `⏰ at:<token>`.
+                assert pending[0].context is not None
+                assert pending[0].context.project is None
+                assert pending[0].context.trigger_source is not None
+                assert pending[0].context.trigger_source.startswith("at:")
+                assert pending[0].context.trigger_source == f"at:{pending[0].token}"
+                # Resolved engine is captured even when project is None so a
                 # later config change to the global default can't drift the
                 # frozen run (mirrors cron.engine).
                 assert pending[0].engine_override == "codex"
+            finally:
+                tg.cancel_scope.cancel()
+
+    async def test_handle_stamps_trigger_source_on_mapped_chat(self):
+        """#271 follow-up: /at preserves the project mapping AND stamps
+        trigger_source = 'at:<token>' so the run footer shows ⏰ at:<id>."""
+        runtime = _FakeRuntime(
+            chat_to_context={12345: RunContext(project="acme", branch=None)},
+            engine_for_context={"acme": "pi"},
+            global_default="codex",
+        )
+        run_recorder = RunJobRecorder()
+        transport = FakeTransport()
+        async with anyio.create_task_group() as tg:
+            at_scheduler.install(tg, run_recorder, transport, 12345)
+            try:
+                await AtCommand().handle(_make_ctx("60s do something", runtime=runtime))
+                pending = at_scheduler.pending_for_chat(12345)
+                assert len(pending) == 1
+                # Project mapping preserved (#362) AND trigger_source stamped.
+                assert pending[0].context is not None
+                assert pending[0].context.project == "acme"
+                assert pending[0].context.trigger_source == f"at:{pending[0].token}"
             finally:
                 tg.cancel_scope.cancel()
 
@@ -358,7 +388,11 @@ class TestAtScheduler:
         #    progress_ref)
         assert args[0] == 555
         assert args[2] == "go"
-        assert args[4] == captured_context  # context (was None pre-#362)
+        # #362 captured project preserved; #271 follow-up stamps trigger_source.
+        assert args[4] is not None
+        assert args[4].project == captured_context.project
+        assert args[4].trigger_source is not None
+        assert args[4].trigger_source.startswith("at:")
         assert args[9] == "pi"  # engine_override (was None pre-#362)
 
 

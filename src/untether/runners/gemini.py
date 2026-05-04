@@ -317,6 +317,13 @@ class GeminiRunner(ResumeTokenMixin, JsonlSubprocessRunner):
     gemini_cmd: str = "gemini"
     model: str | None = None
     session_title: str = "gemini"
+    # #471: Gemini CLI rejects runs from any directory not present in
+    # ~/.gemini/trustedFolders.json — even with --approval-mode yolo. Untether
+    # is always headless so there is no way to interactively trust a folder;
+    # we pass --skip-trust by default for the same reason we pass yolo. Set
+    # `[gemini] skip_trust = false` in untether.toml to opt out (e.g. if the
+    # operator wants Gemini's project-local extension/MCP trust gate enforced).
+    skip_trust: bool = True
     logger = logger
 
     def format_resume(self, token: ResumeToken) -> str:
@@ -351,6 +358,8 @@ class GeminiRunner(ResumeTokenMixin, JsonlSubprocessRunner):
             args.extend(["--approval-mode", run_options.permission_mode])
         else:
             args.extend(["--approval-mode", "yolo"])
+        if self.skip_trust:
+            args.append("--skip-trust")
         args.append(f"--prompt={self.sanitize_prompt(prompt)}")
         return args
 
@@ -538,11 +547,23 @@ def build_runner(config: EngineConfig, config_path: Path) -> Runner:
             f"Invalid `gemini.model` in {config_path}; expected a string."
         )
 
+    skip_trust_value = config.get("skip_trust", True)
+    if not isinstance(skip_trust_value, bool):
+        logger.warning(
+            "gemini.config.invalid",
+            error="skip_trust must be a boolean",
+            config_path=str(config_path),
+        )
+        raise ConfigError(
+            f"Invalid `gemini.skip_trust` in {config_path}; expected a boolean."
+        )
+
     title = str(model) if model is not None else "gemini"
 
     return GeminiRunner(
         model=model,
         session_title=title,
+        skip_trust=skip_trust_value,
     )
 
 

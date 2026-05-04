@@ -16,7 +16,7 @@ from __future__ import annotations
 import secrets
 import time
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
 import anyio
 from anyio.abc import TaskGroup
@@ -148,6 +148,16 @@ def schedule_delayed_run(
     token = secrets.token_hex(6)
     now = time.monotonic()
     scope = anyio.CancelScope()
+    # #271 follow-up: stamp trigger_source = "at:<token>" so the run footer
+    # shows provenance (`⏰ at:<token>`) just like cron/webhook fires. Mirrors
+    # TriggerDispatcher's freeze-at-dispatch pattern. If the chat had no
+    # project mapping, create a fresh RunContext carrying just the source so
+    # the runner_bridge meta seed still fires.
+    trigger_source = f"at:{token}"
+    if context is None:
+        context = RunContext(trigger_source=trigger_source)
+    else:
+        context = replace(context, trigger_source=trigger_source)
     entry = _PendingAt(
         token=token,
         chat_id=chat_id,
