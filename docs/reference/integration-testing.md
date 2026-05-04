@@ -10,6 +10,7 @@ Structured, repeatable integration test process run against `@untether_dev_bot` 
 | **Test projects** | `test-projects/test-{claude,codex,opencode,pi,gemini,amp}/` |
 | **Test chats** | 6 dedicated Telegram groups in the `ut-dev` folder, one per engine |
 | **Engines** | Claude, Codex, OpenCode, Pi, Gemini, Amp |
+| **Engine auth & defaults** | Per-engine provider/model state on `lba-1` lives in [`dev-instance.md` → Engine auth & defaults](dev-instance.md#engine-auth--defaults-lba-1). Run the smoke commands there if a tier 1 test fails on auth. |
 
 ## Automated Testing via Telegram MCP
 

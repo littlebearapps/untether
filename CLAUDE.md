@@ -232,7 +232,7 @@ Key test files:
 
 ## Development
 
-Two instances run on lba-1 — staging (PyPI/TestPyPI) and dev (local editable source). See `docs/reference/dev-instance.md` for full quickref including the staging workflow. See `docs/reference/integration-testing.md` for the structured integration test playbook run against `@untether_dev_bot` before every release. All integration test tiers are fully automated by Claude Code via Telegram MCP tools (`send_message`, `get_history`, `list_inline_buttons`, `press_inline_button`, `reply_to_message`, `send_voice`, `send_file`) and Bash (`journalctl`, `kill -TERM`, FD/zombie checks).
+Five Untether instances run on lba-1: two production (staging + dev) and three special-purpose (demo, dev-hf, dev-ws). The staging/dev pair drives the release workflow described below; the other three are dedicated test bots that share the same source tree but their own configs and Telegram bots. See `docs/reference/dev-instance.md` for the full quickref including the staging workflow. See `docs/reference/integration-testing.md` for the structured integration test playbook run against `@untether_dev_bot` before every release. All integration test tiers are fully automated by Claude Code via Telegram MCP tools (`send_message`, `get_history`, `list_inline_buttons`, `press_inline_button`, `reply_to_message`, `send_voice`, `send_file`) and Bash (`journalctl`, `kill -TERM`, FD/zombie checks).
 
 | | Staging (`@hetz_lba1_bot`) | Dev (`@untether_dev_bot`) |
 |---|---|---|
@@ -240,6 +240,16 @@ Two instances run on lba-1 — staging (PyPI/TestPyPI) and dev (local editable s
 | **Binary** | `~/.local/bin/untether` (pipx) | `.venv/bin/untether` (editable) |
 | **Config** | `~/.untether/untether.toml` | `~/.untether-dev/untether.toml` |
 | **Source** | PyPI release or TestPyPI rc | Local `/home/nathan/untether/src/` |
+
+Special-purpose instances (all run from `/home/nathan/untether/.venv/bin/untether` — local editable source, restart picks up code changes):
+
+| Service | Config dir | Purpose |
+|---|---|---|
+| `untether-demo.service` | `~/.untether-demo/` | Screenshot demo bot |
+| `untether-dev-hf.service` | `~/.untether-dev-hf/` | Handoff-mode (`session_mode = "stateless"`) testing |
+| `untether-dev-ws.service` | `~/.untether-dev-ws/` | Workspace-mode (`session_mode = "chat"`) testing |
+
+Note that `untether-issue-watcher.service` only tails `untether.service` (staging) — errors emitted by dev/demo/dev-hf/dev-ws are NOT auto-filed as issues.
 
 ### 3-phase release workflow (MANDATORY)
 
