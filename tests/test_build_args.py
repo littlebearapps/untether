@@ -468,6 +468,24 @@ class TestGeminiBuildArgs:
         idx = args.index("--approval-mode")
         assert args[idx + 1] == "yolo"
 
+    def test_skip_trust_default_includes_flag(self) -> None:
+        """#471 — runs should pass --skip-trust by default so headless runs
+        work outside ~/.gemini/trustedFolders.json."""
+        runner = self._runner()
+        state = runner.new_state("hello", None)
+        with patch("untether.runners.gemini.get_run_options", return_value=None):
+            args = runner.build_args("hello", None, state=state)
+        assert "--skip-trust" in args
+
+    def test_skip_trust_opt_out_omits_flag(self) -> None:
+        """#471 — `[gemini] skip_trust = false` opts out so Gemini's own
+        project-local trust gate is enforced (security-conscious deployments)."""
+        runner = self._runner(skip_trust=False)
+        state = runner.new_state("hello", None)
+        with patch("untether.runners.gemini.get_run_options", return_value=None):
+            args = runner.build_args("hello", None, state=state)
+        assert "--skip-trust" not in args
+
 
 # ---------------------------------------------------------------------------
 # AMP
