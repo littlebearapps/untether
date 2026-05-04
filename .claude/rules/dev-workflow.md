@@ -4,7 +4,9 @@ applies_to: "src/untether/**"
 
 # Dev/Production Workflow Rules
 
-## Two instances
+## Instances on lba-1
+
+The release workflow only involves two instances — **staging** (PyPI/TestPyPI wheel) and **dev** (local editable source):
 
 | | Staging | Dev |
 |---|---|---|
@@ -12,6 +14,16 @@ applies_to: "src/untether/**"
 | **Bot** | `@hetz_lba1_bot` | `@untether_dev_bot` |
 | **Source** | PyPI wheel or TestPyPI rc | Local editable (`/home/nathan/untether/src/`) |
 | **Config** | `~/.untether/untether.toml` | `~/.untether-dev/untether.toml` |
+
+Three additional special-purpose instances exist on the same host but are **not** part of the release pipeline. They share the local editable source, so a `/home/nathan/untether/src/` change affects them on restart — keep that in mind when iterating:
+
+| Service | Config dir | Purpose |
+|---|---|---|
+| `untether-demo.service` | `~/.untether-demo/` | Screenshot demo bot |
+| `untether-dev-hf.service` | `~/.untether-dev-hf/` | Handoff-mode (`session_mode = "stateless"`) testing |
+| `untether-dev-ws.service` | `~/.untether-dev-ws/` | Workspace-mode (`session_mode = "chat"`) testing |
+
+Do not test code changes against demo/dev-hf/dev-ws by default — use `untether-dev` (`@untether_dev_bot`). The other three exist for mode-specific or screenshot-specific work and should only be touched when those features are the subject of the change.
 
 ## Rules
 

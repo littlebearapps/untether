@@ -20,6 +20,8 @@
 - **Minor**: new features, new commands, new engines, config additions
 - **Major**: breaking changes to config, runner protocol, or public API
 
+**Pre-1.0 minor judgement:** While Untether is pre-1.0, the patch/minor distinction is made by judgement based on size of change, breaking-ness, and ecosystem disruption — not by a strict "any new feature → minor" rule. Opt-in additive features behind config flags (e.g. new runner backends, new commands that don't change existing behaviour) may ship in patches if they preserve all current defaults. Breaking changes to config format, runner protocol, or public API still require a minor (or major if disruptive). When in doubt, prefer patch + clear changelog notation; reserve minors for cohesive feature themes. Precedent: `[security] env_extra_allow` config addition shipped in v0.35.3 patch via [#409](https://github.com/littlebearapps/untether/issues/409).
+
 ## MANDATORY integration testing before release
 
 **Every version bump MUST include integration testing via `@untether_dev_bot`.** This is not optional. See `docs/reference/integration-testing.md` for the full playbook.

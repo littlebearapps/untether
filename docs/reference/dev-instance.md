@@ -1,6 +1,6 @@
 # Dev Instance
 
-Untether runs two isolated instances on lba-1: **staging** (PyPI/TestPyPI release) and **dev** (local editable source). They use separate Telegram bots, separate configs, and separate state — zero crosstalk.
+Untether runs five isolated instances on lba-1. The release workflow uses two — **staging** (PyPI/TestPyPI release) and **dev** (local editable source) — described in detail below. Three additional special-purpose instances (demo, dev-hf, dev-ws) exist on the same host for screenshot generation and mode-specific testing; see [Additional instances on lba-1](#additional-instances-on-lba-1) at the bottom of this page. All five use separate Telegram bots, separate configs, and separate state — zero crosstalk.
 
 ## How it works
 
@@ -10,7 +10,7 @@ Untether runs two isolated instances on lba-1: **staging** (PyPI/TestPyPI releas
 | **Binary** | `~/.local/bin/untether` (pipx, PyPI wheel) | `/home/nathan/untether/.venv/bin/untether` (editable) |
 | **Config** | `~/.untether/untether.toml` | `~/.untether-dev/untether.toml` |
 | **State files** | `~/.untether/*.json` | `~/.untether-dev/*.json` |
-| **Lock file** | `~/.untether/untether.toml.lock` | `~/.untether-dev/untether.toml.lock` |
+| **Lock file** | `~/.untether/untether.lock` | `~/.untether-dev/untether.lock` |
 | **Telegram bot** | `@hetz_lba1_bot` | `@untether_dev_bot` |
 | **Source** | PyPI release or TestPyPI rc | Whatever's in `/home/nathan/untether/src/` |
 
@@ -171,6 +171,40 @@ To add another test route:
 4. Create a workspace directory under `test-projects/`
 5. Restart dev: `systemctl --user restart untether-dev`
 
+## Engine auth & defaults (lba-1)
+
+Each engine on `lba-1` is authed to a different provider so integration tests exercise a range of models on a single host. Always verify state with the smoke commands below before running Tier 1+ tests — defaults shift when an engine updates or a key rotates.
+
+| Engine | CLI ver | Auth | Default provider/model | Cred location |
+|---|---|---|---|---|
+| **Claude Code** | rolling | Anthropic OAuth | latest Sonnet/Opus per CLI | `~/.claude/` |
+| **Codex** | 0.128.0 | ChatGPT subscription | auto-routed (GPT-5.x family) | `~/.codex/` |
+| **Gemini** | 0.40.1 | OAuth-personal + `GEMINI_API_KEY` env (workaround for auth-discovery hang) | auto-routed (gemini-3-flash-preview + gemini-2.5-flash-lite observed) | `~/.gemini/oauth_creds.json` |
+| **OpenCode** | 1.14.33 | DeepSeek API key | `deepseek/deepseek-v4-pro` | `~/.local/share/opencode/auth.json` + `~/.config/opencode/opencode.json` |
+| **Pi** | 0.72.1 | Kimi For Coding API key (`pi /login`) | `kimi-coding/k2p6` ("Kimi K2.6") | `~/.pi/agent/auth.json` + `~/.pi/agent/settings.json` |
+| **AMP** | rolling | ampcode.com API key (`amp login`) | mode `smart` (AMP routes by mode, not model) | `~/.local/share/amp/secrets.json` |
+
+### Smoke verification
+
+```bash
+# Run from /tmp or a trusted dir; expect each to print a one-line answer
+claude --print "say hi"
+codex --ask-for-approval never exec --json --skip-git-repo-check --color=never "say hi" | tail -5
+gemini --output-format stream-json --approval-mode yolo --prompt="say hi" | tail -5    # cwd must be in ~/.gemini/trustedFolders.json or pass --skip-trust
+opencode run --format json -- "say hi" | tail -3
+pi --print --mode json "say hi" | tail -3
+amp --stream-json -x "say hi" | tail -3
+```
+
+### Notes per engine
+
+- **OpenCode**: `google` provider is whitelisted to `[]` so `opencode models` only lists `deepseek/*` and `opencode/*` (free community). Other provider blocks (`kimi`, `minimax`, `zhipu`) auto-register only when their env vars are set; currently inert.
+- **Pi**: `kimi-coding` has `cost: 0` for all models. Other Kimi models on the same provider include `kimi-for-coding` and `kimi-k2-thinking` — verify via `grep -A 1 '"kimi-coding"' /usr/lib/node_modules/@mariozechner/pi-coding-agent/node_modules/@mariozechner/pi-ai/dist/models.generated.js`.
+- **Gemini**: trusted folders live in `~/.gemini/trustedFolders.json` (incl. `/home/nathan/untether`). Untether's runner does NOT pass `--skip-trust` today — see [#471](https://github.com/littlebearapps/untether/issues/471).
+- **AMP**: compute is picked by `--mode` flag (`smart`/`deep`/`free`/`rush`), not `--model`. The runner's `--model` override is mapped onto `--mode` in `runners/amp.py:build_args`.
+
+For the integration-test playbook see [`integration-testing.md`](integration-testing.md).
+
 ## Systemd service configuration
 
 An example service file lives at `contrib/untether.service`. Seven settings are
@@ -275,3 +309,21 @@ systemctl --user restart untether
 ```
 
 The same settings should be applied to `untether-dev.service`.
+
+## Additional instances on lba-1
+
+Three extra Untether instances run on the same host alongside staging and dev. They are **not** part of the release pipeline, do not need rc-version dogfooding, and are not auto-monitored by `untether-issue-watcher` (which only tails `untether.service`). They share the local editable source — a `/home/nathan/untether/src/` change reaches them on the next service restart.
+
+| Service | Config dir | Binary | Telegram bot | Purpose |
+|---|---|---|---|---|
+| `untether-demo.service` | `~/.untether-demo/` | `/home/nathan/untether/.venv/bin/untether` | `8019912075:…` | Screenshot demo bot for README/marketing assets |
+| `untether-dev-hf.service` | `~/.untether-dev-hf/` | `/home/nathan/untether/.venv/bin/untether` | `8485467124:…` | Handoff-mode (`session_mode = "stateless"`) testing |
+| `untether-dev-ws.service` | `~/.untether-dev-ws/` | `/home/nathan/untether/.venv/bin/untether` | `8600461346:…` | Workspace-mode (`session_mode = "chat"`) testing |
+
+When iterating on code, default to restarting `untether-dev` only — restarting demo/dev-hf/dev-ws is unnecessary unless the change touches the mode/feature they exercise.
+
+### Lock-file gotcha (PID-reuse race)
+
+All five instances use the same lockfile mechanism (`~/.untether*/untether.lock`, written by `src/untether/lockfile.py`). The lock stores the holder's PID and bot-token fingerprint. On startup, if the recorded PID is still alive **and** the token fingerprint matches the current config, startup fails with `error: already running`. This check can fail open under PID reuse: if a prior instance died holding the lock and systemd later assigns the same PID to an unrelated process (any process on the host, not just another Untether), the lock looks valid and the service crash-restart-loops indefinitely.
+
+Symptom: `systemctl --user status untether*` shows `activating (auto-restart)` with `status=1/FAILURE` and journal entries like `cli.lock_error … error='error: already running\nremove ~/.untether*/untether.lock if stale'`. The fix is to delete the stale lock file and `systemctl --user reset-failed <service> && systemctl --user restart <service>` — but verify first that no other process is actually running with the same `UNTETHER_CONFIG_PATH` (check `pgrep -af untether` and `cat /proc/<pid>/environ | tr '\0' '\n' | grep UNTETHER_CONFIG_PATH`).
