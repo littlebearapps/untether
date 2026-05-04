@@ -74,6 +74,30 @@ Or disable API cost to show only subscription usage:
     show_subscription_usage = true
     ```
 
+## Debug page (`/usage debug`)
+
+When the subscription usage footer goes silent, run `/usage debug` to see a one-message diagnostic block ([#410](https://github.com/littlebearapps/untether/issues/410)) without grepping `journalctl`:
+
+!!! untether "Untether"
+    **5h window**: 45% used (resets in 2h 15m)
+    …
+    🔧 **debug**
+    Last fetch: 2026-05-04T11:07:32Z (3m ago, fresh)
+    Last error: —
+    OAuth expiry: 2026-05-15T08:00:00Z (10d 21h)
+    Schema-mismatch count: 0
+
+The block shows:
+
+| Field | What it tells you |
+|---|---|
+| **Last fetch** | UTC timestamp + age + freshness label (`fresh` / `stale-while-error`) for the last successful Anthropic API call. |
+| **Last error** | Class name and truncated message of the most recent failure (or `—` if no errors). |
+| **OAuth expiry** | UTC timestamp + hh/mm-until-expiry for the Claude Code OAuth token. Drops to "expired" if the token has lapsed. |
+| **Schema-mismatch count** | Cumulative count of `claude_usage.schema_mismatch` warnings — increments whenever Anthropic ships a usage-payload shape change. Stays at `0` on a healthy host. |
+
+Use this when subscription usage stops appearing in the footer or returns stale numbers — the four fields point at the most likely root causes (auth lapsed, API shape changed, transient HTTP failure, or simply nothing fresh has been fetched yet).
+
 ## Claude Code credentials
 
 The `/usage` command reads your Claude Code OAuth credentials to fetch live data from the Anthropic API. If you see **"No Claude credentials found"**, run `claude login` in your terminal to authenticate.

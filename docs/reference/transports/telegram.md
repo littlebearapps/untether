@@ -74,7 +74,7 @@ Explicit invocation includes any of:
 - `@botname` mention in the message.
 - `/<engine-id>` or `/<project-alias>` as the first token.
 - Replying to a bot message.
-- Built-in or plugin slash commands (for example `/agent`, `/model`, `/reasoning`, `/file`, `/trigger`).
+- Built-in or plugin slash commands (for example `/agent`, `/model`, `/reasoning`, `/file`, `/listen`).
 
 Note: In forum topics, some Telegram clients include `reply_to_message` on every
 message, pointing at the topic’s root service message (`message_id ==
@@ -83,12 +83,14 @@ explicit replies, so they do not trigger mentions-only mode.
 
 Commands:
 
-- `/trigger` shows the current mode and defaults.
-- `/trigger mentions` restricts runs to explicit invocations.
-- `/trigger all` restores the default behavior.
-- `/trigger clear` clears a topic override (topics only).
+- `/listen` shows the current mode and defaults.
+- `/listen mentions` restricts runs to explicit invocations.
+- `/listen all` restores the default behavior.
+- `/listen clear` clears a topic override (topics only).
 
-In group chats, changing trigger mode requires the sender to be an admin.
+`/trigger` continues to work as a deprecated alias for one release cycle ([#297](https://github.com/littlebearapps/untether/issues/297)) and prints a one-line deprecation notice on each invocation.
+
+In group chats, changing listen mode requires the sender to be an admin.
 
 State is stored in `telegram_chat_prefs_state.json` (chat default) and
 `telegram_topics_state.json` (topic overrides) alongside the config file.

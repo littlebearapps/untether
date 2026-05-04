@@ -190,6 +190,44 @@ This is an upstream Claude Code bug ([#34142](https://github.com/anthropics/clau
 
 **Auto-continue is suppressed for signal deaths** (rc=143/SIGTERM, rc=137/SIGKILL) to prevent death spirals under memory pressure. See the [config reference](../reference/config.md#auto_continue).
 
+## "Stream idle timeout - partial response received" (Claude)
+
+**Symptoms:** Claude Code fails with `API Error: Stream idle timeout - partial response received` mid-run, with a Type-A or Type-B classification appended to the failure message.
+
+The error message is classified inline ([#438](https://github.com/littlebearapps/untether/issues/438)) so you don't have to guess which mitigation applies:
+
+* **Type-A (mid-generation stall)** — `num_turns ≥ 1 && duration_api_ms > 0`. Anthropic SSE went silent partway through a generation. Common on long opus 4.7 1M plan-mode runs. **Mitigation:** raise `[watchdog] claude_stream_idle_timeout_ms` to ride out longer silences.
+  ```toml
+  [watchdog]
+  claude_stream_idle_timeout_ms = 600000   # 10 min (default 300000 / 5 min; max 1800000 / 30 min)
+  ```
+  Shell-set `CLAUDE_STREAM_IDLE_TIMEOUT_MS` still wins.
+* **Type-B (cold-start zero-byte stall)** — `num_turns ≤ 1 && duration_api_ms == 0`. The connection opened and went silent before Anthropic produced any tokens. This is an upstream API outage, **not** a watchdog miscalibration — raising the timeout will not help. Wait it out, retry, or check the [Anthropic status page](https://status.anthropic.com).
+
+Auto-retry for Type-A is deferred to a future release pending upstream Anthropic stabilisation.
+
+## Claude session looks alive 30+ min after the final message
+
+**Symptoms:** Claude has clearly finished the turn (you can see the final answer in Telegram), but the session metadata indicates it's still running. The bidirectional Claude CLI is sitting idle holding stdin open.
+
+The post-result idle watchdog ([#333](https://github.com/littlebearapps/untether/issues/333)) closes the gap: every successful `result` event arms `[watchdog] post_result_idle_timeout` (default 600s / 10 min, range 30s–1h). Once the deadline passes the runner closes stdin and the CLI exits cleanly (rc=0). The footer also shows a `✓ turn complete` marker on every successful turn so you have an immediate visual confirmation that the turn has ended even if the process is still alive briefly.
+
+**To disable the timer entirely** (Claude CLI handles its own exit):
+
+```toml
+[watchdog]
+post_result_idle_enabled = false
+```
+
+**To shorten the timeout** for impatient deployments:
+
+```toml
+[watchdog]
+post_result_idle_timeout = 60   # 1 minute
+```
+
+If a button-click `control_response` is mid-flight when the deadline arrives, the timer re-arms instead of closing — preventing orphaned approvals. Look for `claude.post_result_idle.deferred` and `claude.post_result_idle.closing_stdin` in the logs to confirm the watchdog's behaviour.
+
 ## Messages too long or truncated
 
 **Symptoms:** The bot's response is cut off or split across multiple messages.

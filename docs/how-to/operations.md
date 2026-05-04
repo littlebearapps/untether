@@ -37,7 +37,9 @@ Returns `{"status": "ok", "webhooks": N}` where N is the number of configured we
     💰 today: $1.42
     ⏱ uptime: 3d 14h 22m
 
-Each section degrades gracefully when its source is unavailable (non-Linux, no `trigger_manager`, no cost tracker). `/health` is project-aware — `children` reflects the current Untether process tree (Claude Code subprocesses, MCP servers, workerd grandchildren under #275-style cleanup). When triggers are disabled in config, the line reads `triggers: disabled`.
+Each section degrades gracefully when its source is unavailable (non-Linux, no `trigger_manager`, no cost tracker). `/health` is project-aware — `children` reflects the current Untether process tree (Claude Code subprocesses, MCP servers, workerd grandchildren under #275-style cleanup). When triggers are disabled in config, the line reads `triggers: disabled`. When the master pause toggle ([#294](https://github.com/littlebearapps/untether/issues/294)) is engaged, `/health` reports `{"status":"paused","paused":true}` so external monitors can distinguish "paused but up" from healthy.
+
+For Claude subscription diagnostics, use `/usage debug` ([#410](https://github.com/littlebearapps/untether/issues/410)) — it appends a `🔧 debug` block to the standard `/usage` output showing last-fetch wall time and freshness, last-error class+message, OAuth token expiry, and the cumulative `claude_usage.schema_mismatch` counter. See [Subscription usage](subscription-usage.md#debug-page-usage-debug).
 
 ## RAM guard (#350)
 
@@ -185,6 +187,9 @@ When enabled, Untether watches the config file for changes and reloads most sett
 - Trigger system: `triggers.enabled`, crons, webhooks, auth, rate limits, timezones
 - Telegram bridge: `voice_transcription`, `[files]`, `allowed_user_ids`, `allow_any_user`, `show_resume_line`, timing
 - `[security]` keys: `env_extra_allow`, `env_extra_prefix_allow` (re-read on next runner spawn)
+- `[progress]` keys: `max_actions`, `verbosity`, `min_render_interval`, `group_chat_rps` ([#269](https://github.com/littlebearapps/untether/issues/269))
+- `[watchdog]` keys: `tool_timeout`, `mcp_tool_timeout`, `claude_stream_idle_timeout_ms`, `post_result_idle_timeout`, `post_result_idle_enabled` (re-read per run)
+- `[footer]` and `[cost]` settings (re-read per call)
 - Engine defaults, budget, cost/usage display flags
 
 **Restart-only** (require `/restart` or `systemctl restart`):

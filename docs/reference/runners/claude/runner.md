@@ -120,7 +120,7 @@ The Claude runner modifies the subprocess environment before spawning `claude`:
 | `UNTETHER_SESSION` | Set to `1`. Signals to Claude Code plugins (hooks, rules, agents) that the session is running via Untether/Telegram. Plugins can check `[ -n "${UNTETHER_SESSION:-}" ]` in shell hooks to adjust behaviour — e.g. skip blocking Stop hooks that would displace the user's requested content in Telegram's single-message output. See [PitchDocs](https://github.com/littlebearapps/lba-plugins) for a reference implementation. |
 | `ANTHROPIC_API_KEY` | Stripped from the environment by default so Claude Code uses subscription billing. Set `use_api_billing = true` in `[claude]` config to keep the key and use API billing instead. |
 | `CLAUDE_ENABLE_STREAM_WATCHDOG` | Set to `1` via `setdefault` ([#322](https://github.com/littlebearapps/untether/issues/322)). Enables the upstream stream watchdog so Claude Code aborts cleanly on SSE idle timeout instead of hanging. User overrides via shell env still win. |
-| `CLAUDE_STREAM_IDLE_TIMEOUT_MS` | Set to `300000` (5 min) via `setdefault` ([#342](https://github.com/littlebearapps/untether/issues/342)). Matches the undici idle-body timeout that motivated [#322](https://github.com/littlebearapps/untether/issues/322) and Untether's `[watchdog] stuck_after_tool_result_timeout` default. The earlier 60s value tripped on `opus · max` legitimate chain-of-thought windows. |
+| `CLAUDE_STREAM_IDLE_TIMEOUT_MS` | Set to `300000` (5 min) via `setdefault` ([#342](https://github.com/littlebearapps/untether/issues/342)). Matches the undici idle-body timeout that motivated [#322](https://github.com/littlebearapps/untether/issues/322) and Untether's `[watchdog] stuck_after_tool_result_timeout` default. As of v0.35.3 ([#438](https://github.com/littlebearapps/untether/issues/438)) this default is user-configurable via `[watchdog] claude_stream_idle_timeout_ms` (range 30 s – 30 min) for deployments that hit upstream Anthropic API stalls on long opus 4.7 1M plan-mode generations. Shell-set values still win via `setdefault`. The earlier 60 s value tripped on `opus · max` legitimate chain-of-thought windows. |
 | `MCP_TOOL_TIMEOUT` | Set to `120000` (2 min) via `setdefault` ([#322](https://github.com/littlebearapps/untether/issues/322)). |
 | `MAX_MCP_OUTPUT_TOKENS` | Set to `12000` via `setdefault` ([#322](https://github.com/littlebearapps/untether/issues/322)). |
 
@@ -137,6 +137,31 @@ A companion runtime audit (gated by `[security] env_audit = true`, default true)
 ### Reasoning levels (`--effort`)
 
 `--effort` accepts `low`, `medium`, `high`, `xhigh`, `max`. The `xhigh` level was added in v0.35.2 ([#351](https://github.com/littlebearapps/untether/issues/351)) for Claude Code CLI v2.1.114+ — it sits between `high` and `max` and is exposed in `/config → 🧠 Effort`. Set per-chat via the inline menu or pin per-engine via `[engines.claude] reasoning = "xhigh"`.
+
+### Post-result idle timeout + "✓ turn complete" hint ([#333](https://github.com/littlebearapps/untether/issues/333))
+
+After Claude Code emits its final `result` event the bidirectional CLI can sit alive for up to ~36 min before exiting on its own, leaving Untether's progress message looking stuck. The runner now closes that gap two ways:
+
+1. **Footer marker** — every successful `result` event arms a supplementary `StartedEvent` with `meta={"complete": "✓ turn complete"}`, which `markdown.format_meta_line` renders alongside model / effort / permission / trigger so the user sees the turn boundary immediately. Errored results don't emit the hint (no false "complete" tag on a failure).
+2. **Server-side timer** — `_post_result_idle_watchdog` arms `result_received_at` and closes stdin (`this_proc_stdin.aclose()`) once the deadline passes, after which the CLI hits stdin EOF and exits cleanly (rc=0). Claude's auto-continue safety gate already excludes `last_event_type == "result"` so the clean exit will not phantom-resume the session.
+
+Configure via `[watchdog]`:
+
+* `post_result_idle_enabled` — default `true`. Explicit kill-switch.
+* `post_result_idle_timeout` — seconds (default `600`, range 30–3600).
+
+Approval-state guard: if `_REQUEST_TO_SESSION` or `_PENDING_ASK_REQUESTS` has live entries for the session the timer re-arms instead of closing — prevents orphaning a button-click `control_response` mid-flight.
+
+Two structlog events for ops: `claude.post_result_idle.deferred` (approval guard fired) and `claude.post_result_idle.closing_stdin` (deadline passed cleanly).
+
+### `Stream idle timeout - partial response` classification ([#438](https://github.com/littlebearapps/untether/issues/438))
+
+When Claude fails with `API Error: Stream idle timeout - partial response received`, the runner's `_extract_error` now appends a one-line classification to the user-visible message:
+
+* **Type-A (mid-generation)** — `num_turns ≥ 1 && duration_api_ms > 0`. Suggests raising `[watchdog] claude_stream_idle_timeout_ms` to ride out longer SSE silences (typical for opus 4.7 1M plan-mode generations).
+* **Type-B (cold-start zero-byte stall)** — `num_turns ≤ 1 && duration_api_ms == 0`. Tells the user explicitly that raising the timeout will **not** help — it's an upstream Anthropic API outage, not a local watchdog miscalibration.
+
+Auto-retry on Type-A is deferred to v0.35.4 pending upstream Anthropic stabilisation.
 
 ### `rate_limit_event` surfacing ([#349](https://github.com/littlebearapps/untether/issues/349))
 

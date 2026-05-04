@@ -43,7 +43,7 @@ Notes:
 The runner invokes:
 
 ```text
-gemini -p --output-format stream-json --model <model> --prompt=<prompt>
+gemini -p --output-format stream-json --skip-trust --model <model> --prompt=<prompt>
 ```
 
 Flags:
@@ -54,6 +54,7 @@ Flags:
 * `--prompt=<value>` — prompt bound directly to flag (prevents injection when prompt starts with `-`)
 * `--resume <session_id>` — when resuming a session
 * `--approval-mode <mode>` — defaults to `yolo` (full access) when no override is set; configurable via `/config` or `permission_mode` run option
+* `--skip-trust` — passed by **default** as of v0.35.3 ([#471](https://github.com/littlebearapps/untether/issues/471)) so headless runs work outside `~/.gemini/trustedFolders.json`. Gemini CLI rejects runs from any directory not in the trust list — even with `--approval-mode yolo` — and there is no interactive prompt path in headless usage, so projects outside the trust list previously failed silently before any agent output. Set `[gemini] skip_trust = false` in `untether.toml` to opt out (security-conscious operators who want Gemini's project-local extension/MCP trust gate enforced).
 
 ---
 
@@ -75,6 +76,7 @@ Flags:
 
     [gemini]
     model = "gemini-2.5-pro"   # optional; passed as --model
+    skip_trust = true          # optional; default true — opt out to enforce trustedFolders.json
     ```
 
 Notes:
