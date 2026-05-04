@@ -28,11 +28,11 @@ Untether supports four ways to continue a thread:
 
 Reply-to-continue works even if topics or chat sessions are enabled.
 
-## Trigger mode (pre-routing filter)
+## Listen mode (pre-routing filter)
 
-Before routing, Untether checks the chat's **trigger mode**. In `mentions` mode, messages that don't @mention the bot, reply to the bot, or start with a known slash command are silently dropped — they never reach the router. In the default `all` mode, every message passes through.
+Before routing, Untether checks the chat's **listen mode** (renamed from "trigger mode" in v0.35.3 — [#297](https://github.com/littlebearapps/untether/issues/297)). In `mentions` mode, messages that don't @mention the bot, reply to the bot, or start with a known slash command are silently dropped — they never reach the router. In the default `all` mode, every message passes through.
 
-Trigger mode is configured per chat via `/trigger` or `/config`, with optional per-topic overrides in forum groups. See [Group chat](../how-to/group-chat.md#set-trigger-mode-for-groups) for details.
+Listen mode is configured per chat via `/listen` (or the deprecated `/trigger` alias) or `/config`, with optional per-topic overrides in forum groups. See [Group chat](../how-to/group-chat.md#set-trigger-mode-for-groups) for details.
 
 ## Routing (how Untether picks a runner)
 

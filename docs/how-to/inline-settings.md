@@ -104,6 +104,21 @@ When you switch engines via the Engine & model page, the home page automatically
 
 Approval policy appears instead of Plan mode when the engine is Codex CLI. Approval mode appears instead of Plan mode when the engine is Gemini CLI.
 
+### Triggers page {#triggers-page}
+
+When `[triggers]` is enabled and at least one cron or webhook is configured, the home page gains a one-button toggle row at the bottom and a dedicated `📡 Triggers` button that opens the Triggers page (`config:tg`) ([#271](https://github.com/littlebearapps/untether/issues/271) Tier 2 + [#294](https://github.com/littlebearapps/untether/issues/294)).
+
+The Triggers page shows:
+
+* **State and counts** — `running` / `paused`, plus per-chat cron and webhook totals.
+* **Master pause/resume toggle** — tap **Pause** to suspend all cron firing and webhook dispatch globally without editing config; tap **Resume** to clear it. While paused, webhooks return `503 triggers paused` (with `Retry-After: 60`), `/health` reports `paused: true`, and `/ping` shows `⏸ triggers paused: … (suspended)`. Pause is in-memory only — restart auto-resumes (the safe default).
+* **Per-chat cron list** — each line shows the cron `id`, human-readable schedule via `describe_cron(schedule, timezone)`, project, engine, and last-fired relative time.
+* **Per-chat webhook list** — each line shows the webhook `id`, path, auth scheme, project, engine, and last-fired.
+
+Lists are scoped to the current chat (`crons_for_chat()` / `webhooks_for_chat()` with the bridge `default_chat_id` fallback), capped at 10 entries with a `…and N more (see untether.toml)` overflow marker. The pause/resume controls remain visible even when the chat has no triggers configured.
+
+See [Schedule tasks](schedule-tasks.md#pausing-all-triggers) for the pause flow end-to-end.
+
 ### Cost & Usage page
 
 The Cost & Usage sub-page merges cost display and budget controls into a unified page with toggle rows:

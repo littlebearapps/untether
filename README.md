@@ -97,11 +97,11 @@ The wizard offers three **workflow modes** — pick the one that fits:
 - 🔄 **Cross-environment resume** — start a session in your terminal, pick it up from Telegram with `/continue`; works with Claude Code, Codex, OpenCode, Pi, and Gemini ([guide](docs/how-to/cross-environment-resume.md))
 - 📎 **File transfer** — upload files to your repo with `/file put`, download with `/file get`; agents can also deliver files automatically by writing to `.untether-outbox/` during a run — sent as Telegram documents on completion
 - 🛡️ **Graceful recovery** — orphan progress messages cleaned up on restart; stall detection with CPU-aware diagnostics; auto-continue for Claude Code sessions that exit prematurely
-- ⏰ **Scheduled tasks** — cron expressions with timezone support, webhook triggers, one-shot delays (`/at 30m <prompt>`), `run_once` crons, and hot-reload configuration (no restart required). `/ping` shows per-chat trigger summary; trigger-initiated runs show provenance in the footer
+- ⏰ **Scheduled tasks** — cron expressions with timezone support, webhook triggers, one-shot delays (`/at 30m <prompt>`), `run_once` crons, master pause/resume toggle, and hot-reload configuration (no restart required). `/ping` shows per-chat trigger summary; trigger-initiated runs show provenance in the footer (`⏰ cron:<id>` / `⚡ webhook:<id>` / `⏰ at:<token>`); `/stats` reports per-engine triggered-vs-manual breakdown
 - 💬 **Forum topics** — map Telegram topics to projects and branches
 - 📤 **Session export** — `/export` for markdown or JSON transcripts
 - 🗂️ **File browser** — `/browse` to navigate project files with inline buttons
-- ⚙️ **Inline settings** — `/config` opens an in-place settings menu; toggle plan mode, ask mode, approval policy (Codex), approval mode (Gemini), verbose, engine, model, reasoning, and trigger with buttons
+- ⚙️ **Inline settings** — `/config` opens an in-place settings menu; toggle plan mode, ask mode, approval policy (Codex), approval mode (Gemini), verbose, engine, model, reasoning, and listen mode with buttons; dedicated `📡 Triggers` page lists per-chat crons/webhooks with last-fired times and a master pause/resume toggle
 - 🧩 **Plugin system** — extend with custom engines, transports, and commands
 - 🔌 **Plugin-compatible** — Claude Code plugins detect Untether sessions via `UNTETHER_SESSION` env var, preventing hooks from interfering with Telegram output; works with [PitchDocs](https://github.com/littlebearapps/lba-plugins) and other Claude Code plugins
 - 📊 **Session statistics** — `/stats` shows per-engine run counts, action totals, and duration across today, this week, and all time
@@ -168,7 +168,7 @@ Claude effort levels: `low`, `medium`, `high`, `xhigh`, `max` (`xhigh` requires 
 | `/agent` | Show or set the engine for this chat |
 | `/model` | Override the model for an engine |
 | `/planmode` | Toggle plan mode (on/auto/off) |
-| `/usage` | Show API costs for the current session |
+| `/usage` | Show API costs for the current session (`/usage debug` shows fetch state, OAuth expiry, schema-mismatch counter) |
 | `/export` | Export session transcript |
 | `/browse` | Browse project files |
 | `/new` | Cancel running tasks and clear stored sessions |
@@ -177,10 +177,10 @@ Claude effort levels: `low`, `medium`, `high`, `xhigh`, `max` (`xhigh` requires 
 | `/topic` | Create or bind forum topics |
 | `/restart` | Gracefully restart Untether (drains active runs first) |
 | `/verbose` | Toggle verbose progress mode (show tool details) |
-| `/config` | Interactive settings menu (plan mode, ask mode, verbose, engine, model, reasoning, trigger, approval mode, cost & usage) |
+| `/config` | Interactive settings menu (plan mode, ask mode, verbose, engine, model, reasoning, listen, approval mode, cost & usage); `📡 Triggers` page for cron/webhook list + master pause/resume |
 | `/ctx` | Show or update project/branch context |
 | `/reasoning` | Set reasoning level override |
-| `/trigger` | Set group chat trigger mode |
+| `/listen` | Set group chat listen mode (`all` / `mentions` / `clear`); `/trigger` still works as a deprecated alias |
 | `/stats` | Per-engine session statistics (today/week/all-time) |
 | `/auth` | Codex device re-authentication |
 | `/at 30m <prompt>` | Schedule a one-shot delayed run (60s–24h; `/cancel` to drop) |
@@ -275,7 +275,7 @@ Full documentation is available in the [`docs/`](https://github.com/littlebearap
 - [File browser](https://github.com/littlebearapps/untether/blob/master/docs/how-to/browse-files.md) — `/browse` inline navigation
 - [Session export](https://github.com/littlebearapps/untether/blob/master/docs/how-to/export-sessions.md) — markdown and JSON transcripts
 - [Verbose progress](https://github.com/littlebearapps/untether/blob/master/docs/how-to/verbose-progress.md) — tool detail display
-- [Group chats](https://github.com/littlebearapps/untether/blob/master/docs/how-to/group-chat.md) — multi-user and trigger modes
+- [Group chats](https://github.com/littlebearapps/untether/blob/master/docs/how-to/group-chat.md) — multi-user and listen modes
 - [Context binding](https://github.com/littlebearapps/untether/blob/master/docs/how-to/context-binding.md) — per-chat project/branch binding
 - [Webhooks and cron](https://github.com/littlebearapps/untether/blob/master/docs/how-to/webhooks-and-cron.md) — automated runs from external events
 - [Update Untether](https://github.com/littlebearapps/untether/blob/master/docs/how-to/update.md) — upgrade to the latest version

@@ -38,7 +38,7 @@ This line is parsed from replies and takes precedence over new directives. For b
 | `/agent` | Show/set the default engine for the current scope. |
 | `/model` | Show/set the model override for the current scope. |
 | `/reasoning` | Show/set the reasoning override for the current scope. |
-| `/trigger` | Show/set trigger mode (mentions-only vs all). |
+| `/listen` | Show/set listen mode (`all` / `mentions` / `clear`) — controls whether the bot responds to every message in a group chat or only to @-mentions. Renamed from `/trigger` in v0.35.3 ([#297](https://github.com/littlebearapps/untether/issues/297)); `/trigger` continues to work as a deprecated alias for one release cycle. |
 | `/file put <path>` | Upload a document into the repo/worktree (requires file transfer enabled). |
 | `/file get <path>` | Fetch a file or directory back into Telegram. Agents can also send files automatically via `.untether-outbox/` — see [file transfer](../how-to/file-transfer.md#agent-initiated-delivery-outbox). |
 | `/topic <project> @branch` | Create/bind a topic (topics enabled). |
@@ -46,19 +46,19 @@ This line is parsed from replies and takes precedence over new directives. For b
 | `/ctx set <project> @branch` | Update context binding. |
 | `/ctx clear` | Remove context binding. |
 | `/planmode` | Toggle Claude Code plan mode (on/auto/off/show/clear). Claude Code only — non-Claude engines are directed to `/config` → Approval policy. |
-| `/usage` | Show Claude Code subscription usage (5h window, weekly, per-model). Claude Code only. Requires Claude Code OAuth credentials (see [troubleshooting](../how-to/troubleshooting.md#claude-code-credentials)). |
+| `/usage` | Show Claude Code subscription usage (5h window, weekly, per-model). Claude Code only. Requires Claude Code OAuth credentials (see [troubleshooting](../how-to/troubleshooting.md#claude-code-credentials)). `/usage debug` appends a `🔧 debug` block with last-fetch wall time and freshness label, last-error class+message, OAuth token expiry, and the cumulative `claude_usage.schema_mismatch` counter ([#410](https://github.com/littlebearapps/untether/issues/410)). |
 | `/export` | Export last session transcript as Markdown or JSON. |
 | `/browse` | Browse project files with inline keyboard navigation. |
 | `/ping` | Health check — replies with uptime since last (re)start. Shows trigger summary if triggers target the current chat. |
 | `/health` | System + triggers + cost snapshot — RAM/swap, Untether process (PID, RSS, FDs, children), trigger counts, today's API cost, uptime. Compact 6-line HTML message; sections degrade gracefully when sources are unavailable. See [operations](../how-to/operations.md#health-snapshot). |
 | `/restart` | Gracefully drain active runs and restart Untether. |
 | `/verbose` | Toggle verbose progress mode (on/off/clear). Shows tool details in progress messages. |
-| `/config` | Interactive settings menu — plan mode, ask mode, verbose, engine, model, reasoning, trigger toggles with inline buttons. |
-| `/stats` | Per-engine session statistics — runs, actions, and duration for today, this week, and all time. Pass an engine name to filter (e.g. `/stats claude`). |
+| `/config` | Interactive settings menu — plan mode, ask mode, verbose, engine, model, reasoning, listen-mode toggles with inline buttons. The `📡 Triggers` page (`config:tg`) lists per-chat crons (`describe_cron(...)` schedule, project, engine, last-fired) and webhooks (path, auth, project, engine, last-fired), capped at 10 entries with an overflow marker, plus a master pause/resume toggle ([#271](https://github.com/littlebearapps/untether/issues/271), [#294](https://github.com/littlebearapps/untether/issues/294)). |
+| `/stats` | Per-engine session statistics — runs, actions, and duration for today, this week, and all time. Includes `(N triggered, M manual)` per-engine breakdown when at least one count is nonzero ([#271](https://github.com/littlebearapps/untether/issues/271) Tier 3). Pass an engine name to filter (e.g. `/stats claude`). |
 | `/auth` | Headless device re-authentication for Codex — runs `codex login --device-auth` and sends the verification URL + device code. `/auth status` checks CLI availability. Codex-only. |
 | `/new` | Cancel any running task and clear stored sessions for the current scope (topic/chat). |
 | `/continue [prompt]` | Resume the most recent session in the project directory. Picks up CLI-started sessions from Telegram. Optional prompt appended. Not supported for AMP. |
-| `/at <duration> <prompt>` | Schedule a one-shot delayed run. Duration: `Ns` (60-9999s), `Nm`, or `Nh` (up to 24h). The chat's project mapping and engine are captured at schedule time and used at fire time (mirrors cron freeze-at-dispatch behaviour). Pending delays are cancelled via `/cancel` and lost on restart. Per-chat cap of 20 pending delays. |
+| `/at <duration> <prompt>` | Schedule a one-shot delayed run. Duration: `Ns` (60-9999s), `Nm`, or `Nh` (up to 24h). The chat's project mapping and engine are captured at schedule time and used at fire time (mirrors cron freeze-at-dispatch behaviour). Pending delays are cancelled via `/cancel` and lost on restart. Per-chat cap of 20 pending delays. Trigger-source provenance is stamped as `at:<token>` and rendered in the run footer (`⏰ at:<token>`), and the run counts toward `/stats` as triggered ([#271](https://github.com/littlebearapps/untether/issues/271) follow-up). |
 
 Notes:
 

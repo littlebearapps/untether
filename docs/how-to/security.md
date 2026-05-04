@@ -54,7 +54,10 @@ export UNTETHER_CONFIG_PATH=/path/to/untether.toml
 ```
 
 !!! tip "Automatic log redaction"
-    Untether automatically redacts bot tokens, OpenAI API keys (`sk-...` and `sk-proj-...` since v0.35.3 — [#213](https://github.com/littlebearapps/untether/issues/213)), and GitHub tokens (`ghp_`, `ghs_`, `github_pat_`) from all structured log output. Even if a token appears in engine output or error messages, it is replaced with `[REDACTED]` before being written to logs. The Telegram voice transcription API key is wrapped in `SecretStr` so it never appears in `repr()`/tracebacks/structlog ([#378](https://github.com/littlebearapps/untether/issues/378)).
+    Untether automatically redacts bot tokens, OpenAI API keys (`sk-...` and `sk-proj-...` since v0.35.3 — [#213](https://github.com/littlebearapps/untether/issues/213)), and GitHub tokens (`ghp_`, `ghs_`, `github_pat_`) from all structured log output. Even if a token appears in engine output or error messages, it is replaced with `[REDACTED]` before being written to logs. The Telegram voice transcription API key is wrapped in `SecretStr` so it never appears in `repr()`/tracebacks/structlog ([#378](https://github.com/littlebearapps/untether/issues/378)). Stderr path sanitisation also covers macOS (`/Users/<user>/`, `/private/var/...`), container roots (`/app/`, `/workspace/`), and other absolute paths beyond `/home/<user>/` (`/var/`, `/tmp/`, `/opt/`, `/srv/`, `/etc/`, `/usr/local/`, `/root/`) since v0.35.3 ([#208](https://github.com/littlebearapps/untether/issues/208)); path:line markers (`:42`) survive sanitisation so stack traces remain useful.
+
+!!! tip "Pi session directory permissions ([#207](https://github.com/littlebearapps/untether/issues/207))"
+    Pi engine session directories are created with explicit `0o700` mode (and any pre-existing dir gets `chmod`'d to `0o700` on first use) so other users on shared hosts can't read Pi session JSONL files. Applies as of v0.35.3 — no operator action needed.
 
 ## Engine subprocess env allowlist
 
