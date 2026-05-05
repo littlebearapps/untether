@@ -2385,12 +2385,33 @@ class ClaudeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
         if env is not None:
             cmd = wrap_with_env_i(cmd, env)
             env = None
+        # #205 / #478: redact two flavours of secret material before logging
+        # ``args`` at INFO:
+        #   1. ``env -i KEY=VAL`` pairs from wrap_with_env_i embed live
+        #      credentials (bot tokens, API keys, BWS access token, ...)
+        #      — handled by ``redact_env_i_args`` (#361).
+        #   2. In legacy mode ``build_args`` ends with ``-- <prompt>`` so the
+        #      whole prompt sits as the last argv element. Truncate at the
+        #      ``--`` boundary so prompt content never reaches INFO logs.
+        logged_args = redact_env_i_args(cmd)[1:]
+        if "--" in logged_args:
+            sep = logged_args.index("--")
+            logged_args = [*logged_args[:sep], "--", "<prompt redacted>"]
         run_logger.info(
             "runner.start",
             engine=self.engine,
             resume=resume.value if resume else None,
-            prompt=prompt[:100] + "…" if len(prompt) > 100 else prompt,
             prompt_len=len(prompt),
+            args=logged_args,
+        )
+        # #205 / #478: prompt content may carry credentials/PII; keep at DEBUG
+        # so it only surfaces with explicit operator opt-in. Mirrors the
+        # base ``runner.run_impl`` companion log so behaviour is consistent
+        # across all engines.
+        run_logger.debug(
+            "runner.start_prompt",
+            engine=self.engine,
+            prompt_preview=prompt[:100] + "…" if len(prompt) > 100 else prompt,
         )
 
         cwd = get_run_base_dir()
