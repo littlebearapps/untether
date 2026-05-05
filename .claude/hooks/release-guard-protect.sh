@@ -27,6 +27,9 @@ case "$FILE_PATH" in
   */release-guard.sh | */release-guard-protect.sh | */release-guard-mcp.sh)
     deny "🛑 RELEASE GUARD: This file is protected.\n\nRelease guard hooks can only be edited manually by Nathan.\nProtected: .claude/hooks/release-guard*.sh"
     ;;
+  */help-faq-protect.sh)
+    deny "🛑 HELP-FAQ PROTECTION: This hook script is protected.\n\nThe FAQ-protect hook can only be edited manually by Nathan to prevent silent removal of docs/faq/index.md (issue #477).\nProtected: .claude/hooks/help-faq-protect.sh"
+    ;;
   */.claude/hooks.json)
     deny "🛑 RELEASE GUARD: .claude/hooks.json is protected.\n\nHook configuration must be edited manually by Nathan to prevent removal of release guard hooks."
     ;;

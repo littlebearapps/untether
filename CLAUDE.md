@@ -161,8 +161,9 @@ Project hooks in `.claude/hooks.json` fire automatically:
 | Hook | Trigger | What it does |
 |------|---------|-------------|
 | release-guard | Bash: `git push`, `git tag`, `gh pr merge`, `gh release` | Blocks pushes to master/main, tag creation, PR merging, releases; allows feature and dev branch pushes |
-| release-guard-protect | Edit/Write to guard scripts or `hooks.json` | Prevents modification of release guard infrastructure |
+| release-guard-protect | Edit/Write to guard scripts, `hooks.json`, or `help-faq-protect.sh` | Prevents modification of release guard infrastructure and the FAQ-protect hook |
 | release-guard-mcp | GitHub MCP write tools | Blocks `merge_pull_request` and writes to master/main; allows feature branches |
+| help-faq-protect | Bash: `rm`, `git rm`, `mv`, `>` redirect targeting `docs/faq/index.md` | Blocks deletion / move / truncate of the help-centre FAQ; edits via Edit/Write/append `>>` are allowed (#477) |
 | dev-workflow-guard | `systemctl` with `untether` | Blocks staging restarts during dev; guides to `untether-dev`; allows `staging.sh`/`pipx upgrade` path |
 | runner-edit-context | Edit/Write to `runners/*.py` | 3-event contract, PTY lifecycle, test/doc reminders |
 | schema-edit-context | Edit/Write to `schemas/*.py` | msgspec impact on parsing, fixture updates |
@@ -182,6 +183,7 @@ Rules in `.claude/rules/` auto-load when editing matching files:
 | `release-discipline.md` | `CHANGELOG.md`, `pyproject.toml` | GitHub issue linking, changelog format, semantic versioning |
 | `dev-workflow.md` | `src/untether/**` | Dev vs staging separation, never restart staging for testing, always use untether-dev |
 | `context-quality.md` | AI context files (`CLAUDE.md`, `AGENTS.md`, etc.) | Cross-file consistency, path verification, version accuracy, command accuracy |
+| `help-faq.md` | `docs/faq/**` | NEVER delete; keep FAQ current with feature changes; H2s must be question-shaped (#477) |
 
 ## Tests
 
@@ -378,6 +380,12 @@ Before tagging a release:
 ## Documentation screenshots
 
 48 screenshots in `docs/assets/screenshots/` with a tracking checklist in `CAPTURES.md`. README uses a composite hero collage (`hero-collage.jpg`) built with ImageMagick for mobile responsiveness. Doc files use HTML `<img>` tags with `width="360"` and `loading="lazy"` (works in both GitHub and MkDocs). 14 screenshots are still missing and commented out with `<!-- TODO: capture screenshot -->` markers.
+
+## Help-centre FAQ
+
+`docs/faq/index.md` (12 H2 question-shaped Q/A pairs) backs the marketing-site **FAQPage Schema.org** pipeline shipped on `feature/help-seo-geo-items-1-4` in [`littlebearapps/littlebearapps.com`](https://github.com/littlebearapps/littlebearapps.com). Once the docs-sync mapping in `scripts/docs-sync.config.ts` registers `untether → docs/faq → category: faq`, the marketing site emits `<script type="application/ld+json">` `FAQPage` JSON-LD on every help-centre deploy, unlocking AI-citation surface (ChatGPT, Perplexity, Google AI Overviews) and SERP rich-snippet eligibility.
+
+**The file MUST NOT be deleted or moved** — that silently breaks the docs-sync mapping and regresses the schema on the next deploy. The repo enforces this via the `help-faq-protect.sh` Bash hook which blocks `rm`, `git rm`, `mv`-away, and shell `>` truncation. **Edits ARE encouraged**: keep the FAQ in sync with new features as they land in `CHANGELOG.md`. See [`.claude/rules/help-faq.md`](.claude/rules/help-faq.md) for the full update cadence and shape rules. Tracking issue: [#477](https://github.com/littlebearapps/untether/issues/477).
 
 ## Conventions
 
