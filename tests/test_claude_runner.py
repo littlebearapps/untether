@@ -1,3 +1,4 @@
+import contextlib
 import json
 import time
 from pathlib import Path
@@ -171,6 +172,125 @@ def test_prespawn_ram_guard_warn_only_does_not_block(
 
     # 1500 < 2000 warn threshold, but >= 500 block — should warn, not block
     assert runner._check_prespawn_ram_guard(resume=None) is None
+
+
+# ---------------------------------------------------------------------------
+# #478 / #205 — claude runner.start log must NOT carry prompt content at INFO
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.anyio
+async def test_runner_start_does_not_log_prompt_at_info(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#478: ClaudeRunner.run_impl emits ``runner.start`` at INFO with only
+    ``prompt_len`` + ``args`` (no ``prompt`` field). The prompt preview
+    moves to a DEBUG ``runner.start_prompt`` companion event so credentials
+    or PII never surface at the broadly-accessible INFO tier (#205).
+    Regression-locks the duplicate INFO call inside the claude override
+    that was missed when the base runner was fixed.
+    """
+    from structlog.testing import capture_logs
+
+    class _BoomManager:
+        async def __aenter__(self) -> object:
+            raise RuntimeError("stop_after_log")
+
+        async def __aexit__(self, exc_type, exc, tb) -> None:
+            return None
+
+    def fake_manage_subprocess(*args: object, **kwargs: object) -> _BoomManager:
+        _ = args, kwargs
+        return _BoomManager()
+
+    monkeypatch.setattr(claude_runner, "manage_subprocess", fake_manage_subprocess)
+
+    # Force control-channel mode (production default). Without a
+    # permission_mode, build_args falls back to legacy ``-p <prompt>``
+    # which puts the prompt into argv — covered separately below.
+    runner = ClaudeRunner(claude_cmd="claude", permission_mode="acceptEdits")
+    # Distinctive sentinel that won't collide with legitimate env var names
+    # (e.g., GEMINI_API_KEY) which appear redacted in args=[...].
+    sentinel = "ZAPHOD-PROMPT-SECRET-XYZZY-9876"
+    secret_prompt = f"sensitive content: {sentinel} run my task"
+
+    with capture_logs() as logs, contextlib.suppress(RuntimeError):
+        async for _evt in runner.run_impl(secret_prompt, None):
+            pass
+
+    start_events = [r for r in logs if r.get("event") == "runner.start"]
+    assert start_events, "runner.start INFO event must fire"
+    for record in start_events:
+        # Prompt content must NOT appear in the INFO log under any field name.
+        assert "prompt" not in record, (
+            f"runner.start at INFO leaked 'prompt' field: {record!r}"
+        )
+        assert "prompt_preview" not in record
+        # But length should be there for ops visibility.
+        assert record.get("prompt_len") == len(secret_prompt)
+        # ``args`` is part of the base-runner contract — claude override
+        # should mirror it so subprocess invocation is visible.
+        assert "args" in record
+        # The literal prompt sentinel must not appear anywhere in the record.
+        assert sentinel not in str(record), (
+            f"runner.start INFO leaked prompt sentinel: {record!r}"
+        )
+        # And `env -i KEY=VAL` pairs in args must be redacted (#361) so
+        # secrets passed via env-wrap don't surface even when ``args`` is
+        # logged. Spot-check on a known-redacted name from the env policy.
+        args_str = str(record.get("args"))
+        if "BWS_ACCESS_TOKEN" in args_str:
+            assert "BWS_ACCESS_TOKEN=***" in args_str, (
+                f"env -i pair should be redacted: {args_str}"
+            )
+
+
+@pytest.mark.anyio
+async def test_runner_start_redacts_legacy_mode_prompt_in_args(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#478: in legacy ``-p <prompt>`` mode (no permission_mode set), the
+    prompt sits as the last argv element after ``--``. The runner.start INFO
+    log must redact at the ``--`` boundary so prompt content still doesn't
+    reach INFO. Covers the path where _effective_permission_mode() is None.
+    """
+    from structlog.testing import capture_logs
+
+    class _BoomManager:
+        async def __aenter__(self) -> object:
+            raise RuntimeError("stop_after_log")
+
+        async def __aexit__(self, exc_type, exc, tb) -> None:
+            return None
+
+    def fake_manage_subprocess(*args: object, **kwargs: object) -> _BoomManager:
+        _ = args, kwargs
+        return _BoomManager()
+
+    monkeypatch.setattr(claude_runner, "manage_subprocess", fake_manage_subprocess)
+
+    # No permission_mode → legacy ``-p`` path, prompt lands in argv.
+    runner = ClaudeRunner(claude_cmd="claude")
+    sentinel = "ZAPHOD-LEGACY-SECRET-XYZZY-9876"
+    secret_prompt = f"top-secret legacy: {sentinel} run the task"
+
+    with capture_logs() as logs, contextlib.suppress(RuntimeError):
+        async for _evt in runner.run_impl(secret_prompt, None):
+            pass
+
+    start_events = [r for r in logs if r.get("event") == "runner.start"]
+    assert start_events, "runner.start INFO event must fire"
+    for record in start_events:
+        # The literal prompt sentinel must NOT leak through args.
+        assert sentinel not in str(record), (
+            f"runner.start INFO leaked prompt sentinel via legacy args: {record!r}"
+        )
+        args = record.get("args") or []
+        # Legacy mode appends ``--`` then the prompt; we replace the prompt
+        # with a placeholder string so reviewers can still tell the run was
+        # in legacy mode without exposing prompt content.
+        assert "--" in args
+        assert "<prompt redacted>" in args
 
 
 # ---------------------------------------------------------------------------
