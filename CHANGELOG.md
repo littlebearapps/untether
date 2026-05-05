@@ -35,6 +35,10 @@
 - **security:** Pygments bumped 2.19.2 → 2.20.0 to clear CVE-2026-4539 (ReDoS in `AdlLexer`). Transitive dep — `uv lock --upgrade-package pygments` plus an `--ignore-vuln CVE-2026-4539` removal in CI's `pip-audit` step [#402](https://github.com/littlebearapps/untether/issues/402)
 - **security(secrets):** placeholder bot-token strings replaced with `<BOT_ID>:<BOT_TOKEN>` in user-facing onboarding text and tutorials (`telegram/onboarding.py`, `docs/tutorials/install.md`, `llms-full.txt`) so the GitHub secret-scanner stops flagging the format. Test fixtures kept as-is — operator dismisses those alerts as "used in tests" [#403](https://github.com/littlebearapps/untether/issues/403)
 
+### docs
+
+- **docs:** new `docs/faq/index.md` with 12 H2 question-shaped FAQs covering install, supported engines, API keys, data flow, interactive approvals, crash recovery, cost budgets, voice notes, update, uninstall, and support channels. Sourced from README + real common-channel topics; no placeholders. Companion to the marketing-site FAQPage Schema.org pipeline shipped on `feature/help-seo-geo-items-1-4` in `littlebearapps/littlebearapps.com` — the docs-sync mapping (`scripts/docs-sync.config.ts`) lands separately on the marketing-site repo. Once both PRs merge, `https://untether.littlebearapps.com/help/untether/faq/` will surface a `<script type="application/ld+json">` `FAQPage` block with all 12 Q/A pairs for AI-citation surface (ChatGPT, Perplexity, Google AI Overviews) and SERP rich-snippet eligibility [#477](https://github.com/littlebearapps/untether/issues/477)
+
 ## v0.35.2 (2026-04-20)
 
 ### changes
