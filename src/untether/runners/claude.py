@@ -316,6 +316,18 @@ class ClaudeStreamState:
     # bidirectional session re-arms the timer on every turn boundary.
     result_received_at: float | None = None
 
+    # #470: cross-layer signals from _post_result_idle_watchdog → bridge.
+    # The watchdog stamps ``post_result_closed_at`` (monotonic) and
+    # ``post_result_idle_minutes`` immediately before closing stdin.
+    # ``ProgressEdits._stall_monitor`` polls these via engine_state
+    # duck-typing (mirrors the pattern at runner_bridge.py:1426 for
+    # ``has_live_background_work``) and fires a one-shot Telegram closing
+    # message with the elapsed-minutes wording, then sets
+    # ``post_result_closing_sent`` so subsequent ticks no-op (idempotent).
+    post_result_closed_at: float | None = None
+    post_result_idle_minutes: float = 0.0
+    post_result_closing_sent: bool = False
+
 
 def _normalize_tool_result(content: Any) -> str:
     if content is None:
@@ -415,11 +427,23 @@ def _register_background_handle(
     elif tool_name == "Agent" and bool(raw_input.get("run_in_background")):
         state.live_bg_agents.add(tool_id)
     elif tool_name == "ScheduleWakeup":
-        delay_ms = raw_input.get("delay_ms") or raw_input.get("timeout_ms")
-        if isinstance(delay_ms, (int, float)) and delay_ms > 0:
-            state.live_wakeups[tool_id] = time.monotonic() + (delay_ms / 1000.0)
+        # #481: the actual Claude Code ScheduleWakeup tool schema (per
+        # #289 / claude-agent-sdk-python) emits ``delaySeconds`` as the
+        # canonical field. Earlier versions of this code read
+        # ``delay_ms``/``timeout_ms`` only, which always missed in
+        # production (live_wakeups[tool_id] fell to 0.0 → countdown
+        # rendering broken, though membership-only suppression still
+        # worked). Read delaySeconds first; keep the legacy fallbacks so
+        # existing test fixtures parameterised on delay_ms still work.
+        delay_seconds_raw = raw_input.get("delaySeconds")
+        if isinstance(delay_seconds_raw, (int, float)) and delay_seconds_raw > 0:
+            state.live_wakeups[tool_id] = time.monotonic() + float(delay_seconds_raw)
         else:
-            state.live_wakeups[tool_id] = 0.0
+            delay_ms = raw_input.get("delay_ms") or raw_input.get("timeout_ms")
+            if isinstance(delay_ms, (int, float)) and delay_ms > 0:
+                state.live_wakeups[tool_id] = time.monotonic() + (delay_ms / 1000.0)
+            else:
+                state.live_wakeups[tool_id] = 0.0
     elif tool_name == "RemoteTrigger":
         state.live_remote_triggers.add(tool_id)
 
@@ -2244,6 +2268,13 @@ class ClaudeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
                 elapsed_s=round(elapsed, 1),
                 timeout_s=timeout_s,
             )
+            # #470: stamp closed-at signals BEFORE the actual stdin close
+            # so the bridge's heartbeat tick (which polls engine_state via
+            # duck-typing) can fire the one-shot closing Telegram message.
+            # ``post_result_closing_sent`` stays False — the bridge sets
+            # it after the message is sent (idempotency).
+            state.post_result_closed_at = time.monotonic()
+            state.post_result_idle_minutes = elapsed / 60.0
             with contextlib.suppress(Exception):
                 await this_proc_stdin.aclose()
             return

@@ -437,6 +437,58 @@ def test_schedule_wakeup_tracked_with_deadline() -> None:
     assert "toolu_W1" in state.live_wakeups
 
 
+def test_schedule_wakeup_reads_delaySeconds_field() -> None:
+    """#481: real Claude Code stream-json emits ``delaySeconds`` (#289).
+
+    Previous code only read ``delay_ms``/``timeout_ms`` so production
+    deadlines fell to 0.0 (countdown rendering broken). Verify the new
+    code path: a 60s wakeup yields a ``deadline`` ~60s in the future.
+    """
+    import time
+
+    state = ClaudeStreamState()
+    before = time.monotonic()
+    translate_claude_event(
+        _decode_event(
+            _make_tool_use_event("ScheduleWakeup", "toolu_W2", {"delaySeconds": 60})
+        ),
+        title="claude",
+        state=state,
+        factory=state.factory,
+    )
+    after = time.monotonic()
+    deadline = state.live_wakeups["toolu_W2"]
+    # 60s wakeup → deadline between (before + 60) and (after + 60).
+    assert before + 60.0 <= deadline <= after + 60.0
+
+
+def test_schedule_wakeup_delay_ms_fallback_still_works() -> None:
+    """Backward-compat: delay_ms fallback still produces a valid deadline."""
+    import time
+
+    state = ClaudeStreamState()
+    before = time.monotonic()
+    translate_claude_event(
+        _decode_event(
+            _make_tool_use_event("ScheduleWakeup", "toolu_W3", {"delay_ms": 30_000})
+        ),
+        title="claude",
+        state=state,
+        factory=state.factory,
+    )
+    deadline = state.live_wakeups["toolu_W3"]
+    # 30s wakeup via delay_ms fallback.
+    assert before + 30.0 <= deadline <= time.monotonic() + 30.0
+
+
+def test_post_result_closing_state_initial_values() -> None:
+    """#470: ClaudeStreamState carries the new closing-message signal fields."""
+    state = ClaudeStreamState()
+    assert state.post_result_closed_at is None
+    assert state.post_result_idle_minutes == 0.0
+    assert state.post_result_closing_sent is False
+
+
 def test_remote_trigger_tracked_as_set_member() -> None:
     state = ClaudeStreamState()
     translate_claude_event(

@@ -377,3 +377,236 @@ class TestMarkdownFormatterVerbose:
         # Only the last action (max_actions=1) with its detail
         assert len(lines) == 2
         assert "new.py" in lines[1]
+
+
+# ---------------------------------------------------------------------------
+# #481: new tool detail branches + long-running tail.
+# ---------------------------------------------------------------------------
+
+
+class TestNewToolDetails:
+    """#481: BashOutput, KillShell, ScheduleWakeup, Monitor verbose details."""
+
+    def test_bash_output_renders_last_line(self):
+        action = Action(
+            id="1",
+            kind="tool",
+            title="BashOutput",
+            detail={
+                "name": "BashOutput",
+                "input": {"bash_id": "bash_abcdefgh"},
+                "result_preview": "Build started\nDeploy Production: in_progress",
+            },
+        )
+        result = format_verbose_detail(action)
+        assert result == "→ Deploy Production: in_progress"
+
+    def test_bash_output_truncates_long_line(self):
+        long_line = "x" * 200
+        action = Action(
+            id="1",
+            kind="tool",
+            title="BashOutput",
+            detail={
+                "name": "BashOutput",
+                "input": {"bash_id": "bash_abc"},
+                "result_preview": long_line,
+            },
+        )
+        result = format_verbose_detail(action)
+        assert result is not None
+        assert len(result) <= 130  # ~120 + "→ " prefix + ellipsis
+
+    def test_bash_output_no_preview_falls_back_to_id(self):
+        action = Action(
+            id="1",
+            kind="tool",
+            title="BashOutput",
+            detail={
+                "name": "BashOutput",
+                "input": {"bash_id": "bash_abcdefgh"},
+            },
+        )
+        result = format_verbose_detail(action)
+        assert result == "→ bash:abcdefgh"
+
+    def test_kill_shell_shows_bash_id(self):
+        action = Action(
+            id="1",
+            kind="tool",
+            title="KillShell",
+            detail={"name": "KillShell", "input": {"shell_id": "bash_abcdefgh"}},
+        )
+        result = format_verbose_detail(action)
+        assert result == "→ kill bash:abcdefgh"
+
+    def test_schedule_wakeup_with_countdown_and_reason(self):
+        action = Action(
+            id="1",
+            kind="tool",
+            title="ScheduleWakeup",
+            detail={
+                "name": "ScheduleWakeup",
+                "input": {"delaySeconds": 300, "reason": "build check"},
+                "countdown_s": 252.0,
+            },
+        )
+        result = format_verbose_detail(action)
+        assert result == '→ fires in 4m 12s · "build check"'
+
+    def test_schedule_wakeup_falls_back_to_input_delay(self):
+        # Heartbeat hasn't injected countdown_s yet.
+        action = Action(
+            id="1",
+            kind="tool",
+            title="ScheduleWakeup",
+            detail={
+                "name": "ScheduleWakeup",
+                "input": {"delaySeconds": 60},
+            },
+        )
+        result = format_verbose_detail(action)
+        assert result == "→ fires in 1m 00s"
+
+    def test_schedule_wakeup_no_reason(self):
+        action = Action(
+            id="1",
+            kind="tool",
+            title="ScheduleWakeup",
+            detail={
+                "name": "ScheduleWakeup",
+                "input": {"delaySeconds": 30},
+                "countdown_s": 30.0,
+            },
+        )
+        result = format_verbose_detail(action)
+        assert result == "→ fires in 30s"
+
+    def test_monitor_renders_countdown(self):
+        action = Action(
+            id="1",
+            kind="tool",
+            title="Monitor",
+            detail={
+                "name": "Monitor",
+                "input": {"timeout_ms": 600000},
+                "countdown_s": 480.0,
+            },
+        )
+        result = format_verbose_detail(action)
+        assert result == "→ monitoring · 8m 00s remaining"
+
+    def test_monitor_no_countdown_returns_none(self):
+        action = Action(
+            id="1",
+            kind="tool",
+            title="Monitor",
+            detail={"name": "Monitor", "input": {"timeout_ms": 600000}},
+        )
+        result = format_verbose_detail(action)
+        assert result is None
+
+
+class TestFormatDuration:
+    """#481: format_duration / format_countdown helpers."""
+
+    def test_seconds_only(self):
+        from untether.markdown import format_duration
+
+        assert format_duration(0) == "0s"
+        assert format_duration(45) == "45s"
+        assert format_duration(59) == "59s"
+
+    def test_minutes_and_seconds(self):
+        from untether.markdown import format_duration
+
+        assert format_duration(60) == "1m 00s"
+        assert format_duration(227) == "3m 47s"
+        assert format_duration(3600) == "60m 00s"
+
+    def test_negative_clamps_to_zero(self):
+        from untether.markdown import format_duration
+
+        assert format_duration(-5) == "0s"
+
+    def test_format_countdown_aliases_format_duration(self):
+        from untether.markdown import format_countdown, format_duration
+
+        assert format_countdown(120) == format_duration(120)
+
+
+class TestLongRunningTail:
+    """#481: format_action_line tail for non-completed actions older than 60s."""
+
+    def _bash_action(self) -> Action:
+        return Action(
+            id="1",
+            kind="command",
+            title="npm run build",
+            detail={"name": "Bash", "input": {"command": "npm run build"}},
+        )
+
+    def test_short_action_no_tail(self):
+        from untether.markdown import format_action_line
+
+        line = format_action_line(
+            self._bash_action(),
+            phase="started",
+            ok=None,
+            command_width=300,
+            elapsed_seconds=15.0,
+        )
+        # No tail for actions <60s old.
+        assert "·" not in line
+
+    def test_long_running_compact_adds_tail(self):
+        from untether.markdown import format_action_line
+
+        line = format_action_line(
+            self._bash_action(),
+            phase="started",
+            ok=None,
+            command_width=300,
+            elapsed_seconds=227.0,
+        )
+        assert "3m 47s" in line
+        assert "npm run build" in line
+
+    def test_long_running_no_detail_shows_only_elapsed(self):
+        from untether.markdown import format_action_line
+
+        action = Action(id="1", kind="tool", title="UnknownTool", detail={})
+        line = format_action_line(
+            action,
+            phase="started",
+            ok=None,
+            command_width=300,
+            elapsed_seconds=120.0,
+        )
+        assert "2m 00s" in line
+
+    def test_completed_action_no_tail(self):
+        from untether.markdown import format_action_line
+
+        line = format_action_line(
+            self._bash_action(),
+            phase="completed",
+            ok=True,
+            command_width=300,
+            elapsed_seconds=300.0,
+        )
+        # Tail is for in-progress actions only — completed lines are
+        # already terminal and don't need an elapsed counter.
+        assert "5m" not in line
+
+    def test_no_elapsed_no_tail(self):
+        from untether.markdown import format_action_line
+
+        line = format_action_line(
+            self._bash_action(),
+            phase="started",
+            ok=None,
+            command_width=300,
+            elapsed_seconds=None,
+        )
+        assert "·" not in line

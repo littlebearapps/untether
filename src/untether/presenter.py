@@ -13,6 +13,7 @@ class Presenter(Protocol):
         *,
         elapsed_s: float,
         label: str = "working",
+        now: float | None = None,
     ) -> RenderedMessage: ...
 
     def render_final(

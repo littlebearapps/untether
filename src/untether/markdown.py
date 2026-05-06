@@ -157,16 +157,64 @@ def format_action_title(action: Action, *, command_width: int | None) -> str:
     return shorten(title, command_width)
 
 
+def format_duration(seconds: float | int) -> str:
+    """Render a duration as ``Nm Ys`` (≥60s) or ``Ys``.
+
+    Used by the #481 long-running-action tail to surface elapsed time
+    on the progress message even when no JSONL events are arriving.
+    Negative values render as ``0s`` (defensive — clock skew shouldn't
+    break the renderer).
+    """
+    s = max(0, int(seconds))
+    if s < 60:
+        return f"{s}s"
+    minutes, secs = divmod(s, 60)
+    return f"{minutes}m {secs:02d}s"
+
+
+def format_countdown(seconds: float | int) -> str:
+    """Render a remaining-time countdown — alias of format_duration.
+
+    Kept distinct so call sites read clearly (countdown vs elapsed) and
+    so future formatting differences (e.g. ``ETA 14:32``) can land in
+    one place.
+    """
+    return format_duration(seconds)
+
+
 def format_action_line(
     action: Action,
     phase: str,
     ok: bool | None,
     *,
     command_width: int | None,
+    elapsed_seconds: float | None = None,
 ) -> str:
+    """Render one action line for the progress message.
+
+    #481: ``elapsed_seconds`` triggers the long-running tail. When the
+    action is non-completed AND age > 60 s, append ``· <elapsed> · <key arg>``
+    so a glancing user can answer "is it alive? what is it doing? for how
+    long?" without waiting for the next JSONL event. The tail fires
+    regardless of formatter verbosity — verbose mode keeps its existing
+    ``→ <detail>`` second line below (slight redundancy is fine; verbose
+    users opted in).
+    """
     if phase != "completed":
         status = STATUS["update"] if phase == "updated" else STATUS["running"]
-        return f"{status} {format_action_title(action, command_width=command_width)}"
+        line = f"{status} {format_action_title(action, command_width=command_width)}"
+        if elapsed_seconds is not None and elapsed_seconds > 60:
+            elapsed_str = format_duration(elapsed_seconds)
+            detail = format_verbose_detail(action)
+            if detail:
+                # Strip the ``→ `` prefix so the tail reads as
+                # ``▸ Bash · 3m 47s · npm run build`` rather than
+                # ``▸ Bash · 3m 47s · → npm run build``.
+                detail_clean = detail.lstrip("→ ").strip()
+                line += f" · {elapsed_str} · {shorten(detail_clean, 80)}"
+            else:
+                line += f" · {elapsed_str}"
+        return line
     status = action_status(action, completed=True, ok=ok)
     suffix = action_suffix(action)
     return (
@@ -243,6 +291,59 @@ def format_verbose_detail(action: Action) -> str | None:
         query = inp.get("query", "")
         if query:
             return f'→ "{shorten(query, 80)}"'
+        return None
+
+    # #481: BashOutput — Claude Code's mechanism for polling backgrounded
+    # Bash shells. The previous tool_result_event populated
+    # ``detail["result_preview"]`` with the recent stdout snapshot; render
+    # the LAST line as the verbose detail so users see live polling output
+    # (e.g. ``→ Deploy Production: in_progress``) instead of a generic
+    # ``▸ BashOutput`` line for 10+ minutes.
+    if name == "BashOutput":
+        preview = detail.get("result_preview") or ""
+        if isinstance(preview, str) and preview.strip():
+            last = preview.rstrip().splitlines()[-1]
+            if last:
+                return f"→ {shorten(last, 120)}"
+        bash_id = inp.get("bash_id", "")
+        if isinstance(bash_id, str) and bash_id:
+            return f"→ bash:{bash_id[-8:]}"
+        return None
+
+    # #481: KillShell — show which background bash is being terminated.
+    if name == "KillShell":
+        bash_id = inp.get("shell_id") or inp.get("bash_id") or ""
+        if isinstance(bash_id, str) and bash_id:
+            return f"→ kill bash:{bash_id[-8:]}"
+        return None
+
+    # #481: ScheduleWakeup — render countdown from heartbeat-mutated
+    # ``detail['countdown_s']`` (set by ProgressEdits._heartbeat_tick), or
+    # fall back to ``delaySeconds`` from input. Optional ``reason`` field
+    # is shown in quotes when present.
+    if name == "ScheduleWakeup":
+        reason = inp.get("reason")
+        countdown_s = detail.get("countdown_s")
+        if countdown_s is None:
+            delay = (
+                inp.get("delaySeconds")
+                or (inp.get("delay_ms") or 0) / 1000.0
+                or (inp.get("timeout_ms") or 0) / 1000.0
+            )
+            if delay > 0:
+                countdown_s = float(delay)
+        if countdown_s is None or countdown_s < 0:
+            return None
+        timer = format_countdown(countdown_s)
+        if isinstance(reason, str) and reason.strip():
+            return f'→ fires in {timer} · "{shorten(reason, 60)}"'
+        return f"→ fires in {timer}"
+
+    # #481: Monitor — render countdown from heartbeat-mutated countdown_s.
+    if name == "Monitor":
+        countdown_s = detail.get("countdown_s")
+        if isinstance(countdown_s, (int, float)) and countdown_s > 0:
+            return f"→ monitoring · {format_countdown(countdown_s)} remaining"
         return None
 
     # MCP tools: show server:tool
@@ -369,6 +470,7 @@ class MarkdownFormatter:
         *,
         elapsed_s: float,
         label: str = "working",
+        now: float | None = None,
     ) -> MarkdownParts:
         step = state.action_count or None
         header = format_header(
@@ -377,7 +479,7 @@ class MarkdownFormatter:
             label=label,
             engine=state.engine,
         )
-        body = self._assemble_body(self._format_actions(state))
+        body = self._assemble_body(self._format_actions(state, now=now))
         return MarkdownParts(
             header=header, body=body, footer=self._format_footer(state)
         )
@@ -420,16 +522,26 @@ class MarkdownFormatter:
             return None
         return HARD_BREAK.join(lines)
 
-    def _format_actions(self, state: ProgressState) -> list[str]:
+    def _format_actions(
+        self, state: ProgressState, *, now: float | None = None
+    ) -> list[str]:
         actions = list(state.actions)
         actions = [] if self.max_actions == 0 else actions[-self.max_actions :]
         lines: list[str] = []
         for action_state in actions:
+            # #481: derive per-action elapsed when both ``now`` and
+            # ``started_at`` are available. Tests that don't pass a clock
+            # default to None → no tail (preserves the existing compact
+            # output for fast actions and unit tests).
+            elapsed_seconds: float | None = None
+            if now is not None and action_state.started_at > 0:
+                elapsed_seconds = max(0.0, now - action_state.started_at)
             line = format_action_line(
                 action_state.action,
                 action_state.display_phase,
                 action_state.ok,
                 command_width=self.command_width,
+                elapsed_seconds=elapsed_seconds,
             )
             lines.append(line)
             if self.verbosity == "verbose":
@@ -455,9 +567,10 @@ class MarkdownPresenter:
         *,
         elapsed_s: float,
         label: str = "working",
+        now: float | None = None,
     ) -> RenderedMessage:
         parts = self._formatter.render_progress_parts(
-            state, elapsed_s=elapsed_s, label=label
+            state, elapsed_s=elapsed_s, label=label, now=now
         )
         return RenderedMessage(text=assemble_markdown_parts(parts))
 
