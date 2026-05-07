@@ -1997,3 +1997,389 @@ def test_is_session_alive_unknown_session_returns_false() -> None:
     from untether.runners.claude import is_session_alive
 
     assert is_session_alive("session-that-was-never-spawned") is False
+
+
+# ───── #289 — /loop and ScheduleWakeup observation ─────────────────────
+
+
+def _seed_state_for_loop_observation(
+    state: ClaudeStreamState, *, session_id: str = "sess-289"
+) -> None:
+    """Helper: set state.factory._resume so ``_observe_loop_tool_use`` can
+    read the session_id without a full system.init flow."""
+    state.factory._resume = ResumeToken(engine="claude", value=session_id)
+    state.first_user_message_text = "user typed /loop check the deploy"
+
+
+@pytest.mark.anyio
+class TestLoopObservation:
+    """Cover the new ``_observe_loop_tool_use`` /
+    ``_observe_loop_tool_result`` helpers and the ``_loop_enabled_for_chat``
+    gate.  Mirrors ``test_loop_scheduler.py`` cleanup conventions.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _cleanup(self):
+        from untether import loop_scheduler
+
+        loop_scheduler.uninstall()
+        yield
+        loop_scheduler.uninstall()
+
+    @pytest.fixture
+    def _enable_loop(self):
+        """Toggle Loop mode ON via the per-chat run-options contextvar so
+        the master gate inside the observer doesn't short-circuit."""
+        from untether.runners.run_options import (
+            EngineRunOptions,
+            apply_run_options,
+        )
+
+        with apply_run_options(EngineRunOptions(loop_enabled=True)):
+            yield
+
+    @pytest.fixture
+    def _disable_loop(self):
+        """Toggle Loop mode OFF explicitly."""
+        from untether.runners.run_options import (
+            EngineRunOptions,
+            apply_run_options,
+        )
+
+        with apply_run_options(EngineRunOptions(loop_enabled=False)):
+            yield
+
+    @pytest.fixture
+    def _set_chat(self):
+        """Push a chat_id into the run-context contextvar."""
+        from untether.utils.paths import (
+            reset_run_channel_id,
+            set_run_channel_id,
+        )
+
+        token = set_run_channel_id(7777)
+        try:
+            yield 7777
+        finally:
+            reset_run_channel_id(token)
+
+    @pytest.fixture
+    async def _installed_scheduler(self):
+        """Install loop_scheduler so observers can call register_*."""
+        from untether import loop_scheduler
+
+        async def _noop(*args, **kwargs):
+            return None
+
+        class _Transport:
+            async def send(self, **_):
+                return None
+
+            async def edit(self, **_):
+                return None
+
+            async def delete(self, _ref):
+                return None
+
+        async with anyio.create_task_group() as tg:
+            loop_scheduler.install(tg, _noop, _Transport(), 1)
+            try:
+                yield
+            finally:
+                tg.cancel_scope.cancel()
+
+    @pytest.mark.usefixtures("_enable_loop", "_installed_scheduler")
+    async def test_observer_skipped_when_chat_id_unset(self):
+        """Without ``set_run_channel_id`` the observer must no-op."""
+        from untether import loop_scheduler
+
+        state = ClaudeStreamState()
+        _seed_state_for_loop_observation(state)
+        translate_claude_event(
+            _decode_event(
+                _make_tool_use_event(
+                    "CronCreate",
+                    "toolu_C1",
+                    {"cron": "* * * * *", "prompt": "x", "recurring": True},
+                )
+            ),
+            title="claude",
+            state=state,
+            factory=state.factory,
+        )
+        assert loop_scheduler.active_count() == 0
+
+    @pytest.mark.usefixtures("_disable_loop", "_set_chat", "_installed_scheduler")
+    async def test_observer_skipped_when_toggle_off(self):
+        """Loop mode OFF → no registration."""
+        from untether import loop_scheduler
+
+        state = ClaudeStreamState()
+        _seed_state_for_loop_observation(state)
+        translate_claude_event(
+            _decode_event(
+                _make_tool_use_event(
+                    "CronCreate",
+                    "toolu_C2",
+                    {"cron": "* * * * *", "prompt": "ping", "recurring": True},
+                )
+            ),
+            title="claude",
+            state=state,
+            factory=state.factory,
+        )
+        assert loop_scheduler.active_count() == 0
+
+    @pytest.mark.usefixtures("_enable_loop", "_set_chat", "_installed_scheduler")
+    async def test_cron_create_registers_when_enabled(self):
+        """CronCreate with toggle ON registers a recurring entry."""
+        from untether import loop_scheduler
+
+        state = ClaudeStreamState()
+        _seed_state_for_loop_observation(state, session_id="sess-cron-on")
+        translate_claude_event(
+            _decode_event(
+                _make_tool_use_event(
+                    "CronCreate",
+                    "toolu_C3",
+                    {
+                        "cron": "*/5 * * * *",
+                        "prompt": "check the deploy",
+                        "recurring": True,
+                    },
+                )
+            ),
+            title="claude",
+            state=state,
+            factory=state.factory,
+        )
+        assert loop_scheduler.active_count() == 1
+        pending = loop_scheduler.pending_for_chat(7777)
+        assert len(pending) == 1
+        assert pending[0].cron_expression == "*/5 * * * *"
+        assert pending[0].prompt == "check the deploy"
+        assert pending[0].recurring is True
+        assert pending[0].resume_token == "sess-cron-on"
+
+    @pytest.mark.usefixtures("_enable_loop", "_set_chat", "_installed_scheduler")
+    async def test_cron_create_uses_cron_field_not_cron_expression(self):
+        """Probe 5: input field is ``cron`` — fallback aliases shouldn't
+        override the canonical name."""
+        from untether import loop_scheduler
+
+        state = ClaudeStreamState()
+        _seed_state_for_loop_observation(state)
+        translate_claude_event(
+            _decode_event(
+                _make_tool_use_event(
+                    "CronCreate",
+                    "toolu_C4",
+                    {
+                        "cron": "0 * * * *",
+                        "cron_expression": "* * * * *",  # legacy alias — should be ignored
+                        "prompt": "y",
+                        "recurring": True,
+                    },
+                )
+            ),
+            title="claude",
+            state=state,
+            factory=state.factory,
+        )
+        pending = loop_scheduler.pending_for_chat(7777)
+        assert len(pending) == 1
+        assert pending[0].cron_expression == "0 * * * *"
+
+    @pytest.mark.usefixtures("_enable_loop", "_set_chat", "_installed_scheduler")
+    async def test_cron_create_skipped_when_prompt_missing(self):
+        """Defensive: missing prompt field → no registration."""
+        from untether import loop_scheduler
+
+        state = ClaudeStreamState()
+        _seed_state_for_loop_observation(state)
+        translate_claude_event(
+            _decode_event(
+                _make_tool_use_event(
+                    "CronCreate",
+                    "toolu_C5",
+                    {"cron": "* * * * *", "recurring": True},
+                )
+            ),
+            title="claude",
+            state=state,
+            factory=state.factory,
+        )
+        assert loop_scheduler.active_count() == 0
+
+    @pytest.mark.usefixtures("_enable_loop", "_set_chat", "_installed_scheduler")
+    async def test_schedule_wakeup_registers_when_above_threshold(self):
+        """Long ScheduleWakeup → register Untether-side timer."""
+        from untether import loop_scheduler
+
+        state = ClaudeStreamState()
+        _seed_state_for_loop_observation(state)
+        # 3600s > default inline_threshold_seconds=300 — should register.
+        translate_claude_event(
+            _decode_event(
+                _make_tool_use_event(
+                    "ScheduleWakeup",
+                    "toolu_W1",
+                    {
+                        "delaySeconds": 3600,
+                        "reason": "long-poll",
+                        "prompt": "check progress",
+                    },
+                )
+            ),
+            title="claude",
+            state=state,
+            factory=state.factory,
+        )
+        pending = loop_scheduler.pending_for_chat(7777)
+        assert len(pending) == 1
+        assert pending[0].kind == "wakeup"
+        assert pending[0].delay_seconds == 3600.0
+
+    @pytest.mark.usefixtures("_enable_loop", "_set_chat", "_installed_scheduler")
+    async def test_schedule_wakeup_skipped_when_below_threshold(self):
+        """Short waits stay rendered live by the rc8 countdown — no
+        Untether-side timer."""
+        from untether import loop_scheduler
+
+        state = ClaudeStreamState()
+        _seed_state_for_loop_observation(state)
+        translate_claude_event(
+            _decode_event(
+                _make_tool_use_event(
+                    "ScheduleWakeup",
+                    "toolu_W2",
+                    {"delaySeconds": 60, "prompt": "x"},
+                )
+            ),
+            title="claude",
+            state=state,
+            factory=state.factory,
+        )
+        assert loop_scheduler.active_count() == 0
+        # rc8 countdown (live_wakeups) still populated by
+        # _register_background_handle, regardless of loop observation.
+        assert "toolu_W2" in state.live_wakeups
+
+    @pytest.mark.usefixtures("_enable_loop", "_set_chat", "_installed_scheduler")
+    async def test_cron_delete_cancels_matching_entry(self):
+        """CronDelete with the upstream ID cancels the matching entry."""
+        from untether import loop_scheduler
+
+        state = ClaudeStreamState()
+        _seed_state_for_loop_observation(state)
+        # Register an entry, then bind upstream ID, then delete.
+        translate_claude_event(
+            _decode_event(
+                _make_tool_use_event(
+                    "CronCreate",
+                    "toolu_CD1",
+                    {"cron": "* * * * *", "prompt": "x", "recurring": True},
+                )
+            ),
+            title="claude",
+            state=state,
+            factory=state.factory,
+        )
+        # tool_result with upstream ID
+        result = _make_tool_result_event("toolu_CD1")
+        result["message"]["content"][0]["content"] = (
+            "Scheduled recurring job abcdef12 (Every minute). Session-only ..."
+        )
+        translate_claude_event(
+            _decode_event(result),
+            title="claude",
+            state=state,
+            factory=state.factory,
+        )
+        # Now CronDelete that ID
+        translate_claude_event(
+            _decode_event(
+                _make_tool_use_event("CronDelete", "toolu_CD2", {"id": "abcdef12"})
+            ),
+            title="claude",
+            state=state,
+            factory=state.factory,
+        )
+        assert loop_scheduler.active_count() == 0
+
+    @pytest.mark.usefixtures("_enable_loop", "_set_chat", "_installed_scheduler")
+    async def test_tool_result_binds_upstream_cron_id(self):
+        """``_observe_loop_tool_result`` parses the result text and binds
+        the 8-char upstream ID via :func:`bind_upstream_id`."""
+        from untether import loop_scheduler
+
+        state = ClaudeStreamState()
+        _seed_state_for_loop_observation(state)
+        translate_claude_event(
+            _decode_event(
+                _make_tool_use_event(
+                    "CronCreate",
+                    "toolu_BU1",
+                    {"cron": "* * * * *", "prompt": "x", "recurring": True},
+                )
+            ),
+            title="claude",
+            state=state,
+            factory=state.factory,
+        )
+        result = _make_tool_result_event("toolu_BU1")
+        result["message"]["content"][0]["content"] = (
+            "Scheduled recurring job 12345678 (Every minute). Session-only ..."
+        )
+        translate_claude_event(
+            _decode_event(result),
+            title="claude",
+            state=state,
+            factory=state.factory,
+        )
+        # The entry now has upstream_cron_id bound — cancel_by_upstream_id
+        # must succeed.
+        assert loop_scheduler.cancel_by_upstream_id("12345678") is True
+
+    @pytest.mark.usefixtures("_set_chat")
+    async def test_loop_enabled_for_chat_run_options_overrides_global(self):
+        """Per-chat run option True overrides global config False (the
+        common case — user enables Loop mode in their chat)."""
+        from untether.runners.claude import _loop_enabled_for_chat
+        from untether.runners.run_options import (
+            EngineRunOptions,
+            apply_run_options,
+        )
+
+        with apply_run_options(EngineRunOptions(loop_enabled=True)):
+            assert _loop_enabled_for_chat(7777) is True
+        with apply_run_options(EngineRunOptions(loop_enabled=False)):
+            assert _loop_enabled_for_chat(7777) is False
+        # No run options at all → fall back to global ([loop] enabled,
+        # default False).  Use a real options=None context to verify.
+        from untether.runners.run_options import (
+            reset_run_options,
+            set_run_options,
+        )
+
+        token = set_run_options(None)
+        try:
+            assert _loop_enabled_for_chat(7777) is False
+        finally:
+            reset_run_options(token)
+
+
+def test_first_user_message_text_captured_in_new_state() -> None:
+    """new_state should snapshot the prompt for sentinel-fallback later."""
+    runner = ClaudeRunner(
+        claude_cmd="claude",
+        model=None,
+        permission_mode=None,
+        allowed_tools=[],
+        extra_args=[],
+        dangerously_skip_permissions=False,
+        use_api_billing=None,
+        session_title=None,
+    )
+    state = runner.new_state("user typed /loop X", None)
+    assert state.first_user_message_text == "user typed /loop X"

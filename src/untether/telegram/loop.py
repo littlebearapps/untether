@@ -129,6 +129,7 @@ async def _resolve_engine_run_options(
         show_resume_line=merged.show_resume_line,
         budget_enabled=merged.budget_enabled,
         budget_auto_cancel=merged.budget_auto_cancel,
+        loop_enabled=merged.loop_enabled,
     )
 
 
