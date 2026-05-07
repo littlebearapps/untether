@@ -1,6 +1,9 @@
 # Schedule tasks
 
-There are several ways to run tasks on a schedule: the `/at` command for quick one-shot delays, Telegram's built-in message scheduling, and Untether's trigger system (webhooks and cron).
+There are several ways to run tasks on a schedule: the `/at` command for quick one-shot delays, Telegram's built-in message scheduling, Untether's trigger system (webhooks and cron), and Loop mode for Claude Code's `/loop` and `ScheduleWakeup`.
+
+!!! note "Loop mode is opt-in"
+    By default, Untether does **not** fire Claude Code's session-scoped schedules after a turn ends — the `claude --print` subprocess exits and the cron task dies with it (verified empirically against `claude` v2.1.129/2.1.132 — upstream docs claiming `--resume` restores tasks are incorrect in `--print` mode). To enable autonomous loop firing via Telegram, turn on **Loop mode** in `/config → 🔁 Loop mode`. See [Loop mode](#loop-mode) below.
 
 ## One-shot delays with /at
 
@@ -27,6 +30,44 @@ When the delay expires, the prompt runs as a normal agent session. Use `/cancel`
 
 !!! note "Engine and project frozen at schedule time"
     When you run `/at`, Untether snapshots the chat's current project mapping and engine at that moment. That snapshot is what fires when the delay expires — changing `/agent`, `/ctx`, or `/planmode` afterwards does **not** affect already-scheduled delays. Cancel with `/cancel` and re-schedule if you change your mind. ([#362](https://github.com/littlebearapps/untether/issues/362))
+
+## Loop mode
+
+Claude Code has a built-in `/loop <interval> <prompt>` command (and a no-interval `/loop <prompt>` dynamic mode driven by `ScheduleWakeup`) for self-pacing autonomous work. Untether's **Loop mode** observes those tool calls at the JSONL layer, captures the user's intent, and re-fires each iteration when due — even after the subprocess exits. ([#289](https://github.com/littlebearapps/untether/issues/289))
+
+**Default OFF** — opt-in per chat via `/config → 🔁 Loop mode`. When OFF, behaviour matches the pre-v0.35.4 baseline: `/loop` registers a schedule during the turn but nothing fires after the subprocess exits.
+
+### How it works
+
+1. You type `/loop 5m check the deploy` in a Claude session.
+2. Claude calls `CronCreate(cron="*/5 * * * *", prompt="check the deploy", recurring=true)`.
+3. Untether observes the `tool_use` event and registers an Untether-side timer.
+4. The subprocess exits cleanly. Upstream's session-scoped cron dies with it.
+5. Each fire interval, Untether spawns `claude --resume <session_id>` with a wrapped re-issue prompt: `Loop iteration N: check the deploy. Do the task now; do not summarize old results unless necessary.`
+6. State persists to `active_loops.json` (sibling of `untether.toml`) — loops survive Untether restarts.
+
+### Runaway-safety caps
+
+The `[loop]` config has caps in case a loop runs longer than expected:
+
+- `max_iterations = 20` — cap on iteration count (NOT a cost cap)
+- `max_total_duration_hours = 4` — wall-clock cap (NOT a cost cap)
+- `expiry_days = 7` — auto-expire 7 days after creation (matches upstream)
+
+These bound loop duration regardless of cost. They are *not* a substitute for setting a budget — see "Cost considerations" below.
+
+### Cost considerations
+
+Autonomous loops consume API credits or your Claude subscription quota. A 24-hour `/loop 1m` can fire up to 1440 times. Cost per fire depends on conversation length:
+
+- Short conversations: ~$0.01–$0.05 per fire (cache-warm).
+- Long conversations: cache may evict between fires, costing $0.10–$0.50 per fire.
+
+**Set a daily budget BEFORE turning on Loop mode** in `/config → 💰 Cost & usage` (or `[cost_budget].max_cost_per_day` in `untether.toml`). The same daily cost cap applies to loop fires automatically — there is no separate per-loop budget. See [Cost budgets](cost-budgets.md) for setup.
+
+### Cancelling a loop
+
+`/cancel` drops all active loops for the current chat and writes a do-not-resume sentinel so the upstream session-scoped cron — if it ever survives — cannot be re-fired by Untether. `/new` does the same (treats `/new` as "wipe this chat's state").
 
 ## Telegram scheduling
 
