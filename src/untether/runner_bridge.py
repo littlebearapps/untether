@@ -884,6 +884,14 @@ class ProgressEdits:
         self._stall_repeat_seconds: float = 180.0
         self._prev_recent_events: list[tuple[float, str]] | None = None
         self._frozen_ring_count: int = 0
+        # #481: heartbeat tick cadence. The stall monitor loop sleeps
+        # ``min(_heartbeat_interval, _stall_check_interval)`` per tick, so
+        # in production ticks fire every 30 s instead of 60 s; the stall
+        # threshold + ``_stall_repeat_seconds`` wall-clock gates still
+        # control warning frequency unchanged.
+        self._heartbeat_interval: float = 30.0
+        # #481: bash grace window for the stall_bash_grace_suppressed branch.
+        self._bash_grace_seconds: float = 60.0
         # Stuck-after-tool_result detector (#322). Instance overrides of the
         # class-level defaults, populated from WatchdogSettings in
         # handle_message.
@@ -916,16 +924,148 @@ class ProgressEdits:
             await self._run_loop(bg_tg)
             stall_scope.cancel()
 
+    def _heartbeat_tick(self) -> None:
+        """#481: per-tick visibility refresh.
+
+        Runs on EVERY monitor loop tick (both heartbeat-only and stall-check
+        ticks). Three responsibilities, none of which touch stall counters:
+
+        1. Mutate ``action.detail['countdown_s']`` for any open
+           ScheduleWakeup/Monitor action whose deadline lives in
+           ``engine_state.live_wakeups`` / ``live_monitors``. The verbose
+           detail formatter reads this on the next render.
+        2. Fire the post-result closing message exactly once when the
+           Claude watchdog has stamped ``post_result_closed_at`` (#470).
+        3. Bump ``event_seq`` to wake the render loop when any open action
+           is older than 60 s — this keeps the elapsed-time tail current
+           in the chat (otherwise the message looks frozen during long
+           BashOutput polling cycles).
+        """
+        stream = self.stream
+        engine_state = getattr(stream, "engine_state", None) if stream else None
+        live_wakeups = (
+            getattr(engine_state, "live_wakeups", None) if engine_state else None
+        )
+        live_monitors = (
+            getattr(engine_state, "live_monitors", None) if engine_state else None
+        )
+        now = self.clock()
+        # 1) Countdown mutation — ScheduleWakeup + Monitor.
+        if live_wakeups or live_monitors:
+            for action_state in self.tracker._actions.values():
+                if action_state.completed:
+                    continue
+                aid = str(action_state.action.id or "")
+                if not aid:
+                    continue
+                deadline: float | None = None
+                if live_wakeups and aid in live_wakeups:
+                    deadline = live_wakeups[aid]
+                elif live_monitors and aid in live_monitors:
+                    deadline = live_monitors[aid]
+                if deadline is None:
+                    continue
+                # Deadline 0.0 = unknown → leave countdown_s unset so the
+                # formatter falls back to delaySeconds-from-input rendering.
+                if deadline > 0:
+                    action_state.action.detail["countdown_s"] = max(0.0, deadline - now)
+
+        # 2) Post-result closing message — one-shot.
+        if (
+            engine_state is not None
+            and getattr(engine_state, "post_result_closed_at", None) is not None
+            and not getattr(engine_state, "post_result_closing_sent", False)
+        ):
+            mins = int(getattr(engine_state, "post_result_idle_minutes", 0.0))
+            text = f"✓ turn complete · session closed after {mins}m idle"
+            with contextlib.suppress(
+                anyio.WouldBlock,
+                anyio.BrokenResourceError,
+                anyio.ClosedResourceError,
+            ):
+                self.signal_send.send_nowait(None)
+            # Schedule the actual transport.send via the run loop's task
+            # group — the heartbeat tick is sync inside _stall_monitor's
+            # async loop, so we just stash a flag and let the caller fire
+            # the actual send (next tick reads post_result_closing_sent).
+            engine_state.post_result_closing_sent = True
+            # Hand the message off to the bridge's async send via a
+            # one-element queue field.
+            self._pending_closing_message = text
+
+        # 3) Long-running tail refresh — bump event_seq so the renderer
+        #    redraws with the fresh elapsed-time tail.
+        for action_state in self.tracker._actions.values():
+            if action_state.completed:
+                continue
+            if action_state.started_at == 0.0:
+                continue
+            if (now - action_state.started_at) > 60.0:
+                self._bump_heartbeat()
+                break
+
+    async def _flush_pending_closing_message(self) -> None:
+        """#470: send the one-shot post-result closing Telegram message.
+
+        Called from _stall_monitor after _heartbeat_tick. Idempotent — the
+        ``_pending_closing_message`` field is None except for the single
+        tick after the watchdog stamps post_result_closed_at.
+        """
+        text = getattr(self, "_pending_closing_message", None)
+        if not text:
+            return
+        self._pending_closing_message = None
+        try:
+            await self.transport.send(
+                channel_id=self.channel_id,
+                message=RenderedMessage(text=text),
+                options=SendOptions(thread_id=self.thread_id),
+            )
+        except Exception:  # noqa: BLE001
+            logger.debug(
+                "progress_edits.post_result_closing_send_failed", exc_info=True
+            )
+
     async def _stall_monitor(self) -> None:
-        """Periodically check for event stalls, log diagnostics, and notify."""
+        """Periodically check for event stalls, log diagnostics, and notify.
+
+        Two cadences (#481):
+        - **Heartbeat tick** every ``_heartbeat_interval`` (default 30 s):
+          updates countdowns, fires closing message, refreshes elapsed
+          tail. No stall counters touched.
+        - **Stall check** every ``_stall_check_interval`` (default 60 s):
+          full diagnostics, threshold selection, suppression matrix,
+          notification or auto-cancel.
+
+        The loop sleeps ``min(heartbeat_interval, stall_check_interval)``
+        per tick. The stall path runs only when enough wall-clock has
+        elapsed since the last stall check, preserving the existing
+        ``stall_repeat_seconds`` ≈ 3-tick math the test suite relies on.
+        """
         from .utils.proc_diag import (
             collect_proc_diag,
             is_cpu_active,
             is_tree_cpu_active,
         )
 
+        # Initialise pending closing-message slot used by _heartbeat_tick.
+        self._pending_closing_message: str | None = None
+
         while True:
-            await anyio.sleep(self._stall_check_interval)
+            # #481: tick at the FASTER of the two cadences — heartbeat
+            # (30 s default) drives the long-running tail and closing
+            # message; stall warnings still gate themselves at wall-clock
+            # ``_stall_repeat_seconds`` (180 s default) so faster ticks
+            # don't cause warning spam (the gate at line 992-993 below
+            # bails out when too soon to repeat). Tests that override
+            # ``_stall_check_interval`` to 0.01 s still get fast ticks.
+            tick_interval = min(self._heartbeat_interval, self._stall_check_interval)
+            await anyio.sleep(tick_interval)
+
+            # Heartbeat tick — cheap (no proc_diag, just dict scans).
+            self._heartbeat_tick()
+            await self._flush_pending_closing_message()
+
             # #203: piggy-back a TTL sweep of module-level registries on this
             # periodic tick.  Cheap when idle (empty dicts → early return).
             sweep_stale_registries()
@@ -988,6 +1128,26 @@ class ProgressEdits:
             self._total_stall_warn_count += 1
             self._last_stall_warn_at = now
 
+            # #470/#481: compute the 5 expected-wait booleans once. Used to
+            # gate BOTH the auto-cancel arm (below) and the notification
+            # branches (further down — those add a ``not frozen_escalate``
+            # master gate so genuinely-frozen sessions still warn). Auto-
+            # cancel is gated unconditionally — a session that's about to
+            # gracefully close (#470 watchdog) or legitimately waiting on
+            # a pending timer (#481) must not be killed.
+            _post_result_idle = self._is_post_result_idle()
+            _wakeup_state = self._has_pending_wakeup()
+            _monitor_state = self._has_active_monitor()
+            _bash_grace = self._has_recent_bash_action(self._bash_grace_seconds)
+            _bash_fresh = self._has_fresh_bash_output(threshold / 2.0)
+            _expected_wait = (
+                _post_result_idle
+                or _wakeup_state is not None
+                or _monitor_state is not None
+                or _bash_grace
+                or _bash_fresh
+            )
+
             last_action = self._last_action_summary()
 
             recent = list(self.stream.recent_events) if self.stream else []
@@ -1018,7 +1178,15 @@ class ProgressEdits:
                 stderr_hint=stderr_hint,
             )
 
-            # Auto-cancel: dead process, no-PID zombie, or absolute cap
+            # Auto-cancel: dead process, no-PID zombie, or absolute cap.
+            # #470/#481: when an expected-wait state is active, skip the
+            # ``max_warnings`` arm — auto-cancel was designed for "the
+            # subprocess is stuck", not for "the watchdog is doing its job"
+            # (post-result idle) or "we're waiting on a legitimate timer"
+            # (ScheduleWakeup/Monitor/Bash polling). The ``process_dead``
+            # and ``no_pid_no_events`` arms still fire — those mean the
+            # subprocess actually crashed/never started, which is fatal
+            # regardless of the wait state.
             auto_cancel_reason: str | None = None
             if diag and diag.alive is False:
                 auto_cancel_reason = "process_dead"
@@ -1028,6 +1196,23 @@ class ProgressEdits:
                 and self._stall_warn_count >= self._STALL_MAX_WARNINGS_NO_PID
             ):
                 auto_cancel_reason = "no_pid_no_events"
+            elif _expected_wait:
+                # Don't auto-cancel during expected waits even if
+                # warn_count has accumulated. Each new tick will re-check
+                # whether the wait state still holds; once Claude resumes
+                # emitting events, _stall_warned resets via _last_event_at
+                # and the warn_count effectively rolls back.
+                logger.info(
+                    "progress_edits.stall_auto_cancel_suppressed_expected_wait",
+                    channel_id=self.channel_id,
+                    stall_warn_count=self._stall_warn_count,
+                    pid=self.pid,
+                    post_result=_post_result_idle,
+                    pending_wakeup=_wakeup_state is not None,
+                    active_monitor=_monitor_state is not None,
+                    bash_grace=_bash_grace,
+                    bash_fresh=_bash_fresh,
+                )
             elif self._stall_warn_count >= self._STALL_MAX_WARNINGS:
                 # Suppress auto-cancel when process is actively working
                 # (CPU ticks incrementing between diagnostic snapshots).
@@ -1136,7 +1321,68 @@ class ProgressEdits:
                     self.signal_send.send_nowait(None)
                 continue
 
-            if cpu_active is True and not frozen_escalate and not main_sleeping:
+            # #470/#481: expected-wait suppression matrix. Gated by
+            # ``not frozen_escalate`` — a genuinely-frozen session
+            # (no JSONL events for 3+ stall ticks AND CPU still active)
+            # falls through to the existing notification path so the
+            # user gets a real warning. Each branch logs its own info
+            # event so journalctl can audit which rule fired. The
+            # heartbeat bump keeps the elapsed-time tail current
+            # without resetting stall counters.
+            if not frozen_escalate and _post_result_idle:
+                logger.info(
+                    "progress_edits.stall_post_result_suppressed",
+                    channel_id=self.channel_id,
+                    seconds_since_last_event=round(elapsed, 1),
+                    stall_warn_count=self._stall_warn_count,
+                    pid=self.pid,
+                )
+                self._bump_heartbeat()
+            elif not frozen_escalate and _wakeup_state is not None:
+                soonest, count = _wakeup_state
+                logger.info(
+                    "progress_edits.stall_schedule_wakeup_suppressed",
+                    channel_id=self.channel_id,
+                    seconds_since_last_event=round(elapsed, 1),
+                    stall_warn_count=self._stall_warn_count,
+                    pid=self.pid,
+                    soonest_remaining_s=round(soonest, 1),
+                    wakeup_count=count,
+                )
+                self._bump_heartbeat()
+            elif not frozen_escalate and _monitor_state is not None:
+                soonest, count = _monitor_state
+                logger.info(
+                    "progress_edits.stall_monitor_active_suppressed",
+                    channel_id=self.channel_id,
+                    seconds_since_last_event=round(elapsed, 1),
+                    stall_warn_count=self._stall_warn_count,
+                    pid=self.pid,
+                    soonest_remaining_s=round(soonest, 1),
+                    monitor_count=count,
+                )
+                self._bump_heartbeat()
+            elif not frozen_escalate and _bash_grace:
+                logger.info(
+                    "progress_edits.stall_bash_grace_suppressed",
+                    channel_id=self.channel_id,
+                    seconds_since_last_event=round(elapsed, 1),
+                    stall_warn_count=self._stall_warn_count,
+                    pid=self.pid,
+                    bash_grace_seconds=self._bash_grace_seconds,
+                )
+                self._bump_heartbeat()
+            elif not frozen_escalate and _bash_fresh:
+                logger.info(
+                    "progress_edits.stall_long_bash_suppressed",
+                    channel_id=self.channel_id,
+                    seconds_since_last_event=round(elapsed, 1),
+                    stall_warn_count=self._stall_warn_count,
+                    pid=self.pid,
+                    freshness_threshold_s=round(threshold / 2.0, 1),
+                )
+                self._bump_heartbeat()
+            elif cpu_active is True and not frozen_escalate and not main_sleeping:
                 logger.info(
                     "progress_edits.stall_suppressed_notification",
                     channel_id=self.channel_id,
@@ -1330,6 +1576,175 @@ class ProgressEdits:
                         "progress_edits.stall_notify_failed",
                         exc_info=True,
                     )
+
+    def _bump_heartbeat(self) -> None:
+        """Wake the render loop without changing stall counters or last_event_at.
+
+        Used by both existing CPU-active suppression branches (lines 1148-,
+        1179-, 1205-) and the new #481 suppression matrix. Idempotent —
+        the signal channel is buffer=1; subsequent send_nowait calls hit
+        WouldBlock harmlessly because the loop only re-renders if
+        rendered_seq != event_seq.
+        """
+        self.event_seq += 1
+        with contextlib.suppress(
+            anyio.WouldBlock,
+            anyio.BrokenResourceError,
+            anyio.ClosedResourceError,
+        ):
+            self.signal_send.send_nowait(None)
+
+    def _is_post_result_idle(self) -> bool:
+        """#470: suppression — Claude session is past its `result` event.
+
+        Returns True when ``stream.last_event_type == "result"`` AND
+        ``engine_state.result_received_at`` is armed (i.e. the post-result
+        idle watchdog is the legitimate owner of the silence). The
+        bidirectional CLI keeps stdin open between turns; the watchdog
+        will close it after ``post_result_idle_timeout``. Stall warnings
+        during that window are pure noise — and the auto-cancel arm would
+        otherwise wrongly kill a session that's about to gracefully close.
+
+        Stays engine-agnostic via getattr — engines without engine_state
+        no-op gracefully.
+        """
+        stream = self.stream
+        if stream is None:
+            return False
+        if getattr(stream, "last_event_type", None) != "result":
+            return False
+        engine_state = getattr(stream, "engine_state", None)
+        if engine_state is None:
+            return False
+        return getattr(engine_state, "result_received_at", None) is not None
+
+    def _has_pending_wakeup(self) -> tuple[float, int] | None:
+        """#481: suppression — ScheduleWakeup with future deadline.
+
+        Returns (soonest_remaining_seconds, count) when at least one entry
+        in ``engine_state.live_wakeups`` has a deadline still in the future
+        (or 0.0, which means the deadline is unknown but the wakeup is
+        armed — still a legitimate wait). Returns None otherwise.
+
+        ScheduleWakeup parks the Claude subprocess waiting for an upstream
+        timer fire (#289); during that wait Untether sees no JSONL events
+        but the silence is expected. This suppression only fires the
+        Telegram notification — the structlog WARN at line 1000 still
+        emits, so untether-issue-watcher and ops dashboards stay informed.
+        """
+        stream = self.stream
+        if stream is None:
+            return None
+        engine_state = getattr(stream, "engine_state", None)
+        if engine_state is None:
+            return None
+        live = getattr(engine_state, "live_wakeups", None)
+        if not live:
+            return None
+        now = self.clock()
+        soonest: float | None = None
+        for deadline in live.values():
+            # 0.0 = unknown deadline (legacy delay_ms fallback path or
+            # malformed input); treat as still-armed so we don't suppress
+            # the warning forever.
+            if deadline == 0.0:
+                soonest = 0.0
+                continue
+            remaining = deadline - now
+            if remaining <= 0:
+                continue
+            if soonest is None or remaining < soonest:
+                soonest = remaining
+        if soonest is None:
+            return None
+        return (soonest, len(live))
+
+    def _has_active_monitor(self) -> tuple[float, int] | None:
+        """#481: suppression — Monitor handle with future deadline.
+
+        Mirrors ``_has_pending_wakeup`` for ``engine_state.live_monitors``.
+        Monitor primitives park the subprocess on a child-process or
+        external-event watcher; legitimate silence until the deadline.
+        """
+        stream = self.stream
+        if stream is None:
+            return None
+        engine_state = getattr(stream, "engine_state", None)
+        if engine_state is None:
+            return None
+        live = getattr(engine_state, "live_monitors", None)
+        if not live:
+            return None
+        now = self.clock()
+        soonest: float | None = None
+        for deadline in live.values():
+            if deadline == 0.0:
+                soonest = 0.0
+                continue
+            remaining = deadline - now
+            if remaining <= 0:
+                continue
+            if soonest is None or remaining < soonest:
+                soonest = remaining
+        if soonest is None:
+            return None
+        return (soonest, len(live))
+
+    def _last_action_age(self) -> tuple[str | None, float | None]:
+        """Return (tool_name, age_seconds) for the most-recent open action.
+
+        Walks ``tracker._actions`` newest-first (insertion order in the
+        dict; the tracker doesn't reorder). Returns (None, None) when no
+        open action exists or when ``started_at`` is unset (legacy paths
+        without a clock).
+        """
+        for action_state in reversed(list(self.tracker._actions.values())):
+            if action_state.completed:
+                return (None, None)
+            name = action_state.action.detail.get("name") or action_state.action.title
+            tool_name = name if isinstance(name, str) else None
+            started_at = action_state.started_at
+            if started_at == 0.0:
+                return (tool_name, None)
+            return (tool_name, self.clock() - started_at)
+        return (None, None)
+
+    def _has_recent_bash_action(self, grace_s: float) -> bool:
+        """#481: suppression — Bash/BashOutput/KillShell within grace window.
+
+        Returns True when the most recent open action is a Bash-family
+        tool and its age is less than ``grace_s``. Covers the "command
+        is in its startup phase / first poll cycle" window where the
+        chat-side stall warning would be premature.
+        """
+        tool_name, age = self._last_action_age()
+        if tool_name is None or age is None:
+            return False
+        if tool_name not in ("Bash", "BashOutput", "KillShell"):
+            return False
+        return age < grace_s
+
+    def _has_fresh_bash_output(self, freshness_s: float) -> bool:
+        """#481: suppression — recent BashOutput tool_use within freshness_s.
+
+        BashOutput is Claude Code's mechanism for polling backgrounded
+        Bash shells; each call is a fresh tool_use+tool_result cycle. The
+        most-recent BashOutput's last_update_at signals "Claude got new
+        stdout from this bash recently", which IS the upstream proxy for
+        "the command isn't actually frozen". Returns True when any open
+        or recently-completed BashOutput action has last_update_at within
+        the freshness window.
+        """
+        now = self.clock()
+        for action_state in self.tracker._actions.values():
+            name = action_state.action.detail.get("name") or action_state.action.title
+            if name != "BashOutput":
+                continue
+            if action_state.last_update_at == 0.0:
+                continue
+            if (now - action_state.last_update_at) < freshness_s:
+                return True
+        return False
 
     def _has_pending_approval(self) -> bool:
         """Check if the most recent non-completed action is waiting for user approval."""
@@ -1603,7 +2018,10 @@ class ProgressEdits:
                 meta_formatter=format_meta_line,
             )
             rendered = self.presenter.render_progress(
-                state, elapsed_s=now - self.started_at, label=self.label
+                state,
+                elapsed_s=now - self.started_at,
+                label=self.label,
+                now=now,
             )
             # Detect approval button transitions for push notification
             new_kb = rendered.extra.get("reply_markup", {}).get("inline_keyboard", [])
@@ -2221,7 +2639,7 @@ async def handle_message(
     runner_text = _strip_resume_lines(incoming.text, is_resume_line=resume_strip)
     runner_text = _apply_preamble(runner_text)
 
-    progress_tracker = ProgressTracker(engine=runner.engine)
+    progress_tracker = ProgressTracker(engine=runner.engine, clock=clock)
     # rc4 (#271): seed trigger source into meta so the footer renders it.
     # The engine's own StartedEvent.meta merges onto this via note_event.
     # rc6 (#271 follow-up): also render `at:<token>` from /at-scheduled runs
@@ -2304,10 +2722,18 @@ async def handle_message(
         edits._stuck_after_tool_result_recovery_delay = (
             watchdog.stuck_after_tool_result_recovery_delay
         )
+        # #481: bash grace window for the stall_bash_grace_suppressed branch.
+        edits._bash_grace_seconds = watchdog.bash_grace_seconds
         if hasattr(runner, "_LIVENESS_TIMEOUT_SECONDS"):
             runner._LIVENESS_TIMEOUT_SECONDS = watchdog.liveness_timeout
         if hasattr(runner, "_stall_auto_kill"):
             runner._stall_auto_kill = watchdog.stall_auto_kill
+
+    # #481: heartbeat tick cadence — drives the long-running-action elapsed
+    # tail and the post-result closing-message poller. Read live so config
+    # reloads pick up new values on the next message (matches min_render_interval
+    # pattern above).
+    edits._heartbeat_interval = progress_cfg.heartbeat_interval
 
     running_task: RunningTask | None = None
     if running_tasks is not None and progress_ref is not None:

@@ -74,9 +74,10 @@ class TelegramPresenter:
         *,
         elapsed_s: float,
         label: str = "working",
+        now: float | None = None,
     ) -> RenderedMessage:
         parts = self._formatter.render_progress_parts(
-            state, elapsed_s=elapsed_s, label=label
+            state, elapsed_s=elapsed_s, label=label, now=now
         )
         text, entities = prepare_telegram(parts)
         if _is_cancelled_label(label):

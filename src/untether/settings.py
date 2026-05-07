@@ -316,6 +316,14 @@ class WatchdogSettings(BaseModel):
     post_result_idle_enabled: bool = True
     post_result_idle_timeout: float = Field(default=600.0, ge=30, le=3600)
 
+    # #481: grace window for fresh Bash/BashOutput tool calls. When the most
+    # recent action is Bash/BashOutput/KillShell and its age is less than
+    # bash_grace_seconds, ProgressEdits._stall_monitor suppresses the Telegram
+    # stall warning (the command may still be in its startup phase / first
+    # poll cycle). Range 5s-300s. Logged as
+    # ``progress_edits.stall_bash_grace_suppressed`` per suppression.
+    bash_grace_seconds: float = Field(default=60.0, ge=5, le=300)
+
     @model_validator(mode="after")
     def _validate_prespawn_ram_ordering(self) -> WatchdogSettings:
         # When both tiers are active, warn must sit above block — otherwise
@@ -340,6 +348,14 @@ class ProgressSettings(BaseModel):
     max_actions: int = Field(default=5, ge=0, le=50)
     min_render_interval: float = Field(default=2.0, ge=0, le=30)
     group_chat_rps: float = Field(default=20.0 / 60.0, gt=0, le=10)
+    # #481: heartbeat tick cadence for the long-running-action elapsed-time
+    # tail and the post-result closing-message poller. Distinct from the
+    # stall-monitor cadence (60s) because lowering that would silently
+    # break stall_repeat_seconds=180 ≈ 3-tick math and the wider stall test
+    # corpus. The stall monitor's loop sleeps min(heartbeat_interval,
+    # stall_check_interval) and only runs the threshold check at the slower
+    # cadence. Range 5s-120s.
+    heartbeat_interval: float = Field(default=30.0, ge=5, le=120)
 
 
 _ENV_NAME_RE = re.compile(r"^[A-Z_][A-Z0-9_]*$")

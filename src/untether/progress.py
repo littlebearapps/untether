@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
@@ -16,6 +17,13 @@ class ActionState:
     completed: bool
     first_seen: int
     last_update: int
+    # #481: wall-clock timestamps for elapsed-time rendering and
+    # heartbeat-driven "action older than 60s" suppression checks.
+    # 0.0 = unset (backward-compat for tests that build ActionState
+    # without a clock). Populated by ProgressTracker.note_event when a
+    # clock callable is configured.
+    started_at: float = 0.0
+    last_update_at: float = 0.0
 
 
 @dataclass(frozen=True, slots=True)
@@ -30,8 +38,18 @@ class ProgressState:
 
 
 class ProgressTracker:
-    def __init__(self, *, engine: str) -> None:
+    def __init__(
+        self,
+        *,
+        engine: str,
+        clock: Callable[[], float] | None = None,
+    ) -> None:
         self.engine = engine
+        # #481: clock callable for ActionState wall-clock timestamps.
+        # Defaults to time.monotonic so production callers don't need to
+        # plumb anything new. Tests can pass a fake clock for deterministic
+        # elapsed-time assertions.
+        self._clock: Callable[[], float] = clock or time.monotonic
         self.resume: ResumeToken | None = None
         self.meta: dict[str, Any] | None = None
         self.action_count = 0
@@ -65,12 +83,15 @@ class ProgressTracker:
 
                 self._seq += 1
                 seq = self._seq
+                now = self._clock()
 
                 if existing is None:
                     self.action_count += 1
                     first_seen = seq
+                    started_at = now
                 else:
                     first_seen = existing.first_seen
+                    started_at = existing.started_at or now
                 self._actions[action_id] = ActionState(
                     action=action,
                     phase=phase,
@@ -79,6 +100,8 @@ class ProgressTracker:
                     completed=completed,
                     first_seen=first_seen,
                     last_update=seq,
+                    started_at=started_at,
+                    last_update_at=now,
                 )
                 return True
             case _:
