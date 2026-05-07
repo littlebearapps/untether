@@ -232,4 +232,4 @@ def test_loop_supported_engines_constant_is_claude_only() -> None:
     don't expose CronCreate / ScheduleWakeup."""
     from untether.telegram.engine_overrides import LOOP_SUPPORTED_ENGINES
 
-    assert LOOP_SUPPORTED_ENGINES == frozenset({"claude"})
+    assert frozenset({"claude"}) == LOOP_SUPPORTED_ENGINES
