@@ -26,6 +26,10 @@ SUBSCRIPTION_USAGE_SUPPORTED_ENGINES = frozenset({"claude"})
 
 API_COST_SUPPORTED_ENGINES = frozenset({"claude", "opencode", "gemini", "amp"})
 
+# /loop and ScheduleWakeup observation (#289) is Claude-only — other engines
+# don't have session-scoped scheduling tools.
+LOOP_SUPPORTED_ENGINES = frozenset({"claude"})
+
 
 class EngineOverrides(msgspec.Struct, forbid_unknown_fields=False):
     model: str | None = None
@@ -38,6 +42,7 @@ class EngineOverrides(msgspec.Struct, forbid_unknown_fields=False):
     show_resume_line: bool | None = None
     budget_enabled: bool | None = None
     budget_auto_cancel: bool | None = None
+    loop_enabled: bool | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -68,6 +73,7 @@ def normalize_overrides(overrides: EngineOverrides | None) -> EngineOverrides | 
     show_resume_line = overrides.show_resume_line
     budget_enabled = overrides.budget_enabled
     budget_auto_cancel = overrides.budget_auto_cancel
+    loop_enabled = overrides.loop_enabled
     if (
         model is None
         and reasoning is None
@@ -79,6 +85,7 @@ def normalize_overrides(overrides: EngineOverrides | None) -> EngineOverrides | 
         and show_resume_line is None
         and budget_enabled is None
         and budget_auto_cancel is None
+        and loop_enabled is None
     ):
         return None
     return EngineOverrides(
@@ -92,6 +99,7 @@ def normalize_overrides(overrides: EngineOverrides | None) -> EngineOverrides | 
         show_resume_line=show_resume_line,
         budget_enabled=budget_enabled,
         budget_auto_cancel=budget_auto_cancel,
+        loop_enabled=loop_enabled,
     )
 
 
@@ -153,6 +161,11 @@ def merge_overrides(
         budget_auto_cancel = topic.budget_auto_cancel
     elif chat is not None:
         budget_auto_cancel = chat.budget_auto_cancel
+    loop_enabled = None
+    if topic is not None and topic.loop_enabled is not None:
+        loop_enabled = topic.loop_enabled
+    elif chat is not None:
+        loop_enabled = chat.loop_enabled
     return normalize_overrides(
         EngineOverrides(
             model=model,
@@ -165,6 +178,7 @@ def merge_overrides(
             show_resume_line=show_resume_line,
             budget_enabled=budget_enabled,
             budget_auto_cancel=budget_auto_cancel,
+            loop_enabled=loop_enabled,
         )
     )
 

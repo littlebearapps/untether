@@ -170,3 +170,66 @@ def test_get_reasoning_label() -> None:
     assert get_reasoning_label("pi") == "Thinking"
     assert get_reasoning_label("gemini") == "Reasoning"
     assert get_reasoning_label("amp") == "Reasoning"
+
+
+# ---------------------------------------------------------------------------
+# loop_enabled (#289) — per-chat /loop mode toggle
+
+
+def test_loop_enabled_default_none() -> None:
+    """Default state is None — meaning 'inherit global [loop] enabled'."""
+    overrides = EngineOverrides()
+    assert overrides.loop_enabled is None
+
+
+def test_merge_overrides_loop_enabled_topic_wins() -> None:
+    topic = EngineOverrides(loop_enabled=True)
+    chat = EngineOverrides(loop_enabled=False)
+    merged = merge_overrides(topic, chat)
+    assert merged is not None
+    assert merged.loop_enabled is True
+
+
+def test_merge_overrides_loop_enabled_chat_fallback() -> None:
+    topic = EngineOverrides(loop_enabled=None)
+    chat = EngineOverrides(loop_enabled=True)
+    merged = merge_overrides(topic, chat)
+    assert merged is not None
+    assert merged.loop_enabled is True
+
+
+def test_merge_overrides_loop_enabled_both_none() -> None:
+    """Both unset → merge_overrides returns None (no overrides)."""
+    topic = EngineOverrides(loop_enabled=None)
+    chat = EngineOverrides(loop_enabled=None)
+    merged = merge_overrides(topic, chat)
+    assert merged is None
+
+
+@pytest.mark.anyio
+async def test_chat_prefs_loop_enabled_roundtrip(tmp_path) -> None:
+    """Per-chat loop_enabled survives store reload."""
+    path = tmp_path / "telegram_chat_prefs_state.json"
+    store = ChatPrefsStore(path)
+    await store.set_engine_override(
+        456,
+        "claude",
+        EngineOverrides(loop_enabled=True),
+    )
+
+    override = await store.get_engine_override(456, "claude")
+    assert override is not None
+    assert override.loop_enabled is True
+
+    store2 = ChatPrefsStore(path)
+    override2 = await store2.get_engine_override(456, "claude")
+    assert override2 is not None
+    assert override2.loop_enabled is True
+
+
+def test_loop_supported_engines_constant_is_claude_only() -> None:
+    """LOOP_SUPPORTED_ENGINES is intentionally Claude-only — other engines
+    don't expose CronCreate / ScheduleWakeup."""
+    from untether.telegram.engine_overrides import LOOP_SUPPORTED_ENGINES
+
+    assert LOOP_SUPPORTED_ENGINES == frozenset({"claude"})

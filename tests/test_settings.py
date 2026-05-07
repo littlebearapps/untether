@@ -784,3 +784,97 @@ def test_watchdog_prespawn_ram_bounds() -> None:
         WatchdogSettings(prespawn_ram_warn_mb=-1)
     with pytest.raises(ValidationError):
         WatchdogSettings(prespawn_ram_block_mb=65537)
+
+
+# ---------------------------------------------------------------------------
+# LoopSettings (#289) — Untether-side observation of /loop / ScheduleWakeup
+
+
+def test_loop_settings_defaults_off() -> None:
+    """[loop] is opt-in; default state is exactly the v0.35.3 behaviour."""
+
+    from untether.settings import LoopSettings
+
+    s = LoopSettings()
+    assert s.enabled is False
+    assert s.inline_threshold_seconds == 300
+    assert s.redundancy_check_interval == 30
+    assert s.max_iterations == 20
+    assert s.max_total_duration_hours == 4
+    assert s.min_interval_seconds == 60
+    assert s.expiry_days == 7
+
+
+def test_loop_settings_load_from_toml(tmp_path: Path) -> None:
+    config_path = tmp_path / "untether.toml"
+    config_path.write_text(
+        'transport = "telegram"\n\n'
+        "[transports.telegram]\n"
+        'bot_token = "token"\n'
+        "chat_id = 123\n"
+        "allow_any_user = true\n\n"
+        "[loop]\n"
+        "enabled = true\n"
+        "max_iterations = 50\n"
+        "expiry_days = 14\n",
+        encoding="utf-8",
+    )
+
+    settings, _ = load_settings(config_path)
+
+    assert settings.loop.enabled is True
+    assert settings.loop.max_iterations == 50
+    assert settings.loop.expiry_days == 14
+    # Untouched keys keep defaults:
+    assert settings.loop.min_interval_seconds == 60
+
+
+def test_loop_settings_min_interval_floor() -> None:
+    from pydantic import ValidationError
+
+    from untether.settings import LoopSettings
+
+    with pytest.raises(ValidationError):
+        LoopSettings(min_interval_seconds=30)  # floor is 60
+
+
+def test_loop_settings_max_iterations_bounds() -> None:
+    from pydantic import ValidationError
+
+    from untether.settings import LoopSettings
+
+    with pytest.raises(ValidationError):
+        LoopSettings(max_iterations=0)
+    with pytest.raises(ValidationError):
+        LoopSettings(max_iterations=10001)
+
+
+def test_loop_settings_max_duration_bounds() -> None:
+    from pydantic import ValidationError
+
+    from untether.settings import LoopSettings
+
+    with pytest.raises(ValidationError):
+        LoopSettings(max_total_duration_hours=0)
+    with pytest.raises(ValidationError):
+        LoopSettings(max_total_duration_hours=169)
+
+
+def test_loop_settings_expiry_days_bounds() -> None:
+    from pydantic import ValidationError
+
+    from untether.settings import LoopSettings
+
+    with pytest.raises(ValidationError):
+        LoopSettings(expiry_days=0)
+    with pytest.raises(ValidationError):
+        LoopSettings(expiry_days=31)
+
+
+def test_loop_settings_rejects_unknown_keys() -> None:
+    from pydantic import ValidationError
+
+    from untether.settings import LoopSettings
+
+    with pytest.raises(ValidationError):
+        LoopSettings(budget_per_loop_usd=5.0)  # cost caps live in [cost_budget]
