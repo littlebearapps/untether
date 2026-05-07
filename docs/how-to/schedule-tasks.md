@@ -35,7 +35,7 @@ When the delay expires, the prompt runs as a normal agent session. Use `/cancel`
 
 Claude Code has a built-in `/loop <interval> <prompt>` command (and a no-interval `/loop <prompt>` dynamic mode driven by `ScheduleWakeup`) for self-pacing autonomous work. Untether's **Loop mode** observes those tool calls at the JSONL layer, captures the user's intent, and re-fires each iteration when due — even after the subprocess exits. ([#289](https://github.com/littlebearapps/untether/issues/289))
 
-**Default OFF** — opt-in per chat via `/config → 🔁 Loop mode`. When OFF, behaviour matches the pre-v0.35.4 baseline: `/loop` registers a schedule during the turn but nothing fires after the subprocess exits.
+**Default OFF** — opt-in per chat via `/config → 🔁 Loop mode`. When OFF, behaviour matches the prior-version baseline: `/loop` registers a schedule during the turn but nothing fires after the subprocess exits.
 
 ### How it works
 
