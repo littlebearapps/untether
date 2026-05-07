@@ -222,6 +222,28 @@ class CostBudgetSettings(BaseModel):
     auto_cancel: bool = False
 
 
+class LoopSettings(BaseModel):
+    """Untether-side observation of Claude Code's session-scoped scheduling
+    tools (CronCreate, ScheduleWakeup) so /loop and dynamic-mode wakeups
+    keep firing after the subprocess exits.  Off by default — opt-in
+    per-chat via /config → 🔁 Loop mode (#289).
+
+    Cost limits are NOT in [loop]; they live in [cost_budget] and apply
+    to loop fires automatically.  The caps below are runaway-safety
+    only.
+    """
+
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    enabled: bool = False
+    inline_threshold_seconds: int = Field(default=300, ge=0)
+    redundancy_check_interval: int = Field(default=30, ge=1)
+    max_iterations: int = Field(default=20, ge=1, le=10000)
+    max_total_duration_hours: int = Field(default=4, ge=1, le=168)
+    min_interval_seconds: int = Field(default=60, ge=60)
+    expiry_days: int = Field(default=7, ge=1, le=30)
+
+
 class FooterSettings(BaseModel):
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
 
@@ -429,6 +451,7 @@ class UntetherSettings(BaseSettings):
 
     plugins: PluginsSettings = Field(default_factory=PluginsSettings)
     cost_budget: CostBudgetSettings = Field(default_factory=CostBudgetSettings)
+    loop: LoopSettings = Field(default_factory=LoopSettings)
     footer: FooterSettings = Field(default_factory=FooterSettings)
     preamble: PreambleSettings = Field(default_factory=PreambleSettings)
     progress: ProgressSettings = Field(default_factory=ProgressSettings)

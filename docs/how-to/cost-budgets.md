@@ -38,6 +38,9 @@ You can toggle budgets on or off per chat without editing the config file. Open 
 
 These override the global `[cost_budget]` settings for the specific chat. Clear the override to revert to the global setting. See [Inline settings](inline-settings.md) for the full `/config` menu reference.
 
+!!! warning "Loop mode and budgets"
+    If you turn on Loop mode in `/config → 🔁 Loop mode`, autonomous loop fires count toward the same daily and per-run budget caps as manual runs. There is no separate per-loop budget — the existing `max_cost_per_day` cap auto-cancels any loop iteration that would exceed it. **Set a budget before turning on Loop mode** to bound your exposure. See [Schedule tasks → Loop mode](schedule-tasks.md#loop-mode) for the full picture. ([#289](https://github.com/littlebearapps/untether/issues/289))
+
 ## How it works
 
 After each run completes, Untether checks the reported cost against your budgets:

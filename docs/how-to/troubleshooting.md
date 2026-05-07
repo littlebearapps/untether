@@ -512,6 +512,19 @@ Untether recognises **67 error patterns** across 14 categories:
 
 For the full list of patterns and hints, see the [Error Reference](../reference/errors.md).
 
+## Loop didn't fire / loop fired too many times
+
+Loop mode (`/config → 🔁 Loop mode`) gates Untether's observation of Claude Code's `/loop` and `ScheduleWakeup` tools. ([#289](https://github.com/littlebearapps/untether/issues/289))
+
+| Symptom | Likely cause | Fix |
+|---|---|---|
+| `/loop` registered during the turn but no fires happened afterwards | Loop mode toggle is OFF (the default) | `/config → 🔁 Loop mode → 🔁 On` |
+| Loop stopped after N iterations | Hit `[loop] max_iterations` cap | Raise `max_iterations` in `untether.toml`, or restart the loop with a fresh `/loop` |
+| Loop ended with `daily_budget_exceeded` | Hit `[cost_budget] max_cost_per_day` | Raise the cap in `/config → 💰 Cost & usage`, or wait for the daily reset |
+| Loop fires happened but each was a "fresh user turn" rather than autonomous | This is by design — Untether re-issues the original prompt at each fire (see [Schedule tasks → Loop mode](schedule-tasks.md#loop-mode)) | N/A — expected behaviour |
+| Loop kept firing after `/cancel` | Stale `active_loops.json` | Restart `untether` (or the dev/staging unit) — the do-not-resume sentinel is loaded at startup and blocks future fires for cancelled sessions |
+| Loop didn't survive a restart | `active_loops.json` is missing or corrupt | Check `journalctl --user -u untether-dev -f` for `loop.restore.read_failed` warnings; the file lives next to your `untether.toml` |
+
 ## Related
 
 - [Operations and monitoring](operations.md) — `/ping`, `/restart`, hot-reload

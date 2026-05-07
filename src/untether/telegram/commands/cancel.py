@@ -77,6 +77,21 @@ async def handle_cancel(
                 )
             )
             return
+        # Check pending /loop entries for this chat (#289).  Also writes the
+        # do-not-resume sentinel so the upstream session-scoped cron that
+        # may still live in the JSONL transcript can never be re-fired by
+        # us if the user later resumes the session manually.
+        from ... import loop_scheduler
+
+        pending_loops = loop_scheduler.cancel_pending_for_chat(chat_id)
+        if pending_loops:
+            await reply(
+                text=(
+                    f"\u274c cancelled {pending_loops} active loop"
+                    f"{'s' if pending_loops != 1 else ''}."
+                )
+            )
+            return
         logger.debug("cancel.nothing_running", chat_id=chat_id)
         await reply(text="nothing running in this chat.")
         return

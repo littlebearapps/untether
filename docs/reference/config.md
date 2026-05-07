@@ -299,6 +299,37 @@ Budget alerts always appear regardless of `[footer]` settings.
 
 The stall monitor in `ProgressEdits` fires at 5 min (300s) idle, 10 min for local tools, 15 min for MCP tools, and 30 min for pending approvals. When a local tool is running and the child process is CPU-active, the first stall warning fires but repeat warnings are suppressed — they resume if CPU goes idle (indicating a genuinely stuck tool). The liveness watchdog in the subprocess layer fires at `liveness_timeout` with `/proc` diagnostics. When `stall_auto_kill` is enabled, auto-kill requires a triple safety gate: timeout exceeded + zero TCP connections + CPU ticks not increasing between snapshots.
 
+### `[loop]`
+
+Controls Untether's observation of Claude Code's session-scoped scheduling tools (`CronCreate`, `ScheduleWakeup`). Off by default — users opt in per chat via `/config → 🔁 Loop mode`. ([#289](https://github.com/littlebearapps/untether/issues/289))
+
+=== "toml"
+
+    ```toml
+    [loop]
+    enabled = false
+    inline_threshold_seconds = 300
+    redundancy_check_interval = 30
+    max_iterations = 20
+    max_total_duration_hours = 4
+    min_interval_seconds = 60
+    expiry_days = 7
+    ```
+
+| Key | Type | Default | Notes |
+|-----|------|---------|-------|
+| `enabled` | bool | `false` | Global default for Loop mode. Per-chat override available via `/config → 🔁 Loop mode`. |
+| `inline_threshold_seconds` | int | `300` | `ScheduleWakeup` calls with `delaySeconds` ≤ this stay rendered live by the rc8 countdown — no Untether-side timer is registered. Long waits (above the threshold) get an Untether timer that survives subprocess exit. |
+| `redundancy_check_interval` | int | `30` | Seconds the fire path waits before retrying when the originating subprocess is still alive (race-avoidance gate). |
+| `max_iterations` | int | `20` | Runaway-safety cap on iteration count (NOT a cost cap). |
+| `max_total_duration_hours` | int | `4` | Runaway-safety cap on wall-clock duration (NOT a cost cap). |
+| `min_interval_seconds` | int | `60` | Minimum interval between fires (matches upstream cron floor). |
+| `expiry_days` | int | `7` | Auto-expire loops 7 days after creation (matches upstream's session-task expiry). |
+
+**Cost limits are NOT in `[loop]`** — they live in `[cost_budget]` and apply to loop fires automatically. See [Cost budgets](../how-to/cost-budgets.md) for setup.
+
+State is persisted to `active_loops.json` (sibling of your `untether.toml`) so loops survive restarts. The do-not-resume sentinel for `/cancel`-cancelled loops is persisted alongside.
+
 ### `[auto_continue]`
 
 Auto-continue detects when Claude Code exits after receiving tool results without processing them (upstream bugs [#34142](https://github.com/anthropics/claude-code/issues/34142), [#30333](https://github.com/anthropics/claude-code/issues/30333)) and automatically resumes the session. Detection is based on a protocol invariant: normal sessions always end with `last_event_type=result`, while premature exits show `last_event_type=user`.

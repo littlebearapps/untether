@@ -187,6 +187,19 @@ _OUTLINE_MIN_CHARS = 200
 _PENDING_ASK_REQUESTS: dict[str, tuple[int, str]] = {}
 
 
+def is_session_alive(session_id: str) -> bool:
+    """Return True if a Claude subprocess for ``session_id`` is currently
+    running and has an open stdin (registered in :data:`_SESSION_STDIN`).
+
+    Used by :mod:`untether.loop_scheduler` (#289) before firing a loop
+    iteration, to avoid racing a still-live subprocess that may be parked
+    on a control_request awaiting Telegram button input.  Once the
+    subprocess exits its registry entry is cleared in :class:`ClaudeRunner`'s
+    ``run_impl`` finally block.
+    """
+    return session_id in _SESSION_STDIN
+
+
 @dataclass(slots=True)
 class AskQuestionState:
     """Tracks multi-question AskUserQuestion flow state."""
@@ -272,6 +285,12 @@ class ClaudeStreamState:
     live_bg_agents: set[str] = field(default_factory=set)
     live_wakeups: dict[str, float] = field(default_factory=dict)
     live_remote_triggers: set[str] = field(default_factory=set)
+
+    # #289 — first user message text for the run.  Populated by ``new_state``
+    # from the prompt arg.  Used as the fallback for the
+    # ``<<autonomous-loop-dynamic>>`` sentinel when ScheduleWakeup is
+    # observed without an explicit ``prompt`` field (Probe 3 result).
+    first_user_message_text: str | None = None
 
     # #361 env-leak audit: pid populated by ClaudeRunner.run_impl after
     # spawn so translate_claude_event can sample /proc/<pid>/environ in
@@ -455,6 +474,173 @@ def _clear_background_handle(state: ClaudeStreamState, tool_use_id: str) -> None
     state.live_bg_agents.discard(tool_use_id)
     state.live_wakeups.pop(tool_use_id, None)
     state.live_remote_triggers.discard(tool_use_id)
+
+
+# ── /loop and ScheduleWakeup observation (#289) ─────────────────────────
+
+
+# Result-text patterns extracted in ``_observe_loop_tool_result``.
+# CronCreate / CronDelete share the ``\bjob ([0-9a-f]{8})\b`` form (Probe 5).
+_LOOP_CRON_ID_RE = re.compile(r"\bjob ([0-9a-f]{8})\b")
+# ScheduleWakeup result text reports the runtime-clamped delay as ``(in Ns)``.
+_LOOP_WAKEUP_DELAY_RE = re.compile(r"\(in (\d+)s\)")
+
+
+def _loop_enabled_for_chat(chat_id: int | None) -> bool:
+    """Resolve the /loop master toggle for a chat.
+
+    Resolution order (matches the design doc §5.0):
+
+    1. Per-chat override via ``EngineRunOptions.loop_enabled`` (set by
+       ``/config → 🔁 Loop mode``).  ``None`` means "follow global".
+    2. Global ``[loop] enabled`` from ``untether.toml``.
+    3. Hard fallback: ``False`` so a config error never accidentally
+       turns Loop mode on.
+
+    ``chat_id`` is currently advisory — the per-chat override lives in
+    the run-options contextvar set by ``executor.handle_engine_run``,
+    which is already chat-scoped.  We accept it so the call site reads
+    cleanly and so a future per-chat resolver can be wired in without
+    changing observer signatures.
+    """
+    options = get_run_options()
+    if options is not None and options.loop_enabled is not None:
+        return bool(options.loop_enabled)
+    try:
+        result = load_settings_if_exists()
+        if result is None:
+            return False
+        settings, _ = result
+        return bool(settings.loop.enabled)
+    except Exception:  # noqa: BLE001 — never let config errors turn loop ON
+        return False
+
+
+def _observe_loop_tool_use(
+    state: ClaudeStreamState,
+    content: claude_schema.StreamToolUseBlock,
+) -> None:
+    """Observe ``CronCreate`` / ``ScheduleWakeup`` / ``CronDelete``
+    ``tool_use`` events and register Untether-side loop entries (#289).
+
+    Sibling of :func:`_register_background_handle` — does NOT mutate
+    ``state.live_*`` registries.  Called after
+    :func:`_register_background_handle` so the rc8 ScheduleWakeup
+    countdown still works for short waits when Loop mode is OFF.
+    """
+    from ..utils.paths import get_run_channel_id
+
+    chat_id = get_run_channel_id()
+    if chat_id is None:
+        return  # not in a chat-scoped run (probes, ad-hoc spawns)
+    if not _loop_enabled_for_chat(chat_id):
+        return  # master toggle off → behave as today
+    tool_name = str(content.name or "")
+    tool_id = content.id
+    raw_input = content.input if isinstance(content.input, dict) else {}
+    session_id = state.factory.resume.value if state.factory.resume else None
+    if not session_id:
+        return  # session_id only known after system.init; tool_use shouldn't
+        # arrive before that, but guard defensively
+
+    from .. import loop_scheduler
+
+    if tool_name == "CronCreate":
+        # Probe 5: input field is `cron`, NOT `cron_expression`.  Lenient
+        # fallback to `cron_expression`/`schedule` in case the upstream
+        # schema gains aliases later.
+        cron_expr = (
+            raw_input.get("cron")
+            or raw_input.get("cron_expression")
+            or raw_input.get("schedule")
+        )
+        prompt = raw_input.get("prompt") or raw_input.get("text") or ""
+        recurring = bool(raw_input.get("recurring", True))
+        if not cron_expr or not prompt:
+            return
+        try:
+            loop_scheduler.register_pending_cron(
+                session_id=session_id,
+                tool_use_id=tool_id,
+                cron_expression=str(cron_expr),
+                prompt=str(prompt),
+                recurring=recurring,
+                chat_id=int(chat_id),
+                fallback_first_user_message=state.first_user_message_text,
+            )
+        except loop_scheduler.LoopSchedulerError as exc:
+            logger.warning(
+                "loop.observe.cron_register_failed",
+                session=session_id,
+                error=str(exc),
+            )
+    elif tool_name == "ScheduleWakeup":
+        # Probe 5: minimum delaySeconds = 60 (runtime clamps shorter values).
+        delay_seconds_raw = raw_input.get("delaySeconds")
+        if not isinstance(delay_seconds_raw, (int, float)) or delay_seconds_raw <= 0:
+            return
+        # Inline threshold — short waits stay rendered live by the
+        # rc8 countdown without an Untether-side timer (post-result
+        # watchdog won't reach them).
+        try:
+            settings_result = load_settings_if_exists()
+            inline_threshold = (
+                settings_result[0].loop.inline_threshold_seconds
+                if settings_result is not None
+                else 300
+            )
+        except Exception:  # noqa: BLE001
+            inline_threshold = 300
+        if delay_seconds_raw <= inline_threshold:
+            return
+        prompt = raw_input.get("prompt") or "<<autonomous-loop-dynamic>>"
+        try:
+            loop_scheduler.register_pending_wakeup(
+                session_id=session_id,
+                tool_use_id=tool_id,
+                delay_seconds=float(delay_seconds_raw),
+                prompt=str(prompt),
+                chat_id=int(chat_id),
+                fallback_first_user_message=state.first_user_message_text,
+            )
+        except loop_scheduler.LoopSchedulerError as exc:
+            logger.warning(
+                "loop.observe.wakeup_register_failed",
+                session=session_id,
+                error=str(exc),
+            )
+    elif tool_name == "CronDelete":
+        # Probe 5: input field is `id`, NOT `taskId`/`cronId`.
+        upstream_id = raw_input.get("id") or raw_input.get("taskId")
+        if upstream_id:
+            loop_scheduler.cancel_by_upstream_id(str(upstream_id))
+
+
+def _observe_loop_tool_result(
+    state: ClaudeStreamState,
+    tool_use_id: str,
+    result_content: object,
+) -> None:
+    """Observe ``CronCreate`` ``tool_result`` events and bind the upstream
+    8-character cron ID to the matching pending entry (#289).
+
+    Sibling of :func:`_clear_background_handle`.  Does nothing if no
+    matching entry exists (e.g. master toggle was off when tool_use was
+    observed).  Idempotent — bind_upstream_id is a no-op for unknown
+    tool_use_ids.
+    """
+    if not isinstance(result_content, str):
+        # tool_result.content can be list[dict] for multi-block results.
+        # CronCreate / ScheduleWakeup return free-form strings, so anything
+        # else is irrelevant.
+        return
+    from .. import loop_scheduler
+
+    match = _LOOP_CRON_ID_RE.search(result_content)
+    if match is None:
+        return
+    upstream_id = match.group(1)
+    loop_scheduler.bind_upstream_id(tool_use_id, upstream_id)
 
 
 def has_live_background_work(state: ClaudeStreamState) -> bool:
@@ -840,6 +1026,11 @@ def translate_claude_event(
                         # #347 track long-running primitives that outlive
                         # this tool_use → tool_result cycle
                         _register_background_handle(state, content)
+                        # #289 observe /loop and ScheduleWakeup tool calls
+                        # so Untether can re-fire after the subprocess exits
+                        # (master toggle gate inside).  Sibling of, not
+                        # replacement for, _register_background_handle.
+                        _observe_loop_tool_use(state, content)
                         out.append(
                             factory.action_started(
                                 action_id=action.id,
@@ -899,6 +1090,9 @@ def translate_claude_event(
                 tool_use_id = content.tool_use_id
                 # #347 clear any background-task entry for this tool_use_id
                 _clear_background_handle(state, tool_use_id)
+                # #289 bind upstream cron ID so CronDelete observations
+                # later in the session can target the right loop entry.
+                _observe_loop_tool_result(state, tool_use_id, content.content)
                 action = state.pending_actions.pop(tool_use_id, None)
                 if action is None:
                     action = Action(
@@ -1898,6 +2092,11 @@ class ClaudeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
         state = ClaudeStreamState()
         state.auto_approve_exit_plan_mode = self._effective_permission_mode() == "auto"
         state.resumed = resume is not None
+        # #289 capture the first user message so loop observers can fall back
+        # to it when ScheduleWakeup uses the <<autonomous-loop-dynamic>>
+        # sentinel.  For resumed runs this is the resume prompt (still better
+        # than letting the sentinel reach Claude verbatim).
+        state.first_user_message_text = prompt
         # #365 propagate MCP catalog observability knobs from WatchdogSettings.
         # Defaults on the dataclass already mirror WatchdogSettings defaults,
         # so a load failure is a safe no-op.

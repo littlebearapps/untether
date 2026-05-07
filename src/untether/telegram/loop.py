@@ -129,6 +129,7 @@ async def _resolve_engine_run_options(
         show_resume_line=merged.show_resume_line,
         budget_enabled=merged.budget_enabled,
         budget_auto_cancel=merged.budget_auto_cancel,
+        loop_enabled=merged.loop_enabled,
     )
 
 
@@ -1500,10 +1501,18 @@ async def run_main_loop(
 
                 active = len(state.running_tasks)
                 pending_at = at_scheduler.active_count()
+                # #289: include loop fires in the shutdown summary so ops
+                # can see how many were pending at drain time.  Pending
+                # loops are persisted to disk; the task-group cancel below
+                # cancels their in-flight `_arm_timer` sleeps cleanly.
+                from .. import loop_scheduler
+
+                pending_loops = loop_scheduler.active_count()
                 logger.info(
                     "shutdown.draining",
                     active_runs=active,
                     pending_at=pending_at,
+                    pending_loops=pending_loops,
                 )
 
                 if active > 0:
@@ -1691,6 +1700,33 @@ async def run_main_loop(
                 run_job,
                 cfg.exec_cfg.transport,
                 cfg.chat_id,
+            )
+
+            # --- /loop and ScheduleWakeup observation (#289) ---
+            from .. import loop_scheduler
+
+            loop_state_path = None
+            config_path_for_loops = cfg.runtime.config_path
+            if config_path_for_loops is not None:
+                loop_state_path = config_path_for_loops.with_name(
+                    loop_scheduler.STATE_FILENAME
+                )
+
+            def _is_chat_busy(chat_id_in: int) -> bool:
+                """Drop a loop fire if the chat already has a run in flight
+                — mirrors upstream's "no catch-up" semantic."""
+                for ref in state.running_tasks:
+                    if getattr(ref, "channel_id", None) == chat_id_in:
+                        return True
+                return False
+
+            loop_scheduler.install(
+                tg,
+                run_job,
+                cfg.exec_cfg.transport,
+                cfg.chat_id,
+                state_path=loop_state_path,
+                is_chat_busy=_is_chat_busy,
             )
 
             # --- Trigger system (webhooks + cron) ---

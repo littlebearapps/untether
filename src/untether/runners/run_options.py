@@ -18,6 +18,10 @@ class EngineRunOptions:
     show_resume_line: bool | None = None
     budget_enabled: bool | None = None
     budget_auto_cancel: bool | None = None
+    # #289 — per-chat /loop and ScheduleWakeup observation toggle.  ``None``
+    # means "follow global ``[loop] enabled``"; True/False is an explicit
+    # per-chat override set via ``/config → 🔁 Loop mode``.
+    loop_enabled: bool | None = None
 
 
 # Canonical per-engine permission_mode value sets. Used by trigger config

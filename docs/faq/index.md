@@ -106,6 +106,14 @@ auto_cancel_on_exceed = true # cancel the run when the threshold is hit
 
 Cost tracking is most accurate for Claude (full USD reporting via API metadata) and OpenCode. Codex, Pi, Gemini, and Amp report tokens-only. Subscription users (Claude Pro/Max, ChatGPT, Gemini, Amp) see a `5h: N% / 7d: N%` indicator instead of dollars. See the [cost-budgets guide](https://untether.littlebearapps.com/how-to/cost-budgets/) for tuning.
 
+## Does /loop work via Untether?
+
+By default, no — Claude Code's `/loop` and `ScheduleWakeup` are session-scoped, and the Untether subprocess exits when each turn finishes. Schedules registered by Claude don't fire afterwards.
+
+To enable end-to-end /loop support, turn on **Loop mode** in `/config → 🔁 Loop mode`. When on, Untether observes Claude's schedule registrations and re-fires each iteration when due, spawning a fresh `claude --resume` subprocess per fire.
+
+Be aware: autonomous loops consume API credits or your subscription quota. Set a budget in `/config → 💰 Cost & usage` *before* turning Loop mode on — the same daily cost cap applies to loop fires automatically. See the [Schedule tasks how-to](https://untether.littlebearapps.com/how-to/schedule-tasks/#loop-mode) for details.
+
 ## Can I send voice notes instead of typing?
 
 Yes — record a voice message in Telegram and Untether transcribes it via a Whisper-compatible endpoint, then runs the transcribed text as a normal prompt. Configure in `untether.toml`:

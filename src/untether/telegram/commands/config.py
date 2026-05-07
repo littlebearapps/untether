@@ -415,12 +415,17 @@ async def _page_home(ctx: CommandContext) -> None:
         buttons.append(
             [
                 {"text": "📡 Listen", "callback_data": "config:tr"},
-                {"text": "⚙️ Engine & model", "callback_data": "config:ag"},
+                {"text": "🔁 Loop mode", "callback_data": "config:loop"},
             ]
         )
         buttons.append(
             [
                 {"text": f"🧠 {home_rs_label}", "callback_data": "config:rs"},
+                {"text": "⚙️ Engine & model", "callback_data": "config:ag"},
+            ]
+        )
+        buttons.append(
+            [
                 {"text": "ℹ️ About", "callback_data": "config:ab"},
             ]
         )
@@ -786,6 +791,137 @@ async def _page_planmode(ctx: CommandContext, action: str | None = None) -> None
         ]
 
     await _respond(ctx, "\n".join(lines), buttons)
+
+
+# ---------------------------------------------------------------------------
+# Loop mode (#289)
+# ---------------------------------------------------------------------------
+
+
+async def _page_loop(ctx: CommandContext, action: str | None = None) -> None:
+    """Loop mode toggle for /loop and ScheduleWakeup observation (#289).
+
+    Mirrors the shape of ``_page_planmode``: tri-state per-chat override
+    (on / off / clear → fall back to global ``[loop] enabled``), explicit
+    cost/quota warning before enabling, deeplink to ``/config:cu`` for
+    setting a budget cap.
+    """
+    from ..chat_prefs import ChatPrefsStore, resolve_prefs_path
+    from ..engine_overrides import LOOP_SUPPORTED_ENGINES, EngineOverrides
+
+    config_path = ctx.config_path
+    if config_path is None:
+        await _respond(
+            ctx,
+            "<b>🔁 Loop mode</b>\n\nUnavailable (no config path).",
+            [[{"text": "← Back", "callback_data": "config:home"}]],
+        )
+        return
+
+    prefs = ChatPrefsStore(resolve_prefs_path(config_path))
+    chat_id = ctx.message.channel_id
+
+    current_engine, _ = await _resolve_effective_engine(ctx)
+    if current_engine not in LOOP_SUPPORTED_ENGINES:
+        await _respond(
+            ctx,
+            (
+                "<b>🔁 Loop mode</b>\n\nOnly available for Claude Code — "
+                "other engines don't have <code>/loop</code> or "
+                "<code>ScheduleWakeup</code>."
+            ),
+            [[{"text": "← Back", "callback_data": "config:home"}]],
+        )
+        return
+
+    engine = current_engine
+
+    # Action handlers
+    if action in {"on", "off", "clr"}:
+        current = await prefs.get_engine_override(chat_id, engine)
+        if action == "on":
+            new_value: bool | None = True
+        elif action == "off":
+            new_value = False
+        else:
+            new_value = None
+        updated = EngineOverrides(
+            model=current.model if current else None,
+            reasoning=current.reasoning if current else None,
+            permission_mode=current.permission_mode if current else None,
+            ask_questions=current.ask_questions if current else None,
+            diff_preview=current.diff_preview if current else None,
+            show_api_cost=current.show_api_cost if current else None,
+            show_subscription_usage=current.show_subscription_usage
+            if current
+            else None,
+            show_resume_line=current.show_resume_line if current else None,
+            budget_enabled=current.budget_enabled if current else None,
+            budget_auto_cancel=current.budget_auto_cancel if current else None,
+            loop_enabled=new_value,
+        )
+        await prefs.set_engine_override(chat_id, engine, updated)
+        logger.info("config.loop.set", chat_id=chat_id, value=new_value)
+        await _page_home(ctx)
+        return
+
+    # Render — resolve current effective state
+    current = await prefs.get_engine_override(chat_id, engine)
+    per_chat = current.loop_enabled if current else None
+    if per_chat is None:
+        try:
+            from ...settings import load_settings_if_exists
+
+            result = load_settings_if_exists()
+            global_enabled = (
+                bool(result[0].loop.enabled) if result is not None else False
+            )
+        except Exception:  # noqa: BLE001
+            global_enabled = False
+        effective = "On (global)" if global_enabled else "Off (global)"
+    elif per_chat:
+        effective = "On (per-chat)"
+    else:
+        effective = "Off (per-chat)"
+
+    body = (
+        f"<b>🔁 Loop mode</b>\n\n"
+        f"Currently: <b>{effective}</b>\n\n"
+        f"When <b>ON</b>:\n"
+        f"  Claude Code can schedule and continue tasks autonomously.\n"
+        f"  <code>/loop 5m check the deploy</code> works end-to-end via "
+        f"Telegram — Untether observes Claude's CronCreate / "
+        f"ScheduleWakeup tool calls and re-fires each iteration when due, "
+        f"spawning a fresh <code>claude --resume</code> per fire.\n\n"
+        f"When <b>OFF</b> (default):\n"
+        f"  Claude Code only runs when you message it. <code>/loop</code> "
+        f"appears to register schedules during a turn, but nothing fires "
+        f"after the subprocess exits.\n\n"
+        f"⚠️ <b>Cost &amp; quota risk when ON</b>\n"
+        f"  Autonomous loops consume API credits or your Claude "
+        f"subscription quota. A 24h <code>/loop 1m</code> can fire up to "
+        f"1440 times. Set a budget in 💰 Cost &amp; usage <i>before</i> "
+        f"turning Loop mode on — the same daily cost cap applies to loop "
+        f"fires automatically."
+    )
+    buttons = [
+        [
+            {
+                "text": _check("On", active=per_chat is True),
+                "callback_data": "config:loop:on",
+            },
+            {
+                "text": _check("Off", active=per_chat is False),
+                "callback_data": "config:loop:off",
+            },
+        ],
+        [
+            {"text": "Clear override", "callback_data": "config:loop:clr"},
+            {"text": "💰 Set a budget", "callback_data": "config:cu"},
+        ],
+        [{"text": "← Back", "callback_data": "config:home"}],
+    ]
+    await _respond(ctx, body, buttons)
 
 
 # ---------------------------------------------------------------------------
@@ -2040,6 +2176,7 @@ _PAGES: dict[str, object] = {
     "cu": _page_cost_usage,
     "rl": _page_resume_line,
     "ab": _page_about,
+    "loop": _page_loop,
 }
 
 
@@ -2125,6 +2262,11 @@ class ConfigCommand:
                 "on": "Resume line: on",
                 "off": "Resume line: off",
                 "clr": "Resume line: cleared",
+            },
+            "loop": {
+                "on": "🔁 Loop mode: on",
+                "off": "🔁 Loop mode: off",
+                "clr": "🔁 Loop mode: cleared",
             },
         }
         page_labels = _TOAST_LABELS.get(page, {})

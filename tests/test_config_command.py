@@ -404,6 +404,124 @@ class TestPlanMode:
 # ---------------------------------------------------------------------------
 
 
+class TestLoopMode:
+    """Cover the new ``/config:loop`` sub-page (#289)."""
+
+    @pytest.mark.anyio
+    async def test_loop_page_renders(self, tmp_path):
+        """Navigating to loop sub-page shows the toggle UI."""
+        state_path = tmp_path / "prefs.json"
+        cmd = ConfigCommand()
+        ctx = _make_ctx(
+            args_text="loop",
+            text="config:loop",
+            config_path=state_path,
+            default_engine="claude",
+        )
+        await cmd.handle(ctx)
+        msg = _last_edit_msg(ctx)
+        assert "Loop mode" in msg.text
+        # Toggle row + cost-budget deeplink + back
+        assert "config:loop:on" in _buttons_data(msg)
+        assert "config:loop:off" in _buttons_data(msg)
+        assert "config:loop:clr" in _buttons_data(msg)
+        assert "config:cu" in _buttons_data(msg)
+        assert "config:home" in _buttons_data(msg)
+        # Cost+quota warning must be visible before user toggles ON
+        assert "Cost" in msg.text
+        assert "quota" in msg.text.lower()
+
+    @pytest.mark.anyio
+    async def test_loop_page_hidden_for_non_claude(self, tmp_path):
+        """LOOP_SUPPORTED_ENGINES = {claude} — Codex must show the
+        unavailable message instead of the toggle."""
+        state_path = tmp_path / "prefs.json"
+        cmd = ConfigCommand()
+        ctx = _make_ctx(
+            args_text="loop",
+            text="config:loop",
+            config_path=state_path,
+            default_engine="codex",
+        )
+        await cmd.handle(ctx)
+        msg = _last_edit_msg(ctx)
+        assert "Only available for Claude Code" in msg.text
+        # No toggle buttons in this branch
+        assert "config:loop:on" not in _buttons_data(msg)
+
+    @pytest.mark.anyio
+    async def test_loop_set_on_returns_home(self, tmp_path):
+        """Toggling Loop on returns to home page."""
+        state_path = tmp_path / "prefs.json"
+        cmd = ConfigCommand()
+        ctx = _make_ctx(
+            args_text="loop:on",
+            text="config:loop:on",
+            config_path=state_path,
+            default_engine="claude",
+        )
+        await cmd.handle(ctx)
+        msg = _last_edit_msg(ctx)
+        assert "settings" in msg.text.lower()  # home page header
+
+    @pytest.mark.anyio
+    async def test_loop_clear_resets_per_chat_override(self, tmp_path):
+        """Clear → loop_enabled goes back to None (follows global)."""
+        from untether.telegram.chat_prefs import (
+            ChatPrefsStore,
+            resolve_prefs_path,
+        )
+
+        state_path = tmp_path / "prefs.json"
+        cmd = ConfigCommand()
+        # Set on, then clear.
+        ctx = _make_ctx(
+            args_text="loop:on",
+            text="config:loop:on",
+            config_path=state_path,
+            default_engine="claude",
+        )
+        await cmd.handle(ctx)
+        ctx = _make_ctx(
+            args_text="loop:clr",
+            text="config:loop:clr",
+            config_path=state_path,
+            default_engine="claude",
+        )
+        await cmd.handle(ctx)
+        # Verify persisted state is None
+        prefs = ChatPrefsStore(resolve_prefs_path(state_path))
+        override = await prefs.get_engine_override(123, "claude")
+        assert override is None or override.loop_enabled is None
+
+    @pytest.mark.anyio
+    async def test_loop_no_config_path(self):
+        cmd = ConfigCommand()
+        ctx = _make_ctx(args_text="loop", text="config:loop", config_path=None)
+        await cmd.handle(ctx)
+        assert "Unavailable" in _last_edit_msg(ctx).text
+
+    @pytest.mark.anyio
+    async def test_loop_button_in_home_for_claude(self, tmp_path):
+        """The 🔁 Loop mode button must render on the Claude home page."""
+        state_path = tmp_path / "prefs.json"
+        cmd = ConfigCommand()
+        ctx = _make_ctx(config_path=state_path, default_engine="claude")
+        await cmd.handle(ctx)
+        msg = _last_send_msg(ctx)
+        assert "config:loop" in _buttons_data(msg)
+
+    @pytest.mark.anyio
+    async def test_loop_button_hidden_in_home_for_codex(self, tmp_path):
+        """The 🔁 Loop mode button must NOT render on a Codex home page."""
+        state_path = tmp_path / "prefs.json"
+        cmd = ConfigCommand()
+        ctx = _make_ctx(config_path=state_path, default_engine="codex")
+        await cmd.handle(ctx)
+        msg = _last_send_msg(ctx)
+        assert "config:loop" not in _buttons_data(msg)
+
+
 class TestCodexApprovalPolicy:
     @pytest.mark.anyio
     async def test_approval_policy_page_renders(self, tmp_path):

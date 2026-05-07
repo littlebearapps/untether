@@ -43,7 +43,9 @@ def _cancel_chat_tasks(
 ) -> int:
     """Cancel all running tasks for a chat.
 
-    Returns the number of tasks cancelled.
+    Returns the number of tasks cancelled.  Also drops any pending /loop
+    entries for the chat (#289) so ``/new`` cleanly resets loop state in
+    addition to running runs.
     """
     cancelled = 0
     if running_tasks:
@@ -51,6 +53,11 @@ def _cancel_chat_tasks(
             if ref.channel_id == chat_id and not task.cancel_requested.is_set():
                 task.cancel_requested.set()
                 cancelled += 1
+    # #289: drop pending loop entries for the chat too.  Mirror the at
+    # scheduler integration in handle_cancel — /new should leave no trace.
+    from ... import loop_scheduler
+
+    cancelled += loop_scheduler.cancel_pending_for_chat(chat_id)
     return cancelled
 
 
