@@ -1977,3 +1977,23 @@ def test_meta_line_omits_complete_when_absent() -> None:
     line = format_meta_line({"model": "sonnet"})
     assert line is not None
     assert "✓ turn complete" not in line
+
+
+def test_is_session_alive_reads_session_stdin_registry() -> None:
+    """is_session_alive (#289) returns True iff session_id is in _SESSION_STDIN."""
+    from untether.runners.claude import _SESSION_STDIN, is_session_alive
+
+    sid = "test-session-289-alive"
+    try:
+        assert is_session_alive(sid) is False
+        _SESSION_STDIN[sid] = object()  # any sentinel is enough — we test membership
+        assert is_session_alive(sid) is True
+    finally:
+        _SESSION_STDIN.pop(sid, None)
+
+
+def test_is_session_alive_unknown_session_returns_false() -> None:
+    """Sessions never registered are not alive."""
+    from untether.runners.claude import is_session_alive
+
+    assert is_session_alive("session-that-was-never-spawned") is False

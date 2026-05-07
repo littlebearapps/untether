@@ -187,6 +187,19 @@ _OUTLINE_MIN_CHARS = 200
 _PENDING_ASK_REQUESTS: dict[str, tuple[int, str]] = {}
 
 
+def is_session_alive(session_id: str) -> bool:
+    """Return True if a Claude subprocess for ``session_id`` is currently
+    running and has an open stdin (registered in :data:`_SESSION_STDIN`).
+
+    Used by :mod:`untether.loop_scheduler` (#289) before firing a loop
+    iteration, to avoid racing a still-live subprocess that may be parked
+    on a control_request awaiting Telegram button input.  Once the
+    subprocess exits its registry entry is cleared in :class:`ClaudeRunner`'s
+    ``run_impl`` finally block.
+    """
+    return session_id in _SESSION_STDIN
+
+
 @dataclass(slots=True)
 class AskQuestionState:
     """Tracks multi-question AskUserQuestion flow state."""
