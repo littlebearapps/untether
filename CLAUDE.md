@@ -163,7 +163,7 @@ Project hooks in `.claude/hooks.json` fire automatically:
 | release-guard | Bash: `git push`, `git tag`, `gh pr merge`, `gh release` | Blocks pushes to master/main, tag creation, PR merging, releases; allows feature and dev branch pushes |
 | release-guard-protect | Edit/Write to guard scripts, `hooks.json`, or `help-faq-protect.sh` | Prevents modification of release guard infrastructure and the FAQ-protect hook |
 | release-guard-mcp | GitHub MCP write tools | Blocks `merge_pull_request` and writes to master/main; allows feature branches |
-| help-faq-protect | Bash: `rm`, `git rm`, `mv`, `>` redirect targeting `docs/faq/index.md` | Blocks deletion / move / truncate of the help-centre FAQ; edits via Edit/Write/append `>>` are allowed (#477) |
+| help-faq-protect | Bash: `rm`, `git rm`, `mv`, `>` redirect targeting `docs/faq/faq.md` | Blocks deletion / move / truncate of the help-centre FAQ; edits via Edit/Write/append `>>` are allowed (#477, #483) |
 | dev-workflow-guard | `systemctl` with `untether` | Blocks staging restarts during dev; guides to `untether-dev`; allows `staging.sh`/`pipx upgrade` path |
 | runner-edit-context | Edit/Write to `runners/*.py` | 3-event contract, PTY lifecycle, test/doc reminders |
 | schema-edit-context | Edit/Write to `schemas/*.py` | msgspec impact on parsing, fixture updates |
@@ -383,9 +383,9 @@ Before tagging a release:
 
 ## Help-centre FAQ
 
-`docs/faq/index.md` (12 H2 question-shaped Q/A pairs) backs the marketing-site **FAQPage Schema.org** pipeline shipped on `feature/help-seo-geo-items-1-4` in [`littlebearapps/littlebearapps.com`](https://github.com/littlebearapps/littlebearapps.com). Once the docs-sync mapping in `scripts/docs-sync.config.ts` registers `untether → docs/faq → category: faq`, the marketing site emits `<script type="application/ld+json">` `FAQPage` JSON-LD on every help-centre deploy, unlocking AI-citation surface (ChatGPT, Perplexity, Google AI Overviews) and SERP rich-snippet eligibility.
+`docs/faq/faq.md` (12 H2 question-shaped Q/A pairs; renamed from `docs/faq/index.md` in #483 so the help-centre URL becomes `/help/untether/faq/`) backs the marketing-site **FAQPage Schema.org** pipeline shipped on `feature/help-seo-geo-items-1-4` in [`littlebearapps/littlebearapps.com`](https://github.com/littlebearapps/littlebearapps.com). Once the docs-sync mapping in `scripts/docs-sync.config.ts` registers `untether → docs/faq → category: faq`, the marketing site emits `<script type="application/ld+json">` `FAQPage` JSON-LD on every help-centre deploy, unlocking AI-citation surface (ChatGPT, Perplexity, Google AI Overviews) and SERP rich-snippet eligibility.
 
-**The file MUST NOT be deleted or moved** — that silently breaks the docs-sync mapping and regresses the schema on the next deploy. The repo enforces this via the `help-faq-protect.sh` Bash hook which blocks `rm`, `git rm`, `mv`-away, and shell `>` truncation. **Edits ARE encouraged**: keep the FAQ in sync with new features as they land in `CHANGELOG.md`. See [`.claude/rules/help-faq.md`](.claude/rules/help-faq.md) for the full update cadence and shape rules. Tracking issue: [#477](https://github.com/littlebearapps/untether/issues/477).
+**The file MUST NOT be deleted or moved** — that silently breaks the docs-sync mapping and regresses the schema on the next deploy. The repo enforces this via the `help-faq-protect.sh` Bash hook which blocks `rm`, `git rm`, `mv`-away, and shell `>` truncation. **Edits ARE encouraged**: keep the FAQ in sync with new features as they land in `CHANGELOG.md`. See [`.claude/rules/help-faq.md`](.claude/rules/help-faq.md) for the full update cadence and shape rules. Tracking issues: [#477](https://github.com/littlebearapps/untether/issues/477) (creation), [#483](https://github.com/littlebearapps/untether/issues/483) (URL rename).
 
 ## Conventions
 
