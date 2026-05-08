@@ -226,14 +226,19 @@ Controls progress message rendering during agent runs.
     [progress]
     verbosity = "verbose"
     max_actions = 8
+    heartbeat_interval = 30
     ```
 
 | Key | Type | Default | Notes |
 |-----|------|---------|-------|
 | `verbosity` | `"compact"` \| `"verbose"` | `"compact"` | `compact` shows status + title only. `verbose` adds tool detail lines (file paths, commands, patterns). |
 | `max_actions` | int (0–50) | `5` | Maximum action lines shown in the progress message. |
+| `heartbeat_interval` | int (5–120) | `30` | Heartbeat tick that re-renders progress messages so long-running tools surface an elapsed-time tail (e.g. `▸ Bash · 3m 47s · npm run build`) without waiting for the next JSONL event ([#481](https://github.com/littlebearapps/untether/issues/481)). |
 
 Per-chat override: `/verbose on` and `/verbose off` override the config default for the current chat without editing the TOML file. `/verbose clear` removes the override.
+
+!!! tip "Hot-reload"
+    Editing `[progress]` in `untether.toml` applies on the next run without restart ([#269](https://github.com/littlebearapps/untether/issues/269)). The default presenter and per-chat `/verbose` overrides both pick up the new values.
 
 ## `cost_budget`
 
@@ -278,6 +283,9 @@ Budget alerts always appear regardless of `[footer]` settings.
     prespawn_ram_warn_mb = 2000
     prespawn_ram_block_mb = 500
     claude_stream_idle_timeout_ms = 300_000
+    post_result_idle_enabled = true
+    post_result_idle_timeout = 600.0
+    bash_grace_seconds = 60.0
     ```
 
 | Key | Type | Default | Notes |
@@ -296,6 +304,9 @@ Budget alerts always appear regardless of `[footer]` settings.
 | `prespawn_ram_warn_mb` | int | `2000` | Pre-spawn RAM guard ([#350](https://github.com/littlebearapps/untether/issues/350)) — emit `subprocess.prespawn.ram_warning` when free RAM is below this threshold (MB) at engine spawn. `0` disables the warn tier. |
 | `prespawn_ram_block_mb` | int | `500` | Refuse to spawn the engine subprocess (yields `CompletedEvent(ok=False, error="🛑 Insufficient RAM…")`) when free RAM is below this threshold (MB). `0` disables the block tier; `0` for both fully disables the guard. Must be strictly less than `prespawn_ram_warn_mb` when both are set. |
 | `claude_stream_idle_timeout_ms` | int | `300_000` | Sets `CLAUDE_STREAM_IDLE_TIMEOUT_MS` in the Claude Code subprocess env via `setdefault` ([#438](https://github.com/littlebearapps/untether/issues/438)). Range 30 s – 30 min. Long-form opus 4.7 1M plan-mode generations can legitimately idle the SSE stream past 5 min; deployments hitting upstream Anthropic API stalls (Type A — mid-generation) can raise this to `600_000` or `900_000` to ride out longer silences. Type-B failures (cold-start zero-byte, `num_turns ≤ 1 && duration_api_ms == 0`) are upstream API outages — raising this won't help; the failure error message now classifies both modes inline. Shell-set `CLAUDE_STREAM_IDLE_TIMEOUT_MS` still wins. |
+| `post_result_idle_enabled` | bool | `true` | Claude post-result idle watchdog ([#333](https://github.com/littlebearapps/untether/issues/333)) — closes Claude's stdin cleanly after `post_result_idle_timeout` of silence following a `result` event so multi-turn sessions don't sit alive (and billable) for the full upstream ~36 min idle window. Set `false` to disable (Claude will sit idle until the upstream CLI exits on its own). The clean exit is auto-continue safe — `last_event_type=result` is excluded from the auto-continue gate. |
+| `post_result_idle_timeout` | float | `600.0` | Seconds the watchdog waits after a `result` event before closing stdin (30–3600). The first `result` also emits a `✓ turn complete` footer hint so users know the turn is done; when the watchdog actually fires it sends one Telegram message: `✓ turn complete · session closed after Nm idle`. Re-arms (instead of closing) if a control_request or AskUserQuestion is mid-flight, so a button click in flight is never orphaned. |
+| `bash_grace_seconds` | float | `60.0` | Stall-warning grace window for Bash / BashOutput / KillShell tools ([#481](https://github.com/littlebearapps/untether/issues/481)). Range 5–300. While the most-recent action is one of these and within this window of its start, stall warnings (and the `_STALL_MAX_WARNINGS` auto-cancel arm) are suppressed — long builds and deploys are an expected wait, not a hung session. |
 
 The stall monitor in `ProgressEdits` fires at 5 min (300s) idle, 10 min for local tools, 15 min for MCP tools, and 30 min for pending approvals. When a local tool is running and the child process is CPU-active, the first stall warning fires but repeat warnings are suppressed — they resume if CPU goes idle (indicating a genuinely stuck tool). The liveness watchdog in the subprocess layer fires at `liveness_timeout` with `/proc` diagnostics. When `stall_auto_kill` is enabled, auto-kill requires a triple safety gate: timeout exceeded + zero TCP connections + CPU ticks not increasing between snapshots.
 
@@ -475,11 +486,13 @@ here; plugin engines should document their own keys.
 | Key | Type | Default | Notes |
 |-----|------|---------|-------|
 | `model` | string | (unset) | Optional model override, passed as `--model`. |
+| `skip_trust` | bool | `true` | Pass `--skip-trust` so headless runs work outside `~/.gemini/trustedFolders.json` ([#471](https://github.com/littlebearapps/untether/issues/471)). Gemini CLI rejects runs from any directory not in the trust list — even with `--approval-mode yolo` — and there is no interactive prompt path in headless usage. Set `false` to enforce Gemini's project-local extension/MCP trust gate. |
 
 === "untether config"
 
     ```sh
     untether config set gemini.model "gemini-2.5-pro"
+    untether config set gemini.skip_trust true
     ```
 
 === "toml"
@@ -487,6 +500,7 @@ here; plugin engines should document their own keys.
     ```toml
     [gemini]
     model = "gemini-2.5-pro"
+    skip_trust = true
     ```
 
 !!! note "Approval mode"

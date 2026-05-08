@@ -187,8 +187,9 @@ When enabled, Untether watches the config file for changes and reloads most sett
 - Trigger system: `triggers.enabled`, crons, webhooks, auth, rate limits, timezones
 - Telegram bridge: `voice_transcription`, `[files]`, `allowed_user_ids`, `allow_any_user`, `show_resume_line`, timing
 - `[security]` keys: `env_extra_allow`, `env_extra_prefix_allow` (re-read on next runner spawn)
-- `[progress]` keys: `max_actions`, `verbosity`, `min_render_interval`, `group_chat_rps` ([#269](https://github.com/littlebearapps/untether/issues/269))
-- `[watchdog]` keys: `tool_timeout`, `mcp_tool_timeout`, `claude_stream_idle_timeout_ms`, `post_result_idle_timeout`, `post_result_idle_enabled` (re-read per run)
+- `[progress]` keys: `max_actions`, `verbosity`, `min_render_interval`, `group_chat_rps`, `heartbeat_interval` ([#269](https://github.com/littlebearapps/untether/issues/269), [#481](https://github.com/littlebearapps/untether/issues/481))
+- `[watchdog]` keys: `tool_timeout`, `mcp_tool_timeout`, `claude_stream_idle_timeout_ms`, `post_result_idle_timeout`, `post_result_idle_enabled`, `bash_grace_seconds` (re-read per run)
+- Trigger pause/resume: in-memory only, toggled via `/config → 📡 Triggers` ([#294](https://github.com/littlebearapps/untether/issues/294)) — restart auto-resumes
 - `[footer]` and `[cost]` settings (re-read per call)
 - Engine defaults, budget, cost/usage display flags
 

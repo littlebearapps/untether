@@ -119,6 +119,21 @@ Lists are scoped to the current chat (`crons_for_chat()` / `webhooks_for_chat()`
 
 See [Schedule tasks](schedule-tasks.md#pausing-all-triggers) for the pause flow end-to-end.
 
+### Loop mode page {#loop-mode}
+
+When the active engine is Claude Code, the home page gains a `🔁 Loop mode` button that opens the Loop sub-page ([#289](https://github.com/littlebearapps/untether/issues/289)). Loop mode is **off by default** — turning it on enables Untether's observation of Claude's session-scoped scheduling tools (`CronCreate`, `ScheduleWakeup`) so iterations keep firing after the subprocess exits.
+
+The page shows:
+
+* **State** — `Loop mode: on` / `off` for the current chat (per-chat override over the global `[loop] enabled` default).
+* **Cost + quota warning** — explicit reminder before turning ON: every loop fire counts against `[cost_budget]`, and the runaway caps in `[loop]` (`max_iterations`, `max_total_duration_hours`, `expiry_days`) are the safety net.
+* **💰 Set a budget** — deep-link to the `Cost & Usage` page (`config:cu`) for one-tap budget setup.
+* **Toggle row** — `[On] [Off] [Clear]` with ✓ on the active option.
+
+`/cancel` and `/new` both drop pending loop iterations for the current session and write a do-not-resume sentinel so a subsequent `loop_scheduler` resume can't replay them. `/continue` is unaffected (it doesn't trigger loop replay).
+
+Loop mode is **Claude-only** (`LOOP_SUPPORTED_ENGINES = frozenset({"claude"})`); the button is hidden for other engines. See [Schedule tasks → Loop mode](schedule-tasks.md#loop-mode) for the full architecture and cost guidance.
+
 ### Cost & Usage page
 
 The Cost & Usage sub-page merges cost display and budget controls into a unified page with toggle rows:

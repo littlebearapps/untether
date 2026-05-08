@@ -136,6 +136,20 @@ Fields:
 {"type":"tool_use","id":"toolu_1","name":"Bash","input":{"command":"ls -la"}}
 ```
 
+#### `ScheduleWakeup` (session-scoped scheduling)
+
+Claude Code 2.1.x emits `ScheduleWakeup` `tool_use` blocks when the model parks itself for a delay (`/loop`'s no-interval dynamic mode and similar). Untether observes these for [Loop mode](../../../how-to/inline-settings.md#loop-mode) and the long-running tool tail.
+
+```json
+{"type":"tool_use","id":"toolu_3","name":"ScheduleWakeup","input":{"delaySeconds":300,"reason":"build check","prompt":"check if the build finished"}}
+```
+
+* `delaySeconds` (int, 60–3600) — wall-clock delay before wakeup. Untether reads this field for countdown rendering ([#481](https://github.com/littlebearapps/untether/issues/481) fixed; pre-rc7 reads `delay_ms`/`timeout_ms` were always 0.0 in production).
+* `reason` (string) — short human label rendered in verbose mode (`→ fires in 4m 12s · "build check"`).
+* `prompt` (string) — the prompt the model wants to fire on wakeup (loop iteration body).
+
+`CronCreate` follows the same shape with a `cron` field (5-field expression) instead of `delaySeconds`. The Loop observer parses `cron` (not `cron_expression`) and `id` (not `taskId`/`cronId`); upstream 8-character cron IDs bind via `\bjob ([0-9a-f]{8})\b` from the assistant text.
+
 ### Tool result
 String content:
 ```json

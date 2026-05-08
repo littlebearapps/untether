@@ -85,6 +85,7 @@ Notes:
 * `extra_args` lets you pass new Pi flags without changing Untether.
 * Session files are stored under Pi's default session dir:
   `~/.pi/agent/sessions/--<cwd>--` (with path separators replaced by `-`).
+* The Pi runner explicitly creates the session dir with `0o700` (rwx------) and chmods any pre-existing dir to the same mode ([#207](https://github.com/littlebearapps/untether/issues/207)) so other users on a shared host can't read Pi session JSONL.
 
 ---
 

@@ -19,6 +19,8 @@ This page is a high-level map of Untether’s internal modules: what they do and
 | `transport_runtime.py` | Facade used by transports and commands to resolve messages and runners without importing internal router/project types. |
 | `cost_tracker.py` | Per-run and daily cost tracking with budget alerts and auto-cancel. |
 | `shutdown.py` | Graceful shutdown state and drain logic. |
+| `telegram/at_scheduler.py` | One-shot delayed runs from `/at <duration>`; in-memory state, drained on shutdown. |
+| `telegram/loop_scheduler.py` | Loop mode firing for Claude's `/loop` and `ScheduleWakeup`; persists `active_loops.json` so loops survive restart. Mirrors `at_scheduler` API. |
 
 ## Domain model and events
 
@@ -66,6 +68,17 @@ This page is a high-level map of Untether’s internal modules: what they do and
 |--------|----------------|
 | `runners/*` | Engine runner implementations (Claude Code, Codex, OpenCode, Pi, Gemini CLI, Amp). |
 | `schemas/*` | msgspec schemas / decoders for engine JSONL streams. |
+
+## Triggers
+
+| Module | Responsibility |
+|--------|----------------|
+| `triggers/manager.py` | Mutable holder for crons + webhooks; hot-reload on TOML change; master `pause()` / `resume()` / `is_paused` toggle. |
+| `triggers/server.py` | Webhook HTTP server (aiohttp); returns `503 triggers paused` while master pause is active; `/health` reflects paused state. |
+| `triggers/dispatcher.py` | Routes webhook/cron fires to `run_job()` or non-agent action handlers. |
+| `triggers/cron.py` | Cron expression parser, timezone-aware scheduler loop. |
+| `triggers/history.py` | Persistent JSON history of cron/webhook fire times for `/stats` triggered/manual breakdown. |
+| `triggers/describe.py` | Human-friendly cron rendering for `/ping`, `/config → 📡 Triggers`. |
 
 ## Configuration and persistence
 

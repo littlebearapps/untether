@@ -98,6 +98,7 @@ The wizard offers three **workflow modes** — pick the one that fits:
 - 📎 **File transfer** — upload files to your repo with `/file put`, download with `/file get`; agents can also deliver files automatically by writing to `.untether-outbox/` during a run — sent as Telegram documents on completion
 - 🛡️ **Graceful recovery** — orphan progress messages cleaned up on restart; stall detection with CPU-aware diagnostics; auto-continue for Claude Code sessions that exit prematurely
 - ⏰ **Scheduled tasks** — cron expressions with timezone support, webhook triggers, one-shot delays (`/at 30m <prompt>`), `run_once` crons, master pause/resume toggle, and hot-reload configuration (no restart required). `/ping` shows per-chat trigger summary; trigger-initiated runs show provenance in the footer (`⏰ cron:<id>` / `⚡ webhook:<id>` / `⏰ at:<token>`); `/stats` reports per-engine triggered-vs-manual breakdown
+- 🔁 **Autonomous loops (Claude only)** — opt-in observation of Claude Code's `/loop` and `ScheduleWakeup`; Untether re-fires iterations after the subprocess exits so loops keep running between turns. Off by default; enable per chat via `/config → 🔁 Loop mode`. Cost guarded by `[cost_budget]`, runaway-safety capped by `[loop]` (max iterations, total duration, expiry)
 - 💬 **Forum topics** — map Telegram topics to projects and branches
 - 📤 **Session export** — `/export` for markdown or JSON transcripts
 - 🗂️ **File browser** — `/browse` to navigate project files with inline buttons

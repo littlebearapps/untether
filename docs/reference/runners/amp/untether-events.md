@@ -185,7 +185,7 @@ Returns `None` if no usage data was accumulated.
     ```sh
     untether config set amp.model "claude-sonnet-4-6"
     untether config set amp.mode "smart"
-    untether config set amp.dangerously_allow_all true
+    untether config set amp.dangerously_allow_all false
     ```
 
 === "toml"
@@ -194,5 +194,5 @@ Returns `None` if no usage data was accumulated.
     [amp]
     model = "claude-sonnet-4-6"       # optional
     mode = "smart"                     # optional: deep|free|rush|smart
-    dangerously_allow_all = true       # default: true
+    dangerously_allow_all = false      # default: false (flipped in v0.35.3 — #206)
     ```

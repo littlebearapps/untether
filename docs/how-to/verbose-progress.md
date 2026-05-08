@@ -79,6 +79,22 @@ Control how many actions appear in the progress message. Actions beyond this lim
 
 Set to `0` to hide the action list entirely, or increase it to see more history.
 
+!!! tip "Hot-reload"
+    `[progress]` settings (`verbosity`, `max_actions`, `heartbeat_interval`, `min_render_interval`, `group_chat_rps`) hot-reload — editing them in `untether.toml` applies on the next run without restart ([#269](https://github.com/littlebearapps/untether/issues/269)).
+
+## Long-running tool tail (heartbeat)
+
+Long-running tool calls (Bash, BashOutput, ScheduleWakeup, Monitor, KillShell, …) get an automatic elapsed-time tail on the progress message after ~60 s — `▸ Bash · 3m 47s · npm run build` — so a glancing user can answer "is it alive? what's it doing? for how long?" without waiting for the next JSONL event ([#481](https://github.com/littlebearapps/untether/issues/481)). The tail appears regardless of `/verbose` state.
+
+In **verbose** mode the tool's `format_verbose_detail` line additionally renders:
+
+- `BashOutput` — the last line of `result_preview` (so 10-min Cloudflare deploy polls show `→ Deploy Production: in_progress` instead of a static `▸ BashOutput`)
+- `ScheduleWakeup` — countdown + reason: `→ fires in 4m 12s · "build check"`
+- `Monitor` — countdown remaining
+- `KillShell` — target shell id
+
+Tune the heartbeat tick via `[progress] heartbeat_interval` (5–120 s, default 30 s) — every tick walks the open-action set and forces a re-render whenever any action is older than 60 s. Strict "rolling stdout sub-line every 5 s" cannot be achieved without upstream Claude Code changes; the BashOutput-polling path is the proxy and refreshes at each polling cycle (~15 s in practice).
+
 ## Per-chat override
 
 The `/verbose` toggle overrides the global config for the current chat. This override persists until you clear it or restart Untether.

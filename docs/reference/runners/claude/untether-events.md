@@ -151,6 +151,10 @@ The terminal event looks like:
 - Emit exactly one `completed` event; ignore any trailing JSON lines afterward.
   No idle-timeout completion is used.
 
+#### Supplementary `started` event after `result` (`✓ turn complete`)
+
+Every successful `result` (i.e. `is_error=false`) MAY also emit a supplementary `started` event carrying late-arriving meta — `meta={"complete": "✓ turn complete"}` ([#333](https://github.com/littlebearapps/untether/issues/333)). This is the supported pattern for late-arriving meta documented in `runner-development.md`: `ProgressTracker.note_event` merges meta idempotently so the marker shows up in the footer (`format_meta_line`) alongside model / effort / permission / trigger without duplicating the StartedEvent. Errored results do **not** emit the marker — no false "complete" tag on a failure.
+
 #### Permission denials
 
 > **Not yet implemented.** The upstream Claude Code CLI may include

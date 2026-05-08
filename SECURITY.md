@@ -45,6 +45,25 @@ Include:
 - Bot token management — token security is the operator's responsibility
 - Issues requiring physical access to the host machine
 
+## Security improvements in v0.35.3
+
+v0.35.3 ships a follow-on hardening bundle on top of v0.35.2. Upgrade notes:
+
+- **BREAKING — empty `allowed_user_ids` rejected at startup** ([#377](https://github.com/littlebearapps/untether/issues/377)). Previously the empty default meant any Telegram user who knew the bot username could send commands. Untether now refuses to start with `ConfigError: [transports.telegram] allowed_user_ids is empty …`. Operators who genuinely need an open bot (demos, hackathons, dev) must opt in explicitly with `allow_any_user = true`, which is logged INFO every boot (`security.allow_any_user`). See [Security how-to](docs/how-to/security.md).
+- **AMP `dangerously_allow_all` default flipped to `false`** ([#206](https://github.com/littlebearapps/untether/issues/206)). AMP runs no longer skip its built-in permission system unless the operator opts in.
+- **Pi session directory locked to `0o700`** ([#207](https://github.com/littlebearapps/untether/issues/207)). Other users on shared hosts can no longer read Pi session JSONL.
+- **`voice_transcription_api_key` is now `SecretStr`** ([#378](https://github.com/littlebearapps/untether/issues/378)) — parity with `bot_token`. Masked in repr/str/tracebacks and structlog serialisation.
+- **Prompt content removed from INFO logs** ([#205](https://github.com/littlebearapps/untether/issues/205), [#478](https://github.com/littlebearapps/untether/issues/478)) — `runner.start` no longer carries `prompt[:100]`. A debug-only `runner.start_prompt` event is available when explicitly enabled.
+- **`/file get` TOCTOU window closed** ([#211](https://github.com/littlebearapps/untether/issues/211)) — single-open + bounded read in a worker thread.
+- **stderr sanitisation regex extended** ([#208](https://github.com/littlebearapps/untether/issues/208)) — covers macOS (`/Users/…`, `/private/var/…`), container roots (`/app/`, `/workspace/`), and other absolute paths beyond `/home/<user>/`.
+- **OpenAI project-key redaction** ([#213](https://github.com/littlebearapps/untether/issues/213)) — structlog redaction now covers `sk-proj-…` keys (the generic `sk-…` regex didn't match the project-key char set).
+- **Daily cost tracker race fixed** ([#379](https://github.com/littlebearapps/untether/issues/379)) — the unguarded read-modify-write that could lose a run's cost (and bypass the per-day budget cap) is now wrapped in a lock.
+- **Pygments bumped 2.19.2 → 2.20.0** ([#402](https://github.com/littlebearapps/untether/issues/402)) — clears CVE-2026-4539 (ReDoS in `AdlLexer`).
+- **Auto-approve scope re-audit** ([#380](https://github.com/littlebearapps/untether/issues/380)) — `ControlRewindFilesRequest` and `ControlMcpMessageRequest` re-verified safe under the upstream Claude Code 2.1.x trust model. Regression-lock tests fail loudly if the auto-approve path starts inspecting payloads. Audit memo at `docs/audits/2026-04-27-380-auto-approve-scope-review.md`.
+- **User-extensible env allowlist** ([#409](https://github.com/littlebearapps/untether/issues/409)) — `[security] env_extra_allow` and `env_extra_prefix_allow` let operators thread credential-manager tokens (1Password, Doppler, Vault, Infisical) into engine subprocesses without forking. `BWS_ACCESS_TOKEN` is now in the built-in defaults.
+
+See [CHANGELOG v0.35.3](https://github.com/littlebearapps/untether/blob/master/CHANGELOG.md#v0353) for the full entry list.
+
 ## Security improvements in v0.35.2
 
 v0.35.2 ships a security hardening bundle. Upgrade notes:

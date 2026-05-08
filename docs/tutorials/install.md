@@ -79,6 +79,9 @@ npm install -g @google/gemini-cli
 
 Gemini CLI uses Google AI Studio or Vertex AI for authentication. Run `gemini` and sign in with your Google account. Supports plan mode, sandboxing, and automatic model routing (Pro for planning, Flash for implementation).
 
+!!! tip "Headless trust"
+    Untether runs Gemini with `--skip-trust` by default (v0.35.3+, [#471](https://github.com/littlebearapps/untether/issues/471)) so projects outside `~/.gemini/trustedFolders.json` work in headless mode. Set `[gemini] skip_trust = false` in `untether.toml` if you'd rather enforce Gemini's project-local trust gate.
+
 ### AMP
 
 ```sh
