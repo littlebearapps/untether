@@ -1093,6 +1093,94 @@ def test_translate_thinking_block() -> None:
     assert events[0].ok is True
 
 
+# ---------------------------------------------------------------------------
+# #489 — server_tool_use + advisor_tool_result content blocks (regression)
+# ---------------------------------------------------------------------------
+
+
+def test_translate_server_tool_use_block() -> None:
+    """server_tool_use shares the tool_use translation path: emits an
+    action_started, populates state.pending_actions, and stamps
+    state.last_tool_use_id. Regression for #489 — previously msgspec
+    rejected the whole JSONL line and the event was silently dropped."""
+    state = ClaudeStreamState()
+    event = {
+        "type": "assistant",
+        "message": {
+            "id": "msg_1",
+            "content": [
+                {
+                    "type": "server_tool_use",
+                    "id": "stu_01",
+                    "name": "web_search",
+                    "input": {"query": "untether telegram"},
+                }
+            ],
+        },
+    }
+
+    events = translate_claude_event(
+        _decode_event(event),
+        title="claude",
+        state=state,
+        factory=state.factory,
+    )
+
+    assert len(events) == 1
+    assert isinstance(events[0], ActionEvent)
+    assert events[0].phase == "started"
+    assert events[0].action.id == "stu_01"
+    assert "stu_01" in state.pending_actions
+    assert state.last_tool_use_id == "stu_01"
+
+
+def test_translate_advisor_tool_result_block() -> None:
+    """advisor_tool_result shares the tool_result translation path: emits an
+    action_completed and pops the matching entry from state.pending_actions.
+    Regression for #489."""
+    state = ClaudeStreamState()
+    # Inject a pending action keyed on the tool_use_id (mirrors what would
+    # have been registered by the prior server_tool_use / tool_use call).
+    from untether.model import Action
+
+    state.pending_actions["adv_01"] = Action(
+        id="adv_01",
+        kind="tool",
+        title="advisor",
+        detail={},
+    )
+
+    event = {
+        "type": "user",
+        "message": {
+            "id": "msg_r",
+            "content": [
+                {
+                    "type": "advisor_tool_result",
+                    "tool_use_id": "adv_01",
+                    "content": "Reviewer said: looks good.",
+                    "is_error": False,
+                }
+            ],
+        },
+    }
+
+    events = translate_claude_event(
+        _decode_event(event),
+        title="claude",
+        state=state,
+        factory=state.factory,
+    )
+
+    assert any(
+        isinstance(e, ActionEvent)
+        and e.phase == "completed"
+        and e.action.id == "adv_01"
+        for e in events
+    )
+    assert "adv_01" not in state.pending_actions
+
+
 @pytest.mark.anyio
 async def test_run_serializes_same_session() -> None:
     runner = ClaudeRunner(claude_cmd="claude")
