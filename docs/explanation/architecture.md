@@ -46,7 +46,7 @@ flowchart TB
     subgraph Triggers["Triggers Layer"]
         trigger_server[triggers/server.py<br/>webhook HTTP server<br/>multipart, rate limit]
         trigger_cron[triggers/cron.py<br/>cron scheduler<br/>timezone, run_once]
-        trigger_manager[triggers/manager.py<br/>TriggerManager<br/>hot-reload]
+        trigger_manager[triggers/manager.py<br/>TriggerManager<br/>hot-reload + pause/resume]
         trigger_dispatch[triggers/dispatcher.py<br/>dispatch to run_job]
         trigger_actions[triggers/actions.py<br/>file_write, http_forward, notify_only]
         trigger_fetch[triggers/fetch.py<br/>cron data-fetch]
@@ -422,6 +422,6 @@ flowchart TD
 | **Bridge** | `telegram/bridge.py`, `runner_bridge.py` | Message handling, execution coordination |
 | **Runner** | `runner.py`, `runners/*.py`, `schemas/*.py` | Agent CLI subprocess, JSONL parsing, event translation |
 | **Transport** | `transport.py`, `presenter.py`, `telegram/client.py` | Telegram API, message rendering |
-| **Triggers** | `triggers/server.py`, `triggers/cron.py`, `triggers/manager.py`, `triggers/dispatcher.py`, `triggers/actions.py`, `triggers/fetch.py`, `triggers/ssrf.py`, `triggers/auth.py`, `triggers/rate_limit.py`, `triggers/describe.py`, `triggers/templating.py` | Webhook server (multipart, rate limit), cron scheduler (timezone, data-fetch, `run_once`), `TriggerManager` for hot-reload, non-agent actions (`file_write`/`http_forward`/`notify_only`), SSRF protection, HMAC/bearer auth, human-friendly cron description |
+| **Triggers** | `triggers/server.py`, `triggers/cron.py`, `triggers/manager.py`, `triggers/dispatcher.py`, `triggers/actions.py`, `triggers/fetch.py`, `triggers/ssrf.py`, `triggers/auth.py`, `triggers/rate_limit.py`, `triggers/describe.py`, `triggers/history.py`, `triggers/templating.py` | Webhook server (multipart, rate limit, `503 triggers paused`), cron scheduler (timezone, data-fetch, `run_once`), `TriggerManager` for hot-reload + master pause/resume toggle, fire-history persistence for `/stats` triggered/manual breakdown, non-agent actions (`file_write`/`http_forward`/`notify_only`), SSRF protection, HMAC/bearer auth, human-friendly cron description |
 | **Domain** | `model.py`, `progress.py`, `events.py` | Event types, action tracking |
 | **Utils** | `worktrees.py`, `utils/*.py`, `markdown.py` | Git worktrees, formatting, paths |

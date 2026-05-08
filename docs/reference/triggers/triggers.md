@@ -494,7 +494,7 @@ the filesystem context.
 
 ## Trigger visibility
 
-!!! info "New in v0.35.1"
+!!! info "Tier 1 in v0.35.1, Tier 2/3 expanded in v0.35.3"
 
 ### Per-chat `/ping` indicator
 
@@ -511,11 +511,17 @@ If multiple triggers target the chat, the indicator shows counts instead of the 
 ⏰ triggers: 2 crons, 1 webhook
 ```
 
+While master pause is active (see [Pause/Resume](#pause-and-resume)), `/ping` switches to:
+
+```
+⏸ triggers paused: 2 crons, 1 webhook (suspended)
+```
+
 The indicator is per-chat — only triggers whose `chat_id` matches the current chat appear. Triggers that omit `chat_id` (and therefore fall back to the transport's default `chat_id`) show for that chat only.
 
 ### Meta footer
 
-Runs initiated by a cron or webhook show provenance in the meta footer alongside model and mode:
+Runs initiated by a cron, webhook, or `/at` show provenance in the meta footer alongside model and mode:
 
 ```
 🏷 opus 4.6 · plan · ⏰ cron:daily-review
@@ -523,6 +529,28 @@ Runs initiated by a cron or webhook show provenance in the meta footer alongside
 
 - `⏰ cron:<id>` for cron-initiated runs
 - `⚡ webhook:<id>` for webhook-initiated runs
+- `⏰ at:<token>` for `/at <duration>` one-shot delayed runs ([#271](https://github.com/littlebearapps/untether/issues/271) follow-up)
+
+### `/config` → 📡 Triggers page (Tier 2)
+
+`/config` → **📡 Triggers** (`config:tg`) lists every cron and webhook configured for the current chat ([#271](https://github.com/littlebearapps/untether/issues/271) Tier 2):
+
+- **Crons**: human-readable `describe_cron(schedule, timezone)`, project, engine, last-fired relative time
+- **Webhooks**: path, auth scheme, project, engine, last-fired
+
+Lists are scoped to the current chat (using `crons_for_chat` / `webhooks_for_chat` with the bridge `default_chat_id` fallback), capped at 10 entries with a `…and N more (see untether.toml)` overflow marker.
+
+The same page hosts the master [Pause/Resume](#pause-and-resume) toggle.
+
+### `/stats` triggered/manual breakdown (Tier 3)
+
+`/stats` appends `(N triggered, M manual)` to per-engine lines and the totals row when at least one count is nonzero ([#271](https://github.com/littlebearapps/untether/issues/271) Tier 3):
+
+```
+claude: 12 runs (8 triggered, 4 manual)
+```
+
+Triggered counts include cron, webhook, and `/at` fires. Backed by a new persistent JSON history store at `<config_path>.with_name("triggers_history.json")` recording wall time after every successful cron/webhook/action dispatch. Recording is best-effort — a transient disk failure logs `triggers.history.write_failed` and swallows so it can't break the cron loop or webhook server. Renaming a trigger ID in TOML leaves a stale entry that operators can manually delete (no auto-prune to avoid losing data on transient TOML errors).
 
 ### Human-friendly cron descriptions
 
@@ -562,7 +590,35 @@ The webhook server exposes a `GET /health` endpoint that returns:
 {"status": "ok", "webhooks": 2}
 ```
 
+While master pause is active (see [Pause/Resume](#pause-and-resume)) the same endpoint returns:
+
+```json
+{"status": "paused", "paused": true, "webhooks": 2}
+```
+
+External monitors can use the `paused` field to distinguish "paused but up" from "down" — the bot is healthy and reachable, just not dispatching trigger work.
+
 Use this for uptime monitoring or reverse proxy health checks.
+
+## Pause and resume
+
+`TriggerManager` exposes a master pause toggle ([#294](https://github.com/littlebearapps/untether/issues/294)) that gates **both** crons and webhooks at once:
+
+- **Cron loop**: skips its tick while paused. `run_once` crons are not consumed during the pause and fire on the next matching tick after resume.
+- **Webhook server**: returns `503 triggers paused` with `Retry-After: 60` instead of dispatching. Auth, rate-limit, and event-filter checks still run before the 503 so an unauthenticated probe still gets `401`, not `503`.
+- **`/health`**: surfaces `{"status": "paused", "paused": true}`.
+- **`/ping`**: switches to `⏸ triggers paused: … (suspended)`.
+
+### Toggling
+
+Pause/resume is wired into `/config` two ways:
+
+1. **Home-page button row** — appears at the bottom of the `/config` home page only when triggers are configured. One-tap toggle.
+2. **Dedicated 📡 Triggers page** (`config:tg`) — shows current state and counts, with a Pause/Resume button at the top. The same page lists per-chat crons and webhooks.
+
+### Persistence
+
+Pause is **in-memory only** — restart auto-resumes (the safe default). If you need a durable shutoff, set `[triggers] enabled = false` in `untether.toml`, which survives restarts. Pause is for "stop firing for the next half hour while I deploy" not "permanently disable triggers".
 
 ## Testing webhooks
 
@@ -599,6 +655,7 @@ Expected responses:
 | `404 Not Found` | No webhook configured for this path. |
 | `413 Payload Too Large` | Body exceeds `max_body_bytes`. |
 | `429 Too Many Requests` | Rate limit exceeded. |
+| `503 triggers paused` | Master [Pause](#pause-and-resume) toggle is active. Includes `Retry-After: 60`. |
 
 ## Troubleshooting
 

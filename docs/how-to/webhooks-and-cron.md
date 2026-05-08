@@ -242,7 +242,18 @@ Each webhook and cron can specify where the Telegram notification appears:
     max_body_bytes = 1048576  # 1 MB max payload
     ```
 
-The server includes a health endpoint at `GET /health` for uptime monitoring.
+The server includes a health endpoint at `GET /health` for uptime monitoring. While the master pause toggle is active (see [Pause and resume all triggers](#pause-and-resume-all-triggers)) it returns `{"status": "paused", "paused": true}` so external monitors can distinguish "paused but up" from "down".
+
+## Pause and resume all triggers
+
+Untether ships a master pause toggle ([#294](https://github.com/littlebearapps/untether/issues/294)) that gates **both** crons and webhooks at once — useful when deploying, debugging, or muting overnight without editing config:
+
+* **`/config` home page** shows a one-button toggle row at the bottom whenever triggers are configured.
+* **`/config` → `📡 Triggers`** opens a dedicated page with state, per-chat counts, and a Pause/Resume button. It also lists per-chat crons and webhooks with last-fired times.
+* While paused: cron loop skips ticks, webhooks return `503 triggers paused` with `Retry-After: 60`, `/health` returns `paused: true`, and `/ping` shows `⏸ triggers paused: … (suspended)`.
+* `run_once` crons are not consumed during the pause and fire on the next matching tick after resume.
+
+Pause is **in-memory only** — restart auto-resumes (the safe default). For a durable shutoff, set `[triggers] enabled = false` in `untether.toml` instead.
 
 ## Hot-reload configuration
 

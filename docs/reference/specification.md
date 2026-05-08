@@ -1,4 +1,4 @@
-# Untether Specification v0.35.1 [2026-04-15]
+# Untether Specification v0.35.3 [2026-05-08]
 
 This document is **normative**. The words **MUST**, **SHOULD**, and **MAY** express requirements.
 
