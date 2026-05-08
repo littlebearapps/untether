@@ -1,6 +1,6 @@
-# Help-Centre FAQ Rules (`docs/faq/index.md`)
+# Help-Centre FAQ Rules (`docs/faq/faq.md`)
 
-`docs/faq/index.md` is the user-facing FAQ for Untether. It backs the
+`docs/faq/faq.md` is the user-facing FAQ for Untether. It backs the
 marketing-site **FAQPage Schema.org** pipeline shipped in
 [`littlebearapps/littlebearapps.com`](https://github.com/littlebearapps/littlebearapps.com)
 on `feature/help-seo-geo-items-1-4`. Once the docs-sync mapping (`scripts/docs-sync.config.ts`)
@@ -95,7 +95,7 @@ workflow:
 
 1. After drafting the CHANGELOG entry for a new release, scan the
    entries against the "MUST stay current" list above.
-2. If any FAQ-relevant entry exists, edit `docs/faq/index.md`
+2. If any FAQ-relevant entry exists, edit `docs/faq/faq.md`
    in-place. Rephrase, add a new Q/A, or update the cross-link.
 3. Commit the FAQ touch-up alongside the release commits in the same
    feature branch (don't fragment into a separate PR unless the FAQ
@@ -107,11 +107,11 @@ workflow:
 
 ```bash
 # 1. Verify shape: ≥7 H2 question-shaped headings, no placeholders
-grep -c '^## ' docs/faq/index.md   # should be ≥ 7
-grep -ciE 'TODO|\[placeholder\]|TBD|XXX' docs/faq/index.md   # should be 0
+grep -c '^## ' docs/faq/faq.md   # should be ≥ 7
+grep -ciE 'TODO|\[placeholder\]|TBD|XXX' docs/faq/faq.md   # should be 0
 
 # 2. Verify each H2 starts with a question word OR ends with ?
-grep '^## ' docs/faq/index.md | \
+grep '^## ' docs/faq/faq.md | \
   grep -vE '^##.*\?$|^## (How|What|Why|When|Where|Can|Do|Does|Is|Are|Should|Will)\b'
 # (no output = all H2s are question-shaped)
 ```

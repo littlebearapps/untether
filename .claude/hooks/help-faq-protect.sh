@@ -1,8 +1,10 @@
 #!/bin/bash
 # help-faq-protect.sh — PreToolUse hook for Bash tool
-# Blocks deletion / move-out-of-place of `docs/faq/index.md`.
+# Blocks deletion / move-out-of-place of `docs/faq/faq.md`.
 # The file is part of the marketing-site FAQPage Schema.org pipeline
-# (issue #477). Removing it breaks the docs-sync mapping registered in
+# (issue #477; renamed from index.md → faq.md in #483 to expose
+# `/help/untether/faq/` instead of `/help/untether/index/`).
+# Removing it breaks the docs-sync mapping registered in
 # `littlebearapps/littlebearapps.com:scripts/docs-sync.config.ts` and
 # would silently regress AI-citation surface (ChatGPT, Perplexity,
 # Google AI Overviews) on the next deploy.
@@ -29,14 +31,12 @@ deny() {
   exit 0
 }
 
-# Match the canonical path or any plausible relative form. The `-q` is
-# safe — empty COMMAND is short-circuited above.
-match_target='(^|[^A-Za-z0-9_/])docs/faq/(index\.md|\*|.\*|\.\.|.*\.md)?'
+match_target='(^|[^A-Za-z0-9_/])docs/faq/(faq\.md|\*|.\*|\.\.|.*\.md)?'
 
-# 1. `rm` / `unlink` / `shred` removing the file or its directory.
+# 1. `rm` / `unlink` / `shred`
 if echo "$COMMAND" | grep -qE '(^|[^A-Za-z_])(rm|unlink|shred)([[:space:]]|$)'; then
   if echo "$COMMAND" | grep -qE "$match_target"; then
-    deny "🛑 HELP-FAQ PROTECTION: docs/faq/index.md cannot be deleted.
+    deny "🛑 HELP-FAQ PROTECTION: docs/faq/faq.md cannot be deleted.
 
 This file backs the marketing-site FAQPage Schema.org pipeline
 (see issue #477). Removing it silently regresses AI-citation
@@ -51,10 +51,10 @@ the matching mapping removal in
   fi
 fi
 
-# 2. `git rm` removing the file.
+# 2. `git rm`
 if echo "$COMMAND" | grep -qE '\bgit\b[[:space:]]+rm\b'; then
   if echo "$COMMAND" | grep -qE "$match_target"; then
-    deny "🛑 HELP-FAQ PROTECTION: docs/faq/index.md cannot be \`git rm\`'d.
+    deny "🛑 HELP-FAQ PROTECTION: docs/faq/faq.md cannot be \`git rm\`'d.
 
 The file backs the marketing-site FAQPage Schema.org pipeline (#477).
 Edit in place instead. If retirement is genuinely needed, coordinate
@@ -64,8 +64,8 @@ fi
 
 # 3. `mv` away from docs/faq/.
 if echo "$COMMAND" | grep -qE '(^|[^A-Za-z_])mv([[:space:]]|$)'; then
-  if echo "$COMMAND" | grep -qE 'docs/faq/index\.md[[:space:]]+[^[:space:]]+'; then
-    deny "🛑 HELP-FAQ PROTECTION: docs/faq/index.md cannot be moved.
+  if echo "$COMMAND" | grep -qE 'docs/faq/faq\.md[[:space:]]+[^[:space:]]+'; then
+    deny "🛑 HELP-FAQ PROTECTION: docs/faq/faq.md cannot be moved.
 
 The path is referenced by the marketing-site docs-sync config
 (\`scripts/docs-sync.config.ts\` in littlebearapps/littlebearapps.com).
@@ -76,9 +76,9 @@ site first."
   fi
 fi
 
-# 4. Redirect truncation: `> docs/faq/index.md` (without `>>` append).
-if echo "$COMMAND" | grep -qE '(^|[^>])>[[:space:]]*docs/faq/index\.md\b'; then
-  deny "🛑 HELP-FAQ PROTECTION: shell redirect (\`>\`) would truncate docs/faq/index.md.
+# 4. Redirect truncation (`>` not `>>`).
+if echo "$COMMAND" | grep -qE '(^|[^>])>[[:space:]]*docs/faq/faq\.md\b'; then
+  deny "🛑 HELP-FAQ PROTECTION: shell redirect (\`>\`) would truncate docs/faq/faq.md.
 
 Use the Edit tool for in-place changes, or \`>>\` to append, so the
 file's identity (and the FAQPage schema pipeline #477) is preserved.
