@@ -1016,7 +1016,14 @@ def translate_claude_event(
             out: list[UntetherEvent] = []
             for content in message.content:
                 match content:
-                    case claude_schema.StreamToolUseBlock():
+                    case (
+                        claude_schema.StreamToolUseBlock()
+                        | claude_schema.StreamServerToolUseBlock()
+                    ):
+                        # #489 server_tool_use shares the tool_use translation —
+                        # _register_background_handle / _observe_loop_tool_use
+                        # filter on tool name and no-op for unrecognised server
+                        # tools (web_search, code_execution, computer_use, …).
                         action = _tool_action(
                             content,
                             parent_tool_use_id=parent_tool_use_id,
@@ -1084,7 +1091,14 @@ def translate_claude_event(
             out: list[UntetherEvent] = []
             saw_tool_result = False
             for content in message.content:
-                if not isinstance(content, claude_schema.StreamToolResultBlock):
+                # #489 advisor_tool_result shares the tool_result translation.
+                if not isinstance(
+                    content,
+                    (
+                        claude_schema.StreamToolResultBlock,
+                        claude_schema.StreamAdvisorToolResultBlock,
+                    ),
+                ):
                     continue
                 saw_tool_result = True
                 tool_use_id = content.tool_use_id

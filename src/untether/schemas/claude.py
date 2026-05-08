@@ -36,8 +36,39 @@ class StreamToolResultBlock(
     is_error: bool | None = None
 
 
+# #489 — Anthropic server-side tools (web_search, code_execution, computer_use, …)
+# emit `server_tool_use` content blocks. Structurally identical to `tool_use`.
+class StreamServerToolUseBlock(
+    msgspec.Struct,
+    tag="server_tool_use",
+    tag_field="type",
+    forbid_unknown_fields=False,
+):
+    id: str
+    name: str
+    input: dict[str, Any]
+
+
+# #489 — Result of the parent agent's `advisor()` meta-tool. Structurally identical
+# to `tool_result`.
+class StreamAdvisorToolResultBlock(
+    msgspec.Struct,
+    tag="advisor_tool_result",
+    tag_field="type",
+    forbid_unknown_fields=False,
+):
+    tool_use_id: str
+    content: str | list[dict[str, Any]] | None = None
+    is_error: bool | None = None
+
+
 type StreamContentBlock = (
-    StreamTextBlock | StreamThinkingBlock | StreamToolUseBlock | StreamToolResultBlock
+    StreamTextBlock
+    | StreamThinkingBlock
+    | StreamToolUseBlock
+    | StreamToolResultBlock
+    | StreamServerToolUseBlock
+    | StreamAdvisorToolResultBlock
 )
 
 

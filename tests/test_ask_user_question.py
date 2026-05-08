@@ -707,3 +707,107 @@ def test_translate_registers_ask_with_channel_id() -> None:
     channel_id, question = _PENDING_ASK_REQUESTS["req-chan-1"]
     assert channel_id == CHAT_A
     assert question == "Which?"
+
+
+# ---------------------------------------------------------------------------
+# Regression: #488 — multi-question flow text-reply continuation
+# ---------------------------------------------------------------------------
+
+
+class _RecordingTransport:
+    """Minimal Transport stub that records send/edit/delete calls."""
+
+    def __init__(self) -> None:
+        self.sent: list[tuple[int, object, object]] = []
+
+    async def send(self, *, channel_id, message, options=None):  # type: ignore[no-untyped-def]
+        self.sent.append((channel_id, message, options))
+        return
+
+    async def edit(self, ref, message, wait=True):  # type: ignore[no-untyped-def]
+        return None
+
+    async def delete(self, ref):  # type: ignore[no-untyped-def]
+        return None
+
+
+@pytest.mark.anyio
+async def test_send_next_ask_question_message_uses_rendered_message() -> None:
+    """Regression for #488: text-reply continuation must call transport.send
+    with a RenderedMessage carrying the inline keyboard, NOT pass it to
+    send_plain (which would TypeError on str-only `text` kwarg)."""
+    from untether.telegram.commands.ask_question import (
+        send_next_ask_question_message,
+    )
+    from untether.transport import MessageRef, RenderedMessage, SendOptions
+
+    flow = AskQuestionState(
+        request_id="req-488",
+        channel_id=-12345,
+        questions=[
+            {
+                "question": "First?",
+                "options": [{"label": "A"}, {"label": "B"}],
+            },
+            {
+                "question": "Second?",
+                "options": [{"label": "C"}, {"label": "D"}],
+            },
+        ],
+        current_index=1,  # user already answered Q1 by typing
+    )
+
+    transport = _RecordingTransport()
+
+    await send_next_ask_question_message(
+        transport,  # type: ignore[arg-type]
+        chat_id=-12345,
+        user_msg_id=678,
+        thread_id=42,
+        flow=flow,
+    )
+
+    assert len(transport.sent) == 1
+    channel_id, message, options = transport.sent[0]
+    assert channel_id == -12345
+    assert isinstance(message, RenderedMessage)
+    assert "2 of 2" in message.text
+    assert message.extra is not None
+    assert message.extra["parse_mode"] == "HTML"
+    assert "inline_keyboard" in message.extra["reply_markup"]
+    # Buttons present for question 2's options:
+    keyboard = message.extra["reply_markup"]["inline_keyboard"]
+    assert len(keyboard) >= 1
+    assert isinstance(options, SendOptions)
+    assert options.reply_to == MessageRef(channel_id=-12345, message_id=678)
+    assert options.thread_id == 42
+
+
+@pytest.mark.anyio
+async def test_send_next_ask_question_message_no_thread() -> None:
+    """thread_id=None passes through to SendOptions (private chats / non-forum groups)."""
+    from untether.telegram.commands.ask_question import (
+        send_next_ask_question_message,
+    )
+
+    flow = AskQuestionState(
+        request_id="req-488-b",
+        channel_id=-9999,
+        questions=[
+            {"question": "Q1", "options": [{"label": "A"}]},
+            {"question": "Q2", "options": [{"label": "B"}]},
+        ],
+        current_index=1,
+    )
+    transport = _RecordingTransport()
+
+    await send_next_ask_question_message(
+        transport,  # type: ignore[arg-type]
+        chat_id=-9999,
+        user_msg_id=1,
+        thread_id=None,
+        flow=flow,
+    )
+
+    _, _, options = transport.sent[0]
+    assert options.thread_id is None

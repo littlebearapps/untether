@@ -67,3 +67,92 @@ def test_decode_rate_limit_event_bare() -> None:
     decoded = claude_schema.decode_stream_json_line(json.dumps(payload).encode())
     assert isinstance(decoded, claude_schema.StreamRateLimitMessage)
     assert decoded.rate_limit_info is None
+
+
+# ---------------------------------------------------------------------------
+# #489 — server_tool_use + advisor_tool_result content blocks
+# ---------------------------------------------------------------------------
+
+
+def test_decode_server_tool_use_block() -> None:
+    """Anthropic server-side tools (web_search, code_execution, …) emit
+    `server_tool_use` content blocks. Schema must parse them as
+    StreamServerToolUseBlock instead of raising ValidationError."""
+    payload = {
+        "type": "assistant",
+        "uuid": "uuid-1",
+        "session_id": "sess-1",
+        "message": {
+            "role": "assistant",
+            "model": "claude-opus-4-7",
+            "content": [
+                {
+                    "type": "server_tool_use",
+                    "id": "stu_01",
+                    "name": "web_search",
+                    "input": {"query": "untether telegram"},
+                }
+            ],
+        },
+    }
+    decoded = claude_schema.decode_stream_json_line(json.dumps(payload).encode())
+    assert isinstance(decoded, claude_schema.StreamAssistantMessage)
+    assert len(decoded.message.content) == 1
+    block = decoded.message.content[0]
+    assert isinstance(block, claude_schema.StreamServerToolUseBlock)
+    assert block.id == "stu_01"
+    assert block.name == "web_search"
+    assert block.input == {"query": "untether telegram"}
+
+
+def test_decode_advisor_tool_result_block() -> None:
+    """Result of the parent agent's `advisor()` meta-tool. Schema must parse
+    it as StreamAdvisorToolResultBlock instead of raising ValidationError."""
+    payload = {
+        "type": "user",
+        "uuid": "uuid-2",
+        "session_id": "sess-1",
+        "message": {
+            "role": "user",
+            "content": [
+                {
+                    "type": "advisor_tool_result",
+                    "tool_use_id": "adv_01",
+                    "content": "Reviewer said: looks good.",
+                    "is_error": False,
+                }
+            ],
+        },
+    }
+    decoded = claude_schema.decode_stream_json_line(json.dumps(payload).encode())
+    assert isinstance(decoded, claude_schema.StreamUserMessage)
+    assert isinstance(decoded.message.content, list)
+    assert len(decoded.message.content) == 1
+    block = decoded.message.content[0]
+    assert isinstance(block, claude_schema.StreamAdvisorToolResultBlock)
+    assert block.tool_use_id == "adv_01"
+    assert block.content == "Reviewer said: looks good."
+    assert block.is_error is False
+
+
+def test_decode_advisor_tool_result_block_minimal() -> None:
+    """advisor_tool_result with optional fields omitted (content/is_error default)."""
+    payload = {
+        "type": "user",
+        "uuid": "uuid-3",
+        "session_id": "sess-1",
+        "message": {
+            "role": "user",
+            "content": [
+                {"type": "advisor_tool_result", "tool_use_id": "adv_02"},
+            ],
+        },
+    }
+    decoded = claude_schema.decode_stream_json_line(json.dumps(payload).encode())
+    assert isinstance(decoded, claude_schema.StreamUserMessage)
+    assert isinstance(decoded.message.content, list)
+    block = decoded.message.content[0]
+    assert isinstance(block, claude_schema.StreamAdvisorToolResultBlock)
+    assert block.tool_use_id == "adv_02"
+    assert block.content is None
+    assert block.is_error is None

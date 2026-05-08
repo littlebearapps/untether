@@ -2340,11 +2340,10 @@ async def run_main_loop(
                     from ..runners.claude import (
                         answer_ask_question,
                         answer_ask_question_with_options,
-                        format_question_message,
                         get_ask_question_flow,
                         get_pending_ask_request,
-                        get_question_option_buttons,
                     )
+                    from .commands.ask_question import send_next_ask_question_message
 
                     # Check for active option flow in "Other" text mode first
                     flow = get_ask_question_flow(channel_id=msg.chat_id)
@@ -2359,21 +2358,16 @@ async def run_main_loop(
                         flow.current_index += 1
 
                         if flow.current_index < len(flow.questions):
-                            # More questions — show next one
-                            # Note: we can't easily edit the progress message from
-                            # here, so just send a new message with the next question
-                            msg_text = format_question_message(flow)
-                            buttons = get_question_option_buttons(flow)
-                            from ..transport import RenderedMessage as _RM
-
-                            next_msg = _RM(
-                                text=msg_text,
-                                extra={
-                                    "parse_mode": "HTML",
-                                    "reply_markup": {"inline_keyboard": buttons},
-                                },
+                            # More questions — send next one as a new message
+                            # (callback-button continuation edits in place via
+                            # ctx.executor.edit; see commands/ask_question.py).
+                            await send_next_ask_question_message(
+                                cfg.exec_cfg.transport,
+                                chat_id=chat_id,
+                                user_msg_id=msg.message_id,
+                                thread_id=msg.thread_id,
+                                flow=flow,
                             )
-                            await reply(text=next_msg)
                             return
                         else:
                             # All done — send structured answer
