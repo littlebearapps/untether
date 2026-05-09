@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import json
 import re
 import signal
@@ -1166,6 +1167,13 @@ class JsonlSubprocessRunner(BaseRunner):
                 ):
                     yield evt
                 reader_done.set()
+                # #502 — Close our read end of stderr so drain_stderr
+                # exits even when a child (e.g. an MCP server) inherited
+                # the stderr fd and is keeping it open. Without this the
+                # task group blocks forever waiting on drain_stderr and
+                # `proc.wait()` below is never reached.
+                with contextlib.suppress(Exception):
+                    await proc.stderr.aclose()
 
             rc = await proc.wait()
             stream.proc_returncode = rc

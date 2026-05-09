@@ -2821,6 +2821,13 @@ class ClaudeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
                     if use_control_channel and this_proc_stdin is not None:
                         with contextlib.suppress(Exception):
                             await this_proc_stdin.aclose()
+                    # #502 — Close our read end of stderr so drain_stderr
+                    # exits even when a child (e.g. an MCP server) inherited
+                    # the stderr fd and is keeping it open. Without this the
+                    # task group blocks forever waiting on drain_stderr and
+                    # `proc.wait()` below is never reached.
+                    with contextlib.suppress(Exception):
+                        await proc.stderr.aclose()
 
                 rc = await proc.wait()
                 run_logger.info("subprocess.exit", pid=proc.pid, rc=rc)
