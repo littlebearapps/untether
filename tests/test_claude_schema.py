@@ -156,3 +156,63 @@ def test_decode_advisor_tool_result_block_minimal() -> None:
     assert block.tool_use_id == "adv_02"
     assert block.content is None
     assert block.is_error is None
+
+
+# ---------------------------------------------------------------------------
+# #501 — tool_result.content / advisor_tool_result.content as a single dict
+# ---------------------------------------------------------------------------
+
+
+def test_decode_tool_result_block_with_dict_content() -> None:
+    """Claude Code may emit `tool_result.content` as a single content block
+    object (e.g. {"type": "text", "text": "..."}), not just str / list /
+    null. Schema must accept the dict shape so msgspec doesn't drop the
+    line with ValidationError."""
+    payload = {
+        "type": "user",
+        "uuid": "uuid-501a",
+        "session_id": "sess-501",
+        "message": {
+            "role": "user",
+            "content": [
+                {
+                    "type": "tool_result",
+                    "tool_use_id": "tu_501",
+                    "content": {"type": "text", "text": "ok"},
+                    "is_error": False,
+                },
+            ],
+        },
+    }
+    decoded = claude_schema.decode_stream_json_line(json.dumps(payload).encode())
+    assert isinstance(decoded, claude_schema.StreamUserMessage)
+    assert isinstance(decoded.message.content, list)
+    block = decoded.message.content[0]
+    assert isinstance(block, claude_schema.StreamToolResultBlock)
+    assert block.tool_use_id == "tu_501"
+    assert block.content == {"type": "text", "text": "ok"}
+    assert block.is_error is False
+
+
+def test_decode_advisor_tool_result_block_with_dict_content() -> None:
+    """advisor_tool_result with the same dict-content shape as #501."""
+    payload = {
+        "type": "user",
+        "uuid": "uuid-501b",
+        "session_id": "sess-501",
+        "message": {
+            "role": "user",
+            "content": [
+                {
+                    "type": "advisor_tool_result",
+                    "tool_use_id": "adv_501",
+                    "content": {"type": "text", "text": "advice"},
+                },
+            ],
+        },
+    }
+    decoded = claude_schema.decode_stream_json_line(json.dumps(payload).encode())
+    block = decoded.message.content[0]
+    assert isinstance(block, claude_schema.StreamAdvisorToolResultBlock)
+    assert block.tool_use_id == "adv_501"
+    assert block.content == {"type": "text", "text": "advice"}
