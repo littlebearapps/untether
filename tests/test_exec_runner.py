@@ -733,17 +733,18 @@ async def test_base_iter_jsonl_breaks_on_did_emit_completed() -> None:
     stream = JsonlStreamState(expected_session=None)
     logger = structlog.get_logger()
 
-    events: list[UntetherEvent] = []
     with anyio.fail_after(2.0):
-        async for evt in runner._iter_jsonl_events(
-            stdout=None,
-            stream=stream,
-            state=state,
-            resume=None,
-            logger=logger,
-            pid=1234,
-        ):
-            events.append(evt)
+        events: list[UntetherEvent] = [
+            evt
+            async for evt in runner._iter_jsonl_events(
+                stdout=None,
+                stream=stream,
+                state=state,
+                resume=None,
+                logger=logger,
+                pid=1234,
+            )
+        ]
 
     assert stream.did_emit_completed is True
     assert any(isinstance(e, CompletedEvent) for e in events)
