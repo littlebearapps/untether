@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import json
 import re
 import signal
@@ -870,6 +871,15 @@ class JsonlSubprocessRunner(BaseRunner):
                 pid=pid,
             ):
                 yield evt
+            # #505 After CompletedEvent, stop reading stdout. Otherwise a
+            # child process inheriting the stdout fd (e.g. MCP server,
+            # backgrounded shell) keeps the pipe open and we block on
+            # iter_json_lines waiting for an EOF that never comes.
+            # Audited 2026-05-10 across codex/opencode/pi/gemini/amp:
+            # each engine emits exactly one terminal event, no
+            # post-completion events. Mirrors Claude's override.
+            if stream.did_emit_completed:
+                break
 
     _WATCHDOG_GRACE_SECONDS: float = 5.0
 
@@ -1166,6 +1176,13 @@ class JsonlSubprocessRunner(BaseRunner):
                 ):
                     yield evt
                 reader_done.set()
+                # #502 — Close our read end of stderr so drain_stderr
+                # exits even when a child (e.g. an MCP server) inherited
+                # the stderr fd and is keeping it open. Without this the
+                # task group blocks forever waiting on drain_stderr and
+                # `proc.wait()` below is never reached.
+                with contextlib.suppress(Exception):
+                    await proc.stderr.aclose()
 
             rc = await proc.wait()
             stream.proc_returncode = rc

@@ -707,7 +707,10 @@ def _load_settings_from_path(cfg_path: Path) -> UntetherSettings:
     )
     try:
         settings = Bound()
-        logger.info("config.loaded", path=str(cfg_path))
+        # #498 — fires per-helper load (footer/watchdog/progress/auto_continue/
+        # preamble/budget) by design (#269 hot-reload); too noisy at INFO.
+        # See v0.35.4 issue for caching settings within handle_message.
+        logger.debug("config.loaded", path=str(cfg_path))
         return settings
     except ValidationError as exc:
         raise ConfigError(f"Invalid config in {cfg_path}: {exc}") from exc

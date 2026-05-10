@@ -259,6 +259,13 @@ class ClaudeStreamState:
     max_text_len_since_cooldown: int = 0
     # Store outline text for embedding in synthetic approve/deny action
     outline_text: str | None = None
+    # #508 ExitPlanMode plan body — captured from the tool_use input on
+    # every ExitPlanMode call so the bridge can re-emit it as part of the
+    # final answer when the post-approval result is brief or empty
+    # (research/audit tasks where Claude has nothing left to say after
+    # the user approves).  Plan messages on Telegram are deleted on
+    # approve, so this is the only path to retain the body.
+    last_exitplanmode_plan: str | None = None
     # Cumulative seconds the session spent in Anthropic-side rate-limit waits (#349).
     # Sum of every rate_limit_event's retry_after_ms, so the cost footer can annotate
     # "(incl. Xm Ys rate-limited)" when a run finishes after one or more throttles.
@@ -284,6 +291,12 @@ class ClaudeStreamState:
     live_bg_bashes: set[str] = field(default_factory=set)
     live_bg_agents: set[str] = field(default_factory=set)
     live_wakeups: dict[str, float] = field(default_factory=dict)
+    # #507 arm-time `delaySeconds` per ScheduleWakeup tool_use_id, captured
+    # parallel to ``live_wakeups``. ``live_wakeups`` stores future deadlines
+    # which are hard to invert after they pass, so the post-result idle
+    # watchdog reads this dict to shorten its timeout to ``max_delay + 60s``
+    # when /loop is OFF (the wakeup is then a silent no-op upstream).
+    live_wakeups_arm_delay: dict[str, float] = field(default_factory=dict)
     live_remote_triggers: set[str] = field(default_factory=set)
 
     # #289 — first user message text for the run.  Populated by ``new_state``
@@ -457,12 +470,15 @@ def _register_background_handle(
         delay_seconds_raw = raw_input.get("delaySeconds")
         if isinstance(delay_seconds_raw, (int, float)) and delay_seconds_raw > 0:
             state.live_wakeups[tool_id] = time.monotonic() + float(delay_seconds_raw)
+            state.live_wakeups_arm_delay[tool_id] = float(delay_seconds_raw)
         else:
             delay_ms = raw_input.get("delay_ms") or raw_input.get("timeout_ms")
             if isinstance(delay_ms, (int, float)) and delay_ms > 0:
                 state.live_wakeups[tool_id] = time.monotonic() + (delay_ms / 1000.0)
+                state.live_wakeups_arm_delay[tool_id] = delay_ms / 1000.0
             else:
                 state.live_wakeups[tool_id] = 0.0
+                state.live_wakeups_arm_delay[tool_id] = 0.0
     elif tool_name == "RemoteTrigger":
         state.live_remote_triggers.add(tool_id)
 
@@ -473,6 +489,7 @@ def _clear_background_handle(state: ClaudeStreamState, tool_use_id: str) -> None
     state.live_bg_bashes.discard(tool_use_id)
     state.live_bg_agents.discard(tool_use_id)
     state.live_wakeups.pop(tool_use_id, None)
+    state.live_wakeups_arm_delay.pop(tool_use_id, None)
     state.live_remote_triggers.discard(tool_use_id)
 
 
@@ -1038,6 +1055,19 @@ def translate_claude_event(
                         # (master toggle gate inside).  Sibling of, not
                         # replacement for, _register_background_handle.
                         _observe_loop_tool_use(state, content)
+                        # #508 capture ExitPlanMode plan body so the bridge
+                        # can re-emit it in the final answer when the
+                        # post-approval result is brief/empty (research
+                        # tasks).  Only captures from the regular Approve
+                        # flow — Pause-and-Outline outlines go via
+                        # state.outline_text and a different code path.
+                        if str(content.name or "") == "ExitPlanMode":
+                            _epm_input = (
+                                content.input if isinstance(content.input, dict) else {}
+                            )
+                            _plan_body = _epm_input.get("plan")
+                            if isinstance(_plan_body, str) and _plan_body.strip():
+                                state.last_exitplanmode_plan = _plan_body
                         out.append(
                             factory.action_started(
                                 action_id=action.id,
@@ -2443,7 +2473,26 @@ class ClaudeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
             if armed_at is None:
                 continue
             elapsed = time.monotonic() - armed_at
-            if elapsed < timeout_s:
+
+            # #507: dead-ScheduleWakeup shortcut. ScheduleWakeup outside
+            # ``/loop dynamic mode`` is a silent no-op upstream — the
+            # wakeup never fires, the agent's turn ended, and we'd otherwise
+            # wait the full ``timeout_s`` (default 600 s) before closing
+            # stdin. Detect the case via the live_wakeups registry and the
+            # /loop master toggle for this chat; cut the effective timeout
+            # to ``max_armed_delay + 60s grace`` so the session closes
+            # within ~delay+grace instead of 10 minutes.
+            effective_timeout = timeout_s
+            dead_wakeup = False
+            if state.live_wakeups_arm_delay:
+                from ..utils.paths import get_run_channel_id
+
+                _chat_id = get_run_channel_id()
+                if _chat_id is not None and not _loop_enabled_for_chat(_chat_id):
+                    _max_delay = max(state.live_wakeups_arm_delay.values(), default=0.0)
+                    effective_timeout = min(timeout_s, _max_delay + 60.0)
+                    dead_wakeup = True
+            if elapsed < effective_timeout:
                 continue
 
             # Locate the session id for the approval-state guard. The
@@ -2480,6 +2529,8 @@ class ClaudeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
                 session_id=sid,
                 elapsed_s=round(elapsed, 1),
                 timeout_s=timeout_s,
+                effective_timeout_s=round(effective_timeout, 1),
+                dead_wakeup=dead_wakeup,
             )
             # #470: stamp closed-at signals BEFORE the actual stdin close
             # so the bridge's heartbeat tick (which polls engine_state via
@@ -2821,6 +2872,13 @@ class ClaudeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
                     if use_control_channel and this_proc_stdin is not None:
                         with contextlib.suppress(Exception):
                             await this_proc_stdin.aclose()
+                    # #502 — Close our read end of stderr so drain_stderr
+                    # exits even when a child (e.g. an MCP server) inherited
+                    # the stderr fd and is keeping it open. Without this the
+                    # task group blocks forever waiting on drain_stderr and
+                    # `proc.wait()` below is never reached.
+                    with contextlib.suppress(Exception):
+                        await proc.stderr.aclose()
 
                 rc = await proc.wait()
                 run_logger.info("subprocess.exit", pid=proc.pid, rc=rc)

@@ -1134,6 +1134,76 @@ def test_translate_server_tool_use_block() -> None:
     assert state.last_tool_use_id == "stu_01"
 
 
+def test_translate_exitplanmode_captures_plan_body() -> None:
+    """#508 — translating a tool_use(name='ExitPlanMode', input.plan='...')
+    captures the plan body onto state.last_exitplanmode_plan so the bridge
+    can re-emit it in the final answer if the post-approval result is
+    brief.  Regression for the live research-task short-final-message bug.
+    """
+    state = ClaudeStreamState()
+    state.factory._resume = ResumeToken(engine="claude", value="sess-508")
+    plan_body = (
+        "Findings:\n"
+        "- File X has bug Y at line 42\n"
+        "- File Z is unaffected\n"
+        "- Recommend fix A\n"
+    )
+    event = {
+        "type": "assistant",
+        "message": {
+            "id": "msg_1",
+            "content": [
+                {
+                    "type": "tool_use",
+                    "id": "tu_epm_1",
+                    "name": "ExitPlanMode",
+                    "input": {"plan": plan_body},
+                }
+            ],
+        },
+    }
+
+    translate_claude_event(
+        _decode_event(event),
+        title="claude",
+        state=state,
+        factory=state.factory,
+    )
+
+    assert state.last_exitplanmode_plan == plan_body
+
+
+def test_translate_exitplanmode_ignores_empty_plan_body() -> None:
+    """#508 — empty/whitespace-only plan bodies are NOT captured. Avoids
+    overwriting a real prior value with an inadvertent retry/empty call."""
+    state = ClaudeStreamState()
+    state.factory._resume = ResumeToken(engine="claude", value="sess-508")
+    state.last_exitplanmode_plan = "earlier plan body"
+    event = {
+        "type": "assistant",
+        "message": {
+            "id": "msg_2",
+            "content": [
+                {
+                    "type": "tool_use",
+                    "id": "tu_epm_2",
+                    "name": "ExitPlanMode",
+                    "input": {"plan": "   "},
+                }
+            ],
+        },
+    }
+
+    translate_claude_event(
+        _decode_event(event),
+        title="claude",
+        state=state,
+        factory=state.factory,
+    )
+
+    assert state.last_exitplanmode_plan == "earlier plan body"
+
+
 def test_translate_advisor_tool_result_block() -> None:
     """advisor_tool_result shares the tool_result translation path: emits an
     action_completed and pops the matching entry from state.pending_actions.
@@ -2047,6 +2117,196 @@ async def test_post_result_idle_watchdog_defers_when_pending_approval(
         assert state.result_received_at > original_armed
     finally:
         _REQUEST_TO_SESSION.pop("req_pending", None)
+
+
+# ───── #507 — dead ScheduleWakeup outside /loop shortcut ───────────────
+
+
+@pytest.mark.anyio
+async def test_dead_schedule_wakeup_shortens_post_result_timeout(
+    monkeypatch,
+) -> None:
+    """When ScheduleWakeup armed during the run AND /loop is OFF for the
+    chat, ``_post_result_idle_watchdog`` cuts its effective timeout to
+    ``max_armed_delay + 60s`` so the session closes within delay+grace
+    instead of waiting the default 600s. Validates the fix for #507.
+    """
+    import anyio
+
+    from untether.runners.claude import (
+        _PENDING_ASK_REQUESTS,
+        _REQUEST_TO_SESSION,
+        ClaudeRunner,
+    )
+    from untether.runners.run_options import EngineRunOptions, apply_run_options
+    from untether.utils.paths import set_run_channel_id
+
+    _REQUEST_TO_SESSION.clear()
+    _PENDING_ASK_REQUESTS.clear()
+
+    runner = ClaudeRunner(claude_cmd="claude")
+    state = ClaudeStreamState()
+    state.factory.started(
+        ResumeToken(engine="claude", value="watchdog-dead-wakeup-session"),
+    )
+    # ScheduleWakeup armed with delaySeconds=75 → arm_delay dict tracks 75.0.
+    # We only need the parallel arm_delay dict populated for the shortcut
+    # check; the deadline value doesn't affect the test.
+    state.live_wakeups["toolu_W"] = time.monotonic() + 75.0
+    state.live_wakeups_arm_delay["toolu_W"] = 75.0
+    # Pretend the result event landed 200s ago — past the dead-wakeup
+    # effective_timeout (75 + 60 = 135s) but still well below the default
+    # 600s timeout.
+    state.result_received_at = time.monotonic() - 200.0
+
+    closed = anyio.Event()
+
+    class FakeStdin:
+        async def aclose(self) -> None:
+            closed.set()
+
+    fake_stdin = FakeStdin()
+    reader_done = anyio.Event()
+
+    real_sleep = anyio.sleep
+
+    async def fast_sleep(s: float) -> None:
+        await real_sleep(0)
+
+    monkeypatch.setattr("untether.runners.claude.anyio.sleep", fast_sleep)
+
+    captured_logs: list[dict] = []
+
+    class _StubLogger:
+        def info(self, event: str = "", **kwargs) -> None:
+            captured_logs.append({"event": event, **kwargs})
+
+        def warning(self, *a, **k) -> None:
+            pass
+
+        def debug(self, *a, **k) -> None:
+            pass
+
+    # /loop OFF for the chat (default). Set a chat_id so the shortcut
+    # finds it.
+    token = set_run_channel_id(12345)
+    try:
+        with apply_run_options(EngineRunOptions(loop_enabled=False)):
+            async with anyio.create_task_group() as tg:
+                tg.start_soon(
+                    runner._post_result_idle_watchdog,
+                    state,
+                    fake_stdin,
+                    reader_done,
+                    _StubLogger(),
+                    600.0,  # default timeout — shortcut should cut to 135s
+                )
+                with anyio.move_on_after(2.0):
+                    await closed.wait()
+                tg.cancel_scope.cancel()
+    finally:
+        from untether.utils.paths import reset_run_channel_id
+
+        reset_run_channel_id(token)
+
+    assert closed.is_set(), "watchdog should have closed stdin"
+    # Verify the closing log marked dead_wakeup=True with the shortened
+    # effective_timeout.
+    closing = next(
+        (
+            lg
+            for lg in captured_logs
+            if lg["event"] == "claude.post_result_idle.closing_stdin"
+        ),
+        None,
+    )
+    assert closing is not None
+    assert closing["dead_wakeup"] is True
+    assert closing["effective_timeout_s"] == 135.0
+
+
+@pytest.mark.anyio
+async def test_active_loop_preserves_default_post_result_timeout(
+    monkeypatch,
+) -> None:
+    """When /loop is ON for the chat, the dead-wakeup shortcut must NOT
+    apply — the wakeup is legitimate background work. The watchdog should
+    use the full default timeout.
+    """
+    import anyio
+
+    from untether.runners.claude import (
+        _PENDING_ASK_REQUESTS,
+        _REQUEST_TO_SESSION,
+        ClaudeRunner,
+    )
+    from untether.runners.run_options import EngineRunOptions, apply_run_options
+    from untether.utils.paths import set_run_channel_id
+
+    _REQUEST_TO_SESSION.clear()
+    _PENDING_ASK_REQUESTS.clear()
+
+    runner = ClaudeRunner(claude_cmd="claude")
+    state = ClaudeStreamState()
+    state.factory.started(
+        ResumeToken(engine="claude", value="watchdog-loop-on-session"),
+    )
+    state.live_wakeups["toolu_W"] = time.monotonic() + 75.0
+    state.live_wakeups_arm_delay["toolu_W"] = 75.0
+    # Pretend result landed 200s ago — past the dead-wakeup shortcut
+    # threshold (135s), but well below the 600s default timeout. With
+    # /loop ON the watchdog should NOT close stdin yet.
+    state.result_received_at = time.monotonic() - 200.0
+
+    closed = anyio.Event()
+
+    class FakeStdin:
+        async def aclose(self) -> None:
+            closed.set()
+
+    fake_stdin = FakeStdin()
+    reader_done = anyio.Event()
+
+    real_sleep = anyio.sleep
+
+    async def fast_sleep(s: float) -> None:
+        await real_sleep(0)
+
+    monkeypatch.setattr("untether.runners.claude.anyio.sleep", fast_sleep)
+
+    class _StubLogger:
+        def info(self, *a, **k) -> None:
+            pass
+
+        def warning(self, *a, **k) -> None:
+            pass
+
+        def debug(self, *a, **k) -> None:
+            pass
+
+    token = set_run_channel_id(12345)
+    try:
+        with apply_run_options(EngineRunOptions(loop_enabled=True)):
+            async with anyio.create_task_group() as tg:
+                tg.start_soon(
+                    runner._post_result_idle_watchdog,
+                    state,
+                    fake_stdin,
+                    reader_done,
+                    _StubLogger(),
+                    600.0,
+                )
+                # Tick a few times, then signal reader_done.
+                for _ in range(10):
+                    await real_sleep(0)
+                reader_done.set()
+                tg.cancel_scope.cancel()
+    finally:
+        from untether.utils.paths import reset_run_channel_id
+
+        reset_run_channel_id(token)
+
+    assert not closed.is_set(), "with /loop ON, dead-wakeup shortcut must not fire"
 
 
 def test_meta_line_renders_turn_complete_marker() -> None:
