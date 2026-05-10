@@ -298,14 +298,26 @@ _DEFAULT_PREAMBLE = (
     "- If hooks fire at session end, your final response MUST still contain the "
     "user's requested content. Hook concerns are secondary — briefly note them "
     "AFTER the main content, never instead of it.\n\n"
+    "Plan-mode requirements (when you call `ExitPlanMode`):\n"
+    "- Your `plan` parameter MUST include a 3–5 bullet point summary of your "
+    "findings, decisions, or proposed changes — never just a file path. The "
+    "user is on Telegram and cannot easily open files. For code-change tasks "
+    "keep it concise; for research/audit tasks where no further work is "
+    "expected after approval, expand the bullets into a substantive summary.\n"
+    "- After `ExitPlanMode` is approved, your next assistant message — which "
+    "becomes the user's final Telegram message — MUST repeat the substantive "
+    'findings or decisions. Do not just write "Plan approved" or "research '
+    'complete, see file X". The plan-body messages on Telegram disappear '
+    "after approval, so your post-approval text is the only thing the user "
+    "retains.\n\n"
     "Every response that completes work MUST end with a structured summary:\n"
     "  ## Summary\n"
     "  ### Completed\n"
     "  - [What was done, with specific file paths and line numbers where relevant]\n"
     "  - [Key decisions made and why]\n"
     "  ### Plan/Document Created (if applicable)\n"
-    "  - [Path and concise summary of any plan, design doc, or document created — "
-    "the user cannot easily open files from Telegram]\n"
+    "  - [Path AND the key findings inline; do not require the user to open "
+    "the file]\n"
     "  ### Files for Review (if applicable)\n"
     "  - To send files to the user, write them to `.untether-outbox/`\n"
     "  - Example: `mkdir -p .untether-outbox && cp docs/plan.md .untether-outbox/`\n"
@@ -370,6 +382,35 @@ def _apply_preamble(prompt: str) -> str:
         source = "override"
     logger.info("preamble.applied", preamble_len=len(text), source=source)
     return f"{text}\n\n---\n\n{prompt}"
+
+
+def _prepend_exitplanmode_plan(final_answer: str | None, plan_body: str | None) -> str:
+    """#508 Re-emit ExitPlanMode plan body when the post-approval final
+    answer doesn't already contain it.
+
+    Handles the research-task case: Claude does the work, saves to a file,
+    ExitPlanMode plan body has the substantive findings, user approves,
+    post-approval ``result`` is brief or empty (Claude has nothing left
+    to do). Without this re-emit, the user only sees the brief
+    acknowledgement extracted via the ``last_assistant_text`` fallback —
+    the plan body, which got deleted from Telegram on approve, would
+    otherwise be lost.
+
+    Skip rule: if the plan body is already a substring of
+    ``final_answer`` (the preamble guidance may have caused Claude to
+    repeat the plan content in its post-approval text), do NOT prepend
+    — avoid duplication. Substring-only is the right gate; no length
+    threshold (live repro had answer_len=584, larger than any sensible
+    threshold, but still didn't contain the plan content).
+    """
+    if not plan_body or not plan_body.strip():
+        return final_answer or ""
+    body = plan_body.strip()
+    if body in (final_answer or ""):
+        return final_answer or ""
+    if final_answer:
+        return f"📋 Plan (approved):\n\n{plan_body}\n\n---\n\n{final_answer}"
+    return f"📋 Plan (approved):\n\n{plan_body}"
 
 
 def _resolve_presenter(
@@ -2945,23 +2986,17 @@ async def handle_message(
 
     final_answer = completed.answer
 
-    # If there's a plan outline stored in a synthetic warning action,
-    # prepend it to the final answer so the user can read it.
-    # (The progress message that showed the outline gets replaced by
-    # the final message, so the outline would otherwise be lost.)
-    _outline_prefix = "Plan outline:\n"
-    for _action_state in progress_tracker.snapshot(
-        resume_formatter=runner.format_resume,
-        context_line=None,
-    ).actions:
-        _title = _action_state.action.title or ""
-        if _action_state.action.kind == "warning" and _title.startswith(
-            _outline_prefix
-        ):
-            _outline_body = _title[len(_outline_prefix) :]
-            if _outline_body.strip():
-                final_answer = f"{_outline_body}\n\n{final_answer}"
-            break
+    # #508 Re-emit ExitPlanMode plan body when the post-approval final
+    # answer doesn't already contain it. See ``_prepend_exitplanmode_plan``
+    # for full rationale and skip rules.
+    _stream = getattr(runner, "current_stream", None)
+    _engine_state = getattr(_stream, "engine_state", None) if _stream else None
+    _plan_body = (
+        getattr(_engine_state, "last_exitplanmode_plan", None)
+        if _engine_state
+        else None
+    )
+    final_answer = _prepend_exitplanmode_plan(final_answer, _plan_body)
 
     # Auto-clear broken session: if a resumed run failed with 0 turns,
     # clear the saved session so the next message starts fresh.
