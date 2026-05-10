@@ -871,6 +871,15 @@ class JsonlSubprocessRunner(BaseRunner):
                 pid=pid,
             ):
                 yield evt
+            # #505 After CompletedEvent, stop reading stdout. Otherwise a
+            # child process inheriting the stdout fd (e.g. MCP server,
+            # backgrounded shell) keeps the pipe open and we block on
+            # iter_json_lines waiting for an EOF that never comes.
+            # Audited 2026-05-10 across codex/opencode/pi/gemini/amp:
+            # each engine emits exactly one terminal event, no
+            # post-completion events. Mirrors Claude's override.
+            if stream.did_emit_completed:
+                break
 
     _WATCHDOG_GRACE_SECONDS: float = 5.0
 

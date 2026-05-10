@@ -688,3 +688,62 @@ def test_resume_line_proxy_current_stream_no_attr() -> None:
     runner = MockRunner(engine="mock")
     proxy = _ResumeLineProxy(runner=runner)
     assert proxy.current_stream is None
+
+
+# ===========================================================================
+# #505 — base runner _iter_jsonl_events breaks after CompletedEvent
+# ===========================================================================
+
+
+@pytest.mark.anyio
+async def test_base_iter_jsonl_breaks_on_did_emit_completed() -> None:
+    """Base ``_iter_jsonl_events`` must stop reading stdout after a
+    CompletedEvent. Without the break, a child process inheriting the
+    stdout fd (e.g. MCP server, backgrounded shell) would keep the pipe
+    open and the loop would block on ``iter_json_lines`` waiting for an
+    EOF that never comes.
+
+    Validates the fix for #505 by replacing ``iter_json_lines`` with a
+    stub that yields a ``TurnCompleted`` line then a ``hang`` event that
+    never fires. Without the break, the test would deadlock.
+    """
+    import anyio
+    import structlog
+
+    from untether.runner import JsonlStreamState
+
+    runner = CodexRunner(codex_cmd="codex", extra_args=[])
+    state = runner.new_state("hi", ResumeToken(engine=CODEX_ENGINE, value="sid"))
+
+    completed_line = (
+        b'{"type":"turn.completed","turn_id":"t1","usage":{"input_tokens":1,'
+        b'"cached_input_tokens":0,"output_tokens":1,"reasoning_output_tokens":0,'
+        b'"total_tokens":2}}'
+    )
+
+    async def fake_iter_json_lines(_stream):
+        yield completed_line
+        # Without the break, the runner would await this event forever and the
+        # test would hang past the fail_after deadline.
+        await anyio.Event().wait()
+        yield b"never reached"
+
+    runner.iter_json_lines = fake_iter_json_lines  # type: ignore[assignment]
+
+    stream = JsonlStreamState(expected_session=None)
+    logger = structlog.get_logger()
+
+    events: list[UntetherEvent] = []
+    with anyio.fail_after(2.0):
+        async for evt in runner._iter_jsonl_events(
+            stdout=None,
+            stream=stream,
+            state=state,
+            resume=None,
+            logger=logger,
+            pid=1234,
+        ):
+            events.append(evt)
+
+    assert stream.did_emit_completed is True
+    assert any(isinstance(e, CompletedEvent) for e in events)
