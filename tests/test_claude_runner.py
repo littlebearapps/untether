@@ -1204,6 +1204,115 @@ def test_translate_exitplanmode_ignores_empty_plan_body() -> None:
     assert state.last_exitplanmode_plan == "earlier plan body"
 
 
+def test_translate_result_prepends_exitplanmode_plan_into_answer() -> None:
+    """#510: the ExitPlanMode plan body re-emit happens HERE on the per-stream
+    result path (claude.py), not in runner_bridge against the singleton
+    runner.current_stream. Verifies the prepend uses state.last_exitplanmode_plan
+    from the SAME state instance that received the result event.
+    """
+    state = ClaudeStreamState()
+    state.factory._resume = ResumeToken(engine="claude", value="sess-510")
+    state.last_exitplanmode_plan = "- Finding 1\n- Finding 2\n- Recommend X"
+    short_post_approval_result = "Plan approved — see file."
+
+    event = claude_schema.StreamResultMessage(
+        subtype="success",
+        duration_ms=100,
+        duration_api_ms=50,
+        is_error=False,
+        num_turns=2,
+        session_id="sess-510",
+        result=short_post_approval_result,
+    )
+    events = translate_claude_event(
+        event,
+        title="claude",
+        state=state,
+        factory=state.factory,
+    )
+    completed = [evt for evt in events if isinstance(evt, CompletedEvent)]
+    assert len(completed) == 1
+    answer = completed[0].answer
+    assert "📋 Plan (approved):" in answer
+    assert "- Finding 1" in answer
+    assert short_post_approval_result in answer
+    # Plan body comes before the brief post-approval text
+    assert answer.index("- Finding 1") < answer.index(short_post_approval_result)
+
+
+def test_concurrent_states_do_not_leak_exitplanmode_plan_bodies() -> None:
+    """#510 regression — the live bug. Two concurrent Claude sessions
+    each had their own ClaudeStreamState. Previously the bridge read the
+    plan body from ``runner.current_stream`` (a shared singleton on the
+    runner), which was overwritten when either session re-entered
+    run_impl. The fix routes the prepend through the per-stream
+    translate path, so each state can ONLY ever read its own plan body.
+
+    Models the production incident: chat A captured "PLAN — CHANNELO
+    TUNNEL" on its state, chat B was completing a different task with
+    its own short answer — chat B's CompletedEvent must NOT contain
+    chat A's plan body.
+    """
+    state_a = ClaudeStreamState()
+    state_a.factory._resume = ResumeToken(engine="claude", value="sess-A")
+    state_a.last_exitplanmode_plan = "PLAN — CHANNELO TUNNEL secret content"
+
+    state_b = ClaudeStreamState()
+    state_b.factory._resume = ResumeToken(engine="claude", value="sess-B")
+    # state_b has its own (smaller) plan body — different content
+    state_b.last_exitplanmode_plan = "PLAN — legal-DB handover"
+
+    # Session B completes with a brief post-approval result.
+    event_b = claude_schema.StreamResultMessage(
+        subtype="success",
+        duration_ms=100,
+        duration_api_ms=50,
+        is_error=False,
+        num_turns=2,
+        session_id="sess-B",
+        result="done",
+    )
+    events_b = translate_claude_event(
+        event_b,
+        title="claude",
+        state=state_b,
+        factory=state_b.factory,
+    )
+    completed_b = next(evt for evt in events_b if isinstance(evt, CompletedEvent))
+
+    # Session B's answer must only contain its own plan body.
+    assert "PLAN — legal-DB handover" in completed_b.answer
+    assert "CHANNELO TUNNEL" not in completed_b.answer
+    assert "secret content" not in completed_b.answer
+
+
+def test_translate_result_error_does_not_prepend_plan(monkeypatch) -> None:
+    """#510: only the OK path prepends. Errored result paths flow into
+    _extract_error and must not also receive a plan-body prepend.
+    """
+    state = ClaudeStreamState()
+    state.factory._resume = ResumeToken(engine="claude", value="sess-510-err")
+    state.last_exitplanmode_plan = "- Should not appear"
+
+    event = claude_schema.StreamResultMessage(
+        subtype="error_during_execution",
+        duration_ms=100,
+        duration_api_ms=50,
+        is_error=True,
+        num_turns=1,
+        session_id="sess-510-err",
+    )
+    events = translate_claude_event(
+        event,
+        title="claude",
+        state=state,
+        factory=state.factory,
+    )
+    completed = next(evt for evt in events if isinstance(evt, CompletedEvent))
+    assert "📋 Plan (approved):" not in (completed.answer or "")
+    assert "- Should not appear" not in (completed.answer or "")
+
+
 def test_translate_advisor_tool_result_block() -> None:
     """advisor_tool_result shares the tool_result translation path: emits an
     action_completed and pops the matching entry from state.pending_actions.

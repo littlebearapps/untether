@@ -384,35 +384,6 @@ def _apply_preamble(prompt: str) -> str:
     return f"{text}\n\n---\n\n{prompt}"
 
 
-def _prepend_exitplanmode_plan(final_answer: str | None, plan_body: str | None) -> str:
-    """#508 Re-emit ExitPlanMode plan body when the post-approval final
-    answer doesn't already contain it.
-
-    Handles the research-task case: Claude does the work, saves to a file,
-    ExitPlanMode plan body has the substantive findings, user approves,
-    post-approval ``result`` is brief or empty (Claude has nothing left
-    to do). Without this re-emit, the user only sees the brief
-    acknowledgement extracted via the ``last_assistant_text`` fallback —
-    the plan body, which got deleted from Telegram on approve, would
-    otherwise be lost.
-
-    Skip rule: if the plan body is already a substring of
-    ``final_answer`` (the preamble guidance may have caused Claude to
-    repeat the plan content in its post-approval text), do NOT prepend
-    — avoid duplication. Substring-only is the right gate; no length
-    threshold (live repro had answer_len=584, larger than any sensible
-    threshold, but still didn't contain the plan content).
-    """
-    if not plan_body or not plan_body.strip():
-        return final_answer or ""
-    body = plan_body.strip()
-    if body in (final_answer or ""):
-        return final_answer or ""
-    if final_answer:
-        return f"📋 Plan (approved):\n\n{plan_body}\n\n---\n\n{final_answer}"
-    return f"📋 Plan (approved):\n\n{plan_body}"
-
-
 def _resolve_presenter(
     default_presenter: Presenter, channel_id: ChannelId
 ) -> Presenter:
@@ -2984,19 +2955,13 @@ async def handle_message(
         return
     # --- End auto-continue ---
 
+    # #510: ``completed.answer`` already has the #508 ExitPlanMode
+    # plan-body prepend applied at the runner level (claude.py, on the
+    # per-stream path). The previous bridge-side prepend read
+    # ``runner.current_stream`` — a shared singleton on the ClaudeRunner
+    # — and leaked one chat's plan body into another concurrent chat's
+    # final answer.
     final_answer = completed.answer
-
-    # #508 Re-emit ExitPlanMode plan body when the post-approval final
-    # answer doesn't already contain it. See ``_prepend_exitplanmode_plan``
-    # for full rationale and skip rules.
-    _stream = getattr(runner, "current_stream", None)
-    _engine_state = getattr(_stream, "engine_state", None) if _stream else None
-    _plan_body = (
-        getattr(_engine_state, "last_exitplanmode_plan", None)
-        if _engine_state
-        else None
-    )
-    final_answer = _prepend_exitplanmode_plan(final_answer, _plan_body)
 
     # Auto-clear broken session: if a resumed run failed with 0 turns,
     # clear the saved session so the next message starts fresh.
