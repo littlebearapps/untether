@@ -7,8 +7,8 @@ from unittest.mock import patch
 from untether.runner_bridge import (
     _DEFAULT_PREAMBLE,
     _apply_preamble,
-    _prepend_exitplanmode_plan,
 )
+from untether.runners.claude import _prepend_exitplanmode_plan
 from untether.settings import PreambleSettings
 
 

@@ -875,6 +875,35 @@ def _extract_error(
     return f"{first}\n{diagnostics}"
 
 
+def _prepend_exitplanmode_plan(final_answer: str | None, plan_body: str | None) -> str:
+    """#508 Re-emit ExitPlanMode plan body in the final answer.
+
+    Owned by the runner — called from the per-stream ``StreamResultMessage``
+    translation path using ``state.last_exitplanmode_plan`` (correctly
+    scoped to this run's stream). #510: previously called from
+    ``runner_bridge.handle_message`` against ``runner.current_stream``
+    (singleton attribute on the shared ``ClaudeRunner``), which races
+    across concurrent Claude chats and leaked one chat's plan body into
+    another chat's final answer. Moving the call into the per-stream path
+    in ``claude.py`` closes the leak: ``state`` here is the per-run stream
+    state, not a shared field, so the plan body cannot be sourced from a
+    different session.
+
+    Skip rule: if the plan body is already a substring of
+    ``final_answer`` (the preamble guidance may have caused Claude to
+    repeat the plan content in its post-approval text), do NOT prepend
+    — avoid duplication.
+    """
+    if not plan_body or not plan_body.strip():
+        return final_answer or ""
+    body = plan_body.strip()
+    if body in (final_answer or ""):
+        return final_answer or ""
+    if final_answer:
+        return f"📋 Plan (approved):\n\n{plan_body}\n\n---\n\n{final_answer}"
+    return f"📋 Plan (approved):\n\n{plan_body}"
+
+
 def _maybe_audit_env(state: ClaudeStreamState, session_id: str) -> None:
     """One-shot ``/proc/<pid>/environ`` audit on first system.init (#361).
 
@@ -1181,6 +1210,17 @@ def translate_claude_event(
             result_text = event.result or ""
             if ok and not result_text and state.last_assistant_text:
                 result_text = state.last_assistant_text
+
+            # #510 / #508: re-emit the ExitPlanMode plan body when the
+            # post-approval final answer is brief/empty. Done HERE on the
+            # per-stream path (state is per-run, correctly scoped) rather
+            # than in runner_bridge.handle_message against the shared
+            # runner.current_stream singleton — which raced across
+            # concurrent Claude chats and leaked plan bodies cross-chat.
+            if ok:
+                result_text = _prepend_exitplanmode_plan(
+                    result_text, state.last_exitplanmode_plan
+                )
 
             resume = ResumeToken(engine=ENGINE, value=event.session_id)
             error = None if ok else _extract_error(event, resumed=state.resumed)
