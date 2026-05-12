@@ -82,7 +82,7 @@ at = "untether.telegram.commands.at:BACKEND"
 health = "untether.telegram.commands.health:BACKEND"
 
 [build-system]
-requires = ["uv_build>=0.9.18,<0.11.0"]
+requires = ["uv_build>=0.9.18,<0.12.0"]
 build-backend = "uv_build"
 
 [dependency-groups]
