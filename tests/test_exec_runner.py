@@ -625,6 +625,45 @@ async def test_jsonl_stream_state_tracks_events(tmp_path) -> None:
     assert isinstance(started.meta["pid"], int)
 
 
+@pytest.mark.anyio
+async def test_jsonl_stream_state_skips_control_channel_events(tmp_path) -> None:
+    """#502: control_request / control_response events on stdout must not
+    overwrite ``stream.last_event_type``. They are permission-flow traffic,
+    not stream-result events, so the session.summary should reflect the
+    last actual stream event. ``recent_events`` still records them for
+    diagnostics."""
+    thread_id = "019b73c4-0c3f-7701-a0bb-aac6b4d8a3bc"
+
+    codex_path = tmp_path / "codex"
+    codex_path.write_text(
+        "#!/usr/bin/env python3\n"
+        "import json\n"
+        "import sys\n"
+        "\n"
+        "sys.stdin.read()\n"
+        f"print(json.dumps({{'type': 'thread.started', 'thread_id': '{thread_id}'}}), flush=True)\n"
+        # A real stream event — should be reflected in last_event_type
+        "print(json.dumps({'type': 'item.completed', 'item': {'id': 'item_0', 'type': 'agent_message', 'text': 'ok'}}), flush=True)\n"
+        # Control-channel chatter — must NOT overwrite last_event_type
+        "print(json.dumps({'type': 'control_request', 'request_id': 'req_1', 'request': {'subtype': 'mcp_status'}}), flush=True)\n"
+        "print(json.dumps({'type': 'control_response', 'request_id': 'req_1', 'response': {'subtype': 'success'}}), flush=True)\n",
+        encoding="utf-8",
+    )
+    codex_path.chmod(0o755)
+
+    runner = CodexRunner(codex_cmd=str(codex_path), extra_args=[])
+    _ = [evt async for evt in runner.run("hi", None)]
+
+    stream = runner.current_stream
+    assert stream is not None
+    # last_event_type reflects the last *stream* event, not the control chatter
+    assert stream.last_event_type == "item.completed"
+    # But the control events ARE still recorded in recent_events for diagnostics
+    recent_labels = [label for (_ts, label) in stream.recent_events]
+    assert "control_request" in recent_labels
+    assert "control_response" in recent_labels
+
+
 def test_jsonl_stream_state_defaults() -> None:
     """JsonlStreamState initialises with correct defaults."""
     from untether.runner import JsonlStreamState
