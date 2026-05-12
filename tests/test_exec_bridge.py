@@ -2377,7 +2377,12 @@ async def test_stall_suppressed_while_waiting_for_approval() -> None:
 
 @pytest.mark.anyio
 async def test_stall_fires_after_approval_threshold() -> None:
-    """Stall monitor fires after the longer approval threshold is exceeded."""
+    """Stall monitor fires after the longer approval threshold is exceeded.
+
+    #494-C: the message must say "Awaiting your approval" rather than the
+    generic "No progress" copy, so the user realises the buttons above are
+    theirs to action and the agent has not hung.
+    """
     transport = FakeTransport()
     presenter = _KeyboardPresenter()
     clock = _FakeClock(start=100.0)
@@ -2413,8 +2418,18 @@ async def test_stall_fires_after_approval_threshold() -> None:
         tg.start_soon(drive)
 
     assert edits._stall_warn_count >= 1
-    stall_msgs = [c for c in transport.send_calls if "No progress" in c["message"].text]
-    assert len(stall_msgs) >= 1
+    # #494-C: message text differentiates from the generic stall copy
+    approval_msgs = [
+        c for c in transport.send_calls if "Awaiting your approval" in c["message"].text
+    ]
+    assert len(approval_msgs) >= 1, (
+        f"Expected at least one 'Awaiting your approval' message, got: "
+        f"{[c['message'].text for c in transport.send_calls]}"
+    )
+    # And it must NOT contain the generic "No progress" copy or the
+    # alarming "session may be stuck" suffix.
+    assert "No progress" not in approval_msgs[0]["message"].text
+    assert "session may be stuck" not in approval_msgs[0]["message"].text
 
 
 @pytest.mark.anyio

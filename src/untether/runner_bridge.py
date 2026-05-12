@@ -1475,6 +1475,10 @@ class ProgressEdits:
                 # ring buffer escalation despite CPU activity)
                 mins = int(elapsed // 60)
                 mcp_hung = mcp_server is not None and frozen_escalate
+                # Initialised here (not inside the final else) so the
+                # _genuinely_stuck predicate below can reference it safely
+                # from every branch.
+                _tool_name: str | None = None
                 if mcp_hung:
                     logger.warning(
                         "progress_edits.mcp_tool_hung",
@@ -1517,6 +1521,12 @@ class ProgressEdits:
                         parts = [
                             f"⏳ No progress for {mins} min (CPU active, no new events)"
                         ]
+                elif threshold_reason == "pending_approval":
+                    # #494-C: user is waiting on an approval button; the stall
+                    # warning is expected, not a sign the agent has frozen.
+                    # Distinguish from genuine "no progress" copy so the user
+                    # realises the buttons above are theirs to action.
+                    parts = [f"⏳ Awaiting your approval ({mins} min)"]
                 elif mcp_server is not None:
                     parts = [f"⏳ MCP tool running: {mcp_server} ({mins} min)"]
                 elif threshold_reason == "active_children":
@@ -1533,7 +1543,6 @@ class ProgressEdits:
                     # Extract tool name from last running action for
                     # actionable stall messages ("Bash command still running"
                     # instead of generic "session may be stuck").
-                    _tool_name = None
                     if last_action:
                         for _prefix in ("tool:", "note:", "command:"):
                             if last_action.startswith(_prefix):
@@ -1558,12 +1567,14 @@ class ProgressEdits:
                 if self._stall_warn_count > 1:
                     parts[0] += f" (warned {self._stall_warn_count}x)"
                 # "session may be stuck" — only when genuinely stuck
-                # (no tool identified, cpu not active, not MCP/frozen)
+                # (no tool identified, cpu not active, not MCP/frozen,
+                # not waiting on a user approval button — #494-C)
                 _genuinely_stuck = (
                     not mcp_hung
                     and not frozen_escalate
                     and mcp_server is None
                     and threshold_reason != "active_children"
+                    and threshold_reason != "pending_approval"
                     and not (_tool_name and main_sleeping)
                     and cpu_active is not True
                 )
@@ -2561,6 +2572,8 @@ async def run_runner_with_cancel(
         duration_seconds=round(duration, 1),
         event_count=event_count,
         stall_warnings=edits._total_stall_warn_count,
+        # #494: subprocess-health canary, separate from user-facing stall_warnings
+        liveness_stalls=edits.stream.liveness_stalls if edits.stream else 0,
         peak_idle_seconds=round(edits._peak_idle, 1),
         last_event_type=edits.stream.last_event_type if edits.stream else None,
         cancelled=outcome.cancelled,
