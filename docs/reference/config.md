@@ -263,6 +263,18 @@ Per-chat override: `/verbose on` and `/verbose off` override the config default 
 
 Budget alerts always appear regardless of `[footer]` settings.
 
+!!! note "Cumulative session cost is not capped"
+    Sessions can stack many runs via `/continue`, follow-up prompts, or
+    a long back-and-forth dogfooding chat. A single session has been
+    observed to cumulate over US$100 across 5 sub-runs even though each
+    individual run was well under `max_cost_per_run`
+    ([#517](https://github.com/littlebearapps/untether/issues/517)). If
+    you need a ceiling that spans sessions, set `max_cost_per_day` —
+    Untether tracks daily cost across all sessions and triggers
+    `cost_budget.exceeded` once the day's spend crosses it. A
+    `max_cost_per_session` knob is not currently provided; file a
+    feature request if your workflow needs one.
+
 ## `watchdog`
 
 === "toml"
