@@ -875,33 +875,51 @@ def _extract_error(
     return f"{first}\n{diagnostics}"
 
 
+_PREPEND_LENGTH_GATE = 600
+_PREPEND_BODY_CAP = 1500
+_PREPEND_BODY_TRUNC_SUFFIX = "\n\n…\n\n(plan truncated — shown in full during approval)"
+
+
 def _prepend_exitplanmode_plan(final_answer: str | None, plan_body: str | None) -> str:
     """#508 Re-emit ExitPlanMode plan body in the final answer.
 
-    Owned by the runner — called from the per-stream ``StreamResultMessage``
-    translation path using ``state.last_exitplanmode_plan`` (correctly
-    scoped to this run's stream). #510: previously called from
-    ``runner_bridge.handle_message`` against ``runner.current_stream``
-    (singleton attribute on the shared ``ClaudeRunner``), which races
-    across concurrent Claude chats and leaked one chat's plan body into
-    another chat's final answer. Moving the call into the per-stream path
-    in ``claude.py`` closes the leak: ``state`` here is the per-run stream
-    state, not a shared field, so the plan body cannot be sourced from a
-    different session.
+    Called from the per-stream ``StreamResultMessage`` translation path
+    (#510) using ``state.last_exitplanmode_plan`` — correctly scoped to
+    this run's stream, not the shared ``runner.current_stream`` singleton.
 
-    Skip rule: if the plan body is already a substring of
-    ``final_answer`` (the preamble guidance may have caused Claude to
-    repeat the plan content in its post-approval text), do NOT prepend
-    — avoid duplication.
+    #515 length-gate tuning (rc13). The original substring check
+    (``body in final_answer``) failed in practice because the rc11
+    preamble told Claude to *paraphrase* the plan post-approval rather
+    than literal-copy it, so the skip never triggered and Layer E
+    concatenated the full plan body in front of every well-behaved run
+    (42k-char Telegram messages on staging). The new preamble asks for a
+    brief CLI-style summary post-approval — when Claude obeys, the
+    answer is >600 chars and we skip the prepend; when Claude exits with
+    nothing substantive (the original #508 repro at 584 chars), the
+    length gate falls through and we prepend a capped plan body.
+
+    Skip rules (in order):
+    1. ``plan_body`` empty/whitespace → return final answer as-is.
+    2. ``final_answer`` already substantive (≥ ``_PREPEND_LENGTH_GATE``)
+       → skip prepend, post-approval text is doing the job.
+    3. Exact substring match → skip prepend (cheap belt-and-braces).
+    4. Otherwise prepend, truncating ``plan_body`` to
+       ``_PREPEND_BODY_CAP`` chars so a runaway plan body doesn't ship
+       a 30k-char final.
     """
     if not plan_body or not plan_body.strip():
         return final_answer or ""
+    final = final_answer or ""
+    if len(final) >= _PREPEND_LENGTH_GATE:
+        return final
     body = plan_body.strip()
-    if body in (final_answer or ""):
-        return final_answer or ""
-    if final_answer:
-        return f"📋 Plan (approved):\n\n{plan_body}\n\n---\n\n{final_answer}"
-    return f"📋 Plan (approved):\n\n{plan_body}"
+    if body in final:
+        return final
+    if len(body) > _PREPEND_BODY_CAP:
+        body = body[:_PREPEND_BODY_CAP].rstrip() + _PREPEND_BODY_TRUNC_SUFFIX
+    if final:
+        return f"📋 Plan (approved):\n\n{body}\n\n---\n\n{final}"
+    return f"📋 Plan (approved):\n\n{body}"
 
 
 def _maybe_audit_env(state: ClaudeStreamState, session_id: str) -> None:

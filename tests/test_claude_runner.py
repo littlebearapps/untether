@@ -1313,6 +1313,94 @@ def test_translate_result_error_does_not_prepend_plan(monkeypatch) -> None:
     assert "- Should not appear" not in (completed.answer or "")
 
 
+def test_translate_result_skips_prepend_when_answer_substantive() -> None:
+    """#515: when the post-approval text is already a substantive
+    CLI-style summary (≥ ``_PREPEND_LENGTH_GATE`` chars), Layer E must
+    NOT prepend the plan body. Without this gate the rc11/rc12 fix
+    concatenated plan body + paraphrased summary on every well-behaved
+    run, producing 25k-42k char Telegram finals on staging.
+    """
+    from untether.runners.claude import _PREPEND_LENGTH_GATE
+
+    state = ClaudeStreamState()
+    state.factory._resume = ResumeToken(engine="claude", value="sess-515")
+    state.last_exitplanmode_plan = "- Plan finding 1\n- Plan finding 2"
+
+    # A real CLI-style summary, just above the gate. Claude paraphrases
+    # rather than literal-copies, so the substring check would fail —
+    # the length gate is what stops the double-ship.
+    summary = (
+        "Investigation complete. Here is what I found:\n\n"
+        "- Module X had a regression introduced in commit abc123\n"
+        "- The root cause was a missing null guard in the parser\n"
+        "- Rolled back the change and added a regression test\n"
+        "- Next step: backfill the affected rows on Monday morning\n\n"
+        "Decisions made: kept the legacy code path for one more release cycle\n"
+        "to give downstream consumers time to migrate; full removal scheduled\n"
+        "for the next minor version once telemetry confirms zero active\n"
+        "callers. Telegram message size budget respected (under 1500 chars).\n\n"
+        "Next steps: open a follow-up issue to track the backfill timeline,\n"
+        "send a heads-up in the team channel about the rollback, and re-run\n"
+        "the daily-audit cron tomorrow morning to confirm the regression has\n"
+        "cleared the verification window before closing this thread.\n"
+    )
+    assert len(summary) >= _PREPEND_LENGTH_GATE
+
+    event = claude_schema.StreamResultMessage(
+        subtype="success",
+        duration_ms=100,
+        duration_api_ms=50,
+        is_error=False,
+        num_turns=2,
+        session_id="sess-515",
+        result=summary,
+    )
+    events = translate_claude_event(
+        event,
+        title="claude",
+        state=state,
+        factory=state.factory,
+    )
+    completed = next(evt for evt in events if isinstance(evt, CompletedEvent))
+    assert completed.answer == summary
+    assert "📋 Plan (approved):" not in completed.answer
+
+
+def test_translate_result_caps_long_plan_body_when_prepending() -> None:
+    """#515: when Layer E does fire (short post-approval answer), an
+    over-long captured plan body must be truncated to
+    ``_PREPEND_BODY_CAP`` chars + a truncation marker. Without this cap
+    a 30k-char plan body still ships a 30k-char Telegram final even
+    after the length gate is added.
+    """
+    from untether.runners.claude import _PREPEND_BODY_CAP
+
+    state = ClaudeStreamState()
+    state.factory._resume = ResumeToken(engine="claude", value="sess-515-cap")
+    state.last_exitplanmode_plan = "x" * (_PREPEND_BODY_CAP + 2000)
+
+    event = claude_schema.StreamResultMessage(
+        subtype="success",
+        duration_ms=100,
+        duration_api_ms=50,
+        is_error=False,
+        num_turns=2,
+        session_id="sess-515-cap",
+        result="ok",
+    )
+    events = translate_claude_event(
+        event,
+        title="claude",
+        state=state,
+        factory=state.factory,
+    )
+    completed = next(evt for evt in events if isinstance(evt, CompletedEvent))
+    assert "📋 Plan (approved):" in completed.answer
+    assert "plan truncated" in completed.answer
+    # Final answer should not contain the full 3500-char plan body.
+    assert "x" * (_PREPEND_BODY_CAP + 100) not in completed.answer
+
+
 def test_translate_advisor_tool_result_block() -> None:
     """advisor_tool_result shares the tool_result translation path: emits an
     action_completed and pops the matching entry from state.pending_actions.
