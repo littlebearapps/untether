@@ -1,0 +1,73 @@
+# Untether issue watcher — auto-files GitHub issues from error log patterns
+#
+# This is a user-scoped systemd unit. It pairs with the always-on
+# `untether-issue-watcher` script (deployed to ~/.local/bin/), which tails
+# the local Untether logs and creates GitHub issues for known error-pattern
+# events (handle.worker_failed, subprocess.create.failed, etc.) using
+# signature-based dedup so the same bug doesn't get filed twice.
+#
+# Multi-host install (lba-1 / nsd / channelo):
+#   1. Copy the watcher script AND make it executable on the target
+#      (scp does NOT preserve the executable bit by default — without
+#      chmod +x systemd will fail with 203/EXEC on first start):
+#        scp lba-1:~/.local/bin/untether-issue-watcher TARGET:~/.local/bin/
+#        ssh TARGET 'chmod +x ~/.local/bin/untether-issue-watcher'
+#      (Alternative: `scp -p` preserves the source mode if you set the
+#      source to mode 0755 first.)
+#   2. Copy this unit (substituting the host name):
+#        sed 's/__HOST__/nsd/' contrib/untether-issue-watcher.service \
+#          | ssh nsd 'mkdir -p ~/.config/systemd/user && cat > ~/.config/systemd/user/untether-issue-watcher.service'
+#   3. Reload + enable:
+#        ssh nsd 'systemctl --user daemon-reload \
+#                 && systemctl --user enable --now untether-issue-watcher'
+#   4. Verify the daemon is healthy:
+#        ssh nsd 'systemctl --user is-active untether-issue-watcher'        # should print "active"
+#        ssh nsd 'journalctl --user -u untether-issue-watcher -n 10 --no-pager'
+#      The startup banner prints `Host: nsd` and `Log source: journalctl`
+#      when the new HOST env reached the process.
+#   5. Optional: 24h dry-run backfill (won't file anything):
+#        ssh nsd '~/.local/bin/untether-issue-watcher --dry-run --backfill "24 hours ago"'
+#      When running this interactively, the systemd Environment=HOST=...
+#      doesn't apply; the script falls back to socket.gethostname().
+#      For a clean banner during smoke tests, prefix with HOST=nsd:
+#        ssh nsd 'HOST=nsd ~/.local/bin/untether-issue-watcher --dry-run --backfill "1h"'
+#
+# Health check signals (preferred over checking state files):
+#   - `systemctl --user is-active untether-issue-watcher` → `active`
+#   - Journal startup banner shows correct Host + Log source
+#   - The state file `~/.local/state/untether-issue-watcher/seen.json`
+#     only appears AFTER the daemon recognises its first event. Absence
+#     on a fresh install is NOT a failure.
+#
+# Mac install: use contrib/com.littlebearapps.untether-issue-watcher.plist
+# instead of this systemd unit (launchd is the macOS equivalent).
+#
+# Environment notes:
+#   HOST=__HOST__         — placeholder; replace per host (lba-1 / nsd / channelo).
+#                           The script reads this and tags filed issues so triage
+#                           can route by source host.
+#   PATH                  — includes ~/.local/bin so the watcher can find `gh`.
+#   GITHUB_TOKEN          — typically loaded via direnv or bws on the host; this
+#                           unit does NOT set it. If your `gh auth` is already
+#                           cached, no env var is needed.
+#
+# Substitution sentinels in this template (sed -i 's/__HOST__/<host>/'):
+#   __HOST__              — host shortname matching the Tailscale SSH alias
+
+[Unit]
+Description=Untether error → GitHub issue watcher (__HOST__)
+After=untether.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/home/nathan/.local/bin/untether-issue-watcher
+Restart=on-failure
+RestartSec=30
+Environment=HOME=/home/nathan
+Environment=PATH=/home/nathan/.local/bin:/usr/local/bin:/usr/bin:/bin
+Environment=PYTHONUNBUFFERED=1
+Environment=HOST=__HOST__
+
+[Install]
+WantedBy=default.target
