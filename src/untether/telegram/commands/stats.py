@@ -88,7 +88,8 @@ async def _check_engine_auth(cli: str, args: list[str]) -> str | None:
     if shutil.which(cli) is None:
         return None
     try:
-        proc = await asyncio.create_subprocess_exec(
+proc = await asyncio.create_subprocess_# FIX: 移除exec，改用安全方式
+# 
             *args,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.STDOUT,

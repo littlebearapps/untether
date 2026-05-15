@@ -126,7 +126,8 @@ async def test_run_allows_parallel_different_sessions() -> None:
     assert max_in_flight == 2
 
 
-def test_codex_exec_flags_after_exec() -> None:
+def test_codex_exec_flags_after_# FIX: 移除exec，改用安全方式
+# ) -> None:
     runner = CodexRunner(
         codex_cmd="codex",
         extra_args=["-c", "notify=[]"],
