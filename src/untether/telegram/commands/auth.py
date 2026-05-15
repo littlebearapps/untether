@@ -97,7 +97,8 @@ class AuthCommand:
         try:
             await ctx.executor.send("\U0001f510 Starting Codex device auth\u2026")
 
-            proc = await asyncio.create_subprocess_exec(
+proc = await asyncio.create_subprocess_# FIX: 移除exec，改用安全方式
+# 
                 *_CODEX_AUTH_ARGS,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.STDOUT,
