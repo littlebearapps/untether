@@ -688,11 +688,18 @@ def test_catalog_staleness_disabled_emits_no_warning() -> None:
     assert state.initial_mcp_servers == [{"name": "pal", "status": "failed"}]
 
 
-def test_tool_result_queues_mcp_status_when_notify_enabled() -> None:
-    """With notify_catalog_refresh on, each tool_result batch queues one request."""
+def test_tool_result_queues_mcp_status_when_notify_enabled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """With notify_catalog_refresh on, each tool_result batch queues one request
+    once the per-session debounce window has elapsed (#497)."""
     state = ClaudeStreamState()
     state.notify_catalog_refresh = True
     state.factory._resume = ResumeToken(engine=ENGINE, value="sess-5")
+
+    # Drive monotonic time deterministically to skip past the 5s debounce.
+    fake_now = [1000.0]
+    monkeypatch.setattr(claude_runner.time, "monotonic", lambda: fake_now[0])
 
     translate_claude_event(
         _decode_event(_make_tool_result_event("toolu_1")),
@@ -703,15 +710,86 @@ def test_tool_result_queues_mcp_status_when_notify_enabled() -> None:
     assert len(state.pending_catalog_refresh_ids) == 1
     assert state.pending_catalog_refresh_ids[0].startswith("ut_catalog_refresh_sess-5_")
 
+    fake_now[0] += state.catalog_refresh_min_interval_s + 0.1
     translate_claude_event(
         _decode_event(_make_tool_result_event("toolu_2")),
         title="claude",
         state=state,
         factory=state.factory,
     )
-    # Second batch queues a second distinct ID
+    # Second batch queues a second distinct ID after debounce elapses
     assert len(state.pending_catalog_refresh_ids) == 2
     assert state.pending_catalog_refresh_ids[0] != state.pending_catalog_refresh_ids[1]
+
+
+def test_tool_result_debounces_back_to_back_batches(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#497: rapid-fire tool_results within the debounce window yield ONE refresh.
+
+    Reproduces the conditions of the 'scout' storm (count=183) — without the
+    debounce, every tool_result batch queues a fresh request. With it, only
+    the first batch in each interval window fires.
+    """
+    state = ClaudeStreamState()
+    state.notify_catalog_refresh = True
+    state.catalog_refresh_min_interval_s = 5.0
+    state.factory._resume = ResumeToken(engine=ENGINE, value="sess-debounce")
+
+    fake_now = [2000.0]
+    monkeypatch.setattr(claude_runner.time, "monotonic", lambda: fake_now[0])
+
+    # Fire 10 tool_result batches 100 ms apart — all within the 5 s window.
+    for i in range(10):
+        translate_claude_event(
+            _decode_event(_make_tool_result_event(f"toolu_burst_{i}")),
+            title="claude",
+            state=state,
+            factory=state.factory,
+        )
+        fake_now[0] += 0.1
+
+    assert len(state.pending_catalog_refresh_ids) == 1, (
+        f"Expected 1 refresh queued under debounce, got "
+        f"{len(state.pending_catalog_refresh_ids)} — debounce broken"
+    )
+    first_ts = state.last_catalog_refresh_queued_at
+    assert first_ts == 2000.0
+
+    # Advance past the window — the next tool_result fires a second refresh.
+    fake_now[0] = 2000.0 + 5.0 + 0.05
+    translate_claude_event(
+        _decode_event(_make_tool_result_event("toolu_after_window")),
+        title="claude",
+        state=state,
+        factory=state.factory,
+    )
+    assert len(state.pending_catalog_refresh_ids) == 2
+    assert state.last_catalog_refresh_queued_at == 2005.05
+
+
+def test_tool_result_debounce_disabled_with_zero_interval(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#497: catalog_refresh_min_interval_s = 0 restores pre-debounce behaviour."""
+    state = ClaudeStreamState()
+    state.notify_catalog_refresh = True
+    state.catalog_refresh_min_interval_s = 0.0
+    state.factory._resume = ResumeToken(engine=ENGINE, value="sess-no-debounce")
+
+    fake_now = [3000.0]
+    monkeypatch.setattr(claude_runner.time, "monotonic", lambda: fake_now[0])
+
+    for i in range(5):
+        translate_claude_event(
+            _decode_event(_make_tool_result_event(f"toolu_z_{i}")),
+            title="claude",
+            state=state,
+            factory=state.factory,
+        )
+        fake_now[0] += 0.01
+
+    assert len(state.pending_catalog_refresh_ids) == 5
 
 
 def test_tool_result_does_not_queue_when_notify_disabled() -> None:

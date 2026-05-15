@@ -303,6 +303,13 @@ class WatchdogSettings(BaseModel):
     # it causes Claude Code to re-probe its catalog is empirical, so default
     # OFF until staging measurement confirms the UX benefit.
     notify_catalog_refresh: bool = False
+    # #497 debounce: minimum seconds between consecutive
+    # ``catalog.refresh_sent`` fires per session. Without this, a session
+    # with many rapid ``tool_result`` batches (observed: 183 fires in a
+    # single 'scout' run) generates a flood of ``mcp_status`` requests on
+    # the runner's stdin. Set to 0 to disable the debounce and restore the
+    # pre-#497 behaviour of one fire per ``tool_result`` batch.
+    catalog_refresh_min_interval_s: float = Field(default=5.0, ge=0.0, le=60.0)
 
     # Pre-spawn RAM guard (#350) — refuse or warn on new engine subprocesses
     # when the host is near-OOM. 0 disables that tier; set both to 0 to
