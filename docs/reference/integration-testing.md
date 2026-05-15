@@ -319,7 +319,10 @@ Integration tests are run by Claude Code via Telegram MCP tools (see "Automated 
 13. Report results: list each test as pass/fail/error with reason
     Distinguish Untether bugs from upstream engine API errors
 
-14. If all pass: commit, tag, release
+14. If all pass: write the attestation marker, then fleet-roll the rc/stable
+    scripts/run-integration-tests.sh X.Y.ZrcN --manual --tiers "tier7,tier1-claude,..." --notes "..."
+    scripts/fleet-rollout.sh X.Y.ZrcN          # parallel across lba-1/nsd/channelo/mac
+    See .claude/rules/release-discipline.md → Fleet rollout for the full gate + escape hatches.
 ```
 
 ### Per release type
