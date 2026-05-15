@@ -1,6 +1,7 @@
 import contextlib
 import json
 import time
+from datetime import UTC
 from pathlib import Path
 from typing import cast
 
@@ -1059,6 +1060,117 @@ def test_translate_rate_limit_event_handles_missing_retry() -> None:
     assert "waiting to retry" in events[0].action.title
     # cumulative stays at 0 when we have no retry_after_ms to accrue
     assert state.rate_limit_count == 1
+    assert state.rate_limit_total_s == 0.0
+
+
+def test_translate_rate_limit_event_derives_retry_after_from_reset_ts() -> None:
+    """#518: when `retry_after_ms` is missing but `requests_reset` is present
+    as an ISO timestamp, derive `retry_after_s` from the reset window. This
+    is the subscription-cap pattern the rc13 audit observed — bare events
+    that left users with no actionable wait time."""
+    from datetime import datetime, timedelta
+
+    state = ClaudeStreamState()
+    # Reset 90 seconds from now
+    reset_ts = (datetime.now(UTC) + timedelta(seconds=90)).strftime(
+        "%Y-%m-%dT%H:%M:%SZ"
+    )
+    events = translate_claude_event(
+        _decode_event(
+            {
+                "type": "rate_limit_event",
+                "rate_limit_info": {"requests_reset": reset_ts},
+            }
+        ),
+        title="claude",
+        state=state,
+        factory=state.factory,
+    )
+    assert len(events) == 2
+    # Should now show "retrying in Ns" (not the generic "waiting to retry"),
+    # and cumulative should accumulate the derived seconds.
+    assert "retrying in" in events[0].action.title
+    assert state.rate_limit_count == 1
+    # Allow ±2s wiggle for clock drift between the test's setup and translate
+    assert 88 <= state.rate_limit_total_s <= 92, (
+        f"Expected ~90s cumulative, got {state.rate_limit_total_s}"
+    )
+
+
+def test_translate_rate_limit_event_prefers_earlier_reset_when_both_present() -> None:
+    """#518: when both `requests_reset` and `tokens_reset` are present, derive
+    from the EARLIER of the two — the rate limit lifts as soon as either
+    budget refills."""
+    from datetime import datetime, timedelta
+
+    state = ClaudeStreamState()
+    now = datetime.now(UTC)
+    earlier = (now + timedelta(seconds=30)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    later = (now + timedelta(seconds=600)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    events = translate_claude_event(
+        _decode_event(
+            {
+                "type": "rate_limit_event",
+                "rate_limit_info": {
+                    "requests_reset": later,
+                    "tokens_reset": earlier,
+                },
+            }
+        ),
+        title="claude",
+        state=state,
+        factory=state.factory,
+    )
+    assert len(events) == 2
+    # Should pick ~30s, not ~600s
+    assert 28 <= state.rate_limit_total_s <= 32, (
+        f"Expected ~30s (earlier reset), got {state.rate_limit_total_s}"
+    )
+
+
+def test_translate_rate_limit_event_retry_after_ms_takes_precedence() -> None:
+    """#518: explicit `retry_after_ms` is preferred over derived reset_ts so we
+    don't double-account or override the upstream value."""
+    from datetime import datetime, timedelta
+
+    state = ClaudeStreamState()
+    # retry_after_ms says 10s, reset_ts says 60s — we should use 10s
+    later = (datetime.now(UTC) + timedelta(seconds=60)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    events = translate_claude_event(
+        _decode_event(
+            {
+                "type": "rate_limit_event",
+                "rate_limit_info": {
+                    "retry_after_ms": 10_000,
+                    "requests_reset": later,
+                },
+            }
+        ),
+        title="claude",
+        state=state,
+        factory=state.factory,
+    )
+    assert len(events) == 2
+    assert state.rate_limit_total_s == 10.0
+
+
+def test_translate_rate_limit_event_handles_unparseable_reset_ts() -> None:
+    """#518: garbage `requests_reset` is silently ignored — we fall back to the
+    "waiting to retry" copy rather than crashing the runner."""
+    state = ClaudeStreamState()
+    events = translate_claude_event(
+        _decode_event(
+            {
+                "type": "rate_limit_event",
+                "rate_limit_info": {"requests_reset": "not-a-timestamp"},
+            }
+        ),
+        title="claude",
+        state=state,
+        factory=state.factory,
+    )
+    assert len(events) == 2
+    assert "waiting to retry" in events[0].action.title
     assert state.rate_limit_total_s == 0.0
 
 

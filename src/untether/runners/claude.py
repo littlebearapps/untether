@@ -19,6 +19,7 @@ import tty
 from collections import OrderedDict
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
+from datetime import UTC
 from pathlib import Path
 from typing import Any
 
@@ -359,6 +360,43 @@ class ClaudeStreamState:
     post_result_closed_at: float | None = None
     post_result_idle_minutes: float = 0.0
     post_result_closing_sent: bool = False
+
+
+def _derive_retry_after_s(info: claude_schema.RateLimitInfo | None) -> float | None:
+    """#518: when `rate_limit_event` omits `retry_after_ms`, fall back to the
+    earlier of `requests_reset` / `tokens_reset` ISO timestamps.
+
+    Returns the seconds-until-reset (clamped ≥ 0) so the chat can show
+    "retrying in N s" and `state.rate_limit_total_s` accumulates correctly,
+    even when upstream sends only the reset-window form documented in
+    `docs/reference/runners/claude/stream-json-cheatsheet.md`. Returns None
+    if no parseable timestamp is present, in which case the caller continues
+    to render the generic "waiting to retry" copy.
+    """
+    if info is None:
+        return None
+    from datetime import datetime
+
+    candidates: list[float] = []
+    for raw in (info.requests_reset, info.tokens_reset):
+        if not isinstance(raw, str) or not raw:
+            continue
+        try:
+            # `fromisoformat` (3.11+) handles "Z" suffix natively, but to keep
+            # parsing forgiving across CLI versions accept both spellings.
+            normalised = raw[:-1] + "+00:00" if raw.endswith("Z") else raw
+            dt = datetime.fromisoformat(normalised)
+        except ValueError:
+            continue
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=UTC)
+        delta = (dt - datetime.now(UTC)).total_seconds()
+        candidates.append(max(0.0, delta))
+    if not candidates:
+        return None
+    # Choose the EARLIER reset (smaller delta) — the rate limit lifts as
+    # soon as one of the two budgets refills.
+    return min(candidates)
 
 
 def _normalize_tool_result(content: Any) -> str:
@@ -1831,6 +1869,17 @@ def translate_claude_event(
             # status instead of silent inactivity + eventual mystery cancel.
             retry_ms = info.retry_after_ms if info is not None else None
             retry_s = retry_ms / 1000.0 if retry_ms is not None else None
+            # #518: when retry_after_ms is missing, derive retry_after_s from
+            # the requests_reset / tokens_reset ISO timestamps so subscription-
+            # cap throttles (which the rc13 audit showed always emit "bare"
+            # rate_limit_events) still surface an actionable wait time and
+            # accumulate into cumulative_s.
+            retry_s_source = "retry_after_ms"
+            if retry_s is None:
+                derived = _derive_retry_after_s(info)
+                if derived is not None:
+                    retry_s = derived
+                    retry_s_source = "reset_ts"
             if retry_s is not None:
                 state.rate_limit_total_s += retry_s
             state.rate_limit_count += 1
@@ -1850,11 +1899,30 @@ def translate_claude_event(
                     detail["requests_remaining"] = info.requests_remaining
                 if retry_ms is not None:
                     detail["retry_after_ms"] = retry_ms
+            # #518: log all RateLimitInfo fields when present so future audits
+            # can see what upstream actually sent, instead of having to back-
+            # infer from the single-field log line that was here before.
+            info_payload: dict[str, Any] = {}
+            if info is not None:
+                for field_name in (
+                    "requests_limit",
+                    "requests_remaining",
+                    "requests_reset",
+                    "tokens_limit",
+                    "tokens_remaining",
+                    "tokens_reset",
+                    "retry_after_ms",
+                ):
+                    value = getattr(info, field_name, None)
+                    if value is not None:
+                        info_payload[field_name] = value
             logger.info(
                 "claude.rate_limit_event",
                 retry_after_s=retry_s,
+                retry_after_source=retry_s_source if retry_s is not None else None,
                 count=state.rate_limit_count,
                 cumulative_s=state.rate_limit_total_s,
+                info=info_payload or None,
             )
             return [
                 factory.action_started(

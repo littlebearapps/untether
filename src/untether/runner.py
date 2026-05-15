@@ -146,6 +146,13 @@ _CODEX_TOOL_ITEM_TYPES = frozenset(
 )
 _OPENCODE_TOOL_STATUSES = frozenset({"completed", "error"})
 
+# #502: control-channel traffic is stdin/stdout permission-flow (Claude
+# control_request → Untether stdin control_response, and parent-initiated
+# requests like mcp_status). Skip when computing last_event_type so the
+# session.summary reflects the last *stream* event, not the last frame
+# the parser saw. recent_events still records them for diagnostics.
+_CONTROL_CHANNEL_EVENT_TYPES = frozenset({"control_request", "control_response"})
+
 
 def _classify_jsonl_event(raw: Any) -> str:
     """Return "tool_result" | "assistant" | "other" for a decoded JSONL event.
@@ -310,6 +317,12 @@ class JsonlStreamState:
     )
     stderr_capture: list[str] = field(default_factory=list)
     proc_returncode: int | None = None
+    # #494: subprocess.liveness_stall canary counter. Today `liveness_warned`
+    # in _watchdog_loop latches after the first warning, so this is 0 or 1 per
+    # run. Kept as int for forward-compat if the latch is ever relaxed; surfaced
+    # in session.summary so audits can see liveness fires independently of the
+    # user-facing _total_stall_warn_count.
+    liveness_stalls: int = 0
     # Stuck-after-tool_result detector (#322). Engine-agnostic signal:
     # set when a tool_result-equivalent event arrives, cleared when an
     # assistant-turn-start event arrives. When non-zero and elapsed > threshold,
@@ -807,8 +820,12 @@ class JsonlSubprocessRunner(BaseRunner):
                 itype = item.get("type")
                 if isinstance(itype, str) and itype:
                     etool = itype
-            stream.last_event_type = etype
-            stream.last_event_tool = etool
+            # #502: skip control-channel events when updating last_event_type
+            # so session.summary reflects the last stream event, not stdin/stdout
+            # permission-flow traffic. recent_events still records them.
+            if etype not in _CONTROL_CHANNEL_EVENT_TYPES:
+                stream.last_event_type = etype
+                stream.last_event_tool = etool
             label = f"tool:{etool}" if etool else etype
             stream.recent_events.append((now, label))
             # Stuck-after-tool_result tracking (#322). The latch persists across
@@ -996,6 +1013,20 @@ class JsonlSubprocessRunner(BaseRunner):
             except (ProcessLookupError, PermissionError):
                 break  # process exited
 
+            # #494-B: collect a baseline diag on the first successful poll so
+            # cpu_active has a real comparison snapshot if/when the liveness
+            # watchdog fires. Without this prev_diag stayed None for the
+            # lifetime of the run (`liveness_warned` latches one-shot, so the
+            # post-warning assignment at the bottom never ran), and
+            # is_cpu_active(None, diag) always returned None — which both
+            # confused log readers and treated "unknown" as "definitely idle"
+            # in the auto-kill check at `cpu_active is not True` below. After
+            # this baseline, cpu_active becomes an accurate True/False; the
+            # auto-kill semantics are now "kill only when CPU genuinely went
+            # quiet during the 600s window".
+            if prev_diag is None:
+                prev_diag = collect_proc_diag(pid)
+
             # Liveness stall detection
             if (
                 not liveness_warned
@@ -1005,6 +1036,7 @@ class JsonlSubprocessRunner(BaseRunner):
                 idle = time.monotonic() - stream.last_stdout_at
                 if idle >= self._LIVENESS_TIMEOUT_SECONDS:
                     liveness_warned = True
+                    stream.liveness_stalls += 1
                     diag = collect_proc_diag(pid)
                     cpu_active = is_cpu_active(prev_diag, diag)
                     recent = list(stream.recent_events)[-5:]
