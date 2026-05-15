@@ -2536,11 +2536,12 @@ async def test_dead_schedule_wakeup_shortens_post_result_timeout(
     state.factory.started(
         ResumeToken(engine="claude", value="watchdog-dead-wakeup-session"),
     )
-    # ScheduleWakeup armed with delaySeconds=75 → arm_delay dict tracks 75.0.
-    # We only need the parallel arm_delay dict populated for the shortcut
-    # check; the deadline value doesn't affect the test.
+    # ScheduleWakeup armed with delaySeconds=75 → scalar high-water-mark
+    # tracks 75.0. #544: the scalar replaced the per-tool_id
+    # ``live_wakeups_arm_delay`` dict so the value survives
+    # ``_clear_background_handle`` for the rest of the turn.
     state.live_wakeups["toolu_W"] = time.monotonic() + 75.0
-    state.live_wakeups_arm_delay["toolu_W"] = 75.0
+    state.last_schedule_wakeup_arm_delay = 75.0
     # Pretend the result event landed 200s ago — past the dead-wakeup
     # effective_timeout (75 + 60 = 135s) but still well below the default
     # 600s timeout.
@@ -2639,7 +2640,7 @@ async def test_active_loop_preserves_default_post_result_timeout(
         ResumeToken(engine="claude", value="watchdog-loop-on-session"),
     )
     state.live_wakeups["toolu_W"] = time.monotonic() + 75.0
-    state.live_wakeups_arm_delay["toolu_W"] = 75.0
+    state.last_schedule_wakeup_arm_delay = 75.0
     # Pretend result landed 200s ago — past the dead-wakeup shortcut
     # threshold (135s), but well below the 600s default timeout. With
     # /loop ON the watchdog should NOT close stdin yet.
@@ -2694,6 +2695,258 @@ async def test_active_loop_preserves_default_post_result_timeout(
         reset_run_channel_id(token)
 
     assert not closed.is_set(), "with /loop ON, dead-wakeup shortcut must not fire"
+
+
+@pytest.mark.anyio
+async def test_dead_schedule_wakeup_shortens_post_result_after_tool_result_cleared(
+    monkeypatch,
+) -> None:
+    """#544: full lifecycle test for the #507 redux fix.
+
+    The original #507 unit tests directly seeded ``state.live_wakeups_arm_delay``
+    and bypassed ``_clear_background_handle``, which is why the rc11 fix
+    appeared green in CI but failed on channelo rc15 in production. This
+    test exercises the real translate path — tool_use → tool_result → result
+    — so the scalar high-water-mark MUST survive ``_clear_background_handle``
+    for the dead-wakeup shortcut to engage.
+    """
+    import anyio
+
+    from untether.runners.claude import (
+        _PENDING_ASK_REQUESTS,
+        _REQUEST_TO_SESSION,
+        ClaudeRunner,
+    )
+    from untether.runners.run_options import EngineRunOptions, apply_run_options
+    from untether.utils.paths import set_run_channel_id
+
+    _REQUEST_TO_SESSION.clear()
+    _PENDING_ASK_REQUESTS.clear()
+
+    state = ClaudeStreamState()
+    state.factory.started(ResumeToken(engine="claude", value="redux-session"))
+
+    # 1. tool_use ScheduleWakeup(delaySeconds=120) → register arm-delay
+    translate_claude_event(
+        _decode_event(
+            _make_tool_use_event("ScheduleWakeup", "toolu_W", {"delaySeconds": 120})
+        ),
+        title="claude",
+        state=state,
+        factory=state.factory,
+    )
+    assert "toolu_W" in state.live_wakeups
+    assert state.last_schedule_wakeup_arm_delay == 120.0
+
+    # 2. tool_result → _clear_background_handle pops live_wakeups but the
+    # scalar high-water-mark MUST survive.
+    translate_claude_event(
+        _decode_event(_make_tool_result_event("toolu_W")),
+        title="claude",
+        state=state,
+        factory=state.factory,
+    )
+    assert "toolu_W" not in state.live_wakeups, "tool_result must clear dict"
+    assert state.last_schedule_wakeup_arm_delay == 120.0, (
+        "scalar must survive _clear_background_handle (#544 regression check)"
+    )
+
+    # 3. Pretend the result event landed 200s ago — past the dead-wakeup
+    # effective_timeout (120 + 60 = 180s).
+    state.result_received_at = time.monotonic() - 200.0
+
+    # 4. Run the watchdog. With /loop OFF and scalar populated, it should
+    # close stdin and stamp ``dead_wakeup=True effective_timeout_s=180.0``.
+    closed = anyio.Event()
+
+    class FakeStdin:
+        async def aclose(self) -> None:
+            closed.set()
+
+    fake_stdin = FakeStdin()
+    reader_done = anyio.Event()
+
+    real_sleep = anyio.sleep
+
+    async def fast_sleep(s: float) -> None:
+        await real_sleep(0)
+
+    monkeypatch.setattr("untether.runners.claude.anyio.sleep", fast_sleep)
+
+    captured_logs: list[dict] = []
+
+    class _StubLogger:
+        def info(self, event: str = "", **kwargs) -> None:
+            captured_logs.append({"event": event, **kwargs})
+
+        def warning(self, *a, **k) -> None:
+            pass
+
+        def debug(self, *a, **k) -> None:
+            pass
+
+    runner = ClaudeRunner(claude_cmd="claude")
+    token = set_run_channel_id(54321)
+    try:
+        with apply_run_options(EngineRunOptions(loop_enabled=False)):
+            async with anyio.create_task_group() as tg:
+                tg.start_soon(
+                    runner._post_result_idle_watchdog,
+                    state,
+                    fake_stdin,
+                    reader_done,
+                    _StubLogger(),
+                    600.0,
+                )
+                with anyio.move_on_after(2.0):
+                    await closed.wait()
+                tg.cancel_scope.cancel()
+    finally:
+        from untether.utils.paths import reset_run_channel_id
+
+        reset_run_channel_id(token)
+
+    assert closed.is_set(), "watchdog should have closed stdin"
+    closing = next(
+        (
+            lg
+            for lg in captured_logs
+            if lg["event"] == "claude.post_result_idle.closing_stdin"
+        ),
+        None,
+    )
+    assert closing is not None
+    assert closing["dead_wakeup"] is True
+    assert closing["effective_timeout_s"] == 180.0
+
+
+def test_multiple_schedule_wakeups_in_one_turn_use_max_delay() -> None:
+    """Two ScheduleWakeup calls in a single turn — the scalar must hold the
+    longest arm-delay so a 60s wakeup followed by a 240s wakeup still cuts
+    the watchdog timeout to 240 + 60 = 300s, not 60 + 60 = 120s.
+    """
+    state = ClaudeStreamState()
+
+    translate_claude_event(
+        _decode_event(
+            _make_tool_use_event("ScheduleWakeup", "toolu_W1", {"delaySeconds": 60})
+        ),
+        title="claude",
+        state=state,
+        factory=state.factory,
+    )
+    assert state.last_schedule_wakeup_arm_delay == 60.0
+
+    translate_claude_event(
+        _decode_event(
+            _make_tool_use_event("ScheduleWakeup", "toolu_W2", {"delaySeconds": 240})
+        ),
+        title="claude",
+        state=state,
+        factory=state.factory,
+    )
+    assert state.last_schedule_wakeup_arm_delay == 240.0, "max wins"
+
+    # A SHORTER arm after a longer one must NOT replace the high-water-mark.
+    translate_claude_event(
+        _decode_event(
+            _make_tool_use_event("ScheduleWakeup", "toolu_W3", {"delaySeconds": 120})
+        ),
+        title="claude",
+        state=state,
+        factory=state.factory,
+    )
+    assert state.last_schedule_wakeup_arm_delay == 240.0, (
+        "shorter delays must not shrink the high-water-mark"
+    )
+
+
+def test_new_user_turn_resets_schedule_wakeup_arm_delay() -> None:
+    """A fresh user prompt (StreamUserMessage with non-tool_result content)
+    must reset the per-turn scalar so the next turn — if it does NOT call
+    ScheduleWakeup — falls back to the default 600s post-result timeout.
+    """
+    state = ClaudeStreamState()
+
+    # Turn 1: ScheduleWakeup armed
+    translate_claude_event(
+        _decode_event(
+            _make_tool_use_event("ScheduleWakeup", "toolu_W", {"delaySeconds": 90})
+        ),
+        title="claude",
+        state=state,
+        factory=state.factory,
+    )
+    translate_claude_event(
+        _decode_event(_make_tool_result_event("toolu_W")),
+        title="claude",
+        state=state,
+        factory=state.factory,
+    )
+    assert state.last_schedule_wakeup_arm_delay == 90.0
+
+    # Turn 2: a real user prompt arrives as a StreamUserMessage with a text
+    # block (NOT a tool_result block). The reset path must fire.
+    user_text_event = {
+        "type": "user",
+        "message": {
+            "role": "user",
+            "content": [
+                {"type": "text", "text": "Please continue with the next step."}
+            ],
+        },
+    }
+    translate_claude_event(
+        _decode_event(user_text_event),
+        title="claude",
+        state=state,
+        factory=state.factory,
+    )
+    assert state.last_schedule_wakeup_arm_delay is None, (
+        "new user prompt must clear the per-turn arm-delay (#544)"
+    )
+
+
+def test_mixed_user_message_does_not_reset_arm_delay() -> None:
+    """A user message that contains BOTH tool_results AND non-tool_result
+    blocks (rare in practice but allowed by the protocol) must preserve
+    the scalar — the tool turn is still in flight at that point, so the
+    new-turn reset path is suppressed when any tool_result is present.
+    """
+    state = ClaudeStreamState()
+    translate_claude_event(
+        _decode_event(
+            _make_tool_use_event("ScheduleWakeup", "toolu_W", {"delaySeconds": 90})
+        ),
+        title="claude",
+        state=state,
+        factory=state.factory,
+    )
+
+    mixed_event = {
+        "type": "user",
+        "message": {
+            "role": "user",
+            "content": [
+                {
+                    "type": "tool_result",
+                    "tool_use_id": "toolu_W",
+                    "content": "ok",
+                    "is_error": False,
+                },
+                {"type": "text", "text": "noise"},
+            ],
+        },
+    }
+    translate_claude_event(
+        _decode_event(mixed_event),
+        title="claude",
+        state=state,
+        factory=state.factory,
+    )
+    assert state.last_schedule_wakeup_arm_delay == 90.0, (
+        "mixed user message must NOT clear the scalar (#544 edge case)"
+    )
 
 
 def test_meta_line_renders_turn_complete_marker() -> None:

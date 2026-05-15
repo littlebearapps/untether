@@ -292,13 +292,21 @@ class ClaudeStreamState:
     live_bg_bashes: set[str] = field(default_factory=set)
     live_bg_agents: set[str] = field(default_factory=set)
     live_wakeups: dict[str, float] = field(default_factory=dict)
-    # #507 arm-time `delaySeconds` per ScheduleWakeup tool_use_id, captured
-    # parallel to ``live_wakeups``. ``live_wakeups`` stores future deadlines
-    # which are hard to invert after they pass, so the post-result idle
-    # watchdog reads this dict to shorten its timeout to ``max_delay + 60s``
-    # when /loop is OFF (the wakeup is then a silent no-op upstream).
-    live_wakeups_arm_delay: dict[str, float] = field(default_factory=dict)
     live_remote_triggers: set[str] = field(default_factory=set)
+
+    # #544 ScheduleWakeup arm-time `delaySeconds` high-water-mark for the
+    # current turn. The rc11 #507 fix stored this per-tool_id in a sibling
+    # ``live_wakeups_arm_delay`` dict, but that dict was popped by
+    # ``_clear_background_handle`` on the ScheduleWakeup tool_result —
+    # which is the *schedule confirmation*, not a terminal signal — so by
+    # the time ``_post_result_idle_watchdog`` ticked (after the ``result``
+    # event, which lands AFTER tool_result) the dict was empty and the
+    # dead-wakeup shortcut never engaged. The scalar survives
+    # ``_clear_background_handle`` for the rest of the turn, then resets
+    # on the next user prompt (StreamUserMessage with non-tool_result
+    # content) or in ``new_state`` for fresh runs. ``max`` semantics so
+    # multiple ScheduleWakeup calls in one turn use the longest arm.
+    last_schedule_wakeup_arm_delay: float | None = None
 
     # #289 — first user message text for the run.  Populated by ``new_state``
     # from the prompt arg.  Used as the fallback for the
@@ -514,29 +522,46 @@ def _register_background_handle(
         # rendering broken, though membership-only suppression still
         # worked). Read delaySeconds first; keep the legacy fallbacks so
         # existing test fixtures parameterised on delay_ms still work.
+        #
+        # #544: also feed ``state.last_schedule_wakeup_arm_delay`` (a
+        # per-turn scalar high-water-mark) so the post-result idle
+        # watchdog's dead-wakeup shortcut survives the tool_result that
+        # immediately pops ``live_wakeups`` via ``_clear_background_handle``.
         delay_seconds_raw = raw_input.get("delaySeconds")
+        arm_delay_s: float | None = None
         if isinstance(delay_seconds_raw, (int, float)) and delay_seconds_raw > 0:
-            state.live_wakeups[tool_id] = time.monotonic() + float(delay_seconds_raw)
-            state.live_wakeups_arm_delay[tool_id] = float(delay_seconds_raw)
+            arm_delay_s = float(delay_seconds_raw)
+            state.live_wakeups[tool_id] = time.monotonic() + arm_delay_s
         else:
             delay_ms = raw_input.get("delay_ms") or raw_input.get("timeout_ms")
             if isinstance(delay_ms, (int, float)) and delay_ms > 0:
-                state.live_wakeups[tool_id] = time.monotonic() + (delay_ms / 1000.0)
-                state.live_wakeups_arm_delay[tool_id] = delay_ms / 1000.0
+                arm_delay_s = delay_ms / 1000.0
+                state.live_wakeups[tool_id] = time.monotonic() + arm_delay_s
             else:
+                arm_delay_s = 0.0
                 state.live_wakeups[tool_id] = 0.0
-                state.live_wakeups_arm_delay[tool_id] = 0.0
+        # max(prev or 0, this) so multi-wakeup turns keep the longest arm
+        prev = state.last_schedule_wakeup_arm_delay or 0.0
+        state.last_schedule_wakeup_arm_delay = max(prev, arm_delay_s)
     elif tool_name == "RemoteTrigger":
         state.live_remote_triggers.add(tool_id)
 
 
 def _clear_background_handle(state: ClaudeStreamState, tool_use_id: str) -> None:
-    """Remove a background-task entry when its tool_result arrives (#347)."""
+    """Remove a background-task entry when its tool_result arrives (#347).
+
+    Note: ``state.last_schedule_wakeup_arm_delay`` is deliberately NOT
+    cleared here. ScheduleWakeup's tool_result is the arm-OK confirmation,
+    not a terminal signal — the wakeup itself fires later (or, outside
+    ``/loop dynamic mode``, never). The post-result idle watchdog (#507)
+    needs the arm-delay to survive this clear so its dead-wakeup shortcut
+    can engage after the matching ``result`` event lands. The scalar
+    resets on the next user prompt or on ``new_state`` (#544).
+    """
     state.live_monitors.pop(tool_use_id, None)
     state.live_bg_bashes.discard(tool_use_id)
     state.live_bg_agents.discard(tool_use_id)
     state.live_wakeups.pop(tool_use_id, None)
-    state.live_wakeups_arm_delay.pop(tool_use_id, None)
     state.live_remote_triggers.discard(tool_use_id)
 
 
@@ -1214,6 +1239,7 @@ def translate_claude_event(
                 return []
             out: list[UntetherEvent] = []
             saw_tool_result = False
+            saw_non_tool_result = False
             for content in message.content:
                 # #489 advisor_tool_result shares the tool_result translation.
                 if not isinstance(
@@ -1223,6 +1249,12 @@ def translate_claude_event(
                         claude_schema.StreamAdvisorToolResultBlock,
                     ),
                 ):
+                    # #544: any non-tool_result block signals a real user
+                    # prompt arrived (text, image, etc.) — reset the
+                    # ScheduleWakeup arm-delay high-water-mark so a new
+                    # turn that doesn't call ScheduleWakeup falls back
+                    # to the default post-result idle timeout.
+                    saw_non_tool_result = True
                     continue
                 saw_tool_result = True
                 tool_use_id = content.tool_use_id
@@ -1257,6 +1289,15 @@ def translate_claude_event(
                             ok=True,
                         )
                     )
+            # #544: reset the ScheduleWakeup arm-delay high-water-mark when
+            # a fresh user prompt arrives (any non-tool_result content) and
+            # NO tool_result is present in the same batch. Mixed batches
+            # (rare in practice) keep the scalar — the tool turn is still
+            # in flight. The reset must happen here (not in StreamResultMessage)
+            # because the watchdog reads the scalar AFTER result_received_at
+            # is set, so resetting on result would defeat the shortcut.
+            if saw_non_tool_result and not saw_tool_result:
+                state.last_schedule_wakeup_arm_delay = None
             # #365 queue a proactive mcp_status nudge once per tool_result
             # batch. Opt-in via WatchdogSettings.notify_catalog_refresh.
             # Drained from stdin by ClaudeRunner._drain_catalog_refresh so
@@ -2624,18 +2665,20 @@ class ClaudeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
             # ``/loop dynamic mode`` is a silent no-op upstream — the
             # wakeup never fires, the agent's turn ended, and we'd otherwise
             # wait the full ``timeout_s`` (default 600 s) before closing
-            # stdin. Detect the case via the live_wakeups registry and the
-            # /loop master toggle for this chat; cut the effective timeout
-            # to ``max_armed_delay + 60s grace`` so the session closes
-            # within ~delay+grace instead of 10 minutes.
+            # stdin. Detect the case via the scalar
+            # ``state.last_schedule_wakeup_arm_delay`` (a per-turn
+            # high-water-mark that survives ``_clear_background_handle``,
+            # #544) and the /loop master toggle for this chat; cut the
+            # effective timeout to ``max_armed_delay + 60s grace`` so the
+            # session closes within ~delay+grace instead of 10 minutes.
             effective_timeout = timeout_s
             dead_wakeup = False
-            if state.live_wakeups_arm_delay:
+            if state.last_schedule_wakeup_arm_delay is not None:
                 from ..utils.paths import get_run_channel_id
 
                 _chat_id = get_run_channel_id()
                 if _chat_id is not None and not _loop_enabled_for_chat(_chat_id):
-                    _max_delay = max(state.live_wakeups_arm_delay.values(), default=0.0)
+                    _max_delay = state.last_schedule_wakeup_arm_delay
                     effective_timeout = min(timeout_s, _max_delay + 60.0)
                     dead_wakeup = True
             if elapsed < effective_timeout:
