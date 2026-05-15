@@ -146,6 +146,13 @@ _CODEX_TOOL_ITEM_TYPES = frozenset(
 )
 _OPENCODE_TOOL_STATUSES = frozenset({"completed", "error"})
 
+# #502: control-channel traffic is stdin/stdout permission-flow (Claude
+# control_request → Untether stdin control_response, and parent-initiated
+# requests like mcp_status). Skip when computing last_event_type so the
+# session.summary reflects the last *stream* event, not the last frame
+# the parser saw. recent_events still records them for diagnostics.
+_CONTROL_CHANNEL_EVENT_TYPES = frozenset({"control_request", "control_response"})
+
 
 def _classify_jsonl_event(raw: Any) -> str:
     """Return "tool_result" | "assistant" | "other" for a decoded JSONL event.
@@ -807,8 +814,12 @@ class JsonlSubprocessRunner(BaseRunner):
                 itype = item.get("type")
                 if isinstance(itype, str) and itype:
                     etool = itype
-            stream.last_event_type = etype
-            stream.last_event_tool = etool
+            # #502: skip control-channel events when updating last_event_type
+            # so session.summary reflects the last stream event, not stdin/stdout
+            # permission-flow traffic. recent_events still records them.
+            if etype not in _CONTROL_CHANNEL_EVENT_TYPES:
+                stream.last_event_type = etype
+                stream.last_event_tool = etool
             label = f"tool:{etool}" if etool else etype
             stream.recent_events.append((now, label))
             # Stuck-after-tool_result tracking (#322). The latch persists across
