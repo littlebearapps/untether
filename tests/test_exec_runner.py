@@ -1,3 +1,4 @@
+import sys
 from collections.abc import AsyncIterator
 
 import anyio
@@ -664,6 +665,72 @@ async def test_jsonl_stream_state_skips_control_channel_events(tmp_path) -> None
     assert "control_response" in recent_labels
 
 
+@pytest.mark.anyio
+async def test_liveness_stall_increments_counter(tmp_path) -> None:
+    """#494-A: subprocess.liveness_stall increments stream.liveness_stalls so
+    session.summary can surface the subprocess-health canary independently of
+    the user-facing _total_stall_warn_count. Today `liveness_warned` latches
+    after the first warning, so this field will be 0 or 1 per run.
+
+    #494-B: the warning's cpu_active field should be a real bool (True/False)
+    once the baseline prev_diag is populated at watchdog poll start — not None
+    as observed in the rc13 audit.
+    """
+    from structlog.testing import capture_logs
+
+    thread_id = "019b73c4-0c3f-7701-a0bb-aac6b4d8a3bc"
+
+    codex_path = tmp_path / "codex"
+    # Emit one event (sets last_stdout_at > 0), then sleep past the threshold
+    # so the liveness watchdog fires. After the sleep the script exits cleanly
+    # so the test doesn't hang.
+    codex_path.write_text(
+        "#!/usr/bin/env python3\n"
+        "import json\n"
+        "import sys\n"
+        "import time\n"
+        "\n"
+        "sys.stdin.read()\n"
+        f"print(json.dumps({{'type': 'thread.started', 'thread_id': '{thread_id}'}}), flush=True)\n"
+        # Sleep long enough for _LIVENESS_TIMEOUT_SECONDS + _WATCHDOG_POLL to fire
+        "time.sleep(1.0)\n",
+        encoding="utf-8",
+    )
+    codex_path.chmod(0o755)
+
+    runner = CodexRunner(codex_cmd=str(codex_path), extra_args=[])
+    # Tight timing so the watchdog fires within the test's runtime
+    runner._LIVENESS_TIMEOUT_SECONDS = 0.2
+    runner._WATCHDOG_POLL_SECONDS = 0.05
+    runner._WATCHDOG_GRACE_SECONDS = 0.5
+
+    with capture_logs() as logs:
+        with anyio.fail_after(5):
+            _ = [evt async for evt in runner.run("hi", None)]
+
+    stream = runner.current_stream
+    assert stream is not None
+    assert stream.liveness_stalls == 1, (
+        f"Expected liveness_stalls=1 after watchdog fired, got {stream.liveness_stalls}"
+    )
+
+    # #494-B: cpu_active should be True/False (a real bool comparing prev to
+    # curr snapshot), not None. Linux-only assertion since /proc is required
+    # for collect_proc_diag to return non-None.
+    if sys.platform.startswith("linux"):
+        liveness_records = [
+            r for r in logs if r.get("event") == "subprocess.liveness_stall"
+        ]
+        assert len(liveness_records) == 1, (
+            f"Expected 1 liveness_stall log record, got {len(liveness_records)}: "
+            f"{liveness_records!r}"
+        )
+        cpu_active = liveness_records[0].get("cpu_active", "MISSING")
+        assert isinstance(cpu_active, bool), (
+            f"Expected cpu_active to be bool, got {cpu_active!r}"
+        )
+
+
 def test_jsonl_stream_state_defaults() -> None:
     """JsonlStreamState initialises with correct defaults."""
     from untether.runner import JsonlStreamState
@@ -676,6 +743,10 @@ def test_jsonl_stream_state_defaults() -> None:
     assert len(stream.recent_events) == 0
     assert stream.stderr_capture == []
     assert stream.proc_returncode is None
+    # #494: liveness_stalls canary counter — separate from user-facing
+    # _total_stall_warn_count so audits can see subprocess-health hits
+    # independently.
+    assert stream.liveness_stalls == 0
 
 
 def test_jsonl_stream_state_recent_events_ring_buffer() -> None:
