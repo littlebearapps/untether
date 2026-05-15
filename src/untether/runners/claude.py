@@ -341,6 +341,15 @@ class ClaudeStreamState:
     # colliding with Claude Code's own ``req_*`` namespace.
     pending_catalog_refresh_ids: list[str] = field(default_factory=list)
     catalog_refresh_seq: int = 0
+    # #497: debounce gate. Holds the ``time.monotonic()`` timestamp of the
+    # last enqueued refresh; the translate path skips re-enqueue while
+    # ``(now - last) < catalog_refresh_min_interval_s``. None until the
+    # first fire so the very first tool_result batch always queues.
+    last_catalog_refresh_queued_at: float | None = None
+    # Configured per-session interval mirrored from
+    # ``WatchdogSettings.catalog_refresh_min_interval_s`` at session init
+    # so translate() doesn't reach back into settings on every event.
+    catalog_refresh_min_interval_s: float = 5.0
 
     # #333: monotonic timestamp of the most recent ``result`` event. The
     # post-result idle watchdog (``ClaudeRunner._post_result_idle_watchdog``)
@@ -1252,14 +1261,22 @@ def translate_claude_event(
             # batch. Opt-in via WatchdogSettings.notify_catalog_refresh.
             # Drained from stdin by ClaudeRunner._drain_catalog_refresh so
             # the send is fire-and-forget and cannot block translate().
+            # #497 debounce: skip the enqueue while the previous fire is
+            # within ``catalog_refresh_min_interval_s``. Set to 0 to disable.
             if saw_tool_result and state.notify_catalog_refresh:
                 resume_val = factory.resume.value if factory.resume else None
                 if resume_val:
-                    state.catalog_refresh_seq += 1
-                    request_id = (
-                        f"ut_catalog_refresh_{resume_val}_{state.catalog_refresh_seq}"
-                    )
-                    state.pending_catalog_refresh_ids.append(request_id)
+                    now = time.monotonic()
+                    last = state.last_catalog_refresh_queued_at
+                    interval = state.catalog_refresh_min_interval_s
+                    if last is None or interval <= 0 or (now - last) >= interval:
+                        state.catalog_refresh_seq += 1
+                        request_id = (
+                            f"ut_catalog_refresh_{resume_val}_"
+                            f"{state.catalog_refresh_seq}"
+                        )
+                        state.pending_catalog_refresh_ids.append(request_id)
+                        state.last_catalog_refresh_queued_at = now
             return out
         case claude_schema.StreamResultMessage():
             ok = not event.is_error
@@ -2278,6 +2295,9 @@ class ClaudeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
                     settings.watchdog.detect_catalog_staleness
                 )
                 state.notify_catalog_refresh = settings.watchdog.notify_catalog_refresh
+                state.catalog_refresh_min_interval_s = (
+                    settings.watchdog.catalog_refresh_min_interval_s
+                )
         except Exception:  # noqa: BLE001 — settings errors must not block a run
             logger.warning("catalog_settings.load_failed", exc_info=True)
         return state
