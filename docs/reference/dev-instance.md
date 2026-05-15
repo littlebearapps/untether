@@ -2,6 +2,8 @@
 
 Untether runs two isolated instances on lba-1: **staging** (PyPI/TestPyPI release) and **dev** (local editable source). They use separate Telegram bots, separate configs, and separate state — zero crosstalk.
 
+> **Fleet context:** lba-1 staging is one of **four production-ish hosts** (lba-1, nsd, channelo, mac). Multi-host upgrades use `scripts/fleet-rollout.sh` — see [release-discipline.md → Fleet rollout](../../.claude/rules/release-discipline.md). This page covers the lba-1 staging/dev pair specifically.
+
 ## How it works
 
 | | Staging | Dev |
