@@ -246,12 +246,12 @@ Two instances run on lba-1 — staging (PyPI/TestPyPI) and dev (local editable s
 ### 3-phase release workflow (MANDATORY)
 
 1. **Dev** — fix code, run unit tests, test via `@untether_dev_bot` (6 engine chats), run integration tests
-2. **Staging** — bump to `X.Y.ZrcN`, merge feature branches to `dev` → CI publishes to TestPyPI, install on `@hetz_lba1_bot` via `scripts/staging.sh`, Nathan dogfoods for 1+ week
-3. **Release** — bump to `X.Y.Z`, write changelog, PR from `dev` → `master`, tag `vX.Y.Z` on master — `release.yml` publishes to PyPI (requires Nathan's approval in GitHub Actions UI)
+2. **Fleet rollout (rc)** — bump to `X.Y.ZrcN`, merge feature branches to `dev` → CI publishes to TestPyPI, attest tests via `scripts/run-integration-tests.sh ${VERSION} --manual`, then `scripts/fleet-rollout.sh ${VERSION}` rolls the rc to all 4 hosts (lba-1 staging + nsd VPS + channelo VPS + Mac) in parallel
+3. **Release** — bump to `X.Y.Z`, write changelog, PR from `dev` → `master`. After merge, `scripts/fleet-rollout.sh ${VERSION}` rolls the stable PyPI build to all 4 hosts in parallel. `release.yml` publishes to PyPI automatically; the master PR merge IS the approval.
 
 **Branch model:** `feature/*` → PR → `dev` (TestPyPI) → PR → `master` (PyPI). Master always matches the latest PyPI release.
 
-**NEVER skip staging for minor/major releases. NEVER go directly from dev to PyPI tagging.**
+**NEVER skip integration testing for minor/major releases. NEVER skip the attestation gate.** `fleet-rollout.sh` enforces the gate — no production upgrades without a passing `@untether_dev_bot` test run on file.
 
 **Claude Code's role in each phase:**
 - **Dev**: edit code, run tests, push feature branches, create PRs to `dev`, run integration tests via Telegram MCP
@@ -304,9 +304,15 @@ No further manual approval is needed. The PR merge IS the release approval. Pre-
 systemctl --user restart untether-dev
 journalctl --user -u untether-dev -f
 
-# Staging: install rc from TestPyPI for dogfooding
+# Single-host staging (lba-1 only — legacy single-bot path)
 scripts/staging.sh install X.Y.ZrcN
 systemctl --user restart untether
+
+# Fleet rollout to all 4 hosts (lba-1 + nsd + channelo + mac)
+scripts/run-integration-tests.sh X.Y.ZrcN --manual    # attest via @untether_dev_bot
+scripts/fleet-rollout.sh X.Y.ZrcN                     # parallel upgrade
+scripts/fleet-rollout.sh X.Y.ZrcN --dry-run           # preview
+scripts/fleet-rollback.sh X.Y.(Z-1) --only mac        # revert one host
 
 # Promote to stable (only after PyPI release)
 scripts/staging.sh reset && systemctl --user restart untether
@@ -315,6 +321,9 @@ scripts/staging.sh reset && systemctl --user restart untether
 uv run pytest
 uv run ruff check src/
 ```
+
+See `.claude/rules/release-discipline.md` ("Fleet rollout (rc and stable)") and
+`docs/plans/2026-05-13-fleet-monitoring-and-upgrades.md` for the full design.
 
 ## CI Pipeline
 
@@ -351,7 +360,8 @@ Release pipeline (`release.yml`) uses PyPI trusted publishing with OIDC. The `py
 Every bug fix and significant change MUST have a GitHub issue:
 - **Bugs found during debugging**: create an issue before or alongside the fix
 - **Issue body**: description, impact, affected files, fix reference
-- **Labels**: `bug`, `enhancement`, `documentation` as appropriate
+- **Labels**: `bug`, `enhancement`, `documentation` as appropriate; severity on bugs via `severity:critical|major|minor|trivial`; `priority: low|medium|high` (note space) for human triage
+- **Auto-filed sources**: `auto:error-report` (untether-issue-watcher daemon, log-pattern errors — runs on lba-1, nsd, channelo, mac; each filing is host-tagged via the `HOST` env in the daemon's unit/plist) and `auto:monitor-audit` (`/monitor` command audit loop, bugs + enhancements — 4 per-host configs plus the `untether-fleet` meta-target for cross-host audits)
 - **Closing**: reference the fixing PR or commit in a close comment
 
 ### Changelog

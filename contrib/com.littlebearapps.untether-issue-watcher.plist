@@ -1,0 +1,128 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  com.littlebearapps.untether-issue-watcher
+
+  macOS launchd agent for the Untether error to GitHub issue watcher.
+  Pairs with the cross-platform `untether-issue-watcher` Python script at
+  ~/.local/bin/untether-issue-watcher.
+
+  __USER__ is a sed placeholder for the macOS short user name (the
+  directory name under /Users). Replace before deploy. Mirrors the
+  __HOST__ convention used by the Linux systemd unit template at
+  untether/contrib/untether-issue-watcher.service.
+
+  Install (substitute __USER__ for your Mac username — `id -un` on the
+  target Mac, or `ssh mac 'id -un'`):
+
+    1. Make sure the watcher script is in place AND executable:
+         scp ~/.local/bin/untether-issue-watcher mac:~/.local/bin/
+         ssh mac 'chmod +x ~/.local/bin/untether-issue-watcher'
+
+    2. Make sure log directories exist:
+         ssh mac 'mkdir -p ~/Library/Logs/untether-issue-watcher \
+                            ~/.local/bin ~/Library/LaunchAgents'
+
+    3. Substitute __USER__ and copy:
+         MAC_USER=$(ssh mac 'id -un')
+         sed "s|__USER__|$MAC_USER|g" \
+             untether/contrib/com.littlebearapps.untether-issue-watcher.plist \
+           | ssh mac 'cat > ~/Library/LaunchAgents/com.littlebearapps.untether-issue-watcher.plist'
+
+    4. Verify substitution landed:
+         ssh mac 'plutil -lint ~/Library/LaunchAgents/com.littlebearapps.untether-issue-watcher.plist'
+         ssh mac 'grep -E "Users/" ~/Library/LaunchAgents/com.littlebearapps.untether-issue-watcher.plist'
+
+    5. Load:
+         ssh mac 'launchctl load -w ~/Library/LaunchAgents/com.littlebearapps.untether-issue-watcher.plist'
+
+    6. Verify state = running:
+         ssh mac 'launchctl print "gui/$(id -u)/com.littlebearapps.untether-issue-watcher" | head -20'
+         ssh mac 'tail -n 50 ~/Library/Logs/untether-issue-watcher/stdout.log'
+
+  Health check signals (preferred over checking for state files):
+    - `state = running` in `launchctl print` output
+    - Startup banner in stdout.log printing `Host: mac` and `Log source: log-stream`
+    - Empty stderr.log (or no recent entries)
+    - The state file `~/.local/state/untether-issue-watcher/seen.json` only
+      appears AFTER the daemon recognises its first event. Absence on a
+      fresh install is NOT a failure.
+
+  Dependencies on the target Mac:
+    - `python3` on PATH (Apple-provided /usr/bin/python3 works fine).
+    - `gh` CLI on PATH AND authenticated (`gh auth login`). Without `gh`,
+      the daemon runs but cannot file issues; `ensure_label()` and
+      `gh issue create` fail silently. Install via brew if available;
+      otherwise fetch a tarball from github.com/cli/cli/releases and
+      extract `bin/gh` into ~/.local/bin. (See the install steps in
+      this repo's CHANGELOG / fleet rollout docs for the exact curl
+      one-liner the deploy script uses — long-flag args can't live
+      in XML comments.)
+
+  Log source choice (configured in ProgramArguments below):
+
+    Plan B (DEFAULT): macOS Unified Logging via `log stream`. Chosen because
+    it doesn't require modifying the user's existing Untether launchd plist.
+    Untether's structlog output goes to stdout/stderr, launchd routes it to
+    Unified Logging, and this watcher reads it back with `log stream`.
+
+    Plan A (optional): file-based logging via `tail`. Requires Untether's
+    own launchd plist to set a StandardOutPath to a file (for example,
+    ~/Library/Logs/untether/untether.log). Once that's set up, switch the
+    ProgramArguments below to use the tail-follow source with a log-path
+    pointing at that file. Plan A keeps the parsing logic identical to Linux
+    journalctl.
+
+  HOST env: tagged as `mac` so filed GitHub issues route to the right host
+  during triage. Match the SSH alias / Tailscale host name.
+-->
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.littlebearapps.untether-issue-watcher</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/Users/__USER__/.local/bin/untether-issue-watcher</string>
+        <string>--log-source</string>
+        <string>log-stream</string>
+    </array>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>HOST</key>
+        <string>mac</string>
+        <key>PATH</key>
+        <string>/Users/__USER__/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+        <key>PYTHONUNBUFFERED</key>
+        <string>1</string>
+    </dict>
+
+    <key>RunAtLoad</key>
+    <true/>
+
+    <key>KeepAlive</key>
+    <dict>
+        <key>SuccessfulExit</key>
+        <false/>
+        <key>Crashed</key>
+        <true/>
+    </dict>
+
+    <key>ThrottleInterval</key>
+    <integer>30</integer>
+
+    <key>ProcessType</key>
+    <string>Background</string>
+
+    <key>StandardOutPath</key>
+    <string>/Users/__USER__/Library/Logs/untether-issue-watcher/stdout.log</string>
+
+    <key>StandardErrorPath</key>
+    <string>/Users/__USER__/Library/Logs/untether-issue-watcher/stderr.log</string>
+
+    <key>WorkingDirectory</key>
+    <string>/Users/__USER__</string>
+</dict>
+</plist>

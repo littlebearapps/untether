@@ -36,10 +36,17 @@ Step-by-step release workflow for Untether. Covers the full lifecycle from issue
 ## Release workflow phases
 
 ```
-1. Issue audit  →  2. Version decision  →  3. Changelog  →  4. Validate  →  5. Integration test  →  6. Staging  →  7. Tag & publish
+1. Issue audit  →  2. Version decision  →  3. Changelog  →  4. Validate  →
+5. Integration test  →  5.5. Attestation marker  →  6. Staging (lba-1) +
+fleet rollout  →  7. Tag & publish
 ```
 
-All seven phases happen in a single branch (typically `master` for patches, `feature/*` for minors). The CI release pipeline triggers on `v*` tags pushed to `master`.
+All seven (now-8) phases happen in a single branch (typically `master` for patches, `feature/*` for minors). The CI release pipeline triggers on `v*` tags pushed to `master`.
+
+**Phase 5.5 (attestation)** is the gate that makes the fleet rollout safe.
+Without it, `scripts/fleet-rollout.sh` refuses to upgrade production hosts.
+**Phase 6 (staging + fleet rollout)** parallelises across all 4 hosts —
+lba-1 staging, nsd, channelo, mac — instead of staging on lba-1 alone.
 
 ## Phase 1: Issue audit
 
@@ -242,11 +249,32 @@ All integration test tiers are fully automated by Claude Code via Telegram MCP t
 - [ ] No warnings/errors in logs: `journalctl --user -u untether-dev --since "1 hour ago" | grep -E "WARNING|ERROR"`
 - [ ] Upgrade path tested (minor/major): old config parses, state files survive restart
 
-## Phase 6: Staging (recommended for minor+, optional for patches)
+## Phase 5.5: Integration-test attestation marker
 
-Before tagging a final release, publish a release candidate to TestPyPI and dogfood it on `@hetz_lba1_bot` for ~1 week.
+After integration tests pass for a given version, write the attestation marker. This is the precondition for `scripts/fleet-rollout.sh` — without it, fleet rollout to nsd/channelo/mac is gated.
 
-### Enter staging
+```bash
+scripts/run-integration-tests.sh X.Y.ZrcN --manual \
+  --tiers "tier7,tier1-claude,tier1-codex" \
+  --notes "Tier 7 + Tier 1 all pass on @untether_dev_bot. No log warnings."
+```
+
+The marker lands at `~/.untether-dev/integration-test-pass-X.Y.ZrcN.json` with timestamp, tester, tiers, and notes. **One marker per version.** If rc14 → rc15, write a new marker for rc15.
+
+To invalidate a marker (e.g. discovered a regression post-test):
+
+```bash
+rm ~/.untether-dev/integration-test-pass-X.Y.ZrcN.json
+# fleet-rollout.sh will now refuse to run for this version
+```
+
+`--skip-test-gate` exists on fleet-rollout as an escape hatch. It prints a loud warning and is not recommended for any change that touches production hosts.
+
+## Phase 6: Staging + fleet rollout (parallel across all 4 hosts)
+
+Before tagging a final release, publish a release candidate to TestPyPI and roll it to all 4 hosts in parallel. Both lba-1 staging AND nsd/channelo/mac upgrade together — the integration-test attestation from Phase 5.5 gates the rollout, replacing the previous lba-1-only dogfood window.
+
+### Enter the rc cycle
 
 ```bash
 # Bump to rc version (no changelog entry needed)
@@ -254,28 +282,47 @@ Before tagging a final release, publish a release candidate to TestPyPI and dogf
 uv lock
 git add pyproject.toml uv.lock
 git commit -m "chore: staging X.Y.Zrc1"
-git push origin master
+git push origin dev          # dev push, NOT master — CI publishes to TestPyPI
 
-# Wait for CI to publish to TestPyPI, then install
-scripts/staging.sh install X.Y.Zrc1
-systemctl --user restart untether
-scripts/healthcheck.sh --version X.Y.Zrc1
+# Wait for CI to publish to TestPyPI (~3 min), then:
+#   1. Run integration tests via @untether_dev_bot (Phase 5)
+#   2. Write the attestation marker (Phase 5.5)
+#   3. Run fleet rollout (this phase)
+
+scripts/fleet-rollout.sh X.Y.Zrc1                    # all 4 hosts parallel
+scripts/fleet-rollout.sh X.Y.Zrc1 --dry-run          # preview
+scripts/fleet-rollout.sh X.Y.Zrc1 --only mac         # one host
 ```
 
-### During staging
+### During the rc cycle
 
-- Dogfood with all chat routes on `@hetz_lba1_bot` for ~1 week
-- The issue watcher catches bugs automatically (monitors the same service)
-- If bugs found: fix → bump to `X.Y.Zrc2` → push → install
+- All 4 bots run the same rc (lba-1, nsd, channelo, mac)
+- Each host's `untether-issue-watcher` daemon catches log-pattern bugs auto-tagged with `host:<name>`
+- `/monitor untether-fleet` runs cross-host audits in parallel for richer signal
+- If bugs found: fix → bump to `X.Y.Zrc2` → push → re-test → re-attest → re-roll
+- Rc supersede is supported: `fleet-rollout.sh X.Y.Zrc2` detects in-flight rc1 and replaces
 
 ### Promote to release
 
-When staging is stable, proceed to Phase 7 (Tag and publish) with the final version.
+When the rc cycle is stable, bump to the final version (no rc suffix), follow the same flow:
+
+```bash
+# Bump pyproject.toml to X.Y.Z, add CHANGELOG entry, then:
+scripts/run-integration-tests.sh X.Y.Z --manual --notes "Final cut; rc cycle stable"
+scripts/fleet-rollout.sh X.Y.Z                       # all 4 hosts parallel
+```
+
+Then proceed to Phase 7 (Tag and publish).
 
 ### Rollback
 
 ```bash
-scripts/staging.sh rollback     # Reverts to last stable PyPI version
+# Single-host rollback
+scripts/fleet-rollback.sh X.Y.(Z-1) --only mac
+# Whole-fleet rollback to last stable
+scripts/fleet-rollback.sh X.Y.(Z-1)
+# Legacy single-host helper still works on lba-1 only:
+scripts/staging.sh rollback
 systemctl --user restart untether
 ```
 
@@ -284,6 +331,8 @@ systemctl --user restart untether
 - rc versions are **NOT** git-tagged (avoids triggering `release.yml`)
 - rc versions do **NOT** require changelog entries (`validate_release.py` skips them)
 - Commit message: `chore: staging X.Y.ZrcN`
+- Attestation marker is **per-version** — rc14 → rc15 each get their own
+- Partial fleet failures are reported but NOT auto-rolled-back; operator decides
 
 ## Phase 7: Merge to master (single-gate release)
 
