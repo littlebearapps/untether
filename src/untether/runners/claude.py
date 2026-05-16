@@ -308,6 +308,23 @@ class ClaudeStreamState:
     # multiple ScheduleWakeup calls in one turn use the longest arm.
     last_schedule_wakeup_arm_delay: float | None = None
 
+    # #333: per-turn high-water-mark monotonic timestamp of the most recent
+    # ``Bash(run_in_background=True)`` tool_use observed in this turn.
+    # Mirrors ``last_schedule_wakeup_arm_delay`` (#544): survives
+    # ``_clear_background_handle`` so the post-result idle watchdog tick log
+    # can see that a bg-bash was launched even after the tool_result pops
+    # the entry from ``live_bg_bashes``.
+    #
+    # CAVEAT: this is a LAUNCH tracker, not a LIFETIME tracker. A
+    # ``run_in_background=True`` Bash can outlive multiple user turns
+    # (long ``npm install``, ``tail -f``), so this scalar resets on every
+    # fresh user prompt. For true liveness, the bridge already uses
+    # ``_has_fresh_bash_output`` / ``_has_recent_bash_action``
+    # (runner_bridge.py:1738, 1753) — DO NOT replace those with this
+    # scalar. Observability-only today; suppression semantics for bg-bash
+    # are out of scope until the #374 lifecycle refactor.
+    last_bg_bash_launched_at: float | None = None
+
     # #289 — first user message text for the run.  Populated by ``new_state``
     # from the prompt arg.  Used as the fallback for the
     # ``<<autonomous-loop-dynamic>>`` sentinel when ScheduleWakeup is
@@ -511,6 +528,10 @@ def _register_background_handle(
             state.live_monitors[tool_id] = 0.0
     elif tool_name == "Bash" and bool(raw_input.get("run_in_background")):
         state.live_bg_bashes.add(tool_id)
+        # #333: scalar high-water-mark that survives _clear_background_handle
+        # (see ClaudeStreamState.last_bg_bash_launched_at docstring). Used by
+        # the post-result idle watchdog tick log for observability only.
+        state.last_bg_bash_launched_at = time.monotonic()
     elif tool_name == "Agent" and bool(raw_input.get("run_in_background")):
         state.live_bg_agents.add(tool_id)
     elif tool_name == "ScheduleWakeup":
@@ -550,13 +571,16 @@ def _register_background_handle(
 def _clear_background_handle(state: ClaudeStreamState, tool_use_id: str) -> None:
     """Remove a background-task entry when its tool_result arrives (#347).
 
-    Note: ``state.last_schedule_wakeup_arm_delay`` is deliberately NOT
-    cleared here. ScheduleWakeup's tool_result is the arm-OK confirmation,
-    not a terminal signal — the wakeup itself fires later (or, outside
-    ``/loop dynamic mode``, never). The post-result idle watchdog (#507)
-    needs the arm-delay to survive this clear so its dead-wakeup shortcut
-    can engage after the matching ``result`` event lands. The scalar
-    resets on the next user prompt or on ``new_state`` (#544).
+    Note: ``state.last_schedule_wakeup_arm_delay`` and
+    ``state.last_bg_bash_launched_at`` are deliberately NOT cleared here.
+    A tool_result for ScheduleWakeup or ``Bash(run_in_background=True)``
+    is the arm/launch confirmation, not a terminal signal — the wakeup
+    fires later (or never, outside ``/loop dynamic mode``) and a
+    backgrounded bash continues running until it finishes. The
+    post-result idle watchdog (#507/#333) needs these scalars to
+    survive this clear so its diagnostic tick log can see them after
+    the matching ``result`` event lands. Both scalars reset on the
+    next user prompt or on ``new_state`` (#544, #333).
     """
     state.live_monitors.pop(tool_use_id, None)
     state.live_bg_bashes.discard(tool_use_id)
@@ -1298,6 +1322,12 @@ def translate_claude_event(
             # is set, so resetting on result would defeat the shortcut.
             if saw_non_tool_result and not saw_tool_result:
                 state.last_schedule_wakeup_arm_delay = None
+                # #333: same reset semantics as the #544 ScheduleWakeup
+                # scalar — a fresh user prompt clears the per-turn
+                # launch tracker. See last_bg_bash_launched_at docstring
+                # for why this is a launch tracker, not a lifetime
+                # tracker.
+                state.last_bg_bash_launched_at = None
             # #365 queue a proactive mcp_status nudge once per tool_result
             # batch. Opt-in via WatchdogSettings.notify_catalog_refresh.
             # Drained from stdin by ClaudeRunner._drain_catalog_refresh so
@@ -2652,85 +2682,222 @@ class ClaudeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
         # Poll often enough to react within a few seconds of the deadline,
         # but not so often that we burn CPU on a fully idle session.
         poll_interval = max(5.0, min(timeout_s / 20.0, 30.0))
-        while not reader_done.is_set():
-            await anyio.sleep(poll_interval)
-            if reader_done.is_set():
-                return
-            armed_at = state.result_received_at
-            if armed_at is None:
-                continue
-            elapsed = time.monotonic() - armed_at
 
-            # #507: dead-ScheduleWakeup shortcut. ScheduleWakeup outside
-            # ``/loop dynamic mode`` is a silent no-op upstream — the
-            # wakeup never fires, the agent's turn ended, and we'd otherwise
-            # wait the full ``timeout_s`` (default 600 s) before closing
-            # stdin. Detect the case via the scalar
-            # ``state.last_schedule_wakeup_arm_delay`` (a per-turn
-            # high-water-mark that survives ``_clear_background_handle``,
-            # #544) and the /loop master toggle for this chat; cut the
-            # effective timeout to ``max_armed_delay + 60s grace`` so the
-            # session closes within ~delay+grace instead of 10 minutes.
-            effective_timeout = timeout_s
-            dead_wakeup = False
-            if state.last_schedule_wakeup_arm_delay is not None:
-                from ..utils.paths import get_run_channel_id
+        # #333 instrumentation. channelo rc15→rc16 hit a 43+ min post-result
+        # hang where this watchdog silently failed to fire (no
+        # ``closing_stdin`` / ``deferred`` log lines despite elapsed ≫
+        # ``timeout_s``). The four candidate causes from the original
+        # memory note are (1) ``result_received_at`` never set, (2)
+        # ``post_result_idle_enabled`` evaluated False, (3)
+        # ``reader_done`` set early, (4) task crashed silently or never
+        # started. Without entry/exit/tick logs we can't discriminate
+        # them. These logs are intentionally verbose for rc17 — at 30 s
+        # poll x hours of session = O(120) lines, trivial; rate-limiting
+        # now would create ambiguity in the next reproduction.
+        #
+        # Exception strategy mirrors ``_subprocess_watchdog``
+        # (src/untether/runner.py:1010-1079) and
+        # ``_drain_catalog_refresh`` (above): per-tick ``try/except``
+        # log-and-continue so a transient error (e.g. a flaky structlog
+        # ProcessorChain) never cancels the sibling ``_iter_jsonl_events``
+        # task in the task group and aborts the user's in-flight turn.
+        # The outer ``try/finally`` lets us tag the ``task_exited`` log
+        # with the reason for diagnostics.
+        sid_at_start = (
+            state.factory.resume.value if state.factory.resume is not None else None
+        )
+        run_logger.info(
+            "claude.post_result_idle.task_started",
+            session_id=sid_at_start,
+            timeout_s=timeout_s,
+            poll_interval_s=poll_interval,
+        )
+        exit_reason = "loop_exited"
+        try:
+            while not reader_done.is_set():
+                try:
+                    await anyio.sleep(poll_interval)
+                    if reader_done.is_set():
+                        exit_reason = "reader_done"
+                        return
+                    armed_at = state.result_received_at
+                    if armed_at is None:
+                        # Pre-result: tick log still useful so we can
+                        # confirm the watchdog is alive even before the
+                        # first ``result`` event lands.
+                        run_logger.info(
+                            "claude.post_result_idle.tick",
+                            session_id=(
+                                state.factory.resume.value
+                                if state.factory.resume is not None
+                                else None
+                            ),
+                            armed=False,
+                            elapsed_s=None,
+                            effective_timeout_s=None,
+                            dead_wakeup=False,
+                            pending_requests=0,
+                            pending_asks=0,
+                            would_close=False,
+                            last_bg_bash_launched_at_age_s=None,
+                            last_schedule_wakeup_arm_delay=(
+                                state.last_schedule_wakeup_arm_delay
+                            ),
+                        )
+                        continue
+                    elapsed = time.monotonic() - armed_at
 
-                _chat_id = get_run_channel_id()
-                if _chat_id is not None and not _loop_enabled_for_chat(_chat_id):
-                    _max_delay = state.last_schedule_wakeup_arm_delay
-                    effective_timeout = min(timeout_s, _max_delay + 60.0)
-                    dead_wakeup = True
-            if elapsed < effective_timeout:
-                continue
+                    # #507: dead-ScheduleWakeup shortcut. ScheduleWakeup
+                    # outside ``/loop dynamic mode`` is a silent no-op
+                    # upstream — the wakeup never fires, the agent's turn
+                    # ended, and we'd otherwise wait the full
+                    # ``timeout_s`` (default 600 s) before closing stdin.
+                    # Detect the case via the scalar
+                    # ``state.last_schedule_wakeup_arm_delay`` (a
+                    # per-turn high-water-mark that survives
+                    # ``_clear_background_handle``, #544) and the /loop
+                    # master toggle for this chat; cut the effective
+                    # timeout to ``max_armed_delay + 60s grace`` so the
+                    # session closes within ~delay+grace instead of 10
+                    # minutes.
+                    effective_timeout = timeout_s
+                    dead_wakeup = False
+                    if state.last_schedule_wakeup_arm_delay is not None:
+                        from ..utils.paths import get_run_channel_id
 
-            # Locate the session id for the approval-state guard. The
-            # Claude factory's resume token is set during the very first
-            # StartedEvent, so by the time a result lands we always have
-            # one — but defend against the rare race where the watchdog
-            # ticks before that first started event.
-            sid = (
-                state.factory.resume.value if state.factory.resume is not None else None
-            )
-            pending_requests = (
-                [k for k, v in _REQUEST_TO_SESSION.items() if v == sid] if sid else []
-            )
-            pending_asks = (
-                [k for k in _PENDING_ASK_REQUESTS if _REQUEST_TO_SESSION.get(k) == sid]
-                if sid
-                else []
-            )
-            if pending_requests or pending_asks:
-                run_logger.info(
-                    "claude.post_result_idle.deferred",
-                    session_id=sid,
-                    pending_requests=len(pending_requests),
-                    pending_asks=len(pending_asks),
-                    elapsed_s=round(elapsed, 1),
-                    timeout_s=timeout_s,
-                )
-                # Re-arm: push the deadline forward by one full interval.
-                state.result_received_at = time.monotonic()
-                continue
+                        _chat_id = get_run_channel_id()
+                        if _chat_id is not None and not _loop_enabled_for_chat(
+                            _chat_id
+                        ):
+                            _max_delay = state.last_schedule_wakeup_arm_delay
+                            effective_timeout = min(timeout_s, _max_delay + 60.0)
+                            dead_wakeup = True
 
+                    # Locate the session id for the approval-state guard.
+                    # The Claude factory's resume token is set during the
+                    # very first StartedEvent, so by the time a result
+                    # lands we always have one — but defend against the
+                    # rare race where the watchdog ticks before that
+                    # first started event.
+                    sid = (
+                        state.factory.resume.value
+                        if state.factory.resume is not None
+                        else None
+                    )
+                    pending_requests = (
+                        [k for k, v in _REQUEST_TO_SESSION.items() if v == sid]
+                        if sid
+                        else []
+                    )
+                    pending_asks = (
+                        [
+                            k
+                            for k in _PENDING_ASK_REQUESTS
+                            if _REQUEST_TO_SESSION.get(k) == sid
+                        ]
+                        if sid
+                        else []
+                    )
+                    bg_bash_age = (
+                        round(time.monotonic() - state.last_bg_bash_launched_at, 1)
+                        if state.last_bg_bash_launched_at is not None
+                        else None
+                    )
+
+                    # #333 tick log. ``would_close`` answers "if we
+                    # weren't deferring, would this tick close stdin?" —
+                    # useful for spotting cases where the timer is
+                    # repeatedly re-armed.
+                    would_close = elapsed >= effective_timeout and not (
+                        pending_requests or pending_asks
+                    )
+                    run_logger.info(
+                        "claude.post_result_idle.tick",
+                        session_id=sid,
+                        armed=True,
+                        elapsed_s=round(elapsed, 1),
+                        effective_timeout_s=round(effective_timeout, 1),
+                        dead_wakeup=dead_wakeup,
+                        pending_requests=len(pending_requests),
+                        pending_asks=len(pending_asks),
+                        would_close=would_close,
+                        last_bg_bash_launched_at_age_s=bg_bash_age,
+                        last_schedule_wakeup_arm_delay=(
+                            state.last_schedule_wakeup_arm_delay
+                        ),
+                    )
+
+                    if elapsed < effective_timeout:
+                        continue
+                    if pending_requests or pending_asks:
+                        run_logger.info(
+                            "claude.post_result_idle.deferred",
+                            session_id=sid,
+                            pending_requests=len(pending_requests),
+                            pending_asks=len(pending_asks),
+                            elapsed_s=round(elapsed, 1),
+                            timeout_s=timeout_s,
+                        )
+                        # Re-arm: push the deadline forward by one full
+                        # interval.
+                        state.result_received_at = time.monotonic()
+                        continue
+
+                    run_logger.info(
+                        "claude.post_result_idle.closing_stdin",
+                        session_id=sid,
+                        elapsed_s=round(elapsed, 1),
+                        timeout_s=timeout_s,
+                        effective_timeout_s=round(effective_timeout, 1),
+                        dead_wakeup=dead_wakeup,
+                    )
+                    # #470: stamp closed-at signals BEFORE the actual
+                    # stdin close so the bridge's heartbeat tick (which
+                    # polls engine_state via duck-typing) can fire the
+                    # one-shot closing Telegram message.
+                    # ``post_result_closing_sent`` stays False — the
+                    # bridge sets it after the message is sent
+                    # (idempotency).
+                    state.post_result_closed_at = time.monotonic()
+                    state.post_result_idle_minutes = elapsed / 60.0
+                    with contextlib.suppress(Exception):
+                        await this_proc_stdin.aclose()
+                    exit_reason = "stdin_closed"
+                    return
+                except (anyio.get_cancelled_exc_class(), KeyboardInterrupt):
+                    # Cancellation must propagate so the task group can
+                    # tear down cleanly. The outer ``finally`` still
+                    # fires and tags ``exit_reason="cancelled"``.
+                    exit_reason = "cancelled"
+                    raise
+                except Exception as e:  # noqa: BLE001
+                    # Tick-local failure: log + back off one interval to
+                    # avoid hot-looping on a persistent fault. The loop
+                    # continues — we MUST NOT let an unhandled exception
+                    # bubble into the task group and cancel the sibling
+                    # JSONL reader.
+                    run_logger.warning(
+                        "claude.post_result_idle.tick_error",
+                        session_id=(
+                            state.factory.resume.value
+                            if state.factory.resume is not None
+                            else None
+                        ),
+                        error=str(e),
+                        error_type=e.__class__.__name__,
+                        exc_info=True,
+                    )
+                    await anyio.sleep(poll_interval)
+        finally:
             run_logger.info(
-                "claude.post_result_idle.closing_stdin",
-                session_id=sid,
-                elapsed_s=round(elapsed, 1),
-                timeout_s=timeout_s,
-                effective_timeout_s=round(effective_timeout, 1),
-                dead_wakeup=dead_wakeup,
+                "claude.post_result_idle.task_exited",
+                session_id=(
+                    state.factory.resume.value
+                    if state.factory.resume is not None
+                    else None
+                ),
+                reason=exit_reason,
             )
-            # #470: stamp closed-at signals BEFORE the actual stdin close
-            # so the bridge's heartbeat tick (which polls engine_state via
-            # duck-typing) can fire the one-shot closing Telegram message.
-            # ``post_result_closing_sent`` stays False — the bridge sets
-            # it after the message is sent (idempotency).
-            state.post_result_closed_at = time.monotonic()
-            state.post_result_idle_minutes = elapsed / 60.0
-            with contextlib.suppress(Exception):
-                await this_proc_stdin.aclose()
-            return
 
     def translate(
         self,

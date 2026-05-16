@@ -2949,6 +2949,391 @@ def test_mixed_user_message_does_not_reset_arm_delay() -> None:
     )
 
 
+def test_bg_bash_register_sets_launched_at() -> None:
+    """#333: ``Bash(run_in_background=True)`` tool_use sets the
+    ``last_bg_bash_launched_at`` scalar (monotonic timestamp) in
+    addition to populating the ``live_bg_bashes`` set.
+    """
+    state = ClaudeStreamState()
+    assert state.last_bg_bash_launched_at is None
+
+    before = time.monotonic()
+    translate_claude_event(
+        _decode_event(
+            _make_tool_use_event(
+                "Bash", "toolu_B1", {"command": "sleep 30 &", "run_in_background": True}
+            )
+        ),
+        title="claude",
+        state=state,
+        factory=state.factory,
+    )
+    after = time.monotonic()
+    assert "toolu_B1" in state.live_bg_bashes
+    assert state.last_bg_bash_launched_at is not None
+    assert before <= state.last_bg_bash_launched_at <= after
+
+
+def test_bg_bash_tool_result_preserves_launched_at() -> None:
+    """#333 regression check (mirrors #544): the scalar high-water-mark
+    must survive ``_clear_background_handle`` so the post-result idle
+    watchdog tick log can see that a bg-bash was launched even after
+    the tool_result pops the entry from ``live_bg_bashes``.
+    """
+    state = ClaudeStreamState()
+    translate_claude_event(
+        _decode_event(
+            _make_tool_use_event(
+                "Bash",
+                "toolu_B1",
+                {"command": "tail -f log &", "run_in_background": True},
+            )
+        ),
+        title="claude",
+        state=state,
+        factory=state.factory,
+    )
+    launched_at = state.last_bg_bash_launched_at
+    assert launched_at is not None
+
+    translate_claude_event(
+        _decode_event(_make_tool_result_event("toolu_B1")),
+        title="claude",
+        state=state,
+        factory=state.factory,
+    )
+    assert "toolu_B1" not in state.live_bg_bashes, "tool_result must clear set"
+    assert state.last_bg_bash_launched_at == launched_at, (
+        "scalar must survive _clear_background_handle (#333 regression check)"
+    )
+
+
+def test_multiple_bg_bashes_use_most_recent_launched_at() -> None:
+    """Two bg-bash launches in one turn — the scalar holds the MOST RECENT
+    launch timestamp. Unlike ScheduleWakeup arm-delay (where max-of-delays
+    wins), bg-bashes use last-write because the timestamp itself is
+    monotonically increasing.
+    """
+    state = ClaudeStreamState()
+
+    translate_claude_event(
+        _decode_event(
+            _make_tool_use_event(
+                "Bash", "toolu_B1", {"command": "x &", "run_in_background": True}
+            )
+        ),
+        title="claude",
+        state=state,
+        factory=state.factory,
+    )
+    first = state.last_bg_bash_launched_at
+    assert first is not None
+
+    # Small artificial gap so monotonic ticks forward.
+    time.sleep(0.001)
+
+    translate_claude_event(
+        _decode_event(
+            _make_tool_use_event(
+                "Bash", "toolu_B2", {"command": "y &", "run_in_background": True}
+            )
+        ),
+        title="claude",
+        state=state,
+        factory=state.factory,
+    )
+    second = state.last_bg_bash_launched_at
+    assert second is not None
+    assert second > first, "most-recent launch wins (monotonic last-write)"
+
+
+def test_new_user_turn_resets_bg_bash_launched_at() -> None:
+    """#333: a fresh user prompt (StreamUserMessage with non-tool_result
+    content) must reset the per-turn scalar. Mirrors the #544 reset
+    semantics for ``last_schedule_wakeup_arm_delay``.
+    """
+    state = ClaudeStreamState()
+
+    # Turn 1: bg-bash launched + tool_result confirmed
+    translate_claude_event(
+        _decode_event(
+            _make_tool_use_event(
+                "Bash", "toolu_B1", {"command": "z &", "run_in_background": True}
+            )
+        ),
+        title="claude",
+        state=state,
+        factory=state.factory,
+    )
+    translate_claude_event(
+        _decode_event(_make_tool_result_event("toolu_B1")),
+        title="claude",
+        state=state,
+        factory=state.factory,
+    )
+    assert state.last_bg_bash_launched_at is not None
+
+    # Turn 2: fresh user prompt (text-only StreamUserMessage)
+    user_text_event = {
+        "type": "user",
+        "message": {
+            "role": "user",
+            "content": [{"type": "text", "text": "next step please"}],
+        },
+    }
+    translate_claude_event(
+        _decode_event(user_text_event),
+        title="claude",
+        state=state,
+        factory=state.factory,
+    )
+    assert state.last_bg_bash_launched_at is None, (
+        "new user prompt must clear the per-turn launch tracker (#333)"
+    )
+
+
+def test_mixed_user_message_does_not_reset_bg_bash_launched_at() -> None:
+    """A user message that contains BOTH tool_results AND non-tool_result
+    blocks must preserve the scalar — the tool turn is still in flight
+    so the new-turn reset path is suppressed when any tool_result is
+    present. Mirrors the #544 mixed-batch edge case.
+    """
+    state = ClaudeStreamState()
+    translate_claude_event(
+        _decode_event(
+            _make_tool_use_event(
+                "Bash", "toolu_B1", {"command": "z &", "run_in_background": True}
+            )
+        ),
+        title="claude",
+        state=state,
+        factory=state.factory,
+    )
+    launched_at = state.last_bg_bash_launched_at
+    assert launched_at is not None
+
+    mixed_event = {
+        "type": "user",
+        "message": {
+            "role": "user",
+            "content": [
+                {
+                    "type": "tool_result",
+                    "tool_use_id": "toolu_B1",
+                    "content": "ok",
+                    "is_error": False,
+                },
+                {"type": "text", "text": "noise"},
+            ],
+        },
+    }
+    translate_claude_event(
+        _decode_event(mixed_event),
+        title="claude",
+        state=state,
+        factory=state.factory,
+    )
+    assert state.last_bg_bash_launched_at == launched_at, (
+        "mixed user message must NOT clear the scalar (#333 edge case)"
+    )
+
+
+@pytest.mark.anyio
+async def test_post_result_idle_watchdog_emits_lifecycle_logs(monkeypatch) -> None:
+    """#333: the watchdog MUST emit ``task_started`` at startup,
+    ``tick`` every iteration, and ``task_exited`` on every exit path.
+
+    This is the load-bearing diagnostic for the channelo silent-failure
+    scenario. The four candidate causes (result_received_at never set /
+    post_result_idle_enabled False / reader_done set early / task
+    crashed) cannot be discriminated without entry/exit/tick logs.
+    """
+    import anyio
+
+    from untether.runners.claude import (
+        _PENDING_ASK_REQUESTS,
+        _REQUEST_TO_SESSION,
+        ClaudeRunner,
+    )
+    from untether.runners.run_options import EngineRunOptions, apply_run_options
+    from untether.utils.paths import set_run_channel_id
+
+    _REQUEST_TO_SESSION.clear()
+    _PENDING_ASK_REQUESTS.clear()
+
+    state = ClaudeStreamState()
+    state.factory.started(ResumeToken(engine="claude", value="instrumentation-session"))
+    # Arm the watchdog by pretending result landed 700s ago (past the
+    # 600s default timeout so a tick should observe ``would_close=True``
+    # and the loop should close stdin).
+    state.result_received_at = time.monotonic() - 700.0
+
+    closed = anyio.Event()
+
+    class FakeStdin:
+        async def aclose(self) -> None:
+            closed.set()
+
+    fake_stdin = FakeStdin()
+    reader_done = anyio.Event()
+
+    real_sleep = anyio.sleep
+
+    async def fast_sleep(s: float) -> None:
+        await real_sleep(0)
+
+    monkeypatch.setattr("untether.runners.claude.anyio.sleep", fast_sleep)
+
+    captured_logs: list[dict] = []
+
+    class _StubLogger:
+        def info(self, event: str = "", **kwargs) -> None:
+            captured_logs.append({"event": event, "level": "info", **kwargs})
+
+        def warning(self, event: str = "", **kwargs) -> None:
+            captured_logs.append({"event": event, "level": "warning", **kwargs})
+
+        def debug(self, *a, **k) -> None:
+            pass
+
+        def error(self, *a, **k) -> None:
+            pass
+
+    runner = ClaudeRunner(claude_cmd="claude")
+    token = set_run_channel_id(54321)
+    try:
+        with apply_run_options(EngineRunOptions(loop_enabled=False)):
+            async with anyio.create_task_group() as tg:
+                tg.start_soon(
+                    runner._post_result_idle_watchdog,
+                    state,
+                    fake_stdin,
+                    reader_done,
+                    _StubLogger(),
+                    600.0,
+                )
+                with anyio.move_on_after(2.0):
+                    await closed.wait()
+                tg.cancel_scope.cancel()
+    finally:
+        from untether.utils.paths import reset_run_channel_id
+
+        reset_run_channel_id(token)
+
+    events = [lg["event"] for lg in captured_logs]
+    assert "claude.post_result_idle.task_started" in events, (
+        "task_started must fire at entry (#333)"
+    )
+    assert any(e == "claude.post_result_idle.tick" for e in events), (
+        "tick must fire at least once (#333)"
+    )
+    assert "claude.post_result_idle.closing_stdin" in events
+    assert "claude.post_result_idle.task_exited" in events, (
+        "task_exited must fire on every exit path (#333)"
+    )
+
+    # Verify ordering: task_started before any tick, task_exited last.
+    assert events.index("claude.post_result_idle.task_started") < events.index(
+        "claude.post_result_idle.tick"
+    )
+    assert events[-1] == "claude.post_result_idle.task_exited"
+
+    # The closing exit path tags reason="stdin_closed".
+    exit_log = next(
+        lg
+        for lg in captured_logs
+        if lg["event"] == "claude.post_result_idle.task_exited"
+    )
+    assert exit_log["reason"] == "stdin_closed"
+
+    # The first armed tick should show ``would_close=True`` since elapsed
+    # (700s) > effective_timeout (600s) and no pending requests.
+    armed_ticks = [
+        lg
+        for lg in captured_logs
+        if lg["event"] == "claude.post_result_idle.tick" and lg["armed"] is True
+    ]
+    assert armed_ticks, "at least one armed tick expected"
+    assert armed_ticks[0]["would_close"] is True
+
+
+@pytest.mark.anyio
+async def test_post_result_idle_watchdog_exits_reader_done_on_reader_done(
+    monkeypatch,
+) -> None:
+    """#333: when ``reader_done`` is set before the timeout expires, the
+    watchdog must exit with ``reason=reader_done`` — not ``stdin_closed``
+    or ``cancelled``. This is the normal-flow exit path (subprocess
+    finished naturally, no need for the safety-net to close stdin).
+    """
+    import anyio
+
+    from untether.runners.claude import (
+        _PENDING_ASK_REQUESTS,
+        _REQUEST_TO_SESSION,
+        ClaudeRunner,
+    )
+
+    _REQUEST_TO_SESSION.clear()
+    _PENDING_ASK_REQUESTS.clear()
+
+    state = ClaudeStreamState()
+    state.factory.started(ResumeToken(engine="claude", value="reader-done-session"))
+    # Don't set result_received_at — keeps the watchdog in the
+    # ``armed=False`` continue path, so it can't possibly close stdin
+    # on its own and any exit MUST be reader_done.
+
+    class FakeStdin:
+        async def aclose(self) -> None:
+            pass
+
+    reader_done = anyio.Event()
+
+    real_sleep = anyio.sleep
+
+    async def fast_sleep(s: float) -> None:
+        await real_sleep(0)
+
+    monkeypatch.setattr("untether.runners.claude.anyio.sleep", fast_sleep)
+
+    captured_logs: list[dict] = []
+
+    class _StubLogger:
+        def info(self, event: str = "", **kwargs) -> None:
+            captured_logs.append({"event": event, **kwargs})
+
+        def warning(self, *a, **k) -> None:
+            pass
+
+        def debug(self, *a, **k) -> None:
+            pass
+
+    runner = ClaudeRunner(claude_cmd="claude")
+    async with anyio.create_task_group() as tg:
+        tg.start_soon(
+            runner._post_result_idle_watchdog,
+            state,
+            FakeStdin(),
+            reader_done,
+            _StubLogger(),
+            600.0,
+        )
+        # Let the watchdog tick at least once in the unarmed branch.
+        await real_sleep(0.05)
+        reader_done.set()
+
+    exit_log = next(
+        (
+            lg
+            for lg in captured_logs
+            if lg["event"] == "claude.post_result_idle.task_exited"
+        ),
+        None,
+    )
+    assert exit_log is not None
+    assert exit_log["reason"] == "reader_done"
+
+
 def test_meta_line_renders_turn_complete_marker() -> None:
     """format_meta_line includes the `complete` hint when set on meta."""
     from untether.markdown import format_meta_line
