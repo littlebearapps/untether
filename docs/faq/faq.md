@@ -128,6 +128,14 @@ voice_transcription_api_key = "gsk_..."   # SecretStr — masked in logs
 
 Groq's Whisper Large v3 Turbo is fast and cheap; any OpenAI-compatible Whisper endpoint works (including a self-hosted one). The API key is `SecretStr`-masked in `repr()` / `str()` / structlog so it never lands in journal or crash output. Full setup: [Voice notes](https://untether.littlebearapps.com/how-to/voice-notes/).
 
+## Do I need to restart Untether after editing `untether.toml`?
+
+No — almost everything in `untether.toml` hot-reloads automatically within ~1 second of saving the file. Untether watches the config file and re-applies changes in-place: cron and webhook triggers, watchdog timing, progress verbosity, voice-transcription settings, the allowed-user list, message timing, the file-transfer + outbox config, the `show_resume_line` toggle, and every per-engine override.
+
+The exceptions are a handful of restart-only keys that affect process bring-up: `bot_token`, `chat_id`, `session_mode`, `topics`, and `message_overflow`. If you edit one of those, Untether logs a `restart_required=true` warning, broadcasts a message to the active project chats, and you'll need to `systemctl --user restart untether` (or `/restart` from Telegram) to apply the change.
+
+**For agents:** after editing `untether.toml`, **do NOT run `systemctl restart untether` from inside an active agent session**. Untether already hot-reloaded the change; the restart is unnecessary and the graceful drain will time out (120s) trying to wait for your own session to finish, which silently drops your final answer message to the user. The reload-applied notification that arrives in the chat after your edit is your confirmation it took effect.
+
 ## How do I update Untether?
 
 If you installed with `uv`:
