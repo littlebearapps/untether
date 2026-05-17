@@ -288,6 +288,18 @@ def _should_auto_continue(
     return auto_continued_count < max_retries
 
 
+def _format_auto_continue_notice(auto_continued_count: int) -> str:
+    """#551 Tier 1: build the Telegram notice text shown when auto-continue
+    fires. The 🔁 prefix distinguishes auto-resume from a fresh start so
+    users don't ``/cancel`` the salvage. Appends an attempt suffix once we
+    are past the first retry.
+    """
+    notice = "\U0001f501 Auto-resuming session after upstream Claude Code event"
+    if auto_continued_count > 0:
+        notice += f" (attempt {auto_continued_count + 1})"
+    return notice
+
+
 _DEFAULT_PREAMBLE = (
     "[Untether] You are running via Untether, a Telegram bridge for coding agents. "
     "The user is interacting through Telegram on a mobile device.\n\n"
@@ -1254,6 +1266,7 @@ class ProgressEdits:
                 # whether the wait state still holds; once Claude resumes
                 # emitting events, _stall_warned resets via _last_event_at
                 # and the warn_count effectively rolls back.
+                self._bump_stall_suppression("expected_wait")
                 logger.info(
                     "progress_edits.stall_auto_cancel_suppressed_expected_wait",
                     channel_id=self.channel_id,
@@ -1382,6 +1395,7 @@ class ProgressEdits:
             # heartbeat bump keeps the elapsed-time tail current
             # without resetting stall counters.
             if not frozen_escalate and _post_result_idle:
+                self._bump_stall_suppression("post_result")
                 logger.info(
                     "progress_edits.stall_post_result_suppressed",
                     channel_id=self.channel_id,
@@ -1491,6 +1505,7 @@ class ProgressEdits:
                 # already sent, suppress repeats.  Similar to tool-active
                 # suppression but triggered by tree CPU (child processes)
                 # instead of tracked tool state.
+                self._bump_stall_suppression("children_active")
                 logger.info(
                     "progress_edits.stall_children_active_suppressed",
                     channel_id=self.channel_id,
@@ -1656,6 +1671,22 @@ class ProgressEdits:
             anyio.ClosedResourceError,
         ):
             self.signal_send.send_nowait(None)
+
+    def _bump_stall_suppression(self, reason: str) -> None:
+        """#333 Task 4b: count a suppression event for ``session.summary``.
+
+        ``reason`` is a stable kebab-case label (e.g. ``"post_result"``,
+        ``"children_active"``, ``"expected_wait"``). Stored on the
+        stream's ``stall_suppression_counts`` dict so the summary line
+        in ``session.summary`` (emitted from ``run_runner_with_cancel``)
+        can render ``stall_suppressions=expected_wait:N,post_result:N``.
+        """
+        if self.stream is None:
+            return
+        counts = getattr(self.stream, "stall_suppression_counts", None)
+        if counts is None:
+            return
+        counts[reason] = counts.get(reason, 0) + 1
 
     def _is_post_result_idle(self) -> bool:
         """#470: suppression — Claude session is past its `result` event.
@@ -2632,6 +2663,13 @@ async def run_runner_with_cancel(
     # Session completion summary
     duration = time.monotonic() - start_time
     event_count = edits.stream.event_count if edits.stream else 0
+    # #333 Task 4b: render the per-reason suppression counter as a stable
+    # comma-separated string (e.g. ``expected_wait:4,post_result:3``) so
+    # log audits can grep without parsing nested JSON.
+    suppression_counts = getattr(edits.stream, "stall_suppression_counts", None) or {}
+    suppression_summary = ",".join(
+        f"{k}:{v}" for k, v in sorted(suppression_counts.items())
+    )
     logger.info(
         "session.summary",
         session_id=outcome.resume.value if outcome.resume else None,
@@ -2645,6 +2683,7 @@ async def run_runner_with_cancel(
         last_event_type=edits.stream.last_event_type if edits.stream else None,
         cancelled=outcome.cancelled,
         ok=outcome.completed.ok if outcome.completed else None,
+        stall_suppressions=suppression_summary,
     )
     if event_count == 0 and not outcome.cancelled:
         logger.warning(
@@ -2999,12 +3038,50 @@ async def handle_message(
             attempt=_auto_continued_count + 1,
             max_retries=ac_settings.max_retries,
         )
-        notice = (
-            "\u26a0\ufe0f Auto-continuing \u2014 "
-            "Claude stopped before processing tool results"
-        )
-        if _auto_continued_count > 0:
-            notice += f" (attempt {_auto_continued_count + 1})"
+
+        # #551 Tier 0: deliver outbox files from subprocess 1 BEFORE
+        # subprocess 2 spawns. Without this, any files the agent wrote
+        # to ``.untether-outbox/`` during the stuck-after-tool-results
+        # window are orphaned (subprocess 2 starts fresh and the
+        # original outbox is never scanned). ~3.6% silent loss observed
+        # on lba-1 before this fix. Failure to deliver must NOT block
+        # auto-continue itself \u2014 the recovery is more important than
+        # any single batch of files.
+        if cfg.send_file is not None and cfg.outbox_config is not None:
+            from .telegram.outbox_delivery import deliver_outbox_files
+            from .utils.paths import get_run_base_dir
+
+            _run_root = get_run_base_dir()
+            if _run_root is not None:
+                _oc = cfg.outbox_config
+                try:
+                    result = await deliver_outbox_files(
+                        send_file=cfg.send_file,
+                        channel_id=incoming.channel_id,
+                        thread_id=incoming.thread_id,
+                        reply_to_msg_id=user_ref.message_id,
+                        run_root=_run_root,
+                        outbox_dir=_oc.outbox_dir,
+                        deny_globs=_oc.deny_globs,
+                        max_download_bytes=_oc.max_download_bytes,
+                        max_files=_oc.outbox_max_files,
+                        cleanup=True,  # subprocess 2 starts fresh
+                    )
+                    logger.info(
+                        "outbox.delivered_pre_auto_continue",
+                        sent=len(result.sent),
+                        skipped=len(result.skipped),
+                        cleaned=result.cleaned,
+                    )
+                except Exception:  # noqa: BLE001
+                    logger.warning(
+                        "outbox.auto_continue_delivery_failed", exc_info=True
+                    )
+
+        # #551 Tier 1: reworded notice signals recovery, not failure.
+        # The \ud83d\udd01 prefix distinguishes auto-resume from a fresh start
+        # and discourages users from /cancel-ing the salvage.
+        notice = _format_auto_continue_notice(_auto_continued_count)
         notice_msg = RenderedMessage(text=notice, extra={})
         await cfg.transport.send(
             channel_id=incoming.channel_id,

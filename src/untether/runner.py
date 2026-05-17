@@ -346,9 +346,10 @@ class JsonlStreamState:
     lifecycle_state_entered_at: float = 0.0
     # #333 Task 4b: per-suppression-reason counter, summarised in
     # ``session.summary``. Bumped by the bridge stall detector each
-    # tick a suppression branch fires (post_result, children_active,
-    # expected_wait). Plain dict (not defaultdict) so the slots-dataclass
-    # encoding stays trivial; bump via ``counts.get(k, 0) + 1``.
+    # tick a suppression branch fires (``expected_wait``,
+    # ``post_result``, ``children_active``). Plain dict so the
+    # slots-dataclass encoding stays trivial; bump via
+    # ``counts[k] = counts.get(k, 0) + 1`` from the call site.
     stall_suppression_counts: dict[str, int] = field(default_factory=dict)
 
 
