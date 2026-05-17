@@ -138,6 +138,29 @@ class AskQuestionCommand:
                 # All questions answered — send structured response
                 success = await answer_ask_question_with_options(flow.request_id)
                 if success:
+                    # Strip the inline keyboard from the final question message
+                    # so the user can no longer click buttons that would fire
+                    # `ask_question.flow_missing` warnings. We use a short
+                    # completion text because `flow.current_index` is now past
+                    # the end of `flow.questions` (so `format_question_message`
+                    # would IndexError) and `MessageRef` does not carry the
+                    # original text.
+                    cleared = RenderedMessage(
+                        text="✅ All questions answered",
+                        extra={
+                            "parse_mode": "HTML",
+                            "reply_markup": {"inline_keyboard": []},
+                        },
+                    )
+                    try:
+                        await ctx.executor.edit(ctx.message, cleared)
+                    except Exception as exc:  # noqa: BLE001
+                        logger.warning(
+                            "ask_question.keyboard_clear_failed",
+                            request_id=flow.request_id,
+                            error=str(exc),
+                        )
+
                     answer_lines = []
                     for question, answer in flow.answers.items():
                         answer_lines.append(f"Q: {question}\nA: {answer}")
@@ -146,6 +169,7 @@ class AskQuestionCommand:
                         text=f"Answers sent:\n\n{answers_summary}",
                         notify=True,
                     )
+                # Preserve buttons on failure so the user can retry.
                 return CommandResult(
                     text="Failed to send answers — session may have ended",
                     notify=True,
