@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import time
 from typing import TYPE_CHECKING
 
 from ...logging import get_logger
@@ -14,6 +15,38 @@ if TYPE_CHECKING:
     from ..bridge import TelegramBridgeConfig
 
 logger = get_logger(__name__)
+
+
+# #525: rapid double/triple-tap of the inline Cancel button (or any path that
+# can race onto the same progress message within a second) caused
+# ``cancel.requested`` to fire three times for one user intent. Telegram
+# delivered duplicate callbacks before the keyboard could be cleared; the
+# downstream effect of repeat ``cancel_requested.set()`` is benign today, but
+# the log noise + duplicate-dispatch hazard (any future side-effectful cancel
+# action would inherit a 3x fan-out) warranted hardening.
+#
+# A 1-second TTL keyed on (chat_id, progress_message_id) is enough to dedupe
+# the human-tap window without affecting legitimate retries seconds later
+# (e.g. user types ``/cancel`` after the keyboard already dismissed).
+_CANCEL_DEDUP_TTL_S = 1.0
+_RECENT_CANCELS: dict[tuple[int, int], float] = {}
+
+
+def _claim_cancel(chat_id: int, message_id: int) -> bool:
+    """Return ``True`` if this cancel is the first fire within TTL, else
+    ``False`` (caller should silently drop the duplicate). Side-effect: GCs
+    expired entries.
+    """
+    now = time.monotonic()
+    cutoff = now - _CANCEL_DEDUP_TTL_S
+    # Best-effort GC: cheap because dict is keyed per active progress message.
+    for k in [k for k, t in _RECENT_CANCELS.items() if t < cutoff]:
+        _RECENT_CANCELS.pop(k, None)
+    key = (chat_id, message_id)
+    if key in _RECENT_CANCELS:
+        return False
+    _RECENT_CANCELS[key] = now
+    return True
 
 
 async def handle_cancel(
@@ -36,6 +69,14 @@ async def handle_cancel(
         ]
         if len(matches) == 1:
             ref, task = matches[0]
+            if not _claim_cancel(chat_id, ref.message_id):
+                logger.debug(
+                    "cancel.deduped",
+                    chat_id=chat_id,
+                    progress_message_id=ref.message_id,
+                    source="text-fallback",
+                )
+                return
             logger.info(
                 "cancel.requested", chat_id=chat_id, progress_message_id=ref.message_id
             )
@@ -113,6 +154,14 @@ async def handle_cancel(
         await reply(text="nothing is currently running for that message.")
         return
 
+    if not _claim_cancel(chat_id, reply_id):
+        logger.debug(
+            "cancel.deduped",
+            chat_id=chat_id,
+            progress_message_id=reply_id,
+            source="text-reply",
+        )
+        return
     logger.info(
         "cancel.requested",
         chat_id=chat_id,
@@ -166,6 +215,21 @@ async def handle_callback_cancel(
         await cfg.bot.answer_callback_query(
             callback_query_id=query.callback_query_id,
             text="nothing is currently running for that message.",
+        )
+        return
+    if not _claim_cancel(query.chat_id, query.message_id):
+        logger.debug(
+            "cancel.deduped",
+            chat_id=query.chat_id,
+            progress_message_id=query.message_id,
+            source="callback",
+        )
+        # Still ACK the callback to clear the user's spinner — Telegram
+        # delivered an extra tap event; silently dropping the dedup'd
+        # action while ACKing keeps the UX smooth.
+        await cfg.bot.answer_callback_query(
+            callback_query_id=query.callback_query_id,
+            text="cancelling...",
         )
         return
     logger.info(

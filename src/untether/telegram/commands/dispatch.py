@@ -233,15 +233,25 @@ async def _dispatch_callback(
     async def _answer_callback(text: str | None = None, *, early: bool = False) -> None:
         nonlocal _answered
         if callback_query_id is not None and not _answered:
+            # #546: latency_ms now isolates the HTTP round-trip alone — as of
+            # rc19, ``answer_callback_query`` no longer queues behind the
+            # per-chat send outbox. The ``queue_wait_ms=0`` field is kept
+            # explicit so monitoring dashboards can confirm the queue path
+            # was indeed bypassed; if a regression accidentally routes
+            # callback answers through the outbox again, this stays at 0
+            # and a separate ``telegram.outbox.op.completed`` debug line
+            # would appear instead.
             start = time.monotonic()
             await cfg.bot.answer_callback_query(callback_query_id, text=text)
             _answered = True
+            now = time.monotonic()
             logger.info(
                 "callback.answered",
                 command=command_id,
                 chat_id=chat_id,
-                latency_ms=round((time.monotonic() - start) * 1000, 1),
-                total_ms=round((time.monotonic() - dispatch_start) * 1000, 1),
+                latency_ms=round((now - start) * 1000, 1),
+                queue_wait_ms=0.0,
+                total_ms=round((now - dispatch_start) * 1000, 1),
                 early=early,
                 has_toast=text is not None,
             )

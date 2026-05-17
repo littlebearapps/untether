@@ -383,3 +383,63 @@ async def test_deliver_continues_on_send_failure(tmp_path: Path) -> None:
     # First file failed, second succeeded
     assert len(result.sent) == 1
     assert result.sent[0].abs_path.name == "b.txt"
+
+
+# ---------------------------------------------------------------------------
+# #524 — surface skipped outbox entries (directories, oversized, etc.) so the
+# agent's "I've prepared the guides folder for you" final message doesn't
+# become a silent lie.
+# ---------------------------------------------------------------------------
+
+
+def test_format_outbox_skipped_notice_directory_uses_trailing_slash() -> None:
+    from untether.runner_bridge import _format_outbox_skipped_notice
+
+    text = _format_outbox_skipped_notice([("guides", "directory")])
+    assert text.startswith("\U0001f4ce Outbox skipped")
+    assert "guides/ — directory" in text
+
+
+def test_format_outbox_skipped_notice_multiple_items_sorted() -> None:
+    from untether.runner_bridge import _format_outbox_skipped_notice
+
+    text = _format_outbox_skipped_notice(
+        [
+            ("z.txt", "too large: 60 MB > 50 MB"),
+            ("guides", "directory"),
+            ("key.pem", "denied by glob: **/*.pem"),
+        ]
+    )
+    lines = text.splitlines()
+    # Headline + 3 items, sorted alphabetically by name
+    assert len(lines) == 4
+    assert "guides/ — directory" in lines[1]
+    assert "key.pem" in lines[2]
+    assert "z.txt" in lines[3]
+
+
+def test_format_outbox_skipped_notice_caps_at_ten_with_overflow() -> None:
+    from untether.runner_bridge import _format_outbox_skipped_notice
+
+    items = [(f"file_{i:02d}.txt", "denied") for i in range(15)]
+    text = _format_outbox_skipped_notice(items)
+    lines = text.splitlines()
+    # Headline + 10 visible + overflow line = 12
+    assert len(lines) == 12
+    assert lines[-1] == "- … and 5 more"
+
+
+def test_telegram_files_settings_default_notify_skipped() -> None:
+    """#524: the new setting defaults to True so the surface fires
+    automatically on upgrade without users opting in."""
+    from untether.settings import TelegramFilesSettings
+
+    cfg = TelegramFilesSettings()
+    assert cfg.outbox_notify_skipped is True
+
+
+def test_telegram_files_settings_can_disable_notify_skipped() -> None:
+    from untether.settings import TelegramFilesSettings
+
+    cfg = TelegramFilesSettings(outbox_notify_skipped=False)
+    assert cfg.outbox_notify_skipped is False

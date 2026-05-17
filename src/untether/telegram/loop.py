@@ -54,7 +54,7 @@ from .commands.handlers import (
     set_command_menu,
     should_show_resume_line,
 )
-from .commands.parse import is_cancel_command
+from .commands.parse import is_cancel_command, parse_dot_typo
 from .commands.reply import make_reply
 from .context import _merge_topic_context, _usage_ctx_set, _usage_topic
 from .engine_defaults import resolve_engine_for_message
@@ -86,6 +86,17 @@ _SEEN_MESSAGES_LIMIT = 2048
 _SEEN_UPDATES_LIMIT = 4096
 
 _handle_file_put_default = handle_file_put_default
+
+# #528: AskUserQuestion text-reply echo. Earlier versions hard-sliced at
+# [:100] which truncated mid-word with no ellipsis; the agent always
+# received the full reply but the user couldn't see it in the chat.
+_ANSWERED_ECHO_MAX = 300
+
+
+def _format_answered_echo(text: str) -> str:
+    if len(text) <= _ANSWERED_ECHO_MAX:
+        return f"↩️ Answered: {text}"
+    return f"↩️ Answered: {text[: _ANSWERED_ECHO_MAX - 1]}…"
 
 
 def _chat_session_key(
@@ -236,6 +247,65 @@ async def _notify_restart_required(cfg: TelegramBridgeConfig, keys: list[str]) -
     logger.info(
         "config.reload.restart_notify.sent",
         keys=keys,
+        targets=sorted(targets),
+        sent_count=sent_count,
+    )
+
+
+async def _notify_reload_applied(
+    cfg: TelegramBridgeConfig,
+    *,
+    path: Path,
+    hot_keys: list[str],
+    restart_keys: list[str],
+) -> None:
+    """#547 axis 2 / #548: broadcast a hot-reload confirmation message so
+    agents and users see "did my edit work?" answered in-chat (instead of
+    having to switch to ``journalctl``). The headline framing ("No restart
+    needed.") flips the trained-in agent reflex to ``systemctl restart``
+    after editing config.
+
+    Reuses the same broadcast pattern as ``_notify_restart_required``: send
+    to every active project chat + admin DMs, falling back to
+    ``cfg.chat_id`` if no routed targets exist. Per-chat failures are
+    logged and skipped — one bad chat can't mask the affirmation from
+    the rest.
+    """
+    if not hot_keys and not restart_keys:
+        return
+    from ..config_reload_notification import format_reload_notification
+
+    text = format_reload_notification(
+        path=path, hot_keys=hot_keys, restart_keys=restart_keys
+    )
+    targets: set[int] = set()
+    targets.update(cfg.runtime.project_chat_ids())
+    targets.update(cfg.allowed_user_ids or ())
+    if not targets:
+        targets.add(cfg.chat_id)
+    sent_count = 0
+    for chat_id in sorted(targets):
+        try:
+            sent = await cfg.exec_cfg.transport.send(
+                channel_id=chat_id,
+                message=RenderedMessage(
+                    text=text,
+                    extra={"parse_mode": "Markdown"},
+                ),
+                options=SendOptions(notify=False),  # non-disruptive
+            )
+            if sent is not None:
+                sent_count += 1
+        except Exception as exc:  # noqa: BLE001 — logged then continue
+            logger.warning(
+                "config.reload.applied_notify.failed",
+                chat_id=chat_id,
+                error=str(exc),
+            )
+    logger.info(
+        "config.reload.applied_notify.sent",
+        hot_keys=hot_keys,
+        restart_keys=restart_keys,
         targets=sorted(targets),
         sent_count=sent_count,
     )
@@ -1396,6 +1466,12 @@ async def run_main_loop(
                 refresh_commands()
                 refresh_topics_scope()
                 await set_command_menu(cfg)
+                # #547 axis 2 / #548: accumulate the keys that actually
+                # changed in this reload so the broadcast at the end of
+                # handle_reload can tell the user (and any agent reading
+                # in next-turn context) whether a restart is required.
+                _reload_hot_keys: list[str] = []
+                _reload_restart_keys: list[str] = []
                 if state.transport_snapshot is not None:
                     new_snapshot = reload.settings.transports.telegram.model_dump()
                     changed = _diff_keys(state.transport_snapshot, new_snapshot)
@@ -1408,6 +1484,8 @@ async def run_main_loop(
                         restart_only = TelegramTransportSettings.RESTART_REQUIRED_FIELDS
                         restart_keys = [k for k in changed if k in restart_only]
                         hot_keys = [k for k in changed if k not in restart_only]
+                        _reload_hot_keys.extend(hot_keys)
+                        _reload_restart_keys.extend(restart_keys)
                         if restart_keys:
                             logger.warning(
                                 "config.reload.transport_config_changed",
@@ -1448,6 +1526,26 @@ async def run_main_loop(
                         restart_required=True,
                     )
                     state.transport_id = reload.settings.transport
+
+                # #547 axis 2 / #548: broadcast the affirmative
+                # "Hot-reloaded — No restart needed." (or, if any
+                # restart-only key was edited, the matching
+                # "Restart required" / "Partial reload" message). The
+                # headline framing flips the trained-in agent reflex to
+                # ``systemctl restart`` after editing config; agents read
+                # this message in next-turn context and adapt.
+                if _reload_hot_keys or _reload_restart_keys:
+                    try:
+                        await _notify_reload_applied(
+                            cfg,
+                            path=reload.config_path,
+                            hot_keys=_reload_hot_keys,
+                            restart_keys=_reload_restart_keys,
+                        )
+                    except Exception:  # noqa: BLE001 — never break reload
+                        logger.warning(
+                            "config.reload.applied_notify.crashed", exc_info=True
+                        )
 
                 # --- Hot-reload trigger configuration ---
                 if trigger_manager is not None:
@@ -2375,7 +2473,7 @@ async def run_main_loop(
                                 flow.request_id
                             )
                             if success:
-                                await reply(text=f"↩️ Answered: {text[:100]}")
+                                await reply(text=_format_answered_echo(text))
                             return
 
                     pending_ask = get_pending_ask_request(channel_id=msg.chat_id)
@@ -2388,8 +2486,41 @@ async def run_main_loop(
                         )
                         success = await answer_ask_question(ask_req_id, text)
                         if success:
-                            await reply(text=f"↩️ Answered: {text[:100]}")
+                            await reply(text=_format_answered_echo(text))
                             return
+
+                # #523: catch `.new`-style leading-dot typos for slash
+                # commands and surface a hint instead of dispatching a
+                # full agent subprocess (which costs the per-run cold-
+                # start of OAuth handshake + MCP catalog probe + preamble
+                # injection, then leaves the user to cancel).
+                # Only fires for plain text inputs (not voice transcripts
+                # or document captions) so user-typed prose like
+                # ``.new project idea: ...`` stays out of the heuristic.
+                if (
+                    not is_voice_transcribed
+                    and msg.voice is None
+                    and msg.document is None
+                ):
+                    typo_cmd = parse_dot_typo(
+                        text, state.command_ids | state.reserved_chat_commands
+                    )
+                    if typo_cmd is not None:
+                        logger.info(
+                            "command.dot_typo.suppressed",
+                            chat_id=chat_id,
+                            typed=text[:40],
+                            command=typo_cmd,
+                        )
+                        await reply(
+                            text=(
+                                f"Did you mean `/{typo_cmd}`? "
+                                f"(The leading `.` looks like a typo for `/`.)\n\n"
+                                f"Re-send with the slash if you meant the command, "
+                                f"or rephrase to send to the agent."
+                            )
+                        )
+                        return
 
                 pending = _PendingPrompt(
                     msg=msg,
