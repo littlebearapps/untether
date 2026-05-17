@@ -2433,6 +2433,128 @@ async def test_stall_fires_after_approval_threshold() -> None:
 
 
 @pytest.mark.anyio
+async def test_stall_approval_pending_demotes_warn_to_info(monkeypatch) -> None:
+    """#526: when threshold_reason == 'pending_approval', the WARN
+    ``progress_edits.stall_detected`` is replaced by an INFO
+    ``subprocess.approval_pending`` event so warn-filter dashboards stop
+    spamming during normal approval flows. The chat-side message is
+    independent (covered by #494-C) and continues to fire.
+    """
+    from structlog.testing import capture_logs
+
+    transport = FakeTransport()
+    presenter = _KeyboardPresenter()
+    clock = _FakeClock(start=100.0)
+    edits = _make_edits(transport, presenter, clock=clock)
+    edits._stall_check_interval = 0.01
+    edits._STALL_THRESHOLD_SECONDS = 0.05
+    edits._STALL_THRESHOLD_APPROVAL = 0.1
+
+    from untether.model import Action, ActionEvent
+
+    evt = ActionEvent(
+        engine="claude",
+        action=Action(
+            id="ctrl.1",
+            kind="warning",
+            title="Permission Request [CanUseTool] - tool: ExitPlanMode",
+            detail={"inline_keyboard": {"buttons": [[{"text": "Approve"}]]}},
+        ),
+        phase="started",
+    )
+    await edits.on_event(evt)
+    clock.set(100.0)
+
+    with capture_logs() as logs:
+        async with anyio.create_task_group() as tg:
+
+            async def drive() -> None:
+                clock.set(100.2)
+                await anyio.sleep(0.05)
+                edits.signal_send.close()
+
+            tg.start_soon(edits.run)
+            tg.start_soon(drive)
+
+    # The WARN must NOT have been emitted.
+    stall_warns = [e for e in logs if e.get("event") == "progress_edits.stall_detected"]
+    assert stall_warns == [], (
+        f"approval-pending must not emit progress_edits.stall_detected WARN, got: "
+        f"{stall_warns}"
+    )
+
+    # The INFO replacement MUST have been emitted.
+    approval_infos = [
+        e for e in logs if e.get("event") == "subprocess.approval_pending"
+    ]
+    assert len(approval_infos) >= 1
+    assert approval_infos[0].get("approval_pending") is True
+    assert approval_infos[0].get("log_level") == "info"
+
+
+@pytest.mark.anyio
+async def test_stall_approval_pending_info_event_paced_to_30_min(
+    monkeypatch,
+) -> None:
+    """#526: even on rapid stall ticks (every minute or so), the
+    ``subprocess.approval_pending`` INFO fires at most once per 30
+    minutes. The first tick emits; subsequent ticks within the window
+    are silent.
+    """
+    from structlog.testing import capture_logs
+
+    transport = FakeTransport()
+    presenter = _KeyboardPresenter()
+    clock = _FakeClock(start=100.0)
+    edits = _make_edits(transport, presenter, clock=clock)
+    edits._stall_check_interval = 0.01
+    edits._STALL_THRESHOLD_SECONDS = 0.05
+    edits._STALL_THRESHOLD_APPROVAL = 0.05
+    edits._stall_repeat_seconds = 0.0  # bypass the per-tick repeat guard
+
+    from untether.model import Action, ActionEvent
+
+    evt = ActionEvent(
+        engine="claude",
+        action=Action(
+            id="ctrl.1",
+            kind="warning",
+            title="Permission Request [CanUseTool] - tool: AskUserQuestion",
+            detail={"inline_keyboard": {"buttons": [[{"text": "Approve"}]]}},
+        ),
+        phase="started",
+    )
+    await edits.on_event(evt)
+    clock.set(100.0)
+
+    with capture_logs() as logs:
+        async with anyio.create_task_group() as tg:
+
+            async def drive() -> None:
+                # Advance the wall clock past threshold for 2-3 ticks
+                # (well within the 30-min approval-pending window) and
+                # confirm the INFO fires only once.
+                clock.set(100.2)
+                await anyio.sleep(0.03)
+                clock.set(100.5)
+                await anyio.sleep(0.03)
+                clock.set(100.8)
+                await anyio.sleep(0.03)
+                edits.signal_send.close()
+
+            tg.start_soon(edits.run)
+            tg.start_soon(drive)
+
+    approval_infos = [
+        e for e in logs if e.get("event") == "subprocess.approval_pending"
+    ]
+    assert len(approval_infos) == 1, (
+        f"Expected exactly 1 approval-pending INFO within 30-min window, got: "
+        f"{len(approval_infos)} ({approval_infos})"
+    )
+
+
+@pytest.mark.anyio
 async def test_stall_normal_threshold_without_approval() -> None:
     """Stall monitor uses normal threshold when no pending approval."""
     transport = FakeTransport()
