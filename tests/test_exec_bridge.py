@@ -5722,9 +5722,11 @@ async def test_333_post_result_with_pending_wakeup_keeps_suppression() -> None:
     edits.cancel_event = cancel_event
 
     # post-result armed 100 s ago AND a ScheduleWakeup is still live.
-    import time as _t
-
-    future_deadline = _t.monotonic() + 60.0
+    # NOTE: deadline must be expressed in the fake clock's frame.
+    # ``time.monotonic()`` in fresh CI containers is small, so a
+    # real-time deadline can look already-expired against the fake
+    # clock's larger values (#333 Tier 2 test, CI vs local).
+    future_deadline = 1010.0 + 60.0
     es = _make_engine_state(
         result_received_at=900.0,
         live_wakeups={"toolu_w1": future_deadline},
