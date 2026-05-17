@@ -75,6 +75,11 @@ class TelegramFilesSettings(BaseModel):
     outbox_dir: NonEmptyStr = ".untether-outbox"
     outbox_max_files: int = Field(default=10, ge=1, le=50)
     outbox_cleanup: bool = True
+    # #524: surface "skipped" outbox entries (directories, oversized files,
+    # deny-globbed files, …) to the user in chat. Previously these were
+    # logged as ``outbox.skipped`` only — the agent's "I've prepared the
+    # guides folder for you" final message became a silent lie.
+    outbox_notify_skipped: bool = True
 
     @field_validator("uploads_dir")
     @classmethod
