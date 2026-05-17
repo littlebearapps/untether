@@ -17,9 +17,11 @@ import pytest
 from untether.runners.run_options import EngineRunOptions
 from untether.telegram.engine_overrides import EngineOverrides
 from untether.telegram.loop import (
+    _ANSWERED_ECHO_MAX,
     ForwardCoalescer,
     ForwardKey,
     _drain_backlog,
+    _format_answered_echo,
     _forward_key,
     _PendingPrompt,
     _resolve_engine_run_options,
@@ -657,3 +659,43 @@ class TestForwardCoalescer:
             await anyio.sleep(0.15)
 
         assert len(dispatched) == 2
+
+
+# ---------------------------------------------------------------------------
+# #528 — AskUserQuestion text-reply echo helper
+# ---------------------------------------------------------------------------
+
+
+def test_format_answered_echo_short_text_returned_verbatim() -> None:
+    text = (
+        "You tell me, please - please list all of the next tasks now here in the chat"
+    )
+    assert len(text) <= _ANSWERED_ECHO_MAX
+    assert _format_answered_echo(text) == f"↩️ Answered: {text}"
+
+
+def test_format_answered_echo_long_text_ellipsised_not_hard_truncated() -> None:
+    text = "abcdefghij" * 40  # 400 chars, comfortably above _ANSWERED_ECHO_MAX (300)
+    out = _format_answered_echo(text)
+    assert out.startswith("↩️ Answered: ")
+    body = out.removeprefix("↩️ Answered: ")
+    assert body.endswith("…")
+    # Body retains _ANSWERED_ECHO_MAX-1 chars of original + the ellipsis
+    assert len(body) == _ANSWERED_ECHO_MAX
+    assert body[:-1] == text[: _ANSWERED_ECHO_MAX - 1]
+
+
+def test_format_answered_echo_boundary_exactly_max() -> None:
+    text = "x" * _ANSWERED_ECHO_MAX
+    out = _format_answered_echo(text)
+    # No ellipsis when exactly at limit
+    assert out == f"↩️ Answered: {text}"
+    assert "…" not in out
+
+
+def test_format_answered_echo_boundary_one_over_max() -> None:
+    text = "x" * (_ANSWERED_ECHO_MAX + 1)
+    out = _format_answered_echo(text)
+    body = out.removeprefix("↩️ Answered: ")
+    assert body.endswith("…")
+    assert len(body) == _ANSWERED_ECHO_MAX
