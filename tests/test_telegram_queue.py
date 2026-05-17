@@ -250,7 +250,10 @@ async def test_set_my_commands_uses_outbox() -> None:
 
 
 @pytest.mark.anyio
-async def test_answer_callback_query_uses_outbox() -> None:
+async def test_answer_callback_query_bypasses_outbox() -> None:
+    """#546: answer_callback_query bypasses the per-chat send outbox so
+    rapid taps don't escalate latency 6-10x by stacking behind the 1.0s
+    private-chat pacing bucket. The underlying bot call still happens."""
     bot = FakeBot()
     client = TelegramClient(client=bot, private_chat_rps=0.0, group_chat_rps=0.0)
 
@@ -263,6 +266,39 @@ async def test_answer_callback_query_uses_outbox() -> None:
     assert result is True
     assert bot.calls == ["answer_callback_query"]
     assert bot.callback_calls == [("cb-1", "ok", True)]
+    await client.close()
+
+
+@pytest.mark.anyio
+async def test_answer_callback_query_does_not_call_outbox_enqueue() -> None:
+    """#546 regression: ``answer_callback_query`` must bypass
+    ``_outbox.enqueue`` so it never queues behind a slow
+    ``send_message`` / ``edit_message_text`` op stacked on the shared
+    ``_next_at[None]`` pacing bucket. Verified by replacing the outbox
+    with one that explodes on enqueue.
+    """
+    bot = FakeBot()
+    client = TelegramClient(client=bot, private_chat_rps=0.0, group_chat_rps=0.0)
+
+    enqueue_calls: list[Any] = []
+
+    async def exploding_enqueue(*args: Any, **kwargs: Any) -> Any:
+        enqueue_calls.append(("enqueue", args, kwargs))
+        raise AssertionError(
+            "answer_callback_query must NOT route through outbox.enqueue "
+            "(#546). Callbacks bypass the per-chat send pacing because "
+            "Telegram rate-limits per callback-query-id, not per chat."
+        )
+
+    client._outbox.enqueue = exploding_enqueue  # type: ignore[assignment]
+
+    result = await client.answer_callback_query(
+        callback_query_id="cb-fast",
+        text="ack",
+    )
+    assert result is True
+    assert bot.callback_calls == [("cb-fast", "ack", None)]
+    assert enqueue_calls == [], "outbox.enqueue must not be called"
     await client.close()
 
 

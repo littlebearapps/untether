@@ -332,22 +332,58 @@ class TelegramClient:
         text: str | None = None,
         show_alert: bool | None = None,
     ) -> bool:
-        async def execute() -> bool:
+        """Acknowledge a Telegram callback query.
+
+        #546: callback answers are bypassed around the per-chat send outbox
+        so they don't queue behind ``send_message``/``edit_message_text``
+        ops. Rapid taps (e.g. approving plans in two chats inside ~2 s)
+        previously saw the 2nd/3rd answer escalate from the ~220 ms HTTP
+        baseline to 1.4-2.9 s because each callback also blocked on the
+        ``_next_at[None]`` 1.0 s pacing bucket shared with other chat-less
+        ops. Telegram does NOT rate-limit ``answerCallbackQuery`` per chat
+        (it keys off callback-query-id) so the outbox pacing was always
+        the wrong abstraction for this call.
+
+        We still benefit from the underlying ``_client.answer_callback_query``'s
+        retry-after handling for ``RetryAfter``; the outbox detour just adds
+        latency on top of the HTTP round-trip without protecting against
+        anything Telegram actually enforces here.
+        """
+        start = time.monotonic()
+        try:
             return await self._client.answer_callback_query(
                 callback_query_id=callback_query_id,
                 text=text,
                 show_alert=show_alert,
             )
-
-        return bool(
-            await self.enqueue_op(
-                key=self.unique_key("answer_callback_query"),
-                label="answer_callback_query",
-                execute=execute,
-                priority=SEND_PRIORITY,
-                chat_id=None,
+        except TelegramRetryAfter as exc:
+            # Telegram asked us to back off — re-attempt once after the
+            # requested delay. If still rate-limited, fail fast: the
+            # spinner will expire naturally within 30 s, and double-
+            # delivery here is worse than user re-tapping.
+            await self._sleep(exc.retry_after)
+            try:
+                return await self._client.answer_callback_query(
+                    callback_query_id=callback_query_id,
+                    text=text,
+                    show_alert=show_alert,
+                )
+            except TelegramRetryAfter:
+                logger.warning(
+                    "telegram.answer_callback_query.retry_exhausted",
+                    callback_query_id=callback_query_id,
+                    total_ms=round((time.monotonic() - start) * 1000, 1),
+                )
+                return False
+        except Exception as exc:  # noqa: BLE001 — match outbox behaviour
+            logger.error(
+                "telegram.answer_callback_query.failed",
+                callback_query_id=callback_query_id,
+                error=str(exc),
+                error_type=exc.__class__.__name__,
+                total_ms=round((time.monotonic() - start) * 1000, 1),
             )
-        )
+            return False
 
     async def get_chat(self, chat_id: int) -> Chat | None:
         async def execute() -> Chat | None:
