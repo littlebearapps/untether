@@ -1,5 +1,6 @@
 import contextlib
 import json
+import signal
 import time
 from datetime import UTC
 from pathlib import Path
@@ -3756,3 +3757,333 @@ def test_first_user_message_text_captured_in_new_state() -> None:
     )
     state = runner.new_state("user typed /loop X", None)
     assert state.first_user_message_text == "user typed /loop X"
+
+
+# ===========================================================================
+# #333 — post-result hang fix (Tier 1 watchdog subcountdown + Tier 3 limbo)
+# ===========================================================================
+
+
+class _FakeProc:
+    """Minimal anyio.Process stand-in for subcountdown tests.
+
+    Setting ``returncode`` to a non-None value simulates subprocess exit.
+    """
+
+    def __init__(self, pid: int = 99999, returncode: int | None = None):
+        self.pid = pid
+        self.returncode: int | None = returncode
+
+
+class _RecordingLogger:
+    """Capture structlog-style log events for assertions."""
+
+    def __init__(self) -> None:
+        self.records: list[tuple[str, str, dict]] = []  # (level, event, kwargs)
+
+    def _record(self, level: str, *args: object, **kwargs: object) -> None:
+        event = str(args[0]) if args else kwargs.get("event", "")
+        self.records.append((level, str(event), dict(kwargs)))
+
+    def info(self, *a: object, **k: object) -> None:
+        self._record("info", *a, **k)
+
+    def warning(self, *a: object, **k: object) -> None:
+        self._record("warning", *a, **k)
+
+    def debug(self, *a: object, **k: object) -> None:
+        self._record("debug", *a, **k)
+
+    def error(self, *a: object, **k: object) -> None:
+        self._record("error", *a, **k)
+
+    def events(self, level: str | None = None) -> list[str]:
+        return [e for lvl, e, _ in self.records if level is None or lvl == level]
+
+
+@pytest.mark.anyio
+async def test_333_reader_done_but_alive_triggers_subcountdown(monkeypatch) -> None:
+    """#333 Tier 1: when reader_done fires while subprocess is still alive,
+    the watchdog must enter the subcountdown instead of returning early."""
+    import anyio
+
+    from untether.runner import JsonlStreamState
+    from untether.runners.claude import (
+        _PENDING_ASK_REQUESTS,
+        _REQUEST_TO_SESSION,
+        ClaudeRunner,
+    )
+
+    _REQUEST_TO_SESSION.clear()
+    _PENDING_ASK_REQUESTS.clear()
+
+    runner = ClaudeRunner(claude_cmd="claude")
+    # Speed up the subcountdown poll loop and SIGTERM grace for tests.
+    runner._subcountdown_poll_interval_s = 0.02
+    runner._subcountdown_limbo_detect_threshold_s = 0.05
+    runner._subcountdown_sigterm_grace_s = 0.1
+    runner._subcountdown_sigterm_grace_poll_s = 0.02
+
+    state = ClaudeStreamState()
+    state.factory.started(
+        ResumeToken(engine="claude", value="sub-sess-1"),
+    )
+    state.result_received_at = time.monotonic() - 0.5
+    stream = JsonlStreamState(expected_session=None)
+
+    proc = _FakeProc(pid=42424, returncode=None)
+    killed_signals: list[int] = []
+
+    def _fake_killpg(pgid: int, sig: int) -> None:
+        killed_signals.append(sig)
+        # Simulate SIGTERM not stopping the process (so SIGKILL follows).
+        if sig == signal.SIGKILL:
+            proc.returncode = -9
+
+    monkeypatch.setattr("os.killpg", _fake_killpg)
+
+    logger = _RecordingLogger()
+    reader_done = anyio.Event()
+
+    # Pre-fire reader_done so the entry check sees it and hands off to the
+    # subcountdown immediately.
+    reader_done.set()
+
+    class FakeStdin:
+        async def aclose(self) -> None:
+            pass
+
+    async with anyio.create_task_group() as tg:
+        tg.start_soon(
+            runner._post_result_idle_watchdog,
+            state,
+            FakeStdin(),
+            reader_done,
+            logger,
+            0.1,  # 100 ms timeout — short enough for real-time test
+            proc,
+            stream,
+        )
+        # Wait for the subcountdown to fire SIGTERM (or until timeout).
+        with anyio.move_on_after(3.0):
+            while signal.SIGKILL not in killed_signals:
+                await anyio.sleep(0.02)
+        tg.cancel_scope.cancel()
+
+    events = logger.events()
+    assert "claude.post_result_idle.reader_done_but_alive" in events
+    assert signal.SIGTERM in killed_signals
+    assert signal.SIGKILL in killed_signals  # SIGTERM didn't stop our fake proc
+    exit_reasons = [
+        kw.get("reason")
+        for lvl, e, kw in logger.records
+        if e == "claude.post_result_idle.task_exited"
+    ]
+    assert "reader_done_but_alive_timeout" in exit_reasons
+
+
+@pytest.mark.anyio
+async def test_333_subprocess_exits_during_subcountdown(monkeypatch) -> None:
+    """#333 Tier 1: if the subprocess exits naturally during the subcountdown,
+    the watchdog records `subprocess_exited_during_subcountdown` and does NOT
+    SIGTERM."""
+    import anyio
+
+    from untether.runner import JsonlStreamState
+    from untether.runners.claude import (
+        _PENDING_ASK_REQUESTS,
+        _REQUEST_TO_SESSION,
+        ClaudeRunner,
+    )
+
+    _REQUEST_TO_SESSION.clear()
+    _PENDING_ASK_REQUESTS.clear()
+
+    runner = ClaudeRunner(claude_cmd="claude")
+    runner._subcountdown_poll_interval_s = 0.02
+
+    state = ClaudeStreamState()
+    state.factory.started(ResumeToken(engine="claude", value="sub-sess-2"))
+    state.result_received_at = time.monotonic() - 0.5
+    stream = JsonlStreamState(expected_session=None)
+
+    proc = _FakeProc(pid=42425, returncode=None)
+    killed_signals: list[int] = []
+
+    monkeypatch.setattr("os.killpg", lambda pgid, sig: killed_signals.append(sig))
+
+    logger = _RecordingLogger()
+    reader_done = anyio.Event()
+    reader_done.set()
+
+    class FakeStdin:
+        async def aclose(self) -> None:
+            pass
+
+    async with anyio.create_task_group() as tg:
+        tg.start_soon(
+            runner._post_result_idle_watchdog,
+            state,
+            FakeStdin(),
+            reader_done,
+            logger,
+            5.0,  # plenty of time — subprocess should exit first
+            proc,
+            stream,
+        )
+        # Wait for the subcountdown to begin, then simulate subprocess exit.
+        await anyio.sleep(0.1)
+        proc.returncode = 0
+        # Wait for the watchdog to notice and record the exit reason.
+        with anyio.move_on_after(2.0):
+            while not any(
+                e == "claude.post_result_idle.task_exited" for _, e, _ in logger.records
+            ):
+                await anyio.sleep(0.02)
+        tg.cancel_scope.cancel()
+
+    assert killed_signals == []
+    exit_reasons = [
+        kw.get("reason")
+        for lvl, e, kw in logger.records
+        if e == "claude.post_result_idle.task_exited"
+    ]
+    assert "subprocess_exited_during_subcountdown" in exit_reasons
+
+
+@pytest.mark.anyio
+async def test_333_subcountdown_defers_on_pending_request(monkeypatch) -> None:
+    """#333 Tier 1: if pending control_request appears, subcountdown re-arms
+    instead of SIGTERMing (mirrors _post_result_idle_watchdog's deferred
+    re-arm)."""
+    import anyio
+
+    from untether.runner import JsonlStreamState
+    from untether.runners.claude import (
+        _PENDING_ASK_REQUESTS,
+        _REQUEST_TO_SESSION,
+        ClaudeRunner,
+    )
+
+    sid = "sub-sess-3"
+    _REQUEST_TO_SESSION.clear()
+    _PENDING_ASK_REQUESTS.clear()
+    _REQUEST_TO_SESSION["req_x"] = sid
+    try:
+        runner = ClaudeRunner(claude_cmd="claude")
+        runner._subcountdown_poll_interval_s = 0.02
+
+        state = ClaudeStreamState()
+        state.factory.started(ResumeToken(engine="claude", value=sid))
+        state.result_received_at = time.monotonic() - 0.5
+        stream = JsonlStreamState(expected_session=None)
+
+        proc = _FakeProc(pid=42426, returncode=None)
+        killed_signals: list[int] = []
+
+        monkeypatch.setattr("os.killpg", lambda pgid, sig: killed_signals.append(sig))
+
+        logger = _RecordingLogger()
+        reader_done = anyio.Event()
+        reader_done.set()
+
+        class FakeStdin:
+            async def aclose(self) -> None:
+                pass
+
+        async with anyio.create_task_group() as tg:
+            tg.start_soon(
+                runner._post_result_idle_watchdog,
+                state,
+                FakeStdin(),
+                reader_done,
+                logger,
+                0.05,  # tiny timeout — would normally trigger SIGTERM fast
+                proc,
+                stream,
+            )
+            # Let several poll cycles run. Each tick should see the pending
+            # request and defer rather than fire SIGTERM.
+            await anyio.sleep(0.4)
+            tg.cancel_scope.cancel()
+
+        assert killed_signals == [], (
+            "watchdog must defer SIGTERM while a control_request is pending"
+        )
+        deferred = [
+            e
+            for lvl, e, kw in logger.records
+            if e == "claude.post_result_idle.subcountdown_deferred"
+        ]
+        assert deferred, "expected subcountdown_deferred log to fire"
+    finally:
+        _REQUEST_TO_SESSION.clear()
+        _PENDING_ASK_REQUESTS.clear()
+
+
+@pytest.mark.anyio
+async def test_333_lifecycle_state_transitions_logged(monkeypatch) -> None:
+    """Task 4a: subprocess.state.* transitions emitted in the expected order
+    when the subcountdown fires."""
+    import anyio
+
+    from untether.runner import JsonlStreamState
+    from untether.runners.claude import (
+        _PENDING_ASK_REQUESTS,
+        _REQUEST_TO_SESSION,
+        ClaudeRunner,
+    )
+
+    _REQUEST_TO_SESSION.clear()
+    _PENDING_ASK_REQUESTS.clear()
+
+    runner = ClaudeRunner(claude_cmd="claude")
+    runner._subcountdown_poll_interval_s = 0.02
+    runner._subcountdown_sigterm_grace_s = 0.1
+    runner._subcountdown_sigterm_grace_poll_s = 0.02
+
+    state = ClaudeStreamState()
+    state.factory.started(ResumeToken(engine="claude", value="state-sess"))
+    state.result_received_at = time.monotonic() - 0.5
+    stream = JsonlStreamState(expected_session=None)
+    assert stream.lifecycle_state == "spawned"
+
+    proc = _FakeProc(pid=42427, returncode=None)
+
+    def _fake_killpg(pgid: int, sig: int) -> None:
+        if sig == signal.SIGTERM:
+            proc.returncode = -15  # exit on SIGTERM
+
+    monkeypatch.setattr("os.killpg", _fake_killpg)
+
+    logger = _RecordingLogger()
+    reader_done = anyio.Event()
+    reader_done.set()
+
+    class FakeStdin:
+        async def aclose(self) -> None:
+            pass
+
+    async with anyio.create_task_group() as tg:
+        tg.start_soon(
+            runner._post_result_idle_watchdog,
+            state,
+            FakeStdin(),
+            reader_done,
+            logger,
+            0.1,
+            proc,
+            stream,
+        )
+        with anyio.move_on_after(3.0):
+            while stream.lifecycle_state != "exited":
+                await anyio.sleep(0.02)
+        tg.cancel_scope.cancel()
+
+    state_events = [e for e in logger.events() if e.startswith("subprocess.state.")]
+    assert "subprocess.state.reader_eof" in state_events
+    assert "subprocess.state.subcountdown" in state_events
+    assert "subprocess.state.sigterm_sent" in state_events
+    assert "subprocess.state.exited" in state_events
+    # Final lifecycle_state reflects the last transition.
+    assert stream.lifecycle_state == "exited"

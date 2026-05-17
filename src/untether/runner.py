@@ -336,6 +336,20 @@ class JsonlStreamState:
     # `has_live_background_work()`-style info it can gate SIGTERM. Engines
     # without background-task awareness leave this None.
     engine_state: Any = None
+    # #333 Task 4a: subprocess lifecycle state machine. One log per
+    # transition (``subprocess.state.<name>``) gives audits a permanent
+    # canary for hang-class issues even when sibling instrumentation
+    # misses an edge case. ``lifecycle_state`` is monotonic in practice
+    # but engines may skip states (e.g. ``streaming`` is skipped if the
+    # subprocess dies before the first JSONL line).
+    lifecycle_state: str = "spawned"
+    lifecycle_state_entered_at: float = 0.0
+    # #333 Task 4b: per-suppression-reason counter, summarised in
+    # ``session.summary``. Bumped by the bridge stall detector each
+    # tick a suppression branch fires (post_result, children_active,
+    # expected_wait). Plain dict (not defaultdict) so the slots-dataclass
+    # encoding stays trivial; bump via ``counts.get(k, 0) + 1``.
+    stall_suppression_counts: dict[str, int] = field(default_factory=dict)
 
 
 class JsonlSubprocessRunner(BaseRunner):
@@ -345,6 +359,48 @@ class JsonlSubprocessRunner(BaseRunner):
 
     def get_logger(self) -> Any:
         return getattr(self, "logger", get_logger(__name__))
+
+    def _transition_lifecycle(
+        self,
+        stream: JsonlStreamState,
+        new_state: str,
+        logger: Any,
+        *,
+        pid: int | None = None,
+        session_id: str | None = None,
+        **extra: Any,
+    ) -> None:
+        """Emit a ``subprocess.state.<new_state>`` info log and update the
+        stream's lifecycle pointer (Task 4a, #333).
+
+        Idempotent: if ``new_state`` matches the current ``lifecycle_state``
+        no log fires. Safe to call from anywhere — it never raises.
+        """
+        try:
+            if stream.lifecycle_state == new_state:
+                return
+            now = time.monotonic()
+            elapsed_since_last = (
+                round(now - stream.lifecycle_state_entered_at, 1)
+                if stream.lifecycle_state_entered_at
+                else None
+            )
+            prev = stream.lifecycle_state
+            stream.lifecycle_state = new_state
+            stream.lifecycle_state_entered_at = now
+            logger.info(
+                f"subprocess.state.{new_state}",
+                engine=getattr(self, "engine", None),
+                pid=pid,
+                session_id=session_id,
+                previous_state=prev,
+                elapsed_since_last_state_s=elapsed_since_last,
+                **extra,
+            )
+        except Exception:  # noqa: BLE001
+            # Lifecycle logging must never break a run.
+            with contextlib.suppress(Exception):
+                logger.debug("subprocess.state.transition_failed", exc_info=True)
 
     def command(self) -> str:
         raise NotImplementedError
