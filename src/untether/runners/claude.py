@@ -13,6 +13,7 @@ import os
 import pty
 import re
 import shutil
+import signal
 import subprocess as subprocess_module
 import time
 import tty
@@ -2057,6 +2058,12 @@ class ClaudeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
     _proc_stdin: Any | None = None  # PIPE stdin for control channel (permission mode)
     _control_timeout_seconds: float = CONTROL_REQUEST_TIMEOUT_SECONDS
     _max_pending_control_requests: int = 100
+    # #333 Tier 1 / Tier 3: subcountdown tuning constants. Class-level so
+    # tests can override via monkeypatch without touching production code.
+    _subcountdown_poll_interval_s: float = 5.0
+    _subcountdown_limbo_detect_threshold_s: float = 30.0
+    _subcountdown_sigterm_grace_s: float = 5.0
+    _subcountdown_sigterm_grace_poll_s: float = 0.5
 
     def format_resume(self, token: ResumeToken) -> str:
         if token.engine != ENGINE:
@@ -2657,6 +2664,8 @@ class ClaudeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
         reader_done: anyio.Event,
         run_logger: Any,
         timeout_s: float,
+        proc: Any = None,
+        stream: Any = None,
     ) -> None:
         """Close stdin once the bidirectional CLI has been idle past the result.
 
@@ -2714,10 +2723,58 @@ class ClaudeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
         )
         exit_reason = "loop_exited"
         try:
+            # #333 Tier 1 entry check: if ``reader_done`` is already set
+            # before the first poll (e.g. the JSONL reader finished
+            # extremely quickly), still run the subcountdown if the
+            # subprocess is alive. Mirrors the mid-loop check below.
+            if reader_done.is_set():
+                sid_now = (
+                    state.factory.resume.value
+                    if state.factory.resume is not None
+                    else None
+                )
+                if proc is not None and proc.returncode is None:
+                    exit_reason = await self._post_result_subcountdown(
+                        state=state,
+                        proc=proc,
+                        run_logger=run_logger,
+                        timeout_s=timeout_s,
+                        stream=stream,
+                        session_id=sid_now,
+                    )
+                    return
+                exit_reason = "reader_done"
+                return
             while not reader_done.is_set():
                 try:
                     await anyio.sleep(poll_interval)
                     if reader_done.is_set():
+                        # #333 Tier 1: the JSONL reader exhausted — either
+                        # because the subprocess emitted CompletedEvent and
+                        # is exiting (the happy path), or because Claude
+                        # Code v2.1.143 closed stdout while keeping the
+                        # subprocess alive (the limbo path). Before rc18
+                        # the watchdog returned here, bypassing the 600 s
+                        # countdown and leaving the subprocess + MCP
+                        # children to idle for 30+ min until the user
+                        # cancelled. Now we check if the subprocess is
+                        # still alive and, if so, enter a stdout-closed
+                        # subcountdown.
+                        sid_now = (
+                            state.factory.resume.value
+                            if state.factory.resume is not None
+                            else None
+                        )
+                        if proc is not None and proc.returncode is None:
+                            exit_reason = await self._post_result_subcountdown(
+                                state=state,
+                                proc=proc,
+                                run_logger=run_logger,
+                                timeout_s=timeout_s,
+                                stream=stream,
+                                session_id=sid_now,
+                            )
+                            return
                         exit_reason = "reader_done"
                         return
                     armed_at = state.result_received_at
@@ -2898,6 +2955,193 @@ class ClaudeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
                 ),
                 reason=exit_reason,
             )
+
+    async def _post_result_subcountdown(
+        self,
+        *,
+        state: ClaudeStreamState,
+        proc: Any,
+        run_logger: Any,
+        timeout_s: float,
+        stream: Any = None,
+        session_id: str | None = None,
+    ) -> str:
+        """Watch a stdout-closed-but-process-alive subprocess (#333 Tier 1).
+
+        Entered when ``reader_done`` fires while ``proc.returncode is None`` —
+        the JSONL reader exhausted but the subprocess is still alive (Claude
+        Code v2.1.143 sometimes closes stdout without exiting). We wait up
+        to ``timeout_s`` for the subprocess to exit naturally; if it doesn't,
+        SIGTERM the process group, wait 5 s, then SIGKILL. Returns the
+        ``task_exited`` reason for the caller to record.
+
+        Tier 3: 30 s into the subcountdown, if the subprocess is still
+        alive and no real pending state references the session, emit
+        ``runner.limbo_detected`` warning. ``untether-issue-watcher``
+        picks this up automatically.
+        """
+        import os as _os
+
+        from ..utils.proc_diag import collect_proc_diag
+
+        reader_done_at = time.monotonic()
+        run_logger.info(
+            "claude.post_result_idle.reader_done_but_alive",
+            session_id=session_id,
+            pid=proc.pid,
+            elapsed_since_result_s=(
+                round(time.monotonic() - state.result_received_at, 1)
+                if state.result_received_at is not None
+                else None
+            ),
+            timeout_s=timeout_s,
+        )
+        if stream is not None:
+            self._transition_lifecycle(
+                stream, "reader_eof", run_logger, pid=proc.pid, session_id=session_id
+            )
+            self._transition_lifecycle(
+                stream,
+                "subcountdown",
+                run_logger,
+                pid=proc.pid,
+                session_id=session_id,
+                timeout_s=timeout_s,
+            )
+
+        # Poll loop: tick every ``_subcountdown_poll_interval_s`` up to
+        # ``timeout_s``, exit early if the subprocess dies naturally or
+        # pending state appears (in which case we re-arm and stay alive —
+        # the user is still interacting).
+        limbo_logged = False
+        deadline = reader_done_at + timeout_s
+        while True:
+            await anyio.sleep(self._subcountdown_poll_interval_s)
+            if proc.returncode is not None:
+                if stream is not None:
+                    self._transition_lifecycle(
+                        stream,
+                        "exited",
+                        run_logger,
+                        pid=proc.pid,
+                        session_id=session_id,
+                        rc=proc.returncode,
+                    )
+                return "subprocess_exited_during_subcountdown"
+
+            sid = (
+                state.factory.resume.value if state.factory.resume is not None else None
+            )
+            pending_requests = (
+                [k for k, v in _REQUEST_TO_SESSION.items() if v == sid] if sid else []
+            )
+            pending_asks = (
+                [k for k in _PENDING_ASK_REQUESTS if _REQUEST_TO_SESSION.get(k) == sid]
+                if sid
+                else []
+            )
+            if pending_requests or pending_asks:
+                # User is mid-interaction — re-arm the deadline so the
+                # subcountdown doesn't fire while a control_response is
+                # in flight. Match _post_result_idle_watchdog's deferred
+                # re-arm semantics (line 2843).
+                run_logger.info(
+                    "claude.post_result_idle.subcountdown_deferred",
+                    session_id=sid,
+                    pid=proc.pid,
+                    pending_requests=len(pending_requests),
+                    pending_asks=len(pending_asks),
+                )
+                deadline = time.monotonic() + timeout_s
+                continue
+
+            elapsed = time.monotonic() - reader_done_at
+            # Tier 3: limbo detection — a one-shot warning surfacing the
+            # condition for triage. ``untether-issue-watcher`` files this
+            # automatically on the next sweep.
+            if (
+                not limbo_logged
+                and elapsed >= self._subcountdown_limbo_detect_threshold_s
+            ):
+                limbo_logged = True
+                diag = collect_proc_diag(proc.pid)
+                run_logger.warning(
+                    "runner.limbo_detected",
+                    engine="claude",
+                    pid=proc.pid,
+                    session_id=sid,
+                    seconds_since_reader_done=round(elapsed, 1),
+                    seconds_since_last_result=(
+                        round(time.monotonic() - state.result_received_at, 1)
+                        if state.result_received_at is not None
+                        else None
+                    ),
+                    mcp_child_pids=list(diag.child_pids) if diag else [],
+                    rss_kb=diag.rss_kb if diag else None,
+                    tcp_total=diag.tcp_total if diag else None,
+                )
+                if stream is not None:
+                    self._transition_lifecycle(
+                        stream,
+                        "limbo",
+                        run_logger,
+                        pid=proc.pid,
+                        session_id=sid,
+                        seconds_since_reader_done=round(elapsed, 1),
+                    )
+
+            if time.monotonic() >= deadline:
+                # Timeout: SIGTERM the process group (start_new_session=True
+                # so PID == pgid). 5 s grace, then SIGKILL.
+                run_logger.warning(
+                    "claude.post_result_idle.sigterm_after_timeout",
+                    session_id=sid,
+                    pid=proc.pid,
+                    timeout_s=timeout_s,
+                    elapsed_s=round(elapsed, 1),
+                )
+                if stream is not None:
+                    self._transition_lifecycle(
+                        stream,
+                        "sigterm_sent",
+                        run_logger,
+                        pid=proc.pid,
+                        session_id=sid,
+                    )
+                with contextlib.suppress(ProcessLookupError, PermissionError, OSError):
+                    _os.killpg(proc.pid, signal.SIGTERM)
+                # Give MCP children configured grace to clean up.
+                grace_deadline = time.monotonic() + self._subcountdown_sigterm_grace_s
+                while time.monotonic() < grace_deadline:
+                    await anyio.sleep(self._subcountdown_sigterm_grace_poll_s)
+                    if proc.returncode is not None:
+                        if stream is not None:
+                            self._transition_lifecycle(
+                                stream,
+                                "exited",
+                                run_logger,
+                                pid=proc.pid,
+                                session_id=sid,
+                                rc=proc.returncode,
+                            )
+                        return "reader_done_but_alive_timeout"
+                # Still alive — SIGKILL the group.
+                run_logger.warning(
+                    "claude.post_result_idle.sigkill_after_grace",
+                    session_id=sid,
+                    pid=proc.pid,
+                )
+                if stream is not None:
+                    self._transition_lifecycle(
+                        stream,
+                        "sigkill_sent",
+                        run_logger,
+                        pid=proc.pid,
+                        session_id=sid,
+                    )
+                with contextlib.suppress(ProcessLookupError, PermissionError, OSError):
+                    _os.killpg(proc.pid, signal.SIGKILL)
+                return "reader_done_but_alive_timeout"
 
     def translate(
         self,
@@ -3209,6 +3453,8 @@ class ClaudeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
                             reader_done,
                             run_logger,
                             post_result_idle_timeout_s,
+                            proc,
+                            stream,
                         )
                     async for evt in self._iter_jsonl_events(
                         stdout=proc.stdout,

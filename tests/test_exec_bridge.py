@@ -5614,3 +5614,133 @@ async def test_heartbeat_mutates_schedule_wakeup_countdown() -> None:
     action_state = next(iter(edits.tracker._actions.values()))
     assert "countdown_s" in action_state.action.detail
     assert action_state.action.detail["countdown_s"] >= 0
+
+
+# ---------------------------------------------------------------------------
+# #333 Tier 2 — post-result limbo lets auto-cancel fire when watchdog fails
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.anyio
+async def test_333_post_result_limbo_lets_auto_cancel_fire() -> None:
+    """#333 Tier 2: when post-result idle age exceeds the limbo threshold AND
+    no other expected-wait flag is set, the stall detector stops suppressing
+    auto-cancel. Defense-in-depth for the case where claude.py Tier 1
+    subcountdown failed to close the subprocess."""
+    transport = FakeTransport()
+    presenter = _KeyboardPresenter()
+    clock = _FakeClock(start=1000.0)
+    edits = _make_edits(transport, presenter, clock=clock)
+    edits._stall_check_interval = 0.01
+    edits._STALL_THRESHOLD_SECONDS = 0.05
+    edits._STALL_THRESHOLD_TOOL = 0.05
+    edits._STALL_THRESHOLD_APPROVAL = 10.0
+    edits._stall_repeat_seconds = 0.0
+    edits._STALL_MAX_WARNINGS = 1
+    edits._POST_RESULT_LIMBO_THRESHOLD_S = 60.0
+    cancel_event = anyio.Event()
+    edits.cancel_event = cancel_event
+
+    # ``result_received_at`` set 100 s ago (> 60 s limbo threshold).
+    edits.stream = _make_stream(
+        last_event_type="result",
+        engine_state=_make_engine_state(result_received_at=900.0),
+    )
+
+    async with anyio.create_task_group() as tg:
+
+        async def drive() -> None:
+            clock.set(1010.0)  # 10 s after stall window opens
+            with anyio.move_on_after(1.0):
+                await cancel_event.wait()
+            edits.signal_send.close()
+
+        tg.start_soon(edits.run)
+        tg.start_soon(drive)
+
+    # Limbo detection logged + auto-cancel fired.
+    assert edits._post_result_limbo_logged is True
+    assert cancel_event.is_set()
+
+
+@pytest.mark.anyio
+async def test_333_post_result_below_limbo_threshold_still_suppresses() -> None:
+    """#333 Tier 2: within the limbo threshold, post-result idle still
+    suppresses auto-cancel (preserves existing behaviour for normal sessions
+    where the watchdog will close stdin shortly)."""
+    transport = FakeTransport()
+    presenter = _KeyboardPresenter()
+    clock = _FakeClock(start=1000.0)
+    edits = _make_edits(transport, presenter, clock=clock)
+    edits._stall_check_interval = 0.01
+    edits._STALL_THRESHOLD_SECONDS = 0.05
+    edits._STALL_THRESHOLD_TOOL = 0.05
+    edits._STALL_THRESHOLD_APPROVAL = 10.0
+    edits._stall_repeat_seconds = 1000.0
+    edits._STALL_MAX_WARNINGS = 2
+    edits._POST_RESULT_LIMBO_THRESHOLD_S = 600.0
+    cancel_event = anyio.Event()
+    edits.cancel_event = cancel_event
+
+    # ``result_received_at`` 10 s ago (< 600 s limbo threshold).
+    edits.stream = _make_stream(
+        last_event_type="result",
+        engine_state=_make_engine_state(result_received_at=990.0),
+    )
+
+    async with anyio.create_task_group() as tg:
+
+        async def drive() -> None:
+            clock.set(1010.0)
+            await anyio.sleep(0.2)
+            edits.signal_send.close()
+
+        tg.start_soon(edits.run)
+        tg.start_soon(drive)
+
+    assert edits._post_result_limbo_logged is False
+    assert not cancel_event.is_set()
+
+
+@pytest.mark.anyio
+async def test_333_post_result_with_pending_wakeup_keeps_suppression() -> None:
+    """#333 Tier 2: even when post-result idle age exceeds the limbo
+    threshold, another active expected-wait signal (ScheduleWakeup here)
+    keeps auto-cancel suppressed."""
+    transport = FakeTransport()
+    presenter = _KeyboardPresenter()
+    clock = _FakeClock(start=1000.0)
+    edits = _make_edits(transport, presenter, clock=clock)
+    edits._stall_check_interval = 0.01
+    edits._STALL_THRESHOLD_SECONDS = 0.05
+    edits._STALL_THRESHOLD_TOOL = 0.05
+    edits._STALL_THRESHOLD_APPROVAL = 10.0
+    edits._stall_repeat_seconds = 1000.0
+    edits._STALL_MAX_WARNINGS = 1
+    edits._POST_RESULT_LIMBO_THRESHOLD_S = 60.0
+    cancel_event = anyio.Event()
+    edits.cancel_event = cancel_event
+
+    # post-result armed 100 s ago AND a ScheduleWakeup is still live.
+    import time as _t
+
+    future_deadline = _t.monotonic() + 60.0
+    es = _make_engine_state(
+        result_received_at=900.0,
+        live_wakeups={"toolu_w1": future_deadline},
+    )
+    edits.stream = _make_stream(last_event_type="result", engine_state=es)
+
+    async with anyio.create_task_group() as tg:
+
+        async def drive() -> None:
+            clock.set(1010.0)
+            await anyio.sleep(0.2)
+            edits.signal_send.close()
+
+        tg.start_soon(edits.run)
+        tg.start_soon(drive)
+
+    # _real_pending was True (wakeup), so _expected_wait stays True even
+    # though _post_result_limbo also went True. Auto-cancel does NOT fire.
+    assert not cancel_event.is_set()

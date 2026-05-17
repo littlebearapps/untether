@@ -915,6 +915,9 @@ class ProgressEdits:
         self._stuck_after_tool_result_recovery_enabled: bool = True
         self._stuck_after_tool_result_recovery_delay: float = 60.0
         self._stuck_state: _StuckAfterToolResultState | None = None
+        # #333 Tier 2: one-shot guard so we only log the limbo detection
+        # once per session, not on every 60 s stall tick.
+        self._post_result_limbo_logged: bool = False
         self.pid: int | None = None
         self.stream: Any = None  # JsonlStreamState, set from run_runner_with_cancel
         self.cancel_event: anyio.Event | None = None  # threaded from RunningTask
@@ -1155,13 +1158,47 @@ class ProgressEdits:
             _monitor_state = self._has_active_monitor()
             _bash_grace = self._has_recent_bash_action(self._bash_grace_seconds)
             _bash_fresh = self._has_fresh_bash_output(threshold / 2.0)
-            _expected_wait = (
+            # #333 Tier 2 (defense-in-depth): post-result idle alone is no
+            # longer enough to suppress auto-cancel indefinitely. The
+            # claude.py watchdog (Tier 1) should close the subprocess
+            # within ``post_result_idle_timeout + grace`` (≈ 660 s). If
+            # we're still in post-result idle past the limbo threshold
+            # AND no other expected-wait flag is set, treat as limbo and
+            # let auto-cancel fire. Older expected-wait suppression is
+            # preserved for the legitimate case (e.g. ScheduleWakeup, an
+            # active Monitor, or a long bash polling loop).
+            _post_result_age = self._post_result_idle_age_seconds()
+            _post_result_limbo = (
                 _post_result_idle
-                or _wakeup_state is not None
+                and _post_result_age is not None
+                and _post_result_age > self._POST_RESULT_LIMBO_THRESHOLD_S
+            )
+            _real_pending = (
+                _wakeup_state is not None
                 or _monitor_state is not None
                 or _bash_grace
                 or _bash_fresh
             )
+            _expected_wait = (
+                _post_result_idle and not _post_result_limbo
+            ) or _real_pending
+
+            # #333 Tier 2: one-shot warning when limbo is detected. This
+            # complements the claude.py watchdog's ``runner.limbo_detected``
+            # event from the runner side — both signals get picked up by
+            # ``untether-issue-watcher`` and indicate Tier 1 missed an
+            # edge case (subprocess wouldn't die to SIGTERM/SIGKILL, or
+            # the watchdog itself never ran).
+            if _post_result_limbo and not self._post_result_limbo_logged:
+                self._post_result_limbo_logged = True
+                logger.warning(
+                    "progress_edits.post_result_limbo_detected",
+                    channel_id=self.channel_id,
+                    pid=self.pid,
+                    post_result_age_s=round(_post_result_age or 0.0, 1),
+                    limbo_threshold_s=self._POST_RESULT_LIMBO_THRESHOLD_S,
+                    stall_warn_count=self._stall_warn_count,
+                )
 
             last_action = self._last_action_summary()
 
@@ -1643,6 +1680,29 @@ class ProgressEdits:
         if engine_state is None:
             return False
         return getattr(engine_state, "result_received_at", None) is not None
+
+    def _post_result_idle_age_seconds(self) -> float | None:
+        """#333 Tier 2: seconds since ``result_received_at`` was armed.
+
+        Returns None if not in post-result idle state. Used by the stall
+        detector to detect limbo — when the watchdog's post-result
+        countdown should have closed the subprocess but didn't.
+
+        Uses ``self.clock()`` (matches the bridge's clock injection) — in
+        production this is ``time.monotonic`` which is what claude.py uses
+        to set ``result_received_at``; in tests it's the fake clock so
+        ages line up with whatever the test driver advances.
+        """
+        stream = self.stream
+        if stream is None:
+            return None
+        engine_state = getattr(stream, "engine_state", None)
+        if engine_state is None:
+            return None
+        armed_at = getattr(engine_state, "result_received_at", None)
+        if armed_at is None:
+            return None
+        return self.clock() - armed_at
 
     def _has_pending_wakeup(self) -> tuple[float, int] | None:
         """#481: suppression — ScheduleWakeup with future deadline.
@@ -2248,6 +2308,13 @@ class ProgressEdits:
     _STALL_MAX_WARNINGS: int = 10  # absolute cap
     _STALL_MAX_WARNINGS_NO_PID: int = 3  # aggressive cap when pid=None + no events
     _TCP_ACTIVE_THRESHOLD: int = 20  # TCP connections above this suggest active work
+    # #333 Tier 2: post-result idle limbo threshold. The Claude watchdog
+    # (claude.py:_post_result_idle_watchdog + _post_result_subcountdown)
+    # closes the subprocess within ``post_result_idle_timeout`` (600 s) +
+    # 5 s SIGTERM grace + observation slack. If we're still in post-
+    # result idle past this point with no other expected-wait signal,
+    # Tier 1 missed an edge case — stop suppressing auto-cancel.
+    _POST_RESULT_LIMBO_THRESHOLD_S: float = 660.0
 
     async def on_event(self, evt: UntetherEvent) -> None:
         if not self.tracker.note_event(evt):
