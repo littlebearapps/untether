@@ -64,6 +64,26 @@ def test_default_preamble_includes_outbox_instructions() -> None:
     assert "/file get" in _DEFAULT_PREAMBLE
 
 
+def test_default_preamble_warns_against_systemctl_restart() -> None:
+    """#547 axis 1: agents routinely follow ``edit untether.toml`` with
+    ``systemctl --user restart untether`` because their training data is
+    full of "restart the service after config changes". Untether already
+    hot-reloads the file; the restart drops the agent's own final answer
+    (drain timeout + outbox.fail_pending). The preamble must tell agents
+    explicitly NOT to restart after editing config."""
+    # Headline: hot-reload mentioned
+    assert "hot-reload" in _DEFAULT_PREAMBLE.lower()
+    # Explicit "do NOT" framing
+    assert "Do NOT" in _DEFAULT_PREAMBLE
+    assert "systemctl" in _DEFAULT_PREAMBLE
+    assert "restart untether" in _DEFAULT_PREAMBLE
+    # Consequence spelled out so agents understand why
+    assert "drop" in _DEFAULT_PREAMBLE.lower() or "lost" in _DEFAULT_PREAMBLE.lower()
+    # Restart-only keys mentioned so agents know the exception
+    assert "bot_token" in _DEFAULT_PREAMBLE
+    assert "chat_id" in _DEFAULT_PREAMBLE
+
+
 # ───── #508 / #515 — plan-mode preamble clauses ────────────────────────
 
 

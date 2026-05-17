@@ -288,6 +288,25 @@ def _should_auto_continue(
     return auto_continued_count < max_retries
 
 
+def _format_outbox_skipped_notice(skipped: list[tuple[str, str]]) -> str:
+    """#524: human-readable notice for outbox entries that were dropped
+    rather than delivered. Headline framing matches the agent's intent:
+    the user (and the agent reading in next-turn context) should see what
+    the agent meant to send and why it didn't ship.
+
+    Sorted by name, capped at 10 entries (rest collapsed to "...").
+    """
+    lines = ["\U0001f4ce Outbox skipped (unsupported / blocked):"]
+    items = sorted(skipped, key=lambda kv: kv[0])
+    cap = 10
+    for name, reason in items[:cap]:
+        suffix = "/" if reason == "directory" else ""
+        lines.append(f"- {name}{suffix} — {reason}")
+    if len(items) > cap:
+        lines.append(f"- … and {len(items) - cap} more")
+    return "\n".join(lines)
+
+
 def _format_auto_continue_notice(auto_continued_count: int) -> str:
     """#551 Tier 1: build the Telegram notice text shown when auto-continue
     fires. The 🔁 prefix distinguishes auto-resume from a fresh start so
@@ -310,6 +329,16 @@ _DEFAULT_PREAMBLE = (
     "- If hooks fire at session end, your final response MUST still contain the "
     "user's requested content. Hook concerns are secondary — briefly note them "
     "AFTER the main content, never instead of it.\n\n"
+    "Configuration changes (`untether.toml`):\n"
+    "- Untether hot-reloads `~/.untether/untether.toml` automatically — "
+    "edits take effect within ~1 second of saving.\n"
+    "- Do NOT run `systemctl --user restart untether` after editing config. "
+    "The restart is unnecessary, and because it shuts down the very session "
+    "issuing the command, the graceful drain will time out (120s) and your "
+    "final answer to the user will be silently dropped.\n"
+    "- Restart-only keys (`bot_token`, `chat_id`, `session_mode`, `topics`, "
+    "`message_overflow`) are flagged at reload time — if you didn't see "
+    "such a warning, no restart is needed.\n\n"
     "Plan-mode requirements (when you call `ExitPlanMode`):\n"
     "- Your `plan` parameter MUST be a concise 3–5 bullet summary of your "
     "findings, decisions, or proposed changes — never just a file path. "
@@ -930,6 +959,11 @@ class ProgressEdits:
         # #333 Tier 2: one-shot guard so we only log the limbo detection
         # once per session, not on every 60 s stall tick.
         self._post_result_limbo_logged: bool = False
+        # #526: pacing for the ``subprocess.approval_pending`` INFO event so
+        # an approval-waiting session emits at most every 30 min — gives
+        # operators a heartbeat without padding warn-filters with WARNs
+        # that would otherwise fire identically to genuine stalls.
+        self._last_approval_pending_emit_at: float = 0.0
         self.pid: int | None = None
         self.stream: Any = None  # JsonlStreamState, set from run_runner_with_cancel
         self.cancel_event: anyio.Event | None = None  # threaded from RunningTask
@@ -1221,26 +1255,58 @@ class ProgressEdits:
                 else None
             )
 
-            logger.warning(
-                "progress_edits.stall_detected",
-                channel_id=self.channel_id,
-                seconds_since_last_event=round(elapsed, 1),
-                last_event_seq=self.event_seq,
-                stall_warn_count=self._stall_warn_count,
-                pid=self.pid,
-                last_action=last_action,
-                last_event_type=(self.stream.last_event_type if self.stream else None),
-                process_alive=diag.alive if diag else None,
-                process_state=diag.state if diag else None,
-                tcp_established=diag.tcp_established if diag else None,
-                tcp_total=diag.tcp_total if diag else None,
-                rss_kb=diag.rss_kb if diag else None,
-                fd_count=diag.fd_count if diag else None,
-                cpu_active=cpu_active,
-                tree_active=tree_active,
-                recent_events=[(round(t, 1), lbl) for t, lbl in recent[-5:]],
-                stderr_hint=stderr_hint,
-            )
+            # #526: when the stall is the user reading the plan /
+            # deliberating on an approval, demote the WARN to a different
+            # structured INFO (``subprocess.approval_pending``) and pace it
+            # to once per 30 minutes. The chat-side rendering below still
+            # emits the friendly "⏳ Awaiting your approval (N min)" copy
+            # (#494-C) — operators just stop getting warn-filter spam for
+            # what is by definition not a hang. The daemon
+            # (``untether-issue-watcher``) and ``/monitor`` are configured
+            # to treat WARNs as auto-fileable, so this also stops
+            # spurious GitHub issue creation (closes #533).
+            if threshold_reason == "pending_approval":
+                _APPROVAL_PENDING_REFIRE_S = 1800.0
+                if (
+                    self._last_approval_pending_emit_at == 0.0
+                    or now - self._last_approval_pending_emit_at
+                    >= _APPROVAL_PENDING_REFIRE_S
+                ):
+                    self._last_approval_pending_emit_at = now
+                    logger.info(
+                        "subprocess.approval_pending",
+                        channel_id=self.channel_id,
+                        engine=getattr(self.tracker, "engine", None),
+                        pid=self.pid,
+                        seconds_since_last_event=round(elapsed, 1),
+                        last_action=last_action,
+                        recent_events=[(round(t, 1), lbl) for t, lbl in recent[-3:]],
+                        approval_pending=True,
+                    )
+            else:
+                logger.warning(
+                    "progress_edits.stall_detected",
+                    channel_id=self.channel_id,
+                    seconds_since_last_event=round(elapsed, 1),
+                    last_event_seq=self.event_seq,
+                    stall_warn_count=self._stall_warn_count,
+                    pid=self.pid,
+                    last_action=last_action,
+                    last_event_type=(
+                        self.stream.last_event_type if self.stream else None
+                    ),
+                    process_alive=diag.alive if diag else None,
+                    process_state=diag.state if diag else None,
+                    tcp_established=diag.tcp_established if diag else None,
+                    tcp_total=diag.tcp_total if diag else None,
+                    rss_kb=diag.rss_kb if diag else None,
+                    fd_count=diag.fd_count if diag else None,
+                    cpu_active=cpu_active,
+                    tree_active=tree_active,
+                    recent_events=[(round(t, 1), lbl) for t, lbl in recent[-5:]],
+                    stderr_hint=stderr_hint,
+                    approval_pending=False,
+                )
 
             # Auto-cancel: dead process, no-PID zombie, or absolute cap.
             # #470/#481: when an expected-wait state is active, skip the
@@ -3319,7 +3385,7 @@ async def handle_message(
         if _run_root is not None:
             _oc = cfg.outbox_config
             try:
-                await deliver_outbox_files(
+                _outbox_result = await deliver_outbox_files(
                     send_file=cfg.send_file,
                     channel_id=incoming.channel_id,
                     thread_id=incoming.thread_id,
@@ -3333,3 +3399,34 @@ async def handle_message(
                 )
             except Exception:  # noqa: BLE001
                 logger.warning("outbox.delivery_failed", exc_info=True)
+                _outbox_result = None
+
+            # #524: surface skipped items so the agent's "I prepared the
+            # guides folder for you" final message doesn't become a silent
+            # lie. The "..." pseudo-entry is the max-files-exceeded notice
+            # which we keep in logs but skip from the user-facing block
+            # (the per-file reason there isn't actionable).
+            if (
+                _outbox_result is not None
+                and _outbox_result.skipped
+                and getattr(_oc, "outbox_notify_skipped", True)
+            ):
+                notable_skipped = [
+                    (name, reason)
+                    for (name, reason) in _outbox_result.skipped
+                    if name != "..."
+                ]
+                if notable_skipped:
+                    skipped_text = _format_outbox_skipped_notice(notable_skipped)
+                    try:
+                        await cfg.transport.send(
+                            channel_id=incoming.channel_id,
+                            message=RenderedMessage(text=skipped_text, extra={}),
+                            options=SendOptions(
+                                reply_to=user_ref,
+                                notify=False,
+                                thread_id=incoming.thread_id,
+                            ),
+                        )
+                    except Exception:  # noqa: BLE001
+                        logger.warning("outbox.skipped_notice_failed", exc_info=True)
