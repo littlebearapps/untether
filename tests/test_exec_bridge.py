@@ -5746,3 +5746,97 @@ async def test_333_post_result_with_pending_wakeup_keeps_suppression() -> None:
     # _real_pending was True (wakeup), so _expected_wait stays True even
     # though _post_result_limbo also went True. Auto-cancel does NOT fire.
     assert not cancel_event.is_set()
+
+
+# ---------------------------------------------------------------------------
+# #333 Task 4b — stall-suppression counter + session.summary integration
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.anyio
+async def test_4b_bump_stall_suppression_records_counts() -> None:
+    """Task 4b: _bump_stall_suppression increments per-reason counters
+    on JsonlStreamState. Stream missing or counter dict missing must be
+    no-ops (defensive — the stall detector should never break on bookkeeping)."""
+    from untether.runner import JsonlStreamState
+
+    transport = FakeTransport()
+    presenter = _KeyboardPresenter()
+    edits = _make_edits(transport, presenter, clock=_FakeClock(start=0.0))
+
+    # Stream is None initially -> no-op
+    edits.stream = None
+    edits._bump_stall_suppression("post_result")  # must not raise
+
+    # With a real stream, counts accumulate.
+    stream = JsonlStreamState(expected_session=None)
+    edits.stream = stream
+    edits._bump_stall_suppression("post_result")
+    edits._bump_stall_suppression("post_result")
+    edits._bump_stall_suppression("expected_wait")
+    edits._bump_stall_suppression("children_active")
+
+    assert stream.stall_suppression_counts == {
+        "post_result": 2,
+        "expected_wait": 1,
+        "children_active": 1,
+    }
+
+
+def test_551_auto_continue_notice_first_attempt() -> None:
+    """#551 Tier 1: first auto-continue (count=0) notice has 🔁 prefix and
+    no attempt suffix."""
+    from untether.runner_bridge import _format_auto_continue_notice
+
+    text = _format_auto_continue_notice(0)
+    assert text.startswith("\U0001f501 ")
+    assert "Auto-resuming" in text
+    assert "attempt" not in text  # no suffix on first attempt
+
+
+def test_551_auto_continue_notice_repeat_attempt() -> None:
+    """#551 Tier 1: repeat auto-continue (count=1+) shows attempt N+1."""
+    from untether.runner_bridge import _format_auto_continue_notice
+
+    text = _format_auto_continue_notice(1)
+    assert text.startswith("\U0001f501 ")
+    assert "(attempt 2)" in text
+
+
+@pytest.mark.anyio
+async def test_4b_stall_suppression_count_bumped_on_post_result() -> None:
+    """Task 4b: when the bridge stall detector takes the post-result
+    suppression branch, ``stall_suppression_counts['post_result']`` bumps."""
+    from untether.runner import JsonlStreamState
+
+    transport = FakeTransport()
+    presenter = _KeyboardPresenter()
+    clock = _FakeClock(start=1000.0)
+    edits = _make_edits(transport, presenter, clock=clock)
+    edits._stall_check_interval = 0.01
+    edits._STALL_THRESHOLD_SECONDS = 0.05
+    edits._STALL_THRESHOLD_TOOL = 0.05
+    edits._STALL_THRESHOLD_APPROVAL = 10.0
+    edits._stall_repeat_seconds = 1000.0
+    edits._STALL_MAX_WARNINGS = 5
+    edits._POST_RESULT_LIMBO_THRESHOLD_S = 600.0
+    cancel_event = anyio.Event()
+    edits.cancel_event = cancel_event
+
+    # post-result armed only 5 s ago — well within the limbo threshold.
+    stream = JsonlStreamState(expected_session=None)
+    stream.last_event_type = "result"
+    stream.engine_state = _make_engine_state(result_received_at=995.0)
+    edits.stream = stream
+
+    async with anyio.create_task_group() as tg:
+
+        async def drive() -> None:
+            clock.set(1005.0)
+            await anyio.sleep(0.2)
+            edits.signal_send.close()
+
+        tg.start_soon(edits.run)
+        tg.start_soon(drive)
+
+    assert stream.stall_suppression_counts.get("post_result", 0) >= 1
