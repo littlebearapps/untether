@@ -153,6 +153,33 @@ _OPENCODE_TOOL_STATUSES = frozenset({"completed", "error"})
 # the parser saw. recent_events still records them for diagnostics.
 _CONTROL_CHANNEL_EVENT_TYPES = frozenset({"control_request", "control_response"})
 
+# #526 rc20 follow-up: shared with runner_bridge.py for paced
+# ``subprocess.approval_pending`` INFO emission. The user-side stall
+# detector (bridge) and the watchdog-side liveness detector (here)
+# both honour the same 30-min refire window so operators see at most
+# one INFO per session per 30 min of an approval-waiting state.
+_APPROVAL_PENDING_REFIRE_S = 1800.0
+
+
+def _recent_event_is_control_request(stream: JsonlStreamState) -> bool:
+    """True if the most recent JSONL event in the ring buffer is a
+    Claude ``control_request`` frame — i.e. the session is awaiting an
+    approval response on the control channel.
+
+    Used by ``_watchdog_loop`` to demote ``subprocess.liveness_stall``
+    WARN → ``subprocess.approval_pending`` INFO, mirroring the bridge-side
+    behaviour added in rc19. The bridge-side predicate inspects the
+    inline-keyboard payload of the most recent action; the watchdog has
+    no access to bridge state, so it consults the JSONL event stream
+    directly. Both signals agree in the common case where Claude emitted
+    a ``control_request`` and we're waiting for the user to click a
+    button (or otherwise resolve the approval).
+    """
+    if not stream.recent_events:
+        return False
+    _, label = stream.recent_events[-1]
+    return label == "control_request"
+
 
 def _classify_jsonl_event(raw: Any) -> str:
     """Return "tool_result" | "assistant" | "other" for a decoded JSONL event.
@@ -1062,6 +1089,11 @@ class JsonlSubprocessRunner(BaseRunner):
 
         liveness_warned = False
         prev_diag = None
+        # #526 rc20 follow-up: pace ``subprocess.approval_pending`` INFO
+        # so the watchdog emits at most once per 30 min while the user
+        # deliberates. Tracked as a local rather than on the stream so
+        # the lifetime matches the watchdog loop (per-subprocess).
+        last_approval_pending_emit_at: float = 0.0
 
         # Poll until the process is dead or the reader finishes.
         while not reader_done.is_set():
@@ -1092,46 +1124,84 @@ class JsonlSubprocessRunner(BaseRunner):
             ):
                 idle = time.monotonic() - stream.last_stdout_at
                 if idle >= self._LIVENESS_TIMEOUT_SECONDS:
-                    liveness_warned = True
-                    stream.liveness_stalls += 1
-                    diag = collect_proc_diag(pid)
-                    cpu_active = is_cpu_active(prev_diag, diag)
-                    recent = list(stream.recent_events)[-5:]
-                    logger.warning(
-                        "subprocess.liveness_stall",
-                        pid=pid,
-                        idle_seconds=round(idle, 1),
-                        event_count=stream.event_count,
-                        last_event_type=stream.last_event_type,
-                        tcp_established=diag.tcp_established if diag else None,
-                        rss_kb=diag.rss_kb if diag else None,
-                        cpu_active=cpu_active,
-                        recent_events=[(round(t, 1), lbl) for t, lbl in recent],
-                    )
-                    # Auto-kill: config enabled + zero TCP + CPU NOT active
-                    if (
-                        self._stall_auto_kill
-                        and diag is not None
-                        and diag.tcp_established == 0
-                        and diag.alive
-                        and cpu_active is not True
-                    ):
-                        logger.warning(
-                            "subprocess.liveness_kill",
-                            pid=pid,
-                            reason="zero_tcp_zero_cpu",
-                        )
-                        try:
-                            _os.killpg(pid, signal.SIGKILL)
-                        except (ProcessLookupError, PermissionError, OSError) as e:
-                            logger.debug(
-                                "subprocess.watchdog.suppressed",
+                    # #526 rc20 follow-up: when the most recent JSONL
+                    # event is a ``control_request``, the subprocess
+                    # is awaiting a user approval — emit a paced
+                    # ``subprocess.approval_pending`` INFO instead of
+                    # the ``subprocess.liveness_stall`` WARN. Skip the
+                    # auto-kill branch entirely (approval-waiting is
+                    # by definition not a hang). Without latching
+                    # ``liveness_warned`` so a later genuine hang
+                    # (post-approval) can still fire the WARN.
+                    if _recent_event_is_control_request(stream):
+                        now = time.monotonic()
+                        if (
+                            last_approval_pending_emit_at == 0.0
+                            or now - last_approval_pending_emit_at
+                            >= _APPROVAL_PENDING_REFIRE_S
+                        ):
+                            last_approval_pending_emit_at = now
+                            diag = collect_proc_diag(pid)
+                            cpu_active = is_cpu_active(prev_diag, diag)
+                            recent = list(stream.recent_events)[-5:]
+                            logger.info(
+                                "subprocess.approval_pending",
                                 pid=pid,
-                                error=str(e),
-                                error_type=e.__class__.__name__,
-                                context="liveness_kill",
+                                idle_seconds=round(idle, 1),
+                                event_count=stream.event_count,
+                                last_event_type=stream.last_event_type,
+                                cpu_active=cpu_active,
+                                recent_events=[(round(t, 1), lbl) for t, lbl in recent],
+                                approval_pending=True,
+                                source="watchdog",
                             )
-                    prev_diag = diag
+                            prev_diag = diag
+                    else:
+                        liveness_warned = True
+                        stream.liveness_stalls += 1
+                        diag = collect_proc_diag(pid)
+                        cpu_active = is_cpu_active(prev_diag, diag)
+                        recent = list(stream.recent_events)[-5:]
+                        logger.warning(
+                            "subprocess.liveness_stall",
+                            pid=pid,
+                            idle_seconds=round(idle, 1),
+                            event_count=stream.event_count,
+                            last_event_type=stream.last_event_type,
+                            tcp_established=diag.tcp_established if diag else None,
+                            rss_kb=diag.rss_kb if diag else None,
+                            cpu_active=cpu_active,
+                            recent_events=[(round(t, 1), lbl) for t, lbl in recent],
+                            approval_pending=False,
+                        )
+                        # Auto-kill: config enabled + zero TCP + CPU NOT active
+                        if (
+                            self._stall_auto_kill
+                            and diag is not None
+                            and diag.tcp_established == 0
+                            and diag.alive
+                            and cpu_active is not True
+                        ):
+                            logger.warning(
+                                "subprocess.liveness_kill",
+                                pid=pid,
+                                reason="zero_tcp_zero_cpu",
+                            )
+                            try:
+                                _os.killpg(pid, signal.SIGKILL)
+                            except (
+                                ProcessLookupError,
+                                PermissionError,
+                                OSError,
+                            ) as e:
+                                logger.debug(
+                                    "subprocess.watchdog.suppressed",
+                                    pid=pid,
+                                    error=str(e),
+                                    error_type=e.__class__.__name__,
+                                    context="liveness_kill",
+                                )
+                        prev_diag = diag
 
             await anyio.sleep(self._WATCHDOG_POLL_SECONDS)
         if stream.did_emit_completed or reader_done.is_set():

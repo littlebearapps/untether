@@ -18,7 +18,7 @@ from .markdown import format_meta_line, render_event_cli
 from .model import ActionEvent, CompletedEvent, ResumeToken, StartedEvent, UntetherEvent
 from .presenter import Presenter
 from .progress import ProgressTracker
-from .runner import Runner
+from .runner import _APPROVAL_PENDING_REFIRE_S, Runner
 from .transport import (
     ChannelId,
     MessageId,
@@ -305,6 +305,45 @@ def _format_outbox_skipped_notice(skipped: list[tuple[str, str]]) -> str:
     if len(items) > cap:
         lines.append(f"- … and {len(items) - cap} more")
     return "\n".join(lines)
+
+
+async def _surface_outbox_skipped(
+    cfg: ExecBridgeConfig,
+    incoming: IncomingMessage,
+    user_ref: MessageRef,
+    skipped: list[tuple[str, str]],
+    outbox_config: Any,
+) -> None:
+    """#524 rc20 follow-up: send the 📎 Outbox skipped notice as a follow-up
+    Telegram message. Extracted so the same surface fires from both the
+    normal-completion and pre-auto-continue paths in handle_message, and
+    from the run_ok=False branch where outbox delivery itself is skipped
+    but the user still needs to know what the agent intended to send.
+
+    The "..." pseudo-entry is the max-files-exceeded notice which we keep
+    in logs but skip from the user-facing block (the per-file reason there
+    isn't actionable).
+    """
+    if not skipped:
+        return
+    if not getattr(outbox_config, "outbox_notify_skipped", True):
+        return
+    notable = [(name, reason) for (name, reason) in skipped if name != "..."]
+    if not notable:
+        return
+    text = _format_outbox_skipped_notice(notable)
+    try:
+        await cfg.transport.send(
+            channel_id=incoming.channel_id,
+            message=RenderedMessage(text=text, extra={}),
+            options=SendOptions(
+                reply_to=user_ref,
+                notify=False,
+                thread_id=incoming.thread_id,
+            ),
+        )
+    except Exception:  # noqa: BLE001
+        logger.warning("outbox.skipped_notice_failed", exc_info=True)
 
 
 def _format_auto_continue_notice(auto_continued_count: int) -> str:
@@ -1157,7 +1196,14 @@ class ProgressEdits:
             # tool, or when child processes are active (Agent subagents).
             mcp_server = self._has_running_mcp_tool()
             if self._has_pending_approval():
-                threshold = self._STALL_THRESHOLD_APPROVAL
+                # #526 rc20 follow-up: first reminder at 600 s (so users
+                # get a visible "no action needed" message in the same
+                # window as a normal stall), subsequent reminders gated
+                # by the 1800 s refire threshold.
+                if self._last_approval_pending_emit_at == 0.0:
+                    threshold = self._STALL_THRESHOLD_APPROVAL_FIRST
+                else:
+                    threshold = self._STALL_THRESHOLD_APPROVAL
                 threshold_reason = "pending_approval"
             elif mcp_server is not None:
                 threshold = self._STALL_THRESHOLD_MCP_TOOL
@@ -1266,7 +1312,6 @@ class ProgressEdits:
             # to treat WARNs as auto-fileable, so this also stops
             # spurious GitHub issue creation (closes #533).
             if threshold_reason == "pending_approval":
-                _APPROVAL_PENDING_REFIRE_S = 1800.0
                 if (
                     self._last_approval_pending_emit_at == 0.0
                     or now - self._last_approval_pending_emit_at
@@ -1282,6 +1327,7 @@ class ProgressEdits:
                         last_action=last_action,
                         recent_events=[(round(t, 1), lbl) for t, lbl in recent[-3:]],
                         approval_pending=True,
+                        source="bridge",
                     )
             else:
                 logger.warning(
@@ -1644,7 +1690,14 @@ class ProgressEdits:
                     # warning is expected, not a sign the agent has frozen.
                     # Distinguish from genuine "no progress" copy so the user
                     # realises the buttons above are theirs to action.
-                    parts = [f"⏳ Awaiting your approval ({mins} min)"]
+                    # #526 rc20 follow-up: nsd evidence (2026-05-18) showed
+                    # users cancelling at ~13 min because the original copy
+                    # didn't make the "tap a button" affordance explicit
+                    # enough — they assumed the session had hung.
+                    parts = [
+                        f"⏳ Awaiting your approval ({mins} min) — tap a "
+                        "button above to proceed (no action needed otherwise)"
+                    ]
                 elif mcp_server is not None:
                     parts = [f"⏳ MCP tool running: {mcp_server} ({mins} min)"]
                 elif threshold_reason == "active_children":
@@ -2401,7 +2454,15 @@ class ProgressEdits:
     _STALL_THRESHOLD_TOOL: float = 600.0  # 10 minutes when a tool is actively running
     _STALL_THRESHOLD_MCP_TOOL: float = 900.0  # 15 min for MCP tools (network-bound)
     _STALL_THRESHOLD_SUBAGENT: float = 900.0  # 15 min for child process / subagent work
-    _STALL_THRESHOLD_APPROVAL: float = 1800.0  # 30 minutes when waiting for approval
+    # #526 rc20 follow-up: two-tier threshold for approval-pending stalls.
+    # First reminder fires at 600 s so users get a reassuring "tap a button
+    # above" message within the same window as a normal-tool stall (10 min)
+    # — without it, nsd evidence (2026-05-18) showed users ``/cancel``-ing
+    # productive sessions after ~13 min of silence. Subsequent reminders
+    # fall back to 1800 s (30 min) so the chat doesn't get noisy on long
+    # deliberations.
+    _STALL_THRESHOLD_APPROVAL_FIRST: float = 600.0
+    _STALL_THRESHOLD_APPROVAL: float = 1800.0  # refire threshold after first
     _STALL_MAX_WARNINGS: int = 10  # absolute cap
     _STALL_MAX_WARNINGS_NO_PID: int = 3  # aggressive cap when pid=None + no events
     _TCP_ACTIVE_THRESHOLD: int = 20  # TCP connections above this suggest active work
@@ -3139,6 +3200,20 @@ async def handle_message(
                         skipped=len(result.skipped),
                         cleaned=result.cleaned,
                     )
+                    # #524 rc20 follow-up: surface skipped items from the
+                    # pre-auto-continue scan too. Without this, agents that
+                    # write a directory (e.g. ``guides/``) and then hit the
+                    # stuck-after-tool-results recovery never tell the user
+                    # the deliverable existed — the directory is left in
+                    # place for subprocess 2 to re-find, but the user sees
+                    # nothing in chat about the first attempt.
+                    await _surface_outbox_skipped(
+                        cfg,
+                        incoming,
+                        user_ref,
+                        result.skipped,
+                        _oc,
+                    )
                 except Exception:  # noqa: BLE001
                     logger.warning(
                         "outbox.auto_continue_delivery_failed", exc_info=True
@@ -3372,61 +3447,62 @@ async def handle_message(
         session_key = f"{incoming.channel_id}:{progress_ref.message_id}"
         unregister_progress(_PROGRESS_PERSISTENCE_PATH, session_key)
 
-    # Deliver outbox files (agent-initiated file delivery)
-    if (
-        cfg.send_file is not None
-        and cfg.outbox_config is not None
-        and run_ok is not False
-    ):
-        from .telegram.outbox_delivery import deliver_outbox_files
+    # Deliver outbox files (agent-initiated file delivery).
+    # #524 rc20 follow-up: surface skipped items even when run_ok is False.
+    # Delivery of *sent* files still requires a successful run (failures
+    # may leave the outbox in a partially-written state), but the user
+    # should always learn what the agent intended to send.
+    if cfg.send_file is not None and cfg.outbox_config is not None:
+        from .telegram.outbox_delivery import (
+            OutboxResult,
+            deliver_outbox_files,
+            scan_outbox,
+        )
         from .utils.paths import get_run_base_dir
 
         _run_root = get_run_base_dir()
         if _run_root is not None:
             _oc = cfg.outbox_config
-            try:
-                _outbox_result = await deliver_outbox_files(
-                    send_file=cfg.send_file,
-                    channel_id=incoming.channel_id,
-                    thread_id=incoming.thread_id,
-                    reply_to_msg_id=user_ref.message_id,
-                    run_root=_run_root,
-                    outbox_dir=_oc.outbox_dir,
-                    deny_globs=_oc.deny_globs,
-                    max_download_bytes=_oc.max_download_bytes,
-                    max_files=_oc.outbox_max_files,
-                    cleanup=_oc.outbox_cleanup,
-                )
-            except Exception:  # noqa: BLE001
-                logger.warning("outbox.delivery_failed", exc_info=True)
-                _outbox_result = None
+            _outbox_result: OutboxResult | None = None
+            if run_ok is not False:
+                try:
+                    _outbox_result = await deliver_outbox_files(
+                        send_file=cfg.send_file,
+                        channel_id=incoming.channel_id,
+                        thread_id=incoming.thread_id,
+                        reply_to_msg_id=user_ref.message_id,
+                        run_root=_run_root,
+                        outbox_dir=_oc.outbox_dir,
+                        deny_globs=_oc.deny_globs,
+                        max_download_bytes=_oc.max_download_bytes,
+                        max_files=_oc.outbox_max_files,
+                        cleanup=_oc.outbox_cleanup,
+                    )
+                except Exception:  # noqa: BLE001
+                    logger.warning("outbox.delivery_failed", exc_info=True)
+                    _outbox_result = None
+            else:
+                # Failed run: skip file delivery but still scan so the user
+                # gets the 📎 Outbox skipped notice for any directory or
+                # blocked entry the agent left behind.
+                try:
+                    _, _failed_skipped = scan_outbox(
+                        _run_root,
+                        outbox_dir=_oc.outbox_dir,
+                        deny_globs=_oc.deny_globs,
+                        max_download_bytes=_oc.max_download_bytes,
+                        max_files=_oc.outbox_max_files,
+                    )
+                except Exception:  # noqa: BLE001
+                    logger.debug("outbox.failed_run_scan_error", exc_info=True)
+                    _failed_skipped = []
+                _outbox_result = OutboxResult(skipped=_failed_skipped)
 
-            # #524: surface skipped items so the agent's "I prepared the
-            # guides folder for you" final message doesn't become a silent
-            # lie. The "..." pseudo-entry is the max-files-exceeded notice
-            # which we keep in logs but skip from the user-facing block
-            # (the per-file reason there isn't actionable).
-            if (
-                _outbox_result is not None
-                and _outbox_result.skipped
-                and getattr(_oc, "outbox_notify_skipped", True)
-            ):
-                notable_skipped = [
-                    (name, reason)
-                    for (name, reason) in _outbox_result.skipped
-                    if name != "..."
-                ]
-                if notable_skipped:
-                    skipped_text = _format_outbox_skipped_notice(notable_skipped)
-                    try:
-                        await cfg.transport.send(
-                            channel_id=incoming.channel_id,
-                            message=RenderedMessage(text=skipped_text, extra={}),
-                            options=SendOptions(
-                                reply_to=user_ref,
-                                notify=False,
-                                thread_id=incoming.thread_id,
-                            ),
-                        )
-                    except Exception:  # noqa: BLE001
-                        logger.warning("outbox.skipped_notice_failed", exc_info=True)
+            if _outbox_result is not None:
+                await _surface_outbox_skipped(
+                    cfg,
+                    incoming,
+                    user_ref,
+                    _outbox_result.skipped,
+                    _oc,
+                )
