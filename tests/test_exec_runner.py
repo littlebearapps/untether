@@ -762,6 +762,178 @@ def test_jsonl_stream_state_recent_events_ring_buffer() -> None:
 
 
 # ===========================================================================
+# #526 rc20 follow-up — watchdog approval-pending awareness
+# ===========================================================================
+
+
+def test_recent_event_is_control_request_true_when_last_label_matches() -> None:
+    """#526 rc20: the watchdog uses ``recent_events[-1] == 'control_request'``
+    as its approval-pending signal so a session waiting on an
+    ExitPlanMode/CanUseTool/AskUserQuestion approval doesn't flood the
+    operator dashboard with ``subprocess.liveness_stall`` WARNs.
+    """
+    from untether.runner import JsonlStreamState, _recent_event_is_control_request
+
+    stream = JsonlStreamState(expected_session=None)
+    stream.recent_events.append((1.0, "assistant"))
+    stream.recent_events.append((2.0, "control_request"))
+
+    assert _recent_event_is_control_request(stream) is True
+
+
+def test_recent_event_is_control_request_false_when_resolved() -> None:
+    """Once the approval resolves and Claude emits a ``control_response``
+    (followed by assistant work), the predicate must report False — the
+    session is no longer awaiting user input and a subsequent stall
+    SHOULD escalate to the normal WARN path."""
+    from untether.runner import JsonlStreamState, _recent_event_is_control_request
+
+    stream = JsonlStreamState(expected_session=None)
+    stream.recent_events.append((1.0, "control_request"))
+    stream.recent_events.append((2.0, "control_response"))
+    stream.recent_events.append((3.0, "assistant"))
+
+    assert _recent_event_is_control_request(stream) is False
+
+
+def test_recent_event_is_control_request_false_when_buffer_empty() -> None:
+    """A fresh subprocess with no JSONL events yet is not approval-pending
+    — return False rather than raising IndexError."""
+    from untether.runner import JsonlStreamState, _recent_event_is_control_request
+
+    stream = JsonlStreamState(expected_session=None)
+    assert _recent_event_is_control_request(stream) is False
+
+
+def test_approval_pending_refire_constant_is_30_min() -> None:
+    """rc19 picked a 30-minute pacing window for the bridge-side INFO. The
+    watchdog (rc20 follow-up) reuses the SAME constant so both detectors
+    agree on the heartbeat cadence — operators don't see one INFO per
+    detector per session per stall window."""
+    from untether.runner import _APPROVAL_PENDING_REFIRE_S
+
+    assert _APPROVAL_PENDING_REFIRE_S == 1800.0
+
+
+@pytest.mark.anyio
+async def test_watchdog_demotes_to_approval_pending_when_control_request_recent(
+    tmp_path,
+) -> None:
+    """#526 rc20 follow-up: when the most recent JSONL event in
+    ``stream.recent_events`` is ``control_request`` (Claude awaiting an
+    approval), the watchdog must emit ``subprocess.approval_pending``
+    INFO instead of the ``subprocess.liveness_stall`` WARN. This is what
+    stops ``untether-issue-watcher`` from auto-filing GitHub issues on
+    routine approval-pending sessions.
+    """
+    from structlog.testing import capture_logs
+
+    thread_id = "019b73c4-0c3f-7701-a0bb-aac6b4d8a3bc"
+    codex_path = tmp_path / "codex"
+    # Emit the codex thread.started event (so the runner stays alive past
+    # the schema bootstrap) and then a ``control_request``-typed line so
+    # recent_events[-1] is ``"control_request"`` when the watchdog fires.
+    # Then sleep past the liveness threshold so the watchdog fires.
+    codex_path.write_text(
+        "#!/usr/bin/env python3\n"
+        "import json\n"
+        "import sys\n"
+        "import time\n"
+        "\n"
+        "sys.stdin.read()\n"
+        f"print(json.dumps({{'type': 'thread.started', 'thread_id': '{thread_id}'}}), flush=True)\n"
+        "print(json.dumps({'type': 'control_request', 'request_id': 'req_1'}), flush=True)\n"
+        "time.sleep(1.0)\n",
+        encoding="utf-8",
+    )
+    codex_path.chmod(0o755)
+
+    runner = CodexRunner(codex_cmd=str(codex_path), extra_args=[])
+    runner._LIVENESS_TIMEOUT_SECONDS = 0.2
+    runner._WATCHDOG_POLL_SECONDS = 0.05
+    runner._WATCHDOG_GRACE_SECONDS = 0.5
+
+    with capture_logs() as logs:
+        with anyio.fail_after(5):
+            _ = [evt async for evt in runner.run("hi", None)]
+
+    stream = runner.current_stream
+    assert stream is not None
+
+    # The WARN must NOT have been emitted.
+    liveness_warns = [r for r in logs if r.get("event") == "subprocess.liveness_stall"]
+    assert liveness_warns == [], (
+        f"Watchdog must demote WARN to INFO when control_request is most "
+        f"recent, got: {liveness_warns}"
+    )
+
+    # The INFO replacement MUST have been emitted exactly once.
+    approval_infos = [
+        r for r in logs if r.get("event") == "subprocess.approval_pending"
+    ]
+    assert len(approval_infos) == 1, (
+        f"Expected exactly 1 subprocess.approval_pending INFO, "
+        f"got {len(approval_infos)}: {approval_infos!r}"
+    )
+    assert approval_infos[0].get("approval_pending") is True
+    assert approval_infos[0].get("source") == "watchdog"
+    # The latch (liveness_stalls counter) must NOT have been bumped — that
+    # field is reserved for the WARN path so session.summary still reflects
+    # approval-pending separately from actual liveness fires.
+    assert stream.liveness_stalls == 0
+
+
+@pytest.mark.anyio
+async def test_watchdog_warn_still_fires_when_no_control_request(tmp_path) -> None:
+    """The rc20 follow-up must NOT silence the WARN for genuinely-hung
+    sessions. When the most recent event is a plain ``assistant`` (or
+    anything that's not ``control_request``), keep the existing WARN +
+    liveness_stalls counter behaviour."""
+    from structlog.testing import capture_logs
+
+    thread_id = "019b73c4-0c3f-7701-a0bb-aac6b4d8a3bd"
+    codex_path = tmp_path / "codex"
+    # No control_request — last recent_event will be the thread.started.
+    codex_path.write_text(
+        "#!/usr/bin/env python3\n"
+        "import json\n"
+        "import sys\n"
+        "import time\n"
+        "\n"
+        "sys.stdin.read()\n"
+        f"print(json.dumps({{'type': 'thread.started', 'thread_id': '{thread_id}'}}), flush=True)\n"
+        "time.sleep(1.0)\n",
+        encoding="utf-8",
+    )
+    codex_path.chmod(0o755)
+
+    runner = CodexRunner(codex_cmd=str(codex_path), extra_args=[])
+    runner._LIVENESS_TIMEOUT_SECONDS = 0.2
+    runner._WATCHDOG_POLL_SECONDS = 0.05
+    runner._WATCHDOG_GRACE_SECONDS = 0.5
+
+    with capture_logs() as logs:
+        with anyio.fail_after(5):
+            _ = [evt async for evt in runner.run("hi", None)]
+
+    stream = runner.current_stream
+    assert stream is not None
+    assert stream.liveness_stalls == 1
+
+    # WARN fired exactly once with approval_pending=False as the new
+    # disambiguating field.
+    liveness_warns = [r for r in logs if r.get("event") == "subprocess.liveness_stall"]
+    assert len(liveness_warns) == 1
+    assert liveness_warns[0].get("approval_pending") is False
+
+    # No approval-pending INFO.
+    approval_infos = [
+        r for r in logs if r.get("event") == "subprocess.approval_pending"
+    ]
+    assert approval_infos == []
+
+
+# ===========================================================================
 # Phase 2e: _ResumeLineProxy.current_stream forwarding (#98)
 # ===========================================================================
 

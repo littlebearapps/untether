@@ -139,12 +139,12 @@ Files are sent in alphabetical order, one at a time, immediately after the agent
 
 Outbox delivery reuses the same security rules as `/file get`:
 
-- **Deny globs** — files matching `.git/**`, `.env`, `.envrc`, `**/*.pem`, `**/.ssh/**` (and any custom deny globs) are silently skipped
-- **Size limit** — files larger than 50 MB are skipped
+- **Deny globs** — files matching `.git/**`, `.env`, `.envrc`, `**/*.pem`, `**/.ssh/**` (and any custom deny globs) are surfaced to the user as a `📎 Outbox skipped` notice rather than silently dropped (#524)
+- **Size limit** — files larger than 50 MB are skipped (and surfaced via the same notice)
 - **Path traversal** — symlinks pointing outside the project root are rejected
 - **File count** — capped at `outbox_max_files` per run (default 10)
 - **Auto-cleanup** — sent files are deleted after delivery by default, preventing sensitive data accumulation
-- **Successful runs only** — outbox is not scanned on errored or cancelled runs
+- **Failed/auto-continued runs** — actual file delivery is still gated on a successful run, but skipped items (directories, deny-globbed files, oversized files) are surfaced even when the run fails or auto-continues, so you always learn what the agent intended to send. Opt out via `outbox_notify_skipped = false`.
 
 ### Engine compatibility
 
@@ -164,8 +164,8 @@ All engines support outbox delivery — any agent that can write files to disk c
 
 ### Limitations
 
-- **Flat scan only** — only files directly in `.untether-outbox/` are sent; subdirectories are skipped. Agents can zip nested structures if needed.
-- **Successful runs only** — if the agent errors or is cancelled, the outbox is not scanned.
+- **Flat scan only** — only files directly in `.untether-outbox/` are sent; subdirectories are surfaced as `📎 Outbox skipped` (#524) but not delivered. Agents can zip nested structures if needed.
+- **Failed runs deliver no files** — the actual file send is still gated on a successful run, but the skipped-items notice fires either way so the user always learns what the agent intended to ship.
 - **No real-time delivery** — files are sent after the run completes, not during.
 
 <!-- TODO: capture screenshot of outbox delivery in Telegram -->

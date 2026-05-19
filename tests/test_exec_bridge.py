@@ -2389,6 +2389,10 @@ async def test_stall_fires_after_approval_threshold() -> None:
     edits = _make_edits(transport, presenter, clock=clock)
     edits._stall_check_interval = 0.01
     edits._STALL_THRESHOLD_SECONDS = 0.05
+    # #526 rc20 follow-up: approval-pending now uses a two-tier threshold
+    # (FIRST then refire). Override both so the test still exercises the
+    # first-reminder path.
+    edits._STALL_THRESHOLD_APPROVAL_FIRST = 0.1
     edits._STALL_THRESHOLD_APPROVAL = 0.1  # short for test
 
     from untether.model import Action, ActionEvent
@@ -2448,6 +2452,8 @@ async def test_stall_approval_pending_demotes_warn_to_info(monkeypatch) -> None:
     edits = _make_edits(transport, presenter, clock=clock)
     edits._stall_check_interval = 0.01
     edits._STALL_THRESHOLD_SECONDS = 0.05
+    # #526 rc20 follow-up: two-tier approval threshold (FIRST + refire).
+    edits._STALL_THRESHOLD_APPROVAL_FIRST = 0.1
     edits._STALL_THRESHOLD_APPROVAL = 0.1
 
     from untether.model import Action, ActionEvent
@@ -2509,6 +2515,8 @@ async def test_stall_approval_pending_info_event_paced_to_30_min(
     edits = _make_edits(transport, presenter, clock=clock)
     edits._stall_check_interval = 0.01
     edits._STALL_THRESHOLD_SECONDS = 0.05
+    # #526 rc20 follow-up: two-tier approval threshold (FIRST + refire).
+    edits._STALL_THRESHOLD_APPROVAL_FIRST = 0.05
     edits._STALL_THRESHOLD_APPROVAL = 0.05
     edits._stall_repeat_seconds = 0.0  # bypass the per-tick repeat guard
 
@@ -2552,6 +2560,65 @@ async def test_stall_approval_pending_info_event_paced_to_30_min(
         f"Expected exactly 1 approval-pending INFO within 30-min window, got: "
         f"{len(approval_infos)} ({approval_infos})"
     )
+
+
+@pytest.mark.anyio
+async def test_first_approval_reminder_uses_lower_threshold() -> None:
+    """#526 rc20 follow-up: the FIRST chat-side reminder for an
+    approval-pending session fires at ``_STALL_THRESHOLD_APPROVAL_FIRST``
+    (default 600 s — same as the tool stall) rather than the 1800 s
+    refire threshold. Without this fix, nsd evidence (2026-05-18)
+    showed users cancelling productive sessions after ~13 min of
+    silence because no chat-side reassurance had been emitted yet.
+    Subsequent reminders fall back to the 1800 s refire threshold.
+    """
+    transport = FakeTransport()
+    presenter = _KeyboardPresenter()
+    clock = _FakeClock(start=100.0)
+    edits = _make_edits(transport, presenter, clock=clock)
+    edits._stall_check_interval = 0.01
+    edits._STALL_THRESHOLD_SECONDS = 100.0  # normal: very long, shouldn't match
+    edits._STALL_THRESHOLD_APPROVAL_FIRST = 0.1  # first: short
+    edits._STALL_THRESHOLD_APPROVAL = 100.0  # refire: very long
+
+    from untether.model import Action, ActionEvent
+
+    evt = ActionEvent(
+        engine="claude",
+        action=Action(
+            id="ctrl.1",
+            kind="warning",
+            title="Permission Request [CanUseTool] - tool: ExitPlanMode",
+            detail={"inline_keyboard": {"buttons": [[{"text": "Approve"}]]}},
+        ),
+        phase="started",
+    )
+    await edits.on_event(evt)
+    clock.set(100.0)
+
+    async with anyio.create_task_group() as tg:
+
+        async def drive() -> None:
+            clock.set(100.2)  # past FIRST (0.1) but not refire (100)
+            await anyio.sleep(0.05)
+            edits.signal_send.close()
+
+        tg.start_soon(edits.run)
+        tg.start_soon(drive)
+
+    # The chat-side reminder fired with the reworded copy quoted from
+    # the audit's recommended text (covers the "tap a button above"
+    # affordance + the "no action needed otherwise" reassurance).
+    approval_msgs = [
+        c for c in transport.send_calls if "Awaiting your approval" in c["message"].text
+    ]
+    assert len(approval_msgs) >= 1, (
+        f"Expected reworded approval reminder, saw: "
+        f"{[c['message'].text[:80] for c in transport.send_calls]}"
+    )
+    msg_text = approval_msgs[0]["message"].text
+    assert "tap a button above" in msg_text
+    assert "no action needed" in msg_text
 
 
 @pytest.mark.anyio
@@ -4743,6 +4810,129 @@ async def test_outbox_not_scanned_on_error(tmp_path) -> None:
         reset_run_base_dir(token)
 
     send_file.assert_not_called()
+
+
+@pytest.mark.anyio
+async def test_outbox_skipped_surfaced_on_failed_run(tmp_path) -> None:
+    """#524 rc20 follow-up: when a run fails (run_ok=False) but the outbox
+    contains a directory or other blocked entry, the user should still get
+    the ``📎 Outbox skipped`` follow-up message. Without this fix, failed
+    runs silently lose all evidence of intended deliveries."""
+    from unittest.mock import AsyncMock
+
+    from untether.settings import TelegramFilesSettings
+    from untether.utils.paths import reset_run_base_dir, set_run_base_dir
+
+    outbox = tmp_path / ".untether-outbox"
+    outbox.mkdir()
+    # Directory entry — always "skipped" by scan_outbox
+    (outbox / "guides").mkdir()
+
+    send_file = AsyncMock()
+    files_cfg = TelegramFilesSettings(enabled=True)
+    transport = FakeTransport()
+    runner = ScriptRunner([ErrorReturn(error="failed")], engine=CODEX_ENGINE)
+    cfg = ExecBridgeConfig(
+        transport=transport,
+        presenter=MarkdownPresenter(),
+        final_notify=False,
+        send_file=send_file,
+        outbox_config=files_cfg,
+    )
+    incoming = IncomingMessage(channel_id=1, message_id=1, text="test")
+    token = set_run_base_dir(tmp_path)
+    try:
+        await handle_message(cfg, runner=runner, incoming=incoming, resume_token=None)
+    finally:
+        reset_run_base_dir(token)
+
+    # No actual file delivery on a failed run.
+    send_file.assert_not_called()
+    # But the skipped notice IS sent — the user learns that ``guides/`` was
+    # left behind.
+    skipped_notices = [
+        c
+        for c in transport.send_calls
+        if "Outbox skipped" in c["message"].text and "guides" in c["message"].text
+    ]
+    assert len(skipped_notices) == 1, (
+        f"Expected exactly one Outbox skipped notice on failed run, "
+        f"saw {len(skipped_notices)}: "
+        f"{[c['message'].text[:80] for c in transport.send_calls]}"
+    )
+
+
+@pytest.mark.anyio
+async def test_outbox_skipped_surfaced_when_notify_disabled_stays_silent(
+    tmp_path,
+) -> None:
+    """The ``outbox_notify_skipped`` config flag opts the user out of
+    skipped-item surfacing entirely — verify it suppresses the failed-run
+    path too (not just the normal-completion path tested in rc19)."""
+    from unittest.mock import AsyncMock
+
+    from untether.settings import TelegramFilesSettings
+    from untether.utils.paths import reset_run_base_dir, set_run_base_dir
+
+    outbox = tmp_path / ".untether-outbox"
+    outbox.mkdir()
+    (outbox / "guides").mkdir()
+
+    send_file = AsyncMock()
+    files_cfg = TelegramFilesSettings(enabled=True, outbox_notify_skipped=False)
+    transport = FakeTransport()
+    runner = ScriptRunner([ErrorReturn(error="failed")], engine=CODEX_ENGINE)
+    cfg = ExecBridgeConfig(
+        transport=transport,
+        presenter=MarkdownPresenter(),
+        final_notify=False,
+        send_file=send_file,
+        outbox_config=files_cfg,
+    )
+    incoming = IncomingMessage(channel_id=1, message_id=1, text="test")
+    token = set_run_base_dir(tmp_path)
+    try:
+        await handle_message(cfg, runner=runner, incoming=incoming, resume_token=None)
+    finally:
+        reset_run_base_dir(token)
+
+    skipped_notices = [
+        c for c in transport.send_calls if "Outbox skipped" in c["message"].text
+    ]
+    assert skipped_notices == []
+
+
+@pytest.mark.anyio
+async def test_surface_outbox_skipped_helper_only_overflow_entries_silent(
+    tmp_path,
+) -> None:
+    """#524 rc20 follow-up: the ``...`` pseudo-entry from max_files
+    overflow is filtered out of the user-facing notice. If the only
+    skipped item is the overflow rollup, no message is sent at all."""
+    from untether.runner_bridge import _surface_outbox_skipped
+    from untether.settings import TelegramFilesSettings
+    from untether.transport import MessageRef
+
+    files_cfg = TelegramFilesSettings(enabled=True)
+    transport = FakeTransport()
+    cfg = ExecBridgeConfig(
+        transport=transport,
+        presenter=MarkdownPresenter(),
+        final_notify=False,
+        outbox_config=files_cfg,
+    )
+    incoming = IncomingMessage(channel_id=1, message_id=1, text="test")
+    user_ref = MessageRef(channel_id=1, message_id=1)
+
+    await _surface_outbox_skipped(
+        cfg,
+        incoming,
+        user_ref,
+        [("...", "3 more files exceeded max_files=10")],
+        files_cfg,
+    )
+
+    assert transport.send_calls == []
 
 
 # ── _should_auto_continue detection (#34142/#30333) ──
