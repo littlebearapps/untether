@@ -55,6 +55,8 @@ For tools that modify files, the approval message includes a compact diff so you
 
 This lets you make informed approve/deny decisions without leaving Telegram.
 
+You can toggle diff previews on or off via `/config` → **Diff preview**. When OFF, approval messages show the tool name and buttons only — no inline diffs. Useful on slow connections or when you trust the agent enough to skim by tool name alone.
+
 !!! untether "Untether"
     ▸ Permission Request [CanUseTool] - tool: Edit (file_path=src/main.py)<br>
     📝 src/main.py<br>

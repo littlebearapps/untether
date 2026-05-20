@@ -128,6 +128,24 @@ voice_transcription_api_key = "gsk_..."   # SecretStr — masked in logs
 
 Groq's Whisper Large v3 Turbo is fast and cheap; any OpenAI-compatible Whisper endpoint works (including a self-hosted one). The API key is `SecretStr`-masked in `repr()` / `str()` / structlog so it never lands in journal or crash output. Full setup: [Voice notes](https://untether.littlebearapps.com/how-to/voice-notes/).
 
+## Can agents send files back to me automatically?
+
+Yes — agents can write files to `.untether-outbox/` during a run, and Untether delivers them as Telegram documents when the run finishes. No special tool call needed; just write to the directory and Untether picks them up on completion. Each delivered file gets a `📎` caption, the outbox is cleaned up after delivery, and items that can't be sent (matching a deny-glob, oversized, or unsupported entry types like sub-directories) are surfaced in the final message with a `📎 Outbox skipped:` block so nothing is silently dropped.
+
+Configure in `untether.toml`:
+
+```toml
+[transports.telegram.files]
+outbox_enabled = true
+outbox_dir = ".untether-outbox"
+outbox_max_files = 20
+outbox_max_file_size_mb = 50
+outbox_cleanup = true
+outbox_notify_skipped = true
+```
+
+The deny-globs and per-file size cap are enforced before any send, so a misbehaving agent can't exfiltrate arbitrary paths or DOS your Telegram chat with huge attachments. Sub-directory entries are listed as skipped (the current implementation is a flat scan — auto-zipping is tracked as a v0.35.4 enhancement). All engines support it. Full setup: [File transfer](https://untether.littlebearapps.com/how-to/file-transfer/).
+
 ## Do I need to restart Untether after editing `untether.toml`?
 
 No — almost everything in `untether.toml` hot-reloads automatically within ~1 second of saving the file. Untether watches the config file and re-applies changes in-place: cron and webhook triggers, watchdog timing, progress verbosity, voice-transcription settings, the allowed-user list, message timing, the file-transfer + outbox config, the `show_resume_line` toggle, and every per-engine override.
