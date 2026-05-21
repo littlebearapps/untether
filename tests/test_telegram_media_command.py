@@ -89,6 +89,49 @@ async def test_media_group_auto_put_without_caption_delegates(monkeypatch) -> No
     assert calls["count"] == 1
 
 
+class _FakeChatPrefs:
+    """Minimal ChatPrefsStore stub — only ``get_context`` is exercised."""
+
+    def __init__(self, context: RunContext | None) -> None:
+        self._context = context
+
+    async def get_context(self, _chat_id: int) -> RunContext | None:
+        return self._context
+
+
+@pytest.mark.anyio
+async def test_media_group_uses_chat_prefs_bound_context(monkeypatch) -> None:
+    """Media-group uploads must fall back to chat_prefs-bound context.
+
+    Regression for the channelo bug: with no topic binding, no default_project
+    and no chat_map entry, a media group resolved ambient_context=None and
+    failed with "no project context available". The single-file path already
+    consulted chat_prefs; the media-group path did not.
+    """
+    transport = FakeTransport()
+    cfg = replace(make_cfg(transport), files=TelegramFilesSettings(enabled=True))
+    msg = _msg("")
+    captured: dict[str, RunContext | None] = {}
+
+    async def _fake_handle(
+        _cfg, _msg, _rest, _ordered, ambient_context, _topic_store
+    ) -> None:
+        captured["ambient_context"] = ambient_context
+
+    monkeypatch.setattr(media_commands, "_handle_file_put_group", _fake_handle)
+
+    await media_commands._handle_media_group(
+        cfg,
+        [msg],
+        topic_store=None,
+        chat_prefs=_FakeChatPrefs(RunContext(project="auditor-toolkit")),
+    )
+
+    ambient = captured["ambient_context"]
+    assert ambient is not None
+    assert ambient.project == "auditor-toolkit"
+
+
 @pytest.mark.anyio
 async def test_media_group_auto_put_prompt_resolve_none(monkeypatch) -> None:
     transport = FakeTransport()

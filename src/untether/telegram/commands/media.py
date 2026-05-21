@@ -22,6 +22,7 @@ from .reply import make_reply
 
 if TYPE_CHECKING:
     from ..bridge import TelegramBridgeConfig
+    from ..chat_prefs import ChatPrefsStore
 
 
 async def _handle_media_group(
@@ -37,6 +38,7 @@ async def _handle_media_group(
         Awaitable[ResolvedMessage | None],
     ]
     | None = None,
+    chat_prefs: ChatPrefsStore | None = None,
 ) -> None:
     if not messages:
         return
@@ -47,15 +49,25 @@ async def _handle_media_group(
     )
     reply = make_reply(cfg, command_msg)
     topic_key = _topic_key(command_msg, cfg) if topic_store is not None else None
+    # keep in sync with loop.py:build_message_context — same ambient-context
+    # fallback ladder: topic-bound → chat_prefs chat-bound → topic-merged default.
     chat_project = _topics_chat_project(cfg, command_msg.chat_id)
     bound_context = (
         await topic_store.get_context(*topic_key)
         if topic_store is not None and topic_key is not None
         else None
     )
-    ambient_context = _merge_topic_context(
-        chat_project=chat_project, bound=bound_context
-    )
+    chat_bound_context = None
+    if chat_prefs is not None:
+        chat_bound_context = await chat_prefs.get_context(command_msg.chat_id)
+    if bound_context is not None:
+        ambient_context = _merge_topic_context(
+            chat_project=chat_project, bound=bound_context
+        )
+    elif chat_bound_context is not None:
+        ambient_context = chat_bound_context
+    else:
+        ambient_context = _merge_topic_context(chat_project=chat_project, bound=None)
     command_id, args_text = _parse_slash_command(command_msg.text)
     if command_id == "file":
         command, rest, error = parse_file_command(args_text)

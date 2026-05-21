@@ -1102,6 +1102,7 @@ class MediaGroupBuffer:
                     self._topic_store,
                     self._run_prompt_from_upload,
                     self._resolve_prompt_message,
+                    chat_prefs=self._chat_prefs,
                 )
                 logger.debug(
                     "media_group.flush.ok",
