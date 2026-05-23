@@ -339,6 +339,13 @@ Untether is a fork of [takopi](https://github.com/banteg/takopi) by [@banteg](ht
 
 ---
 
+## ✍️ From the blog
+
+- <a href="https://littlebearapps.com/blog/coding-from-the-park/" target="_blank" rel="noopener noreferrer">Coding from the park</a> — why Untether exists, and what it feels like to run an agent while you're away from your desk
+- <a href="https://littlebearapps.com/blog/dogfooding-bugs-tests-cant-find/" target="_blank" rel="noopener noreferrer">Dogfooding bugs tests can't find</a> — how integration testing via `@untether_dev_bot` catches the things unit tests miss
+
+---
+
 ## 📄 Licence
 
 [MIT](https://github.com/littlebearapps/untether/blob/master/LICENSE) — Made by [Little Bear Apps](https://github.com/littlebearapps) 🐶
