@@ -99,7 +99,7 @@ enabled = true
 max_cost_per_run = 2.00      # USD; warn or auto-cancel if a single run exceeds this
 max_cost_per_day = 10.00     # USD; ditto across a calendar day
 warn_at_pct = 80             # warn when this % of budget is consumed
-auto_cancel_on_exceed = true # cancel the run when the threshold is hit
+auto_cancel = true           # cancel the run when the threshold is hit
 ```
 
 `/usage` shows the current run's cost; `/usage debug` shows OAuth token expiry, schema-mismatch counters, and cache freshness — useful when the subscription footer goes silent. `/stats` reports per-engine totals across today, this week, and all time.
