@@ -80,6 +80,8 @@ The wizard offers three **workflow modes** — pick the one that fits:
 
 **Tip:** Already have a bot token? Pass it directly: `untether --bot-token YOUR_TOKEN`
 
+**Capacity:** A single bot token comfortably handles dozens of concurrent agent runs — see [Telegram capacity & limits](docs/explanation/telegram-capacity.md) for the ceilings and where Untether breaks first.
+
 📖 See our [help guides](#-help-guides) for detailed setup, engine configuration, and troubleshooting.
 
 ---
@@ -297,6 +299,7 @@ Full documentation is available in the [`docs/`](https://github.com/littlebearap
 - [Configuration reference](https://github.com/littlebearapps/untether/blob/master/docs/reference/config.md) — full walkthrough of `untether.toml`
 - [Troubleshooting](https://github.com/littlebearapps/untether/blob/master/docs/how-to/troubleshooting.md) — common issues and solutions
 - [Architecture](https://github.com/littlebearapps/untether/blob/master/docs/explanation/architecture.md) — how the pieces fit together
+- [Telegram capacity & limits](https://github.com/littlebearapps/untether/blob/master/docs/explanation/telegram-capacity.md) — how many concurrent agents one bot can handle, rate limits, scaling patterns
 
 ---
 

@@ -328,6 +328,10 @@ the cause.
   if missing, we fall back to a 5s delay. The outbox sets `retry_at` and
   requeues the op if no newer op for the same key has arrived.
 
+For the wider capacity picture — Telegram Bot API limits, Untether's
+operating envelope, where the system breaks first, and scaling patterns — see
+[Telegram capacity & limits](../../explanation/telegram-capacity.md).
+
 ## Error handling
 
 - Non-429 errors are logged and dropped (no retry).
