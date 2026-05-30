@@ -340,3 +340,174 @@ def test_continue_session_id_promoted_from_header() -> None:
     started = next(e for e in events if isinstance(e, StartedEvent))
     assert started.resume.value == "ccd569e0"
     assert started.resume.value != ""
+
+
+# ---------------------------------------------------------------------------
+# #565 — surface Pi stderr / diagnose silent rc=0 no-agent_end exits
+# ---------------------------------------------------------------------------
+
+
+def _pi_runner() -> PiRunner:
+    return PiRunner(extra_args=[], model=None, provider=None)
+
+
+def test_stream_end_zero_events_reports_startup_failure() -> None:
+    """#565: rc=0 with no translated events (state.started False) is a
+    startup/early-exit crash, not a truncated stream — say so, and on a resumed
+    run hint that the session may have failed to load (the real, transient cause
+    behind the original report: MCP servers cold during resume rehydrate)."""
+    runner = _pi_runner()
+    state = PiStreamState(resume=ResumeToken(engine=ENGINE, value="session.jsonl"))
+    # state.started stays False → Pi produced nothing.
+    events = runner.stream_end_events(
+        resume=ResumeToken(engine=ENGINE, value="session.jsonl"),
+        found_session=None,
+        state=state,
+        stderr_lines=["Error: MCP server 'foo' failed to connect", "exiting"],
+    )
+    assert len(events) == 1
+    completed = events[0]
+    assert isinstance(completed, CompletedEvent)
+    assert completed.ok is False
+    assert "produced no events" in completed.error
+    # resume was non-None → resumed hint present
+    assert "failed to load on resume" in completed.error
+    # stderr tail surfaced (the whole point of the fix)
+    assert "MCP server 'foo' failed to connect" in completed.error
+
+
+def test_stream_end_with_events_reports_truncated_stream() -> None:
+    """#565: events were seen but no agent_end → keep the 'truncated stream'
+    wording, not the zero-events startup message."""
+    runner = _pi_runner()
+    state = PiStreamState(resume=ResumeToken(engine=ENGINE, value="session.jsonl"))
+    state.started = True  # at least one event translated
+    events = runner.stream_end_events(
+        resume=None,
+        found_session=None,
+        state=state,
+        stderr_lines=None,
+    )
+    completed = events[0]
+    assert isinstance(completed, CompletedEvent)
+    assert "finished without an agent_end event" in completed.error
+    assert "produced no events" not in completed.error
+
+
+def test_stream_end_appends_stderr_excerpt_when_present() -> None:
+    runner = _pi_runner()
+    state = PiStreamState(resume=ResumeToken(engine=ENGINE, value="session.jsonl"))
+    state.started = True
+    events = runner.stream_end_events(
+        resume=None,
+        found_session=None,
+        state=state,
+        stderr_lines=["traceback line 1", "RuntimeError: kaboom"],
+    )
+    assert "RuntimeError: kaboom" in events[0].error
+
+
+def test_build_args_resume_uses_session_path_verbatim() -> None:
+    """#565 regression guard: the resume value passed to --session must be the
+    session *path* Untether owns, NOT a mangled short id (the rejected fix A).
+    """
+    runner = _pi_runner()
+    path = "/home/nathan/.pi/agent/sessions/--proj--/2026_abc.jsonl"
+    token = ResumeToken(engine=ENGINE, value=path)
+    state = PiStreamState(resume=token)
+    args = runner.build_args("hello", token, state=state)
+    assert "--session" in args
+    assert args[args.index("--session") + 1] == path
+
+
+# ---------------------------------------------------------------------------
+# #460 — AutoRetry event translation
+# ---------------------------------------------------------------------------
+
+
+def _started_state() -> PiStreamState:
+    state = PiStreamState(resume=ResumeToken(engine=ENGINE, value="session.jsonl"))
+    state.started = True  # skip the implicit StartedEvent so we isolate actions
+    return state
+
+
+def test_auto_retry_start_translates_to_note_action() -> None:
+    state = _started_state()
+    events = translate_pi_event(
+        pi_schema.AutoRetryStart(attempt=2, maxAttempts=5, delayMs=1500),
+        title="pi",
+        meta=None,
+        state=state,
+    )
+    assert len(events) == 1
+    evt = events[0]
+    assert isinstance(evt, ActionEvent)
+    assert evt.phase == "started"
+    assert evt.action.kind == "note"
+    assert evt.action.id == "retry_1"
+    assert "attempt 2/5" in evt.action.title
+    assert "~1.5s delay" in evt.action.title
+    assert state.retry_action_id == "retry_1"
+
+
+def test_auto_retry_start_omits_null_fields_gracefully() -> None:
+    state = _started_state()
+    events = translate_pi_event(
+        pi_schema.AutoRetryStart(),
+        title="pi",
+        meta=None,
+        state=state,
+    )
+    assert events[0].action.title == "retrying provider"
+
+
+def test_auto_retry_end_success_completes_same_action() -> None:
+    state = _started_state()
+    translate_pi_event(
+        pi_schema.AutoRetryStart(attempt=1), title="pi", meta=None, state=state
+    )
+    events = translate_pi_event(
+        pi_schema.AutoRetryEnd(success=True), title="pi", meta=None, state=state
+    )
+    assert len(events) == 1
+    evt = events[0]
+    assert evt.phase == "completed"
+    assert evt.ok is True
+    assert evt.action.id == "retry_1"  # stable across start/end
+    assert evt.action.title == "retry succeeded"
+    assert state.retry_action_id is None
+
+
+def test_auto_retry_end_failure_includes_final_error() -> None:
+    state = _started_state()
+    translate_pi_event(pi_schema.AutoRetryStart(), title="pi", meta=None, state=state)
+    events = translate_pi_event(
+        pi_schema.AutoRetryEnd(success=False, finalError="503 from provider"),
+        title="pi",
+        meta=None,
+        state=state,
+    )
+    evt = events[0]
+    assert evt.phase == "completed"
+    assert evt.ok is False
+    assert evt.action.title == "retry exhausted: 503 from provider"
+
+
+def test_multiple_retries_have_stable_distinct_ids() -> None:
+    state = _started_state()
+    s1 = translate_pi_event(
+        pi_schema.AutoRetryStart(attempt=1), title="pi", meta=None, state=state
+    )
+    e1 = translate_pi_event(
+        pi_schema.AutoRetryEnd(success=False), title="pi", meta=None, state=state
+    )
+    s2 = translate_pi_event(
+        pi_schema.AutoRetryStart(attempt=2), title="pi", meta=None, state=state
+    )
+    e2 = translate_pi_event(
+        pi_schema.AutoRetryEnd(success=True), title="pi", meta=None, state=state
+    )
+    assert s1[0].action.id == "retry_1"
+    assert e1[0].action.id == "retry_1"
+    assert s2[0].action.id == "retry_2"
+    assert e2[0].action.id == "retry_2"

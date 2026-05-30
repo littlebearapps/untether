@@ -698,6 +698,7 @@ class CodexRunner(ResumeTokenMixin, JsonlSubprocessRunner):
         resume: ResumeToken | None,
         found_session: ResumeToken | None,
         state: CodexRunState,
+        stderr_lines: list[str] | None = None,
     ) -> list[UntetherEvent]:
         if not found_session:
             logger.warning("codex.stream.no_session")
