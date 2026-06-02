@@ -350,3 +350,57 @@ async def test_transcribe_voice_success() -> None:
     assert result == "transcribed"
     assert replies == []
     assert transcriber.calls
+
+
+@pytest.mark.anyio
+async def test_transcribe_voice_blocks_private_base_url() -> None:
+    """#381: a base_url pointing at a private/reserved address is blocked at
+    the chokepoint before any outbound call (transcriber never runs)."""
+    replies: list[str] = []
+
+    async def reply(**kwargs) -> None:
+        replies.append(kwargs["text"])
+
+    transcriber = _Transcriber(result="should-not-run")
+    bot = _Bot(file_info=File(file_path="voice.ogg"), audio=b"ok")
+    result = await transcribe_voice(
+        bot=bot,
+        msg=_voice_message(file_size=2),
+        enabled=True,
+        model="whisper-1",
+        reply=reply,
+        transcriber=transcriber,
+        base_url="http://127.0.0.1:8080/v1",
+    )
+
+    assert result is None
+    assert replies[-1] == "voice transcription endpoint is not permitted."
+    assert transcriber.calls == []
+
+
+@pytest.mark.anyio
+async def test_transcribe_voice_allows_allowlisted_base_url() -> None:
+    """#381: an explicitly allowlisted private range is permitted."""
+    from untether.triggers.ssrf import parse_networks
+
+    replies: list[str] = []
+
+    async def reply(**kwargs) -> None:
+        replies.append(kwargs["text"])
+
+    transcriber = _Transcriber(result="transcribed")
+    bot = _Bot(file_info=File(file_path="voice.ogg"), audio=b"ok")
+    result = await transcribe_voice(
+        bot=bot,
+        msg=_voice_message(file_size=2),
+        enabled=True,
+        model="whisper-1",
+        reply=reply,
+        transcriber=transcriber,
+        base_url="http://10.0.0.5:9000/v1",
+        url_allowlist=parse_networks(["10.0.0.0/8"]),
+    )
+
+    assert result == "transcribed"
+    assert replies == []
+    assert transcriber.calls

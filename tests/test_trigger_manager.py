@@ -500,3 +500,53 @@ class TestPauseToggle:
             assert body["status"] == "paused"
         # Webhook dispatch was NOT invoked while paused.
         assert dispatcher.calls == []
+
+
+# ── #382: hot-reload guard for unauthenticated webhooks on public bind ──
+
+
+class TestUnauthenticatedReloadGuard:
+    def _open_settings(self, **overrides: Any) -> TriggersSettings:
+        base: dict[str, Any] = {
+            "enabled": True,
+            "server": {"host": "0.0.0.0", "port": 9876},
+            "webhooks": [
+                {
+                    "id": "open",
+                    "path": "/hooks/open",
+                    "auth": "none",
+                    "prompt_template": "Event: {{text}}",
+                }
+            ],
+        }
+        base.update(overrides)
+        return parse_trigger_config(base)
+
+    def test_reload_drops_unauthenticated_route_on_public_bind(self):
+        mgr = TriggerManager()
+        mgr.update(self._open_settings())
+        # The auth=none route must NOT be registered on a non-loopback bind.
+        assert mgr.webhook_for_path("/hooks/open") is None
+        assert "open" not in mgr.webhook_ids()
+
+    def test_reload_keeps_route_with_optin(self):
+        mgr = TriggerManager()
+        mgr.update(self._open_settings(allow_unauthenticated_webhooks=True))
+        assert mgr.webhook_for_path("/hooks/open") is not None
+
+    def test_reload_keeps_route_on_loopback(self):
+        mgr = TriggerManager()
+        mgr.update(self._open_settings(server={"host": "127.0.0.1", "port": 9876}))
+        assert mgr.webhook_for_path("/hooks/open") is not None
+
+    def test_reload_logs_refusal(self):
+        from structlog.testing import capture_logs
+
+        mgr = TriggerManager()
+        with capture_logs() as logs:
+            mgr.update(self._open_settings())
+        refused = [
+            r for r in logs if r["event"] == "triggers.server.refused_unauthenticated"
+        ]
+        assert refused
+        assert refused[0]["webhook_ids"] == ["open"]

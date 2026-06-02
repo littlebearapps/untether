@@ -123,6 +123,10 @@ class TelegramClient:
         )
         return await self._outbox.enqueue(key=key, op=request, wait=wait)
 
+    async def flush_outbox(self, *, timeout: float = 5.0) -> None:  # noqa: ASYNC109
+        """#559: drain queued outbox sends (best-effort, bounded) before close."""
+        await self._outbox.flush(timeout=timeout)
+
     async def close(self) -> None:
         await self._outbox.close()
         await self._client.close()

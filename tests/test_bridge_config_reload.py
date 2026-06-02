@@ -73,9 +73,11 @@ class TestUpdateFrom:
             show_resume_line=False,
             forward_coalesce_s=3.5,
             media_group_debounce_s=2.5,
+            voice_transcription_url_allowlist=["10.0.0.0/8"],
         )
         cfg.update_from(new_settings)
         assert cfg.allowed_user_ids == (111, 222)
+        assert cfg.voice_transcription_url_allowlist == ("10.0.0.0/8",)
         assert cfg.voice_transcription is True
         assert cfg.voice_max_bytes == 1 * 1024 * 1024
         assert cfg.voice_transcription_model == "whisper-1"

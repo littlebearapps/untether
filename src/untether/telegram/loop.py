@@ -1357,10 +1357,11 @@ async def run_main_loop(
     import signal as _signal
 
     from ..shutdown import (
-        DRAIN_TIMEOUT_S,
+        get_shutdown_origin_chat_id,
         is_shutting_down,
         request_shutdown,
         reset_shutdown,
+        select_drain_timeout,
     )
 
     _prev_sigterm = _signal.getsignal(_signal.SIGTERM)
@@ -1615,6 +1616,27 @@ async def run_main_loop(
                 )
 
                 if active > 0:
+                    # #559: when the sole active run is (almost certainly) the
+                    # session that triggered the restart — the self-restart
+                    # deadlock from #547 — the full 120s drain is dead time the
+                    # lone run can never satisfy. Use a short drain instead so we
+                    # reach the clean-exit + outbox-flush path promptly.
+                    origin_chat_id = get_shutdown_origin_chat_id()
+                    self_restart = active == 1
+                    drain_timeout = select_drain_timeout(active)
+                    if self_restart:
+                        sole_chat = next(
+                            (ref.channel_id for ref in state.running_tasks), None
+                        )
+                        logger.info(
+                            "shutdown.drain.self_restart",
+                            drain_timeout_s=drain_timeout,
+                            sole_chat_id=sole_chat,
+                            origin_chat_id=origin_chat_id,
+                            origin_matches=origin_chat_id is not None
+                            and origin_chat_id == sole_chat,
+                        )
+
                     await _notify_drain_start(
                         cfg.exec_cfg.transport, state.running_tasks
                     )
@@ -1623,7 +1645,7 @@ async def run_main_loop(
                     # Pending /at delays that have not yet fired are cancelled
                     # via the task-group cancel below; no need to wait on them.
                     _drain_tick = 0
-                    with anyio.move_on_after(DRAIN_TIMEOUT_S):
+                    with anyio.move_on_after(drain_timeout):
                         while state.running_tasks:
                             await sleep(1.0)
                             _drain_tick += 1
@@ -1638,7 +1660,7 @@ async def run_main_loop(
                         logger.warning(
                             "shutdown.drain_timeout",
                             remaining=remaining,
-                            timeout_s=DRAIN_TIMEOUT_S,
+                            timeout_s=drain_timeout,
                         )
                         await _notify_drain_timeout(
                             cfg.exec_cfg.transport,
@@ -2337,6 +2359,8 @@ async def run_main_loop(
                     return
 
                 if msg.voice is not None:
+                    from ..triggers.ssrf import parse_networks
+
                     text = await transcribe_voice(
                         bot=cfg.bot,
                         msg=msg,
@@ -2349,6 +2373,9 @@ async def run_main_loop(
                             cfg.voice_transcription_api_key.get_secret_value()
                             if cfg.voice_transcription_api_key is not None
                             else None
+                        ),
+                        url_allowlist=parse_networks(
+                            cfg.voice_transcription_url_allowlist
                         ),
                     )
                     if text is None:
@@ -2697,4 +2724,12 @@ async def run_main_loop(
         _signal.signal(_signal.SIGINT, _prev_sigint)
         logger.debug("signal.handler.restored", signals=["SIGTERM", "SIGINT"])
         reset_shutdown()
+        # #559: give queued outbox sends (e.g. an agent's final message after a
+        # self-restart) a bounded chance to flush before close() drops them.
+        _flush_outbox = getattr(cfg.exec_cfg.transport, "flush_outbox", None)
+        if _flush_outbox is not None:
+            try:
+                await _flush_outbox(timeout=5.0)
+            except Exception:  # noqa: BLE001 — never let cleanup raise
+                logger.warning("shutdown.flush_outbox.failed", exc_info=True)
         await cfg.exec_cfg.transport.close()

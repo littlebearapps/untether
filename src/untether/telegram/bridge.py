@@ -175,6 +175,8 @@ class TelegramBridgeConfig:
     # #378: SecretStr ferries the key without leaking it through repr/log.
     voice_transcription_api_key: SecretStr | None = None
     voice_show_transcription: bool = True
+    # #381: CIDR/IP allowlist strings for the voice base_url SSRF check.
+    voice_transcription_url_allowlist: tuple[str, ...] = ()
     forward_coalesce_s: float = 1.0
     media_group_debounce_s: float = 1.0
     allowed_user_ids: tuple[int, ...] = ()
@@ -206,6 +208,9 @@ class TelegramBridgeConfig:
         self.voice_transcription_base_url = settings.voice_transcription_base_url
         self.voice_transcription_api_key = settings.voice_transcription_api_key
         self.voice_show_transcription = bool(settings.voice_show_transcription)
+        self.voice_transcription_url_allowlist = tuple(
+            settings.voice_transcription_url_allowlist
+        )
         self.forward_coalesce_s = float(settings.forward_coalesce_s)
         self.media_group_debounce_s = float(settings.media_group_debounce_s)
         self.allowed_user_ids = tuple(settings.allowed_user_ids)
@@ -252,6 +257,10 @@ class TelegramTransport:
                     error=str(exc),
                     error_type=exc.__class__.__name__,
                 )
+
+    async def flush_outbox(self, *, timeout: float = 5.0) -> None:  # noqa: ASYNC109
+        """#559: drain queued outbox sends (best-effort, bounded) before close."""
+        await self._bot.flush_outbox(timeout=timeout)
 
     async def close(self) -> None:
         await self._bot.close()

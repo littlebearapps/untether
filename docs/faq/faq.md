@@ -126,7 +126,7 @@ voice_transcription_base_url = "https://api.groq.com/openai/v1"
 voice_transcription_api_key = "gsk_..."   # SecretStr — masked in logs
 ```
 
-Groq's Whisper Large v3 Turbo is fast and cheap; any OpenAI-compatible Whisper endpoint works (including a self-hosted one). The API key is `SecretStr`-masked in `repr()` / `str()` / structlog so it never lands in journal or crash output. Full setup: [Voice notes](https://untether.littlebearapps.com/how-to/voice-notes/).
+Groq's Whisper Large v3 Turbo is fast and cheap; any OpenAI-compatible Whisper endpoint works (including a self-hosted one). The API key is `SecretStr`-masked in `repr()` / `str()` / structlog so it never lands in journal or crash output. For safety, `voice_transcription_base_url` is SSRF-checked — a URL that resolves to a private/reserved address (e.g. a self-hosted Whisper on `10.x` or `192.168.x`) is rejected unless you explicitly allow its range with `voice_transcription_url_allowlist = ["10.0.0.0/8"]`. Full setup: [Voice notes](https://untether.littlebearapps.com/how-to/voice-notes/).
 
 ## Can agents send files back to me automatically?
 

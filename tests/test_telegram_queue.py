@@ -846,3 +846,50 @@ async def test_none_chat_id_independent() -> None:
     # No sleep — different "chats" (None vs 100)
     assert sum(sleep_log) == 0.0
     await outbox.close()
+
+
+# ── #559: bounded outbox flush before shutdown ────────────────────────
+
+
+@pytest.mark.anyio
+async def test_flush_drains_queued_op_instead_of_dropping() -> None:
+    """A queued op is given a chance to send during flush, not dropped."""
+    outbox, _sleep_log, _clock = _make_outbox()
+    executed: list[str] = []
+
+    async def execute() -> str:
+        executed.append("sent")
+        return "ok"
+
+    op = OutboxOp(
+        execute=execute,
+        priority=SEND_PRIORITY,
+        queued_at=0.0,
+        chat_id=100,
+        label="final",
+    )
+    await outbox.enqueue(key=("send", 100), op=op, wait=False)
+    await outbox.flush(timeout=2.0)
+    assert executed == ["sent"]
+    assert outbox._pending == {}
+    await outbox.close()
+
+
+@pytest.mark.anyio
+async def test_flush_empty_returns_immediately() -> None:
+    outbox, _sleep_log, _clock = _make_outbox()
+    await outbox.flush(timeout=2.0)  # nothing pending — must not hang
+    await outbox.close()
+
+
+@pytest.mark.anyio
+async def test_flush_times_out_then_fails_pending() -> None:
+    """If the queue can't drain within the timeout, stragglers are failed
+    (same terminal state as before, just after a bounded wait)."""
+    outbox, _sleep_log, _clock = _make_outbox()
+    op = _noop_op(100, SEND_PRIORITY, 0.0)
+    # Populate _pending WITHOUT starting the worker, so it can never drain.
+    outbox._pending[("send", 100)] = op
+    await outbox.flush(timeout=0.2)
+    assert outbox._pending == {}
+    assert op.result is None

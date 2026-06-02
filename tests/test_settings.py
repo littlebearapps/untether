@@ -285,6 +285,64 @@ def test_voice_transcription_api_key_default_none(tmp_path: Path) -> None:
     assert settings.transports.telegram.voice_transcription_api_key is None
 
 
+def test_voice_base_url_private_ip_rejected_at_load(tmp_path: Path) -> None:
+    """#381: a voice_transcription_base_url pointing at a private/reserved IP
+    literal fails fast at config-load (SSRF)."""
+    config_path = tmp_path / "untether.toml"
+    data = {
+        "transport": "telegram",
+        "transports": {
+            "telegram": {
+                "bot_token": "tok",
+                "chat_id": 123,
+                "allow_any_user": True,
+                "voice_transcription_base_url": "http://169.254.169.254/latest",
+            }
+        },
+    }
+    with pytest.raises(ConfigError, match="voice_transcription_base_url"):
+        validate_settings_data(data, config_path=config_path)
+
+
+def test_voice_base_url_allowlisted_private_ip_accepted(tmp_path: Path) -> None:
+    """#381: an explicitly allowlisted private range is permitted at load."""
+    config_path = tmp_path / "untether.toml"
+    data = {
+        "transport": "telegram",
+        "transports": {
+            "telegram": {
+                "bot_token": "tok",
+                "chat_id": 123,
+                "allow_any_user": True,
+                "voice_transcription_base_url": "http://10.1.2.3:9000/v1",
+                "voice_transcription_url_allowlist": ["10.0.0.0/8"],
+            }
+        },
+    }
+    settings = validate_settings_data(data, config_path=config_path)
+    tg = settings.transports.telegram
+    assert tg.voice_transcription_base_url == "http://10.1.2.3:9000/v1"
+    assert tg.voice_transcription_url_allowlist == ["10.0.0.0/8"]
+
+
+def test_voice_url_allowlist_invalid_entry_rejected(tmp_path: Path) -> None:
+    """#381: a malformed allowlist entry is a config error."""
+    config_path = tmp_path / "untether.toml"
+    data = {
+        "transport": "telegram",
+        "transports": {
+            "telegram": {
+                "bot_token": "tok",
+                "chat_id": 123,
+                "allow_any_user": True,
+                "voice_transcription_url_allowlist": ["not-a-cidr"],
+            }
+        },
+    }
+    with pytest.raises(ConfigError, match="voice_transcription_url_allowlist"):
+        validate_settings_data(data, config_path=config_path)
+
+
 # ───────────────────────────────────────────────────────────────────────────
 # #409 — env allowlist user-extensible config (SecuritySettings extras)
 # ───────────────────────────────────────────────────────────────────────────
