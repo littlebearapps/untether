@@ -10,7 +10,12 @@ from aiohttp.test_utils import TestClient, TestServer
 
 from untether.transport import MessageRef
 from untether.triggers.dispatcher import TriggerDispatcher
-from untether.triggers.server import build_webhook_app, run_webhook_server
+from untether.triggers.server import (
+    _unauthenticated_on_public_bind,
+    build_webhook_app,
+    is_loopback_host,
+    run_webhook_server,
+)
 from untether.triggers.settings import TriggersSettings, parse_trigger_config
 
 
@@ -655,3 +660,81 @@ async def test_bind_failure_degrades_gracefully(monkeypatch):
     assert fields["port"] == settings.server.port
     assert "ss -tlnp" in fields["hint"]
     assert "untether.toml" in fields["fix"]
+
+
+# ── #382: startup policy — unauthenticated webhooks on non-loopback bind ──
+
+
+def _unauth_settings(**overrides) -> TriggersSettings:
+    base: dict[str, Any] = {
+        "enabled": True,
+        "server": {"host": "0.0.0.0", "port": 9876},
+        "webhooks": [
+            {
+                "id": "open",
+                "path": "/hooks/open",
+                "auth": "none",
+                "prompt_template": "Event: {{text}}",
+            }
+        ],
+    }
+    base.update(overrides)
+    return parse_trigger_config(base)
+
+
+@pytest.mark.parametrize(
+    "host,expected",
+    [
+        ("127.0.0.1", True),
+        ("127.5.6.7", True),
+        ("::1", True),
+        ("localhost", True),
+        ("LocalHost", True),
+        ("0.0.0.0", False),
+        ("::", False),
+        ("192.168.1.50", False),
+        ("example.com", False),
+        ("", False),
+    ],
+)
+def test_is_loopback_host(host, expected):
+    assert is_loopback_host(host) is expected
+
+
+def test_unauthenticated_on_public_bind_flags_open_webhook():
+    settings = _unauth_settings()
+    assert _unauthenticated_on_public_bind(settings) == ["open"]
+
+
+def test_unauthenticated_on_public_bind_optin_allows():
+    settings = _unauth_settings(allow_unauthenticated_webhooks=True)
+    assert _unauthenticated_on_public_bind(settings) == []
+
+
+def test_unauthenticated_on_loopback_bind_allows():
+    settings = _unauth_settings(server={"host": "127.0.0.1", "port": 9876})
+    assert _unauthenticated_on_public_bind(settings) == []
+
+
+def test_unauthenticated_on_public_bind_authed_is_safe():
+    settings = _make_settings(server={"host": "0.0.0.0", "port": 9876})
+    assert _unauthenticated_on_public_bind(settings) == []
+
+
+@pytest.mark.anyio
+async def test_run_webhook_server_refuses_unauthenticated_public_bind():
+    """The server must NOT bind when an auth=none webhook is exposed on a
+    non-loopback host without the opt-in — it returns after logging."""
+    from structlog.testing import capture_logs
+
+    settings = _unauth_settings()
+    dispatcher, _, _ = _make_dispatcher()
+    with capture_logs() as logs:
+        # Refused path returns immediately; a successful bind would block on
+        # sleep_forever, so completing the await proves the refusal.
+        await run_webhook_server(settings, dispatcher)
+    refused = [
+        r for r in logs if r["event"] == "triggers.server.refused_unauthenticated"
+    ]
+    assert refused, "expected refusal log"
+    assert refused[0]["webhook_ids"] == ["open"]

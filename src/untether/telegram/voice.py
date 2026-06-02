@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import io
-from collections.abc import Awaitable, Callable
+import ipaddress
+from collections.abc import Awaitable, Callable, Sequence
 from typing import Protocol
 
 from openai import AsyncOpenAI, OpenAIError
 
 from ..logging import get_logger
+from ..triggers.ssrf import SSRFError, validate_url_with_dns
 from ..utils.error_display import user_safe_error
 from .client import BotClient
 from .types import TelegramIncomingMessage
@@ -64,6 +66,7 @@ async def transcribe_voice(
     transcriber: VoiceTranscriber | None = None,
     base_url: str | None = None,
     api_key: str | None = None,
+    url_allowlist: Sequence[ipaddress.IPv4Network | ipaddress.IPv6Network] = (),
 ) -> str | None:
     voice = msg.voice
     if voice is None:
@@ -100,6 +103,21 @@ async def transcribe_voice(
     if max_bytes is not None and len(audio_bytes) > max_bytes:
         await reply(text="voice message is too large to transcribe.")
         return None
+    # #381: SSRF-validate a custom base_url before any outbound call. This is
+    # the authoritative chokepoint — every transcription path (incl. values that
+    # arrived via hot-reload) passes through here. base_url=None means the SDK
+    # uses public api.openai.com, which needs no validation.
+    if base_url is not None:
+        try:
+            await validate_url_with_dns(base_url, allowlist=url_allowlist)
+        except SSRFError as exc:
+            logger.error(
+                "voice.base_url.ssrf_blocked",
+                error=str(exc),
+                error_type=exc.__class__.__name__,
+            )
+            await reply(text="voice transcription endpoint is not permitted.")
+            return None
     if transcriber is None:
         transcriber = OpenAIVoiceTranscriber(base_url=base_url, api_key=api_key)
     try:

@@ -189,6 +189,10 @@ class TriggersSettings(BaseModel):
     enabled: bool = False
     default_timezone: NonEmptyStr | None = None
     server: TriggerServerSettings = Field(default_factory=TriggerServerSettings)
+    # #382: webhooks with auth="none" on a non-loopback bind are an
+    # unauthenticated remote-agent-run (RCE) primitive. The server refuses to
+    # bind such routes unless the operator explicitly opts in here (local demos).
+    allow_unauthenticated_webhooks: bool = False
 
     @field_validator("default_timezone")
     @classmethod

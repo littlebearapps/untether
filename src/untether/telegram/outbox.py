@@ -97,6 +97,39 @@ class TelegramOutbox:
                 pending.set_result(None)
             self._cond.notify()
 
+    async def flush(self, *, timeout: float = 5.0) -> None:  # noqa: ASYNC109
+        """#559: best-effort drain of queued sends before shutdown.
+
+        Unlike :meth:`close`, this does NOT stop the worker — it gives the
+        running worker up to ``timeout`` seconds to pick up and dispatch any
+        queued ops (e.g. an agent's final message queued during a self-restart)
+        instead of letting :meth:`close`'s ``fail_pending()`` drop them. Any op
+        still queued when the timeout expires is failed, exactly as before.
+        Bounded so it can never hang shutdown.
+        """
+        import anyio
+
+        pending_count = len(self._pending)
+        if pending_count == 0 or self._closed:
+            return
+        logger.info("outbox.flush.start", pending_count=pending_count, timeout=timeout)
+        with anyio.move_on_after(timeout):
+            while True:
+                async with self._cond:
+                    # Ops the worker is mid-dispatch on have already left
+                    # _pending; an empty queue means everything was picked up.
+                    if not self._pending or self._closed:
+                        break
+                await anyio.sleep(0.05)
+        remaining = len(self._pending)
+        if remaining > 0:
+            logger.warning("outbox.flush.timeout", remaining=remaining)
+            async with self._cond:
+                self.fail_pending()
+                self._cond.notify_all()
+        else:
+            logger.info("outbox.flush.done")
+
     async def close(self) -> None:
         pending_count = len(self._pending)
         logger.info("outbox.closing", pending_count=pending_count)

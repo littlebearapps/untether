@@ -19,7 +19,9 @@ class RestartCommand:
                 notify=True,
             )
 
-        request_shutdown()
+        # #559: record the originating chat so the drain loop can confirm the
+        # precise self-restart case when this chat is the sole active run.
+        request_shutdown(origin_chat_id=ctx.message.channel_id)
         return CommandResult(
             text="Draining active runs… will restart shortly.",
             notify=True,

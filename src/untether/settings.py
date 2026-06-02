@@ -138,6 +138,10 @@ class TelegramTransportSettings(BaseModel):
     # transport boundary (telegram/loop.py before passing to OpenAI SDK).
     voice_transcription_api_key: SecretStr | None = None
     voice_show_transcription: bool = True
+    # #381: optional SSRF allowlist (CIDR / bare-IP strings) for
+    # voice_transcription_base_url — lets operators opt in to private endpoints
+    # (e.g. an Azure private-link range) that would otherwise be blocked.
+    voice_transcription_url_allowlist: list[str] = Field(default_factory=list)
     session_mode: Literal["stateless", "chat"] = "stateless"
     show_resume_line: bool = True
     forward_coalesce_s: float = Field(default=1.0, ge=0)
@@ -170,6 +174,34 @@ class TelegramTransportSettings(BaseModel):
         if not key:
             return None
         return SecretStr(key)
+
+    @model_validator(mode="after")
+    def _validate_voice_base_url_ssrf(self) -> TelegramTransportSettings:
+        """#381: fast-fail at config load for an obviously-unsafe voice
+        transcription endpoint (non-http scheme, or a private/reserved IP
+        literal) and for a malformed allowlist. Hostname-based URLs that
+        resolve to a private IP are caught later (async, with DNS) at the
+        chokepoint in ``transcribe_voice``."""
+        # Lazy import to avoid any import-time cycle through the triggers pkg.
+        from .triggers.ssrf import SSRFError, parse_networks, validate_url
+
+        try:
+            networks = parse_networks(self.voice_transcription_url_allowlist)
+        except ValueError as exc:
+            raise ValueError(
+                "[transports.telegram] voice_transcription_url_allowlist has an "
+                f"invalid CIDR/IP entry: {exc}"
+            ) from exc
+
+        if self.voice_transcription_base_url is not None:
+            try:
+                validate_url(self.voice_transcription_base_url, allowlist=networks)
+            except SSRFError as exc:
+                raise ValueError(
+                    "[transports.telegram] voice_transcription_base_url is not "
+                    f"permitted: {exc}"
+                ) from exc
+        return self
 
     @model_validator(mode="after")
     def _validate_allowed_user_ids_or_optin(self) -> TelegramTransportSettings:

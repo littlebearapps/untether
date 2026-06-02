@@ -2280,8 +2280,10 @@ async def test_run_main_loop_voice_transcript_preserves_directive(
         reply,
         base_url: str | None = None,
         api_key: str | None = None,
+        url_allowlist=(),
     ) -> str:
         _ = bot, msg, enabled, model, max_bytes, reply, base_url, api_key
+        _ = url_allowlist
         return "/codex do thing"
 
     monkeypatch.setattr(telegram_loop, "transcribe_voice", _fake_transcribe)
@@ -2351,8 +2353,10 @@ async def test_run_main_loop_voice_shows_transcription_echo(
         reply,
         base_url: str | None = None,
         api_key: str | None = None,
+        url_allowlist=(),
     ) -> str:
         _ = bot, msg, enabled, model, max_bytes, reply, base_url, api_key
+        _ = url_allowlist
         return "hello world"
 
     monkeypatch.setattr(telegram_loop, "transcribe_voice", _fake_transcribe)
@@ -2422,8 +2426,10 @@ async def test_run_main_loop_voice_hides_transcription_when_disabled(
         reply,
         base_url: str | None = None,
         api_key: str | None = None,
+        url_allowlist=(),
     ) -> str:
         _ = bot, msg, enabled, model, max_bytes, reply, base_url, api_key
+        _ = url_allowlist
         return "hello world"
 
     monkeypatch.setattr(telegram_loop, "transcribe_voice", _fake_transcribe)
