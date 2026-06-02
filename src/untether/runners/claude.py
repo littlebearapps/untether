@@ -569,8 +569,21 @@ def _register_background_handle(
         state.live_remote_triggers.add(tool_id)
 
 
-def _clear_background_handle(state: ClaudeStreamState, tool_use_id: str) -> None:
-    """Remove a background-task entry when its tool_result arrives (#347).
+def _clear_background_handle(
+    state: ClaudeStreamState, tool_use_id: str, *, is_terminal: bool = True
+) -> None:
+    """Remove a background-task entry when its tool_result is *terminal* (#347, #374).
+
+    #374: a tool_result is not always a terminal signal. A long-running Monitor
+    streams *multiple* interim tool_results while it runs; clearing the
+    ``live_monitors`` entry on the first one dropped the
+    ``stall_monitor_active_suppressed`` branch (runner_bridge), so spurious stall
+    warnings rose again while the Monitor was legitimately still working. When
+    ``is_terminal`` is False the handle is left in place — ``_is_terminal_tool_result``
+    makes the call. ``is_terminal`` defaults True so direct callers and the
+    non-Monitor primitives keep their pre-#374 clear-on-result behaviour (see
+    ``_is_terminal_tool_result`` for why Bash-bg / Agent-bg / ScheduleWakeup /
+    RemoteTrigger interim-handling is deferred to the v0.35.5 lifecycle refactor).
 
     Note: ``state.last_schedule_wakeup_arm_delay`` and
     ``state.last_bg_bash_launched_at`` are deliberately NOT cleared here.
@@ -583,11 +596,56 @@ def _clear_background_handle(state: ClaudeStreamState, tool_use_id: str) -> None
     the matching ``result`` event lands. Both scalars reset on the
     next user prompt or on ``new_state`` (#544, #333).
     """
+    if not is_terminal:
+        return
     state.live_monitors.pop(tool_use_id, None)
     state.live_bg_bashes.discard(tool_use_id)
     state.live_bg_agents.discard(tool_use_id)
     state.live_wakeups.pop(tool_use_id, None)
     state.live_remote_triggers.discard(tool_use_id)
+
+
+def _is_terminal_tool_result(
+    content: claude_schema.StreamToolResultBlock
+    | claude_schema.StreamAdvisorToolResultBlock,
+    state: ClaudeStreamState,
+    tool_use_id: str,
+) -> bool:
+    """Decide whether a tool_result terminates its background handle (#374).
+
+    Only Monitor handles can receive *interim* (non-terminal) results today: a
+    Monitor feeds back the watched command's **raw stdout lines as they appear**
+    (see ``docs/plans/2026-05-06-289-loop-and-cron-interception.md``), so clearing
+    ``live_monitors`` on the first line dropped the
+    ``stall_monitor_active_suppressed`` branch while the Monitor was still running.
+
+    Because the result text is arbitrary stdout, we deliberately do NOT scan it for
+    "completed"/"cancelled" markers — that is unreliable in both directions (a build
+    printing "Done" mid-stream would false-clear and reintroduce the bug; a real
+    completion that doesn't print a magic word would be missed). The reliable
+    terminal signals are ``is_error`` and the Monitor's own ``timeout_ms`` deadline
+    (which ``has_live_background_work`` already uses to age the handle out — so no
+    leak). A Monitor that finishes before its deadline keeps the handle (and the
+    suppression) until the deadline; that window is bounded by ``timeout_ms`` and is
+    the safe trade vs. false-clearing on interim stdout.
+
+    Every other tool_result is treated as terminal, preserving the pre-#374
+    clear-on-first-result behaviour for foreground tools and for Bash-bg / Agent-bg
+    / ScheduleWakeup / RemoteTrigger. Their true-terminal detection (KillShell,
+    subprocess exit, deadline sweeps) is the v0.35.5 refactor: doing it here without
+    that infrastructure would risk the inverse failure — a handle that never clears,
+    wedging the post-result idle watchdog into a permanent hang.
+    """
+    deadline = state.live_monitors.get(tool_use_id)
+    if deadline is None:
+        # Not a tracked Monitor → terminal (unchanged behaviour).
+        return True
+    if content.is_error is True:
+        return True
+    # Unknown (0.0) or already-expired deadline → clear now (no leak risk; matches
+    # has_live_background_work's expiry semantics). A live future deadline means an
+    # interim stdout line → keep the handle so stall-suppression keeps firing.
+    return deadline == 0.0 or deadline <= time.monotonic()
 
 
 # ── /loop and ScheduleWakeup observation (#289) ─────────────────────────
@@ -1283,8 +1341,14 @@ def translate_claude_event(
                     continue
                 saw_tool_result = True
                 tool_use_id = content.tool_use_id
-                # #347 clear any background-task entry for this tool_use_id
-                _clear_background_handle(state, tool_use_id)
+                # #347/#374 clear a background-task entry only on a *terminal*
+                # tool_result — interim Monitor results keep the handle so the
+                # stall-suppression branch keeps firing while it runs.
+                _clear_background_handle(
+                    state,
+                    tool_use_id,
+                    is_terminal=_is_terminal_tool_result(content, state, tool_use_id),
+                )
                 # #289 bind upstream cron ID so CronDelete observations
                 # later in the session can target the right loop entry.
                 _observe_loop_tool_result(state, tool_use_id, content.content)
@@ -3216,6 +3280,7 @@ class ClaudeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
         resume: ResumeToken | None,
         found_session: ResumeToken | None,
         state: ClaudeStreamState,
+        stderr_lines: list[str] | None = None,
     ) -> list[UntetherEvent]:
         # Phase 2: Cleanup runner registration
         session_id = (

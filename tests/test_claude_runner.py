@@ -320,7 +320,9 @@ def _make_tool_use_event(
     }
 
 
-def _make_tool_result_event(tool_use_id: str) -> dict:
+def _make_tool_result_event(
+    tool_use_id: str, content: str = "ok", *, is_error: bool = False
+) -> dict:
     return {
         "type": "user",
         "message": {
@@ -329,8 +331,8 @@ def _make_tool_result_event(tool_use_id: str) -> dict:
                 {
                     "type": "tool_result",
                     "tool_use_id": tool_use_id,
-                    "content": "ok",
-                    "is_error": False,
+                    "content": content,
+                    "is_error": is_error,
                 }
             ],
         },
@@ -353,25 +355,101 @@ def test_monitor_tool_registers_live_monitor() -> None:
     assert state.live_monitors["toolu_M1"] > 0
 
 
-def test_monitor_tool_clears_on_tool_result() -> None:
-    state = ClaudeStreamState()
+def _register_monitor(state: ClaudeStreamState, tool_id: str, timeout_ms: int) -> None:
     translate_claude_event(
         _decode_event(
-            _make_tool_use_event("Monitor", "toolu_M1", {"timeout_ms": 60_000})
+            _make_tool_use_event("Monitor", tool_id, {"timeout_ms": timeout_ms})
         ),
         title="claude",
         state=state,
         factory=state.factory,
     )
-    assert "toolu_M1" in state.live_monitors
 
+
+def _feed_tool_result(
+    state: ClaudeStreamState,
+    tool_id: str,
+    content: str = "ok",
+    *,
+    is_error: bool = False,
+) -> None:
     translate_claude_event(
-        _decode_event(_make_tool_result_event("toolu_M1")),
+        _decode_event(_make_tool_result_event(tool_id, content, is_error=is_error)),
         title="claude",
         state=state,
         factory=state.factory,
     )
-    assert "toolu_M1" not in state.live_monitors
+
+
+def test_monitor_interim_tool_result_does_not_clear() -> None:
+    """#374: while a Monitor's deadline is live, every interim stdout line keeps the
+    handle so stall-suppression keeps firing. Crucially this holds even when the
+    stdout text contains words like "completed"/"done" — the result is arbitrary
+    command stdout, so we deliberately do NOT treat such words as terminal (doing so
+    would re-introduce the very bug this fixes when a build prints "Done")."""
+    state = ClaudeStreamState()
+    _register_monitor(state, "toolu_M1", 60_000)
+    assert "toolu_M1" in state.live_monitors
+
+    _feed_tool_result(state, "toolu_M1", "still running… 3 events seen")
+    assert "toolu_M1" in state.live_monitors
+    # stdout that happens to say "Done"/"completed" must NOT false-clear.
+    _feed_tool_result(state, "toolu_M1", "Build step 2 completed. Done in 3.2s")
+    assert "toolu_M1" in state.live_monitors
+
+
+def test_monitor_error_result_clears() -> None:
+    """#374: an errored Monitor result is terminal regardless of deadline."""
+    state = ClaudeStreamState()
+    _register_monitor(state, "toolu_M3", 60_000)
+    _feed_tool_result(state, "toolu_M3", "boom", is_error=True)
+    assert "toolu_M3" not in state.live_monitors
+
+
+def test_monitor_expired_deadline_result_clears() -> None:
+    """#374: once the Monitor's own timeout deadline has passed, a (late) result is
+    terminal — the bounded ``timeout_ms`` window is the reliable cleanup signal."""
+    import time
+
+    state = ClaudeStreamState()
+    _register_monitor(state, "toolu_M4", 60_000)
+    # Simulate the deadline having already elapsed.
+    state.live_monitors["toolu_M4"] = time.monotonic() - 1.0
+    _feed_tool_result(state, "toolu_M4", "still running")
+    assert "toolu_M4" not in state.live_monitors
+
+
+def test_monitor_unknown_deadline_tool_result_clears() -> None:
+    """#374: a Monitor with an unknown deadline (0.0) clears on first result —
+    there is no expiry backstop, so deferring would leak the handle."""
+    state = ClaudeStreamState()
+    translate_claude_event(
+        _decode_event(_make_tool_use_event("Monitor", "toolu_M0", {})),
+        title="claude",
+        state=state,
+        factory=state.factory,
+    )
+    assert state.live_monitors.get("toolu_M0") == 0.0
+    _feed_tool_result(state, "toolu_M0", "still running")
+    assert "toolu_M0" not in state.live_monitors
+
+
+def test_foreground_tool_result_still_clears() -> None:
+    """#374: non-Monitor tool_results keep the pre-#374 clear-on-result behaviour."""
+    state = ClaudeStreamState()
+    translate_claude_event(
+        _decode_event(
+            _make_tool_use_event(
+                "Bash", "toolu_B1", {"command": "sleep 60", "run_in_background": True}
+            )
+        ),
+        title="claude",
+        state=state,
+        factory=state.factory,
+    )
+    assert "toolu_B1" in state.live_bg_bashes
+    _feed_tool_result(state, "toolu_B1", "running in background")
+    assert "toolu_B1" not in state.live_bg_bashes
 
 
 def test_bash_bg_registers_when_run_in_background_true() -> None:

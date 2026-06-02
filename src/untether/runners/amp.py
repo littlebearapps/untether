@@ -483,6 +483,7 @@ class AmpRunner(ResumeTokenMixin, JsonlSubprocessRunner):
         resume: ResumeToken | None,
         found_session: ResumeToken | None,
         state: AmpStreamState,
+        stderr_lines: list[str] | None = None,
     ) -> list[UntetherEvent]:
         if not found_session:
             parts = ["amp finished but no session_id was captured"]

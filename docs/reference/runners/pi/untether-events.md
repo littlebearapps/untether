@@ -141,10 +141,58 @@ Mapping:
 - `action.title = "context compacted (42,000 tokens)"` (formatted with commas).
 - If `aborted=true`, title is `"context compaction aborted"`.
 
-### 4.6 Other events
+### 4.6 `auto_retry_start` / `auto_retry_end`
+
+When Pi transparently retries a transient provider failure (e.g. a 5xx), it
+emits these events (#460). Untether translates them so the retry is visible in
+Telegram and the liveness watchdog sees event activity at each retry boundary
+rather than mistaking the backoff gap for a stall.
+
+`auto_retry_start` example:
+```json
+{"type":"auto_retry_start","attempt":2,"maxAttempts":5,"delayMs":1500,"errorMessage":"503"}
+```
+
+Mapping:
+- Emit `action` with `phase="started"`, `kind="note"`.
+- `action.title = "retrying provider (attempt 2/5, ~1.5s delay)"` — attempt and
+  delay parts are omitted gracefully when the fields are null.
+- Sequential action ids: `retry_1`, `retry_2`, … (stable across the start/end pair).
+
+`auto_retry_end` example:
+```json
+{"type":"auto_retry_end","success":true,"attempt":2}
+```
+
+Mapping:
+- Emit `action` with `phase="completed"` reusing the start action id.
+- `success=true` → `action.title = "retry succeeded"`, `ok=true`.
+- `success=false` → `action.title = "retry exhausted: <finalError>"`, `ok=false`.
+
+> Note: a dedicated stall-watchdog "retry-in-progress is CPU-active" suppression
+> branch is deferred — provider retry delays sit well under the stall threshold,
+> and the translated events already keep the liveness idle timer fresh.
+
+### 4.7 Other events
 
 Ignore unknown events. If a JSONL line is malformed, emit a warning action and
 continue (default `JsonlSubprocessRunner` behavior).
+
+### 4.8 Stream-end fallback diagnostics (no `agent_end`)
+
+If the Pi subprocess exits `rc=0` without an `agent_end` event, the runner emits
+a failing `completed` event whose `error` now distinguishes two cases (#565):
+
+- **No translated events** (a startup/early-exit crash — e.g. MCP servers still
+  cold while a resumed session rehydrates tool state): "pi exited cleanly (rc=0)
+  but produced no events …"; on a resumed run it adds "the session may have
+  failed to load on resume".
+- **Some events but no `agent_end`** (a genuinely truncated stream): keeps the
+  "pi finished without an agent_end event" wording.
+
+In both cases a sanitised tail of Pi's captured stderr is appended when present,
+and the `pi.stream.no_agent_end` WARNING log carries `had_events` and `resumed`
+fields so the issue-watcher can promote resumed-run failures to error tier.
 
 ---
 

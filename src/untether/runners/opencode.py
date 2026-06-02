@@ -582,6 +582,7 @@ class OpenCodeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
         resume: ResumeToken | None,
         found_session: ResumeToken | None,
         state: OpenCodeStreamState,
+        stderr_lines: list[str] | None = None,
     ) -> list[UntetherEvent]:
         if not found_session:
             parts = ["opencode finished but no session_id was captured"]

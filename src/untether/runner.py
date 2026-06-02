@@ -618,11 +618,15 @@ class JsonlSubprocessRunner(BaseRunner):
         resume: ResumeToken | None,
         found_session: ResumeToken | None,
         state: Any,
+        stderr_lines: list[str] | None = None,
     ) -> list[UntetherEvent]:
         parts = [f"{self.tag()} finished without a result event"]
         session = _session_label(found_session, resume)
         if session:
             parts.append(f"session: {session}")
+        excerpt = _stderr_excerpt(stderr_lines)
+        if excerpt:
+            parts.append(excerpt)
         message = "\n".join(parts)
         resume_for_completed = found_session or resume
         return [
@@ -1372,6 +1376,7 @@ class JsonlSubprocessRunner(BaseRunner):
                 resume=resume,
                 found_session=found_session,
                 state=state,
+                stderr_lines=stream.stderr_capture or None,
             )
             for evt in events:
                 if isinstance(evt, CompletedEvent):
