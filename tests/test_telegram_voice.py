@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import httpx
 import pytest
+from openai import APIConnectionError, APITimeoutError, OpenAIError
 
 from untether.telegram.api_models import (
     Chat,
@@ -13,7 +15,13 @@ from untether.telegram.api_models import (
 )
 from untether.telegram.client import BotClient
 from untether.telegram.types import TelegramIncomingMessage, TelegramVoice
-from untether.telegram.voice import VOICE_TRANSCRIPTION_DISABLED_HINT, transcribe_voice
+from untether.telegram.voice import (
+    VOICE_TRANSCRIPTION_CONNECTION_HINT,
+    VOICE_TRANSCRIPTION_DISABLED_HINT,
+    transcribe_voice,
+)
+
+_REQUEST = httpx.Request("POST", "https://api.groq.com/openai/v1/audio/transcriptions")
 
 
 class _Bot(BotClient):
@@ -403,4 +411,104 @@ async def test_transcribe_voice_allows_allowlisted_base_url() -> None:
 
     assert result == "transcribed"
     assert replies == []
+    assert transcriber.calls
+
+
+@pytest.mark.anyio
+async def test_transcribe_voice_connection_error_replies_with_hint() -> None:
+    # #584: a transport-level APIConnectionError should surface an actionable
+    # transient-network hint, not the opaque "Connection error." string.
+    replies: list[str] = []
+
+    async def reply(**kwargs) -> None:
+        replies.append(kwargs["text"])
+
+    transcriber = _Transcriber(error=APIConnectionError(request=_REQUEST))
+    bot = _Bot(file_info=File(file_path="voice.ogg"), audio=b"ok")
+    result = await transcribe_voice(
+        bot=bot,
+        msg=_voice_message(file_size=2),
+        enabled=True,
+        model="whisper-1",
+        reply=reply,
+        transcriber=transcriber,
+    )
+
+    assert result is None
+    assert replies[-1] == VOICE_TRANSCRIPTION_CONNECTION_HINT
+    assert transcriber.calls
+
+
+@pytest.mark.anyio
+async def test_transcribe_voice_timeout_error_replies_with_hint() -> None:
+    # #584: APITimeoutError is a subclass of APIConnectionError, so it should
+    # take the same transient-network hint path.
+    replies: list[str] = []
+
+    async def reply(**kwargs) -> None:
+        replies.append(kwargs["text"])
+
+    transcriber = _Transcriber(error=APITimeoutError(_REQUEST))
+    bot = _Bot(file_info=File(file_path="voice.ogg"), audio=b"ok")
+    result = await transcribe_voice(
+        bot=bot,
+        msg=_voice_message(file_size=2),
+        enabled=True,
+        model="whisper-1",
+        reply=reply,
+        transcriber=transcriber,
+    )
+
+    assert result is None
+    assert replies[-1] == VOICE_TRANSCRIPTION_CONNECTION_HINT
+    assert transcriber.calls
+
+
+@pytest.mark.anyio
+async def test_transcribe_voice_non_connection_openai_error_sanitised() -> None:
+    # A non-connection OpenAIError still goes through user_safe_error so we
+    # don't regress the #200 sanitisation path.
+    replies: list[str] = []
+
+    async def reply(**kwargs) -> None:
+        replies.append(kwargs["text"])
+
+    transcriber = _Transcriber(error=OpenAIError("model not found"))
+    bot = _Bot(file_info=File(file_path="voice.ogg"), audio=b"ok")
+    result = await transcribe_voice(
+        bot=bot,
+        msg=_voice_message(file_size=2),
+        enabled=True,
+        model="whisper-1",
+        reply=reply,
+        transcriber=transcriber,
+    )
+
+    assert result is None
+    assert replies[-1] == "model not found"
+    assert transcriber.calls
+
+
+@pytest.mark.anyio
+async def test_transcribe_voice_stdlib_timeout_branch_reachable() -> None:
+    # #584: TimeoutError is a subclass of OSError; the dedicated timeout
+    # handler must precede the OSError branch to stay reachable.
+    replies: list[str] = []
+
+    async def reply(**kwargs) -> None:
+        replies.append(kwargs["text"])
+
+    transcriber = _Transcriber(error=TimeoutError("slow"))
+    bot = _Bot(file_info=File(file_path="voice.ogg"), audio=b"ok")
+    result = await transcribe_voice(
+        bot=bot,
+        msg=_voice_message(file_size=2),
+        enabled=True,
+        model="whisper-1",
+        reply=reply,
+        transcriber=transcriber,
+    )
+
+    assert result is None
+    assert replies[-1] == "voice transcription timed out"
     assert transcriber.calls
