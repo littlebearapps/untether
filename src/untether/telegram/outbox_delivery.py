@@ -12,6 +12,12 @@ from .files import deny_reason, format_bytes, resolve_path_within_root
 
 logger = get_logger(__name__)
 
+# #600: graveyard subdirectory for skipped outbox directories. Directories
+# can't be sent as Telegram documents; leaving them in place meant they were
+# re-scanned, re-skipped, and re-logged on every run forever. One-time move
+# into this dot-dir stops the noise while preserving the content.
+_SKIPPED_GRAVEYARD = ".skipped"
+
 SendFileFunc = Callable[
     [int, int | None, str, bytes, int | None, str | None],
     Awaitable[Any],
@@ -58,6 +64,10 @@ def scan_outbox(
     entries = sorted(target.iterdir(), key=lambda p: p.name)
     for entry in entries:
         name = entry.name
+        # #600: never re-report the graveyard of previously-archived
+        # skipped directories.
+        if name == _SKIPPED_GRAVEYARD:
+            continue
         if not entry.is_file() or entry.is_symlink():
             if entry.is_symlink():
                 skipped.append((name, "symlink"))
@@ -140,6 +150,55 @@ def cleanup_outbox(
     return False
 
 
+def _archive_skipped_dirs(
+    run_root: Path,
+    outbox_dir: str,
+    skipped: list[tuple[str, str]],
+) -> list[tuple[str, str]]:
+    """#600: move skipped directories into ``<outbox>/.skipped/`` once.
+
+    Directories can never be delivered, so leaving them in the outbox meant
+    per-run log/notice noise forever and the agent's intended deliverable
+    silently stranded. Content is preserved (moved, not deleted); name
+    collisions in the graveyard get a ``_1``/``_2`` suffix (mirrors the
+    upload-dedup convention in ``telegram/files.py``). Returns the skipped
+    list with archived entries' reasons rewritten so the user-facing notice
+    says where the directory went. Move failures keep the original entry.
+    """
+    target = run_root / outbox_dir
+    graveyard = target / _SKIPPED_GRAVEYARD
+    updated: list[tuple[str, str]] = []
+    for name, reason in skipped:
+        if reason != "directory":
+            updated.append((name, reason))
+            continue
+        src = target / name
+        try:
+            graveyard.mkdir(parents=True, exist_ok=True)
+            dest = graveyard / name
+            suffix = 0
+            while dest.exists():
+                suffix += 1
+                dest = graveyard / f"{name}_{suffix}"
+            src.rename(dest)
+        except OSError:
+            logger.warning(
+                "outbox.skipped_dir_archive_failed",
+                directory=name,
+                exc_info=True,
+            )
+            updated.append((name, reason))
+            continue
+        rel_dest = Path(outbox_dir) / _SKIPPED_GRAVEYARD / dest.name
+        logger.info(
+            "outbox.skipped_dir_archived",
+            directory=name,
+            moved_to=str(rel_dest),
+        )
+        updated.append((name, f"directory, moved aside to {rel_dest}"))
+    return updated
+
+
 async def deliver_outbox_files(
     *,
     send_file: SendFileFunc,
@@ -167,6 +226,12 @@ async def deliver_outbox_files(
 
     if skipped:
         logger.info("outbox.skipped", skipped=skipped)
+        # #600: archive skipped directories once so they don't re-log and
+        # re-notify on every subsequent run. Gated on the same ``cleanup``
+        # flag as sent-file deletion (``outbox_cleanup = false`` keeps the
+        # outbox untouched).
+        if cleanup:
+            skipped = _archive_skipped_dirs(run_root, outbox_dir, skipped)
 
     result = OutboxResult(skipped=skipped)
 

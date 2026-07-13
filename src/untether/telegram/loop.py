@@ -1888,10 +1888,18 @@ async def run_main_loop(
                             trigger_dispatcher,
                             trigger_manager,
                         )
+                    # #601: report BOTH counts. ``crons`` previously counted
+                    # raw ``[[triggers.crons]]`` TOML entries while the
+                    # manager/scheduler logs count active crons (raw minus
+                    # run_once entries already spent per the persisted
+                    # fired-state), which read as "3 crons failed to load"
+                    # during triage. ``crons`` now matches the manager;
+                    # ``crons_configured`` preserves the raw entry count.
                     logger.info(
                         "triggers.enabled",
                         webhooks=len(trigger_settings.webhooks),
-                        crons=len(trigger_settings.crons),
+                        crons=len(trigger_manager.crons),
+                        crons_configured=len(trigger_settings.crons),
                     )
                 except (ValueError, TypeError, OSError) as exc:
                     logger.error(

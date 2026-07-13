@@ -550,3 +550,30 @@ class TestUnauthenticatedReloadGuard:
         ]
         assert refused
         assert refused[0]["webhook_ids"] == ["open"]
+
+
+# ── #601: startup count alignment ────────────────────────────────────────
+
+
+class Test601CountAlignment:
+    """#601: the ``triggers.enabled`` startup log (telegram/loop.py) now
+    reports ``crons=len(manager.crons)`` alongside
+    ``crons_configured=len(settings.crons)`` so it agrees with
+    ``triggers.manager.updated`` / ``triggers.cron.started``. This locks the
+    divergence semantics those fields rely on: active == configured minus
+    run_once entries already spent per the persisted fired-state."""
+
+    def test_active_vs_configured_divergence_is_fired_run_once(self):
+        settings = _settings(crons=[_cron("a"), _cron("b", run_once=True), _cron("c")])
+        mgr = TriggerManager(settings)
+        assert len(mgr.crons) == len(settings.crons) == 3
+
+        # The one-shot fires and is retired…
+        assert mgr.remove_cron("b") is True
+        # …and a config reload of the SAME toml keeps it retired: the raw
+        # settings still list 3 crons, the manager loads 2. This is the
+        # benign 15-vs-12 shape from the lba-1 startup logs.
+        mgr.update(settings)
+        assert len(mgr.crons) == 2
+        assert len(settings.crons) == 3
+        assert mgr.fired_run_once_ids() == ["b"]
