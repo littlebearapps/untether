@@ -182,3 +182,11 @@ async def manage_subprocess(
                 if timed_out:
                     kill_process(proc)
                     await proc.wait()
+        # #599: release the asyncio subprocess transport explicitly, on every
+        # exit path including clean rc=0. Without this the transport is only
+        # reached by GC at interpreter exit — after the event loop closed —
+        # so BaseSubprocessTransport.__del__ raises "RuntimeError: Event loop
+        # is closed" and the transport's pipes/FDs live from run completion
+        # until process shutdown.
+        with anyio.CancelScope(shield=True), contextlib.suppress(Exception):
+            await proc.aclose()

@@ -8,7 +8,7 @@ import pytest
 
 from tests.factories import action_completed, action_started
 from untether.markdown import MarkdownParts, MarkdownPresenter
-from untether.model import ResumeToken, UntetherEvent
+from untether.model import CompletedEvent, ResumeToken, UntetherEvent
 from untether.progress import ProgressTracker
 from untether.runner_bridge import (
     _EPHEMERAL_MSGS,
@@ -6152,3 +6152,176 @@ async def test_4b_stall_suppression_count_bumped_on_post_result() -> None:
         tg.start_soon(drive)
 
     assert stream.stall_suppression_counts.get("post_result", 0) >= 1
+
+
+# ---------------------------------------------------------------------------
+# #591 — early final-answer delivery (decoupled from subprocess exit)
+# ---------------------------------------------------------------------------
+
+
+def _completed_591(
+    answer: str = "early answer 591",
+    *,
+    ok: bool = True,
+    error: str | None = None,
+) -> CompletedEvent:
+    return CompletedEvent(
+        engine=CODEX_ENGINE,
+        resume=ResumeToken(engine=CODEX_ENGINE, value="sess-591"),
+        ok=ok,
+        answer=answer,
+        error=error,
+    )
+
+
+@pytest.mark.anyio
+async def test_591_final_answer_delivered_before_runner_returns() -> None:
+    """The final message reaches Telegram the moment the CompletedEvent
+    arrives — not only after the run generator returns (which can lag by
+    the full post-result limbo window when MCP children hold the
+    subprocess open)."""
+    transport = FakeTransport()
+    hang = anyio.Event()
+    runner = ScriptRunner(
+        # Emit a successful result, then hang the generator — the mock
+        # equivalent of a subprocess lingering in post-result limbo.
+        [Emit(_completed_591()), Wait(hang)],
+        engine=CODEX_ENGINE,
+    )
+    cfg = ExecBridgeConfig(
+        transport=transport,
+        presenter=MarkdownPresenter(),
+        final_notify=False,
+    )
+
+    delivered_while_hung = False
+    async with anyio.create_task_group() as tg:
+
+        async def _run() -> None:
+            await handle_message(
+                cfg,
+                runner=runner,
+                incoming=IncomingMessage(channel_id=123, message_id=10, text="hi"),
+                resume_token=None,
+            )
+
+        tg.start_soon(_run)
+        with anyio.move_on_after(5.0):
+            while not any(
+                "early answer 591" in c["message"].text for c in transport.edit_calls
+            ):
+                await anyio.sleep(0.01)
+        delivered_while_hung = any(
+            "early answer 591" in c["message"].text for c in transport.edit_calls
+        )
+        hang.set()
+
+    assert delivered_while_hung
+
+
+@pytest.mark.anyio
+async def test_591_cancel_after_delivery_keeps_answer() -> None:
+    """/cancel of an already-delivered run must not replace the answer
+    with a `cancelled` render (the channelo msg-5815 lost-answer shape)."""
+    transport = FakeTransport()
+    hang = anyio.Event()
+    runner = ScriptRunner(
+        [Emit(_completed_591()), Wait(hang)],
+        engine=CODEX_ENGINE,
+    )
+    cfg = ExecBridgeConfig(
+        transport=transport,
+        presenter=MarkdownPresenter(),
+        final_notify=False,
+    )
+    running_tasks: dict = {}
+
+    async with anyio.create_task_group() as tg:
+
+        async def _run() -> None:
+            await handle_message(
+                cfg,
+                runner=runner,
+                incoming=IncomingMessage(channel_id=123, message_id=10, text="hi"),
+                resume_token=None,
+                running_tasks=running_tasks,
+            )
+
+        tg.start_soon(_run)
+        with anyio.move_on_after(5.0):
+            while not any(
+                "early answer 591" in c["message"].text for c in transport.edit_calls
+            ):
+                await anyio.sleep(0.01)
+        assert running_tasks, "running task should be registered while hung"
+        # Simulate /cancel landing while the subprocess lingers in limbo.
+        task = next(iter(running_tasks.values()))
+        task.cancel_requested.set()
+
+    texts = [c["message"].text for c in transport.edit_calls]
+    assert any("early answer 591" in t for t in texts)
+    assert not any("cancelled" in t for t in texts)
+
+
+@pytest.mark.anyio
+async def test_591_error_result_waits_for_post_return_path() -> None:
+    """ok=False completions are NOT delivered early — they ride the
+    post-return path so auto-continue and error formatting see them
+    first."""
+    transport = FakeTransport()
+    hang = anyio.Event()
+    runner = ScriptRunner(
+        # NOTE: after `hang` releases, ScriptRunner's fall-through emits a
+        # trailing ok=True CompletedEvent; this test only asserts on the
+        # hang window, before that happens.
+        [Emit(_completed_591(answer="", ok=False, error="boom-591")), Wait(hang)],
+        engine=CODEX_ENGINE,
+    )
+    cfg = ExecBridgeConfig(
+        transport=transport,
+        presenter=MarkdownPresenter(),
+        final_notify=False,
+    )
+
+    async with anyio.create_task_group() as tg:
+
+        async def _run() -> None:
+            await handle_message(
+                cfg,
+                runner=runner,
+                incoming=IncomingMessage(channel_id=123, message_id=10, text="hi"),
+                resume_token=None,
+            )
+
+        tg.start_soon(_run)
+        await anyio.sleep(0.3)
+        assert not any("boom-591" in c["message"].text for c in transport.edit_calls), (
+            "error result must not be delivered while the generator is open"
+        )
+        hang.set()
+
+
+def test_591_note_final_records_without_repaint() -> None:
+    """note_final feeds the tracker but does NOT bump event_seq — a bumped
+    seq would wake _run_loop into painting a progress frame that races the
+    final answer edit on the same message."""
+    transport = FakeTransport()
+    clock = _FakeClock()
+    tracker = ProgressTracker(engine="codex", clock=clock)
+    edits = ProgressEdits(
+        transport=transport,
+        presenter=MarkdownPresenter(),
+        channel_id=123,
+        progress_ref=MessageRef(channel_id=123, message_id=1),
+        tracker=tracker,
+        started_at=0.0,
+        clock=clock,
+        last_rendered=None,
+    )
+    seq_before = edits.event_seq
+    assert edits._finalizing is False
+
+    edits.note_final(_completed_591())
+
+    assert edits._finalizing is True
+    assert edits.event_seq == seq_before

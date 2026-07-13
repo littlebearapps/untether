@@ -218,3 +218,93 @@ def test_signal_process_still_signals_descendants_when_parent_gone(
     subprocess_utils.terminate_process(_FakeProc())
 
     assert descendants_signalled == [8001, 8002]
+
+
+# ---------------------------------------------------------------------------
+# #599 — subprocess transport explicitly closed on every exit path
+# ---------------------------------------------------------------------------
+
+
+class _FakeAcloseProc:
+    """Process stand-in that records ``aclose()`` calls."""
+
+    def __init__(self, returncode: int | None = 0, pid: int = 4321) -> None:
+        self.pid = pid
+        self.returncode = returncode
+        self.aclose_called = 0
+        self.aclose_error: Exception | None = None
+
+    async def wait(self) -> int | None:
+        return self.returncode
+
+    async def aclose(self) -> None:
+        self.aclose_called += 1
+        if self.aclose_error is not None:
+            raise self.aclose_error
+
+
+@pytest.mark.anyio
+async def test_manage_subprocess_acloses_transport_on_clean_exit(
+    monkeypatch,
+) -> None:
+    """#599: aclose() must run even when the subprocess exited cleanly —
+    the clean-exit path is exactly where the transport used to leak until
+    interpreter shutdown ("RuntimeError: Event loop is closed" in
+    BaseSubprocessTransport.__del__)."""
+    fake = _FakeAcloseProc(returncode=0)
+
+    async def fake_open(cmd, **kwargs):
+        return fake
+
+    monkeypatch.setattr("untether.utils.subprocess.anyio.open_process", fake_open)
+
+    async with subprocess_utils.manage_subprocess(["fake-cmd"]) as proc:
+        assert proc is fake
+
+    assert fake.aclose_called == 1
+
+
+@pytest.mark.anyio
+async def test_manage_subprocess_acloses_transport_after_kill_path(
+    monkeypatch,
+) -> None:
+    """#599: aclose() also runs after the SIGTERM/SIGKILL teardown path."""
+    fake = _FakeAcloseProc(returncode=None)
+
+    async def fake_open(cmd, **kwargs):
+        return fake
+
+    def fake_terminate(proc) -> None:
+        proc.returncode = -15
+
+    async def fake_wait_for_process(proc, timeout: float) -> bool:
+        return False  # exited within the grace window — no SIGKILL
+
+    monkeypatch.setattr("untether.utils.subprocess.anyio.open_process", fake_open)
+    monkeypatch.setattr(subprocess_utils, "terminate_process", fake_terminate)
+    monkeypatch.setattr(subprocess_utils, "wait_for_process", fake_wait_for_process)
+
+    async with subprocess_utils.manage_subprocess(["fake-cmd"]):
+        pass
+
+    assert fake.returncode == -15
+    assert fake.aclose_called == 1
+
+
+@pytest.mark.anyio
+async def test_manage_subprocess_aclose_errors_are_suppressed(
+    monkeypatch,
+) -> None:
+    """#599: a failing aclose() must never mask the run's own outcome."""
+    fake = _FakeAcloseProc(returncode=0)
+    fake.aclose_error = RuntimeError("Event loop is closed")
+
+    async def fake_open(cmd, **kwargs):
+        return fake
+
+    monkeypatch.setattr("untether.utils.subprocess.anyio.open_process", fake_open)
+
+    async with subprocess_utils.manage_subprocess(["fake-cmd"]):
+        pass  # exiting must not raise despite aclose blowing up
+
+    assert fake.aclose_called == 1
