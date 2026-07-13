@@ -3047,6 +3047,9 @@ async def handle_message(
             runner._LIVENESS_TIMEOUT_SECONDS = watchdog.liveness_timeout
         if hasattr(runner, "_stall_auto_kill"):
             runner._stall_auto_kill = watchdog.stall_auto_kill
+        # #590: post-exit orphan sweep toggle.
+        if hasattr(runner, "_reap_orphans"):
+            runner._reap_orphans = watchdog.reap_orphans
 
     # #481: heartbeat tick cadence — drives the long-running-action elapsed
     # tail and the post-result closing-message poller. Read live so config

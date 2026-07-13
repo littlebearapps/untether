@@ -64,6 +64,16 @@ TimeoutStopSec=150
 OOMScoreAdjust=-100
 OOMPolicy=continue
 
+# Memory guard (#589) — OPTIONAL, uncomment on memory-constrained hosts.
+# The nsd ARM64 VPS hit the kernel OOM killer 5x in one evening under
+# accumulated MCP-child pressure. With the #590 orphan sweep the leak is
+# fixed, but a unit-level ceiling contains any future regression: MemoryHigh
+# throttles/reclaims before the kernel steps in, MemoryMax hard-caps the
+# whole cgroup (main process + all engine subprocesses + MCP children).
+# Size to ~60-75% of host RAM; leave headroom for the CLIs themselves.
+#MemoryHigh=4G
+#MemoryMax=6G
+
 Environment=HOME=%h
 Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin
 EnvironmentFile=%h/.untether/.env

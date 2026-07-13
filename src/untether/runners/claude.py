@@ -54,7 +54,12 @@ from ..settings import load_settings_if_exists
 from ..utils.env_audit import audit_proc_env
 from ..utils.paths import get_run_base_dir
 from ..utils.streams import drain_stderr
-from ..utils.subprocess import manage_subprocess, redact_env_i_args, wrap_with_env_i
+from ..utils.subprocess import (
+    manage_subprocess,
+    redact_env_i_args,
+    signal_pid_group,
+    wrap_with_env_i,
+)
 from .run_options import get_run_options
 from .tool_actions import tool_input_path, tool_kind_and_title
 
@@ -367,6 +372,12 @@ class ClaudeStreamState:
     # colliding with Claude Code's own ``req_*`` namespace.
     pending_catalog_refresh_ids: list[str] = field(default_factory=list)
     catalog_refresh_seq: int = 0
+    # #590: descendant PIDs captured while the subprocess was alive (at
+    # reader-done and at limbo detection). Read by manage_subprocess's
+    # post-exit orphan sweep so pgroup ESCAPEES — MCP chains that setsid
+    # into their own session and survive a plain killpg — are still
+    # terminated after the leader exits.
+    orphan_pid_snapshot: list[int] = field(default_factory=list)
     # #497: debounce gate. Holds the ``time.monotonic()`` timestamp of the
     # last enqueued refresh; the translate path skips re-enqueue while
     # ``(now - last) < catalog_refresh_min_interval_s``. None until the
@@ -3054,8 +3065,6 @@ class ClaudeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
         ``runner.limbo_detected`` warning. ``untether-issue-watcher``
         picks this up automatically.
         """
-        import os as _os
-
         from ..utils.proc_diag import collect_proc_diag
 
         reader_done_at = time.monotonic()
@@ -3154,6 +3163,13 @@ class ClaudeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
             ):
                 limbo_logged = True
                 diag = collect_proc_diag(proc.pid)
+                # #590: refresh the orphan snapshot — children spawned AFTER
+                # the reader-done snapshot (the sl "late leaker" shape) are
+                # captured here so the post-exit sweep can reach them.
+                if diag is not None:
+                    state.orphan_pid_snapshot.extend(
+                        p for p in diag.child_pids if p not in state.orphan_pid_snapshot
+                    )
                 run_logger.warning(
                     "runner.limbo_detected",
                     engine="claude",
@@ -3213,8 +3229,9 @@ class ClaudeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
                         pid=proc.pid,
                         session_id=sid,
                     )
-                with contextlib.suppress(ProcessLookupError, PermissionError, OSError):
-                    _os.killpg(proc.pid, signal.SIGTERM)
+                # #590: descendant-aware — bare killpg missed MCP chains
+                # that re-parented into separate sessions/pgroups.
+                signal_pid_group(proc.pid, signal.SIGTERM)
                 # Give MCP children configured grace to clean up.
                 grace_deadline = time.monotonic() + self._subcountdown_sigterm_grace_s
                 while time.monotonic() < grace_deadline:
@@ -3244,8 +3261,7 @@ class ClaudeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
                         pid=proc.pid,
                         session_id=sid,
                     )
-                with contextlib.suppress(ProcessLookupError, PermissionError, OSError):
-                    _os.killpg(proc.pid, signal.SIGKILL)
+                signal_pid_group(proc.pid, signal.SIGKILL)
                 return "reader_done_but_alive_timeout"
 
     def translate(
@@ -3447,6 +3463,10 @@ class ClaudeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
 
             async with manage_subprocess(
                 cmd,
+                # #590: sweep leaked MCP children after exit; the snapshot
+                # list is filled at reader-done / limbo time (escapees).
+                reap_orphans=self._reap_orphans,
+                orphan_pid_snapshot=state.orphan_pid_snapshot,
                 stdin=stdin_arg,
                 stdout=subprocess_module.PIPE,
                 stderr=subprocess_module.PIPE,
@@ -3577,6 +3597,21 @@ class ClaudeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
                         session_stdin=this_proc_stdin if use_control_channel else None,
                     ):
                         yield evt
+                    # #590: snapshot descendants while the subprocess is
+                    # still alive — after exit, /proc children links are
+                    # gone and pgroup escapees become invisible. The sweep
+                    # in manage_subprocess reads this list at teardown.
+                    if proc.returncode is None:
+                        try:
+                            from ..utils.proc_diag import find_descendants
+
+                            state.orphan_pid_snapshot.extend(
+                                p
+                                for p in find_descendants(proc.pid)
+                                if p not in state.orphan_pid_snapshot
+                            )
+                        except OSError:
+                            pass
                     reader_done.set()
 
                     # Close stdin after all events to let CLI exit.

@@ -994,6 +994,10 @@ class JsonlSubprocessRunner(BaseRunner):
 
     _stall_auto_kill: bool = False
 
+    # #590: post-exit orphan sweep ([watchdog] reap_orphans, default true).
+    # Refreshed per run from WatchdogSettings by the bridge.
+    _reap_orphans: bool = True
+
     def _check_prespawn_ram_guard(
         self, resume: ResumeToken | None
     ) -> CompletedEvent | None:
@@ -1191,20 +1195,11 @@ class JsonlSubprocessRunner(BaseRunner):
                                 pid=pid,
                                 reason="zero_tcp_zero_cpu",
                             )
-                            try:
-                                _os.killpg(pid, signal.SIGKILL)
-                            except (
-                                ProcessLookupError,
-                                PermissionError,
-                                OSError,
-                            ) as e:
-                                logger.debug(
-                                    "subprocess.watchdog.suppressed",
-                                    pid=pid,
-                                    error=str(e),
-                                    error_type=e.__class__.__name__,
-                                    context="liveness_kill",
-                                )
+                            # #590: descendant-aware — bare killpg missed
+                            # grandchildren in separate sessions/pgroups.
+                            from .utils.subprocess import signal_pid_group
+
+                            signal_pid_group(pid, signal.SIGKILL)
                         prev_diag = diag
 
             await anyio.sleep(self._WATCHDOG_POLL_SECONDS)
@@ -1222,20 +1217,12 @@ class JsonlSubprocessRunner(BaseRunner):
         )
         # Kill the process group to terminate orphan children holding pipes open.
         # manage_subprocess uses start_new_session=True, so the process group
-        # matches the subprocess PID.
-        try:
-            _os.killpg(pid, signal.SIGKILL)
-            logger.warning("subprocess.killed_orphan_group", pid=pid)
-        except (ProcessLookupError, PermissionError) as e:
-            logger.debug(
-                "subprocess.watchdog.suppressed",
-                pid=pid,
-                error=str(e),
-                error_type=e.__class__.__name__,
-                context="orphan_killpg",
-            )
-        except OSError:
-            logger.debug("subprocess.killpg_failed", pid=pid, exc_info=True)
+        # matches the subprocess PID. #590: descendant-aware so pgroup
+        # escapees holding the pipes are also terminated.
+        from .utils.subprocess import signal_pid_group
+
+        signal_pid_group(pid, signal.SIGKILL)
+        logger.warning("subprocess.killed_orphan_group", pid=pid)
 
     async def run_impl(
         self, prompt: str, resume: ResumeToken | None
@@ -1276,6 +1263,7 @@ class JsonlSubprocessRunner(BaseRunner):
 
         async with manage_subprocess(
             cmd,
+            reap_orphans=self._reap_orphans,
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
