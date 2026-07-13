@@ -443,3 +443,127 @@ def test_telegram_files_settings_can_disable_notify_skipped() -> None:
 
     cfg = TelegramFilesSettings(outbox_notify_skipped=False)
     assert cfg.outbox_notify_skipped is False
+
+
+# -- #600: skipped-directory graveyard --
+
+
+def _deliver_kwargs(tmp_path: Path, **overrides):
+    kwargs = {
+        "send_file": AsyncMock(),
+        "channel_id": 1,
+        "thread_id": None,
+        "reply_to_msg_id": None,
+        "run_root": tmp_path,
+        "outbox_dir": ".untether-outbox",
+        "deny_globs": DENY_GLOBS,
+        "max_download_bytes": MAX_BYTES,
+        "max_files": 10,
+        "cleanup": True,
+    }
+    kwargs.update(overrides)
+    return kwargs
+
+
+@pytest.mark.anyio
+async def test_600_skipped_dir_archived_to_graveyard(tmp_path: Path) -> None:
+    """A skipped directory is moved into .skipped/ and the skip reason
+    tells the user where it went; sendable files are unaffected."""
+    outbox = tmp_path / ".untether-outbox"
+    outbox.mkdir()
+    (outbox / "guides").mkdir()
+    (outbox / "guides" / "one.md").write_text("g", encoding="utf-8")
+    (outbox / "report.md").write_text("# R", encoding="utf-8")
+
+    result = await deliver_outbox_files(**_deliver_kwargs(tmp_path))
+
+    assert len(result.sent) == 1
+    assert not (outbox / "guides").exists()
+    assert (outbox / ".skipped" / "guides" / "one.md").is_file()
+    reasons = dict(result.skipped)
+    assert "moved aside" in reasons["guides"]
+
+
+@pytest.mark.anyio
+async def test_600_second_run_does_not_rereport_archived_dir(
+    tmp_path: Path,
+) -> None:
+    """After archival, subsequent scans see neither the directory nor the
+    graveyard — the per-run noise stops."""
+    outbox = tmp_path / ".untether-outbox"
+    outbox.mkdir()
+    (outbox / "guides").mkdir()
+
+    await deliver_outbox_files(**_deliver_kwargs(tmp_path))
+
+    files, skipped = scan_outbox(
+        tmp_path,
+        outbox_dir=".untether-outbox",
+        deny_globs=DENY_GLOBS,
+        max_download_bytes=MAX_BYTES,
+        max_files=10,
+    )
+    assert files == []
+    assert skipped == []
+
+
+@pytest.mark.anyio
+async def test_600_only_skipped_dir_outbox_still_archives(tmp_path: Path) -> None:
+    """An outbox containing ONLY a directory (zero sendable files) must
+    still archive it — this was the #600 core gap (cleanup only ran when
+    something was sent)."""
+    outbox = tmp_path / ".untether-outbox"
+    outbox.mkdir()
+    (outbox / "onboarding").mkdir()
+
+    result = await deliver_outbox_files(**_deliver_kwargs(tmp_path))
+
+    assert result.sent == []
+    assert not (outbox / "onboarding").exists()
+    assert (outbox / ".skipped" / "onboarding").is_dir()
+
+
+@pytest.mark.anyio
+async def test_600_cleanup_false_leaves_dir_in_place(tmp_path: Path) -> None:
+    """outbox_cleanup=false keeps the outbox untouched — no archival."""
+    outbox = tmp_path / ".untether-outbox"
+    outbox.mkdir()
+    (outbox / "guides").mkdir()
+
+    result = await deliver_outbox_files(**_deliver_kwargs(tmp_path, cleanup=False))
+
+    assert (outbox / "guides").is_dir()
+    assert not (outbox / ".skipped").exists()
+    assert ("guides", "directory") in result.skipped
+
+
+@pytest.mark.anyio
+async def test_600_graveyard_name_collision_gets_suffix(tmp_path: Path) -> None:
+    """A second directory with the same name archives to guides_1."""
+    outbox = tmp_path / ".untether-outbox"
+    outbox.mkdir()
+    (outbox / "guides").mkdir()
+    await deliver_outbox_files(**_deliver_kwargs(tmp_path))
+
+    (outbox / "guides").mkdir()  # agent makes the same mistake again
+    await deliver_outbox_files(**_deliver_kwargs(tmp_path))
+
+    assert (outbox / ".skipped" / "guides").is_dir()
+    assert (outbox / ".skipped" / "guides_1").is_dir()
+
+
+def test_600_scan_ignores_graveyard(tmp_path: Path) -> None:
+    """The .skipped graveyard itself never appears in scan results."""
+    outbox = tmp_path / ".untether-outbox"
+    (outbox / ".skipped" / "old").mkdir(parents=True)
+    (outbox / "file.txt").write_text("x", encoding="utf-8")
+
+    files, skipped = scan_outbox(
+        tmp_path,
+        outbox_dir=".untether-outbox",
+        deny_globs=DENY_GLOBS,
+        max_download_bytes=MAX_BYTES,
+        max_files=10,
+    )
+    assert [f.rel_path.name for f in files] == ["file.txt"]
+    assert skipped == []
