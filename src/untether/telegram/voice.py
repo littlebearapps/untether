@@ -143,10 +143,18 @@ async def transcribe_voice(
         )
         return text
     except OpenAIError as exc:
+        # #594: include the resolved endpoint and the underlying cause.
+        # APIConnectionError's str() is a bare "Connection error." — the
+        # actual failure (DNS, TLS, or e.g. httpx's LocalProtocolError for
+        # an illegal Authorization header built from a malformed api_key)
+        # lives in __cause__, and without the endpoint the log can't even
+        # say which service was unreachable.
         logger.error(
             "openai.transcribe.error",
             error=str(exc),
             error_type=exc.__class__.__name__,
+            cause=repr(exc.__cause__) if exc.__cause__ is not None else None,
+            endpoint=base_url or "openai-default",
             file_id=voice.file_id,
             file_size=voice.file_size,
         )
@@ -168,6 +176,7 @@ async def transcribe_voice(
         logger.error(
             "voice.transcribe.timeout",
             error=str(exc),
+            endpoint=base_url or "openai-default",
             file_id=voice.file_id,
             file_size=voice.file_size,
         )
@@ -178,6 +187,7 @@ async def transcribe_voice(
             "voice.transcribe.error",
             error=str(exc),
             error_type=exc.__class__.__name__,
+            endpoint=base_url or "openai-default",
             file_id=voice.file_id,
             file_size=voice.file_size,
         )
@@ -188,6 +198,7 @@ async def transcribe_voice(
             "voice.transcribe.unexpected",
             error=str(exc),
             error_type=exc.__class__.__name__,
+            endpoint=base_url or "openai-default",
             file_id=voice.file_id,
             file_size=voice.file_size,
         )

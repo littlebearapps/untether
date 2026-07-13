@@ -936,3 +936,63 @@ def test_loop_settings_rejects_unknown_keys() -> None:
 
     with pytest.raises(ValidationError):
         LoopSettings(budget_per_loop_usd=5.0)  # cost caps live in [cost_budget]
+
+
+def test_594_voice_key_with_embedded_newline_rejected(tmp_path: Path) -> None:
+    """#594: a header-illegal api key (e.g. two keys concatenated with a
+    newline by a credential manager) must fail at config load with a
+    diagnosable error — not hours later as APIConnectionError("Connection
+    error.") on every transcription attempt."""
+    config_path = tmp_path / "untether.toml"
+    data = {
+        "transport": "telegram",
+        "transports": {
+            "telegram": {
+                "bot_token": "tok",
+                "chat_id": 123,
+                "allow_any_user": True,
+                "voice_transcription": True,
+                "voice_transcription_api_key": "gsk_aaaa\ngsk_bbbb",
+            }
+        },
+    }
+    with pytest.raises(ConfigError, match="control characters"):
+        validate_settings_data(data, config_path=config_path)
+
+
+def test_594_voice_key_with_non_latin1_rejected(tmp_path: Path) -> None:
+    """#594: characters that cannot be encoded into an HTTP header are
+    rejected at config load."""
+    config_path = tmp_path / "untether.toml"
+    data = {
+        "transport": "telegram",
+        "transports": {
+            "telegram": {
+                "bot_token": "tok",
+                "chat_id": 123,
+                "allow_any_user": True,
+                "voice_transcription": True,
+                "voice_transcription_api_key": "gsk_ключ",
+            }
+        },
+    }
+    with pytest.raises(ConfigError, match="Authorization header"):
+        validate_settings_data(data, config_path=config_path)
+
+
+def test_594_normal_voice_key_still_accepted(tmp_path: Path) -> None:
+    """#594: ordinary ASCII keys are unaffected by the new validation."""
+    config_path = tmp_path / "untether.toml"
+    config_path.write_text(
+        "[transports.telegram]\n"
+        'bot_token = "tok"\n'
+        "chat_id = 123\n"
+        "allow_any_user = true\n"
+        "voice_transcription = true\n"
+        'voice_transcription_api_key = "gsk_normal-Key_1234567890"\n',
+        encoding="utf-8",
+    )
+    settings, _ = load_settings(config_path)
+    key = settings.transports.telegram.voice_transcription_api_key
+    assert key is not None
+    assert key.get_secret_value() == "gsk_normal-Key_1234567890"

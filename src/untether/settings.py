@@ -167,12 +167,33 @@ class TelegramTransportSettings(BaseModel):
     def _validate_voice_key_not_empty(cls, v: SecretStr | None) -> SecretStr | None:
         """#378: preserve the pre-SecretStr `NonEmptyStr | None` contract.
         Empty / whitespace-only strings round-trip to None so downstream code
-        can use a simple `is not None` (or truthy) check at the call site."""
+        can use a simple `is not None` (or truthy) check at the call site.
+
+        #594: additionally reject header-illegal characters at config load.
+        An embedded newline (e.g. two concatenated keys emitted by a
+        credential manager) or other control character reaches httpx as an
+        illegal ``Authorization`` header and surfaces hours later as a
+        misleading ``APIConnectionError("Connection error.")`` on every
+        transcription attempt — fail fast with a diagnosable error instead
+        (same fail-fast precedent as the #381 base-url SSRF validator)."""
         if v is None:
             return None
         key = v.get_secret_value().strip()
         if not key:
             return None
+        if not key.isprintable():
+            raise ValueError(
+                "voice_transcription_api_key contains control characters "
+                "(embedded newline/tab?) — check for concatenated or "
+                "line-wrapped key material"
+            )
+        try:
+            key.encode("latin-1")
+        except UnicodeEncodeError as exc:
+            raise ValueError(
+                "voice_transcription_api_key contains characters that cannot "
+                "be sent in an HTTP Authorization header"
+            ) from exc
         return SecretStr(key)
 
     @model_validator(mode="after")

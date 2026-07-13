@@ -512,3 +512,64 @@ async def test_transcribe_voice_stdlib_timeout_branch_reachable() -> None:
     assert result is None
     assert replies[-1] == "voice transcription timed out"
     assert transcriber.calls
+
+
+@pytest.mark.anyio
+async def test_594_transcribe_error_log_includes_endpoint_and_cause() -> None:
+    """#594: the openai.transcribe.error log must carry the resolved
+    endpoint and the underlying __cause__ — APIConnectionError's str() is a
+    bare "Connection error." which made the channelo outage (illegal
+    Authorization header from a malformed api_key) undiagnosable from
+    logs."""
+    from structlog.testing import capture_logs
+
+    async def reply(**kwargs) -> None:
+        pass
+
+    err = APIConnectionError(request=_REQUEST)
+    err.__cause__ = RuntimeError("Illegal header value b'Bearer sk-a\\nsk-b'")
+    transcriber = _Transcriber(error=err)
+    bot = _Bot(file_info=File(file_path="voice.ogg"), audio=b"ok")
+
+    with capture_logs() as logs:
+        result = await transcribe_voice(
+            bot=bot,
+            msg=_voice_message(file_size=2),
+            enabled=True,
+            model="whisper-1",
+            reply=reply,
+            transcriber=transcriber,
+            base_url="https://api.groq.com/openai/v1",
+        )
+
+    assert result is None
+    rec = next(r for r in logs if r["event"] == "openai.transcribe.error")
+    assert rec["endpoint"] == "https://api.groq.com/openai/v1"
+    assert "Illegal header value" in (rec["cause"] or "")
+
+
+@pytest.mark.anyio
+async def test_594_transcribe_error_log_default_endpoint_marker() -> None:
+    """#594: with no base_url configured the log says "openai-default"
+    rather than omitting the field."""
+    from structlog.testing import capture_logs
+
+    async def reply(**kwargs) -> None:
+        pass
+
+    transcriber = _Transcriber(error=OpenAIError("nope"))
+    bot = _Bot(file_info=File(file_path="voice.ogg"), audio=b"ok")
+
+    with capture_logs() as logs:
+        await transcribe_voice(
+            bot=bot,
+            msg=_voice_message(file_size=2),
+            enabled=True,
+            model="whisper-1",
+            reply=reply,
+            transcriber=transcriber,
+        )
+
+    rec = next(r for r in logs if r["event"] == "openai.transcribe.error")
+    assert rec["endpoint"] == "openai-default"
+    assert rec["cause"] is None
