@@ -3858,3 +3858,92 @@ async def test_run_main_loop_mentions_only_skips_voice_and_files(
     assert calls["voice"] == 0
     assert calls["file"] == 0
     assert runner.calls == []
+
+
+# ---------------------------------------------------------------------------
+# #598 — transport.edit.failed carries the failure reason
+# ---------------------------------------------------------------------------
+
+
+class _FailingEditBot:
+    """Minimal bot double: edits always fail; reason is retrievable."""
+
+    def __init__(self, reason: str | None) -> None:
+        self._reason = reason
+        self.pop_calls: list[tuple[int, int]] = []
+
+    async def edit_message_text(self, **kwargs: Any) -> None:
+        return None
+
+    def pop_edit_error(self, chat_id: int, message_id: int) -> str | None:
+        self.pop_calls.append((chat_id, message_id))
+        return self._reason
+
+
+@pytest.mark.anyio
+async def test_598_edit_failed_log_includes_reason() -> None:
+    from structlog.testing import capture_logs
+
+    from untether.telegram.bridge import TelegramTransport
+
+    bot = _FailingEditBot("Bad Request: message to edit not found")
+    transport = TelegramTransport(bot)  # type: ignore[arg-type]
+    ref = MessageRef(channel_id=123, message_id=916)
+
+    with capture_logs() as logs:
+        result = await transport.edit(
+            ref=ref,
+            message=RenderedMessage(
+                text="cleared", extra={"reply_markup": {"inline_keyboard": []}}
+            ),
+        )
+
+    assert result is None
+    assert bot.pop_calls == [(123, 916)]
+    rec = next(r for r in logs if r.get("event") == "transport.edit.failed")
+    assert rec["error"] == "Bad Request: message to edit not found"
+    assert rec["has_reply_markup"] is True
+
+
+@pytest.mark.anyio
+async def test_598_not_modified_treated_as_noop() -> None:
+    """'message is not modified' means the edit's intent is already
+    satisfied — an info-level no-op, not a warning."""
+    from structlog.testing import capture_logs
+
+    from untether.telegram.bridge import TelegramTransport
+
+    bot = _FailingEditBot("Bad Request: message is not modified")
+    transport = TelegramTransport(bot)  # type: ignore[arg-type]
+    ref = MessageRef(channel_id=123, message_id=916)
+
+    with capture_logs() as logs:
+        result = await transport.edit(
+            ref=ref, message=RenderedMessage(text="same text")
+        )
+
+    assert result == ref
+    assert not any(r.get("event") == "transport.edit.failed" for r in logs)
+    assert any(r.get("event") == "transport.edit.noop" for r in logs)
+
+
+@pytest.mark.anyio
+async def test_598_edit_failed_tolerates_bot_without_pop() -> None:
+    """Bots/doubles without pop_edit_error still log (error=None)."""
+    from structlog.testing import capture_logs
+
+    from untether.telegram.bridge import TelegramTransport
+
+    class _PlainFailingBot:
+        async def edit_message_text(self, **kwargs: Any) -> None:
+            return None
+
+    transport = TelegramTransport(_PlainFailingBot())  # type: ignore[arg-type]
+    ref = MessageRef(channel_id=123, message_id=917)
+
+    with capture_logs() as logs:
+        result = await transport.edit(ref=ref, message=RenderedMessage(text="x"))
+
+    assert result is None
+    rec = next(r for r in logs if r.get("event") == "transport.edit.failed")
+    assert rec["error"] is None

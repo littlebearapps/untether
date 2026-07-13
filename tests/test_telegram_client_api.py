@@ -275,3 +275,40 @@ async def test_download_file_rejects_path_with_scheme_or_traversal(
         assert client.got_called is False
     finally:
         await client.close()
+
+
+# ---------------------------------------------------------------------------
+# #598 — failure reasons recorded for later correlation
+# ---------------------------------------------------------------------------
+
+
+def test_598_api_error_recorded_and_popped() -> None:
+    client = HttpBotClient("token", http_client=httpx.AsyncClient())
+    payload = {
+        "ok": False,
+        "error_code": 400,
+        "description": "Bad Request: message is not modified",
+    }
+    result = client._parse_telegram_envelope(
+        method="editMessageText",
+        resp=_response(),
+        payload=payload,
+        request_payload={"chat_id": 123, "message_id": 916, "text": "x"},
+    )
+    assert result is None
+    reason = client.pop_last_api_error("editMessageText", 123, 916)
+    assert reason == "Bad Request: message is not modified"
+    # pop clears the entry
+    assert client.pop_last_api_error("editMessageText", 123, 916) is None
+
+
+def test_598_error_store_is_bounded() -> None:
+    client = HttpBotClient("token", http_client=httpx.AsyncClient())
+    for i in range(80):
+        client._record_api_error(
+            "editMessageText", {"chat_id": 1, "message_id": i}, f"err {i}"
+        )
+    assert len(client._last_api_errors) <= 64
+    # Oldest entries evicted, newest retained
+    assert client.pop_last_api_error("editMessageText", 1, 0) is None
+    assert client.pop_last_api_error("editMessageText", 1, 79) == "err 79"

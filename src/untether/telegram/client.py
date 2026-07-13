@@ -240,6 +240,14 @@ class TelegramClient:
             chat_id=chat_id,
         )
 
+    def pop_edit_error(self, chat_id: int, message_id: int) -> str | None:
+        """#598: fetch-and-clear the recorded ``editMessageText`` failure
+        reason for a message, so ``transport.edit.failed`` can say WHY."""
+        pop = getattr(self._client, "pop_last_api_error", None)
+        if callable(pop):
+            return pop("editMessageText", chat_id, message_id)
+        return None
+
     async def edit_message_text(
         self,
         chat_id: int,
