@@ -687,9 +687,14 @@ def test_catalog_init_snapshots_mcp_servers_when_all_connected() -> None:
 
 
 def test_catalog_init_logs_staleness_warning_for_non_connected() -> None:
-    """Any non-``connected`` MCP at init emits a catalog_staleness WARNING."""
+    """#595 severity split: ``failed``/``needs-auth`` at init emits the
+    catalog_staleness WARNING; ``pending`` is a startup race and logs at
+    INFO as ``catalog_staleness.pending`` instead."""
     from structlog.testing import capture_logs
 
+    from untether.runners.claude import _CATALOG_STALENESS_WARNED
+
+    _CATALOG_STALENESS_WARNED.clear()
     state = ClaudeStreamState()
     state.factory._resume = ResumeToken(engine=ENGINE, value="sess-2")
     event = _decode_event(
@@ -708,24 +713,106 @@ def test_catalog_init_logs_staleness_warning_for_non_connected() -> None:
         )
 
     warnings = [r for r in logs if r.get("event") == "catalog_staleness.detected"]
-    assert len(warnings) == 2
-    by_server = {r["server"]: r for r in warnings}
-    assert by_server["github"]["status"] == "failed"
-    assert by_server["github"]["session_id"] == "sess-2"
-    assert by_server["github"]["source"] == "system.init"
-    assert by_server["jina"]["status"] == "pending"
-    # "pal" connected must NOT appear
-    assert "pal" not in by_server
-    # Dedup set mirrors the emitted warnings
+    assert len(warnings) == 1
+    assert warnings[0]["server"] == "github"
+    assert warnings[0]["status"] == "failed"
+    assert warnings[0]["session_id"] == "sess-2"
+    assert warnings[0]["source"] == "system.init"
+    pendings = [r for r in logs if r.get("event") == "catalog_staleness.pending"]
+    assert len(pendings) == 1
+    assert pendings[0]["server"] == "jina"
+    assert pendings[0]["log_level"] == "info"
+    # Dedup set mirrors ALL emitted entries (both severities)
     assert ("sess-2", "github", "failed") in state.catalog_staleness_logged
     assert ("sess-2", "jina", "pending") in state.catalog_staleness_logged
     assert ("sess-2", "pal", "connected") not in state.catalog_staleness_logged
+
+
+def test_catalog_staleness_dedups_across_runs() -> None:
+    """#595: a persistently broken connector warns once per process, not
+    once per subprocess spawn — fresh ClaudeStreamState (new run) must NOT
+    re-warn for the same (server, status)."""
+    from structlog.testing import capture_logs
+
+    from untether.runners.claude import _CATALOG_STALENESS_WARNED
+
+    _CATALOG_STALENESS_WARNED.clear()
+    event_payload = _make_system_init_event(
+        "sess-r1", mcp_servers=[{"name": "gmail", "status": "needs-auth"}]
+    )
+
+    state1 = ClaudeStreamState()
+    state1.factory._resume = ResumeToken(engine=ENGINE, value="sess-r1")
+    with capture_logs() as logs1:
+        translate_claude_event(
+            _decode_event(event_payload),
+            title="claude",
+            state=state1,
+            factory=state1.factory,
+        )
+
+    # Second run: fresh state (this is what happens on every Telegram turn).
+    state2 = ClaudeStreamState()
+    state2.factory._resume = ResumeToken(engine=ENGINE, value="sess-r2")
+    with capture_logs() as logs2:
+        translate_claude_event(
+            _decode_event(
+                _make_system_init_event(
+                    "sess-r2", mcp_servers=[{"name": "gmail", "status": "needs-auth"}]
+                )
+            ),
+            title="claude",
+            state=state2,
+            factory=state2.factory,
+        )
+
+    first = [r for r in logs1 if r.get("event") == "catalog_staleness.detected"]
+    second = [r for r in logs2 if r.get("event") == "catalog_staleness.detected"]
+    assert len(first) == 1
+    assert second == []
+    suppressed = [r for r in logs2 if r.get("event") == "catalog_staleness.suppressed"]
+    assert len(suppressed) == 1
+
+
+def test_catalog_pending_still_logged_per_run() -> None:
+    """#595: pending keeps per-run granularity (INFO) — it is not routed
+    through the process-lifetime warning registry."""
+    from structlog.testing import capture_logs
+
+    from untether.runners.claude import _CATALOG_STALENESS_WARNED
+
+    _CATALOG_STALENESS_WARNED.clear()
+    logs_per_run = []
+    for run_idx in (1, 2):
+        state = ClaudeStreamState()
+        state.factory._resume = ResumeToken(engine=ENGINE, value=f"sess-p{run_idx}")
+        with capture_logs() as logs:
+            translate_claude_event(
+                _decode_event(
+                    _make_system_init_event(
+                        f"sess-p{run_idx}",
+                        mcp_servers=[{"name": "slow", "status": "pending"}],
+                    )
+                ),
+                title="claude",
+                state=state,
+                factory=state.factory,
+            )
+        logs_per_run.append(
+            [r for r in logs if r.get("event") == "catalog_staleness.pending"]
+        )
+
+    assert len(logs_per_run[0]) == 1
+    assert len(logs_per_run[1]) == 1
 
 
 def test_catalog_staleness_dedups_repeated_init() -> None:
     """Re-fired init with same server+status only logs once per session."""
     from structlog.testing import capture_logs
 
+    from untether.runners.claude import _CATALOG_STALENESS_WARNED
+
+    _CATALOG_STALENESS_WARNED.clear()
     state = ClaudeStreamState()
     state.factory._resume = ResumeToken(engine=ENGINE, value="sess-3")
     event = _decode_event(
