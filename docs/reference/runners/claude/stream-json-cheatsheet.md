@@ -160,3 +160,22 @@ Array content (Task tool format):
 ```json
 {"type":"tool_result","tool_use_id":"toolu_2","content":[{"type":"text","text":"Task done"}]}
 ```
+
+### Image / document blocks (binary media echoes)
+
+`Read` on an image or PDF echoes the content back inside the user-role
+message as `image` / `document` blocks alongside the `tool_result`
+([#597](https://github.com/littlebearapps/untether/issues/597) — the schema
+must accept them or msgspec drops the whole line):
+
+```json
+{"type":"image","source":{"type":"base64","media_type":"image/jpeg","data":"…"}}
+```
+
+```json
+{"type":"document","source":{"type":"base64","media_type":"application/pdf","data":"…"},"title":"report.pdf"}
+```
+
+* `source` — `{"type":"base64"|"url", "media_type": …, "data"|"url": …}`.
+  Untether never renders the payload; the blocks exist so the surrounding
+  message parses. Translation treats them as non-`tool_result` content.

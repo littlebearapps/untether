@@ -6325,3 +6325,94 @@ def test_591_note_final_records_without_repaint() -> None:
 
     assert edits._finalizing is True
     assert edits.event_seq == seq_before
+
+
+# ---------------------------------------------------------------------------
+# #596 — 0-turn / $0 / empty-answer ok=True completion (no-op resume)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.anyio
+async def test_596_empty_result_anomaly_surfaces_note() -> None:
+    """A resumed run returning 0 turns / 0 API ms / empty answer with
+    ok=True must warn and tell the user instead of delivering silence."""
+    from structlog.testing import capture_logs
+
+    transport = FakeTransport()
+    runner = ScriptRunner(
+        [Return(answer="", usage={"num_turns": 0, "duration_api_ms": 0})],
+        engine=CODEX_ENGINE,
+        resume_value="sess-596",
+    )
+    cfg = ExecBridgeConfig(
+        transport=transport,
+        presenter=MarkdownPresenter(),
+        final_notify=False,
+    )
+
+    with capture_logs() as logs:
+        await handle_message(
+            cfg,
+            runner=runner,
+            incoming=IncomingMessage(channel_id=123, message_id=10, text="continue"),
+            resume_token=ResumeToken(engine=CODEX_ENGINE, value="sess-596"),
+        )
+
+    assert any(r.get("event") == "runner.empty_result" for r in logs)
+    final_text = transport.edit_calls[-1]["message"].text
+    assert "empty result" in final_text
+    assert "/new" in final_text
+
+
+@pytest.mark.anyio
+async def test_596_normal_run_with_turns_not_flagged() -> None:
+    """A run that did real work (turns > 0) with an empty answer is NOT
+    classified as the no-op anomaly."""
+    from structlog.testing import capture_logs
+
+    transport = FakeTransport()
+    runner = ScriptRunner(
+        [Return(answer="", usage={"num_turns": 3, "duration_api_ms": 900})],
+        engine=CODEX_ENGINE,
+    )
+    cfg = ExecBridgeConfig(
+        transport=transport,
+        presenter=MarkdownPresenter(),
+        final_notify=False,
+    )
+
+    with capture_logs() as logs:
+        await handle_message(
+            cfg,
+            runner=runner,
+            incoming=IncomingMessage(channel_id=123, message_id=10, text="hi"),
+            resume_token=None,
+        )
+
+    assert not any(r.get("event") == "runner.empty_result" for r in logs)
+    assert "empty result" not in transport.edit_calls[-1]["message"].text
+
+
+@pytest.mark.anyio
+async def test_596_no_usage_reporting_not_flagged() -> None:
+    """Engines that report no usage at all never trip the anomaly — an
+    empty answer alone is not evidence of a no-op resume."""
+    from structlog.testing import capture_logs
+
+    transport = FakeTransport()
+    runner = ScriptRunner([Return(answer="")], engine=CODEX_ENGINE)
+    cfg = ExecBridgeConfig(
+        transport=transport,
+        presenter=MarkdownPresenter(),
+        final_notify=False,
+    )
+
+    with capture_logs() as logs:
+        await handle_message(
+            cfg,
+            runner=runner,
+            incoming=IncomingMessage(channel_id=123, message_id=10, text="hi"),
+            resume_token=None,
+        )
+
+    assert not any(r.get("event") == "runner.empty_result" for r in logs)
