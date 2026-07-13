@@ -4532,3 +4532,246 @@ async def test_590_limbo_refreshes_orphan_snapshot(monkeypatch) -> None:
     assert "runner.limbo_detected" in logger.events()
     # 901/902 added; 900 not duplicated.
     assert state.orphan_pid_snapshot == [900, 901, 902]
+
+
+# ===========================================================================
+# #592 — pre-first-result silence cap (the 8-day-zombie dead zone)
+# ===========================================================================
+
+
+def _silence_watchdog_runner() -> "ClaudeRunner":
+    from untether.runners.claude import ClaudeRunner
+
+    runner = ClaudeRunner(claude_cmd="claude")
+    runner._watchdog_min_poll_s = 0.02
+    runner._subcountdown_sigterm_grace_s = 0.1
+    runner._subcountdown_sigterm_grace_poll_s = 0.02
+    return runner
+
+
+@pytest.mark.anyio
+async def test_592_pre_result_silence_cap_kills_silent_run(monkeypatch) -> None:
+    """A run with zero stream output and no result is killed once the
+    silence cap elapses; the reason lands in stderr_capture so the run's
+    error message explains itself."""
+    import anyio
+
+    from untether.runner import JsonlStreamState
+    from untether.runners.claude import (
+        _PENDING_ASK_REQUESTS,
+        _REQUEST_TO_SESSION,
+    )
+
+    _REQUEST_TO_SESSION.clear()
+    _PENDING_ASK_REQUESTS.clear()
+
+    runner = _silence_watchdog_runner()
+    state = ClaudeStreamState()
+    state.factory.started(ResumeToken(engine="claude", value="silent-sess-1"))
+    # result_received_at stays None — pre-result forever.
+    stream = JsonlStreamState(expected_session=None)
+
+    proc = _FakeProc(pid=72424, returncode=None)
+    killed_signals: list[int] = []
+
+    def _fake_killpg(pgid: int, sig: int) -> None:
+        killed_signals.append(sig)
+        proc.returncode = -15  # SIGTERM obeyed
+
+    monkeypatch.setattr("os.killpg", _fake_killpg)
+    monkeypatch.setattr("untether.utils.subprocess.find_descendants", lambda pid: [])
+
+    logger = _RecordingLogger()
+    reader_done = anyio.Event()  # never set — the reader is blocked forever
+
+    class FakeStdin:
+        async def aclose(self) -> None:
+            pass
+
+    async with anyio.create_task_group() as tg:
+        tg.start_soon(
+            runner._post_result_idle_watchdog,
+            state,
+            FakeStdin(),
+            reader_done,
+            logger,
+            0.2,  # post-result timeout (drives poll cadence only here)
+            proc,
+            stream,
+            0.0,  # limbo grace off
+            0.15,  # pre_result_silence_timeout_s — the cap under test
+        )
+        with anyio.move_on_after(3.0):
+            while signal.SIGTERM not in killed_signals:
+                await anyio.sleep(0.02)
+        tg.cancel_scope.cancel()
+
+    assert signal.SIGTERM in killed_signals
+    assert "claude.pre_result_silence.cancel" in logger.events("warning")
+    exit_reasons = [
+        kw.get("reason")
+        for lvl, e, kw in logger.records
+        if e == "claude.post_result_idle.task_exited"
+    ]
+    assert "pre_result_silence_cancelled" in exit_reasons
+    assert any("pre-result silence cap" in line for line in stream.stderr_capture)
+    assert state.pre_result_silence_killed is True
+
+
+@pytest.mark.anyio
+async def test_592_silence_cap_suppressed_by_pending_request(monkeypatch) -> None:
+    """A pending permission request (e.g. plan-mode approval wait) must
+    suppress the cap — cron+plan-mode long idles are by design."""
+    import anyio
+
+    from untether.runner import JsonlStreamState
+    from untether.runners.claude import (
+        _PENDING_ASK_REQUESTS,
+        _REQUEST_TO_SESSION,
+    )
+
+    sid = "silent-sess-2"
+    _REQUEST_TO_SESSION.clear()
+    _PENDING_ASK_REQUESTS.clear()
+    _REQUEST_TO_SESSION["req_silence"] = sid
+    try:
+        runner = _silence_watchdog_runner()
+        state = ClaudeStreamState()
+        state.factory.started(ResumeToken(engine="claude", value=sid))
+        stream = JsonlStreamState(expected_session=None)
+
+        proc = _FakeProc(pid=72425, returncode=None)
+        killed_signals: list[int] = []
+        monkeypatch.setattr("os.killpg", lambda pgid, sig: killed_signals.append(sig))
+
+        logger = _RecordingLogger()
+        reader_done = anyio.Event()
+
+        class FakeStdin:
+            async def aclose(self) -> None:
+                pass
+
+        async with anyio.create_task_group() as tg:
+            tg.start_soon(
+                runner._post_result_idle_watchdog,
+                state,
+                FakeStdin(),
+                reader_done,
+                logger,
+                0.2,
+                proc,
+                stream,
+                0.0,
+                0.1,
+            )
+            await anyio.sleep(0.6)
+            tg.cancel_scope.cancel()
+
+        assert killed_signals == []
+        assert "claude.pre_result_silence.suppressed" in logger.events("info")
+        assert state.pre_result_silence_killed is False
+    finally:
+        _REQUEST_TO_SESSION.clear()
+
+
+@pytest.mark.anyio
+async def test_592_silence_cap_suppressed_by_live_background_work(
+    monkeypatch,
+) -> None:
+    """Live background work (pending wakeup) suppresses the cap."""
+    import anyio
+
+    from untether.runner import JsonlStreamState
+    from untether.runners.claude import (
+        _PENDING_ASK_REQUESTS,
+        _REQUEST_TO_SESSION,
+    )
+
+    _REQUEST_TO_SESSION.clear()
+    _PENDING_ASK_REQUESTS.clear()
+
+    runner = _silence_watchdog_runner()
+    state = ClaudeStreamState()
+    state.factory.started(ResumeToken(engine="claude", value="silent-sess-3"))
+    state.live_wakeups["toolu_silent"] = time.monotonic() + 3600.0
+    stream = JsonlStreamState(expected_session=None)
+
+    proc = _FakeProc(pid=72426, returncode=None)
+    killed_signals: list[int] = []
+    monkeypatch.setattr("os.killpg", lambda pgid, sig: killed_signals.append(sig))
+
+    logger = _RecordingLogger()
+    reader_done = anyio.Event()
+
+    class FakeStdin:
+        async def aclose(self) -> None:
+            pass
+
+    async with anyio.create_task_group() as tg:
+        tg.start_soon(
+            runner._post_result_idle_watchdog,
+            state,
+            FakeStdin(),
+            reader_done,
+            logger,
+            0.2,
+            proc,
+            stream,
+            0.0,
+            0.1,
+        )
+        await anyio.sleep(0.6)
+        tg.cancel_scope.cancel()
+
+    assert killed_signals == []
+    assert state.pre_result_silence_killed is False
+
+
+@pytest.mark.anyio
+async def test_592_silence_cap_zero_disables(monkeypatch) -> None:
+    """pre_result_silence_timeout=0 disables the cap entirely."""
+    import anyio
+
+    from untether.runner import JsonlStreamState
+    from untether.runners.claude import (
+        _PENDING_ASK_REQUESTS,
+        _REQUEST_TO_SESSION,
+    )
+
+    _REQUEST_TO_SESSION.clear()
+    _PENDING_ASK_REQUESTS.clear()
+
+    runner = _silence_watchdog_runner()
+    state = ClaudeStreamState()
+    state.factory.started(ResumeToken(engine="claude", value="silent-sess-4"))
+    stream = JsonlStreamState(expected_session=None)
+
+    proc = _FakeProc(pid=72427, returncode=None)
+    killed_signals: list[int] = []
+    monkeypatch.setattr("os.killpg", lambda pgid, sig: killed_signals.append(sig))
+
+    logger = _RecordingLogger()
+    reader_done = anyio.Event()
+
+    class FakeStdin:
+        async def aclose(self) -> None:
+            pass
+
+    async with anyio.create_task_group() as tg:
+        tg.start_soon(
+            runner._post_result_idle_watchdog,
+            state,
+            FakeStdin(),
+            reader_done,
+            logger,
+            0.2,
+            proc,
+            stream,
+            0.0,
+            0.0,  # disabled
+        )
+        await anyio.sleep(0.5)
+        tg.cancel_scope.cancel()
+
+    assert killed_signals == []
+    assert state.pre_result_silence_killed is False
