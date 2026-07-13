@@ -312,6 +312,14 @@ class WatchdogSettings(BaseModel):
     liveness_timeout: float = Field(default=600.0, ge=60, le=3600)
     stall_auto_kill: bool = False
     stall_repeat_seconds: float = Field(default=180.0, ge=30, le=600)
+    # #590: after an engine subprocess exits (including clean rc=0), sweep
+    # surviving process-group members and captured descendant PIDs — the
+    # Claude CLI leaks MCP node children on exit fleet-wide (1/run on sl,
+    # 11-37/day on nsd, driving the #589 OOM kills). Killing everything the
+    # session spawned at session end is the #573 lifecycle policy (OWASP
+    # ASI08/ASI10); it also terminates user-backgrounded Bash tasks that
+    # outlive the run. Set false to keep survivors.
+    reap_orphans: bool = True
     tool_timeout: float = Field(default=600.0, ge=60, le=7200)
     mcp_tool_timeout: float = Field(default=900.0, ge=60, le=7200)
     subagent_timeout: float = Field(default=900.0, ge=60, le=7200)

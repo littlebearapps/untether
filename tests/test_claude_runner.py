@@ -3919,6 +3919,9 @@ async def test_333_reader_done_but_alive_triggers_subcountdown(monkeypatch) -> N
             proc.returncode = -9
 
     monkeypatch.setattr("os.killpg", _fake_killpg)
+    # #590: signal_pid_group snapshots real /proc descendants before
+    # signalling — neutralise it so tests never touch live processes.
+    monkeypatch.setattr("untether.utils.subprocess.find_descendants", lambda pid: [])
 
     logger = _RecordingLogger()
     reader_done = anyio.Event()
@@ -3989,6 +3992,9 @@ async def test_333_subprocess_exits_during_subcountdown(monkeypatch) -> None:
     killed_signals: list[int] = []
 
     monkeypatch.setattr("os.killpg", lambda pgid, sig: killed_signals.append(sig))
+    # #590: signal_pid_group snapshots real /proc descendants before
+    # signalling — neutralise it so tests never touch live processes.
+    monkeypatch.setattr("untether.utils.subprocess.find_descendants", lambda pid: [])
 
     logger = _RecordingLogger()
     reader_done = anyio.Event()
@@ -4060,6 +4066,11 @@ async def test_333_subcountdown_defers_on_pending_request(monkeypatch) -> None:
         killed_signals: list[int] = []
 
         monkeypatch.setattr("os.killpg", lambda pgid, sig: killed_signals.append(sig))
+        # #590: signal_pid_group snapshots real /proc descendants before
+        # signalling — neutralise it so tests never touch live processes.
+        monkeypatch.setattr(
+            "untether.utils.subprocess.find_descendants", lambda pid: []
+        )
 
         logger = _RecordingLogger()
         reader_done = anyio.Event()
@@ -4133,6 +4144,9 @@ async def test_333_lifecycle_state_transitions_logged(monkeypatch) -> None:
             proc.returncode = -15  # exit on SIGTERM
 
     monkeypatch.setattr("os.killpg", _fake_killpg)
+    # #590: signal_pid_group snapshots real /proc descendants before
+    # signalling — neutralise it so tests never touch live processes.
+    monkeypatch.setattr("untether.utils.subprocess.find_descendants", lambda pid: [])
 
     logger = _RecordingLogger()
     reader_done = anyio.Event()
@@ -4210,6 +4224,9 @@ async def test_591_limbo_grace_short_circuits_subcountdown(monkeypatch) -> None:
         proc.returncode = -15
 
     monkeypatch.setattr("os.killpg", _fake_killpg)
+    # #590: signal_pid_group snapshots real /proc descendants before
+    # signalling — neutralise it so tests never touch live processes.
+    monkeypatch.setattr("untether.utils.subprocess.find_descendants", lambda pid: [])
 
     logger = _RecordingLogger()
     reader_done = anyio.Event()
@@ -4277,6 +4294,9 @@ async def test_591_limbo_grace_deferred_by_live_background_work(monkeypatch) -> 
     proc = _FakeProc(pid=52425, returncode=None)
     killed_signals: list[int] = []
     monkeypatch.setattr("os.killpg", lambda pgid, sig: killed_signals.append(sig))
+    # #590: signal_pid_group snapshots real /proc descendants before
+    # signalling — neutralise it so tests never touch live processes.
+    monkeypatch.setattr("untether.utils.subprocess.find_descendants", lambda pid: [])
 
     logger = _RecordingLogger()
     reader_done = anyio.Event()
@@ -4330,6 +4350,9 @@ async def test_591_limbo_grace_zero_disables_shortcut(monkeypatch) -> None:
     proc = _FakeProc(pid=52426, returncode=None)
     killed_signals: list[int] = []
     monkeypatch.setattr("os.killpg", lambda pgid, sig: killed_signals.append(sig))
+    # #590: signal_pid_group snapshots real /proc descendants before
+    # signalling — neutralise it so tests never touch live processes.
+    monkeypatch.setattr("untether.utils.subprocess.find_descendants", lambda pid: [])
 
     logger = _RecordingLogger()
     reader_done = anyio.Event()
@@ -4355,3 +4378,70 @@ async def test_591_limbo_grace_zero_disables_shortcut(monkeypatch) -> None:
         tg.cancel_scope.cancel()
 
     assert killed_signals == [], "grace=0 must fall back to the full timeout"
+
+
+@pytest.mark.anyio
+async def test_590_limbo_refreshes_orphan_snapshot(monkeypatch) -> None:
+    """#590: limbo detection extends state.orphan_pid_snapshot from the live
+    child-pid diag so late-spawned MCP leakers are visible to the post-exit
+    sweep (the sl leaker was invisible to the reader-done snapshot)."""
+    from types import SimpleNamespace
+
+    import anyio
+
+    from untether.runner import JsonlStreamState
+    from untether.runners.claude import (
+        _PENDING_ASK_REQUESTS,
+        _REQUEST_TO_SESSION,
+        ClaudeRunner,
+    )
+
+    _REQUEST_TO_SESSION.clear()
+    _PENDING_ASK_REQUESTS.clear()
+
+    runner = ClaudeRunner(claude_cmd="claude")
+    runner._subcountdown_poll_interval_s = 0.02
+    runner._subcountdown_limbo_detect_threshold_s = 0.05
+
+    state = ClaudeStreamState()
+    state.factory.started(ResumeToken(engine="claude", value="orphan-sess-1"))
+    state.result_received_at = time.monotonic() - 0.5
+    state.orphan_pid_snapshot.append(900)  # pre-existing reader-done capture
+    stream = JsonlStreamState(expected_session=None)
+
+    proc = _FakeProc(pid=62424, returncode=None)
+    monkeypatch.setattr(
+        "untether.utils.proc_diag.collect_proc_diag",
+        lambda pid: SimpleNamespace(
+            child_pids=[901, 902, 900], rss_kb=1000, tcp_total=3
+        ),
+    )
+
+    logger = _RecordingLogger()
+    reader_done = anyio.Event()
+    reader_done.set()
+
+    class FakeStdin:
+        async def aclose(self) -> None:
+            pass
+
+    async with anyio.create_task_group() as tg:
+        tg.start_soon(
+            runner._post_result_idle_watchdog,
+            state,
+            FakeStdin(),
+            reader_done,
+            logger,
+            30.0,
+            proc,
+            stream,
+            0.0,  # grace disabled — we only want the limbo tick
+        )
+        with anyio.move_on_after(3.0):
+            while "runner.limbo_detected" not in logger.events():
+                await anyio.sleep(0.02)
+        tg.cancel_scope.cancel()
+
+    assert "runner.limbo_detected" in logger.events()
+    # 901/902 added; 900 not duplicated.
+    assert state.orphan_pid_snapshot == [900, 901, 902]

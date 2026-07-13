@@ -308,3 +308,161 @@ async def test_manage_subprocess_aclose_errors_are_suppressed(
         pass  # exiting must not raise despite aclose blowing up
 
     assert fake.aclose_called == 1
+
+
+# ---------------------------------------------------------------------------
+# #590 — descendant-aware signalling + post-exit orphan sweep
+# ---------------------------------------------------------------------------
+
+
+def test_signal_pid_group_delivers_to_group_and_descendants(monkeypatch) -> None:
+    """signal_pid_group snapshots descendants BEFORE killpg and delivers the
+    signal to both — bare killpg missed pgroup escapees."""
+    killpg_calls: list[tuple[int, int]] = []
+    kill_calls: list[tuple[int, int]] = []
+
+    monkeypatch.setattr(subprocess_utils, "find_descendants", lambda pid: [111, 222])
+    monkeypatch.setattr(
+        subprocess_utils.os,
+        "killpg",
+        lambda pgid, sig: killpg_calls.append((pgid, sig)),
+    )
+    monkeypatch.setattr(
+        subprocess_utils.os, "kill", lambda pid, sig: kill_calls.append((pid, sig))
+    )
+    monkeypatch.setattr(subprocess_utils.sys, "platform", "linux")
+
+    subprocess_utils.signal_pid_group(4242, signal.SIGTERM)
+
+    assert killpg_calls == [(4242, signal.SIGTERM)]
+    assert (111, signal.SIGTERM) in kill_calls
+    assert (222, signal.SIGTERM) in kill_calls
+
+
+@pytest.mark.anyio
+async def test_reap_orphaned_group_noop_when_group_empty(monkeypatch) -> None:
+    """No group members and no extras — the sweep returns instantly and
+    signals nothing (the common clean-teardown case must stay free)."""
+    signals: list[tuple[int, int]] = []
+
+    def probe_killpg(pgid: int, sig: int) -> None:
+        if sig == 0:
+            raise ProcessLookupError
+        signals.append((pgid, sig))
+
+    monkeypatch.setattr(subprocess_utils.os, "killpg", probe_killpg)
+
+    reaped = await subprocess_utils.reap_orphaned_group(999)
+
+    assert reaped == []
+    assert signals == []
+
+
+@pytest.mark.anyio
+async def test_reap_orphaned_group_sigterms_then_sigkills_survivors(
+    monkeypatch,
+) -> None:
+    """Group members survive the leader: SIGTERM the group; members that
+    ignore it are SIGKILLed after the grace."""
+    alive = {31001: True, 31002: True}
+    killpg_signals: list[int] = []
+    kill_calls: list[tuple[int, int]] = []
+
+    def fake_killpg(pgid: int, sig: int) -> None:
+        if sig == 0:
+            if not any(alive.values()):
+                raise ProcessLookupError
+            return
+        killpg_signals.append(sig)
+        if sig == signal.SIGTERM:
+            alive[31001] = False  # one member obeys SIGTERM
+        if sig == signal.SIGKILL:
+            alive[31002] = False
+
+    def fake_kill(pid: int, sig: int) -> None:
+        if sig == 0:
+            if not alive.get(pid, False):
+                raise ProcessLookupError
+            return
+        kill_calls.append((pid, sig))
+
+    monkeypatch.setattr(subprocess_utils.os, "killpg", fake_killpg)
+    monkeypatch.setattr(subprocess_utils.os, "kill", fake_kill)
+    monkeypatch.setattr(subprocess_utils, "_pgid_members", lambda pgid: [31001, 31002])
+
+    reaped = await subprocess_utils.reap_orphaned_group(31000, grace_s=0.2)
+
+    assert reaped == [31001, 31002]
+    assert killpg_signals[0] == signal.SIGTERM
+    assert signal.SIGKILL in killpg_signals
+    assert (31002, signal.SIGKILL) in kill_calls
+
+
+@pytest.mark.anyio
+async def test_reap_orphaned_group_kills_snapshot_escapees(monkeypatch) -> None:
+    """PIDs captured while the leader was alive (pgroup escapees in their
+    own session) are signalled even though killpg can't reach them."""
+    alive = {41001: True}
+    kill_calls: list[tuple[int, int]] = []
+
+    def fake_killpg(pgid: int, sig: int) -> None:
+        raise ProcessLookupError  # the group itself is already empty
+
+    def fake_kill(pid: int, sig: int) -> None:
+        if sig == 0:
+            if not alive.get(pid, False):
+                raise ProcessLookupError
+            return
+        kill_calls.append((pid, sig))
+        if sig == signal.SIGTERM:
+            alive[pid] = False
+
+    monkeypatch.setattr(subprocess_utils.os, "killpg", fake_killpg)
+    monkeypatch.setattr(subprocess_utils.os, "kill", fake_kill)
+    monkeypatch.setattr(subprocess_utils, "_pgid_members", lambda pgid: [])
+
+    reaped = await subprocess_utils.reap_orphaned_group(
+        41000, extra_pids=(41001,), grace_s=0.2
+    )
+
+    assert reaped == [41001]
+    assert (41001, signal.SIGTERM) in kill_calls
+
+
+@pytest.mark.anyio
+async def test_manage_subprocess_reaps_after_clean_exit(monkeypatch) -> None:
+    """#590: the sweep runs on the clean rc=0 path with the caller's
+    snapshot, and honours reap_orphans=False."""
+    reap_calls: list[tuple[int, tuple[int, ...]]] = []
+
+    async def fake_reap(pgid: int, *, extra_pids=(), grace_s: float = 2.0):
+        reap_calls.append((pgid, tuple(extra_pids)))
+        return list(extra_pids)
+
+    monkeypatch.setattr(subprocess_utils, "reap_orphaned_group", fake_reap)
+
+    fake = _FakeAcloseProc(returncode=0, pid=5555)
+
+    async def fake_open(cmd, **kwargs):
+        return fake
+
+    monkeypatch.setattr("untether.utils.subprocess.anyio.open_process", fake_open)
+
+    snapshot = [777]
+    async with subprocess_utils.manage_subprocess(
+        ["fake-cmd"], orphan_pid_snapshot=snapshot
+    ):
+        snapshot.append(888)  # captured mid-run, read at teardown
+
+    assert reap_calls == [(5555, (777, 888))]
+
+    reap_calls.clear()
+    fake2 = _FakeAcloseProc(returncode=0, pid=5556)
+
+    async def fake_open2(cmd, **kwargs):
+        return fake2
+
+    monkeypatch.setattr("untether.utils.subprocess.anyio.open_process", fake_open2)
+    async with subprocess_utils.manage_subprocess(["fake-cmd"], reap_orphans=False):
+        pass
+    assert reap_calls == []
