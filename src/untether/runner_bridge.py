@@ -964,6 +964,11 @@ class ProgressEdits:
         self.thread_id = thread_id
         self._approval_notified: bool = False
         self._approval_notify_ref: MessageRef | None = None
+        # #591: set once the final answer has been (or is about to be)
+        # delivered ahead of subprocess exit. Suppresses further progress
+        # repaints and the #470 post-result closing message so neither can
+        # overwrite or trail the already-delivered answer.
+        self._finalizing: bool = False
         self._min_render_interval = min_render_interval
         self._sleep = sleep
         self._last_render_at: float = 0.0
@@ -1073,9 +1078,13 @@ class ProgressEdits:
                 if deadline > 0:
                     action_state.action.detail["countdown_s"] = max(0.0, deadline - now)
 
-        # 2) Post-result closing message — one-shot.
+        # 2) Post-result closing message — one-shot. Skipped once the final
+        # answer was delivered early (#591): the closing notice exists to
+        # give feedback while the user is still waiting for the answer, so
+        # it is pure noise after delivery.
         if (
             engine_state is not None
+            and not self._finalizing
             and getattr(engine_state, "post_result_closed_at", None) is not None
             and not getattr(engine_state, "post_result_closing_sent", False)
         ):
@@ -2240,6 +2249,13 @@ class ProgressEdits:
                 except anyio.EndOfStream:
                     return
 
+            # #591: final answer already delivered (or being delivered) —
+            # consume the wakeup without repainting so a late progress
+            # render can't overwrite the final message.
+            if self._finalizing:
+                self.rendered_seq = self.event_seq
+                continue
+
             # Debounce: never delay the first render; after that, batch events.
             if self._has_rendered and self._min_render_interval > 0:
                 elapsed_since = self.clock() - self._last_render_at
@@ -2473,6 +2489,19 @@ class ProgressEdits:
     # result idle past this point with no other expected-wait signal,
     # Tier 1 missed an edge case — stop suppressing auto-cancel.
     _POST_RESULT_LIMBO_THRESHOLD_S: float = 660.0
+
+    def note_final(self, evt: UntetherEvent) -> None:
+        """#591: record a terminal CompletedEvent WITHOUT scheduling a repaint.
+
+        Used by the early final-answer delivery path: the tracker must see
+        the event so the final snapshot renders completed actions/usage, but
+        bumping ``event_seq`` would wake ``_run_loop`` into painting one more
+        *progress* frame that races the final answer edit on the same
+        Telegram message. ``_finalizing`` makes any already-queued wakeup a
+        no-op too.
+        """
+        self.tracker.note_event(evt)
+        self._finalizing = True
 
     async def on_event(self, evt: UntetherEvent) -> None:
         if not self.tracker.note_event(evt):
@@ -2710,6 +2739,7 @@ async def run_runner_with_cancel(
     running_task: RunningTask | None,
     on_thread_known: Callable[[ResumeToken, anyio.Event], Awaitable[None]] | None,
     channel_id: ChannelId = 0,
+    on_completed: Callable[[CompletedEvent, RunOutcome], Awaitable[None]] | None = None,
 ) -> RunOutcome:
     outcome = RunOutcome()
     start_time = time.monotonic()
@@ -2744,8 +2774,36 @@ async def run_runner_with_cancel(
                                 finally:
                                     running_task.resume_ready.set()
                         elif isinstance(evt, CompletedEvent):
+                            first_completed = outcome.completed is None
                             outcome.resume = evt.resume or outcome.resume
                             outcome.completed = evt
+                            # #591: deliver the final answer NOW — the run
+                            # generator may not return for up to the full
+                            # post-result limbo window (MCP children holding
+                            # the subprocess open), and the answer already
+                            # exists. Only genuine successful results
+                            # (ok=True) qualify: synthesized stream-end
+                            # errors must keep riding the post-return path
+                            # so auto-continue / error formatting still see
+                            # them first. Failures here leave the run
+                            # untouched — the post-return path retries.
+                            if (
+                                on_completed is not None
+                                and evt.ok is True
+                                and first_completed
+                            ):
+                                edits.note_final(evt)
+                                _record_export_event(
+                                    evt, outcome.resume, channel_id=channel_id
+                                )
+                                try:
+                                    await on_completed(evt, outcome)
+                                except Exception:  # noqa: BLE001
+                                    logger.warning(
+                                        "final.early_delivery_failed",
+                                        exc_info=True,
+                                    )
+                                continue
                         # A3: Record events for /export
                         _record_export_event(evt, outcome.resume, channel_id=channel_id)
                         await edits.on_event(evt)
@@ -2996,6 +3054,242 @@ async def handle_message(
     # pattern above).
     edits._heartbeat_interval = progress_cfg.heartbeat_interval
 
+    # #591: early final-answer delivery. The answer exists the moment the
+    # CompletedEvent arrives, but the run generator may not return for up to
+    # the post-result limbo window (MCP children holding the subprocess open
+    # — historically up to 600 s of dead wall-clock, and one answer lost
+    # entirely to a user /cancel of an already-completed run). This closure
+    # performs the final assembly + send. It is invoked from inside
+    # run_runner_with_cancel the moment a successful result arrives and —
+    # when that early path did not run or failed — from the post-return
+    # flow below. ``final_delivery["sent"]`` keeps the two paths idempotent.
+    final_delivery = {"sent": False}
+
+    async def _deliver_final(
+        completed: CompletedEvent, run_outcome: RunOutcome
+    ) -> None:
+        # Idempotence: the early path and the post-return path can both
+        # reach here; only the first delivery wins.
+        if final_delivery["sent"]:
+            return
+        run_ok = completed.ok
+        run_error = completed.error
+        elapsed_final = clock() - started_at
+
+        # #510: ``completed.answer`` already has the #508 ExitPlanMode
+        # plan-body prepend applied at the runner level (claude.py, on the
+        # per-stream path). The previous bridge-side prepend read
+        # ``runner.current_stream`` — a shared singleton on the ClaudeRunner
+        # — and leaked one chat's plan body into another concurrent chat's
+        # final answer.
+        final_answer = completed.answer
+
+        # Auto-clear broken session: if a resumed run failed with 0 turns,
+        # clear the saved session so the next message starts fresh.
+        if (
+            run_ok is False
+            and resume_token is not None
+            and on_resume_failed is not None
+        ):
+            _num_turns = 0
+            if completed.usage:
+                _num_turns = completed.usage.get("num_turns", 0) or 0
+            if _num_turns == 0:
+                try:
+                    await on_resume_failed(resume_token)
+                    logger.info(
+                        "session.auto_cleared",
+                        engine=resume_token.engine,
+                        resume=resume_token.value,
+                    )
+                except Exception:  # noqa: BLE001
+                    logger.debug("session.auto_clear_failed", exc_info=True)
+
+        if run_ok is False and run_error:
+            raw_error = str(run_error)
+            hint = _get_error_hint(raw_error)
+            if final_answer.strip():
+                # Deduplicate: if the answer already starts with the error's
+                # first line (common when runner sets both answer and error
+                # from the same source, e.g. Claude Code subscription
+                # limits), only append the diagnostic context and hint — not
+                # the repeated summary.
+                error_head = raw_error.split("\n", 1)[0].strip()
+                answer_head = final_answer.strip().split("\n", 1)[0].strip()
+                if error_head and error_head == answer_head:
+                    _, _, remainder = raw_error.partition("\n")
+                    parts: list[str] = [final_answer]
+                    if hint:
+                        parts.append(f"\N{ELECTRIC LIGHT BULB} {hint}")
+                    if remainder.strip():
+                        parts.append(f"```\n{remainder.strip()}\n```")
+                    final_answer = "\n\n".join(parts)
+                else:
+                    if hint:
+                        error_text = (
+                            f"\N{ELECTRIC LIGHT BULB} {hint}\n\n```\n{raw_error}\n```"
+                        )
+                    else:
+                        error_text = f"```\n{raw_error}\n```"
+                    final_answer = f"{final_answer}\n\n{error_text}"
+            else:
+                if hint:
+                    final_answer = (
+                        f"\N{ELECTRIC LIGHT BULB} {hint}\n\n```\n{raw_error}\n```"
+                    )
+                else:
+                    final_answer = f"```\n{raw_error}\n```"
+
+        status = (
+            "error"
+            if run_ok is False
+            else ("done" if final_answer.strip() else "error")
+        )
+        resume_value = None
+        final_resume = completed.resume or run_outcome.resume
+        if final_resume is not None:
+            resume_value = final_resume.value
+        usage_log: dict[str, object] = {}
+        if completed.usage:
+            for key in ("num_turns", "total_cost_usd", "duration_api_ms"):
+                val = completed.usage.get(key)
+                if val is not None:
+                    usage_log[key] = val
+        logger.info(
+            "runner.completed",
+            ok=run_ok,
+            error=run_error,
+            answer_len=len(final_answer or ""),
+            elapsed_s=round(elapsed_final, 2),
+            action_count=progress_tracker.action_count,
+            resume=resume_value,
+            **usage_log,
+        )
+        # Record session stats for /stats command
+        from .session_stats import record_run as _record_stats_run
+
+        _record_stats_run(
+            engine=runner.engine,
+            actions=progress_tracker.action_count,
+            duration_ms=int(elapsed_final * 1000),
+            triggered=bool(context and context.trigger_source),
+        )
+        sync_resume_token(progress_tracker, final_resume)
+
+        # Post-outline guidance: if the session was outline-pending (user
+        # clicked "Pause & Outline Plan" but Claude Code ended the run
+        # instead of calling ExitPlanMode), append resume instructions so
+        # the user knows how to proceed.
+        if runner.engine == "claude" and resume_value:
+            from .runners.claude import _OUTLINE_PENDING
+
+            if (
+                resume_value in _OUTLINE_PENDING
+                and final_answer
+                and final_answer.strip()
+            ):
+                final_answer += (
+                    "\n\n---\n"
+                    "Plan outline complete. Resume and say "
+                    '"approved" to proceed, or send feedback to revise.'
+                )
+
+        state = progress_tracker.snapshot(
+            resume_formatter=runner.format_resume,
+            context_line=context_line,
+            meta_formatter=format_meta_line,
+        )
+        final_rendered = effective_presenter.render_final(
+            state,
+            elapsed_s=elapsed_final,
+            status=status,
+            answer=final_answer,
+        )
+
+        # Load footer display config (global defaults + per-chat overrides)
+        footer_cfg = _load_footer_settings()
+        from .runners.run_options import get_run_options
+
+        _footer_run_opts = get_run_options()
+
+        # Append run cost footer with inline budget suffix
+        _show_cost = footer_cfg.show_api_cost
+        if _footer_run_opts and _footer_run_opts.show_api_cost is not None:
+            _show_cost = _footer_run_opts.show_api_cost
+        _cost_alert_text, _cost_alert_obj = _check_cost_budget(completed.usage)
+        if _show_cost and run_ok is not False:
+            cost_line = _format_run_cost(completed.usage)
+            if cost_line:
+                budget_suffix = (
+                    _format_budget_suffix(_cost_alert_obj)
+                    if _cost_alert_obj is not None
+                    else ""
+                )
+                final_rendered = RenderedMessage(
+                    text=_insert_before_resume(
+                        final_rendered.text,
+                        f"\n\U0001f4b0{cost_line}{budget_suffix}",
+                    ),
+                    extra=final_rendered.extra,
+                )
+        elif _cost_alert_text:
+            # Budget exceeded but cost display is off — show standalone alert
+            final_rendered = RenderedMessage(
+                text=_insert_before_resume(
+                    final_rendered.text, f"\n{_cost_alert_text}"
+                ),
+                extra=final_rendered.extra,
+            )
+
+        # Append usage footer for Claude Code engine runs
+        if runner.engine == "claude":
+            _show_sub = footer_cfg.show_subscription_usage
+            if (
+                _footer_run_opts
+                and _footer_run_opts.show_subscription_usage is not None
+            ):
+                _show_sub = _footer_run_opts.show_subscription_usage
+            final_rendered = await _maybe_append_usage_footer(
+                final_rendered, always_show=_show_sub
+            )
+
+        logger.debug(
+            "handle.final.rendered",
+            rendered=final_rendered.text,
+            status=status,
+        )
+
+        can_edit_final = progress_ref is not None
+        edit_ref = None if cfg.final_notify or not can_edit_final else progress_ref
+
+        # #591: stop progress repaints BEFORE the send so a queued render
+        # can't overwrite the final message. (The early path already set
+        # this via note_final; this covers the post-return path.)
+        edits._finalizing = True
+
+        await send_result_message(
+            cfg,
+            channel_id=incoming.channel_id,
+            reply_to=user_ref,
+            progress_ref=progress_ref,
+            message=final_rendered,
+            notify=cfg.final_notify,
+            edit_ref=edit_ref,
+            replace_ref=progress_ref,
+            delete_tag="final",
+            thread_id=incoming.thread_id,
+        )
+        final_delivery["sent"] = True
+
+        # Unregister progress persistence after the final message is sent.
+        # Must happen AFTER send_result_message() so a crash between
+        # delete_ephemeral() and here still has an orphan cleanup pointer.
+        if progress_ref is not None and _PROGRESS_PERSISTENCE_PATH is not None:
+            from .telegram.progress_persistence import unregister_progress
+
+            session_key = f"{incoming.channel_id}:{progress_ref.message_id}"
+            unregister_progress(_PROGRESS_PERSISTENCE_PATH, session_key)
+
     running_task: RunningTask | None = None
     if running_tasks is not None and progress_ref is not None:
         running_task = RunningTask(context=context)
@@ -3028,6 +3322,7 @@ async def handle_message(
                 running_task=running_task,
                 on_thread_known=on_thread_known,
                 channel_id=incoming.channel_id,
+                on_completed=_deliver_final,
             )
         except Exception as exc:
             error = exc
@@ -3049,6 +3344,17 @@ async def handle_message(
             edits_scope.cancel()
 
     elapsed = clock() - started_at
+
+    if error is not None and final_delivery["sent"]:
+        # #591: the answer was already delivered before the teardown error —
+        # don't overwrite the delivered final message with an error render.
+        logger.warning(
+            "handle.error_after_final_delivery",
+            error=str(error),
+            error_type=error.__class__.__name__,
+            elapsed_s=round(elapsed, 2),
+        )
+        return
 
     if error is not None:
         sync_resume_token(progress_tracker, outcome.resume)
@@ -3102,6 +3408,18 @@ async def handle_message(
         )
         return
 
+    if outcome.cancelled and final_delivery["sent"]:
+        # #591: the run completed and its answer was delivered before the
+        # user's /cancel landed (the channelo msg-5815 shape — a cancel of
+        # an already-done run). The cancel only tears the subprocess down;
+        # the delivered answer must not be replaced by a "cancelled" render.
+        logger.info(
+            "handle.cancelled_after_delivery",
+            resume=outcome.resume.value if outcome.resume else None,
+            elapsed_s=elapsed,
+        )
+        return
+
     if outcome.cancelled:
         resume = sync_resume_token(progress_tracker, outcome.resume)
         logger.info(
@@ -3138,7 +3456,6 @@ async def handle_message(
 
     completed = outcome.completed
     run_ok = completed.ok
-    run_error = completed.error
 
     # --- Auto-continue: mitigate Claude Code bug #34142/#30333 ---
     # When Claude Code's turn state machine incorrectly ends a session
@@ -3148,14 +3465,21 @@ async def handle_message(
     _ac_resume = completed.resume or outcome.resume
     _ac_last_event = edits.stream.last_event_type if edits.stream else None
     _ac_proc_rc = edits.stream.proc_returncode if edits.stream else None
-    if ac_settings.enabled and _should_auto_continue(
-        last_event_type=_ac_last_event,
-        engine=runner.engine,
-        cancelled=outcome.cancelled,
-        resume_value=_ac_resume.value if _ac_resume else None,
-        auto_continued_count=_auto_continued_count,
-        max_retries=ac_settings.max_retries,
-        proc_returncode=_ac_proc_rc,
+    # #591: a run whose answer was already delivered can never need the
+    # auto-continue salvage (belt-and-braces — _should_auto_continue already
+    # excludes last_event_type == "result").
+    if (
+        ac_settings.enabled
+        and not final_delivery["sent"]
+        and _should_auto_continue(
+            last_event_type=_ac_last_event,
+            engine=runner.engine,
+            cancelled=outcome.cancelled,
+            resume_value=_ac_resume.value if _ac_resume else None,
+            auto_continued_count=_auto_continued_count,
+            max_retries=ac_settings.max_retries,
+            proc_returncode=_ac_proc_rc,
+        )
     ):
         logger.warning(
             "session.auto_continue",
@@ -3256,196 +3580,9 @@ async def handle_message(
         return
     # --- End auto-continue ---
 
-    # #510: ``completed.answer`` already has the #508 ExitPlanMode
-    # plan-body prepend applied at the runner level (claude.py, on the
-    # per-stream path). The previous bridge-side prepend read
-    # ``runner.current_stream`` — a shared singleton on the ClaudeRunner
-    # — and leaked one chat's plan body into another concurrent chat's
-    # final answer.
-    final_answer = completed.answer
-
-    # Auto-clear broken session: if a resumed run failed with 0 turns,
-    # clear the saved session so the next message starts fresh.
-    if run_ok is False and resume_token is not None and on_resume_failed is not None:
-        _num_turns = 0
-        if completed.usage:
-            _num_turns = completed.usage.get("num_turns", 0) or 0
-        if _num_turns == 0:
-            try:
-                await on_resume_failed(resume_token)
-                logger.info(
-                    "session.auto_cleared",
-                    engine=resume_token.engine,
-                    resume=resume_token.value,
-                )
-            except Exception:  # noqa: BLE001
-                logger.debug("session.auto_clear_failed", exc_info=True)
-
-    if run_ok is False and run_error:
-        raw_error = str(run_error)
-        hint = _get_error_hint(raw_error)
-        if final_answer.strip():
-            # Deduplicate: if the answer already starts with the error's first
-            # line (common when runner sets both answer and error from the same
-            # source, e.g. Claude Code subscription limits), only append the
-            # diagnostic context and hint — not the repeated summary.
-            error_head = raw_error.split("\n", 1)[0].strip()
-            answer_head = final_answer.strip().split("\n", 1)[0].strip()
-            if error_head and error_head == answer_head:
-                _, _, remainder = raw_error.partition("\n")
-                parts: list[str] = [final_answer]
-                if hint:
-                    parts.append(f"\N{ELECTRIC LIGHT BULB} {hint}")
-                if remainder.strip():
-                    parts.append(f"```\n{remainder.strip()}\n```")
-                final_answer = "\n\n".join(parts)
-            else:
-                if hint:
-                    error_text = (
-                        f"\N{ELECTRIC LIGHT BULB} {hint}\n\n```\n{raw_error}\n```"
-                    )
-                else:
-                    error_text = f"```\n{raw_error}\n```"
-                final_answer = f"{final_answer}\n\n{error_text}"
-        else:
-            if hint:
-                final_answer = (
-                    f"\N{ELECTRIC LIGHT BULB} {hint}\n\n```\n{raw_error}\n```"
-                )
-            else:
-                final_answer = f"```\n{raw_error}\n```"
-
-    status = (
-        "error" if run_ok is False else ("done" if final_answer.strip() else "error")
-    )
-    resume_value = None
-    resume_token = completed.resume or outcome.resume
-    if resume_token is not None:
-        resume_value = resume_token.value
-    usage_log: dict[str, object] = {}
-    if completed.usage:
-        for key in ("num_turns", "total_cost_usd", "duration_api_ms"):
-            val = completed.usage.get(key)
-            if val is not None:
-                usage_log[key] = val
-    logger.info(
-        "runner.completed",
-        ok=run_ok,
-        error=run_error,
-        answer_len=len(final_answer or ""),
-        elapsed_s=round(elapsed, 2),
-        action_count=progress_tracker.action_count,
-        resume=resume_value,
-        **usage_log,
-    )
-    # Record session stats for /stats command
-    from .session_stats import record_run as _record_stats_run
-
-    _record_stats_run(
-        engine=runner.engine,
-        actions=progress_tracker.action_count,
-        duration_ms=int(elapsed * 1000),
-        triggered=bool(context and context.trigger_source),
-    )
-    sync_resume_token(progress_tracker, completed.resume or outcome.resume)
-
-    # Post-outline guidance: if the session was outline-pending (user clicked
-    # "Pause & Outline Plan" but Claude Code ended the run instead of calling
-    # ExitPlanMode), append resume instructions so the user knows how to proceed.
-    if runner.engine == "claude" and resume_value:
-        from .runners.claude import _OUTLINE_PENDING
-
-        if resume_value in _OUTLINE_PENDING and final_answer and final_answer.strip():
-            final_answer += (
-                "\n\n---\n"
-                "Plan outline complete. Resume and say "
-                '"approved" to proceed, or send feedback to revise.'
-            )
-
-    state = progress_tracker.snapshot(
-        resume_formatter=runner.format_resume,
-        context_line=context_line,
-        meta_formatter=format_meta_line,
-    )
-    final_rendered = effective_presenter.render_final(
-        state,
-        elapsed_s=elapsed,
-        status=status,
-        answer=final_answer,
-    )
-
-    # Load footer display config (global defaults + per-chat overrides)
-    footer_cfg = _load_footer_settings()
-    from .runners.run_options import get_run_options
-
-    _footer_run_opts = get_run_options()
-
-    # Append run cost footer with inline budget suffix
-    _show_cost = footer_cfg.show_api_cost
-    if _footer_run_opts and _footer_run_opts.show_api_cost is not None:
-        _show_cost = _footer_run_opts.show_api_cost
-    _cost_alert_text, _cost_alert_obj = _check_cost_budget(completed.usage)
-    if _show_cost and run_ok is not False:
-        cost_line = _format_run_cost(completed.usage)
-        if cost_line:
-            budget_suffix = (
-                _format_budget_suffix(_cost_alert_obj)
-                if _cost_alert_obj is not None
-                else ""
-            )
-            final_rendered = RenderedMessage(
-                text=_insert_before_resume(
-                    final_rendered.text,
-                    f"\n\U0001f4b0{cost_line}{budget_suffix}",
-                ),
-                extra=final_rendered.extra,
-            )
-    elif _cost_alert_text:
-        # Budget exceeded but cost display is off — show standalone alert
-        final_rendered = RenderedMessage(
-            text=_insert_before_resume(final_rendered.text, f"\n{_cost_alert_text}"),
-            extra=final_rendered.extra,
-        )
-
-    # Append usage footer for Claude Code engine runs
-    if runner.engine == "claude":
-        _show_sub = footer_cfg.show_subscription_usage
-        if _footer_run_opts and _footer_run_opts.show_subscription_usage is not None:
-            _show_sub = _footer_run_opts.show_subscription_usage
-        final_rendered = await _maybe_append_usage_footer(
-            final_rendered, always_show=_show_sub
-        )
-
-    logger.debug(
-        "handle.final.rendered",
-        rendered=final_rendered.text,
-        status=status,
-    )
-
-    can_edit_final = progress_ref is not None
-    edit_ref = None if cfg.final_notify or not can_edit_final else progress_ref
-
-    await send_result_message(
-        cfg,
-        channel_id=incoming.channel_id,
-        reply_to=user_ref,
-        progress_ref=progress_ref,
-        message=final_rendered,
-        notify=cfg.final_notify,
-        edit_ref=edit_ref,
-        replace_ref=progress_ref,
-        delete_tag="final",
-        thread_id=incoming.thread_id,
-    )
-
-    # Unregister progress persistence after the final message is sent.
-    # Must happen AFTER send_result_message() so a crash between
-    # delete_ephemeral() and here still has an orphan cleanup pointer.
-    if progress_ref is not None and _PROGRESS_PERSISTENCE_PATH is not None:
-        from .telegram.progress_persistence import unregister_progress
-
-        session_key = f"{incoming.channel_id}:{progress_ref.message_id}"
-        unregister_progress(_PROGRESS_PERSISTENCE_PATH, session_key)
+    # #591: deliver the final answer unless the early path already did.
+    if not final_delivery["sent"]:
+        await _deliver_final(completed, outcome)
 
     # Deliver outbox files (agent-initiated file delivery).
     # #524 rc20 follow-up: surface skipped items even when run_ok is False.

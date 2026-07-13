@@ -4165,3 +4165,193 @@ async def test_333_lifecycle_state_transitions_logged(monkeypatch) -> None:
     assert "subprocess.state.exited" in state_events
     # Final lifecycle_state reflects the last transition.
     assert stream.lifecycle_state == "exited"
+
+
+# ===========================================================================
+# #591 — post-result limbo grace (short-circuit the subcountdown when the
+# session is fully quiescent)
+# ===========================================================================
+
+
+@pytest.mark.anyio
+async def test_591_limbo_grace_short_circuits_subcountdown(monkeypatch) -> None:
+    """With no pending requests/asks and no live background work, the
+    subcountdown SIGTERMs after ``limbo_grace_s`` instead of waiting the
+    full ``timeout_s``."""
+    import anyio
+
+    from untether.runner import JsonlStreamState
+    from untether.runners.claude import (
+        _PENDING_ASK_REQUESTS,
+        _REQUEST_TO_SESSION,
+        ClaudeRunner,
+    )
+
+    _REQUEST_TO_SESSION.clear()
+    _PENDING_ASK_REQUESTS.clear()
+
+    runner = ClaudeRunner(claude_cmd="claude")
+    runner._subcountdown_poll_interval_s = 0.02
+    runner._subcountdown_limbo_detect_threshold_s = 0.05
+    runner._subcountdown_sigterm_grace_s = 0.1
+    runner._subcountdown_sigterm_grace_poll_s = 0.02
+
+    state = ClaudeStreamState()
+    state.factory.started(ResumeToken(engine="claude", value="grace-sess-1"))
+    state.result_received_at = time.monotonic() - 0.5
+    stream = JsonlStreamState(expected_session=None)
+
+    proc = _FakeProc(pid=52424, returncode=None)
+    killed_signals: list[int] = []
+
+    def _fake_killpg(pgid: int, sig: int) -> None:
+        killed_signals.append(sig)
+        # SIGTERM stops the fake process cleanly.
+        proc.returncode = -15
+
+    monkeypatch.setattr("os.killpg", _fake_killpg)
+
+    logger = _RecordingLogger()
+    reader_done = anyio.Event()
+    reader_done.set()
+
+    class FakeStdin:
+        async def aclose(self) -> None:
+            pass
+
+    async with anyio.create_task_group() as tg:
+        tg.start_soon(
+            runner._post_result_idle_watchdog,
+            state,
+            FakeStdin(),
+            reader_done,
+            logger,
+            30.0,  # full timeout — far beyond the test's patience
+            proc,
+            stream,
+            0.1,  # limbo_grace_s — the short-circuit under test
+        )
+        with anyio.move_on_after(3.0):
+            while signal.SIGTERM not in killed_signals:
+                await anyio.sleep(0.02)
+        tg.cancel_scope.cancel()
+
+    assert signal.SIGTERM in killed_signals, (
+        "grace should have fired SIGTERM long before the 30s timeout"
+    )
+    sigterm_logs = [
+        kw
+        for lvl, e, kw in logger.records
+        if e == "claude.post_result_idle.sigterm_after_timeout"
+    ]
+    assert sigterm_logs and sigterm_logs[0].get("limbo_grace_applied") is True
+
+
+@pytest.mark.anyio
+async def test_591_limbo_grace_deferred_by_live_background_work(monkeypatch) -> None:
+    """Live background work (e.g. a pending ScheduleWakeup with a future
+    deadline) keeps the full timeout — the grace must not strand a wakeup
+    that is still due to fire."""
+    import anyio
+
+    from untether.runner import JsonlStreamState
+    from untether.runners.claude import (
+        _PENDING_ASK_REQUESTS,
+        _REQUEST_TO_SESSION,
+        ClaudeRunner,
+    )
+
+    _REQUEST_TO_SESSION.clear()
+    _PENDING_ASK_REQUESTS.clear()
+
+    runner = ClaudeRunner(claude_cmd="claude")
+    runner._subcountdown_poll_interval_s = 0.02
+
+    state = ClaudeStreamState()
+    state.factory.started(ResumeToken(engine="claude", value="grace-sess-2"))
+    state.result_received_at = time.monotonic() - 0.5
+    # A live wakeup with a far-future deadline = live background work.
+    state.live_wakeups["toolu_grace"] = time.monotonic() + 3600.0
+    stream = JsonlStreamState(expected_session=None)
+
+    proc = _FakeProc(pid=52425, returncode=None)
+    killed_signals: list[int] = []
+    monkeypatch.setattr("os.killpg", lambda pgid, sig: killed_signals.append(sig))
+
+    logger = _RecordingLogger()
+    reader_done = anyio.Event()
+    reader_done.set()
+
+    class FakeStdin:
+        async def aclose(self) -> None:
+            pass
+
+    async with anyio.create_task_group() as tg:
+        tg.start_soon(
+            runner._post_result_idle_watchdog,
+            state,
+            FakeStdin(),
+            reader_done,
+            logger,
+            30.0,
+            proc,
+            stream,
+            0.05,  # grace much shorter than the observation window below
+        )
+        await anyio.sleep(0.5)
+        tg.cancel_scope.cancel()
+
+    assert killed_signals == [], "grace must not fire while background work is live"
+
+
+@pytest.mark.anyio
+async def test_591_limbo_grace_zero_disables_shortcut(monkeypatch) -> None:
+    """limbo_grace_s=0 disables the shortcut — the full timeout applies."""
+    import anyio
+
+    from untether.runner import JsonlStreamState
+    from untether.runners.claude import (
+        _PENDING_ASK_REQUESTS,
+        _REQUEST_TO_SESSION,
+        ClaudeRunner,
+    )
+
+    _REQUEST_TO_SESSION.clear()
+    _PENDING_ASK_REQUESTS.clear()
+
+    runner = ClaudeRunner(claude_cmd="claude")
+    runner._subcountdown_poll_interval_s = 0.02
+
+    state = ClaudeStreamState()
+    state.factory.started(ResumeToken(engine="claude", value="grace-sess-3"))
+    state.result_received_at = time.monotonic() - 0.5
+    stream = JsonlStreamState(expected_session=None)
+
+    proc = _FakeProc(pid=52426, returncode=None)
+    killed_signals: list[int] = []
+    monkeypatch.setattr("os.killpg", lambda pgid, sig: killed_signals.append(sig))
+
+    logger = _RecordingLogger()
+    reader_done = anyio.Event()
+    reader_done.set()
+
+    class FakeStdin:
+        async def aclose(self) -> None:
+            pass
+
+    async with anyio.create_task_group() as tg:
+        tg.start_soon(
+            runner._post_result_idle_watchdog,
+            state,
+            FakeStdin(),
+            reader_done,
+            logger,
+            30.0,
+            proc,
+            stream,
+            0.0,  # disabled
+        )
+        await anyio.sleep(0.5)
+        tg.cancel_scope.cancel()
+
+    assert killed_signals == [], "grace=0 must fall back to the full timeout"

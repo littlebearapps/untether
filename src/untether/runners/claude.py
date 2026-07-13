@@ -2128,6 +2128,12 @@ class ClaudeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
     _subcountdown_limbo_detect_threshold_s: float = 30.0
     _subcountdown_sigterm_grace_s: float = 5.0
     _subcountdown_sigterm_grace_poll_s: float = 0.5
+    # #591: when the reader is done and NOTHING references the session (no
+    # pending control/ask requests, no live background work), waiting the
+    # full post_result_idle_timeout before SIGTERM only lets MCP children
+    # hold the process (and its RSS/TCP) open. Cap the wait at this grace
+    # instead. 0 disables the shortcut (full timeout always applies).
+    _post_result_limbo_grace_s: float = 60.0
 
     def format_resume(self, token: ResumeToken) -> str:
         if token.engine != ENGINE:
@@ -2730,6 +2736,7 @@ class ClaudeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
         timeout_s: float,
         proc: Any = None,
         stream: Any = None,
+        limbo_grace_s: float | None = None,
     ) -> None:
         """Close stdin once the bidirectional CLI has been idle past the result.
 
@@ -2805,6 +2812,7 @@ class ClaudeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
                         timeout_s=timeout_s,
                         stream=stream,
                         session_id=sid_now,
+                        limbo_grace_s=limbo_grace_s,
                     )
                     return
                 exit_reason = "reader_done"
@@ -2837,6 +2845,7 @@ class ClaudeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
                                 timeout_s=timeout_s,
                                 stream=stream,
                                 session_id=sid_now,
+                                limbo_grace_s=limbo_grace_s,
                             )
                             return
                         exit_reason = "reader_done"
@@ -3029,6 +3038,7 @@ class ClaudeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
         timeout_s: float,
         stream: Any = None,
         session_id: str | None = None,
+        limbo_grace_s: float | None = None,
     ) -> str:
         """Watch a stdout-closed-but-process-alive subprocess (#333 Tier 1).
 
@@ -3079,6 +3089,19 @@ class ClaudeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
         # the user is still interacting).
         limbo_logged = False
         deadline = reader_done_at + timeout_s
+        # #591: when nothing references the session — no pending control/ask
+        # requests and no live background work — the full ``timeout_s`` wait
+        # only lets MCP children hold the process (and its RSS/TCP) open.
+        # Cap the wait at ``limbo_grace_s`` in that case; a grace of 0/None
+        # disables the shortcut. The cap re-arms alongside ``deadline``
+        # whenever pending state appears so a just-answered approval still
+        # gets a fresh grace window.
+        grace = (
+            limbo_grace_s
+            if limbo_grace_s is not None
+            else self._post_result_limbo_grace_s
+        )
+        grace_deadline = reader_done_at + grace if grace > 0 else None
         while True:
             await anyio.sleep(self._subcountdown_poll_interval_s)
             if proc.returncode is not None:
@@ -3117,6 +3140,8 @@ class ClaudeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
                     pending_asks=len(pending_asks),
                 )
                 deadline = time.monotonic() + timeout_s
+                if grace_deadline is not None:
+                    grace_deadline = time.monotonic() + grace
                 continue
 
             elapsed = time.monotonic() - reader_done_at
@@ -3154,7 +3179,21 @@ class ClaudeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
                         seconds_since_reader_done=round(elapsed, 1),
                     )
 
-            if time.monotonic() >= deadline:
+            # #591: cap the deadline at the limbo grace when the session is
+            # fully quiescent — no live background work means nothing can
+            # legitimately produce output any more (pending requests/asks
+            # were handled above via the re-arm branch).
+            effective_deadline = deadline
+            limbo_grace_applied = False
+            if (
+                grace_deadline is not None
+                and grace_deadline < deadline
+                and not has_live_background_work(state)
+            ):
+                effective_deadline = grace_deadline
+                limbo_grace_applied = True
+
+            if time.monotonic() >= effective_deadline:
                 # Timeout: SIGTERM the process group (start_new_session=True
                 # so PID == pgid). 5 s grace, then SIGKILL.
                 run_logger.warning(
@@ -3163,6 +3202,8 @@ class ClaudeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
                     pid=proc.pid,
                     timeout_s=timeout_s,
                     elapsed_s=round(elapsed, 1),
+                    limbo_grace_applied=limbo_grace_applied,
+                    limbo_grace_s=grace if limbo_grace_applied else None,
                 )
                 if stream is not None:
                     self._transition_lifecycle(
@@ -3475,6 +3516,7 @@ class ClaudeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
                 # legacy "stay alive forever" behaviour in place.
                 post_result_idle_enabled = True
                 post_result_idle_timeout_s = 600.0
+                post_result_limbo_grace_s = self._post_result_limbo_grace_s
                 try:
                     result = load_settings_if_exists()
                     if result is not None:
@@ -3484,6 +3526,9 @@ class ClaudeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
                         )
                         post_result_idle_timeout_s = float(
                             settings_obj.watchdog.post_result_idle_timeout
+                        )
+                        post_result_limbo_grace_s = float(
+                            settings_obj.watchdog.post_result_limbo_grace
                         )
                 except Exception:  # noqa: BLE001 — settings errors must not block a run
                     run_logger.debug(
@@ -3520,6 +3565,7 @@ class ClaudeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
                             post_result_idle_timeout_s,
                             proc,
                             stream,
+                            post_result_limbo_grace_s,
                         )
                     async for evt in self._iter_jsonl_events(
                         stdout=proc.stdout,

@@ -382,6 +382,14 @@ class WatchdogSettings(BaseModel):
     post_result_idle_enabled: bool = True
     post_result_idle_timeout: float = Field(default=600.0, ge=30, le=3600)
 
+    # #591: short-circuit grace for the post-result subcountdown. Once the
+    # JSONL reader is done and nothing references the session (no pending
+    # control/ask requests, no live background work), the subprocess is only
+    # being held open by lingering MCP children — SIGTERM after this grace
+    # instead of the full post_result_idle_timeout so the process (and its
+    # RSS/TCP) is released promptly. 0 disables the shortcut. Range 0-600s.
+    post_result_limbo_grace: float = Field(default=60.0, ge=0, le=600)
+
     # #481: grace window for fresh Bash/BashOutput tool calls. When the most
     # recent action is Bash/BashOutput/KillShell and its age is less than
     # bash_grace_seconds, ProgressEdits._stall_monitor suppresses the Telegram
