@@ -92,15 +92,22 @@ class _NullProtocol:
 
     StreamReader only needs ``_reading_paused`` bookkeeping to be callable;
     it never flushes to a real transport when we feed bytes directly.
+    Both methods accept arbitrary arguments because aiohttp's calling
+    convention changes across minor versions (3.14 added
+    ``resume_reading(resume_parser=...)``).
     """
 
     def __init__(self) -> None:
         self._reading_paused = False
 
-    def pause_reading(self) -> None:  # pragma: no cover - no-op
+    def pause_reading(
+        self, *args: object, **kwargs: object
+    ) -> None:  # pragma: no cover - no-op
         self._reading_paused = True
 
-    def resume_reading(self) -> None:  # pragma: no cover - no-op
+    def resume_reading(
+        self, *args: object, **kwargs: object
+    ) -> None:  # pragma: no cover - no-op
         self._reading_paused = False
 
 
