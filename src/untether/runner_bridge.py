@@ -1138,6 +1138,73 @@ class ProgressEdits:
                 "progress_edits.post_result_closing_send_failed", exc_info=True
             )
 
+    # #593: cancel-enforcement tuning. Class-level so tests can shrink them.
+    _CANCEL_ESCALATION_S: float = 30.0
+    _CANCEL_ESCALATION_POLL_S: float = 0.5
+    _CANCEL_SIGKILL_GRACE_S: float = 5.0
+
+    async def _enforce_cancel_teardown(self) -> None:
+        """#593: make the stall auto-cancel decision actually tear down.
+
+        ``cancel_event.set()`` only cancels the run task group; the
+        generator unwind can then stall behind the shielded subcountdown or
+        an OOM-starved event loop (observed on nsd: 14m52s between
+        ``stall_auto_cancel`` and ``handle.cancelled``, a dead-weight
+        subprocess occupying the chat slot through an active OOM crisis).
+        Poll for natural teardown up to ``_CANCEL_ESCALATION_S``; if the
+        subprocess is still alive, kill it directly (descendant-aware,
+        SIGTERM → grace → SIGKILL). Shielded so the enclosing scopes'
+        cancellation can't strip the safety net; the early-exit poll keeps
+        the shield cheap on the normal path (subprocess dies within
+        seconds of the cancel).
+        """
+        pid = self.pid
+        if pid is None:
+            # Nothing to enforce against — no PID was ever learned (spawn
+            # itself hung, or a non-subprocess runner).
+            logger.warning(
+                "progress_edits.cancel_enforcement_no_pid",
+                channel_id=self.channel_id,
+            )
+            return
+
+        def _alive() -> bool:
+            stream = self.stream
+            if stream is not None and stream.proc_returncode is not None:
+                return False
+            try:
+                os.kill(pid, 0)
+            except ProcessLookupError:
+                return False
+            except OSError:
+                return True
+            return True
+
+        from .utils.subprocess import signal_pid_group
+
+        with anyio.CancelScope(shield=True):
+            deadline = time.monotonic() + self._CANCEL_ESCALATION_S
+            while time.monotonic() < deadline:
+                if not _alive():
+                    return
+                await anyio.sleep(self._CANCEL_ESCALATION_POLL_S)
+            if not _alive():
+                return
+            logger.warning(
+                "progress_edits.cancel_escalated",
+                channel_id=self.channel_id,
+                pid=pid,
+                escalation_s=self._CANCEL_ESCALATION_S,
+            )
+            signal_pid_group(pid, _signal.SIGTERM)
+            grace_deadline = time.monotonic() + self._CANCEL_SIGKILL_GRACE_S
+            while time.monotonic() < grace_deadline:
+                if not _alive():
+                    return
+                await anyio.sleep(self._CANCEL_ESCALATION_POLL_S)
+            if _alive():
+                signal_pid_group(pid, _signal.SIGKILL)
+
     async def _stall_monitor(self) -> None:
         """Periodically check for event stalls, log diagnostics, and notify.
 
@@ -1451,6 +1518,14 @@ class ProgressEdits:
                     logger.debug(
                         "progress_edits.stall_auto_cancel_notify_failed", exc_info=True
                     )
+                # #593: enforcement — the cancel DECISION must end in actual
+                # teardown. cancel_event only cancels the run task group;
+                # the generator unwind can stall behind a shielded
+                # subcountdown or an OOM-starved event loop (observed:
+                # 14m52s between stall_auto_cancel and handle.cancelled on
+                # nsd). If the subprocess is still alive after the
+                # escalation window, kill it directly (descendant-aware).
+                await self._enforce_cancel_teardown()
                 # Close signal stream so _run_loop exits
                 self.signal_send.close()
                 return

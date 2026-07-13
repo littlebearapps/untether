@@ -104,6 +104,9 @@ docs = [
 [tool.pytest.ini_options]
 addopts = ["--cov=untether", "--cov-branch", "--cov-report=term-missing", "--cov-fail-under=80"]
 testpaths = ["tests"]
+markers = [
+    "cancel_enforcement: opts a test out of the autouse #593 cancel-enforcement neutraliser",
+]
 
 [tool.mutmut]
 paths_to_mutate = ["src/untether"]

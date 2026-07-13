@@ -390,6 +390,17 @@ class WatchdogSettings(BaseModel):
     post_result_idle_enabled: bool = True
     post_result_idle_timeout: float = Field(default=600.0, ge=30, le=3600)
 
+    # #592: pre-first-result silence cap. A run whose stream goes silent
+    # forever BEFORE any result event was previously never auto-cancelled —
+    # the post-result watchdog only arms after a result, and the liveness
+    # machinery never escalates an alive-but-idle process (8-day zombie
+    # Claude subprocess on mac). After this many seconds with zero stream
+    # output, no pending permission/ask requests, and no live background
+    # work, the subprocess is killed (descendant-aware) and the run ends
+    # with an explanatory error. Default 1h accommodates subscription
+    # rate-limit waits; 0 disables. Range 0-24h.
+    pre_result_silence_timeout: float = Field(default=3600.0, ge=0, le=86400)
+
     # #591: short-circuit grace for the post-result subcountdown. Once the
     # JSONL reader is done and nothing references the session (no pending
     # control/ask requests, no live background work), the subprocess is only

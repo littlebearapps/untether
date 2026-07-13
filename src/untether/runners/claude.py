@@ -378,6 +378,9 @@ class ClaudeStreamState:
     # into their own session and survive a plain killpg — are still
     # terminated after the leader exits.
     orphan_pid_snapshot: list[int] = field(default_factory=list)
+    # #592: one-shot latch — the pre-result silence cap fired and killed
+    # the subprocess; prevents re-firing on subsequent watchdog ticks.
+    pre_result_silence_killed: bool = False
     # #497: debounce gate. Holds the ``time.monotonic()`` timestamp of the
     # last enqueued refresh; the translate path skips re-enqueue while
     # ``(now - last) < catalog_refresh_min_interval_s``. None until the
@@ -2145,6 +2148,9 @@ class ClaudeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
     # hold the process (and its RSS/TCP) open. Cap the wait at this grace
     # instead. 0 disables the shortcut (full timeout always applies).
     _post_result_limbo_grace_s: float = 60.0
+    # Floor for the post-result watchdog poll cadence (class attr so tests
+    # can shrink it; production keeps the 5s floor).
+    _watchdog_min_poll_s: float = 5.0
 
     def format_resume(self, token: ResumeToken) -> str:
         if token.engine != ENGINE:
@@ -2738,6 +2744,92 @@ class ClaudeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
                 )
         state.pending_catalog_refresh_ids.clear()
 
+    async def _maybe_cancel_pre_result_silence(
+        self,
+        *,
+        state: ClaudeStreamState,
+        stream: Any,
+        proc: Any,
+        run_logger: Any,
+        silence_timeout_s: float,
+        started_at: float,
+    ) -> bool:
+        """#592: kill a run whose stream went silent forever pre-first-result.
+
+        The post-result watchdog only arms after a ``result`` event and the
+        liveness machinery never escalates an alive-but-idle process — a run
+        that goes silent before its first result idled FOREVER (8-day zombie
+        Claude subprocess + leaked MCP children + held session lock on mac).
+
+        Fires only when: zero stream output for ``silence_timeout_s``
+        (measured from the later of watchdog start and the last stdout
+        line), NO pending permission/ask requests (plan-approval waits are
+        by design, #526/#527) and NO live background work. The kill is
+        descendant-aware; a reason line is appended to ``stderr_capture`` so
+        the run's error message tells the user what happened. Returns True
+        when the cap fired.
+        """
+        if silence_timeout_s <= 0 or proc is None or proc.returncode is not None:
+            return False
+        if state.pre_result_silence_killed:
+            return False
+        last_out = float(getattr(stream, "last_stdout_at", 0.0) or 0.0)
+        silence_s = time.monotonic() - max(last_out, started_at)
+        if silence_s < silence_timeout_s:
+            return False
+        sid = state.factory.resume.value if state.factory.resume is not None else None
+        pending_requests = (
+            [k for k, v in _REQUEST_TO_SESSION.items() if v == sid] if sid else []
+        )
+        pending_asks = (
+            [k for k in _PENDING_ASK_REQUESTS if _REQUEST_TO_SESSION.get(k) == sid]
+            if sid
+            else []
+        )
+        live_bg = has_live_background_work(state)
+        if pending_requests or pending_asks or live_bg:
+            run_logger.info(
+                "claude.pre_result_silence.suppressed",
+                session_id=sid,
+                pid=proc.pid,
+                silence_s=round(silence_s, 1),
+                pending_requests=len(pending_requests),
+                pending_asks=len(pending_asks),
+                live_background_work=live_bg,
+            )
+            return False
+        state.pre_result_silence_killed = True
+        run_logger.warning(
+            "claude.pre_result_silence.cancel",
+            session_id=sid,
+            pid=proc.pid,
+            silence_s=round(silence_s, 1),
+            timeout_s=silence_timeout_s,
+        )
+        # Thread the reason into the run's error message via the stderr
+        # excerpt (#575 machinery) — the resulting rc=143 error would
+        # otherwise be indistinguishable from any other kill.
+        if hasattr(stream, "stderr_capture"):
+            stream.stderr_capture.append(
+                f"untether: no stream output for {int(silence_s // 60)}m before "
+                f"any result — pre-result silence cap "
+                f"({int(silence_timeout_s // 60)}m) hit; run auto-cancelled (#592)"
+            )
+        signal_pid_group(proc.pid, signal.SIGTERM)
+        grace_deadline = time.monotonic() + self._subcountdown_sigterm_grace_s
+        while time.monotonic() < grace_deadline:
+            await anyio.sleep(self._subcountdown_sigterm_grace_poll_s)
+            if proc.returncode is not None:
+                return True
+        if proc.returncode is None:
+            run_logger.warning(
+                "claude.pre_result_silence.sigkill_after_grace",
+                session_id=sid,
+                pid=proc.pid,
+            )
+            signal_pid_group(proc.pid, signal.SIGKILL)
+        return True
+
     async def _post_result_idle_watchdog(
         self,
         state: ClaudeStreamState,
@@ -2748,6 +2840,7 @@ class ClaudeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
         proc: Any = None,
         stream: Any = None,
         limbo_grace_s: float | None = None,
+        pre_result_silence_timeout_s: float = 3600.0,
     ) -> None:
         """Close stdin once the bidirectional CLI has been idle past the result.
 
@@ -2772,7 +2865,9 @@ class ClaudeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
         """
         # Poll often enough to react within a few seconds of the deadline,
         # but not so often that we burn CPU on a fully idle session.
-        poll_interval = max(5.0, min(timeout_s / 20.0, 30.0))
+        # (_watchdog_min_poll_s is a class attr so tests can shrink it.)
+        poll_interval = max(self._watchdog_min_poll_s, min(timeout_s / 20.0, 30.0))
+        watchdog_started_at = time.monotonic()
 
         # #333 instrumentation. channelo rc15→rc16 hit a 43+ min post-result
         # hang where this watchdog silently failed to fire (no
@@ -2885,6 +2980,20 @@ class ClaudeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
                                 state.last_schedule_wakeup_arm_delay
                             ),
                         )
+                        # #592: a run that never produces its first result
+                        # was previously unbounded — nothing owned the
+                        # "alive-but-silent forever" case.
+                        killed = await self._maybe_cancel_pre_result_silence(
+                            state=state,
+                            stream=stream,
+                            proc=proc,
+                            run_logger=run_logger,
+                            silence_timeout_s=pre_result_silence_timeout_s,
+                            started_at=watchdog_started_at,
+                        )
+                        if killed:
+                            exit_reason = "pre_result_silence_cancelled"
+                            return
                         continue
                     elapsed = time.monotonic() - armed_at
 
@@ -3528,6 +3637,12 @@ class ClaudeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
                 # #361 stash PID so the env audit in translate_claude_event
                 # can sample /proc/<pid>/environ on system.init.
                 state.pid = proc.pid
+                # #593: the base runner sets last_pid but this override never
+                # did — the bridge's thread_pid() early-poll returned None for
+                # Claude, so stall diagnostics ran blind (pid=None
+                # process_alive=None) exactly when a run never emitted a
+                # StartedEvent (the only other PID source).
+                self.last_pid = proc.pid
                 self.current_stream = stream
                 reader_done = anyio.Event()
 
@@ -3537,6 +3652,7 @@ class ClaudeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
                 post_result_idle_enabled = True
                 post_result_idle_timeout_s = 600.0
                 post_result_limbo_grace_s = self._post_result_limbo_grace_s
+                pre_result_silence_timeout_s = 3600.0
                 try:
                     result = load_settings_if_exists()
                     if result is not None:
@@ -3549,6 +3665,9 @@ class ClaudeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
                         )
                         post_result_limbo_grace_s = float(
                             settings_obj.watchdog.post_result_limbo_grace
+                        )
+                        pre_result_silence_timeout_s = float(
+                            settings_obj.watchdog.pre_result_silence_timeout
                         )
                 except Exception:  # noqa: BLE001 — settings errors must not block a run
                     run_logger.debug(
@@ -3586,6 +3705,7 @@ class ClaudeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
                             proc,
                             stream,
                             post_result_limbo_grace_s,
+                            pre_result_silence_timeout_s,
                         )
                     async for evt in self._iter_jsonl_events(
                         stdout=proc.stdout,

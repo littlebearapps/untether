@@ -36,6 +36,25 @@ from untether.transport import MessageRef, RenderedMessage, SendOptions
 CODEX_ENGINE = "codex"
 
 
+@pytest.fixture(autouse=True)
+def _neutralise_cancel_enforcement(request, monkeypatch):
+    """#593: the stall auto-cancel path now enforces teardown by probing —
+    and if needed killing — the recorded PID. Most tests here use fake PIDs
+    (12345 etc.) that can collide with real host processes; neutralise the
+    enforcement everywhere except the dedicated #593 tests (marked
+    ``cancel_enforcement``), which patch the probe/kill primitives
+    themselves."""
+    if request.node.get_closest_marker("cancel_enforcement"):
+        yield
+        return
+
+    async def _noop(self):
+        return None
+
+    monkeypatch.setattr(ProgressEdits, "_enforce_cancel_teardown", _noop)
+    yield
+
+
 class FakeTransport:
     def __init__(self) -> None:
         self._next_id = 1
@@ -6325,3 +6344,99 @@ def test_591_note_final_records_without_repaint() -> None:
 
     assert edits._finalizing is True
     assert edits.event_seq == seq_before
+
+
+# ---------------------------------------------------------------------------
+# #593 — stall auto-cancel enforcement (decision must end in teardown)
+# ---------------------------------------------------------------------------
+
+
+def _enforcement_edits(pid: int | None) -> ProgressEdits:
+    import time as _time
+
+    tracker = ProgressTracker(engine="codex")
+    edits = ProgressEdits(
+        transport=FakeTransport(),
+        presenter=MarkdownPresenter(),
+        channel_id=123,
+        progress_ref=MessageRef(channel_id=123, message_id=1),
+        tracker=tracker,
+        started_at=0.0,
+        clock=_time.monotonic,
+        last_rendered=None,
+    )
+    edits.pid = pid
+    edits._CANCEL_ESCALATION_S = 0.1
+    edits._CANCEL_ESCALATION_POLL_S = 0.01
+    edits._CANCEL_SIGKILL_GRACE_S = 0.1
+    return edits
+
+
+@pytest.mark.anyio
+@pytest.mark.cancel_enforcement
+async def test_593_cancel_enforcement_escalates_to_direct_kill(monkeypatch) -> None:
+    """If the subprocess is still alive after the escalation window, the
+    bridge kills it directly instead of trusting the generator unwind
+    (observed 14m52s gap between stall_auto_cancel and handle.cancelled)."""
+    from structlog.testing import capture_logs
+
+    alive = {"v": True}
+    signals: list[int] = []
+
+    def fake_probe(pid: int, sig: int) -> None:
+        if sig == 0 and not alive["v"]:
+            raise ProcessLookupError
+
+    def fake_group_kill(pid: int, sig) -> None:
+        signals.append(int(sig))
+        if int(sig) == 15:
+            alive["v"] = False  # SIGTERM obeyed
+
+    monkeypatch.setattr("untether.runner_bridge.os.kill", fake_probe)
+    monkeypatch.setattr("untether.utils.subprocess.signal_pid_group", fake_group_kill)
+
+    edits = _enforcement_edits(pid=88888)
+    with capture_logs() as logs:
+        await edits._enforce_cancel_teardown()
+
+    assert 15 in signals  # SIGTERM delivered
+    assert 9 not in signals  # died within grace — no SIGKILL
+    assert any(r.get("event") == "progress_edits.cancel_escalated" for r in logs)
+
+
+@pytest.mark.anyio
+@pytest.mark.cancel_enforcement
+async def test_593_cancel_enforcement_noop_when_teardown_succeeds(
+    monkeypatch,
+) -> None:
+    """Subprocess dies during the escalation window → no direct kill."""
+    calls: list[int] = []
+
+    def fake_probe(pid: int, sig: int) -> None:
+        raise ProcessLookupError  # already dead
+
+    monkeypatch.setattr("untether.runner_bridge.os.kill", fake_probe)
+    monkeypatch.setattr(
+        "untether.utils.subprocess.signal_pid_group",
+        lambda pid, sig: calls.append(int(sig)),
+    )
+
+    edits = _enforcement_edits(pid=88889)
+    await edits._enforce_cancel_teardown()
+
+    assert calls == []
+
+
+@pytest.mark.anyio
+@pytest.mark.cancel_enforcement
+async def test_593_cancel_enforcement_without_pid_logs_and_returns() -> None:
+    """No PID was ever learned — nothing to enforce against; log it."""
+    from structlog.testing import capture_logs
+
+    edits = _enforcement_edits(pid=None)
+    with capture_logs() as logs:
+        await edits._enforce_cancel_teardown()
+
+    assert any(
+        r.get("event") == "progress_edits.cancel_enforcement_no_pid" for r in logs
+    )
