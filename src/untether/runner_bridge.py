@@ -3218,10 +3218,47 @@ async def handle_message(
                 else:
                     final_answer = f"```\n{raw_error}\n```"
 
+        # #596: a 0-turn / $0 / empty-answer completion with ok=True is a
+        # no-op resume (upstream: the resumed session considers itself
+        # complete and emits an immediate empty result). Previously this
+        # rendered a bare "error"-labelled header with no body — the user
+        # got silence and had to re-nudge manually. Surface it explicitly.
+        # Missing usage keys default to 1 (non-anomalous) — only an engine
+        # that EXPLICITLY reported zero turns and zero API time qualifies;
+        # engines without usage reporting never trip this.
+        empty_result_anomaly = False
+        if (
+            run_ok is True
+            and not run_outcome.cancelled
+            and not final_answer.strip()
+            and completed.usage
+            and (completed.usage.get("num_turns", 1) or 0) == 0
+            and (completed.usage.get("duration_api_ms", 1) or 0) == 0
+        ):
+            empty_result_anomaly = True
+            logger.warning(
+                "runner.empty_result",
+                engine=runner.engine,
+                resume=(completed.resume or run_outcome.resume).value
+                if (completed.resume or run_outcome.resume)
+                else None,
+                was_resume=resume_token is not None,
+            )
+            final_answer = (
+                "\N{WARNING SIGN} engine returned an empty result "
+                "(0 turns, no API work) — the resumed session may "
+                "consider itself complete. Resend your message, or "
+                "start fresh with /new."
+            )
+
         status = (
             "error"
             if run_ok is False
-            else ("done" if final_answer.strip() else "error")
+            else (
+                "error"
+                if empty_result_anomaly
+                else ("done" if final_answer.strip() else "error")
+            )
         )
         resume_value = None
         final_resume = completed.resume or run_outcome.resume

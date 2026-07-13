@@ -1135,6 +1135,12 @@ def _maybe_audit_env(state: ClaudeStreamState, session_id: str) -> None:
         )
 
 
+# #595: process-lifetime dedup for needs-auth/failed catalog warnings.
+# Keyed (server, status) — a connector that can never connect as configured
+# warns once per service lifetime instead of once per subprocess spawn.
+_CATALOG_STALENESS_WARNED: set[tuple[str, str]] = set()
+
+
 def _capture_mcp_catalog(
     state: ClaudeStreamState,
     session_id: str,
@@ -1151,6 +1157,14 @@ def _capture_mcp_catalog(
     Gated by ``WatchdogSettings.detect_catalog_staleness`` (default on;
     observability only — no recovery action). Logs once per
     (session, server, status) tuple so re-fired init events don't spam.
+
+    #595 severity split: ``pending`` at init is a startup race (the server
+    is still connecting when Claude snapshots the catalog), not staleness —
+    it logs at INFO (``catalog_staleness.pending``). Persistent
+    ``needs-auth``/``failed`` keep the WARNING but dedup across runs via
+    the process-lifetime ``_CATALOG_STALENESS_WARNED`` registry: the
+    per-state set resets on every subprocess spawn, which multiplied a few
+    broken connectors into ~2,930 WARNINGs/48h fleet-wide.
     """
     if not mcp_servers:
         return
@@ -1173,6 +1187,26 @@ def _capture_mcp_catalog(
         if key in state.catalog_staleness_logged:
             continue
         state.catalog_staleness_logged.add(key)
+        if status == "pending":
+            logger.info(
+                "catalog_staleness.pending",
+                session_id=session_id,
+                pid=state.pid,
+                server=name,
+                status=status,
+                source="system.init",
+            )
+            continue
+        process_key = (name, status)
+        if process_key in _CATALOG_STALENESS_WARNED:
+            logger.debug(
+                "catalog_staleness.suppressed",
+                session_id=session_id,
+                server=name,
+                status=status,
+            )
+            continue
+        _CATALOG_STALENESS_WARNED.add(process_key)
         logger.warning(
             "catalog_staleness.detected",
             session_id=session_id,

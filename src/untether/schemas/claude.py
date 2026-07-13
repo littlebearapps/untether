@@ -68,6 +68,27 @@ class StreamAdvisorToolResultBlock(
     is_error: bool | None = None
 
 
+# #597 — binary media echoed back through user-role messages (e.g. a `Read`
+# on an image/PDF returns the content as an image/document block inside the
+# tool_result envelope). ``source`` carries ``{"type": "base64"|"url",
+# "media_type": ..., "data"|"url": ...}``; kept as a permissive dict — the
+# payload is never rendered, the schema just needs to accept the line so the
+# rest of the event isn't dropped (jsonl.msgspec.invalid x23 on nsd).
+class StreamImageBlock(
+    msgspec.Struct, tag="image", tag_field="type", forbid_unknown_fields=False
+):
+    source: dict[str, Any] | None = None
+
+
+# #597 — see StreamImageBlock; PDFs and other documents use the same shape
+# plus optional metadata fields (title, context, citations toggle).
+class StreamDocumentBlock(
+    msgspec.Struct, tag="document", tag_field="type", forbid_unknown_fields=False
+):
+    source: dict[str, Any] | None = None
+    title: str | None = None
+
+
 type StreamContentBlock = (
     StreamTextBlock
     | StreamThinkingBlock
@@ -75,6 +96,8 @@ type StreamContentBlock = (
     | StreamToolResultBlock
     | StreamServerToolUseBlock
     | StreamAdvisorToolResultBlock
+    | StreamImageBlock
+    | StreamDocumentBlock
 )
 
 
