@@ -365,11 +365,31 @@ class TelegramTransport:
         )
         if edited is None:
             if wait:
+                # #598: attach the recorded failure reason — previously the
+                # Telegram description was only visible in a separate,
+                # uncorrelated telegram.api_error line, making this warning
+                # undiagnosable from logs.
+                reason: str | None = None
+                pop = getattr(self._bot, "pop_edit_error", None)
+                if callable(pop):
+                    reason = pop(chat_id, message_id)
+                if reason is not None and "message is not modified" in reason:
+                    # #598/#364 family: Telegram rejects edits whose text AND
+                    # markup match the current message — the edit's intent is
+                    # already satisfied, so this is a no-op, not a failure.
+                    logger.info(
+                        "transport.edit.noop",
+                        chat_id=chat_id,
+                        message_id=message_id,
+                        has_reply_markup=reply_markup is not None,
+                    )
+                    return ref
                 logger.warning(
                     "transport.edit.failed",
                     chat_id=chat_id,
                     message_id=message_id,
                     has_reply_markup=reply_markup is not None,
+                    error=reason,
                 )
                 return None
             logger.debug(
