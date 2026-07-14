@@ -2881,8 +2881,13 @@ async def run_runner_with_cancel(
                                     # render a spurious "cancelled" message
                                     # on top of the delivered answer. Bounded
                                     # so a wedged transport can't hold the
-                                    # cancel hostage.
-                                    with anyio.move_on_after(15, shield=True):
+                                    # cancel hostage. #618: 60s, not less —
+                                    # a 4-chunk final under group-chat outbox
+                                    # pacing takes 15s+ on its own, and a
+                                    # timeout that fires between the last
+                                    # chunk and the sent-flag re-creates the
+                                    # spurious-cancelled artifact.
+                                    with anyio.move_on_after(60, shield=True):
                                         await on_completed(evt, outcome)
                                 except Exception:  # noqa: BLE001
                                     logger.warning(
