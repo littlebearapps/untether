@@ -85,7 +85,7 @@ systemctl --user restart untether
 
 ## Multi-host fleet rollout
 
-Once integration tests pass on `@untether_dev_bot`, the same rc/stable rolls to all 4 hosts (lba-1 staging, nsd, channelo, mac) in parallel — not just lba-1. The dev/staging separation rules above apply per-host; the fleet scripts wrap them.
+Once integration tests pass on `@untether_dev_bot`, the same rc/stable rolls to all 5 hosts (lba-1 staging, nsd, channelo, sl, mac) in parallel — not just lba-1. The dev/staging separation rules above apply per-host; the fleet scripts wrap them.
 
 ```bash
 scripts/run-integration-tests.sh X.Y.ZrcN --manual    # write attestation marker

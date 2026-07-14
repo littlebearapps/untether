@@ -246,8 +246,8 @@ Two instances run on lba-1 — staging (PyPI/TestPyPI) and dev (local editable s
 ### 3-phase release workflow (MANDATORY)
 
 1. **Dev** — fix code, run unit tests, test via `@untether_dev_bot` (6 engine chats), run integration tests
-2. **Fleet rollout (rc)** — bump to `X.Y.ZrcN`, merge feature branches to `dev` → CI publishes to TestPyPI, attest tests via `scripts/run-integration-tests.sh ${VERSION} --manual`, then `scripts/fleet-rollout.sh ${VERSION}` rolls the rc to all 4 hosts (lba-1 staging + nsd VPS + channelo VPS + Mac) in parallel
-3. **Release** — bump to `X.Y.Z`, write changelog, PR from `dev` → `master`. After merge, `scripts/fleet-rollout.sh ${VERSION}` rolls the stable PyPI build to all 4 hosts in parallel. `release.yml` publishes to PyPI automatically; the master PR merge IS the approval.
+2. **Fleet rollout (rc)** — bump to `X.Y.ZrcN`, merge feature branches to `dev` → CI publishes to TestPyPI, attest tests via `scripts/run-integration-tests.sh ${VERSION} --manual`, then `scripts/fleet-rollout.sh ${VERSION}` rolls the rc to all 5 hosts (lba-1 staging + nsd VPS + channelo VPS + sl VPS + Mac) in parallel
+3. **Release** — bump to `X.Y.Z`, write changelog, PR from `dev` → `master`. After merge, `scripts/fleet-rollout.sh ${VERSION}` rolls the stable PyPI build to all 5 hosts in parallel. `release.yml` publishes to PyPI automatically; the master PR merge IS the approval.
 
 **Branch model:** `feature/*` → PR → `dev` (TestPyPI) → PR → `master` (PyPI). Master always matches the latest PyPI release.
 
@@ -308,7 +308,7 @@ journalctl --user -u untether-dev -f
 scripts/staging.sh install X.Y.ZrcN
 systemctl --user restart untether
 
-# Fleet rollout to all 4 hosts (lba-1 + nsd + channelo + mac)
+# Fleet rollout to all 5 hosts (lba-1 + nsd + channelo + sl + mac)
 scripts/run-integration-tests.sh X.Y.ZrcN --manual    # attest via @untether_dev_bot
 scripts/fleet-rollout.sh X.Y.ZrcN                     # parallel upgrade
 scripts/fleet-rollout.sh X.Y.ZrcN --dry-run           # preview
