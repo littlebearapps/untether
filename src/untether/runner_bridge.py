@@ -2822,8 +2822,9 @@ async def run_runner_with_cancel(
         async with anyio.create_task_group() as tg:
 
             async def run_runner() -> None:
+                events = runner.run(prompt, resume_token)
                 try:
-                    async for evt in runner.run(prompt, resume_token):
+                    async for evt in events:
                         _log_runner_event(evt)
                         if isinstance(evt, StartedEvent):
                             outcome.resume = evt.resume
@@ -2872,7 +2873,17 @@ async def run_runner_with_cancel(
                                     evt, outcome.resume, channel_id=channel_id
                                 )
                                 try:
-                                    await on_completed(evt, outcome)
+                                    # #614: shield the delivery — a /cancel
+                                    # landing mid-send would otherwise cancel
+                                    # this await AFTER the message hit the
+                                    # wire but BEFORE final_delivery["sent"]
+                                    # was recorded, so handle_message would
+                                    # render a spurious "cancelled" message
+                                    # on top of the delivered answer. Bounded
+                                    # so a wedged transport can't hold the
+                                    # cancel hostage.
+                                    with anyio.move_on_after(15, shield=True):
+                                        await on_completed(evt, outcome)
                                 except Exception:  # noqa: BLE001
                                     logger.warning(
                                         "final.early_delivery_failed",
@@ -2883,6 +2894,22 @@ async def run_runner_with_cancel(
                         _record_export_event(evt, outcome.resume, channel_id=channel_id)
                         await edits.on_event(evt)
                 finally:
+                    # #614: close the runner generator in THIS task. When the
+                    # async-for is abandoned mid-body (e.g. /cancel lands
+                    # while on_completed is awaiting), the generator is left
+                    # suspended at a yield and would be finalized later by
+                    # the event loop's async-generator hook in a DIFFERENT
+                    # task — and run_impl's anyio task group then raises
+                    # "Attempted to exit cancel scope in a different task
+                    # than it was entered in" as an unretrieved task
+                    # exception. Shielded so the pending bridge-level
+                    # cancellation can't interrupt generator teardown
+                    # (subprocess kill, registry cleanup); bounded so a
+                    # wedged teardown can't hang the bridge.
+                    aclose = getattr(events, "aclose", None)
+                    if aclose is not None:
+                        with anyio.move_on_after(30, shield=True):
+                            await aclose()
                     tg.cancel_scope.cancel()
 
             async def wait_cancel(task: RunningTask) -> None:

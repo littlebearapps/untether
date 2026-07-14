@@ -15,6 +15,7 @@ from untether.runner_bridge import (
     ExecBridgeConfig,
     IncomingMessage,
     ProgressEdits,
+    RunOutcome,
     _format_run_cost,
     handle_message,
     register_ephemeral_message,
@@ -6530,4 +6531,180 @@ async def test_593_cancel_enforcement_without_pid_logs_and_returns() -> None:
 
     assert any(
         r.get("event") == "progress_edits.cancel_enforcement_no_pid" for r in logs
+    )
+
+
+# ---------------------------------------------------------------------------
+# #614: cancel during early final delivery — generator teardown + delivery
+# ---------------------------------------------------------------------------
+
+
+class _TaskGroupHoldOpenRunner:
+    """Mimics ClaudeRunner.run_impl's shape: yields events from inside an
+    anyio task group, then holds the generator open after CompletedEvent
+    (the #591/#592 post-result idle window).
+
+    Records which asyncio task consumed the generator and which task ran
+    its cleanup, so tests can assert teardown happened in the pump task
+    rather than in the event loop's async-generator finalizer.
+    """
+
+    engine = CODEX_ENGINE
+
+    def __init__(self) -> None:
+        self.consume_task: object = None
+        self.cleanup_task: object = None
+        self.cleanup_ran = anyio.Event()
+        self.taskgroup_exit_error: BaseException | None = None
+        self._token = ResumeToken(
+            engine=CODEX_ENGINE, value="019b66fc-64c2-7a71-81cd-081c504cfeb2"
+        )
+
+    def format_resume(self, token: ResumeToken) -> str:
+        return f"codex resume {token.value}"
+
+    async def run(self, prompt: str, resume: ResumeToken | None):
+        import asyncio
+
+        from untether.model import StartedEvent
+
+        hold = anyio.Event()
+        try:
+            async with anyio.create_task_group() as tg:
+                tg.start_soon(anyio.sleep_forever)
+                self.consume_task = asyncio.current_task()
+                yield StartedEvent(
+                    engine=CODEX_ENGINE, resume=self._token, title="codex"
+                )
+                yield CompletedEvent(
+                    engine=CODEX_ENGINE,
+                    ok=True,
+                    answer="done",
+                    resume=self._token,
+                )
+                # Post-result hold-open: generator stays suspended here (or
+                # at the yield above) until closed.
+                await hold.wait()
+        except BaseException as exc:
+            self.taskgroup_exit_error = exc
+            raise
+        finally:
+            import asyncio
+
+            self.cleanup_task = asyncio.current_task()
+            self.cleanup_ran.set()
+
+
+async def _drive_cancel_mid_delivery(
+    runner: _TaskGroupHoldOpenRunner,
+    blocking_deliver,
+    running_task,
+) -> RunOutcome:
+    """Run run_runner_with_cancel and fire /cancel while on_completed is
+    suspended, so the runner generator is parked at its yield when the
+    pump task unwinds."""
+    from untether.runner_bridge import run_runner_with_cancel
+
+    transport = FakeTransport()
+    presenter = _KeyboardPresenter()
+    edits = _make_edits(transport, presenter)
+    outcome_box: list = []
+
+    async def drive() -> None:
+        outcome_box.append(
+            await run_runner_with_cancel(
+                runner,  # type: ignore[arg-type]
+                prompt="p",
+                resume_token=None,
+                edits=edits,
+                running_task=running_task,
+                on_thread_known=None,
+                channel_id=123,
+                on_completed=blocking_deliver,
+            )
+        )
+
+    async with anyio.create_task_group() as tg:
+        tg.start_soon(drive)
+        with anyio.fail_after(2):
+            await blocking_deliver.in_delivery.wait()
+        running_task.cancel_requested.set()
+        # Let wait_cancel fire and the cancellation propagate before
+        # releasing the delivery, so the pre-fix behaviour (delivery
+        # cancelled mid-flight) is exercised deterministically.
+        for _ in range(20):
+            await anyio.lowlevel.checkpoint()
+        blocking_deliver.release.set()
+
+    assert outcome_box, "run_runner_with_cancel did not return"
+    return outcome_box[0]
+
+
+def _make_blocking_deliver():
+    class _Deliver:
+        in_delivery = anyio.Event()
+        release = anyio.Event()
+        completed = anyio.Event()
+
+        async def __call__(self, evt, outcome) -> None:
+            self.in_delivery.set()
+            await self.release.wait()
+            self.completed.set()
+
+    return _Deliver()
+
+
+@pytest.mark.anyio
+async def test_cancel_mid_delivery_closes_generator_in_pump_task() -> None:
+    """#614: a /cancel landing while the pump awaits on_completed abandons
+    the async-for with the runner generator suspended at a yield inside an
+    anyio task group. The generator must be closed explicitly in the pump
+    task — otherwise the event loop's asyncgen finalizer throws
+    GeneratorExit from a foreign task and the task group raises
+    'Attempted to exit cancel scope in a different task than it was
+    entered in' as an unretrieved task exception."""
+    from untether.runner_bridge import RunningTask
+
+    runner = _TaskGroupHoldOpenRunner()
+    deliver = _make_blocking_deliver()
+    running_task = RunningTask()
+
+    outcome = await _drive_cancel_mid_delivery(runner, deliver, running_task)
+
+    assert outcome.cancelled
+    # Teardown must have happened by the time run_runner_with_cancel
+    # returned — not left to the GC/asyncgen-finalizer.
+    assert runner.cleanup_ran.is_set(), (
+        "runner generator was abandoned without aclose(); teardown left to "
+        "the event loop's async-generator finalizer"
+    )
+    # ...and in the SAME task that consumed the generator, so the anyio
+    # task group's cancel scope exits in the task that entered it.
+    assert runner.cleanup_task is runner.consume_task, (
+        "generator cleanup ran in a different task than the pump — anyio "
+        "cancel scopes must exit in their owning task"
+    )
+    assert not isinstance(runner.taskgroup_exit_error, RuntimeError)
+
+
+@pytest.mark.anyio
+async def test_cancel_mid_delivery_lets_final_delivery_finish() -> None:
+    """#614 (companion symptom): the early final delivery (#591) must be
+    shielded from the bridge cancel scope. Unshielded, a /cancel landing
+    mid-send cancels on_completed AFTER the Telegram send hit the wire but
+    BEFORE final_delivery['sent'] was recorded — so handle_message takes
+    the plain 'cancelled' branch and renders a spurious 'cancelled'
+    message on top of the already-delivered answer."""
+    from untether.runner_bridge import RunningTask
+
+    runner = _TaskGroupHoldOpenRunner()
+    deliver = _make_blocking_deliver()
+    running_task = RunningTask()
+
+    outcome = await _drive_cancel_mid_delivery(runner, deliver, running_task)
+
+    assert outcome.cancelled
+    assert deliver.completed.is_set(), (
+        "on_completed was cancelled mid-delivery; final answer delivery "
+        "must be shielded so the sent-flag matches what reached the wire"
     )
