@@ -126,7 +126,7 @@ cat <<EOF
 The fleet rollout gate is now satisfied for version ${VERSION}.
 
 Next steps:
-  scripts/fleet-rollout.sh ${VERSION}              # roll to all 4 hosts in parallel
+  scripts/fleet-rollout.sh ${VERSION}              # roll to all 5 hosts in parallel
   scripts/fleet-rollout.sh ${VERSION} --dry-run    # preview without executing
   scripts/fleet-rollout.sh ${VERSION} --only mac   # roll a single host
 

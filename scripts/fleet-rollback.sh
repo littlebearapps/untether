@@ -2,14 +2,14 @@
 # Fleet rollback helper for Untether — parallel revert to a known-good version.
 #
 # Used when a fleet-rollout went wrong and you need to step back to the
-# previous version on all four hosts (or one host with --only).
+# previous version on all five hosts (or one host with --only).
 #
 # Mirrors scripts/fleet-rollout.sh's parallel SSH pattern but skips the
 # attestation gate (we're going BACK to a known-good version, not forward
 # to an untested one).
 #
 # Usage:
-#   scripts/fleet-rollback.sh 0.35.2                # revert all 4 hosts to 0.35.2
+#   scripts/fleet-rollback.sh 0.35.2                # revert all 5 hosts to 0.35.2
 #   scripts/fleet-rollback.sh 0.35.3rc13 --only mac # revert only mac
 #   scripts/fleet-rollback.sh 0.35.2 --dry-run      # preview commands
 
@@ -26,7 +26,7 @@ usage() {
     cat <<EOF
 Usage: fleet-rollback.sh VERSION [--dry-run] [--only HOST]
 
-Revert Untether to VERSION on all 4 hosts in parallel (or one host with --only).
+Revert Untether to VERSION on all 5 hosts in parallel (or one host with --only).
 
 The attestation gate is intentionally SKIPPED — rollbacks go to a known-good
 version, not a new one. If VERSION is itself a prerelease (rcN/aN/bN), use
@@ -34,7 +34,7 @@ TestPyPI as the index; otherwise use PyPI.
 
 Options:
   --dry-run            Print install/restart commands per host without executing
-  --only HOST          Roll only one host (lba-1 | nsd | channelo | mac)
+  --only HOST          Roll only one host (lba-1 | nsd | channelo | sl | mac)
 EOF
     exit "${1:-1}"
 }
@@ -119,10 +119,13 @@ POSTCHECK_CMD[nsd]="ssh nsd 'systemctl --user is-active untether'"
 RESTART_CMD[channelo]="ssh channelo 'systemctl --user restart untether'"
 POSTCHECK_CMD[channelo]="ssh channelo 'systemctl --user is-active untether'"
 
+RESTART_CMD[sl]="ssh sl 'systemctl --user restart untether'"
+POSTCHECK_CMD[sl]="ssh sl 'systemctl --user is-active untether'"
+
 RESTART_CMD[mac]='ssh mac "launchctl kickstart -k gui/\$(id -u)/com.littlebearapps.untether"'
 POSTCHECK_CMD[mac]='ssh mac "launchctl print gui/\$(id -u)/com.littlebearapps.untether | grep -E \"^\\s*(state|last exit code)\""'
 
-ALL_HOSTS=(lba-1 nsd channelo mac)
+ALL_HOSTS=(lba-1 nsd channelo sl mac)
 
 if [[ -n "$ONLY_HOST" ]]; then
     valid=0

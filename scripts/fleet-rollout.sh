@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Fleet rollout helper for Untether — single-stage parallel upgrade across all
-# four production-ish hosts (lba-1 staging, nsd, channelo, mac).
+# five production-ish hosts (lba-1 staging, nsd, channelo, sl, mac).
 #
 # Companion scripts:
 #   scripts/fleet-rollback.sh             — same parallel pattern, install previous version
@@ -9,8 +9,8 @@
 # Strategic plan: docs/plans/2026-05-13-fleet-monitoring-and-upgrades.md
 #
 # Usage:
-#   scripts/fleet-rollout.sh 0.35.3rc14                # rc -> TestPyPI rollout, 4 hosts parallel
-#   scripts/fleet-rollout.sh 0.35.3                    # stable -> PyPI rollout, 4 hosts parallel
+#   scripts/fleet-rollout.sh 0.35.3rc14                # rc -> TestPyPI rollout, 5 hosts parallel
+#   scripts/fleet-rollout.sh 0.35.3                    # stable -> PyPI rollout, 5 hosts parallel
 #   scripts/fleet-rollout.sh 0.35.3rc14 --dry-run      # print commands without executing
 #   scripts/fleet-rollout.sh 0.35.3rc14 --only mac     # only roll one host
 #   scripts/fleet-rollout.sh 0.35.3rc14 --skip-test-gate
@@ -50,14 +50,14 @@ usage() {
     cat <<EOF
 Usage: fleet-rollout.sh VERSION [--dry-run] [--only HOST] [--skip-test-gate] [--force-downgrade]
 
-Single-stage parallel rollout of Untether to lba-1, nsd, channelo, mac.
+Single-stage parallel rollout of Untether to lba-1, nsd, channelo, sl, mac.
 
 Required:
   VERSION              Target version (e.g. 0.35.3rc14 or 0.35.3)
 
 Options:
   --dry-run            Print install/restart commands per host without executing
-  --only HOST          Roll only one host (lba-1 | nsd | channelo | mac)
+  --only HOST          Roll only one host (lba-1 | nsd | channelo | sl | mac)
   --skip-test-gate     Bypass the integration-test attestation precondition
   --force-downgrade    Allow installing an older version than the current state
 
@@ -183,7 +183,7 @@ fi
 #
 # lba-1: local install via existing scripts/staging.sh helper (always pipx-
 #        based, parity with the single-host workflow)
-# nsd / channelo / mac: install manager auto-detected at runtime via
+# nsd / channelo / sl / mac: install manager auto-detected at runtime via
 #        detect_install_manager() — supports both pipx and uv tool. The
 #        detection probes the EXISTING install (uv tool list / pipx list)
 #        first; if untether isn't installed at all, falls back to whichever
@@ -273,6 +273,9 @@ POSTCHECK_CMD[nsd]="ssh nsd 'systemctl --user is-active untether'"
 RESTART_CMD[channelo]="ssh channelo 'systemctl --user restart untether'"
 POSTCHECK_CMD[channelo]="ssh channelo 'systemctl --user is-active untether'"
 
+RESTART_CMD[sl]="ssh sl 'systemctl --user restart untether'"
+POSTCHECK_CMD[sl]="ssh sl 'systemctl --user is-active untether'"
+
 RESTART_CMD[mac]='ssh mac "launchctl kickstart -k gui/\$(id -u)/com.littlebearapps.untether"'
 POSTCHECK_CMD[mac]='ssh mac "launchctl print gui/\$(id -u)/com.littlebearapps.untether | grep -E \"^\\s*(state|last exit code)\""'
 
@@ -280,7 +283,7 @@ POSTCHECK_CMD[mac]='ssh mac "launchctl print gui/\$(id -u)/com.littlebearapps.un
 # Host selection
 # ────────────────────────────────────────────────────────────────────────────
 
-ALL_HOSTS=(lba-1 nsd channelo mac)
+ALL_HOSTS=(lba-1 nsd channelo sl mac)
 
 if [[ -n "$ONLY_HOST" ]]; then
     # Validate the host name against ALL_HOSTS (lba-1 is always known;
@@ -338,6 +341,7 @@ if (( DRY_RUN == 1 )); then
     echo "  @hetz_lba1_bot    (lba-1)"
     echo "  @hetz_nsd_bot     (nsd)"
     echo "  @hetz_channelo_bot (channelo)"
+    echo "  @hetz_sl_bot      (sl)"
     echo "  @local_mb_bot     (mac)"
     exit 0
 fi
