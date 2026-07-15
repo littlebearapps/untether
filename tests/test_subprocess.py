@@ -435,7 +435,13 @@ async def test_manage_subprocess_reaps_after_clean_exit(monkeypatch) -> None:
     snapshot, and honours reap_orphans=False."""
     reap_calls: list[tuple[int, tuple[int, ...]]] = []
 
-    async def fake_reap(pgid: int, *, extra_pids=(), grace_s: float = 2.0):
+    async def fake_reap(
+        pgid: int,
+        *,
+        extra_pids=(),
+        extra_pid_starttimes=None,
+        grace_s: float = 2.0,
+    ):
         reap_calls.append((pgid, tuple(extra_pids)))
         return list(extra_pids)
 
@@ -466,3 +472,63 @@ async def test_manage_subprocess_reaps_after_clean_exit(monkeypatch) -> None:
     async with subprocess_utils.manage_subprocess(["fake-cmd"], reap_orphans=False):
         pass
     assert reap_calls == []
+
+
+@pytest.mark.anyio
+async def test_reap_orphaned_group_skips_recycled_pid(monkeypatch) -> None:
+    """#590 hardening: a captured extra PID whose /proc starttime no longer
+    matches (PID recycled by an unrelated process) is NOT signalled."""
+    kill_calls: list[tuple[int, int]] = []
+
+    def fake_killpg(pgid: int, sig: int) -> None:
+        raise ProcessLookupError  # group already empty
+
+    def fake_kill(pid: int, sig: int) -> None:
+        if sig == 0:
+            return  # pretend alive
+        kill_calls.append((pid, sig))
+
+    monkeypatch.setattr(subprocess_utils.os, "killpg", fake_killpg)
+    monkeypatch.setattr(subprocess_utils.os, "kill", fake_kill)
+    monkeypatch.setattr(subprocess_utils, "_pgid_members", lambda pgid: [])
+    # recorded starttime 100, but current is 999 → identity mismatch.
+    monkeypatch.setattr(subprocess_utils, "pid_starttime", lambda pid: 999)
+
+    reaped = await subprocess_utils.reap_orphaned_group(
+        42000, extra_pids=(42001,), extra_pid_starttimes={42001: 100}, grace_s=0.05
+    )
+
+    assert reaped == []
+    assert kill_calls == []
+
+
+@pytest.mark.anyio
+async def test_reap_orphaned_group_signals_matching_identity(monkeypatch) -> None:
+    """#590 hardening: a captured extra PID whose starttime still matches IS
+    signalled (identity verified, not a recycled PID)."""
+    alive = {43001: True}
+    kill_calls: list[tuple[int, int]] = []
+
+    def fake_killpg(pgid: int, sig: int) -> None:
+        raise ProcessLookupError
+
+    def fake_kill(pid: int, sig: int) -> None:
+        if sig == 0:
+            if not alive.get(pid, False):
+                raise ProcessLookupError
+            return
+        kill_calls.append((pid, sig))
+        if sig == signal.SIGTERM:
+            alive[pid] = False
+
+    monkeypatch.setattr(subprocess_utils.os, "killpg", fake_killpg)
+    monkeypatch.setattr(subprocess_utils.os, "kill", fake_kill)
+    monkeypatch.setattr(subprocess_utils, "_pgid_members", lambda pgid: [])
+    monkeypatch.setattr(subprocess_utils, "pid_starttime", lambda pid: 100)
+
+    reaped = await subprocess_utils.reap_orphaned_group(
+        43000, extra_pids=(43001,), extra_pid_starttimes={43001: 100}, grace_s=0.2
+    )
+
+    assert reaped == [43001]
+    assert (43001, signal.SIGTERM) in kill_calls

@@ -25,6 +25,7 @@ from untether.runners.mock import (
     Advance,
     Emit,
     ErrorReturn,
+    MockRunner,
     Raise,
     Return,
     ScriptRunner,
@@ -6352,12 +6353,25 @@ def test_591_note_final_records_without_repaint() -> None:
 # ---------------------------------------------------------------------------
 
 
+def _disable_empty_resend(monkeypatch) -> None:
+    """#596: pin resend_empty_resume=False so the surfacing path (not
+    auto-resend) is exercised."""
+    from untether.settings import AutoContinueSettings
+
+    monkeypatch.setattr(
+        "untether.runner_bridge._load_auto_continue_settings",
+        lambda: AutoContinueSettings(resend_empty_resume=False),
+    )
+
+
 @pytest.mark.anyio
-async def test_596_empty_result_anomaly_surfaces_note() -> None:
+async def test_596_empty_result_anomaly_surfaces_note(monkeypatch) -> None:
     """A resumed run returning 0 turns / 0 API ms / empty answer with
-    ok=True must warn and tell the user instead of delivering silence."""
+    ok=True must warn and tell the user instead of delivering silence
+    (auto-resend disabled here so we test the surfacing fallback)."""
     from structlog.testing import capture_logs
 
+    _disable_empty_resend(monkeypatch)
     transport = FakeTransport()
     runner = ScriptRunner(
         [Return(answer="", usage={"num_turns": 0, "duration_api_ms": 0})],
@@ -6382,6 +6396,8 @@ async def test_596_empty_result_anomaly_surfaces_note() -> None:
     final_text = transport.edit_calls[-1]["message"].text
     assert "empty result" in final_text
     assert "/new" in final_text
+    # No auto-resend when disabled → the runner ran exactly once.
+    assert len(runner.calls) == 1
 
 
 @pytest.mark.anyio
@@ -6436,6 +6452,148 @@ async def test_596_no_usage_reporting_not_flagged() -> None:
         )
 
     assert not any(r.get("event") == "runner.empty_result" for r in logs)
+
+
+class _EmptyThenAnswerRunner(MockRunner):
+    """#596: first run() emits an empty no-op resume (0 turns / $0, ok=True);
+    the next run() delivers a real answer — models the upstream empty-resume
+    that processes normally on the second attempt."""
+
+    def __init__(self, *, engine=CODEX_ENGINE, resume_value: str = "sess-596") -> None:
+        super().__init__(events=[], engine=engine, resume_value=resume_value)
+        self.calls: list[tuple[str, ResumeToken | None]] = []
+
+    async def run(self, prompt, resume):
+        from untether.model import StartedEvent
+        from untether.runners.mock import _resume_token
+
+        self.calls.append((prompt, resume))
+        token_value = resume.value if resume else self._resume_value
+        token = _resume_token(self.engine, token_value)
+        async with self.lock_for(token):
+            yield StartedEvent(engine=self.engine, resume=token, title=self.title)
+            if len(self.calls) == 1:
+                yield CompletedEvent(
+                    engine=self.engine,
+                    resume=token,
+                    ok=True,
+                    answer="",
+                    usage={"num_turns": 0, "duration_api_ms": 0},
+                )
+            else:
+                yield CompletedEvent(
+                    engine=self.engine,
+                    resume=token,
+                    ok=True,
+                    answer="Here is the real result.",
+                )
+
+
+@pytest.mark.anyio
+async def test_596_auto_resend_delivers_answer_on_retry() -> None:
+    """#596: an empty-result no-op resume auto-resends the ORIGINAL prompt
+    once against the SAME session; the retry's real answer reaches the user,
+    removing the manual re-nudge."""
+    from structlog.testing import capture_logs
+
+    transport = FakeTransport()
+    runner = _EmptyThenAnswerRunner(resume_value="sess-596")
+    cfg = ExecBridgeConfig(
+        transport=transport,
+        presenter=MarkdownPresenter(),
+        final_notify=False,
+    )
+
+    with capture_logs() as logs:
+        await handle_message(
+            cfg,
+            runner=runner,
+            incoming=IncomingMessage(
+                channel_id=123, message_id=10, text="please continue"
+            ),
+            resume_token=ResumeToken(engine=CODEX_ENGINE, value="sess-596"),
+        )
+
+    # Exactly one auto-resend fired.
+    assert len(runner.calls) == 2
+    assert any(r.get("event") == "session.auto_resend_empty" for r in logs)
+    # The retry resumed the SAME session.
+    assert runner.calls[1][1] is not None
+    assert runner.calls[1][1].value == "sess-596"
+    # The user saw the retry notice AND the real answer.
+    all_text = " ".join(
+        c["message"].text for c in transport.edit_calls + transport.send_calls
+    )
+    assert "retrying" in all_text
+    assert "Here is the real result." in all_text
+
+
+@pytest.mark.anyio
+async def test_596_auto_resend_is_single_shot() -> None:
+    """#596: if the retry is ALSO an empty no-op, no second retry fires — the
+    surfacing note is shown instead (bounded, no loop)."""
+    from structlog.testing import capture_logs
+
+    transport = FakeTransport()
+    runner = ScriptRunner(
+        [Return(answer="", usage={"num_turns": 0, "duration_api_ms": 0})],
+        engine=CODEX_ENGINE,
+        resume_value="sess-596",
+    )
+    cfg = ExecBridgeConfig(
+        transport=transport,
+        presenter=MarkdownPresenter(),
+        final_notify=False,
+    )
+
+    with capture_logs() as logs:
+        await handle_message(
+            cfg,
+            runner=runner,
+            incoming=IncomingMessage(
+                channel_id=123, message_id=10, text="please continue"
+            ),
+            resume_token=ResumeToken(engine=CODEX_ENGINE, value="sess-596"),
+        )
+
+    # Original run + exactly one resend, then stop.
+    assert len(runner.calls) == 2
+    assert sum(1 for r in logs if r.get("event") == "session.auto_resend_empty") == 1
+    # The exhausted retry falls through to the manual-resend note.
+    final_text = transport.edit_calls[-1]["message"].text
+    assert "empty result" in final_text
+    assert "/new" in final_text
+
+
+@pytest.mark.anyio
+async def test_596_no_resend_when_not_a_resume() -> None:
+    """#596: a fresh (non-resume) empty result is surfaced, never resent —
+    there is no prior session to retry."""
+    from structlog.testing import capture_logs
+
+    transport = FakeTransport()
+    runner = ScriptRunner(
+        [Return(answer="", usage={"num_turns": 0, "duration_api_ms": 0})],
+        engine=CODEX_ENGINE,
+    )
+    cfg = ExecBridgeConfig(
+        transport=transport,
+        presenter=MarkdownPresenter(),
+        final_notify=False,
+    )
+
+    with capture_logs() as logs:
+        await handle_message(
+            cfg,
+            runner=runner,
+            incoming=IncomingMessage(channel_id=123, message_id=10, text="hi"),
+            resume_token=None,
+        )
+
+    assert len(runner.calls) == 1
+    assert not any(r.get("event") == "session.auto_resend_empty" for r in logs)
+    final_text = transport.edit_calls[-1]["message"].text
+    assert "empty result" in final_text
 
 
 # ---------------------------------------------------------------------------

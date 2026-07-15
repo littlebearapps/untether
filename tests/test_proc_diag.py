@@ -381,3 +381,32 @@ def test_mem_available_kb_parses_valid_meminfo(
 
     monkeypatch.setattr(builtins, "open", fake_open)
     assert mem_available_kb() == 4_200_000
+
+
+# --- #590 hardening: pid_starttime ---
+
+
+def test_pid_starttime_returns_int_for_own_process() -> None:
+    from untether.utils.proc_diag import pid_starttime
+
+    st = pid_starttime(os.getpid())
+    if sys.platform == "linux":
+        assert isinstance(st, int)
+        assert st > 0
+    else:
+        assert st is None
+
+
+def test_pid_starttime_stable_across_calls() -> None:
+    from untether.utils.proc_diag import pid_starttime
+
+    if sys.platform != "linux":
+        pytest.skip("Linux-only /proc")
+    assert pid_starttime(os.getpid()) == pid_starttime(os.getpid())
+
+
+def test_pid_starttime_missing_pid_returns_none() -> None:
+    from untether.utils.proc_diag import pid_starttime
+
+    # PID 0 is reserved and never has a /proc/0/stat.
+    assert pid_starttime(0) is None

@@ -60,13 +60,27 @@ class TelegramFilesSettings(BaseModel):
     auto_put_mode: Literal["upload", "prompt"] = "upload"
     uploads_dir: NonEmptyStr = "incoming"
     allowed_user_ids: list[StrictInt] = Field(default_factory=list)
+    # Secret/credential patterns never delivered from the outbox. Broadened
+    # for #628 recursive directory (zip) delivery, which makes shipping a
+    # nested secret far easier than the old flat scan — matched right-to-left
+    # by ``deny_reason`` (PurePosixPath.match), so bare names like ``.env``
+    # also match nested members.
     deny_globs: list[NonEmptyStr] = Field(
         default_factory=lambda: [
             ".git/**",
             ".env",
+            "**/.env",
+            "**/.env.*",
             ".envrc",
+            "**/.envrc",
             "**/*.pem",
+            "**/*.key",
+            "**/id_rsa",
+            "**/id_ed25519",
             "**/.ssh/**",
+            "**/.netrc",
+            "**/.npmrc",
+            "**/.pypirc",
         ]
     )
 
@@ -80,6 +94,16 @@ class TelegramFilesSettings(BaseModel):
     # logged as ``outbox.skipped`` only — the agent's "I've prepared the
     # guides folder for you" final message became a silent lie.
     outbox_notify_skipped: bool = True
+    # #628: deliver skipped outbox DIRECTORIES (e.g. an agent's screenshots/
+    # folder). "off" (default) keeps the #600 archive-to-.skipped/ behaviour;
+    # "zip" bundles each directory's deliverable members into a single
+    # <name>.zip Telegram document. Recursive deny-glob, symlink, per-member
+    # size, member-count, and total-zip-size caps are all applied to the
+    # contents. Recurse-and-send-each-file is intentionally NOT offered
+    # (flooding risk on large trees); zip keeps delivery to one bounded
+    # attachment per directory. Directories with no deliverable members (all
+    # denied/empty) or an oversize zip fall back to the #600 archive.
+    outbox_deliver_directories: Literal["off", "zip"] = "off"
 
     @field_validator("uploads_dir")
     @classmethod
@@ -325,6 +349,15 @@ class AutoContinueSettings(BaseModel):
 
     enabled: bool = True
     max_retries: int = Field(default=1, ge=0, le=3)
+    # #596: an empty-result no-op resume (0 turns / $0 / empty answer, ok=True)
+    # is the same upstream turn-state family — resuming a session whose prior
+    # turn ended on a tool_result (last_event_type=user) can return an
+    # immediate empty result on the first attempt, forcing the user to
+    # manually re-nudge. When enabled, Untether auto-resends the original
+    # prompt once (same session) instead of asking the user to resend.
+    # Single-shot: if the retry is also empty, the user-visible resend notice
+    # is shown and no further retry fires.
+    resend_empty_resume: bool = True
 
 
 class WatchdogSettings(BaseModel):

@@ -567,3 +567,208 @@ def test_600_scan_ignores_graveyard(tmp_path: Path) -> None:
     )
     assert [f.rel_path.name for f in files] == ["file.txt"]
     assert skipped == []
+
+
+# -- #628: deliver skipped directories as zip --
+
+
+def _read_sent_zip(send_file_mock):
+    """Extract (filename, sorted namelist, caption) from a captured send_file
+    call whose payload is a zip document."""
+    import io
+    import zipfile
+
+    args = send_file_mock.call_args[0]
+    fname, payload, caption = args[2], args[3], args[5]
+    with zipfile.ZipFile(io.BytesIO(payload)) as zf:
+        names = sorted(zf.namelist())
+    return fname, names, caption
+
+
+@pytest.mark.anyio
+async def test_628_zip_delivers_directory(tmp_path: Path) -> None:
+    """deliver_directories='zip' bundles a skipped directory into <name>.zip,
+    sends it, removes the source, and does NOT archive to .skipped/."""
+    outbox = tmp_path / ".untether-outbox"
+    (outbox / "screenshots").mkdir(parents=True)
+    (outbox / "screenshots" / "a.png").write_bytes(b"PNGDATA-A")
+    (outbox / "screenshots" / "b.png").write_bytes(b"PNGDATA-B")
+
+    send_file = AsyncMock()
+    result = await deliver_outbox_files(
+        **_deliver_kwargs(tmp_path, send_file=send_file, deliver_directories="zip")
+    )
+
+    send_file.assert_called_once()
+    fname, names, caption = _read_sent_zip(send_file)
+    assert fname == "screenshots.zip"
+    assert names == ["screenshots/a.png", "screenshots/b.png"]
+    assert "screenshots.zip" in caption
+    assert "2 files" in caption
+    assert not (outbox / "screenshots").exists()
+    assert not (outbox / ".skipped").exists()
+    reasons = dict(result.skipped)
+    assert "delivered as screenshots.zip" in reasons["screenshots"]
+
+
+@pytest.mark.anyio
+async def test_628_zip_excludes_denied_and_symlink_members(tmp_path: Path) -> None:
+    """Recursive deny-glob + symlink filtering: secrets nested in a delivered
+    directory are NEVER bundled."""
+    outbox = tmp_path / ".untether-outbox"
+    (outbox / "bundle").mkdir(parents=True)
+    (outbox / "bundle" / "ok.txt").write_text("safe", encoding="utf-8")
+    (outbox / "bundle" / "secret.pem").write_text("PRIVATE KEY", encoding="utf-8")
+    (outbox / "bundle" / ".env").write_text("TOKEN=abc", encoding="utf-8")
+    (outbox / "bundle" / "sub").mkdir()
+    (outbox / "bundle" / "sub" / "nested.pem").write_text("KEY2", encoding="utf-8")
+    # A symlink pointing outside the project must not be followed/bundled.
+    outside = tmp_path / "outside.txt"
+    outside.write_text("SECRET-OUTSIDE", encoding="utf-8")
+    try:
+        (outbox / "bundle" / "link.txt").symlink_to(outside)
+        symlinks_supported = True
+    except OSError:
+        symlinks_supported = False
+
+    send_file = AsyncMock()
+    await deliver_outbox_files(
+        **_deliver_kwargs(tmp_path, send_file=send_file, deliver_directories="zip")
+    )
+
+    _, names, _ = _read_sent_zip(send_file)
+    assert names == ["bundle/ok.txt"]
+    assert not any(".pem" in n for n in names)
+    assert not any(".env" in n for n in names)
+    if symlinks_supported:
+        assert not any("link" in n for n in names)
+
+
+@pytest.mark.anyio
+async def test_628_empty_or_all_denied_dir_falls_back_to_archive(
+    tmp_path: Path,
+) -> None:
+    """A directory with no deliverable members (all denied) is NOT sent; it
+    falls back to the #600 archive so it stops re-scanning."""
+    outbox = tmp_path / ".untether-outbox"
+    (outbox / "secrets").mkdir(parents=True)
+    (outbox / "secrets" / "id.pem").write_text("KEY", encoding="utf-8")
+
+    send_file = AsyncMock()
+    result = await deliver_outbox_files(
+        **_deliver_kwargs(tmp_path, send_file=send_file, deliver_directories="zip")
+    )
+
+    send_file.assert_not_called()
+    assert not (outbox / "secrets").exists()
+    assert (outbox / ".skipped" / "secrets").is_dir()
+    reasons = dict(result.skipped)
+    assert "moved aside" in reasons["secrets"]
+
+
+@pytest.mark.anyio
+async def test_628_oversize_zip_falls_back_to_archive(tmp_path: Path) -> None:
+    """A directory whose zip would exceed the size cap is archived, not sent."""
+    outbox = tmp_path / ".untether-outbox"
+    (outbox / "big").mkdir(parents=True)
+    # Incompressible-ish content bigger than a tiny cap.
+    (outbox / "big" / "data.bin").write_bytes(b"X" * 4096)
+
+    send_file = AsyncMock()
+    result = await deliver_outbox_files(
+        **_deliver_kwargs(
+            tmp_path,
+            send_file=send_file,
+            deliver_directories="zip",
+            max_download_bytes=100,  # tiny cap → member exceeds it
+        )
+    )
+
+    send_file.assert_not_called()
+    assert (outbox / ".skipped" / "big").is_dir()
+    reasons = dict(result.skipped)
+    assert "moved aside" in reasons["big"]
+
+
+@pytest.mark.anyio
+async def test_628_off_keeps_archive_behaviour(tmp_path: Path) -> None:
+    """Default deliver_directories='off' preserves #600 archive behaviour —
+    no zip is sent."""
+    outbox = tmp_path / ".untether-outbox"
+    (outbox / "guides").mkdir(parents=True)
+    (outbox / "guides" / "one.md").write_text("g", encoding="utf-8")
+
+    send_file = AsyncMock()
+    await deliver_outbox_files(
+        **_deliver_kwargs(tmp_path, send_file=send_file, deliver_directories="off")
+    )
+
+    send_file.assert_not_called()
+    assert (outbox / ".skipped" / "guides" / "one.md").is_file()
+
+
+@pytest.mark.anyio
+async def test_628_zip_respects_max_members(tmp_path: Path) -> None:
+    """Member count is capped at max_files; the excess is reported skipped."""
+    outbox = tmp_path / ".untether-outbox"
+    (outbox / "many").mkdir(parents=True)
+    for i in range(5):
+        (outbox / "many" / f"f{i}.txt").write_text(str(i), encoding="utf-8")
+
+    send_file = AsyncMock()
+    await deliver_outbox_files(
+        **_deliver_kwargs(
+            tmp_path, send_file=send_file, deliver_directories="zip", max_files=3
+        )
+    )
+
+    _, names, _ = _read_sent_zip(send_file)
+    assert len(names) == 3
+
+
+@pytest.mark.anyio
+async def test_628_directory_count_capped(tmp_path: Path) -> None:
+    """#628: the number of directory zip attachments is bounded (max_files) so
+    a pathological outbox can't flood the chat; the excess is archived."""
+    outbox = tmp_path / ".untether-outbox"
+    outbox.mkdir()
+    for i in range(4):
+        d = outbox / f"d{i}"
+        d.mkdir()
+        (d / "f.txt").write_text("x", encoding="utf-8")
+
+    send_file = AsyncMock()
+    result = await deliver_outbox_files(
+        **_deliver_kwargs(
+            tmp_path, send_file=send_file, deliver_directories="zip", max_files=2
+        )
+    )
+
+    assert send_file.call_count == 2
+    limited = [n for n, r in result.skipped if "attachment limit" in r]
+    assert len(limited) == 2
+
+
+@pytest.mark.anyio
+async def test_628_zip_build_error_falls_back_to_archive(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """#628: an unexpected error building the zip falls back to the #600
+    archive (and does not abort the whole delivery)."""
+    outbox = tmp_path / ".untether-outbox"
+    (outbox / "boom").mkdir(parents=True)
+    (outbox / "boom" / "x.txt").write_text("x", encoding="utf-8")
+
+    def _raise(*a, **k):
+        raise OSError("zip blew up")
+
+    monkeypatch.setattr("untether.telegram.outbox_delivery._zip_skipped_dir", _raise)
+    send_file = AsyncMock()
+    result = await deliver_outbox_files(
+        **_deliver_kwargs(tmp_path, send_file=send_file, deliver_directories="zip")
+    )
+
+    send_file.assert_not_called()
+    assert (outbox / ".skipped" / "boom").is_dir()
+    reasons = dict(result.skipped)
+    assert "zip failed" in reasons["boom"]

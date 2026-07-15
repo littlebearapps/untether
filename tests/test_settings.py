@@ -775,6 +775,14 @@ def test_auto_continue_settings_defaults() -> None:
     s = AutoContinueSettings()
     assert s.enabled is True
     assert s.max_retries == 1
+    # #596: empty-resume auto-resend is on by default.
+    assert s.resend_empty_resume is True
+
+
+def test_auto_continue_resend_empty_resume_toggle() -> None:
+    from untether.settings import AutoContinueSettings
+
+    assert AutoContinueSettings(resend_empty_resume=False).resend_empty_resume is False
 
 
 def test_auto_continue_max_retries_bounds() -> None:
