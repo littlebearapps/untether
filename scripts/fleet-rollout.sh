@@ -45,6 +45,7 @@ DRY_RUN=0
 SKIP_TEST_GATE=0
 FORCE_DOWNGRADE=0
 ONLY_HOST=""
+CLEAN_MARKERS=0
 
 usage() {
     cat <<EOF
@@ -60,6 +61,7 @@ Options:
   --only HOST          Roll only one host (lba-1 | nsd | channelo | sl | mac)
   --skip-test-gate     Bypass the integration-test attestation precondition
   --force-downgrade    Allow installing an older version than the current state
+  --clean-markers      Delete attestation markers older than 30 days, then exit
 
 The integration-test attestation marker must exist at:
   ${ATTESTATION_DIR}/integration-test-pass-VERSION.json
@@ -87,6 +89,10 @@ while [[ $# -gt 0 ]]; do
             FORCE_DOWNGRADE=1
             shift
             ;;
+        --clean-markers)
+            CLEAN_MARKERS=1
+            shift
+            ;;
         --only)
             ONLY_HOST="${2:?--only requires a host name}"
             shift 2
@@ -106,6 +112,15 @@ while [[ $# -gt 0 ]]; do
             ;;
     esac
 done
+
+# Housekeeping action — remove stale markers and exit (no VERSION needed).
+# Markers are never auto-cleaned otherwise (finding F); this is opt-in.
+if (( CLEAN_MARKERS == 1 )); then
+    echo "Cleaning attestation markers older than 30 days in ${ATTESTATION_DIR}..."
+    find "$ATTESTATION_DIR" -maxdepth 1 -name 'integration-test-pass-*.json' -mtime +30 -print -delete 2>/dev/null || true
+    echo "Done."
+    exit 0
+fi
 
 [[ -n "$VERSION" ]] || { echo "VERSION argument is required." >&2; usage 1; }
 
@@ -146,6 +161,24 @@ EOF
         exit 2
     fi
     echo "Attestation marker found: $ATTESTATION_MARKER"
+
+    # Guardrail 1 — version-match. The marker's JSON "version" must equal VERSION.
+    # Catches rolling with a copied/renamed marker, or a stale marker whose
+    # filename matches but whose content attests a different version.
+    MARKER_VER=$(python3 -c "import json,sys; print(json.load(open(sys.argv[1])).get('version',''))" "$ATTESTATION_MARKER" 2>/dev/null || echo "")
+    if [[ -z "$MARKER_VER" ]]; then
+        echo "WARN: could not read a \"version\" field from $ATTESTATION_MARKER — proceeding (hand-written marker?)." >&2
+    elif [[ "$MARKER_VER" != "$VERSION" ]]; then
+        echo "ERROR: attestation marker version ($MARKER_VER) != rollout version ($VERSION) — wrong marker?" >&2
+        echo "Write the right one with scripts/run-integration-tests.sh ${VERSION} --manual, or pass --skip-test-gate to override." >&2
+        exit 6
+    fi
+
+    # Guardrail 2 — staleness (warn, never block). A genuinely-unchanged rc is
+    # fine to re-roll weeks later; a changed one should be re-tested first.
+    if [[ -n "$(find "$ATTESTATION_MARKER" -mtime +14 2>/dev/null)" ]]; then
+        echo "WARN: attestation marker for $VERSION is >14 days old — re-test if code changed since." >&2
+    fi
 else
     echo "WARN: --skip-test-gate set; attestation gate bypassed."
 fi
@@ -489,13 +522,16 @@ PY
 cat <<EOF
 
 Next steps:
-  - Verify each upgraded bot responds to /ping via Telegram.
+  - Confirm versions landed:  scripts/fleet-status.sh   (all 5 hosts, one shot)
+  - Verify each bot answers:  run the /ping sweep in
+      docs/reference/fleet-ping-verification.md  (Claude-driven via Telegram MCP)
   - Inspect per-host logs in $LOG_DIR for any unexpected output.
   - If a host failed: investigate and either roll forward (rerun this script)
     or roll that host back: scripts/fleet-rollback.sh <prev> --only <host>
 
 NOT done automatically:
-  - Telegram /ping checks (you have to send them yourself via Telegram).
+  - Telegram /ping checks (send them via the playbook above — the MCP tools live
+    inside Claude Code, not this shell).
   - Rollback of successful hosts on partial failure.
 EOF
 
