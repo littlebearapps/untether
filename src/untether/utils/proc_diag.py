@@ -55,6 +55,32 @@ def _read_stat(pid: int) -> tuple[str | None, int | None, int | None]:
     return state, utime, stime
 
 
+def pid_starttime(pid: int) -> int | None:
+    """#590: return a process's start time (clock ticks since boot,
+    /proc/pid/stat field 22) — a stable birth-identity token that survives
+    setpgid/setsid/reparenting but NOT PID reuse. Used to verify a recorded
+    orphan PID still refers to the same process before signalling it. Returns
+    None on non-Linux or any /proc read/parse error.
+    """
+    if sys.platform != "linux":
+        return None
+    try:
+        data = open(f"/proc/{pid}/stat", encoding="utf-8").read()  # noqa: SIM115
+    except (OSError, FileNotFoundError, PermissionError):
+        return None
+    close_paren = data.rfind(")")
+    if close_paren < 0:
+        return None
+    fields = data[close_paren + 2 :].split()
+    # field 22 (starttime) → index 19 after the comm field.
+    if len(fields) <= 19:
+        return None
+    try:
+        return int(fields[19])
+    except ValueError:
+        return None
+
+
 def _read_status(pid: int) -> tuple[int | None, int | None]:
     """Parse /proc/pid/status for VmRSS and Threads."""
     rss_kb = None

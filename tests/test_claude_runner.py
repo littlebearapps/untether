@@ -4470,8 +4470,9 @@ async def test_591_limbo_grace_zero_disables_shortcut(monkeypatch) -> None:
 @pytest.mark.anyio
 async def test_590_limbo_refreshes_orphan_snapshot(monkeypatch) -> None:
     """#590: limbo detection extends state.orphan_pid_snapshot from the live
-    child-pid diag so late-spawned MCP leakers are visible to the post-exit
-    sweep (the sl leaker was invisible to the reader-done snapshot)."""
+    RECURSIVE descendant walk (find_descendants) so late-spawned MCP leakers —
+    including npx→node grandchildren, which diag.child_pids (direct children
+    only) missed — are visible to the post-exit sweep."""
     from types import SimpleNamespace
 
     import anyio
@@ -4497,11 +4498,15 @@ async def test_590_limbo_refreshes_orphan_snapshot(monkeypatch) -> None:
     stream = JsonlStreamState(expected_session=None)
 
     proc = _FakeProc(pid=62424, returncode=None)
+    # collect_proc_diag drives only the diagnostic log line now; the snapshot
+    # comes from the recursive find_descendants walk.
     monkeypatch.setattr(
         "untether.utils.proc_diag.collect_proc_diag",
-        lambda pid: SimpleNamespace(
-            child_pids=[901, 902, 900], rss_kb=1000, tcp_total=3
-        ),
+        lambda pid: SimpleNamespace(child_pids=[901], rss_kb=1000, tcp_total=3),
+    )
+    monkeypatch.setattr(
+        "untether.utils.proc_diag.find_descendants",
+        lambda pid: [901, 902, 900],  # 902 is the grandchild direct-children missed
     )
 
     logger = _RecordingLogger()
@@ -4775,3 +4780,73 @@ async def test_592_silence_cap_zero_disables(monkeypatch) -> None:
 
     assert killed_signals == []
     assert state.pre_result_silence_killed is False
+
+
+# --- #590: orphan descendant snapshot capture -------------------------------
+
+
+def test_capture_orphan_descendants_populates_snapshot_on_result(monkeypatch) -> None:
+    """#590 regression: processing a result event captures the live descendant
+    PIDs into orphan_pid_snapshot — the ONLY snapshot that fires on a fast
+    clean rc=0 run (no limbo, leader may exit before reader-done). This closes
+    the gap that leaked one dembrandt-mcp child (a pgroup escapee) per run.
+    """
+    monkeypatch.setattr(
+        "untether.utils.proc_diag.find_descendants", lambda pid: [111, 222, 333]
+    )
+    state = ClaudeStreamState()
+    state.pid = 40000  # leader alive at result time
+    event = claude_schema.StreamResultMessage(
+        subtype="success",
+        duration_ms=100,
+        duration_api_ms=50,
+        is_error=False,
+        num_turns=1,
+        session_id="sess-590",
+        result="done",
+    )
+    translate_claude_event(event, title="claude", state=state, factory=state.factory)
+    assert state.orphan_pid_snapshot == [111, 222, 333]
+
+
+def test_capture_orphan_descendants_dedups(monkeypatch) -> None:
+    """The helper appends only PIDs not already recorded, so the result /
+    limbo / reader-done refresh points never double-record."""
+    monkeypatch.setattr(
+        "untether.utils.proc_diag.find_descendants", lambda pid: [111, 222]
+    )
+    state = ClaudeStreamState()
+    state.pid = 40001
+    state.orphan_pid_snapshot = [111]
+    claude_runner._capture_orphan_descendants(state, source="result")
+    assert state.orphan_pid_snapshot == [111, 222]
+
+
+def test_capture_orphan_descendants_noop_without_pid(monkeypatch) -> None:
+    """No PID (pre-spawn / non-Linux) → no walk, no capture, no crash."""
+    called = False
+
+    def _fd(pid):
+        nonlocal called
+        called = True
+        return [999]
+
+    monkeypatch.setattr("untether.utils.proc_diag.find_descendants", _fd)
+    state = ClaudeStreamState()
+    state.pid = None
+    claude_runner._capture_orphan_descendants(state, source="result")
+    assert state.orphan_pid_snapshot == []
+    assert called is False
+
+
+def test_capture_orphan_descendants_swallows_oserror(monkeypatch) -> None:
+    """/proc read errors are best-effort — swallowed, snapshot unchanged."""
+
+    def _raise(pid):
+        raise OSError("proc gone")
+
+    monkeypatch.setattr("untether.utils.proc_diag.find_descendants", _raise)
+    state = ClaudeStreamState()
+    state.pid = 40002
+    claude_runner._capture_orphan_descendants(state, source="result")
+    assert state.orphan_pid_snapshot == []

@@ -372,12 +372,20 @@ class ClaudeStreamState:
     # colliding with Claude Code's own ``req_*`` namespace.
     pending_catalog_refresh_ids: list[str] = field(default_factory=list)
     catalog_refresh_seq: int = 0
-    # #590: descendant PIDs captured while the subprocess was alive (at
-    # reader-done and at limbo detection). Read by manage_subprocess's
-    # post-exit orphan sweep so pgroup ESCAPEES — MCP chains that setsid
-    # into their own session and survive a plain killpg — are still
-    # terminated after the leader exits.
+    # #590: descendant PIDs captured while the subprocess was alive (at the
+    # result event, at reader-done, and at limbo detection — see
+    # _capture_orphan_descendants). Read by manage_subprocess's post-exit
+    # orphan sweep so pgroup ESCAPEES — MCP chains that setpgid/setsid into
+    # their own group/session and survive a plain killpg — are still
+    # terminated after the leader exits. The result-event capture is the one
+    # that fires on fast clean rc=0 runs (no limbo, leader may exit before
+    # reader-done), which is where the dembrandt-mcp leak was observed.
     orphan_pid_snapshot: list[int] = field(default_factory=list)
+    # #590 hardening: {pid: /proc starttime} recorded alongside each captured
+    # orphan PID so the post-exit sweep can reject a recycled PID before
+    # signalling it (guards against PID reuse during the capture→teardown
+    # window). Populated by _capture_orphan_descendants.
+    orphan_pid_starttimes: dict[int, int] = field(default_factory=dict)
     # #592: one-shot latch — the pre-result silence cap fired and killed
     # the subprocess; prevents re-firing on subsequent watchdog ticks.
     pre_result_silence_killed: bool = False
@@ -1233,6 +1241,60 @@ def _usage_payload(event: claude_schema.StreamResultMessage) -> dict[str, Any]:
     return usage
 
 
+def _capture_orphan_descendants(
+    state: ClaudeStreamState, *, source: str, pid: int | None = None
+) -> None:
+    """#590: snapshot descendants of the live Claude process for the
+    post-exit orphan sweep in ``manage_subprocess``.
+
+    Some MCP servers ``setpgid`` into their own process group (observed:
+    ``dembrandt-mcp`` on nsd — distinct PGID, still in Claude's session).
+    They survive ``killpg(claude_pgid)`` and are only reachable by their
+    recorded PID via ``reap_orphaned_group``'s ``extra_pids`` path. The
+    reader-done capture is gated on ``proc.returncode is None`` and the
+    limbo capture only fires after the limbo threshold, so a FAST CLEAN
+    (rc=0, no-limbo) run captured nothing and leaked one child every run.
+
+    ``result`` is the reliable capture point: the CLI has just emitted the
+    result event and lingers alive for MCP teardown, and every MCP child has
+    already spawned. Walk recursively (``find_descendants``, depth 4) so
+    ``claude → npx → node`` wrapper grandchildren are caught. Best-effort:
+    no-ops on missing PID / non-Linux / /proc read errors.
+
+    NOTE: recorded PIDs are signalled by ``reap_orphaned_group`` at teardown
+    after an ``_pid_alive`` check only (no birth-identity guard). The
+    capture→teardown window is normally seconds, but a limbo run can widen it;
+    hardening the reaper with a /proc starttime identity token is tracked
+    separately.
+    """
+    target = pid if pid is not None else state.pid
+    if not target or target <= 0:
+        return
+    try:
+        from ..utils.proc_diag import find_descendants, pid_starttime
+
+        new = [
+            p for p in find_descendants(target) if p not in state.orphan_pid_snapshot
+        ]
+    except OSError:
+        return
+    if new:
+        state.orphan_pid_snapshot.extend(new)
+        # Record each PID's birth-identity so the sweep can reject a recycled
+        # PID before signalling it (#590 hardening).
+        for p in new:
+            st = pid_starttime(p)
+            if st is not None:
+                state.orphan_pid_starttimes[p] = st
+        logger.debug(
+            "subprocess.orphan_snapshot",
+            source=source,
+            pid=target,
+            added=new,
+            total=len(state.orphan_pid_snapshot),
+        )
+
+
 def translate_claude_event(
     event: claude_schema.StreamJsonMessage,
     *,
@@ -1486,6 +1548,14 @@ def translate_claude_event(
             # #333: arm the post-result idle watchdog. Reset on every
             # result (multi-turn re-arms the timer per turn boundary).
             state.result_received_at = time.monotonic()
+
+            # #590: capture descendant PIDs NOW — the CLI is still alive
+            # (lingering for MCP teardown) and every MCP child has spawned.
+            # This is the only snapshot that fires on a fast clean rc=0 run,
+            # closing the leak for pgroup-escapee MCP children. Runs before
+            # the CompletedEvent is yielded (yielding hands control to the
+            # consumer, which may cancel/tear down the generator).
+            _capture_orphan_descendants(state, source="result")
 
             events_out: list[UntetherEvent] = []
             # #333 UX signal #1: append "✓ turn complete" to the meta
@@ -3308,11 +3378,11 @@ class ClaudeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
                 diag = collect_proc_diag(proc.pid)
                 # #590: refresh the orphan snapshot — children spawned AFTER
                 # the reader-done snapshot (the sl "late leaker" shape) are
-                # captured here so the post-exit sweep can reach them.
-                if diag is not None:
-                    state.orphan_pid_snapshot.extend(
-                        p for p in diag.child_pids if p not in state.orphan_pid_snapshot
-                    )
+                # captured here so the post-exit sweep can reach them. Use the
+                # recursive walk (find_descendants) rather than diag.child_pids,
+                # which is DIRECT children only and misses the npx→node
+                # grandchild that actually leaks.
+                _capture_orphan_descendants(state, source="limbo", pid=proc.pid)
                 run_logger.warning(
                     "runner.limbo_detected",
                     engine="claude",
@@ -3610,6 +3680,7 @@ class ClaudeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
                 # list is filled at reader-done / limbo time (escapees).
                 reap_orphans=self._reap_orphans,
                 orphan_pid_snapshot=state.orphan_pid_snapshot,
+                orphan_pid_starttimes=state.orphan_pid_starttimes,
                 stdin=stdin_arg,
                 stdout=subprocess_module.PIPE,
                 stderr=subprocess_module.PIPE,
@@ -3751,21 +3822,17 @@ class ClaudeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
                         session_stdin=this_proc_stdin if use_control_channel else None,
                     ):
                         yield evt
-                    # #590: snapshot descendants while the subprocess is
-                    # still alive — after exit, /proc children links are
-                    # gone and pgroup escapees become invisible. The sweep
-                    # in manage_subprocess reads this list at teardown.
+                    # #590: refresh the descendant snapshot while the
+                    # subprocess is still alive — after exit, /proc children
+                    # links are gone and pgroup escapees become invisible.
+                    # The sweep in manage_subprocess reads this list at
+                    # teardown. This is a refresh: the result-event capture
+                    # already seeded the snapshot for fast clean runs, so the
+                    # returncode guard here is no longer fatal.
                     if proc.returncode is None:
-                        try:
-                            from ..utils.proc_diag import find_descendants
-
-                            state.orphan_pid_snapshot.extend(
-                                p
-                                for p in find_descendants(proc.pid)
-                                if p not in state.orphan_pid_snapshot
-                            )
-                        except OSError:
-                            pass
+                        _capture_orphan_descendants(
+                            state, source="reader_done", pid=proc.pid
+                        )
                     reader_done.set()
 
                     # Close stdin after all events to let CLI exit.

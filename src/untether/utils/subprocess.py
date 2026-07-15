@@ -13,7 +13,7 @@ import anyio
 from anyio.abc import Process
 
 from ..logging import get_logger
-from .proc_diag import find_descendants
+from .proc_diag import find_descendants, pid_starttime
 
 logger = get_logger(__name__)
 
@@ -231,6 +231,7 @@ async def reap_orphaned_group(
     pgid: int,
     *,
     extra_pids: Sequence[int] = (),
+    extra_pid_starttimes: Mapping[int, int] | None = None,
     grace_s: float = 2.0,
 ) -> list[int]:
     """#590: sweep process-group survivors after the group leader exited.
@@ -246,10 +247,31 @@ async def reap_orphaned_group(
     exit, then SIGKILLs survivors. Returns the PIDs targeted (best-effort,
     for the ``subprocess.orphans_reaped`` log). No-ops instantly when the
     group is already empty.
+
+    ``extra_pid_starttimes`` (#590 hardening): a ``{pid: /proc starttime}``
+    map recorded when each *extra_pid* was captured. Before signalling an
+    extra PID we re-read its start time and skip it on mismatch — so a
+    captured descendant that exited and had its PID recycled by an unrelated
+    process is never killed. The process-group kill is unaffected (escapees
+    are the only PID-signalled targets).
     """
     if os.name != "posix":
         return []
-    live_extras = [p for p in extra_pids if p != pgid and _pid_alive(p)]
+
+    def _identity_ok(p: int) -> bool:
+        if not extra_pid_starttimes:
+            return True  # legacy / best-effort: no identity recorded
+        recorded = extra_pid_starttimes.get(p)
+        if recorded is None:
+            return True  # this pid was captured without a starttime
+        current = pid_starttime(p)
+        # Unreadable now (raced away / non-Linux) → skip rather than risk a
+        # wrong kill; a genuinely-alive orphan would still expose its stat.
+        return current is not None and current == recorded
+
+    live_extras = [
+        p for p in extra_pids if p != pgid and _pid_alive(p) and _identity_ok(p)
+    ]
 
     def _group_alive() -> bool:
         try:
@@ -276,7 +298,7 @@ async def reap_orphaned_group(
             break
         await anyio.sleep(0.1)
 
-    survivors = [p for p in victims if _pid_alive(p)]
+    survivors = [p for p in victims if _pid_alive(p) and _identity_ok(p)]
     if _group_alive() or survivors:
         with contextlib.suppress(ProcessLookupError, PermissionError, OSError):
             os.killpg(pgid, signal.SIGKILL)
@@ -299,6 +321,7 @@ async def manage_subprocess(
     *,
     reap_orphans: bool = True,
     orphan_pid_snapshot: Sequence[int] | None = None,
+    orphan_pid_starttimes: Mapping[int, int] | None = None,
     **kwargs: Any,
 ) -> AsyncIterator[Process]:
     """Ensure subprocesses receive SIGTERM, then SIGKILL after a 10s timeout.
@@ -307,7 +330,9 @@ async def manage_subprocess(
     has exited — including clean rc=0 — sweep surviving process-group
     members and any PIDs the caller captured into *orphan_pid_snapshot*
     while the leader was alive (a mutable list works: it is read only at
-    teardown time).
+    teardown time). *orphan_pid_starttimes* carries each captured PID's
+    ``/proc`` start time so the sweep can reject a recycled PID before
+    signalling (see ``reap_orphaned_group``).
     """
     if os.name == "posix":
         kwargs.setdefault("start_new_session", True)
@@ -330,6 +355,11 @@ async def manage_subprocess(
                     await reap_orphaned_group(
                         proc.pid,
                         extra_pids=tuple(orphan_pid_snapshot or ()),
+                        extra_pid_starttimes=(
+                            dict(orphan_pid_starttimes)
+                            if orphan_pid_starttimes
+                            else None
+                        ),
                     )
                 except Exception:  # noqa: BLE001
                     logger.debug("subprocess.orphan_sweep_failed", exc_info=True)

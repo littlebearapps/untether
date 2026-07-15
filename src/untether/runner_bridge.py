@@ -3051,6 +3051,7 @@ async def handle_message(
     progress_ref: MessageRef | None = None,
     clock: Callable[[], float] = time.monotonic,
     _auto_continued_count: int = 0,
+    _empty_resent_count: int = 0,
 ) -> None:
     logger.info(
         "handle.incoming",
@@ -3174,6 +3175,11 @@ async def handle_message(
     # when that early path did not run or failed — from the post-return
     # flow below. ``final_delivery["sent"]`` keeps the two paths idempotent.
     final_delivery = {"sent": False}
+    # #596: set by _deliver_final when an empty-result no-op resume is detected
+    # and eligible for a single automatic resend. Read by the post-return
+    # auto-resend block below (independent of final_delivery["sent"], since the
+    # "↻ retrying" notice IS delivered).
+    empty_resume = {"pending": False}
 
     async def _deliver_final(
         completed: CompletedEvent, run_outcome: RunOutcome
@@ -3276,18 +3282,40 @@ async def handle_message(
                 else None,
                 was_resume=resume_token is not None,
             )
-            final_answer = (
-                "\N{WARNING SIGN} engine returned an empty result "
-                "(0 turns, no API work) — the resumed session may "
-                "consider itself complete. Resend your message, or "
-                "start fresh with /new."
-            )
+            # #596: auto-resend the original prompt once (same session)
+            # instead of asking the user to re-nudge. Eligible only on a
+            # resume with a non-empty original prompt, gated by the
+            # single-shot ``_empty_resent_count`` so a retry that is ALSO
+            # empty falls through to the manual-resend notice below.
+            _resend_settings = _load_auto_continue_settings()
+            if (
+                _resend_settings.resend_empty_resume
+                and resume_token is not None
+                and _empty_resent_count < 1
+                and bool(incoming.text and incoming.text.strip())
+            ):
+                empty_resume["pending"] = True
+                final_answer = (
+                    "\N{ANTICLOCKWISE DOWNWARDS AND UPWARDS OPEN CIRCLE ARROWS} "
+                    "engine returned an empty result on resume — retrying your "
+                    "message automatically…"
+                )
+            else:
+                final_answer = (
+                    "\N{WARNING SIGN} engine returned an empty result "
+                    "(0 turns, no API work) — the resumed session may "
+                    "consider itself complete. Resend your message, or "
+                    "start fresh with /new."
+                )
 
         status = (
             "error"
             if run_ok is False
+            # An auto-resend in flight is a transient retry, not an error.
             else (
-                "error"
+                "done"
+                if (empty_result_anomaly and empty_resume["pending"])
+                else "error"
                 if empty_result_anomaly
                 else ("done" if final_answer.strip() else "error")
             )
@@ -3604,6 +3632,50 @@ async def handle_message(
     completed = outcome.completed
     run_ok = completed.ok
 
+    # --- Auto-resend: #596 empty-result no-op resume ---
+    # _deliver_final already delivered the "↻ retrying automatically…" notice
+    # (early, ~5s in). Now that the run generator has fully returned (the
+    # empty run's subprocess is done), resend the ORIGINAL prompt once against
+    # the SAME session. The monitor confirmed a fresh resume of the same
+    # session processes normally on the second attempt. Single-shot via
+    # _empty_resent_count; mutually exclusive with auto-continue (that fires
+    # only when there was no result at all).
+    if empty_resume["pending"] and _empty_resent_count < 1:
+        # Fall back to the original resume_token so a completion that omits a
+        # resume value never silently starts a FRESH session.
+        _er_resume = completed.resume or outcome.resume or resume_token
+        logger.warning(
+            "session.auto_resend_empty",
+            session_id=_er_resume.value if _er_resume else None,
+            engine=runner.engine,
+            attempt=_empty_resent_count + 1,
+        )
+        await handle_message(
+            cfg,
+            runner=runner,
+            incoming=IncomingMessage(
+                channel_id=incoming.channel_id,
+                message_id=incoming.message_id,
+                text=incoming.text,
+                reply_to=incoming.reply_to,
+                thread_id=incoming.thread_id,
+            ),
+            resume_token=_er_resume,
+            context=context,
+            context_line=context_line,
+            strip_resume_line=strip_resume_line,
+            running_tasks=running_tasks,
+            on_thread_known=on_thread_known,
+            on_resume_failed=on_resume_failed,
+            clock=clock,
+            # Carry BOTH recovery counters so an alternating empty-resume ↔
+            # auto-continue chain can't reset the other guard and loop.
+            _auto_continued_count=_auto_continued_count,
+            _empty_resent_count=_empty_resent_count + 1,
+        )
+        return
+    # --- End auto-resend ---
+
     # --- Auto-continue: mitigate Claude Code bug #34142/#30333 ---
     # When Claude Code's turn state machine incorrectly ends a session
     # after receiving tool results (last JSONL event is "user" type),
@@ -3664,6 +3736,9 @@ async def handle_message(
                         max_download_bytes=_oc.max_download_bytes,
                         max_files=_oc.outbox_max_files,
                         cleanup=True,  # subprocess 2 starts fresh
+                        deliver_directories=getattr(
+                            _oc, "outbox_deliver_directories", "off"
+                        ),
                     )
                     logger.info(
                         "outbox.delivered_pre_auto_continue",
@@ -3723,6 +3798,9 @@ async def handle_message(
             on_resume_failed=on_resume_failed,
             clock=clock,
             _auto_continued_count=_auto_continued_count + 1,
+            # Carry the empty-resume guard so it can't be reset by an
+            # interleaved auto-continue (see #596 auto-resend).
+            _empty_resent_count=_empty_resent_count,
         )
         return
     # --- End auto-continue ---
@@ -3761,6 +3839,9 @@ async def handle_message(
                         max_download_bytes=_oc.max_download_bytes,
                         max_files=_oc.outbox_max_files,
                         cleanup=_oc.outbox_cleanup,
+                        deliver_directories=getattr(
+                            _oc, "outbox_deliver_directories", "off"
+                        ),
                     )
                 except Exception:  # noqa: BLE001
                     logger.warning("outbox.delivery_failed", exc_info=True)
