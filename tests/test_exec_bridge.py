@@ -6490,10 +6490,14 @@ class _EmptyThenAnswerRunner(MockRunner):
 
 
 @pytest.mark.anyio
-async def test_596_auto_resend_delivers_answer_on_retry() -> None:
+async def test_596_auto_resend_delivers_answer_on_retry(quarantine_store) -> None:
     """#596: an empty-result no-op resume auto-resends the ORIGINAL prompt
-    once against the SAME session; the retry's real answer reaches the user,
-    removing the manual re-nudge."""
+    once; the retry's real answer reaches the user, removing the manual
+    re-nudge. #631: since empty_resume_fresh now defaults True, the retry
+    clears + quarantines the poisoned session and runs FRESH (resume=None)
+    rather than resuming the same poisoned session — see
+    test_631_empty_resume_legacy_same_session_when_flag_off for the
+    flag-off same-session behaviour this test used to exercise."""
     from structlog.testing import capture_logs
 
     transport = FakeTransport()
@@ -6516,10 +6520,10 @@ async def test_596_auto_resend_delivers_answer_on_retry() -> None:
 
     # Exactly one auto-resend fired.
     assert len(runner.calls) == 2
-    assert any(r.get("event") == "session.auto_resend_empty" for r in logs)
-    # The retry resumed the SAME session.
-    assert runner.calls[1][1] is not None
-    assert runner.calls[1][1].value == "sess-596"
+    assert any(r.get("event") == "session.auto_resend_fresh" for r in logs)
+    # #631: the retry ran as a FRESH session, not the same poisoned one.
+    assert runner.calls[1][1] is None
+    assert quarantine_store.is_quarantined(CODEX_ENGINE, "sess-596") is True
     # The user saw the retry notice AND the real answer.
     all_text = " ".join(
         c["message"].text for c in transport.edit_calls + transport.send_calls
@@ -6529,9 +6533,10 @@ async def test_596_auto_resend_delivers_answer_on_retry() -> None:
 
 
 @pytest.mark.anyio
-async def test_596_auto_resend_is_single_shot() -> None:
+async def test_596_auto_resend_is_single_shot(quarantine_store) -> None:
     """#596: if the retry is ALSO an empty no-op, no second retry fires — the
-    surfacing note is shown instead (bounded, no loop)."""
+    surfacing note is shown instead (bounded, no loop). #631: the single
+    retry now runs as a FRESH session by default (empty_resume_fresh=True)."""
     from structlog.testing import capture_logs
 
     transport = FakeTransport()
@@ -6558,7 +6563,7 @@ async def test_596_auto_resend_is_single_shot() -> None:
 
     # Original run + exactly one resend, then stop.
     assert len(runner.calls) == 2
-    assert sum(1 for r in logs if r.get("event") == "session.auto_resend_empty") == 1
+    assert sum(1 for r in logs if r.get("event") == "session.auto_resend_fresh") == 1
     # The exhausted retry falls through to the manual-resend note.
     final_text = transport.edit_calls[-1]["message"].text
     assert "empty result" in final_text
@@ -6594,6 +6599,117 @@ async def test_596_no_resend_when_not_a_resume() -> None:
     assert not any(r.get("event") == "session.auto_resend_empty" for r in logs)
     final_text = transport.edit_calls[-1]["message"].text
     assert "empty result" in final_text
+
+
+# ---------------------------------------------------------------------------
+# #631 (W1) — quarantine-and-fresh recovery on empty-0-turn resume
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def quarantine_store(tmp_path):
+    """Inject a fresh, isolated QuarantineStore for the duration of a test so
+    the module-level singleton never lazily loads the real config-adjacent
+    quarantine file (which would leak state across tests / touch disk paths
+    that don't exist in the test sandbox)."""
+    from untether.session_quarantine import QuarantineStore, set_quarantine_store
+
+    store = QuarantineStore(path=tmp_path / "session_quarantine.json")
+    set_quarantine_store(store)
+    try:
+        yield store
+    finally:
+        set_quarantine_store(None)
+
+
+@pytest.mark.anyio
+async def test_631_empty_resume_recovers_as_fresh_session(quarantine_store) -> None:
+    """#631 W1: on an empty-0-turn resume, the poisoned session token is
+    cleared via on_resume_failed, the session id is quarantined, and the
+    ORIGINAL prompt is re-run as a FRESH session (resume=None) instead of
+    resending against the same (poisoned) session."""
+    from structlog.testing import capture_logs
+
+    transport = FakeTransport()
+    runner = _EmptyThenAnswerRunner(resume_value="sess-poisoned")
+    cfg = ExecBridgeConfig(
+        transport=transport,
+        presenter=MarkdownPresenter(),
+        final_notify=False,
+    )
+    cleared: list[str] = []
+
+    async def on_resume_failed(tok: ResumeToken) -> None:
+        cleared.append(tok.value)
+
+    with capture_logs() as logs:
+        await handle_message(
+            cfg,
+            runner=runner,
+            incoming=IncomingMessage(
+                channel_id=123, message_id=10, text="please continue"
+            ),
+            resume_token=ResumeToken(engine=CODEX_ENGINE, value="sess-poisoned"),
+            on_resume_failed=on_resume_failed,
+        )
+
+    # (a) the poisoned token was cleared.
+    assert "sess-poisoned" in cleared
+    # (b) the recovery run used resume=None (fresh session) with the
+    # original prompt text.
+    assert len(runner.calls) == 2
+    assert runner.calls[1][1] is None
+    assert "please continue" in runner.calls[1][0]
+    # (c) single-shot: exactly one fresh recovery run.
+    assert sum(1 for c in runner.calls if c[1] is None) == 1
+    # (d) the fresh-recovery event was logged.
+    assert any(r.get("event") == "session.auto_resend_fresh" for r in logs)
+    # (e) the poisoned session is quarantined.
+    assert quarantine_store.is_quarantined(CODEX_ENGINE, "sess-poisoned") is True
+    # (f) the user got the real answer, not the manual empty-result notice.
+    final_text = transport.edit_calls[-1]["message"].text
+    assert "Here is the real result." in final_text
+    assert "engine returned an empty result" not in final_text
+
+
+@pytest.mark.anyio
+async def test_631_empty_resume_legacy_same_session_when_flag_off(
+    monkeypatch,
+) -> None:
+    """#631: when empty_resume_fresh is off, preserve the exact #596
+    same-session resend behaviour — no clearing, no quarantine, resume the
+    same poisoned session id."""
+    from structlog.testing import capture_logs
+
+    from untether.settings import AutoContinueSettings
+
+    monkeypatch.setattr(
+        "untether.runner_bridge._load_auto_continue_settings",
+        lambda: AutoContinueSettings(empty_resume_fresh=False),
+    )
+
+    transport = FakeTransport()
+    runner = _EmptyThenAnswerRunner(resume_value="sess-596")
+    cfg = ExecBridgeConfig(
+        transport=transport,
+        presenter=MarkdownPresenter(),
+        final_notify=False,
+    )
+
+    with capture_logs() as logs:
+        await handle_message(
+            cfg,
+            runner=runner,
+            incoming=IncomingMessage(channel_id=123, message_id=10, text="continue"),
+            resume_token=ResumeToken(engine=CODEX_ENGINE, value="sess-596"),
+        )
+
+    assert len(runner.calls) == 2
+    # The retry resumed the SAME (poisoned) session — legacy #596 behaviour.
+    assert runner.calls[1][1] is not None
+    assert runner.calls[1][1].value == "sess-596"
+    assert any(r.get("event") == "session.auto_resend_empty" for r in logs)
+    assert not any(r.get("event") == "session.auto_resend_fresh" for r in logs)
 
 
 def test_auto_continue_settings_new_flags_default_on() -> None:

@@ -3632,24 +3632,56 @@ async def handle_message(
     completed = outcome.completed
     run_ok = completed.ok
 
-    # --- Auto-resend: #596 empty-result no-op resume ---
+    # --- Auto-resend: #596 empty-result no-op resume / #631 (W1) quarantine-and-fresh ---
     # _deliver_final already delivered the "↻ retrying automatically…" notice
     # (early, ~5s in). Now that the run generator has fully returned (the
-    # empty run's subprocess is done), resend the ORIGINAL prompt once against
-    # the SAME session. The monitor confirmed a fresh resume of the same
-    # session processes normally on the second attempt. Single-shot via
-    # _empty_resent_count; mutually exclusive with auto-continue (that fires
-    # only when there was no result at all).
+    # empty run's subprocess is done), resend the ORIGINAL prompt once.
+    # #631: the resumed session may be POISONED — an upstream dangling turn
+    # left over from a forced teardown will keep returning empty 0-turn
+    # resumes if resumed again. When empty_resume_fresh is on (default),
+    # clear the stored token, quarantine the poisoned session id so it is
+    # never resumed again, and re-run the ORIGINAL prompt as a FRESH session
+    # (resume=None). When the flag is off, preserve the exact #596
+    # same-session resend behaviour. Single-shot via _empty_resent_count;
+    # mutually exclusive with auto-continue (that fires only when there was
+    # no result at all).
     if empty_resume["pending"] and _empty_resent_count < 1:
+        _er_settings = _load_auto_continue_settings()
         # Fall back to the original resume_token so a completion that omits a
-        # resume value never silently starts a FRESH session.
-        _er_resume = completed.resume or outcome.resume or resume_token
-        logger.warning(
-            "session.auto_resend_empty",
-            session_id=_er_resume.value if _er_resume else None,
-            engine=runner.engine,
-            attempt=_empty_resent_count + 1,
-        )
+        # resume value never silently starts a FRESH session by accident.
+        _poison = completed.resume or outcome.resume or resume_token
+        if _er_settings.empty_resume_fresh and _poison is not None:
+            # #631 W1: clear the stored session token and quarantine the
+            # poisoned session id, then retry as a FRESH session.
+            if on_resume_failed is not None:
+                try:
+                    await on_resume_failed(_poison)
+                except Exception:  # noqa: BLE001
+                    logger.debug("session.clear_failed", exc_info=True)
+            from .session_quarantine import get_quarantine_store
+
+            get_quarantine_store().quarantine(
+                runner.engine,
+                _poison.value,
+                reason="empty_zero_turn_resume",
+            )
+            logger.warning(
+                "session.auto_resend_fresh",
+                old_session_id=_poison.value,
+                engine=runner.engine,
+                attempt=_empty_resent_count + 1,
+            )
+            _er_resume = None
+        else:
+            # Legacy same-session path (flag off): preserve #596 behaviour
+            # byte-for-byte.
+            _er_resume = _poison
+            logger.warning(
+                "session.auto_resend_empty",
+                session_id=_er_resume.value if _er_resume else None,
+                engine=runner.engine,
+                attempt=_empty_resent_count + 1,
+            )
         await handle_message(
             cfg,
             runner=runner,
