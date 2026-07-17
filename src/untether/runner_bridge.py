@@ -19,6 +19,7 @@ from .model import ActionEvent, CompletedEvent, ResumeToken, StartedEvent, Untet
 from .presenter import Presenter
 from .progress import ProgressTracker
 from .runner import _APPROVAL_PENDING_REFIRE_S, Runner
+from .session_quarantine import QuarantineStore, get_quarantine_store
 from .transport import (
     ChannelId,
     MessageId,
@@ -3050,6 +3051,7 @@ async def handle_message(
     on_resume_failed: Callable[[ResumeToken], Awaitable[None]] | None = None,
     progress_ref: MessageRef | None = None,
     clock: Callable[[], float] = time.monotonic,
+    quarantine_store: QuarantineStore | None = None,
     _auto_continued_count: int = 0,
     _empty_resent_count: int = 0,
 ) -> None:
@@ -3061,6 +3063,22 @@ async def handle_message(
         text=incoming.text,
     )
 
+    # #631 (T6): resolve the quarantine store ONCE for this call — either
+    # the caller-injected store (tests / explicit wiring) or the
+    # process-wide singleton. All three quarantine call sites below (the
+    # W2 divert check here, the W2 healthy-clear in _deliver_final, and
+    # the W1 quarantine in the auto-resend block) use this resolved
+    # reference. Recursive re-entries (auto-resend, auto-continue) pass it
+    # through explicitly via the ``quarantine_store=`` kwarg so an
+    # injected store survives recursion instead of falling back to the
+    # singleton partway through a recovery chain.
+    try:
+        _qstore: QuarantineStore | None = quarantine_store or get_quarantine_store()
+    except Exception:  # noqa: BLE001 — a store failure must never block
+        # message handling; the sites below already tolerate a None store.
+        logger.debug("session.quarantine_store_resolve_failed", exc_info=True)
+        _qstore = None
+
     # #632 (W2): a session marked quarantined (forced teardown after a
     # result — see claude.py's post-result subcountdown) may have a
     # dangling upstream turn and is unsafe to resume. Divert to a fresh
@@ -3068,11 +3086,11 @@ async def handle_message(
     # anomaly. Runs on every entry, including recursive auto-resend/
     # auto-continue re-entries — a cheap in-memory dict lookup.
     if resume_token is not None:
-        from .session_quarantine import get_quarantine_store
-
         try:
-            _quarantined = get_quarantine_store().is_quarantined(
-                runner.engine, resume_token.value
+            _quarantined = (
+                _qstore.is_quarantined(runner.engine, resume_token.value)
+                if _qstore is not None
+                else False
             )
         except Exception:  # noqa: BLE001 — a store failure must never
             # block message handling.
@@ -3352,11 +3370,9 @@ async def handle_message(
             and (completed.usage or {}).get("num_turns", 0)
         ):
             _healthy_sid = completed.resume or run_outcome.resume
-            if _healthy_sid is not None:
+            if _healthy_sid is not None and _qstore is not None:
                 try:
-                    from .session_quarantine import get_quarantine_store
-
-                    get_quarantine_store().clear(runner.engine, _healthy_sid.value)
+                    _qstore.clear(runner.engine, _healthy_sid.value)
                 except Exception:  # noqa: BLE001 — a store failure must
                     # never break final-message delivery.
                     logger.debug("session.quarantine_clear_failed", exc_info=True)
@@ -3711,13 +3727,12 @@ async def handle_message(
                     await on_resume_failed(_poison)
                 except Exception:  # noqa: BLE001
                     logger.debug("session.clear_failed", exc_info=True)
-            from .session_quarantine import get_quarantine_store
-
-            get_quarantine_store().quarantine(
-                runner.engine,
-                _poison.value,
-                reason="empty_zero_turn_resume",
-            )
+            if _qstore is not None:
+                _qstore.quarantine(
+                    runner.engine,
+                    _poison.value,
+                    reason="empty_zero_turn_resume",
+                )
             logger.warning(
                 "session.auto_resend_fresh",
                 old_session_id=_poison.value,
@@ -3753,6 +3768,9 @@ async def handle_message(
             on_thread_known=on_thread_known,
             on_resume_failed=on_resume_failed,
             clock=clock,
+            # #631 (T6): thread the resolved store through so an
+            # injected/singleton store survives this recursive re-entry.
+            quarantine_store=_qstore,
             # Carry BOTH recovery counters so an alternating empty-resume ↔
             # auto-continue chain can't reset the other guard and loop.
             _auto_continued_count=_auto_continued_count,
@@ -3882,6 +3900,9 @@ async def handle_message(
             on_thread_known=on_thread_known,
             on_resume_failed=on_resume_failed,
             clock=clock,
+            # #631 (T6): thread the resolved store through so an
+            # injected/singleton store survives this recursive re-entry.
+            quarantine_store=_qstore,
             _auto_continued_count=_auto_continued_count + 1,
             # Carry the empty-resume guard so it can't be reset by an
             # interleaved auto-continue (see #596 auto-resend).

@@ -554,6 +554,36 @@ async def _cleanup_orphan_progress(cfg: TelegramBridgeConfig) -> None:
     clear_all_progress(progress_path)
 
 
+def _init_quarantine_store(config_path: Path) -> None:
+    """#631 (T6): eagerly initialise the process-wide ``QuarantineStore``
+    singleton from the ACTUAL loaded config path, once, before polling
+    starts — mirrors the offset-persistence init just above.
+
+    Without this, ``get_quarantine_store()`` lazily resolves the path from
+    ``UNTETHER_CONFIG_PATH``/HOME default on first use, which is wrong
+    when settings were loaded from an explicit non-env path. Doing it
+    eagerly at startup also surfaces a corrupt state file in startup logs
+    instead of mid-run.
+
+    ``QuarantineStore.load()`` already survives corrupt JSON internally
+    (it logs and falls back to an empty store) — the except below only
+    guards against truly unexpected errors. Startup must never fail
+    because of this file; the lazy accessor remains the fallback.
+    """
+    try:
+        from ..session_quarantine import (
+            QuarantineStore,
+            resolve_quarantine_path,
+            set_quarantine_store,
+        )
+
+        set_quarantine_store(QuarantineStore.load(resolve_quarantine_path(config_path)))
+    except Exception:  # noqa: BLE001 — startup must never fail because of
+        # this file; the lazy accessor (get_quarantine_store()) remains
+        # the fallback.
+        logger.warning("quarantine.startup_init_failed", exc_info=True)
+
+
 async def poll_updates(
     cfg: TelegramBridgeConfig,
     *,
@@ -580,6 +610,7 @@ async def poll_updates(
                 path=str(offset_path),
             )
         offset_writer = DebouncedOffsetWriter(offset_path)
+        _init_quarantine_store(config_path)
 
     offset = await _drain_backlog(cfg, offset)
     await _cleanup_orphan_progress(cfg)

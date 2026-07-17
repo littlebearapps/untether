@@ -6855,6 +6855,74 @@ async def test_632_healthy_run_clears_quarantine(quarantine_store) -> None:
     assert quarantine_store.is_quarantined(CODEX_ENGINE, "sid-healthy") is False
 
 
+@pytest.mark.anyio
+async def test_631_handle_message_uses_injected_quarantine_store(
+    tmp_path, monkeypatch
+) -> None:
+    """#631 (T6): ``handle_message`` must honour an explicitly injected
+    ``quarantine_store`` kwarg without ever falling back to (or lazily
+    materialising) the process-wide singleton.
+
+    The singleton is left unset (``set_quarantine_store(None)``) for the
+    duration of this test. As a belt-and-braces guard against a wiring
+    bug that silently falls back to ``get_quarantine_store()``,
+    ``UNTETHER_CONFIG_PATH`` is also monkeypatched to a tmp directory so
+    even a fallback could never touch the real on-disk quarantine file —
+    and we assert no file was written at that fallback-derived path,
+    which is what would happen the moment the lazy accessor's ``.load()``
+    persisted a pruned/dirty store.
+    """
+    from untether.session_quarantine import (
+        QuarantineStore,
+        resolve_quarantine_path,
+        set_quarantine_store,
+    )
+
+    fake_config_path = tmp_path / "cfg" / "untether.toml"
+    fake_config_path.parent.mkdir(parents=True)
+    monkeypatch.setenv("UNTETHER_CONFIG_PATH", str(fake_config_path))
+    fallback_quarantine_path = resolve_quarantine_path(fake_config_path)
+
+    set_quarantine_store(None)  # the singleton starts, and must stay, unset
+
+    injected_path = tmp_path / "injected" / "q.json"
+    injected_path.parent.mkdir(parents=True)
+    injected_store = QuarantineStore(path=injected_path)
+    injected_store.quarantine(
+        CODEX_ENGINE, "sid-injected", reason="forced_teardown_after_result"
+    )
+
+    transport = FakeTransport()
+    runner = _RecordingRunner(
+        engine=CODEX_ENGINE, resume_value="sid-fresh", answer="fresh via injection"
+    )
+    cfg = ExecBridgeConfig(
+        transport=transport,
+        presenter=MarkdownPresenter(),
+        final_notify=False,
+    )
+
+    try:
+        await handle_message(
+            cfg,
+            runner=runner,
+            incoming=IncomingMessage(channel_id=123, message_id=10, text="hi"),
+            resume_token=ResumeToken(engine=CODEX_ENGINE, value="sid-injected"),
+            quarantine_store=injected_store,
+        )
+
+        # (a) the injected store's marker was honoured — the run was
+        # diverted to a fresh session (resume=None), never resumed.
+        assert len(runner.calls) == 1
+        assert runner.calls[0][1] is None
+
+        # (b) the singleton was never touched: no file materialised at the
+        # path the lazy accessor would have used had it been consulted.
+        assert not fallback_quarantine_path.exists()
+    finally:
+        set_quarantine_store(None)
+
+
 # ---------------------------------------------------------------------------
 # #593 — stall auto-cancel enforcement (decision must end in teardown)
 # ---------------------------------------------------------------------------
