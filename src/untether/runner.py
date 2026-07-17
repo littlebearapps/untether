@@ -344,6 +344,18 @@ class JsonlStreamState:
     )
     stderr_capture: list[str] = field(default_factory=list)
     proc_returncode: int | None = None
+    # #631 (W5-diag): set True at the claude.py SIGTERM site
+    # (_post_result_subcountdown's sigterm_after_timeout branch) — records
+    # whether a forced teardown happened during this run, for the
+    # runner.empty_result diagnostic log.
+    sigterm_sent: bool = False
+    # #631 (W5-diag): mirrors ClaudeStreamState.background_observed (the
+    # only state object `_register_background_handle` sees) onto the
+    # engine-agnostic stream — see runner.py's `_handle_jsonl_line` for the
+    # mirror-set and claude.py's `_register_background_handle` for the
+    # source of truth. Engines without background-task awareness leave this
+    # False.
+    background_observed: bool = False
     # #494: subprocess.liveness_stall canary counter. Today `liveness_warned`
     # in _watchdog_loop latches after the first warning, so this is 0 or 1 per
     # run. Kept as int for forward-compat if the latch is ever relaxed; surfaced
@@ -888,6 +900,17 @@ class JsonlSubprocessRunner(BaseRunner):
             logger=logger,
             pid=pid,
         )
+        # #631 (W5-diag): mirror Claude's background-task observation onto
+        # the generic stream state. `_register_background_handle` only sees
+        # the engine-specific `state` (ClaudeStreamState), not this
+        # JsonlStreamState — this is the one place both are in scope after
+        # translate() has had a chance to set it. Defensive getattr keeps
+        # this engine-agnostic: engines whose state has no
+        # `background_observed` attribute leave the mirror False forever.
+        if not stream.background_observed and getattr(
+            state, "background_observed", False
+        ):
+            stream.background_observed = True
         # Peek at raw JSON for event timeline (engine-agnostic)
         try:
             raw_dict = json.loads(line)

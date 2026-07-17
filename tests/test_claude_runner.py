@@ -582,6 +582,90 @@ def test_remote_trigger_tracked_as_set_member() -> None:
     assert "toolu_R1" in state.live_remote_triggers
 
 
+def test_background_observed_defaults_false() -> None:
+    """#631 (W5-diag): a fresh ClaudeStreamState has not observed any
+    background-task primitive yet."""
+    state = ClaudeStreamState()
+    assert state.background_observed is False
+
+
+def test_background_observed_set_by_register_background_handle() -> None:
+    """#631 (W5-diag): registering ANY recognised background-task primitive
+    (Monitor / Bash-bg / Agent-bg / ScheduleWakeup / RemoteTrigger) sets the
+    sticky `background_observed` flag on the ClaudeStreamState — the object
+    `_register_background_handle` actually receives (it has no access to
+    the engine-agnostic JsonlStreamState). This is the flag the bridge's
+    runner.empty_result diagnostic reads via the JsonlStreamState mirror
+    set in runner.py's `_handle_jsonl_line`."""
+    state = ClaudeStreamState()
+    translate_claude_event(
+        _decode_event(
+            _make_tool_use_event("RemoteTrigger", "toolu_R2", {"target": "other-chat"})
+        ),
+        title="claude",
+        state=state,
+        factory=state.factory,
+    )
+    assert state.background_observed is True
+
+
+def test_background_observed_not_set_by_foreground_tool() -> None:
+    """#631 (W5-diag): an ordinary (non-backgrounded) tool call must NOT
+    flip the flag — it only signals genuine background-task primitives."""
+    state = ClaudeStreamState()
+    translate_claude_event(
+        _decode_event(
+            _make_tool_use_event("Bash", "toolu_FG1", {"command": "echo hi"})
+        ),
+        title="claude",
+        state=state,
+        factory=state.factory,
+    )
+    assert state.background_observed is False
+
+
+def test_handle_jsonl_line_mirrors_background_observed_onto_stream() -> None:
+    """#631 (W5-diag): `_register_background_handle` only ever sees the
+    engine-specific ClaudeStreamState — it has no access to the generic
+    JsonlStreamState the bridge reads (`edits.stream`). The mirror-set lives
+    in runner.py's `_handle_jsonl_line`, the one place both objects are in
+    scope after `translate()` runs. This exercises that wiring end-to-end
+    (JSONL bytes in, mirrored flag out) rather than just the ClaudeStreamState
+    side already covered above."""
+    import json
+
+    from untether.runner import JsonlStreamState
+    from untether.runners.claude import ClaudeRunner
+
+    runner = ClaudeRunner(claude_cmd="claude")
+    state = ClaudeStreamState()
+    stream = JsonlStreamState(expected_session=None)
+    assert stream.background_observed is False
+
+    # Build the same fully-populated payload `_decode_event` produces (this
+    # helper feeds raw bytes straight to `decode_stream_json_line`, which is
+    # strict about required msgspec fields — unlike `_decode_event`, which
+    # only fills defaults before decoding).
+    payload = _make_tool_use_event("Monitor", "toolu_MIR1", {"timeout_ms": 60_000})
+    payload["uuid"] = "uuid"
+    payload["session_id"] = "session"
+    payload["message"]["role"] = "assistant"
+    payload["message"]["model"] = "claude"
+    raw_line = json.dumps(payload).encode("utf-8")
+
+    runner._handle_jsonl_line(
+        raw_line=raw_line,
+        stream=stream,
+        state=state,
+        resume=None,
+        logger=_RecordingLogger(),
+        pid=1,
+    )
+
+    assert state.background_observed is True
+    assert stream.background_observed is True
+
+
 def test_has_live_background_work_empty() -> None:
     from untether.runners.claude import has_live_background_work
 
@@ -4353,6 +4437,10 @@ async def test_632_forced_teardown_after_result_quarantines(
         ]
         assert sigterm_records, "expected sigterm_after_timeout to fire"
         assert sigterm_records[0]["quarantined"] is True
+        # #631 (W5-diag): the stream itself records that a forced teardown
+        # happened, so a LATER runner.empty_result diagnostic (in the
+        # bridge) can surface it.
+        assert stream.sigterm_sent is True
     finally:
         set_quarantine_store(None)
         _REQUEST_TO_SESSION.clear()

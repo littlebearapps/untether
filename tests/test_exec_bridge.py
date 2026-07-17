@@ -6712,6 +6712,160 @@ async def test_631_empty_resume_legacy_same_session_when_flag_off(
     assert not any(r.get("event") == "session.auto_resend_fresh" for r in logs)
 
 
+# ---------------------------------------------------------------------------
+# #631 (W5-diag) — structured diagnostics on the runner.empty_result warning
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.anyio
+async def test_631_empty_result_log_carries_diagnostics(quarantine_store) -> None:
+    """#631 (W5-diag): the runner.empty_result warning must carry enough
+    context to diagnose WHY, not just THAT, the anomaly happened.
+    MockRunner-driven bridge tests have no real stream (edits.stream is
+    None), so the three stream-derived fields fall back to their defensive
+    defaults (False/False/None) rather than raising or being omitted."""
+    from structlog.testing import capture_logs
+
+    transport = FakeTransport()
+    runner = _EmptyThenAnswerRunner(resume_value="sess-diag")
+    cfg = ExecBridgeConfig(
+        transport=transport,
+        presenter=MarkdownPresenter(),
+        final_notify=False,
+    )
+
+    with capture_logs() as logs:
+        await handle_message(
+            cfg,
+            runner=runner,
+            incoming=IncomingMessage(
+                channel_id=123, message_id=10, text="please continue"
+            ),
+            resume_token=ResumeToken(engine=CODEX_ENGINE, value="sess-diag"),
+        )
+
+    records = [r for r in logs if r.get("event") == "runner.empty_result"]
+    assert len(records) == 1
+    record = records[0]
+    for key in (
+        "raw_subtype",
+        "is_error",
+        "proc_returncode",
+        "sigterm_sent",
+        "background_observed",
+        "resend_eligible_reason",
+    ):
+        assert key in record, f"missing {key!r} in runner.empty_result record"
+    assert record["raw_subtype"] is None
+    assert record["is_error"] is False
+    assert record["proc_returncode"] is None
+    assert record["sigterm_sent"] is False
+    assert record["background_observed"] is False
+    # Default settings: resend_empty_resume on, empty_resume_fresh on, a
+    # resume token present, non-blank text, first attempt → recovery armed.
+    assert record["resend_eligible_reason"] == "fresh"
+
+
+@pytest.mark.anyio
+async def test_631_resend_reason_disabled(monkeypatch) -> None:
+    """#631 (W5-diag): resend_empty_resume=False → the anomaly log records
+    resend_eligible_reason == "disabled"."""
+    from structlog.testing import capture_logs
+
+    _disable_empty_resend(monkeypatch)
+    transport = FakeTransport()
+    runner = ScriptRunner(
+        [Return(answer="", usage={"num_turns": 0, "duration_api_ms": 0})],
+        engine=CODEX_ENGINE,
+        resume_value="sess-diag-disabled",
+    )
+    cfg = ExecBridgeConfig(
+        transport=transport,
+        presenter=MarkdownPresenter(),
+        final_notify=False,
+    )
+
+    with capture_logs() as logs:
+        await handle_message(
+            cfg,
+            runner=runner,
+            incoming=IncomingMessage(channel_id=123, message_id=10, text="continue"),
+            resume_token=ResumeToken(engine=CODEX_ENGINE, value="sess-diag-disabled"),
+        )
+
+    records = [r for r in logs if r.get("event") == "runner.empty_result"]
+    assert len(records) == 1
+    assert records[0]["resend_eligible_reason"] == "disabled"
+
+
+@pytest.mark.anyio
+async def test_631_resend_reason_no_token() -> None:
+    """#631 (W5-diag): a fresh (non-resume) empty anomaly has no prior
+    session to retry against → resend_eligible_reason == "no_token"."""
+    from structlog.testing import capture_logs
+
+    transport = FakeTransport()
+    runner = ScriptRunner(
+        [Return(answer="", usage={"num_turns": 0, "duration_api_ms": 0})],
+        engine=CODEX_ENGINE,
+    )
+    cfg = ExecBridgeConfig(
+        transport=transport,
+        presenter=MarkdownPresenter(),
+        final_notify=False,
+    )
+
+    with capture_logs() as logs:
+        await handle_message(
+            cfg,
+            runner=runner,
+            incoming=IncomingMessage(channel_id=123, message_id=10, text="hi"),
+            resume_token=None,
+        )
+
+    records = [r for r in logs if r.get("event") == "runner.empty_result"]
+    assert len(records) == 1
+    assert records[0]["resend_eligible_reason"] == "no_token"
+
+
+@pytest.mark.anyio
+async def test_631_resend_reason_counter_exhausted(quarantine_store) -> None:
+    """#631 (W5-diag): when the single-shot retry is ALSO empty, the SECOND
+    runner.empty_result record carries resend_eligible_reason ==
+    "counter_exhausted" — even though the retry ran as a FRESH (unresumed)
+    session under default settings, the exhausted-counter diagnostic takes
+    priority over "no_token" (see the priority-order comment at the log
+    site)."""
+    from structlog.testing import capture_logs
+
+    transport = FakeTransport()
+    runner = ScriptRunner(
+        [Return(answer="", usage={"num_turns": 0, "duration_api_ms": 0})],
+        engine=CODEX_ENGINE,
+        resume_value="sess-diag-exhausted",
+    )
+    cfg = ExecBridgeConfig(
+        transport=transport,
+        presenter=MarkdownPresenter(),
+        final_notify=False,
+    )
+
+    with capture_logs() as logs:
+        await handle_message(
+            cfg,
+            runner=runner,
+            incoming=IncomingMessage(
+                channel_id=123, message_id=10, text="please continue"
+            ),
+            resume_token=ResumeToken(engine=CODEX_ENGINE, value="sess-diag-exhausted"),
+        )
+
+    records = [r for r in logs if r.get("event") == "runner.empty_result"]
+    assert len(records) == 2
+    assert records[0]["resend_eligible_reason"] == "fresh"
+    assert records[1]["resend_eligible_reason"] == "counter_exhausted"
+
+
 def test_auto_continue_settings_new_flags_default_on() -> None:
     """#631: empty_resume_fresh and quarantine_on_forced_teardown flags
     default to True, enabling both fresh-session retry and poisoned-session

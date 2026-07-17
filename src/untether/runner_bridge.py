@@ -3324,6 +3324,39 @@ async def handle_message(
             and (completed.usage.get("duration_api_ms", 1) or 0) == 0
         ):
             empty_result_anomaly = True
+            # #631 (W5-diag): derive WHY the anomaly branch will or will not
+            # auto-recover. Checks the same four conditions the eligibility
+            # test below ANDs together, but in priority order (most specific
+            # diagnostic first) rather than the AND's structural order — a
+            # retry that ran FRESH (unresumed) after exhausting its one shot
+            # has BOTH resume_token is None and _empty_resent_count >= 1
+            # true, and "counter_exhausted" is the more useful signal than
+            # "no_token" in that case. "fresh"/"legacy_same_session" mean
+            # recovery IS armed; the other values explain why it is not. The
+            # fresh-vs-legacy split mirrors — without moving — the W1
+            # decision made later in the post-return auto-resend block: same
+            # settings object, same poison-token derivation
+            # (completed.resume or run_outcome.resume or resume_token).
+            _resend_settings = _load_auto_continue_settings()
+            if not _resend_settings.resend_empty_resume:
+                _resend_reason = "disabled"
+            elif _empty_resent_count >= 1:
+                _resend_reason = "counter_exhausted"
+            elif not bool(incoming.text and incoming.text.strip()):
+                _resend_reason = "blank_input"
+            elif resume_token is None:
+                _resend_reason = "no_token"
+            else:
+                _poison_for_log = completed.resume or run_outcome.resume or resume_token
+                _resend_reason = (
+                    "fresh"
+                    if (
+                        _resend_settings.empty_resume_fresh
+                        and _poison_for_log is not None
+                    )
+                    else "legacy_same_session"
+                )
+            _es = edits.stream
             logger.warning(
                 "runner.empty_result",
                 engine=runner.engine,
@@ -3331,19 +3364,19 @@ async def handle_message(
                 if (completed.resume or run_outcome.resume)
                 else None,
                 was_resume=resume_token is not None,
+                raw_subtype=(completed.usage or {}).get("subtype"),
+                is_error=run_ok is False,
+                proc_returncode=_es.proc_returncode if _es else None,
+                sigterm_sent=bool(_es and _es.sigterm_sent),
+                background_observed=bool(_es and _es.background_observed),
+                resend_eligible_reason=_resend_reason,
             )
             # #596: auto-resend the original prompt once (same session)
             # instead of asking the user to re-nudge. Eligible only on a
             # resume with a non-empty original prompt, gated by the
             # single-shot ``_empty_resent_count`` so a retry that is ALSO
             # empty falls through to the manual-resend notice below.
-            _resend_settings = _load_auto_continue_settings()
-            if (
-                _resend_settings.resend_empty_resume
-                and resume_token is not None
-                and _empty_resent_count < 1
-                and bool(incoming.text and incoming.text.strip())
-            ):
+            if _resend_reason in ("fresh", "legacy_same_session"):
                 empty_resume["pending"] = True
                 final_answer = (
                     "\N{ANTICLOCKWISE DOWNWARDS AND UPWARDS OPEN CIRCLE ARROWS} "

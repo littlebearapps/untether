@@ -318,6 +318,15 @@ class ClaudeStreamState:
     live_wakeups: dict[str, float] = field(default_factory=dict)
     live_remote_triggers: set[str] = field(default_factory=set)
 
+    # #631 (W5-diag): sticky flag — True once any background-task primitive
+    # (Monitor / Bash-bg / Agent-bg / ScheduleWakeup / RemoteTrigger) has
+    # been observed in this session, regardless of whether it has since
+    # completed. Set in `_register_background_handle`; never reset. Mirrored
+    # onto the engine-agnostic `JsonlStreamState.background_observed` (see
+    # `runner.py::_handle_jsonl_line`) so the `runner.empty_result`
+    # diagnostic can read it without importing Claude-specific state.
+    background_observed: bool = False
+
     # #544 ScheduleWakeup arm-time `delaySeconds` high-water-mark for the
     # current turn. The rc11 #507 fix stored this per-tool_id in a sibling
     # ``live_wakeups_arm_delay`` dict, but that dict was popped by
@@ -561,6 +570,7 @@ def _register_background_handle(
     raw_input = content.input if isinstance(content.input, dict) else {}
 
     if tool_name == "Monitor":
+        state.background_observed = True
         timeout_ms = raw_input.get("timeout_ms")
         if isinstance(timeout_ms, (int, float)) and timeout_ms > 0:
             state.live_monitors[tool_id] = time.monotonic() + (timeout_ms / 1000.0)
@@ -568,14 +578,17 @@ def _register_background_handle(
             # Unknown deadline → store 0.0 so membership tests still work
             state.live_monitors[tool_id] = 0.0
     elif tool_name == "Bash" and bool(raw_input.get("run_in_background")):
+        state.background_observed = True
         state.live_bg_bashes.add(tool_id)
         # #333: scalar high-water-mark that survives _clear_background_handle
         # (see ClaudeStreamState.last_bg_bash_launched_at docstring). Used by
         # the post-result idle watchdog tick log for observability only.
         state.last_bg_bash_launched_at = time.monotonic()
     elif tool_name == "Agent" and bool(raw_input.get("run_in_background")):
+        state.background_observed = True
         state.live_bg_agents.add(tool_id)
     elif tool_name == "ScheduleWakeup":
+        state.background_observed = True
         # #481: the actual Claude Code ScheduleWakeup tool schema (per
         # #289 / claude-agent-sdk-python) emits ``delaySeconds`` as the
         # canonical field. Earlier versions of this code read
@@ -606,6 +619,7 @@ def _register_background_handle(
         prev = state.last_schedule_wakeup_arm_delay or 0.0
         state.last_schedule_wakeup_arm_delay = max(prev, arm_delay_s)
     elif tool_name == "RemoteTrigger":
+        state.background_observed = True
         state.live_remote_triggers.add(tool_id)
 
 
@@ -3487,6 +3501,11 @@ class ClaudeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
                         pid=proc.pid,
                         session_id=sid,
                     )
+                    # #631 (W5-diag): record on the stream itself so the
+                    # runner.empty_result diagnostic (in the bridge, on a
+                    # SUBSEQUENT message) can see that a forced teardown
+                    # happened during this run.
+                    stream.sigterm_sent = True
                 # #590: descendant-aware — bare killpg missed MCP chains
                 # that re-parented into separate sessions/pgroups.
                 signal_pid_group(proc.pid, signal.SIGTERM)

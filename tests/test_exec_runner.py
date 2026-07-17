@@ -747,6 +747,11 @@ def test_jsonl_stream_state_defaults() -> None:
     # _total_stall_warn_count so audits can see subprocess-health hits
     # independently.
     assert stream.liveness_stalls == 0
+    # #631 (W5-diag): both default False — set at the claude.py SIGTERM
+    # site and mirrored from ClaudeStreamState.background_observed
+    # respectively; see runner.empty_result's diagnostic fields.
+    assert stream.sigterm_sent is False
+    assert stream.background_observed is False
 
 
 def test_jsonl_stream_state_recent_events_ring_buffer() -> None:
