@@ -6,7 +6,8 @@ a strict empty-0-turn resume anomaly is observed. A quarantined session is
 never resumed again — the next message on it starts a FRESH session.
 
 Persisted to JSON (sibling to untether.toml) so a service restart cannot
-re-enable a poisoned token. Writes are debounced; markers are pruned by age.
+re-enable a poisoned token. Writes are flushed synchronously on each mutation
+(rare events); markers are pruned by age.
 """
 
 from __future__ import annotations
@@ -16,9 +17,10 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
-import structlog
+from .logging import get_logger
+from .utils.json_state import atomic_write_json
 
-logger = structlog.get_logger(__name__)
+logger = get_logger(__name__)
 
 # Prune markers older than this (a session id is only resumable within
 # Claude's ~24h transcript retention anyway; 7d is a safe generous ceiling).
@@ -42,12 +44,19 @@ class QuarantineStore:
             raw = json.loads(path.read_text())
             if isinstance(raw, dict):
                 entries = {k: v for k, v in raw.items() if isinstance(v, dict)}
+            else:
+                logger.warning(
+                    "quarantine.load_failed",
+                    path=str(path),
+                    reason="not_a_dict",
+                )
         except FileNotFoundError:
             pass
         except (ValueError, OSError):
             logger.warning("quarantine.load_failed", path=str(path), exc_info=True)
         store = cls(path=path, _entries=entries)
         store._prune()
+        store.flush()  # persist pruned state to disk
         return store
 
     def is_quarantined(self, engine: str, session_id: str) -> bool:
@@ -74,9 +83,15 @@ class QuarantineStore:
 
     def _prune(self) -> None:
         cutoff = time.time() - _MAX_AGE_SECONDS
-        stale = [
-            k for k, v in self._entries.items() if float(v.get("ts", 0) or 0) < cutoff
-        ]
+        stale = []
+        for k, v in self._entries.items():
+            try:
+                ts = float(v.get("ts", 0) or 0)
+                if ts < cutoff:
+                    stale.append(k)
+            except (TypeError, ValueError):
+                # malformed/invalid ts — treat as expired
+                stale.append(k)
         for k in stale:
             del self._entries[k]
             self._dirty = True
@@ -84,10 +99,8 @@ class QuarantineStore:
     def flush(self) -> None:
         if not self._dirty:
             return
-        tmp = self.path.with_suffix(self.path.suffix + ".tmp")
         try:
-            tmp.write_text(json.dumps(self._entries))
-            tmp.replace(self.path)  # atomic
+            atomic_write_json(self.path, self._entries)
             self._dirty = False
         except OSError:
             logger.warning(
