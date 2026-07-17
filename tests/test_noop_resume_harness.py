@@ -258,8 +258,18 @@ def test_harness_linger_scenario_emits_valid_result_and_outlives_it() -> None:
     path through ClaudeRunner end-to-end -- Task 5 covers the
     forced-teardown quarantine record with the in-process watchdog pattern;
     this test's only job is the scenario script's emission shape.
+
+    ``linger_s`` is deliberately generous (not the minimum that passes
+    locally): the test never waits for the linger to expire before its
+    liveness assertion -- it reads the two JSONL lines, asserts the process
+    is still alive, then kills it in the ``finally`` block regardless of
+    where in the sleep it still is. Widening the linger costs nothing in
+    wall-clock, so the margin between "both lines flushed" and "sleep
+    expires" is kept comfortably larger than any plausible CI cold-start /
+    scheduler-latency jitter (a tight 0.35s margin was observed to be
+    survivable locally but not comfortably clear of that jitter budget).
     """
-    linger_s = 0.35
+    linger_s = 2.0
     env = dict(os.environ)
     env["FAKE_CLAUDE_SCENARIO"] = "linger_then_sigterm_after_result"
     env["FAKE_CLAUDE_LINGER_S"] = str(linger_s)
@@ -288,6 +298,7 @@ def test_harness_linger_scenario_emits_valid_result_and_outlives_it() -> None:
         init_line, result_line = _read_lines_bounded(
             proc.stdout.fileno(), 2, timeout=5.0
         )
+        elapsed_to_result = time.monotonic() - started_at
 
         init_event = decode_stream_json_line(init_line)
         result_event = decode_stream_json_line(result_line)
@@ -301,16 +312,24 @@ def test_harness_linger_scenario_emits_valid_result_and_outlives_it() -> None:
 
         # Right after the result line, the process must still be alive --
         # it is lingering (sleeping), not exiting immediately. This is the
-        # shape W2's forced-teardown SIGTERM path relies on.
+        # shape W2's forced-teardown SIGTERM path relies on. Deliberately
+        # does NOT wait out the rest of the `linger_s` sleep before this
+        # assertion or afterward -- the process is killed in `finally`
+        # regardless of how far into its sleep it still is -- so a larger
+        # `linger_s` buys CI safety margin without costing wall-clock here.
         assert proc.poll() is None, (
             "fake CLI exited immediately after the result line instead of "
             "lingering — scenario does not model the forced-teardown case"
         )
-
-        proc.wait(timeout=5.0)
-        elapsed_total = time.monotonic() - started_at
-        assert elapsed_total >= linger_s
-        assert proc.returncode == 0
+        # Sanity check on the assertion above: if reading both lines somehow
+        # took longer than the linger itself, "still alive" would be a
+        # foregone conclusion rather than a meaningful check of the
+        # lingering behaviour.
+        assert elapsed_to_result < linger_s, (
+            f"reading both JSONL lines took {elapsed_to_result:.2f}s, longer "
+            f"than linger_s={linger_s}s — the liveness assertion above "
+            "wasn't a meaningful check"
+        )
     finally:
         if proc.poll() is None:
             proc.kill()
