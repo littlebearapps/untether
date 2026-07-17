@@ -6596,6 +6596,23 @@ async def test_596_no_resend_when_not_a_resume() -> None:
     assert "empty result" in final_text
 
 
+def test_auto_continue_settings_new_flags_default_on() -> None:
+    """#631: empty_resume_fresh and quarantine_on_forced_teardown flags
+    default to True, enabling both fresh-session retry and poisoned-session
+    quarantine when implemented in later tasks."""
+    from untether.settings import AutoContinueSettings
+
+    # Test defaults
+    s = AutoContinueSettings()
+    assert s.empty_resume_fresh is True
+    assert s.quarantine_on_forced_teardown is True
+
+    # Test that omitting them in a dict/kwarg still yields True
+    s2 = AutoContinueSettings(enabled=True)
+    assert s2.empty_resume_fresh is True
+    assert s2.quarantine_on_forced_teardown is True
+
+
 # ---------------------------------------------------------------------------
 # #593 — stall auto-cancel enforcement (decision must end in teardown)
 # ---------------------------------------------------------------------------
