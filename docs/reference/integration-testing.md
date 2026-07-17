@@ -224,6 +224,30 @@ Run these in addition to the standard tiers for rc4.
 
 ---
 
+## rc7 scenarios (v0.35.4rc7 — no-op empty-resume recovery)
+
+Bespoke scenario for the dangling-tool_use → empty-resume regression fixed in
+[#634](https://github.com/littlebearapps/untether/issues/634) (see
+`docs/plans/2026-07-16-noop-resume-remediation/`). Run in the Claude chat
+(`5284581592`) — the failure mode is specific to Claude's background-subagent
+lifecycle and the control channel (`.claude/rules/control-channel.md`).
+
+### B-RESUME: background-subagent lingering resume recovery
+
+| Step | Action | What to verify |
+|---|---|---|
+| 1 | Send a prompt that spawns a background subagent AND keeps the model busy, e.g. `Launch a background agent to summarise the README, then wait for it.` Don't send anything else — let the run sit so the process lingers past the result (post-result limbo, the dangling-tool_use shape). | Progress messages appear; a result phase completes but the process doesn't fully wind down immediately |
+| 2 | Send a follow-up in the same chat: `what did it find?` — this resumes the session from step 1 | A follow-up run starts using the resume token from step 1 |
+| 3 | **Assert** on the step-2 response | A REAL answer (`num_turns > 0`, non-empty result); the run footer's session id is EITHER a **different** id than step 1 (fresh recovery) OR the **same** id together with real work shown (healthy resume); NO "engine returned an empty result" notice appears anywhere in the response |
+| 4 | **Negative control** — in a fresh exchange with no background agent involved, send a plain two-message conversation, e.g. `what's 2+2?` then reply to the resume line with `and 3+3?` | Both messages resume the SAME session id — a healthy resume must not trigger spurious quarantine or fresh-session diversion |
+| 5 | **Log verification**: `journalctl --user -u untether-dev --since "10 minutes ago" \| grep -E "runner.empty_result\|session.auto_resend_fresh\|session.quarantined\|session.resume_diverted_fresh"` | If steps 1-3 hit the dangling/empty-resume path, every `runner.empty_result` line is followed by `session.auto_resend_fresh` (or the session already carries `session.quarantined` + `session.resume_diverted_fresh` from a prior hit) — never a bare `runner.empty_result` with no recovery event after it |
+
+**Required tiers:** rc7 → Tier 7 (command smoke) + Tier 1 (Claude only) + B-RESUME. rc8 → add Tier 1 (all 6 engines, confirm no cross-engine regression from the quarantine store) + Tier 2 (interactive/plan).
+
+Automate via Telegram MCP (`send_message`, `get_history`) + Bash (`journalctl --user -u untether-dev`) exactly as the other tiers. See `scripts/audit-noop-resume.sh` for the post-deploy fleet-wide correlation check (Layer 4 of the remediation plan) that runs the same five-event correlation across all hosts after rollout.
+
+---
+
 ## Upgrade Path Testing
 
 Run before **minor and major** releases to verify backward compatibility.
@@ -338,6 +362,7 @@ Integration tests are run by Claude Code via Telegram MCP tools (see "Automated 
 | Changed area | Must-run tests |
 |---|---|
 | Runner code (`runners/*.py`) | U1-U4 (all engines), U6, U7 |
+| Runner bridge / auto-continue / no-op resume recovery (`runner_bridge.py`, `runners/claude.py`) | B-RESUME, U1-U4 (Claude), U6, U7 |
 | Telegram transport (`telegram/*.py`) | T1-T10, S7, S8 |
 | Control channel (`claude_control.py`) | C1-C6, T8, S9 |
 | Config/settings (`settings.py`) | O1-O9, S5, upgrade path |
