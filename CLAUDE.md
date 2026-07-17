@@ -187,7 +187,7 @@ Rules in `.claude/rules/` auto-load when editing matching files:
 
 ## Tests
 
-2372 unit tests, 80% coverage threshold. Integration testing against `@untether_dev_bot` is **mandatory before every release** — see `docs/reference/integration-testing.md` for the full playbook with per-release-type tier requirements (patch/minor/major). All integration test tiers are fully automated by Claude Code via Telegram MCP tools and Bash.
+2910 unit tests, 80% coverage threshold. Integration testing against `@untether_dev_bot` is **mandatory before every release** — see `docs/reference/integration-testing.md` for the full playbook with per-release-type tier requirements (patch/minor/major). All integration test tiers are fully automated by Claude Code via Telegram MCP tools and Bash.
 
 Key test files:
 
@@ -231,6 +231,8 @@ Key test files:
 - `test_at_command.py` — 34 tests: `/at` parse (valid/invalid suffixes, bounds, case-insensitive), `_format_delay`, schedule/cancel, per-chat cap, scheduler install/uninstall
 - `test_offset_persistence.py` — 15 tests: Telegram update_id round-trip, corrupt JSON handling, atomic write, `DebouncedOffsetWriter` interval/max-pending semantics, explicit flush
 - `test_sdnotify.py` — 7 tests: NOTIFY_SOCKET handling (absent/empty/filesystem/abstract-namespace), send error swallowing, UTF-8 encoding
+- `test_session_quarantine.py` — 7 tests: QuarantineStore round-trip persistence, engine isolation, malformed/corrupt state-file resilience, age-based pruning to disk, singleton accessor + injection (#631/#632)
+- `test_noop_resume_harness.py` — 3 tests: end-to-end no-op empty-resume reproduction via the fake-claude CLI (`tests/fake_clis/fake_claude_noop_resume.py`) — real ClaudeRunner + handle_message drive quarantine-and-fresh recovery, healthy-resume negative control, linger-scenario emission shape (#634)
 
 ## Development
 

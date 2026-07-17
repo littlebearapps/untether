@@ -135,10 +135,9 @@ def _emit_dangling_tool_use(sid: str) -> None:
     a resume of this session (upstream dangling-tool_use bug, W3).
 
     Note: ``_register_background_handle`` in ``src/untether/runners/
-    claude.py`` does not yet recognise ``Task`` as a background-tracked
-    tool name (Bash-bg/Agent-bg/Monitor/ScheduleWakeup/RemoteTrigger only)
-    -- Task-tool background tracking is pending in a later task on this
-    branch (#374). This scenario reproduces the JSONL SHAPE that poisons a
+    claude.py`` recognises ``Task`` (alongside ``Agent``) as a
+    background-tracked tool name with bounded-keep deadline semantics
+    (#374). This scenario reproduces the JSONL SHAPE that poisons a
     resume regardless of whether Untether's own background-task tracker
     recognises it."""
     emit(
