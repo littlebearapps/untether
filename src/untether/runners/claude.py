@@ -243,6 +243,18 @@ CONTROL_REQUEST_TIMEOUT_SECONDS: float = 300.0  # 5 minutes
 DISCUSS_COOLDOWN_BASE_SECONDS: float = 30.0
 DISCUSS_COOLDOWN_MAX_SECONDS: float = 120.0
 
+# #374 (rc7): bounded keep for background-agent handles (Agent/Task
+# tool_use with run_in_background=True). An interim tool_result no longer
+# clears the handle immediately (see `_is_terminal_tool_result`), but every
+# "keep the handle" branch MUST have a bounded age-out — a handle that
+# never clears wedges the post-result idle watchdog into a permanent hang.
+# 15 minutes mirrors the existing MCP-tool / subagent stall thresholds
+# (`runner_bridge.py` `_STALL_THRESHOLD_MCP_TOOL` / `_STALL_THRESHOLD_SUBAGENT`,
+# both 900s): long enough for a genuine background subagent to keep
+# suppressing stall warnings, short enough that a truly abandoned handle
+# self-heals within one watchdog cycle instead of leaking forever.
+BG_AGENT_MAX_KEEP_S: float = 15 * 60.0  # 900s
+
 _DISCUSS_ESCALATION_MESSAGE = (
     "REJECTED — your ExitPlanMode call was automatically blocked because you have not "
     "written enough visible text yet.\n\n"
@@ -317,6 +329,19 @@ class ClaudeStreamState:
     live_bg_agents: set[str] = field(default_factory=set)
     live_wakeups: dict[str, float] = field(default_factory=dict)
     live_remote_triggers: set[str] = field(default_factory=set)
+
+    # #374 (rc7): deadline map paralleling `live_bg_agents`. Kept as a
+    # separate dict (rather than converting `live_bg_agents` to
+    # `dict[str, float]`) to avoid touching every existing
+    # `live_bg_agents` call site — see the design note in
+    # `_register_background_handle`. Set at register time to
+    # `time.monotonic() + BG_AGENT_MAX_KEEP_S`; consulted by
+    # `_is_terminal_tool_result` and `has_live_background_work` to bound
+    # how long an Agent/Task-bg handle can be kept across interim
+    # tool_results before it is treated as terminal regardless of whether
+    # an explicit terminal signal (`is_error`) ever arrives. Popped in
+    # `_clear_background_handle` alongside the `live_bg_agents` discard.
+    bg_agent_deadlines: dict[str, float] = field(default_factory=dict)
 
     # #631 (W5-diag): sticky flag — True once any background-task primitive
     # (Monitor / Bash-bg / Agent-bg / ScheduleWakeup / RemoteTrigger) has
@@ -587,6 +612,9 @@ def _register_background_handle(
     elif tool_name in ("Agent", "Task") and bool(raw_input.get("run_in_background")):
         state.background_observed = True
         state.live_bg_agents.add(tool_id)
+        # #374 (rc7): bounded keep — see BG_AGENT_MAX_KEEP_S and
+        # ClaudeStreamState.bg_agent_deadlines docstrings.
+        state.bg_agent_deadlines[tool_id] = time.monotonic() + BG_AGENT_MAX_KEEP_S
     elif tool_name == "ScheduleWakeup":
         state.background_observed = True
         # #481: the actual Claude Code ScheduleWakeup tool schema (per
@@ -632,12 +660,17 @@ def _clear_background_handle(
     streams *multiple* interim tool_results while it runs; clearing the
     ``live_monitors`` entry on the first one dropped the
     ``stall_monitor_active_suppressed`` branch (runner_bridge), so spurious stall
-    warnings rose again while the Monitor was legitimately still working. When
-    ``is_terminal`` is False the handle is left in place — ``_is_terminal_tool_result``
-    makes the call. ``is_terminal`` defaults True so direct callers and the
-    non-Monitor primitives keep their pre-#374 clear-on-result behaviour (see
-    ``_is_terminal_tool_result`` for why Bash-bg / Agent-bg / ScheduleWakeup /
-    RemoteTrigger interim-handling is deferred to the v0.35.5 lifecycle refactor).
+    warnings rose again while the Monitor was legitimately still working. The same
+    premature-drain bug applies to Agent/Task-bg (rc7): clearing on the first
+    interim result poisoned the "no live background work" signal the empty-resume
+    detector relies on (#596). When ``is_terminal`` is False the handle is left in
+    place — ``_is_terminal_tool_result`` makes the call, using a bounded deadline
+    for both primitives (Monitor's own ``timeout_ms``; Agent/Task-bg's
+    ``BG_AGENT_MAX_KEEP_S``) so a handle can never be kept forever. ``is_terminal``
+    defaults True so direct callers and the remaining primitives (Bash-bg,
+    ScheduleWakeup, RemoteTrigger) keep their pre-#374 clear-on-result behaviour
+    (see ``_is_terminal_tool_result`` for why their interim-handling is still
+    deferred to the v0.35.5 lifecycle refactor, #573).
 
     Note: ``state.last_schedule_wakeup_arm_delay`` and
     ``state.last_bg_bash_launched_at`` are deliberately NOT cleared here.
@@ -655,6 +688,7 @@ def _clear_background_handle(
     state.live_monitors.pop(tool_use_id, None)
     state.live_bg_bashes.discard(tool_use_id)
     state.live_bg_agents.discard(tool_use_id)
+    state.bg_agent_deadlines.pop(tool_use_id, None)
     state.live_wakeups.pop(tool_use_id, None)
     state.live_remote_triggers.discard(tool_use_id)
 
@@ -667,39 +701,64 @@ def _is_terminal_tool_result(
 ) -> bool:
     """Decide whether a tool_result terminates its background handle (#374).
 
-    Only Monitor handles can receive *interim* (non-terminal) results today: a
-    Monitor feeds back the watched command's **raw stdout lines as they appear**
-    (see ``docs/plans/2026-05-06-289-loop-and-cron-interception.md``), so clearing
-    ``live_monitors`` on the first line dropped the
-    ``stall_monitor_active_suppressed`` branch while the Monitor was still running.
+    Two primitives can receive *interim* (non-terminal) results today, each with
+    its own bounded deadline so neither risks keeping a handle forever:
 
-    Because the result text is arbitrary stdout, we deliberately do NOT scan it for
-    "completed"/"cancelled" markers — that is unreliable in both directions (a build
-    printing "Done" mid-stream would false-clear and reintroduce the bug; a real
-    completion that doesn't print a magic word would be missed). The reliable
-    terminal signals are ``is_error`` and the Monitor's own ``timeout_ms`` deadline
-    (which ``has_live_background_work`` already uses to age the handle out — so no
-    leak). A Monitor that finishes before its deadline keeps the handle (and the
-    suppression) until the deadline; that window is bounded by ``timeout_ms`` and is
-    the safe trade vs. false-clearing on interim stdout.
+    - **Monitor** feeds back the watched command's **raw stdout lines as they
+      appear** (see ``docs/plans/2026-05-06-289-loop-and-cron-interception.md``),
+      so clearing ``live_monitors`` on the first line dropped the
+      ``stall_monitor_active_suppressed`` branch while the Monitor was still
+      running. Its bound is the primitive's own ``timeout_ms`` deadline
+      (``has_live_background_work`` already uses the same deadline to age the
+      handle out — so no leak).
 
-    Every other tool_result is treated as terminal, preserving the pre-#374
-    clear-on-first-result behaviour for foreground tools and for Bash-bg / Agent-bg
-    / ScheduleWakeup / RemoteTrigger. Their true-terminal detection (KillShell,
-    subprocess exit, deadline sweeps) is the v0.35.5 refactor: doing it here without
-    that infrastructure would risk the inverse failure — a handle that never clears,
-    wedging the post-result idle watchdog into a permanent hang.
+    - **Agent/Task with ``run_in_background=True``** (rc7, #374) can likewise emit
+      an interim tool_result before the subagent actually finishes. Clearing
+      ``live_bg_agents`` on that first result reintroduced the same premature-drain
+      bug the Monitor fix addressed: it poisoned the "no live background work"
+      signal the empty-resume detector relies on (#596). There is no reliable
+      upstream completion signal for Agent/Task yet (true-terminal detection via
+      KillShell, subprocess-exit reconciliation, and child-PID cleanup is the
+      v0.35.5 lifecycle refactor, #573), so its bound is the fixed
+      ``BG_AGENT_MAX_KEEP_S`` deadline set at register time in
+      ``_register_background_handle`` — the safe trade-off between "keep
+      suppressing stall warnings while genuinely running" and "never leave a
+      handle uncleared forever".
+
+    Because tool_result text is arbitrary in both cases (Monitor: raw command
+    stdout; Agent/Task: subagent-authored prose), we deliberately do NOT scan it
+    for "completed"/"cancelled" markers for either primitive — that is unreliable
+    in both directions (a build printing "Done" mid-stream would false-clear and
+    reintroduce the bug; a real completion that doesn't print a magic word would be
+    missed). The reliable terminal signals are ``is_error`` and the primitive's own
+    bounded deadline.
+
+    Every other tool_result — including Bash-bg, ScheduleWakeup, and
+    RemoteTrigger, whose true-terminal detection remains deferred to the v0.35.5
+    refactor (#573) — is treated as terminal, preserving the pre-#374
+    clear-on-first-result behaviour for foreground tools and those primitives.
     """
-    deadline = state.live_monitors.get(tool_use_id)
-    if deadline is None:
-        # Not a tracked Monitor → terminal (unchanged behaviour).
-        return True
-    if content.is_error is True:
-        return True
-    # Unknown (0.0) or already-expired deadline → clear now (no leak risk; matches
-    # has_live_background_work's expiry semantics). A live future deadline means an
-    # interim stdout line → keep the handle so stall-suppression keeps firing.
-    return deadline == 0.0 or deadline <= time.monotonic()
+    monitor_deadline = state.live_monitors.get(tool_use_id)
+    if monitor_deadline is not None:
+        if content.is_error is True:
+            return True
+        # Unknown (0.0) or already-expired deadline → clear now (no leak risk;
+        # matches has_live_background_work's expiry semantics). A live future
+        # deadline means an interim stdout line → keep the handle so
+        # stall-suppression keeps firing.
+        return monitor_deadline == 0.0 or monitor_deadline <= time.monotonic()
+
+    bg_agent_deadline = state.bg_agent_deadlines.get(tool_use_id)
+    if bg_agent_deadline is not None:
+        if content.is_error is True:
+            return True
+        # Past-deadline → aged out, terminal regardless of whether an explicit
+        # completion signal ever arrives (no permanent-hang guarantee — see
+        # BG_AGENT_MAX_KEEP_S).
+        return bg_agent_deadline <= time.monotonic()
+
+    # Not a tracked Monitor or bg-agent → terminal (unchanged behaviour).
+    return True
 
 
 # ── /loop and ScheduleWakeup observation (#289) ─────────────────────────
@@ -869,14 +928,39 @@ def _observe_loop_tool_result(
     loop_scheduler.bind_upstream_id(tool_use_id, upstream_id)
 
 
+def _live_bg_agent_count(state: ClaudeStreamState) -> int:
+    """Count Agent/Task-bg handles whose bounded deadline hasn't passed (#374).
+
+    ``live_bg_agents`` and ``bg_agent_deadlines`` are parallel structures (see
+    ``ClaudeStreamState.bg_agent_deadlines`` docstring) — every registered
+    handle should have a matching deadline, but a handle with no deadline entry
+    is defensively treated as already expired (not live) rather than live
+    forever, matching the bounded-keep bias of ``_is_terminal_tool_result``.
+
+    Both consumers below (the #346 wedge-detector gate and the progress-footer
+    summary) need to age out expired bg-agent handles identically, so the
+    expiry expression lives here once instead of being duplicated at each call
+    site.
+    """
+    now = time.monotonic()
+    return sum(
+        1
+        for tool_id in state.live_bg_agents
+        if state.bg_agent_deadlines.get(tool_id, 0.0) > now
+    )
+
+
 def has_live_background_work(state: ClaudeStreamState) -> bool:
     """Return True when the session has any background handle whose deadline
     (if any) is still in the future (#346 gate).
 
     Monitors + wakeups with expired deadlines are treated as "no longer
     live" — the primitive should have fired and emitted its result by then.
-    Sets (bg bashes, bg agents, remote triggers) have no deadline so any
-    entry counts as live.
+    Agent/Task-bg handles (#374, rc7) follow the same rule via
+    ``_live_bg_agent_count`` — a handle past its ``BG_AGENT_MAX_KEEP_S``
+    deadline no longer counts as live, otherwise this gate would wait forever
+    for a tool_result that may never arrive. Bg bashes and remote triggers
+    have no deadline so any entry counts as live.
     """
     now = time.monotonic()
     for deadline in state.live_monitors.values():
@@ -885,9 +969,9 @@ def has_live_background_work(state: ClaudeStreamState) -> bool:
     for deadline in state.live_wakeups.values():
         if deadline == 0.0 or deadline > now:
             return True
-    return bool(
-        state.live_bg_bashes or state.live_bg_agents or state.live_remote_triggers
-    )
+    if _live_bg_agent_count(state) > 0:
+        return True
+    return bool(state.live_bg_bashes or state.live_remote_triggers)
 
 
 def background_task_summary(state: ClaudeStreamState) -> str | None:
@@ -897,11 +981,16 @@ def background_task_summary(state: ClaudeStreamState) -> str | None:
     command. v1 of this PR only computes it; the footer wiring lands in
     a follow-up once meta-threading from ClaudeStreamState to
     `ProgressTracker.meta` is confirmed safe for the other 5 engines.
+
+    #374 (rc7): the bg-agent portion of ``bg_tasks`` uses
+    ``_live_bg_agent_count`` so an aged-out Agent/Task-bg handle (bounded by
+    ``BG_AGENT_MAX_KEEP_S``) stops appearing in the footer the same way it
+    stops counting as live work in ``has_live_background_work``.
     """
     watchers = len(state.live_monitors) + len(state.live_wakeups)
     bg_tasks = (
         len(state.live_bg_bashes)
-        + len(state.live_bg_agents)
+        + _live_bg_agent_count(state)
         + len(state.live_remote_triggers)
     )
     if watchers == 0 and bg_tasks == 0:

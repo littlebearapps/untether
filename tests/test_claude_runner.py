@@ -536,6 +536,130 @@ def test_374_task_tool_foreground_not_registered() -> None:
     assert state.background_observed is False
 
 
+# ---------------------------------------------------------------------------
+# #374 rc7 — bounded keep for background-agent handles (W3 Task 2)
+# ---------------------------------------------------------------------------
+
+
+def _register_bg_agent(
+    state: ClaudeStreamState, tool_id: str, tool_name: str = "Agent"
+) -> None:
+    translate_claude_event(
+        _decode_event(
+            _make_tool_use_event(
+                tool_name, tool_id, {"task": "...", "run_in_background": True}
+            )
+        ),
+        title="claude",
+        state=state,
+        factory=state.factory,
+    )
+
+
+def test_374_bg_agent_handle_kept_across_interim_result() -> None:
+    """#374 rc7: an Agent-bg handle survives a non-error interim tool_result.
+
+    This is the same premature-drain bug the Monitor #374 fix addressed:
+    clearing on the first interim result poisons the "no live background
+    work" signal (`has_live_background_work`), which feeds both the #346
+    wedge detector and the empty-resume auto-continue heuristic (#596)."""
+    state = ClaudeStreamState()
+    _register_bg_agent(state, "toolu_a1", "Agent")
+    assert "toolu_a1" in state.live_bg_agents
+
+    interim = claude_schema.StreamToolResultBlock(
+        tool_use_id="toolu_a1", content="still working", is_error=False
+    )
+    assert claude_runner._is_terminal_tool_result(interim, state, "toolu_a1") is False
+
+    _feed_tool_result(state, "toolu_a1", "still working")
+    assert "toolu_a1" in state.live_bg_agents
+    assert "toolu_a1" in state.bg_agent_deadlines
+
+
+def test_374_bg_agent_error_result_is_terminal() -> None:
+    """#374 rc7: an is_error=True result IS terminal for a bg agent
+    regardless of the bounded deadline still being in the future."""
+    state = ClaudeStreamState()
+    _register_bg_agent(state, "toolu_a2", "Agent")
+
+    err = claude_schema.StreamToolResultBlock(
+        tool_use_id="toolu_a2", content="boom", is_error=True
+    )
+    assert claude_runner._is_terminal_tool_result(err, state, "toolu_a2") is True
+
+    _feed_tool_result(state, "toolu_a2", "boom", is_error=True)
+    assert "toolu_a2" not in state.live_bg_agents
+    assert "toolu_a2" not in state.bg_agent_deadlines
+
+
+def test_374_bg_agent_handle_ages_out(monkeypatch: pytest.MonkeyPatch) -> None:
+    """#374 rc7: once BG_AGENT_MAX_KEEP_S has elapsed, a (late) non-error
+    interim result IS terminal — the bounded deadline is the safety net
+    against a permanent hang when Agent/Task never emits an explicit
+    completion signal (KillShell / subprocess-exit reconciliation is the
+    v0.35.5 refactor, #573)."""
+    fake_now = [10_000.0]
+    monkeypatch.setattr(claude_runner.time, "monotonic", lambda: fake_now[0])
+
+    state = ClaudeStreamState()
+    _register_bg_agent(state, "toolu_a3", "Agent")
+
+    fake_now[0] += claude_runner.BG_AGENT_MAX_KEEP_S + 1.0
+    interim = claude_schema.StreamToolResultBlock(
+        tool_use_id="toolu_a3", content="still working", is_error=False
+    )
+    assert claude_runner._is_terminal_tool_result(interim, state, "toolu_a3") is True
+
+
+def test_374_bg_agent_expired_not_live_work(monkeypatch: pytest.MonkeyPatch) -> None:
+    """#374 rc7: has_live_background_work must age bg-agent handles out
+    identically to Monitor/wakeup deadlines — otherwise the #346 wedge
+    detector (and everything downstream that treats "no live background
+    work" as "safe to drain") waits forever for a tool_result that may
+    never arrive."""
+    from untether.runners.claude import has_live_background_work
+
+    fake_now = [20_000.0]
+    monkeypatch.setattr(claude_runner.time, "monotonic", lambda: fake_now[0])
+
+    state = ClaudeStreamState()
+    _register_bg_agent(state, "toolu_a4", "Agent")
+    assert has_live_background_work(state) is True
+
+    fake_now[0] += claude_runner.BG_AGENT_MAX_KEEP_S + 1.0
+    assert has_live_background_work(state) is False
+
+
+def test_374_clear_pops_deadline() -> None:
+    """#374 rc7: _clear_background_handle must pop bg_agent_deadlines
+    alongside the live_bg_agents discard, so a terminal clear empties both
+    parallel structures rather than leaking a stale deadline entry."""
+    state = ClaudeStreamState()
+    _register_bg_agent(state, "toolu_a5", "Agent")
+    assert "toolu_a5" in state.live_bg_agents
+    assert "toolu_a5" in state.bg_agent_deadlines
+
+    claude_runner._clear_background_handle(state, "toolu_a5", is_terminal=True)
+    assert "toolu_a5" not in state.live_bg_agents
+    assert "toolu_a5" not in state.bg_agent_deadlines
+
+
+def test_374_task_bg_gets_same_deadline_treatment() -> None:
+    """#374 rc7: Task-bg gets the identical bounded-keep treatment as
+    Agent-bg — both register through the same live_bg_agents /
+    bg_agent_deadlines path in _register_background_handle."""
+    state = ClaudeStreamState()
+    _register_bg_agent(state, "toolu_t1", "Task")
+    assert "toolu_t1" in state.live_bg_agents
+    assert "toolu_t1" in state.bg_agent_deadlines
+
+    interim = claude_schema.StreamToolResultBlock(
+        tool_use_id="toolu_t1", content="still working", is_error=False
+    )
+    assert claude_runner._is_terminal_tool_result(interim, state, "toolu_t1") is False
+
+
 def test_schedule_wakeup_tracked_with_deadline() -> None:
     state = ClaudeStreamState()
     translate_claude_event(
@@ -741,6 +865,10 @@ def test_background_task_summary_formatting() -> None:
 
     state.live_monitors["c"] = 0.0
     state.live_bg_agents.add("d")
+    # #374: live_bg_agents/bg_agent_deadlines are parallel structures now —
+    # a handle with no deadline entry is treated as already expired (not
+    # live), so the deadline must be set alongside the set-add here too.
+    state.bg_agent_deadlines["d"] = time.monotonic() + 999.0
     summary = background_task_summary(state)
     assert summary is not None
     assert "2 watchers" in summary

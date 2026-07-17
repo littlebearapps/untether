@@ -5470,6 +5470,10 @@ def _make_engine_state(**fields):
         "live_monitors": {},
         "live_bg_bashes": set(),
         "live_bg_agents": set(),
+        # #374 (rc7): parallel deadline map for live_bg_agents — see
+        # ClaudeStreamState.bg_agent_deadlines. has_live_background_work
+        # reads this to age out expired bg-agent handles.
+        "bg_agent_deadlines": {},
         "live_remote_triggers": set(),
         "post_result_closed_at": None,
         "post_result_idle_minutes": 0.0,
