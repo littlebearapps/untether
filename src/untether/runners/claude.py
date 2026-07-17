@@ -50,6 +50,7 @@ from ..runner import (
     _stderr_excerpt,
 )
 from ..schemas import claude as claude_schema
+from ..session_quarantine import get_quarantine_store
 from ..settings import load_settings_if_exists
 from ..utils.env_audit import audit_proc_env
 from ..utils.paths import get_run_base_dir
@@ -130,6 +131,23 @@ def _load_env_extras() -> tuple[tuple[str, ...], tuple[str, ...]]:
         )
     except Exception:  # noqa: BLE001 — never let config errors block a run
         return ((), ())
+
+
+def _load_quarantine_on_forced_teardown() -> bool:
+    """#632 (W2): read ``[auto_continue].quarantine_on_forced_teardown``.
+
+    Best-effort — config errors must never block subprocess teardown, so we
+    swallow them and default to True (the safety net stays armed even when
+    config can't be read).
+    """
+    try:
+        result = load_settings_if_exists()
+        if result is None:
+            return True
+        settings, _ = result
+        return settings.auto_continue.quarantine_on_forced_teardown
+    except Exception:  # noqa: BLE001 — never let config errors block teardown
+        return True
 
 
 # Phase 2: Global registry for active ClaudeRunner instances
@@ -3423,6 +3441,32 @@ class ClaudeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
                 limbo_grace_applied = True
 
             if time.monotonic() >= effective_deadline:
+                # #632 (W2): the process already emitted a valid result but
+                # is being force-killed while lingering (MCP children / hung
+                # background work) — its last upstream turn may be left
+                # dangling on the far side, making the session unsafe to
+                # resume. Record the marker BEFORE sending SIGTERM. A store
+                # failure must never block teardown, hence the narrow
+                # try/except. SIGKILL (below) always follows this same
+                # branch on the same pass, so recording once here is
+                # sufficient — no second record site needed at sigkill.
+                quarantined = False
+                if (
+                    stream is not None
+                    and stream.did_emit_completed
+                    and sid is not None
+                    and _load_quarantine_on_forced_teardown()
+                ):
+                    try:
+                        get_quarantine_store().quarantine(
+                            self.engine, sid, reason="forced_teardown_after_result"
+                        )
+                        quarantined = True
+                    except Exception:  # noqa: BLE001 — never let a
+                        # quarantine store failure break subprocess teardown.
+                        run_logger.debug(
+                            "session.quarantine_record_failed", exc_info=True
+                        )
                 # Timeout: SIGTERM the process group (start_new_session=True
                 # so PID == pgid). 5 s grace, then SIGKILL.
                 run_logger.warning(
@@ -3433,6 +3477,7 @@ class ClaudeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
                     elapsed_s=round(elapsed, 1),
                     limbo_grace_applied=limbo_grace_applied,
                     limbo_grace_s=grace if limbo_grace_applied else None,
+                    quarantined=quarantined,
                 )
                 if stream is not None:
                     self._transition_lifecycle(

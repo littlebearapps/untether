@@ -6730,6 +6730,132 @@ def test_auto_continue_settings_new_flags_default_on() -> None:
 
 
 # ---------------------------------------------------------------------------
+# #632 (W2) — honour a forced-teardown quarantine marker on the next message
+# ---------------------------------------------------------------------------
+
+
+class _RecordingRunner(MockRunner):
+    """Records ``(prompt, resume)`` per ``run()`` call and always completes
+    with a real answer; ``usage`` is configurable so tests can control
+    whether the #632 (W2) healthy-clear path (``num_turns`` truthy) fires."""
+
+    def __init__(
+        self,
+        *,
+        engine=CODEX_ENGINE,
+        resume_value: str = "sid",
+        answer: str = "ok",
+        usage: dict | None = None,
+    ) -> None:
+        super().__init__(engine=engine, resume_value=resume_value, answer=answer)
+        self.calls: list[tuple[str, ResumeToken | None]] = []
+        self._usage = usage
+
+    async def run(self, prompt, resume):
+        from untether.model import StartedEvent
+        from untether.runners.mock import _resume_token
+
+        self.calls.append((prompt, resume))
+        token_value = resume.value if resume else self._resume_value
+        token = _resume_token(self.engine, token_value)
+        async with self.lock_for(token):
+            yield StartedEvent(engine=self.engine, resume=token, title=self.title)
+            yield CompletedEvent(
+                engine=self.engine,
+                resume=token,
+                ok=True,
+                answer=self._answer,
+                usage=self._usage,
+            )
+
+
+@pytest.mark.anyio
+async def test_632_next_message_on_quarantined_session_starts_fresh(
+    quarantine_store,
+) -> None:
+    """#632 (W2): a session already marked quarantined (forced teardown
+    after a result) must never be resumed — the next message on it starts
+    fresh and the stored token is cleared via on_resume_failed."""
+    from structlog.testing import capture_logs
+
+    quarantine_store.quarantine(
+        CODEX_ENGINE, "sid-q", reason="forced_teardown_after_result"
+    )
+
+    transport = FakeTransport()
+    runner = _RecordingRunner(
+        engine=CODEX_ENGINE, resume_value="sid-fresh", answer="fresh answer"
+    )
+    cfg = ExecBridgeConfig(
+        transport=transport,
+        presenter=MarkdownPresenter(),
+        final_notify=False,
+    )
+    cleared: list[str] = []
+
+    async def on_resume_failed(tok: ResumeToken) -> None:
+        cleared.append(tok.value)
+
+    with capture_logs() as logs:
+        await handle_message(
+            cfg,
+            runner=runner,
+            incoming=IncomingMessage(channel_id=123, message_id=10, text="hi"),
+            resume_token=ResumeToken(engine=CODEX_ENGINE, value="sid-q"),
+            on_resume_failed=on_resume_failed,
+        )
+
+    # (a) started fresh — resume=None was passed to run(), not "sid-q".
+    assert len(runner.calls) == 1
+    assert runner.calls[0][1] is None
+    # (b) the stored token was cleared so the user's session mapping isn't
+    # silently lost.
+    assert "sid-q" in cleared
+    # (c) structured reason logged for diagnosis.
+    assert any(
+        r.get("event") == "session.resume_diverted_fresh"
+        and r.get("session_id") == "sid-q"
+        and r.get("reason") == "quarantined"
+        for r in logs
+    )
+    # (d) the user still got a real answer from the fresh run.
+    final_text = transport.edit_calls[-1]["message"].text
+    assert "fresh answer" in final_text
+
+
+@pytest.mark.anyio
+async def test_632_healthy_run_clears_quarantine(quarantine_store) -> None:
+    """#632 (W2): a run that completes with real work (num_turns truthy)
+    clears any quarantine marker for the session id it reports, so a reused
+    session id is never stuck fresh-only forever."""
+    quarantine_store.quarantine(
+        CODEX_ENGINE, "sid-healthy", reason="forced_teardown_after_result"
+    )
+
+    transport = FakeTransport()
+    runner = _RecordingRunner(
+        engine=CODEX_ENGINE,
+        resume_value="sid-healthy",
+        answer="a real answer",
+        usage={"num_turns": 2},
+    )
+    cfg = ExecBridgeConfig(
+        transport=transport,
+        presenter=MarkdownPresenter(),
+        final_notify=False,
+    )
+
+    await handle_message(
+        cfg,
+        runner=runner,
+        incoming=IncomingMessage(channel_id=123, message_id=10, text="hi"),
+        resume_token=None,
+    )
+
+    assert quarantine_store.is_quarantined(CODEX_ENGINE, "sid-healthy") is False
+
+
+# ---------------------------------------------------------------------------
 # #593 — stall auto-cancel enforcement (decision must end in teardown)
 # ---------------------------------------------------------------------------
 

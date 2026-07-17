@@ -3060,6 +3060,38 @@ async def handle_message(
         resume=resume_token.value if resume_token else None,
         text=incoming.text,
     )
+
+    # #632 (W2): a session marked quarantined (forced teardown after a
+    # result — see claude.py's post-result subcountdown) may have a
+    # dangling upstream turn and is unsafe to resume. Divert to a fresh
+    # session proactively rather than waiting for another empty-result
+    # anomaly. Runs on every entry, including recursive auto-resend/
+    # auto-continue re-entries — a cheap in-memory dict lookup.
+    if resume_token is not None:
+        from .session_quarantine import get_quarantine_store
+
+        try:
+            _quarantined = get_quarantine_store().is_quarantined(
+                runner.engine, resume_token.value
+            )
+        except Exception:  # noqa: BLE001 — a store failure must never
+            # block message handling.
+            logger.debug("session.quarantine_check_failed", exc_info=True)
+            _quarantined = False
+        if _quarantined:
+            logger.info(
+                "session.resume_diverted_fresh",
+                engine=runner.engine,
+                session_id=resume_token.value,
+                reason="quarantined",
+            )
+            if on_resume_failed is not None:
+                try:
+                    await on_resume_failed(resume_token)
+                except Exception:  # noqa: BLE001
+                    logger.debug("session.clear_failed", exc_info=True)
+            resume_token = None
+
     started_at = clock()
     is_resume_line = runner.is_resume_line
     resume_strip = strip_resume_line or is_resume_line
@@ -3307,6 +3339,27 @@ async def handle_message(
                     "consider itself complete. Resend your message, or "
                     "start fresh with /new."
                 )
+
+        # #632 (W2): a run that completed with real work proves the session
+        # is healthy — clear any forced-teardown quarantine marker for the
+        # session id it reports so a reused session id is never stuck
+        # fresh-only forever. ``num_turns`` must be explicitly truthy: this
+        # naturally excludes the #596 empty_result_anomaly zero-turn case
+        # above, and engines that never report usage at all never clear.
+        if (
+            run_ok is True
+            and not run_outcome.cancelled
+            and (completed.usage or {}).get("num_turns", 0)
+        ):
+            _healthy_sid = completed.resume or run_outcome.resume
+            if _healthy_sid is not None:
+                try:
+                    from .session_quarantine import get_quarantine_store
+
+                    get_quarantine_store().clear(runner.engine, _healthy_sid.value)
+                except Exception:  # noqa: BLE001 — a store failure must
+                    # never break final-message delivery.
+                    logger.debug("session.quarantine_clear_failed", exc_info=True)
 
         status = (
             "error"

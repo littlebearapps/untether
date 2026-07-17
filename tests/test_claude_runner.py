@@ -4269,6 +4269,273 @@ async def test_333_lifecycle_state_transitions_logged(monkeypatch) -> None:
 
 
 # ===========================================================================
+# #632 (W2) — forced-teardown quarantine record + honour on next message
+# ===========================================================================
+
+
+@pytest.mark.anyio
+async def test_632_forced_teardown_after_result_quarantines(
+    monkeypatch, tmp_path
+) -> None:
+    """#632 (W2): a subprocess force-killed AFTER it already emitted a valid
+    result may have a dangling upstream turn — the SIGTERM site must
+    quarantine the session id so the next message never resumes it."""
+    import anyio
+
+    from untether.runner import JsonlStreamState
+    from untether.runners.claude import (
+        _PENDING_ASK_REQUESTS,
+        _REQUEST_TO_SESSION,
+        ClaudeRunner,
+    )
+    from untether.session_quarantine import QuarantineStore, set_quarantine_store
+
+    _REQUEST_TO_SESSION.clear()
+    _PENDING_ASK_REQUESTS.clear()
+
+    store = QuarantineStore(path=tmp_path / "session_quarantine.json")
+    set_quarantine_store(store)
+    try:
+        runner = ClaudeRunner(claude_cmd="claude")
+        runner._subcountdown_poll_interval_s = 0.02
+        runner._subcountdown_limbo_detect_threshold_s = 0.05
+        runner._subcountdown_sigterm_grace_s = 0.1
+        runner._subcountdown_sigterm_grace_poll_s = 0.02
+
+        state = ClaudeStreamState()
+        state.factory.started(ResumeToken(engine="claude", value="sub-sess-q1"))
+        state.result_received_at = time.monotonic() - 0.5
+        stream = JsonlStreamState(expected_session=None)
+        stream.did_emit_completed = True  # the process produced a result
+
+        proc = _FakeProc(pid=62424, returncode=None)
+
+        def _fake_killpg(pgid: int, sig: int) -> None:
+            if sig == signal.SIGTERM:
+                proc.returncode = -15  # clean stop, no SIGKILL follow-up
+
+        monkeypatch.setattr("os.killpg", _fake_killpg)
+        # #590: signal_pid_group snapshots real /proc descendants before
+        # signalling — neutralise it so tests never touch live processes.
+        monkeypatch.setattr(
+            "untether.utils.subprocess.find_descendants", lambda pid: []
+        )
+
+        logger = _RecordingLogger()
+        reader_done = anyio.Event()
+        reader_done.set()
+
+        class FakeStdin:
+            async def aclose(self) -> None:
+                pass
+
+        async with anyio.create_task_group() as tg:
+            tg.start_soon(
+                runner._post_result_idle_watchdog,
+                state,
+                FakeStdin(),
+                reader_done,
+                logger,
+                0.1,
+                proc,
+                stream,
+            )
+            with anyio.move_on_after(3.0):
+                while stream.lifecycle_state != "exited":
+                    await anyio.sleep(0.02)
+            tg.cancel_scope.cancel()
+
+        assert store.is_quarantined("claude", "sub-sess-q1") is True
+        sigterm_records = [
+            kw
+            for lvl, e, kw in logger.records
+            if e == "claude.post_result_idle.sigterm_after_timeout"
+        ]
+        assert sigterm_records, "expected sigterm_after_timeout to fire"
+        assert sigterm_records[0]["quarantined"] is True
+    finally:
+        set_quarantine_store(None)
+        _REQUEST_TO_SESSION.clear()
+        _PENDING_ASK_REQUESTS.clear()
+
+
+@pytest.mark.anyio
+async def test_632_forced_teardown_without_result_does_not_quarantine(
+    monkeypatch, tmp_path
+) -> None:
+    """#632 (W2): a process force-killed BEFORE it ever emitted a result is
+    the watchdog's normal (non-poisoned) kill path — must NOT quarantine."""
+    import anyio
+
+    from untether.runner import JsonlStreamState
+    from untether.runners.claude import (
+        _PENDING_ASK_REQUESTS,
+        _REQUEST_TO_SESSION,
+        ClaudeRunner,
+    )
+    from untether.session_quarantine import QuarantineStore, set_quarantine_store
+
+    _REQUEST_TO_SESSION.clear()
+    _PENDING_ASK_REQUESTS.clear()
+
+    store = QuarantineStore(path=tmp_path / "session_quarantine.json")
+    set_quarantine_store(store)
+    try:
+        runner = ClaudeRunner(claude_cmd="claude")
+        runner._subcountdown_poll_interval_s = 0.02
+        runner._subcountdown_limbo_detect_threshold_s = 0.05
+        runner._subcountdown_sigterm_grace_s = 0.1
+        runner._subcountdown_sigterm_grace_poll_s = 0.02
+
+        state = ClaudeStreamState()
+        state.factory.started(ResumeToken(engine="claude", value="sub-sess-q2"))
+        state.result_received_at = time.monotonic() - 0.5
+        stream = JsonlStreamState(expected_session=None)
+        assert stream.did_emit_completed is False  # no result was ever emitted
+
+        proc = _FakeProc(pid=62425, returncode=None)
+
+        def _fake_killpg(pgid: int, sig: int) -> None:
+            if sig == signal.SIGTERM:
+                proc.returncode = -15
+
+        monkeypatch.setattr("os.killpg", _fake_killpg)
+        monkeypatch.setattr(
+            "untether.utils.subprocess.find_descendants", lambda pid: []
+        )
+
+        logger = _RecordingLogger()
+        reader_done = anyio.Event()
+        reader_done.set()
+
+        class FakeStdin:
+            async def aclose(self) -> None:
+                pass
+
+        async with anyio.create_task_group() as tg:
+            tg.start_soon(
+                runner._post_result_idle_watchdog,
+                state,
+                FakeStdin(),
+                reader_done,
+                logger,
+                0.1,
+                proc,
+                stream,
+            )
+            with anyio.move_on_after(3.0):
+                while stream.lifecycle_state != "exited":
+                    await anyio.sleep(0.02)
+            tg.cancel_scope.cancel()
+
+        assert store.is_quarantined("claude", "sub-sess-q2") is False
+        sigterm_records = [
+            kw
+            for lvl, e, kw in logger.records
+            if e == "claude.post_result_idle.sigterm_after_timeout"
+        ]
+        assert sigterm_records, "expected sigterm_after_timeout to fire"
+        assert sigterm_records[0]["quarantined"] is False
+    finally:
+        set_quarantine_store(None)
+        _REQUEST_TO_SESSION.clear()
+        _PENDING_ASK_REQUESTS.clear()
+
+
+@pytest.mark.anyio
+async def test_632_forced_teardown_flag_off_does_not_quarantine(
+    monkeypatch, tmp_path
+) -> None:
+    """#632 (W2): `quarantine_on_forced_teardown = False` disables the
+    marker even when the process already produced a result."""
+    import anyio
+
+    from untether.runner import JsonlStreamState
+    from untether.runners.claude import (
+        _PENDING_ASK_REQUESTS,
+        _REQUEST_TO_SESSION,
+        ClaudeRunner,
+    )
+    from untether.session_quarantine import QuarantineStore, set_quarantine_store
+    from untether.settings import AutoContinueSettings
+
+    class _Fake:
+        auto_continue = AutoContinueSettings(quarantine_on_forced_teardown=False)
+
+    monkeypatch.setattr(
+        claude_runner,
+        "load_settings_if_exists",
+        lambda: (_Fake(), tmp_path / "untether.toml"),
+    )
+
+    _REQUEST_TO_SESSION.clear()
+    _PENDING_ASK_REQUESTS.clear()
+
+    store = QuarantineStore(path=tmp_path / "session_quarantine.json")
+    set_quarantine_store(store)
+    try:
+        runner = ClaudeRunner(claude_cmd="claude")
+        runner._subcountdown_poll_interval_s = 0.02
+        runner._subcountdown_limbo_detect_threshold_s = 0.05
+        runner._subcountdown_sigterm_grace_s = 0.1
+        runner._subcountdown_sigterm_grace_poll_s = 0.02
+
+        state = ClaudeStreamState()
+        state.factory.started(ResumeToken(engine="claude", value="sub-sess-q3"))
+        state.result_received_at = time.monotonic() - 0.5
+        stream = JsonlStreamState(expected_session=None)
+        stream.did_emit_completed = True  # the process produced a result
+
+        proc = _FakeProc(pid=62426, returncode=None)
+
+        def _fake_killpg(pgid: int, sig: int) -> None:
+            if sig == signal.SIGTERM:
+                proc.returncode = -15
+
+        monkeypatch.setattr("os.killpg", _fake_killpg)
+        monkeypatch.setattr(
+            "untether.utils.subprocess.find_descendants", lambda pid: []
+        )
+
+        logger = _RecordingLogger()
+        reader_done = anyio.Event()
+        reader_done.set()
+
+        class FakeStdin:
+            async def aclose(self) -> None:
+                pass
+
+        async with anyio.create_task_group() as tg:
+            tg.start_soon(
+                runner._post_result_idle_watchdog,
+                state,
+                FakeStdin(),
+                reader_done,
+                logger,
+                0.1,
+                proc,
+                stream,
+            )
+            with anyio.move_on_after(3.0):
+                while stream.lifecycle_state != "exited":
+                    await anyio.sleep(0.02)
+            tg.cancel_scope.cancel()
+
+        assert store.is_quarantined("claude", "sub-sess-q3") is False
+        sigterm_records = [
+            kw
+            for lvl, e, kw in logger.records
+            if e == "claude.post_result_idle.sigterm_after_timeout"
+        ]
+        assert sigterm_records, "expected sigterm_after_timeout to fire"
+        assert sigterm_records[0]["quarantined"] is False
+    finally:
+        set_quarantine_store(None)
+        _REQUEST_TO_SESSION.clear()
+        _PENDING_ASK_REQUESTS.clear()
+
+
+# ===========================================================================
 # #591 — post-result limbo grace (short-circuit the subcountdown when the
 # session is fully quiescent)
 # ===========================================================================
