@@ -584,7 +584,7 @@ def _register_background_handle(
         # (see ClaudeStreamState.last_bg_bash_launched_at docstring). Used by
         # the post-result idle watchdog tick log for observability only.
         state.last_bg_bash_launched_at = time.monotonic()
-    elif tool_name == "Agent" and bool(raw_input.get("run_in_background")):
+    elif tool_name in ("Agent", "Task") and bool(raw_input.get("run_in_background")):
         state.background_observed = True
         state.live_bg_agents.add(tool_id)
     elif tool_name == "ScheduleWakeup":

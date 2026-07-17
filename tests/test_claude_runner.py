@@ -504,6 +504,38 @@ def test_agent_bg_tracked_only_when_run_in_background() -> None:
     assert "toolu_A2" not in state2.live_bg_agents
 
 
+def test_374_task_tool_registers_background_handle() -> None:
+    """#374: Task with run_in_background=True should register in live_bg_agents
+    and set background_observed flag, just like Agent."""
+    state = ClaudeStreamState()
+    translate_claude_event(
+        _decode_event(
+            _make_tool_use_event(
+                "Task", "toolu_T1", {"task": "...", "run_in_background": True}
+            )
+        ),
+        title="claude",
+        state=state,
+        factory=state.factory,
+    )
+    assert "toolu_T1" in state.live_bg_agents
+    assert state.background_observed is True
+
+
+def test_374_task_tool_foreground_not_registered() -> None:
+    """#374: Task without run_in_background should NOT register in live_bg_agents
+    and should NOT set background_observed flag."""
+    state = ClaudeStreamState()
+    translate_claude_event(
+        _decode_event(_make_tool_use_event("Task", "toolu_T2", {"task": "..."})),
+        title="claude",
+        state=state,
+        factory=state.factory,
+    )
+    assert "toolu_T2" not in state.live_bg_agents
+    assert state.background_observed is False
+
+
 def test_schedule_wakeup_tracked_with_deadline() -> None:
     state = ClaudeStreamState()
     translate_claude_event(
