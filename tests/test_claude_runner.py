@@ -2378,6 +2378,48 @@ def test_extract_error_with_result_text() -> None:
 
 
 # ===========================================================================
+# #631 (Fix 1) — _usage_payload carries subtype
+# ===========================================================================
+
+
+def test_usage_payload_includes_subtype() -> None:
+    """#631: the usage dict must carry the result message's ``subtype`` so
+    the ``runner.empty_result`` diagnostic's ``raw_subtype`` field is
+    populated from a REAL Claude Code result instead of always being
+    ``None`` — previously ``_usage_payload`` never copied ``subtype`` into
+    the returned dict, so the field was structurally dead."""
+    from untether.runners.claude import _usage_payload
+
+    event = claude_schema.StreamResultMessage(
+        subtype="success",
+        duration_ms=100,
+        duration_api_ms=50,
+        is_error=False,
+        num_turns=0,
+        session_id="sess123456789012",
+    )
+    usage = _usage_payload(event)
+    assert usage["subtype"] == "success"
+
+
+def test_usage_payload_subtype_error_during_execution() -> None:
+    """A different subtype value round-trips too — not hardcoded to
+    "success"."""
+    from untether.runners.claude import _usage_payload
+
+    event = claude_schema.StreamResultMessage(
+        subtype="error_during_execution",
+        duration_ms=100,
+        duration_api_ms=50,
+        is_error=True,
+        num_turns=2,
+        session_id="sess123456789012",
+    )
+    usage = _usage_payload(event)
+    assert usage["subtype"] == "error_during_execution"
+
+
+# ===========================================================================
 # #438 — Stream idle timeout Type-A vs Type-B classification
 # ===========================================================================
 

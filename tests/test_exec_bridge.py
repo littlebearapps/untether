@@ -6727,7 +6727,19 @@ async def test_631_empty_result_log_carries_diagnostics(quarantine_store) -> Non
     context to diagnose WHY, not just THAT, the anomaly happened.
     MockRunner-driven bridge tests have no real stream (edits.stream is
     None), so the three stream-derived fields fall back to their defensive
-    defaults (False/False/None) rather than raising or being omitted."""
+    defaults (False/False/None) rather than raising or being omitted.
+
+    #631 (Fix 1): ``sigterm_sent``/``background_observed`` were renamed to
+    ``sigterm_sent_this_run``/``background_observed_this_run`` — they only
+    ever describe the CURRENT (empty) run's stream, never the prior
+    (poisoned) run where the interesting facts actually live, and the old
+    names read as if they might. ``poison_was_quarantined`` is new: whether
+    the resumed token was ALREADY known-quarantined at the moment this
+    anomaly fired. It's False here because a token that's already
+    quarantined never reaches this point — the W2 entry-divert check
+    (earlier in ``handle_message``) redirects it to a fresh session before
+    any run happens; see test_631_diag_poison_was_quarantined_true for the
+    race window where it's True."""
     from structlog.testing import capture_logs
 
     transport = FakeTransport()
@@ -6755,19 +6767,74 @@ async def test_631_empty_result_log_carries_diagnostics(quarantine_store) -> Non
         "raw_subtype",
         "is_error",
         "proc_returncode",
-        "sigterm_sent",
-        "background_observed",
+        "sigterm_sent_this_run",
+        "background_observed_this_run",
+        "poison_was_quarantined",
         "resend_eligible_reason",
     ):
         assert key in record, f"missing {key!r} in runner.empty_result record"
     assert record["raw_subtype"] is None
     assert record["is_error"] is False
     assert record["proc_returncode"] is None
-    assert record["sigterm_sent"] is False
-    assert record["background_observed"] is False
+    assert record["sigterm_sent_this_run"] is False
+    assert record["background_observed_this_run"] is False
+    assert record["poison_was_quarantined"] is False
     # Default settings: resend_empty_resume on, empty_resume_fresh on, a
     # resume token present, non-blank text, first attempt → recovery armed.
     assert record["resend_eligible_reason"] == "fresh"
+
+
+@pytest.mark.anyio
+async def test_631_diag_poison_was_quarantined_true(
+    quarantine_store, monkeypatch
+) -> None:
+    """#631 (Fix 1): ``poison_was_quarantined`` reflects a TOCTOU race — the
+    W2 entry-divert check (top of ``handle_message``) sees the session as
+    NOT yet quarantined and proceeds to resume it, but by the time the
+    empty-result anomaly is diagnosed the store reports it as quarantined
+    (e.g. a concurrent handle_message call for the same session id
+    quarantined it mid-run). This is exactly the "persisted prior-run
+    memory" the field exists to surface — simulate it by making the
+    store's ``is_quarantined`` answer False on the entry check and True on
+    the later diagnostic check."""
+    from structlog.testing import capture_logs
+
+    calls = {"n": 0}
+    real_is_quarantined = quarantine_store.is_quarantined
+
+    def _flaky_is_quarantined(engine: str, session_id: str) -> bool:
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return real_is_quarantined(engine, session_id)
+        return True
+
+    monkeypatch.setattr(quarantine_store, "is_quarantined", _flaky_is_quarantined)
+
+    transport = FakeTransport()
+    runner = _EmptyThenAnswerRunner(resume_value="sess-race")
+    cfg = ExecBridgeConfig(
+        transport=transport,
+        presenter=MarkdownPresenter(),
+        final_notify=False,
+    )
+
+    with capture_logs() as logs:
+        await handle_message(
+            cfg,
+            runner=runner,
+            incoming=IncomingMessage(
+                channel_id=123, message_id=10, text="please continue"
+            ),
+            resume_token=ResumeToken(engine=CODEX_ENGINE, value="sess-race"),
+        )
+
+    records = [r for r in logs if r.get("event") == "runner.empty_result"]
+    assert len(records) == 1
+    assert records[0]["poison_was_quarantined"] is True
+    # The entry-divert check ran first (call 1, real/False) — the run still
+    # went ahead against the resumed session, proving the race window is
+    # real and not just a stub artefact.
+    assert calls["n"] >= 2
 
 
 @pytest.mark.anyio
@@ -6868,6 +6935,54 @@ async def test_631_resend_reason_counter_exhausted(quarantine_store) -> None:
     assert len(records) == 2
     assert records[0]["resend_eligible_reason"] == "fresh"
     assert records[1]["resend_eligible_reason"] == "counter_exhausted"
+
+
+@pytest.mark.anyio
+async def test_631_resend_reason_blank_input(quarantine_store) -> None:
+    """#631 (W5-diag): a resumed run's empty-0-turn anomaly fires against
+    whitespace-only incoming text → resend_eligible_reason == "blank_input",
+    NOT "fresh" — auto-resending blank text would just reproduce the same
+    empty result, so this reason must take priority even though a resume
+    token IS present and the retry counter has not been exhausted (both of
+    which would otherwise route to "fresh").
+
+    Reachability note: ``handle_message`` performs no text-blank filtering
+    itself — that would be a Telegram-loop-layer concern upstream of this
+    function (e.g. a plain empty/whitespace user message). In practice
+    this branch is most plausibly reached via a cron/webhook prompt that
+    resolves to blank text (``triggers/fetch.py`` builds prompts from
+    fetched data with no non-blank guarantee) or a voice transcription of
+    silence, rather than typed chat input. This test drives the bridge
+    boundary directly, exactly like every other resend_eligible_reason
+    test in this section (disabled/no_token/counter_exhausted) — none of
+    which simulate full Telegram routing either."""
+    from structlog.testing import capture_logs
+
+    transport = FakeTransport()
+    runner = ScriptRunner(
+        [Return(answer="", usage={"num_turns": 0, "duration_api_ms": 0})],
+        engine=CODEX_ENGINE,
+        resume_value="sess-diag-blank",
+    )
+    cfg = ExecBridgeConfig(
+        transport=transport,
+        presenter=MarkdownPresenter(),
+        final_notify=False,
+    )
+
+    with capture_logs() as logs:
+        await handle_message(
+            cfg,
+            runner=runner,
+            incoming=IncomingMessage(channel_id=123, message_id=10, text="   "),
+            resume_token=ResumeToken(engine=CODEX_ENGINE, value="sess-diag-blank"),
+        )
+
+    records = [r for r in logs if r.get("event") == "runner.empty_result"]
+    assert len(records) == 1
+    assert records[0]["resend_eligible_reason"] == "blank_input"
+    # No auto-resend fired — resending blank text would just loop.
+    assert len(runner.calls) == 1
 
 
 def test_auto_continue_settings_new_flags_default_on() -> None:
@@ -7021,9 +7136,14 @@ async def test_631_handle_message_uses_injected_quarantine_store(
     ``quarantine_store`` kwarg without ever falling back to (or lazily
     materialising) the process-wide singleton.
 
-    The singleton is left unset (``set_quarantine_store(None)``) for the
-    duration of this test. As a belt-and-braces guard against a wiring
-    bug that silently falls back to ``get_quarantine_store()``,
+    The singleton is explicitly reset to unset (``set_quarantine_store
+    (None)``) immediately before the call under test, overriding whatever
+    the autouse ``_isolated_quarantine_store`` fixture (tests/conftest.py)
+    injected for this test — that fixture exists to stop *unfixtured*
+    tests from ever touching the real on-disk quarantine file, but this
+    test needs the singleton in its unset (lazy-load-on-first-use) state
+    to prove the specific claim below. As a belt-and-braces guard against
+    a wiring bug that silently falls back to ``get_quarantine_store()``,
     ``UNTETHER_CONFIG_PATH`` is also monkeypatched to a tmp directory so
     even a fallback could never touch the real on-disk quarantine file —
     and we assert no file was written at that fallback-derived path,

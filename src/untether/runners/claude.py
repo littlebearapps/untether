@@ -1353,6 +1353,7 @@ def _usage_payload(event: claude_schema.StreamResultMessage) -> dict[str, Any]:
         "duration_ms",
         "duration_api_ms",
         "num_turns",
+        "subtype",
     ):
         value = getattr(event, key, None)
         if value is not None:

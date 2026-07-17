@@ -3357,6 +3357,26 @@ async def handle_message(
                     else "legacy_same_session"
                 )
             _es = edits.stream
+            # #631 (Fix 1): whether the resumed token was ALREADY known-
+            # quarantined at the moment this anomaly fired. Under normal
+            # control flow this is always False — the W2 entry-divert check
+            # earlier in handle_message redirects an already-quarantined
+            # resume_token to a fresh session before any run happens — so a
+            # True here is evidence of a TOCTOU race (e.g. a concurrent
+            # handle_message call for the same session id quarantined it
+            # mid-run) and gives the fleet-correlation query persisted
+            # prior-run memory. Computed defensively: _qstore may be None if
+            # resolution failed earlier, and the store call itself must
+            # never break diagnostic logging.
+            try:
+                _poison_was_quarantined = (
+                    _qstore.is_quarantined(runner.engine, resume_token.value)
+                    if (resume_token is not None and _qstore is not None)
+                    else False
+                )
+            except Exception:  # noqa: BLE001
+                logger.debug("session.quarantine_check_failed", exc_info=True)
+                _poison_was_quarantined = None
             logger.warning(
                 "runner.empty_result",
                 engine=runner.engine,
@@ -3367,8 +3387,14 @@ async def handle_message(
                 raw_subtype=(completed.usage or {}).get("subtype"),
                 is_error=run_ok is False,
                 proc_returncode=_es.proc_returncode if _es else None,
-                sigterm_sent=bool(_es and _es.sigterm_sent),
-                background_observed=bool(_es and _es.background_observed),
+                # #631 (Fix 1): renamed from sigterm_sent/background_observed
+                # — these fields only ever describe the CURRENT (empty) run's
+                # stream, never the prior (poisoned) run where the
+                # interesting facts actually live; the old names read as if
+                # they might cover both.
+                sigterm_sent_this_run=bool(_es and _es.sigterm_sent),
+                background_observed_this_run=bool(_es and _es.background_observed),
+                poison_was_quarantined=_poison_was_quarantined,
                 resend_eligible_reason=_resend_reason,
             )
             # #596: auto-resend the original prompt once (same session)
@@ -3761,11 +3787,16 @@ async def handle_message(
                 except Exception:  # noqa: BLE001
                     logger.debug("session.clear_failed", exc_info=True)
             if _qstore is not None:
-                _qstore.quarantine(
-                    runner.engine,
-                    _poison.value,
-                    reason="empty_zero_turn_resume",
-                )
+                try:
+                    _qstore.quarantine(
+                        runner.engine,
+                        _poison.value,
+                        reason="empty_zero_turn_resume",
+                    )
+                except Exception:  # noqa: BLE001 — a store failure must
+                    # never crash message handling; the other quarantine
+                    # call sites in this function already tolerate this.
+                    logger.debug("session.quarantine_failed", exc_info=True)
             logger.warning(
                 "session.auto_resend_fresh",
                 old_session_id=_poison.value,
