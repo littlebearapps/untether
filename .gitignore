@@ -22,3 +22,11 @@ docs/research/
 .claude/plans/
 .untether-outbox/
 launch/
+
+# Local test-result write-ups that quote raw log lines. These are working
+# artefacts, not versioned docs — and because they paste journalctl output
+# verbatim they can contain credentials. This one held a (since-rotated) Groq
+# API key and was caught by GitHub push protection on 2026-07-18.
+# NOTE: docs/tests/ and docs/audits/ are deliberately NOT ignored wholesale —
+# 5 files in them ARE tracked (v0.35.2 results, integration test plan, audits).
+docs/tests/results/v0.35.3-followup-test-results-2026-05-05.md
