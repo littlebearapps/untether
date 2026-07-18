@@ -365,6 +365,16 @@ class AutoContinueSettings(BaseModel):
     # resume — quarantine them so resuming on the next message spins up a new
     # session rather than re-entering the poisoned state.
     quarantine_on_forced_teardown: bool = True
+    # #633 (W4): never resume a session whose previous subprocess is still
+    # alive. rc7's quarantine-and-fresh recovers AFTER a session is poisoned;
+    # this prevents the poisoning. Before spawning a `--resume`, wait (bounded)
+    # for the prior owner to exit; if it does not, quarantine and start fresh
+    # rather than racing it. Set False for exact pre-rc8 behaviour.
+    serialize_session_owner: bool = True
+    # Upper bound on that wait. Condition-based, so it resolves the instant the
+    # prior subprocess exits — this is only the give-up point. Kept comfortably
+    # above the post-result SIGTERM grace so a normal teardown wins the race.
+    session_handoff_timeout_s: float = Field(default=30.0, ge=0.0, le=300.0)
 
 
 class WatchdogSettings(BaseModel):

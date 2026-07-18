@@ -7690,3 +7690,236 @@ async def test_640_claude_runner_records_proc_returncode() -> None:
         "_is_signal_death() always sees None and auto-continue can resume a "
         "SIGTERM'd (poisoned) session. See #640."
     )
+
+
+# ---------------------------------------------------------------------------
+# #633 (W4) — bridge-level serialisation gate.
+# ---------------------------------------------------------------------------
+
+CLAUDE_ENGINE = "claude"
+
+
+@pytest.mark.anyio
+async def test_633_handoff_timeout_quarantines_and_starts_fresh(
+    quarantine_store, monkeypatch
+) -> None:
+    """A prior subprocess that will not die must divert the follow-up to a
+    FRESH session and quarantine the old one — resuming it is the documented
+    path into the poisoned 0-turn state."""
+    from structlog.testing import capture_logs
+
+    from untether.runners import claude as claude_mod
+
+    async def _stuck(session_id, timeout_s, *, poll_s=0.25):
+        return "timed_out"
+
+    monkeypatch.setattr(claude_mod, "wait_for_session_handoff", _stuck)
+
+    transport = FakeTransport()
+    runner = _RecordingRunner(
+        engine=CLAUDE_ENGINE, resume_value="sid-fresh", answer="fresh answer"
+    )
+    cfg = ExecBridgeConfig(
+        transport=transport, presenter=MarkdownPresenter(), final_notify=False
+    )
+    cleared: list[str] = []
+
+    async def on_resume_failed(tok: ResumeToken) -> None:
+        cleared.append(tok.value)
+
+    with capture_logs() as logs:
+        await handle_message(
+            cfg,
+            runner=runner,
+            incoming=IncomingMessage(channel_id=123, message_id=10, text="hi"),
+            resume_token=ResumeToken(engine=CLAUDE_ENGINE, value="sid-live"),
+            on_resume_failed=on_resume_failed,
+        )
+
+    # (a) went fresh rather than racing the live owner
+    assert len(runner.calls) == 1
+    assert runner.calls[0][1] is None
+    # (b) NOT quarantined — a busy session is not a known-corrupt one, and a
+    # quarantine marker persists 7 days and permanently diverts the session.
+    # Clearing the token is sufficient; if that process is later force-killed
+    # after a result, the W2 path quarantines it on real evidence.
+    assert quarantine_store.is_quarantined(CLAUDE_ENGINE, "sid-live") is False
+    # (c) stored token cleared, structured reason logged
+    assert "sid-live" in cleared
+    assert any(
+        r.get("event") == "session.resume_diverted_fresh"
+        and r.get("reason") == "handoff_timeout"
+        for r in logs
+    )
+    # (d) the user still gets a real answer
+    assert "fresh answer" in transport.edit_calls[-1]["message"].text
+
+
+@pytest.mark.anyio
+async def test_633_handoff_exit_resumes_normally(quarantine_store, monkeypatch) -> None:
+    """If the prior owner exits within the window we resume as usual — W4 must
+    not turn a normal follow-up into a fresh session."""
+    from untether.runners import claude as claude_mod
+
+    async def _exits(session_id, timeout_s, *, poll_s=0.25):
+        return "exited"
+
+    monkeypatch.setattr(claude_mod, "wait_for_session_handoff", _exits)
+
+    transport = FakeTransport()
+    runner = _RecordingRunner(
+        engine=CLAUDE_ENGINE, resume_value="sid-a", answer="resumed answer"
+    )
+    cfg = ExecBridgeConfig(
+        transport=transport, presenter=MarkdownPresenter(), final_notify=False
+    )
+
+    await handle_message(
+        cfg,
+        runner=runner,
+        incoming=IncomingMessage(channel_id=123, message_id=11, text="hi"),
+        resume_token=ResumeToken(engine=CLAUDE_ENGINE, value="sid-a"),
+    )
+
+    assert len(runner.calls) == 1
+    assert runner.calls[0][1] is not None
+    assert runner.calls[0][1].value == "sid-a"
+    assert quarantine_store.is_quarantined(CLAUDE_ENGINE, "sid-a") is False
+
+
+@pytest.mark.anyio
+async def test_633_non_claude_engines_skip_the_gate(
+    quarantine_store, monkeypatch
+) -> None:
+    """Only Claude has the post-result limbo behaviour; other engines must not
+    pay the handoff check at all."""
+    from untether.runners import claude as claude_mod
+
+    called = False
+
+    async def _tracker(session_id, timeout_s, *, poll_s=0.25):
+        nonlocal called
+        called = True
+        return "timed_out"
+
+    monkeypatch.setattr(claude_mod, "wait_for_session_handoff", _tracker)
+
+    transport = FakeTransport()
+    runner = _RecordingRunner(
+        engine=CODEX_ENGINE, resume_value="sid-c", answer="codex answer"
+    )
+    cfg = ExecBridgeConfig(
+        transport=transport, presenter=MarkdownPresenter(), final_notify=False
+    )
+
+    await handle_message(
+        cfg,
+        runner=runner,
+        incoming=IncomingMessage(channel_id=123, message_id=12, text="hi"),
+        resume_token=ResumeToken(engine=CODEX_ENGINE, value="sid-c"),
+    )
+
+    assert called is False
+    assert runner.calls[0][1] is not None
+
+
+@pytest.mark.anyio
+async def test_633_flag_off_restores_pre_rc8_behaviour(
+    quarantine_store, monkeypatch
+) -> None:
+    """Rollback path: serialize_session_owner=False must skip the gate entirely
+    even when a live owner would otherwise time out."""
+    import untether.runner_bridge as rb
+    from untether.runners import claude as claude_mod
+    from untether.settings import AutoContinueSettings
+
+    called = False
+
+    async def _tracker(session_id, timeout_s, *, poll_s=0.25):
+        nonlocal called
+        called = True
+        return "timed_out"
+
+    monkeypatch.setattr(claude_mod, "wait_for_session_handoff", _tracker)
+    monkeypatch.setattr(
+        rb,
+        "_load_auto_continue_settings",
+        lambda: AutoContinueSettings(serialize_session_owner=False),
+    )
+
+    transport = FakeTransport()
+    runner = _RecordingRunner(
+        engine=CLAUDE_ENGINE, resume_value="sid-x", answer="answer"
+    )
+    cfg = ExecBridgeConfig(
+        transport=transport, presenter=MarkdownPresenter(), final_notify=False
+    )
+
+    await handle_message(
+        cfg,
+        runner=runner,
+        incoming=IncomingMessage(channel_id=123, message_id=13, text="hi"),
+        resume_token=ResumeToken(engine=CLAUDE_ENGINE, value="sid-x"),
+    )
+
+    assert called is False
+    assert runner.calls[0][1] is not None
+    assert runner.calls[0][1].value == "sid-x"
+
+
+@pytest.mark.anyio
+async def test_633_probe_failure_fails_closed(quarantine_store, monkeypatch) -> None:
+    """If the ownership check itself breaks we must NOT resume — that would
+    silently reinstate the very race the gate exists to prevent. Fail closed
+    (fresh session) and log at WARNING so the degradation is visible."""
+    from structlog.testing import capture_logs
+
+    from untether.runners import claude as claude_mod
+
+    async def _explode(session_id, timeout_s, *, poll_s=0.25):
+        raise RuntimeError("registry unavailable")
+
+    monkeypatch.setattr(claude_mod, "wait_for_session_handoff", _explode)
+
+    transport = FakeTransport()
+    runner = _RecordingRunner(
+        engine=CLAUDE_ENGINE, resume_value="sid-fresh", answer="fresh answer"
+    )
+    cfg = ExecBridgeConfig(
+        transport=transport, presenter=MarkdownPresenter(), final_notify=False
+    )
+
+    with capture_logs() as logs:
+        await handle_message(
+            cfg,
+            runner=runner,
+            incoming=IncomingMessage(channel_id=123, message_id=14, text="hi"),
+            resume_token=ResumeToken(engine=CLAUDE_ENGINE, value="sid-broken"),
+        )
+
+    assert runner.calls[0][1] is None  # went fresh, did not resume
+    assert any(
+        r.get("event") == "session.handoff_check_failed"
+        and r.get("log_level") == "warning"
+        for r in logs
+    ), "a broken ownership probe must be visible, not silently degrade"
+
+
+@pytest.mark.anyio
+async def test_633_gate_does_not_stall_a_just_exited_session() -> None:
+    """Regression guard for recursive re-entry (auto-continue / auto-resend):
+    handle_message re-enters with a resume token while the just-finished
+    subprocess is tearing down. Because run_impl's finally deregisters the
+    session before the run generator is exhausted, the gate must return "free"
+    immediately rather than burning the full handoff budget on every
+    auto-continue."""
+    import time as _time
+
+    from untether.runners.claude import wait_for_session_handoff
+
+    t0 = _time.monotonic()
+    outcome = await wait_for_session_handoff("sid-already-gone", 30.0)
+    elapsed = _time.monotonic() - t0
+
+    assert outcome == "free"
+    assert elapsed < 0.5, f"gate stalled {elapsed:.2f}s on a non-live session"

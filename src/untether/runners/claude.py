@@ -225,6 +225,54 @@ def is_session_alive(session_id: str) -> bool:
     return session_id in _SESSION_STDIN
 
 
+SESSION_HANDOFF_POLL_S: float = 0.25
+
+
+async def wait_for_session_handoff(
+    session_id: str,
+    timeout_s: float,
+    *,
+    poll_s: float = SESSION_HANDOFF_POLL_S,
+) -> str:
+    """Wait for any live subprocess owning ``session_id`` to exit.
+
+    Returns ``"free"`` immediately if no subprocess owns the session,
+    ``"exited"`` if one did and it exited within ``timeout_s``, or
+    ``"timed_out"`` if it was still alive when the budget elapsed.
+
+    #633 (W4) — one-owner-per-session serialisation. A follow-up message can
+    otherwise spawn ``--resume <sid>`` while the previous subprocess for that
+    same session is still alive in post-result limbo (the reproductions show a
+    resume 6 s after the prior process was SIGTERM'd). Two owners of one
+    session id is exactly what corrupts the upstream turn/queue state and
+    produces the 0-turn empty resume that rc7 could only recover from after
+    the fact.
+
+    This is condition-based, not a fixed sleep: it resolves the instant the
+    prior owner deregisters, so the common case (already exited) costs one
+    dict lookup and the contended case costs only as long as the handoff
+    actually takes. The wait is always bounded — on ``"timed_out"`` the caller
+    quarantines the session and starts fresh rather than racing the resume.
+
+    Liveness is read from ``_SESSION_STDIN`` via :func:`is_session_alive`,
+    which ``run_impl``'s finally block clears. Note the runner's own
+    ``session_locks`` cannot serve this purpose: it is a
+    ``WeakValueDictionary``, so entries disappear as soon as nothing holds a
+    reference to the semaphore.
+    """
+    if not is_session_alive(session_id):
+        return "free"
+    deadline = time.monotonic() + max(0.0, timeout_s)
+    while time.monotonic() < deadline:
+        await anyio.sleep(poll_s)
+        if not is_session_alive(session_id):
+            return "exited"
+    # Final probe: the loop can overshoot the deadline by up to ``poll_s``, and
+    # an owner that exited during that last sleep should be reported as
+    # "exited" rather than being penalised for our polling granularity.
+    return "exited" if not is_session_alive(session_id) else "timed_out"
+
+
 def pending_control_requests_for_session(session_id: str | None) -> int:
     """Return how many control requests for ``session_id`` are still awaiting
     a response (approval buttons or AskUserQuestion).

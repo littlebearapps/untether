@@ -361,7 +361,9 @@ State is persisted to `active_loops.json` (sibling of your `untether.toml`) so l
 
 Auto-continue detects when Claude Code exits after receiving tool results without processing them (upstream bugs [#34142](https://github.com/anthropics/claude-code/issues/34142), [#30333](https://github.com/anthropics/claude-code/issues/30333)) and automatically resumes the session. Detection is based on a protocol invariant: normal sessions always end with `last_event_type=result`, while premature exits show `last_event_type=user`.
 
-Auto-continue is suppressed on signal deaths (rc=143/SIGTERM, rc=137/SIGKILL) to prevent death spirals under memory pressure.
+Auto-continue only fires on a clean exit (`rc=0`). Signal deaths (rc=143/SIGTERM, rc=137/SIGKILL) and ordinary failures are excluded, to prevent death spirals under memory pressure ([#640](https://github.com/littlebearapps/untether/issues/640)).
+
+This section also carries the empty-resume recovery and session-ownership knobs, since they mitigate the same upstream turn-state family.
 
 === "toml"
 
@@ -369,12 +371,26 @@ Auto-continue is suppressed on signal deaths (rc=143/SIGTERM, rc=137/SIGKILL) to
     [auto_continue]
     enabled = true
     max_retries = 1
+    resend_empty_resume = true
+    empty_resume_fresh = true
+    quarantine_on_forced_teardown = true
+    serialize_session_owner = true
+    session_handoff_timeout_s = 30.0
     ```
 
 | Key | Type | Default | Notes |
 |-----|------|---------|-------|
 | `enabled` | bool | `true` | Enable automatic session continuation for Claude Code. |
-| `max_retries` | int | `1` | Maximum consecutive auto-continue attempts per run (1–5). |
+| `max_retries` | int | `1` | Maximum consecutive auto-continue attempts per run (0–3). |
+| `resend_empty_resume` | bool | `true` | ([#596](https://github.com/littlebearapps/untether/issues/596)) Auto-resend the original prompt once when a resume returns an empty 0-turn / $0 result, instead of asking the user to resend. Single-shot. |
+| `empty_resume_fresh` | bool | `true` | ([#631](https://github.com/littlebearapps/untether/issues/631) W1) Make that retry a **fresh** session rather than the same one — the original session is poisoned, so resending into it can no-op again. |
+| `quarantine_on_forced_teardown` | bool | `true` | ([#632](https://github.com/littlebearapps/untether/issues/632) W2) Mark sessions force-killed after a result as unsafe to resume, so the *next* message diverts fresh before any empty result is seen. |
+| `serialize_session_owner` | bool | `true` | ([#633](https://github.com/littlebearapps/untether/issues/633) W4) Never resume a session whose previous subprocess is still alive. Before spawning `--resume`, wait (bounded) for the prior owner to exit; if it will not, quarantine and start fresh rather than racing it. Two concurrent owners of one session id is what leaves the upstream turn dangling and produces the 0-turn empty resume. Set `false` for exact pre-0.35.4rc8 behaviour. Claude only. |
+| `session_handoff_timeout_s` | float | `30.0` | Upper bound on that wait (0–300). Condition-based, so it resolves the instant the prior subprocess exits — this is only the give-up point. Keep comfortably above the post-result SIGTERM grace so a normal teardown wins the race. |
+
+!!! tip "Layered defence"
+
+    `serialize_session_owner` is *proactive* (stop the session being poisoned); `quarantine_on_forced_teardown` and `empty_resume_fresh` are *reactive* (recover once it has been). Leave all three on unless you are bisecting a regression.
 
 ### `[security]`
 
