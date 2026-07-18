@@ -116,6 +116,32 @@ Example (bare):
 **Untether handling**: Decoded by `StreamRateLimitMessage` schema, silently skipped in
 `translate_claude_event` (no Untether events emitted).
 
+### `tool_progress`
+
+Heartbeat emitted periodically while a long-running tool is in flight (verified on CLI
+2.1.214 by running a Bash command longer than ~30 s). Purely informational — it carries no
+result data and the tool's real `tool_result` still arrives separately.
+
+Fields (all optional in Untether's schema):
+- `type`: `"tool_progress"`
+- `tool_use_id`: the heartbeat's own id, of the form `<parent_tool_use_id>-heartbeat-<n>`
+- `tool_name`: the in-flight tool, e.g. `"Bash"`
+- `parent_tool_use_id`: the `tool_use` this heartbeat belongs to
+- `elapsed_time_seconds`: seconds since the tool started
+- `heartbeat`: `true`
+- `session_id`, `uuid`
+
+Example:
+```json
+{"type":"tool_progress","tool_use_id":"toolu_011cbTyUrSBE4D28tMCVqRSt-heartbeat-0","tool_name":"Bash","parent_tool_use_id":"toolu_011cbTyUrSBE4D28tMCVqRSt","elapsed_time_seconds":30,"heartbeat":true,"session_id":"8e8245e8-952c-4b70-9c6f-4c1cb4d4a687","uuid":"a9786562-4e78-418e-b48a-b14e57a1076d"}
+```
+
+**Untether handling**: Decoded by `StreamToolProgressMessage` schema, silently skipped in
+`translate_claude_event` (no Untether events emitted). Untether renders its own elapsed-time
+tail on long-running actions from its own clock (#481), so the upstream heartbeat is
+redundant for progress rendering — the schema entry exists so the line decodes instead of
+being dropped with a `jsonl.msgspec.invalid` warning ([#637](https://github.com/littlebearapps/untether/issues/637)).
+
 ## Message object (`message` field)
 
 Fields:

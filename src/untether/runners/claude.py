@@ -225,6 +225,39 @@ def is_session_alive(session_id: str) -> bool:
     return session_id in _SESSION_STDIN
 
 
+def pending_control_requests_for_session(session_id: str | None) -> int:
+    """Return how many control requests for ``session_id`` are still awaiting
+    a response (approval buttons or AskUserQuestion).
+
+    This is the **authoritative** "is this session blocked on the user?"
+    signal: :data:`_REQUEST_TO_SESSION` is populated the moment a
+    ``control_request`` is intercepted and popped again in
+    :func:`write_control_response` (and in the Telegram callback handlers)
+    as soon as the request is answered — so an entry means the request is
+    genuinely outstanding right now, not merely that one happened earlier.
+
+    #495/#499/#500: the stall detector previously inferred this from
+    presentation state (``_has_pending_approval`` — the most recent action's
+    ``inline_keyboard`` detail) or from the JSONL ring buffer
+    (``_recent_event_is_control_request`` — the newest ring entry). Both are
+    "most recent thing" heuristics and both go stale during a long approval
+    wait: an ExitPlanMode permission request carries no ``inline_keyboard``
+    detail, and after hours of waiting the newest ring entry is a stale
+    ``user``/``result`` frame. The registry does not go stale.
+
+    The post-result idle watchdog and the pre-result silence cap already
+    consult these same registries to decide whether to defer; this helper
+    centralises that query so the three consumers cannot drift apart.
+    """
+    if not session_id:
+        return 0
+    pending = sum(1 for v in _REQUEST_TO_SESSION.values() if v == session_id)
+    pending += sum(
+        1 for k in _PENDING_ASK_REQUESTS if _REQUEST_TO_SESSION.get(k) == session_id
+    )
+    return pending
+
+
 @dataclass(slots=True)
 class AskQuestionState:
     """Tracks multi-question AskUserQuestion flow state."""
@@ -469,6 +502,32 @@ class ClaudeStreamState:
     post_result_closed_at: float | None = None
     post_result_idle_minutes: float = 0.0
     post_result_closing_sent: bool = False
+
+    # #495/#499/#500: monotonic deadline while Claude is throttled by a
+    # ``rate_limit_event``. Armed alongside ``rate_limit_total_s`` in the
+    # translate branch; the stall detector treats "still inside the retry
+    # window" as an expected wait, not a stall. ``0.0`` = not throttled.
+    rate_limit_wait_until: float = 0.0
+
+    def awaiting_user_approval(self) -> bool:
+        """True while this session has an unanswered control request.
+
+        #495/#499/#500: the engine-agnostic stall detector reaches this via
+        ``getattr(stream, "engine_state", None)`` duck-typing (the same
+        pattern used for ``has_live_background_work``), so non-Claude engines
+        degrade to False rather than needing to know anything about Claude's
+        control channel. Delegates to
+        :func:`pending_control_requests_for_session`, which is backed by the
+        self-cleaning ``_REQUEST_TO_SESSION`` registry — see that docstring
+        for why the previous presentation-state and ring-buffer heuristics
+        both went stale during long approval waits.
+        """
+        sid = self.factory.resume.value if self.factory.resume is not None else None
+        return pending_control_requests_for_session(sid) > 0
+
+    def awaiting_rate_limit_retry(self) -> bool:
+        """True while Claude is inside an upstream rate-limit retry window."""
+        return self.rate_limit_wait_until > time.monotonic()
 
 
 def _derive_retry_after_s(info: claude_schema.RateLimitInfo | None) -> float | None:
@@ -2275,6 +2334,11 @@ def translate_claude_event(
                     retry_s_source = "reset_ts"
             if retry_s is not None:
                 state.rate_limit_total_s += retry_s
+                # #495/#499/#500: latch a deadline so the stall detector can
+                # tell "throttled upstream, will resume by itself" apart from
+                # "hung". Without this only a cumulative total existed, which
+                # says nothing about whether we are waiting *right now*.
+                state.rate_limit_wait_until = time.monotonic() + retry_s
             state.rate_limit_count += 1
             state.note_seq += 1
             action_id = f"rate_limit_{state.note_seq}"
@@ -4004,6 +4068,15 @@ class ClaudeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
                         await proc.stderr.aclose()
 
                 rc = await proc.wait()
+                # #640: mirror the base runner (runner.py:1362). ClaudeRunner
+                # overrides run_impl wholesale, and this assignment was missing
+                # — so `stream.proc_returncode` stayed None for every Claude
+                # run and `_is_signal_death(None)` in the bridge's
+                # auto-continue gate always returned False. The death-spiral
+                # guard #589 relied on was therefore inert for the ONLY engine
+                # auto-continue applies to (nsd fleet logs: 2 auto-continues
+                # fired straight after a rc=143 SIGTERM exit).
+                stream.proc_returncode = rc
                 run_logger.info("subprocess.exit", pid=proc.pid, rc=rc)
                 if stream.did_emit_completed:
                     return
