@@ -358,6 +358,13 @@ class AutoContinueSettings(BaseModel):
     # Single-shot: if the retry is also empty, the user-visible resend notice
     # is shown and no further retry fires.
     resend_empty_resume: bool = True
+    # #631 (W1): when empty-result retry is exhausted, retry as a FRESH session
+    # instead of same-session to circumvent the poisoned-session state.
+    empty_resume_fresh: bool = True
+    # #631 (W2): mark sessions force-killed after a tool result as unsafe to
+    # resume — quarantine them so resuming on the next message spins up a new
+    # session rather than re-entering the poisoned state.
+    quarantine_on_forced_teardown: bool = True
 
 
 class WatchdogSettings(BaseModel):

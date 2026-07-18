@@ -504,6 +504,162 @@ def test_agent_bg_tracked_only_when_run_in_background() -> None:
     assert "toolu_A2" not in state2.live_bg_agents
 
 
+def test_374_task_tool_registers_background_handle() -> None:
+    """#374: Task with run_in_background=True should register in live_bg_agents
+    and set background_observed flag, just like Agent."""
+    state = ClaudeStreamState()
+    translate_claude_event(
+        _decode_event(
+            _make_tool_use_event(
+                "Task", "toolu_T1", {"task": "...", "run_in_background": True}
+            )
+        ),
+        title="claude",
+        state=state,
+        factory=state.factory,
+    )
+    assert "toolu_T1" in state.live_bg_agents
+    assert state.background_observed is True
+
+
+def test_374_task_tool_foreground_not_registered() -> None:
+    """#374: Task without run_in_background should NOT register in live_bg_agents
+    and should NOT set background_observed flag."""
+    state = ClaudeStreamState()
+    translate_claude_event(
+        _decode_event(_make_tool_use_event("Task", "toolu_T2", {"task": "..."})),
+        title="claude",
+        state=state,
+        factory=state.factory,
+    )
+    assert "toolu_T2" not in state.live_bg_agents
+    assert state.background_observed is False
+
+
+# ---------------------------------------------------------------------------
+# #374 rc7 — bounded keep for background-agent handles (W3 Task 2)
+# ---------------------------------------------------------------------------
+
+
+def _register_bg_agent(
+    state: ClaudeStreamState, tool_id: str, tool_name: str = "Agent"
+) -> None:
+    translate_claude_event(
+        _decode_event(
+            _make_tool_use_event(
+                tool_name, tool_id, {"task": "...", "run_in_background": True}
+            )
+        ),
+        title="claude",
+        state=state,
+        factory=state.factory,
+    )
+
+
+def test_374_bg_agent_handle_kept_across_interim_result() -> None:
+    """#374 rc7: an Agent-bg handle survives a non-error interim tool_result.
+
+    This is the same premature-drain bug the Monitor #374 fix addressed:
+    clearing on the first interim result poisons the "no live background
+    work" signal (`has_live_background_work`), which feeds both the #346
+    wedge detector and the empty-resume auto-continue heuristic (#596)."""
+    state = ClaudeStreamState()
+    _register_bg_agent(state, "toolu_a1", "Agent")
+    assert "toolu_a1" in state.live_bg_agents
+
+    interim = claude_schema.StreamToolResultBlock(
+        tool_use_id="toolu_a1", content="still working", is_error=False
+    )
+    assert claude_runner._is_terminal_tool_result(interim, state, "toolu_a1") is False
+
+    _feed_tool_result(state, "toolu_a1", "still working")
+    assert "toolu_a1" in state.live_bg_agents
+    assert "toolu_a1" in state.bg_agent_deadlines
+
+
+def test_374_bg_agent_error_result_is_terminal() -> None:
+    """#374 rc7: an is_error=True result IS terminal for a bg agent
+    regardless of the bounded deadline still being in the future."""
+    state = ClaudeStreamState()
+    _register_bg_agent(state, "toolu_a2", "Agent")
+
+    err = claude_schema.StreamToolResultBlock(
+        tool_use_id="toolu_a2", content="boom", is_error=True
+    )
+    assert claude_runner._is_terminal_tool_result(err, state, "toolu_a2") is True
+
+    _feed_tool_result(state, "toolu_a2", "boom", is_error=True)
+    assert "toolu_a2" not in state.live_bg_agents
+    assert "toolu_a2" not in state.bg_agent_deadlines
+
+
+def test_374_bg_agent_handle_ages_out(monkeypatch: pytest.MonkeyPatch) -> None:
+    """#374 rc7: once BG_AGENT_MAX_KEEP_S has elapsed, a (late) non-error
+    interim result IS terminal — the bounded deadline is the safety net
+    against a permanent hang when Agent/Task never emits an explicit
+    completion signal (KillShell / subprocess-exit reconciliation is the
+    v0.35.5 refactor, #573)."""
+    fake_now = [10_000.0]
+    monkeypatch.setattr(claude_runner.time, "monotonic", lambda: fake_now[0])
+
+    state = ClaudeStreamState()
+    _register_bg_agent(state, "toolu_a3", "Agent")
+
+    fake_now[0] += claude_runner.BG_AGENT_MAX_KEEP_S + 1.0
+    interim = claude_schema.StreamToolResultBlock(
+        tool_use_id="toolu_a3", content="still working", is_error=False
+    )
+    assert claude_runner._is_terminal_tool_result(interim, state, "toolu_a3") is True
+
+
+def test_374_bg_agent_expired_not_live_work(monkeypatch: pytest.MonkeyPatch) -> None:
+    """#374 rc7: has_live_background_work must age bg-agent handles out
+    identically to Monitor/wakeup deadlines — otherwise the #346 wedge
+    detector (and everything downstream that treats "no live background
+    work" as "safe to drain") waits forever for a tool_result that may
+    never arrive."""
+    from untether.runners.claude import has_live_background_work
+
+    fake_now = [20_000.0]
+    monkeypatch.setattr(claude_runner.time, "monotonic", lambda: fake_now[0])
+
+    state = ClaudeStreamState()
+    _register_bg_agent(state, "toolu_a4", "Agent")
+    assert has_live_background_work(state) is True
+
+    fake_now[0] += claude_runner.BG_AGENT_MAX_KEEP_S + 1.0
+    assert has_live_background_work(state) is False
+
+
+def test_374_clear_pops_deadline() -> None:
+    """#374 rc7: _clear_background_handle must pop bg_agent_deadlines
+    alongside the live_bg_agents discard, so a terminal clear empties both
+    parallel structures rather than leaking a stale deadline entry."""
+    state = ClaudeStreamState()
+    _register_bg_agent(state, "toolu_a5", "Agent")
+    assert "toolu_a5" in state.live_bg_agents
+    assert "toolu_a5" in state.bg_agent_deadlines
+
+    claude_runner._clear_background_handle(state, "toolu_a5", is_terminal=True)
+    assert "toolu_a5" not in state.live_bg_agents
+    assert "toolu_a5" not in state.bg_agent_deadlines
+
+
+def test_374_task_bg_gets_same_deadline_treatment() -> None:
+    """#374 rc7: Task-bg gets the identical bounded-keep treatment as
+    Agent-bg — both register through the same live_bg_agents /
+    bg_agent_deadlines path in _register_background_handle."""
+    state = ClaudeStreamState()
+    _register_bg_agent(state, "toolu_t1", "Task")
+    assert "toolu_t1" in state.live_bg_agents
+    assert "toolu_t1" in state.bg_agent_deadlines
+
+    interim = claude_schema.StreamToolResultBlock(
+        tool_use_id="toolu_t1", content="still working", is_error=False
+    )
+    assert claude_runner._is_terminal_tool_result(interim, state, "toolu_t1") is False
+
+
 def test_schedule_wakeup_tracked_with_deadline() -> None:
     state = ClaudeStreamState()
     translate_claude_event(
@@ -582,6 +738,90 @@ def test_remote_trigger_tracked_as_set_member() -> None:
     assert "toolu_R1" in state.live_remote_triggers
 
 
+def test_background_observed_defaults_false() -> None:
+    """#631 (W5-diag): a fresh ClaudeStreamState has not observed any
+    background-task primitive yet."""
+    state = ClaudeStreamState()
+    assert state.background_observed is False
+
+
+def test_background_observed_set_by_register_background_handle() -> None:
+    """#631 (W5-diag): registering ANY recognised background-task primitive
+    (Monitor / Bash-bg / Agent-bg / ScheduleWakeup / RemoteTrigger) sets the
+    sticky `background_observed` flag on the ClaudeStreamState — the object
+    `_register_background_handle` actually receives (it has no access to
+    the engine-agnostic JsonlStreamState). This is the flag the bridge's
+    runner.empty_result diagnostic reads via the JsonlStreamState mirror
+    set in runner.py's `_handle_jsonl_line`."""
+    state = ClaudeStreamState()
+    translate_claude_event(
+        _decode_event(
+            _make_tool_use_event("RemoteTrigger", "toolu_R2", {"target": "other-chat"})
+        ),
+        title="claude",
+        state=state,
+        factory=state.factory,
+    )
+    assert state.background_observed is True
+
+
+def test_background_observed_not_set_by_foreground_tool() -> None:
+    """#631 (W5-diag): an ordinary (non-backgrounded) tool call must NOT
+    flip the flag — it only signals genuine background-task primitives."""
+    state = ClaudeStreamState()
+    translate_claude_event(
+        _decode_event(
+            _make_tool_use_event("Bash", "toolu_FG1", {"command": "echo hi"})
+        ),
+        title="claude",
+        state=state,
+        factory=state.factory,
+    )
+    assert state.background_observed is False
+
+
+def test_handle_jsonl_line_mirrors_background_observed_onto_stream() -> None:
+    """#631 (W5-diag): `_register_background_handle` only ever sees the
+    engine-specific ClaudeStreamState — it has no access to the generic
+    JsonlStreamState the bridge reads (`edits.stream`). The mirror-set lives
+    in runner.py's `_handle_jsonl_line`, the one place both objects are in
+    scope after `translate()` runs. This exercises that wiring end-to-end
+    (JSONL bytes in, mirrored flag out) rather than just the ClaudeStreamState
+    side already covered above."""
+    import json
+
+    from untether.runner import JsonlStreamState
+    from untether.runners.claude import ClaudeRunner
+
+    runner = ClaudeRunner(claude_cmd="claude")
+    state = ClaudeStreamState()
+    stream = JsonlStreamState(expected_session=None)
+    assert stream.background_observed is False
+
+    # Build the same fully-populated payload `_decode_event` produces (this
+    # helper feeds raw bytes straight to `decode_stream_json_line`, which is
+    # strict about required msgspec fields — unlike `_decode_event`, which
+    # only fills defaults before decoding).
+    payload = _make_tool_use_event("Monitor", "toolu_MIR1", {"timeout_ms": 60_000})
+    payload["uuid"] = "uuid"
+    payload["session_id"] = "session"
+    payload["message"]["role"] = "assistant"
+    payload["message"]["model"] = "claude"
+    raw_line = json.dumps(payload).encode("utf-8")
+
+    runner._handle_jsonl_line(
+        raw_line=raw_line,
+        stream=stream,
+        state=state,
+        resume=None,
+        logger=_RecordingLogger(),
+        pid=1,
+    )
+
+    assert state.background_observed is True
+    assert stream.background_observed is True
+
+
 def test_has_live_background_work_empty() -> None:
     from untether.runners.claude import has_live_background_work
 
@@ -625,6 +865,10 @@ def test_background_task_summary_formatting() -> None:
 
     state.live_monitors["c"] = 0.0
     state.live_bg_agents.add("d")
+    # #374: live_bg_agents/bg_agent_deadlines are parallel structures now —
+    # a handle with no deadline entry is treated as already expired (not
+    # live), so the deadline must be set alongside the set-add here too.
+    state.bg_agent_deadlines["d"] = time.monotonic() + 999.0
     summary = background_task_summary(state)
     assert summary is not None
     assert "2 watchers" in summary
@@ -2131,6 +2375,48 @@ def test_extract_error_with_result_text() -> None:
     result = _extract_error(event, resumed=False)
     assert result is not None
     assert result.startswith("Context window limit reached")
+
+
+# ===========================================================================
+# #631 (Fix 1) — _usage_payload carries subtype
+# ===========================================================================
+
+
+def test_usage_payload_includes_subtype() -> None:
+    """#631: the usage dict must carry the result message's ``subtype`` so
+    the ``runner.empty_result`` diagnostic's ``raw_subtype`` field is
+    populated from a REAL Claude Code result instead of always being
+    ``None`` — previously ``_usage_payload`` never copied ``subtype`` into
+    the returned dict, so the field was structurally dead."""
+    from untether.runners.claude import _usage_payload
+
+    event = claude_schema.StreamResultMessage(
+        subtype="success",
+        duration_ms=100,
+        duration_api_ms=50,
+        is_error=False,
+        num_turns=0,
+        session_id="sess123456789012",
+    )
+    usage = _usage_payload(event)
+    assert usage["subtype"] == "success"
+
+
+def test_usage_payload_subtype_error_during_execution() -> None:
+    """A different subtype value round-trips too — not hardcoded to
+    "success"."""
+    from untether.runners.claude import _usage_payload
+
+    event = claude_schema.StreamResultMessage(
+        subtype="error_during_execution",
+        duration_ms=100,
+        duration_api_ms=50,
+        is_error=True,
+        num_turns=2,
+        session_id="sess123456789012",
+    )
+    usage = _usage_payload(event)
+    assert usage["subtype"] == "error_during_execution"
 
 
 # ===========================================================================
@@ -4266,6 +4552,277 @@ async def test_333_lifecycle_state_transitions_logged(monkeypatch) -> None:
     assert "subprocess.state.exited" in state_events
     # Final lifecycle_state reflects the last transition.
     assert stream.lifecycle_state == "exited"
+
+
+# ===========================================================================
+# #632 (W2) — forced-teardown quarantine record + honour on next message
+# ===========================================================================
+
+
+@pytest.mark.anyio
+async def test_632_forced_teardown_after_result_quarantines(
+    monkeypatch, tmp_path
+) -> None:
+    """#632 (W2): a subprocess force-killed AFTER it already emitted a valid
+    result may have a dangling upstream turn — the SIGTERM site must
+    quarantine the session id so the next message never resumes it."""
+    import anyio
+
+    from untether.runner import JsonlStreamState
+    from untether.runners.claude import (
+        _PENDING_ASK_REQUESTS,
+        _REQUEST_TO_SESSION,
+        ClaudeRunner,
+    )
+    from untether.session_quarantine import QuarantineStore, set_quarantine_store
+
+    _REQUEST_TO_SESSION.clear()
+    _PENDING_ASK_REQUESTS.clear()
+
+    store = QuarantineStore(path=tmp_path / "session_quarantine.json")
+    set_quarantine_store(store)
+    try:
+        runner = ClaudeRunner(claude_cmd="claude")
+        runner._subcountdown_poll_interval_s = 0.02
+        runner._subcountdown_limbo_detect_threshold_s = 0.05
+        runner._subcountdown_sigterm_grace_s = 0.1
+        runner._subcountdown_sigterm_grace_poll_s = 0.02
+
+        state = ClaudeStreamState()
+        state.factory.started(ResumeToken(engine="claude", value="sub-sess-q1"))
+        state.result_received_at = time.monotonic() - 0.5
+        stream = JsonlStreamState(expected_session=None)
+        stream.did_emit_completed = True  # the process produced a result
+
+        proc = _FakeProc(pid=62424, returncode=None)
+
+        def _fake_killpg(pgid: int, sig: int) -> None:
+            if sig == signal.SIGTERM:
+                proc.returncode = -15  # clean stop, no SIGKILL follow-up
+
+        monkeypatch.setattr("os.killpg", _fake_killpg)
+        # #590: signal_pid_group snapshots real /proc descendants before
+        # signalling — neutralise it so tests never touch live processes.
+        monkeypatch.setattr(
+            "untether.utils.subprocess.find_descendants", lambda pid: []
+        )
+
+        logger = _RecordingLogger()
+        reader_done = anyio.Event()
+        reader_done.set()
+
+        class FakeStdin:
+            async def aclose(self) -> None:
+                pass
+
+        async with anyio.create_task_group() as tg:
+            tg.start_soon(
+                runner._post_result_idle_watchdog,
+                state,
+                FakeStdin(),
+                reader_done,
+                logger,
+                0.1,
+                proc,
+                stream,
+            )
+            with anyio.move_on_after(3.0):
+                while stream.lifecycle_state != "exited":
+                    await anyio.sleep(0.02)
+            tg.cancel_scope.cancel()
+
+        assert store.is_quarantined("claude", "sub-sess-q1") is True
+        sigterm_records = [
+            kw
+            for lvl, e, kw in logger.records
+            if e == "claude.post_result_idle.sigterm_after_timeout"
+        ]
+        assert sigterm_records, "expected sigterm_after_timeout to fire"
+        assert sigterm_records[0]["quarantined"] is True
+        # #631 (W5-diag): the stream itself records that a forced teardown
+        # happened, so a LATER runner.empty_result diagnostic (in the
+        # bridge) can surface it.
+        assert stream.sigterm_sent is True
+    finally:
+        set_quarantine_store(None)
+        _REQUEST_TO_SESSION.clear()
+        _PENDING_ASK_REQUESTS.clear()
+
+
+@pytest.mark.anyio
+async def test_632_forced_teardown_without_result_does_not_quarantine(
+    monkeypatch, tmp_path
+) -> None:
+    """#632 (W2): a process force-killed BEFORE it ever emitted a result is
+    the watchdog's normal (non-poisoned) kill path — must NOT quarantine."""
+    import anyio
+
+    from untether.runner import JsonlStreamState
+    from untether.runners.claude import (
+        _PENDING_ASK_REQUESTS,
+        _REQUEST_TO_SESSION,
+        ClaudeRunner,
+    )
+    from untether.session_quarantine import QuarantineStore, set_quarantine_store
+
+    _REQUEST_TO_SESSION.clear()
+    _PENDING_ASK_REQUESTS.clear()
+
+    store = QuarantineStore(path=tmp_path / "session_quarantine.json")
+    set_quarantine_store(store)
+    try:
+        runner = ClaudeRunner(claude_cmd="claude")
+        runner._subcountdown_poll_interval_s = 0.02
+        runner._subcountdown_limbo_detect_threshold_s = 0.05
+        runner._subcountdown_sigterm_grace_s = 0.1
+        runner._subcountdown_sigterm_grace_poll_s = 0.02
+
+        state = ClaudeStreamState()
+        state.factory.started(ResumeToken(engine="claude", value="sub-sess-q2"))
+        state.result_received_at = time.monotonic() - 0.5
+        stream = JsonlStreamState(expected_session=None)
+        assert stream.did_emit_completed is False  # no result was ever emitted
+
+        proc = _FakeProc(pid=62425, returncode=None)
+
+        def _fake_killpg(pgid: int, sig: int) -> None:
+            if sig == signal.SIGTERM:
+                proc.returncode = -15
+
+        monkeypatch.setattr("os.killpg", _fake_killpg)
+        monkeypatch.setattr(
+            "untether.utils.subprocess.find_descendants", lambda pid: []
+        )
+
+        logger = _RecordingLogger()
+        reader_done = anyio.Event()
+        reader_done.set()
+
+        class FakeStdin:
+            async def aclose(self) -> None:
+                pass
+
+        async with anyio.create_task_group() as tg:
+            tg.start_soon(
+                runner._post_result_idle_watchdog,
+                state,
+                FakeStdin(),
+                reader_done,
+                logger,
+                0.1,
+                proc,
+                stream,
+            )
+            with anyio.move_on_after(3.0):
+                while stream.lifecycle_state != "exited":
+                    await anyio.sleep(0.02)
+            tg.cancel_scope.cancel()
+
+        assert store.is_quarantined("claude", "sub-sess-q2") is False
+        sigterm_records = [
+            kw
+            for lvl, e, kw in logger.records
+            if e == "claude.post_result_idle.sigterm_after_timeout"
+        ]
+        assert sigterm_records, "expected sigterm_after_timeout to fire"
+        assert sigterm_records[0]["quarantined"] is False
+    finally:
+        set_quarantine_store(None)
+        _REQUEST_TO_SESSION.clear()
+        _PENDING_ASK_REQUESTS.clear()
+
+
+@pytest.mark.anyio
+async def test_632_forced_teardown_flag_off_does_not_quarantine(
+    monkeypatch, tmp_path
+) -> None:
+    """#632 (W2): `quarantine_on_forced_teardown = False` disables the
+    marker even when the process already produced a result."""
+    import anyio
+
+    from untether.runner import JsonlStreamState
+    from untether.runners.claude import (
+        _PENDING_ASK_REQUESTS,
+        _REQUEST_TO_SESSION,
+        ClaudeRunner,
+    )
+    from untether.session_quarantine import QuarantineStore, set_quarantine_store
+    from untether.settings import AutoContinueSettings
+
+    class _Fake:
+        auto_continue = AutoContinueSettings(quarantine_on_forced_teardown=False)
+
+    monkeypatch.setattr(
+        claude_runner,
+        "load_settings_if_exists",
+        lambda: (_Fake(), tmp_path / "untether.toml"),
+    )
+
+    _REQUEST_TO_SESSION.clear()
+    _PENDING_ASK_REQUESTS.clear()
+
+    store = QuarantineStore(path=tmp_path / "session_quarantine.json")
+    set_quarantine_store(store)
+    try:
+        runner = ClaudeRunner(claude_cmd="claude")
+        runner._subcountdown_poll_interval_s = 0.02
+        runner._subcountdown_limbo_detect_threshold_s = 0.05
+        runner._subcountdown_sigterm_grace_s = 0.1
+        runner._subcountdown_sigterm_grace_poll_s = 0.02
+
+        state = ClaudeStreamState()
+        state.factory.started(ResumeToken(engine="claude", value="sub-sess-q3"))
+        state.result_received_at = time.monotonic() - 0.5
+        stream = JsonlStreamState(expected_session=None)
+        stream.did_emit_completed = True  # the process produced a result
+
+        proc = _FakeProc(pid=62426, returncode=None)
+
+        def _fake_killpg(pgid: int, sig: int) -> None:
+            if sig == signal.SIGTERM:
+                proc.returncode = -15
+
+        monkeypatch.setattr("os.killpg", _fake_killpg)
+        monkeypatch.setattr(
+            "untether.utils.subprocess.find_descendants", lambda pid: []
+        )
+
+        logger = _RecordingLogger()
+        reader_done = anyio.Event()
+        reader_done.set()
+
+        class FakeStdin:
+            async def aclose(self) -> None:
+                pass
+
+        async with anyio.create_task_group() as tg:
+            tg.start_soon(
+                runner._post_result_idle_watchdog,
+                state,
+                FakeStdin(),
+                reader_done,
+                logger,
+                0.1,
+                proc,
+                stream,
+            )
+            with anyio.move_on_after(3.0):
+                while stream.lifecycle_state != "exited":
+                    await anyio.sleep(0.02)
+            tg.cancel_scope.cancel()
+
+        assert store.is_quarantined("claude", "sub-sess-q3") is False
+        sigterm_records = [
+            kw
+            for lvl, e, kw in logger.records
+            if e == "claude.post_result_idle.sigterm_after_timeout"
+        ]
+        assert sigterm_records, "expected sigterm_after_timeout to fire"
+        assert sigterm_records[0]["quarantined"] is False
+    finally:
+        set_quarantine_store(None)
+        _REQUEST_TO_SESSION.clear()
+        _PENDING_ASK_REQUESTS.clear()
 
 
 # ===========================================================================

@@ -5470,6 +5470,10 @@ def _make_engine_state(**fields):
         "live_monitors": {},
         "live_bg_bashes": set(),
         "live_bg_agents": set(),
+        # #374 (rc7): parallel deadline map for live_bg_agents — see
+        # ClaudeStreamState.bg_agent_deadlines. has_live_background_work
+        # reads this to age out expired bg-agent handles.
+        "bg_agent_deadlines": {},
         "live_remote_triggers": set(),
         "post_result_closed_at": None,
         "post_result_idle_minutes": 0.0,
@@ -6490,10 +6494,14 @@ class _EmptyThenAnswerRunner(MockRunner):
 
 
 @pytest.mark.anyio
-async def test_596_auto_resend_delivers_answer_on_retry() -> None:
+async def test_596_auto_resend_delivers_answer_on_retry(quarantine_store) -> None:
     """#596: an empty-result no-op resume auto-resends the ORIGINAL prompt
-    once against the SAME session; the retry's real answer reaches the user,
-    removing the manual re-nudge."""
+    once; the retry's real answer reaches the user, removing the manual
+    re-nudge. #631: since empty_resume_fresh now defaults True, the retry
+    clears + quarantines the poisoned session and runs FRESH (resume=None)
+    rather than resuming the same poisoned session — see
+    test_631_empty_resume_legacy_same_session_when_flag_off for the
+    flag-off same-session behaviour this test used to exercise."""
     from structlog.testing import capture_logs
 
     transport = FakeTransport()
@@ -6516,10 +6524,10 @@ async def test_596_auto_resend_delivers_answer_on_retry() -> None:
 
     # Exactly one auto-resend fired.
     assert len(runner.calls) == 2
-    assert any(r.get("event") == "session.auto_resend_empty" for r in logs)
-    # The retry resumed the SAME session.
-    assert runner.calls[1][1] is not None
-    assert runner.calls[1][1].value == "sess-596"
+    assert any(r.get("event") == "session.auto_resend_fresh" for r in logs)
+    # #631: the retry ran as a FRESH session, not the same poisoned one.
+    assert runner.calls[1][1] is None
+    assert quarantine_store.is_quarantined(CODEX_ENGINE, "sess-596") is True
     # The user saw the retry notice AND the real answer.
     all_text = " ".join(
         c["message"].text for c in transport.edit_calls + transport.send_calls
@@ -6529,9 +6537,10 @@ async def test_596_auto_resend_delivers_answer_on_retry() -> None:
 
 
 @pytest.mark.anyio
-async def test_596_auto_resend_is_single_shot() -> None:
+async def test_596_auto_resend_is_single_shot(quarantine_store) -> None:
     """#596: if the retry is ALSO an empty no-op, no second retry fires — the
-    surfacing note is shown instead (bounded, no loop)."""
+    surfacing note is shown instead (bounded, no loop). #631: the single
+    retry now runs as a FRESH session by default (empty_resume_fresh=True)."""
     from structlog.testing import capture_logs
 
     transport = FakeTransport()
@@ -6558,7 +6567,7 @@ async def test_596_auto_resend_is_single_shot() -> None:
 
     # Original run + exactly one resend, then stop.
     assert len(runner.calls) == 2
-    assert sum(1 for r in logs if r.get("event") == "session.auto_resend_empty") == 1
+    assert sum(1 for r in logs if r.get("event") == "session.auto_resend_fresh") == 1
     # The exhausted retry falls through to the manual-resend note.
     final_text = transport.edit_calls[-1]["message"].text
     assert "empty result" in final_text
@@ -6594,6 +6603,602 @@ async def test_596_no_resend_when_not_a_resume() -> None:
     assert not any(r.get("event") == "session.auto_resend_empty" for r in logs)
     final_text = transport.edit_calls[-1]["message"].text
     assert "empty result" in final_text
+
+
+# ---------------------------------------------------------------------------
+# #631 (W1) — quarantine-and-fresh recovery on empty-0-turn resume
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def quarantine_store(tmp_path):
+    """Inject a fresh, isolated QuarantineStore for the duration of a test so
+    the module-level singleton never lazily loads the real config-adjacent
+    quarantine file (which would leak state across tests / touch disk paths
+    that don't exist in the test sandbox)."""
+    from untether.session_quarantine import QuarantineStore, set_quarantine_store
+
+    store = QuarantineStore(path=tmp_path / "session_quarantine.json")
+    set_quarantine_store(store)
+    try:
+        yield store
+    finally:
+        set_quarantine_store(None)
+
+
+@pytest.mark.anyio
+async def test_631_empty_resume_recovers_as_fresh_session(quarantine_store) -> None:
+    """#631 W1: on an empty-0-turn resume, the poisoned session token is
+    cleared via on_resume_failed, the session id is quarantined, and the
+    ORIGINAL prompt is re-run as a FRESH session (resume=None) instead of
+    resending against the same (poisoned) session."""
+    from structlog.testing import capture_logs
+
+    transport = FakeTransport()
+    runner = _EmptyThenAnswerRunner(resume_value="sess-poisoned")
+    cfg = ExecBridgeConfig(
+        transport=transport,
+        presenter=MarkdownPresenter(),
+        final_notify=False,
+    )
+    cleared: list[str] = []
+
+    async def on_resume_failed(tok: ResumeToken) -> None:
+        cleared.append(tok.value)
+
+    with capture_logs() as logs:
+        await handle_message(
+            cfg,
+            runner=runner,
+            incoming=IncomingMessage(
+                channel_id=123, message_id=10, text="please continue"
+            ),
+            resume_token=ResumeToken(engine=CODEX_ENGINE, value="sess-poisoned"),
+            on_resume_failed=on_resume_failed,
+        )
+
+    # (a) the poisoned token was cleared.
+    assert "sess-poisoned" in cleared
+    # (b) the recovery run used resume=None (fresh session) with the
+    # original prompt text.
+    assert len(runner.calls) == 2
+    assert runner.calls[1][1] is None
+    assert "please continue" in runner.calls[1][0]
+    # (c) single-shot: exactly one fresh recovery run.
+    assert sum(1 for c in runner.calls if c[1] is None) == 1
+    # (d) the fresh-recovery event was logged.
+    assert any(r.get("event") == "session.auto_resend_fresh" for r in logs)
+    # (e) the poisoned session is quarantined.
+    assert quarantine_store.is_quarantined(CODEX_ENGINE, "sess-poisoned") is True
+    # (f) the user got the real answer, not the manual empty-result notice.
+    final_text = transport.edit_calls[-1]["message"].text
+    assert "Here is the real result." in final_text
+    assert "engine returned an empty result" not in final_text
+
+
+@pytest.mark.anyio
+async def test_631_empty_resume_legacy_same_session_when_flag_off(
+    monkeypatch,
+) -> None:
+    """#631: when empty_resume_fresh is off, preserve the exact #596
+    same-session resend behaviour — no clearing, no quarantine, resume the
+    same poisoned session id."""
+    from structlog.testing import capture_logs
+
+    from untether.settings import AutoContinueSettings
+
+    monkeypatch.setattr(
+        "untether.runner_bridge._load_auto_continue_settings",
+        lambda: AutoContinueSettings(empty_resume_fresh=False),
+    )
+
+    transport = FakeTransport()
+    runner = _EmptyThenAnswerRunner(resume_value="sess-596")
+    cfg = ExecBridgeConfig(
+        transport=transport,
+        presenter=MarkdownPresenter(),
+        final_notify=False,
+    )
+
+    with capture_logs() as logs:
+        await handle_message(
+            cfg,
+            runner=runner,
+            incoming=IncomingMessage(channel_id=123, message_id=10, text="continue"),
+            resume_token=ResumeToken(engine=CODEX_ENGINE, value="sess-596"),
+        )
+
+    assert len(runner.calls) == 2
+    # The retry resumed the SAME (poisoned) session — legacy #596 behaviour.
+    assert runner.calls[1][1] is not None
+    assert runner.calls[1][1].value == "sess-596"
+    assert any(r.get("event") == "session.auto_resend_empty" for r in logs)
+    assert not any(r.get("event") == "session.auto_resend_fresh" for r in logs)
+
+
+# ---------------------------------------------------------------------------
+# #631 (W5-diag) — structured diagnostics on the runner.empty_result warning
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.anyio
+async def test_631_empty_result_log_carries_diagnostics(quarantine_store) -> None:
+    """#631 (W5-diag): the runner.empty_result warning must carry enough
+    context to diagnose WHY, not just THAT, the anomaly happened.
+    MockRunner-driven bridge tests have no real stream (edits.stream is
+    None), so the three stream-derived fields fall back to their defensive
+    defaults (False/False/None) rather than raising or being omitted.
+
+    #631 (Fix 1): ``sigterm_sent``/``background_observed`` were renamed to
+    ``sigterm_sent_this_run``/``background_observed_this_run`` — they only
+    ever describe the CURRENT (empty) run's stream, never the prior
+    (poisoned) run where the interesting facts actually live, and the old
+    names read as if they might. ``poison_was_quarantined`` is new: whether
+    the resumed token was ALREADY known-quarantined at the moment this
+    anomaly fired. It's False here because a token that's already
+    quarantined never reaches this point — the W2 entry-divert check
+    (earlier in ``handle_message``) redirects it to a fresh session before
+    any run happens; see test_631_diag_poison_was_quarantined_true for the
+    race window where it's True."""
+    from structlog.testing import capture_logs
+
+    transport = FakeTransport()
+    runner = _EmptyThenAnswerRunner(resume_value="sess-diag")
+    cfg = ExecBridgeConfig(
+        transport=transport,
+        presenter=MarkdownPresenter(),
+        final_notify=False,
+    )
+
+    with capture_logs() as logs:
+        await handle_message(
+            cfg,
+            runner=runner,
+            incoming=IncomingMessage(
+                channel_id=123, message_id=10, text="please continue"
+            ),
+            resume_token=ResumeToken(engine=CODEX_ENGINE, value="sess-diag"),
+        )
+
+    records = [r for r in logs if r.get("event") == "runner.empty_result"]
+    assert len(records) == 1
+    record = records[0]
+    for key in (
+        "raw_subtype",
+        "is_error",
+        "proc_returncode",
+        "sigterm_sent_this_run",
+        "background_observed_this_run",
+        "poison_was_quarantined",
+        "resend_eligible_reason",
+    ):
+        assert key in record, f"missing {key!r} in runner.empty_result record"
+    assert record["raw_subtype"] is None
+    assert record["is_error"] is False
+    assert record["proc_returncode"] is None
+    assert record["sigterm_sent_this_run"] is False
+    assert record["background_observed_this_run"] is False
+    assert record["poison_was_quarantined"] is False
+    # Default settings: resend_empty_resume on, empty_resume_fresh on, a
+    # resume token present, non-blank text, first attempt → recovery armed.
+    assert record["resend_eligible_reason"] == "fresh"
+
+
+@pytest.mark.anyio
+async def test_631_diag_poison_was_quarantined_true(
+    quarantine_store, monkeypatch
+) -> None:
+    """#631 (Fix 1): ``poison_was_quarantined`` reflects a TOCTOU race — the
+    W2 entry-divert check (top of ``handle_message``) sees the session as
+    NOT yet quarantined and proceeds to resume it, but by the time the
+    empty-result anomaly is diagnosed the store reports it as quarantined
+    (e.g. a concurrent handle_message call for the same session id
+    quarantined it mid-run). This is exactly the "persisted prior-run
+    memory" the field exists to surface — simulate it by making the
+    store's ``is_quarantined`` answer False on the entry check and True on
+    the later diagnostic check."""
+    from structlog.testing import capture_logs
+
+    calls = {"n": 0}
+    real_is_quarantined = quarantine_store.is_quarantined
+
+    def _flaky_is_quarantined(engine: str, session_id: str) -> bool:
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return real_is_quarantined(engine, session_id)
+        return True
+
+    monkeypatch.setattr(quarantine_store, "is_quarantined", _flaky_is_quarantined)
+
+    transport = FakeTransport()
+    runner = _EmptyThenAnswerRunner(resume_value="sess-race")
+    cfg = ExecBridgeConfig(
+        transport=transport,
+        presenter=MarkdownPresenter(),
+        final_notify=False,
+    )
+
+    with capture_logs() as logs:
+        await handle_message(
+            cfg,
+            runner=runner,
+            incoming=IncomingMessage(
+                channel_id=123, message_id=10, text="please continue"
+            ),
+            resume_token=ResumeToken(engine=CODEX_ENGINE, value="sess-race"),
+        )
+
+    records = [r for r in logs if r.get("event") == "runner.empty_result"]
+    assert len(records) == 1
+    assert records[0]["poison_was_quarantined"] is True
+    # The entry-divert check ran first (call 1, real/False) — the run still
+    # went ahead against the resumed session, proving the race window is
+    # real and not just a stub artefact.
+    assert calls["n"] >= 2
+
+
+@pytest.mark.anyio
+async def test_631_resend_reason_disabled(monkeypatch) -> None:
+    """#631 (W5-diag): resend_empty_resume=False → the anomaly log records
+    resend_eligible_reason == "disabled"."""
+    from structlog.testing import capture_logs
+
+    _disable_empty_resend(monkeypatch)
+    transport = FakeTransport()
+    runner = ScriptRunner(
+        [Return(answer="", usage={"num_turns": 0, "duration_api_ms": 0})],
+        engine=CODEX_ENGINE,
+        resume_value="sess-diag-disabled",
+    )
+    cfg = ExecBridgeConfig(
+        transport=transport,
+        presenter=MarkdownPresenter(),
+        final_notify=False,
+    )
+
+    with capture_logs() as logs:
+        await handle_message(
+            cfg,
+            runner=runner,
+            incoming=IncomingMessage(channel_id=123, message_id=10, text="continue"),
+            resume_token=ResumeToken(engine=CODEX_ENGINE, value="sess-diag-disabled"),
+        )
+
+    records = [r for r in logs if r.get("event") == "runner.empty_result"]
+    assert len(records) == 1
+    assert records[0]["resend_eligible_reason"] == "disabled"
+
+
+@pytest.mark.anyio
+async def test_631_resend_reason_no_token() -> None:
+    """#631 (W5-diag): a fresh (non-resume) empty anomaly has no prior
+    session to retry against → resend_eligible_reason == "no_token"."""
+    from structlog.testing import capture_logs
+
+    transport = FakeTransport()
+    runner = ScriptRunner(
+        [Return(answer="", usage={"num_turns": 0, "duration_api_ms": 0})],
+        engine=CODEX_ENGINE,
+    )
+    cfg = ExecBridgeConfig(
+        transport=transport,
+        presenter=MarkdownPresenter(),
+        final_notify=False,
+    )
+
+    with capture_logs() as logs:
+        await handle_message(
+            cfg,
+            runner=runner,
+            incoming=IncomingMessage(channel_id=123, message_id=10, text="hi"),
+            resume_token=None,
+        )
+
+    records = [r for r in logs if r.get("event") == "runner.empty_result"]
+    assert len(records) == 1
+    assert records[0]["resend_eligible_reason"] == "no_token"
+
+
+@pytest.mark.anyio
+async def test_631_resend_reason_counter_exhausted(quarantine_store) -> None:
+    """#631 (W5-diag): when the single-shot retry is ALSO empty, the SECOND
+    runner.empty_result record carries resend_eligible_reason ==
+    "counter_exhausted" — even though the retry ran as a FRESH (unresumed)
+    session under default settings, the exhausted-counter diagnostic takes
+    priority over "no_token" (see the priority-order comment at the log
+    site)."""
+    from structlog.testing import capture_logs
+
+    transport = FakeTransport()
+    runner = ScriptRunner(
+        [Return(answer="", usage={"num_turns": 0, "duration_api_ms": 0})],
+        engine=CODEX_ENGINE,
+        resume_value="sess-diag-exhausted",
+    )
+    cfg = ExecBridgeConfig(
+        transport=transport,
+        presenter=MarkdownPresenter(),
+        final_notify=False,
+    )
+
+    with capture_logs() as logs:
+        await handle_message(
+            cfg,
+            runner=runner,
+            incoming=IncomingMessage(
+                channel_id=123, message_id=10, text="please continue"
+            ),
+            resume_token=ResumeToken(engine=CODEX_ENGINE, value="sess-diag-exhausted"),
+        )
+
+    records = [r for r in logs if r.get("event") == "runner.empty_result"]
+    assert len(records) == 2
+    assert records[0]["resend_eligible_reason"] == "fresh"
+    assert records[1]["resend_eligible_reason"] == "counter_exhausted"
+
+
+@pytest.mark.anyio
+async def test_631_resend_reason_blank_input(quarantine_store) -> None:
+    """#631 (W5-diag): a resumed run's empty-0-turn anomaly fires against
+    whitespace-only incoming text → resend_eligible_reason == "blank_input",
+    NOT "fresh" — auto-resending blank text would just reproduce the same
+    empty result, so this reason must take priority even though a resume
+    token IS present and the retry counter has not been exhausted (both of
+    which would otherwise route to "fresh").
+
+    Reachability note: ``handle_message`` performs no text-blank filtering
+    itself — that would be a Telegram-loop-layer concern upstream of this
+    function (e.g. a plain empty/whitespace user message). In practice
+    this branch is most plausibly reached via a cron/webhook prompt that
+    resolves to blank text (``triggers/fetch.py`` builds prompts from
+    fetched data with no non-blank guarantee) or a voice transcription of
+    silence, rather than typed chat input. This test drives the bridge
+    boundary directly, exactly like every other resend_eligible_reason
+    test in this section (disabled/no_token/counter_exhausted) — none of
+    which simulate full Telegram routing either."""
+    from structlog.testing import capture_logs
+
+    transport = FakeTransport()
+    runner = ScriptRunner(
+        [Return(answer="", usage={"num_turns": 0, "duration_api_ms": 0})],
+        engine=CODEX_ENGINE,
+        resume_value="sess-diag-blank",
+    )
+    cfg = ExecBridgeConfig(
+        transport=transport,
+        presenter=MarkdownPresenter(),
+        final_notify=False,
+    )
+
+    with capture_logs() as logs:
+        await handle_message(
+            cfg,
+            runner=runner,
+            incoming=IncomingMessage(channel_id=123, message_id=10, text="   "),
+            resume_token=ResumeToken(engine=CODEX_ENGINE, value="sess-diag-blank"),
+        )
+
+    records = [r for r in logs if r.get("event") == "runner.empty_result"]
+    assert len(records) == 1
+    assert records[0]["resend_eligible_reason"] == "blank_input"
+    # No auto-resend fired — resending blank text would just loop.
+    assert len(runner.calls) == 1
+
+
+def test_auto_continue_settings_new_flags_default_on() -> None:
+    """#631: empty_resume_fresh and quarantine_on_forced_teardown flags
+    default to True, enabling both fresh-session retry and poisoned-session
+    quarantine when implemented in later tasks."""
+    from untether.settings import AutoContinueSettings
+
+    # Test defaults
+    s = AutoContinueSettings()
+    assert s.empty_resume_fresh is True
+    assert s.quarantine_on_forced_teardown is True
+
+    # Test that omitting them in a dict/kwarg still yields True
+    s2 = AutoContinueSettings(enabled=True)
+    assert s2.empty_resume_fresh is True
+    assert s2.quarantine_on_forced_teardown is True
+
+
+# ---------------------------------------------------------------------------
+# #632 (W2) — honour a forced-teardown quarantine marker on the next message
+# ---------------------------------------------------------------------------
+
+
+class _RecordingRunner(MockRunner):
+    """Records ``(prompt, resume)`` per ``run()`` call and always completes
+    with a real answer; ``usage`` is configurable so tests can control
+    whether the #632 (W2) healthy-clear path (``num_turns`` truthy) fires."""
+
+    def __init__(
+        self,
+        *,
+        engine=CODEX_ENGINE,
+        resume_value: str = "sid",
+        answer: str = "ok",
+        usage: dict | None = None,
+    ) -> None:
+        super().__init__(engine=engine, resume_value=resume_value, answer=answer)
+        self.calls: list[tuple[str, ResumeToken | None]] = []
+        self._usage = usage
+
+    async def run(self, prompt, resume):
+        from untether.model import StartedEvent
+        from untether.runners.mock import _resume_token
+
+        self.calls.append((prompt, resume))
+        token_value = resume.value if resume else self._resume_value
+        token = _resume_token(self.engine, token_value)
+        async with self.lock_for(token):
+            yield StartedEvent(engine=self.engine, resume=token, title=self.title)
+            yield CompletedEvent(
+                engine=self.engine,
+                resume=token,
+                ok=True,
+                answer=self._answer,
+                usage=self._usage,
+            )
+
+
+@pytest.mark.anyio
+async def test_632_next_message_on_quarantined_session_starts_fresh(
+    quarantine_store,
+) -> None:
+    """#632 (W2): a session already marked quarantined (forced teardown
+    after a result) must never be resumed — the next message on it starts
+    fresh and the stored token is cleared via on_resume_failed."""
+    from structlog.testing import capture_logs
+
+    quarantine_store.quarantine(
+        CODEX_ENGINE, "sid-q", reason="forced_teardown_after_result"
+    )
+
+    transport = FakeTransport()
+    runner = _RecordingRunner(
+        engine=CODEX_ENGINE, resume_value="sid-fresh", answer="fresh answer"
+    )
+    cfg = ExecBridgeConfig(
+        transport=transport,
+        presenter=MarkdownPresenter(),
+        final_notify=False,
+    )
+    cleared: list[str] = []
+
+    async def on_resume_failed(tok: ResumeToken) -> None:
+        cleared.append(tok.value)
+
+    with capture_logs() as logs:
+        await handle_message(
+            cfg,
+            runner=runner,
+            incoming=IncomingMessage(channel_id=123, message_id=10, text="hi"),
+            resume_token=ResumeToken(engine=CODEX_ENGINE, value="sid-q"),
+            on_resume_failed=on_resume_failed,
+        )
+
+    # (a) started fresh — resume=None was passed to run(), not "sid-q".
+    assert len(runner.calls) == 1
+    assert runner.calls[0][1] is None
+    # (b) the stored token was cleared so the user's session mapping isn't
+    # silently lost.
+    assert "sid-q" in cleared
+    # (c) structured reason logged for diagnosis.
+    assert any(
+        r.get("event") == "session.resume_diverted_fresh"
+        and r.get("session_id") == "sid-q"
+        and r.get("reason") == "quarantined"
+        for r in logs
+    )
+    # (d) the user still got a real answer from the fresh run.
+    final_text = transport.edit_calls[-1]["message"].text
+    assert "fresh answer" in final_text
+
+
+@pytest.mark.anyio
+async def test_632_healthy_run_clears_quarantine(quarantine_store) -> None:
+    """#632 (W2): a run that completes with real work (num_turns truthy)
+    clears any quarantine marker for the session id it reports, so a reused
+    session id is never stuck fresh-only forever."""
+    quarantine_store.quarantine(
+        CODEX_ENGINE, "sid-healthy", reason="forced_teardown_after_result"
+    )
+
+    transport = FakeTransport()
+    runner = _RecordingRunner(
+        engine=CODEX_ENGINE,
+        resume_value="sid-healthy",
+        answer="a real answer",
+        usage={"num_turns": 2},
+    )
+    cfg = ExecBridgeConfig(
+        transport=transport,
+        presenter=MarkdownPresenter(),
+        final_notify=False,
+    )
+
+    await handle_message(
+        cfg,
+        runner=runner,
+        incoming=IncomingMessage(channel_id=123, message_id=10, text="hi"),
+        resume_token=None,
+    )
+
+    assert quarantine_store.is_quarantined(CODEX_ENGINE, "sid-healthy") is False
+
+
+@pytest.mark.anyio
+async def test_631_handle_message_uses_injected_quarantine_store(
+    tmp_path, monkeypatch
+) -> None:
+    """#631 (T6): ``handle_message`` must honour an explicitly injected
+    ``quarantine_store`` kwarg without ever falling back to (or lazily
+    materialising) the process-wide singleton.
+
+    The singleton is explicitly reset to unset (``set_quarantine_store
+    (None)``) immediately before the call under test, overriding whatever
+    the autouse ``_isolated_quarantine_store`` fixture (tests/conftest.py)
+    injected for this test — that fixture exists to stop *unfixtured*
+    tests from ever touching the real on-disk quarantine file, but this
+    test needs the singleton in its unset (lazy-load-on-first-use) state
+    to prove the specific claim below. As a belt-and-braces guard against
+    a wiring bug that silently falls back to ``get_quarantine_store()``,
+    ``UNTETHER_CONFIG_PATH`` is also monkeypatched to a tmp directory so
+    even a fallback could never touch the real on-disk quarantine file —
+    and we assert no file was written at that fallback-derived path,
+    which is what would happen the moment the lazy accessor's ``.load()``
+    persisted a pruned/dirty store.
+    """
+    from untether.session_quarantine import (
+        QuarantineStore,
+        resolve_quarantine_path,
+        set_quarantine_store,
+    )
+
+    fake_config_path = tmp_path / "cfg" / "untether.toml"
+    fake_config_path.parent.mkdir(parents=True)
+    monkeypatch.setenv("UNTETHER_CONFIG_PATH", str(fake_config_path))
+    fallback_quarantine_path = resolve_quarantine_path(fake_config_path)
+
+    set_quarantine_store(None)  # the singleton starts, and must stay, unset
+
+    injected_path = tmp_path / "injected" / "q.json"
+    injected_path.parent.mkdir(parents=True)
+    injected_store = QuarantineStore(path=injected_path)
+    injected_store.quarantine(
+        CODEX_ENGINE, "sid-injected", reason="forced_teardown_after_result"
+    )
+
+    transport = FakeTransport()
+    runner = _RecordingRunner(
+        engine=CODEX_ENGINE, resume_value="sid-fresh", answer="fresh via injection"
+    )
+    cfg = ExecBridgeConfig(
+        transport=transport,
+        presenter=MarkdownPresenter(),
+        final_notify=False,
+    )
+
+    try:
+        await handle_message(
+            cfg,
+            runner=runner,
+            incoming=IncomingMessage(channel_id=123, message_id=10, text="hi"),
+            resume_token=ResumeToken(engine=CODEX_ENGINE, value="sid-injected"),
+            quarantine_store=injected_store,
+        )
+
+        # (a) the injected store's marker was honoured — the run was
+        # diverted to a fresh session (resume=None), never resumed.
+        assert len(runner.calls) == 1
+        assert runner.calls[0][1] is None
+
+        # (b) the singleton was never touched: no file materialised at the
+        # path the lazy accessor would have used had it been consulted.
+        assert not fallback_quarantine_path.exists()
+    finally:
+        set_quarantine_store(None)
 
 
 # ---------------------------------------------------------------------------

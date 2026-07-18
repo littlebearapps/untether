@@ -19,6 +19,7 @@ from .model import ActionEvent, CompletedEvent, ResumeToken, StartedEvent, Untet
 from .presenter import Presenter
 from .progress import ProgressTracker
 from .runner import _APPROVAL_PENDING_REFIRE_S, Runner
+from .session_quarantine import QuarantineStore, get_quarantine_store
 from .transport import (
     ChannelId,
     MessageId,
@@ -3050,6 +3051,7 @@ async def handle_message(
     on_resume_failed: Callable[[ResumeToken], Awaitable[None]] | None = None,
     progress_ref: MessageRef | None = None,
     clock: Callable[[], float] = time.monotonic,
+    quarantine_store: QuarantineStore | None = None,
     _auto_continued_count: int = 0,
     _empty_resent_count: int = 0,
 ) -> None:
@@ -3060,6 +3062,54 @@ async def handle_message(
         resume=resume_token.value if resume_token else None,
         text=incoming.text,
     )
+
+    # #631 (T6): resolve the quarantine store ONCE for this call — either
+    # the caller-injected store (tests / explicit wiring) or the
+    # process-wide singleton. All three quarantine call sites below (the
+    # W2 divert check here, the W2 healthy-clear in _deliver_final, and
+    # the W1 quarantine in the auto-resend block) use this resolved
+    # reference. Recursive re-entries (auto-resend, auto-continue) pass it
+    # through explicitly via the ``quarantine_store=`` kwarg so an
+    # injected store survives recursion instead of falling back to the
+    # singleton partway through a recovery chain.
+    try:
+        _qstore: QuarantineStore | None = quarantine_store or get_quarantine_store()
+    except Exception:  # noqa: BLE001 — a store failure must never block
+        # message handling; the sites below already tolerate a None store.
+        logger.debug("session.quarantine_store_resolve_failed", exc_info=True)
+        _qstore = None
+
+    # #632 (W2): a session marked quarantined (forced teardown after a
+    # result — see claude.py's post-result subcountdown) may have a
+    # dangling upstream turn and is unsafe to resume. Divert to a fresh
+    # session proactively rather than waiting for another empty-result
+    # anomaly. Runs on every entry, including recursive auto-resend/
+    # auto-continue re-entries — a cheap in-memory dict lookup.
+    if resume_token is not None:
+        try:
+            _quarantined = (
+                _qstore.is_quarantined(runner.engine, resume_token.value)
+                if _qstore is not None
+                else False
+            )
+        except Exception:  # noqa: BLE001 — a store failure must never
+            # block message handling.
+            logger.debug("session.quarantine_check_failed", exc_info=True)
+            _quarantined = False
+        if _quarantined:
+            logger.info(
+                "session.resume_diverted_fresh",
+                engine=runner.engine,
+                session_id=resume_token.value,
+                reason="quarantined",
+            )
+            if on_resume_failed is not None:
+                try:
+                    await on_resume_failed(resume_token)
+                except Exception:  # noqa: BLE001
+                    logger.debug("session.clear_failed", exc_info=True)
+            resume_token = None
+
     started_at = clock()
     is_resume_line = runner.is_resume_line
     resume_strip = strip_resume_line or is_resume_line
@@ -3274,6 +3324,59 @@ async def handle_message(
             and (completed.usage.get("duration_api_ms", 1) or 0) == 0
         ):
             empty_result_anomaly = True
+            # #631 (W5-diag): derive WHY the anomaly branch will or will not
+            # auto-recover. Checks the same four conditions the eligibility
+            # test below ANDs together, but in priority order (most specific
+            # diagnostic first) rather than the AND's structural order — a
+            # retry that ran FRESH (unresumed) after exhausting its one shot
+            # has BOTH resume_token is None and _empty_resent_count >= 1
+            # true, and "counter_exhausted" is the more useful signal than
+            # "no_token" in that case. "fresh"/"legacy_same_session" mean
+            # recovery IS armed; the other values explain why it is not. The
+            # fresh-vs-legacy split mirrors — without moving — the W1
+            # decision made later in the post-return auto-resend block: same
+            # settings object, same poison-token derivation
+            # (completed.resume or run_outcome.resume or resume_token).
+            _resend_settings = _load_auto_continue_settings()
+            if not _resend_settings.resend_empty_resume:
+                _resend_reason = "disabled"
+            elif _empty_resent_count >= 1:
+                _resend_reason = "counter_exhausted"
+            elif not bool(incoming.text and incoming.text.strip()):
+                _resend_reason = "blank_input"
+            elif resume_token is None:
+                _resend_reason = "no_token"
+            else:
+                _poison_for_log = completed.resume or run_outcome.resume or resume_token
+                _resend_reason = (
+                    "fresh"
+                    if (
+                        _resend_settings.empty_resume_fresh
+                        and _poison_for_log is not None
+                    )
+                    else "legacy_same_session"
+                )
+            _es = edits.stream
+            # #631 (Fix 1): whether the resumed token was ALREADY known-
+            # quarantined at the moment this anomaly fired. Under normal
+            # control flow this is always False — the W2 entry-divert check
+            # earlier in handle_message redirects an already-quarantined
+            # resume_token to a fresh session before any run happens — so a
+            # True here is evidence of a TOCTOU race (e.g. a concurrent
+            # handle_message call for the same session id quarantined it
+            # mid-run) and gives the fleet-correlation query persisted
+            # prior-run memory. Computed defensively: _qstore may be None if
+            # resolution failed earlier, and the store call itself must
+            # never break diagnostic logging.
+            try:
+                _poison_was_quarantined = (
+                    _qstore.is_quarantined(runner.engine, resume_token.value)
+                    if (resume_token is not None and _qstore is not None)
+                    else False
+                )
+            except Exception:  # noqa: BLE001
+                logger.debug("session.quarantine_check_failed", exc_info=True)
+                _poison_was_quarantined = None
             logger.warning(
                 "runner.empty_result",
                 engine=runner.engine,
@@ -3281,19 +3384,25 @@ async def handle_message(
                 if (completed.resume or run_outcome.resume)
                 else None,
                 was_resume=resume_token is not None,
+                raw_subtype=(completed.usage or {}).get("subtype"),
+                is_error=run_ok is False,
+                proc_returncode=_es.proc_returncode if _es else None,
+                # #631 (Fix 1): renamed from sigterm_sent/background_observed
+                # — these fields only ever describe the CURRENT (empty) run's
+                # stream, never the prior (poisoned) run where the
+                # interesting facts actually live; the old names read as if
+                # they might cover both.
+                sigterm_sent_this_run=bool(_es and _es.sigterm_sent),
+                background_observed_this_run=bool(_es and _es.background_observed),
+                poison_was_quarantined=_poison_was_quarantined,
+                resend_eligible_reason=_resend_reason,
             )
             # #596: auto-resend the original prompt once (same session)
             # instead of asking the user to re-nudge. Eligible only on a
             # resume with a non-empty original prompt, gated by the
             # single-shot ``_empty_resent_count`` so a retry that is ALSO
             # empty falls through to the manual-resend notice below.
-            _resend_settings = _load_auto_continue_settings()
-            if (
-                _resend_settings.resend_empty_resume
-                and resume_token is not None
-                and _empty_resent_count < 1
-                and bool(incoming.text and incoming.text.strip())
-            ):
+            if _resend_reason in ("fresh", "legacy_same_session"):
                 empty_resume["pending"] = True
                 final_answer = (
                     "\N{ANTICLOCKWISE DOWNWARDS AND UPWARDS OPEN CIRCLE ARROWS} "
@@ -3307,6 +3416,25 @@ async def handle_message(
                     "consider itself complete. Resend your message, or "
                     "start fresh with /new."
                 )
+
+        # #632 (W2): a run that completed with real work proves the session
+        # is healthy — clear any forced-teardown quarantine marker for the
+        # session id it reports so a reused session id is never stuck
+        # fresh-only forever. ``num_turns`` must be explicitly truthy: this
+        # naturally excludes the #596 empty_result_anomaly zero-turn case
+        # above, and engines that never report usage at all never clear.
+        if (
+            run_ok is True
+            and not run_outcome.cancelled
+            and (completed.usage or {}).get("num_turns", 0)
+        ):
+            _healthy_sid = completed.resume or run_outcome.resume
+            if _healthy_sid is not None and _qstore is not None:
+                try:
+                    _qstore.clear(runner.engine, _healthy_sid.value)
+                except Exception:  # noqa: BLE001 — a store failure must
+                    # never break final-message delivery.
+                    logger.debug("session.quarantine_clear_failed", exc_info=True)
 
         status = (
             "error"
@@ -3632,24 +3760,60 @@ async def handle_message(
     completed = outcome.completed
     run_ok = completed.ok
 
-    # --- Auto-resend: #596 empty-result no-op resume ---
+    # --- Auto-resend: #596 empty-result no-op resume / #631 (W1) quarantine-and-fresh ---
     # _deliver_final already delivered the "↻ retrying automatically…" notice
     # (early, ~5s in). Now that the run generator has fully returned (the
-    # empty run's subprocess is done), resend the ORIGINAL prompt once against
-    # the SAME session. The monitor confirmed a fresh resume of the same
-    # session processes normally on the second attempt. Single-shot via
-    # _empty_resent_count; mutually exclusive with auto-continue (that fires
-    # only when there was no result at all).
+    # empty run's subprocess is done), resend the ORIGINAL prompt once.
+    # #631: the resumed session may be POISONED — an upstream dangling turn
+    # left over from a forced teardown will keep returning empty 0-turn
+    # resumes if resumed again. When empty_resume_fresh is on (default),
+    # clear the stored token, quarantine the poisoned session id so it is
+    # never resumed again, and re-run the ORIGINAL prompt as a FRESH session
+    # (resume=None). When the flag is off, preserve the exact #596
+    # same-session resend behaviour. Single-shot via _empty_resent_count;
+    # mutually exclusive with auto-continue (that fires only when there was
+    # no result at all).
     if empty_resume["pending"] and _empty_resent_count < 1:
+        _er_settings = _load_auto_continue_settings()
         # Fall back to the original resume_token so a completion that omits a
-        # resume value never silently starts a FRESH session.
-        _er_resume = completed.resume or outcome.resume or resume_token
-        logger.warning(
-            "session.auto_resend_empty",
-            session_id=_er_resume.value if _er_resume else None,
-            engine=runner.engine,
-            attempt=_empty_resent_count + 1,
-        )
+        # resume value never silently starts a FRESH session by accident.
+        _poison = completed.resume or outcome.resume or resume_token
+        if _er_settings.empty_resume_fresh and _poison is not None:
+            # #631 W1: clear the stored session token and quarantine the
+            # poisoned session id, then retry as a FRESH session.
+            if on_resume_failed is not None:
+                try:
+                    await on_resume_failed(_poison)
+                except Exception:  # noqa: BLE001
+                    logger.debug("session.clear_failed", exc_info=True)
+            if _qstore is not None:
+                try:
+                    _qstore.quarantine(
+                        runner.engine,
+                        _poison.value,
+                        reason="empty_zero_turn_resume",
+                    )
+                except Exception:  # noqa: BLE001 — a store failure must
+                    # never crash message handling; the other quarantine
+                    # call sites in this function already tolerate this.
+                    logger.debug("session.quarantine_failed", exc_info=True)
+            logger.warning(
+                "session.auto_resend_fresh",
+                old_session_id=_poison.value,
+                engine=runner.engine,
+                attempt=_empty_resent_count + 1,
+            )
+            _er_resume = None
+        else:
+            # Legacy same-session path (flag off): preserve #596 behaviour
+            # byte-for-byte.
+            _er_resume = _poison
+            logger.warning(
+                "session.auto_resend_empty",
+                session_id=_er_resume.value if _er_resume else None,
+                engine=runner.engine,
+                attempt=_empty_resent_count + 1,
+            )
         await handle_message(
             cfg,
             runner=runner,
@@ -3668,6 +3832,9 @@ async def handle_message(
             on_thread_known=on_thread_known,
             on_resume_failed=on_resume_failed,
             clock=clock,
+            # #631 (T6): thread the resolved store through so an
+            # injected/singleton store survives this recursive re-entry.
+            quarantine_store=_qstore,
             # Carry BOTH recovery counters so an alternating empty-resume ↔
             # auto-continue chain can't reset the other guard and loop.
             _auto_continued_count=_auto_continued_count,
@@ -3797,6 +3964,9 @@ async def handle_message(
             on_thread_known=on_thread_known,
             on_resume_failed=on_resume_failed,
             clock=clock,
+            # #631 (T6): thread the resolved store through so an
+            # injected/singleton store survives this recursive re-entry.
+            quarantine_store=_qstore,
             _auto_continued_count=_auto_continued_count + 1,
             # Carry the empty-resume guard so it can't be reset by an
             # interleaved auto-continue (see #596 auto-resend).
