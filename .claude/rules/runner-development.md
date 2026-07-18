@@ -21,6 +21,8 @@ After emitting `CompletedEvent`, drop all subsequent JSONL lines.
 
 When Claude Code exits with `last_event_type=user` (tool results sent but never processed), `runner_bridge.py` auto-resumes the session. Suppressed on signal deaths (rc=143/137) to prevent death spirals. Configure via `[auto_continue]` in `untether.toml` (`enabled`, `max_retries`).
 
+Empty-resume recovery (#631/#632, Claude only): a resume returning 0 turns/$0 quarantines the session (`session_quarantine.py`, persisted to `session_quarantine.json`) and auto-resends once on a fresh session; forced teardown after a result quarantines proactively and the next message diverts fresh. Flags: `empty_resume_fresh`, `quarantine_on_forced_teardown` (both default true). Never retry the same poisoned session.
+
 ## Event creation
 
 Use `EventFactory` (from `src/untether/events.py`) for all event construction:

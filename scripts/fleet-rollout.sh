@@ -320,7 +320,7 @@ ALL_HOSTS=(lba-1 nsd channelo sl mac)
 
 if [[ -n "$ONLY_HOST" ]]; then
     # Validate the host name against ALL_HOSTS (lba-1 is always known;
-    # nsd/channelo/mac need to be in the static list).
+    # all non-lba-1 hosts need to be in the static list).
     valid=0
     for h in "${ALL_HOSTS[@]}"; do
         if [[ "$h" == "$ONLY_HOST" ]]; then valid=1; break; fi
