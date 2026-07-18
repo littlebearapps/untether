@@ -34,6 +34,7 @@ Untether adds interactive permission control, plan mode support, and several UX 
 - **Pi context compaction** — `AutoCompactionStart`/`AutoCompactionEnd` events rendered as progress actions
 - **Stall diagnostics & liveness watchdog** — `/proc` process diagnostics (CPU, RSS, TCP, FDs), progressive stall warnings with Telegram notifications, liveness watchdog for alive-but-silent subprocesses, stall auto-cancel (dead process, no-PID zombie, absolute cap) with CPU-active suppression (sleeping-process aware — shows tool name when main process waiting on child), tool-active repeat suppression (first warning fires, repeats suppressed while child CPU-active), MCP tool-aware threshold (15 min for network-bound MCP calls vs 10 min for local tools) with contextual "MCP tool running: {server}" messaging, `session.summary` structured log; `[watchdog]` config section with configurable `tool_timeout` and `mcp_tool_timeout`
 - **Auto-continue** — detects Claude Code sessions that exit after receiving tool results without processing them (upstream bugs #34142, #30333) and auto-resumes; suppressed on signal deaths (rc=143/SIGTERM, rc=137/SIGKILL) to prevent death spirals under memory pressure; configurable via `[auto_continue]` with `enabled` (default true) and `max_retries` (default 1)
+- **Empty-resume recovery (quarantine-and-fresh)** (#631, #632) — a resume that returns 0 turns/$0 (upstream dangling-tool_use defect) quarantines the session in `session_quarantine.json` and auto-resends the message once on a fresh session; sessions SIGTERM'd after a result (`forced_teardown_after_result`) are quarantined proactively so the next message diverts to a fresh session before any empty result is seen; `[auto_continue]` flags `empty_resume_fresh` and `quarantine_on_forced_teardown` (both default true); structured events `runner.empty_result` → `session.quarantined` → `session.auto_resend_fresh`/`session.resume_diverted_fresh`; Claude runner only
 - **MCP catalog observability + proactive refresh** (#365) — `catalog_staleness.detected` structlog WARNING once per `(session, server, status)` tuple when Claude's `system.init` reports a non-`connected` MCP status (`detect_catalog_staleness`, default **on**); opt-in fire-and-forget `mcp_status` control_request after each `tool_result` to nudge Claude Code's catalog (`notify_catalog_refresh`, default **off**). Request IDs use the `ut_catalog_refresh_<session_id>_<seq>` namespace; drained via `ClaudeRunner._drain_catalog_refresh`. Logs `catalog.refresh_sent` INFO / `catalog.refresh_failed` WARN/ERROR. Claude runner only
 - **File upload deduplication** — auto-appends `_1`, `_2`, … when target file exists, instead of requiring `--force`; media groups without captions auto-save to `incoming/`
 - **Agent-initiated file delivery (outbox)** — agents write files to `.untether-outbox/` during a run; Untether sends them as Telegram documents on completion with `📎` captions; deny-glob security, size limits, file count cap, auto-cleanup; `[transports.telegram.files]` config
@@ -73,7 +74,8 @@ Telegram <-> TelegramPresenter <-> RunnerBridge <-> Runner (claude/codex/opencod
 | `runners/claude.py` | Claude Code runner, interactive features |
 | `runners/gemini.py` | Gemini CLI runner |
 | `runners/amp.py` | AMP CLI runner (Sourcegraph) |
-| `runner_bridge.py` | Connects runners to Telegram presenter, injects agent preamble, auto-continue with signal death suppression |
+| `runner_bridge.py` | Connects runners to Telegram presenter, injects agent preamble, auto-continue with signal death suppression, empty-resume quarantine-and-fresh recovery |
+| `session_quarantine.py` | Persistent QuarantineStore (`session_quarantine.json`): poisoned-session markers, forced-teardown quarantine, resume divert (#631/#632) |
 | `cost_tracker.py` | Per-run/daily cost tracking and budget alerts |
 | `commands/claude_control.py` | Approve/Deny/Discuss callback handler |
 | `commands/dispatch.py` | Callback dispatch and command routing |
@@ -187,11 +189,11 @@ Rules in `.claude/rules/` auto-load when editing matching files:
 
 ## Tests
 
-2910 unit tests, 80% coverage threshold. Integration testing against `@untether_dev_bot` is **mandatory before every release** — see `docs/reference/integration-testing.md` for the full playbook with per-release-type tier requirements (patch/minor/major). All integration test tiers are fully automated by Claude Code via Telegram MCP tools and Bash.
+2914 unit tests, 80% coverage threshold. Integration testing against `@untether_dev_bot` is **mandatory before every release** — see `docs/reference/integration-testing.md` for the full playbook with per-release-type tier requirements (patch/minor/major). All integration test tiers are fully automated by Claude Code via Telegram MCP tools and Bash.
 
 Key test files:
 
-- `test_claude_control.py` — 99 tests: control requests, response routing, registry lifecycle, auto-approve/auto-deny, tool auto-approve, custom deny messages, discuss action, early toast, progressive cooldown, auto permission mode, diff_preview plan bypass
+- `test_claude_control.py` — 109 tests: control requests, response routing, registry lifecycle, auto-approve/auto-deny, tool auto-approve, custom deny messages, discuss action, early toast, progressive cooldown, auto permission mode, diff_preview plan bypass
 - `test_callback_dispatch.py` — 26 tests: callback parsing, dispatch toast/ephemeral behaviour, early answering
 - `test_exec_bridge.py` — 230 tests: ephemeral notification cleanup, approval push notifications, progressive stall warnings, stall diagnostics, stall auto-cancel with CPU-active suppression (sleeping-process aware), tool-active repeat suppression, approval-aware stall threshold, MCP tool stall threshold, frozen ring buffer hung escalation, session summary, PID/stream threading, auto-continue detection, signal death suppression, empty-resume quarantine-and-fresh recovery, resume divert/clear, empty-result diagnostics
 - `test_ask_user_question.py` — 29 tests: AskUserQuestion control request handling, question extraction, pending request registry, answer routing, option button rendering, multi-question flows, structured answer responses, ask mode toggle auto-deny
@@ -363,7 +365,7 @@ Every bug fix and significant change MUST have a GitHub issue:
 - **Bugs found during debugging**: create an issue before or alongside the fix
 - **Issue body**: description, impact, affected files, fix reference
 - **Labels**: `bug`, `enhancement`, `documentation` as appropriate; severity on bugs via `severity:critical|major|minor|trivial`; `priority: low|medium|high` (note space) for human triage
-- **Auto-filed sources**: `auto:error-report` (untether-issue-watcher daemon, log-pattern errors — runs on lba-1, nsd, channelo, mac; each filing is host-tagged via the `HOST` env in the daemon's unit/plist) and `auto:monitor-audit` (`/monitor` command audit loop, bugs + enhancements — 4 per-host configs plus the `untether-fleet` meta-target for cross-host audits)
+- **Auto-filed sources**: `auto:error-report` (untether-issue-watcher daemon, log-pattern errors — runs on all 5 fleet hosts (lba-1, nsd, channelo, sl, mac); each filing is host-tagged via the `HOST` env in the daemon's unit/plist) and `auto:monitor-audit` (`/monitor` command audit loop, bugs + enhancements — 5 per-host configs plus the `untether-fleet` meta-target for cross-host audits)
 - **Closing**: reference the fixing PR or commit in a close comment
 
 ### Changelog
