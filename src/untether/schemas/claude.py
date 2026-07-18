@@ -296,6 +296,37 @@ class StreamRateLimitMessage(
     rate_limit_info: RateLimitInfo | None = None
 
 
+# #637 — Claude Code emits a top-level `tool_progress` heartbeat while a
+# long-running tool is in flight, e.g.
+#   {"type":"tool_progress","tool_use_id":"toolu_…-heartbeat-0",
+#    "tool_name":"Bash","parent_tool_use_id":"toolu_…",
+#    "elapsed_time_seconds":30,"heartbeat":true,"session_id":…,"uuid":…}
+# Verified on CLI 2.1.214 by running a >30s Bash command. Every field is
+# optional so a shape change upstream can't reintroduce the drop; the line
+# just needs to decode so the rest of the stream isn't discarded
+# (jsonl.msgspec.invalid x2 on nsd). Same family as #489 / #597, but the
+# first *top-level* addition since `rate_limit_event`.
+#
+# No runner change is required: `translate_claude_event`'s fallback logs
+# `claude.event.unrecognised` at DEBUG and returns [], so the heartbeat is
+# accepted and ignored. Wire it into progress rendering separately if the
+# elapsed-time detail ever becomes useful (#481 already renders elapsed
+# time from Untether's own clock).
+class StreamToolProgressMessage(
+    msgspec.Struct,
+    tag="tool_progress",
+    tag_field="type",
+    forbid_unknown_fields=False,
+):
+    tool_use_id: str | None = None
+    tool_name: str | None = None
+    parent_tool_use_id: str | None = None
+    elapsed_time_seconds: float | None = None
+    heartbeat: bool | None = None
+    session_id: str | None = None
+    uuid: str | None = None
+
+
 type StreamJsonMessage = (
     StreamUserMessage
     | StreamAssistantMessage
@@ -306,6 +337,7 @@ type StreamJsonMessage = (
     | StreamControlResponse
     | StreamControlCancelRequest
     | StreamRateLimitMessage
+    | StreamToolProgressMessage
 )
 
 

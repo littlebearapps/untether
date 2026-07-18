@@ -5,6 +5,7 @@ import uuid
 
 import anyio
 import pytest
+import structlog.testing
 
 from tests.factories import action_completed, action_started
 from untether.markdown import MarkdownParts, MarkdownPresenter
@@ -5042,9 +5043,19 @@ class TestShouldAutoContinue:
         """rc=None (unknown) — DO auto-continue (conservative)."""
         assert self._call(proc_returncode=None) is True
 
-    def test_allows_rc_one(self):
-        """rc=1 (generic error) — DO auto-continue."""
-        assert self._call(proc_returncode=1) is True
+    def test_blocks_rc_one(self):
+        """rc=1 (generic error) — do NOT auto-continue.
+
+        Behaviour change in 0.35.4rc8 (#640). This previously asserted the
+        opposite. `_should_auto_continue`'s docstring always claimed "the
+        upstream bug exits with rc=0", but the implementation only excluded
+        signal deaths, so ordinary failures were auto-resumed too. 14 days of
+        fleet logs (nsd) show 47/49 auto-continues at rc=0 and 2 at rc=143 —
+        i.e. zero real events anywhere in the 1..128 range, so narrowing the
+        gate costs no genuine recovery and closes the path where a failed run
+        gets pointlessly re-spawned.
+        """
+        assert self._call(proc_returncode=1) is False
 
 
 class TestIsSignalDeath:
@@ -5478,6 +5489,11 @@ def _make_engine_state(**fields):
         "post_result_closed_at": None,
         "post_result_idle_minutes": 0.0,
         "post_result_closing_sent": False,
+        # #495/#499/#500: authoritative expected-wait probes. Callables so
+        # the bridge's ``callable(probe)`` duck-typing matches the real
+        # ClaudeStreamState methods.
+        "awaiting_user_approval": lambda: False,
+        "awaiting_rate_limit_retry": lambda: False,
     }
     defaults.update(fields)
     return SimpleNamespace(**defaults)
@@ -7470,4 +7486,207 @@ async def test_cancel_mid_delivery_lets_final_delivery_finish() -> None:
     assert deliver.completed.is_set(), (
         "on_completed was cancelled mid-delivery; final answer delivery "
         "must be shielded so the sent-flag matches what reached the wire"
+    )
+
+
+# ---------------------------------------------------------------------------
+# #495/#499/#500 — approval-wait / rate-limit-wait stall suppression.
+#
+# One 5 h session parked on an unanswered ExitPlanMode approval produced 88
+# spurious `progress_edits.stall_detected` WARNs (#499), 2
+# `progress_edits.frozen_ring_escalation` WARNs (#500), and a
+# `session.summary` reporting `stall_warnings=88` (#495). The process was
+# healthy throughout (cpu_active=True, state=S).
+# ---------------------------------------------------------------------------
+
+
+def test_499_pending_approval_detected_without_inline_keyboard() -> None:
+    """The root cause: an ExitPlanMode permission-request action carries no
+    ``inline_keyboard`` detail, so the old presentation-state-only predicate
+    returned False and the stall was classified "normal"."""
+    transport = FakeTransport()
+    edits = _make_edits(transport, _KeyboardPresenter())
+
+    # No actions at all -> the old heuristic has nothing to go on.
+    edits.stream = _make_stream(
+        engine_state=_make_engine_state(awaiting_user_approval=lambda: True)
+    )
+    assert edits._has_pending_approval() is True
+
+    edits.stream = _make_stream(
+        engine_state=_make_engine_state(awaiting_user_approval=lambda: False)
+    )
+    assert edits._has_pending_approval() is False
+
+
+def test_499_pending_approval_falls_back_to_inline_keyboard() -> None:
+    """Engines with no control channel keep the old presentation-state path."""
+    transport = FakeTransport()
+    edits = _make_edits(transport, _KeyboardPresenter())
+    edits.stream = _make_stream(engine_state=None)
+    assert edits._has_pending_approval() is False
+
+
+def test_499_pending_approval_survives_probe_exception() -> None:
+    """A raising engine probe must not take the stall monitor down."""
+
+    def _boom() -> bool:
+        raise RuntimeError("engine state exploded")
+
+    transport = FakeTransport()
+    edits = _make_edits(transport, _KeyboardPresenter())
+    edits.stream = _make_stream(
+        engine_state=_make_engine_state(awaiting_user_approval=_boom)
+    )
+    assert edits._has_pending_approval() is False
+
+
+def test_500_rate_limit_waiting_probe() -> None:
+    transport = FakeTransport()
+    edits = _make_edits(transport, _KeyboardPresenter())
+    edits.stream = _make_stream(
+        engine_state=_make_engine_state(awaiting_rate_limit_retry=lambda: True)
+    )
+    assert edits._is_rate_limit_waiting() is True
+    edits.stream = _make_stream(engine_state=None)
+    assert edits._is_rate_limit_waiting() is False
+
+
+@pytest.mark.anyio
+async def test_495_499_500_approval_wait_emits_no_warn_and_no_count() -> None:
+    """End-to-end: a session parked on an approval must emit the demoted INFO,
+    must NOT emit stall_detected / frozen_ring_escalation, must NOT increment
+    the stall_warnings metric, and must hold frozen_ring_count at zero so the
+    counter can't trip a false escalation the instant the user replies."""
+    transport = FakeTransport()
+    presenter = _KeyboardPresenter()
+    clock = _FakeClock(start=100.0)
+    edits = _make_edits(transport, presenter, clock=clock)
+    edits._stall_check_interval = 0.01
+    edits._STALL_THRESHOLD_SECONDS = 0.05
+    edits._STALL_THRESHOLD_TOOL = 0.05
+    edits._STALL_THRESHOLD_APPROVAL = 0.05
+    edits._STALL_THRESHOLD_APPROVAL_FIRST = 0.05
+    edits._stall_repeat_seconds = 0.02  # let many ticks fire
+
+    edits.stream = _make_stream(
+        last_event_type="result",
+        engine_state=_make_engine_state(awaiting_user_approval=lambda: True),
+    )
+
+    with structlog.testing.capture_logs() as logs:
+        async with anyio.create_task_group() as tg:
+
+            async def drive() -> None:
+                clock.set(110.0)
+                await anyio.sleep(0.25)
+                edits.signal_send.close()
+
+            tg.start_soon(edits.run)
+            tg.start_soon(drive)
+
+    events = [entry.get("event") for entry in logs]
+    assert "progress_edits.stall_detected" not in events
+    assert "progress_edits.frozen_ring_escalation" not in events
+    assert "subprocess.approval_pending" in events
+    # #495: the reported metric must stay at zero — no tick was a real stall.
+    assert edits._total_stall_warn_count == 0
+    # #500: counter held down, so approving now cannot instantly escalate.
+    assert edits._frozen_ring_count == 0
+
+
+@pytest.mark.anyio
+async def test_495_genuine_stall_still_warns_and_counts() -> None:
+    """Regression guard: with no expected-wait active, a real stall must still
+    emit the WARNING and still increment the metric."""
+    transport = FakeTransport()
+    presenter = _KeyboardPresenter()
+    clock = _FakeClock(start=100.0)
+    edits = _make_edits(transport, presenter, clock=clock)
+    edits._stall_check_interval = 0.01
+    edits._STALL_THRESHOLD_SECONDS = 0.05
+    edits._STALL_THRESHOLD_TOOL = 0.05
+    edits._stall_repeat_seconds = 1000.0
+
+    edits.stream = _make_stream(
+        last_event_type="assistant",
+        engine_state=_make_engine_state(),
+    )
+
+    with structlog.testing.capture_logs() as logs:
+        async with anyio.create_task_group() as tg:
+
+            async def drive() -> None:
+                clock.set(110.0)
+                await anyio.sleep(0.15)
+                edits.signal_send.close()
+
+            tg.start_soon(edits.run)
+            tg.start_soon(drive)
+
+    events = [entry.get("event") for entry in logs]
+    assert "progress_edits.stall_detected" in events
+    assert edits._total_stall_warn_count >= 1
+
+
+# ---------------------------------------------------------------------------
+# #640 — auto-continue signal-death suppression was inert for Claude because
+# ClaudeRunner.run_impl never wrote `stream.proc_returncode`, so the bridge
+# always saw None. Fleet evidence (nsd, 14 days): 2 of 49 auto-continues fired
+# immediately after a rc=143 SIGTERM exit.
+# ---------------------------------------------------------------------------
+
+
+def _ac(rc):
+    """_should_auto_continue with everything but the return code held eligible."""
+    from untether.runner_bridge import _should_auto_continue
+
+    return _should_auto_continue(
+        last_event_type="user",
+        engine="claude",
+        cancelled=False,
+        resume_value="sess-1",
+        auto_continued_count=0,
+        max_retries=1,
+        proc_returncode=rc,
+    )
+
+
+def test_640_clean_exit_is_eligible() -> None:
+    assert _ac(0) is True
+
+
+def test_640_unknown_returncode_stays_eligible() -> None:
+    """Fail-open: a missing rc must not silently retire the mitigation for the
+    NOT_PLANNED upstream defect. For Claude this no longer occurs."""
+    assert _ac(None) is True
+
+
+@pytest.mark.parametrize("rc", [1, 2, 127, 128])
+def test_640_ordinary_failures_are_not_auto_continued(rc: int) -> None:
+    """The docstring always claimed 'the upstream bug exits with rc=0', but
+    only signal deaths were excluded. Fleet data shows zero real events in
+    this range, so excluding them is safe."""
+    assert _ac(rc) is False
+
+
+@pytest.mark.parametrize("rc", [137, 143, -9, -15])
+def test_640_signal_deaths_are_not_auto_continued(rc: int) -> None:
+    assert _ac(rc) is False
+
+
+@pytest.mark.anyio
+async def test_640_claude_runner_records_proc_returncode() -> None:
+    """The actual defect: ClaudeRunner.run_impl must write the return code back
+    onto the stream state, exactly as the base runner does at runner.py:1362.
+    Without this every rc-based gate downstream is a no-op."""
+    import inspect
+
+    from untether.runners import claude as claude_mod
+
+    src = inspect.getsource(claude_mod.ClaudeRunner.run_impl)
+    assert "stream.proc_returncode = rc" in src, (
+        "ClaudeRunner.run_impl must assign stream.proc_returncode — without it "
+        "_is_signal_death() always sees None and auto-continue can resume a "
+        "SIGTERM'd (poisoned) session. See #640."
     )

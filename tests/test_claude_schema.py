@@ -307,3 +307,57 @@ def test_decode_image_block_in_assistant_message() -> None:
     decoded = claude_schema.decode_stream_json_line(json.dumps(payload).encode())
     assert isinstance(decoded, claude_schema.StreamAssistantMessage)
     assert isinstance(decoded.message.content[0], claude_schema.StreamImageBlock)
+
+
+# #637 — top-level `tool_progress` heartbeat emitted while a long-running
+# tool is in flight. Payload below is the verbatim shape captured from
+# Claude Code CLI 2.1.214 by running a >30s Bash command. Before the fix
+# msgspec raised: Invalid value 'tool_progress' - at `$.type`.
+def test_decode_tool_progress_heartbeat() -> None:
+    payload = {
+        "type": "tool_progress",
+        "tool_use_id": "toolu_011cbTyUrSBE4D28tMCVqRSt-heartbeat-0",
+        "tool_name": "Bash",
+        "parent_tool_use_id": "toolu_011cbTyUrSBE4D28tMCVqRSt",
+        "elapsed_time_seconds": 30,
+        "heartbeat": True,
+        "session_id": "8e8245e8-952c-4b70-9c6f-4c1cb4d4a687",
+        "uuid": "a9786562-4e78-418e-b48a-b14e57a1076d",
+    }
+    decoded = claude_schema.decode_stream_json_line(json.dumps(payload).encode())
+    assert isinstance(decoded, claude_schema.StreamToolProgressMessage)
+    assert decoded.tool_name == "Bash"
+    assert decoded.heartbeat is True
+    assert decoded.elapsed_time_seconds == 30
+    assert decoded.session_id == "8e8245e8-952c-4b70-9c6f-4c1cb4d4a687"
+
+
+def test_decode_tool_progress_minimal_and_unknown_fields() -> None:
+    """Every field is optional and unknown fields are tolerated, so an
+    upstream shape change cannot reintroduce the dropped-line regression."""
+    decoded = claude_schema.decode_stream_json_line(
+        json.dumps({"type": "tool_progress", "some_future_field": {"a": 1}}).encode()
+    )
+    assert isinstance(decoded, claude_schema.StreamToolProgressMessage)
+    assert decoded.tool_name is None
+    assert decoded.heartbeat is None
+
+
+def test_tool_progress_translates_to_no_events() -> None:
+    """The heartbeat must decode *and* be ignored — it carries no progress
+    detail Untether renders (elapsed time comes from Untether's own clock,
+    #481), so translate must not emit a spurious action."""
+    from untether.runners.claude import ClaudeStreamState, translate_claude_event
+
+    decoded = claude_schema.decode_stream_json_line(
+        json.dumps(
+            {"type": "tool_progress", "tool_name": "Bash", "heartbeat": True}
+        ).encode()
+    )
+    state = ClaudeStreamState()
+    assert (
+        translate_claude_event(
+            decoded, title="claude", state=state, factory=state.factory
+        )
+        == []
+    )

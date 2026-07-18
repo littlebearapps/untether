@@ -266,15 +266,36 @@ def _should_auto_continue(
     max_retries: int,
     proc_returncode: int | None = None,
 ) -> bool:
-    """Detect Claude Code silent session termination bug (#34142, #30333).
+    """Detect a Claude Code run that exited without processing its tool results.
 
-    Returns True when the last raw JSONL event was a tool_result ("user")
+    Returns True when the last raw JSONL event was a tool_result ("user"),
     meaning Claude never got a turn to process the results before the CLI
-    exited.
+    exited, and the exit was clean.
 
-    Does NOT trigger on signal deaths (SIGTERM/SIGKILL from earlyoom or
-    other external killers) — those have rc>128 or rc<0.  The upstream bug
-    exits with rc=0.
+    #568 — this is deliberately a **symptom-based** predicate, not an
+    issue-identity one. It mitigates two upstream defects at once:
+    claude-code#34142 (assistant continuation skipped after tool_result;
+    CLOSED/COMPLETED upstream) and claude-code#30333 (ResultMessage never
+    emitted with background subagents; CLOSED/NOT_PLANNED — permanent).
+    The retirement audit asked to drop the #34142 half and keep the #30333
+    half, but at this decision point the subprocess has already exited and
+    the two are observationally identical: a `result` frame would exclude
+    the predicate entirely rather than discriminate, and `background_observed`
+    correlates with #30333 without being sound (it also fires for Monitor,
+    background Bash, ScheduleWakeup and RemoteTrigger). Gating on it would
+    silently drop recovery for a defect upstream has declined to fix, so the
+    mitigation is KEPT and the relevant fields are logged on
+    `session.auto_continue` instead, to build the evidence a future
+    narrowing would need. Do not re-introduce issue-number branching here
+    without a discriminator with measured false-positive/negative rates.
+
+    #640 — requires a clean `rc == 0`. Signal deaths (SIGTERM/SIGKILL from
+    earlyoom, the OOM killer, or Untether's own post-result limbo teardown)
+    and ordinary failures must never be auto-resumed. `None` stays eligible
+    only as a fail-open for engines/paths that do not thread a return code;
+    for Claude it is now always populated (`runners/claude.py`, run_impl).
+    14 days of fleet data showed 47/49 auto-continues at rc=0 and 2 at
+    rc=143 — the latter being exactly the leak this gate now closes.
     """
     if cancelled:
         return False
@@ -285,6 +306,8 @@ def _should_auto_continue(
     if not resume_value:
         return False
     if _is_signal_death(proc_returncode):
+        return False
+    if proc_returncode not in (0, None):
         return False
     return auto_continued_count < max_retries
 
@@ -1282,6 +1305,12 @@ class ProgressEdits:
                 else:
                     threshold = self._STALL_THRESHOLD_APPROVAL
                 threshold_reason = "pending_approval"
+            elif self._is_rate_limit_waiting():
+                # #495/#499/#500: throttled upstream — the run resumes on its
+                # own when the retry window elapses. Reuse the approval
+                # thresholds; this is an expected wait, not a stall.
+                threshold = self._STALL_THRESHOLD_APPROVAL
+                threshold_reason = "rate_limit_waiting"
             elif mcp_server is not None:
                 threshold = self._STALL_THRESHOLD_MCP_TOOL
                 threshold_reason = "running_mcp_tool"
@@ -1312,8 +1341,16 @@ class ProgressEdits:
 
             self._stall_warned = True
             self._stall_warn_count += 1
-            self._total_stall_warn_count += 1
             self._last_stall_warn_at = now
+            # #495: ``_total_stall_warn_count`` is the number reported as
+            # ``stall_warnings`` in ``session.summary`` and consumed by
+            # /monitor. It used to be incremented here — upstream of both the
+            # WARN/INFO demotion fork and the whole expected-wait suppression
+            # matrix — so a 5 h plan-approval wait reported stall_warnings=88
+            # even though not one of those ticks was a genuine stall. It is
+            # now incremented only where a stall WARNING is actually emitted
+            # (see ``_count_stall_warning``), so the metric means what its
+            # name says.
 
             # #470/#481: compute the 5 expected-wait booleans once. Used to
             # gate BOTH the auto-cancel arm (below) and the notification
@@ -1348,9 +1385,19 @@ class ProgressEdits:
                 or _bash_grace
                 or _bash_fresh
             )
+            # #495/#499/#500: an unanswered approval and an upstream rate-limit
+            # retry window are expected waits too. They were previously absent
+            # from this set, so a plan-approval wait could reach the auto-cancel
+            # arm as well as emitting spurious WARNs.
+            _expected_wait_reason = threshold_reason in (
+                "pending_approval",
+                "rate_limit_waiting",
+            )
             _expected_wait = (
-                _post_result_idle and not _post_result_limbo
-            ) or _real_pending
+                (_post_result_idle and not _post_result_limbo)
+                or _real_pending
+                or _expected_wait_reason
+            )
 
             # #333 Tier 2: one-shot warning when limbo is detected. This
             # complements the claude.py watchdog's ``runner.limbo_detected``
@@ -1388,7 +1435,10 @@ class ProgressEdits:
             # (``untether-issue-watcher``) and ``/monitor`` are configured
             # to treat WARNs as auto-fileable, so this also stops
             # spurious GitHub issue creation (closes #533).
-            if threshold_reason == "pending_approval":
+            # #495/#499/#500: ``rate_limit_waiting`` joins ``pending_approval``
+            # as a demoted reason — an upstream throttle resumes by itself, so
+            # it is by definition not a hang either.
+            if threshold_reason in ("pending_approval", "rate_limit_waiting"):
                 if (
                     self._last_approval_pending_emit_at == 0.0
                     or now - self._last_approval_pending_emit_at
@@ -1404,9 +1454,11 @@ class ProgressEdits:
                         last_action=last_action,
                         recent_events=[(round(t, 1), lbl) for t, lbl in recent[-3:]],
                         approval_pending=True,
+                        reason=threshold_reason,
                         source="bridge",
                     )
             else:
+                self._count_stall_warning()
                 logger.warning(
                     "progress_edits.stall_detected",
                     channel_id=self.channel_id,
@@ -1541,6 +1593,23 @@ class ProgressEdits:
             else:
                 self._frozen_ring_count = 0
             self._prev_recent_events = recent_snapshot
+
+            # #500: a frozen ring buffer is only evidence of a hang when the
+            # session is *supposed* to be producing events. While Claude is
+            # blocked on an unanswered control_request (or inside a rate-limit
+            # retry window) no JSONL arrives BY DEFINITION, so the counter
+            # climbed monotonically — observed at 12 and then 85 on a 5 h plan
+            # approval — and ``frozen_escalate`` went permanently True. Since
+            # every expected-wait suppressor below is gated on
+            # ``not frozen_escalate``, an approval wait bypassed all of them
+            # and emitted progress_edits.frozen_ring_escalation regardless.
+            #
+            # Hold the counter at zero for the duration of the expected wait
+            # rather than merely skipping the escalation: otherwise the moment
+            # the user finally clicks Approve, a counter of 85 would trip an
+            # immediate false escalation on the very next tick.
+            if _expected_wait_reason:
+                self._frozen_ring_count = 0
 
             # Suppress Telegram notification when process is CPU-active
             # (extended thinking, background agents). Instead, trigger a
@@ -1729,6 +1798,7 @@ class ProgressEdits:
                 # from every branch.
                 _tool_name: str | None = None
                 if mcp_hung:
+                    self._count_stall_warning()
                     logger.warning(
                         "progress_edits.mcp_tool_hung",
                         channel_id=self.channel_id,
@@ -1741,6 +1811,7 @@ class ProgressEdits:
                         f"⏳ MCP tool may be hung: {mcp_server} ({mins} min, no new events)"
                     ]
                 elif frozen_escalate:
+                    self._count_stall_warning()
                     logger.warning(
                         "progress_edits.frozen_ring_escalation",
                         channel_id=self.channel_id,
@@ -2068,11 +2139,59 @@ class ProgressEdits:
         return False
 
     def _has_pending_approval(self) -> bool:
-        """Check if the most recent non-completed action is waiting for user approval."""
+        """True while the run is blocked on a user approval.
+
+        #495/#499/#500: this used to inspect presentation state only — the
+        most recent non-completed action's ``inline_keyboard`` detail. An
+        ExitPlanMode permission request does not carry that key, so a session
+        parked for hours on a plan approval was classified ``"normal"`` and
+        emitted 88 spurious ``progress_edits.stall_detected`` WARNs.
+
+        The authoritative signal is the engine's own unanswered-control-request
+        registry, reached by the same ``engine_state`` duck-typing used for
+        ``has_live_background_work`` so non-Claude engines degrade cleanly.
+        The presentation-state check is retained as a fallback: it still
+        catches approvals that do render an inline keyboard, and it keeps this
+        predicate meaningful for engines with no control channel.
+        """
+        es = getattr(self.stream, "engine_state", None) if self.stream else None
+        probe = getattr(es, "awaiting_user_approval", None)
+        if callable(probe):
+            try:
+                if probe():
+                    return True
+            except Exception as exc:  # noqa: BLE001 - monitor loop must not die
+                logger.debug("progress_edits.approval_probe_failed", error=str(exc))
         for action_state in reversed(list(self.tracker._actions.values())):
             if not action_state.completed:
                 return bool(action_state.action.detail.get("inline_keyboard"))
             break  # only check the most recent
+        return False
+
+    def _count_stall_warning(self) -> None:
+        """Record that a genuine stall WARNING was emitted (#495).
+
+        Single increment point for ``_total_stall_warn_count`` so future
+        suppression rules cannot reintroduce counter drift: if a tick does not
+        reach one of the WARNING emissions, it does not count as a stall.
+        """
+        self._total_stall_warn_count += 1
+
+    def _is_rate_limit_waiting(self) -> bool:
+        """True while the engine is inside an upstream rate-limit retry window.
+
+        #495/#499/#500 companion to :meth:`_has_pending_approval` — a throttled
+        run resumes by itself, so silence during the retry window is expected
+        rather than a stall.
+        """
+        es = getattr(self.stream, "engine_state", None) if self.stream else None
+        probe = getattr(es, "awaiting_rate_limit_retry", None)
+        if callable(probe):
+            try:
+                return bool(probe())
+            except Exception as exc:  # noqa: BLE001 - monitor loop must not die
+                logger.debug("progress_edits.rate_limit_probe_failed", error=str(exc))
+                return False
         return False
 
     def _has_running_tool(self) -> bool:
@@ -3867,6 +3986,16 @@ async def handle_message(
             proc_returncode=_ac_proc_rc,
         )
     ):
+        # #568: emit the fields a future narrowing decision would need.
+        # The two upstream defects this mitigates are indistinguishable at
+        # this point, so rather than guess we record the cohort markers and
+        # let fleet data decide. `background_observed` in particular is the
+        # candidate discriminator for the NOT_PLANNED claude-code#30333 path
+        # (which is scoped to background subagents) — measure how many
+        # successful salvages have it False before ever gating on it.
+        # #640: `proc_returncode` was previously absent, which is why the
+        # broken signal-death guard needed log-line correlation to detect.
+        _ac_es = getattr(edits.stream, "engine_state", None) if edits.stream else None
         logger.warning(
             "session.auto_continue",
             session_id=_ac_resume.value if _ac_resume else None,
@@ -3874,6 +4003,12 @@ async def handle_message(
             last_event_type=_ac_last_event,
             attempt=_auto_continued_count + 1,
             max_retries=ac_settings.max_retries,
+            proc_returncode=_ac_proc_rc,
+            background_observed=bool(
+                getattr(edits.stream, "background_observed", False)
+                or getattr(_ac_es, "background_observed", False)
+            ),
+            event_count=getattr(edits.stream, "event_count", None),
         )
 
         # #551 Tier 0: deliver outbox files from subprocess 1 BEFORE

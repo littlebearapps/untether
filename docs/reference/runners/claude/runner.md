@@ -154,6 +154,19 @@ Approval-state guard: if `_REQUEST_TO_SESSION` or `_PENDING_ASK_REQUESTS` has li
 
 Two structlog events for ops: `claude.post_result_idle.deferred` (approval guard fired) and `claude.post_result_idle.closing_stdin` (deadline passed cleanly).
 
+#### This watchdog is PERMANENT, not a transitional workaround ([#569](https://github.com/littlebearapps/untether/issues/569))
+
+The post-result idle watchdog, its SIGTERM/SIGKILL subcountdown, and the stuck-after-`tool_result` detector ([#322](https://github.com/littlebearapps/untether/issues/322)) all exist because Claude Code's `--output-format stream-json` intermittently **stops producing output and never exits**. Upstream status, checked 2026-05-29 and unchanged as of 0.35.4rc8:
+
+* [anthropics/claude-code#39700](https://github.com/anthropics/claude-code/issues/39700) — "stream-json intermittently hangs — process stops producing output and never exits" — **CLOSED / NOT_PLANNED**
+* [anthropics/claude-code#30333](https://github.com/anthropics/claude-code/issues/30333) — "ResultMessage never emitted in headless SDK mode" — **CLOSED / NOT_PLANNED**
+
+Because upstream declined to fix both, this machinery is a **permanent mitigation**. Do not mistake it for retire-able dead code during a future cleanup, and do not remove the post-result limbo SIGTERM timeout — it also bounds the MCP-child and memory leaks tracked in [#590](https://github.com/littlebearapps/untether/issues/590) / [#592](https://github.com/littlebearapps/untether/issues/592).
+
+**Constraint on [#527](https://github.com/littlebearapps/untether/issues/527) (unified predicate-based stall detector):** that refactor changes *when Untether warns*. It must not drop the kill-the-hung-process path (`_post_result_idle_watchdog` → SIGTERM → SIGKILL). **The detector decides messaging; the watchdog decides survival. They must stay decoupled.**
+
+Full audit: [`docs/audits/2026-05-29-claude-workaround-retirement-audit.md`](../../../audits/2026-05-29-claude-workaround-retirement-audit.md).
+
 ### `Stream idle timeout - partial response` classification ([#438](https://github.com/littlebearapps/untether/issues/438))
 
 When Claude fails with `API Error: Stream idle timeout - partial response received`, the runner's `_extract_error` now appends a one-line classification to the user-visible message:
