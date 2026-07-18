@@ -315,6 +315,32 @@ async def reap_orphaned_group(
     return reaped
 
 
+# #589: how many engine subprocesses are alive right now, process-wide.
+#
+# The pre-spawn RAM guard (#350) is per-spawn and count-blind: N chats can each
+# individually pass the free-RAM check and then collectively exhaust the box.
+# That is what happened on nsd — the OOM killer struck untether.service 5x in
+# one evening and took two live Claude runs with it (rc=-9), each session
+# holding 10-17 MCP node children.
+#
+# Counted here rather than from `TelegramLoopState.running_tasks` because this
+# is the single spawn point shared by every engine runner, and because what
+# actually consumes memory is a live subprocess, not a queued task. Plain int
+# rather than a lock: anyio is single-threaded per event loop and both mutation
+# sites are synchronous, so there is no interleaving to guard against.
+_LIVE_ENGINE_SUBPROCESSES = 0
+
+
+def _incr_live_engine_subprocesses(delta: int) -> None:
+    global _LIVE_ENGINE_SUBPROCESSES
+    _LIVE_ENGINE_SUBPROCESSES = max(0, _LIVE_ENGINE_SUBPROCESSES + delta)
+
+
+def live_engine_subprocess_count() -> int:
+    """Number of engine subprocesses currently alive in this process (#589)."""
+    return _LIVE_ENGINE_SUBPROCESSES
+
+
 @asynccontextmanager
 async def manage_subprocess(
     cmd: Sequence[str],
@@ -337,9 +363,11 @@ async def manage_subprocess(
     if os.name == "posix":
         kwargs.setdefault("start_new_session", True)
     proc = await anyio.open_process(cmd, **kwargs)
+    _incr_live_engine_subprocesses(1)
     try:
         yield proc
     finally:
+        _incr_live_engine_subprocesses(-1)
         if proc.returncode is None:
             with anyio.CancelScope(shield=True):
                 terminate_process(proc)

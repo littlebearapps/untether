@@ -1004,3 +1004,44 @@ def test_594_normal_voice_key_still_accepted(tmp_path: Path) -> None:
     key = settings.transports.telegram.voice_transcription_api_key
     assert key is not None
     assert key.get_secret_value() == "gsk_normal-Key_1234567890"
+
+
+# ---------------------------------------------------------------------------
+# #589 — concurrency-aware pre-spawn admission.
+#
+# The #350 RAM guard is per-spawn and count-blind, so N chats can each pass the
+# free-RAM check independently and then collectively OOM the host. That is the
+# observed nsd failure: OOM killer 5x in one evening, two live Claude runs
+# killed with rc=-9, each session holding 10-17 MCP node children.
+# ---------------------------------------------------------------------------
+
+
+def test_589_concurrency_guard_defaults() -> None:
+    from untether.settings import WatchdogSettings
+
+    ws = WatchdogSettings()
+    # Headroom scaling is ON by default — it only bites under real concurrency.
+    assert ws.prespawn_ram_per_run_reserve_mb == 750
+    # The hard ceiling is OFF by default: no behaviour change until an operator
+    # opts in on a host that has actually struggled.
+    assert ws.max_concurrent_engine_runs == 0
+
+
+def test_589_concurrency_guard_bounds() -> None:
+    from pydantic import ValidationError
+
+    from untether.settings import WatchdogSettings
+
+    assert (
+        WatchdogSettings(max_concurrent_engine_runs=2).max_concurrent_engine_runs == 2
+    )
+    assert (
+        WatchdogSettings(
+            prespawn_ram_per_run_reserve_mb=0
+        ).prespawn_ram_per_run_reserve_mb
+        == 0
+    )
+    with pytest.raises(ValidationError):
+        WatchdogSettings(max_concurrent_engine_runs=-1)
+    with pytest.raises(ValidationError):
+        WatchdogSettings(prespawn_ram_per_run_reserve_mb=-1)

@@ -334,3 +334,81 @@ def test_harness_linger_scenario_emits_valid_result_and_outlives_it() -> None:
         if proc.poll() is None:
             proc.kill()
             proc.wait(timeout=5.0)
+
+
+@pytest.mark.anyio
+async def test_harness_w4_diverts_fresh_when_prior_owner_will_not_hand_off(
+    monkeypatch, quarantine_store
+) -> None:
+    """#634 W6b / #633 (W4) end-to-end through the real spawn pipeline.
+
+    Converts the manual `B-RESUME` integration procedure into deterministic
+    coverage: a live subprocess still owns the session, so the follow-up must
+    NOT resume it. Instead the bounded handoff wait times out and the run
+    diverts to a fresh session — the whole point of W4, since resuming a
+    session with a live owner is what leaves the upstream turn dangling and
+    produces the 0-turn empty result rc7 could only recover from afterwards.
+
+    Uses a short handoff timeout so the test is fast; the production default
+    (30s) is exercised by the unit tests in test_exec_bridge.py.
+    """
+    import untether.runner_bridge as rb
+    from untether.runners import claude as claude_mod
+    from untether.settings import AutoContinueSettings
+
+    monkeypatch.setenv("FAKE_CLAUDE_SCENARIO", "resume_survives_sigterm")
+    monkeypatch.setattr(
+        rb,
+        "_load_auto_continue_settings",
+        lambda: AutoContinueSettings(
+            serialize_session_owner=True, session_handoff_timeout_s=0.2
+        ),
+    )
+
+    sid = "sess-w4-live-owner"
+    # Simulate the prior subprocess still owning the session, exactly as
+    # run_impl would have registered it on its first StartedEvent.
+    claude_mod._SESSION_STDIN[sid] = object()
+
+    transport = FakeTransport()
+    runner = _harness_runner()
+    cfg = ExecBridgeConfig(
+        transport=transport,
+        presenter=MarkdownPresenter(),
+        final_notify=False,
+    )
+
+    try:
+        with capture_logs() as logs:
+            await _run_bounded(
+                handle_message(
+                    cfg,
+                    runner=runner,
+                    incoming=IncomingMessage(
+                        channel_id=99, message_id=1, text="follow up"
+                    ),
+                    resume_token=ResumeToken(engine=CLAUDE_ENGINE, value=sid),
+                )
+            )
+    finally:
+        claude_mod._SESSION_STDIN.pop(sid, None)
+
+    # (a) the handoff was attempted and timed out rather than deadlocking
+    assert any(
+        r.get("event") == "session.handoff" and r.get("outcome") == "timed_out"
+        for r in logs
+    ), "W4 gate did not run or did not time out against a live owner"
+    # (b) diverted fresh with the structured reason
+    assert any(
+        r.get("event") == "session.resume_diverted_fresh"
+        and r.get("reason") == "handoff_timeout"
+        for r in logs
+    )
+    # (c) exactly ONE spawn, and it was the fresh leg — never a --resume of a
+    # session that still had a live owner. This is the core W4 invariant.
+    assert sum(1 for r in logs if r.get("event") == "subprocess.spawn") == 1
+    # (d) the user still got a real answer rather than silence
+    all_text = " ".join(
+        c["message"].text for c in transport.edit_calls + transport.send_calls
+    )
+    assert "Fresh answer." in all_text

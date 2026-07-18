@@ -5328,16 +5328,43 @@ class TestStuckAfterToolResultDetector:
         assert edits._detect_stuck_after_tool_result(cpu_active=True) is True
 
     def test_silent_when_bg_bash_active(self) -> None:
-        """Session with Bash run_in_background=True → suppress wedge detection."""
+        """Session with Bash run_in_background=True → suppress wedge detection.
+
+        #573 (rc8): bg-bashes carry a parallel deadline now, so the handle must
+        be registered with one (as `_register_background_handle` always does)
+        rather than by bare set membership.
+        """
+        import time as _time
+
+        from untether.runners.claude import BG_BASH_MAX_KEEP_S, ClaudeStreamState
+
+        edits, clock = self._prepare(last_tool_result_at=600.0, frozen_ring_count=3)
+        clock.set(1000.0)
+        claude_state = ClaudeStreamState()
+        claude_state.live_bg_bashes.add("toolu_B1")
+        claude_state.bg_bash_deadlines["toolu_B1"] = (
+            _time.monotonic() + BG_BASH_MAX_KEEP_S
+        )
+        edits.stream.engine_state = claude_state  # type: ignore[attr-defined]
+
+        assert edits._detect_stuck_after_tool_result(cpu_active=True) is False
+
+    def test_573_fires_once_bg_bash_deadline_expires(self) -> None:
+        """The point of the rc8 age-out: a bg-bash whose completion signal never
+        arrives must stop suppressing wedge detection, instead of pinning the
+        session open for the rest of the run."""
+        import time as _time
+
         from untether.runners.claude import ClaudeStreamState
 
         edits, clock = self._prepare(last_tool_result_at=600.0, frozen_ring_count=3)
         clock.set(1000.0)
         claude_state = ClaudeStreamState()
         claude_state.live_bg_bashes.add("toolu_B1")
+        claude_state.bg_bash_deadlines["toolu_B1"] = _time.monotonic() - 1.0
         edits.stream.engine_state = claude_state  # type: ignore[attr-defined]
 
-        assert edits._detect_stuck_after_tool_result(cpu_active=True) is False
+        assert edits._detect_stuck_after_tool_result(cpu_active=True) is True
 
 
 class TestHandleStuckAfterToolResult:

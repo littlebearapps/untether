@@ -336,6 +336,16 @@ DISCUSS_COOLDOWN_MAX_SECONDS: float = 120.0
 # self-heals within one watchdog cycle instead of leaking forever.
 BG_AGENT_MAX_KEEP_S: float = 15 * 60.0  # 900s
 
+# #573 (rc8 slice): age-out backstops for the two primitives that previously
+# had none. Generous on purpose — these are a last-resort ceiling, not a
+# prediction of how long the work takes. A real terminal signal (KillShell
+# tool_result, completion line) still clears the handle much earlier; this only
+# stops a missing signal pinning `has_live_background_work` for the whole run,
+# which suppresses the post-result watchdog and leaves the process in the limbo
+# state that gets SIGTERM'd and poisons the session (#631/#632).
+BG_BASH_MAX_KEEP_S: float = 60 * 60.0  # 1h — long builds/deploys are normal
+REMOTE_TRIGGER_MAX_KEEP_S: float = 60 * 60.0  # 1h
+
 _DISCUSS_ESCALATION_MESSAGE = (
     "REJECTED — your ExitPlanMode call was automatically blocked because you have not "
     "written enough visible text yet.\n\n"
@@ -423,6 +433,17 @@ class ClaudeStreamState:
     # an explicit terminal signal (`is_error`) ever arrives. Popped in
     # `_clear_background_handle` alongside the `live_bg_agents` discard.
     bg_agent_deadlines: dict[str, float] = field(default_factory=dict)
+
+    # #573 (rc8 slice): the same parallel-deadline treatment for the two
+    # remaining unbounded primitives. Before this, `live_bg_bashes` and
+    # `live_remote_triggers` had no deadline at all, so any entry made
+    # `has_live_background_work` return True for the rest of the run — which
+    # suppresses the post-result watchdog and leaves the process lingering in
+    # limbo, the state that gets SIGTERM'd and poisons the session
+    # (#631/#632). Populated at register time, popped in
+    # `_clear_background_handle`, aged out by `_live_bounded_handle_count`.
+    bg_bash_deadlines: dict[str, float] = field(default_factory=dict)
+    remote_trigger_deadlines: dict[str, float] = field(default_factory=dict)
 
     # #631 (W5-diag): sticky flag — True once any background-task primitive
     # (Monitor / Bash-bg / Agent-bg / ScheduleWakeup / RemoteTrigger) has
@@ -712,6 +733,10 @@ def _register_background_handle(
     elif tool_name == "Bash" and bool(raw_input.get("run_in_background")):
         state.background_observed = True
         state.live_bg_bashes.add(tool_id)
+        # #573 (rc8 slice): bounded keep, same rationale as bg-agents in rc7.
+        # A backgrounded Bash whose KillShell/completion signal never arrives
+        # must not pin has_live_background_work() for the rest of the run.
+        state.bg_bash_deadlines[tool_id] = time.monotonic() + BG_BASH_MAX_KEEP_S
         # #333: scalar high-water-mark that survives _clear_background_handle
         # (see ClaudeStreamState.last_bg_bash_launched_at docstring). Used by
         # the post-result idle watchdog tick log for observability only.
@@ -756,6 +781,12 @@ def _register_background_handle(
     elif tool_name == "RemoteTrigger":
         state.background_observed = True
         state.live_remote_triggers.add(tool_id)
+        # #573 (rc8 slice): membership-only before, so a RemoteTrigger could
+        # pin the session open forever. Age-out backstop only — a real
+        # terminal signal still clears it earlier.
+        state.remote_trigger_deadlines[tool_id] = (
+            time.monotonic() + REMOTE_TRIGGER_MAX_KEEP_S
+        )
 
 
 def _clear_background_handle(
@@ -794,10 +825,12 @@ def _clear_background_handle(
         return
     state.live_monitors.pop(tool_use_id, None)
     state.live_bg_bashes.discard(tool_use_id)
+    state.bg_bash_deadlines.pop(tool_use_id, None)
     state.live_bg_agents.discard(tool_use_id)
     state.bg_agent_deadlines.pop(tool_use_id, None)
     state.live_wakeups.pop(tool_use_id, None)
     state.live_remote_triggers.discard(tool_use_id)
+    state.remote_trigger_deadlines.pop(tool_use_id, None)
 
 
 def _is_terminal_tool_result(
@@ -1057,6 +1090,20 @@ def _live_bg_agent_count(state: ClaudeStreamState) -> int:
     )
 
 
+def _live_bounded_handle_count(handles: set[str], deadlines: dict[str, float]) -> int:
+    """Count handles in ``handles`` whose parallel deadline hasn't passed.
+
+    #573 — generalises the rc7 ``_live_bg_agent_count`` pattern to any
+    background primitive tracked as a set plus a parallel deadline map. A
+    handle with no deadline entry is defensively treated as expired rather
+    than live forever: an over-eager expiry costs at most one premature
+    watchdog tick, whereas a handle that never expires pins the session open
+    indefinitely.
+    """
+    now = time.monotonic()
+    return sum(1 for tool_id in handles if deadlines.get(tool_id, 0.0) > now)
+
+
 def has_live_background_work(state: ClaudeStreamState) -> bool:
     """Return True when the session has any background handle whose deadline
     (if any) is still in the future (#346 gate).
@@ -1078,7 +1125,22 @@ def has_live_background_work(state: ClaudeStreamState) -> bool:
             return True
     if _live_bg_agent_count(state) > 0:
         return True
-    return bool(state.live_bg_bashes or state.live_remote_triggers)
+    # #573 (rc8 slice): bg-bashes and remote triggers previously had NO
+    # deadline, so a single entry pinned this gate True for the rest of the
+    # run. That keeps `has_live_background_work` true long after the work is
+    # gone, which suppresses the post-result watchdog and leaves the process
+    # lingering in limbo — the exact state that gets SIGTERM'd and poisons the
+    # session (#631/#632). Same bounded-keep treatment as Agent/Task-bg in
+    # rc7: age out on a deadline rather than trusting a terminal signal that
+    # may never arrive.
+    if _live_bounded_handle_count(state.live_bg_bashes, state.bg_bash_deadlines) > 0:
+        return True
+    return (
+        _live_bounded_handle_count(
+            state.live_remote_triggers, state.remote_trigger_deadlines
+        )
+        > 0
+    )
 
 
 def background_task_summary(state: ClaudeStreamState) -> str | None:

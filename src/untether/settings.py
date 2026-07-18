@@ -434,6 +434,23 @@ class WatchdogSettings(BaseModel):
     prespawn_ram_warn_mb: int = Field(default=2000, ge=0, le=65536)
     prespawn_ram_block_mb: int = Field(default=500, ge=0, le=65536)
 
+    # #589: the guard above is per-spawn and count-blind, so N concurrent chats
+    # can each individually pass the free-RAM check and then collectively
+    # exhaust the host. On nsd the OOM killer struck untether.service 5x in one
+    # evening and killed two live Claude runs (rc=-9), each holding 10-17 MCP
+    # node children.
+    #
+    # Reserve headroom for the runs already in flight: the effective block
+    # threshold becomes
+    #     block_mb + prespawn_ram_per_run_reserve_mb * live_engine_subprocesses
+    # so the bar rises as concurrency does. 0 disables the scaling and restores
+    # the flat pre-0.35.4rc8 threshold.
+    prespawn_ram_per_run_reserve_mb: int = Field(default=750, ge=0, le=65536)
+    # Hard ceiling on concurrent engine subprocesses. Independent of free RAM —
+    # useful on small VPS hosts where the leak rate matters more than the
+    # instantaneous reading. 0 = unlimited (default; no behaviour change).
+    max_concurrent_engine_runs: int = Field(default=0, ge=0, le=64)
+
     # #438: user-configurable Claude SSE-stream watchdog. Sets
     # ``CLAUDE_STREAM_IDLE_TIMEOUT_MS`` for the Claude subprocess (via
     # ``setdefault`` — shell-set values still win). Default 300000 ms (5 min)

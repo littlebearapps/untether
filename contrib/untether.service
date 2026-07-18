@@ -71,6 +71,19 @@ OOMPolicy=continue
 # throttles/reclaims before the kernel steps in, MemoryMax hard-caps the
 # whole cgroup (main process + all engine subprocesses + MCP children).
 # Size to ~60-75% of host RAM; leave headroom for the CLIs themselves.
+#
+# Sizing table (host RAM -> MemoryHigh / MemoryMax):
+#     4 GB   ->  2G / 3G      8 GB  ->  4G / 6G
+#    16 GB   ->  9G / 12G    32 GB  -> 18G / 24G
+#
+# Prefer the in-app guard first — it fails a run with a readable Telegram
+# message instead of having the kernel SIGKILL a live session mid-task:
+#     [watchdog]
+#     max_concurrent_engine_runs = 2        # hard ceiling; 0 = unlimited
+#     prespawn_ram_per_run_reserve_mb = 750 # headroom reserved per live run
+# These two are the primary #589 mitigation; the cgroup limits below are the
+# backstop for anything the in-app guard cannot see (e.g. a single runaway
+# MCP child). Enable both on hosts that have actually OOM'd.
 #MemoryHigh=4G
 #MemoryMax=6G
 

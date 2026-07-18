@@ -1054,29 +1054,71 @@ class JsonlSubprocessRunner(BaseRunner):
 
         warn_mb = watchdog.prespawn_ram_warn_mb
         block_mb = watchdog.prespawn_ram_block_mb
-        if warn_mb <= 0 and block_mb <= 0:
+        max_runs = getattr(watchdog, "max_concurrent_engine_runs", 0)
+        per_run_reserve = getattr(watchdog, "prespawn_ram_per_run_reserve_mb", 0)
+        if warn_mb <= 0 and block_mb <= 0 and max_runs <= 0:
             return None  # guard fully disabled
+
+        logger = self.get_logger()
+
+        # #589: concurrency ceiling. Checked before the RAM reading because it
+        # is deterministic — on a small host the accumulating MCP-child leak
+        # matters more than the instantaneous free-memory figure.
+        from .utils.subprocess import live_engine_subprocess_count
+
+        live_runs = live_engine_subprocess_count()
+        if max_runs > 0 and live_runs >= max_runs:
+            logger.error(
+                "subprocess.prespawn.concurrency_blocked",
+                engine=self.engine,
+                live_runs=live_runs,
+                max_runs=max_runs,
+            )
+            return CompletedEvent(
+                engine=self.engine,
+                ok=False,
+                answer="",
+                resume=resume,
+                error=(
+                    f"🛑 Too many engine runs in flight ({live_runs}/{max_runs}). "
+                    f"Wait for one to finish, or /cancel an active run."
+                ),
+            )
 
         avail_kb = mem_available_kb()
         if avail_kb is None:
             return None  # non-Linux / /proc unreadable — treat as ALLOW
         avail_mb = avail_kb // 1024
 
-        logger = self.get_logger()
+        # #589: raise the bar as concurrency rises. Without this, N chats each
+        # pass a flat threshold independently and then collectively OOM the
+        # host — the observed nsd failure mode.
+        effective_block_mb = block_mb + per_run_reserve * live_runs
 
-        if block_mb > 0 and avail_mb < block_mb:
+        if block_mb > 0 and avail_mb < effective_block_mb:
             logger.error(
                 "subprocess.prespawn.ram_blocked",
                 engine=self.engine,
                 avail_mb=avail_mb,
                 block_mb=block_mb,
+                effective_block_mb=effective_block_mb,
+                live_runs=live_runs,
+                per_run_reserve_mb=per_run_reserve,
                 warn_mb=warn_mb,
             )
-            msg = (
-                f"🛑 Insufficient RAM to start engine ({avail_mb} MB free, "
-                f"threshold {block_mb} MB). Cancel an active run or restart "
-                f"the service."
-            )
+            if live_runs > 0 and effective_block_mb > block_mb:
+                msg = (
+                    f"🛑 Insufficient RAM to start engine ({avail_mb} MB free; "
+                    f"need {effective_block_mb} MB with {live_runs} run(s) "
+                    f"already in flight). Wait for one to finish, or /cancel "
+                    f"an active run."
+                )
+            else:
+                msg = (
+                    f"🛑 Insufficient RAM to start engine ({avail_mb} MB free, "
+                    f"threshold {block_mb} MB). Cancel an active run or restart "
+                    f"the service."
+                )
             return CompletedEvent(
                 engine=self.engine,
                 ok=False,

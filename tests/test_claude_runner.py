@@ -830,11 +830,97 @@ def test_has_live_background_work_empty() -> None:
 
 
 def test_has_live_background_work_with_bg_bash() -> None:
-    from untether.runners.claude import has_live_background_work
+    """#573 (rc8): bg-bashes now carry a parallel deadline, so the handle must
+    be registered with one — as `_register_background_handle` always does —
+    rather than by bare set membership."""
+    import time
+
+    from untether.runners.claude import BG_BASH_MAX_KEEP_S, has_live_background_work
 
     state = ClaudeStreamState()
     state.live_bg_bashes.add("toolu_X")
+    state.bg_bash_deadlines["toolu_X"] = time.monotonic() + BG_BASH_MAX_KEEP_S
     assert has_live_background_work(state) is True
+
+
+def test_573_bg_bash_registration_sets_deadline() -> None:
+    """The real registration path must populate the deadline — otherwise the
+    age-out below can never fire."""
+    import time
+
+    from untether.runners.claude import BG_BASH_MAX_KEEP_S
+
+    state = ClaudeStreamState()
+    translate_claude_event(
+        _decode_event(
+            _make_tool_use_event("Bash", "toolu_B", {"run_in_background": True})
+        ),
+        title="claude",
+        state=state,
+        factory=state.factory,
+    )
+    assert "toolu_B" in state.live_bg_bashes
+    deadline = state.bg_bash_deadlines.get("toolu_B")
+    assert deadline is not None
+    assert deadline <= time.monotonic() + BG_BASH_MAX_KEEP_S + 1
+
+
+def test_573_bg_bash_ages_out() -> None:
+    """A bg-bash whose completion signal never arrives must stop pinning the
+    gate. Before rc8 it had no deadline at all, so a single entry kept
+    has_live_background_work() True for the rest of the run — suppressing the
+    post-result watchdog and leaving the process in the limbo state that gets
+    SIGTERM'd and poisons the session (#631/#632)."""
+    import time
+
+    from untether.runners.claude import has_live_background_work
+
+    state = ClaudeStreamState()
+    state.live_bg_bashes.add("toolu_stale")
+    state.bg_bash_deadlines["toolu_stale"] = time.monotonic() - 1.0
+    assert has_live_background_work(state) is False
+
+
+def test_573_remote_trigger_ages_out() -> None:
+    import time
+
+    from untether.runners.claude import (
+        REMOTE_TRIGGER_MAX_KEEP_S,
+        has_live_background_work,
+    )
+
+    state = ClaudeStreamState()
+    state.live_remote_triggers.add("toolu_R")
+    state.remote_trigger_deadlines["toolu_R"] = (
+        time.monotonic() + REMOTE_TRIGGER_MAX_KEEP_S
+    )
+    assert has_live_background_work(state) is True
+
+    state.remote_trigger_deadlines["toolu_R"] = time.monotonic() - 1.0
+    assert has_live_background_work(state) is False
+
+
+def test_573_clear_removes_deadlines() -> None:
+    """Deadlines must be popped alongside the handle, or the maps grow
+    unboundedly across a long multi-turn session."""
+    import time
+
+    from untether.runners.claude import (
+        _clear_background_handle,
+        has_live_background_work,
+    )
+
+    state = ClaudeStreamState()
+    state.live_bg_bashes.add("toolu_C")
+    state.bg_bash_deadlines["toolu_C"] = time.monotonic() + 600
+    state.live_remote_triggers.add("toolu_C")
+    state.remote_trigger_deadlines["toolu_C"] = time.monotonic() + 600
+
+    _clear_background_handle(state, "toolu_C", is_terminal=True)
+
+    assert state.bg_bash_deadlines == {}
+    assert state.remote_trigger_deadlines == {}
+    assert has_live_background_work(state) is False
 
 
 def test_has_live_background_work_expired_monitor() -> None:
