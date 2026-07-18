@@ -3229,6 +3229,69 @@ async def handle_message(
                     logger.debug("session.clear_failed", exc_info=True)
             resume_token = None
 
+    # #633 (W4): one-owner-per-session serialisation. rc7 recovers *after* a
+    # session is poisoned; this stops it happening. If a subprocess for this
+    # session is still alive (typically lingering in post-result limbo holding
+    # MCP children open), spawning `--resume` now would give one session id two
+    # concurrent owners — the exact race that leaves the upstream turn dangling
+    # on an unresolved tool_use and makes the next resume return 0 turns / $0.
+    #
+    # The wait is condition-based and bounded: it returns the moment the prior
+    # owner deregisters, and on timeout we quarantine and go fresh rather than
+    # racing. Claude-only — no other engine has the limbo behaviour, and
+    # `wait_for_session_handoff` is Claude's registry.
+    if resume_token is not None and runner.engine == "claude":
+        _ac_cfg = _load_auto_continue_settings()
+        if getattr(_ac_cfg, "serialize_session_owner", True):
+            try:
+                from untether.runners.claude import wait_for_session_handoff
+
+                _handoff = await wait_for_session_handoff(
+                    resume_token.value,
+                    getattr(_ac_cfg, "session_handoff_timeout_s", 30.0),
+                )
+            except Exception:  # noqa: BLE001 — never block message handling
+                # Fail CLOSED. The entire point of this gate is to never resume
+                # a session that might still be owned; treating a broken check
+                # as "safe to resume" would silently reinstate the race it
+                # exists to prevent. Logged at WARNING (not debug) so a
+                # persistent failure surfaces as degraded continuity instead of
+                # quietly making every resume fresh.
+                logger.warning("session.handoff_check_failed", exc_info=True)
+                _handoff = "timed_out"
+            if _handoff != "free":
+                logger.info(
+                    "session.handoff",
+                    engine=runner.engine,
+                    session_id=resume_token.value,
+                    outcome=_handoff,
+                )
+            if _handoff == "timed_out":
+                # The prior owner is still alive. Start fresh rather than
+                # racing it.
+                #
+                # Deliberately NOT quarantined: a handoff timeout means the
+                # session is *busy*, not that it is known-corrupt, and a
+                # quarantine marker persists for 7 days and permanently
+                # diverts the session — too destructive for "the previous run
+                # was slow to tear down". Clearing the stored token is enough,
+                # because nothing will reference the old id afterwards. If that
+                # process does go on to be force-killed after a result, the
+                # existing W2 path (`quarantine_on_forced_teardown`) quarantines
+                # it at the point we actually have evidence of poisoning.
+                logger.warning(
+                    "session.resume_diverted_fresh",
+                    engine=runner.engine,
+                    session_id=resume_token.value,
+                    reason="handoff_timeout",
+                )
+                if on_resume_failed is not None:
+                    try:
+                        await on_resume_failed(resume_token)
+                    except Exception:  # noqa: BLE001
+                        logger.debug("session.clear_failed", exc_info=True)
+                resume_token = None
+
     started_at = clock()
     is_resume_line = runner.is_resume_line
     resume_strip = strip_resume_line or is_resume_line
