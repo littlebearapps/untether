@@ -1135,3 +1135,49 @@ def test_633_settings_default_on_and_bounded() -> None:
         AutoContinueSettings(session_handoff_timeout_s=-1.0)
     with pytest.raises(ValidationError):
         AutoContinueSettings(session_handoff_timeout_s=10_000.0)
+
+
+# ---------------------------------------------------------------------------
+# #589 — live engine subprocess accounting.
+# ---------------------------------------------------------------------------
+
+
+def test_589_live_subprocess_counter_tracks_and_floors() -> None:
+    """The counter backs the concurrency-aware admission check. It must never
+    go negative — an unbalanced decrement would otherwise permanently disable
+    the guard by making live_runs read as 0 forever."""
+    from untether.utils import subprocess as sp
+
+    baseline = sp.live_engine_subprocess_count()
+    sp._incr_live_engine_subprocesses(1)
+    sp._incr_live_engine_subprocesses(1)
+    assert sp.live_engine_subprocess_count() == baseline + 2
+    sp._incr_live_engine_subprocesses(-1)
+    assert sp.live_engine_subprocess_count() == baseline + 1
+    sp._incr_live_engine_subprocesses(-99)
+    assert sp.live_engine_subprocess_count() == 0
+
+
+@pytest.mark.anyio
+async def test_589_manage_subprocess_balances_the_counter() -> None:
+    """A real spawn must increment on entry and decrement on exit, including
+    when the body raises."""
+    from untether.utils.subprocess import (
+        live_engine_subprocess_count,
+        manage_subprocess,
+    )
+
+    baseline = live_engine_subprocess_count()
+
+    async with manage_subprocess([sys.executable, "-c", "pass"]) as proc:
+        assert live_engine_subprocess_count() == baseline + 1
+        await proc.wait()
+    assert live_engine_subprocess_count() == baseline
+
+    with pytest.raises(RuntimeError):
+        async with manage_subprocess([sys.executable, "-c", "pass"]):
+            raise RuntimeError("boom")
+    assert live_engine_subprocess_count() == baseline, (
+        "counter leaked on the error path — a leak permanently inflates "
+        "live_runs and would block all future spawns (#589)"
+    )

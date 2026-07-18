@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import json
 import os
+import signal
 import sys
 import time
 from typing import Any
@@ -222,10 +223,38 @@ def _scenario_healthy_resume(argv: list[str]) -> int:
     return 0
 
 
+def _scenario_resume_survives_sigterm(argv: list[str]) -> int:
+    """#634 / #633 (W4): a resume leg that IGNORES SIGTERM.
+
+    Models the worst case the W4 serialisation gate exists for — a prior
+    subprocess that will not die on request, so the handoff wait must time out
+    and the follow-up must divert to a fresh session rather than racing a
+    session that still has a live owner.
+
+    Non-resume invocations return a normal result immediately, so the fresh
+    recovery leg still completes and the user gets a real answer.
+    """
+    resume = _resume_arg(argv)
+    if resume is None:
+        sid = f"S-fresh-{os.getpid()}"
+        _emit_init(sid)
+        _emit_real_result(sid, text="Fresh answer.", num_turns=2, cost=0.03)
+        return 0
+
+    # Deliberately unkillable-by-SIGTERM: this is the "will not hand off"
+    # process. SIGKILL still works, so the test harness can always clean up.
+    signal.signal(signal.SIGTERM, signal.SIG_IGN)
+    _emit_init(resume)
+    _emit_real_result(resume, text="Done.", num_turns=1, cost=0.01)
+    time.sleep(_linger_s())
+    return 0
+
+
 _SCENARIOS = {
     "dangling_then_empty_resume": _scenario_dangling_then_empty_resume,
     "linger_then_sigterm_after_result": _scenario_linger_then_sigterm_after_result,
     "healthy_resume": _scenario_healthy_resume,
+    "resume_survives_sigterm": _scenario_resume_survives_sigterm,
 }
 
 
