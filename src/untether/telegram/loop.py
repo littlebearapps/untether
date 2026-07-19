@@ -1188,6 +1188,45 @@ async def _wait_for_resume(running_task) -> ResumeToken | None:
     return resume
 
 
+def _queued_wait_note(resume_token: ResumeToken) -> str | None:
+    """Explain WHY a queued follow-up is waiting, when knowable (#654).
+
+    A follow-up that queues behind a Claude session lingering post-result
+    (finishing background work under the liveness-aware ceiling, #646/#647)
+    previously sat on a bare "queued" progress message for the whole hold —
+    observed at 5m36s, permitted up to 30 min — with nothing telling the
+    user why, or that /cancel was available. Returns ``None`` for non-Claude
+    engines, unknown sessions, and normal mid-run queues (where the active
+    progress message above already explains itself).
+    """
+    if resume_token.engine != "claude":
+        return None
+    try:
+        from ..runners.claude import session_linger_info
+
+        info = session_linger_info(resume_token.value)
+    except Exception:  # noqa: BLE001 — the note is best-effort decoration;
+        # a registry hiccup must never break the queued send itself.
+        logger.debug("queued_note.linger_info_failed", exc_info=True)
+        return None
+    if info is None:
+        return None
+    post_result, bg_count = info
+    if not post_result:
+        return None
+    if bg_count > 0:
+        plural = "s" if bg_count != 1 else ""
+        return (
+            f"⏳ Queued behind the previous run's {bg_count} background "
+            f"task{plural} — starts when they finish, with context carried "
+            f"over. /cancel to drop it."
+        )
+    return (
+        "⏳ Queued — the previous run is still finishing up. Starts "
+        "when it completes, with context carried over. /cancel to drop it."
+    )
+
+
 async def _send_queued_progress(
     cfg: TelegramBridgeConfig,
     *,
@@ -1206,6 +1245,14 @@ async def _send_queued_progress(
         elapsed_s=0.0,
         label="queued",
     )
+    # #654: when the queue reason is knowable (Claude session lingering
+    # post-result over background work), say so instead of a bare "queued".
+    note = _queued_wait_note(resume_token)
+    if note is not None:
+        message = RenderedMessage(
+            text=f"{message.text}\n\n{note}",
+            extra=message.extra,
+        )
     reply_ref = MessageRef(
         channel_id=chat_id,
         message_id=user_msg_id,
