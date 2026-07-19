@@ -159,6 +159,13 @@ _ACTIVE_RUNNERS: dict[str, tuple[ClaudeRunner, float]] = {}
 # on the same runner instance (runner._proc_stdin would be overwritten).
 _SESSION_STDIN: dict[str, Any] = {}
 
+# #647: session_id -> live ClaudeStreamState for the owning run. Lets the
+# bridge's handoff wait (`handle_message`) ask "does the still-alive prior
+# owner have live background work?" without reaching into runner internals.
+# Registered alongside _SESSION_STDIN in _iter_jsonl_events; cleared in
+# _cleanup_session_registries (run_impl finally).
+_SESSION_BG_STATE: dict[str, ClaudeStreamState] = {}
+
 # Phase 2: Global registry mapping request_id -> session_id
 # This allows callbacks to find the right runner instance
 _REQUEST_TO_SESSION: dict[str, str] = {}
@@ -225,6 +232,41 @@ def is_session_alive(session_id: str) -> bool:
     return session_id in _SESSION_STDIN
 
 
+def session_live_bg_count(session_id: str) -> int:
+    """Return the number of live background handles held by the still-running
+    subprocess that owns ``session_id``, or 0 when there is no live owner or
+    no live background work.
+
+    #647: consumed by the bridge's handoff branch so a follow-up message that
+    arrives while the prior owner is legitimately finishing background
+    subagents can wait longer (and tell the user why) instead of silently
+    diverting to a fresh contextless session after the base 30 s timeout.
+    """
+    state = _SESSION_BG_STATE.get(session_id)
+    if state is None or not has_live_background_work(state):
+        return 0
+    count = (
+        _live_bg_agent_count(state)
+        + _live_bounded_handle_count(state.live_bg_bashes, state.bg_bash_deadlines)
+        + _live_bounded_handle_count(
+            state.live_remote_triggers, state.remote_trigger_deadlines
+        )
+        + sum(
+            1
+            for deadline in state.live_monitors.values()
+            if deadline == 0.0 or deadline > time.monotonic()
+        )
+        + sum(
+            1
+            for deadline in state.live_wakeups.values()
+            if deadline == 0.0 or deadline > time.monotonic()
+        )
+    )
+    # has_live_background_work() was True, so never report fewer than 1 even
+    # if the individual counts race to zero between the two reads.
+    return max(1, count)
+
+
 SESSION_HANDOFF_POLL_S: float = 0.25
 
 
@@ -262,15 +304,35 @@ async def wait_for_session_handoff(
     """
     if not is_session_alive(session_id):
         return "free"
-    deadline = time.monotonic() + max(0.0, timeout_s)
+    # #647 observability: the wait can absorb minutes of user-perceived
+    # latency (base timeout + background-aware extension), and previously
+    # left no trace in the journal — log entry and exit with elapsed.
+    started_at = time.monotonic()
+    logger.info(
+        "session.handoff_wait",
+        session_id=session_id,
+        timeout_s=timeout_s,
+        live_bg_count=session_live_bg_count(session_id),
+    )
+    deadline = started_at + max(0.0, timeout_s)
+    outcome = "timed_out"
     while time.monotonic() < deadline:
         await anyio.sleep(poll_s)
         if not is_session_alive(session_id):
-            return "exited"
+            outcome = "exited"
+            break
     # Final probe: the loop can overshoot the deadline by up to ``poll_s``, and
     # an owner that exited during that last sleep should be reported as
     # "exited" rather than being penalised for our polling granularity.
-    return "exited" if not is_session_alive(session_id) else "timed_out"
+    if outcome == "timed_out" and not is_session_alive(session_id):
+        outcome = "exited"
+    logger.info(
+        "session.handoff_wait_done",
+        session_id=session_id,
+        outcome=outcome,
+        elapsed_s=round(time.monotonic() - started_at, 1),
+    )
+    return outcome
 
 
 def pending_control_requests_for_session(session_id: str | None) -> int:
@@ -2586,6 +2648,18 @@ class ClaudeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
     # hold the process (and its RSS/TCP) open. Cap the wait at this grace
     # instead. 0 disables the shortcut (full timeout always applies).
     _post_result_limbo_grace_s: float = 60.0
+    # #647/#646: liveness-aware extension of the post-result ceiling. When
+    # the subcountdown deadline expires while the session still has live
+    # background work and the process tree is not demonstrably idle, the
+    # SIGTERM is deferred (re-checked each poll) instead of killing live
+    # subagent work mid-flight — the kill quarantines the session and
+    # produces the fresh-session amnesia (#646/#647). Absolute bound on the
+    # deferral, measured from reader-EOF; background handles independently
+    # age out at BG_AGENT_MAX_KEEP_S. 0 disables the extension.
+    _post_result_bg_max_hold_s: float = 1800.0
+    # #650: cadence of the ``subcountdown_tick`` observability line. Class
+    # attr so tests can shrink it; production logs every ~30 s.
+    _subcountdown_tick_log_interval_s: float = 30.0
     # Floor for the post-result watchdog poll cadence (class attr so tests
     # can shrink it; production keeps the 5s floor).
     _watchdog_min_poll_s: float = 5.0
@@ -3005,6 +3079,10 @@ class ClaudeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
                 ):
                     registered_session_id = evt.resume.value
                     _SESSION_STDIN[registered_session_id] = session_stdin
+                    # #647: expose this run's background-handle state to the
+                    # bridge's handoff wait. Cleared with the other
+                    # registries in _cleanup_session_registries.
+                    _SESSION_BG_STATE[registered_session_id] = state
                     logger.info(
                         "session_stdin.registered",
                         session_id=registered_session_id,
@@ -3279,6 +3357,7 @@ class ClaudeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
         stream: Any = None,
         limbo_grace_s: float | None = None,
         pre_result_silence_timeout_s: float = 3600.0,
+        bg_max_hold_s: float | None = None,
     ) -> None:
         """Close stdin once the bidirectional CLI has been idle past the result.
 
@@ -3357,6 +3436,7 @@ class ClaudeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
                         stream=stream,
                         session_id=sid_now,
                         limbo_grace_s=limbo_grace_s,
+                        bg_max_hold_s=bg_max_hold_s,
                     )
                     return
                 exit_reason = "reader_done"
@@ -3390,6 +3470,7 @@ class ClaudeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
                                 stream=stream,
                                 session_id=sid_now,
                                 limbo_grace_s=limbo_grace_s,
+                                bg_max_hold_s=bg_max_hold_s,
                             )
                             return
                         exit_reason = "reader_done"
@@ -3597,6 +3678,7 @@ class ClaudeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
         stream: Any = None,
         session_id: str | None = None,
         limbo_grace_s: float | None = None,
+        bg_max_hold_s: float | None = None,
     ) -> str:
         """Watch a stdout-closed-but-process-alive subprocess (#333 Tier 1).
 
@@ -3611,8 +3693,27 @@ class ClaudeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
         alive and no real pending state references the session, emit
         ``runner.limbo_detected`` warning. ``untether-issue-watcher``
         picks this up automatically.
+
+        #647/#646: the deadline is liveness-aware — when it expires while the
+        session still has live background work (upstream runs subagents in
+        the background by default since Claude Code v2.1.198, and their
+        completion is NOT signalled on stream-json) and the process tree is
+        not demonstrably idle, the SIGTERM is deferred and re-checked each
+        poll, bounded by ``bg_max_hold_s``. Killing live subagent work
+        quarantines the session (#632) and produces fresh-session amnesia.
+
+        #650: every ~30 s of the countdown emits a
+        ``claude.post_result_idle.subcountdown_tick`` INFO — previously the
+        loop logged nothing between the one-shot ``limbo_detected`` and its
+        exit, a blackout window in which the bridge's independent stall
+        detector raced this loop's returncode poll and mislabelled a normal
+        post-result exit as ``process_dead``.
         """
-        from ..utils.proc_diag import collect_proc_diag
+        from ..utils.proc_diag import (
+            collect_proc_diag,
+            is_cpu_active,
+            is_tree_cpu_active,
+        )
 
         reader_done_at = time.monotonic()
         run_logger.info(
@@ -3658,6 +3759,14 @@ class ClaudeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
             else self._post_result_limbo_grace_s
         )
         grace_deadline = reader_done_at + grace if grace > 0 else None
+        bg_hold = (
+            bg_max_hold_s
+            if bg_max_hold_s is not None
+            else self._post_result_bg_max_hold_s
+        )
+        prev_diag = None
+        ceiling_extended_logged = False
+        last_tick_log_at = reader_done_at
         while True:
             await anyio.sleep(self._subcountdown_poll_interval_s)
             if proc.returncode is not None:
@@ -3701,6 +3810,17 @@ class ClaudeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
                 continue
 
             elapsed = time.monotonic() - reader_done_at
+            # #650: per-poll liveness snapshot — feeds the limbo warning, the
+            # ~30 s ``subcountdown_tick`` observability line, and the
+            # #647/#646 liveness-aware ceiling below.
+            diag = collect_proc_diag(proc.pid)
+            cpu_active = is_cpu_active(prev_diag, diag) if prev_diag and diag else None
+            tree_active = (
+                is_tree_cpu_active(prev_diag, diag) if prev_diag and diag else None
+            )
+            prev_diag = diag
+            live_bg = has_live_background_work(state)
+
             # Tier 3: limbo detection — a one-shot warning surfacing the
             # condition for triage. ``untether-issue-watcher`` files this
             # automatically on the next sweep.
@@ -3709,7 +3829,6 @@ class ClaudeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
                 and elapsed >= self._subcountdown_limbo_detect_threshold_s
             ):
                 limbo_logged = True
-                diag = collect_proc_diag(proc.pid)
                 # #590: refresh the orphan snapshot — children spawned AFTER
                 # the reader-done snapshot (the sl "late leaker" shape) are
                 # captured here so the post-exit sweep can reach them. Use the
@@ -3748,15 +3867,67 @@ class ClaudeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
             # were handled above via the re-arm branch).
             effective_deadline = deadline
             limbo_grace_applied = False
-            if (
-                grace_deadline is not None
-                and grace_deadline < deadline
-                and not has_live_background_work(state)
-            ):
+            if grace_deadline is not None and grace_deadline < deadline and not live_bg:
                 effective_deadline = grace_deadline
                 limbo_grace_applied = True
 
+            # #650 (defect 3): per-tick observability, throttled to ~30 s.
+            # Previously nothing logged between the one-shot limbo warning
+            # and the loop's exit — a blackout in which the bridge's stall
+            # detector raced this loop's returncode poll and won.
+            now_mono = time.monotonic()
+            if now_mono - last_tick_log_at >= self._subcountdown_tick_log_interval_s:
+                last_tick_log_at = now_mono
+                run_logger.info(
+                    "claude.post_result_idle.subcountdown_tick",
+                    session_id=sid,
+                    pid=proc.pid,
+                    elapsed_s=round(elapsed, 1),
+                    in_limbo=limbo_logged,
+                    live_background_work=live_bg,
+                    cpu_active=cpu_active,
+                    tree_active=tree_active,
+                    child_count=len(diag.child_pids) if diag else None,
+                    rss_kb=diag.rss_kb if diag else None,
+                    deadline_remaining_s=round(effective_deadline - now_mono, 1),
+                )
+
             if time.monotonic() >= effective_deadline:
+                # #647/#646: liveness-aware ceiling. Upstream runs subagents
+                # in the background by default (Claude Code ≥2.1.198) and
+                # never signals their completion on stream-json, so the only
+                # evidence is /proc. If background handles are still live and
+                # the process tree is not demonstrably idle, defer the
+                # SIGTERM — killing live subagent work quarantines the
+                # session (#632) and produces fresh-session amnesia. Bounded
+                # twice over: handles age out at BG_AGENT_MAX_KEEP_S, and the
+                # hold never exceeds ``bg_hold`` seconds past reader-EOF.
+                demonstrably_idle = (
+                    diag is not None
+                    and diag.alive
+                    and cpu_active is False
+                    and tree_active is False
+                )
+                if (
+                    bg_hold > 0
+                    and elapsed < bg_hold
+                    and live_bg
+                    and not demonstrably_idle
+                ):
+                    if not ceiling_extended_logged:
+                        ceiling_extended_logged = True
+                        run_logger.info(
+                            "claude.post_result_idle.ceiling_extended",
+                            session_id=sid,
+                            pid=proc.pid,
+                            elapsed_s=round(elapsed, 1),
+                            timeout_s=timeout_s,
+                            bg_max_hold_s=bg_hold,
+                            cpu_active=cpu_active,
+                            tree_active=tree_active,
+                            child_count=len(diag.child_pids) if diag else None,
+                        )
+                    continue
                 # #632 (W2): the process already emitted a valid result but
                 # is being force-killed while lingering (MCP children / hung
                 # background work) — its last upstream turn may be left
@@ -3794,6 +3965,14 @@ class ClaudeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
                     limbo_grace_applied=limbo_grace_applied,
                     limbo_grace_s=grace if limbo_grace_applied else None,
                     quarantined=quarantined,
+                    # #647: "background work was correctly tracked and killed
+                    # anyway" is identified by live_background_work=True here,
+                    # regardless of which resume-divert label lands later.
+                    live_background_work=live_bg,
+                    bg_hold_extended=ceiling_extended_logged,
+                    bg_max_hold_s=bg_hold,
+                    cpu_active=cpu_active,
+                    tree_active=tree_active,
                 )
                 if stream is not None:
                     self._transition_lifecycle(
@@ -4124,6 +4303,7 @@ class ClaudeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
                 post_result_idle_timeout_s = 600.0
                 post_result_limbo_grace_s = self._post_result_limbo_grace_s
                 pre_result_silence_timeout_s = 3600.0
+                post_result_bg_max_hold_s = self._post_result_bg_max_hold_s
                 try:
                     result = load_settings_if_exists()
                     if result is not None:
@@ -4139,6 +4319,9 @@ class ClaudeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
                         )
                         pre_result_silence_timeout_s = float(
                             settings_obj.watchdog.pre_result_silence_timeout
+                        )
+                        post_result_bg_max_hold_s = float(
+                            settings_obj.watchdog.post_result_bg_max_hold
                         )
                 except Exception:  # noqa: BLE001 — settings errors must not block a run
                     run_logger.debug(
@@ -4177,6 +4360,7 @@ class ClaudeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
                             stream,
                             post_result_limbo_grace_s,
                             pre_result_silence_timeout_s,
+                            post_result_bg_max_hold_s,
                         )
                     async for evt in self._iter_jsonl_events(
                         stdout=proc.stdout,
@@ -4484,6 +4668,8 @@ def _cleanup_session_registries(session_id: str) -> None:
         cleaned.append("active_runners")
     if _SESSION_STDIN.pop(session_id, None) is not None:
         cleaned.append("session_stdin")
+    if _SESSION_BG_STATE.pop(session_id, None) is not None:
+        cleaned.append("session_bg_state")
     if session_id in _DISCUSS_COOLDOWN:
         cleaned.append("discuss_cooldown")
     clear_discuss_cooldown(session_id)
