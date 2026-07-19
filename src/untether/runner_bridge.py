@@ -1004,6 +1004,11 @@ class ProgressEdits:
         self._last_stall_warn_at: float = 0.0
         self._peak_idle: float = 0.0
         self._prev_diag: Any = None
+        # #650/#593: clock() timestamp of the last stall tick that observed
+        # the subprocess alive. Once the process is gone every /proc-derived
+        # liveness field collapses to None, so this is the only way the
+        # cancel-decision logs can say how recently the process existed.
+        self._last_alive_at: float | None = None
         self._stall_check_interval: float = 60.0
         self._stall_repeat_seconds: float = 180.0
         self._prev_recent_events: list[tuple[float, str]] | None = None
@@ -1291,6 +1296,8 @@ class ProgressEdits:
                 else None
             )
             self._prev_diag = diag
+            if diag is not None and diag.alive:
+                self._last_alive_at = self.clock()
 
             # Use longer threshold when waiting for user approval, running a
             # tool, or when child processes are active (Agent subagents).
@@ -1332,6 +1339,43 @@ class ProgressEdits:
                 reason=threshold_reason,
                 elapsed=round(elapsed, 1),
             )
+
+            # #650: a dead subprocess whose run already emitted its final
+            # CompletedEvent is a normally-completed run being reaped late,
+            # not a stalled one — the detector was racing the post-result
+            # subcountdown's 30 s returncode poll and won. Tear the run down
+            # through the same cancel machinery, but silently: no WARN and no
+            # user-facing "session appears stuck (process_dead)" notice.
+            # #614 made user-initiated cancelled-after-delivery the quiet
+            # path; this makes the watchdog-initiated variant actually quiet
+            # too. Downstream, handle.cancelled_after_delivery keeps the
+            # delivered answer untouched.
+            if (
+                diag is not None
+                and diag.alive is False
+                and bool(getattr(self.stream, "did_emit_completed", False))
+            ):
+                logger.info(
+                    "progress_edits.reaped_after_delivery",
+                    channel_id=self.channel_id,
+                    pid=self.pid,
+                    seconds_since_last_event=round(elapsed, 1),
+                    last_event_type=(
+                        self.stream.last_event_type if self.stream else None
+                    ),
+                    last_seen_alive_s=(
+                        round(self.clock() - self._last_alive_at, 1)
+                        if self._last_alive_at is not None
+                        else None
+                    ),
+                    event_seq=self.event_seq,
+                )
+                if self.cancel_event is not None:
+                    self.cancel_event.set()
+                await self._enforce_cancel_teardown()
+                self.signal_send.close()
+                return
+
             now = self.clock()
             if (
                 self._stall_warned
@@ -1478,6 +1522,11 @@ class ProgressEdits:
                     fd_count=diag.fd_count if diag else None,
                     cpu_active=cpu_active,
                     tree_active=tree_active,
+                    last_seen_alive_s=(
+                        round(now - self._last_alive_at, 1)
+                        if self._last_alive_at is not None
+                        else None
+                    ),
                     recent_events=[(round(t, 1), lbl) for t, lbl in recent[-5:]],
                     stderr_hint=stderr_hint,
                     approval_pending=False,
@@ -1556,6 +1605,14 @@ class ProgressEdits:
                     stall_warn_count=self._stall_warn_count,
                     pid=self.pid,
                     event_seq=self.event_seq,
+                    last_event_type=(
+                        self.stream.last_event_type if self.stream else None
+                    ),
+                    last_seen_alive_s=(
+                        round(now - self._last_alive_at, 1)
+                        if self._last_alive_at is not None
+                        else None
+                    ),
                 )
                 if self.cancel_event is not None:
                     self.cancel_event.set()
@@ -3222,6 +3279,22 @@ async def handle_message(
                 session_id=resume_token.value,
                 reason="quarantined",
             )
+            # #647: announce the divert. Without this the fresh session
+            # answers confidently with no context and no signal that
+            # continuity was lost (observed live: "The last session wrapped
+            # cleanly. Which thread should I 'continue'?").
+            with contextlib.suppress(Exception):
+                await cfg.transport.send(
+                    channel_id=incoming.channel_id,
+                    message=RenderedMessage(
+                        text=(
+                            "ℹ️ Starting a fresh session — the previous one "
+                            "ended in a state that can't be resumed safely, "
+                            "so its context isn't carried over."
+                        )
+                    ),
+                    options=SendOptions(thread_id=incoming.thread_id),
+                )
             if on_resume_failed is not None:
                 try:
                     await on_resume_failed(resume_token)
@@ -3244,12 +3317,54 @@ async def handle_message(
         _ac_cfg = _load_auto_continue_settings()
         if getattr(_ac_cfg, "serialize_session_owner", True):
             try:
-                from untether.runners.claude import wait_for_session_handoff
+                from untether.runners.claude import (
+                    session_live_bg_count,
+                    wait_for_session_handoff,
+                )
 
                 _handoff = await wait_for_session_handoff(
                     resume_token.value,
                     getattr(_ac_cfg, "session_handoff_timeout_s", 30.0),
                 )
+                # #647: the base timeout expired while the prior owner is
+                # still alive. If it is alive because it is legitimately
+                # finishing background work (default-background subagents,
+                # #646), don't silently abandon its context — tell the user
+                # why the reply is delayed and keep waiting. Still
+                # condition-based (resolves the instant the owner exits) and
+                # bounded by ``session_handoff_bg_timeout_s``.
+                if _handoff == "timed_out":
+                    _bg_count = session_live_bg_count(resume_token.value)
+                    _bg_budget = float(
+                        getattr(_ac_cfg, "session_handoff_bg_timeout_s", 600.0)
+                    )
+                    if _bg_count > 0 and _bg_budget > 0:
+                        logger.info(
+                            "session.handoff_bg_extended",
+                            engine=runner.engine,
+                            session_id=resume_token.value,
+                            live_bg_count=_bg_count,
+                            bg_timeout_s=_bg_budget,
+                        )
+                        _plural = "s" if _bg_count != 1 else ""
+                        with contextlib.suppress(Exception):
+                            await cfg.transport.send(
+                                channel_id=incoming.channel_id,
+                                message=RenderedMessage(
+                                    text=(
+                                        f"⏳ The previous session is still "
+                                        f"finishing {_bg_count} background "
+                                        f"task{_plural} — waiting up to "
+                                        f"{int(_bg_budget // 60)} min so your "
+                                        f"context carries over. Send /new to "
+                                        f"drop it and start fresh instead."
+                                    )
+                                ),
+                                options=SendOptions(thread_id=incoming.thread_id),
+                            )
+                        _handoff = await wait_for_session_handoff(
+                            resume_token.value, _bg_budget
+                        )
             except Exception:  # noqa: BLE001 — never block message handling
                 # Fail CLOSED. The entire point of this gate is to never resume
                 # a session that might still be owned; treating a broken check
@@ -3266,6 +3381,51 @@ async def handle_message(
                     session_id=resume_token.value,
                     outcome=_handoff,
                 )
+            if _handoff == "exited":
+                # #647: the owner may have exited because the post-result
+                # ceiling SIGTERM'd it and quarantined the session while we
+                # were waiting (the two paths interact — the incident that
+                # reproduced this issue carried reason=quarantined, not
+                # handoff_timeout). Re-check quarantine so the wait's outcome
+                # can't resume a session marked unsafe moments earlier — and
+                # announce the context loss instead of silently answering
+                # from a fresh session.
+                try:
+                    _q_after = (
+                        _qstore.is_quarantined(runner.engine, resume_token.value)
+                        if _qstore is not None
+                        else False
+                    )
+                except Exception:  # noqa: BLE001
+                    logger.debug("session.quarantine_check_failed", exc_info=True)
+                    _q_after = False
+                if _q_after:
+                    logger.warning(
+                        "session.resume_diverted_fresh",
+                        engine=runner.engine,
+                        session_id=resume_token.value,
+                        reason="quarantined_during_handoff",
+                    )
+                    with contextlib.suppress(Exception):
+                        await cfg.transport.send(
+                            channel_id=incoming.channel_id,
+                            message=RenderedMessage(
+                                text=(
+                                    "⚠️ The previous session had to be "
+                                    "terminated while its background tasks "
+                                    "were still running — starting a fresh "
+                                    "session. Its context couldn't be "
+                                    "carried over."
+                                )
+                            ),
+                            options=SendOptions(thread_id=incoming.thread_id),
+                        )
+                    if on_resume_failed is not None:
+                        try:
+                            await on_resume_failed(resume_token)
+                        except Exception:  # noqa: BLE001
+                            logger.debug("session.clear_failed", exc_info=True)
+                    resume_token = None
             if _handoff == "timed_out":
                 # The prior owner is still alive. Start fresh rather than
                 # racing it.
@@ -3285,6 +3445,21 @@ async def handle_message(
                     session_id=resume_token.value,
                     reason="handoff_timeout",
                 )
+                # #647: never divert silently — a confidently contextless
+                # answer with no signal that continuity was lost is the worst
+                # outcome. One line, before the fresh run starts.
+                with contextlib.suppress(Exception):
+                    await cfg.transport.send(
+                        channel_id=incoming.channel_id,
+                        message=RenderedMessage(
+                            text=(
+                                "⚠️ The previous session was still busy after "
+                                "the wait — starting a fresh session. Its "
+                                "context couldn't be carried over."
+                            )
+                        ),
+                        options=SendOptions(thread_id=incoming.thread_id),
+                    )
                 if on_resume_failed is not None:
                     try:
                         await on_resume_failed(resume_token)

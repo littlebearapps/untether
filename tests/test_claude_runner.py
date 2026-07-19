@@ -5217,7 +5217,6 @@ async def test_590_limbo_refreshes_orphan_snapshot(monkeypatch) -> None:
     RECURSIVE descendant walk (find_descendants) so late-spawned MCP leakers —
     including npx→node grandchildren, which diag.child_pids (direct children
     only) missed — are visible to the post-exit sweep."""
-    from types import SimpleNamespace
 
     import anyio
 
@@ -5243,10 +5242,15 @@ async def test_590_limbo_refreshes_orphan_snapshot(monkeypatch) -> None:
 
     proc = _FakeProc(pid=62424, returncode=None)
     # collect_proc_diag drives only the diagnostic log line now; the snapshot
-    # comes from the recursive find_descendants walk.
+    # comes from the recursive find_descendants walk. A real ProcessDiag is
+    # required since the #650 subcountdown tick feeds it to is_cpu_active.
+    from untether.utils.proc_diag import ProcessDiag
+
     monkeypatch.setattr(
         "untether.utils.proc_diag.collect_proc_diag",
-        lambda pid: SimpleNamespace(child_pids=[901], rss_kb=1000, tcp_total=3),
+        lambda pid: ProcessDiag(
+            pid=pid, alive=True, child_pids=[901], rss_kb=1000, tcp_total=3
+        ),
     )
     monkeypatch.setattr(
         "untether.utils.proc_diag.find_descendants",
@@ -5594,3 +5598,261 @@ def test_capture_orphan_descendants_swallows_oserror(monkeypatch) -> None:
     state.pid = 40002
     claude_runner._capture_orphan_descendants(state, source="result")
     assert state.orphan_pid_snapshot == []
+
+
+# ---------------------------------------------------------------------------
+# #647/#646 — liveness-aware post-result ceiling
+# ---------------------------------------------------------------------------
+
+
+def _bg_diag(pid: int):
+    """ProcessDiag stand-in: alive, has children, CPU data indeterminate —
+    the deterministic 'not demonstrably idle' shape for ceiling tests."""
+    from untether.utils.proc_diag import ProcessDiag
+
+    return ProcessDiag(pid=pid, alive=True, child_pids=[1234], rss_kb=1000)
+
+
+@pytest.mark.anyio
+async def test_647_subcountdown_extends_ceiling_while_bg_work_live(
+    monkeypatch,
+) -> None:
+    """Live background subagents defer the post-result SIGTERM past the fixed
+    deadline; the kill fires only once the background work is gone."""
+    from untether.runner import JsonlStreamState
+    from untether.runners.claude import (
+        _PENDING_ASK_REQUESTS,
+        _REQUEST_TO_SESSION,
+        ClaudeRunner,
+    )
+
+    _REQUEST_TO_SESSION.clear()
+    _PENDING_ASK_REQUESTS.clear()
+
+    runner = ClaudeRunner(claude_cmd="claude")
+    runner._subcountdown_poll_interval_s = 0.02
+    runner._subcountdown_limbo_detect_threshold_s = 0.05
+    runner._subcountdown_sigterm_grace_s = 0.1
+    runner._subcountdown_sigterm_grace_poll_s = 0.02
+
+    state = ClaudeStreamState()
+    state.factory.started(ResumeToken(engine="claude", value="bg-hold-sess-1"))
+    state.result_received_at = time.monotonic() - 0.5
+    # A live default-background Agent handle (#646 workload class).
+    state.live_bg_agents.add("toolu_bg_agent")
+    state.bg_agent_deadlines["toolu_bg_agent"] = time.monotonic() + 3600.0
+    stream = JsonlStreamState(expected_session=None)
+
+    proc = _FakeProc(pid=54241, returncode=None)
+    killed_signals: list[int] = []
+
+    def _fake_killpg(pgid: int, sig: int) -> None:
+        killed_signals.append(sig)
+        proc.returncode = -15
+
+    monkeypatch.setattr("os.killpg", _fake_killpg)
+    monkeypatch.setattr("untether.utils.subprocess.find_descendants", lambda pid: [])
+    monkeypatch.setattr("untether.utils.proc_diag.collect_proc_diag", _bg_diag)
+
+    logger = _RecordingLogger()
+    reader_done = anyio.Event()
+    reader_done.set()
+
+    class FakeStdin:
+        async def aclose(self) -> None:
+            pass
+
+    async with anyio.create_task_group() as tg:
+        tg.start_soon(
+            runner._post_result_idle_watchdog,
+            state,
+            FakeStdin(),
+            reader_done,
+            logger,
+            0.1,  # timeout_s — the fixed deadline expires almost immediately
+            proc,
+            stream,
+            0.0,  # limbo_grace_s disabled — full deadline applies
+            3600.0,
+            30.0,  # bg_max_hold_s — generous, far beyond the test's patience
+        )
+        # Let several deadline evaluations pass with live background work.
+        await anyio.sleep(0.4)
+        assert killed_signals == [], (
+            "SIGTERM must be deferred while background work is live"
+        )
+        assert any(
+            e == "claude.post_result_idle.ceiling_extended"
+            for _, e, _ in logger.records
+        )
+        # Background work finishes — the next deadline check must fire.
+        state.live_bg_agents.clear()
+        state.bg_agent_deadlines.clear()
+        with anyio.move_on_after(3.0):
+            while signal.SIGTERM not in killed_signals:
+                await anyio.sleep(0.02)
+        tg.cancel_scope.cancel()
+
+    assert signal.SIGTERM in killed_signals, (
+        "SIGTERM should fire once background work is gone"
+    )
+
+
+@pytest.mark.anyio
+async def test_647_subcountdown_bg_hold_cap_bounds_extension(monkeypatch) -> None:
+    """The liveness-aware extension is bounded: past ``bg_max_hold_s`` the
+    SIGTERM fires even with live background work, and the log carries the
+    ``live_background_work=True`` marker #647 monitoring keys on."""
+    from untether.runner import JsonlStreamState
+    from untether.runners.claude import (
+        _PENDING_ASK_REQUESTS,
+        _REQUEST_TO_SESSION,
+        ClaudeRunner,
+    )
+
+    _REQUEST_TO_SESSION.clear()
+    _PENDING_ASK_REQUESTS.clear()
+
+    runner = ClaudeRunner(claude_cmd="claude")
+    runner._subcountdown_poll_interval_s = 0.02
+    runner._subcountdown_limbo_detect_threshold_s = 0.05
+    runner._subcountdown_sigterm_grace_s = 0.1
+    runner._subcountdown_sigterm_grace_poll_s = 0.02
+
+    state = ClaudeStreamState()
+    state.factory.started(ResumeToken(engine="claude", value="bg-hold-sess-2"))
+    state.result_received_at = time.monotonic() - 0.5
+    state.live_bg_agents.add("toolu_bg_agent")
+    state.bg_agent_deadlines["toolu_bg_agent"] = time.monotonic() + 3600.0
+    stream = JsonlStreamState(expected_session=None)
+
+    proc = _FakeProc(pid=54242, returncode=None)
+    killed_signals: list[int] = []
+
+    def _fake_killpg(pgid: int, sig: int) -> None:
+        killed_signals.append(sig)
+        proc.returncode = -15
+
+    monkeypatch.setattr("os.killpg", _fake_killpg)
+    monkeypatch.setattr("untether.utils.subprocess.find_descendants", lambda pid: [])
+    monkeypatch.setattr("untether.utils.proc_diag.collect_proc_diag", _bg_diag)
+
+    logger = _RecordingLogger()
+    reader_done = anyio.Event()
+    reader_done.set()
+
+    class FakeStdin:
+        async def aclose(self) -> None:
+            pass
+
+    async with anyio.create_task_group() as tg:
+        tg.start_soon(
+            runner._post_result_idle_watchdog,
+            state,
+            FakeStdin(),
+            reader_done,
+            logger,
+            0.05,  # timeout_s
+            proc,
+            stream,
+            0.0,  # limbo_grace_s disabled
+            3600.0,
+            0.08,  # bg_max_hold_s — cap expires almost immediately
+        )
+        with anyio.move_on_after(3.0):
+            while signal.SIGTERM not in killed_signals:
+                await anyio.sleep(0.02)
+        tg.cancel_scope.cancel()
+
+    assert signal.SIGTERM in killed_signals, "cap must bound the extension"
+    sigterm_logs = [
+        kw
+        for _, e, kw in logger.records
+        if e == "claude.post_result_idle.sigterm_after_timeout"
+    ]
+    assert sigterm_logs and sigterm_logs[0].get("live_background_work") is True
+
+
+@pytest.mark.anyio
+async def test_650_subcountdown_ticks_are_logged(monkeypatch) -> None:
+    """#650 defect (3): the subcountdown loop must emit periodic
+    ``subcountdown_tick`` lines — previously it logged nothing between the
+    one-shot limbo warning and its exit, and the bridge's stall detector won
+    the race inside that blackout."""
+    from untether.runner import JsonlStreamState
+    from untether.runners.claude import (
+        _PENDING_ASK_REQUESTS,
+        _REQUEST_TO_SESSION,
+        ClaudeRunner,
+    )
+
+    _REQUEST_TO_SESSION.clear()
+    _PENDING_ASK_REQUESTS.clear()
+
+    runner = ClaudeRunner(claude_cmd="claude")
+    runner._subcountdown_poll_interval_s = 0.02
+    runner._subcountdown_limbo_detect_threshold_s = 0.05
+    runner._subcountdown_tick_log_interval_s = 0.01
+
+    state = ClaudeStreamState()
+    state.factory.started(ResumeToken(engine="claude", value="tick-sess-1"))
+    state.result_received_at = time.monotonic() - 0.5
+    stream = JsonlStreamState(expected_session=None)
+
+    proc = _FakeProc(pid=54243, returncode=None)
+    monkeypatch.setattr("untether.utils.proc_diag.collect_proc_diag", _bg_diag)
+
+    logger = _RecordingLogger()
+    reader_done = anyio.Event()
+    reader_done.set()
+
+    class FakeStdin:
+        async def aclose(self) -> None:
+            pass
+
+    async with anyio.create_task_group() as tg:
+        tg.start_soon(
+            runner._post_result_idle_watchdog,
+            state,
+            FakeStdin(),
+            reader_done,
+            logger,
+            30.0,  # far beyond the test window — the loop just idles
+            proc,
+            stream,
+            0.0,  # limbo_grace_s disabled so nothing fires
+            3600.0,
+        )
+        await anyio.sleep(0.3)
+        tg.cancel_scope.cancel()
+
+    ticks = [
+        kw
+        for _, e, kw in logger.records
+        if e == "claude.post_result_idle.subcountdown_tick"
+    ]
+    assert len(ticks) >= 2, "expected periodic subcountdown ticks"
+    # Once past the limbo threshold the ticks must keep coming and say so.
+    assert any(kw.get("in_limbo") is True for kw in ticks)
+
+
+def test_647_session_live_bg_count_reads_registry() -> None:
+    """The bridge-facing helper reports live background handles for a
+    registered session and 0 for unknown/idle sessions."""
+    from untether.runners.claude import (
+        _SESSION_BG_STATE,
+        session_live_bg_count,
+    )
+
+    state = ClaudeStreamState()
+    state.live_bg_agents.add("toolu_1")
+    state.bg_agent_deadlines["toolu_1"] = time.monotonic() + 3600.0
+    _SESSION_BG_STATE["bg-count-sess"] = state
+    try:
+        assert session_live_bg_count("bg-count-sess") == 1
+        assert session_live_bg_count("missing-sess") == 0
+        # Aged-out handle no longer counts.
+        state.bg_agent_deadlines["toolu_1"] = time.monotonic() - 1.0
+        assert session_live_bg_count("bg-count-sess") == 0
+    finally:
+        _SESSION_BG_STATE.pop("bg-count-sess", None)
