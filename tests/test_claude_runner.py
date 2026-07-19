@@ -15,6 +15,7 @@ from untether.runners.claude import (
     ENGINE,
     ClaudeRunner,
     ClaudeStreamState,
+    has_live_background_work,
     translate_claude_event,
 )
 from untether.schemas import claude as claude_schema
@@ -480,7 +481,9 @@ def test_bash_without_run_in_background_is_not_tracked() -> None:
     assert "toolu_B2" not in state.live_bg_bashes
 
 
-def test_agent_bg_tracked_only_when_run_in_background() -> None:
+def test_agent_bg_tracked_unless_explicitly_foreground() -> None:
+    """#646: background is the upstream default — only an explicit
+    ``run_in_background=False`` opts out."""
     state = ClaudeStreamState()
     translate_claude_event(
         _decode_event(
@@ -496,7 +499,11 @@ def test_agent_bg_tracked_only_when_run_in_background() -> None:
 
     state2 = ClaudeStreamState()
     translate_claude_event(
-        _decode_event(_make_tool_use_event("Agent", "toolu_A2", {"task": "..."})),
+        _decode_event(
+            _make_tool_use_event(
+                "Agent", "toolu_A2", {"task": "...", "run_in_background": False}
+            )
+        ),
         title="claude",
         state=state2,
         factory=state2.factory,
@@ -523,16 +530,110 @@ def test_374_task_tool_registers_background_handle() -> None:
 
 
 def test_374_task_tool_foreground_not_registered() -> None:
-    """#374: Task without run_in_background should NOT register in live_bg_agents
-    and should NOT set background_observed flag."""
+    """#374/#646: Task with an explicit run_in_background=False should NOT
+    register in live_bg_agents and should NOT set background_observed.
+
+    Pre-#646 this case was expressed by *omitting* the key; omission now means
+    background (the upstream default), so opting out must be explicit.
+    """
     state = ClaudeStreamState()
     translate_claude_event(
-        _decode_event(_make_tool_use_event("Task", "toolu_T2", {"task": "..."})),
+        _decode_event(
+            _make_tool_use_event(
+                "Task", "toolu_T2", {"task": "...", "run_in_background": False}
+            )
+        ),
         title="claude",
         state=state,
         factory=state.factory,
     )
     assert "toolu_T2" not in state.live_bg_agents
+    assert state.background_observed is False
+
+
+# ---------------------------------------------------------------------------
+# #646 — default-background subagent registration
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("tool_name", ["Agent", "Task"])
+@pytest.mark.parametrize(
+    ("raw_input", "expect_background"),
+    [
+        # The real shape emitted by Claude Code: no run_in_background key at
+        # all. 11/11 Agent calls across the 5 sessions quarantined on nsd
+        # 2026-07-18 looked exactly like this.
+        ({"description": "Explore canon doc", "subagent_type": "Explore"}, True),
+        # Explicit opt-in stays background.
+        ({"task": "...", "run_in_background": True}, True),
+        # Only a literal False opts out.
+        ({"task": "...", "run_in_background": False}, False),
+        # Malformed / null values fall back to the upstream default rather
+        # than silently forfeiting the handle — over-registering is bounded by
+        # BG_AGENT_MAX_KEEP_S, under-registering force-kills live work.
+        ({"task": "...", "run_in_background": None}, True),
+        ({"task": "...", "run_in_background": "false"}, True),
+        ({"task": "...", "run_in_background": 0}, True),
+    ],
+)
+def test_646_agent_background_registration_tristate(
+    tool_name: str, raw_input: dict, expect_background: bool
+) -> None:
+    """#646: an omitted ``run_in_background`` means BACKGROUND, not foreground.
+
+    The pre-#646 predicate was ``bool(raw_input.get("run_in_background"))``,
+    which read omission as foreground and so never registered a real subagent.
+    That left ``has_live_background_work()`` False, applied the 60s limbo grace
+    instead of the full post-result timeout, force-killed a subprocess whose
+    subagents were still working, and let the #632 forced-teardown path
+    quarantine a healthy session.
+    """
+    state = ClaudeStreamState()
+    tool_id = f"toolu_{tool_name}_646"
+    translate_claude_event(
+        _decode_event(_make_tool_use_event(tool_name, tool_id, raw_input)),
+        title="claude",
+        state=state,
+        factory=state.factory,
+    )
+    assert (tool_id in state.live_bg_agents) is expect_background
+    assert state.background_observed is expect_background
+    assert has_live_background_work(state) is expect_background
+    if expect_background:
+        # Registration must always come with a bounded age-out (#374).
+        assert state.bg_agent_deadlines[tool_id] > time.monotonic()
+
+
+def test_646_default_background_agent_is_bounded() -> None:
+    """#646: an implicitly-background handle still ages out at
+    BG_AGENT_MAX_KEEP_S — it must not pin the watchdog forever."""
+    state = ClaudeStreamState()
+    translate_claude_event(
+        _decode_event(
+            _make_tool_use_event("Agent", "toolu_A646", {"subagent_type": "Explore"})
+        ),
+        title="claude",
+        state=state,
+        factory=state.factory,
+    )
+    assert has_live_background_work(state) is True
+
+    # Expire the handle: past its deadline it no longer counts as live.
+    state.bg_agent_deadlines["toolu_A646"] = time.monotonic() - 1.0
+    assert has_live_background_work(state) is False
+
+
+def test_646_bash_still_requires_explicit_opt_in() -> None:
+    """#646 must not leak into Bash — its run_in_background flag is genuinely
+    opt-in upstream, so a plain command stays foreground."""
+    state = ClaudeStreamState()
+    translate_claude_event(
+        _decode_event(_make_tool_use_event("Bash", "toolu_B646", {"command": "ls"})),
+        title="claude",
+        state=state,
+        factory=state.factory,
+    )
+    assert "toolu_B646" not in state.live_bg_bashes
     assert state.background_observed is False
 
 
