@@ -325,7 +325,9 @@ DISCUSS_COOLDOWN_BASE_SECONDS: float = 30.0
 DISCUSS_COOLDOWN_MAX_SECONDS: float = 120.0
 
 # #374 (rc7): bounded keep for background-agent handles (Agent/Task
-# tool_use with run_in_background=True). An interim tool_result no longer
+# tool_use that runs in the background — #646: that is the *default*
+# upstream, i.e. every Agent/Task except an explicit run_in_background=False;
+# see `_agent_runs_in_background`). An interim tool_result no longer
 # clears the handle immediately (see `_is_terminal_tool_result`), but every
 # "keep the handle" branch MUST have a bounded age-out — a handle that
 # never clears wedges the post-result idle watchdog into a permanent hang.
@@ -405,8 +407,9 @@ class ClaudeStreamState:
     # #347 per-session background-task tracking. Claude Code v2.1.72+ has
     # primitives that arm long-running work and return the subprocess to
     # "ready" state while the primitive continues in the background:
-    # `Monitor`, `Bash run_in_background=true`, `Agent run_in_background=true`,
-    # `ScheduleWakeup`, `RemoteTrigger`. Untether tracks them so (a) #346's
+    # `Monitor`, `Bash run_in_background=true`, `Agent`/`Task` (background by
+    # default upstream — #646), `ScheduleWakeup`, `RemoteTrigger`. Untether
+    # tracks them so (a) #346's
     # wedge detector can gate SIGTERM on "do we still have armed work?",
     # (b) progress footers can show "⏳ N watchers · M bg tasks", and (c)
     # a future `/background` command can enumerate the handles.
@@ -701,6 +704,38 @@ def _tool_action(
     return Action(id=tool_id, kind=kind, title=title, detail=detail)
 
 
+def _agent_runs_in_background(raw_input: dict) -> bool:
+    """Decide whether an Agent/Task tool_use launches a *background* subagent (#646).
+
+    Claude Code runs subagents in the background **by default**: the tool
+    contract reads "Subagents run in the background by default; ... Pass
+    ``run_in_background: false`` for a synchronous run." The flag is therefore
+    normally ABSENT from `input` — the observed shape is just
+    ``{"description": ..., "subagent_type": ...}``.
+
+    The pre-#646 predicate was ``bool(raw_input.get("run_in_background"))``,
+    which read an omitted key as *foreground*. That inverted the upstream
+    default and missed every real background subagent (measured: 11/11 Agent
+    calls across the 5 sessions quarantined on nsd 2026-07-18 omit the key).
+    An unregistered handle leaves `has_live_background_work()` False, so the
+    post-result idle watchdog applies the 60s limbo grace instead of the full
+    timeout, SIGTERMs a subprocess whose subagents are still working, and the
+    #632 forced-teardown path then quarantines a perfectly healthy session —
+    so the user's next message diverts to a fresh, contextless one.
+
+    Hence: background unless the caller *explicitly* opted out with literal
+    ``False``. Anything else (absent, None, true, or a malformed value) counts
+    as background — over-registering is the safe direction, because a stale
+    handle only forfeits the 60s shortcut while the 600s post-result ceiling
+    and the 900s ``BG_AGENT_MAX_KEEP_S`` age-out both still bound teardown.
+    Under-registering force-kills live work and poisons the session.
+
+    Deliberately NOT applied to ``Bash(run_in_background=...)``, whose flag is
+    genuinely opt-in upstream — see `_register_background_handle`.
+    """
+    return raw_input.get("run_in_background") is not False
+
+
 def _register_background_handle(
     state: ClaudeStreamState,
     content: claude_schema.StreamToolUseBlock,
@@ -741,7 +776,7 @@ def _register_background_handle(
         # (see ClaudeStreamState.last_bg_bash_launched_at docstring). Used by
         # the post-result idle watchdog tick log for observability only.
         state.last_bg_bash_launched_at = time.monotonic()
-    elif tool_name in ("Agent", "Task") and bool(raw_input.get("run_in_background")):
+    elif tool_name in ("Agent", "Task") and _agent_runs_in_background(raw_input):
         state.background_observed = True
         state.live_bg_agents.add(tool_id)
         # #374 (rc7): bounded keep — see BG_AGENT_MAX_KEEP_S and
@@ -852,8 +887,11 @@ def _is_terminal_tool_result(
       (``has_live_background_work`` already uses the same deadline to age the
       handle out — so no leak).
 
-    - **Agent/Task with ``run_in_background=True``** (rc7, #374) can likewise emit
-      an interim tool_result before the subagent actually finishes. Clearing
+    - **Agent/Task running in the background** (rc7, #374) — i.e. every Agent/Task
+      except an explicit ``run_in_background=False``, since background is the
+      upstream default (#646, ``_agent_runs_in_background``). These likewise emit
+      an interim tool_result (observed: ``"Async agent launched successfully."``
+      ~25ms after the tool_use) before the subagent actually finishes. Clearing
       ``live_bg_agents`` on that first result reintroduced the same premature-drain
       bug the Monitor fix addressed: it poisoned the "no live background work"
       signal the empty-resume detector relies on (#596). There is no reliable
