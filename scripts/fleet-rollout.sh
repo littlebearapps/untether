@@ -277,7 +277,7 @@ build_install_cmd() {
     local host="$1" mgr="$2"
     case "$mgr" in
         uv)
-            INSTALL_CMD[$host]="ssh ${host} 'PATH=${REMOTE_PATH} uv tool install --force ${UV_INDEX_ARGS} ${PACKAGE}==${VERSION}'"
+            INSTALL_CMD[$host]="ssh ${host} 'PATH=${REMOTE_PATH} uv tool install --force --refresh ${UV_INDEX_ARGS} ${PACKAGE}==${VERSION}'"
             ;;
         pipx)
             INSTALL_CMD[$host]="ssh ${host} 'PATH=${REMOTE_PATH} pipx install --force --pip-args=\"${PIP_ARGS}\" ${PACKAGE}==${VERSION}'"
