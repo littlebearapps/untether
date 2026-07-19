@@ -5337,6 +5337,113 @@ async def test_655_limbo_grace_still_applies_when_cpu_inactive(monkeypatch) -> N
     assert sigterm_logs and sigterm_logs[0].get("limbo_grace_applied") is True
 
 
+@pytest.mark.anyio
+async def test_655_limbo_grace_real_busy_subprocess_survives() -> None:
+    """End-to-end #655 with a REAL subprocess and REAL /proc CPU accounting —
+    no monkeypatched diag. A genuinely busy process with no registered
+    background handles must survive well past the limbo grace; the eventual
+    kill is the full-timeout path, not the grace."""
+    import contextlib
+    import os
+    import subprocess as _subprocess
+
+    import anyio
+
+    from untether.runner import JsonlStreamState
+    from untether.runners.claude import (
+        _PENDING_ASK_REQUESTS,
+        _REQUEST_TO_SESSION,
+        ClaudeRunner,
+    )
+
+    _REQUEST_TO_SESSION.clear()
+    _PENDING_ASK_REQUESTS.clear()
+
+    runner = ClaudeRunner(claude_cmd="claude")
+    runner._subcountdown_poll_interval_s = 0.1
+    runner._subcountdown_limbo_detect_threshold_s = 0.2
+    runner._subcountdown_sigterm_grace_s = 0.3
+    runner._subcountdown_sigterm_grace_poll_s = 0.05
+
+    state = ClaudeStreamState()
+    state.factory.started(ResumeToken(engine="claude", value="grace-sess-655c"))
+    state.result_received_at = time.monotonic() - 0.5
+    stream = JsonlStreamState(expected_session=None)
+
+    # A real CPU-busy child in its own process group, exactly as the runner
+    # spawns the CLI (start_new_session=True → pid == pgid).
+    proc = _subprocess.Popen(  # noqa: ASYNC220 — fork+exec is instant; the
+        # test needs Popen.poll() semantics for the ProcView adapter below.
+        ["sh", "-c", "while :; do :; done"],
+        start_new_session=True,
+        stdout=_subprocess.DEVNULL,
+        stderr=_subprocess.DEVNULL,
+    )
+
+    logger = _RecordingLogger()
+    reader_done = anyio.Event()
+    reader_done.set()
+
+    class FakeStdin:
+        async def aclose(self) -> None:
+            pass
+
+    class ProcView:
+        """Popen adapter exposing the pid/returncode surface the watchdog
+        polls (Popen.returncode only updates via poll())."""
+
+        pid = proc.pid
+
+        @property
+        def returncode(self) -> int | None:
+            return proc.poll()
+
+    grace_s = 0.4
+    timeout_s = 2.5
+    try:
+        async with anyio.create_task_group() as tg:
+            tg.start_soon(
+                runner._post_result_idle_watchdog,
+                state,
+                FakeStdin(),
+                reader_done,
+                logger,
+                timeout_s,
+                ProcView(),
+                stream,
+                grace_s,
+            )
+            # Well past the grace: the busy process must still be alive and
+            # un-signalled — pre-#655 it was SIGTERM'd at the grace.
+            await anyio.sleep(grace_s * 3)
+            assert proc.poll() is None, (
+                "busy subprocess must survive past the limbo grace"
+            )
+            assert not any(
+                e == "claude.post_result_idle.sigterm_after_timeout"
+                for _, e, _ in logger.records
+            )
+            # Let the full timeout fire and the watchdog return.
+            with anyio.move_on_after(timeout_s * 3):
+                while proc.poll() is None:
+                    await anyio.sleep(0.05)
+            tg.cancel_scope.cancel()
+    finally:
+        with contextlib.suppress(ProcessLookupError, PermissionError):
+            os.killpg(proc.pid, signal.SIGKILL)
+        proc.wait(timeout=5)
+
+    sigterm_logs = [
+        kw
+        for lvl, e, kw in logger.records
+        if e == "claude.post_result_idle.sigterm_after_timeout"
+    ]
+    assert sigterm_logs, "full timeout should eventually reap the process"
+    assert sigterm_logs[0].get("limbo_grace_applied") is False
+    assert sigterm_logs[0].get("cpu_active") is True
+    assert sigterm_logs[0].get("elapsed_s", 0.0) >= timeout_s * 0.8
+
+
 def _limbo_level_records(logger: "_RecordingLogger") -> list[tuple[str, dict]]:
     return [(lvl, kw) for lvl, e, kw in logger.records if e == "runner.limbo_detected"]
 
