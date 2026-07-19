@@ -267,6 +267,25 @@ def session_live_bg_count(session_id: str) -> int:
     return max(1, count)
 
 
+def session_linger_info(session_id: str) -> tuple[bool, int] | None:
+    """Return ``(post_result, live_bg_count)`` for the still-running
+    subprocess that owns ``session_id``, or ``None`` when there is no live
+    owner.
+
+    #654: consumed by the Telegram loop's queued-progress path. A follow-up
+    that arrives while the prior owner lingers post-result (finishing
+    background work) queues silently behind it — this tells the queued
+    message WHY it is waiting. ``post_result`` distinguishes that linger
+    window from a normal mid-run queue, where the active progress message
+    already explains itself.
+    """
+    if not is_session_alive(session_id):
+        return None
+    state = _SESSION_BG_STATE.get(session_id)
+    post_result = state is not None and state.result_received_at is not None
+    return post_result, session_live_bg_count(session_id)
+
+
 SESSION_HANDOFF_POLL_S: float = 0.25
 
 
@@ -3836,7 +3855,19 @@ class ClaudeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
                 # which is DIRECT children only and misses the npx→node
                 # grandchild that actually leaks.
                 _capture_orphan_descendants(state, source="limbo", pid=proc.pid)
-                run_logger.warning(
+                # #653: the level reflects the assessed state, not the
+                # transition into it. Live background work — or a
+                # demonstrably busy process tree — lingering after the
+                # result is healthy, expected behaviour under the
+                # liveness-aware ceiling (#646/#647): INFO. WARNING is
+                # reserved for limbo with no evidence of work, the
+                # genuinely-stuck case the warning was written for.
+                limbo_log = (
+                    run_logger.info
+                    if (live_bg or cpu_active is True or tree_active is True)
+                    else run_logger.warning
+                )
+                limbo_log(
                     "runner.limbo_detected",
                     engine="claude",
                     pid=proc.pid,
@@ -3847,6 +3878,9 @@ class ClaudeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
                         if state.result_received_at is not None
                         else None
                     ),
+                    live_background_work=live_bg,
+                    cpu_active=cpu_active,
+                    tree_active=tree_active,
                     mcp_child_pids=list(diag.child_pids) if diag else [],
                     rss_kb=diag.rss_kb if diag else None,
                     tcp_total=diag.tcp_total if diag else None,
@@ -3865,9 +3899,25 @@ class ClaudeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
             # fully quiescent — no live background work means nothing can
             # legitimately produce output any more (pending requests/asks
             # were handled above via the re-arm branch).
+            #
+            # #655: `not live_bg` alone is NOT quiescence — it only means no
+            # *registered* background handle. A process can be busy with
+            # direct work (waiting on a build, a slow MCP call, a poll loop)
+            # with live_bg False. Consult the same liveness signals the
+            # extension gate below uses, so a demonstrably-busy process falls
+            # through to the full ``timeout_s``. Tri-state: both signals are
+            # None on the first poll (no prev_diag); `is True` keeps unknown
+            # liveness from blocking the grace cap, preserving #591's fast
+            # reap of genuinely quiescent husks.
+            demonstrably_busy = cpu_active is True or tree_active is True
             effective_deadline = deadline
             limbo_grace_applied = False
-            if grace_deadline is not None and grace_deadline < deadline and not live_bg:
+            if (
+                grace_deadline is not None
+                and grace_deadline < deadline
+                and not live_bg
+                and not demonstrably_busy
+            ):
                 effective_deadline = grace_deadline
                 limbo_grace_applied = True
 

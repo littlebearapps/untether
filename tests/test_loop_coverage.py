@@ -762,3 +762,86 @@ class TestInitQuarantineStore:
             assert any(r.get("event") == "quarantine.startup_init_failed" for r in logs)
         finally:
             set_quarantine_store(None)
+
+
+# ---------------------------------------------------------------------------
+# #654 — queued-behind-background-work wait note
+# ---------------------------------------------------------------------------
+
+
+class TestQueuedWaitNote:
+    """#654: `_queued_wait_note` explains WHY a queued follow-up is waiting
+    when it queues behind a Claude session lingering post-result."""
+
+    @staticmethod
+    def _token(engine: str = "claude", value: str = "sess-654"):
+        from untether.model import ResumeToken
+
+        return ResumeToken(engine=engine, value=value)
+
+    def test_non_claude_engine_returns_none(self) -> None:
+        from untether.telegram.loop import _queued_wait_note
+
+        assert _queued_wait_note(self._token(engine="codex")) is None
+
+    def test_no_live_owner_returns_none(self, monkeypatch) -> None:
+        from untether.telegram.loop import _queued_wait_note
+
+        monkeypatch.setattr(
+            "untether.runners.claude.session_linger_info", lambda sid: None
+        )
+        assert _queued_wait_note(self._token()) is None
+
+    def test_mid_run_owner_returns_none(self, monkeypatch) -> None:
+        """A session that has not delivered its result yet is a normal
+        mid-run queue — the active progress message already explains it."""
+        from untether.telegram.loop import _queued_wait_note
+
+        monkeypatch.setattr(
+            "untether.runners.claude.session_linger_info", lambda sid: (False, 0)
+        )
+        assert _queued_wait_note(self._token()) is None
+
+    def test_post_result_with_background_tasks(self, monkeypatch) -> None:
+        from untether.telegram.loop import _queued_wait_note
+
+        monkeypatch.setattr(
+            "untether.runners.claude.session_linger_info", lambda sid: (True, 2)
+        )
+        note = _queued_wait_note(self._token())
+        assert note is not None
+        assert "2 background task" in note
+        assert "/cancel" in note
+
+    def test_post_result_single_task_singular(self, monkeypatch) -> None:
+        from untether.telegram.loop import _queued_wait_note
+
+        monkeypatch.setattr(
+            "untether.runners.claude.session_linger_info", lambda sid: (True, 1)
+        )
+        note = _queued_wait_note(self._token())
+        assert note is not None
+        assert "1 background task" in note
+        assert "1 background tasks" not in note
+
+    def test_post_result_no_registered_tasks(self, monkeypatch) -> None:
+        """#655 shape: busy post-result session with no registered handles
+        still gets an explanatory note, without a task count."""
+        from untether.telegram.loop import _queued_wait_note
+
+        monkeypatch.setattr(
+            "untether.runners.claude.session_linger_info", lambda sid: (True, 0)
+        )
+        note = _queued_wait_note(self._token())
+        assert note is not None
+        assert "background task" not in note
+        assert "/cancel" in note
+
+    def test_linger_info_failure_returns_none(self, monkeypatch) -> None:
+        from untether.telegram.loop import _queued_wait_note
+
+        def _boom(sid: str):
+            raise RuntimeError("registry unavailable")
+
+        monkeypatch.setattr("untether.runners.claude.session_linger_info", _boom)
+        assert _queued_wait_note(self._token()) is None

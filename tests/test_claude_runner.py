@@ -5156,6 +5156,435 @@ async def test_591_limbo_grace_deferred_by_live_background_work(monkeypatch) -> 
 
 
 @pytest.mark.anyio
+async def test_655_limbo_grace_deferred_by_cpu_active(monkeypatch) -> None:
+    """A post-result process that is demonstrably busy (rising CPU counters)
+    but has NO registered background handles must not be reaped at the limbo
+    grace — `not live_bg` alone is not quiescence (#655). It falls through to
+    the full ``timeout_s`` instead."""
+    import anyio
+
+    from untether.runner import JsonlStreamState
+    from untether.runners.claude import (
+        _PENDING_ASK_REQUESTS,
+        _REQUEST_TO_SESSION,
+        ClaudeRunner,
+    )
+    from untether.utils.proc_diag import ProcessDiag
+
+    _REQUEST_TO_SESSION.clear()
+    _PENDING_ASK_REQUESTS.clear()
+
+    runner = ClaudeRunner(claude_cmd="claude")
+    runner._subcountdown_poll_interval_s = 0.02
+    runner._subcountdown_limbo_detect_threshold_s = 0.05
+    runner._subcountdown_sigterm_grace_s = 0.1
+    runner._subcountdown_sigterm_grace_poll_s = 0.02
+
+    state = ClaudeStreamState()
+    state.factory.started(ResumeToken(engine="claude", value="grace-sess-655a"))
+    state.result_received_at = time.monotonic() - 0.5
+    # No live_bg_agents / live_bg_bashes / live_wakeups — live_bg stays False.
+    stream = JsonlStreamState(expected_session=None)
+
+    proc = _FakeProc(pid=52427, returncode=None)
+    killed_signals: list[int] = []
+    monkeypatch.setattr("os.killpg", lambda pgid, sig: killed_signals.append(sig))
+    # #590: signal_pid_group snapshots real /proc descendants before
+    # signalling — neutralise it so tests never touch live processes.
+    monkeypatch.setattr("untether.utils.subprocess.find_descendants", lambda pid: [])
+
+    # Monotonically rising CPU counters: is_cpu_active / is_tree_cpu_active
+    # become True from the second poll onward (first poll has no prev_diag
+    # and yields None — the tri-state the gate must tolerate).
+    calls = {"n": 0}
+
+    def _fake_diag(pid: int) -> ProcessDiag:
+        calls["n"] += 1
+        ticks = calls["n"] * 10
+        return ProcessDiag(
+            pid=pid,
+            alive=True,
+            cpu_utime=ticks,
+            cpu_stime=0,
+            tree_cpu_utime=ticks,
+            tree_cpu_stime=0,
+        )
+
+    monkeypatch.setattr("untether.utils.proc_diag.collect_proc_diag", _fake_diag)
+
+    logger = _RecordingLogger()
+    reader_done = anyio.Event()
+    reader_done.set()
+
+    class FakeStdin:
+        async def aclose(self) -> None:
+            pass
+
+    async with anyio.create_task_group() as tg:
+        tg.start_soon(
+            runner._post_result_idle_watchdog,
+            state,
+            FakeStdin(),
+            reader_done,
+            logger,
+            30.0,  # full timeout — far beyond the observation window
+            proc,
+            stream,
+            0.1,  # limbo_grace_s — must NOT fire against a busy process
+        )
+        await anyio.sleep(1.0)  # ~10x the grace
+        tg.cancel_scope.cancel()
+
+    assert killed_signals == [], (
+        "grace must not fire while the process is demonstrably busy"
+    )
+    sigterm_logs = [
+        kw
+        for lvl, e, kw in logger.records
+        if e == "claude.post_result_idle.sigterm_after_timeout"
+    ]
+    assert not any(kw.get("limbo_grace_applied") is True for kw in sigterm_logs)
+
+
+@pytest.mark.anyio
+async def test_655_limbo_grace_still_applies_when_cpu_inactive(monkeypatch) -> None:
+    """The other side of the #655 boundary: flat CPU counters (demonstrably
+    idle) with no registered background work still reaps at the grace —
+    #591's fast reap of genuinely quiescent husks is preserved."""
+    import anyio
+
+    from untether.runner import JsonlStreamState
+    from untether.runners.claude import (
+        _PENDING_ASK_REQUESTS,
+        _REQUEST_TO_SESSION,
+        ClaudeRunner,
+    )
+    from untether.utils.proc_diag import ProcessDiag
+
+    _REQUEST_TO_SESSION.clear()
+    _PENDING_ASK_REQUESTS.clear()
+
+    runner = ClaudeRunner(claude_cmd="claude")
+    runner._subcountdown_poll_interval_s = 0.02
+    runner._subcountdown_limbo_detect_threshold_s = 0.05
+    runner._subcountdown_sigterm_grace_s = 0.1
+    runner._subcountdown_sigterm_grace_poll_s = 0.02
+
+    state = ClaudeStreamState()
+    state.factory.started(ResumeToken(engine="claude", value="grace-sess-655b"))
+    state.result_received_at = time.monotonic() - 0.5
+    stream = JsonlStreamState(expected_session=None)
+
+    proc = _FakeProc(pid=52428, returncode=None)
+    killed_signals: list[int] = []
+
+    def _fake_killpg(pgid: int, sig: int) -> None:
+        killed_signals.append(sig)
+        proc.returncode = -15
+
+    monkeypatch.setattr("os.killpg", _fake_killpg)
+    # #590: signal_pid_group snapshots real /proc descendants before
+    # signalling — neutralise it so tests never touch live processes.
+    monkeypatch.setattr("untether.utils.subprocess.find_descendants", lambda pid: [])
+
+    # Flat CPU counters: is_cpu_active / is_tree_cpu_active are False from
+    # the second poll onward — demonstrably idle.
+    def _fake_diag(pid: int) -> ProcessDiag:
+        return ProcessDiag(
+            pid=pid,
+            alive=True,
+            cpu_utime=100,
+            cpu_stime=0,
+            tree_cpu_utime=100,
+            tree_cpu_stime=0,
+        )
+
+    monkeypatch.setattr("untether.utils.proc_diag.collect_proc_diag", _fake_diag)
+
+    logger = _RecordingLogger()
+    reader_done = anyio.Event()
+    reader_done.set()
+
+    class FakeStdin:
+        async def aclose(self) -> None:
+            pass
+
+    async with anyio.create_task_group() as tg:
+        tg.start_soon(
+            runner._post_result_idle_watchdog,
+            state,
+            FakeStdin(),
+            reader_done,
+            logger,
+            30.0,
+            proc,
+            stream,
+            0.1,  # limbo_grace_s — SHOULD fire against an idle process
+        )
+        with anyio.move_on_after(3.0):
+            while signal.SIGTERM not in killed_signals:
+                await anyio.sleep(0.02)
+        tg.cancel_scope.cancel()
+
+    assert signal.SIGTERM in killed_signals, (
+        "grace should still reap a demonstrably idle process"
+    )
+    sigterm_logs = [
+        kw
+        for lvl, e, kw in logger.records
+        if e == "claude.post_result_idle.sigterm_after_timeout"
+    ]
+    assert sigterm_logs and sigterm_logs[0].get("limbo_grace_applied") is True
+
+
+@pytest.mark.anyio
+async def test_655_limbo_grace_real_busy_subprocess_survives() -> None:
+    """End-to-end #655 with a REAL subprocess and REAL /proc CPU accounting —
+    no monkeypatched diag. A genuinely busy process with no registered
+    background handles must survive well past the limbo grace; the eventual
+    kill is the full-timeout path, not the grace."""
+    import contextlib
+    import os
+    import subprocess as _subprocess
+
+    import anyio
+
+    from untether.runner import JsonlStreamState
+    from untether.runners.claude import (
+        _PENDING_ASK_REQUESTS,
+        _REQUEST_TO_SESSION,
+        ClaudeRunner,
+    )
+
+    _REQUEST_TO_SESSION.clear()
+    _PENDING_ASK_REQUESTS.clear()
+
+    runner = ClaudeRunner(claude_cmd="claude")
+    runner._subcountdown_poll_interval_s = 0.1
+    runner._subcountdown_limbo_detect_threshold_s = 0.2
+    runner._subcountdown_sigterm_grace_s = 0.3
+    runner._subcountdown_sigterm_grace_poll_s = 0.05
+
+    state = ClaudeStreamState()
+    state.factory.started(ResumeToken(engine="claude", value="grace-sess-655c"))
+    state.result_received_at = time.monotonic() - 0.5
+    stream = JsonlStreamState(expected_session=None)
+
+    # A real CPU-busy child in its own process group, exactly as the runner
+    # spawns the CLI (start_new_session=True → pid == pgid).
+    proc = _subprocess.Popen(  # noqa: ASYNC220 — fork+exec is instant; the
+        # test needs Popen.poll() semantics for the ProcView adapter below.
+        ["sh", "-c", "while :; do :; done"],
+        start_new_session=True,
+        stdout=_subprocess.DEVNULL,
+        stderr=_subprocess.DEVNULL,
+    )
+
+    logger = _RecordingLogger()
+    reader_done = anyio.Event()
+    reader_done.set()
+
+    class FakeStdin:
+        async def aclose(self) -> None:
+            pass
+
+    class ProcView:
+        """Popen adapter exposing the pid/returncode surface the watchdog
+        polls (Popen.returncode only updates via poll())."""
+
+        pid = proc.pid
+
+        @property
+        def returncode(self) -> int | None:
+            return proc.poll()
+
+    grace_s = 0.4
+    timeout_s = 2.5
+    try:
+        async with anyio.create_task_group() as tg:
+            tg.start_soon(
+                runner._post_result_idle_watchdog,
+                state,
+                FakeStdin(),
+                reader_done,
+                logger,
+                timeout_s,
+                ProcView(),
+                stream,
+                grace_s,
+            )
+            # Well past the grace: the busy process must still be alive and
+            # un-signalled — pre-#655 it was SIGTERM'd at the grace.
+            await anyio.sleep(grace_s * 3)
+            assert proc.poll() is None, (
+                "busy subprocess must survive past the limbo grace"
+            )
+            assert not any(
+                e == "claude.post_result_idle.sigterm_after_timeout"
+                for _, e, _ in logger.records
+            )
+            # Let the full timeout fire and the watchdog return.
+            with anyio.move_on_after(timeout_s * 3):
+                while proc.poll() is None:
+                    await anyio.sleep(0.05)
+            tg.cancel_scope.cancel()
+    finally:
+        with contextlib.suppress(ProcessLookupError, PermissionError):
+            os.killpg(proc.pid, signal.SIGKILL)
+        proc.wait(timeout=5)
+
+    sigterm_logs = [
+        kw
+        for lvl, e, kw in logger.records
+        if e == "claude.post_result_idle.sigterm_after_timeout"
+    ]
+    assert sigterm_logs, "full timeout should eventually reap the process"
+    assert sigterm_logs[0].get("limbo_grace_applied") is False
+    assert sigterm_logs[0].get("cpu_active") is True
+    assert sigterm_logs[0].get("elapsed_s", 0.0) >= timeout_s * 0.8
+
+
+def _limbo_level_records(logger: "_RecordingLogger") -> list[tuple[str, dict]]:
+    return [(lvl, kw) for lvl, e, kw in logger.records if e == "runner.limbo_detected"]
+
+
+async def _run_limbo_level_scenario(
+    monkeypatch,
+    *,
+    session_value: str,
+    pid: int,
+    live_bg: bool,
+    rising_cpu: bool,
+) -> "_RecordingLogger":
+    """Drive the subcountdown to its limbo tick and capture the log records.
+
+    Grace is disabled (0.0) so the loop lingers long enough to observe the
+    one-shot ``runner.limbo_detected`` without any kill path interfering.
+    """
+    import anyio
+
+    from untether.runner import JsonlStreamState
+    from untether.runners.claude import (
+        _PENDING_ASK_REQUESTS,
+        _REQUEST_TO_SESSION,
+        ClaudeRunner,
+    )
+    from untether.utils.proc_diag import ProcessDiag
+
+    _REQUEST_TO_SESSION.clear()
+    _PENDING_ASK_REQUESTS.clear()
+
+    runner = ClaudeRunner(claude_cmd="claude")
+    runner._subcountdown_poll_interval_s = 0.02
+    runner._subcountdown_limbo_detect_threshold_s = 0.05
+
+    state = ClaudeStreamState()
+    state.factory.started(ResumeToken(engine="claude", value=session_value))
+    state.result_received_at = time.monotonic() - 0.5
+    if live_bg:
+        state.live_wakeups["toolu_653"] = time.monotonic() + 3600.0
+    stream = JsonlStreamState(expected_session=None)
+
+    proc = _FakeProc(pid=pid, returncode=None)
+    monkeypatch.setattr("os.killpg", lambda pgid, sig: None)
+    monkeypatch.setattr("untether.utils.subprocess.find_descendants", lambda pid: [])
+
+    calls = {"n": 0}
+
+    def _fake_diag(diag_pid: int) -> ProcessDiag:
+        calls["n"] += 1
+        ticks = calls["n"] * 10 if rising_cpu else 100
+        return ProcessDiag(
+            pid=diag_pid,
+            alive=True,
+            cpu_utime=ticks,
+            cpu_stime=0,
+            tree_cpu_utime=ticks,
+            tree_cpu_stime=0,
+        )
+
+    monkeypatch.setattr("untether.utils.proc_diag.collect_proc_diag", _fake_diag)
+
+    logger = _RecordingLogger()
+    reader_done = anyio.Event()
+    reader_done.set()
+
+    class FakeStdin:
+        async def aclose(self) -> None:
+            pass
+
+    async with anyio.create_task_group() as tg:
+        tg.start_soon(
+            runner._post_result_idle_watchdog,
+            state,
+            FakeStdin(),
+            reader_done,
+            logger,
+            30.0,
+            proc,
+            stream,
+            0.0,  # grace disabled — we only want the limbo tick
+        )
+        with anyio.move_on_after(3.0):
+            while "runner.limbo_detected" not in logger.events():
+                await anyio.sleep(0.02)
+        tg.cancel_scope.cancel()
+
+    return logger
+
+
+@pytest.mark.anyio
+async def test_653_limbo_detected_info_when_background_work_live(monkeypatch) -> None:
+    """#653: limbo with live background work is healthy, expected behaviour
+    under the liveness-aware ceiling (#646/#647) — the one-shot
+    ``runner.limbo_detected`` logs at INFO, not WARNING."""
+    logger = await _run_limbo_level_scenario(
+        monkeypatch,
+        session_value="limbo-lvl-1",
+        pid=52430,
+        live_bg=True,
+        rising_cpu=False,
+    )
+    records = _limbo_level_records(logger)
+    assert records, "limbo_detected should have fired"
+    assert all(lvl == "info" for lvl, _ in records)
+    assert records[0][1].get("live_background_work") is True
+
+
+@pytest.mark.anyio
+async def test_653_limbo_detected_info_when_cpu_active(monkeypatch) -> None:
+    """#653/#655: limbo with no registered handles but a demonstrably busy
+    process (rising CPU) is also healthy — INFO, not WARNING."""
+    logger = await _run_limbo_level_scenario(
+        monkeypatch,
+        session_value="limbo-lvl-2",
+        pid=52431,
+        live_bg=False,
+        rising_cpu=True,
+    )
+    records = _limbo_level_records(logger)
+    assert records, "limbo_detected should have fired"
+    assert all(lvl == "info" for lvl, _ in records)
+    assert records[0][1].get("live_background_work") is False
+
+
+@pytest.mark.anyio
+async def test_653_limbo_detected_warning_when_quiescent(monkeypatch) -> None:
+    """#653: limbo with no background work and a flat CPU counter is the
+    genuinely-stuck case the warning was written for — stays WARNING."""
+    logger = await _run_limbo_level_scenario(
+        monkeypatch,
+        session_value="limbo-lvl-3",
+        pid=52432,
+        live_bg=False,
+        rising_cpu=False,
+    )
+    records = _limbo_level_records(logger)
+    assert records, "limbo_detected should have fired"
+    assert all(lvl == "warning" for lvl, _ in records)
+
+
+@pytest.mark.anyio
 async def test_591_limbo_grace_zero_disables_shortcut(monkeypatch) -> None:
     """limbo_grace_s=0 disables the shortcut — the full timeout applies."""
     import anyio
@@ -5856,3 +6285,38 @@ def test_647_session_live_bg_count_reads_registry() -> None:
         assert session_live_bg_count("bg-count-sess") == 0
     finally:
         _SESSION_BG_STATE.pop("bg-count-sess", None)
+
+
+def test_654_session_linger_info_reads_registries() -> None:
+    """#654: `session_linger_info` reports (post_result, bg_count) for a
+    live session owner so the queued-progress path can explain the wait."""
+    from untether.runners.claude import (
+        _SESSION_BG_STATE,
+        _SESSION_STDIN,
+        session_linger_info,
+    )
+
+    sid = "linger-sess-1"
+    state = ClaudeStreamState()
+    try:
+        # No live owner at all.
+        assert session_linger_info(sid) is None
+
+        # Live owner, result not yet delivered — normal mid-run queue.
+        _SESSION_STDIN[sid] = object()
+        _SESSION_BG_STATE[sid] = state
+        assert session_linger_info(sid) == (False, 0)
+
+        # Post-result with a live background handle.
+        state.result_received_at = time.monotonic() - 1.0
+        state.live_bg_agents.add("toolu_654")
+        state.bg_agent_deadlines["toolu_654"] = time.monotonic() + 3600.0
+        assert session_linger_info(sid) == (True, 1)
+
+        # Post-result, handles aged out (the #655 shape) — still reported
+        # as post-result so the note can explain the wait generically.
+        state.bg_agent_deadlines["toolu_654"] = time.monotonic() - 1.0
+        assert session_linger_info(sid) == (True, 0)
+    finally:
+        _SESSION_STDIN.pop(sid, None)
+        _SESSION_BG_STATE.pop(sid, None)
