@@ -167,6 +167,100 @@ def _emit_dangling_tool_use(sid: str) -> None:
     )
 
 
+def _emit_tool_result(sid: str, *, tool_use_id: str = "bg1") -> None:
+    """The ``user``-typed tool_result frame that answers a prior ``tool_use``.
+
+    Shape matters twice over. ``runner.py::_handle_jsonl_line`` sets
+    ``stream.last_event_type`` from the raw JSONL ``type`` field, so this
+    frame is what makes the bridge's auto-continue gate see
+    ``last_event_type == "user"`` -- the "tool results sent but never
+    processed" signature (#322, upstream #34142/#30333). Without it, the
+    gate short-circuits before it ever reaches the signal-death arm that
+    #640 is about.
+    """
+    emit(
+        {
+            "type": "user",
+            "session_id": sid,
+            "message": {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": tool_use_id,
+                        "content": "background agent started",
+                    }
+                ],
+            },
+        }
+    )
+
+
+def _scenario_tool_result_then_sigterm(argv: list[str]) -> int:
+    """#640: exit by SIGNAL with ``last_event_type == "user"``.
+
+    Paired with :func:`_scenario_tool_result_then_clean_exit`, which emits
+    the IDENTICAL frame sequence and differs ONLY in the exit path. That
+    pairing is the discriminator: pre-fix, ``ClaudeRunner`` never wrote
+    ``stream.proc_returncode`` back, so the bridge saw ``None``,
+    ``_is_signal_death(None)`` returned False, and BOTH scenarios
+    auto-continued. Post-fix only the clean-exit twin does.
+
+    Emits no ``result`` frame, so ``final_delivery["sent"]`` stays False and
+    the gate at ``runner_bridge.py`` is genuinely evaluated rather than
+    skipped.
+    """
+    resume = _resume_arg(argv)
+    if resume is not None:
+        # Reached only if the auto-continue gate WRONGLY fired. The marker
+        # text turns a silent miscount into a visible failure in the
+        # transport, so the test fails loudly rather than by arithmetic.
+        _emit_init(resume)
+        _emit_real_result(
+            resume, text="UNEXPECTED-AUTO-CONTINUE", num_turns=1, cost=0.01
+        )
+        return 0
+
+    sid = f"S-ac-sig-{os.getpid()}"
+    _emit_init(sid)
+    _emit_dangling_tool_use(sid)
+    _emit_tool_result(sid)
+    sys.stdout.flush()
+    # Restore default disposition first: the harness parent may have set a
+    # handler, and SIG_DFL is what makes this a true signal death rather
+    # than a normal exit. asyncio reports this as returncode -15.
+    signal.signal(signal.SIGTERM, signal.SIG_DFL)
+    os.kill(os.getpid(), signal.SIGTERM)
+    return 0  # unreachable
+
+
+def _scenario_tool_result_then_clean_exit(argv: list[str]) -> int:
+    """#640 positive control: identical frames to
+    :func:`_scenario_tool_result_then_sigterm`, but rc=0.
+
+    Proves the frame sequence alone DOES drive auto-continue, which is what
+    rules out a false pass on the sigterm twin (a twin that suppressed for
+    the wrong reason -- e.g. a falsy resume value or a non-``user``
+    last_event_type -- would show zero auto-continues here too).
+
+    The resume leg is the auto-continue re-entry and returns a real answer
+    so the run terminates.
+    """
+    resume = _resume_arg(argv)
+    if resume is not None:
+        _emit_init(resume)
+        _emit_real_result(
+            resume, text="Continued after tool result.", num_turns=2, cost=0.02
+        )
+        return 0
+
+    sid = f"S-ac-ok-{os.getpid()}"
+    _emit_init(sid)
+    _emit_dangling_tool_use(sid)
+    _emit_tool_result(sid)
+    return 0
+
+
 def _scenario_dangling_then_empty_resume(argv: list[str]) -> int:
     """#634 harness simplification (see 04-test-strategy.md "Layer 1"):
     keyed purely off the PRESENCE of ``--resume`` in argv, not the specific
@@ -255,6 +349,8 @@ _SCENARIOS = {
     "linger_then_sigterm_after_result": _scenario_linger_then_sigterm_after_result,
     "healthy_resume": _scenario_healthy_resume,
     "resume_survives_sigterm": _scenario_resume_survives_sigterm,
+    "tool_result_then_sigterm": _scenario_tool_result_then_sigterm,
+    "tool_result_then_clean_exit": _scenario_tool_result_then_clean_exit,
 }
 
 
