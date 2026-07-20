@@ -1778,11 +1778,13 @@ async def test_run_main_loop_routes_reply_to_running_resume() -> None:
     async with anyio.create_task_group() as tg:
         tg.start_soon(run_main_loop, cfg, poller)
         try:
-            with anyio.fail_after(2):
+            # #641: hang guards, not races — 30s so cold/loaded coverage
+            # runs don't flake (2s expired on the CI 3.12 runner).
+            with anyio.fail_after(30):
                 await reply_ready.wait()
             await anyio.lowlevel.checkpoint()
             hold.set()
-            with anyio.fail_after(2):
+            with anyio.fail_after(30):
                 while len(runner.calls) < 2:
                     await anyio.lowlevel.checkpoint()
             assert runner.calls[1][1] == ResumeToken(
@@ -3451,7 +3453,8 @@ async def test_run_main_loop_batches_media_group_upload(
     async with anyio.create_task_group() as tg:
         tg.start_soon(run_main_loop, cfg, poller)
         try:
-            with anyio.fail_after(3):
+            # #641: hang guard, not a race — 30s (see above).
+            with anyio.fail_after(30):
                 while len(transport.send_calls) < 1:
                     await anyio.sleep(0.05)
             assert len(transport.send_calls) == 1
