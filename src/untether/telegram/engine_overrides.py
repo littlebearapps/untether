@@ -237,6 +237,45 @@ def get_reasoning_label(engine: str) -> str:
     return _ENGINE_REASONING_LABEL.get(engine, "Reasoning")
 
 
+def get_engine_default_model(engine: str) -> str | None:
+    """#475: read the engine's own default model from its settings file.
+
+    Mirrors :func:`get_engine_default_reasoning` (#272). Returns the resolved
+    model string (matching what the run footer shows) or None when the engine
+    auto-routes / has no authoritative settings file — callers fall back to
+    the static ``_ENGINE_MODEL_HINTS`` placeholder in that case.
+    """
+    import json
+    from pathlib import Path
+
+    if engine == "opencode":
+        settings_path = Path.home() / ".config" / "opencode" / "opencode.json"
+        try:
+            data = json.loads(settings_path.read_text())
+            model = data.get("model")
+            if isinstance(model, str) and model:
+                return model
+        except (OSError, json.JSONDecodeError, TypeError):
+            return None
+        return None
+    if engine == "pi":
+        settings_path = Path.home() / ".pi" / "agent" / "settings.json"
+        try:
+            data = json.loads(settings_path.read_text())
+            provider = data.get("defaultProvider")
+            model = data.get("defaultModel")
+            if isinstance(model, str) and model:
+                if isinstance(provider, str) and provider:
+                    return f"{provider}/{model}"
+                return model
+        except (OSError, json.JSONDecodeError, TypeError):
+            return None
+        return None
+    # claude/codex/gemini auto-route; amp derives from mode — no stable
+    # settings-file source, keep the static hint.
+    return None
+
+
 def get_engine_default_reasoning(engine: str) -> str | None:
     """Read the engine's own default reasoning/effort level from its settings file.
 

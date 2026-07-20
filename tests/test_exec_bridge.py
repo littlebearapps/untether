@@ -8268,3 +8268,304 @@ async def test_647_quarantine_divert_announces_to_user(quarantine_store) -> None
     assert [
         c for c in transport.send_calls if "fresh session" in c["message"].text.lower()
     ]
+
+
+# ---------------------------------------------------------------------------
+# #572 — bounded auto-retry for Type-A stream-idle timeouts
+# ---------------------------------------------------------------------------
+
+_572_STREAM_IDLE_ERROR = (
+    "API Error: Stream idle timeout - partial response received\n"
+    "session: 36693744 · resumed · turns: 19 · api: 261086ms"
+)
+_572_USAGE = {"num_turns": 19, "duration_api_ms": 261086, "total_cost_usd": 1.0}
+
+
+def _572_stream(stream_idle_class: str | None, proc_returncode: int | None = 0):
+    """Real JsonlStreamState whose engine_state carries the #572 classifier —
+    a real instance so every bridge-side stream read resolves."""
+    from untether.runner import JsonlStreamState
+
+    stream = JsonlStreamState(expected_session=None)
+    stream.last_event_type = "result"
+    stream.proc_returncode = proc_returncode
+    stream.event_count = 5
+    stream.engine_state = _make_engine_state(stream_idle_class=stream_idle_class)
+    return stream
+
+
+def _572_watchdog(monkeypatch, **kw) -> None:
+    from untether.settings import WatchdogSettings
+
+    monkeypatch.setattr(
+        "untether.runner_bridge._load_watchdog_settings",
+        lambda: WatchdogSettings(**kw),
+    )
+
+
+class _StreamIdleThenAnswerRunner(MockRunner):
+    """First run() fails with a Type-A stream-idle timeout; the next run()
+    delivers a real answer — models a transient mid-generation API stall."""
+
+    def __init__(
+        self,
+        *,
+        engine=CODEX_ENGINE,
+        resume_value: str = "sess-572",
+        fail_times: int = 1,
+    ) -> None:
+        super().__init__(events=[], engine=engine, resume_value=resume_value)
+        self.calls: list[tuple[str, ResumeToken | None]] = []
+        self._fail_times = fail_times
+        self.current_stream = _572_stream("type_a")
+
+    async def run(self, prompt, resume):
+        from untether.model import StartedEvent
+        from untether.runners.mock import _resume_token
+
+        self.calls.append((prompt, resume))
+        token_value = resume.value if resume else self._resume_value
+        token = _resume_token(self.engine, token_value)
+        async with self.lock_for(token):
+            yield StartedEvent(engine=self.engine, resume=token, title=self.title)
+            if len(self.calls) <= self._fail_times:
+                yield CompletedEvent(
+                    engine=self.engine,
+                    resume=token,
+                    ok=False,
+                    answer="",
+                    error=_572_STREAM_IDLE_ERROR,
+                    usage=dict(_572_USAGE),
+                )
+            else:
+                yield CompletedEvent(
+                    engine=self.engine,
+                    resume=token,
+                    ok=True,
+                    answer="Recovered after retry.",
+                )
+
+
+@pytest.mark.anyio
+async def test_572_type_a_auto_retry_resumes_once(monkeypatch) -> None:
+    """A Type-A stream-idle failure auto-resumes once when the flag is on:
+    the terminal error is suppressed, a 🔁 notice is sent, and the resumed
+    run's real answer reaches the user."""
+    from structlog.testing import capture_logs
+
+    _572_watchdog(monkeypatch, stream_idle_auto_retry=True)
+    transport = FakeTransport()
+    runner = _StreamIdleThenAnswerRunner()
+    cfg = ExecBridgeConfig(
+        transport=transport, presenter=MarkdownPresenter(), final_notify=False
+    )
+
+    with capture_logs() as logs:
+        await handle_message(
+            cfg,
+            runner=runner,
+            incoming=IncomingMessage(channel_id=123, message_id=10, text="do it"),
+            resume_token=ResumeToken(engine=CODEX_ENGINE, value="sess-572"),
+        )
+
+    assert len(runner.calls) == 2
+    # The retry is a RESUME of the same session with a "continue" nudge
+    # (the agent-context preamble is prepended like any run).
+    assert runner.calls[1][0].endswith("continue")
+    assert runner.calls[1][1] is not None
+    assert runner.calls[1][1].value == "sess-572"
+    assert any(r.get("event") == "claude.stream_idle.auto_retry" for r in logs)
+    all_text = " ".join(
+        c["message"].text for c in transport.edit_calls + transport.send_calls
+    )
+    assert "resuming automatically" in all_text
+    assert "Recovered after retry." in all_text
+    # The terminal Type-A error final was suppressed.
+    assert "Stream idle timeout" not in all_text
+
+
+@pytest.mark.anyio
+async def test_572_type_b_never_retries(monkeypatch) -> None:
+    """Type-B (cold-start zero-byte stall) must never retry even with the
+    flag on — retrying hammers a down API."""
+    from structlog.testing import capture_logs
+
+    _572_watchdog(monkeypatch, stream_idle_auto_retry=True)
+    transport = FakeTransport()
+    runner = _StreamIdleThenAnswerRunner(fail_times=99)
+    runner.current_stream = _572_stream("type_b")
+    cfg = ExecBridgeConfig(
+        transport=transport, presenter=MarkdownPresenter(), final_notify=False
+    )
+
+    with capture_logs() as logs:
+        await handle_message(
+            cfg,
+            runner=runner,
+            incoming=IncomingMessage(channel_id=123, message_id=11, text="do it"),
+            resume_token=ResumeToken(engine=CODEX_ENGINE, value="sess-572"),
+        )
+
+    assert len(runner.calls) == 1
+    assert not any(r.get("event") == "claude.stream_idle.auto_retry" for r in logs)
+    final_text = transport.edit_calls[-1]["message"].text
+    assert "Stream idle timeout" in final_text
+
+
+@pytest.mark.anyio
+async def test_572_default_off_no_retry(monkeypatch) -> None:
+    """stream_idle_auto_retry defaults OFF — Type-A failures surface the
+    #438 annotated error exactly as before."""
+    from structlog.testing import capture_logs
+
+    _572_watchdog(monkeypatch)  # defaults: stream_idle_auto_retry=False
+    transport = FakeTransport()
+    runner = _StreamIdleThenAnswerRunner(fail_times=99)
+    cfg = ExecBridgeConfig(
+        transport=transport, presenter=MarkdownPresenter(), final_notify=False
+    )
+
+    with capture_logs() as logs:
+        await handle_message(
+            cfg,
+            runner=runner,
+            incoming=IncomingMessage(channel_id=123, message_id=12, text="do it"),
+            resume_token=ResumeToken(engine=CODEX_ENGINE, value="sess-572"),
+        )
+
+    assert len(runner.calls) == 1
+    assert not any(r.get("event") == "claude.stream_idle.auto_retry" for r in logs)
+    assert "Stream idle timeout" in transport.edit_calls[-1]["message"].text
+
+
+@pytest.mark.anyio
+async def test_572_retry_bounded_by_max_retries(monkeypatch) -> None:
+    """A retry that fails with Type-A again does NOT retry a second time
+    (default cap 1) — the annotated error is delivered instead."""
+    from structlog.testing import capture_logs
+
+    _572_watchdog(monkeypatch, stream_idle_auto_retry=True)
+    transport = FakeTransport()
+    runner = _StreamIdleThenAnswerRunner(fail_times=99)
+    cfg = ExecBridgeConfig(
+        transport=transport, presenter=MarkdownPresenter(), final_notify=False
+    )
+
+    with capture_logs() as logs:
+        await handle_message(
+            cfg,
+            runner=runner,
+            incoming=IncomingMessage(channel_id=123, message_id=13, text="do it"),
+            resume_token=ResumeToken(engine=CODEX_ENGINE, value="sess-572"),
+        )
+
+    # Original + exactly one retry, then the error surfaces.
+    assert len(runner.calls) == 2
+    assert (
+        sum(1 for r in logs if r.get("event") == "claude.stream_idle.auto_retry") == 1
+    )
+    assert "Stream idle timeout" in transport.edit_calls[-1]["message"].text
+
+
+@pytest.mark.anyio
+async def test_572_signal_death_suppressed(monkeypatch) -> None:
+    """rc=143 (SIGTERM) suppresses the retry — same death-spiral guard as
+    auto-continue (#551)."""
+    from structlog.testing import capture_logs
+
+    _572_watchdog(monkeypatch, stream_idle_auto_retry=True)
+    transport = FakeTransport()
+    runner = _StreamIdleThenAnswerRunner(fail_times=99)
+    runner.current_stream = _572_stream("type_a", proc_returncode=143)
+    cfg = ExecBridgeConfig(
+        transport=transport, presenter=MarkdownPresenter(), final_notify=False
+    )
+
+    with capture_logs() as logs:
+        await handle_message(
+            cfg,
+            runner=runner,
+            incoming=IncomingMessage(channel_id=123, message_id=14, text="do it"),
+            resume_token=ResumeToken(engine=CODEX_ENGINE, value="sess-572"),
+        )
+
+    assert len(runner.calls) == 1
+    assert not any(r.get("event") == "claude.stream_idle.auto_retry" for r in logs)
+
+
+@pytest.mark.anyio
+async def test_572_budget_blocked_no_retry(monkeypatch) -> None:
+    """A cost-budget block (per-run/daily cap already hit) suppresses the
+    retry — an automatic salvage must not spend past a user-set limit."""
+    from structlog.testing import capture_logs
+
+    _572_watchdog(monkeypatch, stream_idle_auto_retry=True)
+    monkeypatch.setattr(
+        "untether.runner_bridge._stream_idle_retry_budget_blocked",
+        lambda usage: True,
+    )
+    transport = FakeTransport()
+    runner = _StreamIdleThenAnswerRunner(fail_times=99)
+    cfg = ExecBridgeConfig(
+        transport=transport, presenter=MarkdownPresenter(), final_notify=False
+    )
+
+    with capture_logs() as logs:
+        await handle_message(
+            cfg,
+            runner=runner,
+            incoming=IncomingMessage(channel_id=123, message_id=15, text="do it"),
+            resume_token=ResumeToken(engine=CODEX_ENGINE, value="sess-572"),
+        )
+
+    assert len(runner.calls) == 1
+    assert not any(r.get("event") == "claude.stream_idle.auto_retry" for r in logs)
+
+
+def test_572_budget_guard_blocks_on_per_run_cap(monkeypatch) -> None:
+    """_stream_idle_retry_budget_blocked: failed run's cost >= per-run cap
+    → blocked; under the cap → allowed; disabled budget → allowed."""
+    from types import SimpleNamespace
+
+    from untether.runner_bridge import _stream_idle_retry_budget_blocked
+
+    def _settings(enabled=True, max_per_run=0.5):
+        cost_budget = SimpleNamespace(
+            enabled=enabled,
+            max_cost_per_run=max_per_run,
+            max_cost_per_day=None,
+            warn_at_pct=80.0,
+            auto_cancel=False,
+        )
+        return (SimpleNamespace(cost_budget=cost_budget), None)
+
+    monkeypatch.setattr(
+        "untether.settings.load_settings_if_exists", lambda: _settings()
+    )
+    assert _stream_idle_retry_budget_blocked({"total_cost_usd": 1.0}) is True
+    assert _stream_idle_retry_budget_blocked({"total_cost_usd": 0.1}) is False
+    monkeypatch.setattr(
+        "untether.settings.load_settings_if_exists",
+        lambda: _settings(enabled=False),
+    )
+    assert _stream_idle_retry_budget_blocked({"total_cost_usd": 1.0}) is False
+
+
+def test_572_watchdog_settings_defaults() -> None:
+    """The new [watchdog] keys default to off / 1 attempt."""
+    from untether.settings import WatchdogSettings
+
+    ws = WatchdogSettings()
+    assert ws.stream_idle_auto_retry is False
+    assert ws.stream_idle_max_retries == 1
+
+
+def test_572_retry_notice_format() -> None:
+    from untether.runner_bridge import _format_stream_idle_retry_notice
+
+    first = _format_stream_idle_retry_notice(0)
+    assert first.startswith("\U0001f501")
+    assert "resuming automatically" in first
+    assert "attempt" not in first
+    second = _format_stream_idle_retry_notice(1)
+    assert "(attempt 2)" in second

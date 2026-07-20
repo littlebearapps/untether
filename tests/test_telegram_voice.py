@@ -187,11 +187,15 @@ def _voice_message(*, file_size: int = 123) -> TelegramIncomingMessage:
 class _Transcriber:
     def __init__(self, *, result: str | None = None, error: Exception | None = None):
         self.calls: list[tuple[str, bytes]] = []
+        self.languages: list[str | None] = []
         self._result = result
         self._error = error
 
-    async def transcribe(self, *, model: str, audio_bytes: bytes) -> str:
+    async def transcribe(
+        self, *, model: str, audio_bytes: bytes, language: str | None = None
+    ) -> str:
         self.calls.append((model, audio_bytes))
+        self.languages.append(language)
         if self._error is not None:
             raise self._error
         assert self._result is not None
@@ -358,6 +362,34 @@ async def test_transcribe_voice_success() -> None:
     assert result == "transcribed"
     assert replies == []
     assert transcriber.calls
+    # No language configured → no hint forwarded (auto-detect preserved)
+    assert transcriber.languages == [None]
+
+
+@pytest.mark.anyio
+async def test_transcribe_voice_passes_language_hint() -> None:
+    """#638: a configured voice_transcription_language is forwarded to the
+    transcriber so Whisper-family models stop guessing the language on short
+    utterances ('Continue' → '계속')."""
+    replies: list[str] = []
+
+    async def reply(**kwargs) -> None:
+        replies.append(kwargs["text"])
+
+    transcriber = _Transcriber(result="Continue")
+    bot = _Bot(file_info=File(file_path="voice.ogg"), audio=b"ok")
+    result = await transcribe_voice(
+        bot=bot,
+        msg=_voice_message(file_size=2),
+        enabled=True,
+        model="whisper-1",
+        reply=reply,
+        transcriber=transcriber,
+        language="en",
+    )
+
+    assert result == "Continue"
+    assert transcriber.languages == ["en"]
 
 
 @pytest.mark.anyio

@@ -2463,6 +2463,7 @@ async def run_main_loop(
                         url_allowlist=parse_networks(
                             cfg.voice_transcription_url_allowlist
                         ),
+                        language=cfg.voice_transcription_language,
                     )
                     if text is None:
                         return

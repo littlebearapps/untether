@@ -186,10 +186,13 @@ _REQUEST_TO_TOOL_NAME: dict[str, str] = {}
 _HANDLED_REQUESTS_MAX = 200
 _HANDLED_REQUESTS: OrderedDict[str, None] = OrderedDict()
 
-# Discuss cooldown: session_id -> (timestamp, deny_count)
-# When user clicks "Pause & Outline Plan", this tracks when the denial was sent
-# so rapid ExitPlanMode retries can be auto-denied with escalating messages.
-_DISCUSS_COOLDOWN: dict[str, tuple[float, int]] = {}
+# NOTE (#570): the time-based progressive discuss cooldown (_DISCUSS_COOLDOWN,
+# 30/60/90/120s escalation) that lived here was a workaround for Claude Code
+# v2.1.72-2.1.74 re-issuing ExitPlanMode immediately after a denial (#126
+# lineage). Verified fixed on CLI 2.1.215 (2026-07-20: denied ExitPlanMode →
+# clean text turn, no re-issue) and removed. The TEXT-based outline gate
+# (_OUTLINE_PENDING + _OUTLINE_MIN_CHARS) below is NOT part of that workaround
+# — it enforces the Pause-&-Outline flow and stays.
 
 # Discuss approval: session_ids where user approved the plan via post-outline buttons.
 # When Claude Code next calls ExitPlanMode, it will be auto-approved.
@@ -402,8 +405,6 @@ class AskQuestionState:
 # Active AskUserQuestion flows: request_id -> AskQuestionState
 _ASK_QUESTION_FLOWS: dict[str, AskQuestionState] = {}
 CONTROL_REQUEST_TIMEOUT_SECONDS: float = 300.0  # 5 minutes
-DISCUSS_COOLDOWN_BASE_SECONDS: float = 30.0
-DISCUSS_COOLDOWN_MAX_SECONDS: float = 120.0
 
 # #374 (rc7): bounded keep for background-agent handles (Agent/Task
 # tool_use that runs in the background — #646: that is the *default*
@@ -662,6 +663,12 @@ class ClaudeStreamState:
     # window" as an expected wait, not a stall. ``0.0`` = not throttled.
     rate_limit_wait_until: float = 0.0
 
+    # #572: set when the run's StreamResultMessage was a Stream-idle-timeout
+    # failure — "type_a" (mid-generation stall, retryable) or "type_b"
+    # (cold-start zero-byte stall, never retried). runner_bridge reads this
+    # via engine_state duck-typing to gate the bounded auto-retry.
+    stream_idle_class: str | None = None
+
     def awaiting_user_approval(self) -> bool:
         """True while this session has an unanswered control request.
 
@@ -681,6 +688,16 @@ class ClaudeStreamState:
     def awaiting_rate_limit_retry(self) -> bool:
         """True while Claude is inside an upstream rate-limit retry window."""
         return self.rate_limit_wait_until > time.monotonic()
+
+
+# #657: conservative wait window latched when a `rate_limit_event` arrives with
+# no parseable timing at all (no `retry_after_ms`, no reset timestamps). Upstream
+# throttles are rarely sub-second, and without *some* deadline
+# `awaiting_rate_limit_retry()` reports False while the session genuinely is
+# waiting on upstream — making a throttled-but-healthy session indistinguishable
+# from a hung one. 60s is well under every stall threshold (600s+), so a wrong
+# guess can only delay a stall verdict, never mask one.
+DEFAULT_BARE_RATE_LIMIT_WAIT_S = 60.0
 
 
 def _derive_retry_after_s(info: claude_schema.RateLimitInfo | None) -> float | None:
@@ -1396,16 +1413,28 @@ def _format_diff_preview(tool_name: str, tool_input: dict[str, Any]) -> str:
 _STREAM_IDLE_TIMEOUT_PATTERN = "Stream idle timeout"
 
 
-def _classify_stream_idle_timeout(
+def _stream_idle_timeout_class(
     event: claude_schema.StreamResultMessage,
 ) -> str | None:
-    """Return a short Type-A / Type-B annotation, or None if not a stall."""
+    """#438/#572: return ``"type_a"`` / ``"type_b"`` for a Stream idle
+    timeout failure, or None when the result is not a stall. Shared by the
+    visible annotation below and the bridge's bounded auto-retry gate."""
     result = event.result if isinstance(event.result, str) else ""
     if _STREAM_IDLE_TIMEOUT_PATTERN not in result:
         return None
     if event.num_turns <= 1 and (
         event.duration_api_ms is None or event.duration_api_ms == 0
     ):
+        return "type_b"
+    return "type_a"
+
+
+def _classify_stream_idle_timeout(
+    event: claude_schema.StreamResultMessage,
+) -> str | None:
+    """Return a short Type-A / Type-B annotation, or None if not a stall."""
+    stall_class = _stream_idle_timeout_class(event)
+    if stall_class == "type_b":
         # Type B — cold-start zero-byte stall. No bytes from API.
         return (
             "🌐 Cold-start API stall (Type B): Anthropic API returned no "
@@ -1413,13 +1442,15 @@ def _classify_stream_idle_timeout(
             "queueing/availability — raising CLAUDE_STREAM_IDLE_TIMEOUT_MS "
             "will NOT help. Retry shortly."
         )
-    # Type A — mid-generation stall. Model emitted output then went silent.
-    return (
-        "⏳ Mid-generation API stall (Type A): SSE stream went silent after "
-        "partial output. Often legitimate long reasoning that exceeded the "
-        "watchdog — consider raising [watchdog] claude_stream_idle_timeout_ms "
-        "in untether.toml."
-    )
+    if stall_class == "type_a":
+        # Type A — mid-generation stall. Model emitted output then went silent.
+        return (
+            "⏳ Mid-generation API stall (Type A): SSE stream went silent after "
+            "partial output. Often legitimate long reasoning that exceeded the "
+            "watchdog — consider raising [watchdog] claude_stream_idle_timeout_ms "
+            "in untether.toml."
+        )
+    return None
 
 
 def _extract_error(
@@ -1955,6 +1986,10 @@ def translate_claude_event(
             error = None if ok else _extract_error(event, resumed=state.resumed)
             usage = _usage_payload(event)
 
+            # #572: record the stream-idle classification so the bridge's
+            # bounded auto-retry gate can read it via engine_state duck-typing.
+            state.stream_idle_class = None if ok else _stream_idle_timeout_class(event)
+
             # #333: arm the post-result idle watchdog. Reset on every
             # result (multi-turn re-arms the timer per turn boundary).
             state.result_received_at = time.monotonic()
@@ -2137,7 +2172,6 @@ def translate_claude_event(
                     if session_id in _DISCUSS_APPROVED:
                         _DISCUSS_APPROVED.discard(session_id)
                         _OUTLINE_PENDING.discard(session_id)
-                        clear_discuss_cooldown(session_id)
                         # #283: bypass diff_preview gate for subsequent tools
                         # in this session (#309).
                         _PLAN_EXIT_APPROVED.add(session_id)
@@ -2150,34 +2184,52 @@ def translate_claude_event(
                         state.auto_approve_queue.append(request_id)
                         return []
 
-            # Rate-limit ExitPlanMode after a discuss denial.
-            # Both paths (outline written / not written) auto-deny and show
-            # synthetic 2-button Approve/Deny.  The old "fall through to normal
-            # 3-button flow" caused a confusing loop where the user kept seeing
-            # the same Pause & Outline Plan button.
+            # Gate ExitPlanMode while an outline is pending (Pause & Outline).
+            # Both paths (outline written / not written) bypass the normal
+            # 3-button flow: without this, an outline-pending retry would show
+            # the same "Pause & Outline Plan" button again — a confusing loop.
+            # #570: the additional time-based cooldown arm that lived here was
+            # a v2.1.72-74 workaround; removed after verifying the upstream
+            # immediate-retry loop is fixed on CLI 2.1.215.
             if isinstance(request, claude_schema.ControlCanUseToolRequest):
                 tool_name = getattr(request, "tool_name", "")
                 if tool_name == "ExitPlanMode" and factory.resume:
                     session_id = factory.resume.value
                     text_len = state.max_text_len_since_cooldown
 
-                    # Guard: if outline is pending but Claude hasn't written
-                    # enough visible text, block ExitPlanMode regardless of
-                    # whether the time-based cooldown has expired.
+                    # #659: on plan-file CLIs (≥ ~2.1.2xx) the plan body
+                    # arrives in ExitPlanMode's `plan` input and NO chat text
+                    # is ever written — observed live: 4 consecutive
+                    # outline_guard denies until Claude gave up. The plan
+                    # input IS the outline, so let it satisfy the gate and
+                    # render it as the standalone outline message.
+                    _epm_gate_input = getattr(request, "input", {})
+                    _epm_plan_body = (
+                        _epm_gate_input.get("plan")
+                        if isinstance(_epm_gate_input, dict)
+                        else None
+                    )
+                    if isinstance(_epm_plan_body, str):
+                        text_len = max(text_len, len(_epm_plan_body))
+                        if (
+                            state.outline_text is None
+                            and len(_epm_plan_body) >= _OUTLINE_MIN_CHARS
+                        ):
+                            state.outline_text = _epm_plan_body
+
+                    # Guard: outline pending but Claude hasn't written enough
+                    # visible text — auto-deny with the outline instruction.
                     outline_guard = (
                         session_id in _OUTLINE_PENDING and text_len < _OUTLINE_MIN_CHARS
                     )
-                    # Catch outline-pending sessions even after cooldown expires.
-                    # Without this, expired cooldown + written outline would skip
-                    # the synthetic 2-button flow and fall through to normal
-                    # 3-button ExitPlanMode (showing "Pause & Outline" again).
+                    # Outline written — hold the request open and show the
+                    # synthetic Approve/Deny buttons.
                     outline_ready = (
                         session_id in _OUTLINE_PENDING
                         and text_len >= _OUTLINE_MIN_CHARS
                     )
 
-                    escalation_msg = check_discuss_cooldown(session_id)
-                    if outline_guard or escalation_msg is not None or outline_ready:
+                    if outline_guard or outline_ready:
                         if text_len >= _OUTLINE_MIN_CHARS:
                             # Outline was written — hold the request open.
                             # Don't auto-deny; keep the control request pending
@@ -2207,18 +2259,18 @@ def translate_claude_event(
                                 request, "tool_name", ""
                             )
                         else:
-                            # Retry without outline — auto-deny with escalation.
-                            # outline_guard catches expired-cooldown retries too.
+                            # Retry without outline — auto-deny with the
+                            # write-the-outline-first instruction.
                             logger.info(
-                                "control_request.discuss_cooldown_deny",
+                                "control_request.outline_guard_deny",
                                 request_id=request_id,
                                 session_id=session_id,
-                                outline_guard=outline_guard,
                             )
-                            deny_msg = escalation_msg or _DISCUSS_ESCALATION_MESSAGE
                             _REQUEST_TO_INPUT.pop(request_id, None)
                             _REQUEST_TO_TOOL_NAME.pop(request_id, None)
-                            state.auto_deny_queue.append((request_id, deny_msg))
+                            state.auto_deny_queue.append(
+                                (request_id, _DISCUSS_ESCALATION_MESSAGE)
+                            )
 
                         # Show synthetic Approve/Deny buttons (no "Pause" option).
                         # For outline-ready: uses the REAL request_id so the
@@ -2561,22 +2613,29 @@ def translate_claude_event(
                 if derived is not None:
                     retry_s = derived
                     retry_s_source = "reset_ts"
-            if retry_s is not None:
-                state.rate_limit_total_s += retry_s
-                # #495/#499/#500: latch a deadline so the stall detector can
-                # tell "throttled upstream, will resume by itself" apart from
-                # "hung". Without this only a cumulative total existed, which
-                # says nothing about whether we are waiting *right now*.
-                state.rate_limit_wait_until = time.monotonic() + retry_s
+                else:
+                    # #657: no parseable timing at all — latch a conservative
+                    # default so awaiting_rate_limit_retry() is directionally
+                    # correct. Source stays distinct so audits can tell
+                    # derived waits from guessed ones.
+                    retry_s = DEFAULT_BARE_RATE_LIMIT_WAIT_S
+                    retry_s_source = "default"
+            state.rate_limit_total_s += retry_s
+            # #495/#499/#500: latch a deadline so the stall detector can
+            # tell "throttled upstream, will resume by itself" apart from
+            # "hung". Without this only a cumulative total existed, which
+            # says nothing about whether we are waiting *right now*.
+            state.rate_limit_wait_until = time.monotonic() + retry_s
             state.rate_limit_count += 1
             state.note_seq += 1
             action_id = f"rate_limit_{state.note_seq}"
-            if retry_s is not None:
-                # Round to nearest second for display but show fractional when < 1s
-                display_s = int(retry_s) if retry_s >= 1 else f"{retry_s:.1f}"
-                title = f"⏳ Rate limited — retrying in {display_s}s"
+            # Round to nearest second for display but show fractional when < 1s
+            display_s = int(retry_s) if retry_s >= 1 else f"{retry_s:.1f}"
+            if retry_s_source == "default":
+                # A guessed window is shown as an estimate, not as fact
+                title = f"⏳ Rate limited — waiting to retry (~{display_s}s)"
             else:
-                title = "⏳ Rate limited — waiting to retry"
+                title = f"⏳ Rate limited — retrying in {display_s}s"
             detail: dict[str, Any] = {}
             if info is not None:
                 if info.tokens_remaining is not None:
@@ -2605,7 +2664,7 @@ def translate_claude_event(
             logger.info(
                 "claude.rate_limit_event",
                 retry_after_s=retry_s,
-                retry_after_source=retry_s_source if retry_s is not None else None,
+                retry_after_source=retry_s_source,
                 count=state.rate_limit_count,
                 cumulative_s=state.rate_limit_total_s,
                 info=info_payload or None,
@@ -4656,55 +4715,20 @@ async def send_claude_control_response(
     return success
 
 
-def _cooldown_seconds(count: int) -> float:
-    """Progressive cooldown: 30s, 60s, 90s, 120s (capped)."""
-    return min(DISCUSS_COOLDOWN_BASE_SECONDS * count, DISCUSS_COOLDOWN_MAX_SECONDS)
+def mark_outline_pending(session_id: str) -> None:
+    """Record that 'Pause & Outline Plan' was clicked for this session.
 
+    Subsequent ExitPlanMode requests are gated on visible outline text
+    (``_OUTLINE_MIN_CHARS``): auto-denied with the write-the-outline-first
+    instruction until enough text is written, then held open behind the
+    synthetic Approve/Deny buttons.
 
-def set_discuss_cooldown(session_id: str) -> None:
-    """Record that a discuss denial was sent for this session.
-
-    Called by claude_control when the user clicks 'Pause & Outline Plan'.
-    Subsequent ExitPlanMode requests within the cooldown window will
-    be auto-denied with an escalating message. The cooldown window
-    grows with each click: 30s, 60s, 90s, 120s (capped).
+    #570: replaces ``set_discuss_cooldown`` — the time-based progressive
+    cooldown it also armed was a v2.1.72-74 upstream-loop workaround,
+    removed after verifying the fix on CLI 2.1.215.
     """
-    existing = _DISCUSS_COOLDOWN.get(session_id)
-    count = (existing[1] + 1) if existing else 1
-    _DISCUSS_COOLDOWN[session_id] = (time.time(), count)
-    cooldown = _cooldown_seconds(count)
     _OUTLINE_PENDING.add(session_id)
-    logger.info(
-        "discuss_cooldown.set",
-        session_id=session_id,
-        deny_count=count,
-        cooldown_seconds=cooldown,
-    )
-
-
-def check_discuss_cooldown(session_id: str) -> str | None:
-    """Check if an ExitPlanMode request should be auto-denied due to discuss cooldown.
-
-    Returns an escalation deny message (with cooldown duration) if within
-    cooldown, or None if clear. Uses progressive timing based on deny count.
-    """
-    entry = _DISCUSS_COOLDOWN.get(session_id)
-    if entry is None:
-        return None
-    ts, count = entry
-    cooldown = _cooldown_seconds(count)
-    if time.time() - ts > cooldown:
-        # Cooldown expired — keep the count so next click escalates further
-        # Only clear the timestamp so the next ExitPlanMode gets through
-        # but set_discuss_cooldown will use count+1 for the next window
-        _DISCUSS_COOLDOWN[session_id] = (0.0, count)
-        return None
-    return _DISCUSS_ESCALATION_MESSAGE
-
-
-def clear_discuss_cooldown(session_id: str) -> None:
-    """Clear the discuss cooldown for a session (e.g. on approve/deny)."""
-    _DISCUSS_COOLDOWN.pop(session_id, None)
+    logger.info("outline_pending.set", session_id=session_id)
 
 
 def _cleanup_session_registries(session_id: str) -> None:
@@ -4720,9 +4744,6 @@ def _cleanup_session_registries(session_id: str) -> None:
         cleaned.append("session_stdin")
     if _SESSION_BG_STATE.pop(session_id, None) is not None:
         cleaned.append("session_bg_state")
-    if session_id in _DISCUSS_COOLDOWN:
-        cleaned.append("discuss_cooldown")
-    clear_discuss_cooldown(session_id)
     if session_id in _DISCUSS_APPROVED:
         cleaned.append("discuss_approved")
     _DISCUSS_APPROVED.discard(session_id)

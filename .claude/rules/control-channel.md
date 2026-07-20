@@ -18,13 +18,13 @@ ClaudeRunner uses `pty.openpty()` for stdin (not `subprocess.PIPE`):
 ```python
 _SESSION_STDIN: dict[str, anyio.abc.ByteSendStream]   # session_id -> stdin
 _REQUEST_TO_SESSION: dict[str, str]                    # request_id -> session_id
-_DISCUSS_COOLDOWN: dict[str, tuple[float, int]]        # session_id -> (timestamp, deny_count)
+_OUTLINE_PENDING: set[str]                             # sessions awaiting outline text
 _DISCUSS_APPROVED: set[str]                            # sessions with post-outline approval
 _PENDING_ASK_REQUESTS: dict[str, tuple[int, str]]       # request_id -> (channel_id, question)
 ```
 
 - Register on first `system.init` event (when session_id is known)
-- Clean up all registries in the `finally` block of `run_impl` (including cooldown and approval state)
+- Clean up all registries in the `finally` block of `run_impl` (including outline and approval state)
 - All control responses go through `write_control_response(session_id, request_id, approved, deny_message)`
 
 ## Auto-approve
@@ -54,21 +54,28 @@ When Claude calls `AskUserQuestion`:
 - Write: `+ content` (max 8 lines)
 - Bash: `$ command` (max 200 chars)
 
-## Progressive cooldown
+## Outline gate (Pause & Outline)
 
-After "Pause & Outline Plan" click:
-- Base cooldown: 30 seconds
-- Escalation: `min(30 * deny_count, 120)` seconds
-- Auto-deny rapid `ExitPlanMode` retries within cooldown window
-- Deny count preserved across expiry (keeps escalating)
-- Resets to 0 on explicit Approve or Deny
-- Cooldown and approval state cleaned up on session end
+After a "Pause & Outline Plan" click, `mark_outline_pending(session_id)` arms a
+purely TEXT-based gate on subsequent `ExitPlanMode` requests:
+- Outline not yet written (`max_text_len_since_cooldown < _OUTLINE_MIN_CHARS`,
+  200 chars) → auto-deny with the write-the-outline-first instruction
+- Outline written → hold the request open + synthetic Approve/Deny buttons
+- Outline and approval state cleaned up on session end
+
+**#570 (retired workaround):** a time-based progressive cooldown
+(30/60/90/120s escalation, `_DISCUSS_COOLDOWN`) used to also gate this path —
+it worked around Claude Code v2.1.72–2.1.74 re-issuing `ExitPlanMode`
+immediately after a denial (#126 lineage). Verified fixed on CLI 2.1.215
+(2026-07-20: denied ExitPlanMode → clean text turn, no re-issue) and removed.
+If the upstream loop ever regresses, the repro is: deny an ExitPlanMode
+control_request via the Telegram buttons and watch for an immediate re-issue.
 
 ## Post-outline approval
 
-After cooldown auto-deny, synthetic Approve/Deny/Let's discuss buttons (✅/❌/📋 emoji prefixes) appear in Telegram:
-- User clicks "Approve Plan" → session added to `_DISCUSS_APPROVED`, cooldown cleared
-- User clicks "Deny" → cooldown cleared, no auto-approve flag set
+After the outline-gate auto-deny, synthetic Approve/Deny/Let's discuss buttons (✅/❌/📋 emoji prefixes) appear in Telegram:
+- User clicks "Approve Plan" → session added to `_DISCUSS_APPROVED`, outline-pending cleared
+- User clicks "Deny" → outline-pending cleared, no auto-approve flag set
 - User clicks "Let's discuss" → control request held open (never responded to) so Claude stays alive; 5-minute safety timeout (`CONTROL_REQUEST_TIMEOUT_SECONDS = 300.0`) cleans up stale held requests
 - Next `ExitPlanMode` checks `_DISCUSS_APPROVED` → auto-approves if present
 - Synthetic callback_data prefix: `da:` (fits 64-byte Telegram limit)

@@ -1965,7 +1965,10 @@ async def test_run_main_loop_persists_topic_sessions_in_project_scope(
             thread_id=77,
         )
 
-    with anyio.fail_after(2):
+    # #641: this guard exists to catch hangs, not to race the loop — 2s
+    # flaked when the test ran COLD under coverage instrumentation (isolated
+    # -k runs / first-in-session), while warm whole-file runs passed.
+    with anyio.fail_after(30):
         await run_main_loop(cfg, poller)
 
     state_path = resolve_state_path(runtime.config_path or tmp_path / "untether.toml")
@@ -2281,9 +2284,10 @@ async def test_run_main_loop_voice_transcript_preserves_directive(
         base_url: str | None = None,
         api_key: str | None = None,
         url_allowlist=(),
+        language: str | None = None,
     ) -> str:
         _ = bot, msg, enabled, model, max_bytes, reply, base_url, api_key
-        _ = url_allowlist
+        _ = url_allowlist, language
         return "/codex do thing"
 
     monkeypatch.setattr(telegram_loop, "transcribe_voice", _fake_transcribe)
@@ -2354,9 +2358,10 @@ async def test_run_main_loop_voice_shows_transcription_echo(
         base_url: str | None = None,
         api_key: str | None = None,
         url_allowlist=(),
+        language: str | None = None,
     ) -> str:
         _ = bot, msg, enabled, model, max_bytes, reply, base_url, api_key
-        _ = url_allowlist
+        _ = url_allowlist, language
         return "hello world"
 
     monkeypatch.setattr(telegram_loop, "transcribe_voice", _fake_transcribe)
@@ -2427,9 +2432,10 @@ async def test_run_main_loop_voice_hides_transcription_when_disabled(
         base_url: str | None = None,
         api_key: str | None = None,
         url_allowlist=(),
+        language: str | None = None,
     ) -> str:
         _ = bot, msg, enabled, model, max_bytes, reply, base_url, api_key
-        _ = url_allowlist
+        _ = url_allowlist, language
         return "hello world"
 
     monkeypatch.setattr(telegram_loop, "transcribe_voice", _fake_transcribe)
@@ -3291,7 +3297,8 @@ async def test_run_main_loop_new_clears_topic_sessions(tmp_path: Path) -> None:
             chat_type="supergroup",
         )
 
-    with anyio.fail_after(2):
+    # #641: hang guard, not a race — 30s so cold coverage runs don't flake.
+    with anyio.fail_after(30):
         await run_main_loop(cfg, poller)
 
     store2 = TopicStateStore(resolve_state_path(state_path))

@@ -2092,7 +2092,7 @@ wheels = [
 
 [[package]]
 name = "untether"
-version = "0.35.4rc11"
+version = "0.35.4rc12"
 source = { editable = "." }
 dependencies = [
     { name = "aiohttp" },

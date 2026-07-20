@@ -12,7 +12,6 @@ from untether.model import ActionEvent, ResumeToken
 from untether.runners.claude import (
     _ACTIVE_RUNNERS,
     _ASK_QUESTION_FLOWS,
-    _DISCUSS_COOLDOWN,
     _HANDLED_REQUESTS,
     _PENDING_ASK_REQUESTS,
     _REQUEST_TO_INPUT,
@@ -81,7 +80,6 @@ def _clear_registries():
     _REQUEST_TO_SESSION.clear()
     _REQUEST_TO_INPUT.clear()
     _HANDLED_REQUESTS.clear()
-    _DISCUSS_COOLDOWN.clear()
     _PENDING_ASK_REQUESTS.clear()
     _ASK_QUESTION_FLOWS.clear()
 

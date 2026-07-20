@@ -46,6 +46,7 @@ Configuration (under `[transports.telegram]`):
     voice_transcription_model = "gpt-4o-mini-transcribe" # optional
     voice_transcription_base_url = "http://localhost:8000/v1" # optional
     voice_transcription_api_key = "local" # optional
+    voice_transcription_language = "en" # optional ISO-639-1 hint
     ```
 
 Set `OPENAI_API_KEY` in the environment (or `voice_transcription_api_key` in config).
@@ -57,6 +58,11 @@ To use a local OpenAI-compatible Whisper server, set `voice_transcription_base_u
 requests on their own base URL without relying on `OPENAI_BASE_URL`. If your server
 requires a specific model name, set `voice_transcription_model` (for example,
 `whisper-1`).
+
+If your voice notes are always in one language, set `voice_transcription_language`
+to an ISO-639-1 code (for example, `en`). This is passed as the Whisper `language`
+parameter and prevents wrong-language transcriptions on short utterances. Unset,
+the provider auto-detects the language.
 
 ### Trigger mode (mentions-only)
 
