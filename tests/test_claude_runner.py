@@ -1721,8 +1721,16 @@ def test_translate_rate_limit_event_accumulates_across_throttles() -> None:
     assert state.rate_limit_total_s == 45.0
 
 
-def test_translate_rate_limit_event_handles_missing_retry() -> None:
-    """Rate-limit without a retry hint still surfaces, just without the seconds."""
+def test_translate_rate_limit_event_bare_event_latches_default_wait() -> None:
+    """#657: a bare rate_limit_event (no retry_after_ms, no reset timestamps)
+    latches a conservative default wait window instead of leaving
+    `rate_limit_wait_until` unset — otherwise `awaiting_rate_limit_retry()`
+    returns False while the session genuinely is throttled upstream, and the
+    #495/#499/#500 stall disambiguation silently doesn't apply."""
+    import time
+
+    from untether.runners.claude import DEFAULT_BARE_RATE_LIMIT_WAIT_S
+
     state = ClaudeStreamState()
     events = translate_claude_event(
         _decode_event({"type": "rate_limit_event"}),
@@ -1732,10 +1740,14 @@ def test_translate_rate_limit_event_handles_missing_retry() -> None:
     )
     assert len(events) == 2
     assert "⏳" in events[0].action.title
-    assert "waiting to retry" in events[0].action.title
-    # cumulative stays at 0 when we have no retry_after_ms to accrue
+    # The guessed wait is flagged as an estimate, not presented as fact
+    assert "~" in events[0].action.title
     assert state.rate_limit_count == 1
-    assert state.rate_limit_total_s == 0.0
+    # The default accrues so a repeatedly-throttled session no longer reports 0s
+    assert state.rate_limit_total_s == DEFAULT_BARE_RATE_LIMIT_WAIT_S
+    # The latch is armed: awaiting_rate_limit_retry() is directionally correct
+    assert state.rate_limit_wait_until > time.monotonic()
+    assert state.awaiting_rate_limit_retry() is True
 
 
 def test_translate_rate_limit_event_derives_retry_after_from_reset_ts() -> None:
@@ -1830,8 +1842,11 @@ def test_translate_rate_limit_event_retry_after_ms_takes_precedence() -> None:
 
 
 def test_translate_rate_limit_event_handles_unparseable_reset_ts() -> None:
-    """#518: garbage `requests_reset` is silently ignored — we fall back to the
-    "waiting to retry" copy rather than crashing the runner."""
+    """#518/#657: garbage `requests_reset` is silently ignored — we fall
+    through to the conservative default wait (as if the event were bare)
+    rather than crashing the runner."""
+    from untether.runners.claude import DEFAULT_BARE_RATE_LIMIT_WAIT_S
+
     state = ClaudeStreamState()
     events = translate_claude_event(
         _decode_event(
@@ -1845,8 +1860,9 @@ def test_translate_rate_limit_event_handles_unparseable_reset_ts() -> None:
         factory=state.factory,
     )
     assert len(events) == 2
-    assert "waiting to retry" in events[0].action.title
-    assert state.rate_limit_total_s == 0.0
+    assert "~" in events[0].action.title
+    assert state.rate_limit_total_s == DEFAULT_BARE_RATE_LIMIT_WAIT_S
+    assert state.awaiting_rate_limit_retry() is True
 
 
 def test_translate_thinking_block() -> None:
@@ -2677,6 +2693,76 @@ def test_extract_error_unrelated_failure_no_classification() -> None:
     assert "Type A" not in result
     assert "Type B" not in result
     assert "Tool execution failed" in result
+
+
+# ===========================================================================
+# #572 — stream_idle_class recorded on state for the bridge auto-retry gate
+# ===========================================================================
+
+
+def _result_event(**overrides) -> dict:
+    base = {
+        "type": "result",
+        "subtype": "error_during_execution",
+        "is_error": True,
+        "num_turns": 19,
+        "duration_ms": 635000,
+        "duration_api_ms": 261086,
+        "session_id": "36693744aaaa0000",
+        "result": "API Error: Stream idle timeout - partial response received",
+    }
+    base.update(overrides)
+    return base
+
+
+def test_translate_result_records_type_a_stream_idle_class() -> None:
+    """#572: a Type-A stream-idle failure stamps stream_idle_class="type_a"
+    so runner_bridge can gate the bounded auto-retry via engine_state."""
+    state = ClaudeStreamState()
+    translate_claude_event(
+        _decode_event(_result_event()),
+        title="claude",
+        state=state,
+        factory=state.factory,
+    )
+    assert state.stream_idle_class == "type_a"
+
+
+def test_translate_result_records_type_b_stream_idle_class() -> None:
+    """#572: a cold-start zero-byte stall stamps "type_b" — never retried."""
+    state = ClaudeStreamState()
+    translate_claude_event(
+        _decode_event(_result_event(num_turns=1, duration_api_ms=0)),
+        title="claude",
+        state=state,
+        factory=state.factory,
+    )
+    assert state.stream_idle_class == "type_b"
+
+
+def test_translate_result_non_stall_error_no_stream_idle_class() -> None:
+    """#572: unrelated failures leave stream_idle_class None."""
+    state = ClaudeStreamState()
+    translate_claude_event(
+        _decode_event(_result_event(result="Tool execution failed with code 1")),
+        title="claude",
+        state=state,
+        factory=state.factory,
+    )
+    assert state.stream_idle_class is None
+
+
+def test_translate_result_ok_clears_stream_idle_class() -> None:
+    """#572: a successful result resets any stale classification."""
+    state = ClaudeStreamState()
+    state.stream_idle_class = "type_a"
+    translate_claude_event(
+        _decode_event(_result_event(is_error=False, subtype="success", result="done")),
+        title="claude",
+        state=state,
+        factory=state.factory,
+    )
+    assert state.stream_idle_class is None
 
 
 # ===========================================================================

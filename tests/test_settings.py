@@ -273,6 +273,48 @@ def test_voice_transcription_api_key_empty_string_normalised_to_none(
     assert settings.transports.telegram.voice_transcription_api_key is None
 
 
+def test_voice_transcription_language_normalised(tmp_path: Path) -> None:
+    """#638: language hint is stripped + lowercased at parse time."""
+    config_path = tmp_path / "untether.toml"
+    config_path.write_text(
+        "[transports.telegram]\n"
+        'bot_token = "tok"\n'
+        "chat_id = 123\n"
+        "allow_any_user = true\n"
+        'voice_transcription_language = " EN "\n',
+        encoding="utf-8",
+    )
+    settings, _ = load_settings(config_path)
+    assert settings.transports.telegram.voice_transcription_language == "en"
+
+
+def test_voice_transcription_language_default_none(tmp_path: Path) -> None:
+    """#638: omitted → None → provider auto-detect (pre-#638 behaviour)."""
+    config_path = tmp_path / "untether.toml"
+    config_path.write_text(
+        '[transports.telegram]\nbot_token = "tok"\nchat_id = 123\n'
+        "allow_any_user = true\n",
+        encoding="utf-8",
+    )
+    settings, _ = load_settings(config_path)
+    assert settings.transports.telegram.voice_transcription_language is None
+
+
+def test_voice_transcription_language_rejects_non_iso_code(tmp_path: Path) -> None:
+    """#638: a typo like 'english' fails at boot, not silently at the API."""
+    config_path = tmp_path / "untether.toml"
+    config_path.write_text(
+        "[transports.telegram]\n"
+        'bot_token = "tok"\n'
+        "chat_id = 123\n"
+        "allow_any_user = true\n"
+        'voice_transcription_language = "english"\n',
+        encoding="utf-8",
+    )
+    with pytest.raises(ConfigError, match="voice_transcription_language"):
+        load_settings(config_path)
+
+
 def test_voice_transcription_api_key_default_none(tmp_path: Path) -> None:
     """#378: default is still None when key is omitted."""
     config_path = tmp_path / "untether.toml"

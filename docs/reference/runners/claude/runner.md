@@ -58,7 +58,7 @@ Key control channel features:
 * Auto-approve for routine tools (Grep, Glob, Read, Bash, etc.)
 * `ExitPlanMode` requests shown as Telegram inline buttons (Approve / Deny / Pause & Outline Plan) in `plan` mode; post-outline buttons add **Let's discuss** for plan discussion before approval
 * `ExitPlanMode` requests silently auto-approved in `auto` mode (no buttons shown)
-* Progressive cooldown on rapid ExitPlanMode retries (30s → 60s → 90s → 120s) — only applies in `plan` mode
+* Text-based outline gate on ExitPlanMode after "Pause & Outline Plan" — retries without written outline text are auto-denied; the former time-based progressive cooldown was retired in [#570](https://github.com/littlebearapps/untether/issues/570) (upstream retry loop fixed in Claude Code ≥ 2.1.215)
 
 **Safety note:** `-p/--print` skips the workspace trust dialog; only use this flag in trusted directories.
 

@@ -151,7 +151,7 @@ Domain-specific Claude Code skills for working on Untether:
 |-------|------|----------|
 | Telegram Bot API | `.claude/skills/telegram-bot-api/` | Working on Telegram transport, inline keyboards, outbox, rate limiting, voice, topics |
 | JSONL Subprocess Runner | `.claude/skills/jsonl-subprocess-runner/` | Working on runner base class, event translation, session locking, adding engines |
-| Claude stream-json | `.claude/skills/claude-stream-json/` | Working on Claude runner, control channel, permission modes, auto-approve, cooldown |
+| Claude stream-json | `.claude/skills/claude-stream-json/` | Working on Claude runner, control channel, permission modes, auto-approve, outline gate |
 | Codex/OpenCode/Pi | `.claude/skills/codex-opencode-pi/` | Working on non-Claude runners, comparing engine protocols |
 | Untether Architecture | `.claude/skills/untether-architecture/` | Understanding overall data flow, config system, progress tracking, project system |
 | Release Coordination | `.claude/skills/release-coordination/` | Preparing releases, version bumps, changelog drafting, issue audits, rollback procedures |
@@ -180,7 +180,7 @@ Rules in `.claude/rules/` auto-load when editing matching files:
 |------|-----------|----------------|
 | `runner-development.md` | `runners/**`, `runner.py` | EventFactory usage, session locking, entry point registration |
 | `telegram-transport.md` | `telegram/**` | Outbox-only writes, 64-byte callback data, ephemeral cleanup |
-| `control-channel.md` | `runners/claude.py`, `claude_control.py` | PTY lifecycle, session registries, cooldown mechanics |
+| `control-channel.md` | `runners/claude.py`, `claude_control.py` | PTY lifecycle, session registries, outline-gate mechanics |
 | `testing-conventions.md` | `tests/**` | pytest+anyio, stub patterns, 80% coverage threshold |
 | `release-discipline.md` | `CHANGELOG.md`, `pyproject.toml` | GitHub issue linking, changelog format, semantic versioning |
 | `dev-workflow.md` | `src/untether/**` | Dev vs staging separation, never restart staging for testing, always use untether-dev |
@@ -193,7 +193,7 @@ Rules in `.claude/rules/` auto-load when editing matching files:
 
 Key test files:
 
-- `test_claude_control.py` — 109 tests: control requests, response routing, registry lifecycle, auto-approve/auto-deny, tool auto-approve, custom deny messages, discuss action, early toast, progressive cooldown, auto permission mode, diff_preview plan bypass
+- `test_claude_control.py` — 109 tests: control requests, response routing, registry lifecycle, auto-approve/auto-deny, tool auto-approve, custom deny messages, discuss action, early toast, outline gate (#570 retired the progressive cooldown), auto permission mode, diff_preview plan bypass
 - `test_callback_dispatch.py` — 26 tests: callback parsing, dispatch toast/ephemeral behaviour, early answering
 - `test_exec_bridge.py` — 230 tests: ephemeral notification cleanup, approval push notifications, progressive stall warnings, stall diagnostics, stall auto-cancel with CPU-active suppression (sleeping-process aware), tool-active repeat suppression, approval-aware stall threshold, MCP tool stall threshold, frozen ring buffer hung escalation, session summary, PID/stream threading, auto-continue detection, signal death suppression, empty-resume quarantine-and-fresh recovery, resume divert/clear, empty-result diagnostics
 - `test_ask_user_question.py` — 29 tests: AskUserQuestion control request handling, question extraction, pending request registry, answer routing, option button rendering, multi-question flows, structured answer responses, ask mode toggle auto-deny
@@ -206,7 +206,7 @@ Key test files:
 - `test_shutdown.py` — 4 tests: shutdown state transitions, idempotency, reset
 - `test_preamble.py` — 6 tests: default preamble injection, disabled preamble, custom text override, empty text disables, settings defaults
 - `test_restart_command.py` — 3 tests: command triggers shutdown, idempotent response, command id
-- `test_cooldown_bypass.py` — 21 tests: outline bypass, rapid retry auto-deny, no-text auto-deny, cooldown escalation, hold-open outline flow
+- `test_cooldown_bypass.py` — 21 tests: outline gate (hold-open with outline, auto-deny without), no-text auto-deny, hold-open outline flow (#570 retired the time-based cooldown escalation)
 - `test_verbose_progress.py` — 21 tests: format_verbose_detail() for each tool type, MarkdownFormatter verbose mode, compact regression
 - `test_verbose_command.py` — 7 tests: /verbose toggle on/off/clear, backend id
 - `test_config_command.py` — 221 tests: home page, plan mode/ask mode/verbose/engine/listen/model/reasoning sub-pages, toggle actions, callback vs command routing, button layout, engine-aware visibility, default resolution

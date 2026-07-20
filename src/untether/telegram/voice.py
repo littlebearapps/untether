@@ -40,7 +40,9 @@ _VOICE_MAX_RETRIES = 4
 
 
 class VoiceTranscriber(Protocol):
-    async def transcribe(self, *, model: str, audio_bytes: bytes) -> str: ...
+    async def transcribe(
+        self, *, model: str, audio_bytes: bytes, language: str | None = None
+    ) -> str: ...
 
 
 class OpenAIVoiceTranscriber:
@@ -53,9 +55,17 @@ class OpenAIVoiceTranscriber:
         self._base_url = base_url
         self._api_key = api_key
 
-    async def transcribe(self, *, model: str, audio_bytes: bytes) -> str:
+    async def transcribe(
+        self, *, model: str, audio_bytes: bytes, language: str | None = None
+    ) -> str:
         audio_file = io.BytesIO(audio_bytes)
         audio_file.name = "voice.ogg"
+        # #638: only include `language` when configured — omitting the kwarg
+        # entirely preserves the API's auto-detect for unset configs (passing
+        # None would serialise a null the endpoint may reject).
+        extra: dict[str, str] = {}
+        if language is not None:
+            extra["language"] = language
         async with AsyncOpenAI(
             base_url=self._base_url,
             api_key=self._api_key,
@@ -65,6 +75,7 @@ class OpenAIVoiceTranscriber:
             response = await client.audio.transcriptions.create(
                 model=model,
                 file=audio_file,
+                **extra,
             )
         return response.text
 
@@ -81,6 +92,7 @@ async def transcribe_voice(
     base_url: str | None = None,
     api_key: str | None = None,
     url_allowlist: Sequence[ipaddress.IPv4Network | ipaddress.IPv6Network] = (),
+    language: str | None = None,
 ) -> str | None:
     voice = msg.voice
     if voice is None:
@@ -135,10 +147,13 @@ async def transcribe_voice(
     if transcriber is None:
         transcriber = OpenAIVoiceTranscriber(base_url=base_url, api_key=api_key)
     try:
-        text = await transcriber.transcribe(model=model, audio_bytes=audio_bytes)
+        text = await transcriber.transcribe(
+            model=model, audio_bytes=audio_bytes, language=language
+        )
         logger.debug(
             "voice.transcribe.success",
             model=model,
+            language=language,
             audio_size=len(audio_bytes),
         )
         return text

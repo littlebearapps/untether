@@ -1778,11 +1778,13 @@ async def test_run_main_loop_routes_reply_to_running_resume() -> None:
     async with anyio.create_task_group() as tg:
         tg.start_soon(run_main_loop, cfg, poller)
         try:
-            with anyio.fail_after(2):
+            # #641: hang guards, not races — 30s so cold/loaded coverage
+            # runs don't flake (2s expired on the CI 3.12 runner).
+            with anyio.fail_after(30):
                 await reply_ready.wait()
             await anyio.lowlevel.checkpoint()
             hold.set()
-            with anyio.fail_after(2):
+            with anyio.fail_after(30):
                 while len(runner.calls) < 2:
                     await anyio.lowlevel.checkpoint()
             assert runner.calls[1][1] == ResumeToken(
@@ -1965,7 +1967,10 @@ async def test_run_main_loop_persists_topic_sessions_in_project_scope(
             thread_id=77,
         )
 
-    with anyio.fail_after(2):
+    # #641: this guard exists to catch hangs, not to race the loop — 2s
+    # flaked when the test ran COLD under coverage instrumentation (isolated
+    # -k runs / first-in-session), while warm whole-file runs passed.
+    with anyio.fail_after(30):
         await run_main_loop(cfg, poller)
 
     state_path = resolve_state_path(runtime.config_path or tmp_path / "untether.toml")
@@ -2281,9 +2286,10 @@ async def test_run_main_loop_voice_transcript_preserves_directive(
         base_url: str | None = None,
         api_key: str | None = None,
         url_allowlist=(),
+        language: str | None = None,
     ) -> str:
         _ = bot, msg, enabled, model, max_bytes, reply, base_url, api_key
-        _ = url_allowlist
+        _ = url_allowlist, language
         return "/codex do thing"
 
     monkeypatch.setattr(telegram_loop, "transcribe_voice", _fake_transcribe)
@@ -2354,9 +2360,10 @@ async def test_run_main_loop_voice_shows_transcription_echo(
         base_url: str | None = None,
         api_key: str | None = None,
         url_allowlist=(),
+        language: str | None = None,
     ) -> str:
         _ = bot, msg, enabled, model, max_bytes, reply, base_url, api_key
-        _ = url_allowlist
+        _ = url_allowlist, language
         return "hello world"
 
     monkeypatch.setattr(telegram_loop, "transcribe_voice", _fake_transcribe)
@@ -2427,9 +2434,10 @@ async def test_run_main_loop_voice_hides_transcription_when_disabled(
         base_url: str | None = None,
         api_key: str | None = None,
         url_allowlist=(),
+        language: str | None = None,
     ) -> str:
         _ = bot, msg, enabled, model, max_bytes, reply, base_url, api_key
-        _ = url_allowlist
+        _ = url_allowlist, language
         return "hello world"
 
     monkeypatch.setattr(telegram_loop, "transcribe_voice", _fake_transcribe)
@@ -3291,7 +3299,8 @@ async def test_run_main_loop_new_clears_topic_sessions(tmp_path: Path) -> None:
             chat_type="supergroup",
         )
 
-    with anyio.fail_after(2):
+    # #641: hang guard, not a race — 30s so cold coverage runs don't flake.
+    with anyio.fail_after(30):
         await run_main_loop(cfg, poller)
 
     store2 = TopicStateStore(resolve_state_path(state_path))
@@ -3444,7 +3453,8 @@ async def test_run_main_loop_batches_media_group_upload(
     async with anyio.create_task_group() as tg:
         tg.start_soon(run_main_loop, cfg, poller)
         try:
-            with anyio.fail_after(3):
+            # #641: hang guard, not a race — 30s (see above).
+            with anyio.fail_after(30):
                 while len(transport.send_calls) < 1:
                     await anyio.sleep(0.05)
             assert len(transport.send_calls) == 1

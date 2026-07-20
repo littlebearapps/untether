@@ -15,7 +15,6 @@ from untether.model import ActionEvent, ResumeToken
 from untether.runners.claude import (
     _ACTIVE_RUNNERS,
     _DISCUSS_APPROVED,
-    _DISCUSS_COOLDOWN,
     _HANDLED_REQUESTS,
     _OUTLINE_PENDING,
     _PLAN_EXIT_APPROVED,
@@ -23,15 +22,12 @@ from untether.runners.claude import (
     _REQUEST_TO_SESSION,
     _REQUEST_TO_TOOL_NAME,
     _SESSION_STDIN,
-    DISCUSS_COOLDOWN_BASE_SECONDS,
     ENGINE,
     ClaudeRunner,
     ClaudeStreamState,
     _cleanup_session_registries,
-    check_discuss_cooldown,
-    clear_discuss_cooldown,
+    mark_outline_pending,
     send_claude_control_response,
-    set_discuss_cooldown,
     translate_claude_event,
 )
 from untether.schemas import claude as claude_schema
@@ -88,7 +84,6 @@ def _clear_registries():
         _REQUEST_TO_SESSION.clear()
         _REQUEST_TO_INPUT.clear()
         _HANDLED_REQUESTS.clear()
-        _DISCUSS_COOLDOWN.clear()
         _PLAN_EXIT_APPROVED.clear()
         _DISCUSS_FEEDBACK_REFS.clear()
 
@@ -533,7 +528,7 @@ def test_cleanup_session_registries_clears_all_state() -> None:
     # Populate all registries
     _ACTIVE_RUNNERS[session_id] = (runner, 0.0)
     _SESSION_STDIN[session_id] = AsyncMock()
-    set_discuss_cooldown(session_id)
+    mark_outline_pending(session_id)
     _DISCUSS_APPROVED.add(session_id)
     _OUTLINE_PENDING.add(session_id)
     _REQUEST_TO_SESSION["req-a"] = session_id
@@ -544,7 +539,6 @@ def test_cleanup_session_registries_clears_all_state() -> None:
 
     assert session_id not in _ACTIVE_RUNNERS
     assert session_id not in _SESSION_STDIN
-    assert session_id not in _DISCUSS_COOLDOWN
     assert session_id not in _DISCUSS_APPROVED
     assert session_id not in _OUTLINE_PENDING
     assert "req-a" not in _REQUEST_TO_SESSION
@@ -847,82 +841,23 @@ async def test_discuss_action_sends_deny_with_custom_message() -> None:
 
 
 # ===========================================================================
-# H. Discuss Cooldown / Rate-Limiting
+# H. Outline gate (Pause & Outline) — #570 retired the time-based cooldown
 # ===========================================================================
 
 
-def test_set_discuss_cooldown_creates_entry() -> None:
-    """set_discuss_cooldown creates a cooldown entry with count=1."""
-    set_discuss_cooldown("sess-cd-1")
-    assert "sess-cd-1" in _DISCUSS_COOLDOWN
-    _, count = _DISCUSS_COOLDOWN["sess-cd-1"]
-    assert count == 1
+def test_mark_outline_pending_marks_session() -> None:
+    """mark_outline_pending adds the session to _OUTLINE_PENDING (idempotent)."""
+    mark_outline_pending("sess-cd-1")
+    assert "sess-cd-1" in _OUTLINE_PENDING
+    mark_outline_pending("sess-cd-1")
+    assert "sess-cd-1" in _OUTLINE_PENDING
 
 
-def test_set_discuss_cooldown_increments_count() -> None:
-    """Repeated calls increment the deny count."""
-    set_discuss_cooldown("sess-cd-2")
-    set_discuss_cooldown("sess-cd-2")
-    set_discuss_cooldown("sess-cd-2")
-    _, count = _DISCUSS_COOLDOWN["sess-cd-2"]
-    assert count == 3
-
-
-def test_check_discuss_cooldown_returns_escalation_within_window() -> None:
-    """check_discuss_cooldown returns escalation message within the cooldown window."""
-    set_discuss_cooldown("sess-cd-3")
-    result = check_discuss_cooldown("sess-cd-3")
-    assert result is not None
-    assert "REJECTED" in result
-    assert "ExitPlanMode" in result
-
-
-def test_check_discuss_cooldown_returns_none_when_not_set() -> None:
-    """check_discuss_cooldown returns None for unknown sessions."""
-    result = check_discuss_cooldown("sess-unknown")
-    assert result is None
-
-
-def test_check_discuss_cooldown_returns_none_after_expiry() -> None:
-    """check_discuss_cooldown returns None after the cooldown expires,
-    but preserves the count with zeroed timestamp for progressive escalation."""
-    import time as _time
-
-    set_discuss_cooldown("sess-cd-4")
-    # Manually backdate the timestamp
-    _, count = _DISCUSS_COOLDOWN["sess-cd-4"]
-    _DISCUSS_COOLDOWN["sess-cd-4"] = (
-        _time.time() - DISCUSS_COOLDOWN_BASE_SECONDS - 1,
-        count,
-    )
-
-    result = check_discuss_cooldown("sess-cd-4")
-    assert result is None
-    # Entry preserved with zeroed timestamp so next click escalates further
-    assert "sess-cd-4" in _DISCUSS_COOLDOWN
-    ts, preserved_count = _DISCUSS_COOLDOWN["sess-cd-4"]
-    assert ts == 0.0
-    assert preserved_count == count
-
-
-def test_clear_discuss_cooldown_removes_entry() -> None:
-    """clear_discuss_cooldown removes the cooldown entry."""
-    set_discuss_cooldown("sess-cd-5")
-    assert "sess-cd-5" in _DISCUSS_COOLDOWN
-    clear_discuss_cooldown("sess-cd-5")
-    assert "sess-cd-5" not in _DISCUSS_COOLDOWN
-
-
-def test_clear_discuss_cooldown_noop_for_unknown() -> None:
-    """clear_discuss_cooldown is a no-op for unknown sessions."""
-    clear_discuss_cooldown("sess-nonexistent")  # Should not raise
-
-
-def test_exit_plan_mode_auto_denied_during_cooldown() -> None:
-    """ExitPlanMode request during discuss cooldown queues an auto-deny
-    and returns a synthetic ActionEvent with Approve/Deny buttons."""
+def test_exit_plan_mode_auto_denied_while_outline_pending_without_text() -> None:
+    """ExitPlanMode while outline-pending with no written text queues an
+    auto-deny and returns a synthetic ActionEvent with Approve/Deny buttons."""
     state, factory = _make_state_with_session("sess-cooldown")
-    set_discuss_cooldown("sess-cooldown")
+    mark_outline_pending("sess-cooldown")
 
     event = _decode_event(
         {
@@ -953,18 +888,11 @@ def test_exit_plan_mode_auto_denied_during_cooldown() -> None:
     assert buttons[1][0]["text"] == "💬 Let's discuss"
 
 
-def test_exit_plan_mode_blocked_after_cooldown_expires_without_outline() -> None:
-    """ExitPlanMode after cooldown expires but no outline written is still blocked."""
-    import time as _time
-
+def test_exit_plan_mode_blocked_without_outline_regardless_of_time() -> None:
+    """ExitPlanMode with no outline written is blocked no matter how much
+    time has passed since the Pause & Outline click (#570: purely text-gated)."""
     state, factory = _make_state_with_session("sess-cd-expired")
-    set_discuss_cooldown("sess-cd-expired")
-    # Backdate to expire
-    _, count = _DISCUSS_COOLDOWN["sess-cd-expired"]
-    _DISCUSS_COOLDOWN["sess-cd-expired"] = (
-        _time.time() - DISCUSS_COOLDOWN_BASE_SECONDS - 1,
-        count,
-    )
+    mark_outline_pending("sess-cd-expired")
 
     event = _decode_event(
         {
@@ -984,25 +912,15 @@ def test_exit_plan_mode_blocked_after_cooldown_expires_without_outline() -> None
     assert "REJECTED" in state.auto_deny_queue[0][1]
 
 
-def test_exit_plan_mode_after_cooldown_expires_with_outline_shows_synthetic_buttons() -> (
-    None
-):
-    """ExitPlanMode after cooldown expires WITH outline written shows synthetic 2-button flow.
+def test_exit_plan_mode_with_outline_shows_synthetic_buttons() -> None:
+    """ExitPlanMode WITH outline written shows the synthetic 2-button flow.
 
-    Regression test for #114: previously this fell through to the normal
-    3-button flow (Approve/Deny/Pause & Outline), confusing users who had
-    already outlined. Now it correctly enters the synthetic 2-button path.
+    Regression lineage #114 (updated for #570): outline-pending sessions with
+    enough written text must enter the synthetic 2-button path — never fall
+    through to the normal 3-button flow — regardless of elapsed time.
     """
-    import time as _time
-
     state, factory = _make_state_with_session("sess-cd-outline")
-    set_discuss_cooldown("sess-cd-outline")
-    # Backdate to expire
-    _, count = _DISCUSS_COOLDOWN["sess-cd-outline"]
-    _DISCUSS_COOLDOWN["sess-cd-outline"] = (
-        _time.time() - DISCUSS_COOLDOWN_BASE_SECONDS - 1,
-        count,
-    )
+    mark_outline_pending("sess-cd-outline")
     # Simulate outline written
     state.max_text_len_since_cooldown = 300
 
@@ -1073,8 +991,8 @@ async def test_drain_auto_deny_multiple_items() -> None:
 
 
 @pytest.mark.anyio
-async def test_discuss_handler_sets_cooldown() -> None:
-    """Discuss action sets the discuss cooldown for the session."""
+async def test_discuss_handler_sets_outline_pending() -> None:
+    """Discuss action marks the session outline-pending."""
     from untether.telegram.commands.claude_control import ClaudeControlCommand
 
     runner = ClaudeRunner(claude_cmd="claude")
@@ -1106,8 +1024,8 @@ async def test_discuss_handler_sets_cooldown() -> None:
     cmd = ClaudeControlCommand()
     await cmd.handle(ctx)
 
-    # Cooldown should be set for the session
-    assert session_id in _DISCUSS_COOLDOWN
+    # Session should be marked outline-pending
+    assert session_id in _OUTLINE_PENDING
 
 
 @pytest.mark.anyio
@@ -1123,8 +1041,7 @@ async def test_chat_action_hold_open_sends_deny() -> None:
     _SESSION_STDIN[session_id] = fake_stdin
     _REQUEST_TO_SESSION["req-chat"] = session_id
     _REQUEST_TO_INPUT["req-chat"] = {}
-    set_discuss_cooldown(session_id)
-    _OUTLINE_PENDING.add(session_id)
+    mark_outline_pending(session_id)
 
     from untether.commands import CommandContext
     from untether.transport import MessageRef
@@ -1155,8 +1072,7 @@ async def test_chat_action_hold_open_sends_deny() -> None:
     assert inner["behavior"] == "deny"
     assert "discuss" in inner["message"].lower()
 
-    # Should clear cooldown and outline_pending
-    assert session_id not in _DISCUSS_COOLDOWN
+    # Should clear outline_pending
     assert session_id not in _OUTLINE_PENDING
 
     # Result should mention discuss
@@ -1165,8 +1081,8 @@ async def test_chat_action_hold_open_sends_deny() -> None:
 
 
 @pytest.mark.anyio
-async def test_approve_handler_clears_cooldown() -> None:
-    """Approve action clears any discuss cooldown for the session."""
+async def test_approve_handler_clears_outline_pending() -> None:
+    """Approve action clears outline-pending state for the session."""
     from untether.telegram.commands.claude_control import ClaudeControlCommand
 
     runner = ClaudeRunner(claude_cmd="claude")
@@ -1178,9 +1094,9 @@ async def test_approve_handler_clears_cooldown() -> None:
     _REQUEST_TO_SESSION["req-approve-cd"] = session_id
     _REQUEST_TO_INPUT["req-approve-cd"] = {}
 
-    # Pre-set a cooldown
-    set_discuss_cooldown(session_id)
-    assert session_id in _DISCUSS_COOLDOWN
+    # Pre-set outline-pending
+    mark_outline_pending(session_id)
+    assert session_id in _OUTLINE_PENDING
 
     from untether.commands import CommandContext
     from untether.transport import MessageRef
@@ -1202,60 +1118,13 @@ async def test_approve_handler_clears_cooldown() -> None:
     cmd = ClaudeControlCommand()
     await cmd.handle(ctx)
 
-    # Cooldown should be cleared
-    assert session_id not in _DISCUSS_COOLDOWN
+    # Outline-pending should be cleared
+    assert session_id not in _OUTLINE_PENDING
 
 
-# ===========================================================================
-# I. Progressive Cooldown Timing
-# ===========================================================================
-
-
-def test_progressive_cooldown_increases_with_count() -> None:
-    """Cooldown duration increases with each discuss click: 30s, 60s, 90s, 120s."""
-    from untether.runners.claude import _cooldown_seconds
-
-    assert _cooldown_seconds(1) == 30.0
-    assert _cooldown_seconds(2) == 60.0
-    assert _cooldown_seconds(3) == 90.0
-    assert _cooldown_seconds(4) == 120.0
-    # Capped at 120s
-    assert _cooldown_seconds(5) == 120.0
-    assert _cooldown_seconds(10) == 120.0
-
-
-def test_progressive_cooldown_escalation_message_content() -> None:
-    """Escalation message tells Claude Code to wait for button approval."""
-    set_discuss_cooldown("sess-prog-1")
-    set_discuss_cooldown("sess-prog-1")  # count=2 -> 60s
-
-    msg = check_discuss_cooldown("sess-prog-1")
-    assert msg is not None
-    assert "REJECTED" in msg
-    assert "ExitPlanMode" in msg
-
-
-def test_progressive_cooldown_count_preserved_after_expiry() -> None:
-    """After cooldown expires, count is preserved so next click escalates."""
-    import time as _time
-
-    set_discuss_cooldown("sess-prog-2")  # count=1
-    # Expire the cooldown
-    _, count = _DISCUSS_COOLDOWN["sess-prog-2"]
-    _DISCUSS_COOLDOWN["sess-prog-2"] = (
-        _time.time() - DISCUSS_COOLDOWN_BASE_SECONDS - 1,
-        count,
-    )
-    check_discuss_cooldown("sess-prog-2")  # returns None, preserves count
-
-    # Next click should be count=2 (60s cooldown)
-    set_discuss_cooldown("sess-prog-2")
-    _, new_count = _DISCUSS_COOLDOWN["sess-prog-2"]
-    assert new_count == 2
-
-    msg = check_discuss_cooldown("sess-prog-2")
-    assert msg is not None
-    assert "REJECTED" in msg
+# (Section I — Progressive Cooldown Timing — removed by #570: the time-based
+# escalation was a v2.1.72-74 upstream-loop workaround, verified fixed on
+# CLI 2.1.215. The outline gate above is the surviving behaviour.)
 
 
 # ===========================================================================
@@ -1309,13 +1178,14 @@ def test_exit_plan_mode_not_auto_approved_in_plan_mode() -> None:
     assert "req-plan-epm" not in state.auto_approve_queue
 
 
-def test_exit_plan_mode_auto_mode_skips_cooldown() -> None:
-    """Auto mode bypasses discuss cooldown — auto-approves even during cooldown."""
+def test_exit_plan_mode_auto_mode_skips_outline_gate() -> None:
+    """Auto mode bypasses the outline gate — auto-approves even when the
+    session is outline-pending."""
     state, factory = _make_state_with_session("sess-auto-cd")
     state.auto_approve_exit_plan_mode = True
 
-    # Set a discuss cooldown for this session
-    set_discuss_cooldown("sess-auto-cd")
+    # Mark the session outline-pending
+    mark_outline_pending("sess-auto-cd")
 
     event = _decode_event(
         {
@@ -1908,7 +1778,7 @@ async def test_deny_non_exit_plan_mode_uses_generic_message() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Cancel cleanup (stale outline_guard / cooldown after cancel + resume)
+# Cancel cleanup (stale outline_guard after cancel + resume)
 # ---------------------------------------------------------------------------
 
 
@@ -1925,7 +1795,7 @@ class TestCancelCleanup:
         _SESSION_STDIN[sid] = AsyncMock()
         _REQUEST_TO_SESSION["req-a"] = sid
         _REQUEST_TO_SESSION["req-b"] = sid
-        set_discuss_cooldown(sid)  # sets _DISCUSS_COOLDOWN + _OUTLINE_PENDING
+        mark_outline_pending(sid)
         _DISCUSS_APPROVED.add(sid)
 
         _cleanup_session_registries(sid)
@@ -1934,7 +1804,6 @@ class TestCancelCleanup:
         assert sid not in _SESSION_STDIN
         assert "req-a" not in _REQUEST_TO_SESSION
         assert "req-b" not in _REQUEST_TO_SESSION
-        assert sid not in _DISCUSS_COOLDOWN
         assert sid not in _DISCUSS_APPROVED
         assert sid not in _OUTLINE_PENDING
 
@@ -1951,16 +1820,14 @@ class TestCancelCleanup:
 
         _ACTIVE_RUNNERS[sid] = (runner, 0.0)
         _SESSION_STDIN[sid] = AsyncMock()
-        set_discuss_cooldown(sid)
+        mark_outline_pending(sid)
 
         assert sid in _OUTLINE_PENDING
-        assert check_discuss_cooldown(sid) is not None
 
         # Simulates the finally block running on cancel
         _cleanup_session_registries(sid)
 
         assert sid not in _OUTLINE_PENDING
-        assert check_discuss_cooldown(sid) is None
 
     def test_resumed_session_no_stale_outline_guard(self):
         """After cleanup, a resumed session should not see outline_guard=True."""
@@ -1970,8 +1837,7 @@ class TestCancelCleanup:
         # Set up stale state (as if Pause & Outline was clicked before cancel)
         _ACTIVE_RUNNERS[sid] = (runner, 0.0)
         _SESSION_STDIN[sid] = AsyncMock()
-        set_discuss_cooldown(sid)
-        _OUTLINE_PENDING.add(sid)
+        mark_outline_pending(sid)
 
         # Cancel triggers cleanup
         _cleanup_session_registries(sid)

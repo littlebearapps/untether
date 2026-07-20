@@ -3,13 +3,13 @@ name: claude-stream-json
 description: >
   Claude Code CLI stream-json protocol as consumed by Untether.
   Covers JSONL event types, content blocks, control channel protocol,
-  permission modes, auto-approve, progressive cooldown, and ExitPlanMode handling.
+  permission modes, auto-approve, the outline gate, and ExitPlanMode handling.
   This is the CONSUMER side — Untether spawns Claude Code as a subprocess.
 triggers:
   - working on Claude runner code
   - modifying control channel handling
   - changing permission request logic
-  - working on auto-approve or cooldown
+  - working on auto-approve or the outline gate
   - debugging Claude Code event streams
   - modifying ExitPlanMode or plan mode handling
 ---
@@ -196,22 +196,17 @@ When Claude requests `ExitPlanMode`:
 2. "Pause & Outline Plan" sends a deny with a detailed message asking Claude to write a step-by-step plan
 3. After outline is written, post-outline buttons appear: **Approve Plan** / **Deny** / **Let's discuss**
 4. "Let's discuss" sends a deny asking Claude to discuss the plan (action: `chat`)
-5. Progressive cooldown on rapid retries: 30s, 60s, 90s, 120s (capped)
+5. Text-based outline gate: retries without written outline text are auto-denied
 
-### Progressive cooldown
+### Outline gate (#570 retired the progressive cooldown)
 
-```python
-# In ClaudeRunner
-_discuss_deny_count: int = 0          # escalates per click
-_discuss_last_at: float = 0.0         # timestamp of last discuss/auto-deny
-_DISCUSS_BASE_COOLDOWN_S = 30         # base cooldown
-_DISCUSS_MAX_COOLDOWN_S = 120         # cap
-```
-
-- After "Pause & Outline Plan", auto-deny rapid ExitPlanMode retries within cooldown window
-- Cooldown: `min(base * count, max)` seconds
-- Deny count preserved across expiry (keeps escalating)
-- Resets on explicit Approve or Deny
+- After "Pause & Outline Plan", `mark_outline_pending(session_id)` arms a
+  purely TEXT-based gate: ExitPlanMode is auto-denied until
+  `max_text_len_since_cooldown >= _OUTLINE_MIN_CHARS` (200), then held open
+  behind synthetic Approve/Deny buttons
+- The former time-based progressive cooldown (30/60/90/120s escalation) was a
+  workaround for the v2.1.72–74 immediate-retry-after-denial loop — verified
+  fixed on CLI 2.1.215 and removed (#570)
 
 ## Early callback answering
 

@@ -382,6 +382,60 @@ def _format_auto_continue_notice(auto_continued_count: int) -> str:
     return notice
 
 
+def _format_stream_idle_retry_notice(retried_count: int) -> str:
+    """#572: notice shown when a Type-A stream-idle timeout auto-retries.
+    Mirrors :func:`_format_auto_continue_notice` — the 🔁 prefix signals
+    recovery, not failure, so users don't ``/cancel`` the salvage."""
+    notice = (
+        "\U0001f501 Stream stalled mid-generation (upstream API) — "
+        "resuming automatically…"
+    )
+    if retried_count > 0:
+        notice += f" (attempt {retried_count + 1})"
+    return notice
+
+
+def _stream_idle_retry_budget_blocked(usage: dict[str, Any] | None) -> bool:
+    """#572: read-only cost-budget guard for the Type-A auto-retry.
+
+    True when the failed run's cost already trips the per-run cap or the
+    daily total has reached the per-day cap — an automatic retry must not
+    spend past a limit the user explicitly set. Deliberately read-only:
+    ``record_run_cost`` stays with ``_check_cost_budget`` on the delivery
+    path so the failed run's cost is not double-counted.
+    """
+    try:
+        from .cost_tracker import CostBudget, check_run_budget
+        from .runners.run_options import get_run_options
+        from .settings import load_settings_if_exists
+
+        result = load_settings_if_exists()
+        if result is None:
+            return False
+        settings, _ = result
+        budget_cfg = settings.cost_budget
+        run_options = get_run_options()
+        if run_options is not None and run_options.budget_enabled is not None:
+            budget_enabled = run_options.budget_enabled
+        else:
+            budget_enabled = budget_cfg.enabled
+        if not budget_enabled:
+            return False
+        cost = float((usage or {}).get("total_cost_usd") or 0.0)
+        budget = CostBudget(
+            max_cost_per_run=budget_cfg.max_cost_per_run,
+            max_cost_per_day=budget_cfg.max_cost_per_day,
+            warn_at_pct=budget_cfg.warn_at_pct,
+            auto_cancel=False,
+        )
+        alert = check_run_budget(cost, budget)
+        return getattr(alert, "level", None) == "exceeded"
+    except Exception:  # noqa: BLE001 — match _check_cost_budget's fail-open
+        # posture; the retry is bounded to stream_idle_max_retries anyway.
+        logger.warning("stream_idle_retry.budget_check_failed", exc_info=True)
+        return False
+
+
 _DEFAULT_PREAMBLE = (
     "[Untether] You are running via Untether, a Telegram bridge for coding agents. "
     "The user is interacting through Telegram on a mobile device.\n\n"
@@ -3230,6 +3284,7 @@ async def handle_message(
     quarantine_store: QuarantineStore | None = None,
     _auto_continued_count: int = 0,
     _empty_resent_count: int = 0,
+    _stream_idle_retried_count: int = 0,
 ) -> None:
     logger.info(
         "handle.incoming",
@@ -4192,10 +4247,12 @@ async def handle_message(
             # #631 (T6): thread the resolved store through so an
             # injected/singleton store survives this recursive re-entry.
             quarantine_store=_qstore,
-            # Carry BOTH recovery counters so an alternating empty-resume ↔
-            # auto-continue chain can't reset the other guard and loop.
+            # Carry ALL recovery counters so an alternating empty-resume ↔
+            # auto-continue ↔ stream-idle-retry chain can't reset another
+            # guard and loop.
             _auto_continued_count=_auto_continued_count,
             _empty_resent_count=_empty_resent_count + 1,
+            _stream_idle_retried_count=_stream_idle_retried_count,
         )
         return
     # --- End auto-resend ---
@@ -4341,12 +4398,95 @@ async def handle_message(
             # injected/singleton store survives this recursive re-entry.
             quarantine_store=_qstore,
             _auto_continued_count=_auto_continued_count + 1,
-            # Carry the empty-resume guard so it can't be reset by an
-            # interleaved auto-continue (see #596 auto-resend).
+            # Carry the other recovery guards so they can't be reset by an
+            # interleaved auto-continue (see #596 auto-resend / #572 retry).
             _empty_resent_count=_empty_resent_count,
+            _stream_idle_retried_count=_stream_idle_retried_count,
         )
         return
     # --- End auto-continue ---
+
+    # --- #572: bounded auto-retry for Type-A stream-idle timeouts ---
+    # A Type-A failure is a mid-generation SSE stall after real output began
+    # (#438: num_turns >= 1, duration_api_ms > 0) — transient upstream flake.
+    # When [watchdog] stream_idle_auto_retry is on (default OFF), auto-resume
+    # the session instead of surfacing a terminal error with only a "raise
+    # the timeout" hint. Type-B (cold-start zero-byte stall) NEVER retries —
+    # retrying hammers a down API. Error finals ride the post-return path
+    # (the #591 early delivery is ok=True-only), so returning here fully
+    # suppresses the terminal error message. The retry re-enters
+    # handle_message as a normal resumed run — quarantine divert, session-
+    # owner serialisation, RAM guard and per-run budget checks all apply to
+    # it exactly as to a user-initiated run.
+    _si_ws = _load_watchdog_settings()
+    _si_es = getattr(edits.stream, "engine_state", None) if edits.stream else None
+    _si_class = getattr(_si_es, "stream_idle_class", None)
+    _si_resume = completed.resume or outcome.resume
+    _si_rc = edits.stream.proc_returncode if edits.stream else None
+    _si_max = getattr(_si_ws, "stream_idle_max_retries", 1) if _si_ws else 1
+    if (
+        _si_ws is not None
+        and getattr(_si_ws, "stream_idle_auto_retry", False)
+        and _si_class == "type_a"
+        and run_ok is False
+        and not outcome.cancelled
+        and not final_delivery["sent"]
+        and _si_resume is not None
+        and _stream_idle_retried_count < _si_max
+        and not _is_signal_death(_si_rc)
+        and not _stream_idle_retry_budget_blocked(completed.usage)
+    ):
+        logger.warning(
+            "claude.stream_idle.auto_retry",
+            session_id=_si_resume.value,
+            engine=runner.engine,
+            attempt=_stream_idle_retried_count + 1,
+            max_retries=_si_max,
+            proc_returncode=_si_rc,
+            num_turns=(completed.usage or {}).get("num_turns"),
+            duration_api_ms=(completed.usage or {}).get("duration_api_ms"),
+            total_cost_usd=(completed.usage or {}).get("total_cost_usd"),
+        )
+        notice_msg = RenderedMessage(
+            text=_format_stream_idle_retry_notice(_stream_idle_retried_count),
+            extra={},
+        )
+        await cfg.transport.send(
+            channel_id=incoming.channel_id,
+            message=notice_msg,
+            options=SendOptions(
+                reply_to=user_ref,
+                notify=True,
+                thread_id=incoming.thread_id,
+            ),
+        )
+        await handle_message(
+            cfg,
+            runner=runner,
+            incoming=IncomingMessage(
+                channel_id=incoming.channel_id,
+                message_id=incoming.message_id,
+                text="continue",
+                reply_to=incoming.reply_to,
+                thread_id=incoming.thread_id,
+            ),
+            resume_token=_si_resume,
+            context=context,
+            context_line=context_line,
+            strip_resume_line=strip_resume_line,
+            running_tasks=running_tasks,
+            on_thread_known=on_thread_known,
+            on_resume_failed=on_resume_failed,
+            clock=clock,
+            quarantine_store=_qstore,
+            # Carry the other recovery counters so an alternating chain
+            # can't reset another guard and loop.
+            _auto_continued_count=_auto_continued_count,
+            _empty_resent_count=_empty_resent_count,
+            _stream_idle_retried_count=_stream_idle_retried_count + 1,
+        )
+        return
+    # --- End #572 stream-idle auto-retry ---
 
     # #591: deliver the final answer unless the early path already did.
     if not final_delivery["sent"]:

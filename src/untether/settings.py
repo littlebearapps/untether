@@ -161,6 +161,11 @@ class TelegramTransportSettings(BaseModel):
     # tracebacks/structlog. Access the raw value via .get_secret_value() at the
     # transport boundary (telegram/loop.py before passing to OpenAI SDK).
     voice_transcription_api_key: SecretStr | None = None
+    # #638: optional ISO-639-1 language hint passed to the transcription API.
+    # Unset = provider auto-detect (the pre-#638 behaviour). Pinning e.g. "en"
+    # stops Whisper-family models mis-guessing the language on short
+    # utterances ('Continue' → '계속').
+    voice_transcription_language: NonEmptyStr | None = None
     voice_show_transcription: bool = True
     # #381: optional SSRF allowlist (CIDR / bare-IP strings) for
     # voice_transcription_base_url — lets operators opt in to private endpoints
@@ -219,6 +224,26 @@ class TelegramTransportSettings(BaseModel):
                 "be sent in an HTTP Authorization header"
             ) from exc
         return SecretStr(key)
+
+    @field_validator("voice_transcription_language", mode="after")
+    @classmethod
+    def _validate_voice_language(cls, v: str | None) -> str | None:
+        """#638: normalise + validate the language hint at config parse time
+        (same fail-fast precedent as timezone names in triggers/settings.py).
+        Whisper-family APIs take an ISO-639-1 code ("en", "de"); accept 2-3
+        lowercase letters after stripping/lowercasing so a typo like
+        "english" fails at boot, not silently at the API."""
+        if v is None:
+            return None
+        code = v.strip().lower()
+        if not code:
+            return None
+        if not (2 <= len(code) <= 3 and code.isalpha() and code.isascii()):
+            raise ValueError(
+                "voice_transcription_language must be an ISO-639-1 code "
+                f"like 'en' (got {v!r})"
+            )
+        return code
 
     @model_validator(mode="after")
     def _validate_voice_base_url_ssrf(self) -> TelegramTransportSettings:
@@ -470,6 +495,18 @@ class WatchdogSettings(BaseModel):
     # stalls (#438) can raise this to 600000-900000 to ride out longer
     # silences before Untether reports the run failed. Range 30s-30min.
     claude_stream_idle_timeout_ms: int = Field(default=300_000, ge=30_000, le=1_800_000)
+
+    # #572: bounded auto-retry for Type-A stream-idle timeouts. Type A is a
+    # mid-generation SSE stall AFTER real output began (num_turns >= 1,
+    # duration_api_ms > 0) — transient upstream flake worth one resume.
+    # Type B (cold-start zero-byte stall) NEVER retries regardless of this
+    # flag: retrying hammers a down API. Default OFF while the upstream
+    # Anthropic API is unstable — a flapping API must not become a retry
+    # storm. The retry re-enters handle_message as a normal resumed run, so
+    # quarantine divert, session-owner serialisation, RAM guard and cost-
+    # budget checks all apply; signal deaths (rc=143/137) are suppressed.
+    stream_idle_auto_retry: bool = False
+    stream_idle_max_retries: int = Field(default=1, ge=1, le=3)
 
     # #333: post-result idle timeout for Claude bidirectional sessions.
     # Claude Code in stream-json + permission-mode keeps stdin open after
