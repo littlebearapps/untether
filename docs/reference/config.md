@@ -87,6 +87,7 @@ systemctl --user restart untether-dev    # dev
 | `voice_transcription_model` | string | `"gpt-4o-mini-transcribe"` | OpenAI transcription model name. |
 | `voice_transcription_base_url` | string\|null | `null` | Override base URL for voice transcription only. |
 | `voice_transcription_api_key` | string\|null | `null` | Override API key for voice transcription only. |
+| `voice_transcription_language` | string\|null | `null` | ([#638](https://github.com/littlebearapps/untether/issues/638)) Optional ISO-639-1 language hint (e.g. `"en"`) passed to the Whisper `language` param — stops wrong-language guesses on short voice notes. Unset = provider auto-detect. Hot-reloadable. |
 | `session_mode` | `"stateless"`\|`"chat"` | `"stateless"` | 🔄 Auto-resume mode. See [workflow modes](modes.md) — `"chat"` for assistant/workspace, `"stateless"` for handoff. Restart-required. |
 | `show_resume_line` | bool | `true` | Show resume line in message footer. See [workflow modes](modes.md) — `false` for assistant/workspace, `true` for handoff. |
 

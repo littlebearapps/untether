@@ -95,22 +95,18 @@ For long outlines that span multiple messages, **Approve Plan / Let's discuss / 
 - Tap **Deny** to stop Claude Code and provide different direction
 - Tap **Let's discuss** to talk about the plan before deciding — Claude Code will ask what you'd like to change and wait for your reply
 
-## Progressive cooldown
+## The outline gate
 
-After you tap "Pause & Outline Plan", the ExitPlanMode request is held open — Claude Code stays alive while you read the outline. A cooldown window prevents Claude Code from immediately retrying:
+After you tap "Pause & Outline Plan", Untether gates ExitPlanMode until it has a readable outline to show you:
 
-| Click count | Cooldown |
-|-------------|----------|
-| 1st | 30 seconds |
-| 2nd | 60 seconds |
-| 3rd | 90 seconds |
-| 4th+ | 120 seconds (maximum) |
+- On current Claude Code CLIs the plan body arrives with the ExitPlanMode call itself, so the very next attempt is **held open** — the plan is posted to the chat and Claude Code stays alive while you read it.
+- If Claude Code retries **without** providing an outline (no plan body and no substantial chat text), the attempt is automatically denied with an instruction to write the outline first.
 
-During the cooldown, any ExitPlanMode attempt is automatically denied, but **Approve Plan / Let's discuss / Deny buttons** are shown in Telegram so you can act as soon as you've read the outline. The cooldown resets when you explicitly Approve or Deny.
+Either way, **Approve Plan / Let's discuss / Deny buttons** appear in Telegram so you can act as soon as you've read the outline. This keeps the agent from bulldozing through when you've asked it to slow down and explain its approach, while still giving you a one-tap way to approve once you're satisfied.
 
-This prevents the agent from bulldozing through when you've asked it to slow down and explain its approach, while still giving you a one-tap way to approve once you're satisfied.
+*(Earlier versions also enforced a 30–120s escalating cooldown here — a workaround for a Claude Code v2.1.72-2.1.74 retry loop that was fixed upstream and retired in v0.35.4.)*
 
-<img src="../assets/screenshots/cooldown-auto-deny.jpg" alt="Auto-denied ExitPlanMode during cooldown with Approve Plan / Deny buttons" width="360" loading="lazy" />
+<img src="../assets/screenshots/cooldown-auto-deny.jpg" alt="Auto-denied ExitPlanMode (no outline yet) with Approve Plan / Deny buttons" width="360" loading="lazy" />
 
 <div markdown>
 

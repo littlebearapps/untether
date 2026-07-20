@@ -211,7 +211,7 @@ Discovery: `importlib.metadata.entry_points(group="untether.engine_backends")`
 | File | Commands |
 |------|----------|
 | `dispatch.py` | Callback dispatch, early answering, ephemeral registration |
-| `claude_control.py` | Approve/Deny/Discuss handlers, cooldown wiring |
+| `claude_control.py` | Approve/Deny/Discuss handlers, outline-gate wiring |
 | `planmode.py` | `/planmode` toggle |
 | `usage.py` | `/usage` — Claude Code API usage |
 | `model.py` | `/model` override |
