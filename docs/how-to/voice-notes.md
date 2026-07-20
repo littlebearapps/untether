@@ -13,6 +13,7 @@ Dictate coding tasks hands-free — while walking, driving, or away from a keybo
     # local OpenAI-compatible transcription server (optional)
     untether config set transports.telegram.voice_transcription_base_url "http://localhost:8000/v1"
     untether config set transports.telegram.voice_transcription_api_key "local"
+    untether config set transports.telegram.voice_transcription_language "en"
     ```
 
 === "toml"
@@ -23,6 +24,7 @@ Dictate coding tasks hands-free — while walking, driving, or away from a keybo
     voice_transcription_model = "gpt-4o-mini-transcribe" # optional
     voice_transcription_base_url = "http://localhost:8000/v1" # optional
     voice_transcription_api_key = "local" # optional
+    voice_transcription_language = "en" # optional ISO-639-1 hint — stops wrong-language guesses on short notes
     ```
 
 Set `OPENAI_API_KEY` in your environment (or `voice_transcription_api_key` in config).
