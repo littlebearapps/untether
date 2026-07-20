@@ -7702,21 +7702,18 @@ def test_640_signal_deaths_are_not_auto_continued(rc: int) -> None:
     assert _ac(rc) is False
 
 
-@pytest.mark.anyio
-async def test_640_claude_runner_records_proc_returncode() -> None:
-    """The actual defect: ClaudeRunner.run_impl must write the return code back
-    onto the stream state, exactly as the base runner does at runner.py:1362.
-    Without this every rc-based gate downstream is a no-op."""
-    import inspect
-
-    from untether.runners import claude as claude_mod
-
-    src = inspect.getsource(claude_mod.ClaudeRunner.run_impl)
-    assert "stream.proc_returncode = rc" in src, (
-        "ClaudeRunner.run_impl must assign stream.proc_returncode — without it "
-        "_is_signal_death() always sees None and auto-continue can resume a "
-        "SIGTERM'd (poisoned) session. See #640."
-    )
+# NOTE: the former `test_640_claude_runner_records_proc_returncode` lived here
+# and asserted the literal string "stream.proc_returncode = rc" appeared in
+# `ClaudeRunner.run_impl`'s source. It never executed the code, so it could
+# not distinguish "the assignment runs" from "the assignment is present but
+# unreachable" — and it coupled the suite to implementation wording.
+#
+# Real runtime coverage now lives in tests/test_noop_resume_harness.py:
+#   test_harness_640_signal_death_suppresses_auto_continue
+#   test_harness_640_clean_exit_auto_continues_with_integer_returncode
+# a paired pair of scenarios differing ONLY in exit path, driven through the
+# real spawn/PTY/msgspec pipeline. Both were verified to FAIL when the
+# assignment at runners/claude.py is removed (mutation-checked, 2026-07-20).
 
 
 # ---------------------------------------------------------------------------

@@ -412,3 +412,305 @@ async def test_harness_w4_diverts_fresh_when_prior_owner_will_not_hand_off(
         c["message"].text for c in transport.edit_calls + transport.send_calls
     )
     assert "Fresh answer." in all_text
+
+
+# ---------------------------------------------------------------------------
+# #640 — auto-continue signal-death suppression
+#
+# The two tests below are a PAIR and only mean something together. They drive
+# the IDENTICAL frame sequence (init -> assistant tool_use -> user tool_result,
+# and deliberately no `result` frame) through the real ClaudeRunner spawn
+# pipeline, differing ONLY in the exit path: signal death vs rc=0.
+#
+# Pre-fix, `ClaudeRunner.run_impl` never wrote `stream.proc_returncode` back
+# (it was assigned only in the base runner), so the bridge always read `None`,
+# `_is_signal_death(None)` returned False, and BOTH of these would have
+# auto-continued. Post-fix only the clean-exit twin does.
+#
+# Prior coverage for #640 was a source-text grep for the literal string
+# "stream.proc_returncode = rc" — it never executed the code. These do.
+# ---------------------------------------------------------------------------
+
+
+def _joined_text(transport: FakeTransport) -> str:
+    return " ".join(
+        c["message"].text for c in transport.edit_calls + transport.send_calls
+    )
+
+
+@pytest.mark.anyio
+async def test_harness_640_signal_death_suppresses_auto_continue(
+    monkeypatch, quarantine_store
+) -> None:
+    """#640: a Claude subprocess that dies by SIGNAL after emitting a
+    tool_result must NOT be auto-continued.
+
+    This is the death-spiral guard #589 relied on. Fleet evidence on nsd (14
+    days) showed it never fired: correlating each `session.auto_continue` with
+    the preceding `subprocess.exit` gave {rc=0: 47, rc=143: 2} — two
+    auto-continues straight after a SIGTERM.
+    """
+    import untether.runner_bridge as rb
+    from untether.runner_bridge import _is_signal_death, _should_auto_continue
+    from untether.settings import AutoContinueSettings
+
+    monkeypatch.setenv("FAKE_CLAUDE_SCENARIO", "tool_result_then_sigterm")
+    monkeypatch.delenv("FAKE_CLAUDE_LINGER_S", raising=False)
+    monkeypatch.setattr(
+        rb,
+        "_load_auto_continue_settings",
+        lambda: AutoContinueSettings(enabled=True, max_retries=1),
+    )
+
+    transport = FakeTransport()
+    runner = _harness_runner()
+    cfg = ExecBridgeConfig(
+        transport=transport, presenter=MarkdownPresenter(), final_notify=False
+    )
+
+    with capture_logs() as logs:
+        await _run_bounded(
+            handle_message(
+                cfg,
+                runner=runner,
+                # No resume token: the fake CLI branches on `--resume`, so the
+                # first leg gets the tool_result sequence and any auto-continue
+                # re-entry would arrive WITH --resume and return the
+                # UNEXPECTED-AUTO-CONTINUE marker asserted against below.
+                incoming=IncomingMessage(channel_id=99, message_id=1, text="go"),
+                resume_token=None,
+            )
+        )
+
+    # (a) The fix actually landed at runtime: a real signal-death return code
+    # reached the stream state. Pre-fix this field was None for every Claude
+    # run, which is the whole defect.
+    exits = [r for r in logs if r.get("event") == "subprocess.exit"]
+    assert exits, "no subprocess.exit was recorded"
+    rc = exits[-1].get("rc")
+    assert rc is not None, "proc_returncode is None — #640 regression"
+    assert _is_signal_death(rc), f"expected a signal death, observed rc={rc!r}"
+
+    # (b) No auto-continue fired.
+    assert not [r for r in logs if r.get("event") == "session.auto_continue"], (
+        "auto-continue fired after a signal death — #640 guard is inert"
+    )
+
+    # (c) Exactly one spawn: the run was never re-entered.
+    assert sum(1 for r in logs if r.get("event") == "subprocess.spawn") == 1
+
+    # (d) The marker the fake CLI emits ONLY on a wrongly-fired auto-continue
+    # never reached the user — a loud check that (b) isn't just a miscount.
+    assert "UNEXPECTED-AUTO-CONTINUE" not in _joined_text(transport)
+
+    # (e) COUNTERFACTUAL — the discriminating assertion. Feed the gate the
+    # values this run actually produced and flip ONLY proc_returncode back to
+    # the pre-fix `None`. If the gate would have auto-continued then but does
+    # not now, the return-code capture is provably what suppresses it — this
+    # rules out a false pass where some earlier arm (cancelled / non-"user"
+    # last_event_type / falsy resume) did the suppressing instead.
+    summary = [r for r in logs if r.get("event") == "session.summary"]
+    assert summary, "no session.summary recorded"
+    observed_last_event = summary[-1].get("last_event_type")
+    assert observed_last_event == "user", (
+        f"scenario did not end on a user/tool_result frame (got "
+        f"{observed_last_event!r}) — the gate would short-circuit before the "
+        "signal-death arm and this test would pass for the wrong reason"
+    )
+    gate_kwargs = {
+        "last_event_type": observed_last_event,
+        "engine": "claude",
+        "cancelled": False,
+        "resume_value": "sid-observed",
+        "auto_continued_count": 0,
+        "max_retries": 1,
+    }
+    assert _should_auto_continue(**gate_kwargs, proc_returncode=None) is True, (
+        "pre-fix baseline is wrong: with proc_returncode=None the gate should "
+        "have allowed auto-continue"
+    )
+    assert _should_auto_continue(**gate_kwargs, proc_returncode=rc) is False
+
+
+@pytest.mark.anyio
+async def test_harness_640_clean_exit_auto_continues_with_integer_returncode(
+    monkeypatch, quarantine_store
+) -> None:
+    """#640 positive control: identical frames to the sigterm twin, rc=0.
+
+    Proves the frame sequence alone DOES drive auto-continue, so the twin's
+    silence is attributable to the exit path and nothing else. Also asserts
+    the logged `proc_returncode` is the integer 0 rather than `None` — that
+    field being None was the entire defect, and it is now visible in
+    journalctl instead of requiring log-line correlation (issue item 3).
+    """
+    import untether.runner_bridge as rb
+    from untether.settings import AutoContinueSettings
+
+    monkeypatch.setenv("FAKE_CLAUDE_SCENARIO", "tool_result_then_clean_exit")
+    monkeypatch.delenv("FAKE_CLAUDE_LINGER_S", raising=False)
+    monkeypatch.setattr(
+        rb,
+        "_load_auto_continue_settings",
+        lambda: AutoContinueSettings(enabled=True, max_retries=1),
+    )
+
+    transport = FakeTransport()
+    runner = _harness_runner()
+    cfg = ExecBridgeConfig(
+        transport=transport, presenter=MarkdownPresenter(), final_notify=False
+    )
+
+    with capture_logs() as logs:
+        await _run_bounded(
+            handle_message(
+                cfg,
+                runner=runner,
+                incoming=IncomingMessage(channel_id=99, message_id=2, text="go"),
+                resume_token=None,
+            )
+        )
+
+    ac = [r for r in logs if r.get("event") == "session.auto_continue"]
+    assert len(ac) == 1, f"expected exactly one auto-continue, got {len(ac)}"
+    assert ac[0].get("last_event_type") == "user"
+    # The heart of #640: an integer, never None.
+    assert ac[0].get("proc_returncode") == 0
+    assert isinstance(ac[0].get("proc_returncode"), int)
+
+    # Two spawns: the original leg plus the auto-continue re-entry.
+    assert sum(1 for r in logs if r.get("event") == "subprocess.spawn") == 2
+    assert "Continued after tool result." in _joined_text(transport)
+
+
+@pytest.mark.anyio
+async def test_harness_633_handoff_waits_on_owner_with_real_background_handles(
+    monkeypatch, quarantine_store
+) -> None:
+    """#633/#647: the handoff wait must SEE real background work.
+
+    Closes a specific coverage gap: every existing bridge test for #633
+    monkeypatches ``wait_for_session_handoff``, and the unit tests in
+    test_exec_runner.py hand-insert into ``_SESSION_STDIN`` without ever
+    touching ``_SESSION_BG_STATE``. So nothing exercised the real
+    ``_register_background_handle`` -> ``session_live_bg_count`` ->
+    ``session.handoff_wait(live_bg_count=N)`` chain, and a regression in that
+    bookkeeping would have gone unnoticed.
+
+    Everything here is production code except the two registry entries, which
+    stand in for a prior subprocess that ``run_impl`` would have registered on
+    its first StartedEvent and which is still alive in post-result limbo.
+
+    This is the deterministic counterpart to the live repro: chasing the
+    live window proved unreliable because the lingering owner exits within
+    ~20ms of the follow-up being received (Telegram long-poll latency is
+    5-30s and swamps it), so criteria 1-2 are pinned down here instead.
+    """
+    import untether.runner_bridge as rb
+    from untether.runners import claude as claude_mod
+    from untether.schemas.claude import StreamToolUseBlock
+    from untether.settings import AutoContinueSettings
+
+    monkeypatch.setenv("FAKE_CLAUDE_SCENARIO", "healthy_resume")
+    monkeypatch.delenv("FAKE_CLAUDE_LINGER_S", raising=False)
+    monkeypatch.setattr(
+        rb,
+        "_load_auto_continue_settings",
+        lambda: AutoContinueSettings(
+            serialize_session_owner=True,
+            session_handoff_timeout_s=1.0,
+            session_handoff_bg_timeout_s=2.0,
+        ),
+    )
+
+    sid = "sess-633-real-bg"
+    state = claude_mod.ClaudeStreamState()
+    # Register TWO genuine background handles through the production
+    # registrar, exactly as a tool_use frame would.
+    for tool_id, name, raw in (
+        ("bg-agent-1", "Agent", {"run_in_background": True, "prompt": "survey"}),
+        ("bg-bash-1", "Bash", {"run_in_background": True, "command": "sleep 400"}),
+    ):
+        claude_mod._register_background_handle(
+            state, StreamToolUseBlock(id=tool_id, name=name, input=raw)
+        )
+    assert claude_mod.has_live_background_work(state) is True
+    assert claude_mod.session_live_bg_count(sid) == 0, "not registered yet"
+
+    claude_mod._SESSION_STDIN[sid] = object()
+    claude_mod._SESSION_BG_STATE[sid] = state
+    # The real counter, over the real registry.
+    assert claude_mod.session_live_bg_count(sid) == 2
+
+    transport = FakeTransport()
+    runner = _harness_runner()
+    cfg = ExecBridgeConfig(
+        transport=transport, presenter=MarkdownPresenter(), final_notify=False
+    )
+
+    try:
+        with capture_logs() as logs:
+            await _run_bounded(
+                handle_message(
+                    cfg,
+                    runner=runner,
+                    incoming=IncomingMessage(
+                        channel_id=99, message_id=3, text="follow up"
+                    ),
+                    resume_token=ResumeToken(engine=CLAUDE_ENGINE, value=sid),
+                ),
+                timeout=20.0,
+            )
+    finally:
+        claude_mod._SESSION_STDIN.pop(sid, None)
+        claude_mod._SESSION_BG_STATE.pop(sid, None)
+
+    # Criterion 1: the wait ran AND saw the real background work.
+    waits = [r for r in logs if r.get("event") == "session.handoff_wait"]
+    assert waits, "handoff wait never ran against a live owner"
+    assert waits[0].get("live_bg_count") == 2, (
+        f"live_bg_count did not reflect the real registered handles: "
+        f"{waits[0].get('live_bg_count')!r}"
+    )
+
+    # Criterion 2: it terminated with a structured outcome and an elapsed time.
+    done = [r for r in logs if r.get("event") == "session.handoff_wait_done"]
+    assert done, "handoff wait never logged completion — possible deadlock"
+    assert done[0].get("outcome") in {"free", "exited", "timed_out"}
+    assert isinstance(done[0].get("elapsed_s"), (int, float))
+
+    # #647: the owner still holds live background work at base timeout, so the
+    # wait is extended rather than silently abandoning the session's context.
+    assert any(
+        r.get("event") == "session.handoff_bg_extended" and r.get("live_bg_count") == 2
+        for r in logs
+    ), "background-aware extension did not engage despite live background work"
+
+    # Bounded, not a deadlock: never two live owners for one sid.
+    assert sum(1 for r in logs if r.get("event") == "subprocess.spawn") <= 1
+
+
+def test_640_should_auto_continue_rc_table() -> None:
+    """#640 acceptance item 4 — the return-code table, as the filer specified.
+
+    Pure-predicate coverage of the gate arm itself, independent of the spawn
+    pipeline. `None` remains eligible by design: it is the documented
+    fail-open for engines that do not thread a return code. For Claude it is
+    now always populated on the normal exit path (see the harness pair above).
+    """
+    from untether.runner_bridge import _should_auto_continue
+
+    base = {
+        "last_event_type": "user",
+        "engine": "claude",
+        "cancelled": False,
+        "resume_value": "sid",
+        "auto_continued_count": 0,
+        "max_retries": 1,
+    }
+    eligible = {0, None}
+    for rc in (0, 1, 128, 137, 143, -9, -15, None):
+        expected = rc in eligible
+        assert _should_auto_continue(**base, proc_returncode=rc) is expected, (
+            f"rc={rc!r} should {'' if expected else 'NOT '}be eligible"
+        )
