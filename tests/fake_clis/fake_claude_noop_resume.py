@@ -250,11 +250,32 @@ def _scenario_resume_survives_sigterm(argv: list[str]) -> int:
     return 0
 
 
+def _scenario_hang_before_result(argv: list[str]) -> int:
+    """#667: emit init + a partial assistant chunk, then hang for
+    FAKE_CLAUDE_LINGER_S WITHOUT ever emitting a result.
+
+    Models a run cancelled mid-flight (/cancel, /new, drain) or dying messily
+    before its first result — the path where ``run_impl`` never reaches its
+    happy-path ``stream.proc_returncode = rc`` assignment. The harness cancels
+    this scenario mid-hang; ``manage_subprocess``'s shielded terminate+reap
+    SIGTERMs it, and the #667 ``finally`` capture must still record the reaped
+    return code onto the stream (so the auto-continue signal-death guard sees a
+    real rc instead of None). Uses DEFAULT SIGTERM handling — unlike
+    ``resume_survives_sigterm`` — so the teardown kills it promptly."""
+    resume = _resume_arg(argv)
+    sid = resume or f"S-fresh-{os.getpid()}"
+    _emit_init(sid)
+    _emit_assistant_text(sid, "working on it")
+    time.sleep(_linger_s())  # hang until cancelled/killed; no result ever emitted
+    return 0
+
+
 _SCENARIOS = {
     "dangling_then_empty_resume": _scenario_dangling_then_empty_resume,
     "linger_then_sigterm_after_result": _scenario_linger_then_sigterm_after_result,
     "healthy_resume": _scenario_healthy_resume,
     "resume_survives_sigterm": _scenario_resume_survives_sigterm,
+    "hang_before_result": _scenario_hang_before_result,
 }
 
 
