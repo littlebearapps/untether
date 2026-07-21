@@ -32,9 +32,9 @@ Each loop records four fields (AT's shape) plus a build **Status**:
 Delivery loops (net-new capability)
   L1   /plan          idea → phased pack under docs/plans/<slug>/ (read-only)      [available]
   L2   /implement     approved phase → feature branch, TDD, stop before PR         [available]
-  L3   /qa            validate a target; drive integ. tiers vs dev bot; attest     [planned P3]
-  L4a  /pr-dev        green + docs → ONE batch PR to dev (→ TestPyPI); may merge dev [planned P3]
-  L4b  /pr-main       release-prep → open dev→master PR → STOP (Nathan merges → PyPI) [planned P3]
+  L3   /qa            validate a target; drive integ. tiers vs dev bot; attest     [available]
+  L4a  /pr-dev        green + docs → ONE batch PR to dev (→ TestPyPI); may merge dev [available]
+  L4b  /pr-main       release-prep → open dev→master PR → STOP (Nathan merges → PyPI) [available]
 
 Production loops (defects)
   L5   /debug         8-step investigate (sweep / targeted) — fleet-aware          [available]
@@ -45,7 +45,12 @@ Continuous improvement
   L8   /kaizen-review weekly propose-only promotion                                [available]
 
 Continuity
-  L9   /handover      H0–H3 interruption stop-state (state-derived)                [planned P4]
+  L9   /handover      H0–H3 interruption stop-state (state-derived)                [available]
+
+Support commands + conventions
+  /docs            escape-hatch: reconcile docs OUTSIDE a PR (default = folded into /pr-dev) [available]
+  /research        reuse the global /research; findings land under docs/findings/  [available]
+  agents           advisory non-authoring reviewers: debug-reviewer / delivery-reviewer / qa-reviewer [available]
 
 Automated (non-agentic — already live)
   A1   untether-issue-watcher daemon (auto:error-report) — 5 hosts, host-tagged
@@ -99,21 +104,21 @@ See `docs/plans/agentic-loops-and-commands/README.md` §7 for the diagram and ra
 - **Output:** in-scope code + tests committed to `feature/<slug>-phase-N`, verified, **stopped before the PR**.
 - **Authority:** code + tests in the approved phase scope only. Refuses multi-phase; never opens the PR (`/pr-dev` does); never widens scope; defect work routes to `/fix`.
 
-### L3 · `/qa` — validate  ·  Status: **planned P3**
+### L3 · `/qa` — validate  ·  Status: **available**
 
 - **Trigger:** "is this validated enough for its risk?" — before a merge, before a release, or a retest after `/fix`.
 - **Driver:** `/qa` implementing `docs/reference/integration-testing.md` (tier definitions + chat IDs + Telegram MCP tools).
 - **Output:** capped (≤5/run) findings routed to `/debug`→`/fix`; on a green release tier, the attestation marker `~/.untether-dev/integration-test-pass-<VERSION>.json`.
 - **Authority:** read + safe local tests + **bounded** live drive of the **allowlisted dev bot only** (defaults to plan/dry-run; `--run` to drive). Never fixes code, merges, tags, releases, or rolls the fleet. Fails closed if the target can't be proven to be the dev bot.
 
-### L4a · `/pr-dev` — finalise → PR to `dev`  ·  Status: **planned P3**
+### L4a · `/pr-dev` — finalise → PR to `dev`  ·  Status: **available**
 
 - **Trigger:** a feature/fix/chore branch at "code + tests done".
 - **Driver:** `/pr-dev` (docs reconciliation folded in as a completion criterion).
 - **Output:** ONE merge-ready PR to `dev` with the table-shaped body; docs/CHANGELOG/FAQ/`## Tests` reconciled inline. Merge → TestPyPI (automatic CI).
 - **Authority:** stage explicit paths; open a PR to `dev`; merge **only** with `--merge` + confirm + base = `dev` (the one merge Claude may do). Never master/tag/release/deploy.
 
-### L4b · `/pr-main` — release-prep → open `dev`→`master` PR, STOP  ·  Status: **planned P3**
+### L4b · `/pr-main` — release-prep → open `dev`→`master` PR, STOP  ·  Status: **available**
 
 - **Trigger:** `dev` is green + ahead of `master` and a stable `X.Y.Z` is decided.
 - **Driver:** `/pr-main`.
@@ -134,12 +139,41 @@ See `docs/plans/agentic-loops-and-commands/README.md` §7 for the diagram and ra
 - **Output:** approval packets → on Accept, a propose-only artefact (pytest/doc/rule draft + GH issue) and the source bullet struck.
 - **Authority:** propose only. Never auto-edits `.claude/rules/`, `hooks.json`, `CLAUDE.md`, or code.
 
-### L9 · `/handover` — interruption stop-state  ·  Status: **planned P4**
+### L9 · `/handover` — interruption stop-state  ·  Status: **available**
 
 - **Trigger:** work genuinely paused/blocked/moving between sessions.
 - **Driver:** `/handover` (state-derived).
 - **Output:** H0 (none) / H1 (inline note) / H2 (`incoming/handovers/<date>-<slug>.md`, gitignored) / H3 (`docs/handovers/<date>-<slug>.md`, committed).
 - **Authority:** derive `complete[]`/`decisions[]`/`next_action` from persisted state (git, test runs, `session_quarantine.json`, logs) — never from chat memory. Default DOWN between levels; routine ends are H0.
+
+---
+
+## Support commands + conventions
+
+Not full loops — helpers the loops lean on.
+
+### `/docs` — reconcile docs outside a PR  ·  Status: **available**
+
+- **Trigger:** documentation drifted with **no code change** to deliver alongside it.
+- **Driver:** `.claude/commands/docs.md`. The default path is `/pr-dev` (docs are folded in as a completion criterion); `/docs` is the escape hatch.
+- **Output:** minimal edits to CHANGELOG / `docs/faq/faq.md` / `CLAUDE.md ## Tests` / `docs/reference/*`.
+- **Authority:** docs only. No code, no PR (a code branch routes to `/pr-dev`), no master/tag/release. FAQ is gate-protected.
+
+### `/research` + `docs/findings/` — current-truth convention  ·  Status: **available**
+
+- **Trigger:** a provider/API/current-truth question that must not be answered from memory (the research gate in `/plan`, `/debug`, `/qa`).
+- **Driver:** the **global** `/research` command (Untether ships no research loop of its own).
+- **Output:** a cited note under `docs/findings/<date>-<slug>.md` (committed). Packs/reports **cite** it; they never restate it. See `docs/findings/README.md`.
+
+### Advisory reviewer agents (non-authoring)  ·  Status: **available**
+
+Read-only, verdict-returning reviewers under `.claude/agents/`, invoked via the Agent tool. They surface gaps; they author nothing (no edits, no filing, no merge).
+
+| Agent | Reviews | Reject-on |
+|---|---|---|
+| `debug-reviewer` | a `/debug`/`/fix` hand-off (Debug Report + fix) | symptom-not-root-cause, un-falsifiable verification, co-batched high-risk state machines |
+| `delivery-reviewer` | a `/pr-dev`/`/pr-main` hand-off | wrong PR base, red locally, missing docs completion, any master-merge/tag/release boundary crossed |
+| `qa-reviewer` | a `/qa` run | non-dev-bot target, unbounded drive, hand-written/non-green marker, authority escalation |
 
 ---
 

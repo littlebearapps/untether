@@ -84,6 +84,11 @@ pushing on. Record the redirect in the run summary.
 | `/kaizen` | no (one comment) | no | no | no |
 | `/kaizen-review` | no (propose-only) | no | no | no |
 | `/handover` | handover doc only | no | no | no |
+| `/docs` | docs only (outside a PR) | no | no | no |
+
+Advisory reviewer agents (`debug-reviewer` · `delivery-reviewer` · `qa-reviewer`,
+under `.claude/agents/`) are **non-authoring** — read-only verdicts, no code, no
+filing, no merge.
 
 The one action reserved for Nathan across the whole suite: **merging the
 `dev`→`master` PR** (→ auto-tag → PyPI → `fleet-rollout.sh`).
