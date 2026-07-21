@@ -30,8 +30,8 @@ Each loop records four fields (AT's shape) plus a build **Status**:
 
 ```
 Delivery loops (net-new capability)
-  L1   /plan          idea → phased pack under docs/plans/<slug>/ (read-only)      [planned P2]
-  L2   /implement     approved phase → feature branch, TDD, stop before PR         [planned P2]
+  L1   /plan          idea → phased pack under docs/plans/<slug>/ (read-only)      [available]
+  L2   /implement     approved phase → feature branch, TDD, stop before PR         [available]
   L3   /qa            validate a target; drive integ. tiers vs dev bot; attest     [planned P3]
   L4a  /pr-dev        green + docs → ONE batch PR to dev (→ TestPyPI); may merge dev [planned P3]
   L4b  /pr-main       release-prep → open dev→master PR → STOP (Nathan merges → PyPI) [planned P3]
@@ -85,14 +85,14 @@ See `docs/plans/agentic-loops-and-commands/README.md` §7 for the diagram and ra
 - **Output:** per-fix branch off `dev` → PR **to `dev`** with the batch-PR body shape (`Issue | Root cause | Fix | Live verification` + `## Tests`) + `needs-verification`.
 - **Authority:** branch/fix/test/CHANGELOG/PR-to-`dev` only. Runaway-capped (>8 → top 5 + `queued-next-run`; >15 → STOP diagnosis-only). Never batches independent high-risk state machines; never master/tag/release; never closes an unverified fix.
 
-### L1 · `/plan` — scope  ·  Status: **planned P2**
+### L1 · `/plan` — scope  ·  Status: **available**
 
 - **Trigger:** an idea (`incoming/<file>.md` | `#issue` | inline) that is net-new capability, not a defect.
 - **Driver:** `/plan` wrapping `superpowers:brainstorming` + Explore + `feature-dev:code-architect`.
 - **Output:** a phased plan pack under `docs/plans/<slug>/` (index + phase files + reuse map + decisions + progress-tracker). Read-only on code.
 - **Authority:** writes plan docs only, never code. Runs in plan mode by nature.
 
-### L2 · `/implement` — build one phase  ·  Status: **planned P2**
+### L2 · `/implement` — build one phase  ·  Status: **available**
 
 - **Trigger:** one approved phase of an existing plan pack.
 - **Driver:** `/implement` composing `superpowers:executing-plans` + `test-driven-development`.
