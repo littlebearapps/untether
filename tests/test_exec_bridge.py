@@ -7925,11 +7925,20 @@ async def test_633_probe_failure_fails_closed(quarantine_store, monkeypatch) -> 
         )
 
     assert runner.calls[0][1] is None  # went fresh, did not resume
-    assert any(
-        r.get("event") == "session.handoff_check_failed"
-        and r.get("log_level") == "warning"
+    # #668: the failure must be ATTRIBUTABLE — without engine/session/chat the
+    # issue-watcher dedups every chat's probe failure into one indistinguishable
+    # report and there is no way to tell which session lost continuity.
+    failed = [
+        r
         for r in logs
-    ), "a broken ownership probe must be visible, not silently degrade"
+        if r.get("event") == "session.handoff_check_failed"
+        and r.get("log_level") == "warning"
+    ]
+    assert failed, "a broken ownership probe must be visible, not silently degrade"
+    rec = failed[0]
+    assert rec.get("engine") == CLAUDE_ENGINE
+    assert rec.get("session_id") == "sid-broken"
+    assert rec.get("chat_id") == 123
 
 
 @pytest.mark.anyio

@@ -4557,6 +4557,27 @@ class ClaudeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
                     yield evt
 
         finally:
+            # #667: stream.proc_returncode is assigned only on the happy path
+            # (after `rc = await proc.wait()` in the try body). Cancellation
+            # (/cancel, /new, drain), an exception in the task group / JSONL
+            # reader, or the early pipes RuntimeError all skip that assignment,
+            # leaving it None — so _is_signal_death(None) stays False and the
+            # bridge's auto-continue death-spiral guard (#640) is inert on
+            # exactly those paths. manage_subprocess.__aexit__ has already run
+            # its shielded, bounded terminate+reap by the time this finally
+            # executes (utils/subprocess.py), so proc.returncode is populated;
+            # capture it here with no extra wait. Guarded because BOTH `proc`
+            # (unbound if manage_subprocess raised in __aenter__) and `stream`
+            # (assigned inside the manage_subprocess block, so unbound if we
+            # exit before then) can be absent — the sibling `stream.found_session`
+            # access below guards the same way.
+            with contextlib.suppress(NameError, AttributeError):
+                if (
+                    stream.proc_returncode is None
+                    and proc is not None
+                    and proc.returncode is not None
+                ):
+                    stream.proc_returncode = proc.returncode
             # Clean up global registries on ANY exit (cancel, error, normal).
             # process_error_events/stream_end_events handle normal paths but
             # cancellation skips both, leaving stale outline_guard/cooldown state.

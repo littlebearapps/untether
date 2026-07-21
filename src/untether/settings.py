@@ -393,8 +393,12 @@ class AutoContinueSettings(BaseModel):
     # #633 (W4): never resume a session whose previous subprocess is still
     # alive. rc7's quarantine-and-fresh recovers AFTER a session is poisoned;
     # this prevents the poisoning. Before spawning a `--resume`, wait (bounded)
-    # for the prior owner to exit; if it does not, quarantine and start fresh
-    # rather than racing it. Set False for exact pre-rc8 behaviour.
+    # for the prior owner to exit; if it does not, divert to a FRESH session.
+    # #668: this deliberately does NOT quarantine on timeout — a deviation from
+    # the original #633 W4 design. A still-busy session is not a known-corrupt
+    # one, and a 7-day quarantine marker is far too destructive to write on a
+    # mere give-up; see the "Deliberately NOT quarantined" note beside the
+    # handoff_timeout branch in runner_bridge.py. Set False for pre-rc8 behaviour.
     serialize_session_owner: bool = True
     # Upper bound on that wait. Condition-based, so it resolves the instant the
     # prior subprocess exits — this is only the give-up point. Kept comfortably

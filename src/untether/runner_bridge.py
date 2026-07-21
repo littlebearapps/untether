@@ -3427,7 +3427,17 @@ async def handle_message(
                 # exists to prevent. Logged at WARNING (not debug) so a
                 # persistent failure surfaces as degraded continuity instead of
                 # quietly making every resume fresh.
-                logger.warning("session.handoff_check_failed", exc_info=True)
+                # #668: bind session/engine/chat so a persistent probe failure
+                # is attributable — without these the issue-watcher dedups every
+                # chat's failure into one indistinguishable report. Matches the
+                # sibling session.handoff / session.handoff_bg_extended events.
+                logger.warning(
+                    "session.handoff_check_failed",
+                    engine=runner.engine,
+                    session_id=resume_token.value,
+                    chat_id=incoming.channel_id,
+                    exc_info=True,
+                )
                 _handoff = "timed_out"
             if _handoff != "free":
                 logger.info(

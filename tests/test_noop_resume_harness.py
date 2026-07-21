@@ -412,3 +412,77 @@ async def test_harness_w4_diverts_fresh_when_prior_owner_will_not_hand_off(
         c["message"].text for c in transport.edit_calls + transport.send_calls
     )
     assert "Fresh answer." in all_text
+
+
+@pytest.mark.anyio
+async def test_667_cancel_midflight_captures_proc_returncode(
+    monkeypatch, quarantine_store
+) -> None:
+    """#667 (#640 follow-up): capture proc_returncode on the CANCELLATION path,
+    not only the happy path.
+
+    A run cancelled mid-flight (/cancel, /new, drain) unwinds through
+    run_impl's task group and never reaches the try-body
+    ``stream.proc_returncode = rc``. Before the fix that left proc_returncode
+    None on exactly the paths the auto-continue death-spiral guard (#640)
+    depends on — ``_is_signal_death(None)`` is False, so a messily-killed run
+    could still be auto-continued.
+
+    Drives the REAL ClaudeRunner against a scenario that hangs before its first
+    result, waits until the subprocess is confirmed streaming, cancels it, then
+    asserts the reaped signal return code was still captured onto
+    ``runner.current_stream`` by run_impl's finally.
+    """
+    from untether.runner_bridge import _is_signal_death
+
+    monkeypatch.setenv("FAKE_CLAUDE_SCENARIO", "hang_before_result")
+    # Long hang so the process is unambiguously mid-flight when we cancel;
+    # manage_subprocess's shielded SIGTERM teardown ends it well before this.
+    monkeypatch.setenv("FAKE_CLAUDE_LINGER_S", "30")
+
+    transport = FakeTransport()
+    runner = _harness_runner()
+    cfg = ExecBridgeConfig(
+        transport=transport,
+        presenter=MarkdownPresenter(),
+        final_notify=False,
+    )
+
+    async def _drive() -> None:
+        await handle_message(
+            cfg,
+            runner=runner,
+            incoming=IncomingMessage(
+                channel_id=7, message_id=1, text="do a slow thing"
+            ),
+            # A brand-new sid has no live owner, so the W4 handoff gate returns
+            # "free" immediately and the run proceeds (then hangs) — this test
+            # is about the cancellation path, not the handoff path.
+            resume_token=ResumeToken(engine=CLAUDE_ENGINE, value="sess-667-hang"),
+        )
+
+    async with anyio.create_task_group() as tg:
+        tg.start_soon(_drive)
+        # Wait until the real subprocess has spawned and is streaming (hanging):
+        # current_stream is assigned right after spawn, before any result, so a
+        # non-None stream with proc_returncode still None means "alive
+        # mid-flight". Bounded so a pipeline regression fails fast.
+        with anyio.fail_after(5.0):
+            while (
+                runner.current_stream is None
+                or runner.current_stream.proc_returncode is not None
+            ):
+                await anyio.sleep(0.02)
+        # Cancel the whole run. run_impl's finally must still capture the reaped
+        # rc even though the happy-path assignment is skipped.
+        tg.cancel_scope.cancel()
+
+    assert runner.current_stream is not None
+    rc = runner.current_stream.proc_returncode
+    assert rc is not None, (
+        "#667 regression: proc_returncode left None on the cancellation path"
+    )
+    # The teardown SIGTERM'd the hanging CLI, so this is a signal death — the
+    # exact case the auto-continue guard must recognise and could not when the
+    # return code was None.
+    assert _is_signal_death(rc), f"expected a signal death, got rc={rc}"
