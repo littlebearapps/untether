@@ -146,12 +146,14 @@ hand), binding the exact commit SHA:
 HEAD_SHA=$(git rev-parse HEAD)
 scripts/run-integration-tests.sh <VERSION> --manual \
   --tiers "<the tiers actually run>" \
-  --notes "green on @untether_dev_bot; head_sha=${HEAD_SHA}; run-id qa-<stamp>"
+  --head-sha "${HEAD_SHA}" \
+  --notes "green on @untether_dev_bot; run-id qa-<stamp>"
 ```
 
-The marker MUST bind commit SHA + dev-bot identity + suite/tier set + outcome +
-actor + timestamp (SHA-binding of `run-integration-tests.sh` is a
-propose-to-Nathan enhancement — plan §9.2). **Writing the marker never invokes
+The marker binds commit SHA + dev-bot identity + suite/tier set + outcome +
+actor + timestamp — `run-integration-tests.sh` records `head_sha` + `dev_bot_id`
+as first-class fields (#674), and `fleet-rollout.sh` surfaces them at the gate.
+**Writing the marker never invokes
 rollout** — `fleet-rollout.sh` is the operator's step and verifies the marker
 matches the artifact. Idempotent: if a green marker for this exact
 VERSION+SHA already exists, do not rewrite it.

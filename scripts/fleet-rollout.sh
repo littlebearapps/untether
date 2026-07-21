@@ -179,6 +179,18 @@ EOF
     if [[ -n "$(find "$ATTESTATION_MARKER" -mtime +14 2>/dev/null)" ]]; then
         echo "WARN: attestation marker for $VERSION is >14 days old — re-test if code changed since." >&2
     fi
+
+    # Guardrail 3 — surface the SHA/dev-bot binding (#674). Informational, never
+    # a hard gate: the operator eyeballs that the marker was bound to the commit
+    # the artifact was built from and to the real dev bot. Markers written before
+    # #674 have no head_sha — warn so they can be re-attested if it matters.
+    MARKER_SHA=$(python3 -c "import json,sys; print(json.load(open(sys.argv[1])).get('head_sha',''))" "$ATTESTATION_MARKER" 2>/dev/null || echo "")
+    MARKER_BOT=$(python3 -c "import json,sys; d=json.load(open(sys.argv[1])); print(d.get('dev_bot_id') or d.get('dev_bot',''))" "$ATTESTATION_MARKER" 2>/dev/null || echo "")
+    if [[ -z "$MARKER_SHA" || "$MARKER_SHA" == "unknown" ]]; then
+        echo "WARN: attestation marker has no head_sha (pre-#674 or hand-written) — cannot confirm it binds this artifact's commit." >&2
+    else
+        echo "Attestation bound to head_sha ${MARKER_SHA} · dev_bot ${MARKER_BOT}."
+    fi
 else
     echo "WARN: --skip-test-gate set; attestation gate bypassed."
 fi
