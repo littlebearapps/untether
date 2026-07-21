@@ -187,6 +187,7 @@ Rules in `.claude/rules/` auto-load when editing matching files:
 | `context-quality.md` | AI context files (`CLAUDE.md`, `AGENTS.md`, etc.) | Cross-file consistency, path verification, version accuracy, command accuracy |
 | `help-faq.md` | `docs/faq/**` | NEVER delete; keep FAQ current with feature changes; H2s must be question-shaped (#477) |
 | `workflow-commands.md` | agentic loop commands (`.claude/commands/*.md`) | Routing table + 7 cross-cutting rules (Untether-mode, release-guard, dev/staging, reuse, confirm-gated writes, idempotency, redaction); cited by every workflow command. See `docs/LOOPS.md` for the loop registry |
+| `kaizen.md` | `/kaizen`, `/kaizen-review` | Capture shape (8 tags + evidence + S/C/R), read-only-except-one-comment boundary, propose-only promotion; full rubric in `docs/kaizen/README.md` |
 
 ## Tests
 

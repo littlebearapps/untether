@@ -38,11 +38,11 @@ Delivery loops (net-new capability)
 
 Production loops (defects)
   L5   /debug         8-step investigate (sweep / targeted) — fleet-aware          [available]
-  L6   /fix           8-step act — sweep actionable defects → needs-verification   [planned P1]
+  L6   /fix           8-step act — sweep actionable defects → needs-verification   [available]
 
 Continuous improvement
-  L7   /kaizen        session-end capture → [kaizen] GitHub collector              [planned P1]
-  L8   /kaizen-review weekly propose-only promotion                                [planned P1]
+  L7   /kaizen        session-end capture → [kaizen] GitHub collector              [available]
+  L8   /kaizen-review weekly propose-only promotion                                [available]
 
 Continuity
   L9   /handover      H0–H3 interruption stop-state (state-derived)                [planned P4]
@@ -78,7 +78,7 @@ See `docs/plans/agentic-loops-and-commands/README.md` §7 for the diagram and ra
 - **Output:** *sweep* → a printed ranked Triage Report (no filing). *targeted* → a per-issue Debug Report comment + `needs-verification` (posted only on explicit approval).
 - **Authority:** diagnose only. Ships at most a *minimal* ≤3-file fix in `targeted`. Never files in sweep mode; never auto-closes; never pushes/merges to master; never restarts staging.
 
-### L6 · `/fix` — act  ·  Status: **planned P1**
+### L6 · `/fix` — act  ·  Status: **available**
 
 - **Trigger:** one or more open actionable defect issues to ship fixes for.
 - **Driver:** `/fix` (thin action layer over the same `.claude/commands/debug/` engine).
@@ -120,14 +120,14 @@ See `docs/plans/agentic-loops-and-commands/README.md` §7 for the diagram and ra
 - **Output:** stable version bump + `uv lock` + collapsed CHANGELOG + FAQ pass + the opened `dev`→`master` PR (release body), then **STOP**.
 - **Authority:** everything Claude *may* do up to the operator boundary. Never merges to master, tags, `gh release create`, or runs `fleet-rollout.sh`. The master merge is Nathan's single release gate.
 
-### L7 · `/kaizen` — capture a process learning  ·  Status: **planned P1**
+### L7 · `/kaizen` — capture a process learning  ·  Status: **available**
 
 - **Trigger:** session end (self-invoked; a Stop-hook nudge is proposed to Nathan for wiring).
 - **Driver:** `/kaizen` + `.claude/rules/kaizen.md` (thin slice) + `docs/kaizen/README.md` (policy).
 - **Output:** 0–3 evidence-linked bullets appended to the permanent `[kaizen]` GitHub collector issue. **0 captures is valid.**
 - **Authority:** read-only except ONE `gh issue comment`. Never edits rules/hooks/code.
 
-### L8 · `/kaizen-review` — promote learnings  ·  Status: **planned P1**
+### L8 · `/kaizen-review` — promote learnings  ·  Status: **available**
 
 - **Trigger:** weekly (human-gated); monthly `--monthly` health sample.
 - **Driver:** `/kaizen-review` (propose-only).
