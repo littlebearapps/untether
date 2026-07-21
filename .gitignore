@@ -30,3 +30,12 @@ launch/
 # NOTE: docs/tests/ and docs/audits/ are deliberately NOT ignored wholesale —
 # 5 files in them ARE tracked (v0.35.2 results, integration test plan, audits).
 docs/tests/results/v0.35.3-followup-test-results-2026-05-05.md
+
+# Workflow-command run artefacts (agentic loops — see docs/LOOPS.md).
+# These are local scratch/continuity outputs, not versioned docs:
+#   incoming/*-runs/    — per-command run buffers (e.g. /fix, /qa working sets)
+#   incoming/handovers/ — H2 interruption stop-state (gitignored; H3 lives in docs/handovers/)
+#   incoming/docs/      — staging area if a standalone /docs command is later built
+incoming/*-runs/
+incoming/handovers/
+incoming/docs/
