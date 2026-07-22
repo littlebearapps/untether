@@ -21,6 +21,7 @@ from ..settings import (
 from ..transport import MessageRef, RenderedMessage, SendOptions, Transport
 from ..transport_runtime import TransportRuntime
 from .client import BotClient
+from .outbox import SUPERSEDED
 from .render import MAX_BODY_CHARS, prepare_telegram, prepare_telegram_multi
 from .types import TelegramCallbackQuery, TelegramIncomingMessage
 
@@ -366,6 +367,20 @@ class TelegramTransport:
             reply_markup=reply_markup,
             wait=wait,
         )
+        if edited is SUPERSEDED:
+            # #598: a newer same-key edit (or a delete/replace) coalesced this
+            # one out of the outbox before dispatch — the message ends in the
+            # winning op's state, so this is a benign no-op, NOT a failure. A
+            # superseded op resolves without any HTTP call (hence no recorded
+            # api_error), which previously surfaced as the spurious
+            # ``transport.edit.failed error=None`` warning.
+            logger.debug(
+                "transport.edit.superseded",
+                chat_id=chat_id,
+                message_id=message_id,
+                has_reply_markup=reply_markup is not None,
+            )
+            return ref
         if edited is None:
             if wait:
                 # #598: attach the recorded failure reason — previously the

@@ -17,6 +17,27 @@ DELETE_PRIORITY = 1
 EDIT_PRIORITY = 2
 
 
+class _Superseded:
+    """Sentinel result for an op the outbox intentionally dropped *before*
+    dispatch — replaced by a newer same-key op, dropped ahead of a
+    delete/replace, or dropped on a ``RetryAfter`` requeue collision — as
+    opposed to one that was sent and failed. Distinct from ``None`` (a real
+    transport failure) so the edit path can tell a benign coalesced edit apart
+    from a genuine ``editMessageText`` failure (#598)."""
+
+    __slots__ = ()
+
+    def __repr__(self) -> str:  # pragma: no cover - debug aid only
+        return "SUPERSEDED"
+
+
+#: Shared singleton; compare with ``is``. Ops that opt in (edits set
+#: ``superseded_result=SUPERSEDED``) receive this instead of ``None`` when the
+#: outbox drops them before dispatch. Other ops default to ``None`` so the
+#: send/delete return contracts are unchanged.
+SUPERSEDED = _Superseded()
+
+
 @dataclass(slots=True)
 class OutboxOp:
     execute: Callable[[], Awaitable[Any]]
@@ -24,6 +45,11 @@ class OutboxOp:
     queued_at: float
     chat_id: int | None
     label: str | None = None
+    #: Result handed to this op's waiter when the outbox drops it before
+    #: dispatch (supersede / drop_pending / retry-after collision). Defaults to
+    #: ``None``; edit ops set it to ``SUPERSEDED`` so a coalesced edit is not
+    #: misread as a transport failure (#598).
+    superseded_result: Any = None
     done: anyio.Event = field(default_factory=anyio.Event)
     result: Any = None
 
@@ -82,7 +108,7 @@ class TelegramOutbox:
                     prev_label=previous.label,
                 )
                 op.queued_at = previous.queued_at
-                previous.set_result(None)
+                previous.set_result(previous.superseded_result)
             self._pending[key] = op
             self._cond.notify()
         if not wait:
@@ -94,7 +120,7 @@ class TelegramOutbox:
         async with self._cond:
             pending = self._pending.pop(key, None)
             if pending is not None:
-                pending.set_result(None)
+                pending.set_result(pending.superseded_result)
             self._cond.notify()
 
     async def flush(self, *, timeout: float = 5.0) -> None:  # noqa: ASYNC109
@@ -248,7 +274,7 @@ class TelegramOutbox:
                                 label=op.label,
                                 chat_id=op.chat_id,
                             )
-                            op.set_result(None)
+                            op.set_result(op.superseded_result)
                     continue
                 logger.debug(
                     "outbox.op.completed",
