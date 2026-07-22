@@ -3957,3 +3957,37 @@ async def test_598_edit_failed_tolerates_bot_without_pop() -> None:
     assert result is None
     rec = next(r for r in logs if r.get("event") == "transport.edit.failed")
     assert rec["error"] is None
+
+
+@pytest.mark.anyio
+async def test_598_superseded_edit_is_noop_not_failure() -> None:
+    """A coalesced (superseded) edit returns SUPERSEDED, which the transport
+    treats as a benign no-op — NOT the spurious transport.edit.failed
+    error=None that fired after every answered AskUserQuestion (#598)."""
+    from structlog.testing import capture_logs
+
+    from untether.telegram.bridge import TelegramTransport
+    from untether.telegram.outbox import SUPERSEDED
+
+    class _SupersedingBot:
+        async def edit_message_text(self, **kwargs: Any) -> Any:
+            return SUPERSEDED
+
+    transport = TelegramTransport(_SupersedingBot())  # type: ignore[arg-type]
+    ref = MessageRef(channel_id=123, message_id=1561)
+
+    with capture_logs() as logs:
+        result = await transport.edit(
+            ref=ref,
+            message=RenderedMessage(
+                text="✅ All questions answered",
+                extra={"reply_markup": {"inline_keyboard": []}},
+            ),
+        )
+
+    # The keyboard-clear edit is reported as a no-op returning the ref, not a
+    # failure — the winning same-key edit leaves the message in its final state.
+    assert result == ref
+    assert not any(r.get("event") == "transport.edit.failed" for r in logs)
+    rec = next(r for r in logs if r.get("event") == "transport.edit.superseded")
+    assert rec["has_reply_markup"] is True
