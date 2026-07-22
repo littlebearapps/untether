@@ -65,7 +65,7 @@ Every webhook requires explicit auth. Choose one:
 | `bearer` | `Authorization: Bearer <token>` | Simple shared secret |
 | `hmac-sha256` | `X-Hub-Signature-256` | GitHub webhooks |
 | `hmac-sha1` | `X-Hub-Signature` | Legacy GitHub webhooks |
-| `none` | (none) | Local testing only |
+| `none` | (none) | Local testing only — since v0.35.4 **refused on non-loopback hosts** unless `[triggers] allow_unauthenticated_webhooks = true` ([#382](https://github.com/littlebearapps/untether/issues/382)) |
 
 ### Prompt templating
 

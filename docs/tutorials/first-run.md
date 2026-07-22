@@ -16,7 +16,7 @@ untether
 Untether keeps running in your terminal. In Telegram, your bot will post a startup message like:
 
 !!! untether "Untether"
-    🐕 untether (v0.35.1)
+    🐕 untether (v0.35.4)
 
     *default engine:* `codex`<br>
     *installed engines:* claude, codex, opencode<br>

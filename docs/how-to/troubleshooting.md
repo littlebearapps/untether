@@ -338,7 +338,13 @@ Run `untether doctor` to validate voice configuration.
 
 - **Chat mode** (`session_mode = "chat"`): Just send another message — it auto-resumes. Use `/new` to start fresh.
 - **Stateless mode** (`session_mode = "stateless"`): You must **reply** to a message that contains a resume token. Plain messages start new sessions.
-- If resume fails silently, the previous session may have been corrupted. Untether auto-clears broken resume tokens (0-turn sessions).
+- If resume fails silently, the previous session may be **poisoned** by an upstream turn-state bug (a resume that returns 0 turns / an empty answer). Untether detects this, quarantines that session so it is never resumed again, and automatically re-sends your message on a **fresh** session — you'll see a short notice that it did so ([#631](https://github.com/littlebearapps/untether/issues/631), [#632](https://github.com/littlebearapps/untether/issues/632)). A session force-killed after delivering its result is quarantined proactively, so your *next* message diverts fresh before any empty result appears.
+
+## Follow-up message says it's "queued"
+
+**Symptoms:** You send a follow-up (or voice note) and it sits on a `queued` notice for a while instead of running immediately.
+
+This is expected when the previous Claude turn is still doing background work (subagents, a `Monitor`, background Bash) after delivering its answer. Since v0.35.4 the notice tells you why — the live background-task count, that your context will carry over, and a `/cancel` hint if you'd rather interrupt ([#654](https://github.com/littlebearapps/untether/issues/654)). The message runs automatically once the prior work finishes; it is not a hang. If the wait is genuinely stuck, `/cancel` and resend.
 
 ## Claude Code plugin interference
 

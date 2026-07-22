@@ -186,6 +186,14 @@ Either `prompt` or `prompt_template` is required. Cron IDs must be unique across
 Every webhook must declare an `auth` mode. Setting `auth = "none"` must be
 explicit -- there is no implicit open mode.
 
+Since v0.35.4, an `auth = "none"` webhook is additionally **refused on a
+non-loopback bind host** ([#382](https://github.com/littlebearapps/untether/issues/382)) --
+an unauthenticated webhook on a public interface is a remote-agent-run primitive.
+The route is dropped at initial bind and on hot-reload (polling, commands, and
+crons keep running); loopback binds (`127.0.0.1`, the default) are always allowed.
+To deliberately expose an unauthenticated webhook on a public host, set
+`[triggers] allow_unauthenticated_webhooks = true`.
+
 ### Bearer token
 
 ```toml
@@ -480,7 +488,9 @@ the filesystem context.
 - **Localhost binding**: The server binds to `127.0.0.1` by default. Use a
   reverse proxy (nginx, Caddy) to expose it to the internet with TLS.
 - **Authentication**: Every webhook requires explicit auth configuration.
-  `auth = "none"` must be set deliberately.
+  `auth = "none"` must be set deliberately, and since v0.35.4 is **refused on a
+  non-loopback bind host** unless `[triggers] allow_unauthenticated_webhooks = true`
+  ([#382](https://github.com/littlebearapps/untether/issues/382)).
 - **Timing-safe comparison**: All secret comparisons use `hmac.compare_digest()`.
 - **Rate limiting**: Token-bucket rate limiter enforced per-webhook and globally.
 - **Body size limits**: `max_body_bytes` (default 1 MB) prevents memory

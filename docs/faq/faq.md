@@ -85,7 +85,7 @@ For non-Claude engines, approval is enforced per-engine pre-run (Codex `--ask-fo
 Untether is built around the assumption that your phone is unreliable but your computer isn't. Two things matter here:
 
 1. **Your agent keeps running.** It's a subprocess on your machine. It doesn't care whether your phone is connected, whether Telegram is open, or whether you've gone to sleep. Progress messages buffer locally; reconnection rendering is automatic.
-2. **Untether catches the common failure modes.** If a Claude Code session exits prematurely after a tool result without processing it (a known upstream bug), Untether auto-resumes it. If the bot is restarted while a run is in progress, ephemeral approval messages are cleaned up and orphaned progress messages get a `⚠️ interrupted by restart` marker. Stalls that look "alive but silent" trigger progressive warnings, and the watchdog auto-cancels truly dead processes.
+2. **Untether catches the common failure modes.** If a Claude Code session exits prematurely after a tool result without processing it (a known upstream bug), Untether auto-resumes it. If a resume comes back empty — 0 turns and no answer, another upstream turn-state bug — Untether quarantines that session and automatically retries your message on a fresh one, telling you it did so. If the bot is restarted while a run is in progress, ephemeral approval messages are cleaned up and orphaned progress messages get a `⚠️ interrupted by restart` marker. Stalls that look "alive but silent" trigger progressive warnings, and the watchdog auto-cancels truly dead processes.
 
 Everything important — Telegram update offsets, active progress message references, trigger fire history — is persisted to disk so a restart picks up where you left off without dropping or duplicating messages.
 
@@ -145,7 +145,7 @@ outbox_cleanup = true
 outbox_notify_skipped = true
 ```
 
-The deny-globs and per-file size cap are enforced before any send, so a misbehaving agent can't exfiltrate arbitrary paths or DOS your Telegram chat with huge attachments. Sub-directory entries are listed as skipped (the current implementation is a flat scan — auto-zipping is tracked as a v0.35.4 enhancement). All engines support it. Full setup: [File transfer](https://untether.littlebearapps.com/how-to/file-transfer/).
+The deny-globs and per-file size cap are enforced before any send, so a misbehaving agent can't exfiltrate arbitrary paths or DOS your Telegram chat with huge attachments. Sub-directories are handled two ways: by default they're archived to `.untether-outbox/.skipped/` and listed as skipped, or set `outbox_deliver_directories = "zip"` (v0.35.4) to have each one bundled into a single `<name>.zip` document and delivered — recursive deny-globs, symlink pruning, and size caps still apply. All engines support it. Full setup: [File transfer](https://untether.littlebearapps.com/how-to/file-transfer/).
 
 ## Do I need to restart Untether after editing `untether.toml`?
 

@@ -85,7 +85,8 @@ systemctl --user restart untether-dev    # dev
 | `voice_transcription` | bool | `false` | Enable voice note transcription. |
 | `voice_max_bytes` | int | `10485760` | Max voice note size (bytes). |
 | `voice_transcription_model` | string | `"gpt-4o-mini-transcribe"` | OpenAI transcription model name. |
-| `voice_transcription_base_url` | string\|null | `null` | Override base URL for voice transcription only. |
+| `voice_transcription_base_url` | string\|null | `null` | Override base URL for voice transcription only. **SSRF-validated ([#381](https://github.com/littlebearapps/untether/issues/381)):** the resolved host must be public — loopback/private endpoints (e.g. a local Whisper server at `http://localhost:8000/v1`) are **rejected** unless allowlisted via `voice_transcription_url_allowlist`. Unset (the default public `api.openai.com` path) skips validation. |
+| `voice_transcription_url_allowlist` | string[] | `[]` | ([#381](https://github.com/littlebearapps/untether/issues/381)) CIDR/IP allowlist that opts specific private/loopback transcription endpoints back in past the SSRF guard — e.g. `["127.0.0.0/8"]` for a local Whisper server, or an Azure private-link range. Only consulted when `voice_transcription_base_url` is set. |
 | `voice_transcription_api_key` | string\|null | `null` | Override API key for voice transcription only. |
 | `voice_transcription_language` | string\|null | `null` | ([#638](https://github.com/littlebearapps/untether/issues/638)) Optional ISO-639-1 language hint (e.g. `"en"`) passed to the Whisper `language` param — stops wrong-language guesses on short voice notes. Unset = provider auto-detect. Hot-reloadable. |
 | `session_mode` | `"stateless"`\|`"chat"` | `"stateless"` | 🔄 Auto-resume mode. See [workflow modes](modes.md) — `"chat"` for assistant/workspace, `"stateless"` for handoff. Restart-required. |
@@ -116,6 +117,8 @@ When `allowed_user_ids` is set, updates without a sender id (for example, some c
 | `outbox_dir` | string | `".untether-outbox"` | Relative outbox directory name (must not be absolute). |
 | `outbox_max_files` | int (1–50) | `10` | Max files sent per run. |
 | `outbox_cleanup` | bool | `true` | Delete sent files and remove empty outbox directory after delivery. |
+| `outbox_notify_skipped` | bool | `true` | ([#524](https://github.com/littlebearapps/untether/issues/524)) Notify the user when a non-deliverable outbox entry (a subdirectory, or a deny-globbed / oversize file) is skipped and archived to `.untether-outbox/.skipped/`, rather than dropping it silently. |
+| `outbox_deliver_directories` | `"off"`\|`"zip"` | `"off"` | ([#628](https://github.com/littlebearapps/untether/issues/628)) When `"zip"`, a subdirectory an agent writes into the outbox (e.g. a `screenshots/` folder from a quality audit) is bundled into a single `<name>.zip` document and delivered, instead of only being archived. Recursive deny-globs, symlink pruning, and per-member / total-input / member-count / final-size caps all apply; anything that fails them falls back to the `.skipped/` archive. |
 
 File size limits (not configurable):
 
@@ -301,6 +304,9 @@ Budget alerts always appear regardless of `[footer]` settings.
     post_result_idle_enabled = true
     post_result_idle_timeout = 600.0
     bash_grace_seconds = 60.0
+    pre_result_silence_timeout = 3600.0
+    post_result_limbo_grace = 60.0
+    post_result_bg_max_hold = 1800.0
     ```
 
 | Key | Type | Default | Notes |
@@ -326,6 +332,9 @@ Budget alerts always appear regardless of `[footer]` settings.
 | `post_result_idle_enabled` | bool | `true` | Claude post-result idle watchdog ([#333](https://github.com/littlebearapps/untether/issues/333)) — closes Claude's stdin cleanly after `post_result_idle_timeout` of silence following a `result` event so multi-turn sessions don't sit alive (and billable) for the full upstream ~36 min idle window. Set `false` to disable (Claude will sit idle until the upstream CLI exits on its own). The clean exit is auto-continue safe — `last_event_type=result` is excluded from the auto-continue gate. |
 | `post_result_idle_timeout` | float | `600.0` | Seconds the watchdog waits after a `result` event before closing stdin (30–3600). The first `result` also emits a `✓ turn complete` footer hint so users know the turn is done; when the watchdog actually fires it sends one Telegram message: `✓ turn complete · session closed after Nm idle`. Re-arms (instead of closing) if a control_request or AskUserQuestion is mid-flight, so a button click in flight is never orphaned. |
 | `bash_grace_seconds` | float | `60.0` | Stall-warning grace window for Bash / BashOutput / KillShell tools ([#481](https://github.com/littlebearapps/untether/issues/481)). Range 5–300. While the most-recent action is one of these and within this window of its start, stall warnings (and the `_STALL_MAX_WARNINGS` auto-cancel arm) are suppressed — long builds and deploys are an expected wait, not a hung session. |
+| `pre_result_silence_timeout` | float | `3600.0` | ([#592](https://github.com/littlebearapps/untether/issues/592)) Bounds the *pre-result* dead zone — a run whose stream goes silent **before its first `result` event** is SIGTERMed after this many seconds (0–86400; `0` disables). Suppressed while a permission/ask request is pending, so plan-approval waits stay safe. Catches zombie subprocesses that never produced output (an 8-day idle Claude on mac leaked its session lock and MCP children). |
+| `post_result_limbo_grace` | float | `60.0` | ([#591](https://github.com/littlebearapps/untether/issues/591)) After a successful `result`, a *fully quiescent* limbo subprocess (no live background work, not CPU/tree-active) is SIGTERMed after this grace instead of waiting the full `post_result_idle_timeout` (0–600; `0` = wait the full timeout). A demonstrably-busy process is exempt ([#655](https://github.com/littlebearapps/untether/issues/655)). |
+| `post_result_bg_max_hold` | float | `1800.0` | ([#647](https://github.com/littlebearapps/untether/issues/647)) Upper bound on how long the post-result ceiling defers its SIGTERM while `/proc` evidence shows the subagent tree still working (0–7200; `0` disables the hold). Independently bounded by the `BG_AGENT_MAX_KEEP_S` handle age-out. Stops the 600s ceiling killing live background subagent work. |
 
 !!! note "The post-result watchdog is a permanent mitigation ([#569](https://github.com/littlebearapps/untether/issues/569))"
 
@@ -383,6 +392,7 @@ This section also carries the empty-resume recovery and session-ownership knobs,
     quarantine_on_forced_teardown = true
     serialize_session_owner = true
     session_handoff_timeout_s = 30.0
+    session_handoff_bg_timeout_s = 600.0
     ```
 
 | Key | Type | Default | Notes |
@@ -394,6 +404,7 @@ This section also carries the empty-resume recovery and session-ownership knobs,
 | `quarantine_on_forced_teardown` | bool | `true` | ([#632](https://github.com/littlebearapps/untether/issues/632) W2) Mark sessions force-killed after a result as unsafe to resume, so the *next* message diverts fresh before any empty result is seen. |
 | `serialize_session_owner` | bool | `true` | ([#633](https://github.com/littlebearapps/untether/issues/633) W4) Never resume a session whose previous subprocess is still alive. Before spawning `--resume`, wait (bounded) for the prior owner to exit; if it will not, quarantine and start fresh rather than racing it. Two concurrent owners of one session id is what leaves the upstream turn dangling and produces the 0-turn empty resume. Set `false` for exact pre-0.35.4rc8 behaviour. Claude only. |
 | `session_handoff_timeout_s` | float | `30.0` | Upper bound on that wait (0–300). Condition-based, so it resolves the instant the prior subprocess exits — this is only the give-up point. Keep comfortably above the post-result SIGTERM grace so a normal teardown wins the race. |
+| `session_handoff_bg_timeout_s` | float | `600.0` | ([#647](https://github.com/littlebearapps/untether/issues/647)) Extended handoff wait when the prior owner still has live background work at the base `session_handoff_timeout_s` deadline (0–1800). The user is told why the reply is delayed, and the wait extends up to this bound before diverting to a fresh session. |
 
 !!! tip "Layered defence"
 
@@ -610,6 +621,7 @@ routing details.
 |-----|------|---------|-------|
 | `enabled` | bool | `false` | Master switch. No server or cron loop starts when `false`. |
 | `default_timezone` | string\|null | `null` | Default IANA timezone for all crons (e.g. `"Australia/Melbourne"`). Per-cron `timezone` overrides. |
+| `allow_unauthenticated_webhooks` | bool | `false` | ([#382](https://github.com/littlebearapps/untether/issues/382)) Opt-in escape hatch permitting a webhook with `auth = "none"` to bind on a **non-loopback** host. By default such a route is refused at initial bind and dropped on hot-reload — an unauthenticated public webhook is a remote-agent-run primitive — while polling, commands, and crons keep running. Loopback binds are always allowed regardless. Set `true` only for trusted local demos. |
 
 !!! tip "Hot-reload"
     When `watch_config = true`, changes to webhooks, crons, schedules, and timezones

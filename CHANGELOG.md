@@ -1,8 +1,9 @@
 # changelog
 
-## v0.35.4 (2026-07-20)
+## v0.35.4 (2026-07-22)
 
-<!-- Date provisional — finalise at release. Covers rc1 through rc12. -->
+<!-- Covers rc1 through rc14 (the full v0.35.4 release-candidate cycle). Date is the
+     finalisation date; adjust if the dev→master release merge slips to another day. -->
 <!-- NB: rc8's TestPyPI publish was a silent no-op (version unchanged → skip-existing
      swallowed the 400). Everything in the rc8 commits first executed on fleet hosts
      as rc9 — do not claim "verified in rc8" anywhere. -->
@@ -60,6 +61,7 @@
 - **changes(watchdog):** `runner.limbo_detected` now logs at INFO when the same evaluation shows live background work or a busy process tree, reserving WARNING for the genuinely quiescent stuck case. Under rc10's liveness-aware ceiling a healthy long-running session routinely trips this path, so a WARNING was misleading operators and the issue-watcher alike. The event is enriched with `live_background_work` / `cpu_active` / `tree_active` [#653](https://github.com/littlebearapps/untether/issues/653)
 - **feat(telegram):** tell the user why a follow-up is queued. A message arriving behind a lingering post-result Claude session could sit on a bare "queued" for up to 30 minutes with no explanation — one observed case held a voice note for 5m36s in silence. The notice now states the background-task count, that context will carry over, and the `/cancel` hint [#654](https://github.com/littlebearapps/untether/issues/654)
 - **feat(fleet):** `scripts/fleet-status.sh` gives a one-shot read-only version/state view across all 5 hosts, plus rollout attestation guardrails and a `/ping` verification playbook [#627](https://github.com/littlebearapps/untether/issues/627)
+- **feat(scripts):** SHA-bind the integration-test attestation marker. `scripts/run-integration-tests.sh` now records the `head_sha` of the tested commit (auto-derived from the script's repo, overridable via `--head-sha` / `UT_INTEGRATION_HEAD_SHA`) and a `dev_bot_id` (default overridable via `UT_DEV_BOT_ID`) into the marker JSON, so the fleet-rollout gate can bind an attestation to the exact commit being rolled rather than a bare version string; tiers and notes are preserved. 5 tests in `tests/test_attestation_marker.py` [#674](https://github.com/littlebearapps/untether/issues/674)
 
 ### tests
 
