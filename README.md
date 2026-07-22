@@ -87,7 +87,7 @@ The wizard offers three **workflow modes** — pick the one that fits:
 ## 🎯 Features
 
 - 📡 **Progress streaming** — watch your agent work in real time; see tool calls, file changes, and elapsed time as they happen
-- 🔐 **Interactive permissions** — approve plan transitions and answer clarifying questions with inline option buttons; tools auto-execute, with progressive cooldown after "Pause & Outline Plan"
+- 🔐 **Interactive permissions** — approve plan transitions and answer clarifying questions with inline option buttons; tools auto-execute, and "Pause & Outline Plan" holds the session open while you review the plan outline before approving
 - 📋 **Plan mode** — toggle per chat with `/planmode`; choose full manual approval, auto-approved transitions, or no plan phase
 - 📁 **Projects and worktrees** — register repos with `untether init`, target with `/myproject @feat/thing`, run branches in isolated worktrees in parallel
 - 💰 **Cost and usage tracking** — run agents remotely with confidence; per-run and daily budgets, `/usage` breakdowns, and optional auto-cancel keep spending visible
@@ -95,7 +95,7 @@ The wizard offers three **workflow modes** — pick the one that fits:
 - 🏷 **Model and mode metadata** — every completed message shows model with version, effort level, and permission mode (e.g. `🏷 opus 4.6 · medium · plan`) across all engines
 - 🎙️ **Voice notes** — hands full? Dictate tasks instead of typing; Untether transcribes via a configurable Whisper-compatible endpoint
 - 🔄 **Cross-environment resume** — start a session in your terminal, pick it up from Telegram with `/continue`; works with Claude Code, Codex, OpenCode, Pi, and Gemini ([guide](docs/how-to/cross-environment-resume.md))
-- 📎 **File transfer** — upload files to your repo with `/file put`, download with `/file get`; agents can also deliver files automatically by writing to `.untether-outbox/` during a run — sent as Telegram documents on completion
+- 📎 **File transfer** — upload files to your repo with `/file put`, download with `/file get`; agents can also deliver files automatically by writing to `.untether-outbox/` during a run — sent as Telegram documents on completion, with whole directories optionally bundled as a zip (`outbox_deliver_directories = "zip"`)
 - 🛡️ **Graceful recovery** — orphan progress messages cleaned up on restart; stall detection with CPU-aware diagnostics; auto-continue for Claude Code sessions that exit prematurely
 - ⏰ **Scheduled tasks** — cron expressions with timezone support, webhook triggers, one-shot delays (`/at 30m <prompt>`), `run_once` crons, master pause/resume toggle, and hot-reload configuration (no restart required). `/ping` shows per-chat trigger summary; trigger-initiated runs show provenance in the footer (`⏰ cron:<id>` / `⚡ webhook:<id>` / `⏰ at:<token>`); `/stats` reports per-engine triggered-vs-manual breakdown
 - 🔁 **Autonomous loops (Claude only)** — opt-in observation of Claude Code's `/loop` and `ScheduleWakeup`; Untether re-fires iterations after the subprocess exits so loops keep running between turns. Off by default; enable per chat via `/config → 🔁 Loop mode`. Cost guarded by `[cost_budget]`, runaway-safety capped by `[loop]` (max iterations, total duration, expiry)
@@ -144,7 +144,7 @@ The wizard offers three **workflow modes** — pick the one that fits:
 | **Ask mode (option buttons)** | ✅ | — | — | — | — | — |
 | **Diff preview** | ✅ | — | — | — | — | — |
 | **Auto-approve safe tools** | ✅ | — | — | — | — | — |
-| **Progressive cooldown** | ✅ | — | — | — | — | — |
+| **Plan outline gate** | ✅ | — | — | — | — | — |
 | **Subscription usage** | ✅ | — | — | — | — | — |
 | **Reasoning/effort levels** | ✅ | ✅ | — | — | — | — |
 | **Device re-auth (`/auth`)** | — | ✅ | — | — | — | — |
