@@ -204,7 +204,15 @@ The error message is classified inline ([#438](https://github.com/littlebearapps
   Shell-set `CLAUDE_STREAM_IDLE_TIMEOUT_MS` still wins.
 * **Type-B (cold-start zero-byte stall)** — `num_turns ≤ 1 && duration_api_ms == 0`. The connection opened and went silent before Anthropic produced any tokens. This is an upstream API outage, **not** a watchdog miscalibration — raising the timeout will not help. Wait it out, retry, or check the [Anthropic status page](https://status.anthropic.com).
 
-Auto-retry for Type-A is deferred to a future release pending upstream Anthropic stabilisation.
+**Auto-retry (opt-in, since v0.35.4):** a Type-A stall can now auto-resume the session instead of surfacing a terminal error ([#572](https://github.com/littlebearapps/untether/issues/572)). It's off by default:
+
+```toml
+[watchdog]
+stream_idle_auto_retry = true    # resume Type-A stalls automatically (🔁 notice)
+stream_idle_max_retries = 1      # attempt cap, 1–3
+```
+
+Type-B (cold-start zero-byte) is **never** retried — retrying just hammers a down API. Cost-budget caps and signal-death suppression still apply to a retried run, so it can't spiral under memory pressure or blow a daily budget.
 
 ## Claude session looks alive 30+ min after the final message
 
@@ -268,6 +276,12 @@ To change:
 2. Make sure you have an OpenAI API key set (voice transcription uses the OpenAI transcription API by default)
 3. Check the voice note size — default max is 10 MiB (`voice_max_bytes`)
 4. If using a custom transcription server, verify `voice_transcription_base_url` is reachable
+5. **Since v0.35.4**, a `voice_transcription_base_url` that resolves to a private/loopback address (e.g. a self-hosted Whisper on `localhost`, `10.x`, or `192.168.x`) is **rejected by the SSRF guard** ([#381](https://github.com/littlebearapps/untether/issues/381)). Opt the endpoint back in with its CIDR range:
+
+    ```toml
+    [transports.telegram]
+    voice_transcription_url_allowlist = ["127.0.0.0/8"]   # or your private range
+    ```
 
 Run `untether doctor` to validate voice configuration.
 
