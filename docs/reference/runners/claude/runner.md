@@ -58,7 +58,7 @@ Key control channel features:
 * Auto-approve for routine tools (Grep, Glob, Read, Bash, etc.)
 * `ExitPlanMode` requests shown as Telegram inline buttons (Approve / Deny / Pause & Outline Plan) in `plan` mode; post-outline buttons add **Let's discuss** for plan discussion before approval
 * `ExitPlanMode` requests silently auto-approved in `auto` mode (no buttons shown)
-* Progressive cooldown on rapid ExitPlanMode retries (30s → 60s → 90s → 120s) — only applies in `plan` mode
+* Text-based outline gate on ExitPlanMode after "Pause & Outline Plan" — retries without written outline text are auto-denied; the former time-based progressive cooldown was retired in [#570](https://github.com/littlebearapps/untether/issues/570) (upstream retry loop fixed in Claude Code ≥ 2.1.215)
 
 **Safety note:** `-p/--print` skips the workspace trust dialog; only use this flag in trusted directories.
 
@@ -153,6 +153,19 @@ Configure via `[watchdog]`:
 Approval-state guard: if `_REQUEST_TO_SESSION` or `_PENDING_ASK_REQUESTS` has live entries for the session the timer re-arms instead of closing — prevents orphaning a button-click `control_response` mid-flight.
 
 Two structlog events for ops: `claude.post_result_idle.deferred` (approval guard fired) and `claude.post_result_idle.closing_stdin` (deadline passed cleanly).
+
+#### This watchdog is PERMANENT, not a transitional workaround ([#569](https://github.com/littlebearapps/untether/issues/569))
+
+The post-result idle watchdog, its SIGTERM/SIGKILL subcountdown, and the stuck-after-`tool_result` detector ([#322](https://github.com/littlebearapps/untether/issues/322)) all exist because Claude Code's `--output-format stream-json` intermittently **stops producing output and never exits**. Upstream status, checked 2026-05-29 and unchanged as of 0.35.4rc8:
+
+* [anthropics/claude-code#39700](https://github.com/anthropics/claude-code/issues/39700) — "stream-json intermittently hangs — process stops producing output and never exits" — **CLOSED / NOT_PLANNED**
+* [anthropics/claude-code#30333](https://github.com/anthropics/claude-code/issues/30333) — "ResultMessage never emitted in headless SDK mode" — **CLOSED / NOT_PLANNED**
+
+Because upstream declined to fix both, this machinery is a **permanent mitigation**. Do not mistake it for retire-able dead code during a future cleanup, and do not remove the post-result limbo SIGTERM timeout — it also bounds the MCP-child and memory leaks tracked in [#590](https://github.com/littlebearapps/untether/issues/590) / [#592](https://github.com/littlebearapps/untether/issues/592).
+
+**Constraint on [#527](https://github.com/littlebearapps/untether/issues/527) (unified predicate-based stall detector):** that refactor changes *when Untether warns*. It must not drop the kill-the-hung-process path (`_post_result_idle_watchdog` → SIGTERM → SIGKILL). **The detector decides messaging; the watchdog decides survival. They must stay decoupled.**
+
+Full audit: [`docs/audits/2026-05-29-claude-workaround-retirement-audit.md`](../../../audits/2026-05-29-claude-workaround-retirement-audit.md).
 
 ### `Stream idle timeout - partial response` classification ([#438](https://github.com/littlebearapps/untether/issues/438))
 

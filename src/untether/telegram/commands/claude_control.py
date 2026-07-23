@@ -11,9 +11,8 @@ from ...runners.claude import (
     _OUTLINE_PENDING,
     _REQUEST_TO_SESSION,
     _REQUEST_TO_TOOL_NAME,
-    clear_discuss_cooldown,
+    mark_outline_pending,
     send_claude_control_response,
-    set_discuss_cooldown,
 )
 from ...transport import MessageRef
 
@@ -142,9 +141,11 @@ class ClaudeControlCommand:
                     notify=True,
                 )
 
-            # Start rate-limiting cooldown so rapid ExitPlanMode retries are auto-denied
+            # Arm the outline gate: ExitPlanMode is auto-denied until Claude
+            # writes enough visible outline text (#570 retired the extra
+            # time-based cooldown this used to arm).
             if session_id:
-                set_discuss_cooldown(session_id)
+                mark_outline_pending(session_id)
 
             logger.info(
                 "claude_control.sent",
@@ -198,7 +199,6 @@ class ClaudeControlCommand:
             if approved:
                 _DISCUSS_APPROVED.add(session_id)
                 _OUTLINE_PENDING.discard(session_id)
-                clear_discuss_cooldown(session_id)
                 logger.info(
                     "claude_control.discuss_plan_approved",
                     session_id=session_id,
@@ -206,7 +206,6 @@ class ClaudeControlCommand:
                 action_text = "✅ Plan approved — Claude Code will proceed"
             else:
                 _OUTLINE_PENDING.discard(session_id)
-                clear_discuss_cooldown(session_id)
                 logger.info(
                     "claude_control.discuss_plan_denied",
                     session_id=session_id,
@@ -260,10 +259,9 @@ class ClaudeControlCommand:
                 notify=True,
             )
 
-        # Clear any discuss cooldown on explicit approve/deny
+        # Clear outline-pending state on explicit approve/deny
         had_outline = False
         if session_id:
-            clear_discuss_cooldown(session_id)
             _OUTLINE_PENDING.discard(session_id)
             # Delete outline messages when ExitPlanMode is approved/denied.
             # Track whether outlines existed — if the callback originated from
@@ -337,7 +335,6 @@ class ClaudeControlCommand:
 
             await delete_outline_messages(session_id)
             _OUTLINE_PENDING.discard(session_id)
-            clear_discuss_cooldown(session_id)
             logger.info(
                 "claude_control.discuss_plan_chat",
                 session_id=session_id,
@@ -378,7 +375,6 @@ class ClaudeControlCommand:
             )
 
         if session_id:
-            clear_discuss_cooldown(session_id)
             _OUTLINE_PENDING.discard(session_id)
             await delete_outline_messages(session_id)
 

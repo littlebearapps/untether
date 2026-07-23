@@ -97,7 +97,21 @@ class TriggerManager:
                 dropped=sorted(stale_fired),
             )
 
-        self._webhooks_by_path = {wh.path: wh for wh in settings.webhooks}
+        # #382: on a non-loopback bind, drop auth="none" webhooks so a reload
+        # can't open an unauthenticated remote-agent-run hole on the live
+        # server (mirrors the initial-bind guard in server.run_webhook_server).
+        # Lazy import to avoid the server<->manager import cycle.
+        from .server import is_loopback_host
+
+        refused_unauth: set[str] = set()
+        if not settings.allow_unauthenticated_webhooks and not is_loopback_host(
+            settings.server.host
+        ):
+            refused_unauth = {wh.id for wh in settings.webhooks if wh.auth == "none"}
+
+        self._webhooks_by_path = {
+            wh.path: wh for wh in settings.webhooks if wh.id not in refused_unauth
+        }
         self._default_timezone = settings.default_timezone
 
         new_cron_ids = {c.id for c in self._crons}
@@ -120,9 +134,27 @@ class TriggerManager:
                 total_webhooks=len(self._webhooks_by_path),
             )
 
-        # Warn about unauthenticated webhooks.
+        # #382: loudly refuse unauthenticated webhooks dropped on a public bind.
+        if refused_unauth:
+            logger.error(
+                "triggers.server.refused_unauthenticated",
+                host=settings.server.host,
+                webhook_ids=sorted(refused_unauth),
+                hint=(
+                    'Reload dropped auth="none" webhooks on a non-loopback '
+                    "bind. Add auth, bind 127.0.0.1, or set [triggers] "
+                    "allow_unauthenticated_webhooks = true (local demos only)."
+                ),
+            )
+
+        # Warn about the unauthenticated webhooks we DID register (loopback or
+        # explicit opt-in).
         for wh in settings.webhooks:
-            if wh.auth == "none" and wh.id in added_webhooks:
+            if (
+                wh.auth == "none"
+                and wh.id in added_webhooks
+                and wh.id not in refused_unauth
+            ):
                 logger.warning(
                     "triggers.webhook.no_auth",
                     webhook_id=wh.id,

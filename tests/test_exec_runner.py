@@ -3,6 +3,7 @@ from collections.abc import AsyncIterator
 
 import anyio
 import pytest
+from pydantic import ValidationError
 
 from untether.model import (
     ActionEvent,
@@ -747,6 +748,11 @@ def test_jsonl_stream_state_defaults() -> None:
     # _total_stall_warn_count so audits can see subprocess-health hits
     # independently.
     assert stream.liveness_stalls == 0
+    # #631 (W5-diag): both default False — set at the claude.py SIGTERM
+    # site and mirrored from ClaudeStreamState.background_observed
+    # respectively; see runner.empty_result's diagnostic fields.
+    assert stream.sigterm_sent is False
+    assert stream.background_observed is False
 
 
 def test_jsonl_stream_state_recent_events_ring_buffer() -> None:
@@ -1030,3 +1036,148 @@ async def test_base_iter_jsonl_breaks_on_did_emit_completed() -> None:
 
     assert stream.did_emit_completed is True
     assert any(isinstance(e, CompletedEvent) for e in events)
+
+
+# ---------------------------------------------------------------------------
+# #633 (W4) — one-owner-per-session serialisation.
+#
+# rc7's quarantine-and-fresh recovers AFTER a session is poisoned. W4 prevents
+# the poisoning: never spawn `--resume <sid>` while a subprocess for that same
+# sid is still alive. Two concurrent owners of one session id is what leaves
+# the upstream turn dangling on an unresolved tool_use.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.anyio
+async def test_633_handoff_free_when_no_owner() -> None:
+    """The common case must be a single dict lookup with no sleep."""
+    from untether.runners.claude import wait_for_session_handoff
+
+    assert await wait_for_session_handoff("no-such-session", 5.0) == "free"
+
+
+@pytest.mark.anyio
+async def test_633_handoff_exits_when_prior_owner_deregisters() -> None:
+    """Condition-based: resolves the instant the prior owner goes away, well
+    before the timeout budget elapses."""
+    import anyio
+
+    from untether.runners import claude as claude_mod
+    from untether.runners.claude import wait_for_session_handoff
+
+    sid = "sess-handoff-exit"
+    claude_mod._SESSION_STDIN[sid] = object()
+    try:
+        result: list[str] = []
+
+        async with anyio.create_task_group() as tg:
+
+            async def waiter() -> None:
+                result.append(await wait_for_session_handoff(sid, 10.0, poll_s=0.01))
+
+            async def releaser() -> None:
+                await anyio.sleep(0.05)
+                claude_mod._SESSION_STDIN.pop(sid, None)
+
+            tg.start_soon(waiter)
+            tg.start_soon(releaser)
+
+        assert result == ["exited"]
+    finally:
+        claude_mod._SESSION_STDIN.pop(sid, None)
+
+
+@pytest.mark.anyio
+async def test_633_handoff_times_out_and_is_bounded() -> None:
+    """A prior owner that will not die must NOT deadlock the follow-up
+    message — the wait is bounded and always resolves."""
+    from untether.runners import claude as claude_mod
+    from untether.runners.claude import wait_for_session_handoff
+
+    sid = "sess-handoff-stuck"
+    claude_mod._SESSION_STDIN[sid] = object()
+    try:
+        assert await wait_for_session_handoff(sid, 0.05, poll_s=0.01) == "timed_out"
+    finally:
+        claude_mod._SESSION_STDIN.pop(sid, None)
+
+
+@pytest.mark.anyio
+async def test_633_never_two_live_owners_for_one_session() -> None:
+    """The core invariant. While one owner holds the session, a second caller
+    must never be told the session is free to resume."""
+    from untether.runners import claude as claude_mod
+    from untether.runners.claude import is_session_alive, wait_for_session_handoff
+
+    sid = "sess-single-owner"
+    claude_mod._SESSION_STDIN[sid] = object()
+    try:
+        assert is_session_alive(sid) is True
+        assert await wait_for_session_handoff(sid, 0.05, poll_s=0.01) == "timed_out"
+    finally:
+        claude_mod._SESSION_STDIN.pop(sid, None)
+    # Once the owner deregisters the session is immediately resumable again.
+    assert await wait_for_session_handoff(sid, 1.0) == "free"
+
+
+def test_633_settings_default_on_and_bounded() -> None:
+    from untether.settings import AutoContinueSettings
+
+    s = AutoContinueSettings()
+    assert s.serialize_session_owner is True
+    assert s.session_handoff_timeout_s == 30.0
+    # Flag off must be expressible for an exact pre-rc8 rollback.
+    assert (
+        AutoContinueSettings(serialize_session_owner=False).serialize_session_owner
+        is False
+    )
+    with pytest.raises(ValidationError):
+        AutoContinueSettings(session_handoff_timeout_s=-1.0)
+    with pytest.raises(ValidationError):
+        AutoContinueSettings(session_handoff_timeout_s=10_000.0)
+
+
+# ---------------------------------------------------------------------------
+# #589 — live engine subprocess accounting.
+# ---------------------------------------------------------------------------
+
+
+def test_589_live_subprocess_counter_tracks_and_floors() -> None:
+    """The counter backs the concurrency-aware admission check. It must never
+    go negative — an unbalanced decrement would otherwise permanently disable
+    the guard by making live_runs read as 0 forever."""
+    from untether.utils import subprocess as sp
+
+    baseline = sp.live_engine_subprocess_count()
+    sp._incr_live_engine_subprocesses(1)
+    sp._incr_live_engine_subprocesses(1)
+    assert sp.live_engine_subprocess_count() == baseline + 2
+    sp._incr_live_engine_subprocesses(-1)
+    assert sp.live_engine_subprocess_count() == baseline + 1
+    sp._incr_live_engine_subprocesses(-99)
+    assert sp.live_engine_subprocess_count() == 0
+
+
+@pytest.mark.anyio
+async def test_589_manage_subprocess_balances_the_counter() -> None:
+    """A real spawn must increment on entry and decrement on exit, including
+    when the body raises."""
+    from untether.utils.subprocess import (
+        live_engine_subprocess_count,
+        manage_subprocess,
+    )
+
+    baseline = live_engine_subprocess_count()
+
+    async with manage_subprocess([sys.executable, "-c", "pass"]) as proc:
+        assert live_engine_subprocess_count() == baseline + 1
+        await proc.wait()
+    assert live_engine_subprocess_count() == baseline
+
+    with pytest.raises(RuntimeError):
+        async with manage_subprocess([sys.executable, "-c", "pass"]):
+            raise RuntimeError("boom")
+    assert live_engine_subprocess_count() == baseline, (
+        "counter leaked on the error path — a leak permanently inflates "
+        "live_runs and would block all future spawns (#589)"
+    )

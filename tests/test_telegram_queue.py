@@ -17,6 +17,7 @@ from untether.telegram.client_api import RetryAfter
 from untether.telegram.outbox import (
     EDIT_PRIORITY,
     SEND_PRIORITY,
+    SUPERSEDED,
     OutboxOp,
     TelegramOutbox,
 )
@@ -846,3 +847,274 @@ async def test_none_chat_id_independent() -> None:
     # No sleep — different "chats" (None vs 100)
     assert sum(sleep_log) == 0.0
     await outbox.close()
+
+
+# ── #559: bounded outbox flush before shutdown ────────────────────────
+
+
+@pytest.mark.anyio
+async def test_flush_drains_queued_op_instead_of_dropping() -> None:
+    """A queued op is given a chance to send during flush, not dropped."""
+    outbox, _sleep_log, _clock = _make_outbox()
+    executed: list[str] = []
+
+    async def execute() -> str:
+        executed.append("sent")
+        return "ok"
+
+    op = OutboxOp(
+        execute=execute,
+        priority=SEND_PRIORITY,
+        queued_at=0.0,
+        chat_id=100,
+        label="final",
+    )
+    await outbox.enqueue(key=("send", 100), op=op, wait=False)
+    await outbox.flush(timeout=2.0)
+    assert executed == ["sent"]
+    assert outbox._pending == {}
+    await outbox.close()
+
+
+@pytest.mark.anyio
+async def test_flush_empty_returns_immediately() -> None:
+    outbox, _sleep_log, _clock = _make_outbox()
+    await outbox.flush(timeout=2.0)  # nothing pending — must not hang
+    await outbox.close()
+
+
+@pytest.mark.anyio
+async def test_flush_times_out_then_fails_pending() -> None:
+    """If the queue can't drain within the timeout, stragglers are failed
+    (same terminal state as before, just after a bounded wait)."""
+    outbox, _sleep_log, _clock = _make_outbox()
+    op = _noop_op(100, SEND_PRIORITY, 0.0)
+    # Populate _pending WITHOUT starting the worker, so it can never drain.
+    outbox._pending[("send", 100)] = op
+    await outbox.flush(timeout=0.2)
+    assert outbox._pending == {}
+    assert op.result is None
+
+
+# ---------------------------------------------------------------------------
+# #598: superseded/dropped edits must be distinguishable from real failures.
+#
+# A pending edit that the outbox drops before dispatch (a newer same-key edit
+# supersedes it, a delete/replace drops it, or a RetryAfter requeue collides)
+# used to resolve to None — indistinguishable at the edit() layer from a real
+# editMessageText failure, producing the spurious `transport.edit.failed
+# error=None` warning after every answered AskUserQuestion. Edit ops now opt
+# into the SUPERSEDED disposition; non-opting ops (send/delete) keep None.
+# ---------------------------------------------------------------------------
+
+
+class _BlockingEditBot(FakeBot):
+    """FakeBot that blocks the first dispatched edit so later same-key edits
+    pile up in _pending and coalesce, deterministically reproducing #598."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.edit_started = anyio.Event()
+        self.release = anyio.Event()
+        self._block_first = True
+
+    async def edit_message_text(
+        self,
+        chat_id: int,
+        message_id: int,
+        text: str,
+        entities: list[dict] | None = None,
+        parse_mode: str | None = None,
+        reply_markup: dict | None = None,
+        *,
+        wait: bool = True,
+    ) -> Message | None:
+        if self._block_first:
+            self._block_first = False
+            self.edit_started.set()
+            await self.release.wait()
+        return await super().edit_message_text(
+            chat_id=chat_id,
+            message_id=message_id,
+            text=text,
+            entities=entities,
+            parse_mode=parse_mode,
+            reply_markup=reply_markup,
+            wait=wait,
+        )
+
+
+def _edit_op(chat_id: int | None) -> OutboxOp:
+    """An edit op that opts into the SUPERSEDED disposition, like the real
+    ``TelegramClient.edit_message_text`` path."""
+
+    async def execute() -> str:
+        return "ok"
+
+    return OutboxOp(
+        execute=execute,
+        priority=EDIT_PRIORITY,
+        queued_at=0.0,
+        chat_id=chat_id,
+        label="edit_message_text",
+        superseded_result=SUPERSEDED,
+    )
+
+
+@pytest.mark.anyio
+async def test_enqueue_supersede_uses_op_superseded_result() -> None:
+    """A pending edit coalesced out by a newer same-key edit resolves to
+    SUPERSEDED; a non-opting op collision still resolves to None (#598)."""
+    outbox, _sleep_log, _clock = _make_outbox(private_rps=0.0)
+    started = anyio.Event()
+    release = anyio.Event()
+
+    async def blocker() -> str:
+        started.set()
+        await release.wait()
+        return "blocker"
+
+    # Hold the worker busy on an unrelated key so the edits below stay pending.
+    blocker_op = OutboxOp(
+        execute=blocker,
+        priority=EDIT_PRIORITY,
+        queued_at=0.0,
+        chat_id=1,
+        label="blocker",
+    )
+    await outbox.enqueue(key=("edit", 1, 999), op=blocker_op, wait=False)
+    with anyio.fail_after(1):
+        await started.wait()
+
+    # Edit op (opts in) superseded by a newer same-key edit.
+    kb = _edit_op(chat_id=1)
+    await outbox.enqueue(key=("edit", 1, 1), op=kb, wait=False)
+    progress = _edit_op(chat_id=1)
+    await outbox.enqueue(key=("edit", 1, 1), op=progress, wait=False)
+    assert kb.done.is_set()
+    assert kb.result is SUPERSEDED  # #598: NOT None
+
+    # Non-opting op (e.g. a send) superseded on a stable key keeps the None
+    # contract, so send/delete callers are unaffected.
+    plain = _noop_op(chat_id=1, priority=SEND_PRIORITY, queued_at=0.0)
+    await outbox.enqueue(key=("send", 1, 1), op=plain, wait=False)
+    plain2 = _noop_op(chat_id=1, priority=SEND_PRIORITY, queued_at=0.0)
+    await outbox.enqueue(key=("send", 1, 1), op=plain2, wait=False)
+    assert plain.done.is_set()
+    assert plain.result is None
+
+    release.set()
+    await outbox.close()
+
+
+@pytest.mark.anyio
+async def test_drop_pending_edit_uses_op_superseded_result() -> None:
+    """An edit dropped ahead of a delete/replace resolves to SUPERSEDED (#598)."""
+    outbox, _sleep_log, _clock = _make_outbox(private_rps=0.0)
+    started = anyio.Event()
+    release = anyio.Event()
+
+    async def blocker() -> str:
+        started.set()
+        await release.wait()
+        return "blocker"
+
+    blocker_op = OutboxOp(
+        execute=blocker,
+        priority=EDIT_PRIORITY,
+        queued_at=0.0,
+        chat_id=1,
+        label="blocker",
+    )
+    await outbox.enqueue(key=("edit", 1, 999), op=blocker_op, wait=False)
+    with anyio.fail_after(1):
+        await started.wait()
+
+    kb = _edit_op(chat_id=1)
+    await outbox.enqueue(key=("edit", 1, 1), op=kb, wait=False)
+    await outbox.drop_pending(key=("edit", 1, 1))
+    assert kb.done.is_set()
+    assert kb.result is SUPERSEDED  # #598: NOT None
+
+    release.set()
+    await outbox.close()
+
+
+@pytest.mark.anyio
+async def test_retry_after_collision_uses_op_superseded_result() -> None:
+    """An edit that raises RetryAfter and finds its key re-occupied by a newer
+    op resolves to SUPERSEDED, not None (#598 — third supersession path)."""
+    outbox, _sleep_log, _clock = _make_outbox(private_rps=0.0)
+    picked = anyio.Event()
+    proceed = anyio.Event()
+
+    async def retrying() -> str:
+        picked.set()
+        await proceed.wait()
+        raise RetryAfter(0.0)
+
+    op = OutboxOp(
+        execute=retrying,
+        priority=EDIT_PRIORITY,
+        queued_at=0.0,
+        chat_id=1,
+        label="edit_message_text",
+        superseded_result=SUPERSEDED,
+    )
+    await outbox.enqueue(key=("edit", 1, 1), op=op, wait=False)
+    with anyio.fail_after(1):
+        await picked.wait()  # op removed from _pending, now executing
+
+    # A newer same-key edit arrives while op is mid-flight.
+    newer = _edit_op(chat_id=1)
+    await outbox.enqueue(key=("edit", 1, 1), op=newer, wait=False)
+    proceed.set()  # op raises RetryAfter; key occupied -> superseded
+
+    with anyio.fail_after(1):
+        while not op.done.is_set():
+            await anyio.lowlevel.checkpoint()
+    assert op.result is SUPERSEDED  # #598: NOT None
+
+    await outbox.close()
+
+
+@pytest.mark.anyio
+async def test_client_superseded_edit_returns_sentinel() -> None:
+    """End-to-end at the client layer: a pending keyboard-clear edit coalesced
+    out by a newer same-key progress edit returns SUPERSEDED, not None (#598)."""
+    bot = _BlockingEditBot()
+    client = TelegramClient(client=bot, private_chat_rps=0.0, group_chat_rps=0.0)
+
+    # 'first' dispatches and blocks; the ('edit', 1, 1) slot is now free.
+    await client.edit_message_text(chat_id=1, message_id=1, text="first", wait=False)
+    with anyio.fail_after(1):
+        await bot.edit_started.wait()
+
+    second_result: list[Any] = []
+
+    async with anyio.create_task_group() as tg:
+
+        async def _await_second() -> None:
+            second_result.append(
+                await client.edit_message_text(
+                    chat_id=1, message_id=1, text="second", wait=True
+                )
+            )
+
+        tg.start_soon(_await_second)
+        # Wait until 'second' is the pending op before enqueuing 'third'.
+        with anyio.fail_after(1):
+            while ("edit", 1, 1) not in client._outbox._pending:
+                await anyio.lowlevel.checkpoint()
+        await client.edit_message_text(
+            chat_id=1, message_id=1, text="third", wait=False
+        )
+        bot.release.set()
+
+    assert second_result == [SUPERSEDED]  # #598: NOT None
+    # 'third' wins the slot and dispatches; the superseded 'second' never
+    # reaches the bot.
+    with anyio.fail_after(1):
+        while len(bot.edit_calls) < 2:
+            await anyio.lowlevel.checkpoint()
+    assert bot.edit_calls == ["first", "third"]

@@ -136,6 +136,8 @@ _HOME_HINTS: dict[str, dict[str, str]] = {
 }
 
 # Engine-specific default model hints shown when no model override is set.
+# #475: static placeholders — _engine_model_hint() prefers the engine's real
+# resolved default (get_engine_default_model) and only falls back to these.
 _ENGINE_MODEL_HINTS: dict[str, str] = {
     "claude": "from CLI settings",
     "codex": "codex-mini-latest",
@@ -144,6 +146,18 @@ _ENGINE_MODEL_HINTS: dict[str, str] = {
     "opencode": "provider/model (e.g. openai/gpt-4o)",
     "pi": "from provider config",
 }
+
+
+def _engine_model_hint(engine: str) -> str:
+    """#475: the engine's resolved default model (matching the run footer),
+    falling back to the static placeholder when unresolvable."""
+    from ..engine_overrides import get_engine_default_model
+
+    resolved = get_engine_default_model(engine)
+    if resolved is not None:
+        return resolved
+    return _ENGINE_MODEL_HINTS.get(engine, "from CLI settings")
+
 
 # Map "default" to effective value for settings with known defaults.
 _DEFAULT_EFFECTIVE: dict[str, str] = {
@@ -347,7 +361,7 @@ async def _page_home(ctx: CommandContext) -> None:
     lines.append(f"Engine: <b>{engine_label}</b>")
     model_hint = _home_hint("md", model_label)
     if model_label == "default":
-        engine_hint = _ENGINE_MODEL_HINTS.get(current_engine, "from CLI settings")
+        engine_hint = _engine_model_hint(current_engine)
         model_hint = f"  · {engine_hint}"
     lines.append(f"Model: <b>{model_label}</b>{model_hint}")
     lines.append(f"Listen: <b>{listen_label}</b>{_home_hint('tr', listen_label)}")
@@ -1048,7 +1062,7 @@ async def _page_engine(ctx: CommandContext, action: str | None = None) -> None:
     # Model info
     engine_override = await prefs.get_engine_override(chat_id, current_engine)
     model_override = engine_override.model if engine_override else None
-    engine_hint = _ENGINE_MODEL_HINTS.get(current_engine, "from CLI settings")
+    engine_hint = _engine_model_hint(current_engine)
     model_label = model_override or f"default ({engine_hint})"
 
     lines = [

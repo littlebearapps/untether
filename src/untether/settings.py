@@ -60,13 +60,27 @@ class TelegramFilesSettings(BaseModel):
     auto_put_mode: Literal["upload", "prompt"] = "upload"
     uploads_dir: NonEmptyStr = "incoming"
     allowed_user_ids: list[StrictInt] = Field(default_factory=list)
+    # Secret/credential patterns never delivered from the outbox. Broadened
+    # for #628 recursive directory (zip) delivery, which makes shipping a
+    # nested secret far easier than the old flat scan — matched right-to-left
+    # by ``deny_reason`` (PurePosixPath.match), so bare names like ``.env``
+    # also match nested members.
     deny_globs: list[NonEmptyStr] = Field(
         default_factory=lambda: [
             ".git/**",
             ".env",
+            "**/.env",
+            "**/.env.*",
             ".envrc",
+            "**/.envrc",
             "**/*.pem",
+            "**/*.key",
+            "**/id_rsa",
+            "**/id_ed25519",
             "**/.ssh/**",
+            "**/.netrc",
+            "**/.npmrc",
+            "**/.pypirc",
         ]
     )
 
@@ -80,6 +94,16 @@ class TelegramFilesSettings(BaseModel):
     # logged as ``outbox.skipped`` only — the agent's "I've prepared the
     # guides folder for you" final message became a silent lie.
     outbox_notify_skipped: bool = True
+    # #628: deliver skipped outbox DIRECTORIES (e.g. an agent's screenshots/
+    # folder). "off" (default) keeps the #600 archive-to-.skipped/ behaviour;
+    # "zip" bundles each directory's deliverable members into a single
+    # <name>.zip Telegram document. Recursive deny-glob, symlink, per-member
+    # size, member-count, and total-zip-size caps are all applied to the
+    # contents. Recurse-and-send-each-file is intentionally NOT offered
+    # (flooding risk on large trees); zip keeps delivery to one bounded
+    # attachment per directory. Directories with no deliverable members (all
+    # denied/empty) or an oversize zip fall back to the #600 archive.
+    outbox_deliver_directories: Literal["off", "zip"] = "off"
 
     @field_validator("uploads_dir")
     @classmethod
@@ -137,7 +161,16 @@ class TelegramTransportSettings(BaseModel):
     # tracebacks/structlog. Access the raw value via .get_secret_value() at the
     # transport boundary (telegram/loop.py before passing to OpenAI SDK).
     voice_transcription_api_key: SecretStr | None = None
+    # #638: optional ISO-639-1 language hint passed to the transcription API.
+    # Unset = provider auto-detect (the pre-#638 behaviour). Pinning e.g. "en"
+    # stops Whisper-family models mis-guessing the language on short
+    # utterances ('Continue' → '계속').
+    voice_transcription_language: NonEmptyStr | None = None
     voice_show_transcription: bool = True
+    # #381: optional SSRF allowlist (CIDR / bare-IP strings) for
+    # voice_transcription_base_url — lets operators opt in to private endpoints
+    # (e.g. an Azure private-link range) that would otherwise be blocked.
+    voice_transcription_url_allowlist: list[str] = Field(default_factory=list)
     session_mode: Literal["stateless", "chat"] = "stateless"
     show_resume_line: bool = True
     forward_coalesce_s: float = Field(default=1.0, ge=0)
@@ -163,13 +196,82 @@ class TelegramTransportSettings(BaseModel):
     def _validate_voice_key_not_empty(cls, v: SecretStr | None) -> SecretStr | None:
         """#378: preserve the pre-SecretStr `NonEmptyStr | None` contract.
         Empty / whitespace-only strings round-trip to None so downstream code
-        can use a simple `is not None` (or truthy) check at the call site."""
+        can use a simple `is not None` (or truthy) check at the call site.
+
+        #594: additionally reject header-illegal characters at config load.
+        An embedded newline (e.g. two concatenated keys emitted by a
+        credential manager) or other control character reaches httpx as an
+        illegal ``Authorization`` header and surfaces hours later as a
+        misleading ``APIConnectionError("Connection error.")`` on every
+        transcription attempt — fail fast with a diagnosable error instead
+        (same fail-fast precedent as the #381 base-url SSRF validator)."""
         if v is None:
             return None
         key = v.get_secret_value().strip()
         if not key:
             return None
+        if not key.isprintable():
+            raise ValueError(
+                "voice_transcription_api_key contains control characters "
+                "(embedded newline/tab?) — check for concatenated or "
+                "line-wrapped key material"
+            )
+        try:
+            key.encode("latin-1")
+        except UnicodeEncodeError as exc:
+            raise ValueError(
+                "voice_transcription_api_key contains characters that cannot "
+                "be sent in an HTTP Authorization header"
+            ) from exc
         return SecretStr(key)
+
+    @field_validator("voice_transcription_language", mode="after")
+    @classmethod
+    def _validate_voice_language(cls, v: str | None) -> str | None:
+        """#638: normalise + validate the language hint at config parse time
+        (same fail-fast precedent as timezone names in triggers/settings.py).
+        Whisper-family APIs take an ISO-639-1 code ("en", "de"); accept 2-3
+        lowercase letters after stripping/lowercasing so a typo like
+        "english" fails at boot, not silently at the API."""
+        if v is None:
+            return None
+        code = v.strip().lower()
+        if not code:
+            return None
+        if not (2 <= len(code) <= 3 and code.isalpha() and code.isascii()):
+            raise ValueError(
+                "voice_transcription_language must be an ISO-639-1 code "
+                f"like 'en' (got {v!r})"
+            )
+        return code
+
+    @model_validator(mode="after")
+    def _validate_voice_base_url_ssrf(self) -> TelegramTransportSettings:
+        """#381: fast-fail at config load for an obviously-unsafe voice
+        transcription endpoint (non-http scheme, or a private/reserved IP
+        literal) and for a malformed allowlist. Hostname-based URLs that
+        resolve to a private IP are caught later (async, with DNS) at the
+        chokepoint in ``transcribe_voice``."""
+        # Lazy import to avoid any import-time cycle through the triggers pkg.
+        from .triggers.ssrf import SSRFError, parse_networks, validate_url
+
+        try:
+            networks = parse_networks(self.voice_transcription_url_allowlist)
+        except ValueError as exc:
+            raise ValueError(
+                "[transports.telegram] voice_transcription_url_allowlist has an "
+                f"invalid CIDR/IP entry: {exc}"
+            ) from exc
+
+        if self.voice_transcription_base_url is not None:
+            try:
+                validate_url(self.voice_transcription_base_url, allowlist=networks)
+            except SSRFError as exc:
+                raise ValueError(
+                    "[transports.telegram] voice_transcription_base_url is not "
+                    f"permitted: {exc}"
+                ) from exc
+        return self
 
     @model_validator(mode="after")
     def _validate_allowed_user_ids_or_optin(self) -> TelegramTransportSettings:
@@ -272,6 +374,46 @@ class AutoContinueSettings(BaseModel):
 
     enabled: bool = True
     max_retries: int = Field(default=1, ge=0, le=3)
+    # #596: an empty-result no-op resume (0 turns / $0 / empty answer, ok=True)
+    # is the same upstream turn-state family — resuming a session whose prior
+    # turn ended on a tool_result (last_event_type=user) can return an
+    # immediate empty result on the first attempt, forcing the user to
+    # manually re-nudge. When enabled, Untether auto-resends the original
+    # prompt once (same session) instead of asking the user to resend.
+    # Single-shot: if the retry is also empty, the user-visible resend notice
+    # is shown and no further retry fires.
+    resend_empty_resume: bool = True
+    # #631 (W1): when empty-result retry is exhausted, retry as a FRESH session
+    # instead of same-session to circumvent the poisoned-session state.
+    empty_resume_fresh: bool = True
+    # #631 (W2): mark sessions force-killed after a tool result as unsafe to
+    # resume — quarantine them so resuming on the next message spins up a new
+    # session rather than re-entering the poisoned state.
+    quarantine_on_forced_teardown: bool = True
+    # #633 (W4): never resume a session whose previous subprocess is still
+    # alive. rc7's quarantine-and-fresh recovers AFTER a session is poisoned;
+    # this prevents the poisoning. Before spawning a `--resume`, wait (bounded)
+    # for the prior owner to exit; if it does not, divert to a FRESH session.
+    # #668: this deliberately does NOT quarantine on timeout — a deviation from
+    # the original #633 W4 design. A still-busy session is not a known-corrupt
+    # one, and a 7-day quarantine marker is far too destructive to write on a
+    # mere give-up; see the "Deliberately NOT quarantined" note beside the
+    # handoff_timeout branch in runner_bridge.py. Set False for pre-rc8 behaviour.
+    serialize_session_owner: bool = True
+    # Upper bound on that wait. Condition-based, so it resolves the instant the
+    # prior subprocess exits — this is only the give-up point. Kept comfortably
+    # above the post-result SIGTERM grace so a normal teardown wins the race.
+    session_handoff_timeout_s: float = Field(default=30.0, ge=0.0, le=300.0)
+    # #647: extra wait budget when the base timeout expires while the prior
+    # owner still has LIVE background work (default-background subagents,
+    # #646). This is the realistic flow — the agent says "I'll report back
+    # when the subagents finish" and the user immediately asks for a progress
+    # report. Silently diverting to a fresh session loses all context; instead
+    # Untether tells the user it's waiting for the background work and keeps
+    # waiting up to this budget (still condition-based — resolves the instant
+    # the owner exits). On expiry the divert still happens but is announced
+    # rather than silent. 0 disables the extended wait. Range 0-30min.
+    session_handoff_bg_timeout_s: float = Field(default=600.0, ge=0.0, le=1800.0)
 
 
 class WatchdogSettings(BaseModel):
@@ -280,6 +422,14 @@ class WatchdogSettings(BaseModel):
     liveness_timeout: float = Field(default=600.0, ge=60, le=3600)
     stall_auto_kill: bool = False
     stall_repeat_seconds: float = Field(default=180.0, ge=30, le=600)
+    # #590: after an engine subprocess exits (including clean rc=0), sweep
+    # surviving process-group members and captured descendant PIDs — the
+    # Claude CLI leaks MCP node children on exit fleet-wide (1/run on sl,
+    # 11-37/day on nsd, driving the #589 OOM kills). Killing everything the
+    # session spawned at session end is the #573 lifecycle policy (OWASP
+    # ASI08/ASI10); it also terminates user-backgrounded Bash tasks that
+    # outlive the run. Set false to keep survivors.
+    reap_orphans: bool = True
     tool_timeout: float = Field(default=600.0, ge=60, le=7200)
     mcp_tool_timeout: float = Field(default=900.0, ge=60, le=7200)
     subagent_timeout: float = Field(default=900.0, ge=60, le=7200)
@@ -323,6 +473,23 @@ class WatchdogSettings(BaseModel):
     prespawn_ram_warn_mb: int = Field(default=2000, ge=0, le=65536)
     prespawn_ram_block_mb: int = Field(default=500, ge=0, le=65536)
 
+    # #589: the guard above is per-spawn and count-blind, so N concurrent chats
+    # can each individually pass the free-RAM check and then collectively
+    # exhaust the host. On nsd the OOM killer struck untether.service 5x in one
+    # evening and killed two live Claude runs (rc=-9), each holding 10-17 MCP
+    # node children.
+    #
+    # Reserve headroom for the runs already in flight: the effective block
+    # threshold becomes
+    #     block_mb + prespawn_ram_per_run_reserve_mb * live_engine_subprocesses
+    # so the bar rises as concurrency does. 0 disables the scaling and restores
+    # the flat pre-0.35.4rc8 threshold.
+    prespawn_ram_per_run_reserve_mb: int = Field(default=750, ge=0, le=65536)
+    # Hard ceiling on concurrent engine subprocesses. Independent of free RAM —
+    # useful on small VPS hosts where the leak rate matters more than the
+    # instantaneous reading. 0 = unlimited (default; no behaviour change).
+    max_concurrent_engine_runs: int = Field(default=0, ge=0, le=64)
+
     # #438: user-configurable Claude SSE-stream watchdog. Sets
     # ``CLAUDE_STREAM_IDLE_TIMEOUT_MS`` for the Claude subprocess (via
     # ``setdefault`` — shell-set values still win). Default 300000 ms (5 min)
@@ -332,6 +499,18 @@ class WatchdogSettings(BaseModel):
     # stalls (#438) can raise this to 600000-900000 to ride out longer
     # silences before Untether reports the run failed. Range 30s-30min.
     claude_stream_idle_timeout_ms: int = Field(default=300_000, ge=30_000, le=1_800_000)
+
+    # #572: bounded auto-retry for Type-A stream-idle timeouts. Type A is a
+    # mid-generation SSE stall AFTER real output began (num_turns >= 1,
+    # duration_api_ms > 0) — transient upstream flake worth one resume.
+    # Type B (cold-start zero-byte stall) NEVER retries regardless of this
+    # flag: retrying hammers a down API. Default OFF while the upstream
+    # Anthropic API is unstable — a flapping API must not become a retry
+    # storm. The retry re-enters handle_message as a normal resumed run, so
+    # quarantine divert, session-owner serialisation, RAM guard and cost-
+    # budget checks all apply; signal deaths (rc=143/137) are suppressed.
+    stream_idle_auto_retry: bool = False
+    stream_idle_max_retries: int = Field(default=1, ge=1, le=3)
 
     # #333: post-result idle timeout for Claude bidirectional sessions.
     # Claude Code in stream-json + permission-mode keeps stdin open after
@@ -349,6 +528,38 @@ class WatchdogSettings(BaseModel):
     # Range 30s-1h.
     post_result_idle_enabled: bool = True
     post_result_idle_timeout: float = Field(default=600.0, ge=30, le=3600)
+
+    # #592: pre-first-result silence cap. A run whose stream goes silent
+    # forever BEFORE any result event was previously never auto-cancelled —
+    # the post-result watchdog only arms after a result, and the liveness
+    # machinery never escalates an alive-but-idle process (8-day zombie
+    # Claude subprocess on mac). After this many seconds with zero stream
+    # output, no pending permission/ask requests, and no live background
+    # work, the subprocess is killed (descendant-aware) and the run ends
+    # with an explanatory error. Default 1h accommodates subscription
+    # rate-limit waits; 0 disables. Range 0-24h.
+    pre_result_silence_timeout: float = Field(default=3600.0, ge=0, le=86400)
+
+    # #591: short-circuit grace for the post-result subcountdown. Once the
+    # JSONL reader is done and nothing references the session (no pending
+    # control/ask requests, no live background work), the subprocess is only
+    # being held open by lingering MCP children — SIGTERM after this grace
+    # instead of the full post_result_idle_timeout so the process (and its
+    # RSS/TCP) is released promptly. 0 disables the shortcut. Range 0-600s.
+    post_result_limbo_grace: float = Field(default=60.0, ge=0, le=600)
+
+    # #647/#646: liveness-aware extension of the post-result ceiling. Upstream
+    # runs Agent/Task subagents in the background by default (Claude Code
+    # ≥2.1.198) and their completion is never signalled on stream-json, so a
+    # fixed `post_result_idle_timeout` SIGTERMs live subagent work mid-flight —
+    # which quarantines the session (#632) and diverts the user's next message
+    # to a fresh contextless session. When the ceiling expires while background
+    # handles are still live and the process tree is not demonstrably idle
+    # (/proc CPU evidence), the SIGTERM is deferred and re-checked each poll.
+    # Bounded: background handles age out at 900 s from registration, and the
+    # total post-result hold never exceeds this cap. 0 disables the extension
+    # (pre-rc10 fixed-cap behaviour). Range 0-2h.
+    post_result_bg_max_hold: float = Field(default=1800.0, ge=0, le=7200)
 
     # #481: grace window for fresh Bash/BashOutput tool calls. When the most
     # recent action is Bash/BashOutput/KillShell and its age is less than

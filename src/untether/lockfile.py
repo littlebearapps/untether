@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import contextlib
+import fcntl
 import hashlib
 import json
 import os
@@ -31,11 +33,29 @@ class LockError(RuntimeError):
 
 @dataclass(slots=True)
 class LockHandle:
+    """Holds an exclusive ``flock(2)`` on the lock file for the process lifetime.
+
+    The kernel releases the lock automatically when the holding process exits
+    (#459: this eliminates the PID-reuse race that the old ``os.kill(pid, 0)``
+    liveness check suffered — a reused PID could make a stale lock look valid
+    forever). ``fd`` is kept open until :meth:`release` (or process death);
+    it MUST stay non-inheritable so the lock can't leak into a spawned engine
+    subprocess that outlives us — ``os.open`` returns a non-inheritable fd by
+    default (PEP 446), so do NOT ``os.set_inheritable(fd, True)``.
+    """
+
     path: Path
+    fd: int
 
     def release(self) -> None:
+        # Release the advisory lock and close the descriptor. The file itself
+        # is intentionally NOT unlinked: removing it would let another process
+        # create+lock a fresh file at the same path while a third still holds
+        # an flock on the now-orphaned inode (the classic open-then-flock race).
+        # A leftover lock file with no live flock is harmless — the next
+        # acquire just re-locks it.
         try:
-            self.path.unlink(missing_ok=True)
+            fcntl.flock(self.fd, fcntl.LOCK_UN)
         except OSError as exc:
             logger.warning(
                 "lock.release.failed",
@@ -43,6 +63,9 @@ class LockHandle:
                 error=str(exc),
                 error_type=exc.__class__.__name__,
             )
+        finally:
+            with contextlib.suppress(OSError):
+                os.close(self.fd)
 
     def __enter__(self) -> LockHandle:
         return self
@@ -67,33 +90,51 @@ def acquire_lock(
     lock_path = lock_path_for_config(cfg_path)
     try:
         lock_path.parent.mkdir(parents=True, exist_ok=True)
-        existing = _read_lock_info(lock_path)
-        if existing:
-            if (
-                token_fingerprint
-                and existing.token_fingerprint
-                and existing.token_fingerprint != token_fingerprint
-            ):
-                _write_lock_info(
-                    lock_path,
-                    pid=os.getpid(),
-                    token_fingerprint=token_fingerprint,
-                )
-                return LockHandle(path=lock_path)
-            if _pid_running(existing.pid):
-                raise LockError(path=lock_path, state="running") from None
-        _write_lock_info(
-            lock_path,
-            pid=os.getpid(),
-            token_fingerprint=token_fingerprint,
-        )
+        # O_CREAT so the file appears on first run; O_RDWR so we can stamp
+        # diagnostics. The fd is non-inheritable by default (PEP 446) — keep
+        # it that way (see LockHandle docstring).
+        fd = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o644)
     except OSError as exc:
         raise LockError(path=lock_path, state=str(exc)) from exc
 
-    return LockHandle(path=lock_path)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        # Another live process holds the lock. The kernel guarantees this is a
+        # real, running holder — no PID inference needed.
+        os.close(fd)
+        raise LockError(path=lock_path, state="running") from None
+    except OSError as exc:
+        os.close(fd)
+        raise LockError(path=lock_path, state=str(exc)) from exc
+
+    # We hold the lock. Stamp pid + fingerprint into the file purely for human
+    # debugging (`cat untether.lock`); they're no longer used for liveness.
+    try:
+        payload = json.dumps(
+            {"pid": os.getpid(), "token_fingerprint": token_fingerprint},
+            indent=2,
+            sort_keys=True,
+        )
+        os.ftruncate(fd, 0)
+        os.lseek(fd, 0, os.SEEK_SET)
+        os.write(fd, (payload + "\n").encode("utf-8"))
+    except OSError as exc:
+        # Stamping is best-effort; the lock itself is already held. Log and
+        # keep going rather than dropping the lock over a diagnostics write.
+        logger.warning(
+            "lock.stamp.failed",
+            path=str(lock_path),
+            error=str(exc),
+            error_type=exc.__class__.__name__,
+        )
+
+    return LockHandle(path=lock_path, fd=fd)
 
 
 def _read_lock_info(path: Path) -> LockInfo | None:
+    """Read the diagnostic pid/fingerprint stamp. No longer used for locking
+    decisions (flock handles liveness) — retained for tooling/tests."""
     try:
         raw = path.read_text(encoding="utf-8")
     except FileNotFoundError:
@@ -118,33 +159,18 @@ def _read_lock_info(path: Path) -> LockInfo | None:
     )
 
 
-def _write_lock_info(path: Path, *, pid: int, token_fingerprint: str | None) -> None:
-    payload = {"pid": pid, "token_fingerprint": token_fingerprint}
-    path.write_text(
-        json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8"
-    )
-
-
-def _pid_running(pid: int | None) -> bool:
-    if pid is None or pid <= 0:
-        return False
-    try:
-        os.kill(pid, 0)
-    except ProcessLookupError:
-        return False
-    except PermissionError:
-        return True
-    except OSError:
-        return False
-    return True
-
-
 def _format_lock_message(path: Path, state: str) -> str:
     if state != "running":
         return f"error: lock failed: {state}"
     header = "error: already running"
     display_path = _display_lock_path(path)
-    lines = [header, f"remove {display_path} if stale"]
+    # flock auto-releases when the holder dies, so manual `rm` is no longer the
+    # recovery path — surface the lock file only for diagnostics.
+    lines = [
+        header,
+        f"another untether process holds the lock on {display_path}",
+        "(the lock auto-releases when that process exits)",
+    ]
     return "\n".join(lines)
 
 

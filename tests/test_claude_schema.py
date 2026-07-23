@@ -216,3 +216,148 @@ def test_decode_advisor_tool_result_block_with_dict_content() -> None:
     assert isinstance(block, claude_schema.StreamAdvisorToolResultBlock)
     assert block.tool_use_id == "adv_501"
     assert block.content == {"type": "text", "text": "advice"}
+
+
+# ---------------------------------------------------------------------------
+# #597 — image + document content blocks (Read on binary media echoes these
+# back inside user-role messages; x23 jsonl.msgspec.invalid on nsd)
+# ---------------------------------------------------------------------------
+
+
+def test_decode_image_block_in_user_message() -> None:
+    """A `Read` on an image echoes an image content block in the user-role
+    message. Schema must parse it instead of dropping the whole line."""
+    payload = {
+        "type": "user",
+        "uuid": "uuid-img",
+        "session_id": "sess-1",
+        "message": {
+            "role": "user",
+            "content": [
+                {
+                    "type": "image",
+                    "source": {
+                        "type": "base64",
+                        "media_type": "image/jpeg",
+                        "data": "aGVsbG8=",
+                    },
+                },
+                {
+                    "type": "tool_result",
+                    "tool_use_id": "toolu_img",
+                    "content": "read 1 image",
+                },
+            ],
+        },
+    }
+    decoded = claude_schema.decode_stream_json_line(json.dumps(payload).encode())
+    assert isinstance(decoded, claude_schema.StreamUserMessage)
+    assert isinstance(decoded.message.content, list)
+    block = decoded.message.content[0]
+    assert isinstance(block, claude_schema.StreamImageBlock)
+    assert block.source is not None
+    assert block.source["media_type"] == "image/jpeg"
+    assert isinstance(decoded.message.content[1], claude_schema.StreamToolResultBlock)
+
+
+def test_decode_document_block_in_user_message() -> None:
+    """PDF reads echo a document content block — same #489-family shape."""
+    payload = {
+        "type": "user",
+        "uuid": "uuid-doc",
+        "session_id": "sess-1",
+        "message": {
+            "role": "user",
+            "content": [
+                {
+                    "type": "document",
+                    "source": {
+                        "type": "base64",
+                        "media_type": "application/pdf",
+                        "data": "JVBERi0=",
+                    },
+                    "title": "report.pdf",
+                }
+            ],
+        },
+    }
+    decoded = claude_schema.decode_stream_json_line(json.dumps(payload).encode())
+    assert isinstance(decoded, claude_schema.StreamUserMessage)
+    assert isinstance(decoded.message.content, list)
+    block = decoded.message.content[0]
+    assert isinstance(block, claude_schema.StreamDocumentBlock)
+    assert block.title == "report.pdf"
+
+
+def test_decode_image_block_in_assistant_message() -> None:
+    """Assistant-role messages can carry image blocks too (vision replies);
+    the union addition covers both bodies for free."""
+    payload = {
+        "type": "assistant",
+        "uuid": "uuid-img2",
+        "session_id": "sess-1",
+        "message": {
+            "role": "assistant",
+            "model": "claude-fable-5",
+            "content": [
+                {"type": "image", "source": {"type": "url", "url": "https://x/y.png"}}
+            ],
+        },
+    }
+    decoded = claude_schema.decode_stream_json_line(json.dumps(payload).encode())
+    assert isinstance(decoded, claude_schema.StreamAssistantMessage)
+    assert isinstance(decoded.message.content[0], claude_schema.StreamImageBlock)
+
+
+# #637 — top-level `tool_progress` heartbeat emitted while a long-running
+# tool is in flight. Payload below is the verbatim shape captured from
+# Claude Code CLI 2.1.214 by running a >30s Bash command. Before the fix
+# msgspec raised: Invalid value 'tool_progress' - at `$.type`.
+def test_decode_tool_progress_heartbeat() -> None:
+    payload = {
+        "type": "tool_progress",
+        "tool_use_id": "toolu_011cbTyUrSBE4D28tMCVqRSt-heartbeat-0",
+        "tool_name": "Bash",
+        "parent_tool_use_id": "toolu_011cbTyUrSBE4D28tMCVqRSt",
+        "elapsed_time_seconds": 30,
+        "heartbeat": True,
+        "session_id": "8e8245e8-952c-4b70-9c6f-4c1cb4d4a687",
+        "uuid": "a9786562-4e78-418e-b48a-b14e57a1076d",
+    }
+    decoded = claude_schema.decode_stream_json_line(json.dumps(payload).encode())
+    assert isinstance(decoded, claude_schema.StreamToolProgressMessage)
+    assert decoded.tool_name == "Bash"
+    assert decoded.heartbeat is True
+    assert decoded.elapsed_time_seconds == 30
+    assert decoded.session_id == "8e8245e8-952c-4b70-9c6f-4c1cb4d4a687"
+
+
+def test_decode_tool_progress_minimal_and_unknown_fields() -> None:
+    """Every field is optional and unknown fields are tolerated, so an
+    upstream shape change cannot reintroduce the dropped-line regression."""
+    decoded = claude_schema.decode_stream_json_line(
+        json.dumps({"type": "tool_progress", "some_future_field": {"a": 1}}).encode()
+    )
+    assert isinstance(decoded, claude_schema.StreamToolProgressMessage)
+    assert decoded.tool_name is None
+    assert decoded.heartbeat is None
+
+
+def test_tool_progress_translates_to_no_events() -> None:
+    """The heartbeat must decode *and* be ignored — it carries no progress
+    detail Untether renders (elapsed time comes from Untether's own clock,
+    #481), so translate must not emit a spurious action."""
+    from untether.runners.claude import ClaudeStreamState, translate_claude_event
+
+    decoded = claude_schema.decode_stream_json_line(
+        json.dumps(
+            {"type": "tool_progress", "tool_name": "Bash", "heartbeat": True}
+        ).encode()
+    )
+    state = ClaudeStreamState()
+    assert (
+        translate_claude_event(
+            decoded, title="claude", state=state, factory=state.factory
+        )
+        == []
+    )

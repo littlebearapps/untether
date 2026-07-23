@@ -10,7 +10,7 @@ Untether adds interactive permission control, plan mode support, and several UX 
 ## Features (vs upstream takopi)
 
 - **Interactive permission control** — bidirectional Telegram buttons for tool approval, plan mode, and clarifying questions
-- **Pause & Outline Plan** — third button on plan approval; after Claude writes the outline, Approve/Deny/Let's discuss buttons appear automatically (hold-open keeps session alive while user reads)
+- **Pause & Outline Plan** — third button on plan approval; the outline (chat text, or the ExitPlanMode `plan` input on plan-file CLIs, #659) is posted with Approve/Deny/Let's discuss buttons (hold-open keeps session alive while user reads); the v2.1.72-74-era progressive cooldown was retired in #570 (upstream retry loop fixed, verified on CLI 2.1.215)
 - **Agent context preamble** — configurable prompt preamble tells agents they're on Telegram and requests structured end-of-task summaries; `[preamble]` config section
 - **`/planmode`** — toggle permission mode per chat (on/off/auto)
 - **`/listen`** — set listen mode (`all` / `mentions`) per chat or topic; controls when the bot responds in groups; renamed from `/trigger` in v0.35.3 (#297) to disambiguate from webhook/cron triggers — `/trigger` still works as a deprecated alias for one release cycle
@@ -32,8 +32,9 @@ Untether adds interactive permission control, plan mode support, and several UX 
 - **`/config`** — inline settings menu with navigable sub-pages; toggle plan mode, ask mode, verbose, engine, trigger via buttons
 - **`[progress]` config** — global verbosity and max_actions settings in `untether.toml`
 - **Pi context compaction** — `AutoCompactionStart`/`AutoCompactionEnd` events rendered as progress actions
-- **Stall diagnostics & liveness watchdog** — `/proc` process diagnostics (CPU, RSS, TCP, FDs), progressive stall warnings with Telegram notifications, liveness watchdog for alive-but-silent subprocesses, stall auto-cancel (dead process, no-PID zombie, absolute cap) with CPU-active suppression (sleeping-process aware — shows tool name when main process waiting on child), tool-active repeat suppression (first warning fires, repeats suppressed while child CPU-active), MCP tool-aware threshold (15 min for network-bound MCP calls vs 10 min for local tools) with contextual "MCP tool running: {server}" messaging, `session.summary` structured log; `[watchdog]` config section with configurable `tool_timeout` and `mcp_tool_timeout`
+- **Stall diagnostics & liveness watchdog** — `/proc` process diagnostics (CPU, RSS, TCP, FDs), progressive stall warnings with Telegram notifications, liveness watchdog for alive-but-silent subprocesses, stall auto-cancel (dead process, no-PID zombie, absolute cap) with CPU-active suppression (sleeping-process aware — shows tool name when main process waiting on child), tool-active repeat suppression (first warning fires, repeats suppressed while child CPU-active), MCP tool-aware threshold (15 min for network-bound MCP calls vs 10 min for local tools) with contextual "MCP tool running: {server}" messaging, `session.summary` structured log; bare rate_limit_events latch a conservative 60s wait so throttled sessions aren't mistaken for hung ones (#657); `[watchdog]` config section with configurable `tool_timeout`, `mcp_tool_timeout`, and `stream_idle_auto_retry`/`stream_idle_max_retries` (#572 — bounded auto-resume of Type-A mid-generation API stalls, default off; Type-B never retries)
 - **Auto-continue** — detects Claude Code sessions that exit after receiving tool results without processing them (upstream bugs #34142, #30333) and auto-resumes; suppressed on signal deaths (rc=143/SIGTERM, rc=137/SIGKILL) to prevent death spirals under memory pressure; configurable via `[auto_continue]` with `enabled` (default true) and `max_retries` (default 1)
+- **Empty-resume recovery (quarantine-and-fresh)** (#631, #632) — a resume that returns 0 turns/$0 (upstream dangling-tool_use defect) quarantines the session in `session_quarantine.json` and auto-resends the message once on a fresh session; sessions SIGTERM'd after a result (`forced_teardown_after_result`) are quarantined proactively so the next message diverts to a fresh session before any empty result is seen; `[auto_continue]` flags `empty_resume_fresh` and `quarantine_on_forced_teardown` (both default true); structured events `runner.empty_result` → `session.quarantined` → `session.auto_resend_fresh`/`session.resume_diverted_fresh`; Claude runner only
 - **MCP catalog observability + proactive refresh** (#365) — `catalog_staleness.detected` structlog WARNING once per `(session, server, status)` tuple when Claude's `system.init` reports a non-`connected` MCP status (`detect_catalog_staleness`, default **on**); opt-in fire-and-forget `mcp_status` control_request after each `tool_result` to nudge Claude Code's catalog (`notify_catalog_refresh`, default **off**). Request IDs use the `ut_catalog_refresh_<session_id>_<seq>` namespace; drained via `ClaudeRunner._drain_catalog_refresh`. Logs `catalog.refresh_sent` INFO / `catalog.refresh_failed` WARN/ERROR. Claude runner only
 - **File upload deduplication** — auto-appends `_1`, `_2`, … when target file exists, instead of requiring `--force`; media groups without captions auto-save to `incoming/`
 - **Agent-initiated file delivery (outbox)** — agents write files to `.untether-outbox/` during a run; Untether sends them as Telegram documents on completion with `📎` captions; deny-glob security, size limits, file count cap, auto-cleanup; `[transports.telegram.files]` config
@@ -42,7 +43,7 @@ Untether adds interactive permission control, plan mode support, and several UX 
 - **`/continue`** — cross-environment resume; pick up the most recent CLI session from Telegram using each engine's native continue flag (`--continue`, `resume --last`, `--resume latest`); supported for Claude, Codex, OpenCode, Pi, Gemini (not AMP)
 - **Timezone-aware cron triggers** — per-cron `timezone` or global `default_timezone` with IANA names (e.g. `Australia/Melbourne`); DST-aware via `zoneinfo`; invalid names rejected at config parse time
 - **Hot-reload trigger configuration** — editing `untether.toml` applies cron/webhook changes immediately without restart; `TriggerManager` holds mutable state that the cron scheduler and webhook server reference at runtime; `handle_reload()` re-parses `[triggers]` on config file change
-- **Hot-reload Telegram bridge settings** — `voice_transcription`, file transfer, `allowed_user_ids`, timing, and `show_resume_line` settings reload without restart; `TelegramBridgeConfig` unfrozen (slots kept) with `update_from()` wired into `handle_reload()`; restart-only keys (`bot_token`, `chat_id`, `session_mode`, `topics`, `message_overflow`) still warn
+- **Hot-reload Telegram bridge settings** — `voice_transcription` (incl. the #638 `voice_transcription_language` ISO-639-1 hint), file transfer, `allowed_user_ids`, timing, and `show_resume_line` settings reload without restart; `TelegramBridgeConfig` unfrozen (slots kept) with `update_from()` wired into `handle_reload()`; restart-only keys (`bot_token`, `chat_id`, `session_mode`, `topics`, `message_overflow`) still warn
 - **`/at` command** — one-shot delayed runs: `/at 30m <prompt>` schedules a prompt to run in 60s–24h; `/cancel` drops pending delays before firing; lost on restart (documented) with a per-chat cap of 20 pending delays; `telegram/at_scheduler.py` holds task-group + run_job refs
 - **`run_once` cron flag** — `[[triggers.crons]]` entries can set `run_once = true` to fire once then auto-disable; cron stays in TOML and re-activates on config reload or restart
 - **Trigger visibility (Tier 1)** — `/ping` shows per-chat trigger summary (`⏰ triggers: 1 cron (id, 9:00 AM daily (Melbourne))`); run footer shows `⏰ cron:<id>` / `⚡ webhook:<id>` for trigger-initiated runs; new `describe_cron()` utility renders common patterns in plain English
@@ -73,7 +74,8 @@ Telegram <-> TelegramPresenter <-> RunnerBridge <-> Runner (claude/codex/opencod
 | `runners/claude.py` | Claude Code runner, interactive features |
 | `runners/gemini.py` | Gemini CLI runner |
 | `runners/amp.py` | AMP CLI runner (Sourcegraph) |
-| `runner_bridge.py` | Connects runners to Telegram presenter, injects agent preamble, auto-continue with signal death suppression |
+| `runner_bridge.py` | Connects runners to Telegram presenter, injects agent preamble, auto-continue with signal death suppression, empty-resume quarantine-and-fresh recovery |
+| `session_quarantine.py` | Persistent QuarantineStore (`session_quarantine.json`): poisoned-session markers, forced-teardown quarantine, resume divert (#631/#632) |
 | `cost_tracker.py` | Per-run/daily cost tracking and budget alerts |
 | `commands/claude_control.py` | Approve/Deny/Discuss callback handler |
 | `commands/dispatch.py` | Callback dispatch and command routing |
@@ -149,7 +151,7 @@ Domain-specific Claude Code skills for working on Untether:
 |-------|------|----------|
 | Telegram Bot API | `.claude/skills/telegram-bot-api/` | Working on Telegram transport, inline keyboards, outbox, rate limiting, voice, topics |
 | JSONL Subprocess Runner | `.claude/skills/jsonl-subprocess-runner/` | Working on runner base class, event translation, session locking, adding engines |
-| Claude stream-json | `.claude/skills/claude-stream-json/` | Working on Claude runner, control channel, permission modes, auto-approve, cooldown |
+| Claude stream-json | `.claude/skills/claude-stream-json/` | Working on Claude runner, control channel, permission modes, auto-approve, outline gate |
 | Codex/OpenCode/Pi | `.claude/skills/codex-opencode-pi/` | Working on non-Claude runners, comparing engine protocols |
 | Untether Architecture | `.claude/skills/untether-architecture/` | Understanding overall data flow, config system, progress tracking, project system |
 | Release Coordination | `.claude/skills/release-coordination/` | Preparing releases, version bumps, changelog drafting, issue audits, rollback procedures |
@@ -178,23 +180,25 @@ Rules in `.claude/rules/` auto-load when editing matching files:
 |------|-----------|----------------|
 | `runner-development.md` | `runners/**`, `runner.py` | EventFactory usage, session locking, entry point registration |
 | `telegram-transport.md` | `telegram/**` | Outbox-only writes, 64-byte callback data, ephemeral cleanup |
-| `control-channel.md` | `runners/claude.py`, `claude_control.py` | PTY lifecycle, session registries, cooldown mechanics |
+| `control-channel.md` | `runners/claude.py`, `claude_control.py` | PTY lifecycle, session registries, outline-gate mechanics |
 | `testing-conventions.md` | `tests/**` | pytest+anyio, stub patterns, 80% coverage threshold |
 | `release-discipline.md` | `CHANGELOG.md`, `pyproject.toml` | GitHub issue linking, changelog format, semantic versioning |
 | `dev-workflow.md` | `src/untether/**` | Dev vs staging separation, never restart staging for testing, always use untether-dev |
 | `context-quality.md` | AI context files (`CLAUDE.md`, `AGENTS.md`, etc.) | Cross-file consistency, path verification, version accuracy, command accuracy |
 | `help-faq.md` | `docs/faq/**` | NEVER delete; keep FAQ current with feature changes; H2s must be question-shaped (#477) |
+| `workflow-commands.md` | agentic loop commands (`.claude/commands/*.md`) | Routing table + 7 cross-cutting rules (Untether-mode, release-guard, dev/staging, reuse, confirm-gated writes, idempotency, redaction); cited by every workflow command. See `docs/LOOPS.md` for the loop registry |
+| `kaizen.md` | `/kaizen`, `/kaizen-review` | Capture shape (8 tags + evidence + S/C/R), read-only-except-one-comment boundary, propose-only promotion; full rubric in `docs/kaizen/README.md` |
 
 ## Tests
 
-2372 unit tests, 80% coverage threshold. Integration testing against `@untether_dev_bot` is **mandatory before every release** — see `docs/reference/integration-testing.md` for the full playbook with per-release-type tier requirements (patch/minor/major). All integration test tiers are fully automated by Claude Code via Telegram MCP tools and Bash.
+3021 unit tests, 80% coverage threshold. Integration testing against `@untether_dev_bot` is **mandatory before every release** — see `docs/reference/integration-testing.md` for the full playbook with per-release-type tier requirements (patch/minor/major). All integration test tiers are fully automated by Claude Code via Telegram MCP tools and Bash.
 
 Key test files:
 
-- `test_claude_control.py` — 99 tests: control requests, response routing, registry lifecycle, auto-approve/auto-deny, tool auto-approve, custom deny messages, discuss action, early toast, progressive cooldown, auto permission mode, diff_preview plan bypass
+- `test_claude_control.py` — 100 tests: control requests, response routing, registry lifecycle, auto-approve/auto-deny, tool auto-approve, custom deny messages, discuss action, early toast, outline gate (#570 retired the progressive cooldown), auto permission mode, diff_preview plan bypass
 - `test_callback_dispatch.py` — 26 tests: callback parsing, dispatch toast/ephemeral behaviour, early answering
-- `test_exec_bridge.py` — 140 tests: ephemeral notification cleanup, approval push notifications, progressive stall warnings, stall diagnostics, stall auto-cancel with CPU-active suppression (sleeping-process aware), tool-active repeat suppression, approval-aware stall threshold, MCP tool stall threshold, frozen ring buffer hung escalation, session summary, PID/stream threading, auto-continue detection, signal death suppression
-- `test_ask_user_question.py` — 29 tests: AskUserQuestion control request handling, question extraction, pending request registry, answer routing, option button rendering, multi-question flows, structured answer responses, ask mode toggle auto-deny
+- `test_exec_bridge.py` — 270 tests: ephemeral notification cleanup, approval push notifications, progressive stall warnings, stall diagnostics, stall auto-cancel with CPU-active suppression (sleeping-process aware), tool-active repeat suppression, approval-aware stall threshold, MCP tool stall threshold, frozen ring buffer hung escalation, session summary, PID/stream threading, auto-continue detection, signal death suppression, Type-A stream-idle auto-retry (#572), empty-resume quarantine-and-fresh recovery, resume divert/clear, empty-result diagnostics
+- `test_ask_user_question.py` — 35 tests: AskUserQuestion control request handling, question extraction, pending request registry, answer routing, option button rendering, multi-question flows, structured answer responses, ask mode toggle auto-deny
 - `test_diff_preview.py` — 14 tests: Edit diff display, Write content preview, Bash command display, line/char truncation
 - `test_cost_tracker.py` — 12 tests: cost accumulation, per-run/daily budget thresholds, warning levels, daily reset, auto-cancel flag
 - `test_export_command.py` — 16 tests: session event recording, markdown/JSON export formatting, usage integration, session trimming
@@ -204,10 +208,10 @@ Key test files:
 - `test_shutdown.py` — 4 tests: shutdown state transitions, idempotency, reset
 - `test_preamble.py` — 6 tests: default preamble injection, disabled preamble, custom text override, empty text disables, settings defaults
 - `test_restart_command.py` — 3 tests: command triggers shutdown, idempotent response, command id
-- `test_cooldown_bypass.py` — 21 tests: outline bypass, rapid retry auto-deny, no-text auto-deny, cooldown escalation, hold-open outline flow
+- `test_cooldown_bypass.py` — 24 tests: outline gate (hold-open with outline, auto-deny without), plan-input gate on plan-file CLIs (#659), no-text auto-deny, hold-open outline flow (#570 retired the time-based cooldown escalation)
 - `test_verbose_progress.py` — 21 tests: format_verbose_detail() for each tool type, MarkdownFormatter verbose mode, compact regression
 - `test_verbose_command.py` — 7 tests: /verbose toggle on/off/clear, backend id
-- `test_config_command.py` — 221 tests: home page, plan mode/ask mode/verbose/engine/listen/model/reasoning sub-pages, toggle actions, callback vs command routing, button layout, engine-aware visibility, default resolution
+- `test_config_command.py` — 240 tests: home page, plan mode/ask mode/verbose/engine/listen/model/reasoning sub-pages, toggle actions, callback vs command routing, button layout, engine-aware visibility, default resolution
 - `test_pi_compaction.py` — 6 tests: compaction start/end, aborted, no tokens, sequence
 - `test_proc_diag.py` — 24 tests: format_diag, is_cpu_active, collect_proc_diag (Linux /proc reads), ProcessDiag defaults
 - `test_exec_runner.py` — 22 tests: event tracking (event_count, recent_events ring buffer, PID in StartedEvent meta), JsonlStreamState defaults
@@ -231,6 +235,9 @@ Key test files:
 - `test_at_command.py` — 34 tests: `/at` parse (valid/invalid suffixes, bounds, case-insensitive), `_format_delay`, schedule/cancel, per-chat cap, scheduler install/uninstall
 - `test_offset_persistence.py` — 15 tests: Telegram update_id round-trip, corrupt JSON handling, atomic write, `DebouncedOffsetWriter` interval/max-pending semantics, explicit flush
 - `test_sdnotify.py` — 7 tests: NOTIFY_SOCKET handling (absent/empty/filesystem/abstract-namespace), send error swallowing, UTF-8 encoding
+- `test_session_quarantine.py` — 7 tests: QuarantineStore round-trip persistence, engine isolation, malformed/corrupt state-file resilience, age-based pruning to disk, singleton accessor + injection (#631/#632)
+- `test_noop_resume_harness.py` — 3 tests: end-to-end no-op empty-resume reproduction via the fake-claude CLI (`tests/fake_clis/fake_claude_noop_resume.py`) — real ClaudeRunner + handle_message drive quarantine-and-fresh recovery, healthy-resume negative control, linger-scenario emission shape (#634)
+- `test_attestation_marker.py` — 5 tests: `scripts/run-integration-tests.sh` SHA-binding (#674) — `head_sha` auto-derived from the script repo, `--head-sha` + `UT_INTEGRATION_HEAD_SHA` overrides, `dev_bot_id` default + `UT_DEV_BOT_ID` override, tiers/notes preserved in the marker JSON
 
 ## Development
 
@@ -246,8 +253,8 @@ Two instances run on lba-1 — staging (PyPI/TestPyPI) and dev (local editable s
 ### 3-phase release workflow (MANDATORY)
 
 1. **Dev** — fix code, run unit tests, test via `@untether_dev_bot` (6 engine chats), run integration tests
-2. **Fleet rollout (rc)** — bump to `X.Y.ZrcN`, merge feature branches to `dev` → CI publishes to TestPyPI, attest tests via `scripts/run-integration-tests.sh ${VERSION} --manual`, then `scripts/fleet-rollout.sh ${VERSION}` rolls the rc to all 4 hosts (lba-1 staging + nsd VPS + channelo VPS + Mac) in parallel
-3. **Release** — bump to `X.Y.Z`, write changelog, PR from `dev` → `master`. After merge, `scripts/fleet-rollout.sh ${VERSION}` rolls the stable PyPI build to all 4 hosts in parallel. `release.yml` publishes to PyPI automatically; the master PR merge IS the approval.
+2. **Fleet rollout (rc)** — bump to `X.Y.ZrcN`, merge feature branches to `dev` → CI publishes to TestPyPI, attest tests via `scripts/run-integration-tests.sh ${VERSION} --manual`, then `scripts/fleet-rollout.sh ${VERSION}` rolls the rc to all 5 hosts (lba-1 staging + nsd VPS + channelo VPS + sl VPS + Mac) in parallel
+3. **Release** — bump to `X.Y.Z`, write changelog, PR from `dev` → `master`. After merge, `scripts/fleet-rollout.sh ${VERSION}` rolls the stable PyPI build to all 5 hosts in parallel. `release.yml` publishes to PyPI automatically; the master PR merge IS the approval.
 
 **Branch model:** `feature/*` → PR → `dev` (TestPyPI) → PR → `master` (PyPI). Master always matches the latest PyPI release.
 
@@ -308,7 +315,7 @@ journalctl --user -u untether-dev -f
 scripts/staging.sh install X.Y.ZrcN
 systemctl --user restart untether
 
-# Fleet rollout to all 4 hosts (lba-1 + nsd + channelo + mac)
+# Fleet rollout to all 5 hosts (lba-1 + nsd + channelo + sl + mac)
 scripts/run-integration-tests.sh X.Y.ZrcN --manual    # attest via @untether_dev_bot
 scripts/fleet-rollout.sh X.Y.ZrcN                     # parallel upgrade
 scripts/fleet-rollout.sh X.Y.ZrcN --dry-run           # preview
@@ -361,7 +368,7 @@ Every bug fix and significant change MUST have a GitHub issue:
 - **Bugs found during debugging**: create an issue before or alongside the fix
 - **Issue body**: description, impact, affected files, fix reference
 - **Labels**: `bug`, `enhancement`, `documentation` as appropriate; severity on bugs via `severity:critical|major|minor|trivial`; `priority: low|medium|high` (note space) for human triage
-- **Auto-filed sources**: `auto:error-report` (untether-issue-watcher daemon, log-pattern errors — runs on lba-1, nsd, channelo, mac; each filing is host-tagged via the `HOST` env in the daemon's unit/plist) and `auto:monitor-audit` (`/monitor` command audit loop, bugs + enhancements — 4 per-host configs plus the `untether-fleet` meta-target for cross-host audits)
+- **Auto-filed sources**: `auto:error-report` (untether-issue-watcher daemon, log-pattern errors — runs on all 5 fleet hosts (lba-1, nsd, channelo, sl, mac); each filing is host-tagged via the `HOST` env in the daemon's unit/plist) and `auto:monitor-audit` (`/monitor` command audit loop, bugs + enhancements — 5 per-host configs plus the `untether-fleet` meta-target for cross-host audits)
 - **Closing**: reference the fixing PR or commit in a close comment
 
 ### Changelog

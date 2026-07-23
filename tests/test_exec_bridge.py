@@ -5,16 +5,18 @@ import uuid
 
 import anyio
 import pytest
+import structlog.testing
 
 from tests.factories import action_completed, action_started
 from untether.markdown import MarkdownParts, MarkdownPresenter
-from untether.model import ResumeToken, UntetherEvent
+from untether.model import CompletedEvent, ResumeToken, UntetherEvent
 from untether.progress import ProgressTracker
 from untether.runner_bridge import (
     _EPHEMERAL_MSGS,
     ExecBridgeConfig,
     IncomingMessage,
     ProgressEdits,
+    RunOutcome,
     _format_run_cost,
     handle_message,
     register_ephemeral_message,
@@ -24,6 +26,7 @@ from untether.runners.mock import (
     Advance,
     Emit,
     ErrorReturn,
+    MockRunner,
     Raise,
     Return,
     ScriptRunner,
@@ -34,6 +37,25 @@ from untether.telegram.render import prepare_telegram
 from untether.transport import MessageRef, RenderedMessage, SendOptions
 
 CODEX_ENGINE = "codex"
+
+
+@pytest.fixture(autouse=True)
+def _neutralise_cancel_enforcement(request, monkeypatch):
+    """#593: the stall auto-cancel path now enforces teardown by probing —
+    and if needed killing — the recorded PID. Most tests here use fake PIDs
+    (12345 etc.) that can collide with real host processes; neutralise the
+    enforcement everywhere except the dedicated #593 tests (marked
+    ``cancel_enforcement``), which patch the probe/kill primitives
+    themselves."""
+    if request.node.get_closest_marker("cancel_enforcement"):
+        yield
+        return
+
+    async def _noop(self):
+        return None
+
+    monkeypatch.setattr(ProgressEdits, "_enforce_cancel_teardown", _noop)
+    yield
 
 
 class FakeTransport:
@@ -5021,9 +5043,19 @@ class TestShouldAutoContinue:
         """rc=None (unknown) — DO auto-continue (conservative)."""
         assert self._call(proc_returncode=None) is True
 
-    def test_allows_rc_one(self):
-        """rc=1 (generic error) — DO auto-continue."""
-        assert self._call(proc_returncode=1) is True
+    def test_blocks_rc_one(self):
+        """rc=1 (generic error) — do NOT auto-continue.
+
+        Behaviour change in 0.35.4rc8 (#640). This previously asserted the
+        opposite. `_should_auto_continue`'s docstring always claimed "the
+        upstream bug exits with rc=0", but the implementation only excluded
+        signal deaths, so ordinary failures were auto-resumed too. 14 days of
+        fleet logs (nsd) show 47/49 auto-continues at rc=0 and 2 at rc=143 —
+        i.e. zero real events anywhere in the 1..128 range, so narrowing the
+        gate costs no genuine recovery and closes the path where a failed run
+        gets pointlessly re-spawned.
+        """
+        assert self._call(proc_returncode=1) is False
 
 
 class TestIsSignalDeath:
@@ -5296,16 +5328,43 @@ class TestStuckAfterToolResultDetector:
         assert edits._detect_stuck_after_tool_result(cpu_active=True) is True
 
     def test_silent_when_bg_bash_active(self) -> None:
-        """Session with Bash run_in_background=True → suppress wedge detection."""
+        """Session with Bash run_in_background=True → suppress wedge detection.
+
+        #573 (rc8): bg-bashes carry a parallel deadline now, so the handle must
+        be registered with one (as `_register_background_handle` always does)
+        rather than by bare set membership.
+        """
+        import time as _time
+
+        from untether.runners.claude import BG_BASH_MAX_KEEP_S, ClaudeStreamState
+
+        edits, clock = self._prepare(last_tool_result_at=600.0, frozen_ring_count=3)
+        clock.set(1000.0)
+        claude_state = ClaudeStreamState()
+        claude_state.live_bg_bashes.add("toolu_B1")
+        claude_state.bg_bash_deadlines["toolu_B1"] = (
+            _time.monotonic() + BG_BASH_MAX_KEEP_S
+        )
+        edits.stream.engine_state = claude_state  # type: ignore[attr-defined]
+
+        assert edits._detect_stuck_after_tool_result(cpu_active=True) is False
+
+    def test_573_fires_once_bg_bash_deadline_expires(self) -> None:
+        """The point of the rc8 age-out: a bg-bash whose completion signal never
+        arrives must stop suppressing wedge detection, instead of pinning the
+        session open for the rest of the run."""
+        import time as _time
+
         from untether.runners.claude import ClaudeStreamState
 
         edits, clock = self._prepare(last_tool_result_at=600.0, frozen_ring_count=3)
         clock.set(1000.0)
         claude_state = ClaudeStreamState()
         claude_state.live_bg_bashes.add("toolu_B1")
+        claude_state.bg_bash_deadlines["toolu_B1"] = _time.monotonic() - 1.0
         edits.stream.engine_state = claude_state  # type: ignore[attr-defined]
 
-        assert edits._detect_stuck_after_tool_result(cpu_active=True) is False
+        assert edits._detect_stuck_after_tool_result(cpu_active=True) is True
 
 
 class TestHandleStuckAfterToolResult:
@@ -5449,10 +5508,19 @@ def _make_engine_state(**fields):
         "live_monitors": {},
         "live_bg_bashes": set(),
         "live_bg_agents": set(),
+        # #374 (rc7): parallel deadline map for live_bg_agents — see
+        # ClaudeStreamState.bg_agent_deadlines. has_live_background_work
+        # reads this to age out expired bg-agent handles.
+        "bg_agent_deadlines": {},
         "live_remote_triggers": set(),
         "post_result_closed_at": None,
         "post_result_idle_minutes": 0.0,
         "post_result_closing_sent": False,
+        # #495/#499/#500: authoritative expected-wait probes. Callables so
+        # the bridge's ``callable(probe)`` duck-typing matches the real
+        # ClaudeStreamState methods.
+        "awaiting_user_approval": lambda: False,
+        "awaiting_rate_limit_retry": lambda: False,
     }
     defaults.update(fields)
     return SimpleNamespace(**defaults)
@@ -6152,3 +6220,2361 @@ async def test_4b_stall_suppression_count_bumped_on_post_result() -> None:
         tg.start_soon(drive)
 
     assert stream.stall_suppression_counts.get("post_result", 0) >= 1
+
+
+# ---------------------------------------------------------------------------
+# #591 — early final-answer delivery (decoupled from subprocess exit)
+# ---------------------------------------------------------------------------
+
+
+def _completed_591(
+    answer: str = "early answer 591",
+    *,
+    ok: bool = True,
+    error: str | None = None,
+) -> CompletedEvent:
+    return CompletedEvent(
+        engine=CODEX_ENGINE,
+        resume=ResumeToken(engine=CODEX_ENGINE, value="sess-591"),
+        ok=ok,
+        answer=answer,
+        error=error,
+    )
+
+
+@pytest.mark.anyio
+async def test_591_final_answer_delivered_before_runner_returns() -> None:
+    """The final message reaches Telegram the moment the CompletedEvent
+    arrives — not only after the run generator returns (which can lag by
+    the full post-result limbo window when MCP children hold the
+    subprocess open)."""
+    transport = FakeTransport()
+    hang = anyio.Event()
+    runner = ScriptRunner(
+        # Emit a successful result, then hang the generator — the mock
+        # equivalent of a subprocess lingering in post-result limbo.
+        [Emit(_completed_591()), Wait(hang)],
+        engine=CODEX_ENGINE,
+    )
+    cfg = ExecBridgeConfig(
+        transport=transport,
+        presenter=MarkdownPresenter(),
+        final_notify=False,
+    )
+
+    delivered_while_hung = False
+    async with anyio.create_task_group() as tg:
+
+        async def _run() -> None:
+            await handle_message(
+                cfg,
+                runner=runner,
+                incoming=IncomingMessage(channel_id=123, message_id=10, text="hi"),
+                resume_token=None,
+            )
+
+        tg.start_soon(_run)
+        with anyio.move_on_after(5.0):
+            while not any(
+                "early answer 591" in c["message"].text for c in transport.edit_calls
+            ):
+                await anyio.sleep(0.01)
+        delivered_while_hung = any(
+            "early answer 591" in c["message"].text for c in transport.edit_calls
+        )
+        hang.set()
+
+    assert delivered_while_hung
+
+
+@pytest.mark.anyio
+async def test_591_cancel_after_delivery_keeps_answer() -> None:
+    """/cancel of an already-delivered run must not replace the answer
+    with a `cancelled` render (the channelo msg-5815 lost-answer shape)."""
+    transport = FakeTransport()
+    hang = anyio.Event()
+    runner = ScriptRunner(
+        [Emit(_completed_591()), Wait(hang)],
+        engine=CODEX_ENGINE,
+    )
+    cfg = ExecBridgeConfig(
+        transport=transport,
+        presenter=MarkdownPresenter(),
+        final_notify=False,
+    )
+    running_tasks: dict = {}
+
+    async with anyio.create_task_group() as tg:
+
+        async def _run() -> None:
+            await handle_message(
+                cfg,
+                runner=runner,
+                incoming=IncomingMessage(channel_id=123, message_id=10, text="hi"),
+                resume_token=None,
+                running_tasks=running_tasks,
+            )
+
+        tg.start_soon(_run)
+        with anyio.move_on_after(5.0):
+            while not any(
+                "early answer 591" in c["message"].text for c in transport.edit_calls
+            ):
+                await anyio.sleep(0.01)
+        assert running_tasks, "running task should be registered while hung"
+        # Simulate /cancel landing while the subprocess lingers in limbo.
+        task = next(iter(running_tasks.values()))
+        task.cancel_requested.set()
+
+    texts = [c["message"].text for c in transport.edit_calls]
+    assert any("early answer 591" in t for t in texts)
+    assert not any("cancelled" in t for t in texts)
+
+
+@pytest.mark.anyio
+async def test_591_error_result_waits_for_post_return_path() -> None:
+    """ok=False completions are NOT delivered early — they ride the
+    post-return path so auto-continue and error formatting see them
+    first."""
+    transport = FakeTransport()
+    hang = anyio.Event()
+    runner = ScriptRunner(
+        # NOTE: after `hang` releases, ScriptRunner's fall-through emits a
+        # trailing ok=True CompletedEvent; this test only asserts on the
+        # hang window, before that happens.
+        [Emit(_completed_591(answer="", ok=False, error="boom-591")), Wait(hang)],
+        engine=CODEX_ENGINE,
+    )
+    cfg = ExecBridgeConfig(
+        transport=transport,
+        presenter=MarkdownPresenter(),
+        final_notify=False,
+    )
+
+    async with anyio.create_task_group() as tg:
+
+        async def _run() -> None:
+            await handle_message(
+                cfg,
+                runner=runner,
+                incoming=IncomingMessage(channel_id=123, message_id=10, text="hi"),
+                resume_token=None,
+            )
+
+        tg.start_soon(_run)
+        await anyio.sleep(0.3)
+        assert not any("boom-591" in c["message"].text for c in transport.edit_calls), (
+            "error result must not be delivered while the generator is open"
+        )
+        hang.set()
+
+
+def test_591_note_final_records_without_repaint() -> None:
+    """note_final feeds the tracker but does NOT bump event_seq — a bumped
+    seq would wake _run_loop into painting a progress frame that races the
+    final answer edit on the same message."""
+    transport = FakeTransport()
+    clock = _FakeClock()
+    tracker = ProgressTracker(engine="codex", clock=clock)
+    edits = ProgressEdits(
+        transport=transport,
+        presenter=MarkdownPresenter(),
+        channel_id=123,
+        progress_ref=MessageRef(channel_id=123, message_id=1),
+        tracker=tracker,
+        started_at=0.0,
+        clock=clock,
+        last_rendered=None,
+    )
+    seq_before = edits.event_seq
+    assert edits._finalizing is False
+
+    edits.note_final(_completed_591())
+
+    assert edits._finalizing is True
+    assert edits.event_seq == seq_before
+
+
+# ---------------------------------------------------------------------------
+# #596 — 0-turn / $0 / empty-answer ok=True completion (no-op resume)
+# ---------------------------------------------------------------------------
+
+
+def _disable_empty_resend(monkeypatch) -> None:
+    """#596: pin resend_empty_resume=False so the surfacing path (not
+    auto-resend) is exercised."""
+    from untether.settings import AutoContinueSettings
+
+    monkeypatch.setattr(
+        "untether.runner_bridge._load_auto_continue_settings",
+        lambda: AutoContinueSettings(resend_empty_resume=False),
+    )
+
+
+@pytest.mark.anyio
+async def test_596_empty_result_anomaly_surfaces_note(monkeypatch) -> None:
+    """A resumed run returning 0 turns / 0 API ms / empty answer with
+    ok=True must warn and tell the user instead of delivering silence
+    (auto-resend disabled here so we test the surfacing fallback)."""
+    from structlog.testing import capture_logs
+
+    _disable_empty_resend(monkeypatch)
+    transport = FakeTransport()
+    runner = ScriptRunner(
+        [Return(answer="", usage={"num_turns": 0, "duration_api_ms": 0})],
+        engine=CODEX_ENGINE,
+        resume_value="sess-596",
+    )
+    cfg = ExecBridgeConfig(
+        transport=transport,
+        presenter=MarkdownPresenter(),
+        final_notify=False,
+    )
+
+    with capture_logs() as logs:
+        await handle_message(
+            cfg,
+            runner=runner,
+            incoming=IncomingMessage(channel_id=123, message_id=10, text="continue"),
+            resume_token=ResumeToken(engine=CODEX_ENGINE, value="sess-596"),
+        )
+
+    assert any(r.get("event") == "runner.empty_result" for r in logs)
+    final_text = transport.edit_calls[-1]["message"].text
+    assert "empty result" in final_text
+    assert "/new" in final_text
+    # No auto-resend when disabled → the runner ran exactly once.
+    assert len(runner.calls) == 1
+
+
+@pytest.mark.anyio
+async def test_596_normal_run_with_turns_not_flagged() -> None:
+    """A run that did real work (turns > 0) with an empty answer is NOT
+    classified as the no-op anomaly."""
+    from structlog.testing import capture_logs
+
+    transport = FakeTransport()
+    runner = ScriptRunner(
+        [Return(answer="", usage={"num_turns": 3, "duration_api_ms": 900})],
+        engine=CODEX_ENGINE,
+    )
+    cfg = ExecBridgeConfig(
+        transport=transport,
+        presenter=MarkdownPresenter(),
+        final_notify=False,
+    )
+
+    with capture_logs() as logs:
+        await handle_message(
+            cfg,
+            runner=runner,
+            incoming=IncomingMessage(channel_id=123, message_id=10, text="hi"),
+            resume_token=None,
+        )
+
+    assert not any(r.get("event") == "runner.empty_result" for r in logs)
+    assert "empty result" not in transport.edit_calls[-1]["message"].text
+
+
+@pytest.mark.anyio
+async def test_596_no_usage_reporting_not_flagged() -> None:
+    """Engines that report no usage at all never trip the anomaly — an
+    empty answer alone is not evidence of a no-op resume."""
+    from structlog.testing import capture_logs
+
+    transport = FakeTransport()
+    runner = ScriptRunner([Return(answer="")], engine=CODEX_ENGINE)
+    cfg = ExecBridgeConfig(
+        transport=transport,
+        presenter=MarkdownPresenter(),
+        final_notify=False,
+    )
+
+    with capture_logs() as logs:
+        await handle_message(
+            cfg,
+            runner=runner,
+            incoming=IncomingMessage(channel_id=123, message_id=10, text="hi"),
+            resume_token=None,
+        )
+
+    assert not any(r.get("event") == "runner.empty_result" for r in logs)
+
+
+class _EmptyThenAnswerRunner(MockRunner):
+    """#596: first run() emits an empty no-op resume (0 turns / $0, ok=True);
+    the next run() delivers a real answer — models the upstream empty-resume
+    that processes normally on the second attempt."""
+
+    def __init__(self, *, engine=CODEX_ENGINE, resume_value: str = "sess-596") -> None:
+        super().__init__(events=[], engine=engine, resume_value=resume_value)
+        self.calls: list[tuple[str, ResumeToken | None]] = []
+
+    async def run(self, prompt, resume):
+        from untether.model import StartedEvent
+        from untether.runners.mock import _resume_token
+
+        self.calls.append((prompt, resume))
+        token_value = resume.value if resume else self._resume_value
+        token = _resume_token(self.engine, token_value)
+        async with self.lock_for(token):
+            yield StartedEvent(engine=self.engine, resume=token, title=self.title)
+            if len(self.calls) == 1:
+                yield CompletedEvent(
+                    engine=self.engine,
+                    resume=token,
+                    ok=True,
+                    answer="",
+                    usage={"num_turns": 0, "duration_api_ms": 0},
+                )
+            else:
+                yield CompletedEvent(
+                    engine=self.engine,
+                    resume=token,
+                    ok=True,
+                    answer="Here is the real result.",
+                )
+
+
+@pytest.mark.anyio
+async def test_596_auto_resend_delivers_answer_on_retry(quarantine_store) -> None:
+    """#596: an empty-result no-op resume auto-resends the ORIGINAL prompt
+    once; the retry's real answer reaches the user, removing the manual
+    re-nudge. #631: since empty_resume_fresh now defaults True, the retry
+    clears + quarantines the poisoned session and runs FRESH (resume=None)
+    rather than resuming the same poisoned session — see
+    test_631_empty_resume_legacy_same_session_when_flag_off for the
+    flag-off same-session behaviour this test used to exercise."""
+    from structlog.testing import capture_logs
+
+    transport = FakeTransport()
+    runner = _EmptyThenAnswerRunner(resume_value="sess-596")
+    cfg = ExecBridgeConfig(
+        transport=transport,
+        presenter=MarkdownPresenter(),
+        final_notify=False,
+    )
+
+    with capture_logs() as logs:
+        await handle_message(
+            cfg,
+            runner=runner,
+            incoming=IncomingMessage(
+                channel_id=123, message_id=10, text="please continue"
+            ),
+            resume_token=ResumeToken(engine=CODEX_ENGINE, value="sess-596"),
+        )
+
+    # Exactly one auto-resend fired.
+    assert len(runner.calls) == 2
+    assert any(r.get("event") == "session.auto_resend_fresh" for r in logs)
+    # #631: the retry ran as a FRESH session, not the same poisoned one.
+    assert runner.calls[1][1] is None
+    assert quarantine_store.is_quarantined(CODEX_ENGINE, "sess-596") is True
+    # The user saw the retry notice AND the real answer.
+    all_text = " ".join(
+        c["message"].text for c in transport.edit_calls + transport.send_calls
+    )
+    assert "retrying" in all_text
+    assert "Here is the real result." in all_text
+
+
+@pytest.mark.anyio
+async def test_596_auto_resend_is_single_shot(quarantine_store) -> None:
+    """#596: if the retry is ALSO an empty no-op, no second retry fires — the
+    surfacing note is shown instead (bounded, no loop). #631: the single
+    retry now runs as a FRESH session by default (empty_resume_fresh=True)."""
+    from structlog.testing import capture_logs
+
+    transport = FakeTransport()
+    runner = ScriptRunner(
+        [Return(answer="", usage={"num_turns": 0, "duration_api_ms": 0})],
+        engine=CODEX_ENGINE,
+        resume_value="sess-596",
+    )
+    cfg = ExecBridgeConfig(
+        transport=transport,
+        presenter=MarkdownPresenter(),
+        final_notify=False,
+    )
+
+    with capture_logs() as logs:
+        await handle_message(
+            cfg,
+            runner=runner,
+            incoming=IncomingMessage(
+                channel_id=123, message_id=10, text="please continue"
+            ),
+            resume_token=ResumeToken(engine=CODEX_ENGINE, value="sess-596"),
+        )
+
+    # Original run + exactly one resend, then stop.
+    assert len(runner.calls) == 2
+    assert sum(1 for r in logs if r.get("event") == "session.auto_resend_fresh") == 1
+    # The exhausted retry falls through to the manual-resend note.
+    final_text = transport.edit_calls[-1]["message"].text
+    assert "empty result" in final_text
+    assert "/new" in final_text
+
+
+@pytest.mark.anyio
+async def test_596_no_resend_when_not_a_resume() -> None:
+    """#596: a fresh (non-resume) empty result is surfaced, never resent —
+    there is no prior session to retry."""
+    from structlog.testing import capture_logs
+
+    transport = FakeTransport()
+    runner = ScriptRunner(
+        [Return(answer="", usage={"num_turns": 0, "duration_api_ms": 0})],
+        engine=CODEX_ENGINE,
+    )
+    cfg = ExecBridgeConfig(
+        transport=transport,
+        presenter=MarkdownPresenter(),
+        final_notify=False,
+    )
+
+    with capture_logs() as logs:
+        await handle_message(
+            cfg,
+            runner=runner,
+            incoming=IncomingMessage(channel_id=123, message_id=10, text="hi"),
+            resume_token=None,
+        )
+
+    assert len(runner.calls) == 1
+    assert not any(r.get("event") == "session.auto_resend_empty" for r in logs)
+    final_text = transport.edit_calls[-1]["message"].text
+    assert "empty result" in final_text
+
+
+# ---------------------------------------------------------------------------
+# #631 (W1) — quarantine-and-fresh recovery on empty-0-turn resume
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def quarantine_store(tmp_path):
+    """Inject a fresh, isolated QuarantineStore for the duration of a test so
+    the module-level singleton never lazily loads the real config-adjacent
+    quarantine file (which would leak state across tests / touch disk paths
+    that don't exist in the test sandbox)."""
+    from untether.session_quarantine import QuarantineStore, set_quarantine_store
+
+    store = QuarantineStore(path=tmp_path / "session_quarantine.json")
+    set_quarantine_store(store)
+    try:
+        yield store
+    finally:
+        set_quarantine_store(None)
+
+
+@pytest.mark.anyio
+async def test_631_empty_resume_recovers_as_fresh_session(quarantine_store) -> None:
+    """#631 W1: on an empty-0-turn resume, the poisoned session token is
+    cleared via on_resume_failed, the session id is quarantined, and the
+    ORIGINAL prompt is re-run as a FRESH session (resume=None) instead of
+    resending against the same (poisoned) session."""
+    from structlog.testing import capture_logs
+
+    transport = FakeTransport()
+    runner = _EmptyThenAnswerRunner(resume_value="sess-poisoned")
+    cfg = ExecBridgeConfig(
+        transport=transport,
+        presenter=MarkdownPresenter(),
+        final_notify=False,
+    )
+    cleared: list[str] = []
+
+    async def on_resume_failed(tok: ResumeToken) -> None:
+        cleared.append(tok.value)
+
+    with capture_logs() as logs:
+        await handle_message(
+            cfg,
+            runner=runner,
+            incoming=IncomingMessage(
+                channel_id=123, message_id=10, text="please continue"
+            ),
+            resume_token=ResumeToken(engine=CODEX_ENGINE, value="sess-poisoned"),
+            on_resume_failed=on_resume_failed,
+        )
+
+    # (a) the poisoned token was cleared.
+    assert "sess-poisoned" in cleared
+    # (b) the recovery run used resume=None (fresh session) with the
+    # original prompt text.
+    assert len(runner.calls) == 2
+    assert runner.calls[1][1] is None
+    assert "please continue" in runner.calls[1][0]
+    # (c) single-shot: exactly one fresh recovery run.
+    assert sum(1 for c in runner.calls if c[1] is None) == 1
+    # (d) the fresh-recovery event was logged.
+    assert any(r.get("event") == "session.auto_resend_fresh" for r in logs)
+    # (e) the poisoned session is quarantined.
+    assert quarantine_store.is_quarantined(CODEX_ENGINE, "sess-poisoned") is True
+    # (f) the user got the real answer, not the manual empty-result notice.
+    final_text = transport.edit_calls[-1]["message"].text
+    assert "Here is the real result." in final_text
+    assert "engine returned an empty result" not in final_text
+
+
+@pytest.mark.anyio
+async def test_631_empty_resume_legacy_same_session_when_flag_off(
+    monkeypatch,
+) -> None:
+    """#631: when empty_resume_fresh is off, preserve the exact #596
+    same-session resend behaviour — no clearing, no quarantine, resume the
+    same poisoned session id."""
+    from structlog.testing import capture_logs
+
+    from untether.settings import AutoContinueSettings
+
+    monkeypatch.setattr(
+        "untether.runner_bridge._load_auto_continue_settings",
+        lambda: AutoContinueSettings(empty_resume_fresh=False),
+    )
+
+    transport = FakeTransport()
+    runner = _EmptyThenAnswerRunner(resume_value="sess-596")
+    cfg = ExecBridgeConfig(
+        transport=transport,
+        presenter=MarkdownPresenter(),
+        final_notify=False,
+    )
+
+    with capture_logs() as logs:
+        await handle_message(
+            cfg,
+            runner=runner,
+            incoming=IncomingMessage(channel_id=123, message_id=10, text="continue"),
+            resume_token=ResumeToken(engine=CODEX_ENGINE, value="sess-596"),
+        )
+
+    assert len(runner.calls) == 2
+    # The retry resumed the SAME (poisoned) session — legacy #596 behaviour.
+    assert runner.calls[1][1] is not None
+    assert runner.calls[1][1].value == "sess-596"
+    assert any(r.get("event") == "session.auto_resend_empty" for r in logs)
+    assert not any(r.get("event") == "session.auto_resend_fresh" for r in logs)
+
+
+# ---------------------------------------------------------------------------
+# #631 (W5-diag) — structured diagnostics on the runner.empty_result warning
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.anyio
+async def test_631_empty_result_log_carries_diagnostics(quarantine_store) -> None:
+    """#631 (W5-diag): the runner.empty_result warning must carry enough
+    context to diagnose WHY, not just THAT, the anomaly happened.
+    MockRunner-driven bridge tests have no real stream (edits.stream is
+    None), so the three stream-derived fields fall back to their defensive
+    defaults (False/False/None) rather than raising or being omitted.
+
+    #631 (Fix 1): ``sigterm_sent``/``background_observed`` were renamed to
+    ``sigterm_sent_this_run``/``background_observed_this_run`` — they only
+    ever describe the CURRENT (empty) run's stream, never the prior
+    (poisoned) run where the interesting facts actually live, and the old
+    names read as if they might. ``poison_was_quarantined`` is new: whether
+    the resumed token was ALREADY known-quarantined at the moment this
+    anomaly fired. It's False here because a token that's already
+    quarantined never reaches this point — the W2 entry-divert check
+    (earlier in ``handle_message``) redirects it to a fresh session before
+    any run happens; see test_631_diag_poison_was_quarantined_true for the
+    race window where it's True."""
+    from structlog.testing import capture_logs
+
+    transport = FakeTransport()
+    runner = _EmptyThenAnswerRunner(resume_value="sess-diag")
+    cfg = ExecBridgeConfig(
+        transport=transport,
+        presenter=MarkdownPresenter(),
+        final_notify=False,
+    )
+
+    with capture_logs() as logs:
+        await handle_message(
+            cfg,
+            runner=runner,
+            incoming=IncomingMessage(
+                channel_id=123, message_id=10, text="please continue"
+            ),
+            resume_token=ResumeToken(engine=CODEX_ENGINE, value="sess-diag"),
+        )
+
+    records = [r for r in logs if r.get("event") == "runner.empty_result"]
+    assert len(records) == 1
+    record = records[0]
+    for key in (
+        "raw_subtype",
+        "is_error",
+        "proc_returncode",
+        "sigterm_sent_this_run",
+        "background_observed_this_run",
+        "poison_was_quarantined",
+        "resend_eligible_reason",
+    ):
+        assert key in record, f"missing {key!r} in runner.empty_result record"
+    assert record["raw_subtype"] is None
+    assert record["is_error"] is False
+    assert record["proc_returncode"] is None
+    assert record["sigterm_sent_this_run"] is False
+    assert record["background_observed_this_run"] is False
+    assert record["poison_was_quarantined"] is False
+    # Default settings: resend_empty_resume on, empty_resume_fresh on, a
+    # resume token present, non-blank text, first attempt → recovery armed.
+    assert record["resend_eligible_reason"] == "fresh"
+
+
+@pytest.mark.anyio
+async def test_631_diag_poison_was_quarantined_true(
+    quarantine_store, monkeypatch
+) -> None:
+    """#631 (Fix 1): ``poison_was_quarantined`` reflects a TOCTOU race — the
+    W2 entry-divert check (top of ``handle_message``) sees the session as
+    NOT yet quarantined and proceeds to resume it, but by the time the
+    empty-result anomaly is diagnosed the store reports it as quarantined
+    (e.g. a concurrent handle_message call for the same session id
+    quarantined it mid-run). This is exactly the "persisted prior-run
+    memory" the field exists to surface — simulate it by making the
+    store's ``is_quarantined`` answer False on the entry check and True on
+    the later diagnostic check."""
+    from structlog.testing import capture_logs
+
+    calls = {"n": 0}
+    real_is_quarantined = quarantine_store.is_quarantined
+
+    def _flaky_is_quarantined(engine: str, session_id: str) -> bool:
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return real_is_quarantined(engine, session_id)
+        return True
+
+    monkeypatch.setattr(quarantine_store, "is_quarantined", _flaky_is_quarantined)
+
+    transport = FakeTransport()
+    runner = _EmptyThenAnswerRunner(resume_value="sess-race")
+    cfg = ExecBridgeConfig(
+        transport=transport,
+        presenter=MarkdownPresenter(),
+        final_notify=False,
+    )
+
+    with capture_logs() as logs:
+        await handle_message(
+            cfg,
+            runner=runner,
+            incoming=IncomingMessage(
+                channel_id=123, message_id=10, text="please continue"
+            ),
+            resume_token=ResumeToken(engine=CODEX_ENGINE, value="sess-race"),
+        )
+
+    records = [r for r in logs if r.get("event") == "runner.empty_result"]
+    assert len(records) == 1
+    assert records[0]["poison_was_quarantined"] is True
+    # The entry-divert check ran first (call 1, real/False) — the run still
+    # went ahead against the resumed session, proving the race window is
+    # real and not just a stub artefact.
+    assert calls["n"] >= 2
+
+
+@pytest.mark.anyio
+async def test_631_resend_reason_disabled(monkeypatch) -> None:
+    """#631 (W5-diag): resend_empty_resume=False → the anomaly log records
+    resend_eligible_reason == "disabled"."""
+    from structlog.testing import capture_logs
+
+    _disable_empty_resend(monkeypatch)
+    transport = FakeTransport()
+    runner = ScriptRunner(
+        [Return(answer="", usage={"num_turns": 0, "duration_api_ms": 0})],
+        engine=CODEX_ENGINE,
+        resume_value="sess-diag-disabled",
+    )
+    cfg = ExecBridgeConfig(
+        transport=transport,
+        presenter=MarkdownPresenter(),
+        final_notify=False,
+    )
+
+    with capture_logs() as logs:
+        await handle_message(
+            cfg,
+            runner=runner,
+            incoming=IncomingMessage(channel_id=123, message_id=10, text="continue"),
+            resume_token=ResumeToken(engine=CODEX_ENGINE, value="sess-diag-disabled"),
+        )
+
+    records = [r for r in logs if r.get("event") == "runner.empty_result"]
+    assert len(records) == 1
+    assert records[0]["resend_eligible_reason"] == "disabled"
+
+
+@pytest.mark.anyio
+async def test_631_resend_reason_no_token() -> None:
+    """#631 (W5-diag): a fresh (non-resume) empty anomaly has no prior
+    session to retry against → resend_eligible_reason == "no_token"."""
+    from structlog.testing import capture_logs
+
+    transport = FakeTransport()
+    runner = ScriptRunner(
+        [Return(answer="", usage={"num_turns": 0, "duration_api_ms": 0})],
+        engine=CODEX_ENGINE,
+    )
+    cfg = ExecBridgeConfig(
+        transport=transport,
+        presenter=MarkdownPresenter(),
+        final_notify=False,
+    )
+
+    with capture_logs() as logs:
+        await handle_message(
+            cfg,
+            runner=runner,
+            incoming=IncomingMessage(channel_id=123, message_id=10, text="hi"),
+            resume_token=None,
+        )
+
+    records = [r for r in logs if r.get("event") == "runner.empty_result"]
+    assert len(records) == 1
+    assert records[0]["resend_eligible_reason"] == "no_token"
+
+
+@pytest.mark.anyio
+async def test_631_resend_reason_counter_exhausted(quarantine_store) -> None:
+    """#631 (W5-diag): when the single-shot retry is ALSO empty, the SECOND
+    runner.empty_result record carries resend_eligible_reason ==
+    "counter_exhausted" — even though the retry ran as a FRESH (unresumed)
+    session under default settings, the exhausted-counter diagnostic takes
+    priority over "no_token" (see the priority-order comment at the log
+    site)."""
+    from structlog.testing import capture_logs
+
+    transport = FakeTransport()
+    runner = ScriptRunner(
+        [Return(answer="", usage={"num_turns": 0, "duration_api_ms": 0})],
+        engine=CODEX_ENGINE,
+        resume_value="sess-diag-exhausted",
+    )
+    cfg = ExecBridgeConfig(
+        transport=transport,
+        presenter=MarkdownPresenter(),
+        final_notify=False,
+    )
+
+    with capture_logs() as logs:
+        await handle_message(
+            cfg,
+            runner=runner,
+            incoming=IncomingMessage(
+                channel_id=123, message_id=10, text="please continue"
+            ),
+            resume_token=ResumeToken(engine=CODEX_ENGINE, value="sess-diag-exhausted"),
+        )
+
+    records = [r for r in logs if r.get("event") == "runner.empty_result"]
+    assert len(records) == 2
+    assert records[0]["resend_eligible_reason"] == "fresh"
+    assert records[1]["resend_eligible_reason"] == "counter_exhausted"
+
+
+@pytest.mark.anyio
+async def test_631_resend_reason_blank_input(quarantine_store) -> None:
+    """#631 (W5-diag): a resumed run's empty-0-turn anomaly fires against
+    whitespace-only incoming text → resend_eligible_reason == "blank_input",
+    NOT "fresh" — auto-resending blank text would just reproduce the same
+    empty result, so this reason must take priority even though a resume
+    token IS present and the retry counter has not been exhausted (both of
+    which would otherwise route to "fresh").
+
+    Reachability note: ``handle_message`` performs no text-blank filtering
+    itself — that would be a Telegram-loop-layer concern upstream of this
+    function (e.g. a plain empty/whitespace user message). In practice
+    this branch is most plausibly reached via a cron/webhook prompt that
+    resolves to blank text (``triggers/fetch.py`` builds prompts from
+    fetched data with no non-blank guarantee) or a voice transcription of
+    silence, rather than typed chat input. This test drives the bridge
+    boundary directly, exactly like every other resend_eligible_reason
+    test in this section (disabled/no_token/counter_exhausted) — none of
+    which simulate full Telegram routing either."""
+    from structlog.testing import capture_logs
+
+    transport = FakeTransport()
+    runner = ScriptRunner(
+        [Return(answer="", usage={"num_turns": 0, "duration_api_ms": 0})],
+        engine=CODEX_ENGINE,
+        resume_value="sess-diag-blank",
+    )
+    cfg = ExecBridgeConfig(
+        transport=transport,
+        presenter=MarkdownPresenter(),
+        final_notify=False,
+    )
+
+    with capture_logs() as logs:
+        await handle_message(
+            cfg,
+            runner=runner,
+            incoming=IncomingMessage(channel_id=123, message_id=10, text="   "),
+            resume_token=ResumeToken(engine=CODEX_ENGINE, value="sess-diag-blank"),
+        )
+
+    records = [r for r in logs if r.get("event") == "runner.empty_result"]
+    assert len(records) == 1
+    assert records[0]["resend_eligible_reason"] == "blank_input"
+    # No auto-resend fired — resending blank text would just loop.
+    assert len(runner.calls) == 1
+
+
+def test_auto_continue_settings_new_flags_default_on() -> None:
+    """#631: empty_resume_fresh and quarantine_on_forced_teardown flags
+    default to True, enabling both fresh-session retry and poisoned-session
+    quarantine when implemented in later tasks."""
+    from untether.settings import AutoContinueSettings
+
+    # Test defaults
+    s = AutoContinueSettings()
+    assert s.empty_resume_fresh is True
+    assert s.quarantine_on_forced_teardown is True
+
+    # Test that omitting them in a dict/kwarg still yields True
+    s2 = AutoContinueSettings(enabled=True)
+    assert s2.empty_resume_fresh is True
+    assert s2.quarantine_on_forced_teardown is True
+
+
+# ---------------------------------------------------------------------------
+# #632 (W2) — honour a forced-teardown quarantine marker on the next message
+# ---------------------------------------------------------------------------
+
+
+class _RecordingRunner(MockRunner):
+    """Records ``(prompt, resume)`` per ``run()`` call and always completes
+    with a real answer; ``usage`` is configurable so tests can control
+    whether the #632 (W2) healthy-clear path (``num_turns`` truthy) fires."""
+
+    def __init__(
+        self,
+        *,
+        engine=CODEX_ENGINE,
+        resume_value: str = "sid",
+        answer: str = "ok",
+        usage: dict | None = None,
+    ) -> None:
+        super().__init__(engine=engine, resume_value=resume_value, answer=answer)
+        self.calls: list[tuple[str, ResumeToken | None]] = []
+        self._usage = usage
+
+    async def run(self, prompt, resume):
+        from untether.model import StartedEvent
+        from untether.runners.mock import _resume_token
+
+        self.calls.append((prompt, resume))
+        token_value = resume.value if resume else self._resume_value
+        token = _resume_token(self.engine, token_value)
+        async with self.lock_for(token):
+            yield StartedEvent(engine=self.engine, resume=token, title=self.title)
+            yield CompletedEvent(
+                engine=self.engine,
+                resume=token,
+                ok=True,
+                answer=self._answer,
+                usage=self._usage,
+            )
+
+
+@pytest.mark.anyio
+async def test_632_next_message_on_quarantined_session_starts_fresh(
+    quarantine_store,
+) -> None:
+    """#632 (W2): a session already marked quarantined (forced teardown
+    after a result) must never be resumed — the next message on it starts
+    fresh and the stored token is cleared via on_resume_failed."""
+    from structlog.testing import capture_logs
+
+    quarantine_store.quarantine(
+        CODEX_ENGINE, "sid-q", reason="forced_teardown_after_result"
+    )
+
+    transport = FakeTransport()
+    runner = _RecordingRunner(
+        engine=CODEX_ENGINE, resume_value="sid-fresh", answer="fresh answer"
+    )
+    cfg = ExecBridgeConfig(
+        transport=transport,
+        presenter=MarkdownPresenter(),
+        final_notify=False,
+    )
+    cleared: list[str] = []
+
+    async def on_resume_failed(tok: ResumeToken) -> None:
+        cleared.append(tok.value)
+
+    with capture_logs() as logs:
+        await handle_message(
+            cfg,
+            runner=runner,
+            incoming=IncomingMessage(channel_id=123, message_id=10, text="hi"),
+            resume_token=ResumeToken(engine=CODEX_ENGINE, value="sid-q"),
+            on_resume_failed=on_resume_failed,
+        )
+
+    # (a) started fresh — resume=None was passed to run(), not "sid-q".
+    assert len(runner.calls) == 1
+    assert runner.calls[0][1] is None
+    # (b) the stored token was cleared so the user's session mapping isn't
+    # silently lost.
+    assert "sid-q" in cleared
+    # (c) structured reason logged for diagnosis.
+    assert any(
+        r.get("event") == "session.resume_diverted_fresh"
+        and r.get("session_id") == "sid-q"
+        and r.get("reason") == "quarantined"
+        for r in logs
+    )
+    # (d) the user still got a real answer from the fresh run.
+    final_text = transport.edit_calls[-1]["message"].text
+    assert "fresh answer" in final_text
+
+
+@pytest.mark.anyio
+async def test_632_healthy_run_clears_quarantine(quarantine_store) -> None:
+    """#632 (W2): a run that completes with real work (num_turns truthy)
+    clears any quarantine marker for the session id it reports, so a reused
+    session id is never stuck fresh-only forever."""
+    quarantine_store.quarantine(
+        CODEX_ENGINE, "sid-healthy", reason="forced_teardown_after_result"
+    )
+
+    transport = FakeTransport()
+    runner = _RecordingRunner(
+        engine=CODEX_ENGINE,
+        resume_value="sid-healthy",
+        answer="a real answer",
+        usage={"num_turns": 2},
+    )
+    cfg = ExecBridgeConfig(
+        transport=transport,
+        presenter=MarkdownPresenter(),
+        final_notify=False,
+    )
+
+    await handle_message(
+        cfg,
+        runner=runner,
+        incoming=IncomingMessage(channel_id=123, message_id=10, text="hi"),
+        resume_token=None,
+    )
+
+    assert quarantine_store.is_quarantined(CODEX_ENGINE, "sid-healthy") is False
+
+
+@pytest.mark.anyio
+async def test_631_handle_message_uses_injected_quarantine_store(
+    tmp_path, monkeypatch
+) -> None:
+    """#631 (T6): ``handle_message`` must honour an explicitly injected
+    ``quarantine_store`` kwarg without ever falling back to (or lazily
+    materialising) the process-wide singleton.
+
+    The singleton is explicitly reset to unset (``set_quarantine_store
+    (None)``) immediately before the call under test, overriding whatever
+    the autouse ``_isolated_quarantine_store`` fixture (tests/conftest.py)
+    injected for this test — that fixture exists to stop *unfixtured*
+    tests from ever touching the real on-disk quarantine file, but this
+    test needs the singleton in its unset (lazy-load-on-first-use) state
+    to prove the specific claim below. As a belt-and-braces guard against
+    a wiring bug that silently falls back to ``get_quarantine_store()``,
+    ``UNTETHER_CONFIG_PATH`` is also monkeypatched to a tmp directory so
+    even a fallback could never touch the real on-disk quarantine file —
+    and we assert no file was written at that fallback-derived path,
+    which is what would happen the moment the lazy accessor's ``.load()``
+    persisted a pruned/dirty store.
+    """
+    from untether.session_quarantine import (
+        QuarantineStore,
+        resolve_quarantine_path,
+        set_quarantine_store,
+    )
+
+    fake_config_path = tmp_path / "cfg" / "untether.toml"
+    fake_config_path.parent.mkdir(parents=True)
+    monkeypatch.setenv("UNTETHER_CONFIG_PATH", str(fake_config_path))
+    fallback_quarantine_path = resolve_quarantine_path(fake_config_path)
+
+    set_quarantine_store(None)  # the singleton starts, and must stay, unset
+
+    injected_path = tmp_path / "injected" / "q.json"
+    injected_path.parent.mkdir(parents=True)
+    injected_store = QuarantineStore(path=injected_path)
+    injected_store.quarantine(
+        CODEX_ENGINE, "sid-injected", reason="forced_teardown_after_result"
+    )
+
+    transport = FakeTransport()
+    runner = _RecordingRunner(
+        engine=CODEX_ENGINE, resume_value="sid-fresh", answer="fresh via injection"
+    )
+    cfg = ExecBridgeConfig(
+        transport=transport,
+        presenter=MarkdownPresenter(),
+        final_notify=False,
+    )
+
+    try:
+        await handle_message(
+            cfg,
+            runner=runner,
+            incoming=IncomingMessage(channel_id=123, message_id=10, text="hi"),
+            resume_token=ResumeToken(engine=CODEX_ENGINE, value="sid-injected"),
+            quarantine_store=injected_store,
+        )
+
+        # (a) the injected store's marker was honoured — the run was
+        # diverted to a fresh session (resume=None), never resumed.
+        assert len(runner.calls) == 1
+        assert runner.calls[0][1] is None
+
+        # (b) the singleton was never touched: no file materialised at the
+        # path the lazy accessor would have used had it been consulted.
+        assert not fallback_quarantine_path.exists()
+    finally:
+        set_quarantine_store(None)
+
+
+# ---------------------------------------------------------------------------
+# #593 — stall auto-cancel enforcement (decision must end in teardown)
+# ---------------------------------------------------------------------------
+
+
+def _enforcement_edits(pid: int | None) -> ProgressEdits:
+    import time as _time
+
+    tracker = ProgressTracker(engine="codex")
+    edits = ProgressEdits(
+        transport=FakeTransport(),
+        presenter=MarkdownPresenter(),
+        channel_id=123,
+        progress_ref=MessageRef(channel_id=123, message_id=1),
+        tracker=tracker,
+        started_at=0.0,
+        clock=_time.monotonic,
+        last_rendered=None,
+    )
+    edits.pid = pid
+    edits._CANCEL_ESCALATION_S = 0.1
+    edits._CANCEL_ESCALATION_POLL_S = 0.01
+    edits._CANCEL_SIGKILL_GRACE_S = 0.1
+    return edits
+
+
+@pytest.mark.anyio
+@pytest.mark.cancel_enforcement
+async def test_593_cancel_enforcement_escalates_to_direct_kill(monkeypatch) -> None:
+    """If the subprocess is still alive after the escalation window, the
+    bridge kills it directly instead of trusting the generator unwind
+    (observed 14m52s gap between stall_auto_cancel and handle.cancelled)."""
+    from structlog.testing import capture_logs
+
+    alive = {"v": True}
+    signals: list[int] = []
+
+    def fake_probe(pid: int, sig: int) -> None:
+        if sig == 0 and not alive["v"]:
+            raise ProcessLookupError
+
+    def fake_group_kill(pid: int, sig) -> None:
+        signals.append(int(sig))
+        if int(sig) == 15:
+            alive["v"] = False  # SIGTERM obeyed
+
+    monkeypatch.setattr("untether.runner_bridge.os.kill", fake_probe)
+    monkeypatch.setattr("untether.utils.subprocess.signal_pid_group", fake_group_kill)
+
+    edits = _enforcement_edits(pid=88888)
+    with capture_logs() as logs:
+        await edits._enforce_cancel_teardown()
+
+    assert 15 in signals  # SIGTERM delivered
+    assert 9 not in signals  # died within grace — no SIGKILL
+    assert any(r.get("event") == "progress_edits.cancel_escalated" for r in logs)
+
+
+@pytest.mark.anyio
+@pytest.mark.cancel_enforcement
+async def test_593_cancel_enforcement_noop_when_teardown_succeeds(
+    monkeypatch,
+) -> None:
+    """Subprocess dies during the escalation window → no direct kill."""
+    calls: list[int] = []
+
+    def fake_probe(pid: int, sig: int) -> None:
+        raise ProcessLookupError  # already dead
+
+    monkeypatch.setattr("untether.runner_bridge.os.kill", fake_probe)
+    monkeypatch.setattr(
+        "untether.utils.subprocess.signal_pid_group",
+        lambda pid, sig: calls.append(int(sig)),
+    )
+
+    edits = _enforcement_edits(pid=88889)
+    await edits._enforce_cancel_teardown()
+
+    assert calls == []
+
+
+@pytest.mark.anyio
+@pytest.mark.cancel_enforcement
+async def test_593_cancel_enforcement_without_pid_logs_and_returns() -> None:
+    """No PID was ever learned — nothing to enforce against; log it."""
+    from structlog.testing import capture_logs
+
+    edits = _enforcement_edits(pid=None)
+    with capture_logs() as logs:
+        await edits._enforce_cancel_teardown()
+
+    assert any(
+        r.get("event") == "progress_edits.cancel_enforcement_no_pid" for r in logs
+    )
+
+
+# ---------------------------------------------------------------------------
+# #614: cancel during early final delivery — generator teardown + delivery
+# ---------------------------------------------------------------------------
+
+
+class _TaskGroupHoldOpenRunner:
+    """Mimics ClaudeRunner.run_impl's shape: yields events from inside an
+    anyio task group, then holds the generator open after CompletedEvent
+    (the #591/#592 post-result idle window).
+
+    Records which asyncio task consumed the generator and which task ran
+    its cleanup, so tests can assert teardown happened in the pump task
+    rather than in the event loop's async-generator finalizer.
+    """
+
+    engine = CODEX_ENGINE
+
+    def __init__(self) -> None:
+        self.consume_task: object = None
+        self.cleanup_task: object = None
+        self.cleanup_ran = anyio.Event()
+        self.taskgroup_exit_error: BaseException | None = None
+        self._token = ResumeToken(
+            engine=CODEX_ENGINE, value="019b66fc-64c2-7a71-81cd-081c504cfeb2"
+        )
+
+    def format_resume(self, token: ResumeToken) -> str:
+        return f"codex resume {token.value}"
+
+    async def run(self, prompt: str, resume: ResumeToken | None):
+        import asyncio
+
+        from untether.model import StartedEvent
+
+        hold = anyio.Event()
+        try:
+            async with anyio.create_task_group() as tg:
+                tg.start_soon(anyio.sleep_forever)
+                self.consume_task = asyncio.current_task()
+                yield StartedEvent(
+                    engine=CODEX_ENGINE, resume=self._token, title="codex"
+                )
+                yield CompletedEvent(
+                    engine=CODEX_ENGINE,
+                    ok=True,
+                    answer="done",
+                    resume=self._token,
+                )
+                # Post-result hold-open: generator stays suspended here (or
+                # at the yield above) until closed.
+                await hold.wait()
+        except BaseException as exc:
+            self.taskgroup_exit_error = exc
+            raise
+        finally:
+            import asyncio
+
+            self.cleanup_task = asyncio.current_task()
+            self.cleanup_ran.set()
+
+
+async def _drive_cancel_mid_delivery(
+    runner: _TaskGroupHoldOpenRunner,
+    blocking_deliver,
+    running_task,
+) -> RunOutcome:
+    """Run run_runner_with_cancel and fire /cancel while on_completed is
+    suspended, so the runner generator is parked at its yield when the
+    pump task unwinds."""
+    from untether.runner_bridge import run_runner_with_cancel
+
+    transport = FakeTransport()
+    presenter = _KeyboardPresenter()
+    edits = _make_edits(transport, presenter)
+    outcome_box: list = []
+
+    async def drive() -> None:
+        outcome_box.append(
+            await run_runner_with_cancel(
+                runner,  # type: ignore[arg-type]
+                prompt="p",
+                resume_token=None,
+                edits=edits,
+                running_task=running_task,
+                on_thread_known=None,
+                channel_id=123,
+                on_completed=blocking_deliver,
+            )
+        )
+
+    async with anyio.create_task_group() as tg:
+        tg.start_soon(drive)
+        with anyio.fail_after(2):
+            await blocking_deliver.in_delivery.wait()
+        running_task.cancel_requested.set()
+        # Let wait_cancel fire and the cancellation propagate before
+        # releasing the delivery, so the pre-fix behaviour (delivery
+        # cancelled mid-flight) is exercised deterministically.
+        for _ in range(20):
+            await anyio.lowlevel.checkpoint()
+        blocking_deliver.release.set()
+
+    assert outcome_box, "run_runner_with_cancel did not return"
+    return outcome_box[0]
+
+
+def _make_blocking_deliver():
+    class _Deliver:
+        in_delivery = anyio.Event()
+        release = anyio.Event()
+        completed = anyio.Event()
+
+        async def __call__(self, evt, outcome) -> None:
+            self.in_delivery.set()
+            await self.release.wait()
+            self.completed.set()
+
+    return _Deliver()
+
+
+@pytest.mark.anyio
+async def test_cancel_mid_delivery_closes_generator_in_pump_task() -> None:
+    """#614: a /cancel landing while the pump awaits on_completed abandons
+    the async-for with the runner generator suspended at a yield inside an
+    anyio task group. The generator must be closed explicitly in the pump
+    task — otherwise the event loop's asyncgen finalizer throws
+    GeneratorExit from a foreign task and the task group raises
+    'Attempted to exit cancel scope in a different task than it was
+    entered in' as an unretrieved task exception."""
+    from untether.runner_bridge import RunningTask
+
+    runner = _TaskGroupHoldOpenRunner()
+    deliver = _make_blocking_deliver()
+    running_task = RunningTask()
+
+    outcome = await _drive_cancel_mid_delivery(runner, deliver, running_task)
+
+    assert outcome.cancelled
+    # Teardown must have happened by the time run_runner_with_cancel
+    # returned — not left to the GC/asyncgen-finalizer.
+    assert runner.cleanup_ran.is_set(), (
+        "runner generator was abandoned without aclose(); teardown left to "
+        "the event loop's async-generator finalizer"
+    )
+    # ...and in the SAME task that consumed the generator, so the anyio
+    # task group's cancel scope exits in the task that entered it.
+    assert runner.cleanup_task is runner.consume_task, (
+        "generator cleanup ran in a different task than the pump — anyio "
+        "cancel scopes must exit in their owning task"
+    )
+    assert not isinstance(runner.taskgroup_exit_error, RuntimeError)
+
+
+@pytest.mark.anyio
+async def test_cancel_mid_delivery_lets_final_delivery_finish() -> None:
+    """#614 (companion symptom): the early final delivery (#591) must be
+    shielded from the bridge cancel scope. Unshielded, a /cancel landing
+    mid-send cancels on_completed AFTER the Telegram send hit the wire but
+    BEFORE final_delivery['sent'] was recorded — so handle_message takes
+    the plain 'cancelled' branch and renders a spurious 'cancelled'
+    message on top of the already-delivered answer."""
+    from untether.runner_bridge import RunningTask
+
+    runner = _TaskGroupHoldOpenRunner()
+    deliver = _make_blocking_deliver()
+    running_task = RunningTask()
+
+    outcome = await _drive_cancel_mid_delivery(runner, deliver, running_task)
+
+    assert outcome.cancelled
+    assert deliver.completed.is_set(), (
+        "on_completed was cancelled mid-delivery; final answer delivery "
+        "must be shielded so the sent-flag matches what reached the wire"
+    )
+
+
+# ---------------------------------------------------------------------------
+# #495/#499/#500 — approval-wait / rate-limit-wait stall suppression.
+#
+# One 5 h session parked on an unanswered ExitPlanMode approval produced 88
+# spurious `progress_edits.stall_detected` WARNs (#499), 2
+# `progress_edits.frozen_ring_escalation` WARNs (#500), and a
+# `session.summary` reporting `stall_warnings=88` (#495). The process was
+# healthy throughout (cpu_active=True, state=S).
+# ---------------------------------------------------------------------------
+
+
+def test_499_pending_approval_detected_without_inline_keyboard() -> None:
+    """The root cause: an ExitPlanMode permission-request action carries no
+    ``inline_keyboard`` detail, so the old presentation-state-only predicate
+    returned False and the stall was classified "normal"."""
+    transport = FakeTransport()
+    edits = _make_edits(transport, _KeyboardPresenter())
+
+    # No actions at all -> the old heuristic has nothing to go on.
+    edits.stream = _make_stream(
+        engine_state=_make_engine_state(awaiting_user_approval=lambda: True)
+    )
+    assert edits._has_pending_approval() is True
+
+    edits.stream = _make_stream(
+        engine_state=_make_engine_state(awaiting_user_approval=lambda: False)
+    )
+    assert edits._has_pending_approval() is False
+
+
+def test_499_pending_approval_falls_back_to_inline_keyboard() -> None:
+    """Engines with no control channel keep the old presentation-state path."""
+    transport = FakeTransport()
+    edits = _make_edits(transport, _KeyboardPresenter())
+    edits.stream = _make_stream(engine_state=None)
+    assert edits._has_pending_approval() is False
+
+
+def test_499_pending_approval_survives_probe_exception() -> None:
+    """A raising engine probe must not take the stall monitor down."""
+
+    def _boom() -> bool:
+        raise RuntimeError("engine state exploded")
+
+    transport = FakeTransport()
+    edits = _make_edits(transport, _KeyboardPresenter())
+    edits.stream = _make_stream(
+        engine_state=_make_engine_state(awaiting_user_approval=_boom)
+    )
+    assert edits._has_pending_approval() is False
+
+
+def test_500_rate_limit_waiting_probe() -> None:
+    transport = FakeTransport()
+    edits = _make_edits(transport, _KeyboardPresenter())
+    edits.stream = _make_stream(
+        engine_state=_make_engine_state(awaiting_rate_limit_retry=lambda: True)
+    )
+    assert edits._is_rate_limit_waiting() is True
+    edits.stream = _make_stream(engine_state=None)
+    assert edits._is_rate_limit_waiting() is False
+
+
+@pytest.mark.anyio
+async def test_495_499_500_approval_wait_emits_no_warn_and_no_count() -> None:
+    """End-to-end: a session parked on an approval must emit the demoted INFO,
+    must NOT emit stall_detected / frozen_ring_escalation, must NOT increment
+    the stall_warnings metric, and must hold frozen_ring_count at zero so the
+    counter can't trip a false escalation the instant the user replies."""
+    transport = FakeTransport()
+    presenter = _KeyboardPresenter()
+    clock = _FakeClock(start=100.0)
+    edits = _make_edits(transport, presenter, clock=clock)
+    edits._stall_check_interval = 0.01
+    edits._STALL_THRESHOLD_SECONDS = 0.05
+    edits._STALL_THRESHOLD_TOOL = 0.05
+    edits._STALL_THRESHOLD_APPROVAL = 0.05
+    edits._STALL_THRESHOLD_APPROVAL_FIRST = 0.05
+    edits._stall_repeat_seconds = 0.02  # let many ticks fire
+
+    edits.stream = _make_stream(
+        last_event_type="result",
+        engine_state=_make_engine_state(awaiting_user_approval=lambda: True),
+    )
+
+    with structlog.testing.capture_logs() as logs:
+        async with anyio.create_task_group() as tg:
+
+            async def drive() -> None:
+                clock.set(110.0)
+                await anyio.sleep(0.25)
+                edits.signal_send.close()
+
+            tg.start_soon(edits.run)
+            tg.start_soon(drive)
+
+    events = [entry.get("event") for entry in logs]
+    assert "progress_edits.stall_detected" not in events
+    assert "progress_edits.frozen_ring_escalation" not in events
+    assert "subprocess.approval_pending" in events
+    # #495: the reported metric must stay at zero — no tick was a real stall.
+    assert edits._total_stall_warn_count == 0
+    # #500: counter held down, so approving now cannot instantly escalate.
+    assert edits._frozen_ring_count == 0
+
+
+@pytest.mark.anyio
+async def test_495_genuine_stall_still_warns_and_counts() -> None:
+    """Regression guard: with no expected-wait active, a real stall must still
+    emit the WARNING and still increment the metric."""
+    transport = FakeTransport()
+    presenter = _KeyboardPresenter()
+    clock = _FakeClock(start=100.0)
+    edits = _make_edits(transport, presenter, clock=clock)
+    edits._stall_check_interval = 0.01
+    edits._STALL_THRESHOLD_SECONDS = 0.05
+    edits._STALL_THRESHOLD_TOOL = 0.05
+    edits._stall_repeat_seconds = 1000.0
+
+    edits.stream = _make_stream(
+        last_event_type="assistant",
+        engine_state=_make_engine_state(),
+    )
+
+    with structlog.testing.capture_logs() as logs:
+        async with anyio.create_task_group() as tg:
+
+            async def drive() -> None:
+                clock.set(110.0)
+                await anyio.sleep(0.15)
+                edits.signal_send.close()
+
+            tg.start_soon(edits.run)
+            tg.start_soon(drive)
+
+    events = [entry.get("event") for entry in logs]
+    assert "progress_edits.stall_detected" in events
+    assert edits._total_stall_warn_count >= 1
+
+
+# ---------------------------------------------------------------------------
+# #640 — auto-continue signal-death suppression was inert for Claude because
+# ClaudeRunner.run_impl never wrote `stream.proc_returncode`, so the bridge
+# always saw None. Fleet evidence (nsd, 14 days): 2 of 49 auto-continues fired
+# immediately after a rc=143 SIGTERM exit.
+# ---------------------------------------------------------------------------
+
+
+def _ac(rc):
+    """_should_auto_continue with everything but the return code held eligible."""
+    from untether.runner_bridge import _should_auto_continue
+
+    return _should_auto_continue(
+        last_event_type="user",
+        engine="claude",
+        cancelled=False,
+        resume_value="sess-1",
+        auto_continued_count=0,
+        max_retries=1,
+        proc_returncode=rc,
+    )
+
+
+def test_640_clean_exit_is_eligible() -> None:
+    assert _ac(0) is True
+
+
+def test_640_unknown_returncode_stays_eligible() -> None:
+    """Fail-open: a missing rc must not silently retire the mitigation for the
+    NOT_PLANNED upstream defect. For Claude this no longer occurs."""
+    assert _ac(None) is True
+
+
+@pytest.mark.parametrize("rc", [1, 2, 127, 128])
+def test_640_ordinary_failures_are_not_auto_continued(rc: int) -> None:
+    """The docstring always claimed 'the upstream bug exits with rc=0', but
+    only signal deaths were excluded. Fleet data shows zero real events in
+    this range, so excluding them is safe."""
+    assert _ac(rc) is False
+
+
+@pytest.mark.parametrize("rc", [137, 143, -9, -15])
+def test_640_signal_deaths_are_not_auto_continued(rc: int) -> None:
+    assert _ac(rc) is False
+
+
+@pytest.mark.anyio
+async def test_640_claude_runner_records_proc_returncode() -> None:
+    """The actual defect: ClaudeRunner.run_impl must write the return code back
+    onto the stream state, exactly as the base runner does at runner.py:1362.
+    Without this every rc-based gate downstream is a no-op."""
+    import inspect
+
+    from untether.runners import claude as claude_mod
+
+    src = inspect.getsource(claude_mod.ClaudeRunner.run_impl)
+    assert "stream.proc_returncode = rc" in src, (
+        "ClaudeRunner.run_impl must assign stream.proc_returncode — without it "
+        "_is_signal_death() always sees None and auto-continue can resume a "
+        "SIGTERM'd (poisoned) session. See #640."
+    )
+
+
+# ---------------------------------------------------------------------------
+# #633 (W4) — bridge-level serialisation gate.
+# ---------------------------------------------------------------------------
+
+CLAUDE_ENGINE = "claude"
+
+
+@pytest.mark.anyio
+async def test_633_handoff_timeout_quarantines_and_starts_fresh(
+    quarantine_store, monkeypatch
+) -> None:
+    """A prior subprocess that will not die must divert the follow-up to a
+    FRESH session and quarantine the old one — resuming it is the documented
+    path into the poisoned 0-turn state."""
+    from structlog.testing import capture_logs
+
+    from untether.runners import claude as claude_mod
+
+    async def _stuck(session_id, timeout_s, *, poll_s=0.25):
+        return "timed_out"
+
+    monkeypatch.setattr(claude_mod, "wait_for_session_handoff", _stuck)
+
+    transport = FakeTransport()
+    runner = _RecordingRunner(
+        engine=CLAUDE_ENGINE, resume_value="sid-fresh", answer="fresh answer"
+    )
+    cfg = ExecBridgeConfig(
+        transport=transport, presenter=MarkdownPresenter(), final_notify=False
+    )
+    cleared: list[str] = []
+
+    async def on_resume_failed(tok: ResumeToken) -> None:
+        cleared.append(tok.value)
+
+    with capture_logs() as logs:
+        await handle_message(
+            cfg,
+            runner=runner,
+            incoming=IncomingMessage(channel_id=123, message_id=10, text="hi"),
+            resume_token=ResumeToken(engine=CLAUDE_ENGINE, value="sid-live"),
+            on_resume_failed=on_resume_failed,
+        )
+
+    # (a) went fresh rather than racing the live owner
+    assert len(runner.calls) == 1
+    assert runner.calls[0][1] is None
+    # (b) NOT quarantined — a busy session is not a known-corrupt one, and a
+    # quarantine marker persists 7 days and permanently diverts the session.
+    # Clearing the token is sufficient; if that process is later force-killed
+    # after a result, the W2 path quarantines it on real evidence.
+    assert quarantine_store.is_quarantined(CLAUDE_ENGINE, "sid-live") is False
+    # (c) stored token cleared, structured reason logged
+    assert "sid-live" in cleared
+    assert any(
+        r.get("event") == "session.resume_diverted_fresh"
+        and r.get("reason") == "handoff_timeout"
+        for r in logs
+    )
+    # (d) the user still gets a real answer
+    assert "fresh answer" in transport.edit_calls[-1]["message"].text
+
+
+@pytest.mark.anyio
+async def test_633_handoff_exit_resumes_normally(quarantine_store, monkeypatch) -> None:
+    """If the prior owner exits within the window we resume as usual — W4 must
+    not turn a normal follow-up into a fresh session."""
+    from untether.runners import claude as claude_mod
+
+    async def _exits(session_id, timeout_s, *, poll_s=0.25):
+        return "exited"
+
+    monkeypatch.setattr(claude_mod, "wait_for_session_handoff", _exits)
+
+    transport = FakeTransport()
+    runner = _RecordingRunner(
+        engine=CLAUDE_ENGINE, resume_value="sid-a", answer="resumed answer"
+    )
+    cfg = ExecBridgeConfig(
+        transport=transport, presenter=MarkdownPresenter(), final_notify=False
+    )
+
+    await handle_message(
+        cfg,
+        runner=runner,
+        incoming=IncomingMessage(channel_id=123, message_id=11, text="hi"),
+        resume_token=ResumeToken(engine=CLAUDE_ENGINE, value="sid-a"),
+    )
+
+    assert len(runner.calls) == 1
+    assert runner.calls[0][1] is not None
+    assert runner.calls[0][1].value == "sid-a"
+    assert quarantine_store.is_quarantined(CLAUDE_ENGINE, "sid-a") is False
+
+
+@pytest.mark.anyio
+async def test_633_non_claude_engines_skip_the_gate(
+    quarantine_store, monkeypatch
+) -> None:
+    """Only Claude has the post-result limbo behaviour; other engines must not
+    pay the handoff check at all."""
+    from untether.runners import claude as claude_mod
+
+    called = False
+
+    async def _tracker(session_id, timeout_s, *, poll_s=0.25):
+        nonlocal called
+        called = True
+        return "timed_out"
+
+    monkeypatch.setattr(claude_mod, "wait_for_session_handoff", _tracker)
+
+    transport = FakeTransport()
+    runner = _RecordingRunner(
+        engine=CODEX_ENGINE, resume_value="sid-c", answer="codex answer"
+    )
+    cfg = ExecBridgeConfig(
+        transport=transport, presenter=MarkdownPresenter(), final_notify=False
+    )
+
+    await handle_message(
+        cfg,
+        runner=runner,
+        incoming=IncomingMessage(channel_id=123, message_id=12, text="hi"),
+        resume_token=ResumeToken(engine=CODEX_ENGINE, value="sid-c"),
+    )
+
+    assert called is False
+    assert runner.calls[0][1] is not None
+
+
+@pytest.mark.anyio
+async def test_633_flag_off_restores_pre_rc8_behaviour(
+    quarantine_store, monkeypatch
+) -> None:
+    """Rollback path: serialize_session_owner=False must skip the gate entirely
+    even when a live owner would otherwise time out."""
+    import untether.runner_bridge as rb
+    from untether.runners import claude as claude_mod
+    from untether.settings import AutoContinueSettings
+
+    called = False
+
+    async def _tracker(session_id, timeout_s, *, poll_s=0.25):
+        nonlocal called
+        called = True
+        return "timed_out"
+
+    monkeypatch.setattr(claude_mod, "wait_for_session_handoff", _tracker)
+    monkeypatch.setattr(
+        rb,
+        "_load_auto_continue_settings",
+        lambda: AutoContinueSettings(serialize_session_owner=False),
+    )
+
+    transport = FakeTransport()
+    runner = _RecordingRunner(
+        engine=CLAUDE_ENGINE, resume_value="sid-x", answer="answer"
+    )
+    cfg = ExecBridgeConfig(
+        transport=transport, presenter=MarkdownPresenter(), final_notify=False
+    )
+
+    await handle_message(
+        cfg,
+        runner=runner,
+        incoming=IncomingMessage(channel_id=123, message_id=13, text="hi"),
+        resume_token=ResumeToken(engine=CLAUDE_ENGINE, value="sid-x"),
+    )
+
+    assert called is False
+    assert runner.calls[0][1] is not None
+    assert runner.calls[0][1].value == "sid-x"
+
+
+@pytest.mark.anyio
+async def test_633_probe_failure_fails_closed(quarantine_store, monkeypatch) -> None:
+    """If the ownership check itself breaks we must NOT resume — that would
+    silently reinstate the very race the gate exists to prevent. Fail closed
+    (fresh session) and log at WARNING so the degradation is visible."""
+    from structlog.testing import capture_logs
+
+    from untether.runners import claude as claude_mod
+
+    async def _explode(session_id, timeout_s, *, poll_s=0.25):
+        raise RuntimeError("registry unavailable")
+
+    monkeypatch.setattr(claude_mod, "wait_for_session_handoff", _explode)
+
+    transport = FakeTransport()
+    runner = _RecordingRunner(
+        engine=CLAUDE_ENGINE, resume_value="sid-fresh", answer="fresh answer"
+    )
+    cfg = ExecBridgeConfig(
+        transport=transport, presenter=MarkdownPresenter(), final_notify=False
+    )
+
+    with capture_logs() as logs:
+        await handle_message(
+            cfg,
+            runner=runner,
+            incoming=IncomingMessage(channel_id=123, message_id=14, text="hi"),
+            resume_token=ResumeToken(engine=CLAUDE_ENGINE, value="sid-broken"),
+        )
+
+    assert runner.calls[0][1] is None  # went fresh, did not resume
+    # #668: the failure must be ATTRIBUTABLE — without engine/session/chat the
+    # issue-watcher dedups every chat's probe failure into one indistinguishable
+    # report and there is no way to tell which session lost continuity.
+    failed = [
+        r
+        for r in logs
+        if r.get("event") == "session.handoff_check_failed"
+        and r.get("log_level") == "warning"
+    ]
+    assert failed, "a broken ownership probe must be visible, not silently degrade"
+    rec = failed[0]
+    assert rec.get("engine") == CLAUDE_ENGINE
+    assert rec.get("session_id") == "sid-broken"
+    assert rec.get("chat_id") == 123
+
+
+@pytest.mark.anyio
+async def test_633_gate_does_not_stall_a_just_exited_session() -> None:
+    """Regression guard for recursive re-entry (auto-continue / auto-resend):
+    handle_message re-enters with a resume token while the just-finished
+    subprocess is tearing down. Because run_impl's finally deregisters the
+    session before the run generator is exhausted, the gate must return "free"
+    immediately rather than burning the full handoff budget on every
+    auto-continue."""
+    import time as _time
+
+    from untether.runners.claude import wait_for_session_handoff
+
+    t0 = _time.monotonic()
+    outcome = await wait_for_session_handoff("sid-already-gone", 30.0)
+    elapsed = _time.monotonic() - t0
+
+    assert outcome == "free"
+    assert elapsed < 0.5, f"gate stalled {elapsed:.2f}s on a non-live session"
+
+
+# ---------------------------------------------------------------------------
+# #650 — process_dead auto-cancel must not alarm after a delivered result
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.anyio
+async def test_650_process_dead_after_delivery_reaps_silently() -> None:
+    """A dead subprocess whose run already emitted CompletedEvent is a
+    normally-completed run being reaped late: cancel machinery still runs,
+    but no WARN and no user-facing 'session appears stuck' notice."""
+    from unittest.mock import patch
+
+    from untether.runner import JsonlStreamState
+    from untether.utils.proc_diag import ProcessDiag
+
+    transport = FakeTransport()
+    presenter = _KeyboardPresenter()
+    clock = _FakeClock(start=100.0)
+    edits = _make_edits(transport, presenter, clock=clock)
+    edits._stall_check_interval = 0.01
+    edits._STALL_THRESHOLD_SECONDS = 0.05
+    edits.pid = 99999
+    stream = JsonlStreamState(expected_session=None)
+    stream.did_emit_completed = True
+    stream.last_event_type = "result"
+    stream.proc_returncode = 0
+    edits.stream = stream
+    cancel_event = anyio.Event()
+    edits.cancel_event = cancel_event
+
+    dead_diag = ProcessDiag(pid=99999, alive=False)
+    with (
+        patch("untether.utils.proc_diag.collect_proc_diag", return_value=dead_diag),
+        structlog.testing.capture_logs() as logs,
+    ):
+        async with anyio.create_task_group() as tg:
+
+            async def drive() -> None:
+                clock.set(100.1)
+                await anyio.sleep(0.1)
+                if not cancel_event.is_set():
+                    edits.signal_send.close()
+
+            tg.start_soon(edits.run)
+            tg.start_soon(drive)
+
+    assert cancel_event.is_set(), "the run must still be torn down"
+    assert not [
+        c for c in transport.send_calls if "Auto-cancelled" in c["message"].text
+    ], "no user-facing alarm after a delivered result"
+    assert any(r.get("event") == "progress_edits.reaped_after_delivery" for r in logs)
+    assert not any(r.get("event") == "progress_edits.stall_auto_cancel" for r in logs)
+
+
+@pytest.mark.anyio
+async def test_650_process_dead_without_delivery_still_alarms() -> None:
+    """Regression guard for the gate's direction: a dead process on a run
+    that never emitted CompletedEvent is a genuine crash — the alarm stays."""
+    from unittest.mock import patch
+
+    from untether.runner import JsonlStreamState
+    from untether.utils.proc_diag import ProcessDiag
+
+    transport = FakeTransport()
+    presenter = _KeyboardPresenter()
+    clock = _FakeClock(start=100.0)
+    edits = _make_edits(transport, presenter, clock=clock)
+    edits._stall_check_interval = 0.01
+    edits._STALL_THRESHOLD_SECONDS = 0.05
+    edits.pid = 99999
+    stream = JsonlStreamState(expected_session=None)
+    stream.did_emit_completed = False
+    edits.stream = stream
+    cancel_event = anyio.Event()
+    edits.cancel_event = cancel_event
+
+    dead_diag = ProcessDiag(pid=99999, alive=False)
+    with patch("untether.utils.proc_diag.collect_proc_diag", return_value=dead_diag):
+        async with anyio.create_task_group() as tg:
+
+            async def drive() -> None:
+                clock.set(100.1)
+                await anyio.sleep(0.1)
+                if not cancel_event.is_set():
+                    edits.signal_send.close()
+
+            tg.start_soon(edits.run)
+            tg.start_soon(drive)
+
+    assert cancel_event.is_set()
+    auto_cancel_msgs = [
+        c for c in transport.send_calls if "Auto-cancelled" in c["message"].text
+    ]
+    assert len(auto_cancel_msgs) == 1
+    assert "process_dead" in auto_cancel_msgs[0]["message"].text
+
+
+# ---------------------------------------------------------------------------
+# #647 — handoff during live background work: no silent contextless divert
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.anyio
+async def test_647_handoff_bg_extended_wait_then_resume(
+    quarantine_store, monkeypatch
+) -> None:
+    """Base timeout expires while the owner is finishing background work: the
+    user is told why, the wait extends, and when the owner exits the resume
+    proceeds with context intact."""
+    from structlog.testing import capture_logs
+
+    from untether.runners import claude as claude_mod
+
+    waits: list[float] = []
+
+    async def _timed_out_then_exited(session_id, timeout_s, *, poll_s=0.25):
+        waits.append(timeout_s)
+        return "timed_out" if len(waits) == 1 else "exited"
+
+    monkeypatch.setattr(claude_mod, "wait_for_session_handoff", _timed_out_then_exited)
+    monkeypatch.setattr(claude_mod, "session_live_bg_count", lambda sid: 2)
+
+    transport = FakeTransport()
+    runner = _RecordingRunner(
+        engine=CLAUDE_ENGINE, resume_value="sid-bg", answer="resumed answer"
+    )
+    cfg = ExecBridgeConfig(
+        transport=transport, presenter=MarkdownPresenter(), final_notify=False
+    )
+
+    with capture_logs() as logs:
+        await handle_message(
+            cfg,
+            runner=runner,
+            incoming=IncomingMessage(channel_id=123, message_id=20, text="progress?"),
+            resume_token=ResumeToken(engine=CLAUDE_ENGINE, value="sid-bg"),
+        )
+
+    # Two waits: base then background-extended.
+    assert len(waits) == 2
+    # Resume proceeded with the ORIGINAL session — no amnesia.
+    assert len(runner.calls) == 1
+    assert runner.calls[0][1] is not None
+    assert runner.calls[0][1].value == "sid-bg"
+    # The user was told about the wait.
+    wait_notices = [
+        c for c in transport.send_calls if "background task" in c["message"].text
+    ]
+    assert len(wait_notices) == 1
+    assert any(r.get("event") == "session.handoff_bg_extended" for r in logs)
+
+
+@pytest.mark.anyio
+async def test_647_handoff_bg_wait_exhausted_diverts_with_notice(
+    quarantine_store, monkeypatch
+) -> None:
+    """Both waits expire: divert fresh as before, but ANNOUNCE the context
+    loss instead of answering contextlessly in silence."""
+    from untether.runners import claude as claude_mod
+
+    async def _always_stuck(session_id, timeout_s, *, poll_s=0.25):
+        return "timed_out"
+
+    monkeypatch.setattr(claude_mod, "wait_for_session_handoff", _always_stuck)
+    monkeypatch.setattr(claude_mod, "session_live_bg_count", lambda sid: 3)
+
+    transport = FakeTransport()
+    runner = _RecordingRunner(
+        engine=CLAUDE_ENGINE, resume_value="sid-fresh2", answer="fresh answer"
+    )
+    cfg = ExecBridgeConfig(
+        transport=transport, presenter=MarkdownPresenter(), final_notify=False
+    )
+
+    await handle_message(
+        cfg,
+        runner=runner,
+        incoming=IncomingMessage(channel_id=123, message_id=21, text="progress?"),
+        resume_token=ResumeToken(engine=CLAUDE_ENGINE, value="sid-busy"),
+    )
+
+    assert len(runner.calls) == 1
+    assert runner.calls[0][1] is None
+    divert_notices = [
+        c
+        for c in transport.send_calls
+        if "starting a fresh session" in c["message"].text.lower()
+    ]
+    assert len(divert_notices) == 1
+
+
+@pytest.mark.anyio
+async def test_647_handoff_timeout_without_bg_diverts_with_notice(
+    quarantine_store, monkeypatch
+) -> None:
+    """No live background work: the base timeout diverts immediately (no
+    extended wait), but the divert is still announced."""
+    from untether.runners import claude as claude_mod
+
+    waits: list[float] = []
+
+    async def _always_stuck(session_id, timeout_s, *, poll_s=0.25):
+        waits.append(timeout_s)
+        return "timed_out"
+
+    monkeypatch.setattr(claude_mod, "wait_for_session_handoff", _always_stuck)
+    monkeypatch.setattr(claude_mod, "session_live_bg_count", lambda sid: 0)
+
+    transport = FakeTransport()
+    runner = _RecordingRunner(
+        engine=CLAUDE_ENGINE, resume_value="sid-fresh3", answer="fresh answer"
+    )
+    cfg = ExecBridgeConfig(
+        transport=transport, presenter=MarkdownPresenter(), final_notify=False
+    )
+
+    await handle_message(
+        cfg,
+        runner=runner,
+        incoming=IncomingMessage(channel_id=123, message_id=22, text="hi"),
+        resume_token=ResumeToken(engine=CLAUDE_ENGINE, value="sid-busy2"),
+    )
+
+    assert len(waits) == 1, "no extended wait without live background work"
+    assert len(runner.calls) == 1
+    assert runner.calls[0][1] is None
+    assert [
+        c
+        for c in transport.send_calls
+        if "starting a fresh session" in c["message"].text.lower()
+    ]
+
+
+@pytest.mark.anyio
+async def test_647_quarantined_during_handoff_diverts_with_notice(
+    quarantine_store, monkeypatch
+) -> None:
+    """The post-result ceiling can SIGTERM + quarantine the owner while the
+    handoff wait is in flight (the rc9 incident carried reason=quarantined).
+    The 'exited' outcome must re-check quarantine and announce the divert."""
+    from structlog.testing import capture_logs
+
+    from untether.runners import claude as claude_mod
+
+    async def _quarantines_then_exits(session_id, timeout_s, *, poll_s=0.25):
+        quarantine_store.quarantine(
+            CLAUDE_ENGINE, session_id, reason="forced_teardown_after_result"
+        )
+        return "exited"
+
+    monkeypatch.setattr(claude_mod, "wait_for_session_handoff", _quarantines_then_exits)
+
+    transport = FakeTransport()
+    runner = _RecordingRunner(
+        engine=CLAUDE_ENGINE, resume_value="sid-fresh4", answer="fresh answer"
+    )
+    cfg = ExecBridgeConfig(
+        transport=transport, presenter=MarkdownPresenter(), final_notify=False
+    )
+    cleared: list[str] = []
+
+    async def on_resume_failed(tok: ResumeToken) -> None:
+        cleared.append(tok.value)
+
+    with capture_logs() as logs:
+        await handle_message(
+            cfg,
+            runner=runner,
+            incoming=IncomingMessage(channel_id=123, message_id=23, text="continue"),
+            resume_token=ResumeToken(engine=CLAUDE_ENGINE, value="sid-mid-q"),
+            on_resume_failed=on_resume_failed,
+        )
+
+    assert len(runner.calls) == 1
+    assert runner.calls[0][1] is None, "must not resume a just-quarantined session"
+    assert "sid-mid-q" in cleared
+    assert any(
+        r.get("event") == "session.resume_diverted_fresh"
+        and r.get("reason") == "quarantined_during_handoff"
+        for r in logs
+    )
+    assert [
+        c
+        for c in transport.send_calls
+        if "starting a fresh session" in c["message"].text.lower()
+    ]
+
+
+@pytest.mark.anyio
+async def test_647_quarantine_divert_announces_to_user(quarantine_store) -> None:
+    """The pre-existing entry-time quarantine divert (reason=quarantined) is
+    no longer silent: the user is told context isn't carried over."""
+    quarantine_store.quarantine(
+        CODEX_ENGINE, "sess-known-poisoned", reason="forced_teardown_after_result"
+    )
+
+    transport = FakeTransport()
+    runner = _RecordingRunner(
+        engine=CODEX_ENGINE, resume_value="sid-fresh5", answer="fresh answer"
+    )
+    cfg = ExecBridgeConfig(
+        transport=transport, presenter=MarkdownPresenter(), final_notify=False
+    )
+
+    await handle_message(
+        cfg,
+        runner=runner,
+        incoming=IncomingMessage(channel_id=123, message_id=24, text="continue"),
+        resume_token=ResumeToken(engine=CODEX_ENGINE, value="sess-known-poisoned"),
+    )
+
+    assert len(runner.calls) == 1
+    assert runner.calls[0][1] is None
+    assert [
+        c for c in transport.send_calls if "fresh session" in c["message"].text.lower()
+    ]
+
+
+# ---------------------------------------------------------------------------
+# #572 — bounded auto-retry for Type-A stream-idle timeouts
+# ---------------------------------------------------------------------------
+
+_572_STREAM_IDLE_ERROR = (
+    "API Error: Stream idle timeout - partial response received\n"
+    "session: 36693744 · resumed · turns: 19 · api: 261086ms"
+)
+_572_USAGE = {"num_turns": 19, "duration_api_ms": 261086, "total_cost_usd": 1.0}
+
+
+def _572_stream(stream_idle_class: str | None, proc_returncode: int | None = 0):
+    """Real JsonlStreamState whose engine_state carries the #572 classifier —
+    a real instance so every bridge-side stream read resolves."""
+    from untether.runner import JsonlStreamState
+
+    stream = JsonlStreamState(expected_session=None)
+    stream.last_event_type = "result"
+    stream.proc_returncode = proc_returncode
+    stream.event_count = 5
+    stream.engine_state = _make_engine_state(stream_idle_class=stream_idle_class)
+    return stream
+
+
+def _572_watchdog(monkeypatch, **kw) -> None:
+    from untether.settings import WatchdogSettings
+
+    monkeypatch.setattr(
+        "untether.runner_bridge._load_watchdog_settings",
+        lambda: WatchdogSettings(**kw),
+    )
+
+
+class _StreamIdleThenAnswerRunner(MockRunner):
+    """First run() fails with a Type-A stream-idle timeout; the next run()
+    delivers a real answer — models a transient mid-generation API stall."""
+
+    def __init__(
+        self,
+        *,
+        engine=CODEX_ENGINE,
+        resume_value: str = "sess-572",
+        fail_times: int = 1,
+    ) -> None:
+        super().__init__(events=[], engine=engine, resume_value=resume_value)
+        self.calls: list[tuple[str, ResumeToken | None]] = []
+        self._fail_times = fail_times
+        self.current_stream = _572_stream("type_a")
+
+    async def run(self, prompt, resume):
+        from untether.model import StartedEvent
+        from untether.runners.mock import _resume_token
+
+        self.calls.append((prompt, resume))
+        token_value = resume.value if resume else self._resume_value
+        token = _resume_token(self.engine, token_value)
+        async with self.lock_for(token):
+            yield StartedEvent(engine=self.engine, resume=token, title=self.title)
+            if len(self.calls) <= self._fail_times:
+                yield CompletedEvent(
+                    engine=self.engine,
+                    resume=token,
+                    ok=False,
+                    answer="",
+                    error=_572_STREAM_IDLE_ERROR,
+                    usage=dict(_572_USAGE),
+                )
+            else:
+                yield CompletedEvent(
+                    engine=self.engine,
+                    resume=token,
+                    ok=True,
+                    answer="Recovered after retry.",
+                )
+
+
+@pytest.mark.anyio
+async def test_572_type_a_auto_retry_resumes_once(monkeypatch) -> None:
+    """A Type-A stream-idle failure auto-resumes once when the flag is on:
+    the terminal error is suppressed, a 🔁 notice is sent, and the resumed
+    run's real answer reaches the user."""
+    from structlog.testing import capture_logs
+
+    _572_watchdog(monkeypatch, stream_idle_auto_retry=True)
+    transport = FakeTransport()
+    runner = _StreamIdleThenAnswerRunner()
+    cfg = ExecBridgeConfig(
+        transport=transport, presenter=MarkdownPresenter(), final_notify=False
+    )
+
+    with capture_logs() as logs:
+        await handle_message(
+            cfg,
+            runner=runner,
+            incoming=IncomingMessage(channel_id=123, message_id=10, text="do it"),
+            resume_token=ResumeToken(engine=CODEX_ENGINE, value="sess-572"),
+        )
+
+    assert len(runner.calls) == 2
+    # The retry is a RESUME of the same session with a "continue" nudge
+    # (the agent-context preamble is prepended like any run).
+    assert runner.calls[1][0].endswith("continue")
+    assert runner.calls[1][1] is not None
+    assert runner.calls[1][1].value == "sess-572"
+    assert any(r.get("event") == "claude.stream_idle.auto_retry" for r in logs)
+    all_text = " ".join(
+        c["message"].text for c in transport.edit_calls + transport.send_calls
+    )
+    assert "resuming automatically" in all_text
+    assert "Recovered after retry." in all_text
+    # The terminal Type-A error final was suppressed.
+    assert "Stream idle timeout" not in all_text
+
+
+@pytest.mark.anyio
+async def test_572_type_b_never_retries(monkeypatch) -> None:
+    """Type-B (cold-start zero-byte stall) must never retry even with the
+    flag on — retrying hammers a down API."""
+    from structlog.testing import capture_logs
+
+    _572_watchdog(monkeypatch, stream_idle_auto_retry=True)
+    transport = FakeTransport()
+    runner = _StreamIdleThenAnswerRunner(fail_times=99)
+    runner.current_stream = _572_stream("type_b")
+    cfg = ExecBridgeConfig(
+        transport=transport, presenter=MarkdownPresenter(), final_notify=False
+    )
+
+    with capture_logs() as logs:
+        await handle_message(
+            cfg,
+            runner=runner,
+            incoming=IncomingMessage(channel_id=123, message_id=11, text="do it"),
+            resume_token=ResumeToken(engine=CODEX_ENGINE, value="sess-572"),
+        )
+
+    assert len(runner.calls) == 1
+    assert not any(r.get("event") == "claude.stream_idle.auto_retry" for r in logs)
+    final_text = transport.edit_calls[-1]["message"].text
+    assert "Stream idle timeout" in final_text
+
+
+@pytest.mark.anyio
+async def test_572_default_off_no_retry(monkeypatch) -> None:
+    """stream_idle_auto_retry defaults OFF — Type-A failures surface the
+    #438 annotated error exactly as before."""
+    from structlog.testing import capture_logs
+
+    _572_watchdog(monkeypatch)  # defaults: stream_idle_auto_retry=False
+    transport = FakeTransport()
+    runner = _StreamIdleThenAnswerRunner(fail_times=99)
+    cfg = ExecBridgeConfig(
+        transport=transport, presenter=MarkdownPresenter(), final_notify=False
+    )
+
+    with capture_logs() as logs:
+        await handle_message(
+            cfg,
+            runner=runner,
+            incoming=IncomingMessage(channel_id=123, message_id=12, text="do it"),
+            resume_token=ResumeToken(engine=CODEX_ENGINE, value="sess-572"),
+        )
+
+    assert len(runner.calls) == 1
+    assert not any(r.get("event") == "claude.stream_idle.auto_retry" for r in logs)
+    assert "Stream idle timeout" in transport.edit_calls[-1]["message"].text
+
+
+@pytest.mark.anyio
+async def test_572_retry_bounded_by_max_retries(monkeypatch) -> None:
+    """A retry that fails with Type-A again does NOT retry a second time
+    (default cap 1) — the annotated error is delivered instead."""
+    from structlog.testing import capture_logs
+
+    _572_watchdog(monkeypatch, stream_idle_auto_retry=True)
+    transport = FakeTransport()
+    runner = _StreamIdleThenAnswerRunner(fail_times=99)
+    cfg = ExecBridgeConfig(
+        transport=transport, presenter=MarkdownPresenter(), final_notify=False
+    )
+
+    with capture_logs() as logs:
+        await handle_message(
+            cfg,
+            runner=runner,
+            incoming=IncomingMessage(channel_id=123, message_id=13, text="do it"),
+            resume_token=ResumeToken(engine=CODEX_ENGINE, value="sess-572"),
+        )
+
+    # Original + exactly one retry, then the error surfaces.
+    assert len(runner.calls) == 2
+    assert (
+        sum(1 for r in logs if r.get("event") == "claude.stream_idle.auto_retry") == 1
+    )
+    assert "Stream idle timeout" in transport.edit_calls[-1]["message"].text
+
+
+@pytest.mark.anyio
+async def test_572_signal_death_suppressed(monkeypatch) -> None:
+    """rc=143 (SIGTERM) suppresses the retry — same death-spiral guard as
+    auto-continue (#551)."""
+    from structlog.testing import capture_logs
+
+    _572_watchdog(monkeypatch, stream_idle_auto_retry=True)
+    transport = FakeTransport()
+    runner = _StreamIdleThenAnswerRunner(fail_times=99)
+    runner.current_stream = _572_stream("type_a", proc_returncode=143)
+    cfg = ExecBridgeConfig(
+        transport=transport, presenter=MarkdownPresenter(), final_notify=False
+    )
+
+    with capture_logs() as logs:
+        await handle_message(
+            cfg,
+            runner=runner,
+            incoming=IncomingMessage(channel_id=123, message_id=14, text="do it"),
+            resume_token=ResumeToken(engine=CODEX_ENGINE, value="sess-572"),
+        )
+
+    assert len(runner.calls) == 1
+    assert not any(r.get("event") == "claude.stream_idle.auto_retry" for r in logs)
+
+
+@pytest.mark.anyio
+async def test_572_budget_blocked_no_retry(monkeypatch) -> None:
+    """A cost-budget block (per-run/daily cap already hit) suppresses the
+    retry — an automatic salvage must not spend past a user-set limit."""
+    from structlog.testing import capture_logs
+
+    _572_watchdog(monkeypatch, stream_idle_auto_retry=True)
+    monkeypatch.setattr(
+        "untether.runner_bridge._stream_idle_retry_budget_blocked",
+        lambda usage: True,
+    )
+    transport = FakeTransport()
+    runner = _StreamIdleThenAnswerRunner(fail_times=99)
+    cfg = ExecBridgeConfig(
+        transport=transport, presenter=MarkdownPresenter(), final_notify=False
+    )
+
+    with capture_logs() as logs:
+        await handle_message(
+            cfg,
+            runner=runner,
+            incoming=IncomingMessage(channel_id=123, message_id=15, text="do it"),
+            resume_token=ResumeToken(engine=CODEX_ENGINE, value="sess-572"),
+        )
+
+    assert len(runner.calls) == 1
+    assert not any(r.get("event") == "claude.stream_idle.auto_retry" for r in logs)
+
+
+def test_572_budget_guard_blocks_on_per_run_cap(monkeypatch) -> None:
+    """_stream_idle_retry_budget_blocked: failed run's cost >= per-run cap
+    → blocked; under the cap → allowed; disabled budget → allowed."""
+    from types import SimpleNamespace
+
+    from untether.runner_bridge import _stream_idle_retry_budget_blocked
+
+    def _settings(enabled=True, max_per_run=0.5):
+        cost_budget = SimpleNamespace(
+            enabled=enabled,
+            max_cost_per_run=max_per_run,
+            max_cost_per_day=None,
+            warn_at_pct=80.0,
+            auto_cancel=False,
+        )
+        return (SimpleNamespace(cost_budget=cost_budget), None)
+
+    monkeypatch.setattr(
+        "untether.settings.load_settings_if_exists", lambda: _settings()
+    )
+    assert _stream_idle_retry_budget_blocked({"total_cost_usd": 1.0}) is True
+    assert _stream_idle_retry_budget_blocked({"total_cost_usd": 0.1}) is False
+    monkeypatch.setattr(
+        "untether.settings.load_settings_if_exists",
+        lambda: _settings(enabled=False),
+    )
+    assert _stream_idle_retry_budget_blocked({"total_cost_usd": 1.0}) is False
+
+
+def test_572_watchdog_settings_defaults() -> None:
+    """The new [watchdog] keys default to off / 1 attempt."""
+    from untether.settings import WatchdogSettings
+
+    ws = WatchdogSettings()
+    assert ws.stream_idle_auto_retry is False
+    assert ws.stream_idle_max_retries == 1
+
+
+def test_572_retry_notice_format() -> None:
+    from untether.runner_bridge import _format_stream_idle_retry_notice
+
+    first = _format_stream_idle_retry_notice(0)
+    assert first.startswith("\U0001f501")
+    assert "resuming automatically" in first
+    assert "attempt" not in first
+    second = _format_stream_idle_retry_notice(1)
+    assert "(attempt 2)" in second

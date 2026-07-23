@@ -554,6 +554,36 @@ async def _cleanup_orphan_progress(cfg: TelegramBridgeConfig) -> None:
     clear_all_progress(progress_path)
 
 
+def _init_quarantine_store(config_path: Path) -> None:
+    """#631 (T6): eagerly initialise the process-wide ``QuarantineStore``
+    singleton from the ACTUAL loaded config path, once, before polling
+    starts — mirrors the offset-persistence init just above.
+
+    Without this, ``get_quarantine_store()`` lazily resolves the path from
+    ``UNTETHER_CONFIG_PATH``/HOME default on first use, which is wrong
+    when settings were loaded from an explicit non-env path. Doing it
+    eagerly at startup also surfaces a corrupt state file in startup logs
+    instead of mid-run.
+
+    ``QuarantineStore.load()`` already survives corrupt JSON internally
+    (it logs and falls back to an empty store) — the except below only
+    guards against truly unexpected errors. Startup must never fail
+    because of this file; the lazy accessor remains the fallback.
+    """
+    try:
+        from ..session_quarantine import (
+            QuarantineStore,
+            resolve_quarantine_path,
+            set_quarantine_store,
+        )
+
+        set_quarantine_store(QuarantineStore.load(resolve_quarantine_path(config_path)))
+    except Exception:  # noqa: BLE001 — startup must never fail because of
+        # this file; the lazy accessor (get_quarantine_store()) remains
+        # the fallback.
+        logger.warning("quarantine.startup_init_failed", exc_info=True)
+
+
 async def poll_updates(
     cfg: TelegramBridgeConfig,
     *,
@@ -580,6 +610,7 @@ async def poll_updates(
                 path=str(offset_path),
             )
         offset_writer = DebouncedOffsetWriter(offset_path)
+        _init_quarantine_store(config_path)
 
     offset = await _drain_backlog(cfg, offset)
     await _cleanup_orphan_progress(cfg)
@@ -1157,6 +1188,45 @@ async def _wait_for_resume(running_task) -> ResumeToken | None:
     return resume
 
 
+def _queued_wait_note(resume_token: ResumeToken) -> str | None:
+    """Explain WHY a queued follow-up is waiting, when knowable (#654).
+
+    A follow-up that queues behind a Claude session lingering post-result
+    (finishing background work under the liveness-aware ceiling, #646/#647)
+    previously sat on a bare "queued" progress message for the whole hold —
+    observed at 5m36s, permitted up to 30 min — with nothing telling the
+    user why, or that /cancel was available. Returns ``None`` for non-Claude
+    engines, unknown sessions, and normal mid-run queues (where the active
+    progress message above already explains itself).
+    """
+    if resume_token.engine != "claude":
+        return None
+    try:
+        from ..runners.claude import session_linger_info
+
+        info = session_linger_info(resume_token.value)
+    except Exception:  # noqa: BLE001 — the note is best-effort decoration;
+        # a registry hiccup must never break the queued send itself.
+        logger.debug("queued_note.linger_info_failed", exc_info=True)
+        return None
+    if info is None:
+        return None
+    post_result, bg_count = info
+    if not post_result:
+        return None
+    if bg_count > 0:
+        plural = "s" if bg_count != 1 else ""
+        return (
+            f"⏳ Queued behind the previous run's {bg_count} background "
+            f"task{plural} — starts when they finish, with context carried "
+            f"over. /cancel to drop it."
+        )
+    return (
+        "⏳ Queued — the previous run is still finishing up. Starts "
+        "when it completes, with context carried over. /cancel to drop it."
+    )
+
+
 async def _send_queued_progress(
     cfg: TelegramBridgeConfig,
     *,
@@ -1175,6 +1245,14 @@ async def _send_queued_progress(
         elapsed_s=0.0,
         label="queued",
     )
+    # #654: when the queue reason is knowable (Claude session lingering
+    # post-result over background work), say so instead of a bare "queued".
+    note = _queued_wait_note(resume_token)
+    if note is not None:
+        message = RenderedMessage(
+            text=f"{message.text}\n\n{note}",
+            extra=message.extra,
+        )
     reply_ref = MessageRef(
         channel_id=chat_id,
         message_id=user_msg_id,
@@ -1357,10 +1435,11 @@ async def run_main_loop(
     import signal as _signal
 
     from ..shutdown import (
-        DRAIN_TIMEOUT_S,
+        get_shutdown_origin_chat_id,
         is_shutting_down,
         request_shutdown,
         reset_shutdown,
+        select_drain_timeout,
     )
 
     _prev_sigterm = _signal.getsignal(_signal.SIGTERM)
@@ -1615,6 +1694,27 @@ async def run_main_loop(
                 )
 
                 if active > 0:
+                    # #559: when the sole active run is (almost certainly) the
+                    # session that triggered the restart — the self-restart
+                    # deadlock from #547 — the full 120s drain is dead time the
+                    # lone run can never satisfy. Use a short drain instead so we
+                    # reach the clean-exit + outbox-flush path promptly.
+                    origin_chat_id = get_shutdown_origin_chat_id()
+                    self_restart = active == 1
+                    drain_timeout = select_drain_timeout(active)
+                    if self_restart:
+                        sole_chat = next(
+                            (ref.channel_id for ref in state.running_tasks), None
+                        )
+                        logger.info(
+                            "shutdown.drain.self_restart",
+                            drain_timeout_s=drain_timeout,
+                            sole_chat_id=sole_chat,
+                            origin_chat_id=origin_chat_id,
+                            origin_matches=origin_chat_id is not None
+                            and origin_chat_id == sole_chat,
+                        )
+
                     await _notify_drain_start(
                         cfg.exec_cfg.transport, state.running_tasks
                     )
@@ -1623,7 +1723,7 @@ async def run_main_loop(
                     # Pending /at delays that have not yet fired are cancelled
                     # via the task-group cancel below; no need to wait on them.
                     _drain_tick = 0
-                    with anyio.move_on_after(DRAIN_TIMEOUT_S):
+                    with anyio.move_on_after(drain_timeout):
                         while state.running_tasks:
                             await sleep(1.0)
                             _drain_tick += 1
@@ -1638,7 +1738,7 @@ async def run_main_loop(
                         logger.warning(
                             "shutdown.drain_timeout",
                             remaining=remaining,
-                            timeout_s=DRAIN_TIMEOUT_S,
+                            timeout_s=drain_timeout,
                         )
                         await _notify_drain_timeout(
                             cfg.exec_cfg.transport,
@@ -1866,10 +1966,18 @@ async def run_main_loop(
                             trigger_dispatcher,
                             trigger_manager,
                         )
+                    # #601: report BOTH counts. ``crons`` previously counted
+                    # raw ``[[triggers.crons]]`` TOML entries while the
+                    # manager/scheduler logs count active crons (raw minus
+                    # run_once entries already spent per the persisted
+                    # fired-state), which read as "3 crons failed to load"
+                    # during triage. ``crons`` now matches the manager;
+                    # ``crons_configured`` preserves the raw entry count.
                     logger.info(
                         "triggers.enabled",
                         webhooks=len(trigger_settings.webhooks),
-                        crons=len(trigger_settings.crons),
+                        crons=len(trigger_manager.crons),
+                        crons_configured=len(trigger_settings.crons),
                     )
                 except (ValueError, TypeError, OSError) as exc:
                     logger.error(
@@ -2337,6 +2445,8 @@ async def run_main_loop(
                     return
 
                 if msg.voice is not None:
+                    from ..triggers.ssrf import parse_networks
+
                     text = await transcribe_voice(
                         bot=cfg.bot,
                         msg=msg,
@@ -2350,6 +2460,10 @@ async def run_main_loop(
                             if cfg.voice_transcription_api_key is not None
                             else None
                         ),
+                        url_allowlist=parse_networks(
+                            cfg.voice_transcription_url_allowlist
+                        ),
+                        language=cfg.voice_transcription_language,
                     )
                     if text is None:
                         return
@@ -2697,4 +2811,12 @@ async def run_main_loop(
         _signal.signal(_signal.SIGINT, _prev_sigint)
         logger.debug("signal.handler.restored", signals=["SIGTERM", "SIGINT"])
         reset_shutdown()
+        # #559: give queued outbox sends (e.g. an agent's final message after a
+        # self-restart) a bounded chance to flush before close() drops them.
+        _flush_outbox = getattr(cfg.exec_cfg.transport, "flush_outbox", None)
+        if _flush_outbox is not None:
+            try:
+                await _flush_outbox(timeout=5.0)
+            except Exception:  # noqa: BLE001 — never let cleanup raise
+                logger.warning("shutdown.flush_outbox.failed", exc_info=True)
         await cfg.exec_cfg.transport.close()

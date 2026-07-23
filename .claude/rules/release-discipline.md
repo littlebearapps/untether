@@ -67,11 +67,11 @@ Pre-release versions (`X.Y.ZrcN`) are used for staging on `@hetz_lba1_bot` befor
 
 ## Fleet rollout (rc and stable)
 
-Untether ships from one repo to **four hosts**: lba-1 staging, nsd VPS, channelo VPS, and Nathan's Mac. As of 2026-05-13, all four hosts are rolled in parallel after integration tests pass (no separate dogfood window — the integration tests are the quality gate).
+Untether ships from one repo to **five hosts**: lba-1 staging, nsd VPS, channelo VPS, sl VPS, and Nathan's Mac. All hosts are rolled in parallel after integration tests pass (no separate dogfood window — the integration tests are the quality gate). sl was added to the fleet 2026-07-14; before that it was upgraded manually.
 
 ```bash
 scripts/run-integration-tests.sh 0.35.3rc14 --manual    # write attestation marker
-scripts/fleet-rollout.sh 0.35.3rc14                     # parallel upgrade across 4 hosts
+scripts/fleet-rollout.sh 0.35.3rc14                     # parallel upgrade across 5 hosts
 scripts/fleet-rollout.sh 0.35.3rc14 --dry-run           # preview without executing
 scripts/fleet-rollout.sh 0.35.3rc14 --only mac          # roll one host
 scripts/fleet-rollback.sh 0.35.2 --only mac             # revert one host to known-good
@@ -82,7 +82,7 @@ scripts/fleet-rollback.sh 0.35.2 --only mac             # revert one host to kno
 1. Push rc to dev → CI publishes to TestPyPI in ~3 min
 2. Run integration tests via `@untether_dev_bot` (Tier 7 + Tier 1 minimum)
 3. Write attestation marker (`scripts/run-integration-tests.sh ${VERSION} --manual`)
-4. Run fleet rollout (`scripts/fleet-rollout.sh ${VERSION}`) — all 4 hosts in parallel
+4. Run fleet rollout (`scripts/fleet-rollout.sh ${VERSION}`) — all 5 hosts in parallel
 5. Verify each host's bot responds to `/ping` via Telegram
 
 **Partial failure handling:** if one host fails (network glitch, SSH timeout, etc.), the script reports the failure but does NOT roll back successful hosts. Operator decides whether to roll forward (rerun) or roll back the failed host (`fleet-rollback.sh <prev> --only <host>`).

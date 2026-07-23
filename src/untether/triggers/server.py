@@ -23,6 +23,39 @@ logger = get_logger(__name__)
 _SAFE_FILENAME_RE = __import__("re").compile(r"^[a-zA-Z0-9._-]+$")
 
 
+def is_loopback_host(host: str) -> bool:
+    """#382: whether a bind host is loopback-only (safe for unauthenticated
+    webhooks).
+
+    ``127.0.0.0/8`` and ``::1`` are loopback. The wildcard binds
+    (``0.0.0.0`` / ``::``) reach external interfaces, so they are explicitly
+    NON-loopback. ``host`` may be a hostname string rather than an IP literal:
+    ``"localhost"`` is treated as loopback; any other unparseable/hostname value
+    is treated conservatively as NON-loopback (we cannot prove it's local).
+    """
+    import ipaddress
+
+    candidate = (host or "").strip()
+    if candidate.lower() == "localhost":
+        return True
+    try:
+        addr = ipaddress.ip_address(candidate)
+    except ValueError:
+        # Hostname (or empty) — can't prove it's local; be conservative.
+        return False
+    return addr.is_loopback
+
+
+def _unauthenticated_on_public_bind(settings: TriggersSettings) -> list[str]:
+    """Return the ids of ``auth="none"`` webhooks that would be exposed on a
+    non-loopback bind without the explicit opt-in. Empty list = safe to bind."""
+    if settings.allow_unauthenticated_webhooks:
+        return []
+    if is_loopback_host(settings.server.host):
+        return []
+    return [wh.id for wh in settings.webhooks if wh.auth == "none"]
+
+
 class _MultipartError(Exception):
     """Raised during multipart parsing to return an HTTP error."""
 
@@ -59,15 +92,22 @@ class _NullProtocol:
 
     StreamReader only needs ``_reading_paused`` bookkeeping to be callable;
     it never flushes to a real transport when we feed bytes directly.
+    Both methods accept arbitrary arguments because aiohttp's calling
+    convention changes across minor versions (3.14 added
+    ``resume_reading(resume_parser=...)``).
     """
 
     def __init__(self) -> None:
         self._reading_paused = False
 
-    def pause_reading(self) -> None:  # pragma: no cover - no-op
+    def pause_reading(
+        self, *args: object, **kwargs: object
+    ) -> None:  # pragma: no cover - no-op
         self._reading_paused = True
 
-    def resume_reading(self) -> None:  # pragma: no cover - no-op
+    def resume_reading(
+        self, *args: object, **kwargs: object
+    ) -> None:  # pragma: no cover - no-op
         self._reading_paused = False
 
 
@@ -386,6 +426,25 @@ async def run_webhook_server(
     ``triggers.server.bind_failed`` with remediation hints and returns without
     raising, so the rest of the bot (polling, commands, crons) stays up.
     """
+    # #382: refuse to expose unauthenticated webhooks on a non-loopback bind.
+    # Like the bind-failure path below, this degrades gracefully — the webhook
+    # server stays down but polling / commands / crons keep running.
+    unauth = _unauthenticated_on_public_bind(settings)
+    if unauth:
+        logger.error(
+            "triggers.server.refused_unauthenticated",
+            host=settings.server.host,
+            webhook_ids=unauth,
+            hint=(
+                'Webhooks with auth="none" on a non-loopback host are an '
+                "unauthenticated remote-agent-run primitive. Add auth to these "
+                "webhooks, bind [triggers.server] host to 127.0.0.1, or set "
+                "[triggers] allow_unauthenticated_webhooks = true to opt in "
+                "(local demos only)."
+            ),
+        )
+        return
+
     app = build_webhook_app(settings, dispatcher, manager=manager)
 
     runner = web.AppRunner(app, access_log=None)

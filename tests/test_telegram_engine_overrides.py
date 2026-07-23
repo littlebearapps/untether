@@ -161,6 +161,81 @@ def test_get_engine_default_reasoning_unsupported_engine() -> None:
     assert get_engine_default_reasoning("gemini") is None
 
 
+def test_get_engine_default_model_opencode(tmp_path) -> None:
+    """#475: reads the top-level model string from opencode.json."""
+    import json
+    from unittest.mock import patch
+
+    from untether.telegram.engine_overrides import get_engine_default_model
+
+    oc_dir = tmp_path / ".config" / "opencode"
+    oc_dir.mkdir(parents=True)
+    (oc_dir / "opencode.json").write_text(
+        json.dumps({"model": "deepseek/deepseek-v4-pro"})
+    )
+
+    with patch("pathlib.Path.home", return_value=tmp_path):
+        assert get_engine_default_model("opencode") == "deepseek/deepseek-v4-pro"
+
+
+def test_get_engine_default_model_pi_joins_provider(tmp_path) -> None:
+    """#475: joins defaultProvider/defaultModel from Pi settings.json."""
+    import json
+    from unittest.mock import patch
+
+    from untether.telegram.engine_overrides import get_engine_default_model
+
+    pi_dir = tmp_path / ".pi" / "agent"
+    pi_dir.mkdir(parents=True)
+    (pi_dir / "settings.json").write_text(
+        json.dumps({"defaultProvider": "kimi-coding", "defaultModel": "k2p6"})
+    )
+
+    with patch("pathlib.Path.home", return_value=tmp_path):
+        assert get_engine_default_model("pi") == "kimi-coding/k2p6"
+
+
+def test_get_engine_default_model_pi_model_only(tmp_path) -> None:
+    """#475: a Pi settings file without defaultProvider returns bare model."""
+    import json
+    from unittest.mock import patch
+
+    from untether.telegram.engine_overrides import get_engine_default_model
+
+    pi_dir = tmp_path / ".pi" / "agent"
+    pi_dir.mkdir(parents=True)
+    (pi_dir / "settings.json").write_text(json.dumps({"defaultModel": "k2p6"}))
+
+    with patch("pathlib.Path.home", return_value=tmp_path):
+        assert get_engine_default_model("pi") == "k2p6"
+
+
+def test_get_engine_default_model_missing_or_malformed(tmp_path) -> None:
+    """#475: absent or garbage settings files resolve to None (fallback to
+    the static placeholder hint)."""
+    from unittest.mock import patch
+
+    from untether.telegram.engine_overrides import get_engine_default_model
+
+    with patch("pathlib.Path.home", return_value=tmp_path):
+        assert get_engine_default_model("opencode") is None
+        assert get_engine_default_model("pi") is None
+
+    oc_dir = tmp_path / ".config" / "opencode"
+    oc_dir.mkdir(parents=True)
+    (oc_dir / "opencode.json").write_text("{not json")
+    with patch("pathlib.Path.home", return_value=tmp_path):
+        assert get_engine_default_model("opencode") is None
+
+
+def test_get_engine_default_model_auto_routed_engines() -> None:
+    """#475: auto-routed engines keep the static hint (None here)."""
+    from untether.telegram.engine_overrides import get_engine_default_model
+
+    for engine in ("claude", "codex", "gemini", "amp"):
+        assert get_engine_default_model(engine) is None
+
+
 def test_get_reasoning_label() -> None:
     """Engine-specific reasoning labels."""
     from untether.telegram.engine_overrides import get_reasoning_label

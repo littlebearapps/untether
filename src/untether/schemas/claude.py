@@ -68,6 +68,27 @@ class StreamAdvisorToolResultBlock(
     is_error: bool | None = None
 
 
+# #597 — binary media echoed back through user-role messages (e.g. a `Read`
+# on an image/PDF returns the content as an image/document block inside the
+# tool_result envelope). ``source`` carries ``{"type": "base64"|"url",
+# "media_type": ..., "data"|"url": ...}``; kept as a permissive dict — the
+# payload is never rendered, the schema just needs to accept the line so the
+# rest of the event isn't dropped (jsonl.msgspec.invalid x23 on nsd).
+class StreamImageBlock(
+    msgspec.Struct, tag="image", tag_field="type", forbid_unknown_fields=False
+):
+    source: dict[str, Any] | None = None
+
+
+# #597 — see StreamImageBlock; PDFs and other documents use the same shape
+# plus optional metadata fields (title, context, citations toggle).
+class StreamDocumentBlock(
+    msgspec.Struct, tag="document", tag_field="type", forbid_unknown_fields=False
+):
+    source: dict[str, Any] | None = None
+    title: str | None = None
+
+
 type StreamContentBlock = (
     StreamTextBlock
     | StreamThinkingBlock
@@ -75,6 +96,8 @@ type StreamContentBlock = (
     | StreamToolResultBlock
     | StreamServerToolUseBlock
     | StreamAdvisorToolResultBlock
+    | StreamImageBlock
+    | StreamDocumentBlock
 )
 
 
@@ -273,6 +296,37 @@ class StreamRateLimitMessage(
     rate_limit_info: RateLimitInfo | None = None
 
 
+# #637 — Claude Code emits a top-level `tool_progress` heartbeat while a
+# long-running tool is in flight, e.g.
+#   {"type":"tool_progress","tool_use_id":"toolu_…-heartbeat-0",
+#    "tool_name":"Bash","parent_tool_use_id":"toolu_…",
+#    "elapsed_time_seconds":30,"heartbeat":true,"session_id":…,"uuid":…}
+# Verified on CLI 2.1.214 by running a >30s Bash command. Every field is
+# optional so a shape change upstream can't reintroduce the drop; the line
+# just needs to decode so the rest of the stream isn't discarded
+# (jsonl.msgspec.invalid x2 on nsd). Same family as #489 / #597, but the
+# first *top-level* addition since `rate_limit_event`.
+#
+# No runner change is required: `translate_claude_event`'s fallback logs
+# `claude.event.unrecognised` at DEBUG and returns [], so the heartbeat is
+# accepted and ignored. Wire it into progress rendering separately if the
+# elapsed-time detail ever becomes useful (#481 already renders elapsed
+# time from Untether's own clock).
+class StreamToolProgressMessage(
+    msgspec.Struct,
+    tag="tool_progress",
+    tag_field="type",
+    forbid_unknown_fields=False,
+):
+    tool_use_id: str | None = None
+    tool_name: str | None = None
+    parent_tool_use_id: str | None = None
+    elapsed_time_seconds: float | None = None
+    heartbeat: bool | None = None
+    session_id: str | None = None
+    uuid: str | None = None
+
+
 type StreamJsonMessage = (
     StreamUserMessage
     | StreamAssistantMessage
@@ -283,6 +337,7 @@ type StreamJsonMessage = (
     | StreamControlResponse
     | StreamControlCancelRequest
     | StreamRateLimitMessage
+    | StreamToolProgressMessage
 )
 
 

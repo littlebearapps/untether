@@ -139,8 +139,8 @@ After Claude Code writes the outline, **Approve Plan**, **Deny**, and **Let's di
 - Tap **Deny** to stop Claude Code and provide different direction
 - Tap **Let's discuss** to talk about the plan before deciding — Claude Code will ask what you'd like to change and wait for your reply
 
-!!! tip "Progressive cooldown"
-    After tapping "Pause & Outline Plan", a cooldown prevents Claude Code from immediately retrying. The cooldown starts at 30 seconds and escalates up to 120 seconds if Claude Code keeps retrying. This ensures the agent pauses long enough for you to read the outline.
+!!! tip "Outline gate"
+    After tapping "Pause & Outline Plan", Untether holds ExitPlanMode open until Claude Code provides a readable outline — the plan is posted to the chat and the agent stays alive while you read it. If Claude Code retries *without* an outline, that attempt is auto-denied with an instruction to write the outline first. *(Earlier versions also enforced a 30–120s escalating cooldown here — a workaround for a Claude Code v2.1.72–2.1.74 retry loop that was fixed upstream and retired in v0.35.4.)*
 
 ## 8. Answer a question
 
@@ -243,7 +243,7 @@ Check your internet connection. If the tap doesn't register, try again — Untet
 
 **Claude Code keeps retrying after I tap "Pause & Outline Plan"**
 
-This is the progressive cooldown at work. Claude Code may retry ExitPlanMode during the cooldown window, but each retry is auto-denied. Wait for Claude Code to write the outline, then use the Approve Plan / Let's discuss / Deny buttons that appear.
+Until Claude Code writes an outline, each ExitPlanMode retry is auto-denied with an instruction to provide the plan first — this is the outline gate. Wait for Claude Code to write the outline, then use the Approve Plan / Let's discuss / Deny buttons that appear. *(The 30–120s escalating cooldown earlier versions used here was retired in v0.35.4 — the upstream retry loop it worked around is fixed.)*
 
 **I don't get push notifications for approval requests**
 

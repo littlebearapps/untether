@@ -164,7 +164,7 @@ All engines support outbox delivery — any agent that can write files to disk c
 
 ### Limitations
 
-- **Flat scan only** — only files directly in `.untether-outbox/` are sent; subdirectories are surfaced as `📎 Outbox skipped` (#524) but not delivered. Agents can zip nested structures if needed.
+- **Sub-directories need opt-in** — by default only files directly in `.untether-outbox/` are sent; a subdirectory is archived to `.untether-outbox/.skipped/` and surfaced as `📎 Outbox skipped` (#524). Set `outbox_deliver_directories = "zip"` (#628) to bundle each one into a single `<name>.zip` document instead — recursive deny-globs, symlink pruning, and per-member/total/size caps apply.
 - **Failed runs deliver no files** — the actual file send is still gated on a successful run, but the skipped-items notice fires either way so the user always learns what the agent intended to ship.
 - **No real-time delivery** — files are sent after the run completes, not during.
 

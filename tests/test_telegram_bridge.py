@@ -1778,11 +1778,13 @@ async def test_run_main_loop_routes_reply_to_running_resume() -> None:
     async with anyio.create_task_group() as tg:
         tg.start_soon(run_main_loop, cfg, poller)
         try:
-            with anyio.fail_after(2):
+            # #641: hang guards, not races — 30s so cold/loaded coverage
+            # runs don't flake (2s expired on the CI 3.12 runner).
+            with anyio.fail_after(30):
                 await reply_ready.wait()
             await anyio.lowlevel.checkpoint()
             hold.set()
-            with anyio.fail_after(2):
+            with anyio.fail_after(30):
                 while len(runner.calls) < 2:
                     await anyio.lowlevel.checkpoint()
             assert runner.calls[1][1] == ResumeToken(
@@ -1965,7 +1967,10 @@ async def test_run_main_loop_persists_topic_sessions_in_project_scope(
             thread_id=77,
         )
 
-    with anyio.fail_after(2):
+    # #641: this guard exists to catch hangs, not to race the loop — 2s
+    # flaked when the test ran COLD under coverage instrumentation (isolated
+    # -k runs / first-in-session), while warm whole-file runs passed.
+    with anyio.fail_after(30):
         await run_main_loop(cfg, poller)
 
     state_path = resolve_state_path(runtime.config_path or tmp_path / "untether.toml")
@@ -2280,8 +2285,11 @@ async def test_run_main_loop_voice_transcript_preserves_directive(
         reply,
         base_url: str | None = None,
         api_key: str | None = None,
+        url_allowlist=(),
+        language: str | None = None,
     ) -> str:
         _ = bot, msg, enabled, model, max_bytes, reply, base_url, api_key
+        _ = url_allowlist, language
         return "/codex do thing"
 
     monkeypatch.setattr(telegram_loop, "transcribe_voice", _fake_transcribe)
@@ -2351,8 +2359,11 @@ async def test_run_main_loop_voice_shows_transcription_echo(
         reply,
         base_url: str | None = None,
         api_key: str | None = None,
+        url_allowlist=(),
+        language: str | None = None,
     ) -> str:
         _ = bot, msg, enabled, model, max_bytes, reply, base_url, api_key
+        _ = url_allowlist, language
         return "hello world"
 
     monkeypatch.setattr(telegram_loop, "transcribe_voice", _fake_transcribe)
@@ -2422,8 +2433,11 @@ async def test_run_main_loop_voice_hides_transcription_when_disabled(
         reply,
         base_url: str | None = None,
         api_key: str | None = None,
+        url_allowlist=(),
+        language: str | None = None,
     ) -> str:
         _ = bot, msg, enabled, model, max_bytes, reply, base_url, api_key
+        _ = url_allowlist, language
         return "hello world"
 
     monkeypatch.setattr(telegram_loop, "transcribe_voice", _fake_transcribe)
@@ -3285,7 +3299,8 @@ async def test_run_main_loop_new_clears_topic_sessions(tmp_path: Path) -> None:
             chat_type="supergroup",
         )
 
-    with anyio.fail_after(2):
+    # #641: hang guard, not a race — 30s so cold coverage runs don't flake.
+    with anyio.fail_after(30):
         await run_main_loop(cfg, poller)
 
     store2 = TopicStateStore(resolve_state_path(state_path))
@@ -3438,7 +3453,8 @@ async def test_run_main_loop_batches_media_group_upload(
     async with anyio.create_task_group() as tg:
         tg.start_soon(run_main_loop, cfg, poller)
         try:
-            with anyio.fail_after(3):
+            # #641: hang guard, not a race — 30s (see above).
+            with anyio.fail_after(30):
                 while len(transport.send_calls) < 1:
                     await anyio.sleep(0.05)
             assert len(transport.send_calls) == 1
@@ -3852,3 +3868,126 @@ async def test_run_main_loop_mentions_only_skips_voice_and_files(
     assert calls["voice"] == 0
     assert calls["file"] == 0
     assert runner.calls == []
+
+
+# ---------------------------------------------------------------------------
+# #598 — transport.edit.failed carries the failure reason
+# ---------------------------------------------------------------------------
+
+
+class _FailingEditBot:
+    """Minimal bot double: edits always fail; reason is retrievable."""
+
+    def __init__(self, reason: str | None) -> None:
+        self._reason = reason
+        self.pop_calls: list[tuple[int, int]] = []
+
+    async def edit_message_text(self, **kwargs: Any) -> None:
+        return None
+
+    def pop_edit_error(self, chat_id: int, message_id: int) -> str | None:
+        self.pop_calls.append((chat_id, message_id))
+        return self._reason
+
+
+@pytest.mark.anyio
+async def test_598_edit_failed_log_includes_reason() -> None:
+    from structlog.testing import capture_logs
+
+    from untether.telegram.bridge import TelegramTransport
+
+    bot = _FailingEditBot("Bad Request: message to edit not found")
+    transport = TelegramTransport(bot)  # type: ignore[arg-type]
+    ref = MessageRef(channel_id=123, message_id=916)
+
+    with capture_logs() as logs:
+        result = await transport.edit(
+            ref=ref,
+            message=RenderedMessage(
+                text="cleared", extra={"reply_markup": {"inline_keyboard": []}}
+            ),
+        )
+
+    assert result is None
+    assert bot.pop_calls == [(123, 916)]
+    rec = next(r for r in logs if r.get("event") == "transport.edit.failed")
+    assert rec["error"] == "Bad Request: message to edit not found"
+    assert rec["has_reply_markup"] is True
+
+
+@pytest.mark.anyio
+async def test_598_not_modified_treated_as_noop() -> None:
+    """'message is not modified' means the edit's intent is already
+    satisfied — an info-level no-op, not a warning."""
+    from structlog.testing import capture_logs
+
+    from untether.telegram.bridge import TelegramTransport
+
+    bot = _FailingEditBot("Bad Request: message is not modified")
+    transport = TelegramTransport(bot)  # type: ignore[arg-type]
+    ref = MessageRef(channel_id=123, message_id=916)
+
+    with capture_logs() as logs:
+        result = await transport.edit(
+            ref=ref, message=RenderedMessage(text="same text")
+        )
+
+    assert result == ref
+    assert not any(r.get("event") == "transport.edit.failed" for r in logs)
+    assert any(r.get("event") == "transport.edit.noop" for r in logs)
+
+
+@pytest.mark.anyio
+async def test_598_edit_failed_tolerates_bot_without_pop() -> None:
+    """Bots/doubles without pop_edit_error still log (error=None)."""
+    from structlog.testing import capture_logs
+
+    from untether.telegram.bridge import TelegramTransport
+
+    class _PlainFailingBot:
+        async def edit_message_text(self, **kwargs: Any) -> None:
+            return None
+
+    transport = TelegramTransport(_PlainFailingBot())  # type: ignore[arg-type]
+    ref = MessageRef(channel_id=123, message_id=917)
+
+    with capture_logs() as logs:
+        result = await transport.edit(ref=ref, message=RenderedMessage(text="x"))
+
+    assert result is None
+    rec = next(r for r in logs if r.get("event") == "transport.edit.failed")
+    assert rec["error"] is None
+
+
+@pytest.mark.anyio
+async def test_598_superseded_edit_is_noop_not_failure() -> None:
+    """A coalesced (superseded) edit returns SUPERSEDED, which the transport
+    treats as a benign no-op — NOT the spurious transport.edit.failed
+    error=None that fired after every answered AskUserQuestion (#598)."""
+    from structlog.testing import capture_logs
+
+    from untether.telegram.bridge import TelegramTransport
+    from untether.telegram.outbox import SUPERSEDED
+
+    class _SupersedingBot:
+        async def edit_message_text(self, **kwargs: Any) -> Any:
+            return SUPERSEDED
+
+    transport = TelegramTransport(_SupersedingBot())  # type: ignore[arg-type]
+    ref = MessageRef(channel_id=123, message_id=1561)
+
+    with capture_logs() as logs:
+        result = await transport.edit(
+            ref=ref,
+            message=RenderedMessage(
+                text="✅ All questions answered",
+                extra={"reply_markup": {"inline_keyboard": []}},
+            ),
+        )
+
+    # The keyboard-clear edit is reported as a no-op returning the ref, not a
+    # failure — the winning same-key edit leaves the message in its final state.
+    assert result == ref
+    assert not any(r.get("event") == "transport.edit.failed" for r in logs)
+    rec = next(r for r in logs if r.get("event") == "transport.edit.superseded")
+    assert rec["has_reply_markup"] is True

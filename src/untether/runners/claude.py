@@ -50,11 +50,17 @@ from ..runner import (
     _stderr_excerpt,
 )
 from ..schemas import claude as claude_schema
+from ..session_quarantine import get_quarantine_store
 from ..settings import load_settings_if_exists
 from ..utils.env_audit import audit_proc_env
 from ..utils.paths import get_run_base_dir
 from ..utils.streams import drain_stderr
-from ..utils.subprocess import manage_subprocess, redact_env_i_args, wrap_with_env_i
+from ..utils.subprocess import (
+    manage_subprocess,
+    redact_env_i_args,
+    signal_pid_group,
+    wrap_with_env_i,
+)
 from .run_options import get_run_options
 from .tool_actions import tool_input_path, tool_kind_and_title
 
@@ -127,6 +133,23 @@ def _load_env_extras() -> tuple[tuple[str, ...], tuple[str, ...]]:
         return ((), ())
 
 
+def _load_quarantine_on_forced_teardown() -> bool:
+    """#632 (W2): read ``[auto_continue].quarantine_on_forced_teardown``.
+
+    Best-effort — config errors must never block subprocess teardown, so we
+    swallow them and default to True (the safety net stays armed even when
+    config can't be read).
+    """
+    try:
+        result = load_settings_if_exists()
+        if result is None:
+            return True
+        settings, _ = result
+        return settings.auto_continue.quarantine_on_forced_teardown
+    except Exception:  # noqa: BLE001 — never let config errors block teardown
+        return True
+
+
 # Phase 2: Global registry for active ClaudeRunner instances
 # Keyed by session_id, stores (runner_instance, timestamp)
 _ACTIVE_RUNNERS: dict[str, tuple[ClaudeRunner, float]] = {}
@@ -135,6 +158,13 @@ _ACTIVE_RUNNERS: dict[str, tuple[ClaudeRunner, float]] = {}
 # Stored separately from _ACTIVE_RUNNERS to support concurrent sessions
 # on the same runner instance (runner._proc_stdin would be overwritten).
 _SESSION_STDIN: dict[str, Any] = {}
+
+# #647: session_id -> live ClaudeStreamState for the owning run. Lets the
+# bridge's handoff wait (`handle_message`) ask "does the still-alive prior
+# owner have live background work?" without reaching into runner internals.
+# Registered alongside _SESSION_STDIN in _iter_jsonl_events; cleared in
+# _cleanup_session_registries (run_impl finally).
+_SESSION_BG_STATE: dict[str, ClaudeStreamState] = {}
 
 # Phase 2: Global registry mapping request_id -> session_id
 # This allows callbacks to find the right runner instance
@@ -156,10 +186,13 @@ _REQUEST_TO_TOOL_NAME: dict[str, str] = {}
 _HANDLED_REQUESTS_MAX = 200
 _HANDLED_REQUESTS: OrderedDict[str, None] = OrderedDict()
 
-# Discuss cooldown: session_id -> (timestamp, deny_count)
-# When user clicks "Pause & Outline Plan", this tracks when the denial was sent
-# so rapid ExitPlanMode retries can be auto-denied with escalating messages.
-_DISCUSS_COOLDOWN: dict[str, tuple[float, int]] = {}
+# NOTE (#570): the time-based progressive discuss cooldown (_DISCUSS_COOLDOWN,
+# 30/60/90/120s escalation) that lived here was a workaround for Claude Code
+# v2.1.72-2.1.74 re-issuing ExitPlanMode immediately after a denial (#126
+# lineage). Verified fixed on CLI 2.1.215 (2026-07-20: denied ExitPlanMode →
+# clean text turn, no re-issue) and removed. The TEXT-based outline gate
+# (_OUTLINE_PENDING + _OUTLINE_MIN_CHARS) below is NOT part of that workaround
+# — it enforces the Pause-&-Outline flow and stays.
 
 # Discuss approval: session_ids where user approved the plan via post-outline buttons.
 # When Claude Code next calls ExitPlanMode, it will be auto-approved.
@@ -202,6 +235,161 @@ def is_session_alive(session_id: str) -> bool:
     return session_id in _SESSION_STDIN
 
 
+def session_live_bg_count(session_id: str) -> int:
+    """Return the number of live background handles held by the still-running
+    subprocess that owns ``session_id``, or 0 when there is no live owner or
+    no live background work.
+
+    #647: consumed by the bridge's handoff branch so a follow-up message that
+    arrives while the prior owner is legitimately finishing background
+    subagents can wait longer (and tell the user why) instead of silently
+    diverting to a fresh contextless session after the base 30 s timeout.
+    """
+    state = _SESSION_BG_STATE.get(session_id)
+    if state is None or not has_live_background_work(state):
+        return 0
+    count = (
+        _live_bg_agent_count(state)
+        + _live_bounded_handle_count(state.live_bg_bashes, state.bg_bash_deadlines)
+        + _live_bounded_handle_count(
+            state.live_remote_triggers, state.remote_trigger_deadlines
+        )
+        + sum(
+            1
+            for deadline in state.live_monitors.values()
+            if deadline == 0.0 or deadline > time.monotonic()
+        )
+        + sum(
+            1
+            for deadline in state.live_wakeups.values()
+            if deadline == 0.0 or deadline > time.monotonic()
+        )
+    )
+    # has_live_background_work() was True, so never report fewer than 1 even
+    # if the individual counts race to zero between the two reads.
+    return max(1, count)
+
+
+def session_linger_info(session_id: str) -> tuple[bool, int] | None:
+    """Return ``(post_result, live_bg_count)`` for the still-running
+    subprocess that owns ``session_id``, or ``None`` when there is no live
+    owner.
+
+    #654: consumed by the Telegram loop's queued-progress path. A follow-up
+    that arrives while the prior owner lingers post-result (finishing
+    background work) queues silently behind it — this tells the queued
+    message WHY it is waiting. ``post_result`` distinguishes that linger
+    window from a normal mid-run queue, where the active progress message
+    already explains itself.
+    """
+    if not is_session_alive(session_id):
+        return None
+    state = _SESSION_BG_STATE.get(session_id)
+    post_result = state is not None and state.result_received_at is not None
+    return post_result, session_live_bg_count(session_id)
+
+
+SESSION_HANDOFF_POLL_S: float = 0.25
+
+
+async def wait_for_session_handoff(
+    session_id: str,
+    timeout_s: float,
+    *,
+    poll_s: float = SESSION_HANDOFF_POLL_S,
+) -> str:
+    """Wait for any live subprocess owning ``session_id`` to exit.
+
+    Returns ``"free"`` immediately if no subprocess owns the session,
+    ``"exited"`` if one did and it exited within ``timeout_s``, or
+    ``"timed_out"`` if it was still alive when the budget elapsed.
+
+    #633 (W4) — one-owner-per-session serialisation. A follow-up message can
+    otherwise spawn ``--resume <sid>`` while the previous subprocess for that
+    same session is still alive in post-result limbo (the reproductions show a
+    resume 6 s after the prior process was SIGTERM'd). Two owners of one
+    session id is exactly what corrupts the upstream turn/queue state and
+    produces the 0-turn empty resume that rc7 could only recover from after
+    the fact.
+
+    This is condition-based, not a fixed sleep: it resolves the instant the
+    prior owner deregisters, so the common case (already exited) costs one
+    dict lookup and the contended case costs only as long as the handoff
+    actually takes. The wait is always bounded — on ``"timed_out"`` the caller
+    quarantines the session and starts fresh rather than racing the resume.
+
+    Liveness is read from ``_SESSION_STDIN`` via :func:`is_session_alive`,
+    which ``run_impl``'s finally block clears. Note the runner's own
+    ``session_locks`` cannot serve this purpose: it is a
+    ``WeakValueDictionary``, so entries disappear as soon as nothing holds a
+    reference to the semaphore.
+    """
+    if not is_session_alive(session_id):
+        return "free"
+    # #647 observability: the wait can absorb minutes of user-perceived
+    # latency (base timeout + background-aware extension), and previously
+    # left no trace in the journal — log entry and exit with elapsed.
+    started_at = time.monotonic()
+    logger.info(
+        "session.handoff_wait",
+        session_id=session_id,
+        timeout_s=timeout_s,
+        live_bg_count=session_live_bg_count(session_id),
+    )
+    deadline = started_at + max(0.0, timeout_s)
+    outcome = "timed_out"
+    while time.monotonic() < deadline:
+        await anyio.sleep(poll_s)
+        if not is_session_alive(session_id):
+            outcome = "exited"
+            break
+    # Final probe: the loop can overshoot the deadline by up to ``poll_s``, and
+    # an owner that exited during that last sleep should be reported as
+    # "exited" rather than being penalised for our polling granularity.
+    if outcome == "timed_out" and not is_session_alive(session_id):
+        outcome = "exited"
+    logger.info(
+        "session.handoff_wait_done",
+        session_id=session_id,
+        outcome=outcome,
+        elapsed_s=round(time.monotonic() - started_at, 1),
+    )
+    return outcome
+
+
+def pending_control_requests_for_session(session_id: str | None) -> int:
+    """Return how many control requests for ``session_id`` are still awaiting
+    a response (approval buttons or AskUserQuestion).
+
+    This is the **authoritative** "is this session blocked on the user?"
+    signal: :data:`_REQUEST_TO_SESSION` is populated the moment a
+    ``control_request`` is intercepted and popped again in
+    :func:`write_control_response` (and in the Telegram callback handlers)
+    as soon as the request is answered — so an entry means the request is
+    genuinely outstanding right now, not merely that one happened earlier.
+
+    #495/#499/#500: the stall detector previously inferred this from
+    presentation state (``_has_pending_approval`` — the most recent action's
+    ``inline_keyboard`` detail) or from the JSONL ring buffer
+    (``_recent_event_is_control_request`` — the newest ring entry). Both are
+    "most recent thing" heuristics and both go stale during a long approval
+    wait: an ExitPlanMode permission request carries no ``inline_keyboard``
+    detail, and after hours of waiting the newest ring entry is a stale
+    ``user``/``result`` frame. The registry does not go stale.
+
+    The post-result idle watchdog and the pre-result silence cap already
+    consult these same registries to decide whether to defer; this helper
+    centralises that query so the three consumers cannot drift apart.
+    """
+    if not session_id:
+        return 0
+    pending = sum(1 for v in _REQUEST_TO_SESSION.values() if v == session_id)
+    pending += sum(
+        1 for k in _PENDING_ASK_REQUESTS if _REQUEST_TO_SESSION.get(k) == session_id
+    )
+    return pending
+
+
 @dataclass(slots=True)
 class AskQuestionState:
     """Tracks multi-question AskUserQuestion flow state."""
@@ -217,8 +405,30 @@ class AskQuestionState:
 # Active AskUserQuestion flows: request_id -> AskQuestionState
 _ASK_QUESTION_FLOWS: dict[str, AskQuestionState] = {}
 CONTROL_REQUEST_TIMEOUT_SECONDS: float = 300.0  # 5 minutes
-DISCUSS_COOLDOWN_BASE_SECONDS: float = 30.0
-DISCUSS_COOLDOWN_MAX_SECONDS: float = 120.0
+
+# #374 (rc7): bounded keep for background-agent handles (Agent/Task
+# tool_use that runs in the background — #646: that is the *default*
+# upstream, i.e. every Agent/Task except an explicit run_in_background=False;
+# see `_agent_runs_in_background`). An interim tool_result no longer
+# clears the handle immediately (see `_is_terminal_tool_result`), but every
+# "keep the handle" branch MUST have a bounded age-out — a handle that
+# never clears wedges the post-result idle watchdog into a permanent hang.
+# 15 minutes mirrors the existing MCP-tool / subagent stall thresholds
+# (`runner_bridge.py` `_STALL_THRESHOLD_MCP_TOOL` / `_STALL_THRESHOLD_SUBAGENT`,
+# both 900s): long enough for a genuine background subagent to keep
+# suppressing stall warnings, short enough that a truly abandoned handle
+# self-heals within one watchdog cycle instead of leaking forever.
+BG_AGENT_MAX_KEEP_S: float = 15 * 60.0  # 900s
+
+# #573 (rc8 slice): age-out backstops for the two primitives that previously
+# had none. Generous on purpose — these are a last-resort ceiling, not a
+# prediction of how long the work takes. A real terminal signal (KillShell
+# tool_result, completion line) still clears the handle much earlier; this only
+# stops a missing signal pinning `has_live_background_work` for the whole run,
+# which suppresses the post-result watchdog and leaves the process in the limbo
+# state that gets SIGTERM'd and poisons the session (#631/#632).
+BG_BASH_MAX_KEEP_S: float = 60 * 60.0  # 1h — long builds/deploys are normal
+REMOTE_TRIGGER_MAX_KEEP_S: float = 60 * 60.0  # 1h
 
 _DISCUSS_ESCALATION_MESSAGE = (
     "REJECTED — your ExitPlanMode call was automatically blocked because you have not "
@@ -279,8 +489,9 @@ class ClaudeStreamState:
     # #347 per-session background-task tracking. Claude Code v2.1.72+ has
     # primitives that arm long-running work and return the subprocess to
     # "ready" state while the primitive continues in the background:
-    # `Monitor`, `Bash run_in_background=true`, `Agent run_in_background=true`,
-    # `ScheduleWakeup`, `RemoteTrigger`. Untether tracks them so (a) #346's
+    # `Monitor`, `Bash run_in_background=true`, `Agent`/`Task` (background by
+    # default upstream — #646), `ScheduleWakeup`, `RemoteTrigger`. Untether
+    # tracks them so (a) #346's
     # wedge detector can gate SIGTERM on "do we still have armed work?",
     # (b) progress footers can show "⏳ N watchers · M bg tasks", and (c)
     # a future `/background` command can enumerate the handles.
@@ -294,6 +505,39 @@ class ClaudeStreamState:
     live_bg_agents: set[str] = field(default_factory=set)
     live_wakeups: dict[str, float] = field(default_factory=dict)
     live_remote_triggers: set[str] = field(default_factory=set)
+
+    # #374 (rc7): deadline map paralleling `live_bg_agents`. Kept as a
+    # separate dict (rather than converting `live_bg_agents` to
+    # `dict[str, float]`) to avoid touching every existing
+    # `live_bg_agents` call site — see the design note in
+    # `_register_background_handle`. Set at register time to
+    # `time.monotonic() + BG_AGENT_MAX_KEEP_S`; consulted by
+    # `_is_terminal_tool_result` and `has_live_background_work` to bound
+    # how long an Agent/Task-bg handle can be kept across interim
+    # tool_results before it is treated as terminal regardless of whether
+    # an explicit terminal signal (`is_error`) ever arrives. Popped in
+    # `_clear_background_handle` alongside the `live_bg_agents` discard.
+    bg_agent_deadlines: dict[str, float] = field(default_factory=dict)
+
+    # #573 (rc8 slice): the same parallel-deadline treatment for the two
+    # remaining unbounded primitives. Before this, `live_bg_bashes` and
+    # `live_remote_triggers` had no deadline at all, so any entry made
+    # `has_live_background_work` return True for the rest of the run — which
+    # suppresses the post-result watchdog and leaves the process lingering in
+    # limbo, the state that gets SIGTERM'd and poisons the session
+    # (#631/#632). Populated at register time, popped in
+    # `_clear_background_handle`, aged out by `_live_bounded_handle_count`.
+    bg_bash_deadlines: dict[str, float] = field(default_factory=dict)
+    remote_trigger_deadlines: dict[str, float] = field(default_factory=dict)
+
+    # #631 (W5-diag): sticky flag — True once any background-task primitive
+    # (Monitor / Bash-bg / Agent-bg / ScheduleWakeup / RemoteTrigger) has
+    # been observed in this session, regardless of whether it has since
+    # completed. Set in `_register_background_handle`; never reset. Mirrored
+    # onto the engine-agnostic `JsonlStreamState.background_observed` (see
+    # `runner.py::_handle_jsonl_line`) so the `runner.empty_result`
+    # diagnostic can read it without importing Claude-specific state.
+    background_observed: bool = False
 
     # #544 ScheduleWakeup arm-time `delaySeconds` high-water-mark for the
     # current turn. The rc11 #507 fix stored this per-tool_id in a sibling
@@ -367,6 +611,23 @@ class ClaudeStreamState:
     # colliding with Claude Code's own ``req_*`` namespace.
     pending_catalog_refresh_ids: list[str] = field(default_factory=list)
     catalog_refresh_seq: int = 0
+    # #590: descendant PIDs captured while the subprocess was alive (at the
+    # result event, at reader-done, and at limbo detection — see
+    # _capture_orphan_descendants). Read by manage_subprocess's post-exit
+    # orphan sweep so pgroup ESCAPEES — MCP chains that setpgid/setsid into
+    # their own group/session and survive a plain killpg — are still
+    # terminated after the leader exits. The result-event capture is the one
+    # that fires on fast clean rc=0 runs (no limbo, leader may exit before
+    # reader-done), which is where the dembrandt-mcp leak was observed.
+    orphan_pid_snapshot: list[int] = field(default_factory=list)
+    # #590 hardening: {pid: /proc starttime} recorded alongside each captured
+    # orphan PID so the post-exit sweep can reject a recycled PID before
+    # signalling it (guards against PID reuse during the capture→teardown
+    # window). Populated by _capture_orphan_descendants.
+    orphan_pid_starttimes: dict[int, int] = field(default_factory=dict)
+    # #592: one-shot latch — the pre-result silence cap fired and killed
+    # the subprocess; prevents re-firing on subsequent watchdog ticks.
+    pre_result_silence_killed: bool = False
     # #497: debounce gate. Holds the ``time.monotonic()`` timestamp of the
     # last enqueued refresh; the translate path skips re-enqueue while
     # ``(now - last) < catalog_refresh_min_interval_s``. None until the
@@ -395,6 +656,48 @@ class ClaudeStreamState:
     post_result_closed_at: float | None = None
     post_result_idle_minutes: float = 0.0
     post_result_closing_sent: bool = False
+
+    # #495/#499/#500: monotonic deadline while Claude is throttled by a
+    # ``rate_limit_event``. Armed alongside ``rate_limit_total_s`` in the
+    # translate branch; the stall detector treats "still inside the retry
+    # window" as an expected wait, not a stall. ``0.0`` = not throttled.
+    rate_limit_wait_until: float = 0.0
+
+    # #572: set when the run's StreamResultMessage was a Stream-idle-timeout
+    # failure — "type_a" (mid-generation stall, retryable) or "type_b"
+    # (cold-start zero-byte stall, never retried). runner_bridge reads this
+    # via engine_state duck-typing to gate the bounded auto-retry.
+    stream_idle_class: str | None = None
+
+    def awaiting_user_approval(self) -> bool:
+        """True while this session has an unanswered control request.
+
+        #495/#499/#500: the engine-agnostic stall detector reaches this via
+        ``getattr(stream, "engine_state", None)`` duck-typing (the same
+        pattern used for ``has_live_background_work``), so non-Claude engines
+        degrade to False rather than needing to know anything about Claude's
+        control channel. Delegates to
+        :func:`pending_control_requests_for_session`, which is backed by the
+        self-cleaning ``_REQUEST_TO_SESSION`` registry — see that docstring
+        for why the previous presentation-state and ring-buffer heuristics
+        both went stale during long approval waits.
+        """
+        sid = self.factory.resume.value if self.factory.resume is not None else None
+        return pending_control_requests_for_session(sid) > 0
+
+    def awaiting_rate_limit_retry(self) -> bool:
+        """True while Claude is inside an upstream rate-limit retry window."""
+        return self.rate_limit_wait_until > time.monotonic()
+
+
+# #657: conservative wait window latched when a `rate_limit_event` arrives with
+# no parseable timing at all (no `retry_after_ms`, no reset timestamps). Upstream
+# throttles are rarely sub-second, and without *some* deadline
+# `awaiting_rate_limit_retry()` reports False while the session genuinely is
+# waiting on upstream — making a throttled-but-healthy session indistinguishable
+# from a hung one. 60s is well under every stall threshold (600s+), so a wrong
+# guess can only delay a stall verdict, never mask one.
+DEFAULT_BARE_RATE_LIMIT_WAIT_S = 60.0
 
 
 def _derive_retry_after_s(info: claude_schema.RateLimitInfo | None) -> float | None:
@@ -499,6 +802,38 @@ def _tool_action(
     return Action(id=tool_id, kind=kind, title=title, detail=detail)
 
 
+def _agent_runs_in_background(raw_input: dict) -> bool:
+    """Decide whether an Agent/Task tool_use launches a *background* subagent (#646).
+
+    Claude Code runs subagents in the background **by default**: the tool
+    contract reads "Subagents run in the background by default; ... Pass
+    ``run_in_background: false`` for a synchronous run." The flag is therefore
+    normally ABSENT from `input` — the observed shape is just
+    ``{"description": ..., "subagent_type": ...}``.
+
+    The pre-#646 predicate was ``bool(raw_input.get("run_in_background"))``,
+    which read an omitted key as *foreground*. That inverted the upstream
+    default and missed every real background subagent (measured: 11/11 Agent
+    calls across the 5 sessions quarantined on nsd 2026-07-18 omit the key).
+    An unregistered handle leaves `has_live_background_work()` False, so the
+    post-result idle watchdog applies the 60s limbo grace instead of the full
+    timeout, SIGTERMs a subprocess whose subagents are still working, and the
+    #632 forced-teardown path then quarantines a perfectly healthy session —
+    so the user's next message diverts to a fresh, contextless one.
+
+    Hence: background unless the caller *explicitly* opted out with literal
+    ``False``. Anything else (absent, None, true, or a malformed value) counts
+    as background — over-registering is the safe direction, because a stale
+    handle only forfeits the 60s shortcut while the 600s post-result ceiling
+    and the 900s ``BG_AGENT_MAX_KEEP_S`` age-out both still bound teardown.
+    Under-registering force-kills live work and poisons the session.
+
+    Deliberately NOT applied to ``Bash(run_in_background=...)``, whose flag is
+    genuinely opt-in upstream — see `_register_background_handle`.
+    """
+    return raw_input.get("run_in_background") is not False
+
+
 def _register_background_handle(
     state: ClaudeStreamState,
     content: claude_schema.StreamToolUseBlock,
@@ -521,6 +856,7 @@ def _register_background_handle(
     raw_input = content.input if isinstance(content.input, dict) else {}
 
     if tool_name == "Monitor":
+        state.background_observed = True
         timeout_ms = raw_input.get("timeout_ms")
         if isinstance(timeout_ms, (int, float)) and timeout_ms > 0:
             state.live_monitors[tool_id] = time.monotonic() + (timeout_ms / 1000.0)
@@ -528,14 +864,24 @@ def _register_background_handle(
             # Unknown deadline → store 0.0 so membership tests still work
             state.live_monitors[tool_id] = 0.0
     elif tool_name == "Bash" and bool(raw_input.get("run_in_background")):
+        state.background_observed = True
         state.live_bg_bashes.add(tool_id)
+        # #573 (rc8 slice): bounded keep, same rationale as bg-agents in rc7.
+        # A backgrounded Bash whose KillShell/completion signal never arrives
+        # must not pin has_live_background_work() for the rest of the run.
+        state.bg_bash_deadlines[tool_id] = time.monotonic() + BG_BASH_MAX_KEEP_S
         # #333: scalar high-water-mark that survives _clear_background_handle
         # (see ClaudeStreamState.last_bg_bash_launched_at docstring). Used by
         # the post-result idle watchdog tick log for observability only.
         state.last_bg_bash_launched_at = time.monotonic()
-    elif tool_name == "Agent" and bool(raw_input.get("run_in_background")):
+    elif tool_name in ("Agent", "Task") and _agent_runs_in_background(raw_input):
+        state.background_observed = True
         state.live_bg_agents.add(tool_id)
+        # #374 (rc7): bounded keep — see BG_AGENT_MAX_KEEP_S and
+        # ClaudeStreamState.bg_agent_deadlines docstrings.
+        state.bg_agent_deadlines[tool_id] = time.monotonic() + BG_AGENT_MAX_KEEP_S
     elif tool_name == "ScheduleWakeup":
+        state.background_observed = True
         # #481: the actual Claude Code ScheduleWakeup tool schema (per
         # #289 / claude-agent-sdk-python) emits ``delaySeconds`` as the
         # canonical field. Earlier versions of this code read
@@ -566,11 +912,36 @@ def _register_background_handle(
         prev = state.last_schedule_wakeup_arm_delay or 0.0
         state.last_schedule_wakeup_arm_delay = max(prev, arm_delay_s)
     elif tool_name == "RemoteTrigger":
+        state.background_observed = True
         state.live_remote_triggers.add(tool_id)
+        # #573 (rc8 slice): membership-only before, so a RemoteTrigger could
+        # pin the session open forever. Age-out backstop only — a real
+        # terminal signal still clears it earlier.
+        state.remote_trigger_deadlines[tool_id] = (
+            time.monotonic() + REMOTE_TRIGGER_MAX_KEEP_S
+        )
 
 
-def _clear_background_handle(state: ClaudeStreamState, tool_use_id: str) -> None:
-    """Remove a background-task entry when its tool_result arrives (#347).
+def _clear_background_handle(
+    state: ClaudeStreamState, tool_use_id: str, *, is_terminal: bool = True
+) -> None:
+    """Remove a background-task entry when its tool_result is *terminal* (#347, #374).
+
+    #374: a tool_result is not always a terminal signal. A long-running Monitor
+    streams *multiple* interim tool_results while it runs; clearing the
+    ``live_monitors`` entry on the first one dropped the
+    ``stall_monitor_active_suppressed`` branch (runner_bridge), so spurious stall
+    warnings rose again while the Monitor was legitimately still working. The same
+    premature-drain bug applies to Agent/Task-bg (rc7): clearing on the first
+    interim result poisoned the "no live background work" signal the empty-resume
+    detector relies on (#596). When ``is_terminal`` is False the handle is left in
+    place — ``_is_terminal_tool_result`` makes the call, using a bounded deadline
+    for both primitives (Monitor's own ``timeout_ms``; Agent/Task-bg's
+    ``BG_AGENT_MAX_KEEP_S``) so a handle can never be kept forever. ``is_terminal``
+    defaults True so direct callers and the remaining primitives (Bash-bg,
+    ScheduleWakeup, RemoteTrigger) keep their pre-#374 clear-on-result behaviour
+    (see ``_is_terminal_tool_result`` for why their interim-handling is still
+    deferred to the v0.35.5 lifecycle refactor, #573).
 
     Note: ``state.last_schedule_wakeup_arm_delay`` and
     ``state.last_bg_bash_launched_at`` are deliberately NOT cleared here.
@@ -583,11 +954,87 @@ def _clear_background_handle(state: ClaudeStreamState, tool_use_id: str) -> None
     the matching ``result`` event lands. Both scalars reset on the
     next user prompt or on ``new_state`` (#544, #333).
     """
+    if not is_terminal:
+        return
     state.live_monitors.pop(tool_use_id, None)
     state.live_bg_bashes.discard(tool_use_id)
+    state.bg_bash_deadlines.pop(tool_use_id, None)
     state.live_bg_agents.discard(tool_use_id)
+    state.bg_agent_deadlines.pop(tool_use_id, None)
     state.live_wakeups.pop(tool_use_id, None)
     state.live_remote_triggers.discard(tool_use_id)
+    state.remote_trigger_deadlines.pop(tool_use_id, None)
+
+
+def _is_terminal_tool_result(
+    content: claude_schema.StreamToolResultBlock
+    | claude_schema.StreamAdvisorToolResultBlock,
+    state: ClaudeStreamState,
+    tool_use_id: str,
+) -> bool:
+    """Decide whether a tool_result terminates its background handle (#374).
+
+    Two primitives can receive *interim* (non-terminal) results today, each with
+    its own bounded deadline so neither risks keeping a handle forever:
+
+    - **Monitor** feeds back the watched command's **raw stdout lines as they
+      appear** (see ``docs/plans/2026-05-06-289-loop-and-cron-interception.md``),
+      so clearing ``live_monitors`` on the first line dropped the
+      ``stall_monitor_active_suppressed`` branch while the Monitor was still
+      running. Its bound is the primitive's own ``timeout_ms`` deadline
+      (``has_live_background_work`` already uses the same deadline to age the
+      handle out — so no leak).
+
+    - **Agent/Task running in the background** (rc7, #374) — i.e. every Agent/Task
+      except an explicit ``run_in_background=False``, since background is the
+      upstream default (#646, ``_agent_runs_in_background``). These likewise emit
+      an interim tool_result (observed: ``"Async agent launched successfully."``
+      ~25ms after the tool_use) before the subagent actually finishes. Clearing
+      ``live_bg_agents`` on that first result reintroduced the same premature-drain
+      bug the Monitor fix addressed: it poisoned the "no live background work"
+      signal the empty-resume detector relies on (#596). There is no reliable
+      upstream completion signal for Agent/Task yet (true-terminal detection via
+      KillShell, subprocess-exit reconciliation, and child-PID cleanup is the
+      v0.35.5 lifecycle refactor, #573), so its bound is the fixed
+      ``BG_AGENT_MAX_KEEP_S`` deadline set at register time in
+      ``_register_background_handle`` — the safe trade-off between "keep
+      suppressing stall warnings while genuinely running" and "never leave a
+      handle uncleared forever".
+
+    Because tool_result text is arbitrary in both cases (Monitor: raw command
+    stdout; Agent/Task: subagent-authored prose), we deliberately do NOT scan it
+    for "completed"/"cancelled" markers for either primitive — that is unreliable
+    in both directions (a build printing "Done" mid-stream would false-clear and
+    reintroduce the bug; a real completion that doesn't print a magic word would be
+    missed). The reliable terminal signals are ``is_error`` and the primitive's own
+    bounded deadline.
+
+    Every other tool_result — including Bash-bg, ScheduleWakeup, and
+    RemoteTrigger, whose true-terminal detection remains deferred to the v0.35.5
+    refactor (#573) — is treated as terminal, preserving the pre-#374
+    clear-on-first-result behaviour for foreground tools and those primitives.
+    """
+    monitor_deadline = state.live_monitors.get(tool_use_id)
+    if monitor_deadline is not None:
+        if content.is_error is True:
+            return True
+        # Unknown (0.0) or already-expired deadline → clear now (no leak risk;
+        # matches has_live_background_work's expiry semantics). A live future
+        # deadline means an interim stdout line → keep the handle so
+        # stall-suppression keeps firing.
+        return monitor_deadline == 0.0 or monitor_deadline <= time.monotonic()
+
+    bg_agent_deadline = state.bg_agent_deadlines.get(tool_use_id)
+    if bg_agent_deadline is not None:
+        if content.is_error is True:
+            return True
+        # Past-deadline → aged out, terminal regardless of whether an explicit
+        # completion signal ever arrives (no permanent-hang guarantee — see
+        # BG_AGENT_MAX_KEEP_S).
+        return bg_agent_deadline <= time.monotonic()
+
+    # Not a tracked Monitor or bg-agent → terminal (unchanged behaviour).
+    return True
 
 
 # ── /loop and ScheduleWakeup observation (#289) ─────────────────────────
@@ -757,14 +1204,53 @@ def _observe_loop_tool_result(
     loop_scheduler.bind_upstream_id(tool_use_id, upstream_id)
 
 
+def _live_bg_agent_count(state: ClaudeStreamState) -> int:
+    """Count Agent/Task-bg handles whose bounded deadline hasn't passed (#374).
+
+    ``live_bg_agents`` and ``bg_agent_deadlines`` are parallel structures (see
+    ``ClaudeStreamState.bg_agent_deadlines`` docstring) — every registered
+    handle should have a matching deadline, but a handle with no deadline entry
+    is defensively treated as already expired (not live) rather than live
+    forever, matching the bounded-keep bias of ``_is_terminal_tool_result``.
+
+    Both consumers below (the #346 wedge-detector gate and the progress-footer
+    summary) need to age out expired bg-agent handles identically, so the
+    expiry expression lives here once instead of being duplicated at each call
+    site.
+    """
+    now = time.monotonic()
+    return sum(
+        1
+        for tool_id in state.live_bg_agents
+        if state.bg_agent_deadlines.get(tool_id, 0.0) > now
+    )
+
+
+def _live_bounded_handle_count(handles: set[str], deadlines: dict[str, float]) -> int:
+    """Count handles in ``handles`` whose parallel deadline hasn't passed.
+
+    #573 — generalises the rc7 ``_live_bg_agent_count`` pattern to any
+    background primitive tracked as a set plus a parallel deadline map. A
+    handle with no deadline entry is defensively treated as expired rather
+    than live forever: an over-eager expiry costs at most one premature
+    watchdog tick, whereas a handle that never expires pins the session open
+    indefinitely.
+    """
+    now = time.monotonic()
+    return sum(1 for tool_id in handles if deadlines.get(tool_id, 0.0) > now)
+
+
 def has_live_background_work(state: ClaudeStreamState) -> bool:
     """Return True when the session has any background handle whose deadline
     (if any) is still in the future (#346 gate).
 
     Monitors + wakeups with expired deadlines are treated as "no longer
     live" — the primitive should have fired and emitted its result by then.
-    Sets (bg bashes, bg agents, remote triggers) have no deadline so any
-    entry counts as live.
+    Agent/Task-bg handles (#374, rc7) follow the same rule via
+    ``_live_bg_agent_count`` — a handle past its ``BG_AGENT_MAX_KEEP_S``
+    deadline no longer counts as live, otherwise this gate would wait forever
+    for a tool_result that may never arrive. Bg bashes and remote triggers
+    have no deadline so any entry counts as live.
     """
     now = time.monotonic()
     for deadline in state.live_monitors.values():
@@ -773,8 +1259,23 @@ def has_live_background_work(state: ClaudeStreamState) -> bool:
     for deadline in state.live_wakeups.values():
         if deadline == 0.0 or deadline > now:
             return True
-    return bool(
-        state.live_bg_bashes or state.live_bg_agents or state.live_remote_triggers
+    if _live_bg_agent_count(state) > 0:
+        return True
+    # #573 (rc8 slice): bg-bashes and remote triggers previously had NO
+    # deadline, so a single entry pinned this gate True for the rest of the
+    # run. That keeps `has_live_background_work` true long after the work is
+    # gone, which suppresses the post-result watchdog and leaves the process
+    # lingering in limbo — the exact state that gets SIGTERM'd and poisons the
+    # session (#631/#632). Same bounded-keep treatment as Agent/Task-bg in
+    # rc7: age out on a deadline rather than trusting a terminal signal that
+    # may never arrive.
+    if _live_bounded_handle_count(state.live_bg_bashes, state.bg_bash_deadlines) > 0:
+        return True
+    return (
+        _live_bounded_handle_count(
+            state.live_remote_triggers, state.remote_trigger_deadlines
+        )
+        > 0
     )
 
 
@@ -785,11 +1286,16 @@ def background_task_summary(state: ClaudeStreamState) -> str | None:
     command. v1 of this PR only computes it; the footer wiring lands in
     a follow-up once meta-threading from ClaudeStreamState to
     `ProgressTracker.meta` is confirmed safe for the other 5 engines.
+
+    #374 (rc7): the bg-agent portion of ``bg_tasks`` uses
+    ``_live_bg_agent_count`` so an aged-out Agent/Task-bg handle (bounded by
+    ``BG_AGENT_MAX_KEEP_S``) stops appearing in the footer the same way it
+    stops counting as live work in ``has_live_background_work``.
     """
     watchers = len(state.live_monitors) + len(state.live_wakeups)
     bg_tasks = (
         len(state.live_bg_bashes)
-        + len(state.live_bg_agents)
+        + _live_bg_agent_count(state)
         + len(state.live_remote_triggers)
     )
     if watchers == 0 and bg_tasks == 0:
@@ -907,16 +1413,28 @@ def _format_diff_preview(tool_name: str, tool_input: dict[str, Any]) -> str:
 _STREAM_IDLE_TIMEOUT_PATTERN = "Stream idle timeout"
 
 
-def _classify_stream_idle_timeout(
+def _stream_idle_timeout_class(
     event: claude_schema.StreamResultMessage,
 ) -> str | None:
-    """Return a short Type-A / Type-B annotation, or None if not a stall."""
+    """#438/#572: return ``"type_a"`` / ``"type_b"`` for a Stream idle
+    timeout failure, or None when the result is not a stall. Shared by the
+    visible annotation below and the bridge's bounded auto-retry gate."""
     result = event.result if isinstance(event.result, str) else ""
     if _STREAM_IDLE_TIMEOUT_PATTERN not in result:
         return None
     if event.num_turns <= 1 and (
         event.duration_api_ms is None or event.duration_api_ms == 0
     ):
+        return "type_b"
+    return "type_a"
+
+
+def _classify_stream_idle_timeout(
+    event: claude_schema.StreamResultMessage,
+) -> str | None:
+    """Return a short Type-A / Type-B annotation, or None if not a stall."""
+    stall_class = _stream_idle_timeout_class(event)
+    if stall_class == "type_b":
         # Type B — cold-start zero-byte stall. No bytes from API.
         return (
             "🌐 Cold-start API stall (Type B): Anthropic API returned no "
@@ -924,13 +1442,15 @@ def _classify_stream_idle_timeout(
             "queueing/availability — raising CLAUDE_STREAM_IDLE_TIMEOUT_MS "
             "will NOT help. Retry shortly."
         )
-    # Type A — mid-generation stall. Model emitted output then went silent.
-    return (
-        "⏳ Mid-generation API stall (Type A): SSE stream went silent after "
-        "partial output. Often legitimate long reasoning that exceeded the "
-        "watchdog — consider raising [watchdog] claude_stream_idle_timeout_ms "
-        "in untether.toml."
-    )
+    if stall_class == "type_a":
+        # Type A — mid-generation stall. Model emitted output then went silent.
+        return (
+            "⏳ Mid-generation API stall (Type A): SSE stream went silent after "
+            "partial output. Often legitimate long reasoning that exceeded the "
+            "watchdog — consider raising [watchdog] claude_stream_idle_timeout_ms "
+            "in untether.toml."
+        )
+    return None
 
 
 def _extract_error(
@@ -1063,6 +1583,12 @@ def _maybe_audit_env(state: ClaudeStreamState, session_id: str) -> None:
         )
 
 
+# #595: process-lifetime dedup for needs-auth/failed catalog warnings.
+# Keyed (server, status) — a connector that can never connect as configured
+# warns once per service lifetime instead of once per subprocess spawn.
+_CATALOG_STALENESS_WARNED: set[tuple[str, str]] = set()
+
+
 def _capture_mcp_catalog(
     state: ClaudeStreamState,
     session_id: str,
@@ -1079,6 +1605,14 @@ def _capture_mcp_catalog(
     Gated by ``WatchdogSettings.detect_catalog_staleness`` (default on;
     observability only — no recovery action). Logs once per
     (session, server, status) tuple so re-fired init events don't spam.
+
+    #595 severity split: ``pending`` at init is a startup race (the server
+    is still connecting when Claude snapshots the catalog), not staleness —
+    it logs at INFO (``catalog_staleness.pending``). Persistent
+    ``needs-auth``/``failed`` keep the WARNING but dedup across runs via
+    the process-lifetime ``_CATALOG_STALENESS_WARNED`` registry: the
+    per-state set resets on every subprocess spawn, which multiplied a few
+    broken connectors into ~2,930 WARNINGs/48h fleet-wide.
     """
     if not mcp_servers:
         return
@@ -1101,6 +1635,26 @@ def _capture_mcp_catalog(
         if key in state.catalog_staleness_logged:
             continue
         state.catalog_staleness_logged.add(key)
+        if status == "pending":
+            logger.info(
+                "catalog_staleness.pending",
+                session_id=session_id,
+                pid=state.pid,
+                server=name,
+                status=status,
+                source="system.init",
+            )
+            continue
+        process_key = (name, status)
+        if process_key in _CATALOG_STALENESS_WARNED:
+            logger.debug(
+                "catalog_staleness.suppressed",
+                session_id=session_id,
+                server=name,
+                status=status,
+            )
+            continue
+        _CATALOG_STALENESS_WARNED.add(process_key)
         logger.warning(
             "catalog_staleness.detected",
             session_id=session_id,
@@ -1118,6 +1672,7 @@ def _usage_payload(event: claude_schema.StreamResultMessage) -> dict[str, Any]:
         "duration_ms",
         "duration_api_ms",
         "num_turns",
+        "subtype",
     ):
         value = getattr(event, key, None)
         if value is not None:
@@ -1125,6 +1680,60 @@ def _usage_payload(event: claude_schema.StreamResultMessage) -> dict[str, Any]:
     if event.usage is not None:
         usage["usage"] = event.usage
     return usage
+
+
+def _capture_orphan_descendants(
+    state: ClaudeStreamState, *, source: str, pid: int | None = None
+) -> None:
+    """#590: snapshot descendants of the live Claude process for the
+    post-exit orphan sweep in ``manage_subprocess``.
+
+    Some MCP servers ``setpgid`` into their own process group (observed:
+    ``dembrandt-mcp`` on nsd — distinct PGID, still in Claude's session).
+    They survive ``killpg(claude_pgid)`` and are only reachable by their
+    recorded PID via ``reap_orphaned_group``'s ``extra_pids`` path. The
+    reader-done capture is gated on ``proc.returncode is None`` and the
+    limbo capture only fires after the limbo threshold, so a FAST CLEAN
+    (rc=0, no-limbo) run captured nothing and leaked one child every run.
+
+    ``result`` is the reliable capture point: the CLI has just emitted the
+    result event and lingers alive for MCP teardown, and every MCP child has
+    already spawned. Walk recursively (``find_descendants``, depth 4) so
+    ``claude → npx → node`` wrapper grandchildren are caught. Best-effort:
+    no-ops on missing PID / non-Linux / /proc read errors.
+
+    NOTE: recorded PIDs are signalled by ``reap_orphaned_group`` at teardown
+    after an ``_pid_alive`` check only (no birth-identity guard). The
+    capture→teardown window is normally seconds, but a limbo run can widen it;
+    hardening the reaper with a /proc starttime identity token is tracked
+    separately.
+    """
+    target = pid if pid is not None else state.pid
+    if not target or target <= 0:
+        return
+    try:
+        from ..utils.proc_diag import find_descendants, pid_starttime
+
+        new = [
+            p for p in find_descendants(target) if p not in state.orphan_pid_snapshot
+        ]
+    except OSError:
+        return
+    if new:
+        state.orphan_pid_snapshot.extend(new)
+        # Record each PID's birth-identity so the sweep can reject a recycled
+        # PID before signalling it (#590 hardening).
+        for p in new:
+            st = pid_starttime(p)
+            if st is not None:
+                state.orphan_pid_starttimes[p] = st
+        logger.debug(
+            "subprocess.orphan_snapshot",
+            source=source,
+            pid=target,
+            added=new,
+            total=len(state.orphan_pid_snapshot),
+        )
 
 
 def translate_claude_event(
@@ -1283,8 +1892,14 @@ def translate_claude_event(
                     continue
                 saw_tool_result = True
                 tool_use_id = content.tool_use_id
-                # #347 clear any background-task entry for this tool_use_id
-                _clear_background_handle(state, tool_use_id)
+                # #347/#374 clear a background-task entry only on a *terminal*
+                # tool_result — interim Monitor results keep the handle so the
+                # stall-suppression branch keeps firing while it runs.
+                _clear_background_handle(
+                    state,
+                    tool_use_id,
+                    is_terminal=_is_terminal_tool_result(content, state, tool_use_id),
+                )
                 # #289 bind upstream cron ID so CronDelete observations
                 # later in the session can target the right loop entry.
                 _observe_loop_tool_result(state, tool_use_id, content.content)
@@ -1371,9 +1986,21 @@ def translate_claude_event(
             error = None if ok else _extract_error(event, resumed=state.resumed)
             usage = _usage_payload(event)
 
+            # #572: record the stream-idle classification so the bridge's
+            # bounded auto-retry gate can read it via engine_state duck-typing.
+            state.stream_idle_class = None if ok else _stream_idle_timeout_class(event)
+
             # #333: arm the post-result idle watchdog. Reset on every
             # result (multi-turn re-arms the timer per turn boundary).
             state.result_received_at = time.monotonic()
+
+            # #590: capture descendant PIDs NOW — the CLI is still alive
+            # (lingering for MCP teardown) and every MCP child has spawned.
+            # This is the only snapshot that fires on a fast clean rc=0 run,
+            # closing the leak for pgroup-escapee MCP children. Runs before
+            # the CompletedEvent is yielded (yielding hands control to the
+            # consumer, which may cancel/tear down the generator).
+            _capture_orphan_descendants(state, source="result")
 
             events_out: list[UntetherEvent] = []
             # #333 UX signal #1: append "✓ turn complete" to the meta
@@ -1545,7 +2172,6 @@ def translate_claude_event(
                     if session_id in _DISCUSS_APPROVED:
                         _DISCUSS_APPROVED.discard(session_id)
                         _OUTLINE_PENDING.discard(session_id)
-                        clear_discuss_cooldown(session_id)
                         # #283: bypass diff_preview gate for subsequent tools
                         # in this session (#309).
                         _PLAN_EXIT_APPROVED.add(session_id)
@@ -1558,34 +2184,52 @@ def translate_claude_event(
                         state.auto_approve_queue.append(request_id)
                         return []
 
-            # Rate-limit ExitPlanMode after a discuss denial.
-            # Both paths (outline written / not written) auto-deny and show
-            # synthetic 2-button Approve/Deny.  The old "fall through to normal
-            # 3-button flow" caused a confusing loop where the user kept seeing
-            # the same Pause & Outline Plan button.
+            # Gate ExitPlanMode while an outline is pending (Pause & Outline).
+            # Both paths (outline written / not written) bypass the normal
+            # 3-button flow: without this, an outline-pending retry would show
+            # the same "Pause & Outline Plan" button again — a confusing loop.
+            # #570: the additional time-based cooldown arm that lived here was
+            # a v2.1.72-74 workaround; removed after verifying the upstream
+            # immediate-retry loop is fixed on CLI 2.1.215.
             if isinstance(request, claude_schema.ControlCanUseToolRequest):
                 tool_name = getattr(request, "tool_name", "")
                 if tool_name == "ExitPlanMode" and factory.resume:
                     session_id = factory.resume.value
                     text_len = state.max_text_len_since_cooldown
 
-                    # Guard: if outline is pending but Claude hasn't written
-                    # enough visible text, block ExitPlanMode regardless of
-                    # whether the time-based cooldown has expired.
+                    # #659: on plan-file CLIs (≥ ~2.1.2xx) the plan body
+                    # arrives in ExitPlanMode's `plan` input and NO chat text
+                    # is ever written — observed live: 4 consecutive
+                    # outline_guard denies until Claude gave up. The plan
+                    # input IS the outline, so let it satisfy the gate and
+                    # render it as the standalone outline message.
+                    _epm_gate_input = getattr(request, "input", {})
+                    _epm_plan_body = (
+                        _epm_gate_input.get("plan")
+                        if isinstance(_epm_gate_input, dict)
+                        else None
+                    )
+                    if isinstance(_epm_plan_body, str):
+                        text_len = max(text_len, len(_epm_plan_body))
+                        if (
+                            state.outline_text is None
+                            and len(_epm_plan_body) >= _OUTLINE_MIN_CHARS
+                        ):
+                            state.outline_text = _epm_plan_body
+
+                    # Guard: outline pending but Claude hasn't written enough
+                    # visible text — auto-deny with the outline instruction.
                     outline_guard = (
                         session_id in _OUTLINE_PENDING and text_len < _OUTLINE_MIN_CHARS
                     )
-                    # Catch outline-pending sessions even after cooldown expires.
-                    # Without this, expired cooldown + written outline would skip
-                    # the synthetic 2-button flow and fall through to normal
-                    # 3-button ExitPlanMode (showing "Pause & Outline" again).
+                    # Outline written — hold the request open and show the
+                    # synthetic Approve/Deny buttons.
                     outline_ready = (
                         session_id in _OUTLINE_PENDING
                         and text_len >= _OUTLINE_MIN_CHARS
                     )
 
-                    escalation_msg = check_discuss_cooldown(session_id)
-                    if outline_guard or escalation_msg is not None or outline_ready:
+                    if outline_guard or outline_ready:
                         if text_len >= _OUTLINE_MIN_CHARS:
                             # Outline was written — hold the request open.
                             # Don't auto-deny; keep the control request pending
@@ -1615,18 +2259,18 @@ def translate_claude_event(
                                 request, "tool_name", ""
                             )
                         else:
-                            # Retry without outline — auto-deny with escalation.
-                            # outline_guard catches expired-cooldown retries too.
+                            # Retry without outline — auto-deny with the
+                            # write-the-outline-first instruction.
                             logger.info(
-                                "control_request.discuss_cooldown_deny",
+                                "control_request.outline_guard_deny",
                                 request_id=request_id,
                                 session_id=session_id,
-                                outline_guard=outline_guard,
                             )
-                            deny_msg = escalation_msg or _DISCUSS_ESCALATION_MESSAGE
                             _REQUEST_TO_INPUT.pop(request_id, None)
                             _REQUEST_TO_TOOL_NAME.pop(request_id, None)
-                            state.auto_deny_queue.append((request_id, deny_msg))
+                            state.auto_deny_queue.append(
+                                (request_id, _DISCUSS_ESCALATION_MESSAGE)
+                            )
 
                         # Show synthetic Approve/Deny buttons (no "Pause" option).
                         # For outline-ready: uses the REAL request_id so the
@@ -1969,17 +2613,29 @@ def translate_claude_event(
                 if derived is not None:
                     retry_s = derived
                     retry_s_source = "reset_ts"
-            if retry_s is not None:
-                state.rate_limit_total_s += retry_s
+                else:
+                    # #657: no parseable timing at all — latch a conservative
+                    # default so awaiting_rate_limit_retry() is directionally
+                    # correct. Source stays distinct so audits can tell
+                    # derived waits from guessed ones.
+                    retry_s = DEFAULT_BARE_RATE_LIMIT_WAIT_S
+                    retry_s_source = "default"
+            state.rate_limit_total_s += retry_s
+            # #495/#499/#500: latch a deadline so the stall detector can
+            # tell "throttled upstream, will resume by itself" apart from
+            # "hung". Without this only a cumulative total existed, which
+            # says nothing about whether we are waiting *right now*.
+            state.rate_limit_wait_until = time.monotonic() + retry_s
             state.rate_limit_count += 1
             state.note_seq += 1
             action_id = f"rate_limit_{state.note_seq}"
-            if retry_s is not None:
-                # Round to nearest second for display but show fractional when < 1s
-                display_s = int(retry_s) if retry_s >= 1 else f"{retry_s:.1f}"
-                title = f"⏳ Rate limited — retrying in {display_s}s"
+            # Round to nearest second for display but show fractional when < 1s
+            display_s = int(retry_s) if retry_s >= 1 else f"{retry_s:.1f}"
+            if retry_s_source == "default":
+                # A guessed window is shown as an estimate, not as fact
+                title = f"⏳ Rate limited — waiting to retry (~{display_s}s)"
             else:
-                title = "⏳ Rate limited — waiting to retry"
+                title = f"⏳ Rate limited — retrying in {display_s}s"
             detail: dict[str, Any] = {}
             if info is not None:
                 if info.tokens_remaining is not None:
@@ -2008,7 +2664,7 @@ def translate_claude_event(
             logger.info(
                 "claude.rate_limit_event",
                 retry_after_s=retry_s,
-                retry_after_source=retry_s_source if retry_s is not None else None,
+                retry_after_source=retry_s_source,
                 count=state.rate_limit_count,
                 cumulative_s=state.rate_limit_total_s,
                 info=info_payload or None,
@@ -2064,6 +2720,27 @@ class ClaudeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
     _subcountdown_limbo_detect_threshold_s: float = 30.0
     _subcountdown_sigterm_grace_s: float = 5.0
     _subcountdown_sigterm_grace_poll_s: float = 0.5
+    # #591: when the reader is done and NOTHING references the session (no
+    # pending control/ask requests, no live background work), waiting the
+    # full post_result_idle_timeout before SIGTERM only lets MCP children
+    # hold the process (and its RSS/TCP) open. Cap the wait at this grace
+    # instead. 0 disables the shortcut (full timeout always applies).
+    _post_result_limbo_grace_s: float = 60.0
+    # #647/#646: liveness-aware extension of the post-result ceiling. When
+    # the subcountdown deadline expires while the session still has live
+    # background work and the process tree is not demonstrably idle, the
+    # SIGTERM is deferred (re-checked each poll) instead of killing live
+    # subagent work mid-flight — the kill quarantines the session and
+    # produces the fresh-session amnesia (#646/#647). Absolute bound on the
+    # deferral, measured from reader-EOF; background handles independently
+    # age out at BG_AGENT_MAX_KEEP_S. 0 disables the extension.
+    _post_result_bg_max_hold_s: float = 1800.0
+    # #650: cadence of the ``subcountdown_tick`` observability line. Class
+    # attr so tests can shrink it; production logs every ~30 s.
+    _subcountdown_tick_log_interval_s: float = 30.0
+    # Floor for the post-result watchdog poll cadence (class attr so tests
+    # can shrink it; production keeps the 5s floor).
+    _watchdog_min_poll_s: float = 5.0
 
     def format_resume(self, token: ResumeToken) -> str:
         if token.engine != ENGINE:
@@ -2480,6 +3157,10 @@ class ClaudeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
                 ):
                     registered_session_id = evt.resume.value
                     _SESSION_STDIN[registered_session_id] = session_stdin
+                    # #647: expose this run's background-handle state to the
+                    # bridge's handoff wait. Cleared with the other
+                    # registries in _cleanup_session_registries.
+                    _SESSION_BG_STATE[registered_session_id] = state
                     logger.info(
                         "session_stdin.registered",
                         session_id=registered_session_id,
@@ -2657,6 +3338,92 @@ class ClaudeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
                 )
         state.pending_catalog_refresh_ids.clear()
 
+    async def _maybe_cancel_pre_result_silence(
+        self,
+        *,
+        state: ClaudeStreamState,
+        stream: Any,
+        proc: Any,
+        run_logger: Any,
+        silence_timeout_s: float,
+        started_at: float,
+    ) -> bool:
+        """#592: kill a run whose stream went silent forever pre-first-result.
+
+        The post-result watchdog only arms after a ``result`` event and the
+        liveness machinery never escalates an alive-but-idle process — a run
+        that goes silent before its first result idled FOREVER (8-day zombie
+        Claude subprocess + leaked MCP children + held session lock on mac).
+
+        Fires only when: zero stream output for ``silence_timeout_s``
+        (measured from the later of watchdog start and the last stdout
+        line), NO pending permission/ask requests (plan-approval waits are
+        by design, #526/#527) and NO live background work. The kill is
+        descendant-aware; a reason line is appended to ``stderr_capture`` so
+        the run's error message tells the user what happened. Returns True
+        when the cap fired.
+        """
+        if silence_timeout_s <= 0 or proc is None or proc.returncode is not None:
+            return False
+        if state.pre_result_silence_killed:
+            return False
+        last_out = float(getattr(stream, "last_stdout_at", 0.0) or 0.0)
+        silence_s = time.monotonic() - max(last_out, started_at)
+        if silence_s < silence_timeout_s:
+            return False
+        sid = state.factory.resume.value if state.factory.resume is not None else None
+        pending_requests = (
+            [k for k, v in _REQUEST_TO_SESSION.items() if v == sid] if sid else []
+        )
+        pending_asks = (
+            [k for k in _PENDING_ASK_REQUESTS if _REQUEST_TO_SESSION.get(k) == sid]
+            if sid
+            else []
+        )
+        live_bg = has_live_background_work(state)
+        if pending_requests or pending_asks or live_bg:
+            run_logger.info(
+                "claude.pre_result_silence.suppressed",
+                session_id=sid,
+                pid=proc.pid,
+                silence_s=round(silence_s, 1),
+                pending_requests=len(pending_requests),
+                pending_asks=len(pending_asks),
+                live_background_work=live_bg,
+            )
+            return False
+        state.pre_result_silence_killed = True
+        run_logger.warning(
+            "claude.pre_result_silence.cancel",
+            session_id=sid,
+            pid=proc.pid,
+            silence_s=round(silence_s, 1),
+            timeout_s=silence_timeout_s,
+        )
+        # Thread the reason into the run's error message via the stderr
+        # excerpt (#575 machinery) — the resulting rc=143 error would
+        # otherwise be indistinguishable from any other kill.
+        if hasattr(stream, "stderr_capture"):
+            stream.stderr_capture.append(
+                f"untether: no stream output for {int(silence_s // 60)}m before "
+                f"any result — pre-result silence cap "
+                f"({int(silence_timeout_s // 60)}m) hit; run auto-cancelled (#592)"
+            )
+        signal_pid_group(proc.pid, signal.SIGTERM)
+        grace_deadline = time.monotonic() + self._subcountdown_sigterm_grace_s
+        while time.monotonic() < grace_deadline:
+            await anyio.sleep(self._subcountdown_sigterm_grace_poll_s)
+            if proc.returncode is not None:
+                return True
+        if proc.returncode is None:
+            run_logger.warning(
+                "claude.pre_result_silence.sigkill_after_grace",
+                session_id=sid,
+                pid=proc.pid,
+            )
+            signal_pid_group(proc.pid, signal.SIGKILL)
+        return True
+
     async def _post_result_idle_watchdog(
         self,
         state: ClaudeStreamState,
@@ -2666,6 +3433,9 @@ class ClaudeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
         timeout_s: float,
         proc: Any = None,
         stream: Any = None,
+        limbo_grace_s: float | None = None,
+        pre_result_silence_timeout_s: float = 3600.0,
+        bg_max_hold_s: float | None = None,
     ) -> None:
         """Close stdin once the bidirectional CLI has been idle past the result.
 
@@ -2690,7 +3460,9 @@ class ClaudeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
         """
         # Poll often enough to react within a few seconds of the deadline,
         # but not so often that we burn CPU on a fully idle session.
-        poll_interval = max(5.0, min(timeout_s / 20.0, 30.0))
+        # (_watchdog_min_poll_s is a class attr so tests can shrink it.)
+        poll_interval = max(self._watchdog_min_poll_s, min(timeout_s / 20.0, 30.0))
+        watchdog_started_at = time.monotonic()
 
         # #333 instrumentation. channelo rc15→rc16 hit a 43+ min post-result
         # hang where this watchdog silently failed to fire (no
@@ -2741,6 +3513,8 @@ class ClaudeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
                         timeout_s=timeout_s,
                         stream=stream,
                         session_id=sid_now,
+                        limbo_grace_s=limbo_grace_s,
+                        bg_max_hold_s=bg_max_hold_s,
                     )
                     return
                 exit_reason = "reader_done"
@@ -2773,6 +3547,8 @@ class ClaudeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
                                 timeout_s=timeout_s,
                                 stream=stream,
                                 session_id=sid_now,
+                                limbo_grace_s=limbo_grace_s,
+                                bg_max_hold_s=bg_max_hold_s,
                             )
                             return
                         exit_reason = "reader_done"
@@ -2801,6 +3577,20 @@ class ClaudeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
                                 state.last_schedule_wakeup_arm_delay
                             ),
                         )
+                        # #592: a run that never produces its first result
+                        # was previously unbounded — nothing owned the
+                        # "alive-but-silent forever" case.
+                        killed = await self._maybe_cancel_pre_result_silence(
+                            state=state,
+                            stream=stream,
+                            proc=proc,
+                            run_logger=run_logger,
+                            silence_timeout_s=pre_result_silence_timeout_s,
+                            started_at=watchdog_started_at,
+                        )
+                        if killed:
+                            exit_reason = "pre_result_silence_cancelled"
+                            return
                         continue
                     elapsed = time.monotonic() - armed_at
 
@@ -2965,6 +3755,8 @@ class ClaudeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
         timeout_s: float,
         stream: Any = None,
         session_id: str | None = None,
+        limbo_grace_s: float | None = None,
+        bg_max_hold_s: float | None = None,
     ) -> str:
         """Watch a stdout-closed-but-process-alive subprocess (#333 Tier 1).
 
@@ -2979,10 +3771,27 @@ class ClaudeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
         alive and no real pending state references the session, emit
         ``runner.limbo_detected`` warning. ``untether-issue-watcher``
         picks this up automatically.
-        """
-        import os as _os
 
-        from ..utils.proc_diag import collect_proc_diag
+        #647/#646: the deadline is liveness-aware — when it expires while the
+        session still has live background work (upstream runs subagents in
+        the background by default since Claude Code v2.1.198, and their
+        completion is NOT signalled on stream-json) and the process tree is
+        not demonstrably idle, the SIGTERM is deferred and re-checked each
+        poll, bounded by ``bg_max_hold_s``. Killing live subagent work
+        quarantines the session (#632) and produces fresh-session amnesia.
+
+        #650: every ~30 s of the countdown emits a
+        ``claude.post_result_idle.subcountdown_tick`` INFO — previously the
+        loop logged nothing between the one-shot ``limbo_detected`` and its
+        exit, a blackout window in which the bridge's independent stall
+        detector raced this loop's returncode poll and mislabelled a normal
+        post-result exit as ``process_dead``.
+        """
+        from ..utils.proc_diag import (
+            collect_proc_diag,
+            is_cpu_active,
+            is_tree_cpu_active,
+        )
 
         reader_done_at = time.monotonic()
         run_logger.info(
@@ -3015,6 +3824,27 @@ class ClaudeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
         # the user is still interacting).
         limbo_logged = False
         deadline = reader_done_at + timeout_s
+        # #591: when nothing references the session — no pending control/ask
+        # requests and no live background work — the full ``timeout_s`` wait
+        # only lets MCP children hold the process (and its RSS/TCP) open.
+        # Cap the wait at ``limbo_grace_s`` in that case; a grace of 0/None
+        # disables the shortcut. The cap re-arms alongside ``deadline``
+        # whenever pending state appears so a just-answered approval still
+        # gets a fresh grace window.
+        grace = (
+            limbo_grace_s
+            if limbo_grace_s is not None
+            else self._post_result_limbo_grace_s
+        )
+        grace_deadline = reader_done_at + grace if grace > 0 else None
+        bg_hold = (
+            bg_max_hold_s
+            if bg_max_hold_s is not None
+            else self._post_result_bg_max_hold_s
+        )
+        prev_diag = None
+        ceiling_extended_logged = False
+        last_tick_log_at = reader_done_at
         while True:
             await anyio.sleep(self._subcountdown_poll_interval_s)
             if proc.returncode is not None:
@@ -3053,9 +3883,22 @@ class ClaudeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
                     pending_asks=len(pending_asks),
                 )
                 deadline = time.monotonic() + timeout_s
+                if grace_deadline is not None:
+                    grace_deadline = time.monotonic() + grace
                 continue
 
             elapsed = time.monotonic() - reader_done_at
+            # #650: per-poll liveness snapshot — feeds the limbo warning, the
+            # ~30 s ``subcountdown_tick`` observability line, and the
+            # #647/#646 liveness-aware ceiling below.
+            diag = collect_proc_diag(proc.pid)
+            cpu_active = is_cpu_active(prev_diag, diag) if prev_diag and diag else None
+            tree_active = (
+                is_tree_cpu_active(prev_diag, diag) if prev_diag and diag else None
+            )
+            prev_diag = diag
+            live_bg = has_live_background_work(state)
+
             # Tier 3: limbo detection — a one-shot warning surfacing the
             # condition for triage. ``untether-issue-watcher`` files this
             # automatically on the next sweep.
@@ -3064,8 +3907,26 @@ class ClaudeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
                 and elapsed >= self._subcountdown_limbo_detect_threshold_s
             ):
                 limbo_logged = True
-                diag = collect_proc_diag(proc.pid)
-                run_logger.warning(
+                # #590: refresh the orphan snapshot — children spawned AFTER
+                # the reader-done snapshot (the sl "late leaker" shape) are
+                # captured here so the post-exit sweep can reach them. Use the
+                # recursive walk (find_descendants) rather than diag.child_pids,
+                # which is DIRECT children only and misses the npx→node
+                # grandchild that actually leaks.
+                _capture_orphan_descendants(state, source="limbo", pid=proc.pid)
+                # #653: the level reflects the assessed state, not the
+                # transition into it. Live background work — or a
+                # demonstrably busy process tree — lingering after the
+                # result is healthy, expected behaviour under the
+                # liveness-aware ceiling (#646/#647): INFO. WARNING is
+                # reserved for limbo with no evidence of work, the
+                # genuinely-stuck case the warning was written for.
+                limbo_log = (
+                    run_logger.info
+                    if (live_bg or cpu_active is True or tree_active is True)
+                    else run_logger.warning
+                )
+                limbo_log(
                     "runner.limbo_detected",
                     engine="claude",
                     pid=proc.pid,
@@ -3076,6 +3937,9 @@ class ClaudeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
                         if state.result_received_at is not None
                         else None
                     ),
+                    live_background_work=live_bg,
+                    cpu_active=cpu_active,
+                    tree_active=tree_active,
                     mcp_child_pids=list(diag.child_pids) if diag else [],
                     rss_kb=diag.rss_kb if diag else None,
                     tcp_total=diag.tcp_total if diag else None,
@@ -3090,7 +3954,115 @@ class ClaudeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
                         seconds_since_reader_done=round(elapsed, 1),
                     )
 
-            if time.monotonic() >= deadline:
+            # #591: cap the deadline at the limbo grace when the session is
+            # fully quiescent — no live background work means nothing can
+            # legitimately produce output any more (pending requests/asks
+            # were handled above via the re-arm branch).
+            #
+            # #655: `not live_bg` alone is NOT quiescence — it only means no
+            # *registered* background handle. A process can be busy with
+            # direct work (waiting on a build, a slow MCP call, a poll loop)
+            # with live_bg False. Consult the same liveness signals the
+            # extension gate below uses, so a demonstrably-busy process falls
+            # through to the full ``timeout_s``. Tri-state: both signals are
+            # None on the first poll (no prev_diag); `is True` keeps unknown
+            # liveness from blocking the grace cap, preserving #591's fast
+            # reap of genuinely quiescent husks.
+            demonstrably_busy = cpu_active is True or tree_active is True
+            effective_deadline = deadline
+            limbo_grace_applied = False
+            if (
+                grace_deadline is not None
+                and grace_deadline < deadline
+                and not live_bg
+                and not demonstrably_busy
+            ):
+                effective_deadline = grace_deadline
+                limbo_grace_applied = True
+
+            # #650 (defect 3): per-tick observability, throttled to ~30 s.
+            # Previously nothing logged between the one-shot limbo warning
+            # and the loop's exit — a blackout in which the bridge's stall
+            # detector raced this loop's returncode poll and won.
+            now_mono = time.monotonic()
+            if now_mono - last_tick_log_at >= self._subcountdown_tick_log_interval_s:
+                last_tick_log_at = now_mono
+                run_logger.info(
+                    "claude.post_result_idle.subcountdown_tick",
+                    session_id=sid,
+                    pid=proc.pid,
+                    elapsed_s=round(elapsed, 1),
+                    in_limbo=limbo_logged,
+                    live_background_work=live_bg,
+                    cpu_active=cpu_active,
+                    tree_active=tree_active,
+                    child_count=len(diag.child_pids) if diag else None,
+                    rss_kb=diag.rss_kb if diag else None,
+                    deadline_remaining_s=round(effective_deadline - now_mono, 1),
+                )
+
+            if time.monotonic() >= effective_deadline:
+                # #647/#646: liveness-aware ceiling. Upstream runs subagents
+                # in the background by default (Claude Code ≥2.1.198) and
+                # never signals their completion on stream-json, so the only
+                # evidence is /proc. If background handles are still live and
+                # the process tree is not demonstrably idle, defer the
+                # SIGTERM — killing live subagent work quarantines the
+                # session (#632) and produces fresh-session amnesia. Bounded
+                # twice over: handles age out at BG_AGENT_MAX_KEEP_S, and the
+                # hold never exceeds ``bg_hold`` seconds past reader-EOF.
+                demonstrably_idle = (
+                    diag is not None
+                    and diag.alive
+                    and cpu_active is False
+                    and tree_active is False
+                )
+                if (
+                    bg_hold > 0
+                    and elapsed < bg_hold
+                    and live_bg
+                    and not demonstrably_idle
+                ):
+                    if not ceiling_extended_logged:
+                        ceiling_extended_logged = True
+                        run_logger.info(
+                            "claude.post_result_idle.ceiling_extended",
+                            session_id=sid,
+                            pid=proc.pid,
+                            elapsed_s=round(elapsed, 1),
+                            timeout_s=timeout_s,
+                            bg_max_hold_s=bg_hold,
+                            cpu_active=cpu_active,
+                            tree_active=tree_active,
+                            child_count=len(diag.child_pids) if diag else None,
+                        )
+                    continue
+                # #632 (W2): the process already emitted a valid result but
+                # is being force-killed while lingering (MCP children / hung
+                # background work) — its last upstream turn may be left
+                # dangling on the far side, making the session unsafe to
+                # resume. Record the marker BEFORE sending SIGTERM. A store
+                # failure must never block teardown, hence the narrow
+                # try/except. SIGKILL (below) always follows this same
+                # branch on the same pass, so recording once here is
+                # sufficient — no second record site needed at sigkill.
+                quarantined = False
+                if (
+                    stream is not None
+                    and stream.did_emit_completed
+                    and sid is not None
+                    and _load_quarantine_on_forced_teardown()
+                ):
+                    try:
+                        get_quarantine_store().quarantine(
+                            self.engine, sid, reason="forced_teardown_after_result"
+                        )
+                        quarantined = True
+                    except Exception:  # noqa: BLE001 — never let a
+                        # quarantine store failure break subprocess teardown.
+                        run_logger.debug(
+                            "session.quarantine_record_failed", exc_info=True
+                        )
                 # Timeout: SIGTERM the process group (start_new_session=True
                 # so PID == pgid). 5 s grace, then SIGKILL.
                 run_logger.warning(
@@ -3099,6 +4071,17 @@ class ClaudeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
                     pid=proc.pid,
                     timeout_s=timeout_s,
                     elapsed_s=round(elapsed, 1),
+                    limbo_grace_applied=limbo_grace_applied,
+                    limbo_grace_s=grace if limbo_grace_applied else None,
+                    quarantined=quarantined,
+                    # #647: "background work was correctly tracked and killed
+                    # anyway" is identified by live_background_work=True here,
+                    # regardless of which resume-divert label lands later.
+                    live_background_work=live_bg,
+                    bg_hold_extended=ceiling_extended_logged,
+                    bg_max_hold_s=bg_hold,
+                    cpu_active=cpu_active,
+                    tree_active=tree_active,
                 )
                 if stream is not None:
                     self._transition_lifecycle(
@@ -3108,8 +4091,14 @@ class ClaudeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
                         pid=proc.pid,
                         session_id=sid,
                     )
-                with contextlib.suppress(ProcessLookupError, PermissionError, OSError):
-                    _os.killpg(proc.pid, signal.SIGTERM)
+                    # #631 (W5-diag): record on the stream itself so the
+                    # runner.empty_result diagnostic (in the bridge, on a
+                    # SUBSEQUENT message) can see that a forced teardown
+                    # happened during this run.
+                    stream.sigterm_sent = True
+                # #590: descendant-aware — bare killpg missed MCP chains
+                # that re-parented into separate sessions/pgroups.
+                signal_pid_group(proc.pid, signal.SIGTERM)
                 # Give MCP children configured grace to clean up.
                 grace_deadline = time.monotonic() + self._subcountdown_sigterm_grace_s
                 while time.monotonic() < grace_deadline:
@@ -3139,8 +4128,7 @@ class ClaudeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
                         pid=proc.pid,
                         session_id=sid,
                     )
-                with contextlib.suppress(ProcessLookupError, PermissionError, OSError):
-                    _os.killpg(proc.pid, signal.SIGKILL)
+                signal_pid_group(proc.pid, signal.SIGKILL)
                 return "reader_done_but_alive_timeout"
 
     def translate(
@@ -3216,6 +4204,7 @@ class ClaudeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
         resume: ResumeToken | None,
         found_session: ResumeToken | None,
         state: ClaudeStreamState,
+        stderr_lines: list[str] | None = None,
     ) -> list[UntetherEvent]:
         # Phase 2: Cleanup runner registration
         session_id = (
@@ -3341,6 +4330,11 @@ class ClaudeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
 
             async with manage_subprocess(
                 cmd,
+                # #590: sweep leaked MCP children after exit; the snapshot
+                # list is filled at reader-done / limbo time (escapees).
+                reap_orphans=self._reap_orphans,
+                orphan_pid_snapshot=state.orphan_pid_snapshot,
+                orphan_pid_starttimes=state.orphan_pid_starttimes,
                 stdin=stdin_arg,
                 stdout=subprocess_module.PIPE,
                 stderr=subprocess_module.PIPE,
@@ -3402,6 +4396,12 @@ class ClaudeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
                 # #361 stash PID so the env audit in translate_claude_event
                 # can sample /proc/<pid>/environ on system.init.
                 state.pid = proc.pid
+                # #593: the base runner sets last_pid but this override never
+                # did — the bridge's thread_pid() early-poll returned None for
+                # Claude, so stall diagnostics ran blind (pid=None
+                # process_alive=None) exactly when a run never emitted a
+                # StartedEvent (the only other PID source).
+                self.last_pid = proc.pid
                 self.current_stream = stream
                 reader_done = anyio.Event()
 
@@ -3410,6 +4410,9 @@ class ClaudeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
                 # legacy "stay alive forever" behaviour in place.
                 post_result_idle_enabled = True
                 post_result_idle_timeout_s = 600.0
+                post_result_limbo_grace_s = self._post_result_limbo_grace_s
+                pre_result_silence_timeout_s = 3600.0
+                post_result_bg_max_hold_s = self._post_result_bg_max_hold_s
                 try:
                     result = load_settings_if_exists()
                     if result is not None:
@@ -3419,6 +4422,15 @@ class ClaudeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
                         )
                         post_result_idle_timeout_s = float(
                             settings_obj.watchdog.post_result_idle_timeout
+                        )
+                        post_result_limbo_grace_s = float(
+                            settings_obj.watchdog.post_result_limbo_grace
+                        )
+                        pre_result_silence_timeout_s = float(
+                            settings_obj.watchdog.pre_result_silence_timeout
+                        )
+                        post_result_bg_max_hold_s = float(
+                            settings_obj.watchdog.post_result_bg_max_hold
                         )
                 except Exception:  # noqa: BLE001 — settings errors must not block a run
                     run_logger.debug(
@@ -3455,6 +4467,9 @@ class ClaudeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
                             post_result_idle_timeout_s,
                             proc,
                             stream,
+                            post_result_limbo_grace_s,
+                            pre_result_silence_timeout_s,
+                            post_result_bg_max_hold_s,
                         )
                     async for evt in self._iter_jsonl_events(
                         stdout=proc.stdout,
@@ -3466,6 +4481,17 @@ class ClaudeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
                         session_stdin=this_proc_stdin if use_control_channel else None,
                     ):
                         yield evt
+                    # #590: refresh the descendant snapshot while the
+                    # subprocess is still alive — after exit, /proc children
+                    # links are gone and pgroup escapees become invisible.
+                    # The sweep in manage_subprocess reads this list at
+                    # teardown. This is a refresh: the result-event capture
+                    # already seeded the snapshot for fast clean runs, so the
+                    # returncode guard here is no longer fatal.
+                    if proc.returncode is None:
+                        _capture_orphan_descendants(
+                            state, source="reader_done", pid=proc.pid
+                        )
                     reader_done.set()
 
                     # Close stdin after all events to let CLI exit.
@@ -3483,6 +4509,15 @@ class ClaudeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
                         await proc.stderr.aclose()
 
                 rc = await proc.wait()
+                # #640: mirror the base runner (runner.py:1362). ClaudeRunner
+                # overrides run_impl wholesale, and this assignment was missing
+                # — so `stream.proc_returncode` stayed None for every Claude
+                # run and `_is_signal_death(None)` in the bridge's
+                # auto-continue gate always returned False. The death-spiral
+                # guard #589 relied on was therefore inert for the ONLY engine
+                # auto-continue applies to (nsd fleet logs: 2 auto-continues
+                # fired straight after a rc=143 SIGTERM exit).
+                stream.proc_returncode = rc
                 run_logger.info("subprocess.exit", pid=proc.pid, rc=rc)
                 if stream.did_emit_completed:
                     return
@@ -3522,6 +4557,27 @@ class ClaudeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
                     yield evt
 
         finally:
+            # #667: stream.proc_returncode is assigned only on the happy path
+            # (after `rc = await proc.wait()` in the try body). Cancellation
+            # (/cancel, /new, drain), an exception in the task group / JSONL
+            # reader, or the early pipes RuntimeError all skip that assignment,
+            # leaving it None — so _is_signal_death(None) stays False and the
+            # bridge's auto-continue death-spiral guard (#640) is inert on
+            # exactly those paths. manage_subprocess.__aexit__ has already run
+            # its shielded, bounded terminate+reap by the time this finally
+            # executes (utils/subprocess.py), so proc.returncode is populated;
+            # capture it here with no extra wait. Guarded because BOTH `proc`
+            # (unbound if manage_subprocess raised in __aenter__) and `stream`
+            # (assigned inside the manage_subprocess block, so unbound if we
+            # exit before then) can be absent — the sibling `stream.found_session`
+            # access below guards the same way.
+            with contextlib.suppress(NameError, AttributeError):
+                if (
+                    stream.proc_returncode is None
+                    and proc is not None
+                    and proc.returncode is not None
+                ):
+                    stream.proc_returncode = proc.returncode
             # Clean up global registries on ANY exit (cancel, error, normal).
             # process_error_events/stream_end_events handle normal paths but
             # cancellation skips both, leaving stale outline_guard/cooldown state.
@@ -3680,55 +4736,20 @@ async def send_claude_control_response(
     return success
 
 
-def _cooldown_seconds(count: int) -> float:
-    """Progressive cooldown: 30s, 60s, 90s, 120s (capped)."""
-    return min(DISCUSS_COOLDOWN_BASE_SECONDS * count, DISCUSS_COOLDOWN_MAX_SECONDS)
+def mark_outline_pending(session_id: str) -> None:
+    """Record that 'Pause & Outline Plan' was clicked for this session.
 
+    Subsequent ExitPlanMode requests are gated on visible outline text
+    (``_OUTLINE_MIN_CHARS``): auto-denied with the write-the-outline-first
+    instruction until enough text is written, then held open behind the
+    synthetic Approve/Deny buttons.
 
-def set_discuss_cooldown(session_id: str) -> None:
-    """Record that a discuss denial was sent for this session.
-
-    Called by claude_control when the user clicks 'Pause & Outline Plan'.
-    Subsequent ExitPlanMode requests within the cooldown window will
-    be auto-denied with an escalating message. The cooldown window
-    grows with each click: 30s, 60s, 90s, 120s (capped).
+    #570: replaces ``set_discuss_cooldown`` — the time-based progressive
+    cooldown it also armed was a v2.1.72-74 upstream-loop workaround,
+    removed after verifying the fix on CLI 2.1.215.
     """
-    existing = _DISCUSS_COOLDOWN.get(session_id)
-    count = (existing[1] + 1) if existing else 1
-    _DISCUSS_COOLDOWN[session_id] = (time.time(), count)
-    cooldown = _cooldown_seconds(count)
     _OUTLINE_PENDING.add(session_id)
-    logger.info(
-        "discuss_cooldown.set",
-        session_id=session_id,
-        deny_count=count,
-        cooldown_seconds=cooldown,
-    )
-
-
-def check_discuss_cooldown(session_id: str) -> str | None:
-    """Check if an ExitPlanMode request should be auto-denied due to discuss cooldown.
-
-    Returns an escalation deny message (with cooldown duration) if within
-    cooldown, or None if clear. Uses progressive timing based on deny count.
-    """
-    entry = _DISCUSS_COOLDOWN.get(session_id)
-    if entry is None:
-        return None
-    ts, count = entry
-    cooldown = _cooldown_seconds(count)
-    if time.time() - ts > cooldown:
-        # Cooldown expired — keep the count so next click escalates further
-        # Only clear the timestamp so the next ExitPlanMode gets through
-        # but set_discuss_cooldown will use count+1 for the next window
-        _DISCUSS_COOLDOWN[session_id] = (0.0, count)
-        return None
-    return _DISCUSS_ESCALATION_MESSAGE
-
-
-def clear_discuss_cooldown(session_id: str) -> None:
-    """Clear the discuss cooldown for a session (e.g. on approve/deny)."""
-    _DISCUSS_COOLDOWN.pop(session_id, None)
+    logger.info("outline_pending.set", session_id=session_id)
 
 
 def _cleanup_session_registries(session_id: str) -> None:
@@ -3742,9 +4763,8 @@ def _cleanup_session_registries(session_id: str) -> None:
         cleaned.append("active_runners")
     if _SESSION_STDIN.pop(session_id, None) is not None:
         cleaned.append("session_stdin")
-    if session_id in _DISCUSS_COOLDOWN:
-        cleaned.append("discuss_cooldown")
-    clear_discuss_cooldown(session_id)
+    if _SESSION_BG_STATE.pop(session_id, None) is not None:
+        cleaned.append("session_bg_state")
     if session_id in _DISCUSS_APPROVED:
         cleaned.append("discuss_approved")
     _DISCUSS_APPROVED.discard(session_id)

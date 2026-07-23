@@ -344,6 +344,18 @@ class JsonlStreamState:
     )
     stderr_capture: list[str] = field(default_factory=list)
     proc_returncode: int | None = None
+    # #631 (W5-diag): set True at the claude.py SIGTERM site
+    # (_post_result_subcountdown's sigterm_after_timeout branch) — records
+    # whether a forced teardown happened during this run, for the
+    # runner.empty_result diagnostic log.
+    sigterm_sent: bool = False
+    # #631 (W5-diag): mirrors ClaudeStreamState.background_observed (the
+    # only state object `_register_background_handle` sees) onto the
+    # engine-agnostic stream — see runner.py's `_handle_jsonl_line` for the
+    # mirror-set and claude.py's `_register_background_handle` for the
+    # source of truth. Engines without background-task awareness leave this
+    # False.
+    background_observed: bool = False
     # #494: subprocess.liveness_stall canary counter. Today `liveness_warned`
     # in _watchdog_loop latches after the first warning, so this is 0 or 1 per
     # run. Kept as int for forward-compat if the latch is ever relaxed; surfaced
@@ -618,11 +630,15 @@ class JsonlSubprocessRunner(BaseRunner):
         resume: ResumeToken | None,
         found_session: ResumeToken | None,
         state: Any,
+        stderr_lines: list[str] | None = None,
     ) -> list[UntetherEvent]:
         parts = [f"{self.tag()} finished without a result event"]
         session = _session_label(found_session, resume)
         if session:
             parts.append(f"session: {session}")
+        excerpt = _stderr_excerpt(stderr_lines)
+        if excerpt:
+            parts.append(excerpt)
         message = "\n".join(parts)
         resume_for_completed = found_session or resume
         return [
@@ -884,6 +900,17 @@ class JsonlSubprocessRunner(BaseRunner):
             logger=logger,
             pid=pid,
         )
+        # #631 (W5-diag): mirror Claude's background-task observation onto
+        # the generic stream state. `_register_background_handle` only sees
+        # the engine-specific `state` (ClaudeStreamState), not this
+        # JsonlStreamState — this is the one place both are in scope after
+        # translate() has had a chance to set it. Defensive getattr keeps
+        # this engine-agnostic: engines whose state has no
+        # `background_observed` attribute leave the mirror False forever.
+        if not stream.background_observed and getattr(
+            state, "background_observed", False
+        ):
+            stream.background_observed = True
         # Peek at raw JSON for event timeline (engine-agnostic)
         try:
             raw_dict = json.loads(line)
@@ -990,6 +1017,10 @@ class JsonlSubprocessRunner(BaseRunner):
 
     _stall_auto_kill: bool = False
 
+    # #590: post-exit orphan sweep ([watchdog] reap_orphans, default true).
+    # Refreshed per run from WatchdogSettings by the bridge.
+    _reap_orphans: bool = True
+
     def _check_prespawn_ram_guard(
         self, resume: ResumeToken | None
     ) -> CompletedEvent | None:
@@ -1023,29 +1054,71 @@ class JsonlSubprocessRunner(BaseRunner):
 
         warn_mb = watchdog.prespawn_ram_warn_mb
         block_mb = watchdog.prespawn_ram_block_mb
-        if warn_mb <= 0 and block_mb <= 0:
+        max_runs = getattr(watchdog, "max_concurrent_engine_runs", 0)
+        per_run_reserve = getattr(watchdog, "prespawn_ram_per_run_reserve_mb", 0)
+        if warn_mb <= 0 and block_mb <= 0 and max_runs <= 0:
             return None  # guard fully disabled
+
+        logger = self.get_logger()
+
+        # #589: concurrency ceiling. Checked before the RAM reading because it
+        # is deterministic — on a small host the accumulating MCP-child leak
+        # matters more than the instantaneous free-memory figure.
+        from .utils.subprocess import live_engine_subprocess_count
+
+        live_runs = live_engine_subprocess_count()
+        if max_runs > 0 and live_runs >= max_runs:
+            logger.error(
+                "subprocess.prespawn.concurrency_blocked",
+                engine=self.engine,
+                live_runs=live_runs,
+                max_runs=max_runs,
+            )
+            return CompletedEvent(
+                engine=self.engine,
+                ok=False,
+                answer="",
+                resume=resume,
+                error=(
+                    f"🛑 Too many engine runs in flight ({live_runs}/{max_runs}). "
+                    f"Wait for one to finish, or /cancel an active run."
+                ),
+            )
 
         avail_kb = mem_available_kb()
         if avail_kb is None:
             return None  # non-Linux / /proc unreadable — treat as ALLOW
         avail_mb = avail_kb // 1024
 
-        logger = self.get_logger()
+        # #589: raise the bar as concurrency rises. Without this, N chats each
+        # pass a flat threshold independently and then collectively OOM the
+        # host — the observed nsd failure mode.
+        effective_block_mb = block_mb + per_run_reserve * live_runs
 
-        if block_mb > 0 and avail_mb < block_mb:
+        if block_mb > 0 and avail_mb < effective_block_mb:
             logger.error(
                 "subprocess.prespawn.ram_blocked",
                 engine=self.engine,
                 avail_mb=avail_mb,
                 block_mb=block_mb,
+                effective_block_mb=effective_block_mb,
+                live_runs=live_runs,
+                per_run_reserve_mb=per_run_reserve,
                 warn_mb=warn_mb,
             )
-            msg = (
-                f"🛑 Insufficient RAM to start engine ({avail_mb} MB free, "
-                f"threshold {block_mb} MB). Cancel an active run or restart "
-                f"the service."
-            )
+            if live_runs > 0 and effective_block_mb > block_mb:
+                msg = (
+                    f"🛑 Insufficient RAM to start engine ({avail_mb} MB free; "
+                    f"need {effective_block_mb} MB with {live_runs} run(s) "
+                    f"already in flight). Wait for one to finish, or /cancel "
+                    f"an active run."
+                )
+            else:
+                msg = (
+                    f"🛑 Insufficient RAM to start engine ({avail_mb} MB free, "
+                    f"threshold {block_mb} MB). Cancel an active run or restart "
+                    f"the service."
+                )
             return CompletedEvent(
                 engine=self.engine,
                 ok=False,
@@ -1187,20 +1260,11 @@ class JsonlSubprocessRunner(BaseRunner):
                                 pid=pid,
                                 reason="zero_tcp_zero_cpu",
                             )
-                            try:
-                                _os.killpg(pid, signal.SIGKILL)
-                            except (
-                                ProcessLookupError,
-                                PermissionError,
-                                OSError,
-                            ) as e:
-                                logger.debug(
-                                    "subprocess.watchdog.suppressed",
-                                    pid=pid,
-                                    error=str(e),
-                                    error_type=e.__class__.__name__,
-                                    context="liveness_kill",
-                                )
+                            # #590: descendant-aware — bare killpg missed
+                            # grandchildren in separate sessions/pgroups.
+                            from .utils.subprocess import signal_pid_group
+
+                            signal_pid_group(pid, signal.SIGKILL)
                         prev_diag = diag
 
             await anyio.sleep(self._WATCHDOG_POLL_SECONDS)
@@ -1218,20 +1282,12 @@ class JsonlSubprocessRunner(BaseRunner):
         )
         # Kill the process group to terminate orphan children holding pipes open.
         # manage_subprocess uses start_new_session=True, so the process group
-        # matches the subprocess PID.
-        try:
-            _os.killpg(pid, signal.SIGKILL)
-            logger.warning("subprocess.killed_orphan_group", pid=pid)
-        except (ProcessLookupError, PermissionError) as e:
-            logger.debug(
-                "subprocess.watchdog.suppressed",
-                pid=pid,
-                error=str(e),
-                error_type=e.__class__.__name__,
-                context="orphan_killpg",
-            )
-        except OSError:
-            logger.debug("subprocess.killpg_failed", pid=pid, exc_info=True)
+        # matches the subprocess PID. #590: descendant-aware so pgroup
+        # escapees holding the pipes are also terminated.
+        from .utils.subprocess import signal_pid_group
+
+        signal_pid_group(pid, signal.SIGKILL)
+        logger.warning("subprocess.killed_orphan_group", pid=pid)
 
     async def run_impl(
         self, prompt: str, resume: ResumeToken | None
@@ -1272,6 +1328,7 @@ class JsonlSubprocessRunner(BaseRunner):
 
         async with manage_subprocess(
             cmd,
+            reap_orphans=self._reap_orphans,
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
@@ -1372,6 +1429,7 @@ class JsonlSubprocessRunner(BaseRunner):
                 resume=resume,
                 found_session=found_session,
                 state=state,
+                stderr_lines=stream.stderr_capture or None,
             )
             for evt in events:
                 if isinstance(evt, CompletedEvent):

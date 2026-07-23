@@ -13,7 +13,7 @@ import anyio
 from anyio.abc import Process
 
 from ..logging import get_logger
-from .proc_diag import find_descendants
+from .proc_diag import find_descendants, pid_starttime
 
 logger = get_logger(__name__)
 
@@ -164,17 +164,210 @@ def _signal_descendants(pids: list[int], sig: signal.Signals, log_event: str) ->
             )
 
 
+def signal_pid_group(pid: int, sig: signal.Signals) -> None:
+    """Deliver *sig* to a bare pid's process group AND its captured
+    descendants (#590).
+
+    The pid-based twin of :func:`_signal_process` for callers that hold a
+    pid rather than an anyio ``Process`` (the Claude post-result watchdog).
+    Bare ``os.killpg`` misses grandchildren that re-parented into separate
+    sessions/pgroups (e.g. MCP ``node`` → ``mcp-remote`` chains), so the
+    descendant tree is snapshotted BEFORE signalling the group.
+    """
+    if os.name != "posix":
+        return
+    descendants: list[int] = []
+    if sys.platform == "linux":
+        try:
+            descendants = find_descendants(pid)
+        except OSError:
+            descendants = []
+    with contextlib.suppress(ProcessLookupError, PermissionError, OSError):
+        os.killpg(pid, sig)
+    _signal_descendants(descendants, sig, "subprocess.group_signal.failed")
+
+
+def _pid_alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except (PermissionError, OSError):
+        return True
+    return True
+
+
+def _pgid_members(pgid: int) -> list[int]:
+    """Enumerate live PIDs whose process group is *pgid* (Linux /proc scan).
+
+    Used by the post-exit orphan sweep for logging and per-PID delivery.
+    Best-effort: unreadable or vanished entries are skipped; non-Linux
+    returns an empty list (the killpg-based sweep still works there).
+    """
+    if sys.platform != "linux":
+        return []
+    members: list[int] = []
+    try:
+        entries = os.listdir("/proc")
+    except OSError:
+        return []
+    for entry in entries:
+        if not entry.isdigit():
+            continue
+        try:
+            with open(f"/proc/{entry}/stat", "rb") as fh:
+                stat = fh.read()
+            # Field 5 (pgrp) sits after the comm field, which can contain
+            # spaces/parens — parse from the LAST ')'.
+            after_comm = stat[stat.rindex(b")") + 2 :].split()
+            if int(after_comm[1]) == pgid:
+                members.append(int(entry))
+        except (OSError, ValueError, IndexError):
+            continue
+    return members
+
+
+async def reap_orphaned_group(
+    pgid: int,
+    *,
+    extra_pids: Sequence[int] = (),
+    extra_pid_starttimes: Mapping[int, int] | None = None,
+    grace_s: float = 2.0,
+) -> list[int]:
+    """#590: sweep process-group survivors after the group leader exited.
+
+    The Claude CLI leaks MCP ``node`` children on clean (rc=0) exits —
+    observed fleet-wide as 1 orphan per run accumulating until the daily
+    systemd SIGKILL sweep, and the dominant memory pressure behind the nsd
+    OOM kills (#589). Nothing previously killed them: ``manage_subprocess``
+    only signalled while the *leader* was still alive.
+
+    Delivers SIGTERM to the group (plus any *extra_pids* captured while the
+    leader was alive — pgroup escapees), waits up to *grace_s* for a clean
+    exit, then SIGKILLs survivors. Returns the PIDs targeted (best-effort,
+    for the ``subprocess.orphans_reaped`` log). No-ops instantly when the
+    group is already empty.
+
+    ``extra_pid_starttimes`` (#590 hardening): a ``{pid: /proc starttime}``
+    map recorded when each *extra_pid* was captured. Before signalling an
+    extra PID we re-read its start time and skip it on mismatch — so a
+    captured descendant that exited and had its PID recycled by an unrelated
+    process is never killed. The process-group kill is unaffected (escapees
+    are the only PID-signalled targets).
+    """
+    if os.name != "posix":
+        return []
+
+    def _identity_ok(p: int) -> bool:
+        if not extra_pid_starttimes:
+            return True  # legacy / best-effort: no identity recorded
+        recorded = extra_pid_starttimes.get(p)
+        if recorded is None:
+            return True  # this pid was captured without a starttime
+        current = pid_starttime(p)
+        # Unreadable now (raced away / non-Linux) → skip rather than risk a
+        # wrong kill; a genuinely-alive orphan would still expose its stat.
+        return current is not None and current == recorded
+
+    live_extras = [
+        p for p in extra_pids if p != pgid and _pid_alive(p) and _identity_ok(p)
+    ]
+
+    def _group_alive() -> bool:
+        try:
+            os.killpg(pgid, 0)
+        except ProcessLookupError:
+            return False
+        except (PermissionError, OSError):
+            return True
+        return True
+
+    if not _group_alive() and not live_extras:
+        return []
+
+    victims: set[int] = set(_pgid_members(pgid))
+    victims.update(live_extras)
+
+    with contextlib.suppress(ProcessLookupError, PermissionError, OSError):
+        os.killpg(pgid, signal.SIGTERM)
+    _signal_descendants(live_extras, signal.SIGTERM, "subprocess.orphan_sweep.failed")
+
+    deadline_polls = max(1, int(grace_s / 0.1))
+    for _ in range(deadline_polls):
+        if not _group_alive() and not any(_pid_alive(p) for p in live_extras):
+            break
+        await anyio.sleep(0.1)
+
+    survivors = [p for p in victims if _pid_alive(p) and _identity_ok(p)]
+    if _group_alive() or survivors:
+        with contextlib.suppress(ProcessLookupError, PermissionError, OSError):
+            os.killpg(pgid, signal.SIGKILL)
+        _signal_descendants(survivors, signal.SIGKILL, "subprocess.orphan_sweep.failed")
+
+    reaped = sorted(victims)
+    if reaped:
+        logger.info(
+            "subprocess.orphans_reaped",
+            pgid=pgid,
+            pids=reaped,
+            extra_pids=sorted(live_extras),
+        )
+    return reaped
+
+
+# #589: how many engine subprocesses are alive right now, process-wide.
+#
+# The pre-spawn RAM guard (#350) is per-spawn and count-blind: N chats can each
+# individually pass the free-RAM check and then collectively exhaust the box.
+# That is what happened on nsd — the OOM killer struck untether.service 5x in
+# one evening and took two live Claude runs with it (rc=-9), each session
+# holding 10-17 MCP node children.
+#
+# Counted here rather than from `TelegramLoopState.running_tasks` because this
+# is the single spawn point shared by every engine runner, and because what
+# actually consumes memory is a live subprocess, not a queued task. Plain int
+# rather than a lock: anyio is single-threaded per event loop and both mutation
+# sites are synchronous, so there is no interleaving to guard against.
+_LIVE_ENGINE_SUBPROCESSES = 0
+
+
+def _incr_live_engine_subprocesses(delta: int) -> None:
+    global _LIVE_ENGINE_SUBPROCESSES
+    _LIVE_ENGINE_SUBPROCESSES = max(0, _LIVE_ENGINE_SUBPROCESSES + delta)
+
+
+def live_engine_subprocess_count() -> int:
+    """Number of engine subprocesses currently alive in this process (#589)."""
+    return _LIVE_ENGINE_SUBPROCESSES
+
+
 @asynccontextmanager
 async def manage_subprocess(
-    cmd: Sequence[str], **kwargs: Any
+    cmd: Sequence[str],
+    *,
+    reap_orphans: bool = True,
+    orphan_pid_snapshot: Sequence[int] | None = None,
+    orphan_pid_starttimes: Mapping[int, int] | None = None,
+    **kwargs: Any,
 ) -> AsyncIterator[Process]:
-    """Ensure subprocesses receive SIGTERM, then SIGKILL after a 10s timeout."""
+    """Ensure subprocesses receive SIGTERM, then SIGKILL after a 10s timeout.
+
+    ``reap_orphans`` (#590, ``[watchdog] reap_orphans``): after the leader
+    has exited — including clean rc=0 — sweep surviving process-group
+    members and any PIDs the caller captured into *orphan_pid_snapshot*
+    while the leader was alive (a mutable list works: it is read only at
+    teardown time). *orphan_pid_starttimes* carries each captured PID's
+    ``/proc`` start time so the sweep can reject a recycled PID before
+    signalling (see ``reap_orphaned_group``).
+    """
     if os.name == "posix":
         kwargs.setdefault("start_new_session", True)
     proc = await anyio.open_process(cmd, **kwargs)
+    _incr_live_engine_subprocesses(1)
     try:
         yield proc
     finally:
+        _incr_live_engine_subprocesses(-1)
         if proc.returncode is None:
             with anyio.CancelScope(shield=True):
                 terminate_process(proc)
@@ -182,3 +375,27 @@ async def manage_subprocess(
                 if timed_out:
                     kill_process(proc)
                     await proc.wait()
+        # #590: the leader is dead — reap group survivors (leaked MCP
+        # children etc.) before releasing the transport.
+        if reap_orphans:
+            with anyio.CancelScope(shield=True):
+                try:
+                    await reap_orphaned_group(
+                        proc.pid,
+                        extra_pids=tuple(orphan_pid_snapshot or ()),
+                        extra_pid_starttimes=(
+                            dict(orphan_pid_starttimes)
+                            if orphan_pid_starttimes
+                            else None
+                        ),
+                    )
+                except Exception:  # noqa: BLE001
+                    logger.debug("subprocess.orphan_sweep_failed", exc_info=True)
+        # #599: release the asyncio subprocess transport explicitly, on every
+        # exit path including clean rc=0. Without this the transport is only
+        # reached by GC at interpreter exit — after the event loop closed —
+        # so BaseSubprocessTransport.__del__ raises "RuntimeError: Event loop
+        # is closed" and the transport's pipes/FDs live from run completion
+        # until process shutdown.
+        with anyio.CancelScope(shield=True), contextlib.suppress(Exception):
+            await proc.aclose()

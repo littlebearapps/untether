@@ -23,6 +23,7 @@ from untether.telegram.loop import (
     _drain_backlog,
     _format_answered_echo,
     _forward_key,
+    _init_quarantine_store,
     _PendingPrompt,
     _resolve_engine_run_options,
 )
@@ -699,3 +700,148 @@ def test_format_answered_echo_boundary_one_over_max() -> None:
     body = out.removeprefix("↩️ Answered: ")
     assert body.endswith("…")
     assert len(body) == _ANSWERED_ECHO_MAX
+
+
+# ---------------------------------------------------------------------------
+# #631 (T6) — eager QuarantineStore startup init
+# ---------------------------------------------------------------------------
+
+
+class TestInitQuarantineStore:
+    """``_init_quarantine_store`` is called once from ``poll_updates``, at
+    the same startup lifecycle point as the offset-persistence writer, so
+    the process-wide QuarantineStore singleton is resolved from the
+    ACTUAL loaded config path rather than lazily re-deriving it from
+    UNTETHER_CONFIG_PATH/HOME on first use mid-run. Driving ``poll_updates``
+    itself would require a full FakeBot/polling harness this file doesn't
+    otherwise build, so the init logic is exercised directly via the
+    extracted helper (per the file's existing pattern of testing small
+    loop.py units in isolation, e.g. ``_drain_backlog``).
+    """
+
+    def test_631_startup_initialises_quarantine_store(self, tmp_path) -> None:
+        from untether.session_quarantine import (
+            get_quarantine_store,
+            set_quarantine_store,
+        )
+
+        config_path = tmp_path / "untether.toml"
+        config_path.write_text("")
+
+        set_quarantine_store(None)
+        try:
+            _init_quarantine_store(config_path)
+            store = get_quarantine_store()
+            assert store.path == config_path.with_name("session_quarantine.json")
+        finally:
+            set_quarantine_store(None)
+
+    def test_631_startup_init_never_raises_on_unexpected_load_error(
+        self, tmp_path, monkeypatch
+    ) -> None:
+        """``QuarantineStore.load()`` already survives corrupt JSON
+        internally (it logs and falls back to an empty store) — the
+        helper's ``except`` only guards against truly unexpected errors.
+        Force one via monkeypatch and assert the helper swallows it,
+        logs ``quarantine.startup_init_failed``, and never raises —
+        startup must never fail because of this file."""
+        from structlog.testing import capture_logs
+
+        from untether.session_quarantine import QuarantineStore, set_quarantine_store
+
+        def _raise(cls, path):
+            raise RuntimeError("boom")
+
+        monkeypatch.setattr(QuarantineStore, "load", classmethod(_raise))
+
+        config_path = tmp_path / "untether.toml"
+        set_quarantine_store(None)
+        try:
+            with capture_logs() as logs:
+                _init_quarantine_store(config_path)  # must not raise
+            assert any(r.get("event") == "quarantine.startup_init_failed" for r in logs)
+        finally:
+            set_quarantine_store(None)
+
+
+# ---------------------------------------------------------------------------
+# #654 — queued-behind-background-work wait note
+# ---------------------------------------------------------------------------
+
+
+class TestQueuedWaitNote:
+    """#654: `_queued_wait_note` explains WHY a queued follow-up is waiting
+    when it queues behind a Claude session lingering post-result."""
+
+    @staticmethod
+    def _token(engine: str = "claude", value: str = "sess-654"):
+        from untether.model import ResumeToken
+
+        return ResumeToken(engine=engine, value=value)
+
+    def test_non_claude_engine_returns_none(self) -> None:
+        from untether.telegram.loop import _queued_wait_note
+
+        assert _queued_wait_note(self._token(engine="codex")) is None
+
+    def test_no_live_owner_returns_none(self, monkeypatch) -> None:
+        from untether.telegram.loop import _queued_wait_note
+
+        monkeypatch.setattr(
+            "untether.runners.claude.session_linger_info", lambda sid: None
+        )
+        assert _queued_wait_note(self._token()) is None
+
+    def test_mid_run_owner_returns_none(self, monkeypatch) -> None:
+        """A session that has not delivered its result yet is a normal
+        mid-run queue — the active progress message already explains it."""
+        from untether.telegram.loop import _queued_wait_note
+
+        monkeypatch.setattr(
+            "untether.runners.claude.session_linger_info", lambda sid: (False, 0)
+        )
+        assert _queued_wait_note(self._token()) is None
+
+    def test_post_result_with_background_tasks(self, monkeypatch) -> None:
+        from untether.telegram.loop import _queued_wait_note
+
+        monkeypatch.setattr(
+            "untether.runners.claude.session_linger_info", lambda sid: (True, 2)
+        )
+        note = _queued_wait_note(self._token())
+        assert note is not None
+        assert "2 background task" in note
+        assert "/cancel" in note
+
+    def test_post_result_single_task_singular(self, monkeypatch) -> None:
+        from untether.telegram.loop import _queued_wait_note
+
+        monkeypatch.setattr(
+            "untether.runners.claude.session_linger_info", lambda sid: (True, 1)
+        )
+        note = _queued_wait_note(self._token())
+        assert note is not None
+        assert "1 background task" in note
+        assert "1 background tasks" not in note
+
+    def test_post_result_no_registered_tasks(self, monkeypatch) -> None:
+        """#655 shape: busy post-result session with no registered handles
+        still gets an explanatory note, without a task count."""
+        from untether.telegram.loop import _queued_wait_note
+
+        monkeypatch.setattr(
+            "untether.runners.claude.session_linger_info", lambda sid: (True, 0)
+        )
+        note = _queued_wait_note(self._token())
+        assert note is not None
+        assert "background task" not in note
+        assert "/cancel" in note
+
+    def test_linger_info_failure_returns_none(self, monkeypatch) -> None:
+        from untether.telegram.loop import _queued_wait_note
+
+        def _boom(sid: str):
+            raise RuntimeError("registry unavailable")
+
+        monkeypatch.setattr("untether.runners.claude.session_linger_info", _boom)
+        assert _queued_wait_note(self._token()) is None

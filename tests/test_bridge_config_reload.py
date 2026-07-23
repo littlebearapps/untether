@@ -70,16 +70,21 @@ class TestUpdateFrom:
             voice_transcription_base_url="https://x/v1",
             voice_transcription_api_key="sk-new",
             voice_show_transcription=False,
+            voice_transcription_language="EN",
             show_resume_line=False,
             forward_coalesce_s=3.5,
             media_group_debounce_s=2.5,
+            voice_transcription_url_allowlist=["10.0.0.0/8"],
         )
         cfg.update_from(new_settings)
         assert cfg.allowed_user_ids == (111, 222)
+        assert cfg.voice_transcription_url_allowlist == ("10.0.0.0/8",)
         assert cfg.voice_transcription is True
         assert cfg.voice_max_bytes == 1 * 1024 * 1024
         assert cfg.voice_transcription_model == "whisper-1"
         assert cfg.voice_transcription_base_url == "https://x/v1"
+        # #638: hot-reloadable, normalised to lowercase at parse time
+        assert cfg.voice_transcription_language == "en"
         # #378: SecretStr — compare via .get_secret_value() since equality
         # against a bare str returns False.
         assert cfg.voice_transcription_api_key is not None

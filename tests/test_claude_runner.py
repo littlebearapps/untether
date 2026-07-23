@@ -15,6 +15,7 @@ from untether.runners.claude import (
     ENGINE,
     ClaudeRunner,
     ClaudeStreamState,
+    has_live_background_work,
     translate_claude_event,
 )
 from untether.schemas import claude as claude_schema
@@ -320,7 +321,9 @@ def _make_tool_use_event(
     }
 
 
-def _make_tool_result_event(tool_use_id: str) -> dict:
+def _make_tool_result_event(
+    tool_use_id: str, content: str = "ok", *, is_error: bool = False
+) -> dict:
     return {
         "type": "user",
         "message": {
@@ -329,8 +332,8 @@ def _make_tool_result_event(tool_use_id: str) -> dict:
                 {
                     "type": "tool_result",
                     "tool_use_id": tool_use_id,
-                    "content": "ok",
-                    "is_error": False,
+                    "content": content,
+                    "is_error": is_error,
                 }
             ],
         },
@@ -353,25 +356,101 @@ def test_monitor_tool_registers_live_monitor() -> None:
     assert state.live_monitors["toolu_M1"] > 0
 
 
-def test_monitor_tool_clears_on_tool_result() -> None:
-    state = ClaudeStreamState()
+def _register_monitor(state: ClaudeStreamState, tool_id: str, timeout_ms: int) -> None:
     translate_claude_event(
         _decode_event(
-            _make_tool_use_event("Monitor", "toolu_M1", {"timeout_ms": 60_000})
+            _make_tool_use_event("Monitor", tool_id, {"timeout_ms": timeout_ms})
         ),
         title="claude",
         state=state,
         factory=state.factory,
     )
-    assert "toolu_M1" in state.live_monitors
 
+
+def _feed_tool_result(
+    state: ClaudeStreamState,
+    tool_id: str,
+    content: str = "ok",
+    *,
+    is_error: bool = False,
+) -> None:
     translate_claude_event(
-        _decode_event(_make_tool_result_event("toolu_M1")),
+        _decode_event(_make_tool_result_event(tool_id, content, is_error=is_error)),
         title="claude",
         state=state,
         factory=state.factory,
     )
-    assert "toolu_M1" not in state.live_monitors
+
+
+def test_monitor_interim_tool_result_does_not_clear() -> None:
+    """#374: while a Monitor's deadline is live, every interim stdout line keeps the
+    handle so stall-suppression keeps firing. Crucially this holds even when the
+    stdout text contains words like "completed"/"done" — the result is arbitrary
+    command stdout, so we deliberately do NOT treat such words as terminal (doing so
+    would re-introduce the very bug this fixes when a build prints "Done")."""
+    state = ClaudeStreamState()
+    _register_monitor(state, "toolu_M1", 60_000)
+    assert "toolu_M1" in state.live_monitors
+
+    _feed_tool_result(state, "toolu_M1", "still running… 3 events seen")
+    assert "toolu_M1" in state.live_monitors
+    # stdout that happens to say "Done"/"completed" must NOT false-clear.
+    _feed_tool_result(state, "toolu_M1", "Build step 2 completed. Done in 3.2s")
+    assert "toolu_M1" in state.live_monitors
+
+
+def test_monitor_error_result_clears() -> None:
+    """#374: an errored Monitor result is terminal regardless of deadline."""
+    state = ClaudeStreamState()
+    _register_monitor(state, "toolu_M3", 60_000)
+    _feed_tool_result(state, "toolu_M3", "boom", is_error=True)
+    assert "toolu_M3" not in state.live_monitors
+
+
+def test_monitor_expired_deadline_result_clears() -> None:
+    """#374: once the Monitor's own timeout deadline has passed, a (late) result is
+    terminal — the bounded ``timeout_ms`` window is the reliable cleanup signal."""
+    import time
+
+    state = ClaudeStreamState()
+    _register_monitor(state, "toolu_M4", 60_000)
+    # Simulate the deadline having already elapsed.
+    state.live_monitors["toolu_M4"] = time.monotonic() - 1.0
+    _feed_tool_result(state, "toolu_M4", "still running")
+    assert "toolu_M4" not in state.live_monitors
+
+
+def test_monitor_unknown_deadline_tool_result_clears() -> None:
+    """#374: a Monitor with an unknown deadline (0.0) clears on first result —
+    there is no expiry backstop, so deferring would leak the handle."""
+    state = ClaudeStreamState()
+    translate_claude_event(
+        _decode_event(_make_tool_use_event("Monitor", "toolu_M0", {})),
+        title="claude",
+        state=state,
+        factory=state.factory,
+    )
+    assert state.live_monitors.get("toolu_M0") == 0.0
+    _feed_tool_result(state, "toolu_M0", "still running")
+    assert "toolu_M0" not in state.live_monitors
+
+
+def test_foreground_tool_result_still_clears() -> None:
+    """#374: non-Monitor tool_results keep the pre-#374 clear-on-result behaviour."""
+    state = ClaudeStreamState()
+    translate_claude_event(
+        _decode_event(
+            _make_tool_use_event(
+                "Bash", "toolu_B1", {"command": "sleep 60", "run_in_background": True}
+            )
+        ),
+        title="claude",
+        state=state,
+        factory=state.factory,
+    )
+    assert "toolu_B1" in state.live_bg_bashes
+    _feed_tool_result(state, "toolu_B1", "running in background")
+    assert "toolu_B1" not in state.live_bg_bashes
 
 
 def test_bash_bg_registers_when_run_in_background_true() -> None:
@@ -402,7 +481,9 @@ def test_bash_without_run_in_background_is_not_tracked() -> None:
     assert "toolu_B2" not in state.live_bg_bashes
 
 
-def test_agent_bg_tracked_only_when_run_in_background() -> None:
+def test_agent_bg_tracked_unless_explicitly_foreground() -> None:
+    """#646: background is the upstream default — only an explicit
+    ``run_in_background=False`` opts out."""
     state = ClaudeStreamState()
     translate_claude_event(
         _decode_event(
@@ -418,12 +499,266 @@ def test_agent_bg_tracked_only_when_run_in_background() -> None:
 
     state2 = ClaudeStreamState()
     translate_claude_event(
-        _decode_event(_make_tool_use_event("Agent", "toolu_A2", {"task": "..."})),
+        _decode_event(
+            _make_tool_use_event(
+                "Agent", "toolu_A2", {"task": "...", "run_in_background": False}
+            )
+        ),
         title="claude",
         state=state2,
         factory=state2.factory,
     )
     assert "toolu_A2" not in state2.live_bg_agents
+
+
+def test_374_task_tool_registers_background_handle() -> None:
+    """#374: Task with run_in_background=True should register in live_bg_agents
+    and set background_observed flag, just like Agent."""
+    state = ClaudeStreamState()
+    translate_claude_event(
+        _decode_event(
+            _make_tool_use_event(
+                "Task", "toolu_T1", {"task": "...", "run_in_background": True}
+            )
+        ),
+        title="claude",
+        state=state,
+        factory=state.factory,
+    )
+    assert "toolu_T1" in state.live_bg_agents
+    assert state.background_observed is True
+
+
+def test_374_task_tool_foreground_not_registered() -> None:
+    """#374/#646: Task with an explicit run_in_background=False should NOT
+    register in live_bg_agents and should NOT set background_observed.
+
+    Pre-#646 this case was expressed by *omitting* the key; omission now means
+    background (the upstream default), so opting out must be explicit.
+    """
+    state = ClaudeStreamState()
+    translate_claude_event(
+        _decode_event(
+            _make_tool_use_event(
+                "Task", "toolu_T2", {"task": "...", "run_in_background": False}
+            )
+        ),
+        title="claude",
+        state=state,
+        factory=state.factory,
+    )
+    assert "toolu_T2" not in state.live_bg_agents
+    assert state.background_observed is False
+
+
+# ---------------------------------------------------------------------------
+# #646 — default-background subagent registration
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("tool_name", ["Agent", "Task"])
+@pytest.mark.parametrize(
+    ("raw_input", "expect_background"),
+    [
+        # The real shape emitted by Claude Code: no run_in_background key at
+        # all. 11/11 Agent calls across the 5 sessions quarantined on nsd
+        # 2026-07-18 looked exactly like this.
+        ({"description": "Explore canon doc", "subagent_type": "Explore"}, True),
+        # Explicit opt-in stays background.
+        ({"task": "...", "run_in_background": True}, True),
+        # Only a literal False opts out.
+        ({"task": "...", "run_in_background": False}, False),
+        # Malformed / null values fall back to the upstream default rather
+        # than silently forfeiting the handle — over-registering is bounded by
+        # BG_AGENT_MAX_KEEP_S, under-registering force-kills live work.
+        ({"task": "...", "run_in_background": None}, True),
+        ({"task": "...", "run_in_background": "false"}, True),
+        ({"task": "...", "run_in_background": 0}, True),
+    ],
+)
+def test_646_agent_background_registration_tristate(
+    tool_name: str, raw_input: dict, expect_background: bool
+) -> None:
+    """#646: an omitted ``run_in_background`` means BACKGROUND, not foreground.
+
+    The pre-#646 predicate was ``bool(raw_input.get("run_in_background"))``,
+    which read omission as foreground and so never registered a real subagent.
+    That left ``has_live_background_work()`` False, applied the 60s limbo grace
+    instead of the full post-result timeout, force-killed a subprocess whose
+    subagents were still working, and let the #632 forced-teardown path
+    quarantine a healthy session.
+    """
+    state = ClaudeStreamState()
+    tool_id = f"toolu_{tool_name}_646"
+    translate_claude_event(
+        _decode_event(_make_tool_use_event(tool_name, tool_id, raw_input)),
+        title="claude",
+        state=state,
+        factory=state.factory,
+    )
+    assert (tool_id in state.live_bg_agents) is expect_background
+    assert state.background_observed is expect_background
+    assert has_live_background_work(state) is expect_background
+    if expect_background:
+        # Registration must always come with a bounded age-out (#374).
+        assert state.bg_agent_deadlines[tool_id] > time.monotonic()
+
+
+def test_646_default_background_agent_is_bounded() -> None:
+    """#646: an implicitly-background handle still ages out at
+    BG_AGENT_MAX_KEEP_S — it must not pin the watchdog forever."""
+    state = ClaudeStreamState()
+    translate_claude_event(
+        _decode_event(
+            _make_tool_use_event("Agent", "toolu_A646", {"subagent_type": "Explore"})
+        ),
+        title="claude",
+        state=state,
+        factory=state.factory,
+    )
+    assert has_live_background_work(state) is True
+
+    # Expire the handle: past its deadline it no longer counts as live.
+    state.bg_agent_deadlines["toolu_A646"] = time.monotonic() - 1.0
+    assert has_live_background_work(state) is False
+
+
+def test_646_bash_still_requires_explicit_opt_in() -> None:
+    """#646 must not leak into Bash — its run_in_background flag is genuinely
+    opt-in upstream, so a plain command stays foreground."""
+    state = ClaudeStreamState()
+    translate_claude_event(
+        _decode_event(_make_tool_use_event("Bash", "toolu_B646", {"command": "ls"})),
+        title="claude",
+        state=state,
+        factory=state.factory,
+    )
+    assert "toolu_B646" not in state.live_bg_bashes
+    assert state.background_observed is False
+
+
+# ---------------------------------------------------------------------------
+# #374 rc7 — bounded keep for background-agent handles (W3 Task 2)
+# ---------------------------------------------------------------------------
+
+
+def _register_bg_agent(
+    state: ClaudeStreamState, tool_id: str, tool_name: str = "Agent"
+) -> None:
+    translate_claude_event(
+        _decode_event(
+            _make_tool_use_event(
+                tool_name, tool_id, {"task": "...", "run_in_background": True}
+            )
+        ),
+        title="claude",
+        state=state,
+        factory=state.factory,
+    )
+
+
+def test_374_bg_agent_handle_kept_across_interim_result() -> None:
+    """#374 rc7: an Agent-bg handle survives a non-error interim tool_result.
+
+    This is the same premature-drain bug the Monitor #374 fix addressed:
+    clearing on the first interim result poisons the "no live background
+    work" signal (`has_live_background_work`), which feeds both the #346
+    wedge detector and the empty-resume auto-continue heuristic (#596)."""
+    state = ClaudeStreamState()
+    _register_bg_agent(state, "toolu_a1", "Agent")
+    assert "toolu_a1" in state.live_bg_agents
+
+    interim = claude_schema.StreamToolResultBlock(
+        tool_use_id="toolu_a1", content="still working", is_error=False
+    )
+    assert claude_runner._is_terminal_tool_result(interim, state, "toolu_a1") is False
+
+    _feed_tool_result(state, "toolu_a1", "still working")
+    assert "toolu_a1" in state.live_bg_agents
+    assert "toolu_a1" in state.bg_agent_deadlines
+
+
+def test_374_bg_agent_error_result_is_terminal() -> None:
+    """#374 rc7: an is_error=True result IS terminal for a bg agent
+    regardless of the bounded deadline still being in the future."""
+    state = ClaudeStreamState()
+    _register_bg_agent(state, "toolu_a2", "Agent")
+
+    err = claude_schema.StreamToolResultBlock(
+        tool_use_id="toolu_a2", content="boom", is_error=True
+    )
+    assert claude_runner._is_terminal_tool_result(err, state, "toolu_a2") is True
+
+    _feed_tool_result(state, "toolu_a2", "boom", is_error=True)
+    assert "toolu_a2" not in state.live_bg_agents
+    assert "toolu_a2" not in state.bg_agent_deadlines
+
+
+def test_374_bg_agent_handle_ages_out(monkeypatch: pytest.MonkeyPatch) -> None:
+    """#374 rc7: once BG_AGENT_MAX_KEEP_S has elapsed, a (late) non-error
+    interim result IS terminal — the bounded deadline is the safety net
+    against a permanent hang when Agent/Task never emits an explicit
+    completion signal (KillShell / subprocess-exit reconciliation is the
+    v0.35.5 refactor, #573)."""
+    fake_now = [10_000.0]
+    monkeypatch.setattr(claude_runner.time, "monotonic", lambda: fake_now[0])
+
+    state = ClaudeStreamState()
+    _register_bg_agent(state, "toolu_a3", "Agent")
+
+    fake_now[0] += claude_runner.BG_AGENT_MAX_KEEP_S + 1.0
+    interim = claude_schema.StreamToolResultBlock(
+        tool_use_id="toolu_a3", content="still working", is_error=False
+    )
+    assert claude_runner._is_terminal_tool_result(interim, state, "toolu_a3") is True
+
+
+def test_374_bg_agent_expired_not_live_work(monkeypatch: pytest.MonkeyPatch) -> None:
+    """#374 rc7: has_live_background_work must age bg-agent handles out
+    identically to Monitor/wakeup deadlines — otherwise the #346 wedge
+    detector (and everything downstream that treats "no live background
+    work" as "safe to drain") waits forever for a tool_result that may
+    never arrive."""
+    from untether.runners.claude import has_live_background_work
+
+    fake_now = [20_000.0]
+    monkeypatch.setattr(claude_runner.time, "monotonic", lambda: fake_now[0])
+
+    state = ClaudeStreamState()
+    _register_bg_agent(state, "toolu_a4", "Agent")
+    assert has_live_background_work(state) is True
+
+    fake_now[0] += claude_runner.BG_AGENT_MAX_KEEP_S + 1.0
+    assert has_live_background_work(state) is False
+
+
+def test_374_clear_pops_deadline() -> None:
+    """#374 rc7: _clear_background_handle must pop bg_agent_deadlines
+    alongside the live_bg_agents discard, so a terminal clear empties both
+    parallel structures rather than leaking a stale deadline entry."""
+    state = ClaudeStreamState()
+    _register_bg_agent(state, "toolu_a5", "Agent")
+    assert "toolu_a5" in state.live_bg_agents
+    assert "toolu_a5" in state.bg_agent_deadlines
+
+    claude_runner._clear_background_handle(state, "toolu_a5", is_terminal=True)
+    assert "toolu_a5" not in state.live_bg_agents
+    assert "toolu_a5" not in state.bg_agent_deadlines
+
+
+def test_374_task_bg_gets_same_deadline_treatment() -> None:
+    """#374 rc7: Task-bg gets the identical bounded-keep treatment as
+    Agent-bg — both register through the same live_bg_agents /
+    bg_agent_deadlines path in _register_background_handle."""
+    state = ClaudeStreamState()
+    _register_bg_agent(state, "toolu_t1", "Task")
+    assert "toolu_t1" in state.live_bg_agents
+    assert "toolu_t1" in state.bg_agent_deadlines
+
+    interim = claude_schema.StreamToolResultBlock(
+        tool_use_id="toolu_t1", content="still working", is_error=False
+    )
+    assert claude_runner._is_terminal_tool_result(interim, state, "toolu_t1") is False
 
 
 def test_schedule_wakeup_tracked_with_deadline() -> None:
@@ -504,6 +839,90 @@ def test_remote_trigger_tracked_as_set_member() -> None:
     assert "toolu_R1" in state.live_remote_triggers
 
 
+def test_background_observed_defaults_false() -> None:
+    """#631 (W5-diag): a fresh ClaudeStreamState has not observed any
+    background-task primitive yet."""
+    state = ClaudeStreamState()
+    assert state.background_observed is False
+
+
+def test_background_observed_set_by_register_background_handle() -> None:
+    """#631 (W5-diag): registering ANY recognised background-task primitive
+    (Monitor / Bash-bg / Agent-bg / ScheduleWakeup / RemoteTrigger) sets the
+    sticky `background_observed` flag on the ClaudeStreamState — the object
+    `_register_background_handle` actually receives (it has no access to
+    the engine-agnostic JsonlStreamState). This is the flag the bridge's
+    runner.empty_result diagnostic reads via the JsonlStreamState mirror
+    set in runner.py's `_handle_jsonl_line`."""
+    state = ClaudeStreamState()
+    translate_claude_event(
+        _decode_event(
+            _make_tool_use_event("RemoteTrigger", "toolu_R2", {"target": "other-chat"})
+        ),
+        title="claude",
+        state=state,
+        factory=state.factory,
+    )
+    assert state.background_observed is True
+
+
+def test_background_observed_not_set_by_foreground_tool() -> None:
+    """#631 (W5-diag): an ordinary (non-backgrounded) tool call must NOT
+    flip the flag — it only signals genuine background-task primitives."""
+    state = ClaudeStreamState()
+    translate_claude_event(
+        _decode_event(
+            _make_tool_use_event("Bash", "toolu_FG1", {"command": "echo hi"})
+        ),
+        title="claude",
+        state=state,
+        factory=state.factory,
+    )
+    assert state.background_observed is False
+
+
+def test_handle_jsonl_line_mirrors_background_observed_onto_stream() -> None:
+    """#631 (W5-diag): `_register_background_handle` only ever sees the
+    engine-specific ClaudeStreamState — it has no access to the generic
+    JsonlStreamState the bridge reads (`edits.stream`). The mirror-set lives
+    in runner.py's `_handle_jsonl_line`, the one place both objects are in
+    scope after `translate()` runs. This exercises that wiring end-to-end
+    (JSONL bytes in, mirrored flag out) rather than just the ClaudeStreamState
+    side already covered above."""
+    import json
+
+    from untether.runner import JsonlStreamState
+    from untether.runners.claude import ClaudeRunner
+
+    runner = ClaudeRunner(claude_cmd="claude")
+    state = ClaudeStreamState()
+    stream = JsonlStreamState(expected_session=None)
+    assert stream.background_observed is False
+
+    # Build the same fully-populated payload `_decode_event` produces (this
+    # helper feeds raw bytes straight to `decode_stream_json_line`, which is
+    # strict about required msgspec fields — unlike `_decode_event`, which
+    # only fills defaults before decoding).
+    payload = _make_tool_use_event("Monitor", "toolu_MIR1", {"timeout_ms": 60_000})
+    payload["uuid"] = "uuid"
+    payload["session_id"] = "session"
+    payload["message"]["role"] = "assistant"
+    payload["message"]["model"] = "claude"
+    raw_line = json.dumps(payload).encode("utf-8")
+
+    runner._handle_jsonl_line(
+        raw_line=raw_line,
+        stream=stream,
+        state=state,
+        resume=None,
+        logger=_RecordingLogger(),
+        pid=1,
+    )
+
+    assert state.background_observed is True
+    assert stream.background_observed is True
+
+
 def test_has_live_background_work_empty() -> None:
     from untether.runners.claude import has_live_background_work
 
@@ -512,11 +931,97 @@ def test_has_live_background_work_empty() -> None:
 
 
 def test_has_live_background_work_with_bg_bash() -> None:
-    from untether.runners.claude import has_live_background_work
+    """#573 (rc8): bg-bashes now carry a parallel deadline, so the handle must
+    be registered with one — as `_register_background_handle` always does —
+    rather than by bare set membership."""
+    import time
+
+    from untether.runners.claude import BG_BASH_MAX_KEEP_S, has_live_background_work
 
     state = ClaudeStreamState()
     state.live_bg_bashes.add("toolu_X")
+    state.bg_bash_deadlines["toolu_X"] = time.monotonic() + BG_BASH_MAX_KEEP_S
     assert has_live_background_work(state) is True
+
+
+def test_573_bg_bash_registration_sets_deadline() -> None:
+    """The real registration path must populate the deadline — otherwise the
+    age-out below can never fire."""
+    import time
+
+    from untether.runners.claude import BG_BASH_MAX_KEEP_S
+
+    state = ClaudeStreamState()
+    translate_claude_event(
+        _decode_event(
+            _make_tool_use_event("Bash", "toolu_B", {"run_in_background": True})
+        ),
+        title="claude",
+        state=state,
+        factory=state.factory,
+    )
+    assert "toolu_B" in state.live_bg_bashes
+    deadline = state.bg_bash_deadlines.get("toolu_B")
+    assert deadline is not None
+    assert deadline <= time.monotonic() + BG_BASH_MAX_KEEP_S + 1
+
+
+def test_573_bg_bash_ages_out() -> None:
+    """A bg-bash whose completion signal never arrives must stop pinning the
+    gate. Before rc8 it had no deadline at all, so a single entry kept
+    has_live_background_work() True for the rest of the run — suppressing the
+    post-result watchdog and leaving the process in the limbo state that gets
+    SIGTERM'd and poisons the session (#631/#632)."""
+    import time
+
+    from untether.runners.claude import has_live_background_work
+
+    state = ClaudeStreamState()
+    state.live_bg_bashes.add("toolu_stale")
+    state.bg_bash_deadlines["toolu_stale"] = time.monotonic() - 1.0
+    assert has_live_background_work(state) is False
+
+
+def test_573_remote_trigger_ages_out() -> None:
+    import time
+
+    from untether.runners.claude import (
+        REMOTE_TRIGGER_MAX_KEEP_S,
+        has_live_background_work,
+    )
+
+    state = ClaudeStreamState()
+    state.live_remote_triggers.add("toolu_R")
+    state.remote_trigger_deadlines["toolu_R"] = (
+        time.monotonic() + REMOTE_TRIGGER_MAX_KEEP_S
+    )
+    assert has_live_background_work(state) is True
+
+    state.remote_trigger_deadlines["toolu_R"] = time.monotonic() - 1.0
+    assert has_live_background_work(state) is False
+
+
+def test_573_clear_removes_deadlines() -> None:
+    """Deadlines must be popped alongside the handle, or the maps grow
+    unboundedly across a long multi-turn session."""
+    import time
+
+    from untether.runners.claude import (
+        _clear_background_handle,
+        has_live_background_work,
+    )
+
+    state = ClaudeStreamState()
+    state.live_bg_bashes.add("toolu_C")
+    state.bg_bash_deadlines["toolu_C"] = time.monotonic() + 600
+    state.live_remote_triggers.add("toolu_C")
+    state.remote_trigger_deadlines["toolu_C"] = time.monotonic() + 600
+
+    _clear_background_handle(state, "toolu_C", is_terminal=True)
+
+    assert state.bg_bash_deadlines == {}
+    assert state.remote_trigger_deadlines == {}
+    assert has_live_background_work(state) is False
 
 
 def test_has_live_background_work_expired_monitor() -> None:
@@ -547,6 +1052,10 @@ def test_background_task_summary_formatting() -> None:
 
     state.live_monitors["c"] = 0.0
     state.live_bg_agents.add("d")
+    # #374: live_bg_agents/bg_agent_deadlines are parallel structures now —
+    # a handle with no deadline entry is treated as already expired (not
+    # live), so the deadline must be set alongside the set-add here too.
+    state.bg_agent_deadlines["d"] = time.monotonic() + 999.0
     summary = background_task_summary(state)
     assert summary is not None
     assert "2 watchers" in summary
@@ -609,9 +1118,14 @@ def test_catalog_init_snapshots_mcp_servers_when_all_connected() -> None:
 
 
 def test_catalog_init_logs_staleness_warning_for_non_connected() -> None:
-    """Any non-``connected`` MCP at init emits a catalog_staleness WARNING."""
+    """#595 severity split: ``failed``/``needs-auth`` at init emits the
+    catalog_staleness WARNING; ``pending`` is a startup race and logs at
+    INFO as ``catalog_staleness.pending`` instead."""
     from structlog.testing import capture_logs
 
+    from untether.runners.claude import _CATALOG_STALENESS_WARNED
+
+    _CATALOG_STALENESS_WARNED.clear()
     state = ClaudeStreamState()
     state.factory._resume = ResumeToken(engine=ENGINE, value="sess-2")
     event = _decode_event(
@@ -630,24 +1144,106 @@ def test_catalog_init_logs_staleness_warning_for_non_connected() -> None:
         )
 
     warnings = [r for r in logs if r.get("event") == "catalog_staleness.detected"]
-    assert len(warnings) == 2
-    by_server = {r["server"]: r for r in warnings}
-    assert by_server["github"]["status"] == "failed"
-    assert by_server["github"]["session_id"] == "sess-2"
-    assert by_server["github"]["source"] == "system.init"
-    assert by_server["jina"]["status"] == "pending"
-    # "pal" connected must NOT appear
-    assert "pal" not in by_server
-    # Dedup set mirrors the emitted warnings
+    assert len(warnings) == 1
+    assert warnings[0]["server"] == "github"
+    assert warnings[0]["status"] == "failed"
+    assert warnings[0]["session_id"] == "sess-2"
+    assert warnings[0]["source"] == "system.init"
+    pendings = [r for r in logs if r.get("event") == "catalog_staleness.pending"]
+    assert len(pendings) == 1
+    assert pendings[0]["server"] == "jina"
+    assert pendings[0]["log_level"] == "info"
+    # Dedup set mirrors ALL emitted entries (both severities)
     assert ("sess-2", "github", "failed") in state.catalog_staleness_logged
     assert ("sess-2", "jina", "pending") in state.catalog_staleness_logged
     assert ("sess-2", "pal", "connected") not in state.catalog_staleness_logged
+
+
+def test_catalog_staleness_dedups_across_runs() -> None:
+    """#595: a persistently broken connector warns once per process, not
+    once per subprocess spawn — fresh ClaudeStreamState (new run) must NOT
+    re-warn for the same (server, status)."""
+    from structlog.testing import capture_logs
+
+    from untether.runners.claude import _CATALOG_STALENESS_WARNED
+
+    _CATALOG_STALENESS_WARNED.clear()
+    event_payload = _make_system_init_event(
+        "sess-r1", mcp_servers=[{"name": "gmail", "status": "needs-auth"}]
+    )
+
+    state1 = ClaudeStreamState()
+    state1.factory._resume = ResumeToken(engine=ENGINE, value="sess-r1")
+    with capture_logs() as logs1:
+        translate_claude_event(
+            _decode_event(event_payload),
+            title="claude",
+            state=state1,
+            factory=state1.factory,
+        )
+
+    # Second run: fresh state (this is what happens on every Telegram turn).
+    state2 = ClaudeStreamState()
+    state2.factory._resume = ResumeToken(engine=ENGINE, value="sess-r2")
+    with capture_logs() as logs2:
+        translate_claude_event(
+            _decode_event(
+                _make_system_init_event(
+                    "sess-r2", mcp_servers=[{"name": "gmail", "status": "needs-auth"}]
+                )
+            ),
+            title="claude",
+            state=state2,
+            factory=state2.factory,
+        )
+
+    first = [r for r in logs1 if r.get("event") == "catalog_staleness.detected"]
+    second = [r for r in logs2 if r.get("event") == "catalog_staleness.detected"]
+    assert len(first) == 1
+    assert second == []
+    suppressed = [r for r in logs2 if r.get("event") == "catalog_staleness.suppressed"]
+    assert len(suppressed) == 1
+
+
+def test_catalog_pending_still_logged_per_run() -> None:
+    """#595: pending keeps per-run granularity (INFO) — it is not routed
+    through the process-lifetime warning registry."""
+    from structlog.testing import capture_logs
+
+    from untether.runners.claude import _CATALOG_STALENESS_WARNED
+
+    _CATALOG_STALENESS_WARNED.clear()
+    logs_per_run = []
+    for run_idx in (1, 2):
+        state = ClaudeStreamState()
+        state.factory._resume = ResumeToken(engine=ENGINE, value=f"sess-p{run_idx}")
+        with capture_logs() as logs:
+            translate_claude_event(
+                _decode_event(
+                    _make_system_init_event(
+                        f"sess-p{run_idx}",
+                        mcp_servers=[{"name": "slow", "status": "pending"}],
+                    )
+                ),
+                title="claude",
+                state=state,
+                factory=state.factory,
+            )
+        logs_per_run.append(
+            [r for r in logs if r.get("event") == "catalog_staleness.pending"]
+        )
+
+    assert len(logs_per_run[0]) == 1
+    assert len(logs_per_run[1]) == 1
 
 
 def test_catalog_staleness_dedups_repeated_init() -> None:
     """Re-fired init with same server+status only logs once per session."""
     from structlog.testing import capture_logs
 
+    from untether.runners.claude import _CATALOG_STALENESS_WARNED
+
+    _CATALOG_STALENESS_WARNED.clear()
     state = ClaudeStreamState()
     state.factory._resume = ResumeToken(engine=ENGINE, value="sess-3")
     event = _decode_event(
@@ -1125,8 +1721,16 @@ def test_translate_rate_limit_event_accumulates_across_throttles() -> None:
     assert state.rate_limit_total_s == 45.0
 
 
-def test_translate_rate_limit_event_handles_missing_retry() -> None:
-    """Rate-limit without a retry hint still surfaces, just without the seconds."""
+def test_translate_rate_limit_event_bare_event_latches_default_wait() -> None:
+    """#657: a bare rate_limit_event (no retry_after_ms, no reset timestamps)
+    latches a conservative default wait window instead of leaving
+    `rate_limit_wait_until` unset — otherwise `awaiting_rate_limit_retry()`
+    returns False while the session genuinely is throttled upstream, and the
+    #495/#499/#500 stall disambiguation silently doesn't apply."""
+    import time
+
+    from untether.runners.claude import DEFAULT_BARE_RATE_LIMIT_WAIT_S
+
     state = ClaudeStreamState()
     events = translate_claude_event(
         _decode_event({"type": "rate_limit_event"}),
@@ -1136,10 +1740,14 @@ def test_translate_rate_limit_event_handles_missing_retry() -> None:
     )
     assert len(events) == 2
     assert "⏳" in events[0].action.title
-    assert "waiting to retry" in events[0].action.title
-    # cumulative stays at 0 when we have no retry_after_ms to accrue
+    # The guessed wait is flagged as an estimate, not presented as fact
+    assert "~" in events[0].action.title
     assert state.rate_limit_count == 1
-    assert state.rate_limit_total_s == 0.0
+    # The default accrues so a repeatedly-throttled session no longer reports 0s
+    assert state.rate_limit_total_s == DEFAULT_BARE_RATE_LIMIT_WAIT_S
+    # The latch is armed: awaiting_rate_limit_retry() is directionally correct
+    assert state.rate_limit_wait_until > time.monotonic()
+    assert state.awaiting_rate_limit_retry() is True
 
 
 def test_translate_rate_limit_event_derives_retry_after_from_reset_ts() -> None:
@@ -1234,8 +1842,11 @@ def test_translate_rate_limit_event_retry_after_ms_takes_precedence() -> None:
 
 
 def test_translate_rate_limit_event_handles_unparseable_reset_ts() -> None:
-    """#518: garbage `requests_reset` is silently ignored — we fall back to the
-    "waiting to retry" copy rather than crashing the runner."""
+    """#518/#657: garbage `requests_reset` is silently ignored — we fall
+    through to the conservative default wait (as if the event were bare)
+    rather than crashing the runner."""
+    from untether.runners.claude import DEFAULT_BARE_RATE_LIMIT_WAIT_S
+
     state = ClaudeStreamState()
     events = translate_claude_event(
         _decode_event(
@@ -1249,8 +1860,9 @@ def test_translate_rate_limit_event_handles_unparseable_reset_ts() -> None:
         factory=state.factory,
     )
     assert len(events) == 2
-    assert "waiting to retry" in events[0].action.title
-    assert state.rate_limit_total_s == 0.0
+    assert "~" in events[0].action.title
+    assert state.rate_limit_total_s == DEFAULT_BARE_RATE_LIMIT_WAIT_S
+    assert state.awaiting_rate_limit_retry() is True
 
 
 def test_translate_thinking_block() -> None:
@@ -1969,6 +2581,48 @@ def test_extract_error_with_result_text() -> None:
 
 
 # ===========================================================================
+# #631 (Fix 1) — _usage_payload carries subtype
+# ===========================================================================
+
+
+def test_usage_payload_includes_subtype() -> None:
+    """#631: the usage dict must carry the result message's ``subtype`` so
+    the ``runner.empty_result`` diagnostic's ``raw_subtype`` field is
+    populated from a REAL Claude Code result instead of always being
+    ``None`` — previously ``_usage_payload`` never copied ``subtype`` into
+    the returned dict, so the field was structurally dead."""
+    from untether.runners.claude import _usage_payload
+
+    event = claude_schema.StreamResultMessage(
+        subtype="success",
+        duration_ms=100,
+        duration_api_ms=50,
+        is_error=False,
+        num_turns=0,
+        session_id="sess123456789012",
+    )
+    usage = _usage_payload(event)
+    assert usage["subtype"] == "success"
+
+
+def test_usage_payload_subtype_error_during_execution() -> None:
+    """A different subtype value round-trips too — not hardcoded to
+    "success"."""
+    from untether.runners.claude import _usage_payload
+
+    event = claude_schema.StreamResultMessage(
+        subtype="error_during_execution",
+        duration_ms=100,
+        duration_api_ms=50,
+        is_error=True,
+        num_turns=2,
+        session_id="sess123456789012",
+    )
+    usage = _usage_payload(event)
+    assert usage["subtype"] == "error_during_execution"
+
+
+# ===========================================================================
 # #438 — Stream idle timeout Type-A vs Type-B classification
 # ===========================================================================
 
@@ -2039,6 +2693,76 @@ def test_extract_error_unrelated_failure_no_classification() -> None:
     assert "Type A" not in result
     assert "Type B" not in result
     assert "Tool execution failed" in result
+
+
+# ===========================================================================
+# #572 — stream_idle_class recorded on state for the bridge auto-retry gate
+# ===========================================================================
+
+
+def _result_event(**overrides) -> dict:
+    base = {
+        "type": "result",
+        "subtype": "error_during_execution",
+        "is_error": True,
+        "num_turns": 19,
+        "duration_ms": 635000,
+        "duration_api_ms": 261086,
+        "session_id": "36693744aaaa0000",
+        "result": "API Error: Stream idle timeout - partial response received",
+    }
+    base.update(overrides)
+    return base
+
+
+def test_translate_result_records_type_a_stream_idle_class() -> None:
+    """#572: a Type-A stream-idle failure stamps stream_idle_class="type_a"
+    so runner_bridge can gate the bounded auto-retry via engine_state."""
+    state = ClaudeStreamState()
+    translate_claude_event(
+        _decode_event(_result_event()),
+        title="claude",
+        state=state,
+        factory=state.factory,
+    )
+    assert state.stream_idle_class == "type_a"
+
+
+def test_translate_result_records_type_b_stream_idle_class() -> None:
+    """#572: a cold-start zero-byte stall stamps "type_b" — never retried."""
+    state = ClaudeStreamState()
+    translate_claude_event(
+        _decode_event(_result_event(num_turns=1, duration_api_ms=0)),
+        title="claude",
+        state=state,
+        factory=state.factory,
+    )
+    assert state.stream_idle_class == "type_b"
+
+
+def test_translate_result_non_stall_error_no_stream_idle_class() -> None:
+    """#572: unrelated failures leave stream_idle_class None."""
+    state = ClaudeStreamState()
+    translate_claude_event(
+        _decode_event(_result_event(result="Tool execution failed with code 1")),
+        title="claude",
+        state=state,
+        factory=state.factory,
+    )
+    assert state.stream_idle_class is None
+
+
+def test_translate_result_ok_clears_stream_idle_class() -> None:
+    """#572: a successful result resets any stale classification."""
+    state = ClaudeStreamState()
+    state.stream_idle_class = "type_a"
+    translate_claude_event(
+        _decode_event(_result_event(is_error=False, subtype="success", result="done")),
+        title="claude",
+        state=state,
+        factory=state.factory,
+    )
+    assert state.stream_idle_class is None
 
 
 # ===========================================================================
@@ -3841,6 +4565,9 @@ async def test_333_reader_done_but_alive_triggers_subcountdown(monkeypatch) -> N
             proc.returncode = -9
 
     monkeypatch.setattr("os.killpg", _fake_killpg)
+    # #590: signal_pid_group snapshots real /proc descendants before
+    # signalling — neutralise it so tests never touch live processes.
+    monkeypatch.setattr("untether.utils.subprocess.find_descendants", lambda pid: [])
 
     logger = _RecordingLogger()
     reader_done = anyio.Event()
@@ -3911,6 +4638,9 @@ async def test_333_subprocess_exits_during_subcountdown(monkeypatch) -> None:
     killed_signals: list[int] = []
 
     monkeypatch.setattr("os.killpg", lambda pgid, sig: killed_signals.append(sig))
+    # #590: signal_pid_group snapshots real /proc descendants before
+    # signalling — neutralise it so tests never touch live processes.
+    monkeypatch.setattr("untether.utils.subprocess.find_descendants", lambda pid: [])
 
     logger = _RecordingLogger()
     reader_done = anyio.Event()
@@ -3982,6 +4712,11 @@ async def test_333_subcountdown_defers_on_pending_request(monkeypatch) -> None:
         killed_signals: list[int] = []
 
         monkeypatch.setattr("os.killpg", lambda pgid, sig: killed_signals.append(sig))
+        # #590: signal_pid_group snapshots real /proc descendants before
+        # signalling — neutralise it so tests never touch live processes.
+        monkeypatch.setattr(
+            "untether.utils.subprocess.find_descendants", lambda pid: []
+        )
 
         logger = _RecordingLogger()
         reader_done = anyio.Event()
@@ -4055,6 +4790,9 @@ async def test_333_lifecycle_state_transitions_logged(monkeypatch) -> None:
             proc.returncode = -15  # exit on SIGTERM
 
     monkeypatch.setattr("os.killpg", _fake_killpg)
+    # #590: signal_pid_group snapshots real /proc descendants before
+    # signalling — neutralise it so tests never touch live processes.
+    monkeypatch.setattr("untether.utils.subprocess.find_descendants", lambda pid: [])
 
     logger = _RecordingLogger()
     reader_done = anyio.Event()
@@ -4087,3 +4825,1584 @@ async def test_333_lifecycle_state_transitions_logged(monkeypatch) -> None:
     assert "subprocess.state.exited" in state_events
     # Final lifecycle_state reflects the last transition.
     assert stream.lifecycle_state == "exited"
+
+
+# ===========================================================================
+# #632 (W2) — forced-teardown quarantine record + honour on next message
+# ===========================================================================
+
+
+@pytest.mark.anyio
+async def test_632_forced_teardown_after_result_quarantines(
+    monkeypatch, tmp_path
+) -> None:
+    """#632 (W2): a subprocess force-killed AFTER it already emitted a valid
+    result may have a dangling upstream turn — the SIGTERM site must
+    quarantine the session id so the next message never resumes it."""
+    import anyio
+
+    from untether.runner import JsonlStreamState
+    from untether.runners.claude import (
+        _PENDING_ASK_REQUESTS,
+        _REQUEST_TO_SESSION,
+        ClaudeRunner,
+    )
+    from untether.session_quarantine import QuarantineStore, set_quarantine_store
+
+    _REQUEST_TO_SESSION.clear()
+    _PENDING_ASK_REQUESTS.clear()
+
+    store = QuarantineStore(path=tmp_path / "session_quarantine.json")
+    set_quarantine_store(store)
+    try:
+        runner = ClaudeRunner(claude_cmd="claude")
+        runner._subcountdown_poll_interval_s = 0.02
+        runner._subcountdown_limbo_detect_threshold_s = 0.05
+        runner._subcountdown_sigterm_grace_s = 0.1
+        runner._subcountdown_sigterm_grace_poll_s = 0.02
+
+        state = ClaudeStreamState()
+        state.factory.started(ResumeToken(engine="claude", value="sub-sess-q1"))
+        state.result_received_at = time.monotonic() - 0.5
+        stream = JsonlStreamState(expected_session=None)
+        stream.did_emit_completed = True  # the process produced a result
+
+        proc = _FakeProc(pid=62424, returncode=None)
+
+        def _fake_killpg(pgid: int, sig: int) -> None:
+            if sig == signal.SIGTERM:
+                proc.returncode = -15  # clean stop, no SIGKILL follow-up
+
+        monkeypatch.setattr("os.killpg", _fake_killpg)
+        # #590: signal_pid_group snapshots real /proc descendants before
+        # signalling — neutralise it so tests never touch live processes.
+        monkeypatch.setattr(
+            "untether.utils.subprocess.find_descendants", lambda pid: []
+        )
+
+        logger = _RecordingLogger()
+        reader_done = anyio.Event()
+        reader_done.set()
+
+        class FakeStdin:
+            async def aclose(self) -> None:
+                pass
+
+        async with anyio.create_task_group() as tg:
+            tg.start_soon(
+                runner._post_result_idle_watchdog,
+                state,
+                FakeStdin(),
+                reader_done,
+                logger,
+                0.1,
+                proc,
+                stream,
+            )
+            with anyio.move_on_after(3.0):
+                while stream.lifecycle_state != "exited":
+                    await anyio.sleep(0.02)
+            tg.cancel_scope.cancel()
+
+        assert store.is_quarantined("claude", "sub-sess-q1") is True
+        sigterm_records = [
+            kw
+            for lvl, e, kw in logger.records
+            if e == "claude.post_result_idle.sigterm_after_timeout"
+        ]
+        assert sigterm_records, "expected sigterm_after_timeout to fire"
+        assert sigterm_records[0]["quarantined"] is True
+        # #631 (W5-diag): the stream itself records that a forced teardown
+        # happened, so a LATER runner.empty_result diagnostic (in the
+        # bridge) can surface it.
+        assert stream.sigterm_sent is True
+    finally:
+        set_quarantine_store(None)
+        _REQUEST_TO_SESSION.clear()
+        _PENDING_ASK_REQUESTS.clear()
+
+
+@pytest.mark.anyio
+async def test_632_forced_teardown_without_result_does_not_quarantine(
+    monkeypatch, tmp_path
+) -> None:
+    """#632 (W2): a process force-killed BEFORE it ever emitted a result is
+    the watchdog's normal (non-poisoned) kill path — must NOT quarantine."""
+    import anyio
+
+    from untether.runner import JsonlStreamState
+    from untether.runners.claude import (
+        _PENDING_ASK_REQUESTS,
+        _REQUEST_TO_SESSION,
+        ClaudeRunner,
+    )
+    from untether.session_quarantine import QuarantineStore, set_quarantine_store
+
+    _REQUEST_TO_SESSION.clear()
+    _PENDING_ASK_REQUESTS.clear()
+
+    store = QuarantineStore(path=tmp_path / "session_quarantine.json")
+    set_quarantine_store(store)
+    try:
+        runner = ClaudeRunner(claude_cmd="claude")
+        runner._subcountdown_poll_interval_s = 0.02
+        runner._subcountdown_limbo_detect_threshold_s = 0.05
+        runner._subcountdown_sigterm_grace_s = 0.1
+        runner._subcountdown_sigterm_grace_poll_s = 0.02
+
+        state = ClaudeStreamState()
+        state.factory.started(ResumeToken(engine="claude", value="sub-sess-q2"))
+        state.result_received_at = time.monotonic() - 0.5
+        stream = JsonlStreamState(expected_session=None)
+        assert stream.did_emit_completed is False  # no result was ever emitted
+
+        proc = _FakeProc(pid=62425, returncode=None)
+
+        def _fake_killpg(pgid: int, sig: int) -> None:
+            if sig == signal.SIGTERM:
+                proc.returncode = -15
+
+        monkeypatch.setattr("os.killpg", _fake_killpg)
+        monkeypatch.setattr(
+            "untether.utils.subprocess.find_descendants", lambda pid: []
+        )
+
+        logger = _RecordingLogger()
+        reader_done = anyio.Event()
+        reader_done.set()
+
+        class FakeStdin:
+            async def aclose(self) -> None:
+                pass
+
+        async with anyio.create_task_group() as tg:
+            tg.start_soon(
+                runner._post_result_idle_watchdog,
+                state,
+                FakeStdin(),
+                reader_done,
+                logger,
+                0.1,
+                proc,
+                stream,
+            )
+            with anyio.move_on_after(3.0):
+                while stream.lifecycle_state != "exited":
+                    await anyio.sleep(0.02)
+            tg.cancel_scope.cancel()
+
+        assert store.is_quarantined("claude", "sub-sess-q2") is False
+        sigterm_records = [
+            kw
+            for lvl, e, kw in logger.records
+            if e == "claude.post_result_idle.sigterm_after_timeout"
+        ]
+        assert sigterm_records, "expected sigterm_after_timeout to fire"
+        assert sigterm_records[0]["quarantined"] is False
+    finally:
+        set_quarantine_store(None)
+        _REQUEST_TO_SESSION.clear()
+        _PENDING_ASK_REQUESTS.clear()
+
+
+@pytest.mark.anyio
+async def test_632_forced_teardown_flag_off_does_not_quarantine(
+    monkeypatch, tmp_path
+) -> None:
+    """#632 (W2): `quarantine_on_forced_teardown = False` disables the
+    marker even when the process already produced a result."""
+    import anyio
+
+    from untether.runner import JsonlStreamState
+    from untether.runners.claude import (
+        _PENDING_ASK_REQUESTS,
+        _REQUEST_TO_SESSION,
+        ClaudeRunner,
+    )
+    from untether.session_quarantine import QuarantineStore, set_quarantine_store
+    from untether.settings import AutoContinueSettings
+
+    class _Fake:
+        auto_continue = AutoContinueSettings(quarantine_on_forced_teardown=False)
+
+    monkeypatch.setattr(
+        claude_runner,
+        "load_settings_if_exists",
+        lambda: (_Fake(), tmp_path / "untether.toml"),
+    )
+
+    _REQUEST_TO_SESSION.clear()
+    _PENDING_ASK_REQUESTS.clear()
+
+    store = QuarantineStore(path=tmp_path / "session_quarantine.json")
+    set_quarantine_store(store)
+    try:
+        runner = ClaudeRunner(claude_cmd="claude")
+        runner._subcountdown_poll_interval_s = 0.02
+        runner._subcountdown_limbo_detect_threshold_s = 0.05
+        runner._subcountdown_sigterm_grace_s = 0.1
+        runner._subcountdown_sigterm_grace_poll_s = 0.02
+
+        state = ClaudeStreamState()
+        state.factory.started(ResumeToken(engine="claude", value="sub-sess-q3"))
+        state.result_received_at = time.monotonic() - 0.5
+        stream = JsonlStreamState(expected_session=None)
+        stream.did_emit_completed = True  # the process produced a result
+
+        proc = _FakeProc(pid=62426, returncode=None)
+
+        def _fake_killpg(pgid: int, sig: int) -> None:
+            if sig == signal.SIGTERM:
+                proc.returncode = -15
+
+        monkeypatch.setattr("os.killpg", _fake_killpg)
+        monkeypatch.setattr(
+            "untether.utils.subprocess.find_descendants", lambda pid: []
+        )
+
+        logger = _RecordingLogger()
+        reader_done = anyio.Event()
+        reader_done.set()
+
+        class FakeStdin:
+            async def aclose(self) -> None:
+                pass
+
+        async with anyio.create_task_group() as tg:
+            tg.start_soon(
+                runner._post_result_idle_watchdog,
+                state,
+                FakeStdin(),
+                reader_done,
+                logger,
+                0.1,
+                proc,
+                stream,
+            )
+            with anyio.move_on_after(3.0):
+                while stream.lifecycle_state != "exited":
+                    await anyio.sleep(0.02)
+            tg.cancel_scope.cancel()
+
+        assert store.is_quarantined("claude", "sub-sess-q3") is False
+        sigterm_records = [
+            kw
+            for lvl, e, kw in logger.records
+            if e == "claude.post_result_idle.sigterm_after_timeout"
+        ]
+        assert sigterm_records, "expected sigterm_after_timeout to fire"
+        assert sigterm_records[0]["quarantined"] is False
+    finally:
+        set_quarantine_store(None)
+        _REQUEST_TO_SESSION.clear()
+        _PENDING_ASK_REQUESTS.clear()
+
+
+# ===========================================================================
+# #591 — post-result limbo grace (short-circuit the subcountdown when the
+# session is fully quiescent)
+# ===========================================================================
+
+
+@pytest.mark.anyio
+async def test_591_limbo_grace_short_circuits_subcountdown(monkeypatch) -> None:
+    """With no pending requests/asks and no live background work, the
+    subcountdown SIGTERMs after ``limbo_grace_s`` instead of waiting the
+    full ``timeout_s``."""
+    import anyio
+
+    from untether.runner import JsonlStreamState
+    from untether.runners.claude import (
+        _PENDING_ASK_REQUESTS,
+        _REQUEST_TO_SESSION,
+        ClaudeRunner,
+    )
+
+    _REQUEST_TO_SESSION.clear()
+    _PENDING_ASK_REQUESTS.clear()
+
+    runner = ClaudeRunner(claude_cmd="claude")
+    runner._subcountdown_poll_interval_s = 0.02
+    runner._subcountdown_limbo_detect_threshold_s = 0.05
+    runner._subcountdown_sigterm_grace_s = 0.1
+    runner._subcountdown_sigterm_grace_poll_s = 0.02
+
+    state = ClaudeStreamState()
+    state.factory.started(ResumeToken(engine="claude", value="grace-sess-1"))
+    state.result_received_at = time.monotonic() - 0.5
+    stream = JsonlStreamState(expected_session=None)
+
+    proc = _FakeProc(pid=52424, returncode=None)
+    killed_signals: list[int] = []
+
+    def _fake_killpg(pgid: int, sig: int) -> None:
+        killed_signals.append(sig)
+        # SIGTERM stops the fake process cleanly.
+        proc.returncode = -15
+
+    monkeypatch.setattr("os.killpg", _fake_killpg)
+    # #590: signal_pid_group snapshots real /proc descendants before
+    # signalling — neutralise it so tests never touch live processes.
+    monkeypatch.setattr("untether.utils.subprocess.find_descendants", lambda pid: [])
+
+    logger = _RecordingLogger()
+    reader_done = anyio.Event()
+    reader_done.set()
+
+    class FakeStdin:
+        async def aclose(self) -> None:
+            pass
+
+    async with anyio.create_task_group() as tg:
+        tg.start_soon(
+            runner._post_result_idle_watchdog,
+            state,
+            FakeStdin(),
+            reader_done,
+            logger,
+            30.0,  # full timeout — far beyond the test's patience
+            proc,
+            stream,
+            0.1,  # limbo_grace_s — the short-circuit under test
+        )
+        with anyio.move_on_after(3.0):
+            while signal.SIGTERM not in killed_signals:
+                await anyio.sleep(0.02)
+        tg.cancel_scope.cancel()
+
+    assert signal.SIGTERM in killed_signals, (
+        "grace should have fired SIGTERM long before the 30s timeout"
+    )
+    sigterm_logs = [
+        kw
+        for lvl, e, kw in logger.records
+        if e == "claude.post_result_idle.sigterm_after_timeout"
+    ]
+    assert sigterm_logs and sigterm_logs[0].get("limbo_grace_applied") is True
+
+
+@pytest.mark.anyio
+async def test_591_limbo_grace_deferred_by_live_background_work(monkeypatch) -> None:
+    """Live background work (e.g. a pending ScheduleWakeup with a future
+    deadline) keeps the full timeout — the grace must not strand a wakeup
+    that is still due to fire."""
+    import anyio
+
+    from untether.runner import JsonlStreamState
+    from untether.runners.claude import (
+        _PENDING_ASK_REQUESTS,
+        _REQUEST_TO_SESSION,
+        ClaudeRunner,
+    )
+
+    _REQUEST_TO_SESSION.clear()
+    _PENDING_ASK_REQUESTS.clear()
+
+    runner = ClaudeRunner(claude_cmd="claude")
+    runner._subcountdown_poll_interval_s = 0.02
+
+    state = ClaudeStreamState()
+    state.factory.started(ResumeToken(engine="claude", value="grace-sess-2"))
+    state.result_received_at = time.monotonic() - 0.5
+    # A live wakeup with a far-future deadline = live background work.
+    state.live_wakeups["toolu_grace"] = time.monotonic() + 3600.0
+    stream = JsonlStreamState(expected_session=None)
+
+    proc = _FakeProc(pid=52425, returncode=None)
+    killed_signals: list[int] = []
+    monkeypatch.setattr("os.killpg", lambda pgid, sig: killed_signals.append(sig))
+    # #590: signal_pid_group snapshots real /proc descendants before
+    # signalling — neutralise it so tests never touch live processes.
+    monkeypatch.setattr("untether.utils.subprocess.find_descendants", lambda pid: [])
+
+    logger = _RecordingLogger()
+    reader_done = anyio.Event()
+    reader_done.set()
+
+    class FakeStdin:
+        async def aclose(self) -> None:
+            pass
+
+    async with anyio.create_task_group() as tg:
+        tg.start_soon(
+            runner._post_result_idle_watchdog,
+            state,
+            FakeStdin(),
+            reader_done,
+            logger,
+            30.0,
+            proc,
+            stream,
+            0.05,  # grace much shorter than the observation window below
+        )
+        await anyio.sleep(0.5)
+        tg.cancel_scope.cancel()
+
+    assert killed_signals == [], "grace must not fire while background work is live"
+
+
+@pytest.mark.anyio
+async def test_655_limbo_grace_deferred_by_cpu_active(monkeypatch) -> None:
+    """A post-result process that is demonstrably busy (rising CPU counters)
+    but has NO registered background handles must not be reaped at the limbo
+    grace — `not live_bg` alone is not quiescence (#655). It falls through to
+    the full ``timeout_s`` instead."""
+    import anyio
+
+    from untether.runner import JsonlStreamState
+    from untether.runners.claude import (
+        _PENDING_ASK_REQUESTS,
+        _REQUEST_TO_SESSION,
+        ClaudeRunner,
+    )
+    from untether.utils.proc_diag import ProcessDiag
+
+    _REQUEST_TO_SESSION.clear()
+    _PENDING_ASK_REQUESTS.clear()
+
+    runner = ClaudeRunner(claude_cmd="claude")
+    runner._subcountdown_poll_interval_s = 0.02
+    runner._subcountdown_limbo_detect_threshold_s = 0.05
+    runner._subcountdown_sigterm_grace_s = 0.1
+    runner._subcountdown_sigterm_grace_poll_s = 0.02
+
+    state = ClaudeStreamState()
+    state.factory.started(ResumeToken(engine="claude", value="grace-sess-655a"))
+    state.result_received_at = time.monotonic() - 0.5
+    # No live_bg_agents / live_bg_bashes / live_wakeups — live_bg stays False.
+    stream = JsonlStreamState(expected_session=None)
+
+    proc = _FakeProc(pid=52427, returncode=None)
+    killed_signals: list[int] = []
+    monkeypatch.setattr("os.killpg", lambda pgid, sig: killed_signals.append(sig))
+    # #590: signal_pid_group snapshots real /proc descendants before
+    # signalling — neutralise it so tests never touch live processes.
+    monkeypatch.setattr("untether.utils.subprocess.find_descendants", lambda pid: [])
+
+    # Monotonically rising CPU counters: is_cpu_active / is_tree_cpu_active
+    # become True from the second poll onward (first poll has no prev_diag
+    # and yields None — the tri-state the gate must tolerate).
+    calls = {"n": 0}
+
+    def _fake_diag(pid: int) -> ProcessDiag:
+        calls["n"] += 1
+        ticks = calls["n"] * 10
+        return ProcessDiag(
+            pid=pid,
+            alive=True,
+            cpu_utime=ticks,
+            cpu_stime=0,
+            tree_cpu_utime=ticks,
+            tree_cpu_stime=0,
+        )
+
+    monkeypatch.setattr("untether.utils.proc_diag.collect_proc_diag", _fake_diag)
+
+    logger = _RecordingLogger()
+    reader_done = anyio.Event()
+    reader_done.set()
+
+    class FakeStdin:
+        async def aclose(self) -> None:
+            pass
+
+    async with anyio.create_task_group() as tg:
+        tg.start_soon(
+            runner._post_result_idle_watchdog,
+            state,
+            FakeStdin(),
+            reader_done,
+            logger,
+            30.0,  # full timeout — far beyond the observation window
+            proc,
+            stream,
+            0.1,  # limbo_grace_s — must NOT fire against a busy process
+        )
+        await anyio.sleep(1.0)  # ~10x the grace
+        tg.cancel_scope.cancel()
+
+    assert killed_signals == [], (
+        "grace must not fire while the process is demonstrably busy"
+    )
+    sigterm_logs = [
+        kw
+        for lvl, e, kw in logger.records
+        if e == "claude.post_result_idle.sigterm_after_timeout"
+    ]
+    assert not any(kw.get("limbo_grace_applied") is True for kw in sigterm_logs)
+
+
+@pytest.mark.anyio
+async def test_655_limbo_grace_still_applies_when_cpu_inactive(monkeypatch) -> None:
+    """The other side of the #655 boundary: flat CPU counters (demonstrably
+    idle) with no registered background work still reaps at the grace —
+    #591's fast reap of genuinely quiescent husks is preserved."""
+    import anyio
+
+    from untether.runner import JsonlStreamState
+    from untether.runners.claude import (
+        _PENDING_ASK_REQUESTS,
+        _REQUEST_TO_SESSION,
+        ClaudeRunner,
+    )
+    from untether.utils.proc_diag import ProcessDiag
+
+    _REQUEST_TO_SESSION.clear()
+    _PENDING_ASK_REQUESTS.clear()
+
+    runner = ClaudeRunner(claude_cmd="claude")
+    runner._subcountdown_poll_interval_s = 0.02
+    runner._subcountdown_limbo_detect_threshold_s = 0.05
+    runner._subcountdown_sigterm_grace_s = 0.1
+    runner._subcountdown_sigterm_grace_poll_s = 0.02
+
+    state = ClaudeStreamState()
+    state.factory.started(ResumeToken(engine="claude", value="grace-sess-655b"))
+    state.result_received_at = time.monotonic() - 0.5
+    stream = JsonlStreamState(expected_session=None)
+
+    proc = _FakeProc(pid=52428, returncode=None)
+    killed_signals: list[int] = []
+
+    def _fake_killpg(pgid: int, sig: int) -> None:
+        killed_signals.append(sig)
+        proc.returncode = -15
+
+    monkeypatch.setattr("os.killpg", _fake_killpg)
+    # #590: signal_pid_group snapshots real /proc descendants before
+    # signalling — neutralise it so tests never touch live processes.
+    monkeypatch.setattr("untether.utils.subprocess.find_descendants", lambda pid: [])
+
+    # Flat CPU counters: is_cpu_active / is_tree_cpu_active are False from
+    # the second poll onward — demonstrably idle.
+    def _fake_diag(pid: int) -> ProcessDiag:
+        return ProcessDiag(
+            pid=pid,
+            alive=True,
+            cpu_utime=100,
+            cpu_stime=0,
+            tree_cpu_utime=100,
+            tree_cpu_stime=0,
+        )
+
+    monkeypatch.setattr("untether.utils.proc_diag.collect_proc_diag", _fake_diag)
+
+    logger = _RecordingLogger()
+    reader_done = anyio.Event()
+    reader_done.set()
+
+    class FakeStdin:
+        async def aclose(self) -> None:
+            pass
+
+    async with anyio.create_task_group() as tg:
+        tg.start_soon(
+            runner._post_result_idle_watchdog,
+            state,
+            FakeStdin(),
+            reader_done,
+            logger,
+            30.0,
+            proc,
+            stream,
+            0.1,  # limbo_grace_s — SHOULD fire against an idle process
+        )
+        with anyio.move_on_after(3.0):
+            while signal.SIGTERM not in killed_signals:
+                await anyio.sleep(0.02)
+        tg.cancel_scope.cancel()
+
+    assert signal.SIGTERM in killed_signals, (
+        "grace should still reap a demonstrably idle process"
+    )
+    sigterm_logs = [
+        kw
+        for lvl, e, kw in logger.records
+        if e == "claude.post_result_idle.sigterm_after_timeout"
+    ]
+    assert sigterm_logs and sigterm_logs[0].get("limbo_grace_applied") is True
+
+
+@pytest.mark.anyio
+async def test_655_limbo_grace_real_busy_subprocess_survives() -> None:
+    """End-to-end #655 with a REAL subprocess and REAL /proc CPU accounting —
+    no monkeypatched diag. A genuinely busy process with no registered
+    background handles must survive well past the limbo grace; the eventual
+    kill is the full-timeout path, not the grace."""
+    import contextlib
+    import os
+    import subprocess as _subprocess
+
+    import anyio
+
+    from untether.runner import JsonlStreamState
+    from untether.runners.claude import (
+        _PENDING_ASK_REQUESTS,
+        _REQUEST_TO_SESSION,
+        ClaudeRunner,
+    )
+
+    _REQUEST_TO_SESSION.clear()
+    _PENDING_ASK_REQUESTS.clear()
+
+    runner = ClaudeRunner(claude_cmd="claude")
+    runner._subcountdown_poll_interval_s = 0.1
+    runner._subcountdown_limbo_detect_threshold_s = 0.2
+    runner._subcountdown_sigterm_grace_s = 0.3
+    runner._subcountdown_sigterm_grace_poll_s = 0.05
+
+    state = ClaudeStreamState()
+    state.factory.started(ResumeToken(engine="claude", value="grace-sess-655c"))
+    state.result_received_at = time.monotonic() - 0.5
+    stream = JsonlStreamState(expected_session=None)
+
+    # A real CPU-busy child in its own process group, exactly as the runner
+    # spawns the CLI (start_new_session=True → pid == pgid).
+    proc = _subprocess.Popen(  # noqa: ASYNC220 — fork+exec is instant; the
+        # test needs Popen.poll() semantics for the ProcView adapter below.
+        ["sh", "-c", "while :; do :; done"],
+        start_new_session=True,
+        stdout=_subprocess.DEVNULL,
+        stderr=_subprocess.DEVNULL,
+    )
+
+    logger = _RecordingLogger()
+    reader_done = anyio.Event()
+    reader_done.set()
+
+    class FakeStdin:
+        async def aclose(self) -> None:
+            pass
+
+    class ProcView:
+        """Popen adapter exposing the pid/returncode surface the watchdog
+        polls (Popen.returncode only updates via poll())."""
+
+        pid = proc.pid
+
+        @property
+        def returncode(self) -> int | None:
+            return proc.poll()
+
+    grace_s = 0.4
+    timeout_s = 2.5
+    try:
+        async with anyio.create_task_group() as tg:
+            tg.start_soon(
+                runner._post_result_idle_watchdog,
+                state,
+                FakeStdin(),
+                reader_done,
+                logger,
+                timeout_s,
+                ProcView(),
+                stream,
+                grace_s,
+            )
+            # Well past the grace: the busy process must still be alive and
+            # un-signalled — pre-#655 it was SIGTERM'd at the grace.
+            await anyio.sleep(grace_s * 3)
+            assert proc.poll() is None, (
+                "busy subprocess must survive past the limbo grace"
+            )
+            assert not any(
+                e == "claude.post_result_idle.sigterm_after_timeout"
+                for _, e, _ in logger.records
+            )
+            # Let the full timeout fire and the watchdog return.
+            with anyio.move_on_after(timeout_s * 3):
+                while proc.poll() is None:
+                    await anyio.sleep(0.05)
+            tg.cancel_scope.cancel()
+    finally:
+        with contextlib.suppress(ProcessLookupError, PermissionError):
+            os.killpg(proc.pid, signal.SIGKILL)
+        proc.wait(timeout=5)
+
+    sigterm_logs = [
+        kw
+        for lvl, e, kw in logger.records
+        if e == "claude.post_result_idle.sigterm_after_timeout"
+    ]
+    assert sigterm_logs, "full timeout should eventually reap the process"
+    assert sigterm_logs[0].get("limbo_grace_applied") is False
+    assert sigterm_logs[0].get("cpu_active") is True
+    assert sigterm_logs[0].get("elapsed_s", 0.0) >= timeout_s * 0.8
+
+
+def _limbo_level_records(logger: "_RecordingLogger") -> list[tuple[str, dict]]:
+    return [(lvl, kw) for lvl, e, kw in logger.records if e == "runner.limbo_detected"]
+
+
+async def _run_limbo_level_scenario(
+    monkeypatch,
+    *,
+    session_value: str,
+    pid: int,
+    live_bg: bool,
+    rising_cpu: bool,
+) -> "_RecordingLogger":
+    """Drive the subcountdown to its limbo tick and capture the log records.
+
+    Grace is disabled (0.0) so the loop lingers long enough to observe the
+    one-shot ``runner.limbo_detected`` without any kill path interfering.
+    """
+    import anyio
+
+    from untether.runner import JsonlStreamState
+    from untether.runners.claude import (
+        _PENDING_ASK_REQUESTS,
+        _REQUEST_TO_SESSION,
+        ClaudeRunner,
+    )
+    from untether.utils.proc_diag import ProcessDiag
+
+    _REQUEST_TO_SESSION.clear()
+    _PENDING_ASK_REQUESTS.clear()
+
+    runner = ClaudeRunner(claude_cmd="claude")
+    runner._subcountdown_poll_interval_s = 0.02
+    runner._subcountdown_limbo_detect_threshold_s = 0.05
+
+    state = ClaudeStreamState()
+    state.factory.started(ResumeToken(engine="claude", value=session_value))
+    state.result_received_at = time.monotonic() - 0.5
+    if live_bg:
+        state.live_wakeups["toolu_653"] = time.monotonic() + 3600.0
+    stream = JsonlStreamState(expected_session=None)
+
+    proc = _FakeProc(pid=pid, returncode=None)
+    monkeypatch.setattr("os.killpg", lambda pgid, sig: None)
+    monkeypatch.setattr("untether.utils.subprocess.find_descendants", lambda pid: [])
+
+    calls = {"n": 0}
+
+    def _fake_diag(diag_pid: int) -> ProcessDiag:
+        calls["n"] += 1
+        ticks = calls["n"] * 10 if rising_cpu else 100
+        return ProcessDiag(
+            pid=diag_pid,
+            alive=True,
+            cpu_utime=ticks,
+            cpu_stime=0,
+            tree_cpu_utime=ticks,
+            tree_cpu_stime=0,
+        )
+
+    monkeypatch.setattr("untether.utils.proc_diag.collect_proc_diag", _fake_diag)
+
+    logger = _RecordingLogger()
+    reader_done = anyio.Event()
+    reader_done.set()
+
+    class FakeStdin:
+        async def aclose(self) -> None:
+            pass
+
+    async with anyio.create_task_group() as tg:
+        tg.start_soon(
+            runner._post_result_idle_watchdog,
+            state,
+            FakeStdin(),
+            reader_done,
+            logger,
+            30.0,
+            proc,
+            stream,
+            0.0,  # grace disabled — we only want the limbo tick
+        )
+        with anyio.move_on_after(3.0):
+            while "runner.limbo_detected" not in logger.events():
+                await anyio.sleep(0.02)
+        tg.cancel_scope.cancel()
+
+    return logger
+
+
+@pytest.mark.anyio
+async def test_653_limbo_detected_info_when_background_work_live(monkeypatch) -> None:
+    """#653: limbo with live background work is healthy, expected behaviour
+    under the liveness-aware ceiling (#646/#647) — the one-shot
+    ``runner.limbo_detected`` logs at INFO, not WARNING."""
+    logger = await _run_limbo_level_scenario(
+        monkeypatch,
+        session_value="limbo-lvl-1",
+        pid=52430,
+        live_bg=True,
+        rising_cpu=False,
+    )
+    records = _limbo_level_records(logger)
+    assert records, "limbo_detected should have fired"
+    assert all(lvl == "info" for lvl, _ in records)
+    assert records[0][1].get("live_background_work") is True
+
+
+@pytest.mark.anyio
+async def test_653_limbo_detected_info_when_cpu_active(monkeypatch) -> None:
+    """#653/#655: limbo with no registered handles but a demonstrably busy
+    process (rising CPU) is also healthy — INFO, not WARNING."""
+    logger = await _run_limbo_level_scenario(
+        monkeypatch,
+        session_value="limbo-lvl-2",
+        pid=52431,
+        live_bg=False,
+        rising_cpu=True,
+    )
+    records = _limbo_level_records(logger)
+    assert records, "limbo_detected should have fired"
+    assert all(lvl == "info" for lvl, _ in records)
+    assert records[0][1].get("live_background_work") is False
+
+
+@pytest.mark.anyio
+async def test_653_limbo_detected_warning_when_quiescent(monkeypatch) -> None:
+    """#653: limbo with no background work and a flat CPU counter is the
+    genuinely-stuck case the warning was written for — stays WARNING."""
+    logger = await _run_limbo_level_scenario(
+        monkeypatch,
+        session_value="limbo-lvl-3",
+        pid=52432,
+        live_bg=False,
+        rising_cpu=False,
+    )
+    records = _limbo_level_records(logger)
+    assert records, "limbo_detected should have fired"
+    assert all(lvl == "warning" for lvl, _ in records)
+
+
+@pytest.mark.anyio
+async def test_591_limbo_grace_zero_disables_shortcut(monkeypatch) -> None:
+    """limbo_grace_s=0 disables the shortcut — the full timeout applies."""
+    import anyio
+
+    from untether.runner import JsonlStreamState
+    from untether.runners.claude import (
+        _PENDING_ASK_REQUESTS,
+        _REQUEST_TO_SESSION,
+        ClaudeRunner,
+    )
+
+    _REQUEST_TO_SESSION.clear()
+    _PENDING_ASK_REQUESTS.clear()
+
+    runner = ClaudeRunner(claude_cmd="claude")
+    runner._subcountdown_poll_interval_s = 0.02
+
+    state = ClaudeStreamState()
+    state.factory.started(ResumeToken(engine="claude", value="grace-sess-3"))
+    state.result_received_at = time.monotonic() - 0.5
+    stream = JsonlStreamState(expected_session=None)
+
+    proc = _FakeProc(pid=52426, returncode=None)
+    killed_signals: list[int] = []
+    monkeypatch.setattr("os.killpg", lambda pgid, sig: killed_signals.append(sig))
+    # #590: signal_pid_group snapshots real /proc descendants before
+    # signalling — neutralise it so tests never touch live processes.
+    monkeypatch.setattr("untether.utils.subprocess.find_descendants", lambda pid: [])
+
+    logger = _RecordingLogger()
+    reader_done = anyio.Event()
+    reader_done.set()
+
+    class FakeStdin:
+        async def aclose(self) -> None:
+            pass
+
+    async with anyio.create_task_group() as tg:
+        tg.start_soon(
+            runner._post_result_idle_watchdog,
+            state,
+            FakeStdin(),
+            reader_done,
+            logger,
+            30.0,
+            proc,
+            stream,
+            0.0,  # disabled
+        )
+        await anyio.sleep(0.5)
+        tg.cancel_scope.cancel()
+
+    assert killed_signals == [], "grace=0 must fall back to the full timeout"
+
+
+@pytest.mark.anyio
+async def test_590_limbo_refreshes_orphan_snapshot(monkeypatch) -> None:
+    """#590: limbo detection extends state.orphan_pid_snapshot from the live
+    RECURSIVE descendant walk (find_descendants) so late-spawned MCP leakers —
+    including npx→node grandchildren, which diag.child_pids (direct children
+    only) missed — are visible to the post-exit sweep."""
+
+    import anyio
+
+    from untether.runner import JsonlStreamState
+    from untether.runners.claude import (
+        _PENDING_ASK_REQUESTS,
+        _REQUEST_TO_SESSION,
+        ClaudeRunner,
+    )
+
+    _REQUEST_TO_SESSION.clear()
+    _PENDING_ASK_REQUESTS.clear()
+
+    runner = ClaudeRunner(claude_cmd="claude")
+    runner._subcountdown_poll_interval_s = 0.02
+    runner._subcountdown_limbo_detect_threshold_s = 0.05
+
+    state = ClaudeStreamState()
+    state.factory.started(ResumeToken(engine="claude", value="orphan-sess-1"))
+    state.result_received_at = time.monotonic() - 0.5
+    state.orphan_pid_snapshot.append(900)  # pre-existing reader-done capture
+    stream = JsonlStreamState(expected_session=None)
+
+    proc = _FakeProc(pid=62424, returncode=None)
+    # collect_proc_diag drives only the diagnostic log line now; the snapshot
+    # comes from the recursive find_descendants walk. A real ProcessDiag is
+    # required since the #650 subcountdown tick feeds it to is_cpu_active.
+    from untether.utils.proc_diag import ProcessDiag
+
+    monkeypatch.setattr(
+        "untether.utils.proc_diag.collect_proc_diag",
+        lambda pid: ProcessDiag(
+            pid=pid, alive=True, child_pids=[901], rss_kb=1000, tcp_total=3
+        ),
+    )
+    monkeypatch.setattr(
+        "untether.utils.proc_diag.find_descendants",
+        lambda pid: [901, 902, 900],  # 902 is the grandchild direct-children missed
+    )
+
+    logger = _RecordingLogger()
+    reader_done = anyio.Event()
+    reader_done.set()
+
+    class FakeStdin:
+        async def aclose(self) -> None:
+            pass
+
+    async with anyio.create_task_group() as tg:
+        tg.start_soon(
+            runner._post_result_idle_watchdog,
+            state,
+            FakeStdin(),
+            reader_done,
+            logger,
+            30.0,
+            proc,
+            stream,
+            0.0,  # grace disabled — we only want the limbo tick
+        )
+        with anyio.move_on_after(3.0):
+            while "runner.limbo_detected" not in logger.events():
+                await anyio.sleep(0.02)
+        tg.cancel_scope.cancel()
+
+    assert "runner.limbo_detected" in logger.events()
+    # 901/902 added; 900 not duplicated.
+    assert state.orphan_pid_snapshot == [900, 901, 902]
+
+
+# ===========================================================================
+# #592 — pre-first-result silence cap (the 8-day-zombie dead zone)
+# ===========================================================================
+
+
+def _silence_watchdog_runner() -> "ClaudeRunner":
+    from untether.runners.claude import ClaudeRunner
+
+    runner = ClaudeRunner(claude_cmd="claude")
+    runner._watchdog_min_poll_s = 0.02
+    runner._subcountdown_sigterm_grace_s = 0.1
+    runner._subcountdown_sigterm_grace_poll_s = 0.02
+    return runner
+
+
+@pytest.mark.anyio
+async def test_592_pre_result_silence_cap_kills_silent_run(monkeypatch) -> None:
+    """A run with zero stream output and no result is killed once the
+    silence cap elapses; the reason lands in stderr_capture so the run's
+    error message explains itself."""
+    import anyio
+
+    from untether.runner import JsonlStreamState
+    from untether.runners.claude import (
+        _PENDING_ASK_REQUESTS,
+        _REQUEST_TO_SESSION,
+    )
+
+    _REQUEST_TO_SESSION.clear()
+    _PENDING_ASK_REQUESTS.clear()
+
+    runner = _silence_watchdog_runner()
+    state = ClaudeStreamState()
+    state.factory.started(ResumeToken(engine="claude", value="silent-sess-1"))
+    # result_received_at stays None — pre-result forever.
+    stream = JsonlStreamState(expected_session=None)
+
+    proc = _FakeProc(pid=72424, returncode=None)
+    killed_signals: list[int] = []
+
+    def _fake_killpg(pgid: int, sig: int) -> None:
+        killed_signals.append(sig)
+        proc.returncode = -15  # SIGTERM obeyed
+
+    monkeypatch.setattr("os.killpg", _fake_killpg)
+    monkeypatch.setattr("untether.utils.subprocess.find_descendants", lambda pid: [])
+
+    logger = _RecordingLogger()
+    reader_done = anyio.Event()  # never set — the reader is blocked forever
+
+    class FakeStdin:
+        async def aclose(self) -> None:
+            pass
+
+    async with anyio.create_task_group() as tg:
+        tg.start_soon(
+            runner._post_result_idle_watchdog,
+            state,
+            FakeStdin(),
+            reader_done,
+            logger,
+            0.2,  # post-result timeout (drives poll cadence only here)
+            proc,
+            stream,
+            0.0,  # limbo grace off
+            0.15,  # pre_result_silence_timeout_s — the cap under test
+        )
+        with anyio.move_on_after(3.0):
+            while signal.SIGTERM not in killed_signals:
+                await anyio.sleep(0.02)
+        tg.cancel_scope.cancel()
+
+    assert signal.SIGTERM in killed_signals
+    assert "claude.pre_result_silence.cancel" in logger.events("warning")
+    exit_reasons = [
+        kw.get("reason")
+        for lvl, e, kw in logger.records
+        if e == "claude.post_result_idle.task_exited"
+    ]
+    assert "pre_result_silence_cancelled" in exit_reasons
+    assert any("pre-result silence cap" in line for line in stream.stderr_capture)
+    assert state.pre_result_silence_killed is True
+
+
+@pytest.mark.anyio
+async def test_592_silence_cap_suppressed_by_pending_request(monkeypatch) -> None:
+    """A pending permission request (e.g. plan-mode approval wait) must
+    suppress the cap — cron+plan-mode long idles are by design."""
+    import anyio
+
+    from untether.runner import JsonlStreamState
+    from untether.runners.claude import (
+        _PENDING_ASK_REQUESTS,
+        _REQUEST_TO_SESSION,
+    )
+
+    sid = "silent-sess-2"
+    _REQUEST_TO_SESSION.clear()
+    _PENDING_ASK_REQUESTS.clear()
+    _REQUEST_TO_SESSION["req_silence"] = sid
+    try:
+        runner = _silence_watchdog_runner()
+        state = ClaudeStreamState()
+        state.factory.started(ResumeToken(engine="claude", value=sid))
+        stream = JsonlStreamState(expected_session=None)
+
+        proc = _FakeProc(pid=72425, returncode=None)
+        killed_signals: list[int] = []
+        monkeypatch.setattr("os.killpg", lambda pgid, sig: killed_signals.append(sig))
+
+        logger = _RecordingLogger()
+        reader_done = anyio.Event()
+
+        class FakeStdin:
+            async def aclose(self) -> None:
+                pass
+
+        async with anyio.create_task_group() as tg:
+            tg.start_soon(
+                runner._post_result_idle_watchdog,
+                state,
+                FakeStdin(),
+                reader_done,
+                logger,
+                0.2,
+                proc,
+                stream,
+                0.0,
+                0.1,
+            )
+            await anyio.sleep(0.6)
+            tg.cancel_scope.cancel()
+
+        assert killed_signals == []
+        assert "claude.pre_result_silence.suppressed" in logger.events("info")
+        assert state.pre_result_silence_killed is False
+    finally:
+        _REQUEST_TO_SESSION.clear()
+
+
+@pytest.mark.anyio
+async def test_592_silence_cap_suppressed_by_live_background_work(
+    monkeypatch,
+) -> None:
+    """Live background work (pending wakeup) suppresses the cap."""
+    import anyio
+
+    from untether.runner import JsonlStreamState
+    from untether.runners.claude import (
+        _PENDING_ASK_REQUESTS,
+        _REQUEST_TO_SESSION,
+    )
+
+    _REQUEST_TO_SESSION.clear()
+    _PENDING_ASK_REQUESTS.clear()
+
+    runner = _silence_watchdog_runner()
+    state = ClaudeStreamState()
+    state.factory.started(ResumeToken(engine="claude", value="silent-sess-3"))
+    state.live_wakeups["toolu_silent"] = time.monotonic() + 3600.0
+    stream = JsonlStreamState(expected_session=None)
+
+    proc = _FakeProc(pid=72426, returncode=None)
+    killed_signals: list[int] = []
+    monkeypatch.setattr("os.killpg", lambda pgid, sig: killed_signals.append(sig))
+
+    logger = _RecordingLogger()
+    reader_done = anyio.Event()
+
+    class FakeStdin:
+        async def aclose(self) -> None:
+            pass
+
+    async with anyio.create_task_group() as tg:
+        tg.start_soon(
+            runner._post_result_idle_watchdog,
+            state,
+            FakeStdin(),
+            reader_done,
+            logger,
+            0.2,
+            proc,
+            stream,
+            0.0,
+            0.1,
+        )
+        await anyio.sleep(0.6)
+        tg.cancel_scope.cancel()
+
+    assert killed_signals == []
+    assert state.pre_result_silence_killed is False
+
+
+@pytest.mark.anyio
+async def test_592_silence_cap_zero_disables(monkeypatch) -> None:
+    """pre_result_silence_timeout=0 disables the cap entirely."""
+    import anyio
+
+    from untether.runner import JsonlStreamState
+    from untether.runners.claude import (
+        _PENDING_ASK_REQUESTS,
+        _REQUEST_TO_SESSION,
+    )
+
+    _REQUEST_TO_SESSION.clear()
+    _PENDING_ASK_REQUESTS.clear()
+
+    runner = _silence_watchdog_runner()
+    state = ClaudeStreamState()
+    state.factory.started(ResumeToken(engine="claude", value="silent-sess-4"))
+    stream = JsonlStreamState(expected_session=None)
+
+    proc = _FakeProc(pid=72427, returncode=None)
+    killed_signals: list[int] = []
+    monkeypatch.setattr("os.killpg", lambda pgid, sig: killed_signals.append(sig))
+
+    logger = _RecordingLogger()
+    reader_done = anyio.Event()
+
+    class FakeStdin:
+        async def aclose(self) -> None:
+            pass
+
+    async with anyio.create_task_group() as tg:
+        tg.start_soon(
+            runner._post_result_idle_watchdog,
+            state,
+            FakeStdin(),
+            reader_done,
+            logger,
+            0.2,
+            proc,
+            stream,
+            0.0,
+            0.0,  # disabled
+        )
+        await anyio.sleep(0.5)
+        tg.cancel_scope.cancel()
+
+    assert killed_signals == []
+    assert state.pre_result_silence_killed is False
+
+
+# --- #590: orphan descendant snapshot capture -------------------------------
+
+
+def test_capture_orphan_descendants_populates_snapshot_on_result(monkeypatch) -> None:
+    """#590 regression: processing a result event captures the live descendant
+    PIDs into orphan_pid_snapshot — the ONLY snapshot that fires on a fast
+    clean rc=0 run (no limbo, leader may exit before reader-done). This closes
+    the gap that leaked one dembrandt-mcp child (a pgroup escapee) per run.
+    """
+    monkeypatch.setattr(
+        "untether.utils.proc_diag.find_descendants", lambda pid: [111, 222, 333]
+    )
+    state = ClaudeStreamState()
+    state.pid = 40000  # leader alive at result time
+    event = claude_schema.StreamResultMessage(
+        subtype="success",
+        duration_ms=100,
+        duration_api_ms=50,
+        is_error=False,
+        num_turns=1,
+        session_id="sess-590",
+        result="done",
+    )
+    translate_claude_event(event, title="claude", state=state, factory=state.factory)
+    assert state.orphan_pid_snapshot == [111, 222, 333]
+
+
+def test_capture_orphan_descendants_dedups(monkeypatch) -> None:
+    """The helper appends only PIDs not already recorded, so the result /
+    limbo / reader-done refresh points never double-record."""
+    monkeypatch.setattr(
+        "untether.utils.proc_diag.find_descendants", lambda pid: [111, 222]
+    )
+    state = ClaudeStreamState()
+    state.pid = 40001
+    state.orphan_pid_snapshot = [111]
+    claude_runner._capture_orphan_descendants(state, source="result")
+    assert state.orphan_pid_snapshot == [111, 222]
+
+
+def test_capture_orphan_descendants_noop_without_pid(monkeypatch) -> None:
+    """No PID (pre-spawn / non-Linux) → no walk, no capture, no crash."""
+    called = False
+
+    def _fd(pid):
+        nonlocal called
+        called = True
+        return [999]
+
+    monkeypatch.setattr("untether.utils.proc_diag.find_descendants", _fd)
+    state = ClaudeStreamState()
+    state.pid = None
+    claude_runner._capture_orphan_descendants(state, source="result")
+    assert state.orphan_pid_snapshot == []
+    assert called is False
+
+
+def test_capture_orphan_descendants_swallows_oserror(monkeypatch) -> None:
+    """/proc read errors are best-effort — swallowed, snapshot unchanged."""
+
+    def _raise(pid):
+        raise OSError("proc gone")
+
+    monkeypatch.setattr("untether.utils.proc_diag.find_descendants", _raise)
+    state = ClaudeStreamState()
+    state.pid = 40002
+    claude_runner._capture_orphan_descendants(state, source="result")
+    assert state.orphan_pid_snapshot == []
+
+
+# ---------------------------------------------------------------------------
+# #647/#646 — liveness-aware post-result ceiling
+# ---------------------------------------------------------------------------
+
+
+def _bg_diag(pid: int):
+    """ProcessDiag stand-in: alive, has children, CPU data indeterminate —
+    the deterministic 'not demonstrably idle' shape for ceiling tests."""
+    from untether.utils.proc_diag import ProcessDiag
+
+    return ProcessDiag(pid=pid, alive=True, child_pids=[1234], rss_kb=1000)
+
+
+@pytest.mark.anyio
+async def test_647_subcountdown_extends_ceiling_while_bg_work_live(
+    monkeypatch,
+) -> None:
+    """Live background subagents defer the post-result SIGTERM past the fixed
+    deadline; the kill fires only once the background work is gone."""
+    from untether.runner import JsonlStreamState
+    from untether.runners.claude import (
+        _PENDING_ASK_REQUESTS,
+        _REQUEST_TO_SESSION,
+        ClaudeRunner,
+    )
+
+    _REQUEST_TO_SESSION.clear()
+    _PENDING_ASK_REQUESTS.clear()
+
+    runner = ClaudeRunner(claude_cmd="claude")
+    runner._subcountdown_poll_interval_s = 0.02
+    runner._subcountdown_limbo_detect_threshold_s = 0.05
+    runner._subcountdown_sigterm_grace_s = 0.1
+    runner._subcountdown_sigterm_grace_poll_s = 0.02
+
+    state = ClaudeStreamState()
+    state.factory.started(ResumeToken(engine="claude", value="bg-hold-sess-1"))
+    state.result_received_at = time.monotonic() - 0.5
+    # A live default-background Agent handle (#646 workload class).
+    state.live_bg_agents.add("toolu_bg_agent")
+    state.bg_agent_deadlines["toolu_bg_agent"] = time.monotonic() + 3600.0
+    stream = JsonlStreamState(expected_session=None)
+
+    proc = _FakeProc(pid=54241, returncode=None)
+    killed_signals: list[int] = []
+
+    def _fake_killpg(pgid: int, sig: int) -> None:
+        killed_signals.append(sig)
+        proc.returncode = -15
+
+    monkeypatch.setattr("os.killpg", _fake_killpg)
+    monkeypatch.setattr("untether.utils.subprocess.find_descendants", lambda pid: [])
+    monkeypatch.setattr("untether.utils.proc_diag.collect_proc_diag", _bg_diag)
+
+    logger = _RecordingLogger()
+    reader_done = anyio.Event()
+    reader_done.set()
+
+    class FakeStdin:
+        async def aclose(self) -> None:
+            pass
+
+    async with anyio.create_task_group() as tg:
+        tg.start_soon(
+            runner._post_result_idle_watchdog,
+            state,
+            FakeStdin(),
+            reader_done,
+            logger,
+            0.1,  # timeout_s — the fixed deadline expires almost immediately
+            proc,
+            stream,
+            0.0,  # limbo_grace_s disabled — full deadline applies
+            3600.0,
+            30.0,  # bg_max_hold_s — generous, far beyond the test's patience
+        )
+        # Let several deadline evaluations pass with live background work.
+        await anyio.sleep(0.4)
+        assert killed_signals == [], (
+            "SIGTERM must be deferred while background work is live"
+        )
+        assert any(
+            e == "claude.post_result_idle.ceiling_extended"
+            for _, e, _ in logger.records
+        )
+        # Background work finishes — the next deadline check must fire.
+        state.live_bg_agents.clear()
+        state.bg_agent_deadlines.clear()
+        with anyio.move_on_after(3.0):
+            while signal.SIGTERM not in killed_signals:
+                await anyio.sleep(0.02)
+        tg.cancel_scope.cancel()
+
+    assert signal.SIGTERM in killed_signals, (
+        "SIGTERM should fire once background work is gone"
+    )
+
+
+@pytest.mark.anyio
+async def test_647_subcountdown_bg_hold_cap_bounds_extension(monkeypatch) -> None:
+    """The liveness-aware extension is bounded: past ``bg_max_hold_s`` the
+    SIGTERM fires even with live background work, and the log carries the
+    ``live_background_work=True`` marker #647 monitoring keys on."""
+    from untether.runner import JsonlStreamState
+    from untether.runners.claude import (
+        _PENDING_ASK_REQUESTS,
+        _REQUEST_TO_SESSION,
+        ClaudeRunner,
+    )
+
+    _REQUEST_TO_SESSION.clear()
+    _PENDING_ASK_REQUESTS.clear()
+
+    runner = ClaudeRunner(claude_cmd="claude")
+    runner._subcountdown_poll_interval_s = 0.02
+    runner._subcountdown_limbo_detect_threshold_s = 0.05
+    runner._subcountdown_sigterm_grace_s = 0.1
+    runner._subcountdown_sigterm_grace_poll_s = 0.02
+
+    state = ClaudeStreamState()
+    state.factory.started(ResumeToken(engine="claude", value="bg-hold-sess-2"))
+    state.result_received_at = time.monotonic() - 0.5
+    state.live_bg_agents.add("toolu_bg_agent")
+    state.bg_agent_deadlines["toolu_bg_agent"] = time.monotonic() + 3600.0
+    stream = JsonlStreamState(expected_session=None)
+
+    proc = _FakeProc(pid=54242, returncode=None)
+    killed_signals: list[int] = []
+
+    def _fake_killpg(pgid: int, sig: int) -> None:
+        killed_signals.append(sig)
+        proc.returncode = -15
+
+    monkeypatch.setattr("os.killpg", _fake_killpg)
+    monkeypatch.setattr("untether.utils.subprocess.find_descendants", lambda pid: [])
+    monkeypatch.setattr("untether.utils.proc_diag.collect_proc_diag", _bg_diag)
+
+    logger = _RecordingLogger()
+    reader_done = anyio.Event()
+    reader_done.set()
+
+    class FakeStdin:
+        async def aclose(self) -> None:
+            pass
+
+    async with anyio.create_task_group() as tg:
+        tg.start_soon(
+            runner._post_result_idle_watchdog,
+            state,
+            FakeStdin(),
+            reader_done,
+            logger,
+            0.05,  # timeout_s
+            proc,
+            stream,
+            0.0,  # limbo_grace_s disabled
+            3600.0,
+            0.08,  # bg_max_hold_s — cap expires almost immediately
+        )
+        with anyio.move_on_after(3.0):
+            while signal.SIGTERM not in killed_signals:
+                await anyio.sleep(0.02)
+        tg.cancel_scope.cancel()
+
+    assert signal.SIGTERM in killed_signals, "cap must bound the extension"
+    sigterm_logs = [
+        kw
+        for _, e, kw in logger.records
+        if e == "claude.post_result_idle.sigterm_after_timeout"
+    ]
+    assert sigterm_logs and sigterm_logs[0].get("live_background_work") is True
+
+
+@pytest.mark.anyio
+async def test_650_subcountdown_ticks_are_logged(monkeypatch) -> None:
+    """#650 defect (3): the subcountdown loop must emit periodic
+    ``subcountdown_tick`` lines — previously it logged nothing between the
+    one-shot limbo warning and its exit, and the bridge's stall detector won
+    the race inside that blackout."""
+    from untether.runner import JsonlStreamState
+    from untether.runners.claude import (
+        _PENDING_ASK_REQUESTS,
+        _REQUEST_TO_SESSION,
+        ClaudeRunner,
+    )
+
+    _REQUEST_TO_SESSION.clear()
+    _PENDING_ASK_REQUESTS.clear()
+
+    runner = ClaudeRunner(claude_cmd="claude")
+    runner._subcountdown_poll_interval_s = 0.02
+    runner._subcountdown_limbo_detect_threshold_s = 0.05
+    runner._subcountdown_tick_log_interval_s = 0.01
+
+    state = ClaudeStreamState()
+    state.factory.started(ResumeToken(engine="claude", value="tick-sess-1"))
+    state.result_received_at = time.monotonic() - 0.5
+    stream = JsonlStreamState(expected_session=None)
+
+    proc = _FakeProc(pid=54243, returncode=None)
+    monkeypatch.setattr("untether.utils.proc_diag.collect_proc_diag", _bg_diag)
+
+    logger = _RecordingLogger()
+    reader_done = anyio.Event()
+    reader_done.set()
+
+    class FakeStdin:
+        async def aclose(self) -> None:
+            pass
+
+    async with anyio.create_task_group() as tg:
+        tg.start_soon(
+            runner._post_result_idle_watchdog,
+            state,
+            FakeStdin(),
+            reader_done,
+            logger,
+            30.0,  # far beyond the test window — the loop just idles
+            proc,
+            stream,
+            0.0,  # limbo_grace_s disabled so nothing fires
+            3600.0,
+        )
+        await anyio.sleep(0.3)
+        tg.cancel_scope.cancel()
+
+    ticks = [
+        kw
+        for _, e, kw in logger.records
+        if e == "claude.post_result_idle.subcountdown_tick"
+    ]
+    assert len(ticks) >= 2, "expected periodic subcountdown ticks"
+    # Once past the limbo threshold the ticks must keep coming and say so.
+    assert any(kw.get("in_limbo") is True for kw in ticks)
+
+
+def test_647_session_live_bg_count_reads_registry() -> None:
+    """The bridge-facing helper reports live background handles for a
+    registered session and 0 for unknown/idle sessions."""
+    from untether.runners.claude import (
+        _SESSION_BG_STATE,
+        session_live_bg_count,
+    )
+
+    state = ClaudeStreamState()
+    state.live_bg_agents.add("toolu_1")
+    state.bg_agent_deadlines["toolu_1"] = time.monotonic() + 3600.0
+    _SESSION_BG_STATE["bg-count-sess"] = state
+    try:
+        assert session_live_bg_count("bg-count-sess") == 1
+        assert session_live_bg_count("missing-sess") == 0
+        # Aged-out handle no longer counts.
+        state.bg_agent_deadlines["toolu_1"] = time.monotonic() - 1.0
+        assert session_live_bg_count("bg-count-sess") == 0
+    finally:
+        _SESSION_BG_STATE.pop("bg-count-sess", None)
+
+
+def test_654_session_linger_info_reads_registries() -> None:
+    """#654: `session_linger_info` reports (post_result, bg_count) for a
+    live session owner so the queued-progress path can explain the wait."""
+    from untether.runners.claude import (
+        _SESSION_BG_STATE,
+        _SESSION_STDIN,
+        session_linger_info,
+    )
+
+    sid = "linger-sess-1"
+    state = ClaudeStreamState()
+    try:
+        # No live owner at all.
+        assert session_linger_info(sid) is None
+
+        # Live owner, result not yet delivered — normal mid-run queue.
+        _SESSION_STDIN[sid] = object()
+        _SESSION_BG_STATE[sid] = state
+        assert session_linger_info(sid) == (False, 0)
+
+        # Post-result with a live background handle.
+        state.result_received_at = time.monotonic() - 1.0
+        state.live_bg_agents.add("toolu_654")
+        state.bg_agent_deadlines["toolu_654"] = time.monotonic() + 3600.0
+        assert session_linger_info(sid) == (True, 1)
+
+        # Post-result, handles aged out (the #655 shape) — still reported
+        # as post-result so the note can explain the wait generically.
+        state.bg_agent_deadlines["toolu_654"] = time.monotonic() - 1.0
+        assert session_linger_info(sid) == (True, 0)
+    finally:
+        _SESSION_STDIN.pop(sid, None)
+        _SESSION_BG_STATE.pop(sid, None)

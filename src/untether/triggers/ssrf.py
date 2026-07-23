@@ -68,6 +68,18 @@ class SSRFError(Exception):
     """Raised when an outbound request is blocked by SSRF protection."""
 
 
+def parse_networks(
+    entries: Sequence[str],
+) -> list[ipaddress.IPv4Network | ipaddress.IPv6Network]:
+    """Parse CIDR / bare-IP strings into networks for use as an SSRF allowlist.
+
+    Bare IPs (``"10.0.0.5"``) become host networks (``/32`` or ``/128``).
+    Raises :class:`ValueError` on any unparseable entry — callers validating
+    config should surface this as a config error.
+    """
+    return [ipaddress.ip_network(entry, strict=False) for entry in entries]
+
+
 def _is_blocked_ip(
     addr: ipaddress.IPv4Address | ipaddress.IPv6Address,
     *,

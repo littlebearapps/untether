@@ -83,6 +83,10 @@ class PiStreamState:
     note_seq: int = 0
     compaction_seq: int = 0
     compaction_action_id: str | None = None
+    # #460: stable action id across an AutoRetryStart/AutoRetryEnd pair so the
+    # progress UI updates the same action rather than stacking a new one.
+    retry_seq: int = 0
+    retry_action_id: str | None = None
     # #225: latch once the runner has emitted the JSONL-derived model into
     # meta. Prevents us from re-emitting supplementary StartedEvents on every
     # subsequent message_end when the default-config model path is in use.
@@ -142,6 +146,14 @@ def _action_event(
         message=message,
         level=level,
     )
+
+
+def _format_retry_delay(delay_ms: int) -> str:
+    """Render an AutoRetry ``delayMs`` as a compact human string (#460)."""
+    if delay_ms >= 1000:
+        seconds = delay_ms / 1000
+        return f"{seconds:.0f}s" if delay_ms % 1000 == 0 else f"{seconds:.1f}s"
+    return f"{delay_ms}ms"
 
 
 def _extract_text_blocks(content: Any) -> str | None:
@@ -389,6 +401,70 @@ def translate_pi_event(
             )
             return out
 
+        case pi_schema.AutoRetryStart(
+            attempt=attempt,
+            maxAttempts=max_attempts,
+            delayMs=delay_ms,
+            errorMessage=error_message,
+        ):
+            # #460: surface transient provider retries so they're visible in
+            # Telegram and the liveness watchdog sees event activity at each
+            # retry boundary (rather than mistaking the backoff gap for a stall).
+            state.retry_seq += 1
+            action_id = f"retry_{state.retry_seq}"
+            state.retry_action_id = action_id
+            bits: list[str] = []
+            if attempt is not None:
+                if max_attempts:
+                    bits.append(f"attempt {attempt}/{max_attempts}")
+                else:
+                    bits.append(f"attempt {attempt}")
+            if delay_ms:
+                bits.append(f"~{_format_retry_delay(delay_ms)} delay")
+            suffix = f" ({', '.join(bits)})" if bits else ""
+            retry_detail: dict[str, Any] = {}
+            if error_message:
+                retry_detail["error"] = error_message
+            out.append(
+                _action_event(
+                    phase="started",
+                    action=Action(
+                        id=action_id,
+                        kind="note",
+                        title=f"retrying provider{suffix}",
+                        detail=retry_detail,
+                    ),
+                )
+            )
+            return out
+
+        case pi_schema.AutoRetryEnd(success=success, finalError=final_error):
+            action_id = state.retry_action_id or f"retry_{state.retry_seq}"
+            state.retry_action_id = None
+            if success:
+                retry_title = "retry succeeded"
+                retry_ok = True
+            else:
+                retry_title = (
+                    f"retry exhausted: {final_error}"
+                    if final_error
+                    else "retry exhausted"
+                )
+                retry_ok = False
+            out.append(
+                _action_event(
+                    phase="completed",
+                    action=Action(
+                        id=action_id,
+                        kind="note",
+                        title=retry_title,
+                        detail={"final_error": final_error} if final_error else {},
+                    ),
+                    ok=retry_ok,
+                )
+            )
+            return out
+
         case _:
             logger.debug(
                 "pi.event.unrecognised",
@@ -590,14 +666,43 @@ class PiRunner(ResumeTokenMixin, JsonlSubprocessRunner):
         resume: ResumeToken | None,
         found_session: ResumeToken | None,
         state: PiStreamState,
+        stderr_lines: list[str] | None = None,
     ) -> list[UntetherEvent]:
         resume_for_completed = found_session or resume or state.resume
-        parts = ["pi finished without an agent_end event"]
+        resumed = resume is not None
+        # #565: Untether was blind to *why* Pi exited on this path — the old
+        # hardcoded "finished without an agent_end event" message hid both the
+        # failure category and Pi's own stderr. Distinguish two cases:
+        #   * zero translated events (rc=0, ~1.5s) → a startup/early-exit crash,
+        #     e.g. MCP servers still cold while a resumed session rehydrates
+        #     tool state (the real, transient cause behind the original report).
+        #   * events seen but no agent_end → a genuinely truncated stream.
+        # ``state.started`` flips True on the first translated event, so it is a
+        # reliable "did Pi produce anything?" signal without threading the raw
+        # JSONL line count through the polymorphic call.
+        if not state.started:
+            opener = (
+                "pi exited cleanly (rc=0) but produced no events — likely a "
+                "startup/early-exit failure (e.g. MCP servers still connecting)"
+            )
+            if resumed:
+                opener += "; the session may have failed to load on resume"
+            parts = [opener + "."]
+        else:
+            parts = ["pi finished without an agent_end event"]
         session = _session_label(found_session, resume)
         if session:
             parts.append(f"session: {session}")
+        excerpt = _stderr_excerpt(stderr_lines)
+        if excerpt:
+            parts.append(excerpt)
         message = "\n".join(parts)
-        logger.warning("pi.stream.no_agent_end", resume=state.resume.value)
+        logger.warning(
+            "pi.stream.no_agent_end",
+            resume=state.resume.value,
+            had_events=state.started,
+            resumed=resumed,
+        )
         return [
             CompletedEvent(
                 engine=ENGINE,

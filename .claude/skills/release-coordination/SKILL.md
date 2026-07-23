@@ -45,8 +45,8 @@ All seven (now-8) phases happen in a single branch (typically `master` for patch
 
 **Phase 5.5 (attestation)** is the gate that makes the fleet rollout safe.
 Without it, `scripts/fleet-rollout.sh` refuses to upgrade production hosts.
-**Phase 6 (staging + fleet rollout)** parallelises across all 4 hosts —
-lba-1 staging, nsd, channelo, mac — instead of staging on lba-1 alone.
+**Phase 6 (staging + fleet rollout)** parallelises across all 5 hosts —
+lba-1 staging, nsd, channelo, sl, mac — instead of staging on lba-1 alone.
 
 ## Phase 1: Issue audit
 
@@ -251,7 +251,7 @@ All integration test tiers are fully automated by Claude Code via Telegram MCP t
 
 ## Phase 5.5: Integration-test attestation marker
 
-After integration tests pass for a given version, write the attestation marker. This is the precondition for `scripts/fleet-rollout.sh` — without it, fleet rollout to nsd/channelo/mac is gated.
+After integration tests pass for a given version, write the attestation marker. This is the precondition for `scripts/fleet-rollout.sh` — without it, fleet rollout to nsd/channelo/sl/mac is gated.
 
 ```bash
 scripts/run-integration-tests.sh X.Y.ZrcN --manual \
@@ -270,9 +270,9 @@ rm ~/.untether-dev/integration-test-pass-X.Y.ZrcN.json
 
 `--skip-test-gate` exists on fleet-rollout as an escape hatch. It prints a loud warning and is not recommended for any change that touches production hosts.
 
-## Phase 6: Staging + fleet rollout (parallel across all 4 hosts)
+## Phase 6: Staging + fleet rollout (parallel across all 5 hosts)
 
-Before tagging a final release, publish a release candidate to TestPyPI and roll it to all 4 hosts in parallel. Both lba-1 staging AND nsd/channelo/mac upgrade together — the integration-test attestation from Phase 5.5 gates the rollout, replacing the previous lba-1-only dogfood window.
+Before tagging a final release, publish a release candidate to TestPyPI and roll it to all 5 hosts in parallel. Both lba-1 staging AND nsd/channelo/sl/mac upgrade together — the integration-test attestation from Phase 5.5 gates the rollout, replacing the previous lba-1-only dogfood window.
 
 ### Enter the rc cycle
 
@@ -289,14 +289,14 @@ git push origin dev          # dev push, NOT master — CI publishes to TestPyPI
 #   2. Write the attestation marker (Phase 5.5)
 #   3. Run fleet rollout (this phase)
 
-scripts/fleet-rollout.sh X.Y.Zrc1                    # all 4 hosts parallel
+scripts/fleet-rollout.sh X.Y.Zrc1                    # all 5 hosts parallel
 scripts/fleet-rollout.sh X.Y.Zrc1 --dry-run          # preview
 scripts/fleet-rollout.sh X.Y.Zrc1 --only mac         # one host
 ```
 
 ### During the rc cycle
 
-- All 4 bots run the same rc (lba-1, nsd, channelo, mac)
+- All 5 bots run the same rc (lba-1, nsd, channelo, sl, mac)
 - Each host's `untether-issue-watcher` daemon catches log-pattern bugs auto-tagged with `host:<name>`
 - `/monitor untether-fleet` runs cross-host audits in parallel for richer signal
 - If bugs found: fix → bump to `X.Y.Zrc2` → push → re-test → re-attest → re-roll
@@ -309,7 +309,7 @@ When the rc cycle is stable, bump to the final version (no rc suffix), follow th
 ```bash
 # Bump pyproject.toml to X.Y.Z, add CHANGELOG entry, then:
 scripts/run-integration-tests.sh X.Y.Z --manual --notes "Final cut; rc cycle stable"
-scripts/fleet-rollout.sh X.Y.Z                       # all 4 hosts parallel
+scripts/fleet-rollout.sh X.Y.Z                       # all 5 hosts parallel
 ```
 
 Then proceed to Phase 7 (Tag and publish).

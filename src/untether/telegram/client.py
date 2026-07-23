@@ -15,8 +15,10 @@ from .outbox import (
     DELETE_PRIORITY,
     EDIT_PRIORITY,
     SEND_PRIORITY,
+    SUPERSEDED,
     OutboxOp,
     TelegramOutbox,
+    _Superseded,
 )
 from .parsing import parse_incoming_update, poll_incoming
 
@@ -113,6 +115,7 @@ class TelegramClient:
         priority: int,
         chat_id: int | None,
         wait: bool = True,
+        superseded_result: Any = None,
     ) -> Any:
         request = OutboxOp(
             execute=execute,
@@ -120,8 +123,13 @@ class TelegramClient:
             queued_at=self._clock(),
             chat_id=chat_id,
             label=label,
+            superseded_result=superseded_result,
         )
         return await self._outbox.enqueue(key=key, op=request, wait=wait)
+
+    async def flush_outbox(self, *, timeout: float = 5.0) -> None:  # noqa: ASYNC109
+        """#559: drain queued outbox sends (best-effort, bounded) before close."""
+        await self._outbox.flush(timeout=timeout)
 
     async def close(self) -> None:
         await self._outbox.close()
@@ -236,6 +244,14 @@ class TelegramClient:
             chat_id=chat_id,
         )
 
+    def pop_edit_error(self, chat_id: int, message_id: int) -> str | None:
+        """#598: fetch-and-clear the recorded ``editMessageText`` failure
+        reason for a message, so ``transport.edit.failed`` can say WHY."""
+        pop = getattr(self._client, "pop_last_api_error", None)
+        if callable(pop):
+            return pop("editMessageText", chat_id, message_id)
+        return None
+
     async def edit_message_text(
         self,
         chat_id: int,
@@ -246,7 +262,7 @@ class TelegramClient:
         reply_markup: dict[str, Any] | None = None,
         *,
         wait: bool = True,
-    ) -> Message | None:
+    ) -> Message | _Superseded | None:
         async def execute() -> Message | None:
             return await self._client.edit_message_text(
                 chat_id=chat_id,
@@ -258,6 +274,11 @@ class TelegramClient:
                 wait=wait,
             )
 
+        # #598: opt this op into the SUPERSEDED disposition so a coalesced edit
+        # (a newer same-key edit, or a delete/replace dropping this one) is
+        # distinguishable from a real failure. The transport layer treats
+        # SUPERSEDED as a benign no-op instead of logging the spurious
+        # ``transport.edit.failed error=None`` warning.
         return await self.enqueue_op(
             key=("edit", chat_id, message_id),
             label="edit_message_text",
@@ -265,6 +286,7 @@ class TelegramClient:
             priority=EDIT_PRIORITY,
             chat_id=chat_id,
             wait=wait,
+            superseded_result=SUPERSEDED,
         )
 
     async def delete_message(

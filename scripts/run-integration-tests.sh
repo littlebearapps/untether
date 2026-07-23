@@ -34,6 +34,11 @@ MODE="manual"
 TIERS=""
 NOTES=""
 TESTER="${UT_INTEGRATION_TESTER:-${USER}@$(hostname)}"
+# SHA-binding (#674): bind the attestation to the exact commit tested + a
+# machine-readable dev-bot identity, so the marker is not a reusable boolean.
+HEAD_SHA="${UT_INTEGRATION_HEAD_SHA:-}"
+DEV_BOT_ID="${UT_DEV_BOT_ID:-8678330610}"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 usage() {
     cat <<EOF
@@ -52,6 +57,14 @@ Options:
   --auto               Reserved for future — exit 1 with a notice.
   --tiers LIST         Comma-separated tier list run (e.g. "tier7,tier1-claude")
   --notes TEXT         Free-form notes about the test run
+  --head-sha SHA       Commit the tests were run against. Defaults to the
+                       script repo's HEAD (git rev-parse). Also settable via
+                       UT_INTEGRATION_HEAD_SHA. Binds the marker to an artifact.
+
+Environment:
+  UT_INTEGRATION_TESTER   Overrides the recorded tester (default: user@host)
+  UT_INTEGRATION_HEAD_SHA Overrides the recorded head_sha
+  UT_DEV_BOT_ID           Overrides the recorded dev_bot_id (default: 8678330610)
 
 The marker is written to:
   ${ATTESTATION_DIR}/integration-test-pass-VERSION.json
@@ -66,6 +79,7 @@ while [[ $# -gt 0 ]]; do
         --auto) MODE="auto"; shift ;;
         --tiers) TIERS="${2:?--tiers requires a value}"; shift 2 ;;
         --notes) NOTES="${2:?--notes requires a value}"; shift 2 ;;
+        --head-sha) HEAD_SHA="${2:?--head-sha requires a value}"; shift 2 ;;
         -*) echo "Unknown option: $1" >&2; usage 1 ;;
         *)
             if [[ -z "$VERSION" ]]; then VERSION="$1"; else echo "Unexpected: $1" >&2; usage 1; fi
@@ -97,6 +111,12 @@ fi
 mkdir -p "$ATTESTATION_DIR"
 MARKER="${ATTESTATION_DIR}/integration-test-pass-${VERSION}.json"
 
+# Derive head_sha from the script's own repo if not supplied. Never abort the
+# attestation just because git is unavailable — fall back to "unknown".
+if [[ -z "$HEAD_SHA" ]]; then
+    HEAD_SHA="$(git -C "$SCRIPT_DIR" rev-parse HEAD 2>/dev/null || echo "unknown")"
+fi
+
 # Default tier list mirrors the release-discipline rule's per-bump-severity
 # requirements. Patch -> tier7+tier1-affected; minor -> wider; major -> all.
 # We don't know the bump severity from this script, so default empty and
@@ -108,12 +128,14 @@ import json
 marker = "${MARKER}"
 data = {
     "version": "${VERSION}",
+    "head_sha": "${HEAD_SHA}",
     "tester": "${TESTER}",
     "attested_at": "${TIMESTAMP}",
     "mode": "${MODE}",
     "tiers": "${TIERS}".split(",") if "${TIERS}" else [],
     "notes": """${NOTES}""",
     "dev_bot": "@untether_dev_bot",
+    "dev_bot_id": "${DEV_BOT_ID}",
     "playbook": "docs/reference/integration-testing.md",
 }
 with open(marker, "w") as f:
@@ -124,9 +146,10 @@ EOF
 cat <<EOF
 
 The fleet rollout gate is now satisfied for version ${VERSION}.
+Bound to head_sha ${HEAD_SHA} · dev_bot @untether_dev_bot (${DEV_BOT_ID}).
 
 Next steps:
-  scripts/fleet-rollout.sh ${VERSION}              # roll to all 4 hosts in parallel
+  scripts/fleet-rollout.sh ${VERSION}              # roll to all 5 hosts in parallel
   scripts/fleet-rollout.sh ${VERSION} --dry-run    # preview without executing
   scripts/fleet-rollout.sh ${VERSION} --only mac   # roll a single host
 

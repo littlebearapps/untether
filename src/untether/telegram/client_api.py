@@ -150,10 +150,38 @@ class HttpBotClient:
         self._file_base = f"https://api.telegram.org/file/bot{token}"
         self._http_client = http_client or httpx.AsyncClient(timeout=timeout_s)
         self._owns_http_client = http_client is None
+        # #598: last failure reason per (method, chat_id, message_id). The
+        # queued call chain returns bare ``None`` on failure, so upper
+        # layers (e.g. ``transport.edit.failed``) previously could not say
+        # WHY an edit failed — the Telegram description was only visible in
+        # a separate, uncorrelated ``telegram.api_error`` line. Bounded
+        # insertion-ordered dict; entries are popped on read.
+        self._last_api_errors: dict[tuple[str, Any, Any], str] = {}
 
     async def close(self) -> None:
         if self._owns_http_client:
             await self._http_client.aclose()
+
+    def _record_api_error(
+        self,
+        method: str,
+        request_payload: Any,
+        description: str,
+    ) -> None:
+        """#598: remember why a request failed, keyed for later correlation."""
+        chat_id = message_id = None
+        if isinstance(request_payload, dict):
+            chat_id = request_payload.get("chat_id")
+            message_id = request_payload.get("message_id")
+        self._last_api_errors[(method, chat_id, message_id)] = description
+        while len(self._last_api_errors) > 64:
+            self._last_api_errors.pop(next(iter(self._last_api_errors)))
+
+    def pop_last_api_error(
+        self, method: str, chat_id: Any, message_id: Any
+    ) -> str | None:
+        """#598: fetch-and-clear the recorded failure reason for a request."""
+        return self._last_api_errors.pop((method, chat_id, message_id), None)
 
     def _parse_telegram_envelope(
         self,
@@ -161,6 +189,7 @@ class HttpBotClient:
         method: str,
         resp: httpx.Response,
         payload: Any,
+        request_payload: Any = None,
     ) -> Any | None:
         if not isinstance(payload, dict):
             logger.error(
@@ -169,6 +198,7 @@ class HttpBotClient:
                 url=_safe_url(resp.request.url),
                 payload=payload,
             )
+            self._record_api_error(method, request_payload, "invalid payload")
             return None
 
         if not payload.get("ok"):
@@ -187,6 +217,11 @@ class HttpBotClient:
                 method=method,
                 url=_safe_url(resp.request.url),
                 payload=payload,
+            )
+            self._record_api_error(
+                method,
+                request_payload,
+                str(payload.get("description") or payload.get("error_code") or "?"),
             )
             return None
 
@@ -225,6 +260,9 @@ class HttpBotClient:
                 error=str(exc),
                 error_type=exc.__class__.__name__,
             )
+            self._record_api_error(
+                method, request_payload, f"network error: {exc.__class__.__name__}"
+            )
             return None
 
         try:
@@ -261,6 +299,9 @@ class HttpBotClient:
                 error=str(exc),
                 body=body,
             )
+            self._record_api_error(
+                method, request_payload, f"http {resp.status_code}: {body[:200]}"
+            )
             return None
 
         try:
@@ -282,6 +323,7 @@ class HttpBotClient:
             method=method,
             resp=resp,
             payload=response_payload,
+            request_payload=request_payload,
         )
 
     def _decode_result(

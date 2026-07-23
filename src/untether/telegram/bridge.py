@@ -21,6 +21,7 @@ from ..settings import (
 from ..transport import MessageRef, RenderedMessage, SendOptions, Transport
 from ..transport_runtime import TransportRuntime
 from .client import BotClient
+from .outbox import SUPERSEDED
 from .render import MAX_BODY_CHARS, prepare_telegram, prepare_telegram_multi
 from .types import TelegramCallbackQuery, TelegramIncomingMessage
 
@@ -174,7 +175,11 @@ class TelegramBridgeConfig:
     voice_transcription_base_url: str | None = None
     # #378: SecretStr ferries the key without leaking it through repr/log.
     voice_transcription_api_key: SecretStr | None = None
+    # #638: optional ISO-639-1 hint forwarded to the transcription API.
+    voice_transcription_language: str | None = None
     voice_show_transcription: bool = True
+    # #381: CIDR/IP allowlist strings for the voice base_url SSRF check.
+    voice_transcription_url_allowlist: tuple[str, ...] = ()
     forward_coalesce_s: float = 1.0
     media_group_debounce_s: float = 1.0
     allowed_user_ids: tuple[int, ...] = ()
@@ -205,7 +210,11 @@ class TelegramBridgeConfig:
         self.voice_transcription_model = settings.voice_transcription_model
         self.voice_transcription_base_url = settings.voice_transcription_base_url
         self.voice_transcription_api_key = settings.voice_transcription_api_key
+        self.voice_transcription_language = settings.voice_transcription_language
         self.voice_show_transcription = bool(settings.voice_show_transcription)
+        self.voice_transcription_url_allowlist = tuple(
+            settings.voice_transcription_url_allowlist
+        )
         self.forward_coalesce_s = float(settings.forward_coalesce_s)
         self.media_group_debounce_s = float(settings.media_group_debounce_s)
         self.allowed_user_ids = tuple(settings.allowed_user_ids)
@@ -252,6 +261,10 @@ class TelegramTransport:
                     error=str(exc),
                     error_type=exc.__class__.__name__,
                 )
+
+    async def flush_outbox(self, *, timeout: float = 5.0) -> None:  # noqa: ASYNC109
+        """#559: drain queued outbox sends (best-effort, bounded) before close."""
+        await self._bot.flush_outbox(timeout=timeout)
 
     async def close(self) -> None:
         await self._bot.close()
@@ -354,13 +367,47 @@ class TelegramTransport:
             reply_markup=reply_markup,
             wait=wait,
         )
+        if edited is SUPERSEDED:
+            # #598: a newer same-key edit (or a delete/replace) coalesced this
+            # one out of the outbox before dispatch — the message ends in the
+            # winning op's state, so this is a benign no-op, NOT a failure. A
+            # superseded op resolves without any HTTP call (hence no recorded
+            # api_error), which previously surfaced as the spurious
+            # ``transport.edit.failed error=None`` warning.
+            logger.debug(
+                "transport.edit.superseded",
+                chat_id=chat_id,
+                message_id=message_id,
+                has_reply_markup=reply_markup is not None,
+            )
+            return ref
         if edited is None:
             if wait:
+                # #598: attach the recorded failure reason — previously the
+                # Telegram description was only visible in a separate,
+                # uncorrelated telegram.api_error line, making this warning
+                # undiagnosable from logs.
+                reason: str | None = None
+                pop = getattr(self._bot, "pop_edit_error", None)
+                if callable(pop):
+                    reason = pop(chat_id, message_id)
+                if reason is not None and "message is not modified" in reason:
+                    # #598/#364 family: Telegram rejects edits whose text AND
+                    # markup match the current message — the edit's intent is
+                    # already satisfied, so this is a no-op, not a failure.
+                    logger.info(
+                        "transport.edit.noop",
+                        chat_id=chat_id,
+                        message_id=message_id,
+                        has_reply_markup=reply_markup is not None,
+                    )
+                    return ref
                 logger.warning(
                     "transport.edit.failed",
                     chat_id=chat_id,
                     message_id=message_id,
                     has_reply_markup=reply_markup is not None,
+                    error=reason,
                 )
                 return None
             logger.debug(

@@ -85,8 +85,10 @@ systemctl --user restart untether-dev    # dev
 | `voice_transcription` | bool | `false` | Enable voice note transcription. |
 | `voice_max_bytes` | int | `10485760` | Max voice note size (bytes). |
 | `voice_transcription_model` | string | `"gpt-4o-mini-transcribe"` | OpenAI transcription model name. |
-| `voice_transcription_base_url` | string\|null | `null` | Override base URL for voice transcription only. |
+| `voice_transcription_base_url` | string\|null | `null` | Override base URL for voice transcription only. **SSRF-validated ([#381](https://github.com/littlebearapps/untether/issues/381)):** the resolved host must be public — loopback/private endpoints (e.g. a local Whisper server at `http://localhost:8000/v1`) are **rejected** unless allowlisted via `voice_transcription_url_allowlist`. Unset (the default public `api.openai.com` path) skips validation. |
+| `voice_transcription_url_allowlist` | string[] | `[]` | ([#381](https://github.com/littlebearapps/untether/issues/381)) CIDR/IP allowlist that opts specific private/loopback transcription endpoints back in past the SSRF guard — e.g. `["127.0.0.0/8"]` for a local Whisper server, or an Azure private-link range. Only consulted when `voice_transcription_base_url` is set. |
 | `voice_transcription_api_key` | string\|null | `null` | Override API key for voice transcription only. |
+| `voice_transcription_language` | string\|null | `null` | ([#638](https://github.com/littlebearapps/untether/issues/638)) Optional ISO-639-1 language hint (e.g. `"en"`) passed to the Whisper `language` param — stops wrong-language guesses on short voice notes. Unset = provider auto-detect. Hot-reloadable. |
 | `session_mode` | `"stateless"`\|`"chat"` | `"stateless"` | 🔄 Auto-resume mode. See [workflow modes](modes.md) — `"chat"` for assistant/workspace, `"stateless"` for handoff. Restart-required. |
 | `show_resume_line` | bool | `true` | Show resume line in message footer. See [workflow modes](modes.md) — `false` for assistant/workspace, `true` for handoff. |
 
@@ -115,6 +117,8 @@ When `allowed_user_ids` is set, updates without a sender id (for example, some c
 | `outbox_dir` | string | `".untether-outbox"` | Relative outbox directory name (must not be absolute). |
 | `outbox_max_files` | int (1–50) | `10` | Max files sent per run. |
 | `outbox_cleanup` | bool | `true` | Delete sent files and remove empty outbox directory after delivery. |
+| `outbox_notify_skipped` | bool | `true` | ([#524](https://github.com/littlebearapps/untether/issues/524)) Notify the user when a non-deliverable outbox entry (a subdirectory, or a deny-globbed / oversize file) is skipped and archived to `.untether-outbox/.skipped/`, rather than dropping it silently. |
+| `outbox_deliver_directories` | `"off"`\|`"zip"` | `"off"` | ([#628](https://github.com/littlebearapps/untether/issues/628)) When `"zip"`, a subdirectory an agent writes into the outbox (e.g. a `screenshots/` folder from a quality audit) is bundled into a single `<name>.zip` document and delivered, instead of only being archived. Recursive deny-globs, symlink pruning, and per-member / total-input / member-count / final-size caps all apply; anything that fails them falls back to the `.skipped/` archive. |
 
 File size limits (not configurable):
 
@@ -295,9 +299,14 @@ Budget alerts always appear regardless of `[footer]` settings.
     prespawn_ram_warn_mb = 2000
     prespawn_ram_block_mb = 500
     claude_stream_idle_timeout_ms = 300_000
+    stream_idle_auto_retry = false
+    stream_idle_max_retries = 1
     post_result_idle_enabled = true
     post_result_idle_timeout = 600.0
     bash_grace_seconds = 60.0
+    pre_result_silence_timeout = 3600.0
+    post_result_limbo_grace = 60.0
+    post_result_bg_max_hold = 1800.0
     ```
 
 | Key | Type | Default | Notes |
@@ -315,12 +324,23 @@ Budget alerts always appear regardless of `[footer]` settings.
 | `notify_catalog_refresh` | bool | `false` | Opt-in experimental ([#365](https://github.com/littlebearapps/untether/issues/365)) — after each `tool_result` batch, send an `mcp_status` control_request on Claude's stdin to nudge the catalog. Documented parent→CLI primitive from Anthropic's `claude-agent-sdk-python` (`get_mcp_status`). Logs `catalog.refresh_sent` INFO on success. Default `false` because the upstream refresh effect on the catalog UI is empirical; enable on staging to measure. Claude runner only. |
 | `prespawn_ram_warn_mb` | int | `2000` | Pre-spawn RAM guard ([#350](https://github.com/littlebearapps/untether/issues/350)) — emit `subprocess.prespawn.ram_warning` when free RAM is below this threshold (MB) at engine spawn. `0` disables the warn tier. |
 | `prespawn_ram_block_mb` | int | `500` | Refuse to spawn the engine subprocess (yields `CompletedEvent(ok=False, error="🛑 Insufficient RAM…")`) when free RAM is below this threshold (MB). `0` disables the block tier; `0` for both fully disables the guard. Must be strictly less than `prespawn_ram_warn_mb` when both are set. |
+| `prespawn_ram_per_run_reserve_mb` | int | `750` | ([#589](https://github.com/littlebearapps/untether/issues/589)) Headroom reserved per engine run already in flight. The block threshold becomes `prespawn_ram_block_mb + this × live_runs`, so the bar rises with concurrency. Without it the guard is count-blind: N chats each pass the flat check independently and then collectively exhaust the host — the observed nsd failure (OOM killer 5× in one evening, two live Claude runs killed with `rc=-9`). `0` restores the flat pre-0.35.4rc8 threshold. |
+| `max_concurrent_engine_runs` | int | `0` | ([#589](https://github.com/littlebearapps/untether/issues/589)) Hard ceiling on concurrent engine subprocesses, independent of free RAM — useful on small VPS hosts where the accumulating MCP-child leak matters more than the instantaneous memory reading. Exceeding it fails the run with a readable Telegram message rather than letting the kernel SIGKILL a live session mid-task. `0` = unlimited (default, no behaviour change). Suggested: `2` on a 4 GB host, `3–4` on 8 GB. |
 | `claude_stream_idle_timeout_ms` | int | `300_000` | Sets `CLAUDE_STREAM_IDLE_TIMEOUT_MS` in the Claude Code subprocess env via `setdefault` ([#438](https://github.com/littlebearapps/untether/issues/438)). Range 30 s – 30 min. Long-form opus 4.7 1M plan-mode generations can legitimately idle the SSE stream past 5 min; deployments hitting upstream Anthropic API stalls (Type A — mid-generation) can raise this to `600_000` or `900_000` to ride out longer silences. Type-B failures (cold-start zero-byte, `num_turns ≤ 1 && duration_api_ms == 0`) are upstream API outages — raising this won't help; the failure error message now classifies both modes inline. Shell-set `CLAUDE_STREAM_IDLE_TIMEOUT_MS` still wins. |
+| `stream_idle_auto_retry` | bool | `false` | ([#572](https://github.com/littlebearapps/untether/issues/572)) Bounded auto-retry for **Type-A** stream-idle timeouts: when a run fails with a mid-generation SSE stall after real output began, Untether resumes the session automatically (with a `🔁` notice) instead of surfacing a terminal error. Type-B (cold-start zero-byte) **never** retries — retrying hammers a down API. The retry is a normal resumed run, so cost-budget caps, quarantine divert and the RAM guard all apply; signal deaths (rc=143/137) are suppressed. Default off while the upstream API is unstable. |
+| `stream_idle_max_retries` | int | `1` | ([#572](https://github.com/littlebearapps/untether/issues/572)) Attempt cap for `stream_idle_auto_retry` (1–3). A retry that fails with Type-A again surfaces the classified error once the cap is reached. |
 | `post_result_idle_enabled` | bool | `true` | Claude post-result idle watchdog ([#333](https://github.com/littlebearapps/untether/issues/333)) — closes Claude's stdin cleanly after `post_result_idle_timeout` of silence following a `result` event so multi-turn sessions don't sit alive (and billable) for the full upstream ~36 min idle window. Set `false` to disable (Claude will sit idle until the upstream CLI exits on its own). The clean exit is auto-continue safe — `last_event_type=result` is excluded from the auto-continue gate. |
 | `post_result_idle_timeout` | float | `600.0` | Seconds the watchdog waits after a `result` event before closing stdin (30–3600). The first `result` also emits a `✓ turn complete` footer hint so users know the turn is done; when the watchdog actually fires it sends one Telegram message: `✓ turn complete · session closed after Nm idle`. Re-arms (instead of closing) if a control_request or AskUserQuestion is mid-flight, so a button click in flight is never orphaned. |
 | `bash_grace_seconds` | float | `60.0` | Stall-warning grace window for Bash / BashOutput / KillShell tools ([#481](https://github.com/littlebearapps/untether/issues/481)). Range 5–300. While the most-recent action is one of these and within this window of its start, stall warnings (and the `_STALL_MAX_WARNINGS` auto-cancel arm) are suppressed — long builds and deploys are an expected wait, not a hung session. |
+| `pre_result_silence_timeout` | float | `3600.0` | ([#592](https://github.com/littlebearapps/untether/issues/592)) Bounds the *pre-result* dead zone — a run whose stream goes silent **before its first `result` event** is SIGTERMed after this many seconds (0–86400; `0` disables). Suppressed while a permission/ask request is pending, so plan-approval waits stay safe. Catches zombie subprocesses that never produced output (an 8-day idle Claude on mac leaked its session lock and MCP children). |
+| `post_result_limbo_grace` | float | `60.0` | ([#591](https://github.com/littlebearapps/untether/issues/591)) After a successful `result`, a *fully quiescent* limbo subprocess (no live background work, not CPU/tree-active) is SIGTERMed after this grace instead of waiting the full `post_result_idle_timeout` (0–600; `0` = wait the full timeout). A demonstrably-busy process is exempt ([#655](https://github.com/littlebearapps/untether/issues/655)). |
+| `post_result_bg_max_hold` | float | `1800.0` | ([#647](https://github.com/littlebearapps/untether/issues/647)) Upper bound on how long the post-result ceiling defers its SIGTERM while `/proc` evidence shows the subagent tree still working (0–7200; `0` disables the hold). Independently bounded by the `BG_AGENT_MAX_KEEP_S` handle age-out. Stops the 600s ceiling killing live background subagent work. |
 
-The stall monitor in `ProgressEdits` fires at 5 min (300s) idle, 10 min for local tools, 15 min for MCP tools, and 30 min for pending approvals. When a local tool is running and the child process is CPU-active, the first stall warning fires but repeat warnings are suppressed — they resume if CPU goes idle (indicating a genuinely stuck tool). The liveness watchdog in the subprocess layer fires at `liveness_timeout` with `/proc` diagnostics. When `stall_auto_kill` is enabled, auto-kill requires a triple safety gate: timeout exceeded + zero TCP connections + CPU ticks not increasing between snapshots.
+!!! note "The post-result watchdog is a permanent mitigation ([#569](https://github.com/littlebearapps/untether/issues/569))"
+
+    `post_result_idle_*`, the SIGTERM/SIGKILL subcountdown, and `detect_stuck_after_tool_result` are not transitional workarounds. Both upstream defects they mitigate — [claude-code#39700](https://github.com/anthropics/claude-code/issues/39700) (stream-json hangs and never exits) and [claude-code#30333](https://github.com/anthropics/claude-code/issues/30333) (ResultMessage never emitted) — are **CLOSED / NOT_PLANNED**. Disabling these knobs re-exposes hung sessions that never terminate, and the post-result limbo SIGTERM additionally bounds the MCP-child leak tracked in [#590](https://github.com/littlebearapps/untether/issues/590) / [#592](https://github.com/littlebearapps/untether/issues/592). See [Claude runner reference](runners/claude/runner.md#this-watchdog-is-permanent-not-a-transitional-workaround-569).
+
+The stall monitor in `ProgressEdits` fires at 5 min (300s) idle, 10 min for local tools, 15 min for MCP tools, and 30 min for pending approvals. Sessions blocked on an unanswered approval or inside an upstream rate-limit retry window are treated as *expected waits* ([#495](https://github.com/littlebearapps/untether/issues/495)/[#499](https://github.com/littlebearapps/untether/issues/499)/[#500](https://github.com/littlebearapps/untether/issues/500)): they log a paced `subprocess.approval_pending` INFO instead of a `progress_edits.stall_detected` WARNING, are excluded from the frozen-ring escalation, and do not count toward the `stall_warnings` metric reported in `session.summary`. When a local tool is running and the child process is CPU-active, the first stall warning fires but repeat warnings are suppressed — they resume if CPU goes idle (indicating a genuinely stuck tool). The liveness watchdog in the subprocess layer fires at `liveness_timeout` with `/proc` diagnostics. When `stall_auto_kill` is enabled, auto-kill requires a triple safety gate: timeout exceeded + zero TCP connections + CPU ticks not increasing between snapshots.
 
 ### `[loop]`
 
@@ -357,7 +377,9 @@ State is persisted to `active_loops.json` (sibling of your `untether.toml`) so l
 
 Auto-continue detects when Claude Code exits after receiving tool results without processing them (upstream bugs [#34142](https://github.com/anthropics/claude-code/issues/34142), [#30333](https://github.com/anthropics/claude-code/issues/30333)) and automatically resumes the session. Detection is based on a protocol invariant: normal sessions always end with `last_event_type=result`, while premature exits show `last_event_type=user`.
 
-Auto-continue is suppressed on signal deaths (rc=143/SIGTERM, rc=137/SIGKILL) to prevent death spirals under memory pressure.
+Auto-continue only fires on a clean exit (`rc=0`). Signal deaths (rc=143/SIGTERM, rc=137/SIGKILL) and ordinary failures are excluded, to prevent death spirals under memory pressure ([#640](https://github.com/littlebearapps/untether/issues/640)).
+
+This section also carries the empty-resume recovery and session-ownership knobs, since they mitigate the same upstream turn-state family.
 
 === "toml"
 
@@ -365,12 +387,28 @@ Auto-continue is suppressed on signal deaths (rc=143/SIGTERM, rc=137/SIGKILL) to
     [auto_continue]
     enabled = true
     max_retries = 1
+    resend_empty_resume = true
+    empty_resume_fresh = true
+    quarantine_on_forced_teardown = true
+    serialize_session_owner = true
+    session_handoff_timeout_s = 30.0
+    session_handoff_bg_timeout_s = 600.0
     ```
 
 | Key | Type | Default | Notes |
 |-----|------|---------|-------|
 | `enabled` | bool | `true` | Enable automatic session continuation for Claude Code. |
-| `max_retries` | int | `1` | Maximum consecutive auto-continue attempts per run (1–5). |
+| `max_retries` | int | `1` | Maximum consecutive auto-continue attempts per run (0–3). |
+| `resend_empty_resume` | bool | `true` | ([#596](https://github.com/littlebearapps/untether/issues/596)) Auto-resend the original prompt once when a resume returns an empty 0-turn / $0 result, instead of asking the user to resend. Single-shot. |
+| `empty_resume_fresh` | bool | `true` | ([#631](https://github.com/littlebearapps/untether/issues/631) W1) Make that retry a **fresh** session rather than the same one — the original session is poisoned, so resending into it can no-op again. |
+| `quarantine_on_forced_teardown` | bool | `true` | ([#632](https://github.com/littlebearapps/untether/issues/632) W2) Mark sessions force-killed after a result as unsafe to resume, so the *next* message diverts fresh before any empty result is seen. |
+| `serialize_session_owner` | bool | `true` | ([#633](https://github.com/littlebearapps/untether/issues/633) W4) Never resume a session whose previous subprocess is still alive. Before spawning `--resume`, wait (bounded) for the prior owner to exit; if it will not, quarantine and start fresh rather than racing it. Two concurrent owners of one session id is what leaves the upstream turn dangling and produces the 0-turn empty resume. Set `false` for exact pre-0.35.4rc8 behaviour. Claude only. |
+| `session_handoff_timeout_s` | float | `30.0` | Upper bound on that wait (0–300). Condition-based, so it resolves the instant the prior subprocess exits — this is only the give-up point. Keep comfortably above the post-result SIGTERM grace so a normal teardown wins the race. |
+| `session_handoff_bg_timeout_s` | float | `600.0` | ([#647](https://github.com/littlebearapps/untether/issues/647)) Extended handoff wait when the prior owner still has live background work at the base `session_handoff_timeout_s` deadline (0–1800). The user is told why the reply is delayed, and the wait extends up to this bound before diverting to a fresh session. |
+
+!!! tip "Layered defence"
+
+    `serialize_session_owner` is *proactive* (stop the session being poisoned); `quarantine_on_forced_teardown` and `empty_resume_fresh` are *reactive* (recover once it has been). Leave all three on unless you are bisecting a regression.
 
 ### `[security]`
 
@@ -583,6 +621,7 @@ routing details.
 |-----|------|---------|-------|
 | `enabled` | bool | `false` | Master switch. No server or cron loop starts when `false`. |
 | `default_timezone` | string\|null | `null` | Default IANA timezone for all crons (e.g. `"Australia/Melbourne"`). Per-cron `timezone` overrides. |
+| `allow_unauthenticated_webhooks` | bool | `false` | ([#382](https://github.com/littlebearapps/untether/issues/382)) Opt-in escape hatch permitting a webhook with `auth = "none"` to bind on a **non-loopback** host. By default such a route is refused at initial bind and dropped on hot-reload — an unauthenticated public webhook is a remote-agent-run primitive — while polling, commands, and crons keep running. Loopback binds are always allowed regardless. Set `true` only for trusted local demos. |
 
 !!! tip "Hot-reload"
     When `watch_config = true`, changes to webhooks, crons, schedules, and timezones

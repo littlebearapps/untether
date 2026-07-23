@@ -1,11 +1,16 @@
-"""Tests for the Pause & Outline Plan cooldown bypass mechanism.
+"""Tests for the Pause & Outline Plan outline-gate mechanism.
 
-When the user clicks "Pause & Outline Plan", a cooldown is set.
-Subsequent ExitPlanMode calls are handled differently depending on
-whether Claude Code has written substantial outline text (>= 200 chars):
+When the user clicks "Pause & Outline Plan", the session is marked
+outline-pending. Subsequent ExitPlanMode calls are handled differently
+depending on whether Claude Code has written substantial outline text
+(>= 200 chars):
 
 - With outline: hold request open + synthetic Approve/Deny buttons (real request_id)
-- Without outline: auto-deny with escalation message + synthetic Approve/Deny buttons (da: prefix)
+- Without outline: auto-deny with the outline instruction + synthetic buttons (da: prefix)
+
+#570: the additional time-based progressive cooldown that used to be armed
+here was a workaround for the v2.1.72-74 upstream immediate-retry loop —
+verified fixed on CLI 2.1.215 and removed. The text-based gate stays.
 """
 
 from __future__ import annotations
@@ -18,7 +23,6 @@ from untether.model import ActionEvent, ResumeToken
 from untether.runners.claude import (
     _ACTIVE_RUNNERS,
     _DISCUSS_APPROVED,
-    _DISCUSS_COOLDOWN,
     _OUTLINE_MIN_CHARS,
     _OUTLINE_PENDING,
     _REQUEST_TO_INPUT,
@@ -27,7 +31,7 @@ from untether.runners.claude import (
     _SESSION_STDIN,
     ClaudeRunner,
     ClaudeStreamState,
-    set_discuss_cooldown,
+    mark_outline_pending,
     translate_claude_event,
 )
 from untether.schemas import claude as claude_schema
@@ -36,7 +40,6 @@ from untether.schemas import claude as claude_schema
 @pytest.fixture(autouse=True)
 def _clear_registries():
     """Clear global registries before each test."""
-    _DISCUSS_COOLDOWN.clear()
     _DISCUSS_APPROVED.clear()
     _OUTLINE_PENDING.clear()
     _REQUEST_TO_SESSION.clear()
@@ -45,7 +48,6 @@ def _clear_registries():
     _ACTIVE_RUNNERS.clear()
     _SESSION_STDIN.clear()
     yield
-    _DISCUSS_COOLDOWN.clear()
     _DISCUSS_APPROVED.clear()
     _OUTLINE_PENDING.clear()
     _REQUEST_TO_SESSION.clear()
@@ -100,7 +102,7 @@ def test_outline_ready_holds_request_open():
     itself.  This test does NOT pre-set those mappings to verify the code creates them.
     """
     state = _make_state("sess-1")
-    set_discuss_cooldown("sess-1")
+    mark_outline_pending("sess-1")
     state.last_assistant_text = "x" * 300
     state.max_text_len_since_cooldown = 300
 
@@ -124,7 +126,7 @@ def test_outline_ready_holds_request_open():
 def test_outline_ready_buttons_use_real_request_id():
     """Outline-ready path should use the real request_id in button callbacks."""
     state = _make_state("sess-2")
-    set_discuss_cooldown("sess-2")
+    mark_outline_pending("sess-2")
     state.max_text_len_since_cooldown = 300
 
     request_id = "req_exit_plan"
@@ -159,8 +161,8 @@ def test_outline_ready_buttons_use_real_request_id():
 def test_bypass_clears_outline_pending():
     """Bypass should clear _OUTLINE_PENDING for the session."""
     state = _make_state("sess-3")
-    set_discuss_cooldown("sess-3")
-    assert "sess-3" in _OUTLINE_PENDING  # set by set_discuss_cooldown
+    mark_outline_pending("sess-3")
+    assert "sess-3" in _OUTLINE_PENDING  # set by mark_outline_pending
 
     state.max_text_len_since_cooldown = 300
     request_id = "req_exit_plan"
@@ -181,7 +183,7 @@ def test_bypass_survives_text_overwrite():
     ``max_text_len_since_cooldown`` preserves the peak length.
     """
     state = _make_state("sess-overwrite")
-    set_discuss_cooldown("sess-overwrite")
+    mark_outline_pending("sess-overwrite")
 
     # First text block: long outline (500 chars)
     state.last_assistant_text = "x" * 500
@@ -208,13 +210,89 @@ def test_bypass_survives_text_overwrite():
     assert state.max_text_len_since_cooldown == 0
 
 
+# --- #659: ExitPlanMode plan input satisfies the outline gate ---
+
+
+def _make_exit_plan_mode_request_with_plan(
+    request_id: str, plan: str
+) -> claude_schema.StreamControlRequest:
+    return claude_schema.StreamControlRequest(
+        request_id=request_id,
+        request=claude_schema.ControlCanUseToolRequest(
+            tool_name="ExitPlanMode",
+            input={"plan": plan},
+        ),
+    )
+
+
+def test_plan_input_satisfies_outline_gate():
+    """#659: on plan-file CLIs the plan body arrives in ExitPlanMode's input
+    and NO chat text is written — the gate must hold the request open, not
+    deny-loop until Claude gives up."""
+    state = _make_state("sess-planinput")
+    mark_outline_pending("sess-planinput")
+    # No assistant text at all (the observed CLI 2.1.215 behaviour)
+    assert state.max_text_len_since_cooldown == 0
+
+    request_id = "req_exit_plan"
+    plan = "Step 1: create notes.txt\nStep 2: append the line\n" * 10
+    event = _make_exit_plan_mode_request_with_plan(request_id, plan)
+    events = translate_claude_event(
+        event, title="claude", state=state, factory=state.factory
+    )
+
+    # Held open, not auto-denied
+    assert len(state.auto_deny_queue) == 0
+    assert request_id in state.pending_control_requests
+    # The plan body is surfaced as the outline for the standalone message
+    action_events = [e for e in events if isinstance(e, ActionEvent)]
+    assert len(action_events) == 1
+    assert action_events[0].action.detail.get("outline_full_text") == plan
+    assert "sess-planinput" not in _OUTLINE_PENDING
+
+
+def test_short_plan_input_still_denied():
+    """#659: a trivially short plan input (< 200 chars) with no text does not
+    satisfy the gate — auto-deny with the outline instruction as before."""
+    state = _make_state("sess-shortplan")
+    mark_outline_pending("sess-shortplan")
+
+    request_id = "req_exit_plan"
+    _REQUEST_TO_SESSION[request_id] = "sess-shortplan"
+    _REQUEST_TO_INPUT[request_id] = {}
+    event = _make_exit_plan_mode_request_with_plan(request_id, "do the thing")
+    translate_claude_event(event, title="claude", state=state, factory=state.factory)
+
+    assert len(state.auto_deny_queue) == 1
+
+
+def test_chat_text_outline_preferred_over_plan_input():
+    """#659: when Claude DID write a chat-text outline, that text remains the
+    outline shown (legacy behaviour unchanged); plan input is the fallback."""
+    state = _make_state("sess-textwins")
+    mark_outline_pending("sess-textwins")
+    chat_outline = "Written in chat: " + "y" * 300
+    state.outline_text = chat_outline
+    state.max_text_len_since_cooldown = len(chat_outline)
+
+    request_id = "req_exit_plan"
+    plan = "plan input body " * 30
+    event = _make_exit_plan_mode_request_with_plan(request_id, plan)
+    events = translate_claude_event(
+        event, title="claude", state=state, factory=state.factory
+    )
+
+    action_events = [e for e in events if isinstance(e, ActionEvent)]
+    assert action_events[0].action.detail.get("outline_full_text") == chat_outline
+
+
 # --- No-bypass path: no outline written ---
 
 
 def test_auto_deny_without_outline():
     """ExitPlanMode should be auto-denied when no substantial text was written."""
     state = _make_state("sess-4")
-    set_discuss_cooldown("sess-4")
+    mark_outline_pending("sess-4")
     state.last_assistant_text = "ok"
 
     request_id = "req_exit_plan"
@@ -231,7 +309,7 @@ def test_auto_deny_without_outline():
 def test_auto_deny_no_text():
     """ExitPlanMode should be auto-denied when no text at all."""
     state = _make_state("sess-5")
-    set_discuss_cooldown("sess-5")
+    mark_outline_pending("sess-5")
     state.last_assistant_text = None
 
     request_id = "req_exit_plan"
@@ -247,7 +325,7 @@ def test_auto_deny_no_text():
 def test_escalation_path_uses_da_prefix():
     """No-outline escalation path should use da: prefix in button callbacks."""
     state = _make_state("sess-esc")
-    set_discuss_cooldown("sess-esc")
+    mark_outline_pending("sess-esc")
     state.max_text_len_since_cooldown = 50  # below threshold
 
     request_id = "req_exit_plan"
@@ -280,7 +358,7 @@ def test_escalation_path_uses_da_prefix():
 def test_outline_text_stored_on_state_during_cooldown():
     """StreamTextBlock stores outline text on state when pending and text >= 200 chars."""
     state = _make_state("sess-note")
-    set_discuss_cooldown("sess-note")
+    mark_outline_pending("sess-note")
     assert "sess-note" in _OUTLINE_PENDING
 
     outline = "A" * 250
@@ -298,7 +376,7 @@ def test_outline_text_stored_on_state_during_cooldown():
 def test_outline_text_not_stored_without_pending():
     """StreamTextBlock should NOT store outline text during normal operation."""
     state = _make_state("sess-normal")
-    # No set_discuss_cooldown → _OUTLINE_PENDING is empty
+    # No mark_outline_pending → _OUTLINE_PENDING is empty
 
     text_event = _make_text_block("A" * 300)
     translate_claude_event(
@@ -311,7 +389,7 @@ def test_outline_text_not_stored_without_pending():
 def test_outline_text_not_stored_for_short_text():
     """Short text (< 200 chars) should NOT be stored even when outline is pending."""
     state = _make_state("sess-short")
-    set_discuss_cooldown("sess-short")
+    mark_outline_pending("sess-short")
 
     text_event = _make_text_block("Short text")
     translate_claude_event(
@@ -324,7 +402,7 @@ def test_outline_text_not_stored_for_short_text():
 def test_outline_in_synthetic_action_detail():
     """Synthetic Approve/Deny action should include full outline in detail dict."""
     state = _make_state("sess-embed")
-    set_discuss_cooldown("sess-embed")
+    mark_outline_pending("sess-embed")
 
     # Simulate outline capture
     outline = "Step 1: Do X\nStep 2: Do Y\n" * 20  # ~520 chars
@@ -354,7 +432,7 @@ def test_outline_in_synthetic_action_detail():
 def test_long_outline_not_truncated_in_detail():
     """Outline text of any length should be passed fully in detail dict (no truncation)."""
     state = _make_state("sess-trunc")
-    set_discuss_cooldown("sess-trunc")
+    mark_outline_pending("sess-trunc")
 
     long_text = "B" * 5000
     state.outline_text = long_text
@@ -380,9 +458,9 @@ def test_long_outline_not_truncated_in_detail():
 # --- _OUTLINE_PENDING lifecycle ---
 
 
-def test_set_discuss_cooldown_adds_outline_pending():
-    """set_discuss_cooldown should add session to _OUTLINE_PENDING."""
-    set_discuss_cooldown("sess-pending")
+def test_mark_outline_pending_adds_outline_pending():
+    """mark_outline_pending should add session to _OUTLINE_PENDING."""
+    mark_outline_pending("sess-pending")
     assert "sess-pending" in _OUTLINE_PENDING
 
 
@@ -502,26 +580,26 @@ async def test_synthetic_approve_with_active_session():
     assert session_id in _DISCUSS_APPROVED
 
 
-def test_hold_open_after_cooldown_expires_with_outline():
-    """Request should be held open even after cooldown expires.
+def test_hold_open_long_after_outline_request():
+    """Outline-pending sessions hold the request open regardless of elapsed time.
 
-    Regression test for #114: when cooldown expires before Claude calls
-    ExitPlanMode but the outline has been written (text >= 200 chars),
-    the code should still enter the hold-open path with synthetic buttons
-    — not fall through to the normal 3-button ExitPlanMode flow.
+    Regression lineage #114 (updated for #570): the gate is purely text-based
+    now — an outline-pending session with enough written text must enter the
+    hold-open path with synthetic buttons no matter how long ago the user
+    clicked Pause & Outline, never fall through to the 3-button flow.
     """
     import time
     from unittest.mock import patch
 
     state = _make_state("sess-expired")
-    set_discuss_cooldown("sess-expired")
+    mark_outline_pending("sess-expired")
     assert "sess-expired" in _OUTLINE_PENDING
 
     # Simulate outline written
     state.max_text_len_since_cooldown = 400
     state.outline_text = "Step 1: Do this\nStep 2: Do that\n" * 15
 
-    # Advance time past max cooldown (120s)
+    # Far in the future — elapsed time must not matter (#570)
     with patch.object(time, "time", return_value=time.time() + 200):
         request_id = "req_exit_plan"
         _REQUEST_TO_SESSION[request_id] = "sess-expired"
@@ -599,8 +677,7 @@ async def test_chat_on_synthetic_with_active_session():
     _ACTIVE_RUNNERS[session_id] = (runner, 0.0)
     _SESSION_STDIN[session_id] = AsyncMock()
     _REQUEST_TO_SESSION[synth_request_id] = session_id
-    _OUTLINE_PENDING.add(session_id)
-    set_discuss_cooldown(session_id)
+    mark_outline_pending(session_id)
 
     ctx = CommandContext(
         command="claude_control",
@@ -621,8 +698,7 @@ async def test_chat_on_synthetic_with_active_session():
 
     assert result is not None
     assert "discuss" in result.text.lower()
-    # Should clear cooldown and outline_pending
-    assert session_id not in _DISCUSS_COOLDOWN
+    # Should clear outline_pending
     assert session_id not in _OUTLINE_PENDING
 
 

@@ -19,6 +19,7 @@ from .model import ActionEvent, CompletedEvent, ResumeToken, StartedEvent, Untet
 from .presenter import Presenter
 from .progress import ProgressTracker
 from .runner import _APPROVAL_PENDING_REFIRE_S, Runner
+from .session_quarantine import QuarantineStore, get_quarantine_store
 from .transport import (
     ChannelId,
     MessageId,
@@ -265,15 +266,36 @@ def _should_auto_continue(
     max_retries: int,
     proc_returncode: int | None = None,
 ) -> bool:
-    """Detect Claude Code silent session termination bug (#34142, #30333).
+    """Detect a Claude Code run that exited without processing its tool results.
 
-    Returns True when the last raw JSONL event was a tool_result ("user")
+    Returns True when the last raw JSONL event was a tool_result ("user"),
     meaning Claude never got a turn to process the results before the CLI
-    exited.
+    exited, and the exit was clean.
 
-    Does NOT trigger on signal deaths (SIGTERM/SIGKILL from earlyoom or
-    other external killers) — those have rc>128 or rc<0.  The upstream bug
-    exits with rc=0.
+    #568 — this is deliberately a **symptom-based** predicate, not an
+    issue-identity one. It mitigates two upstream defects at once:
+    claude-code#34142 (assistant continuation skipped after tool_result;
+    CLOSED/COMPLETED upstream) and claude-code#30333 (ResultMessage never
+    emitted with background subagents; CLOSED/NOT_PLANNED — permanent).
+    The retirement audit asked to drop the #34142 half and keep the #30333
+    half, but at this decision point the subprocess has already exited and
+    the two are observationally identical: a `result` frame would exclude
+    the predicate entirely rather than discriminate, and `background_observed`
+    correlates with #30333 without being sound (it also fires for Monitor,
+    background Bash, ScheduleWakeup and RemoteTrigger). Gating on it would
+    silently drop recovery for a defect upstream has declined to fix, so the
+    mitigation is KEPT and the relevant fields are logged on
+    `session.auto_continue` instead, to build the evidence a future
+    narrowing would need. Do not re-introduce issue-number branching here
+    without a discriminator with measured false-positive/negative rates.
+
+    #640 — requires a clean `rc == 0`. Signal deaths (SIGTERM/SIGKILL from
+    earlyoom, the OOM killer, or Untether's own post-result limbo teardown)
+    and ordinary failures must never be auto-resumed. `None` stays eligible
+    only as a fail-open for engines/paths that do not thread a return code;
+    for Claude it is now always populated (`runners/claude.py`, run_impl).
+    14 days of fleet data showed 47/49 auto-continues at rc=0 and 2 at
+    rc=143 — the latter being exactly the leak this gate now closes.
     """
     if cancelled:
         return False
@@ -284,6 +306,8 @@ def _should_auto_continue(
     if not resume_value:
         return False
     if _is_signal_death(proc_returncode):
+        return False
+    if proc_returncode not in (0, None):
         return False
     return auto_continued_count < max_retries
 
@@ -356,6 +380,60 @@ def _format_auto_continue_notice(auto_continued_count: int) -> str:
     if auto_continued_count > 0:
         notice += f" (attempt {auto_continued_count + 1})"
     return notice
+
+
+def _format_stream_idle_retry_notice(retried_count: int) -> str:
+    """#572: notice shown when a Type-A stream-idle timeout auto-retries.
+    Mirrors :func:`_format_auto_continue_notice` — the 🔁 prefix signals
+    recovery, not failure, so users don't ``/cancel`` the salvage."""
+    notice = (
+        "\U0001f501 Stream stalled mid-generation (upstream API) — "
+        "resuming automatically…"
+    )
+    if retried_count > 0:
+        notice += f" (attempt {retried_count + 1})"
+    return notice
+
+
+def _stream_idle_retry_budget_blocked(usage: dict[str, Any] | None) -> bool:
+    """#572: read-only cost-budget guard for the Type-A auto-retry.
+
+    True when the failed run's cost already trips the per-run cap or the
+    daily total has reached the per-day cap — an automatic retry must not
+    spend past a limit the user explicitly set. Deliberately read-only:
+    ``record_run_cost`` stays with ``_check_cost_budget`` on the delivery
+    path so the failed run's cost is not double-counted.
+    """
+    try:
+        from .cost_tracker import CostBudget, check_run_budget
+        from .runners.run_options import get_run_options
+        from .settings import load_settings_if_exists
+
+        result = load_settings_if_exists()
+        if result is None:
+            return False
+        settings, _ = result
+        budget_cfg = settings.cost_budget
+        run_options = get_run_options()
+        if run_options is not None and run_options.budget_enabled is not None:
+            budget_enabled = run_options.budget_enabled
+        else:
+            budget_enabled = budget_cfg.enabled
+        if not budget_enabled:
+            return False
+        cost = float((usage or {}).get("total_cost_usd") or 0.0)
+        budget = CostBudget(
+            max_cost_per_run=budget_cfg.max_cost_per_run,
+            max_cost_per_day=budget_cfg.max_cost_per_day,
+            warn_at_pct=budget_cfg.warn_at_pct,
+            auto_cancel=False,
+        )
+        alert = check_run_budget(cost, budget)
+        return getattr(alert, "level", None) == "exceeded"
+    except Exception:  # noqa: BLE001 — match _check_cost_budget's fail-open
+        # posture; the retry is bounded to stream_idle_max_retries anyway.
+        logger.warning("stream_idle_retry.budget_check_failed", exc_info=True)
+        return False
 
 
 _DEFAULT_PREAMBLE = (
@@ -964,6 +1042,11 @@ class ProgressEdits:
         self.thread_id = thread_id
         self._approval_notified: bool = False
         self._approval_notify_ref: MessageRef | None = None
+        # #591: set once the final answer has been (or is about to be)
+        # delivered ahead of subprocess exit. Suppresses further progress
+        # repaints and the #470 post-result closing message so neither can
+        # overwrite or trail the already-delivered answer.
+        self._finalizing: bool = False
         self._min_render_interval = min_render_interval
         self._sleep = sleep
         self._last_render_at: float = 0.0
@@ -975,6 +1058,11 @@ class ProgressEdits:
         self._last_stall_warn_at: float = 0.0
         self._peak_idle: float = 0.0
         self._prev_diag: Any = None
+        # #650/#593: clock() timestamp of the last stall tick that observed
+        # the subprocess alive. Once the process is gone every /proc-derived
+        # liveness field collapses to None, so this is the only way the
+        # cancel-decision logs can say how recently the process existed.
+        self._last_alive_at: float | None = None
         self._stall_check_interval: float = 60.0
         self._stall_repeat_seconds: float = 180.0
         self._prev_recent_events: list[tuple[float, str]] | None = None
@@ -1073,9 +1161,13 @@ class ProgressEdits:
                 if deadline > 0:
                     action_state.action.detail["countdown_s"] = max(0.0, deadline - now)
 
-        # 2) Post-result closing message — one-shot.
+        # 2) Post-result closing message — one-shot. Skipped once the final
+        # answer was delivered early (#591): the closing notice exists to
+        # give feedback while the user is still waiting for the answer, so
+        # it is pure noise after delivery.
         if (
             engine_state is not None
+            and not self._finalizing
             and getattr(engine_state, "post_result_closed_at", None) is not None
             and not getattr(engine_state, "post_result_closing_sent", False)
         ):
@@ -1128,6 +1220,73 @@ class ProgressEdits:
             logger.debug(
                 "progress_edits.post_result_closing_send_failed", exc_info=True
             )
+
+    # #593: cancel-enforcement tuning. Class-level so tests can shrink them.
+    _CANCEL_ESCALATION_S: float = 30.0
+    _CANCEL_ESCALATION_POLL_S: float = 0.5
+    _CANCEL_SIGKILL_GRACE_S: float = 5.0
+
+    async def _enforce_cancel_teardown(self) -> None:
+        """#593: make the stall auto-cancel decision actually tear down.
+
+        ``cancel_event.set()`` only cancels the run task group; the
+        generator unwind can then stall behind the shielded subcountdown or
+        an OOM-starved event loop (observed on nsd: 14m52s between
+        ``stall_auto_cancel`` and ``handle.cancelled``, a dead-weight
+        subprocess occupying the chat slot through an active OOM crisis).
+        Poll for natural teardown up to ``_CANCEL_ESCALATION_S``; if the
+        subprocess is still alive, kill it directly (descendant-aware,
+        SIGTERM → grace → SIGKILL). Shielded so the enclosing scopes'
+        cancellation can't strip the safety net; the early-exit poll keeps
+        the shield cheap on the normal path (subprocess dies within
+        seconds of the cancel).
+        """
+        pid = self.pid
+        if pid is None:
+            # Nothing to enforce against — no PID was ever learned (spawn
+            # itself hung, or a non-subprocess runner).
+            logger.warning(
+                "progress_edits.cancel_enforcement_no_pid",
+                channel_id=self.channel_id,
+            )
+            return
+
+        def _alive() -> bool:
+            stream = self.stream
+            if stream is not None and stream.proc_returncode is not None:
+                return False
+            try:
+                os.kill(pid, 0)
+            except ProcessLookupError:
+                return False
+            except OSError:
+                return True
+            return True
+
+        from .utils.subprocess import signal_pid_group
+
+        with anyio.CancelScope(shield=True):
+            deadline = time.monotonic() + self._CANCEL_ESCALATION_S
+            while time.monotonic() < deadline:
+                if not _alive():
+                    return
+                await anyio.sleep(self._CANCEL_ESCALATION_POLL_S)
+            if not _alive():
+                return
+            logger.warning(
+                "progress_edits.cancel_escalated",
+                channel_id=self.channel_id,
+                pid=pid,
+                escalation_s=self._CANCEL_ESCALATION_S,
+            )
+            signal_pid_group(pid, _signal.SIGTERM)
+            grace_deadline = time.monotonic() + self._CANCEL_SIGKILL_GRACE_S
+            while time.monotonic() < grace_deadline:
+                if not _alive():
+                    return
+                await anyio.sleep(self._CANCEL_ESCALATION_POLL_S)
+            if _alive():
+                signal_pid_group(pid, _signal.SIGKILL)
 
     async def _stall_monitor(self) -> None:
         """Periodically check for event stalls, log diagnostics, and notify.
@@ -1191,6 +1350,8 @@ class ProgressEdits:
                 else None
             )
             self._prev_diag = diag
+            if diag is not None and diag.alive:
+                self._last_alive_at = self.clock()
 
             # Use longer threshold when waiting for user approval, running a
             # tool, or when child processes are active (Agent subagents).
@@ -1205,6 +1366,12 @@ class ProgressEdits:
                 else:
                     threshold = self._STALL_THRESHOLD_APPROVAL
                 threshold_reason = "pending_approval"
+            elif self._is_rate_limit_waiting():
+                # #495/#499/#500: throttled upstream — the run resumes on its
+                # own when the retry window elapses. Reuse the approval
+                # thresholds; this is an expected wait, not a stall.
+                threshold = self._STALL_THRESHOLD_APPROVAL
+                threshold_reason = "rate_limit_waiting"
             elif mcp_server is not None:
                 threshold = self._STALL_THRESHOLD_MCP_TOOL
                 threshold_reason = "running_mcp_tool"
@@ -1226,6 +1393,43 @@ class ProgressEdits:
                 reason=threshold_reason,
                 elapsed=round(elapsed, 1),
             )
+
+            # #650: a dead subprocess whose run already emitted its final
+            # CompletedEvent is a normally-completed run being reaped late,
+            # not a stalled one — the detector was racing the post-result
+            # subcountdown's 30 s returncode poll and won. Tear the run down
+            # through the same cancel machinery, but silently: no WARN and no
+            # user-facing "session appears stuck (process_dead)" notice.
+            # #614 made user-initiated cancelled-after-delivery the quiet
+            # path; this makes the watchdog-initiated variant actually quiet
+            # too. Downstream, handle.cancelled_after_delivery keeps the
+            # delivered answer untouched.
+            if (
+                diag is not None
+                and diag.alive is False
+                and bool(getattr(self.stream, "did_emit_completed", False))
+            ):
+                logger.info(
+                    "progress_edits.reaped_after_delivery",
+                    channel_id=self.channel_id,
+                    pid=self.pid,
+                    seconds_since_last_event=round(elapsed, 1),
+                    last_event_type=(
+                        self.stream.last_event_type if self.stream else None
+                    ),
+                    last_seen_alive_s=(
+                        round(self.clock() - self._last_alive_at, 1)
+                        if self._last_alive_at is not None
+                        else None
+                    ),
+                    event_seq=self.event_seq,
+                )
+                if self.cancel_event is not None:
+                    self.cancel_event.set()
+                await self._enforce_cancel_teardown()
+                self.signal_send.close()
+                return
+
             now = self.clock()
             if (
                 self._stall_warned
@@ -1235,8 +1439,16 @@ class ProgressEdits:
 
             self._stall_warned = True
             self._stall_warn_count += 1
-            self._total_stall_warn_count += 1
             self._last_stall_warn_at = now
+            # #495: ``_total_stall_warn_count`` is the number reported as
+            # ``stall_warnings`` in ``session.summary`` and consumed by
+            # /monitor. It used to be incremented here — upstream of both the
+            # WARN/INFO demotion fork and the whole expected-wait suppression
+            # matrix — so a 5 h plan-approval wait reported stall_warnings=88
+            # even though not one of those ticks was a genuine stall. It is
+            # now incremented only where a stall WARNING is actually emitted
+            # (see ``_count_stall_warning``), so the metric means what its
+            # name says.
 
             # #470/#481: compute the 5 expected-wait booleans once. Used to
             # gate BOTH the auto-cancel arm (below) and the notification
@@ -1271,9 +1483,19 @@ class ProgressEdits:
                 or _bash_grace
                 or _bash_fresh
             )
+            # #495/#499/#500: an unanswered approval and an upstream rate-limit
+            # retry window are expected waits too. They were previously absent
+            # from this set, so a plan-approval wait could reach the auto-cancel
+            # arm as well as emitting spurious WARNs.
+            _expected_wait_reason = threshold_reason in (
+                "pending_approval",
+                "rate_limit_waiting",
+            )
             _expected_wait = (
-                _post_result_idle and not _post_result_limbo
-            ) or _real_pending
+                (_post_result_idle and not _post_result_limbo)
+                or _real_pending
+                or _expected_wait_reason
+            )
 
             # #333 Tier 2: one-shot warning when limbo is detected. This
             # complements the claude.py watchdog's ``runner.limbo_detected``
@@ -1311,7 +1533,10 @@ class ProgressEdits:
             # (``untether-issue-watcher``) and ``/monitor`` are configured
             # to treat WARNs as auto-fileable, so this also stops
             # spurious GitHub issue creation (closes #533).
-            if threshold_reason == "pending_approval":
+            # #495/#499/#500: ``rate_limit_waiting`` joins ``pending_approval``
+            # as a demoted reason — an upstream throttle resumes by itself, so
+            # it is by definition not a hang either.
+            if threshold_reason in ("pending_approval", "rate_limit_waiting"):
                 if (
                     self._last_approval_pending_emit_at == 0.0
                     or now - self._last_approval_pending_emit_at
@@ -1327,9 +1552,11 @@ class ProgressEdits:
                         last_action=last_action,
                         recent_events=[(round(t, 1), lbl) for t, lbl in recent[-3:]],
                         approval_pending=True,
+                        reason=threshold_reason,
                         source="bridge",
                     )
             else:
+                self._count_stall_warning()
                 logger.warning(
                     "progress_edits.stall_detected",
                     channel_id=self.channel_id,
@@ -1349,6 +1576,11 @@ class ProgressEdits:
                     fd_count=diag.fd_count if diag else None,
                     cpu_active=cpu_active,
                     tree_active=tree_active,
+                    last_seen_alive_s=(
+                        round(now - self._last_alive_at, 1)
+                        if self._last_alive_at is not None
+                        else None
+                    ),
                     recent_events=[(round(t, 1), lbl) for t, lbl in recent[-5:]],
                     stderr_hint=stderr_hint,
                     approval_pending=False,
@@ -1427,6 +1659,14 @@ class ProgressEdits:
                     stall_warn_count=self._stall_warn_count,
                     pid=self.pid,
                     event_seq=self.event_seq,
+                    last_event_type=(
+                        self.stream.last_event_type if self.stream else None
+                    ),
+                    last_seen_alive_s=(
+                        round(now - self._last_alive_at, 1)
+                        if self._last_alive_at is not None
+                        else None
+                    ),
                 )
                 if self.cancel_event is not None:
                     self.cancel_event.set()
@@ -1442,6 +1682,14 @@ class ProgressEdits:
                     logger.debug(
                         "progress_edits.stall_auto_cancel_notify_failed", exc_info=True
                     )
+                # #593: enforcement — the cancel DECISION must end in actual
+                # teardown. cancel_event only cancels the run task group;
+                # the generator unwind can stall behind a shielded
+                # subcountdown or an OOM-starved event loop (observed:
+                # 14m52s between stall_auto_cancel and handle.cancelled on
+                # nsd). If the subprocess is still alive after the
+                # escalation window, kill it directly (descendant-aware).
+                await self._enforce_cancel_teardown()
                 # Close signal stream so _run_loop exits
                 self.signal_send.close()
                 return
@@ -1456,6 +1704,23 @@ class ProgressEdits:
             else:
                 self._frozen_ring_count = 0
             self._prev_recent_events = recent_snapshot
+
+            # #500: a frozen ring buffer is only evidence of a hang when the
+            # session is *supposed* to be producing events. While Claude is
+            # blocked on an unanswered control_request (or inside a rate-limit
+            # retry window) no JSONL arrives BY DEFINITION, so the counter
+            # climbed monotonically — observed at 12 and then 85 on a 5 h plan
+            # approval — and ``frozen_escalate`` went permanently True. Since
+            # every expected-wait suppressor below is gated on
+            # ``not frozen_escalate``, an approval wait bypassed all of them
+            # and emitted progress_edits.frozen_ring_escalation regardless.
+            #
+            # Hold the counter at zero for the duration of the expected wait
+            # rather than merely skipping the escalation: otherwise the moment
+            # the user finally clicks Approve, a counter of 85 would trip an
+            # immediate false escalation on the very next tick.
+            if _expected_wait_reason:
+                self._frozen_ring_count = 0
 
             # Suppress Telegram notification when process is CPU-active
             # (extended thinking, background agents). Instead, trigger a
@@ -1644,6 +1909,7 @@ class ProgressEdits:
                 # from every branch.
                 _tool_name: str | None = None
                 if mcp_hung:
+                    self._count_stall_warning()
                     logger.warning(
                         "progress_edits.mcp_tool_hung",
                         channel_id=self.channel_id,
@@ -1656,6 +1922,7 @@ class ProgressEdits:
                         f"⏳ MCP tool may be hung: {mcp_server} ({mins} min, no new events)"
                     ]
                 elif frozen_escalate:
+                    self._count_stall_warning()
                     logger.warning(
                         "progress_edits.frozen_ring_escalation",
                         channel_id=self.channel_id,
@@ -1983,11 +2250,59 @@ class ProgressEdits:
         return False
 
     def _has_pending_approval(self) -> bool:
-        """Check if the most recent non-completed action is waiting for user approval."""
+        """True while the run is blocked on a user approval.
+
+        #495/#499/#500: this used to inspect presentation state only — the
+        most recent non-completed action's ``inline_keyboard`` detail. An
+        ExitPlanMode permission request does not carry that key, so a session
+        parked for hours on a plan approval was classified ``"normal"`` and
+        emitted 88 spurious ``progress_edits.stall_detected`` WARNs.
+
+        The authoritative signal is the engine's own unanswered-control-request
+        registry, reached by the same ``engine_state`` duck-typing used for
+        ``has_live_background_work`` so non-Claude engines degrade cleanly.
+        The presentation-state check is retained as a fallback: it still
+        catches approvals that do render an inline keyboard, and it keeps this
+        predicate meaningful for engines with no control channel.
+        """
+        es = getattr(self.stream, "engine_state", None) if self.stream else None
+        probe = getattr(es, "awaiting_user_approval", None)
+        if callable(probe):
+            try:
+                if probe():
+                    return True
+            except Exception as exc:  # noqa: BLE001 - monitor loop must not die
+                logger.debug("progress_edits.approval_probe_failed", error=str(exc))
         for action_state in reversed(list(self.tracker._actions.values())):
             if not action_state.completed:
                 return bool(action_state.action.detail.get("inline_keyboard"))
             break  # only check the most recent
+        return False
+
+    def _count_stall_warning(self) -> None:
+        """Record that a genuine stall WARNING was emitted (#495).
+
+        Single increment point for ``_total_stall_warn_count`` so future
+        suppression rules cannot reintroduce counter drift: if a tick does not
+        reach one of the WARNING emissions, it does not count as a stall.
+        """
+        self._total_stall_warn_count += 1
+
+    def _is_rate_limit_waiting(self) -> bool:
+        """True while the engine is inside an upstream rate-limit retry window.
+
+        #495/#499/#500 companion to :meth:`_has_pending_approval` — a throttled
+        run resumes by itself, so silence during the retry window is expected
+        rather than a stall.
+        """
+        es = getattr(self.stream, "engine_state", None) if self.stream else None
+        probe = getattr(es, "awaiting_rate_limit_retry", None)
+        if callable(probe):
+            try:
+                return bool(probe())
+            except Exception as exc:  # noqa: BLE001 - monitor loop must not die
+                logger.debug("progress_edits.rate_limit_probe_failed", error=str(exc))
+                return False
         return False
 
     def _has_running_tool(self) -> bool:
@@ -2240,6 +2555,13 @@ class ProgressEdits:
                 except anyio.EndOfStream:
                     return
 
+            # #591: final answer already delivered (or being delivered) —
+            # consume the wakeup without repainting so a late progress
+            # render can't overwrite the final message.
+            if self._finalizing:
+                self.rendered_seq = self.event_seq
+                continue
+
             # Debounce: never delay the first render; after that, batch events.
             if self._has_rendered and self._min_render_interval > 0:
                 elapsed_since = self.clock() - self._last_render_at
@@ -2473,6 +2795,19 @@ class ProgressEdits:
     # result idle past this point with no other expected-wait signal,
     # Tier 1 missed an edge case — stop suppressing auto-cancel.
     _POST_RESULT_LIMBO_THRESHOLD_S: float = 660.0
+
+    def note_final(self, evt: UntetherEvent) -> None:
+        """#591: record a terminal CompletedEvent WITHOUT scheduling a repaint.
+
+        Used by the early final-answer delivery path: the tracker must see
+        the event so the final snapshot renders completed actions/usage, but
+        bumping ``event_seq`` would wake ``_run_loop`` into painting one more
+        *progress* frame that races the final answer edit on the same
+        Telegram message. ``_finalizing`` makes any already-queued wakeup a
+        no-op too.
+        """
+        self.tracker.note_event(evt)
+        self._finalizing = True
 
     async def on_event(self, evt: UntetherEvent) -> None:
         if not self.tracker.note_event(evt):
@@ -2710,6 +3045,7 @@ async def run_runner_with_cancel(
     running_task: RunningTask | None,
     on_thread_known: Callable[[ResumeToken, anyio.Event], Awaitable[None]] | None,
     channel_id: ChannelId = 0,
+    on_completed: Callable[[CompletedEvent, RunOutcome], Awaitable[None]] | None = None,
 ) -> RunOutcome:
     outcome = RunOutcome()
     start_time = time.monotonic()
@@ -2717,8 +3053,9 @@ async def run_runner_with_cancel(
         async with anyio.create_task_group() as tg:
 
             async def run_runner() -> None:
+                events = runner.run(prompt, resume_token)
                 try:
-                    async for evt in runner.run(prompt, resume_token):
+                    async for evt in events:
                         _log_runner_event(evt)
                         if isinstance(evt, StartedEvent):
                             outcome.resume = evt.resume
@@ -2744,12 +3081,71 @@ async def run_runner_with_cancel(
                                 finally:
                                     running_task.resume_ready.set()
                         elif isinstance(evt, CompletedEvent):
+                            first_completed = outcome.completed is None
                             outcome.resume = evt.resume or outcome.resume
                             outcome.completed = evt
+                            # #591: deliver the final answer NOW — the run
+                            # generator may not return for up to the full
+                            # post-result limbo window (MCP children holding
+                            # the subprocess open), and the answer already
+                            # exists. Only genuine successful results
+                            # (ok=True) qualify: synthesized stream-end
+                            # errors must keep riding the post-return path
+                            # so auto-continue / error formatting still see
+                            # them first. Failures here leave the run
+                            # untouched — the post-return path retries.
+                            if (
+                                on_completed is not None
+                                and evt.ok is True
+                                and first_completed
+                            ):
+                                edits.note_final(evt)
+                                _record_export_event(
+                                    evt, outcome.resume, channel_id=channel_id
+                                )
+                                try:
+                                    # #614: shield the delivery — a /cancel
+                                    # landing mid-send would otherwise cancel
+                                    # this await AFTER the message hit the
+                                    # wire but BEFORE final_delivery["sent"]
+                                    # was recorded, so handle_message would
+                                    # render a spurious "cancelled" message
+                                    # on top of the delivered answer. Bounded
+                                    # so a wedged transport can't hold the
+                                    # cancel hostage. #618: 60s, not less —
+                                    # a 4-chunk final under group-chat outbox
+                                    # pacing takes 15s+ on its own, and a
+                                    # timeout that fires between the last
+                                    # chunk and the sent-flag re-creates the
+                                    # spurious-cancelled artifact.
+                                    with anyio.move_on_after(60, shield=True):
+                                        await on_completed(evt, outcome)
+                                except Exception:  # noqa: BLE001
+                                    logger.warning(
+                                        "final.early_delivery_failed",
+                                        exc_info=True,
+                                    )
+                                continue
                         # A3: Record events for /export
                         _record_export_event(evt, outcome.resume, channel_id=channel_id)
                         await edits.on_event(evt)
                 finally:
+                    # #614: close the runner generator in THIS task. When the
+                    # async-for is abandoned mid-body (e.g. /cancel lands
+                    # while on_completed is awaiting), the generator is left
+                    # suspended at a yield and would be finalized later by
+                    # the event loop's async-generator hook in a DIFFERENT
+                    # task — and run_impl's anyio task group then raises
+                    # "Attempted to exit cancel scope in a different task
+                    # than it was entered in" as an unretrieved task
+                    # exception. Shielded so the pending bridge-level
+                    # cancellation can't interrupt generator teardown
+                    # (subprocess kill, registry cleanup); bounded so a
+                    # wedged teardown can't hang the bridge.
+                    aclose = getattr(events, "aclose", None)
+                    if aclose is not None:
+                        with anyio.move_on_after(30, shield=True):
+                            await aclose()
                     tg.cancel_scope.cancel()
 
             async def wait_cancel(task: RunningTask) -> None:
@@ -2885,7 +3281,10 @@ async def handle_message(
     on_resume_failed: Callable[[ResumeToken], Awaitable[None]] | None = None,
     progress_ref: MessageRef | None = None,
     clock: Callable[[], float] = time.monotonic,
+    quarantine_store: QuarantineStore | None = None,
     _auto_continued_count: int = 0,
+    _empty_resent_count: int = 0,
+    _stream_idle_retried_count: int = 0,
 ) -> None:
     logger.info(
         "handle.incoming",
@@ -2894,6 +3293,245 @@ async def handle_message(
         resume=resume_token.value if resume_token else None,
         text=incoming.text,
     )
+
+    # #631 (T6): resolve the quarantine store ONCE for this call — either
+    # the caller-injected store (tests / explicit wiring) or the
+    # process-wide singleton. All three quarantine call sites below (the
+    # W2 divert check here, the W2 healthy-clear in _deliver_final, and
+    # the W1 quarantine in the auto-resend block) use this resolved
+    # reference. Recursive re-entries (auto-resend, auto-continue) pass it
+    # through explicitly via the ``quarantine_store=`` kwarg so an
+    # injected store survives recursion instead of falling back to the
+    # singleton partway through a recovery chain.
+    try:
+        _qstore: QuarantineStore | None = quarantine_store or get_quarantine_store()
+    except Exception:  # noqa: BLE001 — a store failure must never block
+        # message handling; the sites below already tolerate a None store.
+        logger.debug("session.quarantine_store_resolve_failed", exc_info=True)
+        _qstore = None
+
+    # #632 (W2): a session marked quarantined (forced teardown after a
+    # result — see claude.py's post-result subcountdown) may have a
+    # dangling upstream turn and is unsafe to resume. Divert to a fresh
+    # session proactively rather than waiting for another empty-result
+    # anomaly. Runs on every entry, including recursive auto-resend/
+    # auto-continue re-entries — a cheap in-memory dict lookup.
+    if resume_token is not None:
+        try:
+            _quarantined = (
+                _qstore.is_quarantined(runner.engine, resume_token.value)
+                if _qstore is not None
+                else False
+            )
+        except Exception:  # noqa: BLE001 — a store failure must never
+            # block message handling.
+            logger.debug("session.quarantine_check_failed", exc_info=True)
+            _quarantined = False
+        if _quarantined:
+            logger.info(
+                "session.resume_diverted_fresh",
+                engine=runner.engine,
+                session_id=resume_token.value,
+                reason="quarantined",
+            )
+            # #647: announce the divert. Without this the fresh session
+            # answers confidently with no context and no signal that
+            # continuity was lost (observed live: "The last session wrapped
+            # cleanly. Which thread should I 'continue'?").
+            with contextlib.suppress(Exception):
+                await cfg.transport.send(
+                    channel_id=incoming.channel_id,
+                    message=RenderedMessage(
+                        text=(
+                            "ℹ️ Starting a fresh session — the previous one "
+                            "ended in a state that can't be resumed safely, "
+                            "so its context isn't carried over."
+                        )
+                    ),
+                    options=SendOptions(thread_id=incoming.thread_id),
+                )
+            if on_resume_failed is not None:
+                try:
+                    await on_resume_failed(resume_token)
+                except Exception:  # noqa: BLE001
+                    logger.debug("session.clear_failed", exc_info=True)
+            resume_token = None
+
+    # #633 (W4): one-owner-per-session serialisation. rc7 recovers *after* a
+    # session is poisoned; this stops it happening. If a subprocess for this
+    # session is still alive (typically lingering in post-result limbo holding
+    # MCP children open), spawning `--resume` now would give one session id two
+    # concurrent owners — the exact race that leaves the upstream turn dangling
+    # on an unresolved tool_use and makes the next resume return 0 turns / $0.
+    #
+    # The wait is condition-based and bounded: it returns the moment the prior
+    # owner deregisters, and on timeout we quarantine and go fresh rather than
+    # racing. Claude-only — no other engine has the limbo behaviour, and
+    # `wait_for_session_handoff` is Claude's registry.
+    if resume_token is not None and runner.engine == "claude":
+        _ac_cfg = _load_auto_continue_settings()
+        if getattr(_ac_cfg, "serialize_session_owner", True):
+            try:
+                from untether.runners.claude import (
+                    session_live_bg_count,
+                    wait_for_session_handoff,
+                )
+
+                _handoff = await wait_for_session_handoff(
+                    resume_token.value,
+                    getattr(_ac_cfg, "session_handoff_timeout_s", 30.0),
+                )
+                # #647: the base timeout expired while the prior owner is
+                # still alive. If it is alive because it is legitimately
+                # finishing background work (default-background subagents,
+                # #646), don't silently abandon its context — tell the user
+                # why the reply is delayed and keep waiting. Still
+                # condition-based (resolves the instant the owner exits) and
+                # bounded by ``session_handoff_bg_timeout_s``.
+                if _handoff == "timed_out":
+                    _bg_count = session_live_bg_count(resume_token.value)
+                    _bg_budget = float(
+                        getattr(_ac_cfg, "session_handoff_bg_timeout_s", 600.0)
+                    )
+                    if _bg_count > 0 and _bg_budget > 0:
+                        logger.info(
+                            "session.handoff_bg_extended",
+                            engine=runner.engine,
+                            session_id=resume_token.value,
+                            live_bg_count=_bg_count,
+                            bg_timeout_s=_bg_budget,
+                        )
+                        _plural = "s" if _bg_count != 1 else ""
+                        with contextlib.suppress(Exception):
+                            await cfg.transport.send(
+                                channel_id=incoming.channel_id,
+                                message=RenderedMessage(
+                                    text=(
+                                        f"⏳ The previous session is still "
+                                        f"finishing {_bg_count} background "
+                                        f"task{_plural} — waiting up to "
+                                        f"{int(_bg_budget // 60)} min so your "
+                                        f"context carries over. Send /new to "
+                                        f"drop it and start fresh instead."
+                                    )
+                                ),
+                                options=SendOptions(thread_id=incoming.thread_id),
+                            )
+                        _handoff = await wait_for_session_handoff(
+                            resume_token.value, _bg_budget
+                        )
+            except Exception:  # noqa: BLE001 — never block message handling
+                # Fail CLOSED. The entire point of this gate is to never resume
+                # a session that might still be owned; treating a broken check
+                # as "safe to resume" would silently reinstate the race it
+                # exists to prevent. Logged at WARNING (not debug) so a
+                # persistent failure surfaces as degraded continuity instead of
+                # quietly making every resume fresh.
+                # #668: bind session/engine/chat so a persistent probe failure
+                # is attributable — without these the issue-watcher dedups every
+                # chat's failure into one indistinguishable report. Matches the
+                # sibling session.handoff / session.handoff_bg_extended events.
+                logger.warning(
+                    "session.handoff_check_failed",
+                    engine=runner.engine,
+                    session_id=resume_token.value,
+                    chat_id=incoming.channel_id,
+                    exc_info=True,
+                )
+                _handoff = "timed_out"
+            if _handoff != "free":
+                logger.info(
+                    "session.handoff",
+                    engine=runner.engine,
+                    session_id=resume_token.value,
+                    outcome=_handoff,
+                )
+            if _handoff == "exited":
+                # #647: the owner may have exited because the post-result
+                # ceiling SIGTERM'd it and quarantined the session while we
+                # were waiting (the two paths interact — the incident that
+                # reproduced this issue carried reason=quarantined, not
+                # handoff_timeout). Re-check quarantine so the wait's outcome
+                # can't resume a session marked unsafe moments earlier — and
+                # announce the context loss instead of silently answering
+                # from a fresh session.
+                try:
+                    _q_after = (
+                        _qstore.is_quarantined(runner.engine, resume_token.value)
+                        if _qstore is not None
+                        else False
+                    )
+                except Exception:  # noqa: BLE001
+                    logger.debug("session.quarantine_check_failed", exc_info=True)
+                    _q_after = False
+                if _q_after:
+                    logger.warning(
+                        "session.resume_diverted_fresh",
+                        engine=runner.engine,
+                        session_id=resume_token.value,
+                        reason="quarantined_during_handoff",
+                    )
+                    with contextlib.suppress(Exception):
+                        await cfg.transport.send(
+                            channel_id=incoming.channel_id,
+                            message=RenderedMessage(
+                                text=(
+                                    "⚠️ The previous session had to be "
+                                    "terminated while its background tasks "
+                                    "were still running — starting a fresh "
+                                    "session. Its context couldn't be "
+                                    "carried over."
+                                )
+                            ),
+                            options=SendOptions(thread_id=incoming.thread_id),
+                        )
+                    if on_resume_failed is not None:
+                        try:
+                            await on_resume_failed(resume_token)
+                        except Exception:  # noqa: BLE001
+                            logger.debug("session.clear_failed", exc_info=True)
+                    resume_token = None
+            if _handoff == "timed_out":
+                # The prior owner is still alive. Start fresh rather than
+                # racing it.
+                #
+                # Deliberately NOT quarantined: a handoff timeout means the
+                # session is *busy*, not that it is known-corrupt, and a
+                # quarantine marker persists for 7 days and permanently
+                # diverts the session — too destructive for "the previous run
+                # was slow to tear down". Clearing the stored token is enough,
+                # because nothing will reference the old id afterwards. If that
+                # process does go on to be force-killed after a result, the
+                # existing W2 path (`quarantine_on_forced_teardown`) quarantines
+                # it at the point we actually have evidence of poisoning.
+                logger.warning(
+                    "session.resume_diverted_fresh",
+                    engine=runner.engine,
+                    session_id=resume_token.value,
+                    reason="handoff_timeout",
+                )
+                # #647: never divert silently — a confidently contextless
+                # answer with no signal that continuity was lost is the worst
+                # outcome. One line, before the fresh run starts.
+                with contextlib.suppress(Exception):
+                    await cfg.transport.send(
+                        channel_id=incoming.channel_id,
+                        message=RenderedMessage(
+                            text=(
+                                "⚠️ The previous session was still busy after "
+                                "the wait — starting a fresh session. Its "
+                                "context couldn't be carried over."
+                            )
+                        ),
+                        options=SendOptions(thread_id=incoming.thread_id),
+                    )
+                if on_resume_failed is not None:
+                    try:
+                        await on_resume_failed(resume_token)
+                    except Exception:  # noqa: BLE001
+                        logger.debug("session.clear_failed", exc_info=True)
+                resume_token = None
+
     started_at = clock()
     is_resume_line = runner.is_resume_line
     resume_strip = strip_resume_line or is_resume_line
@@ -2989,12 +3627,393 @@ async def handle_message(
             runner._LIVENESS_TIMEOUT_SECONDS = watchdog.liveness_timeout
         if hasattr(runner, "_stall_auto_kill"):
             runner._stall_auto_kill = watchdog.stall_auto_kill
+        # #590: post-exit orphan sweep toggle.
+        if hasattr(runner, "_reap_orphans"):
+            runner._reap_orphans = watchdog.reap_orphans
 
     # #481: heartbeat tick cadence — drives the long-running-action elapsed
     # tail and the post-result closing-message poller. Read live so config
     # reloads pick up new values on the next message (matches min_render_interval
     # pattern above).
     edits._heartbeat_interval = progress_cfg.heartbeat_interval
+
+    # #591: early final-answer delivery. The answer exists the moment the
+    # CompletedEvent arrives, but the run generator may not return for up to
+    # the post-result limbo window (MCP children holding the subprocess open
+    # — historically up to 600 s of dead wall-clock, and one answer lost
+    # entirely to a user /cancel of an already-completed run). This closure
+    # performs the final assembly + send. It is invoked from inside
+    # run_runner_with_cancel the moment a successful result arrives and —
+    # when that early path did not run or failed — from the post-return
+    # flow below. ``final_delivery["sent"]`` keeps the two paths idempotent.
+    final_delivery = {"sent": False}
+    # #596: set by _deliver_final when an empty-result no-op resume is detected
+    # and eligible for a single automatic resend. Read by the post-return
+    # auto-resend block below (independent of final_delivery["sent"], since the
+    # "↻ retrying" notice IS delivered).
+    empty_resume = {"pending": False}
+
+    async def _deliver_final(
+        completed: CompletedEvent, run_outcome: RunOutcome
+    ) -> None:
+        # Idempotence: the early path and the post-return path can both
+        # reach here; only the first delivery wins.
+        if final_delivery["sent"]:
+            return
+        run_ok = completed.ok
+        run_error = completed.error
+        elapsed_final = clock() - started_at
+
+        # #510: ``completed.answer`` already has the #508 ExitPlanMode
+        # plan-body prepend applied at the runner level (claude.py, on the
+        # per-stream path). The previous bridge-side prepend read
+        # ``runner.current_stream`` — a shared singleton on the ClaudeRunner
+        # — and leaked one chat's plan body into another concurrent chat's
+        # final answer.
+        final_answer = completed.answer
+
+        # Auto-clear broken session: if a resumed run failed with 0 turns,
+        # clear the saved session so the next message starts fresh.
+        if (
+            run_ok is False
+            and resume_token is not None
+            and on_resume_failed is not None
+        ):
+            _num_turns = 0
+            if completed.usage:
+                _num_turns = completed.usage.get("num_turns", 0) or 0
+            if _num_turns == 0:
+                try:
+                    await on_resume_failed(resume_token)
+                    logger.info(
+                        "session.auto_cleared",
+                        engine=resume_token.engine,
+                        resume=resume_token.value,
+                    )
+                except Exception:  # noqa: BLE001
+                    logger.debug("session.auto_clear_failed", exc_info=True)
+
+        if run_ok is False and run_error:
+            raw_error = str(run_error)
+            hint = _get_error_hint(raw_error)
+            if final_answer.strip():
+                # Deduplicate: if the answer already starts with the error's
+                # first line (common when runner sets both answer and error
+                # from the same source, e.g. Claude Code subscription
+                # limits), only append the diagnostic context and hint — not
+                # the repeated summary.
+                error_head = raw_error.split("\n", 1)[0].strip()
+                answer_head = final_answer.strip().split("\n", 1)[0].strip()
+                if error_head and error_head == answer_head:
+                    _, _, remainder = raw_error.partition("\n")
+                    parts: list[str] = [final_answer]
+                    if hint:
+                        parts.append(f"\N{ELECTRIC LIGHT BULB} {hint}")
+                    if remainder.strip():
+                        parts.append(f"```\n{remainder.strip()}\n```")
+                    final_answer = "\n\n".join(parts)
+                else:
+                    if hint:
+                        error_text = (
+                            f"\N{ELECTRIC LIGHT BULB} {hint}\n\n```\n{raw_error}\n```"
+                        )
+                    else:
+                        error_text = f"```\n{raw_error}\n```"
+                    final_answer = f"{final_answer}\n\n{error_text}"
+            else:
+                if hint:
+                    final_answer = (
+                        f"\N{ELECTRIC LIGHT BULB} {hint}\n\n```\n{raw_error}\n```"
+                    )
+                else:
+                    final_answer = f"```\n{raw_error}\n```"
+
+        # #596: a 0-turn / $0 / empty-answer completion with ok=True is a
+        # no-op resume (upstream: the resumed session considers itself
+        # complete and emits an immediate empty result). Previously this
+        # rendered a bare "error"-labelled header with no body — the user
+        # got silence and had to re-nudge manually. Surface it explicitly.
+        # Missing usage keys default to 1 (non-anomalous) — only an engine
+        # that EXPLICITLY reported zero turns and zero API time qualifies;
+        # engines without usage reporting never trip this.
+        empty_result_anomaly = False
+        if (
+            run_ok is True
+            and not run_outcome.cancelled
+            and not final_answer.strip()
+            and completed.usage
+            and (completed.usage.get("num_turns", 1) or 0) == 0
+            and (completed.usage.get("duration_api_ms", 1) or 0) == 0
+        ):
+            empty_result_anomaly = True
+            # #631 (W5-diag): derive WHY the anomaly branch will or will not
+            # auto-recover. Checks the same four conditions the eligibility
+            # test below ANDs together, but in priority order (most specific
+            # diagnostic first) rather than the AND's structural order — a
+            # retry that ran FRESH (unresumed) after exhausting its one shot
+            # has BOTH resume_token is None and _empty_resent_count >= 1
+            # true, and "counter_exhausted" is the more useful signal than
+            # "no_token" in that case. "fresh"/"legacy_same_session" mean
+            # recovery IS armed; the other values explain why it is not. The
+            # fresh-vs-legacy split mirrors — without moving — the W1
+            # decision made later in the post-return auto-resend block: same
+            # settings object, same poison-token derivation
+            # (completed.resume or run_outcome.resume or resume_token).
+            _resend_settings = _load_auto_continue_settings()
+            if not _resend_settings.resend_empty_resume:
+                _resend_reason = "disabled"
+            elif _empty_resent_count >= 1:
+                _resend_reason = "counter_exhausted"
+            elif not bool(incoming.text and incoming.text.strip()):
+                _resend_reason = "blank_input"
+            elif resume_token is None:
+                _resend_reason = "no_token"
+            else:
+                _poison_for_log = completed.resume or run_outcome.resume or resume_token
+                _resend_reason = (
+                    "fresh"
+                    if (
+                        _resend_settings.empty_resume_fresh
+                        and _poison_for_log is not None
+                    )
+                    else "legacy_same_session"
+                )
+            _es = edits.stream
+            # #631 (Fix 1): whether the resumed token was ALREADY known-
+            # quarantined at the moment this anomaly fired. Under normal
+            # control flow this is always False — the W2 entry-divert check
+            # earlier in handle_message redirects an already-quarantined
+            # resume_token to a fresh session before any run happens — so a
+            # True here is evidence of a TOCTOU race (e.g. a concurrent
+            # handle_message call for the same session id quarantined it
+            # mid-run) and gives the fleet-correlation query persisted
+            # prior-run memory. Computed defensively: _qstore may be None if
+            # resolution failed earlier, and the store call itself must
+            # never break diagnostic logging.
+            try:
+                _poison_was_quarantined = (
+                    _qstore.is_quarantined(runner.engine, resume_token.value)
+                    if (resume_token is not None and _qstore is not None)
+                    else False
+                )
+            except Exception:  # noqa: BLE001
+                logger.debug("session.quarantine_check_failed", exc_info=True)
+                _poison_was_quarantined = None
+            logger.warning(
+                "runner.empty_result",
+                engine=runner.engine,
+                resume=(completed.resume or run_outcome.resume).value
+                if (completed.resume or run_outcome.resume)
+                else None,
+                was_resume=resume_token is not None,
+                raw_subtype=(completed.usage or {}).get("subtype"),
+                is_error=run_ok is False,
+                proc_returncode=_es.proc_returncode if _es else None,
+                # #631 (Fix 1): renamed from sigterm_sent/background_observed
+                # — these fields only ever describe the CURRENT (empty) run's
+                # stream, never the prior (poisoned) run where the
+                # interesting facts actually live; the old names read as if
+                # they might cover both.
+                sigterm_sent_this_run=bool(_es and _es.sigterm_sent),
+                background_observed_this_run=bool(_es and _es.background_observed),
+                poison_was_quarantined=_poison_was_quarantined,
+                resend_eligible_reason=_resend_reason,
+            )
+            # #596: auto-resend the original prompt once (same session)
+            # instead of asking the user to re-nudge. Eligible only on a
+            # resume with a non-empty original prompt, gated by the
+            # single-shot ``_empty_resent_count`` so a retry that is ALSO
+            # empty falls through to the manual-resend notice below.
+            if _resend_reason in ("fresh", "legacy_same_session"):
+                empty_resume["pending"] = True
+                final_answer = (
+                    "\N{ANTICLOCKWISE DOWNWARDS AND UPWARDS OPEN CIRCLE ARROWS} "
+                    "engine returned an empty result on resume — retrying your "
+                    "message automatically…"
+                )
+            else:
+                final_answer = (
+                    "\N{WARNING SIGN} engine returned an empty result "
+                    "(0 turns, no API work) — the resumed session may "
+                    "consider itself complete. Resend your message, or "
+                    "start fresh with /new."
+                )
+
+        # #632 (W2): a run that completed with real work proves the session
+        # is healthy — clear any forced-teardown quarantine marker for the
+        # session id it reports so a reused session id is never stuck
+        # fresh-only forever. ``num_turns`` must be explicitly truthy: this
+        # naturally excludes the #596 empty_result_anomaly zero-turn case
+        # above, and engines that never report usage at all never clear.
+        if (
+            run_ok is True
+            and not run_outcome.cancelled
+            and (completed.usage or {}).get("num_turns", 0)
+        ):
+            _healthy_sid = completed.resume or run_outcome.resume
+            if _healthy_sid is not None and _qstore is not None:
+                try:
+                    _qstore.clear(runner.engine, _healthy_sid.value)
+                except Exception:  # noqa: BLE001 — a store failure must
+                    # never break final-message delivery.
+                    logger.debug("session.quarantine_clear_failed", exc_info=True)
+
+        status = (
+            "error"
+            if run_ok is False
+            # An auto-resend in flight is a transient retry, not an error.
+            else (
+                "done"
+                if (empty_result_anomaly and empty_resume["pending"])
+                else "error"
+                if empty_result_anomaly
+                else ("done" if final_answer.strip() else "error")
+            )
+        )
+        resume_value = None
+        final_resume = completed.resume or run_outcome.resume
+        if final_resume is not None:
+            resume_value = final_resume.value
+        usage_log: dict[str, object] = {}
+        if completed.usage:
+            for key in ("num_turns", "total_cost_usd", "duration_api_ms"):
+                val = completed.usage.get(key)
+                if val is not None:
+                    usage_log[key] = val
+        logger.info(
+            "runner.completed",
+            ok=run_ok,
+            error=run_error,
+            answer_len=len(final_answer or ""),
+            elapsed_s=round(elapsed_final, 2),
+            action_count=progress_tracker.action_count,
+            resume=resume_value,
+            **usage_log,
+        )
+        # Record session stats for /stats command
+        from .session_stats import record_run as _record_stats_run
+
+        _record_stats_run(
+            engine=runner.engine,
+            actions=progress_tracker.action_count,
+            duration_ms=int(elapsed_final * 1000),
+            triggered=bool(context and context.trigger_source),
+        )
+        sync_resume_token(progress_tracker, final_resume)
+
+        # Post-outline guidance: if the session was outline-pending (user
+        # clicked "Pause & Outline Plan" but Claude Code ended the run
+        # instead of calling ExitPlanMode), append resume instructions so
+        # the user knows how to proceed.
+        if runner.engine == "claude" and resume_value:
+            from .runners.claude import _OUTLINE_PENDING
+
+            if (
+                resume_value in _OUTLINE_PENDING
+                and final_answer
+                and final_answer.strip()
+            ):
+                final_answer += (
+                    "\n\n---\n"
+                    "Plan outline complete. Resume and say "
+                    '"approved" to proceed, or send feedback to revise.'
+                )
+
+        state = progress_tracker.snapshot(
+            resume_formatter=runner.format_resume,
+            context_line=context_line,
+            meta_formatter=format_meta_line,
+        )
+        final_rendered = effective_presenter.render_final(
+            state,
+            elapsed_s=elapsed_final,
+            status=status,
+            answer=final_answer,
+        )
+
+        # Load footer display config (global defaults + per-chat overrides)
+        footer_cfg = _load_footer_settings()
+        from .runners.run_options import get_run_options
+
+        _footer_run_opts = get_run_options()
+
+        # Append run cost footer with inline budget suffix
+        _show_cost = footer_cfg.show_api_cost
+        if _footer_run_opts and _footer_run_opts.show_api_cost is not None:
+            _show_cost = _footer_run_opts.show_api_cost
+        _cost_alert_text, _cost_alert_obj = _check_cost_budget(completed.usage)
+        if _show_cost and run_ok is not False:
+            cost_line = _format_run_cost(completed.usage)
+            if cost_line:
+                budget_suffix = (
+                    _format_budget_suffix(_cost_alert_obj)
+                    if _cost_alert_obj is not None
+                    else ""
+                )
+                final_rendered = RenderedMessage(
+                    text=_insert_before_resume(
+                        final_rendered.text,
+                        f"\n\U0001f4b0{cost_line}{budget_suffix}",
+                    ),
+                    extra=final_rendered.extra,
+                )
+        elif _cost_alert_text:
+            # Budget exceeded but cost display is off — show standalone alert
+            final_rendered = RenderedMessage(
+                text=_insert_before_resume(
+                    final_rendered.text, f"\n{_cost_alert_text}"
+                ),
+                extra=final_rendered.extra,
+            )
+
+        # Append usage footer for Claude Code engine runs
+        if runner.engine == "claude":
+            _show_sub = footer_cfg.show_subscription_usage
+            if (
+                _footer_run_opts
+                and _footer_run_opts.show_subscription_usage is not None
+            ):
+                _show_sub = _footer_run_opts.show_subscription_usage
+            final_rendered = await _maybe_append_usage_footer(
+                final_rendered, always_show=_show_sub
+            )
+
+        logger.debug(
+            "handle.final.rendered",
+            rendered=final_rendered.text,
+            status=status,
+        )
+
+        can_edit_final = progress_ref is not None
+        edit_ref = None if cfg.final_notify or not can_edit_final else progress_ref
+
+        # #591: stop progress repaints BEFORE the send so a queued render
+        # can't overwrite the final message. (The early path already set
+        # this via note_final; this covers the post-return path.)
+        edits._finalizing = True
+
+        await send_result_message(
+            cfg,
+            channel_id=incoming.channel_id,
+            reply_to=user_ref,
+            progress_ref=progress_ref,
+            message=final_rendered,
+            notify=cfg.final_notify,
+            edit_ref=edit_ref,
+            replace_ref=progress_ref,
+            delete_tag="final",
+            thread_id=incoming.thread_id,
+        )
+        final_delivery["sent"] = True
+
+        # Unregister progress persistence after the final message is sent.
+        # Must happen AFTER send_result_message() so a crash between
+        # delete_ephemeral() and here still has an orphan cleanup pointer.
+        if progress_ref is not None and _PROGRESS_PERSISTENCE_PATH is not None:
+            from .telegram.progress_persistence import unregister_progress
+
+            session_key = f"{incoming.channel_id}:{progress_ref.message_id}"
+            unregister_progress(_PROGRESS_PERSISTENCE_PATH, session_key)
 
     running_task: RunningTask | None = None
     if running_tasks is not None and progress_ref is not None:
@@ -3028,6 +4047,7 @@ async def handle_message(
                 running_task=running_task,
                 on_thread_known=on_thread_known,
                 channel_id=incoming.channel_id,
+                on_completed=_deliver_final,
             )
         except Exception as exc:
             error = exc
@@ -3049,6 +4069,17 @@ async def handle_message(
             edits_scope.cancel()
 
     elapsed = clock() - started_at
+
+    if error is not None and final_delivery["sent"]:
+        # #591: the answer was already delivered before the teardown error —
+        # don't overwrite the delivered final message with an error render.
+        logger.warning(
+            "handle.error_after_final_delivery",
+            error=str(error),
+            error_type=error.__class__.__name__,
+            elapsed_s=round(elapsed, 2),
+        )
+        return
 
     if error is not None:
         sync_resume_token(progress_tracker, outcome.resume)
@@ -3102,6 +4133,18 @@ async def handle_message(
         )
         return
 
+    if outcome.cancelled and final_delivery["sent"]:
+        # #591: the run completed and its answer was delivered before the
+        # user's /cancel landed (the channelo msg-5815 shape — a cancel of
+        # an already-done run). The cancel only tears the subprocess down;
+        # the delivered answer must not be replaced by a "cancelled" render.
+        logger.info(
+            "handle.cancelled_after_delivery",
+            resume=outcome.resume.value if outcome.resume else None,
+            elapsed_s=elapsed,
+        )
+        return
+
     if outcome.cancelled:
         resume = sync_resume_token(progress_tracker, outcome.resume)
         logger.info(
@@ -3138,7 +4181,91 @@ async def handle_message(
 
     completed = outcome.completed
     run_ok = completed.ok
-    run_error = completed.error
+
+    # --- Auto-resend: #596 empty-result no-op resume / #631 (W1) quarantine-and-fresh ---
+    # _deliver_final already delivered the "↻ retrying automatically…" notice
+    # (early, ~5s in). Now that the run generator has fully returned (the
+    # empty run's subprocess is done), resend the ORIGINAL prompt once.
+    # #631: the resumed session may be POISONED — an upstream dangling turn
+    # left over from a forced teardown will keep returning empty 0-turn
+    # resumes if resumed again. When empty_resume_fresh is on (default),
+    # clear the stored token, quarantine the poisoned session id so it is
+    # never resumed again, and re-run the ORIGINAL prompt as a FRESH session
+    # (resume=None). When the flag is off, preserve the exact #596
+    # same-session resend behaviour. Single-shot via _empty_resent_count;
+    # mutually exclusive with auto-continue (that fires only when there was
+    # no result at all).
+    if empty_resume["pending"] and _empty_resent_count < 1:
+        _er_settings = _load_auto_continue_settings()
+        # Fall back to the original resume_token so a completion that omits a
+        # resume value never silently starts a FRESH session by accident.
+        _poison = completed.resume or outcome.resume or resume_token
+        if _er_settings.empty_resume_fresh and _poison is not None:
+            # #631 W1: clear the stored session token and quarantine the
+            # poisoned session id, then retry as a FRESH session.
+            if on_resume_failed is not None:
+                try:
+                    await on_resume_failed(_poison)
+                except Exception:  # noqa: BLE001
+                    logger.debug("session.clear_failed", exc_info=True)
+            if _qstore is not None:
+                try:
+                    _qstore.quarantine(
+                        runner.engine,
+                        _poison.value,
+                        reason="empty_zero_turn_resume",
+                    )
+                except Exception:  # noqa: BLE001 — a store failure must
+                    # never crash message handling; the other quarantine
+                    # call sites in this function already tolerate this.
+                    logger.debug("session.quarantine_failed", exc_info=True)
+            logger.warning(
+                "session.auto_resend_fresh",
+                old_session_id=_poison.value,
+                engine=runner.engine,
+                attempt=_empty_resent_count + 1,
+            )
+            _er_resume = None
+        else:
+            # Legacy same-session path (flag off): preserve #596 behaviour
+            # byte-for-byte.
+            _er_resume = _poison
+            logger.warning(
+                "session.auto_resend_empty",
+                session_id=_er_resume.value if _er_resume else None,
+                engine=runner.engine,
+                attempt=_empty_resent_count + 1,
+            )
+        await handle_message(
+            cfg,
+            runner=runner,
+            incoming=IncomingMessage(
+                channel_id=incoming.channel_id,
+                message_id=incoming.message_id,
+                text=incoming.text,
+                reply_to=incoming.reply_to,
+                thread_id=incoming.thread_id,
+            ),
+            resume_token=_er_resume,
+            context=context,
+            context_line=context_line,
+            strip_resume_line=strip_resume_line,
+            running_tasks=running_tasks,
+            on_thread_known=on_thread_known,
+            on_resume_failed=on_resume_failed,
+            clock=clock,
+            # #631 (T6): thread the resolved store through so an
+            # injected/singleton store survives this recursive re-entry.
+            quarantine_store=_qstore,
+            # Carry ALL recovery counters so an alternating empty-resume ↔
+            # auto-continue ↔ stream-idle-retry chain can't reset another
+            # guard and loop.
+            _auto_continued_count=_auto_continued_count,
+            _empty_resent_count=_empty_resent_count + 1,
+            _stream_idle_retried_count=_stream_idle_retried_count,
+        )
+        return
+    # --- End auto-resend ---
 
     # --- Auto-continue: mitigate Claude Code bug #34142/#30333 ---
     # When Claude Code's turn state machine incorrectly ends a session
@@ -3148,15 +4275,32 @@ async def handle_message(
     _ac_resume = completed.resume or outcome.resume
     _ac_last_event = edits.stream.last_event_type if edits.stream else None
     _ac_proc_rc = edits.stream.proc_returncode if edits.stream else None
-    if ac_settings.enabled and _should_auto_continue(
-        last_event_type=_ac_last_event,
-        engine=runner.engine,
-        cancelled=outcome.cancelled,
-        resume_value=_ac_resume.value if _ac_resume else None,
-        auto_continued_count=_auto_continued_count,
-        max_retries=ac_settings.max_retries,
-        proc_returncode=_ac_proc_rc,
+    # #591: a run whose answer was already delivered can never need the
+    # auto-continue salvage (belt-and-braces — _should_auto_continue already
+    # excludes last_event_type == "result").
+    if (
+        ac_settings.enabled
+        and not final_delivery["sent"]
+        and _should_auto_continue(
+            last_event_type=_ac_last_event,
+            engine=runner.engine,
+            cancelled=outcome.cancelled,
+            resume_value=_ac_resume.value if _ac_resume else None,
+            auto_continued_count=_auto_continued_count,
+            max_retries=ac_settings.max_retries,
+            proc_returncode=_ac_proc_rc,
+        )
     ):
+        # #568: emit the fields a future narrowing decision would need.
+        # The two upstream defects this mitigates are indistinguishable at
+        # this point, so rather than guess we record the cohort markers and
+        # let fleet data decide. `background_observed` in particular is the
+        # candidate discriminator for the NOT_PLANNED claude-code#30333 path
+        # (which is scoped to background subagents) — measure how many
+        # successful salvages have it False before ever gating on it.
+        # #640: `proc_returncode` was previously absent, which is why the
+        # broken signal-death guard needed log-line correlation to detect.
+        _ac_es = getattr(edits.stream, "engine_state", None) if edits.stream else None
         logger.warning(
             "session.auto_continue",
             session_id=_ac_resume.value if _ac_resume else None,
@@ -3164,6 +4308,12 @@ async def handle_message(
             last_event_type=_ac_last_event,
             attempt=_auto_continued_count + 1,
             max_retries=ac_settings.max_retries,
+            proc_returncode=_ac_proc_rc,
+            background_observed=bool(
+                getattr(edits.stream, "background_observed", False)
+                or getattr(_ac_es, "background_observed", False)
+            ),
+            event_count=getattr(edits.stream, "event_count", None),
         )
 
         # #551 Tier 0: deliver outbox files from subprocess 1 BEFORE
@@ -3193,6 +4343,9 @@ async def handle_message(
                         max_download_bytes=_oc.max_download_bytes,
                         max_files=_oc.outbox_max_files,
                         cleanup=True,  # subprocess 2 starts fresh
+                        deliver_directories=getattr(
+                            _oc, "outbox_deliver_directories", "off"
+                        ),
                     )
                     logger.info(
                         "outbox.delivered_pre_auto_continue",
@@ -3251,201 +4404,103 @@ async def handle_message(
             on_thread_known=on_thread_known,
             on_resume_failed=on_resume_failed,
             clock=clock,
+            # #631 (T6): thread the resolved store through so an
+            # injected/singleton store survives this recursive re-entry.
+            quarantine_store=_qstore,
             _auto_continued_count=_auto_continued_count + 1,
+            # Carry the other recovery guards so they can't be reset by an
+            # interleaved auto-continue (see #596 auto-resend / #572 retry).
+            _empty_resent_count=_empty_resent_count,
+            _stream_idle_retried_count=_stream_idle_retried_count,
         )
         return
     # --- End auto-continue ---
 
-    # #510: ``completed.answer`` already has the #508 ExitPlanMode
-    # plan-body prepend applied at the runner level (claude.py, on the
-    # per-stream path). The previous bridge-side prepend read
-    # ``runner.current_stream`` — a shared singleton on the ClaudeRunner
-    # — and leaked one chat's plan body into another concurrent chat's
-    # final answer.
-    final_answer = completed.answer
-
-    # Auto-clear broken session: if a resumed run failed with 0 turns,
-    # clear the saved session so the next message starts fresh.
-    if run_ok is False and resume_token is not None and on_resume_failed is not None:
-        _num_turns = 0
-        if completed.usage:
-            _num_turns = completed.usage.get("num_turns", 0) or 0
-        if _num_turns == 0:
-            try:
-                await on_resume_failed(resume_token)
-                logger.info(
-                    "session.auto_cleared",
-                    engine=resume_token.engine,
-                    resume=resume_token.value,
-                )
-            except Exception:  # noqa: BLE001
-                logger.debug("session.auto_clear_failed", exc_info=True)
-
-    if run_ok is False and run_error:
-        raw_error = str(run_error)
-        hint = _get_error_hint(raw_error)
-        if final_answer.strip():
-            # Deduplicate: if the answer already starts with the error's first
-            # line (common when runner sets both answer and error from the same
-            # source, e.g. Claude Code subscription limits), only append the
-            # diagnostic context and hint — not the repeated summary.
-            error_head = raw_error.split("\n", 1)[0].strip()
-            answer_head = final_answer.strip().split("\n", 1)[0].strip()
-            if error_head and error_head == answer_head:
-                _, _, remainder = raw_error.partition("\n")
-                parts: list[str] = [final_answer]
-                if hint:
-                    parts.append(f"\N{ELECTRIC LIGHT BULB} {hint}")
-                if remainder.strip():
-                    parts.append(f"```\n{remainder.strip()}\n```")
-                final_answer = "\n\n".join(parts)
-            else:
-                if hint:
-                    error_text = (
-                        f"\N{ELECTRIC LIGHT BULB} {hint}\n\n```\n{raw_error}\n```"
-                    )
-                else:
-                    error_text = f"```\n{raw_error}\n```"
-                final_answer = f"{final_answer}\n\n{error_text}"
-        else:
-            if hint:
-                final_answer = (
-                    f"\N{ELECTRIC LIGHT BULB} {hint}\n\n```\n{raw_error}\n```"
-                )
-            else:
-                final_answer = f"```\n{raw_error}\n```"
-
-    status = (
-        "error" if run_ok is False else ("done" if final_answer.strip() else "error")
-    )
-    resume_value = None
-    resume_token = completed.resume or outcome.resume
-    if resume_token is not None:
-        resume_value = resume_token.value
-    usage_log: dict[str, object] = {}
-    if completed.usage:
-        for key in ("num_turns", "total_cost_usd", "duration_api_ms"):
-            val = completed.usage.get(key)
-            if val is not None:
-                usage_log[key] = val
-    logger.info(
-        "runner.completed",
-        ok=run_ok,
-        error=run_error,
-        answer_len=len(final_answer or ""),
-        elapsed_s=round(elapsed, 2),
-        action_count=progress_tracker.action_count,
-        resume=resume_value,
-        **usage_log,
-    )
-    # Record session stats for /stats command
-    from .session_stats import record_run as _record_stats_run
-
-    _record_stats_run(
-        engine=runner.engine,
-        actions=progress_tracker.action_count,
-        duration_ms=int(elapsed * 1000),
-        triggered=bool(context and context.trigger_source),
-    )
-    sync_resume_token(progress_tracker, completed.resume or outcome.resume)
-
-    # Post-outline guidance: if the session was outline-pending (user clicked
-    # "Pause & Outline Plan" but Claude Code ended the run instead of calling
-    # ExitPlanMode), append resume instructions so the user knows how to proceed.
-    if runner.engine == "claude" and resume_value:
-        from .runners.claude import _OUTLINE_PENDING
-
-        if resume_value in _OUTLINE_PENDING and final_answer and final_answer.strip():
-            final_answer += (
-                "\n\n---\n"
-                "Plan outline complete. Resume and say "
-                '"approved" to proceed, or send feedback to revise.'
-            )
-
-    state = progress_tracker.snapshot(
-        resume_formatter=runner.format_resume,
-        context_line=context_line,
-        meta_formatter=format_meta_line,
-    )
-    final_rendered = effective_presenter.render_final(
-        state,
-        elapsed_s=elapsed,
-        status=status,
-        answer=final_answer,
-    )
-
-    # Load footer display config (global defaults + per-chat overrides)
-    footer_cfg = _load_footer_settings()
-    from .runners.run_options import get_run_options
-
-    _footer_run_opts = get_run_options()
-
-    # Append run cost footer with inline budget suffix
-    _show_cost = footer_cfg.show_api_cost
-    if _footer_run_opts and _footer_run_opts.show_api_cost is not None:
-        _show_cost = _footer_run_opts.show_api_cost
-    _cost_alert_text, _cost_alert_obj = _check_cost_budget(completed.usage)
-    if _show_cost and run_ok is not False:
-        cost_line = _format_run_cost(completed.usage)
-        if cost_line:
-            budget_suffix = (
-                _format_budget_suffix(_cost_alert_obj)
-                if _cost_alert_obj is not None
-                else ""
-            )
-            final_rendered = RenderedMessage(
-                text=_insert_before_resume(
-                    final_rendered.text,
-                    f"\n\U0001f4b0{cost_line}{budget_suffix}",
-                ),
-                extra=final_rendered.extra,
-            )
-    elif _cost_alert_text:
-        # Budget exceeded but cost display is off — show standalone alert
-        final_rendered = RenderedMessage(
-            text=_insert_before_resume(final_rendered.text, f"\n{_cost_alert_text}"),
-            extra=final_rendered.extra,
+    # --- #572: bounded auto-retry for Type-A stream-idle timeouts ---
+    # A Type-A failure is a mid-generation SSE stall after real output began
+    # (#438: num_turns >= 1, duration_api_ms > 0) — transient upstream flake.
+    # When [watchdog] stream_idle_auto_retry is on (default OFF), auto-resume
+    # the session instead of surfacing a terminal error with only a "raise
+    # the timeout" hint. Type-B (cold-start zero-byte stall) NEVER retries —
+    # retrying hammers a down API. Error finals ride the post-return path
+    # (the #591 early delivery is ok=True-only), so returning here fully
+    # suppresses the terminal error message. The retry re-enters
+    # handle_message as a normal resumed run — quarantine divert, session-
+    # owner serialisation, RAM guard and per-run budget checks all apply to
+    # it exactly as to a user-initiated run.
+    _si_ws = _load_watchdog_settings()
+    _si_es = getattr(edits.stream, "engine_state", None) if edits.stream else None
+    _si_class = getattr(_si_es, "stream_idle_class", None)
+    _si_resume = completed.resume or outcome.resume
+    _si_rc = edits.stream.proc_returncode if edits.stream else None
+    _si_max = getattr(_si_ws, "stream_idle_max_retries", 1) if _si_ws else 1
+    if (
+        _si_ws is not None
+        and getattr(_si_ws, "stream_idle_auto_retry", False)
+        and _si_class == "type_a"
+        and run_ok is False
+        and not outcome.cancelled
+        and not final_delivery["sent"]
+        and _si_resume is not None
+        and _stream_idle_retried_count < _si_max
+        and not _is_signal_death(_si_rc)
+        and not _stream_idle_retry_budget_blocked(completed.usage)
+    ):
+        logger.warning(
+            "claude.stream_idle.auto_retry",
+            session_id=_si_resume.value,
+            engine=runner.engine,
+            attempt=_stream_idle_retried_count + 1,
+            max_retries=_si_max,
+            proc_returncode=_si_rc,
+            num_turns=(completed.usage or {}).get("num_turns"),
+            duration_api_ms=(completed.usage or {}).get("duration_api_ms"),
+            total_cost_usd=(completed.usage or {}).get("total_cost_usd"),
         )
-
-    # Append usage footer for Claude Code engine runs
-    if runner.engine == "claude":
-        _show_sub = footer_cfg.show_subscription_usage
-        if _footer_run_opts and _footer_run_opts.show_subscription_usage is not None:
-            _show_sub = _footer_run_opts.show_subscription_usage
-        final_rendered = await _maybe_append_usage_footer(
-            final_rendered, always_show=_show_sub
+        notice_msg = RenderedMessage(
+            text=_format_stream_idle_retry_notice(_stream_idle_retried_count),
+            extra={},
         )
+        await cfg.transport.send(
+            channel_id=incoming.channel_id,
+            message=notice_msg,
+            options=SendOptions(
+                reply_to=user_ref,
+                notify=True,
+                thread_id=incoming.thread_id,
+            ),
+        )
+        await handle_message(
+            cfg,
+            runner=runner,
+            incoming=IncomingMessage(
+                channel_id=incoming.channel_id,
+                message_id=incoming.message_id,
+                text="continue",
+                reply_to=incoming.reply_to,
+                thread_id=incoming.thread_id,
+            ),
+            resume_token=_si_resume,
+            context=context,
+            context_line=context_line,
+            strip_resume_line=strip_resume_line,
+            running_tasks=running_tasks,
+            on_thread_known=on_thread_known,
+            on_resume_failed=on_resume_failed,
+            clock=clock,
+            quarantine_store=_qstore,
+            # Carry the other recovery counters so an alternating chain
+            # can't reset another guard and loop.
+            _auto_continued_count=_auto_continued_count,
+            _empty_resent_count=_empty_resent_count,
+            _stream_idle_retried_count=_stream_idle_retried_count + 1,
+        )
+        return
+    # --- End #572 stream-idle auto-retry ---
 
-    logger.debug(
-        "handle.final.rendered",
-        rendered=final_rendered.text,
-        status=status,
-    )
-
-    can_edit_final = progress_ref is not None
-    edit_ref = None if cfg.final_notify or not can_edit_final else progress_ref
-
-    await send_result_message(
-        cfg,
-        channel_id=incoming.channel_id,
-        reply_to=user_ref,
-        progress_ref=progress_ref,
-        message=final_rendered,
-        notify=cfg.final_notify,
-        edit_ref=edit_ref,
-        replace_ref=progress_ref,
-        delete_tag="final",
-        thread_id=incoming.thread_id,
-    )
-
-    # Unregister progress persistence after the final message is sent.
-    # Must happen AFTER send_result_message() so a crash between
-    # delete_ephemeral() and here still has an orphan cleanup pointer.
-    if progress_ref is not None and _PROGRESS_PERSISTENCE_PATH is not None:
-        from .telegram.progress_persistence import unregister_progress
-
-        session_key = f"{incoming.channel_id}:{progress_ref.message_id}"
-        unregister_progress(_PROGRESS_PERSISTENCE_PATH, session_key)
+    # #591: deliver the final answer unless the early path already did.
+    if not final_delivery["sent"]:
+        await _deliver_final(completed, outcome)
 
     # Deliver outbox files (agent-initiated file delivery).
     # #524 rc20 follow-up: surface skipped items even when run_ok is False.
@@ -3477,6 +4532,9 @@ async def handle_message(
                         max_download_bytes=_oc.max_download_bytes,
                         max_files=_oc.outbox_max_files,
                         cleanup=_oc.outbox_cleanup,
+                        deliver_directories=getattr(
+                            _oc, "outbox_deliver_directories", "off"
+                        ),
                     )
                 except Exception:  # noqa: BLE001
                     logger.warning("outbox.delivery_failed", exc_info=True)

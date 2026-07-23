@@ -273,6 +273,48 @@ def test_voice_transcription_api_key_empty_string_normalised_to_none(
     assert settings.transports.telegram.voice_transcription_api_key is None
 
 
+def test_voice_transcription_language_normalised(tmp_path: Path) -> None:
+    """#638: language hint is stripped + lowercased at parse time."""
+    config_path = tmp_path / "untether.toml"
+    config_path.write_text(
+        "[transports.telegram]\n"
+        'bot_token = "tok"\n'
+        "chat_id = 123\n"
+        "allow_any_user = true\n"
+        'voice_transcription_language = " EN "\n',
+        encoding="utf-8",
+    )
+    settings, _ = load_settings(config_path)
+    assert settings.transports.telegram.voice_transcription_language == "en"
+
+
+def test_voice_transcription_language_default_none(tmp_path: Path) -> None:
+    """#638: omitted → None → provider auto-detect (pre-#638 behaviour)."""
+    config_path = tmp_path / "untether.toml"
+    config_path.write_text(
+        '[transports.telegram]\nbot_token = "tok"\nchat_id = 123\n'
+        "allow_any_user = true\n",
+        encoding="utf-8",
+    )
+    settings, _ = load_settings(config_path)
+    assert settings.transports.telegram.voice_transcription_language is None
+
+
+def test_voice_transcription_language_rejects_non_iso_code(tmp_path: Path) -> None:
+    """#638: a typo like 'english' fails at boot, not silently at the API."""
+    config_path = tmp_path / "untether.toml"
+    config_path.write_text(
+        "[transports.telegram]\n"
+        'bot_token = "tok"\n'
+        "chat_id = 123\n"
+        "allow_any_user = true\n"
+        'voice_transcription_language = "english"\n',
+        encoding="utf-8",
+    )
+    with pytest.raises(ConfigError, match="voice_transcription_language"):
+        load_settings(config_path)
+
+
 def test_voice_transcription_api_key_default_none(tmp_path: Path) -> None:
     """#378: default is still None when key is omitted."""
     config_path = tmp_path / "untether.toml"
@@ -283,6 +325,64 @@ def test_voice_transcription_api_key_default_none(tmp_path: Path) -> None:
     )
     settings, _ = load_settings(config_path)
     assert settings.transports.telegram.voice_transcription_api_key is None
+
+
+def test_voice_base_url_private_ip_rejected_at_load(tmp_path: Path) -> None:
+    """#381: a voice_transcription_base_url pointing at a private/reserved IP
+    literal fails fast at config-load (SSRF)."""
+    config_path = tmp_path / "untether.toml"
+    data = {
+        "transport": "telegram",
+        "transports": {
+            "telegram": {
+                "bot_token": "tok",
+                "chat_id": 123,
+                "allow_any_user": True,
+                "voice_transcription_base_url": "http://169.254.169.254/latest",
+            }
+        },
+    }
+    with pytest.raises(ConfigError, match="voice_transcription_base_url"):
+        validate_settings_data(data, config_path=config_path)
+
+
+def test_voice_base_url_allowlisted_private_ip_accepted(tmp_path: Path) -> None:
+    """#381: an explicitly allowlisted private range is permitted at load."""
+    config_path = tmp_path / "untether.toml"
+    data = {
+        "transport": "telegram",
+        "transports": {
+            "telegram": {
+                "bot_token": "tok",
+                "chat_id": 123,
+                "allow_any_user": True,
+                "voice_transcription_base_url": "http://10.1.2.3:9000/v1",
+                "voice_transcription_url_allowlist": ["10.0.0.0/8"],
+            }
+        },
+    }
+    settings = validate_settings_data(data, config_path=config_path)
+    tg = settings.transports.telegram
+    assert tg.voice_transcription_base_url == "http://10.1.2.3:9000/v1"
+    assert tg.voice_transcription_url_allowlist == ["10.0.0.0/8"]
+
+
+def test_voice_url_allowlist_invalid_entry_rejected(tmp_path: Path) -> None:
+    """#381: a malformed allowlist entry is a config error."""
+    config_path = tmp_path / "untether.toml"
+    data = {
+        "transport": "telegram",
+        "transports": {
+            "telegram": {
+                "bot_token": "tok",
+                "chat_id": 123,
+                "allow_any_user": True,
+                "voice_transcription_url_allowlist": ["not-a-cidr"],
+            }
+        },
+    }
+    with pytest.raises(ConfigError, match="voice_transcription_url_allowlist"):
+        validate_settings_data(data, config_path=config_path)
 
 
 # ───────────────────────────────────────────────────────────────────────────
@@ -717,6 +817,14 @@ def test_auto_continue_settings_defaults() -> None:
     s = AutoContinueSettings()
     assert s.enabled is True
     assert s.max_retries == 1
+    # #596: empty-resume auto-resend is on by default.
+    assert s.resend_empty_resume is True
+
+
+def test_auto_continue_resend_empty_resume_toggle() -> None:
+    from untether.settings import AutoContinueSettings
+
+    assert AutoContinueSettings(resend_empty_resume=False).resend_empty_resume is False
 
 
 def test_auto_continue_max_retries_bounds() -> None:
@@ -878,3 +986,104 @@ def test_loop_settings_rejects_unknown_keys() -> None:
 
     with pytest.raises(ValidationError):
         LoopSettings(budget_per_loop_usd=5.0)  # cost caps live in [cost_budget]
+
+
+def test_594_voice_key_with_embedded_newline_rejected(tmp_path: Path) -> None:
+    """#594: a header-illegal api key (e.g. two keys concatenated with a
+    newline by a credential manager) must fail at config load with a
+    diagnosable error — not hours later as APIConnectionError("Connection
+    error.") on every transcription attempt."""
+    config_path = tmp_path / "untether.toml"
+    data = {
+        "transport": "telegram",
+        "transports": {
+            "telegram": {
+                "bot_token": "tok",
+                "chat_id": 123,
+                "allow_any_user": True,
+                "voice_transcription": True,
+                "voice_transcription_api_key": "gsk_aaaa\ngsk_bbbb",
+            }
+        },
+    }
+    with pytest.raises(ConfigError, match="control characters"):
+        validate_settings_data(data, config_path=config_path)
+
+
+def test_594_voice_key_with_non_latin1_rejected(tmp_path: Path) -> None:
+    """#594: characters that cannot be encoded into an HTTP header are
+    rejected at config load."""
+    config_path = tmp_path / "untether.toml"
+    data = {
+        "transport": "telegram",
+        "transports": {
+            "telegram": {
+                "bot_token": "tok",
+                "chat_id": 123,
+                "allow_any_user": True,
+                "voice_transcription": True,
+                "voice_transcription_api_key": "gsk_ключ",
+            }
+        },
+    }
+    with pytest.raises(ConfigError, match="Authorization header"):
+        validate_settings_data(data, config_path=config_path)
+
+
+def test_594_normal_voice_key_still_accepted(tmp_path: Path) -> None:
+    """#594: ordinary ASCII keys are unaffected by the new validation."""
+    config_path = tmp_path / "untether.toml"
+    config_path.write_text(
+        "[transports.telegram]\n"
+        'bot_token = "tok"\n'
+        "chat_id = 123\n"
+        "allow_any_user = true\n"
+        "voice_transcription = true\n"
+        'voice_transcription_api_key = "gsk_normal-Key_1234567890"\n',
+        encoding="utf-8",
+    )
+    settings, _ = load_settings(config_path)
+    key = settings.transports.telegram.voice_transcription_api_key
+    assert key is not None
+    assert key.get_secret_value() == "gsk_normal-Key_1234567890"
+
+
+# ---------------------------------------------------------------------------
+# #589 — concurrency-aware pre-spawn admission.
+#
+# The #350 RAM guard is per-spawn and count-blind, so N chats can each pass the
+# free-RAM check independently and then collectively OOM the host. That is the
+# observed nsd failure: OOM killer 5x in one evening, two live Claude runs
+# killed with rc=-9, each session holding 10-17 MCP node children.
+# ---------------------------------------------------------------------------
+
+
+def test_589_concurrency_guard_defaults() -> None:
+    from untether.settings import WatchdogSettings
+
+    ws = WatchdogSettings()
+    # Headroom scaling is ON by default — it only bites under real concurrency.
+    assert ws.prespawn_ram_per_run_reserve_mb == 750
+    # The hard ceiling is OFF by default: no behaviour change until an operator
+    # opts in on a host that has actually struggled.
+    assert ws.max_concurrent_engine_runs == 0
+
+
+def test_589_concurrency_guard_bounds() -> None:
+    from pydantic import ValidationError
+
+    from untether.settings import WatchdogSettings
+
+    assert (
+        WatchdogSettings(max_concurrent_engine_runs=2).max_concurrent_engine_runs == 2
+    )
+    assert (
+        WatchdogSettings(
+            prespawn_ram_per_run_reserve_mb=0
+        ).prespawn_ram_per_run_reserve_mb
+        == 0
+    )
+    with pytest.raises(ValidationError):
+        WatchdogSettings(max_concurrent_engine_runs=-1)
+    with pytest.raises(ValidationError):
+        WatchdogSettings(prespawn_ram_per_run_reserve_mb=-1)
