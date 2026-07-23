@@ -1,20 +1,27 @@
 name: Auto-tag on master
 
 # When a push lands on master that bumps the version in pyproject.toml,
-# automatically create and push the matching `vX.Y.Z` tag. The tag push
-# triggers `release.yml`, which builds, validates, and publishes to PyPI.
+# automatically create and push the matching `vX.Y.Z` tag, then dispatch
+# `release.yml` against that tag to build, validate, and publish to PyPI.
 #
 # This collapses the previous two-gate release flow (PR merge + manual tag
 # creation + PyPI environment approval) into a single gate: the master PR
-# review. See docs/reference/release-process.md for the full rationale.
+# review.
 #
-# REQUIRES (one-time setup — see issue #376):
-#   1. A repo Actions secret `RELEASE_TAG_PAT` — a fine-scoped PAT with
-#      `contents: write` on this repo only. The tag push uses it (not the
-#      workflow GITHUB_TOKEN) so the resulting tag-push event actually fires
-#      release.yml. Without the secret this job fails loudly.
-#   2. The `pypi` GitHub Environment must NOT require a reviewer (the master PR
-#      review is the single gate; OIDC trusted publishing still protects PyPI).
+# WHY AN EXPLICIT DISPATCH (issue #376): a tag push does NOT cascade into
+# release.yml's `on: push: tags` trigger. GitHub suppresses downstream
+# workflow runs for GITHUB_TOKEN-triggered events, and a fine-grained-PAT
+# tag push does not trigger them either (empirically — every release from
+# v0.35.2 onward still required a manual `gh workflow run` even after the PAT
+# was provisioned). workflow_dispatch is the ONE event a GITHUB_TOKEN is
+# allowed to trigger, so this workflow pushes the tag and then dispatches
+# release.yml explicitly. Deterministic, exactly one release run, no PAT to
+# provision or rotate. The former `RELEASE_TAG_PAT` secret is no longer used.
+#
+# REQUIRES (one-time setup): the `pypi` GitHub Environment must NOT require a
+# reviewer (the master PR review is the single gate; OIDC trusted publishing
+# still protects PyPI). Already configured — the environment carries no
+# protection rules.
 #
 # Only fires when:
 #   1. The push is to master
@@ -39,6 +46,7 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write  # create + push tags
+      actions: write  # dispatch release.yml via workflow_dispatch (#376)
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -93,25 +101,32 @@ jobs:
         if: steps.version.outputs.stable == 'true' && steps.existing.outputs.exists == 'false'
         env:
           TAG: ${{ steps.version.outputs.tag }}
-          # #376: push the tag with a user-scoped PAT, NOT the workflow's
-          # GITHUB_TOKEN. GitHub deliberately suppresses downstream workflow
-          # runs for events triggered by GITHUB_TOKEN, so a GITHUB_TOKEN tag
-          # push never fires release.yml (`on: push: tags`). A PAT is treated
-          # as a normal actor and DOES trigger downstream workflows. There is
-          # NO GITHUB_TOKEN fallback on purpose — a fallback would silently
-          # reintroduce the "release didn't fire" bug.
-          RELEASE_TAG_PAT: ${{ secrets.RELEASE_TAG_PAT }}
-          REPO: ${{ github.repository }}
         run: |
-          if [ -z "$RELEASE_TAG_PAT" ]; then
-            echo "::error::RELEASE_TAG_PAT secret is not set. Create a fine-scoped PAT (contents:write on this repo only) and add it as the RELEASE_TAG_PAT Actions secret so the tag push triggers release.yml. See issue #376." >&2
-            exit 1
-          fi
           # Tag the merge commit (HEAD on master). Annotated tag so it
-          # carries the release version for audit purposes.
+          # carries the release version for audit purposes. The checkout step
+          # already persisted GITHUB_TOKEN as the origin credential, so this
+          # push needs no extra secret. It intentionally does NOT trigger
+          # release.yml (GITHUB_TOKEN pushes are suppressed) — the next step
+          # dispatches release.yml explicitly. See issue #376.
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git tag -a "$TAG" -m "Release $TAG"
-          git remote set-url origin "https://x-access-token:${RELEASE_TAG_PAT}@github.com/${REPO}.git"
           git push origin "$TAG"
-          echo "::notice::Created and pushed $TAG via RELEASE_TAG_PAT. release.yml will fire next."
+          echo "::notice::Created and pushed $TAG."
+
+      - name: Dispatch release workflow
+        if: steps.version.outputs.stable == 'true' && steps.existing.outputs.exists == 'false'
+        env:
+          TAG: ${{ steps.version.outputs.tag }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # #376: dispatch release.yml against the freshly-pushed tag. This is
+          # the one path that reliably runs release.yml unattended — GITHUB_TOKEN
+          # is permitted to trigger workflow_dispatch (the documented exception
+          # to the downstream-suppression rule), and release.yml already exposes
+          # a workflow_dispatch trigger. Running it with --ref "$TAG" checks out
+          # the tag, so release.yml's "tag matches version" guard and the
+          # build/publish all operate on the release commit — identical to the
+          # manual `gh workflow run release.yml --ref vX.Y.Z` this replaces.
+          gh workflow run release.yml --repo "$GITHUB_REPOSITORY" --ref "$TAG"
+          echo "::notice::Dispatched release.yml against $TAG. Publishing will proceed unattended."

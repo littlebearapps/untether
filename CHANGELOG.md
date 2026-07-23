@@ -1,5 +1,11 @@
 # changelog
 
+## v0.35.5 (unreleased)
+
+### fixes
+
+- **release:** dispatch `release.yml` explicitly from `auto-tag-on-master.yml` instead of relying on the tag push to trigger it. The `RELEASE_TAG_PAT` approach shipped in v0.35.4 did not work — a fine-grained-PAT tag push does not fire a downstream `on: push: tags` workflow any more than a `GITHUB_TOKEN` push does, so v0.35.4 still needed a manual `gh workflow run release.yml --ref v0.35.4` (verified: the v0.35.4 `release.yml` run was `workflow_dispatch`, 5.5 min after the auto-tag pushed the tag via the PAT). `auto-tag-on-master.yml` now pushes the tag with the workflow `GITHUB_TOKEN` and then runs `gh workflow run release.yml --ref "$TAG"` — `workflow_dispatch` is the one event a `GITHUB_TOKEN` is permitted to trigger, so the release proceeds unattended with exactly one run and no PAT to provision or rotate. Adds `actions: write` to the job; the now-unused `RELEASE_TAG_PAT` secret can be deleted. [#376](https://github.com/littlebearapps/untether/issues/376)
+
 ## v0.35.4 (2026-07-22)
 
 <!-- Covers rc1 through rc14 (the full v0.35.4 release-candidate cycle). Date is the
