@@ -168,6 +168,59 @@ organisation that has not set `permissions.disableAutoMode`. Where it is
 unavailable the CLI rejects `--permission-mode auto` at startup with rc=1 and
 a stderr message, which Untether surfaces through the normal fatal-error path.
 
+#### The six-stage permission pipeline, and where Untether sits ([#749](https://github.com/littlebearapps/untether/issues/749))
+
+A tool call passes through six stages inside Claude Code before it runs. Only
+two of them are Untether's:
+
+| Stage | Decided by | Untether's lever |
+|---|---|---|
+| 1 · hooks | `PreToolUse` hooks | — |
+| 2 · deny rules | `permissions.deny` in settings | — |
+| 3 · ask rules | `permissions.ask` in settings | — |
+| 4 · mode logic | `--permission-mode` (incl. auto's classifier) | chooses the mode |
+| **5 · allow rules** | `permissions.allow` + **`--allowedTools`** | **sends or omits the allowlist** |
+| **6 · prompt** | `--permission-prompt-tool stdio` → `can_use_tool` | **approves, denies, or routes to Telegram** |
+
+Reaching **stage 6 means every earlier stage declined to decide** — it is
+unresolved permission work by definition. Until 0.35.5rc9 Untether
+blanket-approved every stage-6 request except `ExitPlanMode` and
+`AskUserQuestion`, in *all* modes. Combined with `--allowedTools
+Bash,Read,Edit,Write` at stage 5, that made `default`, `manual` and
+`acceptEdits` behave indistinguishably from `bypassPermissions`.
+
+rc9 makes the stage-6 gate mode-derived (`is_claude_prompting_mode`, carried
+onto the run as `ClaudeStreamState.prompting_mode`):
+
+| Mode class | Modes | Stage 6 behaviour |
+|---|---|---|
+| **Prompting** | `default`, `manual`, `acceptEdits` | **Every** tool routes to a Telegram approval |
+| **Autonomous** | `plan`, `plan-auto`, `auto`, `dontAsk`, `bypassPermissions` | Only `ExitPlanMode` / `AskUserQuestion` route; the rest are approved |
+
+Autonomous modes keep the narrow set deliberately. `DEFAULT_ALLOWED_TOOLS`
+only covers `Bash`/`Read`/`Edit`/`Write`, so `Glob`, `Grep`, `WebFetch` and
+`Task` already arrive at stage 6 under `plan`. Gating them would raise an
+approval button per tool in the fleet's most-used mode while buying no safety
+— plan mode blocks writes internally, verified by probe G (a `Write` was never
+created and never surfaced as a `can_use_tool`).
+
+> **Known gap, carried to v0.35.6.** An explicit `permissions.ask` rule reaches
+> stage 6 *even under `bypassPermissions`* — the CLI deliberately overriding
+> the mode to honour the user's highest-priority rule. Because autonomous modes
+> retain both the two-tool gate and the stage-5 allowlist, such a rule is still
+> pre-empted for the four allowlisted tools. Closing that requires a stage-5
+> change, not a wider stage-6 gate.
+
+**`--permission-prompt-tool` is a hidden flag** — it is absent from
+`claude --help`, so its continued existence can only be established by
+spawning the binary. `tests/test_claude_permission_modes.py::
+test_750_permission_prompt_tool_flag_still_accepted` does that by passing the
+flag with its argument missing and reading commander's error, which costs zero
+tokens. That probe is rc9's entire mitigation for
+[#750](https://github.com/littlebearapps/untether/issues/750): if Anthropic
+ever drops the flag, CI fails there instead of five fleet hosts failing in
+production.
+
 ---
 
 ## Environment variables

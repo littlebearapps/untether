@@ -111,6 +111,41 @@ def is_claude_plan_auto(mode: str | None) -> bool:
     return mode == CLAUDE_PLAN_AUTO_MODE
 
 
+# Modes whose stated purpose is to ask the user before acting.  Untether must
+# neither pre-approve their tools at stage 5 (``--allowedTools``) nor
+# blanket-approve their stage-6 ``canUseTool`` requests (#749).
+_CLAUDE_PROMPTING_MODES: frozenset[str] = frozenset(
+    {"default", "manual", "acceptEdits"}
+)
+
+
+def is_claude_prompting_mode(mode: str | None) -> bool:
+    """True when *mode* promises the user a permission prompt (#749).
+
+    Enumerated rather than derived, so adding a CLI mode is a deliberate
+    classification rather than an accident of a predicate.  Membership drives
+    two things: whether ``--allowedTools`` is sent, and whether the control
+    handler gates every tool or only ``ExitPlanMode``/``AskUserQuestion``.
+
+    ``plan`` and ``plan-auto`` are **False** despite plan mode being
+    interactive.  Probe G (2026-08-13, CLI 2.1.228) showed plan mode blocks a
+    ``Write`` *internally* — the file was never created and no ``can_use_tool``
+    ever surfaced — so it does not need Untether's gate to be safe.  Probes H/I
+    showed the opposite: dropping the allowlist there turns every ``Read`` into
+    a stage-6 round-trip Untether approves anyway.  Gating plan mode would buy
+    no safety and cost an approval button per tool in the fleet's most-used
+    mode.  See docs/findings/2026-08-13-claude-permission-modes.md.
+
+    ``auto``, ``dontAsk`` and ``bypassPermissions`` are False because each
+    resolves permissions elsewhere: ``auto`` at the stage-4 classifier,
+    ``dontAsk`` by auto-denying, ``bypassPermissions`` by skipping checks.
+
+    ``None`` (no mode configured) is False — that run takes the legacy ``-p``
+    path with no control channel at all, so no stage-6 request can arrive.
+    """
+    return mode in _CLAUDE_PROMPTING_MODES
+
+
 _RUN_OPTIONS: ContextVar[EngineRunOptions | None] = ContextVar(
     "untether.engine_run_options", default=None
 )

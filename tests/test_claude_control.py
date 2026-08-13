@@ -2161,3 +2161,241 @@ class TestAutoApproveSafetyInvariant:
                 "the safety invariant in runners/claude.py requires silent "
                 "auto-approve — re-audit if this fails."
             )
+
+
+# ===========================================================================
+# K. #749 — the stage-6 approval invariant
+#
+# rc9 phase 01.  Before this, EVERY `can_use_tool` control request except
+# `ExitPlanMode` / `AskUserQuestion` was blanket-approved by the handler,
+# regardless of the selected permission mode.  That made `default`, `manual`
+# and `acceptEdits` — the three modes whose entire purpose is to prompt —
+# behave identically to `bypassPermissions` from the user's point of view.
+#
+# The gate is now mode-derived (`state.prompting_mode`, armed in
+# `new_state()` from `is_claude_prompting_mode`):
+#
+#   prompting  (default / manual / acceptEdits)  -> every tool routes to
+#                                                   Telegram approval
+#   autonomous (plan / plan-auto / auto /        -> today's two-tool set is
+#               dontAsk / bypassPermissions)        retained
+#
+# Autonomous modes keep the narrow set deliberately: `DEFAULT_ALLOWED_TOOLS`
+# only pre-approves Bash/Read/Edit/Write, so Glob/Grep/WebFetch/Task already
+# reach stage 6 there.  Gating them would raise an approval button per tool
+# in plan mode — the fleet's primary mode.  See docs/plans/v0.35.5-rc9/
+# decisions.md D-1 and phase 02's risk section.
+#
+# KNOWN GAP (carry-forward, not fixed here): D-1's motivating case is an
+# explicit `ask` rule reaching stage 6 *even under bypassPermissions*.  With
+# the two-tool set retained AND phase 02 keeping `--allowedTools` for
+# autonomous modes, such a rule is still defeated at stage 5 by the
+# allowlist.  Closing that needs a stage-5 change, not a handler change.
+# ===========================================================================
+
+
+def _can_use_tool_event(request_id: str, tool_name: str, **tool_input: Any):
+    return _decode_event(
+        {
+            "type": "control_request",
+            "request_id": request_id,
+            "request": {
+                "subtype": "can_use_tool",
+                "tool_name": tool_name,
+                "input": dict(tool_input),
+            },
+        }
+    )
+
+
+def _assert_routed_to_approval(
+    events: list, state: ClaudeStreamState, rid: str
+) -> None:
+    """The request produced an approval keyboard and was NOT auto-approved."""
+    assert len(events) == 1, f"expected one approval action, got {events!r}"
+    assert isinstance(events[0], ActionEvent)
+    assert events[0].action.kind == "warning"
+    assert rid not in state.auto_approve_queue
+    assert rid not in [r for r, _ in state.auto_deny_queue]
+
+
+@pytest.mark.parametrize("tool_name", ["Bash", "Read", "Edit", "Write", "Glob"])
+def test_749_default_mode_bash_routes_to_telegram_approval(tool_name: str) -> None:
+    """`default` gates every ordinary tool instead of blanket-approving it."""
+    state, factory = _make_state_with_session()
+    state.prompting_mode = True
+
+    rid = f"req-749-default-{tool_name}"
+    events = translate_claude_event(
+        _can_use_tool_event(rid, tool_name, command="ls"),
+        title="claude",
+        state=state,
+        factory=factory,
+    )
+
+    _assert_routed_to_approval(events, state, rid)
+
+
+def test_749_manual_mode_matches_default_mode_gate() -> None:
+    """`manual` is a CLI alias for `default` — same gate, byte for byte."""
+    from untether.runners.run_options import is_claude_prompting_mode
+
+    assert is_claude_prompting_mode("manual") == is_claude_prompting_mode("default")
+
+    state, factory = _make_state_with_session()
+    state.prompting_mode = is_claude_prompting_mode("manual")
+
+    rid = "req-749-manual-bash"
+    events = translate_claude_event(
+        _can_use_tool_event(rid, "Bash", command="rm -rf /tmp/x"),
+        title="claude",
+        state=state,
+        factory=factory,
+    )
+
+    _assert_routed_to_approval(events, state, rid)
+
+
+def test_749_accept_edits_mode_gates_out_of_scope_tool() -> None:
+    """D-4: upstream `acceptEdits` prompts for out-of-scope writes.
+
+    A blanket allow pre-approves precisely those, so `acceptEdits` is a
+    prompting mode too — contrary to the original issue body.
+    """
+    from untether.runners.run_options import is_claude_prompting_mode
+
+    assert is_claude_prompting_mode("acceptEdits") is True
+
+    state, factory = _make_state_with_session()
+    state.prompting_mode = True
+
+    rid = "req-749-acceptedits-write"
+    events = translate_claude_event(
+        _can_use_tool_event(rid, "Write", file_path="/etc/nope.conf"),
+        title="claude",
+        state=state,
+        factory=factory,
+    )
+
+    _assert_routed_to_approval(events, state, rid)
+    # The out-of-scope path must be visible on the approval message.
+    assert "/etc/nope.conf" in events[0].action.title
+
+
+@pytest.mark.parametrize("tool_name", ["Bash", "Read", "Glob", "Task"])
+def test_749_plan_mode_gate_unchanged_two_tools_only(tool_name: str) -> None:
+    """Plan mode keeps today's behaviour — no approval storm (D-3 H/I)."""
+    state, factory = _make_state_with_session()
+    state.prompting_mode = False
+
+    rid = f"req-749-plan-{tool_name}"
+    events = translate_claude_event(
+        _can_use_tool_event(rid, tool_name),
+        title="claude",
+        state=state,
+        factory=factory,
+    )
+
+    assert events == []
+    assert rid in state.auto_approve_queue
+
+
+def test_749_auto_mode_gate_unchanged() -> None:
+    """CLI `auto` is classifier-gated at stage 4; stage 6 stays cheap (D-1)."""
+    from untether.runners.run_options import is_claude_prompting_mode
+
+    assert is_claude_prompting_mode("auto") is False
+
+    state, factory = _make_state_with_session()
+    state.prompting_mode = False
+
+    rid = "req-749-auto-bash"
+    events = translate_claude_event(
+        _can_use_tool_event(rid, "Bash", command="ls"),
+        title="claude",
+        state=state,
+        factory=factory,
+    )
+
+    assert events == []
+    assert rid in state.auto_approve_queue
+
+
+def test_749_bypass_mode_still_honours_stage6_request() -> None:
+    """`bypassPermissions` must still *answer* a stage-6 request.
+
+    The CLI blocks on stdin until the parent responds, so dropping the
+    request would hang the run.  Honouring it here means queueing a control
+    response — which under the retained two-tool set is an approval.
+    """
+    from untether.runners.run_options import is_claude_prompting_mode
+
+    assert is_claude_prompting_mode("bypassPermissions") is False
+
+    state, factory = _make_state_with_session()
+    state.prompting_mode = False
+
+    rid = "req-749-bypass-bash"
+    events = translate_claude_event(
+        _can_use_tool_event(rid, "Bash", command="ls"),
+        title="claude",
+        state=state,
+        factory=factory,
+    )
+
+    assert events == []
+    # The load-bearing assertion: a response is queued, the request is not
+    # silently dropped.
+    assert rid in state.auto_approve_queue
+
+
+def test_749_exit_plan_mode_exception_survives_in_plan_auto() -> None:
+    """The `plan-auto` rubber stamp must not be broken by the new gate."""
+    state, factory = _make_state_with_session()
+    state.prompting_mode = False
+    state.auto_approve_exit_plan_mode = True
+
+    rid = "req-749-planauto-epm"
+    events = translate_claude_event(
+        _can_use_tool_event(rid, "ExitPlanMode", plan="do the thing"),
+        title="claude",
+        state=state,
+        factory=factory,
+    )
+
+    assert events == []
+    assert rid in state.auto_approve_queue
+
+
+def test_749_ask_user_question_still_routes_to_option_buttons() -> None:
+    """AskUserQuestion keeps its own UX in a prompting mode."""
+    state, factory = _make_state_with_session()
+    state.prompting_mode = True
+
+    rid = "req-749-prompting-auq"
+    events = translate_claude_event(
+        _can_use_tool_event(rid, "AskUserQuestion", question="which one?"),
+        title="claude",
+        state=state,
+        factory=factory,
+    )
+
+    _assert_routed_to_approval(events, state, rid)
+    assert _REQUEST_TO_TOOL_NAME.get(rid) == "AskUserQuestion"
+
+
+def test_749_new_state_arms_prompting_mode_from_effective_mode() -> None:
+    """The helper is wired, not merely defined.
+
+    Mirrors how `auto_approve_exit_plan_mode` is armed — without this the
+    gate would never fire in production no matter what the helper returns.
+    """
+    runner = ClaudeRunner(claude_cmd="claude", permission_mode="default")
+    assert runner.new_state("hi", None).prompting_mode is True
+
+    runner = ClaudeRunner(claude_cmd="claude", permission_mode="plan")
+    assert runner.new_state("hi", None).prompting_mode is False
+
+    # No mode at all => legacy `-p` path, no control channel, no requests.
+    runner = ClaudeRunner(claude_cmd="claude")
+    assert runner.new_state("hi", None).prompting_mode is False

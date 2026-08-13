@@ -425,3 +425,118 @@ def test_migration_handles_none_overrides() -> None:
     from untether.telegram.engine_overrides import migrate_legacy_overrides
 
     assert migrate_legacy_overrides("claude", None) is None
+
+
+# ---------------------------------------------------------------------------
+# #749 — prompting vs autonomous classification (rc9 phase 01)
+# ---------------------------------------------------------------------------
+
+
+def test_749_prompting_mode_classification_matrix() -> None:
+    """All 8 accepted values, pinned explicitly rather than by rule.
+
+    A table beats a predicate here: the whole class of bug #749 fixes is
+    "a mode was silently lumped in with the wrong group", and an
+    enumeration makes that visible in the diff.
+    """
+    from untether.runners.run_options import is_claude_prompting_mode
+
+    expected = {
+        # Prompting: the CLI intends to ask the user.
+        "default": True,
+        "manual": True,
+        "acceptEdits": True,
+        # Autonomous: the CLI resolves earlier in the pipeline, or the user
+        # asked for no prompts at all.
+        "plan": False,
+        CLAUDE_PLAN_AUTO_MODE: False,
+        "auto": False,
+        "dontAsk": False,
+        "bypassPermissions": False,
+    }
+    actual = {mode: is_claude_prompting_mode(mode) for mode in expected}
+    assert actual == expected
+
+    # Every value the config layer accepts is classified — no silent gaps.
+    assert set(expected) == set(VALID_PERMISSION_MODES_BY_ENGINE["claude"])
+
+
+def test_749_unset_mode_is_not_a_prompting_mode() -> None:
+    """`None` means the legacy `-p` path: no control channel, no stage 6."""
+    from untether.runners.run_options import is_claude_prompting_mode
+
+    assert is_claude_prompting_mode(None) is False
+
+
+def test_749_unknown_mode_is_not_a_prompting_mode() -> None:
+    """Forward-compatibility: an unrecognised mode keeps today's behaviour.
+
+    Drift is caught by `test_no_drift_against_installed_cli`, which fails
+    loudly when the CLI grows a mode we haven't classified.
+    """
+    from untether.runners.run_options import is_claude_prompting_mode
+
+    assert is_claude_prompting_mode("someFutureMode") is False
+
+
+# ---------------------------------------------------------------------------
+# #750 — release-gate probe (decisions.md D-10)
+#
+# rc9 does NOT migrate to claude-agent-sdk-python.  It keeps the hand-rolled
+# PTY + stream-json + control-registry layer, which depends entirely on
+# `--permission-prompt-tool stdio` remaining accepted.  If Anthropic ever
+# drops the flag, CI must fail here rather than five fleet hosts failing in
+# production.
+# ---------------------------------------------------------------------------
+
+# The CLI this probe was last green against.  Bump when re-verified.
+PROBED_CLI_VERSION = "2.1.229"
+
+
+@pytest.mark.skipif(shutil.which("claude") is None, reason="claude CLI not installed")
+def test_750_permission_prompt_tool_flag_still_accepted() -> None:
+    """`--permission-prompt-tool` must survive as a recognised option.
+
+    The flag is **hidden** — it does not appear in ``claude --help`` — so its
+    presence can only be established by spawning the binary.  Passing it with
+    its argument deliberately **missing** makes commander answer the question
+    without ever reaching the model:
+
+      * flag known   -> ``option '--permission-prompt-tool <tool>' argument
+        missing``
+      * flag dropped -> ``unknown option '--permission-prompt-tool'``
+
+    Both are argument-parse errors, so this probe costs **zero tokens** and
+    needs no auth, no MCP servers and no network.  An earlier draft passed a
+    bogus *tool name* instead; that reached the model on a machine with no MCP
+    servers configured and billed a real turn.  Don't reintroduce it.
+    """
+    claude = shutil.which("claude")
+    assert claude is not None
+    try:
+        proc = subprocess.run(
+            [claude, "--permission-prompt-tool"],
+            capture_output=True,
+            text=True,
+            timeout=60,
+            stdin=subprocess.DEVNULL,
+        )
+    except (OSError, subprocess.SubprocessError):
+        pytest.skip("could not spawn the installed CLI")
+
+    blob = f"{proc.stderr}\n{proc.stdout}".lower()
+
+    if "unknown option" in blob:
+        pytest.fail(
+            "the installed Claude CLI no longer accepts "
+            "--permission-prompt-tool; Untether's control channel depends on "
+            f"it (last green on CLI {PROBED_CLI_VERSION}). See #750 / "
+            "decisions.md D-10 — this is the trigger for the "
+            "claude-agent-sdk-python migration."
+        )
+    if "argument missing" not in blob:
+        pytest.skip(
+            "the installed CLI answered neither 'argument missing' nor "
+            "'unknown option'; commander's error wording has changed and the "
+            f"probe needs re-deriving (last green on CLI {PROBED_CLI_VERSION})"
+        )

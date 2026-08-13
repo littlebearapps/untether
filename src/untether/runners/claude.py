@@ -69,6 +69,7 @@ from .run_options import (
     claude_cli_permission_mode,
     get_run_options,
     is_claude_plan_auto,
+    is_claude_prompting_mode,
 )
 from .tool_actions import tool_input_path, tool_kind_and_title
 
@@ -488,6 +489,12 @@ class ClaudeStreamState:
     # Auto-approve ExitPlanMode when permission_mode is `plan-auto` (#741;
     # spelled `auto` before 0.35.5rc8)
     auto_approve_exit_plan_mode: bool = False
+    # #749 the run's permission mode promises the user a prompt, so every
+    # stage-6 `can_use_tool` request routes to Telegram instead of being
+    # blanket-approved.  Armed in `new_state()` from
+    # `is_claude_prompting_mode`.  Default False keeps the legacy `-p` path
+    # (no control channel, no requests) and every autonomous mode unchanged.
+    prompting_mode: bool = False
     # Whether this run is a resume (for error diagnostics)
     resumed: bool = False
     # Track max text block length seen (for cooldown bypass — survives overwrites)
@@ -2322,10 +2329,27 @@ def translate_claude_event(
 
             # Auto-approve tool requests that don't need user interaction.
             # _DIFF_PREVIEW_TOOLS is module-scoped — see top of file.
+            #
+            # #749: in a prompting mode (`default`/`manual`/`acceptEdits`) the
+            # user was promised an approval prompt, so NOTHING is auto-approved
+            # here — a stage-6 request is unresolved permission work by
+            # definition (decisions.md D-1).  Autonomous modes retain the
+            # historical two-tool set: `DEFAULT_ALLOWED_TOOLS` only pre-approves
+            # Bash/Read/Edit/Write, so Glob/Grep/WebFetch/Task already arrive
+            # here in plan mode, and gating them would raise a button per tool
+            # in the fleet's most-used mode for no safety gain (probes G/H/I).
+            #
+            # Known gap, carried to v0.35.6: an explicit `ask` rule reaches
+            # stage 6 even under `bypassPermissions`, and this branch still
+            # approves it.  Closing that needs a stage-5 change (the allowlist),
+            # not a wider handler gate.
             _TOOLS_REQUIRING_APPROVAL = {"ExitPlanMode", "AskUserQuestion"}
             if isinstance(request, claude_schema.ControlCanUseToolRequest):
                 tool_name = getattr(request, "tool_name", "unknown")
-                if tool_name not in _TOOLS_REQUIRING_APPROVAL:
+                if (
+                    not state.prompting_mode
+                    and tool_name not in _TOOLS_REQUIRING_APPROVAL
+                ):
                     # When diff_preview is enabled, route previewable tools
                     # through interactive approval so users see the diff.
                     # Bypass after ExitPlanMode approval — the user already
@@ -3336,6 +3360,14 @@ class ClaudeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
     def new_state(self, prompt: str, resume: ResumeToken | None) -> ClaudeStreamState:
         state = ClaudeStreamState()
         state.auto_approve_exit_plan_mode = is_claude_plan_auto(
+            self._effective_permission_mode()
+        )
+        # #749 arm the stage-6 gate from the same resolved mode.  This must
+        # read `_effective_permission_mode()` (per-chat override → engine
+        # config), not `self.permission_mode`: `translate_claude_event` is a
+        # module-level function with no access to the runner, so the decision
+        # has to be made here and carried on the state.
+        state.prompting_mode = is_claude_prompting_mode(
             self._effective_permission_mode()
         )
         state.resumed = resume is not None
