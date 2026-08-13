@@ -990,6 +990,12 @@ def _normalize_tool_result(content: Any) -> str:
     return str(content)
 
 
+# #749 permission modes already warned about an explicit `allowed_tools`
+# override.  Process-scoped so a long-lived bot logs the interaction once per
+# mode instead of once per run.
+_PROMPTING_MODE_ALLOWLIST_LOGGED: set[str] = set()
+
+
 def _coerce_comma_list(value: Any) -> str | None:
     if value is None:
         return None
@@ -3025,6 +3031,12 @@ class ClaudeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
     model: str | None = None
     permission_mode: str | None = None
     allowed_tools: list[str] | None = None
+    # #749 True when `allowed_tools` came from an explicit
+    # `[engines.claude] allowed_tools` key rather than DEFAULT_ALLOWED_TOOLS.
+    # `build_runner` collapses both into `allowed_tools`, so without this flag
+    # a prompting-mode run cannot tell a deliberate user choice (which must be
+    # honoured) from inherited plumbing (which must be dropped).
+    allowed_tools_explicit: bool = False
     extra_args: list[str] = field(default_factory=list)
     dangerously_skip_permissions: bool = False
     use_api_billing: bool = False
@@ -3244,7 +3256,29 @@ class ClaudeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
             reasoning = run_options.reasoning
         if reasoning is not None:
             args.extend(["--effort", reasoning])
+        # #749 stage 5 sits BEFORE the stage-6 prompt, so an allowlist covering
+        # Bash/Read/Edit/Write pre-approves exactly the tools a prompting mode
+        # exists to ask about — phase 01's gate would never see them.  Drop it
+        # for those modes unless the user asked for it by name.
         allowed_tools = _coerce_comma_list(self.allowed_tools)
+        if allowed_tools is not None and is_claude_prompting_mode(effective_mode):
+            if self.allowed_tools_explicit:
+                # An explicit choice is honoured, but the interaction is
+                # surprising enough to deserve one line in the log.
+                if effective_mode not in _PROMPTING_MODE_ALLOWLIST_LOGGED:
+                    _PROMPTING_MODE_ALLOWLIST_LOGGED.add(effective_mode)
+                    logger.info(
+                        "claude.allowed_tools.prompting_mode_override",
+                        permission_mode=effective_mode,
+                        allowed_tools=allowed_tools,
+                        detail=(
+                            "explicit [engines.claude] allowed_tools pre-approves "
+                            "these tools at stage 5, so they will not raise a "
+                            "Telegram approval in this mode (#749)"
+                        ),
+                    )
+            else:
+                allowed_tools = None
         if allowed_tools is not None:
             args.extend(["--allowedTools", allowed_tools])
         if self.dangerously_skip_permissions is True:
@@ -5093,7 +5127,10 @@ def build_runner(config: EngineConfig, config_path: Path) -> Runner:
     claude_cmd = shutil.which("claude") or "claude"
 
     model = config.get("model")
-    if "allowed_tools" in config:
+    # #749 remember which branch this came from: an explicit user choice
+    # survives into prompting modes, the inherited default does not.
+    allowed_tools_explicit = "allowed_tools" in config
+    if allowed_tools_explicit:
         allowed_tools = config.get("allowed_tools")
     else:
         allowed_tools = DEFAULT_ALLOWED_TOOLS
@@ -5138,6 +5175,7 @@ def build_runner(config: EngineConfig, config_path: Path) -> Runner:
         model=model,
         permission_mode=permission_mode,
         allowed_tools=allowed_tools,
+        allowed_tools_explicit=allowed_tools_explicit,
         extra_args=extra_args,
         dangerously_skip_permissions=dangerously_skip_permissions,
         use_api_billing=use_api_billing,

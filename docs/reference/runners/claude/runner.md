@@ -204,6 +204,42 @@ approval button per tool in the fleet's most-used mode while buying no safety
 — plan mode blocks writes internally, verified by probe G (a `Write` was never
 created and never surfaced as a `can_use_tool`).
 
+#### `--allowedTools` is mode-aware ([#749](https://github.com/littlebearapps/untether/issues/749))
+
+Stage 5 runs *before* the prompt, so the allowlist is the stronger of the two
+levers: whatever it covers never reaches a Telegram approval no matter what
+stage 6 does. Since 0.35.5rc9 Untether sends it only where it doesn't
+contradict the mode.
+
+| Mode | Allowlist sent | Resulting gate |
+|---|---|---|
+| `default` | ✗ | every tool prompts |
+| `manual` | ✗ | every tool prompts |
+| `acceptEdits` | ✗ | in-scope edits auto-run in the CLI; out-of-scope writes prompt |
+| `plan` | ✓ | reads pre-approved; writes blocked internally by plan mode |
+| `plan-auto` | ✓ | as `plan`, plus `ExitPlanMode` rubber-stamped |
+| `auto` | ✓ | classifier decides at stage 4; stage 6 is the fallback path |
+| `dontAsk` | ✓ | **only** the allowlisted tools can run — see below |
+| `bypassPermissions` | ✓ | no checks |
+| *(unset)* | ✓ | legacy `-p` path, no control channel |
+
+`DEFAULT_ALLOWED_TOOLS` itself is unchanged (`Bash`, `Read`, `Edit`, `Write`)
+— rc9 changes *when* it is sent, not what it contains. An explicit
+`[engines.claude] allowed_tools` always wins, in every mode; when it applies
+in a prompting mode Untether logs
+`claude.allowed_tools.prompting_mode_override` (INFO, once per mode per
+process) so the interaction is discoverable rather than silent.
+
+> **`dontAsk` is deliberately more than the CLI's `dontAsk`** (decisions.md
+> D-6). Untether's `dontAsk` = the CLI's `dontAsk` **plus** `Bash`, `Read`,
+> `Edit` and `Write` pre-approved. The CLI's own `dontAsk` auto-denies
+> anything that would prompt, so without an allowlist it cannot run any tool
+> at all (probe F). Those four are adopted as a defensible core surface for a
+> locked-down agent — this is an owned product decision, not inherited
+> plumbing. Narrowing it to `Read,Glob,Grep` would make the mode genuinely
+> read-only and closer to its documented "locked-down CI" purpose; revisit if
+> `dontAsk` acquires real usage.
+
 > **Known gap, carried to v0.35.6.** An explicit `permissions.ask` rule reaches
 > stage 6 *even under `bypassPermissions`* — the CLI deliberately overriding
 > the mode to honour the user's highest-priority rule. Because autonomous modes

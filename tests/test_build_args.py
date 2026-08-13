@@ -740,3 +740,163 @@ class TestPiBuildArgs:
         args = runner.build_args("-dangerous", None, state=state)
         # Should prepend space to avoid flag parsing
         assert args[-1] == " -dangerous"
+
+
+# ---------------------------------------------------------------------------
+# #749 phase 02 — mode-aware `--allowedTools`
+#
+# Stage 5 (`permissions.allow` + `--allowedTools`) sits BEFORE the stage-6
+# prompt.  Sending `Bash,Read,Edit,Write` there pre-approves exactly the tools
+# a prompting mode exists to ask about, so phase 01's gate would never see
+# them.  The two phases are one fix: reverting 02 alone degrades to
+# "allowlist pre-approves"; reverting 01 alone leaves requests reaching a
+# handler that blanket-approves.  Do not revert 01 without also reverting 02.
+# ---------------------------------------------------------------------------
+
+
+class TestClaudeAllowedToolsByMode:
+    def _runner(self, **kwargs: Any):
+        from untether.runners.claude import DEFAULT_ALLOWED_TOOLS, ClaudeRunner
+
+        kwargs.setdefault("allowed_tools", DEFAULT_ALLOWED_TOOLS)
+        return ClaudeRunner(claude_cmd="claude", **kwargs)
+
+    def _args(self, mode: str | None, **kwargs: Any) -> list[str]:
+        from untether.runners.claude import ClaudeStreamState
+
+        runner = self._runner(permission_mode=mode, **kwargs)
+        return runner.build_args("hello", None, state=ClaudeStreamState())
+
+    # -- prompting modes: the flag must be gone ---------------------------
+
+    def test_749_no_allowed_tools_for_default(self) -> None:
+        assert "--allowedTools" not in self._args("default")
+
+    def test_749_no_allowed_tools_for_manual(self) -> None:
+        assert "--allowedTools" not in self._args("manual")
+
+    def test_749_no_allowed_tools_for_accept_edits(self) -> None:
+        """D-4: out-of-scope writes are supposed to prompt under acceptEdits."""
+        assert "--allowedTools" not in self._args("acceptEdits")
+
+    def test_749_dropping_the_flag_leaves_the_rest_of_argv_intact(self) -> None:
+        """Only the allowlist pair is removed — nothing else shifts.
+
+        `extra_args` position is load-bearing (#407), so prove the removal is
+        surgical rather than a rebuild of the argv.
+        """
+        with_flag = self._args("plan")
+        without = self._args("default")
+        idx = with_flag.index("--allowedTools")
+        expected = with_flag[:idx] + with_flag[idx + 2 :]
+        # Only the permission-mode value itself should differ.
+        assert [a for a in expected if a not in ("plan", "default")] == [
+            a for a in without if a not in ("plan", "default")
+        ]
+
+    # -- autonomous modes: the flag must stay -----------------------------
+
+    def test_749_allowed_tools_present_for_plan(self) -> None:
+        """D-3 / probe H+I: dropping it here is pure stage-6 overhead."""
+        assert "--allowedTools" in self._args("plan")
+
+    def test_749_allowed_tools_present_for_plan_auto(self) -> None:
+        assert "--allowedTools" in self._args(CLAUDE_PLAN_AUTO_MODE)
+
+    def test_749_allowed_tools_present_for_auto(self) -> None:
+        assert "--allowedTools" in self._args("auto")
+
+    def test_749_allowed_tools_present_for_dont_ask(self) -> None:
+        """D-6 / probe F: `dontAsk` auto-denies anything not pre-approved, so
+        without an allowlist it is unusable."""
+        assert "--allowedTools" in self._args("dontAsk")
+
+    def test_749_allowed_tools_present_for_bypass(self) -> None:
+        assert "--allowedTools" in self._args("bypassPermissions")
+
+    def test_749_allowed_tools_present_when_no_mode_configured(self) -> None:
+        """No mode => legacy `-p` path, no control channel, nothing to gate."""
+        assert "--allowedTools" in self._args(None)
+
+    # -- explicit user override ------------------------------------------
+
+    def test_749_explicit_user_allowed_tools_honoured_in_prompting_mode(self) -> None:
+        """An explicit `[engines.claude] allowed_tools` is not overridden.
+
+        Dropping a value the user deliberately wrote would be Untether
+        silently reversing their configuration; the log line is how they find
+        out the two settings interact.
+        """
+        args = self._args(
+            "default", allowed_tools=["Read", "Grep"], allowed_tools_explicit=True
+        )
+        assert "--allowedTools" in args
+        assert args[args.index("--allowedTools") + 1] == "Read,Grep"
+
+    def test_749_default_allowlist_is_not_treated_as_explicit(self) -> None:
+        """The fallback must stay droppable — it is plumbing, not a choice."""
+        from untether.runners.claude import DEFAULT_ALLOWED_TOOLS
+
+        args = self._args(
+            "default",
+            allowed_tools=DEFAULT_ALLOWED_TOOLS,
+            allowed_tools_explicit=False,
+        )
+        assert "--allowedTools" not in args
+
+    def test_749_explicit_override_logs_once_per_process(self) -> None:
+        """One INFO, not one per run — a chatty log is an ignored log."""
+        import untether.runners.claude as claude_mod
+
+        claude_mod._PROMPTING_MODE_ALLOWLIST_LOGGED.clear()
+        with patch.object(claude_mod.logger, "info") as mock_info:
+            for _ in range(3):
+                self._args(
+                    "default",
+                    allowed_tools=["Read"],
+                    allowed_tools_explicit=True,
+                )
+        calls = [
+            c
+            for c in mock_info.call_args_list
+            if c.args and c.args[0] == "claude.allowed_tools.prompting_mode_override"
+        ]
+        assert len(calls) == 1, f"expected exactly one INFO, got {len(calls)}"
+        assert calls[0].kwargs.get("permission_mode") == "default"
+
+    def test_749_no_override_log_in_an_autonomous_mode(self) -> None:
+        """Nothing is being overridden there — the allowlist is sent anyway."""
+        import untether.runners.claude as claude_mod
+
+        claude_mod._PROMPTING_MODE_ALLOWLIST_LOGGED.clear()
+        with patch.object(claude_mod.logger, "info") as mock_info:
+            self._args("plan", allowed_tools=["Read"], allowed_tools_explicit=True)
+        assert not [
+            c
+            for c in mock_info.call_args_list
+            if c.args and c.args[0] == "claude.allowed_tools.prompting_mode_override"
+        ]
+
+    # -- regressions ------------------------------------------------------
+
+    def test_749_empty_allowed_tools_list_still_drops_flag(self) -> None:
+        """`_coerce_comma_list([])` returns None — an empty list must not
+        become a bare `--allowedTools` with no value, in any mode."""
+        for mode in ("default", "plan", "auto", None):
+            args = self._args(mode, allowed_tools=[], allowed_tools_explicit=True)
+            assert "--allowedTools" not in args, f"empty list leaked in {mode!r}"
+
+    def test_749_build_runner_marks_explicit_config(self) -> None:
+        """The flag must come from real config parsing, not just the ctor."""
+        from pathlib import Path
+
+        from untether.runners.claude import build_runner
+
+        explicit = build_runner(
+            {"permission_mode": "default", "allowed_tools": ["Read"]},
+            Path("untether.toml"),
+        )
+        assert explicit.allowed_tools_explicit is True
+
+        implicit = build_runner({"permission_mode": "default"}, Path("untether.toml"))
+        assert implicit.allowed_tools_explicit is False
