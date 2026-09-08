@@ -371,6 +371,7 @@ async def test_transcribe_voice_success() -> None:
     assert transcriber.calls
     # No language configured → no hint forwarded (auto-detect preserved)
     assert transcriber.languages == [None]
+    assert transcriber.prompts == [None]
 
 
 @pytest.mark.anyio
@@ -409,6 +410,7 @@ async def test_transcribe_voice_passes_vocabulary_prompt() -> None:
     async def reply(**kwargs) -> None:
         replies.append(kwargs["text"])
 
+    transcriber = _Transcriber(result="Deploy Qdrant with Bernstein")
     transcriber = _Transcriber(result="Update the Trello cards")
     bot = _Bot(file_info=File(file_path="voice.ogg"), audio=b"ok")
     result = await transcribe_voice(
@@ -418,6 +420,11 @@ async def test_transcribe_voice_passes_vocabulary_prompt() -> None:
         model="whisper-1",
         reply=reply,
         transcriber=transcriber,
+        prompt="Qdrant, Bernstein",
+    )
+
+    assert result == "Deploy Qdrant with Bernstein"
+    assert transcriber.prompts == ["Qdrant, Bernstein"]
         prompt="Trello, Untether, Claude Code",
     )
 

@@ -2,6 +2,10 @@
 
 ## v0.35.5 (unreleased)
 
+### features
+
+- **feat(telegram):** add hot-reloadable `voice_transcription_prompt`, forwarding a short vocabulary/context hint to OpenAI-compatible transcription providers for project names and technical terms [#691](https://github.com/littlebearapps/untether/issues/691)
+
 ### fixes
 
 - **fix(claude):** validate `[engines.claude] permission_mode` at config load, and re-derive the allowlist against Claude Code **2.1.228**. The canonical set in `runners/run_options.py` was consumed by exactly one caller — `CronConfig._validate_permission_mode` — so the same key validated differently depending on which table it appeared in: `[[triggers.crons]] permission_mode = "dontAsk"` was a hard parse error while `[engines.claude] permission_mode = "dontAsk"` passed straight through, and a typo like `"palan"` produced no parse error at all and instead killed the run at subprocess spawn with a CLI usage error — the exact failure the validator exists to prevent. `build_runner()` now runs the same allowlist and raises `ConfigError` naming the key, the offending value and the config path. The allowlist itself gained `manual` and `dontAsk`, both legal upstream but rejected at parse time. **One premise in the issue was wrong and is corrected here:** `default` is *not* rejected by the CLI. `claude --help` lists `manual` in its place, but the binary accepts both — a spawn probe of `--permission-mode default` exits 0, and the docs confirm `manual` is a documented alias for `default` (CLI ≥ 2.1.200). `default` therefore stays in the set, and the new drift test excludes it from the comparison rather than dropping it. That drift test is the durable half: it feeds an invalid value to the installed binary, parses commander's "Allowed choices are ..." list and fails when the constant diverges, so this rots loudly instead of silently. 42 new tests in `tests/test_claude_permission_modes.py`, including cron/engine-config accept-and-reject parity across every allowed value [#742](https://github.com/littlebearapps/untether/issues/742)
