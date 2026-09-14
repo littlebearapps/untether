@@ -116,4 +116,5 @@ class AutoRouter:
         return self.extract_resume(cleaned)
 
     def is_resume_line(self, line: str) -> bool:
-        return any(entry.runner.is_resume_line(line) for entry in self._entries)
+        cleaned = _RESUME_EMOJI_PREFIX.sub("", line)
+        return any(entry.runner.is_resume_line(cleaned) for entry in self._entries)
