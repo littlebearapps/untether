@@ -851,6 +851,49 @@ def test_files_outbox_defaults() -> None:
     assert cfg.outbox_dir == ".untether-outbox"
     assert cfg.outbox_max_files == 10
     assert cfg.outbox_cleanup is True
+    assert cfg.max_download_bytes == 50 * 1024 * 1024
+
+
+def test_files_max_download_bytes_accepts_two_gibibytes() -> None:
+    from untether.settings import TelegramFilesSettings
+
+    cfg = TelegramFilesSettings(max_download_bytes=2 * 1024 * 1024 * 1024)
+    assert cfg.max_download_bytes == 2 * 1024 * 1024 * 1024
+
+
+def test_files_max_download_bytes_rejects_more_than_two_gibibytes() -> None:
+    from pydantic import ValidationError
+
+    from untether.settings import TelegramFilesSettings
+
+    with pytest.raises(ValidationError):
+        TelegramFilesSettings(max_download_bytes=2 * 1024 * 1024 * 1024 + 1)
+
+
+def test_bot_api_base_url_accepts_loopback_http() -> None:
+    from untether.settings import TelegramTransportSettings
+
+    cfg = TelegramTransportSettings(
+        bot_token="token",
+        bot_api_base_url="http://127.0.0.1:8081/",
+        chat_id=1,
+        allow_any_user=True,
+    )
+    assert cfg.bot_api_base_url == "http://127.0.0.1:8081"
+
+
+def test_bot_api_base_url_rejects_remote_http() -> None:
+    from pydantic import ValidationError
+
+    from untether.settings import TelegramTransportSettings
+
+    with pytest.raises(ValidationError, match="loopback"):
+        TelegramTransportSettings(
+            bot_token="token",
+            bot_api_base_url="http://example.com",
+            chat_id=1,
+            allow_any_user=True,
+        )
 
 
 def test_files_outbox_dir_rejects_absolute() -> None:

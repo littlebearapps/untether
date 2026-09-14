@@ -44,6 +44,7 @@ class TelegramClient:
         token: str | None = None,
         *,
         client: BotClient | None = None,
+        base_url: str = "https://api.telegram.org",
         timeout_s: float = 120,
         http_client: httpx.AsyncClient | None = None,
         clock: Callable[[], float] = time.monotonic,
@@ -60,6 +61,7 @@ class TelegramClient:
                 raise ValueError("Telegram token is empty")
             self._client = HttpBotClient(
                 token,
+                base_url=base_url,
                 timeout_s=timeout_s,
                 http_client=http_client,
             )
