@@ -510,12 +510,18 @@ class CodexRunner(ResumeTokenMixin, JsonlSubprocessRunner):
                 "--color=never",
             ]
         )
+        image_paths = run_options.image_paths if run_options is not None else ()
         if resume:
+            args.append("resume")
+            for image_path in image_paths:
+                args.extend(["--image", image_path])
             if resume.is_continue:
-                args.extend(["resume", "--last", "-"])
+                args.extend(["--last", "-"])
             else:
-                args.extend(["resume", resume.value, "-"])
+                args.extend([resume.value, "-"])
         else:
+            for image_path in image_paths:
+                args.extend(["--image", image_path])
             args.append("-")
         return args
 

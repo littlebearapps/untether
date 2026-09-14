@@ -192,12 +192,18 @@ def _best_photo(photos: list[PhotoSize] | None) -> PhotoSize | None:
 
 
 def _document_from_media(media: Document | Video) -> TelegramDocument:
+    is_image = (
+        isinstance(media, Document)
+        and media.mime_type is not None
+        and media.mime_type.lower().startswith("image/")
+    )
     return TelegramDocument(
         file_id=media.file_id,
         file_name=media.file_name,
         mime_type=media.mime_type,
         file_size=media.file_size,
         raw=msgspec.to_builtins(media),
+        is_image=is_image,
     )
 
 
@@ -205,9 +211,10 @@ def _document_from_photo(photo: PhotoSize) -> TelegramDocument:
     return TelegramDocument(
         file_id=photo.file_id,
         file_name=None,
-        mime_type=None,
+        mime_type="image/jpeg",
         file_size=photo.file_size,
         raw=msgspec.to_builtins(photo),
+        is_image=True,
     )
 
 

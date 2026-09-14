@@ -34,6 +34,74 @@ def test_codex_run_options_override_model_and_reasoning() -> None:
     ]
 
 
+def test_codex_run_options_place_images_for_new_and_resumed_sessions() -> None:
+    runner = CodexRunner(codex_cmd="codex", extra_args=[])
+    options = EngineRunOptions(image_paths=("incoming/one.jpg", "incoming/two.png"))
+
+    with apply_run_options(options):
+        new_args = runner.build_args("inspect", None, state=None)
+        resumed_args = runner.build_args(
+            "inspect",
+            ResumeToken(engine="codex", value="session-123"),
+            state=None,
+        )
+
+    assert new_args == [
+        "--ask-for-approval",
+        "never",
+        "exec",
+        "--json",
+        "--skip-git-repo-check",
+        "--color=never",
+        "--image",
+        "incoming/one.jpg",
+        "--image",
+        "incoming/two.png",
+        "-",
+    ]
+    assert resumed_args == [
+        "--ask-for-approval",
+        "never",
+        "exec",
+        "--json",
+        "--skip-git-repo-check",
+        "--color=never",
+        "resume",
+        "--image",
+        "incoming/one.jpg",
+        "--image",
+        "incoming/two.png",
+        "session-123",
+        "-",
+    ]
+
+
+def test_codex_run_options_place_images_for_continue_session() -> None:
+    runner = CodexRunner(codex_cmd="codex", extra_args=[])
+    options = EngineRunOptions(image_paths=("incoming/continued.png",))
+
+    with apply_run_options(options):
+        args = runner.build_args(
+            "inspect",
+            ResumeToken(engine="codex", value="", is_continue=True),
+            state=None,
+        )
+
+    assert args == [
+        "--ask-for-approval",
+        "never",
+        "exec",
+        "--json",
+        "--skip-git-repo-check",
+        "--color=never",
+        "resume",
+        "--image",
+        "incoming/continued.png",
+        "--last",
+        "-",
+    ]
+
+
 def test_claude_run_options_override_model() -> None:
     runner = ClaudeRunner(claude_cmd="claude", model="claude-sonnet")
     with apply_run_options(EngineRunOptions(model="claude-opus")):

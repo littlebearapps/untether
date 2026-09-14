@@ -22,6 +22,9 @@ class EngineRunOptions:
     # means "follow global ``[loop] enabled``"; True/False is an explicit
     # per-chat override set via ``/config → 🔁 Loop mode``.
     loop_enabled: bool | None = None
+    # Native, runner-specific attachments. Telegram populates this only after
+    # resolving the effective engine to Codex; other runners ignore the field.
+    image_paths: tuple[str, ...] = ()
 
 
 # Permission modes the Claude Code CLI accepts for ``--permission-mode``.
