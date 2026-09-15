@@ -197,6 +197,10 @@ async def transcribe_voice(
         transcriber = OpenAIVoiceTranscriber(base_url=base_url, api_key=api_key)
     try:
         text = await transcriber.transcribe(
+            model=model,
+            audio_bytes=audio_bytes,
+            language=language,
+            prompt=prompt,
             model=model, audio_bytes=audio_bytes, language=language, prompt=prompt
         )
         logger.debug(

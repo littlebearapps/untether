@@ -14,6 +14,7 @@ Dictate coding tasks hands-free — while walking, driving, or away from a keybo
     untether config set transports.telegram.voice_transcription_base_url "http://localhost:8000/v1"
     untether config set transports.telegram.voice_transcription_api_key "local"
     untether config set transports.telegram.voice_transcription_language "en"
+    untether config set transports.telegram.voice_transcription_prompt "Qdrant, Bernstein"
     ```
 
 === "toml"
@@ -26,6 +27,7 @@ Dictate coding tasks hands-free — while walking, driving, or away from a keybo
     voice_transcription_api_key = "local" # optional
     voice_transcription_url_allowlist = ["127.0.0.0/8"] # required for a loopback/private endpoint (see below)
     voice_transcription_language = "en" # optional ISO-639-1 hint — stops wrong-language guesses on short notes
+    voice_transcription_prompt = "Qdrant, Bernstein" # optional vocabulary/context hint
     ```
 
 Set `OPENAI_API_KEY` in your environment (or `voice_transcription_api_key` in config).
@@ -35,6 +37,10 @@ To use a local OpenAI-compatible Whisper server, set `voice_transcription_base_u
 requests on their own base URL without relying on `OPENAI_BASE_URL`. If your server
 requires a specific model name, set `voice_transcription_model` (for example,
 `whisper-1`).
+
+Use `voice_transcription_prompt` for names or specialist vocabulary that the
+provider might otherwise mishear. Prompt support is model-dependent, and an
+overly broad prompt can bias the transcript, so keep it short and specific.
 
 !!! warning "Local/private endpoints need an allowlist (v0.35.4+)"
     Since v0.35.4 the transcription base URL is SSRF-validated ([#381](https://github.com/littlebearapps/untether/issues/381)) — a loopback or private-network host (like `http://localhost:8000/v1`) is **rejected** to stop a misconfigured URL exfiltrating voice audio to an internal service. To use a local Whisper server, opt it back in with a CIDR/IP allowlist:

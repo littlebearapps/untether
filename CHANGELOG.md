@@ -2,6 +2,10 @@
 
 ## v0.35.5 (unreleased)
 
+### features
+
+- **feat(telegram):** add hot-reloadable `voice_transcription_prompt`, forwarding a short vocabulary/context hint to OpenAI-compatible transcription providers for project names and technical terms [#691](https://github.com/littlebearapps/untether/issues/691)
+
 ### fixes
 
 - **fix(triggers):** retry the announce send before aborting a trigger dispatch. `TriggerDispatcher._dispatch` treated a single failed Telegram announce as fatal and never spawned the session — a one-second DNS blip at 06:45 on 2026-08-29 silently killed a whole day's cron work (auditor-toolkit #2535). The announce now retries with a bounded backoff (`SEND_RETRY_DELAYS = (5.0, 30.0)`, both cron and webhook paths; each retry logs `triggers.dispatch.send_retry`), and a persistent outage still fails loudly within ~35 s. (#758)

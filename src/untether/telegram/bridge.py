@@ -185,6 +185,7 @@ class TelegramBridgeConfig:
     voice_transcription_api_key: SecretStr | None = None
     # #638: optional ISO-639-1 hint forwarded to the transcription API.
     voice_transcription_language: str | None = None
+    # #691: optional vocabulary/context hint forwarded to the provider.
     # #691: optional vocabulary-bias prompt forwarded to the STT API.
     voice_transcription_prompt: str | None = None
     voice_show_transcription: bool = True
