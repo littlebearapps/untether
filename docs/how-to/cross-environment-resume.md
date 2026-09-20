@@ -42,7 +42,7 @@ Each engine CLI stores sessions per directory. Untether projects map to director
 |--------|:---------:|---------------|-------|
 | Claude Code | ✅ | `--continue` | Tested, works reliably |
 | Codex CLI | ✅ | `resume --last` | Tested, works reliably |
-| Gemini CLI | ✅ | `--resume latest` | Tested, works reliably |
+| Antigravity CLI | ✅ | `--continue` | Tested, works reliably |
 | OpenCode | ✅ | `--continue` | Tested via dev bot; requires latest OpenCode version |
 | Pi | ✅ | `--continue` | Requires `provider` config for OAuth subscriptions (see below) |
 | Amp | — | N/A | Requires explicit thread ID; no "most recent" mode |
@@ -55,8 +55,6 @@ Pi stores OAuth subscription credentials under provider names like `openai-codex
 [engines.pi]
 provider = "openai-codex"
 ```
-
-Or for Gemini CLI subscriptions: `provider = "google-gemini-cli"`.
 
 ## Handoff mode: terminal-first workflow
 

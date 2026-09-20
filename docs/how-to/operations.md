@@ -142,7 +142,7 @@ This validates:
 - Topics configuration (if enabled)
 - File transfer permissions and deny globs
 - Voice transcription setup
-- Engine availability (Claude Code, Codex, OpenCode, Pi, Gemini CLI, Amp)
+- Engine availability (Claude Code, Codex, OpenCode, Pi, Antigravity CLI, Amp)
 
 Run this after any config change, after upgrading, or when something isn't working.
 

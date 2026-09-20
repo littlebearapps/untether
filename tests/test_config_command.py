@@ -606,21 +606,21 @@ class TestCodexApprovalPolicy:
 
 
 # ---------------------------------------------------------------------------
-# Gemini approval mode (via plan mode page)
+# Antigravity approval mode (via plan mode page)
 # ---------------------------------------------------------------------------
 
 
-class TestGeminiApprovalMode:
+class TestAntigravityApprovalMode:
     @pytest.mark.anyio
     async def test_approval_mode_page_renders(self, tmp_path):
-        """Navigating to pm page with gemini engine shows approval mode."""
+        """Navigating to pm page with antigravity engine shows approval mode."""
         state_path = tmp_path / "prefs.json"
         cmd = ConfigCommand()
         ctx = _make_ctx(
             args_text="pm",
             text="config:pm",
             config_path=state_path,
-            default_engine="gemini",
+            default_engine="antigravity",
         )
         await cmd.handle(ctx)
         msg = _last_edit_msg(ctx)
@@ -629,8 +629,8 @@ class TestGeminiApprovalMode:
         assert "config:pm:ro" in _buttons_data(msg)
 
     @pytest.mark.anyio
-    async def test_set_full_access_stores_yolo(self, tmp_path):
-        """Setting full access stores 'yolo' as permission_mode."""
+    async def test_set_full_access_stores_auto(self, tmp_path):
+        """Setting full access stores 'auto' as permission_mode."""
         from untether.telegram.chat_prefs import ChatPrefsStore, resolve_prefs_path
 
         state_path = tmp_path / "prefs.json"
@@ -639,7 +639,7 @@ class TestGeminiApprovalMode:
             args_text="pm:ya",
             text="config:pm:ya",
             config_path=state_path,
-            default_engine="gemini",
+            default_engine="antigravity",
         )
         await cmd.handle(ctx)
         msg = _last_edit_msg(ctx)
@@ -647,9 +647,9 @@ class TestGeminiApprovalMode:
         assert "full access" in msg.text.lower()
 
         prefs = ChatPrefsStore(resolve_prefs_path(state_path))
-        override = await prefs.get_engine_override(123, "gemini")
+        override = await prefs.get_engine_override(123, "antigravity")
         assert override is not None
-        assert override.permission_mode == "yolo"
+        assert override.permission_mode == "auto"
 
     @pytest.mark.anyio
     async def test_set_readonly_clears_permission(self, tmp_path):
@@ -660,7 +660,7 @@ class TestGeminiApprovalMode:
         state_path = tmp_path / "prefs.json"
         prefs = ChatPrefsStore(resolve_prefs_path(state_path))
         await prefs.set_engine_override(
-            123, "gemini", EngineOverrides(permission_mode="yolo")
+            123, "antigravity", EngineOverrides(permission_mode="auto")
         )
 
         cmd = ConfigCommand()
@@ -668,7 +668,7 @@ class TestGeminiApprovalMode:
             args_text="pm:ro",
             text="config:pm:ro",
             config_path=state_path,
-            default_engine="gemini",
+            default_engine="antigravity",
         )
         await cmd.handle(ctx)
         msg = _last_edit_msg(ctx)
@@ -684,25 +684,25 @@ class TestGeminiApprovalMode:
             args_text="pm:ya",
             text="config:pm:ya",
             config_path=state_path,
-            default_engine="gemini",
+            default_engine="antigravity",
         )
         await cmd.handle(ctx)
         ctx = _make_ctx(
             args_text="pm:clr",
             text="config:pm:clr",
             config_path=state_path,
-            default_engine="gemini",
+            default_engine="antigravity",
         )
         await cmd.handle(ctx)
         msg = _last_edit_msg(ctx)
         assert "settings" in msg.text.lower()
 
     @pytest.mark.anyio
-    async def test_home_shows_approval_mode_for_gemini(self, tmp_path):
-        """Home page shows 'Approval mode' label and button for gemini."""
+    async def test_home_shows_approval_mode_for_antigravity(self, tmp_path):
+        """Home page shows 'Approval mode' label and button for antigravity."""
         state_path = tmp_path / "prefs.json"
         cmd = ConfigCommand()
-        ctx = _make_ctx(config_path=state_path, default_engine="gemini")
+        ctx = _make_ctx(config_path=state_path, default_engine="antigravity")
         await cmd.handle(ctx)
         msg = _last_send_msg(ctx)
         assert "Approval mode" in msg.text
@@ -713,25 +713,25 @@ class TestGeminiApprovalMode:
 
     @pytest.mark.anyio
     async def test_home_shows_full_access_label(self, tmp_path):
-        """Home page shows 'full access' when yolo is set."""
+        """Home page shows 'full access' when auto is set."""
         from untether.telegram.chat_prefs import ChatPrefsStore, resolve_prefs_path
         from untether.telegram.engine_overrides import EngineOverrides
 
         state_path = tmp_path / "prefs.json"
         prefs = ChatPrefsStore(resolve_prefs_path(state_path))
         await prefs.set_engine_override(
-            123, "gemini", EngineOverrides(permission_mode="yolo")
+            123, "antigravity", EngineOverrides(permission_mode="auto")
         )
 
         cmd = ConfigCommand()
-        ctx = _make_ctx(config_path=state_path, default_engine="gemini")
+        ctx = _make_ctx(config_path=state_path, default_engine="antigravity")
         await cmd.handle(ctx)
         msg = _last_send_msg(ctx)
         assert "full access" in msg.text.lower()
 
     @pytest.mark.anyio
     async def test_set_auto_edit_stores_mode(self, tmp_path):
-        """Setting edit files stores 'auto_edit' as permission_mode."""
+        """Setting edit files stores 'accept-edits' as permission_mode."""
         from untether.telegram.chat_prefs import ChatPrefsStore, resolve_prefs_path
 
         state_path = tmp_path / "prefs.json"
@@ -740,42 +740,42 @@ class TestGeminiApprovalMode:
             args_text="pm:ae",
             text="config:pm:ae",
             config_path=state_path,
-            default_engine="gemini",
+            default_engine="antigravity",
         )
         await cmd.handle(ctx)
         prefs = ChatPrefsStore(resolve_prefs_path(state_path))
-        override = await prefs.get_engine_override(123, "gemini")
+        override = await prefs.get_engine_override(123, "antigravity")
         assert override is not None
-        assert override.permission_mode == "auto_edit"
+        assert override.permission_mode == "accept-edits"
 
     @pytest.mark.anyio
     async def test_home_shows_edit_files_label(self, tmp_path):
-        """Home page shows 'edit files' when auto_edit is set."""
+        """Home page shows 'edit files' when accept-edits is set."""
         from untether.telegram.chat_prefs import ChatPrefsStore, resolve_prefs_path
         from untether.telegram.engine_overrides import EngineOverrides
 
         state_path = tmp_path / "prefs.json"
         prefs = ChatPrefsStore(resolve_prefs_path(state_path))
         await prefs.set_engine_override(
-            123, "gemini", EngineOverrides(permission_mode="auto_edit")
+            123, "antigravity", EngineOverrides(permission_mode="accept-edits")
         )
 
         cmd = ConfigCommand()
-        ctx = _make_ctx(config_path=state_path, default_engine="gemini")
+        ctx = _make_ctx(config_path=state_path, default_engine="antigravity")
         await cmd.handle(ctx)
         msg = _last_send_msg(ctx)
         assert "edit files" in msg.text.lower()
 
     @pytest.mark.anyio
     async def test_approval_page_shows_three_options(self, tmp_path):
-        """Gemini approval page shows read-only, edit files, and full access."""
+        """Antigravity approval page shows read-only, edit files, and full access."""
         state_path = tmp_path / "prefs.json"
         cmd = ConfigCommand()
         ctx = _make_ctx(
             args_text="pm",
             text="config:pm",
             config_path=state_path,
-            default_engine="gemini",
+            default_engine="antigravity",
         )
         await cmd.handle(ctx)
         data = _buttons_data(_last_edit_msg(ctx))
@@ -791,13 +791,13 @@ class TestGeminiApprovalMode:
             args_text="pm",
             text="config:pm",
             config_path=state_path,
-            default_engine="gemini",
+            default_engine="antigravity",
         )
         await cmd.handle(ctx)
         assert "config:home" in _buttons_data(_last_edit_msg(ctx))
 
 
-class TestGeminiApprovalModeToasts:
+class TestAntigravityApprovalModeToasts:
     def test_toast_full_access(self):
         assert ConfigCommand.early_answer_toast("pm:ya") == "Approval mode: full access"
 
@@ -1132,11 +1132,11 @@ class TestEngineAwareTransitions:
         state_path = tmp_path / "prefs.json"
         cmd = ConfigCommand()
         ctx = _make_ctx(
-            args_text="ag:gemini",
-            text="config:ag:gemini",
+            args_text="ag:opencode",
+            text="config:ag:opencode",
             config_path=state_path,
             default_engine="codex",
-            engine_ids=("codex", "gemini"),
+            engine_ids=("codex", "opencode"),
         )
         await cmd.handle(ctx)
         msg = _last_edit_msg(ctx)
@@ -1682,8 +1682,8 @@ class TestReasoning:
             args_text="rs",
             text="config:rs",
             config_path=state_path,
-            default_engine="gemini",
-            engine_ids=("gemini", "claude"),
+            default_engine="opencode",
+            engine_ids=("opencode", "claude"),
         )
         await cmd.handle(ctx)
         msg = _last_edit_msg(ctx)
@@ -2798,11 +2798,11 @@ class TestHomePageSections:
         assert "config:ab" in _buttons_data(_last_send_msg(ctx))
 
     @pytest.mark.anyio
-    async def test_home_has_about_button_gemini(self, tmp_path):
-        """About button appears for Gemini engine."""
+    async def test_home_has_about_button_antigravity(self, tmp_path):
+        """About button appears for Antigravity engine."""
         state_path = tmp_path / "prefs.json"
         cmd = ConfigCommand()
-        ctx = _make_ctx(config_path=state_path, default_engine="gemini")
+        ctx = _make_ctx(config_path=state_path, default_engine="antigravity")
         await cmd.handle(ctx)
         assert "config:ab" in _buttons_data(_last_send_msg(ctx))
 

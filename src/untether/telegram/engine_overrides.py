@@ -8,23 +8,24 @@ import msgspec
 OverrideSource = Literal["topic_override", "chat_default", "default"]
 
 REASONING_LEVELS: tuple[str, ...] = ("minimal", "low", "medium", "high", "xhigh", "max")
-REASONING_SUPPORTED_ENGINES = frozenset({"claude", "codex"})
+REASONING_SUPPORTED_ENGINES = frozenset({"claude", "codex", "antigravity"})
 
 _ENGINE_REASONING_LEVELS: dict[str, tuple[str, ...]] = {
     "claude": ("low", "medium", "high", "xhigh", "max"),
     "codex": ("minimal", "low", "medium", "high", "xhigh"),
+    "antigravity": ("low", "medium", "high"),
 }
 
 
 ASK_QUESTIONS_SUPPORTED_ENGINES = frozenset({"claude"})
 
-PERMISSION_MODE_SUPPORTED_ENGINES = frozenset({"claude", "codex", "gemini"})
+PERMISSION_MODE_SUPPORTED_ENGINES = frozenset({"claude", "codex", "gemini", "antigravity"})
 
 DIFF_PREVIEW_SUPPORTED_ENGINES = frozenset({"claude"})
 
-SUBSCRIPTION_USAGE_SUPPORTED_ENGINES = frozenset({"claude"})
+SUBSCRIPTION_USAGE_SUPPORTED_ENGINES = frozenset({"claude", "antigravity"})
 
-API_COST_SUPPORTED_ENGINES = frozenset({"claude", "opencode", "gemini", "amp"})
+API_COST_SUPPORTED_ENGINES = frozenset({"claude", "opencode", "gemini", "antigravity", "amp"})
 
 # /loop and ScheduleWakeup observation (#289) is Claude-only — other engines
 # don't have session-scoped scheduling tools.
@@ -229,6 +230,7 @@ _ENGINE_REASONING_LABEL: dict[str, str] = {
     "claude": "Effort",
     "codex": "Reasoning",
     "pi": "Thinking",
+    "antigravity": "Effort",
 }
 
 
@@ -271,7 +273,17 @@ def get_engine_default_model(engine: str) -> str | None:
         except (OSError, json.JSONDecodeError, TypeError):
             return None
         return None
-    # claude/codex/gemini auto-route; amp derives from mode — no stable
+    if engine == "antigravity":
+        settings_path = Path.home() / ".gemini" / "antigravity-cli" / "settings.json"
+        try:
+            data = json.loads(settings_path.read_text())
+            model = data.get("model")
+            if isinstance(model, str) and model:
+                return model
+        except (OSError, json.JSONDecodeError, TypeError):
+            return None
+        return None
+    # claude/codex/antigravity auto-route; amp derives from mode — no stable
     # settings-file source, keep the static hint.
     return None
 
@@ -289,6 +301,19 @@ def get_engine_default_reasoning(engine: str) -> str | None:
         try:
             data = json.loads(settings_path.read_text())
             level = data.get("effortLevel")
+            if isinstance(level, str) and level:
+                return level
+        except (OSError, json.JSONDecodeError, KeyError, TypeError):
+            return None
+    if engine == "antigravity":
+        settings_path = Path.home() / ".gemini" / "antigravity-cli" / "settings.json"
+        try:
+            data = json.loads(settings_path.read_text())
+            level = (
+                data.get("effort")
+                or data.get("reasoningEffort")
+                or data.get("modelReasoningEffort")
+            )
             if isinstance(level, str) and level:
                 return level
         except (OSError, json.JSONDecodeError, KeyError, TypeError):

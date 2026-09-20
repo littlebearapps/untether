@@ -7,9 +7,9 @@ Structured, repeatable integration test process run against `@untether_dev_bot` 
 | | Details |
 |---|---|
 | **Dev service** | `untether-dev.service` → `@untether_dev_bot` |
-| **Test projects** | `test-projects/test-{claude,codex,opencode,pi,gemini,amp}/` |
+| **Test projects** | `test-projects/test-{claude,codex,opencode,pi,antigravity,amp}/` |
 | **Test chats** | 6 dedicated Telegram groups in the `ut-dev` folder, one per engine |
-| **Engines** | Claude, Codex, OpenCode, Pi, Gemini, Amp |
+| **Engines** | Claude, Codex, OpenCode, Pi, Antigravity, Amp |
 
 ## Automated Testing via Telegram MCP
 
@@ -32,7 +32,7 @@ For DM-only tests (commands, `/at`, `/cancel`), use Nathan's personal DM chat ID
 | Codex CLI | `4929463515` | `-4929463515` |
 | OpenCode | `5200822877` | `-5200822877` |
 | Pi | `5156256333` | `-5156256333` |
-| Gemini CLI | `5207762142` | `-5207762142` |
+| Antigravity CLI | `5207762142` | `-5207762142` |
 | AMP CLI | `5230875989` | `-5230875989` |
 
 > **Note:** The Telegram MCP (Telethon) accepts both positive and negative chat IDs.
@@ -72,15 +72,15 @@ These tests were previously considered "manual" but can be automated via MCP and
 
 ## Engine Feature Matrix
 
-| Capability | Claude | Codex | OpenCode | Pi | Gemini | Amp |
+| Capability | Claude | Codex | OpenCode | Pi | Antigravity | Amp |
 |---|:---:|:---:|:---:|:---:|:---:|:---:|
 | Interactive approval | Yes | - | - | - | Flag only | - |
 | Plan mode | Yes | - | - | - | - | - |
 | Ask questions | Yes | - | - | - | - | - |
 | Resume/continue | Yes | Yes | Yes | Yes | Yes | Yes |
 | Model override | Yes | Yes | Yes | Yes | Yes | Yes |
-| Reasoning levels | Yes | Yes | - | - | - | - |
-| API cost tracking | Yes | - | Yes | - | Yes | Yes |
+| Reasoning levels | Yes | Yes | - | - | Yes | - |
+| API cost tracking | Yes | - | Yes | - | - | Yes |
 | Subscription usage | Yes | - | - | - | - | - |
 | Diff preview | Yes | - | - | - | - | - |
 
@@ -142,7 +142,7 @@ Tests for per-chat and per-topic settings that affect run behaviour. Use forum t
 
 | # | Test | What to send | What to verify | Catches |
 |---|------|-------------|----------------|---------|
-| O1 | **Engine override** | `/agent set gemini`, then send a plain prompt (no directive) | Gemini runs, footer shows Gemini model | Per-chat engine default, override hierarchy |
+| O1 | **Engine override** | `/agent set antigravity`, then send a plain prompt (no directive) | Antigravity runs, footer shows Antigravity model | Per-chat engine default, override hierarchy |
 | O2 | **Reasoning level** | `/config` → Reasoning → enable, then send a prompt | Reasoning model used, footer reflects it | Reasoning flag in build_args |
 | O3 | **Listen mode** | `/listen mentions` in group, send plain text, then `@bot do something` | Plain text ignored, @mention triggers run | Listen mode filtering (renamed from `/trigger` in v0.35.3 [#297](https://github.com/littlebearapps/untether/issues/297); deprecated alias still works) |
 | O4 | **Ask mode toggle** | `/config` → Ask → off, send prompt that would trigger AskUserQuestion | Question auto-denied instead of shown | Ask mode auto-deny path |

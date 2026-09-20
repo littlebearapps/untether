@@ -19,7 +19,7 @@ PERMISSION_MODES = {
 }
 
 # Engines that support the /planmode command (Claude-style permission modes).
-# Codex and Gemini have approval policies but use different semantics —
+# Codex and Antigravity have approval policies but use different semantics —
 # they should use /config → Approval policy instead.
 _PLANMODE_ENGINES = frozenset({"claude"})
 
@@ -45,7 +45,7 @@ class PlanModeCommand:
         current_engine = await resolve_effective_engine(ctx)
         if current_engine not in _PLANMODE_ENGINES:
             hint = ""
-            if current_engine in {"codex", "gemini"}:
+            if current_engine in {"codex", "antigravity"}:
                 hint = " Use /config → Approval policy instead."
             return CommandResult(
                 text=(

@@ -1,0 +1,2 @@
+{"event":"init","conversation_id":"err456","init":{"cwd":"/tmp","model":"gemini-3.8-flash-high","tools":[],"permission_mode":"always-proceed"}}
+{"event":"result","result":{"conversation_id":"err456","status":"ERROR","response":"","error":"API key invalid or expired","duration_seconds":0.1,"num_turns":0,"usage":{"input_tokens":0,"output_tokens":0,"thinking_tokens":0,"cache_read_tokens":0,"total_tokens":0}}}

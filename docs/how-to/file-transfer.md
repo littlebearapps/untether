@@ -156,11 +156,11 @@ All engines support outbox delivery — any agent that can write files to disk c
 | Codex CLI | Yes | — |
 | OpenCode | Yes | — |
 | Pi | Yes | — |
-| Gemini CLI | Needs config | Set approval mode to "Full access" via `/config` → Approval mode |
+| Antigravity CLI | Yes | Set approval mode via `/config` if needed |
 | AMP | Yes | — |
 
-!!! tip "Gemini CLI permissions"
-    Gemini CLI defaults to read-only approval mode. To enable file creation (and outbox delivery), set the approval mode to "Full access" via `/config` → **Approval mode** in the Gemini chat.
+!!! tip "Antigravity CLI permissions"
+    To enable file creation (and outbox delivery), ensure Antigravity CLI's approval mode is set to "Edit files" or "Full access" via `/config` → **Approval mode** in the chat.
 
 ### Limitations
 

@@ -1,5 +1,11 @@
 # changelog
 
+## v0.35.5 (unreleased)
+
+### changes
+
+- **feat(antigravity):** replace deprecated Gemini CLI support with Google's Antigravity CLI (`agy`). Implements `AntigravityRunner` adhering to the 3-event contract (`StartedEvent`, `ActionEvent`, `CompletedEvent`), supporting `--conversation <id>` for session continuation, `--effort` for reasoning levels, and `--dangerously-skip-permissions`. Runner binary dynamically detected at `~/.local/bin/agy` or `agy` on PATH, with tilde expansion support in `antigravity.cmd`. Adds `/usage` session command support parsing `agy -p /usage --output-format stream-json`, rendering usage progress bars and quota reset windows with 60s cache TTL and stale-while-error fallback. Replaces Gemini references across documentation, Telegram presenter, config menu, and test fixtures. 29 new unit tests in `tests/test_antigravity_runner.py` [#558](https://github.com/littlebearapps/untether/issues/558)
+
 ## v0.35.4 (2026-07-22)
 
 <!-- Covers rc1 through rc14 (the full v0.35.4 release-candidate cycle). Date is the

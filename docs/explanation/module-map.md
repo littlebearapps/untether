@@ -66,7 +66,7 @@ This page is a high-level map of Untether’s internal modules: what they do and
 
 | Module | Responsibility |
 |--------|----------------|
-| `runners/*` | Engine runner implementations (Claude Code, Codex, OpenCode, Pi, Gemini CLI, Amp). |
+| `runners/*` | Engine runner implementations (Claude Code, Codex, OpenCode, Pi, Antigravity CLI, Amp). |
 | `schemas/*` | msgspec schemas / decoders for engine JSONL streams. |
 
 ## Triggers

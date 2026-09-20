@@ -107,7 +107,7 @@ def test_setup_summary_emitted_once_with_found_and_missing_lists(
 
     settings = _settings_with_engines()  # no user-level [engines] block
     backends = runtime_loader.load_backends(
-        engine_ids=["claude", "codex", "gemini", "opencode", "pi"],
+        engine_ids=["claude", "codex", "antigravity", "opencode", "pi"],
         allowlist=None,
         default_engine="claude",
     )
@@ -124,7 +124,7 @@ def test_setup_summary_emitted_once_with_found_and_missing_lists(
     assert len(summary) == 1
     s = summary[0]
     assert "claude" in s["found"]
-    assert set(s["missing_on_path"]) == {"codex", "gemini", "opencode", "pi"}
+    assert set(s["missing_on_path"]) == {"codex", "antigravity", "opencode", "pi"}
     assert s["bad_config"] == []
     assert s["default_engine"] == "claude"
 
@@ -138,7 +138,7 @@ def test_setup_summary_emitted_once_with_found_and_missing_lists(
 def test_setup_warning_fires_for_user_configured_engine_missing_on_path(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    """If the user has put ``[engines.gemini]`` in their TOML but ``gemini``
+    """If the user has put ``[engines.antigravity]`` in their TOML but ``agy``
     isn't on PATH, that IS noteworthy — fire one focused WARN. The summary
     line still emits alongside.
     """
@@ -153,10 +153,10 @@ def test_setup_warning_fires_for_user_configured_engine_missing_on_path(
     monkeypatch.setattr(runtime_loader.shutil, "which", fake_which)
 
     settings = _settings_with_engines(
-        {"gemini": {"model": "gemini-pro"}}
-    )  # user configured gemini despite it missing
+        {"antigravity": {"model": "gemini-3.8-flash-high"}}
+    )  # user configured antigravity despite it missing
     backends = runtime_loader.load_backends(
-        engine_ids=["claude", "gemini"],
+        engine_ids=["claude", "antigravity"],
         allowlist=None,
         default_engine="claude",
     )
@@ -171,11 +171,11 @@ def test_setup_warning_fires_for_user_configured_engine_missing_on_path(
 
     summary = [e for e in logs if e.get("event") == "setup.summary"]
     assert len(summary) == 1
-    assert "gemini" in summary[0]["missing_on_path"]
+    assert "antigravity" in summary[0]["missing_on_path"]
 
     warnings = [e for e in logs if e.get("event") == "setup.warning"]
     assert len(warnings) == 1
-    assert warnings[0]["engine"] == "gemini"
+    assert warnings[0]["engine"] == "antigravity"
     assert "not found on PATH" in warnings[0]["issue"]
 
 

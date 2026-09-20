@@ -165,7 +165,7 @@ jobs:
           from untether.runners.codex import BACKEND as codex_backend
           from untether.runners.opencode import BACKEND as opencode_backend
           from untether.runners.pi import BACKEND as pi_backend
-          from untether.runners.gemini import BACKEND as gemini_backend
+          from untether.runners.antigravity import BACKEND as antigravity_backend
           from untether.runners.amp import BACKEND as amp_backend
           from untether.settings import load_settings
           print('All imports OK')

@@ -21,7 +21,7 @@ Scope of this change
 --------------------
 
 Only the Claude and Pi runners opt in via :func:`filtered_env` in
-v0.35.2. Other engines (Codex, OpenCode, Gemini, AMP) continue to
+v0.35.2. Other engines (Codex, OpenCode, Antigravity, AMP) continue to
 return ``None`` from their ``env()`` hook and inherit the parent
 environment unchanged. Extending to those engines needs per-engine
 integration validation — see #332 for the follow-up milestone.
@@ -107,7 +107,7 @@ _EXACT_ALLOW: frozenset[str] = frozenset(
         "SSH_AGENT_PID",
         "GIT_CONFIG_GLOBAL",
         "GIT_SSH_COMMAND",
-        # Cloud / AI provider keys. Claude / Codex / Gemini / OpenCode
+        # Cloud / AI provider keys. Claude / Codex / Antigravity / OpenCode
         # / AMP each need their own; list all of them here rather than
         # per-engine so ``filtered_env`` is a single source of truth.
         "ANTHROPIC_API_KEY",

@@ -5,7 +5,7 @@ Quick definitions for terms used throughout the Untether documentation.
 ## Core concepts
 
 **Engine**
-:   A coding agent CLI that Untether runs as a subprocess. Each engine is a separate tool — Claude Code, Codex, OpenCode, Pi, Gemini CLI, or Amp. Untether spawns the engine, reads its output, and renders progress in Telegram. You can switch engines per-message with directives like `/claude` or `/codex`.
+:   A coding agent CLI that Untether runs as a subprocess. Each engine is a separate tool — Claude Code, Codex, OpenCode, Pi, Antigravity CLI, or Amp. Untether spawns the engine, reads its output, and renders progress in Telegram. You can switch engines per-message with directives like `/claude` or `/codex`.
 
 **Runner**
 :   The Untether component that manages an engine subprocess. Each engine has a dedicated runner (e.g. `ClaudeRunner`, `CodexRunner`) that translates between the engine's output format and Untether's internal events.

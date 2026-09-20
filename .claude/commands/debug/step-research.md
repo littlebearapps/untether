@@ -14,7 +14,7 @@ documented config gotcha.
 | `docs/reference/runners/codex/*.md` | Codex runner spec + JSONL + translation |
 | `docs/reference/runners/opencode/*.md` | OpenCode runner spec + JSONL + translation |
 | `docs/reference/runners/pi/*.md` | Pi runner spec + JSONL + translation |
-| `docs/reference/runners/gemini/*.md` | Gemini runner spec + JSONL + translation |
+| `docs/reference/runners/antigravity/*.md` | Antigravity runner spec + JSONL + translation |
 | `docs/reference/runners/amp/*.md` | AMP runner spec + JSONL + translation |
 | `docs/reference/transports/telegram.md` | Telegram transport — Bot API client, outbox, voice, forum topics |
 | `docs/reference/modes.md` | Workflow modes (assistant / workspace / handoff) |
@@ -55,7 +55,7 @@ issue tracker before proposing a fix in Untether code:
 | Codex CLI | `openai/codex` | `gh search issues "repo:openai/codex <error fragment>" --limit 10` |
 | OpenCode | `sst/opencode` | `gh search issues "repo:sst/opencode <error fragment>" --limit 10` |
 | Pi | (inflection-ai / pi-cli) | Search Inflection's docs + GitHub — Pi's source is sometimes closed. Fall back to web search. |
-| Gemini CLI | `google-gemini/gemini-cli` | `gh search issues "repo:google-gemini/gemini-cli <error fragment>" --limit 10` |
+| Antigravity CLI | `google-deepmind/antigravity` | `gh search issues "repo:google-deepmind/antigravity <error fragment>" --limit 10` |
 | AMP CLI | `sourcegraph/amp` | `gh search issues "repo:sourcegraph/amp <error fragment>" --limit 10` |
 
 Known long-standing upstream issues already tracked in Untether memory:

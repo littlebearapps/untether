@@ -193,7 +193,7 @@ class TestGetErrorHint:
     # --- Signal errors ---
 
     def test_sigterm(self):
-        hint = get_error_hint("gemini failed (rc=-15 (SIGTERM)).")
+        hint = get_error_hint("antigravity failed (rc=-15 (SIGTERM)).")
         assert hint is not None
         assert "restarted" in hint.lower()
         assert "session is saved" in hint.lower()
@@ -226,7 +226,7 @@ class TestGetErrorHint:
 
     def test_finished_without_result_cross_engine(self):
         """Pattern matches all engine names."""
-        for engine in ("claude code", "codex", "opencode", "pi", "gemini", "amp"):
+        for engine in ("claude code", "codex", "opencode", "pi", "antigravity", "amp"):
             msg = f"{engine} finished without a result event"
             hint = get_error_hint(msg)
             assert hint is not None, f"no hint for: {msg}"
@@ -238,7 +238,7 @@ class TestGetErrorHint:
 
     def test_no_session_id_cross_engine(self):
         """Pattern matches all engine names."""
-        for engine in ("claude code", "codex", "gemini", "amp", "opencode"):
+        for engine in ("claude code", "codex", "antigravity", "amp", "opencode"):
             msg = f"{engine} finished but no session_id was captured"
             hint = get_error_hint(msg)
             assert hint is not None, f"no hint for: {msg}"

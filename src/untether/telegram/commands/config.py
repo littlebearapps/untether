@@ -141,6 +141,7 @@ _HOME_HINTS: dict[str, dict[str, str]] = {
 _ENGINE_MODEL_HINTS: dict[str, str] = {
     "claude": "from CLI settings",
     "codex": "codex-mini-latest",
+    "antigravity": "auto (routes Flash ↔ Pro)",
     "gemini": "auto (routes Flash ↔ Pro)",
     "amp": "smart mode (Opus 4.6)",
     "opencode": "provider/model (e.g. openai/gpt-4o)",
@@ -226,6 +227,16 @@ async def _page_home(ctx: CommandContext) -> None:
                 pm_label = "default"
         elif current_engine == "codex":
             pm_label = "safe" if pm == "safe" else "full auto"
+        elif current_engine == "antigravity":
+            if pm == "auto":
+                pm_label = "full access"
+            elif pm in {"accept-edits", "acceptEdits"}:
+                pm_label = "edit files"
+            elif pm == "plan":
+                pm_label = "plan"
+            else:
+                pm_label = "read-only"
+
         elif current_engine == "gemini":
             if pm == "yolo":
                 pm_label = "full access"
@@ -325,6 +336,12 @@ async def _page_home(ctx: CommandContext) -> None:
             lines.append(
                 f"Approval policy: <b>{pm_label}</b>{_home_hint('pm', pm_label)}"
             )
+        elif current_engine == "antigravity":
+            lines.append("<b>Agent controls</b> <i>(Antigravity CLI)</i>")
+            lines.append(
+                f"Approval mode: <b>{pm_label}</b>{_home_hint('pm', pm_label)}"
+            )
+
         elif current_engine == "gemini":
             lines.append("<b>Agent controls</b> <i>(Gemini CLI)</i>")
             lines.append(
@@ -467,6 +484,33 @@ async def _page_home(ctx: CommandContext) -> None:
                 {"text": "ℹ️ About", "callback_data": "config:ab"},
             ]
         )
+    elif current_engine == "antigravity":
+        # Antigravity layout
+        buttons.append(
+            [
+                {"text": "📋 Approval mode", "callback_data": "config:pm"},
+                {"text": "💰 Cost & usage", "callback_data": "config:cu"},
+            ]
+        )
+        buttons.append(
+            [
+                {"text": f"🧠 {home_rs_label}", "callback_data": "config:rs"},
+                {"text": "🔍 Verbose", "callback_data": "config:vb"},
+            ]
+        )
+        buttons.append(
+            [
+                {"text": "↩️ Resume line", "callback_data": "config:rl"},
+                {"text": "📡 Listen", "callback_data": "config:tr"},
+            ]
+        )
+        buttons.append(
+            [
+                {"text": "⚙️ Engine & model", "callback_data": "config:ag"},
+                {"text": "ℹ️ About", "callback_data": "config:ab"},
+            ]
+        )
+
     elif current_engine == "gemini":
         # Gemini layout
         buttons.append(
@@ -479,12 +523,6 @@ async def _page_home(ctx: CommandContext) -> None:
             [
                 {"text": "🔍 Verbose", "callback_data": "config:vb"},
                 {"text": "↩️ Resume line", "callback_data": "config:rl"},
-            ]
-        )
-        buttons.append(
-            [
-                {"text": "📡 Listen", "callback_data": "config:tr"},
-                {"text": "⚙️ Engine & model", "callback_data": "config:ag"},
             ]
         )
         buttons.append([{"text": "ℹ️ About", "callback_data": "config:ab"}])
@@ -530,6 +568,12 @@ _PM_MODES: dict[str, str] = {"on": "plan", "auto": "auto", "off": "acceptEdits"}
 
 _CODEX_PM_MODES: dict[str, str] = {"fa": "auto", "safe": "safe"}
 
+_ANTIGRAVITY_AM_MODES: dict[str, str] = {
+    "ya": "auto",
+    "ae": "accept-edits",
+    "pl": "plan",
+}
+
 _GEMINI_AM_MODES: dict[str, str] = {"ya": "yolo", "ae": "auto_edit"}
 
 
@@ -558,7 +602,7 @@ async def _page_planmode(ctx: CommandContext, action: str | None = None) -> None
             ctx,
             (
                 "<b>📋 Permission mode</b>\n\n"
-                "Only available for Claude Code, Codex, and Gemini CLI."
+                "Only available for Claude Code, Codex, Gemini CLI, and Antigravity CLI."
             ),
             [[{"text": "← Back", "callback_data": "config:home"}]],
         )
@@ -621,6 +665,26 @@ async def _page_planmode(ctx: CommandContext, action: str | None = None) -> None
             ask_questions=current.ask_questions if current else None,
             diff_preview=current.diff_preview if current else None,
             show_api_cost=current.show_api_cost if current else None,
+            show_subscription_usage=current.show_subscription_usage if current else None,
+            show_resume_line=current.show_resume_line if current else None,
+            budget_enabled=current.budget_enabled if current else None,
+            budget_auto_cancel=current.budget_auto_cancel if current else None,
+            loop_enabled=current.loop_enabled if current else None,
+        )
+        await prefs.set_engine_override(chat_id, engine, updated)
+        await _page_home(ctx)
+        return
+
+    # --- Antigravity approval mode actions ---
+    if engine == "antigravity" and action in _ANTIGRAVITY_AM_MODES:
+        current = await prefs.get_engine_override(chat_id, engine)
+        updated = EngineOverrides(
+            model=current.model if current else None,
+            reasoning=current.reasoning if current else None,
+            permission_mode=_ANTIGRAVITY_AM_MODES[action],
+            ask_questions=current.ask_questions if current else None,
+            diff_preview=current.diff_preview if current else None,
+            show_api_cost=current.show_api_cost if current else None,
             show_subscription_usage=current.show_subscription_usage
             if current
             else None,
@@ -633,7 +697,26 @@ async def _page_planmode(ctx: CommandContext, action: str | None = None) -> None
         await _page_home(ctx)
         return
 
-    if engine == "gemini" and action == "ro":
+    if engine == "gemini" and action in {"ro", "clr"}:
+        current = await prefs.get_engine_override(chat_id, engine)
+        updated = EngineOverrides(
+            model=current.model if current else None,
+            reasoning=current.reasoning if current else None,
+            permission_mode=None,
+            ask_questions=current.ask_questions if current else None,
+            diff_preview=current.diff_preview if current else None,
+            show_api_cost=current.show_api_cost if current else None,
+            show_subscription_usage=current.show_subscription_usage if current else None,
+            show_resume_line=current.show_resume_line if current else None,
+            budget_enabled=current.budget_enabled if current else None,
+            budget_auto_cancel=current.budget_auto_cancel if current else None,
+            loop_enabled=current.loop_enabled if current else None,
+        )
+        await prefs.set_engine_override(chat_id, engine, updated)
+        await _page_home(ctx)
+        return
+
+    if engine == "antigravity" and action in {"ro", "clr"}:
         current = await prefs.get_engine_override(chat_id, engine)
         updated = EngineOverrides(
             model=current.model if current else None,
@@ -776,7 +859,7 @@ async def _page_planmode(ctx: CommandContext, action: str | None = None) -> None
             "",
             "• <b>read-only</b> — research only, no modifications (default)",
             "• <b>edit files</b> — file reads/writes OK, shell commands blocked",
-            "• <b>full access</b> — all tools approved",
+            "• <b>full access</b> — fully autonomous, can run shell commands",
             "",
             f"Current: <b>{current_label}</b>",
             "",
@@ -802,6 +885,63 @@ async def _page_planmode(ctx: CommandContext, action: str | None = None) -> None
                 {"text": "Clear override", "callback_data": "config:pm:clr"},
             ],
             [{"text": "← Back", "callback_data": "config:home"}],
+        ]
+
+    elif engine == "antigravity":
+        if pm == "auto":
+            current_label = "full access"
+        elif pm in {"accept-edits", "acceptEdits"}:
+            current_label = "edit files"
+        elif pm == "plan":
+            current_label = "plan"
+        else:
+            current_label = "read-only"
+
+        lines = [
+            "<b>📋 Approval mode</b>",
+            "",
+            "Control which tools Antigravity can use in non-interactive mode.",
+            "",
+            "• <b>read-only</b> — research only, no modifications (default)",
+            "• <b>plan</b> — propose changes, ask before executing",
+            "• <b>edit files</b> — file reads/writes OK, shell commands blocked",
+            "• <b>full access</b> — all tools approved",
+            "",
+            f"Current: <b>{current_label}</b>",
+            "",
+            f'📖 <a href="{_DOCS_BASE}inline-settings/">Learn more</a>',
+        ]
+
+        buttons = [
+            [
+                {
+                    "text": _check(
+                        "Read-only",
+                        active=pm not in {"auto", "accept-edits", "acceptEdits", "plan"},
+                    ),
+                    "callback_data": "config:pm:ro",
+                },
+                {
+                    "text": _check("Plan", active=pm == "plan"),
+                    "callback_data": "config:pm:pl",
+                },
+            ],
+            [
+                {
+                    "text": _check(
+                        "Edit files", active=pm in {"accept-edits", "acceptEdits"}
+                    ),
+                    "callback_data": "config:pm:ae",
+                },
+                {
+                    "text": _check("Full access", active=pm == "auto"),
+                    "callback_data": "config:pm:ya",
+                },
+            ],
+            [
+                {"text": "Clear override", "callback_data": "config:pm:clr"},
+                {"text": "← Back", "callback_data": "config:home"},
+            ],
         ]
 
     await _respond(ctx, "\n".join(lines), buttons)

@@ -27,15 +27,15 @@ systemctl --user restart untether
 ```
 
 !!! note "Agent CLIs are separate"
-    Untether wraps agent CLIs (Claude Code, Codex, OpenCode, Pi, Gemini CLI, Amp) as subprocesses. Updating Untether does not update the agent CLIs. Update them separately:
+    Untether wraps agent CLIs (Claude Code, Codex, OpenCode, Pi, Antigravity CLI, Amp) as subprocesses. Updating Untether does not update the agent CLIs. Update them separately:
 
     ```sh
     npm update -g @anthropic-ai/claude-code
     npm update -g @openai/codex
     npm update -g opencode-ai
     npm update -g @mariozechner/pi-coding-agent
-    npm update -g @google/gemini-cli
     npm update -g @sourcegraph/amp
+    agy update
     ```
 
 ## Upgrading to v0.35.4

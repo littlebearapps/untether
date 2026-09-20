@@ -11,7 +11,7 @@ Prefix the first non-empty line with an engine directive:
 /claude shrink and store artifacts forever
 /opencode hide their paper until they reply
 /pi render a diorama of this timeline
-/gemini analyse the codebase architecture
+/antigravity analyse the codebase architecture
 /amp review recent changes
 ```
 
@@ -45,7 +45,7 @@ Selection precedence (highest to lowest): resume token → `/<engine-id>` direct
 ## Engine installation
 
 Untether shells out to engine CLIs. Install them and make sure they’re on your `PATH`
-(`codex`, `claude`, `opencode`, `pi`, `gemini`, `amp`). Authentication is handled by each CLI.
+(`codex`, `claude`, `opencode`, `pi`, `agy`, `amp`). Authentication is handled by each CLI.
 
 ## Feature differences
 

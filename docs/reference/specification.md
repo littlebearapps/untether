@@ -23,7 +23,7 @@ Out of scope:
 
 ## 2. Terminology
 
-- **EngineId**: string identifier of an engine (e.g., `"claude"`, `"codex"`, `"opencode"`, `"pi"`, `"gemini"`, `"amp"`).
+- **EngineId**: string identifier of an engine (e.g., `"claude"`, `"codex"`, `"opencode"`, `"pi"`, `"antigravity"`, `"amp"`).
 - **Runner**: Untether adapter that executes an engine process and yields **Untether events**.
 - **Thread**: a single engine-side conversation, identified in Untether by a **ResumeToken**.
 - **ResumeToken**: Untether-owned thread identifier `{ engine: EngineId, value: str }`.
@@ -43,7 +43,7 @@ The canonical ResumeLine embedded in chat MUST be the engine’s CLI resume comm
 - `claude --resume <id>`
 - `opencode run --session <id>`
 - `pi --session <token>`
-- `gemini --resume <id>`
+- `agy --conversation <id>`
 - `amp threads continue <id>`
 
 ResumeLine MUST resume the interactive session when the engine offers both interactive and headless modes. It MUST NOT point to a headless/batch command that requires a new prompt (e.g., a `run` subcommand that errors without a message).

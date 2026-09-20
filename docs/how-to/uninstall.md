@@ -60,6 +60,5 @@ npm uninstall -g @anthropic-ai/claude-code
 npm uninstall -g @openai/codex
 npm uninstall -g opencode-ai
 npm uninstall -g @mariozechner/pi-coding-agent
-npm uninstall -g @google/gemini-cli
 npm uninstall -g @sourcegraph/amp
 ```

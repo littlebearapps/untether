@@ -115,7 +115,7 @@ Even in chat mode, replying to a message with a resume line takes precedence and
 
 ## Cross-environment resume
 
-Started a session in your terminal and left the house? Use `/continue` to pick it up from Telegram — no reply needed. Works with Claude, Codex, OpenCode, Pi, and Gemini.
+Started a session in your terminal and left the house? Use `/continue` to pick it up from Telegram — no reply needed. Works with Claude, Codex, OpenCode, Pi, and Antigravity.
 
 See the [cross-environment resume guide](../how-to/cross-environment-resume.md) for details.
 

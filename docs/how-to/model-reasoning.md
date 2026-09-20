@@ -59,8 +59,9 @@ Valid levels depend on the engine:
 
 - **Claude Code**: `low`, `medium`, `high`, `xhigh`, `max` (passed as `--effort`)
 - **Codex CLI**: `minimal`, `low`, `medium`, `high`, `xhigh`
+- **Antigravity CLI**: `low`, `medium`, `high` (passed as `--effort`)
 
-Other engines (OpenCode, Pi, Gemini, Amp) ignore this setting.
+Other engines (OpenCode, Amp) ignore this setting.
 
 ## Per-engine reasoning
 

@@ -225,7 +225,7 @@ class TestCronConfig:
         # Forward-compatible behaviour: engines not in
         # VALID_PERMISSION_MODES_BY_ENGINE accept any non-empty string; the
         # runner silently no-ops. See #331 / #332 for the path to strict
-        # validation on Codex/Gemini/OpenCode/Pi/AMP.
+        # validation on Codex/Antigravity/OpenCode/Pi/AMP.
         c = CronConfig(
             id="cr",
             schedule="* * * * *",

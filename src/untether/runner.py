@@ -184,11 +184,25 @@ def _recent_event_is_control_request(stream: JsonlStreamState) -> bool:
 def _classify_jsonl_event(raw: Any) -> str:
     """Return "tool_result" | "assistant" | "other" for a decoded JSONL event.
 
-    Engine-agnostic: handles Claude, Codex, OpenCode, Pi, Gemini, AMP.
+    Engine-agnostic: handles Claude, Codex, OpenCode, Pi, Antigravity, AMP.
     Conservative — unknown shapes return "other".
     """
     if not isinstance(raw, dict):
         return _OTHER_EVENT_KIND
+    # Antigravity uses "event"
+    ev = raw.get("event")
+    if ev == "step_update":
+        su = raw.get("step_update")
+        if isinstance(su, dict):
+            step_type = su.get("step_type")
+            state = su.get("state")
+            if step_type == "tool" and state == "DONE":
+                return _TOOL_RESULT_EVENT_KIND
+            if step_type == "agent_response":
+                return _ASSISTANT_EVENT_KIND
+        return _OTHER_EVENT_KIND
+    if ev == "result":
+        return _ASSISTANT_EVENT_KIND
     t = raw.get("type")
     if not isinstance(t, str):
         return _OTHER_EVENT_KIND
@@ -545,7 +559,7 @@ class JsonlSubprocessRunner(BaseRunner):
         try:
             return cast(dict[str, Any], json.loads(text))
         except json.JSONDecodeError:
-            # Some CLIs (e.g. Gemini) mix non-JSON warnings with JSONL on
+            # Some CLIs (e.g. Antigravity) mix non-JSON warnings with JSONL on
             # stdout.  Try to extract the first JSON object from the line.
             brace = text.find("{")
             if brace > 0:
@@ -1003,7 +1017,7 @@ class JsonlSubprocessRunner(BaseRunner):
             # child process inheriting the stdout fd (e.g. MCP server,
             # backgrounded shell) keeps the pipe open and we block on
             # iter_json_lines waiting for an EOF that never comes.
-            # Audited 2026-05-10 across codex/opencode/pi/gemini/amp:
+            # Audited 2026-05-10 across codex/opencode/pi/antigravity/amp:
             # each engine emits exactly one terminal event, no
             # post-completion events. Mirrors Claude's override.
             if stream.did_emit_completed:

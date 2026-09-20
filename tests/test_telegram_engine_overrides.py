@@ -158,7 +158,24 @@ def test_get_engine_default_reasoning_unsupported_engine() -> None:
     from untether.telegram.engine_overrides import get_engine_default_reasoning
 
     assert get_engine_default_reasoning("codex") is None
-    assert get_engine_default_reasoning("gemini") is None
+    assert get_engine_default_reasoning("amp") is None
+
+
+def test_get_engine_default_reasoning_antigravity(tmp_path) -> None:
+    """Reads modelReasoningEffort from ~/.gemini/antigravity-cli/settings.json."""
+    import json
+    from unittest.mock import patch
+
+    from untether.telegram.engine_overrides import get_engine_default_reasoning
+
+    agy_dir = tmp_path / ".gemini" / "antigravity-cli"
+    agy_dir.mkdir(parents=True)
+    (agy_dir / "settings.json").write_text(
+        json.dumps({"modelReasoningEffort": "medium"})
+    )
+
+    with patch("pathlib.Path.home", return_value=tmp_path):
+        assert get_engine_default_reasoning("antigravity") == "medium"
 
 
 def test_get_engine_default_model_opencode(tmp_path) -> None:
@@ -176,6 +193,23 @@ def test_get_engine_default_model_opencode(tmp_path) -> None:
 
     with patch("pathlib.Path.home", return_value=tmp_path):
         assert get_engine_default_model("opencode") == "deepseek/deepseek-v4-pro"
+
+
+def test_get_engine_default_model_antigravity(tmp_path) -> None:
+    """Reads model from ~/.gemini/antigravity-cli/settings.json."""
+    import json
+    from unittest.mock import patch
+
+    from untether.telegram.engine_overrides import get_engine_default_model
+
+    agy_dir = tmp_path / ".gemini" / "antigravity-cli"
+    agy_dir.mkdir(parents=True)
+    (agy_dir / "settings.json").write_text(
+        json.dumps({"model": "gemini-3.8-flash-high"})
+    )
+
+    with patch("pathlib.Path.home", return_value=tmp_path):
+        assert get_engine_default_model("antigravity") == "gemini-3.8-flash-high"
 
 
 def test_get_engine_default_model_pi_joins_provider(tmp_path) -> None:
@@ -220,6 +254,7 @@ def test_get_engine_default_model_missing_or_malformed(tmp_path) -> None:
     with patch("pathlib.Path.home", return_value=tmp_path):
         assert get_engine_default_model("opencode") is None
         assert get_engine_default_model("pi") is None
+        assert get_engine_default_model("antigravity") is None
 
     oc_dir = tmp_path / ".config" / "opencode"
     oc_dir.mkdir(parents=True)
@@ -232,7 +267,7 @@ def test_get_engine_default_model_auto_routed_engines() -> None:
     """#475: auto-routed engines keep the static hint (None here)."""
     from untether.telegram.engine_overrides import get_engine_default_model
 
-    for engine in ("claude", "codex", "gemini", "amp"):
+    for engine in ("claude", "codex", "amp"):
         assert get_engine_default_model(engine) is None
 
 
@@ -243,7 +278,7 @@ def test_get_reasoning_label() -> None:
     assert get_reasoning_label("claude") == "Effort"
     assert get_reasoning_label("codex") == "Reasoning"
     assert get_reasoning_label("pi") == "Thinking"
-    assert get_reasoning_label("gemini") == "Reasoning"
+    assert get_reasoning_label("antigravity") == "Effort"
     assert get_reasoning_label("amp") == "Reasoning"
 
 

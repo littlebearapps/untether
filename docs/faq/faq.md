@@ -10,7 +10,7 @@ description: "Common questions about Untether: installation, supported engines, 
 
 ## What is Untether?
 
-Untether is a Telegram bridge for AI coding agents. It runs on your computer (or a server you control) and forwards messages between Telegram and the agent CLI of your choice — Claude Code, Codex, OpenCode, Pi, Gemini CLI, or Amp.
+Untether is a Telegram bridge for AI coding agents. It runs on your computer (or a server you control) and forwards messages between Telegram and the agent CLI of your choice — Claude Code, Codex, OpenCode, Pi, Antigravity CLI, or Amp.
 
 Your machine still does all the work. Untether is the wire between your phone and the agent, with progress streaming, interactive approval buttons, voice transcription, cost tracking, scheduled runs, and inline settings layered on top. The intent is simple: keep using the same agent you already use, but stop being chained to a terminal window when you want to walk the dog or watch the footy.
 
@@ -42,14 +42,14 @@ Untether supports six agent CLIs out of the box:
 - **[Codex](https://github.com/openai/codex)** — fast edits, shell commands, OpenAI subscription via ChatGPT login.
 - **[OpenCode](https://github.com/opencode-ai/opencode)** — 75+ providers via Models.dev, local model support.
 - **[Pi](https://github.com/mariozechner/pi-coding-agent)** — multi-provider auth, conversational style.
-- **[Gemini CLI](https://github.com/google-gemini/gemini-cli)** — Google Gemini models with configurable approval modes.
+- **[Antigravity CLI](https://github.com/google-deepmind/antigravity)** — Google DeepMind agent CLI with configurable permissions and reasoning effort.
 - **[Amp](https://ampcode.com)** — Sourcegraph's coding agent with mode selection.
 
 You can switch between engines per-message by prefixing with `/<engine>` (e.g. `/claude`, `/codex`). Each chat or topic can also have its own default engine. The full per-engine feature matrix is in the [README](https://github.com/littlebearapps/untether#-supported-engines).
 
 ## Do I need an API key to use Untether?
 
-In most cases, no. Untether uses whatever authentication your agent CLI already has — your existing Claude Pro/Max subscription via OAuth, your ChatGPT Plus/Pro/Business plan via the Codex device-auth flow, your Gemini account, your Amp Sourcegraph login. If `claude auth status` works on your machine, Untether will use the same authentication.
+In most cases, no. Untether uses whatever authentication your agent CLI already has — your existing Claude Pro/Max subscription via OAuth, your ChatGPT Plus/Pro/Business plan via the Codex device-auth flow, your Antigravity account, your Amp Sourcegraph login. If `claude auth status` works on your machine, Untether will use the same authentication.
 
 API keys (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, etc.) are only needed if you specifically want API billing instead of a subscription, or for engines that don't offer subscription auth (e.g. some OpenCode providers). Untether itself doesn't make any API calls — it just spawns the agent CLI as a subprocess.
 
@@ -78,7 +78,7 @@ Per-chat plan mode (`/planmode on/auto/off`) controls when the buttons appear:
 - **auto** — plan transitions auto-approve, but tool approvals still appear.
 - **off** — no plan phase; tools auto-execute (subject to engine policy).
 
-For non-Claude engines, approval is enforced per-engine pre-run (Codex `--ask-for-approval`, Gemini `--approval-mode`) rather than via mid-run buttons. Full guide: [Interactive approval](https://untether.littlebearapps.com/how-to/interactive-approval/).
+For non-Claude engines, approval is enforced per-engine pre-run (Codex `--ask-for-approval`, Antigravity `--dangerously-skip-permissions` / `--mode`) rather than via mid-run buttons. Full guide: [Interactive approval](https://untether.littlebearapps.com/how-to/interactive-approval/).
 
 ## What happens if my agent crashes or my phone loses signal mid-run?
 
@@ -104,7 +104,7 @@ auto_cancel_on_exceed = true # cancel the run when the threshold is hit
 
 `/usage` shows the current run's cost; `/usage debug` shows OAuth token expiry, schema-mismatch counters, and cache freshness — useful when the subscription footer goes silent. `/stats` reports per-engine totals across today, this week, and all time.
 
-Cost tracking is most accurate for Claude (full USD reporting via API metadata) and OpenCode. Codex, Pi, Gemini, and Amp report tokens-only. Subscription users (Claude Pro/Max, ChatGPT, Gemini, Amp) see a `5h: N% / 7d: N%` indicator instead of dollars. See the [cost-budgets guide](https://untether.littlebearapps.com/how-to/cost-budgets/) for tuning.
+Cost tracking is most accurate for Claude (full USD reporting via API metadata) and OpenCode. Codex, Pi, and Amp report tokens-only. Subscription users (Claude Pro/Max, ChatGPT, Antigravity, Amp) see a `5h: N% / 7d: N%` indicator instead of dollars. See the [cost-budgets guide](https://untether.littlebearapps.com/how-to/cost-budgets/) for tuning.
 
 ## Does /loop work via Untether?
 

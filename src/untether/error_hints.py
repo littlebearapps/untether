@@ -281,8 +281,8 @@ _HINT_PATTERNS: list[tuple[str, str]] = [
         "Run `amp login` to authenticate with Sourcegraph.",
     ),
     (
-        "gemini result status:",
-        "Gemini returned an unexpected result. Try a fresh session with /new.",
+        "antigravity result status:",
+        "Antigravity returned an unexpected result. Try a fresh session with /new.",
     ),
     # --- Account errors ---
     (

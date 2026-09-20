@@ -307,7 +307,7 @@ prompt = "Review overnight PRs and reply with a summary."
 permission_mode = "auto"
 ```
 
-Precedence (Claude only): cron `permission_mode` > per-chat `/planmode` > engine config default. Every run that actually changes the resolved value logs `trigger.cron.permission_mode_override` for staging observability. Valid values: `default`, `plan`, `auto`, `acceptEdits`, `bypassPermissions`. Other engines (Codex, Gemini, OpenCode, Pi, AMP) silently ignore this field — full coverage is tracked in [#332](https://github.com/littlebearapps/untether/issues/332). See [Schedule tasks — Autonomous crons](schedule-tasks.md#autonomous-crons) for the everyday framing.
+Precedence: cron `permission_mode` > per-chat `/planmode` / approval mode > engine config default. Every run that actually changes the resolved value logs `trigger.cron.permission_mode_override` for staging observability. Valid values: `default`, `plan`, `auto`, `acceptEdits`, `bypassPermissions`. For Antigravity, `plan` is forwarded as `--mode plan` and `acceptEdits` as `--mode accept-edits`. Other engines (Codex, OpenCode, Pi, AMP) silently ignore this field — full coverage is tracked in [#332](https://github.com/littlebearapps/untether/issues/332). See [Schedule tasks — Autonomous crons](schedule-tasks.md#autonomous-crons) for the everyday framing.
 
 ## Delayed runs with `/at`
 
