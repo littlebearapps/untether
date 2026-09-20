@@ -1,11 +1,11 @@
 # Untether — Agent Instructions
 
-Telegram bridge for AI coding agents. Control Claude Code, Codex, OpenCode, Pi, Gemini CLI, and Amp from your phone or any device — agents run on your machine in the background while you're away from the terminal. Features interactive permissions, voice input, cost tracking, and live progress streaming.
+Telegram bridge for AI coding agents. Control Claude Code, Codex, OpenCode, Pi, Antigravity CLI, and Amp from your phone or any device — agents run on your machine in the background while you're away from the terminal. Features interactive permissions, voice input, cost tracking, and live progress streaming.
 
 ## Architecture
 
 ```
-Telegram <-> TelegramPresenter <-> RunnerBridge <-> Runner (claude/codex/opencode/pi/gemini/amp)
+Telegram <-> TelegramPresenter <-> RunnerBridge <-> Runner (claude/codex/opencode/pi/antigravity/amp)
                                        |
                                   ProgressTracker
 ```

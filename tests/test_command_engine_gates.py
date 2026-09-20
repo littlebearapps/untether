@@ -144,6 +144,41 @@ class TestUsageEngineGate:
         # Should get past the engine gate — either shows data or credential error
         assert "not available" not in result.text.lower()
 
+    @pytest.mark.anyio
+    async def test_usage_allowed_for_antigravity_attempts_fetch(self, monkeypatch):
+        """For Antigravity, /usage should fetch usage by running /usage inside agy."""
+
+        async def _fake_fetch(*a, **kw):
+            return {
+                "engine": "antigravity",
+                "groups": [
+                    {
+                        "name": "Gemini Models",
+                        "buckets": [
+                            {
+                                "name": "Weekly Limit Remaining",
+                                "window": "weekly",
+                                "remaining_fraction": 0.8,
+                                "reset_time": "2030-01-01T00:00:00Z",
+                            }
+                        ],
+                    }
+                ],
+            }
+
+        monkeypatch.setattr(
+            "untether.telegram.commands.usage.fetch_antigravity_usage", _fake_fetch
+        )
+        ctx = FakeCommandContext(
+            runtime=FakeTransportRuntime(default_engine="antigravity"),
+        )
+        cmd = UsageCommand()
+        result = await cmd.handle(ctx)  # type: ignore[arg-type]
+        assert result is not None
+        assert "not available" not in result.text.lower()
+        assert "Antigravity Usage" in result.text
+        assert "Gemini Models" in result.text
+
 
 # ---------------------------------------------------------------------------
 # /planmode engine gate
@@ -177,11 +212,11 @@ class TestPlanModeEngineGate:
         assert "approval policy" in result.text.lower()
 
     @pytest.mark.anyio
-    async def test_planmode_blocked_for_gemini_with_config_hint(self):
+    async def test_planmode_blocked_for_antigravity_with_config_hint(self):
         ctx = FakeCommandContext(
             args_text="on",
             config_path=Path("/tmp/fake.toml"),
-            runtime=FakeTransportRuntime(default_engine="gemini"),
+            runtime=FakeTransportRuntime(default_engine="antigravity"),
         )
         cmd = PlanModeCommand()
         result = await cmd.handle(ctx)  # type: ignore[arg-type]
@@ -266,3 +301,30 @@ class TestUsageDebugMode:
         result_plain = await cmd.handle(ctx_plain)  # type: ignore[arg-type]
         assert result_plain is not None
         assert "🔧 debug" not in result_plain.text
+
+    @pytest.mark.anyio
+    async def test_debug_section_antigravity(self, monkeypatch):
+        from untether.telegram.commands.usage import UsageCommand
+        from untether.utils import usage_cache
+
+        usage_cache.reset_cache()
+
+        async def _fake_fetch(*a, **kw):
+            return {
+                "engine": "antigravity",
+                "groups": [],
+            }
+
+        monkeypatch.setattr(
+            "untether.telegram.commands.usage.fetch_antigravity_usage", _fake_fetch
+        )
+
+        ctx = FakeCommandContext(
+            runtime=FakeTransportRuntime(default_engine="antigravity"),
+            args_text="debug",
+        )
+        cmd = UsageCommand()
+        result = await cmd.handle(ctx)  # type: ignore[arg-type]
+        assert result is not None
+        assert "🔧 debug" in result.text
+        assert "CLI binary" in result.text

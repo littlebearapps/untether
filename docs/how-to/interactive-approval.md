@@ -127,17 +127,17 @@ Toggle via `/config` → **Approval policy**:
 
 This is a pre-run policy — Codex doesn't pause mid-run to ask for permission. The policy is set before the run starts.
 
-### Gemini CLI — Approval mode
+### Antigravity CLI — Approval mode
 
 Toggle via `/config` → **Approval mode**:
 
 | Mode | CLI flag | Behaviour |
 |------|----------|-----------|
-| **Read-only** (default) | (none) | Write tools blocked — Gemini can only read files |
-| **Edit files** | `--approval-mode auto_edit` | File reads and writes OK, shell commands blocked |
-| **Full access** | `--approval-mode yolo` | All tools approved — full autonomy |
+| **Read-only** (default) | (none) | Permissions enforced per settings |
+| **Edit files** | `--mode accept-edits` | File changes accepted |
+| **Full access** | `--dangerously-skip-permissions` | All tools auto-approved — full autonomy |
 
-This is also a pre-run policy. Gemini CLI doesn't have interactive mid-run approval.
+This is also a pre-run policy. Antigravity CLI doesn't have interactive mid-run approval in headless mode.
 
 Both policies persist per chat via `/config` and can be cleared back to the default. See [Inline settings](inline-settings.md) for the full `/config` menu reference.
 

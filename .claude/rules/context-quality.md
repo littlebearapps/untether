@@ -1,6 +1,6 @@
 # AI Context File Quality Standards
 
-When generating or updating AI context files (CLAUDE.md, AGENTS.md, GEMINI.md, .cursorrules, copilot-instructions.md, .windsurfrules, .clinerules), follow these standards.
+When generating or updating AI context files (CLAUDE.md, AGENTS.md, GEMINI.md, ANTIGRAVITY.md, .cursorrules, copilot-instructions.md, .windsurfrules, .clinerules), follow these standards.
 
 ## Cross-File Consistency
 
@@ -57,12 +57,13 @@ Not all context files work in all tools:
 
 | File | Works In | Does NOT Work In |
 |------|----------|-----------------|
-| `AGENTS.md` | Claude Code, OpenCode, Codex CLI, Gemini CLI | — |
+| `AGENTS.md` | Claude Code, OpenCode, Codex CLI, Antigravity CLI | — |
 | `CLAUDE.md` | Claude Code, OpenCode (fallback) | Cursor, Copilot |
 | `.cursorrules` | Cursor | Claude Code, OpenCode |
 | `.github/copilot-instructions.md` | GitHub Copilot | Claude Code, Cursor |
 | `.windsurfrules` | Windsurf | Claude Code, Cursor |
 | `.clinerules` | Cline | Claude Code, Cursor |
-| `GEMINI.md` | Gemini CLI | Claude Code, Cursor |
+| `GEMINI.md` | Antigravity CLI (`agy`) | Claude Code, Cursor |
+| `ANTIGRAVITY.md` | Antigravity CLI (`agy`) | Claude Code, Cursor |
 | `.claude/rules/*.md` | Claude Code only | OpenCode, Codex CLI, Cursor |
 | Claude Code hooks | Claude Code only | OpenCode, Codex CLI, all others |

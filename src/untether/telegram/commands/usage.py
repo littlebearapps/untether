@@ -7,13 +7,18 @@ do not use Anthropic OAuth credentials.
 from __future__ import annotations
 
 import contextlib
+import html
 import json
+import os
+import shutil
 import subprocess
 import sys
 import time
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
 
+import anyio
 import httpx
 
 from ...commands import CommandBackend, CommandContext, CommandResult
@@ -297,11 +302,211 @@ def _format_debug_section() -> str:
     return "\n".join(lines)
 
 
+async def fetch_antigravity_usage(
+    *,
+    conversation_id: str | None = None,
+    antigravity_cmd: str | None = None,
+    timeout_seconds: float = _TIMEOUT,
+) -> dict[str, Any]:
+    """Fetch usage and quota data from Antigravity CLI by running `/usage` inside an agy session."""
+    from ...runners.antigravity import default_antigravity_cmd
+
+    cmd = antigravity_cmd or default_antigravity_cmd()
+    if not shutil.which(cmd) and not Path(cmd).exists():
+        raise FileNotFoundError(
+            f"Antigravity CLI (agy) not found at {cmd}. Run 'curl -fsSL https://antigravity.google/install.sh | bash' to install."
+        )
+
+    args = [cmd, "--output-format", "stream-json"]
+    if conversation_id:
+        args.extend(["--conversation", conversation_id])
+    args.extend(["-p", "/usage"])
+
+    try:
+        with anyio.fail_after(timeout_seconds):
+            result = await anyio.run_process(
+                args,
+                check=False,
+            )
+    except TimeoutError:
+        raise TimeoutError("Antigravity CLI timed out while fetching usage.") from None
+
+    if result.returncode != 0:
+        err_msg = result.stderr.decode("utf-8", errors="replace").strip()
+        raise RuntimeError(
+            f"agy exited with code {result.returncode}: {err_msg or 'unknown error'}"
+        )
+
+    usage_data: dict[str, Any] = {}
+    for line in result.stdout.decode("utf-8", errors="replace").splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            ev = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if ev.get("event") == "command_result":
+            cmd = ev.get("command")
+            if isinstance(cmd, dict):
+                cmd_data = cmd.get("data")
+                if isinstance(cmd_data, dict) and "groups" in cmd_data:
+                    usage_data = cmd_data
+        elif ev.get("event") == "result":
+            res = ev.get("result")
+            if isinstance(res, dict):
+                res_cmd = res.get("command")
+                if isinstance(res_cmd, dict):
+                    res_cmd_data = res_cmd.get("data")
+                    if isinstance(res_cmd_data, dict) and "groups" in res_cmd_data:
+                        usage_data = res_cmd_data
+
+    groups = usage_data.get("groups") or []
+    five_hour: dict[str, Any] | None = None
+    seven_day: dict[str, Any] | None = None
+
+    for group in groups:
+        for bucket in group.get("buckets", []):
+            rem = bucket.get("remaining_fraction")
+            reset = bucket.get("reset_time")
+            b_id = str(bucket.get("id", ""))
+            window = str(bucket.get("window", ""))
+            if rem is not None:
+                utilization = round(max(0.0, min(100.0, (1.0 - float(rem)) * 100)), 1)
+                if (window == "5h" or b_id.endswith("-5h")) and (
+                    five_hour is None or utilization > five_hour["utilization"]
+                ):
+                    five_hour = {"utilization": utilization, "resets_at": reset}
+                elif (window == "weekly" or b_id.endswith("-weekly")) and (
+                    seven_day is None or utilization > seven_day["utilization"]
+                ):
+                    seven_day = {"utilization": utilization, "resets_at": reset}
+
+    return {
+        "engine": "antigravity",
+        "groups": groups,
+        "description": usage_data.get("description"),
+        "five_hour": five_hour,
+        "seven_day": seven_day,
+    }
+
+
+def format_antigravity_usage(data: dict) -> str:
+    """Format Antigravity usage and quota data into a concise Telegram message."""
+    lines: list[str] = ["📊 Antigravity Usage\n"]
+    groups = data.get("groups") or []
+    if not groups:
+        return "📊 Antigravity Usage\n\nNo quota groups returned."
+
+    for group in groups:
+        name = html.escape(str(group.get("name") or "Quota"))
+        lines.append(f"<b>{name}</b>")
+        for bucket in group.get("buckets", []):
+            b_name = html.escape(str(bucket.get("name") or bucket.get("window", "Quota")))
+            rem = bucket.get("remaining_fraction")
+            reset = bucket.get("reset_time")
+            if rem is not None:
+                pct_used = max(0.0, min(100.0, (1.0 - float(rem)) * 100))
+                bar = _progress_bar(pct_used)
+                pct_left = float(rem) * 100
+                reset_str = (
+                    f" (resets in {_time_until(reset)})"
+                    if reset and pct_used > 0
+                    else ""
+                )
+                lines.append(
+                    f"• {b_name}: {bar} {pct_used:.0f}% ({pct_left:.0f}% left{reset_str})"
+                )
+        lines.append("")
+    return "\n".join(lines).rstrip()
+
+
+def _format_antigravity_debug_section(
+    *,
+    conversation_id: str | None = None,
+    antigravity_cmd: str | None = None,
+) -> str:
+    """Render the ``/usage debug`` block for Antigravity."""
+    from ...utils.usage_cache import get_cache_stats
+
+    stats = get_cache_stats("antigravity")
+    lines: list[str] = ["", "<b>🔧 debug</b>"]
+
+    if stats.last_success_wall_seconds is None:
+        lines.append("• cache: no successful fetch yet")
+    else:
+        wall = datetime.fromtimestamp(
+            stats.last_success_wall_seconds, tz=UTC
+        ).isoformat(timespec="seconds")
+        age = stats.cache_age_seconds
+        age_label = "fresh" if age is not None and age <= 60 else "stale"
+        if age is not None:
+            lines.append(f"• cache: last success {wall} ({age:.0f}s ago, {age_label})")
+        else:
+            lines.append(f"• cache: last success {wall}")
+
+    if stats.last_error_kind:
+        msg = stats.last_error_message or "(no message)"
+        if len(msg) > 120:
+            msg = msg[:117] + "…"
+        lines.append(f"• last error: <code>{stats.last_error_kind}</code>: {msg}")
+    else:
+        lines.append("• last error: none")
+
+    lines.append(f"• session: <code>{conversation_id or '(none)'}</code>")
+    cmd = antigravity_cmd or "agy"
+    lines.append(f"• CLI binary: <code>{cmd}</code>")
+    return "\n".join(lines)
+
+
+async def _resolve_antigravity_session_id(ctx: CommandContext) -> str | None:
+    if ctx.config_path is None:
+        return None
+    try:
+        if ctx.message.thread_id is not None:
+            from ..topic_state import TopicStateStore, resolve_state_path
+
+            topic_store = TopicStateStore(resolve_state_path(ctx.config_path))
+            token = await topic_store.get_session_resume(
+                int(ctx.message.channel_id), int(ctx.message.thread_id), "antigravity"
+            )
+            if token and token.value:
+                return token.value
+
+        from ..chat_sessions import ChatSessionStore, resolve_sessions_path
+
+        chat_store = ChatSessionStore(resolve_sessions_path(ctx.config_path))
+        token = await chat_store.get_session_resume(
+            int(ctx.message.channel_id), owner_id=None, engine="antigravity"
+        )
+        if token and token.value:
+            return token.value
+    except Exception:  # noqa: BLE001
+        logger.warning("usage.session_resolve_failed", exc_info=True)
+    return None
+
+
+def _resolve_antigravity_cmd(ctx: CommandContext) -> str:
+    if ctx.config_path is not None:
+        with contextlib.suppress(Exception):
+            from ...config import read_config
+
+            cfg = read_config(ctx.config_path)
+            raw = cfg.get("antigravity", {}).get("cmd") or cfg.get(
+                "antigravity", {}
+            ).get("antigravity_cmd")
+            if raw and isinstance(raw, str):
+                return os.path.expanduser(raw)
+    from ...runners.antigravity import default_antigravity_cmd
+
+    return default_antigravity_cmd()
+
+
 class UsageCommand:
-    """Command backend for Claude Code usage reporting."""
+    """Command backend for Claude Code and Antigravity subscription usage reporting."""
 
     id = "usage"
-    description = "Show Claude Code subscription usage"
+    description = "Show subscription usage"
 
     async def handle(self, ctx: CommandContext) -> CommandResult | None:
         from ..engine_overrides import SUBSCRIPTION_USAGE_SUPPORTED_ENGINES
@@ -321,6 +526,45 @@ class UsageCommand:
                 notify=True,
                 parse_mode="HTML",
             )
+
+        if current_engine == "antigravity":
+            conversation_id = await _resolve_antigravity_session_id(ctx)
+            antigravity_cmd = _resolve_antigravity_cmd(ctx)
+            from ...utils.usage_cache import fetch_antigravity_usage_cached
+
+            try:
+                data = await fetch_antigravity_usage_cached(
+                    conversation_id=conversation_id,
+                    antigravity_cmd=antigravity_cmd,
+                )
+            except FileNotFoundError as exc:
+                return CommandResult(
+                    text=f"Antigravity CLI error: {exc}",
+                    notify=True,
+                )
+            except TimeoutError:
+                return CommandResult(
+                    text="Antigravity CLI timed out while fetching usage stats.",
+                    notify=True,
+                )
+            except Exception as exc:
+                logger.exception("usage.antigravity_failed", error=str(exc))
+                return CommandResult(
+                    text=f"Failed to fetch Antigravity usage: {type(exc).__name__}: {exc}",
+                    notify=True,
+                )
+
+            text = format_antigravity_usage(data)
+            if debug_mode:
+                text = (
+                    text
+                    + "\n"
+                    + _format_antigravity_debug_section(
+                        conversation_id=conversation_id,
+                        antigravity_cmd=antigravity_cmd,
+                    )
+                )
+            return CommandResult(text=text, notify=True, parse_mode="HTML")
 
         try:
             data = await fetch_claude_usage()

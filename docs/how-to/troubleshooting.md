@@ -79,8 +79,8 @@ npm install -g opencode-ai@latest
 # Pi
 npm install -g @mariozechner/pi-coding-agent
 
-# Gemini CLI
-npm install -g @google/gemini-cli
+# Antigravity CLI
+# Follow official agy installation instructions
 
 # Amp
 npm install -g @sourcegraph/amp
@@ -98,7 +98,7 @@ Run `untether doctor` to see which engines are detected.
 - **Claude Code:** Run `claude login` to authenticate. On macOS, credentials are stored in Keychain; on Linux, in `~/.claude/.credentials.json`
 - **OpenCode:** Run `opencode` and authenticate with your chosen provider
 - **Pi:** Run `pi` and log in with your provider
-- **Gemini CLI:** Run `gemini` and authenticate with your Google account
+- **Antigravity CLI:** Run `agy` and complete setup
 - **Amp:** Run `amp` and sign in with your Sourcegraph account
 
 ## Progress stuck on "starting"
@@ -518,18 +518,18 @@ Untether recognises **67 error patterns** across 14 categories:
 | Category | Examples | Engines |
 |----------|----------|---------|
 | Authentication | API key missing/invalid, token refresh, login required | All |
-| Subscription & billing | Usage limits, quota exceeded, billing hard limit | Claude, Codex, OpenCode, Gemini |
+| Subscription & billing | Usage limits, quota exceeded, billing hard limit | Claude, Codex, OpenCode, Antigravity |
 | API overload & server | 500/502/503/504, overloaded | All |
 | Rate limits | Rate limited, too many requests | All |
 | Model errors | Model not found, invalid model | All |
 | Context length | Context too long, max tokens exceeded | Claude, Codex, OpenCode |
-| Content safety | Content filter, safety block, prompt blocked | Claude, Gemini |
+| Content safety | Content filter, safety block, prompt blocked | Claude, Antigravity |
 | Invalid request | Malformed API request | Claude, Codex |
 | Network & SSL | DNS, timeout, connection refused, certificate errors | All |
 | CLI & filesystem | Command not found, disk full, permission denied | All |
 | Signals | SIGTERM, SIGKILL, SIGABRT | All |
 | Process & session | No result event, no session ID, execution errors | All |
-| Engine-specific | AMP credits/login, Gemini result status | AMP, Gemini |
+| Engine-specific | AMP credits/login, Antigravity result status | AMP, Antigravity |
 | Account & proxy | Account suspended, proxy auth, request timeout | All |
 
 For the full list of patterns and hints, see the [Error Reference](../reference/errors.md).

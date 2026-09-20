@@ -49,6 +49,11 @@ _last_success_wall: float | None = None
 _last_error_kind: str | None = None
 _last_error_message: str | None = None
 
+_ag_cache: tuple[float, dict[str, Any]] | None = None
+_ag_last_success_wall: float | None = None
+_ag_last_error_kind: str | None = None
+_ag_last_error_message: str | None = None
+
 
 def _get_lock() -> anyio.Lock:
     global _lock
@@ -60,16 +65,32 @@ def _get_lock() -> anyio.Lock:
 def reset_cache() -> None:
     """Clear the cache and lock. Intended for tests."""
     global _cache, _lock, _last_success_wall, _last_error_kind, _last_error_message
+    global _ag_cache, _ag_last_success_wall, _ag_last_error_kind, _ag_last_error_message
     _cache = None
     _lock = None
     _last_success_wall = None
     _last_error_kind = None
     _last_error_message = None
+    _ag_cache = None
+    _ag_last_success_wall = None
+    _ag_last_error_kind = None
+    _ag_last_error_message = None
 
 
-def get_cache_stats() -> UsageCacheStats:
+def get_cache_stats(engine: str = "claude") -> UsageCacheStats:
     """Return a snapshot of cache observability state (#410)."""
-    age: float | None = None
+    if engine == "antigravity":
+        age: float | None = None
+        if _ag_last_success_wall is not None:
+            age = max(0.0, time.time() - _ag_last_success_wall)
+        return UsageCacheStats(
+            last_success_wall_seconds=_ag_last_success_wall,
+            cache_age_seconds=age,
+            last_error_kind=_ag_last_error_kind,
+            last_error_message=_ag_last_error_message,
+        )
+
+    age = None
     if _last_success_wall is not None:
         age = max(0.0, time.time() - _last_success_wall)
     return UsageCacheStats(
@@ -112,4 +133,46 @@ async def fetch_claude_usage_cached() -> dict[str, Any]:
         _last_error_kind = None
         _last_error_message = None
         _cache = (now, data)
+        return data
+
+
+async def fetch_antigravity_usage_cached(
+    *,
+    conversation_id: str | None = None,
+    antigravity_cmd: str | None = None,
+) -> dict[str, Any]:
+    """Return Antigravity usage data, using a 60s TTL cache with stale-while-error.
+
+    On cache hit within TTL, returns the cached dict without calling the CLI.
+    On miss, calls `fetch_antigravity_usage()` and stores the result. If the
+    underlying fetch raises, returns the stale cached value if present;
+    otherwise re-raises so the caller's existing error handling still fires.
+    """
+    global _ag_cache, _ag_last_success_wall, _ag_last_error_kind, _ag_last_error_message
+    from ..telegram.commands.usage import fetch_antigravity_usage
+
+    now = time.monotonic()
+    async with _get_lock():
+        if _ag_cache is not None:
+            cached_at, cached_data = _ag_cache
+            if now - cached_at < _TTL_SECONDS:
+                return cached_data
+
+        try:
+            data = await fetch_antigravity_usage(
+                conversation_id=conversation_id,
+                antigravity_cmd=antigravity_cmd,
+            )
+        except Exception as exc:
+            _ag_last_error_kind = type(exc).__name__
+            _ag_last_error_message = str(exc) or repr(exc)
+            if _ag_cache is not None:
+                logger.debug("antigravity_usage.cache.stale_on_error")
+                return _ag_cache[1]
+            raise
+
+        _ag_last_success_wall = time.time()
+        _ag_last_error_kind = None
+        _ag_last_error_message = None
+        _ag_cache = (now, data)
         return data

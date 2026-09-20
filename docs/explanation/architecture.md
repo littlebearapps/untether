@@ -31,7 +31,7 @@ flowchart TB
 
     subgraph Runner["Runner Layer"]
         runner_proto[Runner Protocol<br/>runner.py]
-        runners[runners/<br/>claude, codex, opencode, pi, gemini, amp]
+        runners[runners/<br/>claude, codex, opencode, pi, antigravity, amp]
         schemas[schemas/<br/>JSONL decoders]
     end
 
@@ -54,7 +54,7 @@ flowchart TB
     end
 
     subgraph External["External"]
-        agent_clis[Agent CLIs<br/>claude, codex, opencode, pi, gemini, amp]
+        agent_clis[Agent CLIs<br/>claude, codex, opencode, pi, agy, amp]
         telegram_api[Telegram Bot API]
         webhook_sources[Webhook Sources<br/>GitHub, CI, etc.]
     end
@@ -225,7 +225,7 @@ flowchart TD
     D -->|Codex| D2["codex exec --json<br/>[resume &lt;token&gt;] -"]
     D -->|Pi| D3["pi --print --mode json<br/>--session &lt;id&gt; &lt;prompt&gt;"]
     D -->|OpenCode| D4["opencode run --format json<br/>[--session id] -- &lt;prompt&gt;"]
-    D -->|Gemini| D5["gemini --output-format stream-json<br/>[--resume id] --prompt=&lt;prompt&gt;"]
+    D -->|Antigravity| D5["agy --output-format stream-json<br/>[--conversation id] --prompt=&lt;prompt&gt;"]
     D -->|Amp| D6["amp --stream-json<br/>-x &lt;prompt&gt;"]
 
     D1 --> E[Spawn Subprocess<br/>anyio.open_process]
@@ -301,7 +301,7 @@ flowchart TD
         codex[codex.py]
         opencode[opencode.py]
         pi[pi.py]
-        gemini[gemini.py]
+        antigravity[antigravity.py]
         amp[amp.py]
     end
 
@@ -310,7 +310,7 @@ flowchart TD
         codex_s[codex.py]
         opencode_s[opencode.py]
         pi_s[pi.py]
-        gemini_s[gemini.py]
+        antigravity_s[antigravity.py]
         amp_s[amp.py]
     end
 
@@ -318,7 +318,7 @@ flowchart TD
     codex --> codex_s
     opencode --> opencode_s
     pi --> pi_s
-    gemini --> gemini_s
+    antigravity --> antigravity_s
     amp --> amp_s
 
     cli --> router[router.py]

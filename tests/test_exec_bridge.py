@@ -5171,7 +5171,43 @@ class TestClassifyJsonlEvent:
 
         assert _classify_jsonl_event({"type": "ToolExecutionEnd"}) == "tool_result"
 
-    def test_gemini_tool_result_direct(self) -> None:
+    def test_antigravity_step_update_tool_result(self) -> None:
+        from untether.runner import _classify_jsonl_event
+
+        assert (
+            _classify_jsonl_event(
+                {
+                    "event": "step_update",
+                    "step_update": {"step_type": "tool", "state": "DONE"},
+                }
+            )
+            == "tool_result"
+        )
+        assert (
+            _classify_jsonl_event(
+                {
+                    "event": "step_update",
+                    "step_update": {"step_type": "tool", "state": "ACTIVE"},
+                }
+            )
+            == "other"
+        )
+
+    def test_antigravity_step_update_assistant(self) -> None:
+        from untether.runner import _classify_jsonl_event
+
+        assert (
+            _classify_jsonl_event(
+                {
+                    "event": "step_update",
+                    "step_update": {"step_type": "agent_response"},
+                }
+            )
+            == "assistant"
+        )
+        assert _classify_jsonl_event({"event": "result"}) == "assistant"
+
+    def test_generic_tool_result_direct(self) -> None:
         from untether.runner import _classify_jsonl_event
 
         assert _classify_jsonl_event({"type": "tool_result"}) == "tool_result"

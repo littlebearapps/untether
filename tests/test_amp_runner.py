@@ -42,7 +42,7 @@ def test_amp_resume_format_and_extract() -> None:
         engine=ENGINE, value="T-abc-def-123"
     )
     assert runner.extract_resume("`claude --resume sid`") is None
-    assert runner.extract_resume("`gemini --resume abc`") is None
+    assert runner.extract_resume("`agy --conversation abc`") is None
 
 
 def test_translate_success_fixture() -> None:

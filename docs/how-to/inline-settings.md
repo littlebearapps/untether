@@ -39,7 +39,7 @@ Listen: all
 <!-- TODO: capture screenshot: config-menu-v035 — /config home page with 2-column toggle layout -->
 
 !!! note "Engine-specific controls"
-    The home page adapts to the current engine. **Claude Code** shows Plan mode, Ask mode, and Diff preview under "Agent controls". **Codex CLI** shows **Approval policy** (full auto / safe). **Gemini CLI** shows **Approval mode** (read-only / edit files / full access). Engines without interactive controls (OpenCode, Pi, Amp) skip the agent controls section entirely.
+    The home page adapts to the current engine. **Claude Code** shows Plan mode, Ask mode, and Diff preview under "Agent controls". **Codex CLI** shows **Approval policy** (full auto / safe). **Antigravity CLI** shows **Approval mode** (read-only / edit files / full access). Engines without interactive controls (OpenCode, Pi, Amp) skip the agent controls section entirely.
 
 ## Navigate sub-pages
 
@@ -65,9 +65,10 @@ When you tap a setting button:
 Some settings have more than two states and use a different layout:
 
 - **Plan mode** — three options (off / on / auto) shown as separate buttons in a 2+1 split: `[Off] [On]` on the first row, `[Auto] [Clear override]` on the second
-- **Approval mode** (Gemini) — three options (read-only / edit files / full access)
+- **Approval mode** (Antigravity) — three options (read-only / edit files / full access)
 - **Effort** (Claude Code) — low / medium / high / xhigh / max
 - **Reasoning** (Codex) — minimal / low / medium / high / xhigh
+- **Effort** (Antigravity) — low / medium / high
 
 The active option is marked with a ✓ prefix. Tap a different option to switch.
 
@@ -75,11 +76,11 @@ The active option is marked with a ✓ prefix. Tap a different option to switch.
 
 Settings are engine-specific and only appear when relevant:
 
-- **Plan mode** — Claude Code only. Codex and Gemini have their own pre-run policies instead.
+- **Plan mode** — Claude Code only. Codex and Antigravity have their own pre-run policies instead.
 - **Approval policy** — Codex CLI only. Toggle between "full auto" (default, all tools approved) and "safe" (untrusted tools blocked via `--ask-for-approval untrusted`). This is a pre-run policy — not interactive mid-run approval.
-- **Approval mode** — Gemini CLI only. Toggle between "read-only" (default, write tools blocked), "edit files" (file reads/writes OK, shell commands blocked via `--approval-mode auto_edit`), and "full access" (all tools approved via `--approval-mode yolo`). This is a pre-run policy.
+- **Approval mode** — Antigravity CLI only. Toggle between "read-only", "edit files" (`accept-edits`), and "full access" (`auto`). This is a pre-run policy.
 - **Ask mode** and **Diff preview** — Claude Code only. Hidden for other engines.
-- **Reasoning** — Claude Code and Codex only. Hidden for OpenCode, Pi, Gemini, and Amp.
+- **Reasoning / Effort** — Claude Code, Codex, Pi, and Antigravity. Hidden for OpenCode and Amp.
 - **Engine & model** — always visible. Engine and model are merged into a single page. Shows the current engine and model override; to set a model, use `/model set <name>`.
 
 When you switch engines via the Engine & model page, the home page automatically shows or hides the relevant controls.
@@ -95,14 +96,14 @@ When you switch engines via the Engine & model page, the home page automatically
 | Verbose | off, on | Yes (chat prefs) |
 | Diff preview | off, on | Yes (chat prefs) |
 | Engine & model | any configured engine + model | Yes (chat prefs) |
-| Effort / Reasoning | Claude: low, medium, high, xhigh, max; Codex: minimal, low, medium, high, xhigh | Yes (chat prefs) |
+| Effort / Reasoning | Claude: low, medium, high, xhigh, max; Codex: minimal, low, medium, high, xhigh; Antigravity: low, medium, high | Yes (chat prefs) |
 | Cost & usage | API cost, subscription usage, budget, auto-cancel | Yes (chat prefs) |
 | Resume line | off, on | Yes (chat prefs) |
 | Listen | all, mentions | Yes (chat prefs) |
 | Budget enabled | off, on | Yes (chat prefs) |
 | Budget auto-cancel | off, on | Yes (chat prefs) |
 
-Approval policy appears instead of Plan mode when the engine is Codex CLI. Approval mode appears instead of Plan mode when the engine is Gemini CLI.
+Approval policy appears instead of Plan mode when the engine is Codex CLI. Approval mode appears instead of Plan mode when the engine is Antigravity CLI.
 
 ### Triggers page {#triggers-page}
 

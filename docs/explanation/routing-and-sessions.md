@@ -24,7 +24,7 @@ Untether supports four ways to continue a thread:
    - Resume the most recent session in the project directory, regardless of where it was started.
    - Useful for picking up a CLI session (iTerm, tmux, mosh) from Telegram while away from the terminal.
    - Uses each engine's native "continue" flag (`--continue`, `resume --last`, `--resume latest`).
-   - Works with Claude, Codex, OpenCode, Pi, and Gemini. Not supported for AMP. See the [cross-environment resume guide](../how-to/cross-environment-resume.md).
+   - Works with Claude, Codex, OpenCode, Pi, and Antigravity. Not supported for AMP. See the [cross-environment resume guide](../how-to/cross-environment-resume.md).
 
 Reply-to-continue works even if topics or chat sessions are enabled.
 

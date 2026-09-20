@@ -1,6 +1,6 @@
-# Untether — Gemini Instructions
+# Untether — Instructions for Antigravity CLI (agy)
 
-Telegram bridge for AI coding agents. Control Claude Code, Codex, OpenCode, Pi, Gemini CLI, and Amp from your phone or any device — agents run on your machine in the background while you're away from the terminal. Features interactive permissions, voice input, cost tracking, and live progress streaming.
+Telegram bridge for AI coding agents. Control Claude Code, Codex, OpenCode, Pi, Antigravity CLI, and Amp from your phone or any device — agents run on your machine in the background while you're away from the terminal. Features interactive permissions, voice input, cost tracking, and live progress streaming.
 
 ## Stack & conventions
 
@@ -41,7 +41,7 @@ Telegram <-> TelegramPresenter <-> RunnerBridge <-> Runner
 ## Key files
 
 - runners/claude.py — Claude Code runner with interactive features
-- runners/gemini.py — Gemini CLI runner
+- runners/antigravity.py — Antigravity CLI (`agy`) runner
 - runners/amp.py — AMP CLI runner (Sourcegraph)
 - runner_bridge.py — Runner-to-transport bridge
 - cost_tracker.py — Per-run/daily cost tracking

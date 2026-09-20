@@ -126,7 +126,7 @@ AMP uses a Claude Code-compatible JSONL protocol with a `type` discriminator. Th
 
 #### Usage accumulation
 
-Unlike Gemini (which reports usage once in `result.stats`), AMP reports per-message `usage` in assistant messages. The runner accumulates `input_tokens` and `output_tokens` across all assistant messages and builds the final usage dict at completion.
+Unlike Antigravity (which reports usage once in the terminal `result`), AMP reports per-message `usage` in assistant messages. The runner accumulates `input_tokens` and `output_tokens` across all assistant messages and builds the final usage dict at completion.
 
 ---
 

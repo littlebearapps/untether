@@ -116,7 +116,7 @@ There is no migration step — the new mode takes effect on restart.
 
 These work identically in all three modes:
 
-- All 6 engine runners (Claude, Codex, OpenCode, Pi, Gemini, AMP)
+- All 6 engine runners (Claude, Codex, OpenCode, Pi, Antigravity, AMP)
 - All commands except `/ctx` and `/topic` (workspace-only)
 - Permission control (approve/deny/discuss, plan mode)
 - AskUserQuestion with option buttons

@@ -74,7 +74,7 @@ Error:
 ## Notes
 
 * AMP's protocol is Claude Code-compatible — `system(init)`, `assistant`, `user`, `result` follow the same shapes.
-* Tool use and tool results are embedded in `message.content` blocks (not top-level events like Gemini).
+* Tool use and tool results are embedded in `message.content` blocks.
 * `usage` is per-message in `assistant` events — accumulate `input_tokens` and `output_tokens` across messages for session totals.
 * `parent_tool_use_id` in `assistant`/`user` messages indicates subagent nesting.
 * `stop_reason` can be `end_turn` (final text) or `tool_use` (pending tool call).

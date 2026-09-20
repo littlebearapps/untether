@@ -374,15 +374,15 @@ class TestOpenCodeBuildArgs:
 
 
 # ---------------------------------------------------------------------------
-# Gemini
+# Antigravity
 # ---------------------------------------------------------------------------
 
 
-class TestGeminiBuildArgs:
+class TestAntigravityBuildArgs:
     def _runner(self, **kwargs: Any):
-        from untether.runners.gemini import GeminiRunner
+        from untether.runners.antigravity import AntigravityRunner
 
-        return GeminiRunner(**kwargs)
+        return AntigravityRunner(**kwargs)
 
     def test_basic_prompt(self) -> None:
         runner = self._runner()
@@ -395,96 +395,82 @@ class TestGeminiBuildArgs:
     def test_resume(self) -> None:
         runner = self._runner()
         state = runner.new_state("hello", None)
-        token = ResumeToken(engine="gemini", value="abc123")
+        token = ResumeToken(engine="antigravity", value="abc123")
         args = runner.build_args("hello", token, state=state)
-        assert "--resume" in args
-        idx = args.index("--resume")
+        assert "--conversation" in args
+        idx = args.index("--conversation")
         assert args[idx + 1] == "abc123"
 
     def test_continue(self) -> None:
         runner = self._runner()
         state = runner.new_state("hello", None)
-        token = ResumeToken(engine="gemini", value="", is_continue=True)
+        token = ResumeToken(engine="antigravity", value="", is_continue=True)
         args = runner.build_args("hello", token, state=state)
-        assert "--resume" in args
-        idx = args.index("--resume")
-        assert args[idx + 1] == "latest"
+        assert "--continue" in args
+        assert "--conversation" not in args
 
     def test_model_override(self) -> None:
         runner = self._runner()
         state = runner.new_state("hello", None)
-        opts = RunOptions(model="gemini-2.5-pro")
-        with patch("untether.runners.gemini.get_run_options", return_value=opts):
+        opts = RunOptions(model="gemini-3.8-flash-high")
+        with patch("untether.runners.antigravity.get_run_options", return_value=opts):
             args = runner.build_args("hello", None, state=state)
         assert "--model" in args
         idx = args.index("--model")
-        assert args[idx + 1] == "gemini-2.5-pro"
+        assert args[idx + 1] == "gemini-3.8-flash-high"
 
     def test_model_from_config(self) -> None:
-        runner = self._runner(model="gemini-2.0-flash")
+        runner = self._runner(model="gemini-3.8-flash-medium")
         state = runner.new_state("hello", None)
-        with patch("untether.runners.gemini.get_run_options", return_value=None):
+        with patch("untether.runners.antigravity.get_run_options", return_value=None):
             args = runner.build_args("hello", None, state=state)
         assert "--model" in args
         idx = args.index("--model")
-        assert args[idx + 1] == "gemini-2.0-flash"
+        assert args[idx + 1] == "gemini-3.8-flash-medium"
 
-    def test_permission_mode(self) -> None:
+    def test_permission_mode_plan(self) -> None:
         runner = self._runner()
         state = runner.new_state("hello", None)
-        opts = RunOptions(permission_mode="auto")
-        with patch("untether.runners.gemini.get_run_options", return_value=opts):
+        opts = RunOptions(permission_mode="plan")
+        with patch("untether.runners.antigravity.get_run_options", return_value=opts):
             args = runner.build_args("hello", None, state=state)
-        assert "--approval-mode" in args
-        idx = args.index("--approval-mode")
-        assert args[idx + 1] == "auto"
+        assert "--mode" in args
+        idx = args.index("--mode")
+        assert args[idx + 1] == "plan"
 
-    def test_permission_mode_auto_edit(self) -> None:
+    def test_permission_mode_accept_edits(self) -> None:
         runner = self._runner()
         state = runner.new_state("hello", None)
-        opts = RunOptions(permission_mode="auto_edit")
-        with patch("untether.runners.gemini.get_run_options", return_value=opts):
+        opts = RunOptions(permission_mode="accept-edits")
+        with patch("untether.runners.antigravity.get_run_options", return_value=opts):
             args = runner.build_args("hello", None, state=state)
-        assert "--approval-mode" in args
-        idx = args.index("--approval-mode")
-        assert args[idx + 1] == "auto_edit"
+        assert "--mode" in args
+        idx = args.index("--mode")
+        assert args[idx + 1] == "accept-edits"
 
-    def test_permission_mode_none_defaults_to_yolo(self) -> None:
+    def test_reasoning_effort(self) -> None:
         runner = self._runner()
         state = runner.new_state("hello", None)
-        opts = RunOptions(permission_mode=None)
-        with patch("untether.runners.gemini.get_run_options", return_value=opts):
+        opts = RunOptions(reasoning="high")
+        with patch("untether.runners.antigravity.get_run_options", return_value=opts):
             args = runner.build_args("hello", None, state=state)
-        assert "--approval-mode" in args
-        idx = args.index("--approval-mode")
-        assert args[idx + 1] == "yolo"
+        assert "--effort" in args
+        idx = args.index("--effort")
+        assert args[idx + 1] == "high"
 
-    def test_run_options_none_defaults_to_yolo(self) -> None:
+    def test_dangerously_skip_permissions_default(self) -> None:
         runner = self._runner()
         state = runner.new_state("hello", None)
-        with patch("untether.runners.gemini.get_run_options", return_value=None):
+        with patch("untether.runners.antigravity.get_run_options", return_value=None):
             args = runner.build_args("hello", None, state=state)
-        assert "--approval-mode" in args
-        idx = args.index("--approval-mode")
-        assert args[idx + 1] == "yolo"
+        assert "--dangerously-skip-permissions" in args
 
-    def test_skip_trust_default_includes_flag(self) -> None:
-        """#471 — runs should pass --skip-trust by default so headless runs
-        work outside ~/.gemini/trustedFolders.json."""
-        runner = self._runner()
+    def test_dangerously_skip_permissions_opt_out(self) -> None:
+        runner = self._runner(dangerously_skip_permissions=False)
         state = runner.new_state("hello", None)
-        with patch("untether.runners.gemini.get_run_options", return_value=None):
+        with patch("untether.runners.antigravity.get_run_options", return_value=None):
             args = runner.build_args("hello", None, state=state)
-        assert "--skip-trust" in args
-
-    def test_skip_trust_opt_out_omits_flag(self) -> None:
-        """#471 — `[gemini] skip_trust = false` opts out so Gemini's own
-        project-local trust gate is enforced (security-conscious deployments)."""
-        runner = self._runner(skip_trust=False)
-        state = runner.new_state("hello", None)
-        with patch("untether.runners.gemini.get_run_options", return_value=None):
-            args = runner.build_args("hello", None, state=state)
-        assert "--skip-trust" not in args
+        assert "--dangerously-skip-permissions" not in args
 
 
 # ---------------------------------------------------------------------------
@@ -574,21 +560,21 @@ class TestAmpBuildArgs:
 
 
 # ---------------------------------------------------------------------------
-# Gemini prompt sanitisation (#194)
+# Antigravity prompt sanitisation (#194)
 # ---------------------------------------------------------------------------
 
 
-class TestGeminiPromptSanitisation:
+class TestAntigravityPromptSanitisation:
     def _runner(self, **kwargs: Any):
-        from untether.runners.gemini import GeminiRunner
+        from untether.runners.antigravity import AntigravityRunner
 
-        return GeminiRunner(**kwargs)
+        return AntigravityRunner(**kwargs)
 
     def test_flag_like_prompt_sanitised(self) -> None:
         """Prompts starting with - are sanitised in --prompt= value (#194)."""
         runner = self._runner()
         state = runner.new_state("--help", None)
-        with patch("untether.runners.gemini.get_run_options", return_value=None):
+        with patch("untether.runners.antigravity.get_run_options", return_value=None):
             args = runner.build_args("--help", None, state=state)
         prompt_arg = [a for a in args if a.startswith("--prompt=")]
         assert len(prompt_arg) == 1
@@ -597,7 +583,7 @@ class TestGeminiPromptSanitisation:
     def test_normal_prompt_unchanged(self) -> None:
         runner = self._runner()
         state = runner.new_state("hello world", None)
-        with patch("untether.runners.gemini.get_run_options", return_value=None):
+        with patch("untether.runners.antigravity.get_run_options", return_value=None):
             args = runner.build_args("hello world", None, state=state)
         prompt_arg = [a for a in args if a.startswith("--prompt=")]
         assert prompt_arg[0] == "--prompt=hello world"

@@ -248,11 +248,11 @@ class TestFooterWithMetaLine:
 
     def test_progress_footer_combined(self) -> None:
         """Progress messages show combined 🏷 dir + model line."""
-        tracker = ProgressTracker(engine="gemini")
+        tracker = ProgressTracker(engine="antigravity")
         meta = {"model": "gemini-2.5-pro"}
         evt = StartedEvent(
-            engine="gemini",
-            resume=ResumeToken(engine="gemini", value="abc123"),
+            engine="antigravity",
+            resume=ResumeToken(engine="antigravity", value="abc123"),
             meta=meta,
         )
         tracker.note_event(evt)
@@ -343,13 +343,13 @@ class TestCrossEngineFooter:
             footer == "\N{LABEL} dir: untether @master | sonnet 4.5 \N{MIDDLE DOT} plan"
         )
 
-    def test_gemini_model(self) -> None:
+    def test_antigravity_model(self) -> None:
         footer = self._render_footer(
-            "gemini",
-            meta={"model": "gemini-2.5-pro"},
-            context_line="dir: gemini-test",
+            "antigravity",
+            meta={"model": "gemini-3.8-flash-high"},
+            context_line="dir: antigravity-test",
         )
-        assert footer == "\N{LABEL} dir: gemini-test | gemini-2.5-pro"
+        assert footer == "\N{LABEL} dir: antigravity-test | gemini-3.8-flash-high"
 
     def test_amp_with_mode(self) -> None:
         footer = self._render_footer(
@@ -418,13 +418,13 @@ class TestCrossEngineFooter:
             == "\N{LABEL} dir: untether @master | opus 4.6 (1M) \N{MIDDLE DOT} plan"
         )
 
-    def test_gemini_auto_model(self) -> None:
+    def test_antigravity_auto_model(self) -> None:
         footer = self._render_footer(
-            "gemini",
+            "antigravity",
             meta={"model": "auto-gemini-3"},
-            context_line="dir: gemini-test",
+            context_line="dir: ag-test",
         )
-        assert footer == "\N{LABEL} dir: gemini-test | gemini-3"
+        assert footer == "\N{LABEL} dir: ag-test | gemini-3"
 
     def test_neither_dir_nor_model(self) -> None:
         footer = self._render_footer("codex", meta=None, context_line=None)

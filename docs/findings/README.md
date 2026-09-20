@@ -11,7 +11,7 @@ re-deriving provider/current-truth facts from memory.
 Whenever a decision depends on **external or current truth** that drifts and must
 not be answered from model memory:
 
-- an engine CLI's actual behaviour (Claude/Codex/OpenCode/Pi/Gemini/AMP flags,
+- an engine CLI's actual behaviour (Claude/Codex/OpenCode/Pi/Antigravity/AMP flags,
   resume semantics, event shapes),
 - a provider's billing / API / rate-limit model (the research gate in `/plan`),
 - a library's current API (before planning against it),

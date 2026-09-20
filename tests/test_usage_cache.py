@@ -250,3 +250,67 @@ class TestCacheStatsObservability:
         stats = get_cache_stats()
         # Last error recorded.
         assert stats.last_error_kind == "ValueError"
+
+
+class TestAntigravityCache:
+    @pytest.mark.anyio
+    async def test_antigravity_cache_hit_and_stats(self, monkeypatch):
+        from untether.utils.usage_cache import (
+            fetch_antigravity_usage_cached,
+            get_cache_stats,
+            reset_cache,
+        )
+
+        reset_cache()
+        call_count = 0
+
+        async def _fake_fetch(*, conversation_id=None, antigravity_cmd=None):
+            nonlocal call_count
+            call_count += 1
+            return {
+                "engine": "antigravity",
+                "groups": [{"name": "Gemini"}],
+            }
+
+        monkeypatch.setattr(
+            "untether.telegram.commands.usage.fetch_antigravity_usage", _fake_fetch
+        )
+
+        first = await fetch_antigravity_usage_cached(conversation_id="conv1")
+        second = await fetch_antigravity_usage_cached(conversation_id="conv1")
+        assert call_count == 1
+        assert first == second
+        stats = get_cache_stats("antigravity")
+        assert stats.last_success_wall_seconds is not None
+        assert stats.last_error_kind is None
+
+    @pytest.mark.anyio
+    async def test_antigravity_stale_while_error(self, monkeypatch):
+        from untether.utils.usage_cache import (
+            fetch_antigravity_usage_cached,
+            get_cache_stats,
+            reset_cache,
+        )
+
+        reset_cache()
+        fail = False
+
+        async def _fake_fetch(*, conversation_id=None, antigravity_cmd=None):
+            if fail:
+                raise RuntimeError("CLI failed")
+            return {"engine": "antigravity", "groups": []}
+
+        monkeypatch.setattr(
+            "untether.telegram.commands.usage.fetch_antigravity_usage", _fake_fetch
+        )
+
+        first = await fetch_antigravity_usage_cached()
+        fail = True
+        # Force TTL expiry by monkeypatching time
+        from untether.utils import usage_cache
+
+        monkeypatch.setattr(usage_cache.time, "monotonic", lambda: 1000000.0)
+        second = await fetch_antigravity_usage_cached()
+        assert second == first
+        stats = get_cache_stats("antigravity")
+        assert stats.last_error_kind == "RuntimeError"

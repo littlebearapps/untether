@@ -42,7 +42,7 @@ Untether-tuned (AT's `[data-quality]` → `[engine-quirk]`):
 | `[issue-quality]` | issue/PR hygiene — missing repro, weak labels, unlinked changelog |
 | `[novel-pattern]` | a reusable technique discovered this session |
 | `[guardrail-block]` | a release-guard/permission block hit (and whether it was right) |
-| `[engine-quirk]` | upstream CLI behaviour (Claude/Codex/OpenCode/Pi/Gemini/AMP) — not an Untether bug |
+| `[engine-quirk]` | upstream CLI behaviour (Claude/Codex/OpenCode/Pi/Antigravity/AMP) — not an Untether bug |
 | `[cost]` | spend/rate-limit surprises (billing split, budget hit, throttle) |
 | `[meta]` | about the kaizen/loop system itself |
 
