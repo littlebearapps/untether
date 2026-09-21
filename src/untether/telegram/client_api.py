@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 import re
+from pathlib import Path
 from typing import Any, Protocol, TypeVar
+from urllib.parse import urlsplit
 
+import anyio
 import httpx
 import msgspec
 
@@ -141,13 +144,20 @@ class HttpBotClient:
         self,
         token: str,
         *,
+        base_url: str = "https://api.telegram.org",
         timeout_s: float = 30,
         http_client: httpx.AsyncClient | None = None,
     ) -> None:
         if not token:
             raise ValueError("Telegram token is empty")
-        self._base = f"https://api.telegram.org/bot{token}"
-        self._file_base = f"https://api.telegram.org/file/bot{token}"
+        api_base = base_url.rstrip("/")
+        self._local_mode = urlsplit(api_base).hostname in {
+            "127.0.0.1",
+            "::1",
+            "localhost",
+        }
+        self._base = f"{api_base}/bot{token}"
+        self._file_base = f"{api_base}/file/bot{token}"
         self._http_client = http_client or httpx.AsyncClient(timeout=timeout_s)
         self._owns_http_client = http_client is None
         # #598: last failure reason per (method, chat_id, message_id). The
@@ -395,6 +405,16 @@ class HttpBotClient:
         return self._decode_result(method="getFile", payload=result, model=File)
 
     async def download_file(self, file_path: str) -> bytes | None:
+        if self._local_mode and file_path.startswith("/"):
+            try:
+                return await anyio.to_thread.run_sync(Path(file_path).read_bytes)
+            except OSError as exc:
+                logger.error(
+                    "telegram.local_file_read_error",
+                    error=str(exc),
+                    error_type=exc.__class__.__name__,
+                )
+                return None
         # #204: reject file_path values that could redirect the request away
         # from api.telegram.org.  Telegram's documented shape is a relative
         # path ("documents/file_123.txt") — any scheme marker or parent-dir

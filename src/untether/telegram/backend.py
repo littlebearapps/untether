@@ -232,7 +232,11 @@ class TelegramBackend(TransportBackend):
             trigger_config=trigger_config,
         )
         progress_cfg = _load_progress_settings()
-        bot = TelegramClient(token, group_chat_rps=progress_cfg.group_chat_rps)
+        bot = TelegramClient(
+            token,
+            base_url=settings.bot_api_base_url,
+            group_chat_rps=progress_cfg.group_chat_rps,
+        )
         transport = TelegramTransport(bot)
         formatter = MarkdownFormatter(
             max_actions=progress_cfg.max_actions,

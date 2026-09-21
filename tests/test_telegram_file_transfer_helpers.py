@@ -1159,14 +1159,16 @@ async def test_handle_file_get_zip_too_large(tmp_path: Path, monkeypatch) -> Non
 
 
 @pytest.mark.anyio
-async def test_handle_file_get_file_too_large(tmp_path: Path, monkeypatch) -> None:
+async def test_handle_file_get_file_too_large(tmp_path: Path) -> None:
     transport = FakeTransport()
-    cfg = replace(make_cfg(transport), runtime=_runtime(tmp_path))
+    cfg = replace(
+        make_cfg(transport),
+        runtime=_runtime(tmp_path),
+        files=TelegramFilesSettings(max_download_bytes=1),
+    )
     target = tmp_path / "notes.txt"
     target.write_bytes(b"data")
     msg = _msg("/file get")
-
-    monkeypatch.setattr(TelegramFilesSettings, "max_download_bytes", 1)
 
     await transfer._handle_file_get(
         cfg,
@@ -1182,17 +1184,19 @@ async def test_handle_file_get_file_too_large(tmp_path: Path, monkeypatch) -> No
 
 @pytest.mark.anyio
 async def test_handle_file_get_oversize_detected_on_read(
-    tmp_path: Path, monkeypatch
+    tmp_path: Path,
 ) -> None:
     """#211: streaming read caps at max+1 bytes — TOCTOU between stat() and
     read() can no longer slip an over-sized file through."""
     transport = FakeTransport()
-    cfg = replace(make_cfg(transport), runtime=_runtime(tmp_path))
+    cfg = replace(
+        make_cfg(transport),
+        runtime=_runtime(tmp_path),
+        files=TelegramFilesSettings(max_download_bytes=50),
+    )
     target = tmp_path / "notes.txt"
     target.write_bytes(b"x" * 100)
     msg = _msg("/file get")
-
-    monkeypatch.setattr(TelegramFilesSettings, "max_download_bytes", 50)
 
     await transfer._handle_file_get(
         cfg,
@@ -1209,16 +1213,18 @@ async def test_handle_file_get_oversize_detected_on_read(
 
 @pytest.mark.anyio
 async def test_handle_file_get_at_size_limit_succeeds(
-    tmp_path: Path, monkeypatch
+    tmp_path: Path,
 ) -> None:
     """#211: file exactly at the cap is delivered (read returns max bytes)."""
     transport = FakeTransport()
-    cfg = replace(make_cfg(transport), runtime=_runtime(tmp_path))
+    cfg = replace(
+        make_cfg(transport),
+        runtime=_runtime(tmp_path),
+        files=TelegramFilesSettings(max_download_bytes=50),
+    )
     target = tmp_path / "notes.txt"
     target.write_bytes(b"x" * 50)
     msg = _msg("/file get")
-
-    monkeypatch.setattr(TelegramFilesSettings, "max_download_bytes", 50)
 
     await transfer._handle_file_get(
         cfg,

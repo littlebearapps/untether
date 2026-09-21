@@ -277,6 +277,24 @@ async def test_download_file_rejects_path_with_scheme_or_traversal(
         await client.close()
 
 
+@pytest.mark.anyio
+async def test_download_file_reads_local_bot_api_absolute_path(tmp_path) -> None:
+    target = tmp_path / "document.bin"
+    target.write_bytes(b"local payload")
+    client = HttpBotClient(
+        "token",
+        base_url="http://127.0.0.1:8081",
+        http_client=httpx.AsyncClient(),
+    )
+
+    try:
+        result = await client.download_file(str(target))
+    finally:
+        await client.close()
+
+    assert result == b"local payload"
+
+
 # ---------------------------------------------------------------------------
 # #598 — failure reasons recorded for later correlation
 # ---------------------------------------------------------------------------
