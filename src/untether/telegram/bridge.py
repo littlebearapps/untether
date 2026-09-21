@@ -6,10 +6,8 @@ from typing import TYPE_CHECKING, Literal, cast
 
 from pydantic import SecretStr
 
-from ..context import RunContext
 from ..logging import get_logger
 from ..markdown import MarkdownFormatter, MarkdownParts
-from ..model import ResumeToken
 from ..progress import ProgressState
 from ..runner_bridge import ExecBridgeConfig, RunningTask, RunningTasks
 from ..scheduler import ThreadScheduler
@@ -533,25 +531,14 @@ async def handle_callback_cancel(
 
 async def send_with_resume(
     cfg: TelegramBridgeConfig,
-    enqueue: Callable[
-        [
-            int,
-            int,
-            str,
-            ResumeToken,
-            RunContext | None,
-            int | None,
-            tuple[int, int | None] | None,
-            MessageRef | None,
-        ],
-        Awaitable[None],
-    ],
+    enqueue: Callable[..., Awaitable[None]],
     running_task: RunningTask,
     chat_id: int,
     user_msg_id: int,
     thread_id: int | None,
     session_key: tuple[int, int | None] | None,
     text: str,
+    image_paths: tuple[str, ...] = (),
 ) -> None:
     from .loop import send_with_resume as _send_with_resume
 
@@ -564,6 +551,7 @@ async def send_with_resume(
         thread_id,
         session_key,
         text,
+        image_paths,
     )
 
 

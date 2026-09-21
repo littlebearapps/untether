@@ -163,6 +163,30 @@ def test_parse_incoming_update_document_message() -> None:
     assert msg.document.file_name == "doc.txt"
     assert msg.document.mime_type == "text/plain"
     assert msg.document.file_size == 4321
+    assert msg.document.is_image is False
+
+
+def test_parse_incoming_update_image_document() -> None:
+    update = Update(
+        update_id=1,
+        message=Message(
+            message_id=10,
+            caption="inspect this",
+            chat=Chat(id=123, type="private"),
+            document=Document(
+                file_id="image-id",
+                file_name="diagram.png",
+                mime_type="image/png",
+                file_size=4321,
+            ),
+        ),
+    )
+
+    msg = parse_incoming_update(update, chat_id=123)
+
+    assert isinstance(msg, TelegramIncomingMessage)
+    assert msg.document is not None
+    assert msg.document.is_image is True
 
 
 def test_parse_incoming_update_photo_message() -> None:
@@ -196,7 +220,9 @@ def test_parse_incoming_update_photo_message() -> None:
     assert msg.document is not None
     assert msg.document.file_id == "large"
     assert msg.document.file_name is None
+    assert msg.document.mime_type == "image/jpeg"
     assert msg.document.file_size == 1000
+    assert msg.document.is_image is True
 
 
 def test_parse_incoming_update_media_group_id() -> None:
@@ -248,6 +274,7 @@ def test_parse_incoming_update_video_message() -> None:
     assert msg.document.file_name == "video.mp4"
     assert msg.document.mime_type == "video/mp4"
     assert msg.document.file_size == 4242
+    assert msg.document.is_image is False
 
 
 def test_parse_incoming_update_sticker_message() -> None:
