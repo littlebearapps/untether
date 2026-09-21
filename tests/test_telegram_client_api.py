@@ -69,7 +69,21 @@ def test_parse_envelope_ok() -> None:
 @pytest.mark.anyio
 async def test_client_methods_build_params_and_decode() -> None:
     payloads = {
-        "getUpdates": [{"update_id": 1}],
+        "getUpdates": [
+            {
+                "update_id": 1,
+                "message": {
+                    "message_id": 9,
+                    "chat": {"id": 1, "type": "private"},
+                    "text": "new",
+                    "quote": {"text": "selected"},
+                    "reply_to_message": {
+                        "message_id": 8,
+                        "caption": "caption",
+                    },
+                },
+            }
+        ],
         "getFile": {"file_path": "path"},
         "sendMessage": {"message_id": 1, "chat": {"id": 1, "type": "private"}},
         "sendDocument": {"message_id": 2, "chat": {"id": 1, "type": "private"}},
@@ -107,6 +121,11 @@ async def test_client_methods_build_params_and_decode() -> None:
 
     updates = await client.get_updates(offset=10, allowed_updates=["message"])
     assert updates and updates[0].update_id == 1
+    assert updates[0].message is not None
+    assert updates[0].message.quote is not None
+    assert updates[0].message.quote.text == "selected"
+    assert updates[0].message.reply_to_message is not None
+    assert updates[0].message.reply_to_message.caption == "caption"
 
     assert await client.get_file("file") is not None
 
