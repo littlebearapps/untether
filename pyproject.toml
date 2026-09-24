@@ -97,7 +97,7 @@ dev = [
     "ty>=0.0.8",
 ]
 docs = [
-    "mkdocstrings-python>=2.0.1",
+    "mkdocstrings-python>=2.0.5",
     "zensical>=0.0.15",
 ]
 
