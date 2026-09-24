@@ -2536,6 +2536,7 @@ async def run_main_loop(
                             cfg.voice_transcription_url_allowlist
                         ),
                         language=cfg.voice_transcription_language,
+                        prompt=cfg.voice_transcription_prompt,
                         # #703: unset → the shipped vocabulary default;
                         # explicit "" → omit the parameter.
                         prompt=resolve_transcription_prompt(

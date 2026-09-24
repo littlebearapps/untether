@@ -300,6 +300,7 @@ def test_voice_transcription_language_default_none(tmp_path: Path) -> None:
     assert settings.transports.telegram.voice_transcription_language is None
 
 
+def test_voice_transcription_prompt_normalised(tmp_path: Path) -> None:
 def test_voice_transcription_prompt_stripped(tmp_path: Path) -> None:
     """#691: vocabulary-bias prompt is stripped at parse time."""
     config_path = tmp_path / "untether.toml"
@@ -308,6 +309,14 @@ def test_voice_transcription_prompt_stripped(tmp_path: Path) -> None:
         'bot_token = "tok"\n'
         "chat_id = 123\n"
         "allow_any_user = true\n"
+        'voice_transcription_prompt = "  Qdrant, Bernstein  "\n',
+        encoding="utf-8",
+    )
+    settings, _ = load_settings(config_path)
+    assert settings.transports.telegram.voice_transcription_prompt == "Qdrant, Bernstein"
+
+
+def test_voice_transcription_prompt_default_none(tmp_path: Path) -> None:
         'voice_transcription_prompt = " Trello, Untether, Claude Code "\n',
         encoding="utf-8",
     )

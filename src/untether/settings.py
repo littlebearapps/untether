@@ -166,6 +166,9 @@ class TelegramTransportSettings(BaseModel):
     # stops Whisper-family models mis-guessing the language on short
     # utterances ('Continue' → '계속').
     voice_transcription_language: NonEmptyStr | None = None
+    # #691: optional vocabulary/context hint forwarded to OpenAI-compatible
+    # transcription providers. Useful for project names and technical terms.
+    voice_transcription_prompt: NonEmptyStr | None = None
     # #691: optional vocabulary-bias prompt forwarded to the STT API — steers
     # the decoder toward domain proper nouns ('trollo' → Trello). Effect is
     # model-dependent; keep it to genuinely high-frequency nouns — an
