@@ -221,7 +221,7 @@ Rules in `.claude/rules/` auto-load when editing matching files:
 
 ## Tests
 
-3362 unit tests, 80% coverage threshold. Integration testing against `@untether_dev_bot` is **mandatory before every release** — see `docs/reference/integration-testing.md` for the full playbook with per-release-type tier requirements (patch/minor/major). All integration test tiers are fully automated by Claude Code via Telegram MCP tools and Bash.
+3369 unit tests, 80% coverage threshold. Integration testing against `@untether_dev_bot` is **mandatory before every release** — see `docs/reference/integration-testing.md` for the full playbook with per-release-type tier requirements (patch/minor/major). All integration test tiers are fully automated by Claude Code via Telegram MCP tools and Bash.
 
 Key test files:
 
@@ -272,10 +272,10 @@ Key test files:
 - `test_session_quarantine.py` — 7 tests: QuarantineStore round-trip persistence, engine isolation, malformed/corrupt state-file resilience, age-based pruning to disk, singleton accessor + injection (#631/#632)
 - `test_claude_task_map.py` — 23 tests: native background-task map from `system/task_*` events (#776) — schema decode incl. `command_lifecycle`, live/terminal statuses, snapshot reconciliation, Monitor as `local_bash`, native-vs-legacy handle precedence, ScheduleWakeup legacy handle, `claude.task.registered`/`ended` logs (#662)
 - `test_live_session_runner.py` — 11 tests: real ClaudeRunner over the control-channel fake `tests/fake_clis/fake_claude_live.py` — `TurnEvent` segments for bg Bash/Agent wake, Monitor ticks, scheduled wake-up and injected follow-ups (uuid attribution), subagent events not opening a turn, kill switch, resume guard, #505 inherited-fd regression
-- `test_live_session_lifecycle.py` — 8 tests: idle close (rc=0, no quarantine), task hold until wake, max-hold notice + graceful close, pending ScheduleWakeup hold, pending-request pause, absolute cap, close-grace SIGTERM + quarantine, close/injection race guard
-- `test_live_session_bridge.py` — 17 tests: stall monitor quiet while live-idle, `FollowupTurnRouter` (lazy progress, approvals attach to the turn, interrupted-turn final, follow-up anchors, notice anchor), turn headers, closing-notice wording
+- `test_live_session_lifecycle.py` — 10 tests: idle close (rc=0, no quarantine), task hold until wake, max-hold notice + graceful close, pending ScheduleWakeup hold, pending-request pause, absolute cap, close-grace SIGTERM + quarantine, close/injection race guard, errored first result closes the session at once, idle close backs off for a just-written follow-up
+- `test_live_session_bridge.py` — 19 tests: stall monitor quiet while live-idle and run-level edits standing down during follow-up turns, `FollowupTurnRouter` (lazy progress created once under concurrency, approvals attach to the turn, interrupted-turn final, follow-up anchors, notice anchor), turn headers, closing-notice wording
 - `test_live_session_harness.py` — 5 tests: real `handle_message` + ClaudeRunner + fake live CLI — 🔔 wake message after turn 1 (#591 ordering), short vs tool-using wake turns, Monitor notify policy, alias release, max-hold notice
-- `test_live_session_injection.py` — 13 tests: scheduler `inject_job` hook and live pump (regression: follow-up stuck behind a live run), queue-semantics `inject_when_idle`, FIFO, closing fallback, end-to-end one-spawn follow-up
+- `test_live_session_injection.py` — 16 tests: scheduler `inject_job` hook and live pump (regression: follow-up stuck behind a live run), queue-semantics `inject_when_idle`, FIFO, closing fallback, changed chat settings close instead of inject, end-to-end one-spawn follow-up
 - `test_live_session_control.py` — 8 tests: unique-run counting with turn aliases, live-idle detection, drain closes idle sessions only, graceful `/cancel` of an idle live session, `/cancel` fallback dedupe
 - `test_session_costs.py` — 11 tests: cost ledger persistence/prune, deltas (ledger / seeded baseline / new session / unknown baseline), staging-evidence sequence, live follow-up turn budget sees the delta (#778)
 - `test_noop_resume_harness.py` — 6 tests: end-to-end no-op empty-resume reproduction via the fake-claude CLI (`tests/fake_clis/fake_claude_noop_resume.py`) — real ClaudeRunner + handle_message drive quarantine-and-fresh recovery, healthy-resume negative control, linger-scenario emission shape (#634); also hosts the `trailing_user_after_result` scenario proving a post-`result` frame never reaches the stream (#716)
