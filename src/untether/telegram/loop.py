@@ -1720,7 +1720,21 @@ async def run_main_loop(
                 if sdnotify.notify("STOPPING=1"):
                     logger.debug("sdnotify.stopping")
 
-                active = len(state.running_tasks)
+                from ..runner_bridge import (
+                    close_idle_live_sessions,
+                    unique_running_tasks,
+                )
+
+                # #776: live Claude sessions that are only holding between
+                # turns are closed gracefully now (the CLI stops their
+                # background tasks and exits in seconds) instead of holding
+                # the drain for up to their 30 min background hold.
+                closed_live = await close_idle_live_sessions(
+                    state.running_tasks, "drain"
+                )
+                if closed_live:
+                    logger.info("shutdown.live_sessions_closed", count=closed_live)
+                active = len(unique_running_tasks(state.running_tasks))
                 pending_at = at_scheduler.active_count()
                 # #289: include loop fires in the shutdown summary so ops
                 # can see how many were pending at drain time.  Pending
@@ -1751,7 +1765,8 @@ async def run_main_loop(
                     sole_task = None
                     if active == 1:
                         sole_ref, sole_task = next(
-                            iter(state.running_tasks.items()), (None, None)
+                            iter(unique_running_tasks(state.running_tasks)),
+                            (None, None),
                         )
                     sole_chat = sole_ref.channel_id if sole_ref is not None else None
                     origin_matches = (
@@ -1784,8 +1799,16 @@ async def run_main_loop(
                     # Bounded so a hanging transport send can't eat the 30s
                     # margin between DRAIN_TIMEOUT_S and TimeoutStopSec=150.
                     with anyio.move_on_after(10.0):
+                        from ..runner_bridge import running_task_is_live_idle
+
+                        # Idle live sessions get their own "closing" notice.
                         await _notify_drain_start(
-                            cfg.exec_cfg.transport, state.running_tasks
+                            cfg.exec_cfg.transport,
+                            {
+                                ref: task
+                                for ref, task in state.running_tasks.items()
+                                if not running_task_is_live_idle(task)
+                            },
                         )
 
                     # Wait for all runs to complete (up to drain timeout).
@@ -1799,10 +1822,12 @@ async def run_main_loop(
                             if _drain_tick % 10 == 0:
                                 logger.info(
                                     "shutdown.drain.progress",
-                                    remaining=len(state.running_tasks),
+                                    remaining=len(
+                                        unique_running_tasks(state.running_tasks)
+                                    ),
                                 )
 
-                    remaining = len(state.running_tasks)
+                    remaining = len(unique_running_tasks(state.running_tasks))
                     if remaining > 0:
                         logger.warning(
                             "shutdown.drain_timeout",
@@ -1992,8 +2017,13 @@ async def run_main_loop(
             def _is_chat_busy(chat_id_in: int) -> bool:
                 """Drop a loop fire if the chat already has a run in flight
                 — mirrors upstream's "no catch-up" semantic."""
-                for ref in state.running_tasks:
-                    if getattr(ref, "channel_id", None) == chat_id_in:
+                from ..runner_bridge import running_task_is_live_idle
+
+                for ref, task in state.running_tasks.items():
+                    # #776: a live session idling between turns isn't busy.
+                    if getattr(
+                        ref, "channel_id", None
+                    ) == chat_id_in and not running_task_is_live_idle(task):
                         return True
                 return False
 

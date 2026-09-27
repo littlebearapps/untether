@@ -64,8 +64,14 @@ async def handle_cancel(
             await reply(text="nothing is currently running for that message.")
             return
         # Fallback: single active run or single queued job in this chat
+        # #776: one entry per run — a live run is also registered under each
+        # follow-up turn's message.
+        from ...runner_bridge import unique_running_tasks
+
         matches = [
-            (ref, t) for ref, t in running_tasks.items() if ref.channel_id == chat_id
+            (ref, t)
+            for ref, t in unique_running_tasks(running_tasks)
+            if ref.channel_id == chat_id
         ]
         if len(matches) == 1:
             ref, task = matches[0]

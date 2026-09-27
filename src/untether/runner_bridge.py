@@ -5,7 +5,7 @@ import os
 import signal as _signal
 import threading
 import time
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -3403,6 +3403,7 @@ async def run_runner_with_cancel(
 ) -> RunOutcome:
     outcome = RunOutcome()
     start_time = time.monotonic()
+    runner_finished = anyio.Event()
     try:
         async with anyio.create_task_group() as tg:
 
@@ -3509,11 +3510,24 @@ async def run_runner_with_cancel(
                     if aclose is not None:
                         with anyio.move_on_after(30, shield=True):
                             await aclose()
+                    runner_finished.set()
                     tg.cancel_scope.cancel()
 
             async def wait_cancel(task: RunningTask) -> None:
                 await task.cancel_requested.wait()
                 outcome.cancelled = True
+                # #776: /cancel (or /new) on a live session that is only
+                # holding between turns closes its stdin — the CLI stops its
+                # background tasks and exits cleanly (no SIGTERM, nothing
+                # quarantined). An active turn is still killed as before.
+                if running_task_is_live_idle(task) and task.resume is not None:
+                    from .runners.claude import close_live_session
+
+                    if await close_live_session(
+                        task.resume.value, "cancel", notice=True
+                    ):
+                        with anyio.move_on_after(20):
+                            await runner_finished.wait()
                 tg.cancel_scope.cancel()
 
             async def thread_pid() -> None:
@@ -3640,6 +3654,50 @@ async def send_result_message(
             tag=delete_tag,
         )
         await cfg.transport.delete(ref=progress_ref)
+
+
+def unique_running_tasks(
+    running_tasks: Mapping[MessageRef, RunningTask],
+) -> list[tuple[MessageRef, RunningTask]]:
+    """One entry per run (#776): a live run is registered under its progress
+    message *and* each follow-up turn's message, so counting keys over-counts."""
+    seen: set[int] = set()
+    out: list[tuple[MessageRef, RunningTask]] = []
+    for ref, task in running_tasks.items():
+        if id(task) in seen:
+            continue
+        seen.add(id(task))
+        out.append((ref, task))
+    return out
+
+
+def running_task_is_live_idle(task: Any) -> bool:
+    """True when the run is a live Claude session sitting between turns — it
+    is holding for background work or a follow-up, not doing work (#776)."""
+    stream = getattr(getattr(task, "edits", None), "stream", None)
+    engine_state = getattr(stream, "engine_state", None)
+    if engine_state is None or not getattr(engine_state, "live_mode", False):
+        return False
+    return bool(getattr(engine_state, "completed_turns", 0)) and not getattr(
+        engine_state, "turn_open", True
+    )
+
+
+async def close_idle_live_sessions(
+    running_tasks: Mapping[MessageRef, RunningTask], reason: str
+) -> int:
+    """Gracefully close every idle live session (drain / restart, #776 D-7)."""
+    closed = 0
+    for _ref, task in unique_running_tasks(running_tasks):
+        if not running_task_is_live_idle(task) or task.resume is None:
+            continue
+        if task.resume.engine != "claude":
+            continue
+        from .runners.claude import close_live_session
+
+        if await close_live_session(task.resume.value, reason, notice=True):
+            closed += 1
+    return closed
 
 
 # ── #776 live-session follow-up turns ──────────────────────────────────────
@@ -4767,6 +4825,7 @@ async def handle_message(
             "max_hold": "still running after the background hold limit",
             "abs_cap": "still running at the session time limit",
             "drain": "still running — Untether is restarting",
+            "cancel": "stopped by /cancel",
         }.get(str(reason), "still running")
         names = ", ".join(t[:60] for t in tasks[:3])
         more = f" (+{len(tasks) - 3} more)" if len(tasks) > 3 else ""
