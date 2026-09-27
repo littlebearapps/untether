@@ -212,6 +212,8 @@ def user_text(obj: dict) -> str:
 
 def serve_followups() -> None:
     """Answer each further user line as its own turn until stdin EOF."""
+    while _deferred:
+        _lines.put(_deferred.pop(0))
     while True:
         obj = next_user(None)
         if obj is None or obj == "timeout":
@@ -232,9 +234,21 @@ def shutdown() -> None:
     sys.exit(0)
 
 
+_deferred: list[dict] = []
+
+
 def wait_idle_or_eof(seconds: float) -> dict | None | str:
-    """Sleep while idle but notice EOF (the CLI would kill bg work)."""
-    return next_user(seconds)
+    """Sleep while idle but notice EOF (the CLI would kill bg work). A user
+    line arriving meanwhile is queued, as the real CLI queues it (F7) — it
+    runs as its own turn once the scripted wake is done."""
+    deadline = time.monotonic() + seconds
+    while True:
+        got = next_user(max(0.0, deadline - time.monotonic()))
+        if got is None:
+            return None
+        if got == "timeout":
+            return "timeout"
+        _deferred.append(got)
 
 
 def scenario_bg_bash_wake(first: dict) -> None:
@@ -251,8 +265,6 @@ def scenario_bg_bash_wake(first: dict) -> None:
     init()
     text("GOT: BG-FINISHED")
     result("GOT: BG-FINISHED")
-    if isinstance(got, dict):
-        _lines.put(got)
     serve_followups()
 
 

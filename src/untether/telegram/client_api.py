@@ -298,6 +298,12 @@ class HttpBotClient:
                 url=_safe_url(resp.request.url),
                 error=str(exc),
                 body=body,
+                # Which message a failed edit/delete targeted (diagnostic).
+                message_id=(
+                    request_payload.get("message_id")
+                    if isinstance(request_payload, dict)
+                    else None
+                ),
             )
             self._record_api_error(
                 method, request_payload, f"http {resp.status_code}: {body[:200]}"
