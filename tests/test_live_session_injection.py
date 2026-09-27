@@ -244,3 +244,65 @@ async def test_followup_to_live_session_is_injected_not_resumed(
     assert edits and edits[-1]["ref"] == placeholder
     assert rb._FOLLOWUP_ANCHORS == {}
     os.environ.pop("FAKE_CLAUDE_SCENARIO", None)
+
+
+async def test_scheduler_offers_next_job_while_a_live_run_is_in_flight() -> None:
+    """Regression (found on @untether_dev_bot): the worker awaited run_job for
+    the whole live run, so a follow-up for the same session never reached the
+    injector until the session closed and then resumed in a new process."""
+    ran: list[str] = []
+    injected: list[str] = []
+    release = anyio.Event()
+
+    async def run_job(job: ThreadJob) -> None:
+        ran.append(job.text)
+        if job.text == "first":
+            await release.wait()  # a live run: lasts until its session closes
+
+    async def inject(job: ThreadJob) -> bool:
+        if job.text == "first":
+            return False
+        injected.append(job.text)
+        return True
+
+    async with anyio.create_task_group() as tg:
+        sched = ThreadScheduler(task_group=tg, run_job=run_job, inject_job=inject)
+        sched._live_pump_interval_s = 0.01
+        await sched.enqueue(_job(text="first"))
+        await anyio.sleep(0.05)
+        await sched.enqueue(_job(text="second"))
+        with anyio.fail_after(2):
+            while not injected:
+                await anyio.sleep(0.01)
+        release.set()
+    assert ran == ["first"]
+    assert injected == ["second"]
+
+
+async def test_scheduler_pump_keeps_job_queued_when_not_injectable() -> None:
+    ran: list[str] = []
+    release = anyio.Event()
+    attempts = 0
+
+    async def run_job(job: ThreadJob) -> None:
+        ran.append(job.text)
+        if job.text == "first":
+            await release.wait()
+
+    async def inject(job: ThreadJob) -> bool:
+        nonlocal attempts
+        if job.text == "second":
+            attempts += 1
+        return False
+
+    async with anyio.create_task_group() as tg:
+        sched = ThreadScheduler(task_group=tg, run_job=run_job, inject_job=inject)
+        sched._live_pump_interval_s = 0.01
+        await sched.enqueue(_job(text="first"))
+        await anyio.sleep(0.03)
+        await sched.enqueue(_job(text="second"))
+        await anyio.sleep(0.1)
+        assert ran == ["first"] and attempts >= 2
+        assert sched.queued_for_chat(123)  # still cancellable while queued
+        release.set()
+    assert ran == ["first", "second"]

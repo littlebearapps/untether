@@ -26,10 +26,21 @@ async def inject_live_followup(job: ThreadJob) -> bool:
     if token.engine != "claude":
         return False
     from .runner_bridge import pop_followup_anchor, register_followup_anchor
-    from .runners.claude import inject_when_idle, is_session_accepting
+    from .runners.claude import (
+        get_live_session,
+        inject_when_idle,
+        is_session_accepting,
+    )
 
     session_id = token.value
     if not is_session_accepting(session_id):
+        live = get_live_session(session_id)
+        logger.debug(
+            "claude.live_session.inject_skipped",
+            session_id=session_id,
+            live=live is not None,
+            closing=bool(live and live.closing),
+        )
         return False
     command_uuid = str(uuid.uuid4())
     register_followup_anchor(
