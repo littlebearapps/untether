@@ -133,7 +133,7 @@ async def test_cancel_idle_live_session_closes_gracefully(
     assert stream.proc_returncode == 0
     assert not get_quarantine_store().is_quarantined("claude", "fake-live-session")
     texts = [c["message"].text for c in holder["t"].send_calls]
-    assert any("stopped by /cancel" in t and "bg b1" in t for t in texts)
+    assert any("Stopped 1 background task: bg b1" in t for t in texts)
     assert running_tasks == {}
 
 

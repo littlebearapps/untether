@@ -185,4 +185,5 @@ async def test_max_hold_sends_closing_notice(monkeypatch: pytest.MonkeyPatch) ->
     transport = await _drive("bg_bash_wake", wake_s=30)
     notices = [t for t in _texts(transport) if "Closing session" in t]
     assert len(notices) == 1
-    assert "1 background task" in notices[0] and "bg b1" in notices[0]
+    assert "1 background task still running" in notices[0]
+    assert "bg b1" in notices[0] and "Stopping it" in notices[0]

@@ -3755,6 +3755,32 @@ _TURN_PUSH_REASONS = frozenset({"task_finished", "scheduled_wakeup", "unknown"})
 _TURN_LAZY_PROGRESS_S = 5.0
 
 
+def _live_closing_notice(reason: str, tasks: list[str]) -> str:
+    """User-facing text for a live session closing over running background
+    tasks (#776)."""
+    n = len(tasks)
+    names = ", ".join(t[:60] for t in tasks[:3])
+    if n > 3:
+        names += f" (+{n - 3} more)"
+    noun = f"{n} background task{'s' if n != 1 else ''}"
+    if reason == "cancel":
+        return f"\N{BLACK SQUARE FOR STOP} Stopped {noun}: {names}. Reply to continue."
+    if reason == "drain":
+        return (
+            f"\N{HOURGLASS WITH FLOWING SAND} Untether is restarting — stopping "
+            f"{noun}: {names}. Reply to continue."
+        )
+    it = "it" if n == 1 else "they"
+    why = {
+        "max_hold": "the background hold limit",
+        "abs_cap": "the session time limit",
+    }.get(reason, "the session limit")
+    return (
+        f"\N{HOURGLASS WITH FLOWING SAND} Closing session — {noun} still running "
+        f"at {why}: {names}. Stopping {it}; reply to continue."
+    )
+
+
 def _turn_header(evt: TurnEvent) -> str | None:
     if evt.reason == "followup":
         return None
@@ -3819,6 +3845,9 @@ class FollowupTurnRouter:
         self._tg: Any = None
         self.current: _TurnCtx | None = None
         self.turns_delivered = 0
+        # The message the live session's latest turn answered — where
+        # session-level notices (closing, restart) belong.
+        self.last_reply_to: MessageRef = default_reply_to
 
     def bind_task_group(self, tg: Any) -> None:
         self._tg = tg
@@ -3853,6 +3882,7 @@ class FollowupTurnRouter:
             progress_ref=placeholder,
         )
         self.current = ctx
+        self.last_reply_to = ctx.reply_to
         if self._tg is not None:
             self._tg.start_soon(self._lazy_progress, ctx)
         return ctx
@@ -4820,26 +4850,15 @@ async def handle_message(
         tasks = [t for t in payload.get("tasks", []) if isinstance(t, str)]
         if not tasks:
             return
-        reason = payload.get("reason")
-        why = {
-            "max_hold": "still running after the background hold limit",
-            "abs_cap": "still running at the session time limit",
-            "drain": "still running — Untether is restarting",
-            "cancel": "stopped by /cancel",
-        }.get(str(reason), "still running")
-        names = ", ".join(t[:60] for t in tasks[:3])
-        more = f" (+{len(tasks) - 3} more)" if len(tasks) > 3 else ""
-        text = (
-            f"\N{HOURGLASS WITH FLOWING SAND} Closing session — {len(tasks)} "
-            f"background task{'s' if len(tasks) != 1 else ''} {why}: "
-            f"{names}{more}. They will be stopped; reply to continue."
-        )
+        text = _live_closing_notice(str(payload.get("reason")), tasks)
         try:
             await cfg.transport.send(
                 channel_id=incoming.channel_id,
                 message=RenderedMessage(text=text),
                 options=SendOptions(
-                    reply_to=user_ref, notify=True, thread_id=incoming.thread_id
+                    reply_to=turn_router.last_reply_to,
+                    notify=True,
+                    thread_id=incoming.thread_id,
                 ),
             )
         except Exception:  # noqa: BLE001

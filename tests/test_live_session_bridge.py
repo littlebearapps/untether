@@ -228,3 +228,38 @@ async def test_router_followup_turn_anchors_to_its_message() -> None:
 )
 def test_turn_headers(reason: str, detail: dict, expected: str | None) -> None:
     assert rb._turn_header(_turn("started", reason=reason, detail=detail)) == expected
+
+
+@pytest.mark.parametrize(
+    ("reason", "tasks", "expected"),
+    [
+        (
+            "cancel",
+            ["a"],
+            "\N{BLACK SQUARE FOR STOP} Stopped 1 background task: a. Reply to continue.",
+        ),
+        (
+            "drain",
+            ["a", "b"],
+            "\N{HOURGLASS WITH FLOWING SAND} Untether is restarting — stopping 2 background tasks: a, b. Reply to continue.",
+        ),
+        (
+            "max_hold",
+            ["a"],
+            "\N{HOURGLASS WITH FLOWING SAND} Closing session — 1 background task still running at the background hold limit: a. Stopping it; reply to continue.",
+        ),
+    ],
+)
+def test_live_closing_notice_wording(
+    reason: str, tasks: list[str], expected: str
+) -> None:
+    assert rb._live_closing_notice(reason, tasks) == expected
+
+
+async def test_router_tracks_last_reply_anchor_for_notices() -> None:
+    rec = _Recorder()
+    anchor = MessageRef(channel_id=1, message_id=77)
+    router = _router(rec, anchors={"cmd-9": (anchor, None)})
+    assert router.last_reply_to == USER_REF
+    await router.on_turn(_turn("started", reason="followup", command_uuid="cmd-9"))
+    assert router.last_reply_to == anchor
