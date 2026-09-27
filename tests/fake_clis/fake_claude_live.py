@@ -406,7 +406,27 @@ def scenario_ignore_eof(first: dict) -> None:
     time.sleep(60)
 
 
+def scenario_error_first(first: dict) -> None:
+    # The first result is an error (usage limit / API error) — the session
+    # must not be kept live.
+    init()
+    emit(
+        {
+            "type": "result",
+            "subtype": "error_during_execution",
+            "is_error": True,
+            "duration_ms": 500,
+            "duration_api_ms": 400,
+            "num_turns": 1,
+            "result": "API Error: overloaded",
+            "total_cost_usd": 0.001,
+        }
+    )
+    serve_followups()
+
+
 _SCENARIOS = {
+    "error_first": scenario_error_first,
     "ignore_eof": scenario_ignore_eof,
     "bg_bash_wake": scenario_bg_bash_wake,
     "bg_agent_wake": scenario_bg_agent_wake,

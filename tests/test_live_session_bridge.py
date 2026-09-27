@@ -268,3 +268,51 @@ async def test_router_tracks_last_reply_anchor_for_notices() -> None:
     assert router.last_reply_to == USER_REF
     await router.on_turn(_turn("started", reason="followup", command_uuid="cmd-9"))
     assert router.last_reply_to == anchor
+
+
+async def test_router_creates_progress_once_under_concurrent_requests(
+    monkeypatch,
+) -> None:
+    """Review finding: the lazy timer and the first action could both create
+    a progress message (the first orphaned, its alias leaked)."""
+    monkeypatch.setattr(rb, "_TURN_LAZY_PROGRESS_S", 0.0)
+    rec = _Recorder()
+    real_create = rec.create
+
+    async def slow_create(ctx):
+        await anyio.sleep(0.05)  # a send in flight
+        await real_create(ctx)
+
+    rec.create = slow_create  # type: ignore[method-assign]
+    router = rb.FollowupTurnRouter(
+        new_tracker=lambda: ProgressTracker(engine="claude"),
+        create_progress=slow_create,
+        close_progress=rec.close,
+        deliver=rec.deliver,
+        default_reply_to=USER_REF,
+        followup_notify=False,
+    )
+    async with anyio.create_task_group() as tg:
+        router.bind_task_group(tg)
+        await router.on_turn(_turn("started"))
+        await anyio.sleep(0.01)  # lazy task now mid-create
+        await router.on_event(_action())
+        await router.on_turn(_turn("completed", ok=True, answer="x"))
+    assert rec.created == [2]
+    assert len(rec.delivered) == 1
+
+
+def test_run_level_edits_stand_down_during_followup_turns() -> None:
+    """Review finding: the run's own stall monitor saw a wake turn as a stall
+    (it no longer receives the turn's events) and could auto-cancel it."""
+    transport = FakeTransport()
+    edits = _make_edits(transport, _KeyboardPresenter(), clock=_FakeClock(start=0.0))
+    edits.stream = _make_stream(
+        last_event_type="assistant",
+        engine_state=_make_engine_state(
+            live_mode=True, completed_turns=1, turn_open=True
+        ),
+    )
+    assert edits._is_live_session_idle() is False  # a turn's own edits
+    edits.run_level = True
+    assert edits._is_live_session_idle() is True  # the run's edits stand down

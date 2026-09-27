@@ -1361,6 +1361,8 @@ class ProgressEdits:
         # repaints and the #470 post-result closing message so neither can
         # overwrite or trail the already-delivered answer.
         self._finalizing: bool = False
+        # #776: True for the run's own ProgressEdits (not a follow-up turn's).
+        self.run_level: bool = False
         self._min_render_interval = min_render_interval
         self._sleep = sleep
         self._last_render_at: float = 0.0
@@ -2427,9 +2429,15 @@ class ProgressEdits:
         engine_state = getattr(stream, "engine_state", None) if stream else None
         if engine_state is None or not getattr(engine_state, "live_mode", False):
             return False
-        return bool(getattr(engine_state, "completed_turns", 0)) and not getattr(
-            engine_state, "turn_open", True
-        )
+        if not getattr(engine_state, "completed_turns", 0):
+            return False
+        if self.run_level:
+            # The run's own progress monitor stands down after the run's
+            # result: each follow-up turn has its own ProgressEdits watching
+            # it, and this one no longer receives the turn's events (review
+            # finding — it would warn/auto-cancel a healthy wake turn).
+            return True
+        return not getattr(engine_state, "turn_open", True)
 
     def _post_result_idle_age_seconds(self) -> float | None:
         """#333 Tier 2: seconds since ``result_received_at`` was armed.
@@ -3812,6 +3820,9 @@ class _TurnCtx:
     edits_scope: anyio.CancelScope | None = None
     lazy_scope: anyio.CancelScope | None = None
     delivery: dict[str, bool] = field(default_factory=lambda: {"sent": False})
+    # Serialises progress creation: the lazy timer and the first action can
+    # both ask for it (review finding, #776).
+    progress_lock: anyio.Lock = field(default_factory=anyio.Lock)
 
 
 class FollowupTurnRouter:
@@ -3892,18 +3903,25 @@ class FollowupTurnRouter:
     async def _lazy_progress(self, ctx: _TurnCtx) -> None:
         scope = anyio.CancelScope()
         ctx.lazy_scope = scope
+        # Only the wait is cancellable: cancelling a create mid-send would
+        # orphan the message it just sent.
         with scope:
             await anyio.sleep(_TURN_LAZY_PROGRESS_S)
-            if self.current is ctx and ctx.edits is None and not ctx.delivery["sent"]:
-                await self._ensure_progress(ctx)
+        if scope.cancelled_caught:
+            return
+        if self.current is ctx:
+            await self._ensure_progress(ctx)
 
     async def _ensure_progress(self, ctx: _TurnCtx) -> None:
-        if ctx.edits is not None or ctx.delivery["sent"]:
-            return
-        try:
-            await self._create_progress(ctx)
-        except Exception:  # noqa: BLE001 — a progress message is best-effort
-            logger.warning("live_turn.progress_failed", turn=ctx.turn, exc_info=True)
+        async with ctx.progress_lock:
+            if ctx.edits is not None or ctx.delivery["sent"]:
+                return
+            try:
+                await self._create_progress(ctx)
+            except Exception:  # noqa: BLE001 — a progress message is best-effort
+                logger.warning(
+                    "live_turn.progress_failed", turn=ctx.turn, exc_info=True
+                )
 
     async def on_turn(self, evt: TurnEvent) -> None:
         if evt.phase == "started":
@@ -3930,11 +3948,16 @@ class FollowupTurnRouter:
         )
         if ctx.lazy_scope is not None:
             ctx.lazy_scope.cancel()
-        try:
-            await self._deliver(completed, ctx)
-            self.turns_delivered += 1
-        except Exception:  # noqa: BLE001
-            logger.warning("live_turn.delivery_failed", turn=ctx.turn, exc_info=True)
+        # Wait out a progress send already in flight so the final replaces it
+        # rather than leaving it orphaned.
+        async with ctx.progress_lock:
+            try:
+                await self._deliver(completed, ctx)
+                self.turns_delivered += 1
+            except Exception:  # noqa: BLE001
+                logger.warning(
+                    "live_turn.delivery_failed", turn=ctx.turn, exc_info=True
+                )
         await self._finish(ctx)
 
     async def on_event(self, evt: UntetherEvent) -> None:
@@ -4319,6 +4342,7 @@ async def handle_message(
     )
 
     # Apply watchdog settings to runner and edits
+    edits.run_level = True
     watchdog = _load_watchdog_settings()
 
     def _configure_edits(target: ProgressEdits) -> None:
@@ -5039,7 +5063,7 @@ async def handle_message(
         finally:
             # #776: an unfinished follow-up turn (session closed mid-turn)
             # still gets a final so its progress message isn't orphaned.
-            with anyio.CancelScope(shield=True):
+            with anyio.move_on_after(60, shield=True):
                 await turn_router.aclose()
                 await _resolve_unrun_followups()
             if running_task is not None and running_tasks is not None:

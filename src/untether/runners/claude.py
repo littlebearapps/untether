@@ -393,7 +393,11 @@ async def _notify_live_listeners(
 
 
 async def close_live_session(
-    session_id: str, reason: str, *, notice: bool = False
+    session_id: str,
+    reason: str,
+    *,
+    notice: bool = False,
+    only_if_idle: bool = False,
 ) -> bool:
     """Gracefully close a live session's stdin (#776).
 
@@ -407,6 +411,11 @@ async def close_live_session(
         return False
     async with live.lock:
         if live.closing:
+            return False
+        if only_if_idle and (not live.idle or live.state.awaiting_injected):
+            # A follow-up was written (or a turn opened) since the caller
+            # decided to close — re-checked under the injection lock
+            # (review finding, #776).
             return False
         live.closing = True
         live.close_reason = reason
@@ -2493,6 +2502,18 @@ def _has_pending_wakeup(state: ClaudeStreamState) -> bool:
     )
 
 
+def _completed_keeps_session_live(evt: CompletedEvent) -> bool:
+    """A live session only survives a successful, non-empty first result."""
+    if not evt.ok:
+        return False
+    usage = evt.usage or {}
+    return not (
+        not (evt.answer or "").strip()
+        and (usage.get("num_turns", 1) or 0) == 0
+        and (usage.get("duration_api_ms", 1) or 0) == 0
+    )
+
+
 def _open_followup_turn(
     state: ClaudeStreamState, factory: EventFactory
 ) -> UntetherEvent:
@@ -4283,6 +4304,26 @@ class ClaudeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
                         session_id=registered_session_id,
                         pid=pid,
                     )
+                if (
+                    isinstance(evt, CompletedEvent)
+                    and state.live_mode
+                    and not _completed_keeps_session_live(evt)
+                ):
+                    # Review finding (#776): an errored or empty first result
+                    # must not leave a live session behind — the bridge only
+                    # delivers ok results early, so the error (and #596/#572
+                    # recovery) would wait for the idle close, and follow-ups
+                    # could be injected into a broken session. Close it now:
+                    # the CLI exits, the reader hits EOF, the run ends and the
+                    # error is delivered straight away.
+                    sid = evt.resume.value if evt.resume else registered_session_id
+                    if sid is not None:
+                        await close_live_session(sid, "error")
+                    logger.info(
+                        "claude.live_session.closed_after_result",
+                        session_id=sid,
+                        ok=evt.ok,
+                    )
                 yield evt
             # Drain auto-approve and auto-deny queues after EVERY line, even if no events
             # were yielded.  This prevents deadlock when auto-handled requests produce no events.
@@ -4629,10 +4670,12 @@ class ClaudeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
                         and live.hold_started is not None
                         and now - live.hold_started >= max_hold_s
                     ):
-                        await close_live_session(sid, "max_hold", notice=True)
+                        await close_live_session(
+                            sid, "max_hold", notice=True, only_if_idle=True
+                        )
                     continue
                 if now - live.idle_since >= idle_grace_s:
-                    await close_live_session(sid, "idle_no_tasks")
+                    await close_live_session(sid, "idle_no_tasks", only_if_idle=True)
         except (anyio.get_cancelled_exc_class(), KeyboardInterrupt):
             exit_reason = "cancelled"
             raise

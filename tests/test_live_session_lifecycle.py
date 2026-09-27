@@ -209,3 +209,51 @@ async def test_accepting_input_false_once_closing() -> None:
         assert await close_live_session("sid-race", "drain") is False
     finally:
         claude_mod._LIVE_SESSIONS.pop("sid-race", None)
+
+
+async def test_errored_first_result_does_not_keep_session_live(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Review finding: an errored first result left a live session behind, so
+    the error (delivered only post-return) waited for the idle close and
+    follow-ups could be injected into the broken session."""
+    import time as _time
+
+    _settings(monkeypatch, post_result_limbo_grace=30.0)  # would hold 30 s
+    started = _time.monotonic()
+    runner, events = await _run("error_first")
+    assert isinstance(events[-1], CompletedEvent) and events[-1].ok is False
+    assert not any(isinstance(e, TurnEvent) for e in events)
+    assert _engine_state(runner).live_close_reason == "error"
+    assert runner.current_stream.sigterm_sent is False
+    assert _time.monotonic() - started < 10
+
+
+async def test_idle_close_backs_off_when_a_followup_was_just_written() -> None:
+    """Review finding: the lifecycle's idle close must re-check under the
+    injection lock, or it closes stdin right after a follow-up was written."""
+
+    class _Pipe:
+        closed = False
+
+        async def aclose(self) -> None:
+            self.closed = True
+
+    pipe = _Pipe()
+    state = ClaudeStreamState()
+    state.completed_turns = 1
+    state.turn_open = False
+    state.awaiting_injected["u1"] = 0.0
+    claude_mod._LIVE_SESSIONS["sid-race2"] = LiveSession(
+        session_id="sid-race2", state=state, stdin=pipe
+    )
+    try:
+        assert (
+            await close_live_session("sid-race2", "idle_no_tasks", only_if_idle=True)
+            is False
+        )
+        assert pipe.closed is False and is_session_accepting("sid-race2")
+        # An explicit close (cancel / drain) still goes through.
+        assert await close_live_session("sid-race2", "cancel") is True
+    finally:
+        claude_mod._LIVE_SESSIONS.pop("sid-race2", None)

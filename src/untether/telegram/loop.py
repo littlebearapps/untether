@@ -1818,6 +1818,9 @@ async def run_main_loop(
                     with anyio.move_on_after(drain_timeout):
                         while state.running_tasks:
                             await sleep(1.0)
+                            # A run mid-turn at drain start goes idle when its
+                            # turn ends — close it then too (review finding).
+                            await close_idle_live_sessions(state.running_tasks, "drain")
                             _drain_tick += 1
                             if _drain_tick % 10 == 0:
                                 logger.info(
