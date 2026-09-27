@@ -262,6 +262,39 @@ def scenario_bg_agent_wake(first: dict) -> None:
     start_bg("a1", "toolu_ag", task_type="local_agent")
     tool_result("toolu_ag", "Async agent launched successfully.")
     result("agent started", turns=2)
+    # The subagent works while the parent is idle: its events carry
+    # parent_tool_use_id and must not open a parent turn (F2).
+    emit(
+        {
+            "type": "assistant",
+            "parent_tool_use_id": "toolu_ag",
+            "message": {
+                "id": "msg_sub",
+                "role": "assistant",
+                "model": "claude-haiku-fake",
+                "content": [
+                    {
+                        "type": "tool_use",
+                        "id": "toolu_sub",
+                        "name": "Bash",
+                        "input": {"command": "sleep 1"},
+                    }
+                ],
+            },
+        }
+    )
+    emit(
+        {
+            "type": "user",
+            "parent_tool_use_id": "toolu_ag",
+            "message": {
+                "role": "user",
+                "content": [
+                    {"type": "tool_result", "tool_use_id": "toolu_sub", "content": ""}
+                ],
+            },
+        }
+    )
     got = wait_idle_or_eof(WAKE_S)
     if got is None:
         shutdown()

@@ -2657,6 +2657,17 @@ def translate_claude_event(
             return out
         case claude_schema.StreamAssistantMessage() | claude_schema.StreamUserMessage():
             out = []
+            if not state.turn_open and event.parent_tool_use_id is not None:
+                # A background subagent streams its own assistant/tool events
+                # on stdout while the parent is idle (F2). They are not the
+                # parent starting a turn — keep their side effects (pending
+                # actions, task bookkeeping) but surface nothing; the wake
+                # turn comes after its task_notification. #777 renders
+                # background progress.
+                _translate_claude_event_base(
+                    event, title=title, state=state, factory=factory
+                )
+                return []
             if not state.turn_open and not _is_tool_result_only(event):
                 out.append(_open_followup_turn(state, factory))
             out.extend(

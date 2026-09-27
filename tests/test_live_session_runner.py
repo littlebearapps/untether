@@ -115,6 +115,13 @@ async def test_bg_agent_wake_actions_are_bracketed() -> None:
     )
     assert not any(isinstance(e, (StartedEvent, CompletedEvent)) for e in between)
     assert end.answer == "REPORT: all good"
+    # Regression (dev bot, B-LIVE-2): the subagent's own events while the
+    # parent idled opened a premature "unknown" turn.
+    assert start.reason == "task_finished"
+    assert len([t for t in _turns(events) if t.phase == "started"]) == 1
+    assert not any(
+        getattr(e, "action", None) and e.action.id == "toolu_sub" for e in between
+    )
 
 
 async def test_monitor_ticks_yield_one_segment_per_tick() -> None:
