@@ -16,7 +16,14 @@ from .context import RunContext
 from .error_hints import get_error_hint as _get_error_hint
 from .logging import bind_run_context, get_logger
 from .markdown import _short_model_name, format_meta_line, render_event_cli
-from .model import ActionEvent, CompletedEvent, ResumeToken, StartedEvent, UntetherEvent
+from .model import (
+    ActionEvent,
+    CompletedEvent,
+    ResumeToken,
+    StartedEvent,
+    TurnEvent,
+    UntetherEvent,
+)
 from .presenter import Presenter
 from .progress import ProgressTracker
 from .runner import _APPROVAL_PENDING_REFIRE_S, Runner
@@ -3344,6 +3351,7 @@ async def run_runner_with_cancel(
     on_thread_known: Callable[[ResumeToken, anyio.Event], Awaitable[None]] | None,
     channel_id: ChannelId = 0,
     on_completed: Callable[[CompletedEvent, RunOutcome], Awaitable[None]] | None = None,
+    turn_router: FollowupTurnRouter | None = None,
 ) -> RunOutcome:
     outcome = RunOutcome()
     start_time = time.monotonic()
@@ -3355,6 +3363,15 @@ async def run_runner_with_cancel(
                 try:
                     async for evt in events:
                         _log_runner_event(evt)
+                        # #776: follow-up turns of a live session get their
+                        # own messages; the run's progress/final stay put.
+                        if isinstance(evt, TurnEvent):
+                            if turn_router is not None:
+                                await turn_router.on_turn(evt)
+                            continue
+                        if turn_router is not None and turn_router.active:
+                            await turn_router.on_event(evt)
+                            continue
                         if isinstance(evt, StartedEvent):
                             outcome.resume = evt.resume
                             bind_run_context(
@@ -3512,6 +3529,8 @@ async def run_runner_with_cancel(
         else False,
         cancelled=outcome.cancelled,
         ok=outcome.completed.ok if outcome.completed else None,
+        # #776: turns delivered after the run's own result (live session).
+        followup_turns=turn_router.turns_delivered if turn_router else 0,
         stall_suppressions=suppression_summary,
         # #695: both events carry the model so a single grep over either
         # answers "which model ran this session?".
@@ -3573,6 +3592,209 @@ async def send_result_message(
             tag=delete_tag,
         )
         await cfg.transport.delete(ref=progress_ref)
+
+
+# ── #776 live-session follow-up turns ──────────────────────────────────────
+
+_TURN_HEADERS: dict[str, str] = {
+    "task_finished": "\N{BELL} Background task finished",
+    "scheduled_wakeup": "\N{ALARM CLOCK} Scheduled wake-up",
+    "monitor_event": "\N{SATELLITE ANTENNA} Monitor",
+    "unknown": "\N{BELL} Claude continued",
+}
+# Reasons whose final is pushed (the user is waiting for it); Monitor ticks
+# can be many per minute, so they arrive silently (#776 D-6).
+_TURN_PUSH_REASONS = frozenset({"task_finished", "scheduled_wakeup", "unknown"})
+# A wake turn gets a progress message only if it outlives this, uses a tool
+# or raises an approval (#776 D-10) — short turns send just their final.
+_TURN_LAZY_PROGRESS_S = 5.0
+
+
+def _turn_header(evt: TurnEvent) -> str | None:
+    if evt.reason == "followup":
+        return None
+    base = _TURN_HEADERS.get(evt.reason, _TURN_HEADERS["unknown"])
+    tasks = [t for t in (evt.detail or {}).get("tasks", []) if isinstance(t, str)]
+    if evt.reason == "task_finished" and tasks:
+        if len(tasks) == 1:
+            return f"{base} — {tasks[0][:80]}"
+        return f"\N{BELL} {len(tasks)} background tasks finished"
+    return base
+
+
+@dataclass(slots=True)
+class _TurnCtx:
+    """Per-turn delivery state for one follow-up turn of a live session."""
+
+    turn: int
+    reason: str
+    tracker: ProgressTracker
+    reply_to: MessageRef
+    started_at: float
+    notify: bool
+    header: str | None
+    command_uuid: str | None = None
+    edits: ProgressEdits | None = None
+    progress_ref: MessageRef | None = None
+    edits_scope: anyio.CancelScope | None = None
+    lazy_scope: anyio.CancelScope | None = None
+    delivery: dict[str, bool] = field(default_factory=lambda: {"sent": False})
+
+
+class FollowupTurnRouter:
+    """Routes a live run's TurnEvent segments to per-turn Telegram messages.
+
+    Owned by ``handle_message``; ``run_runner_with_cancel`` hands it every
+    ``TurnEvent`` plus the events that arrive while a follow-up turn is open.
+    Everything Telegram-specific is injected, so the router is testable with
+    plain callables.
+    """
+
+    def __init__(
+        self,
+        *,
+        new_tracker: Callable[[], ProgressTracker],
+        create_progress: Callable[[_TurnCtx], Awaitable[None]],
+        close_progress: Callable[[_TurnCtx], Awaitable[None]],
+        deliver: Callable[[CompletedEvent, _TurnCtx], Awaitable[None]],
+        default_reply_to: MessageRef,
+        followup_notify: bool,
+        clock: Callable[[], float] = time.monotonic,
+        anchor_for: Callable[[str | None], MessageRef | None] | None = None,
+    ) -> None:
+        self._new_tracker = new_tracker
+        self._create_progress = create_progress
+        self._close_progress = close_progress
+        self._deliver = deliver
+        self._default_reply_to = default_reply_to
+        self._followup_notify = followup_notify
+        self._clock = clock
+        self._anchor_for = anchor_for
+        self._tg: Any = None
+        self.current: _TurnCtx | None = None
+        self.turns_delivered = 0
+
+    def bind_task_group(self, tg: Any) -> None:
+        self._tg = tg
+
+    @property
+    def active(self) -> bool:
+        return self.current is not None
+
+    def _open(self, evt: TurnEvent) -> _TurnCtx:
+        anchor = None
+        if self._anchor_for is not None and evt.command_uuid:
+            anchor = self._anchor_for(evt.command_uuid)
+        notify = (
+            self._followup_notify
+            if evt.reason == "followup"
+            else evt.reason in _TURN_PUSH_REASONS
+        )
+        ctx = _TurnCtx(
+            turn=evt.turn,
+            reason=evt.reason,
+            tracker=self._new_tracker(),
+            reply_to=anchor or self._default_reply_to,
+            started_at=self._clock(),
+            notify=notify,
+            header=_turn_header(evt),
+            command_uuid=evt.command_uuid,
+        )
+        self.current = ctx
+        if self._tg is not None:
+            self._tg.start_soon(self._lazy_progress, ctx)
+        return ctx
+
+    async def _lazy_progress(self, ctx: _TurnCtx) -> None:
+        scope = anyio.CancelScope()
+        ctx.lazy_scope = scope
+        with scope:
+            await anyio.sleep(_TURN_LAZY_PROGRESS_S)
+            if self.current is ctx and ctx.edits is None and not ctx.delivery["sent"]:
+                await self._ensure_progress(ctx)
+
+    async def _ensure_progress(self, ctx: _TurnCtx) -> None:
+        if ctx.edits is not None or ctx.delivery["sent"]:
+            return
+        try:
+            await self._create_progress(ctx)
+        except Exception:  # noqa: BLE001 — a progress message is best-effort
+            logger.warning("live_turn.progress_failed", turn=ctx.turn, exc_info=True)
+
+    async def on_turn(self, evt: TurnEvent) -> None:
+        if evt.phase == "started":
+            if self.current is not None:
+                await self._finish(self.current)
+            ctx = self._open(evt)
+            logger.info(
+                "live_turn.started",
+                turn=ctx.turn,
+                reason=ctx.reason,
+                command_uuid=ctx.command_uuid,
+            )
+            return
+        ctx = self.current
+        if ctx is None or ctx.turn != evt.turn:
+            ctx = self._open(evt)
+        completed = CompletedEvent(
+            engine=evt.engine,
+            ok=bool(evt.ok),
+            answer=evt.answer or "",
+            resume=evt.resume,
+            error=evt.error,
+            usage=evt.usage,
+        )
+        if ctx.lazy_scope is not None:
+            ctx.lazy_scope.cancel()
+        try:
+            await self._deliver(completed, ctx)
+            self.turns_delivered += 1
+        except Exception:  # noqa: BLE001
+            logger.warning("live_turn.delivery_failed", turn=ctx.turn, exc_info=True)
+        await self._finish(ctx)
+
+    async def on_event(self, evt: UntetherEvent) -> None:
+        ctx = self.current
+        if ctx is None:
+            return
+        if isinstance(evt, ActionEvent) and ctx.edits is None:
+            await self._ensure_progress(ctx)
+        if ctx.edits is not None:
+            await ctx.edits.on_event(evt)
+        else:
+            ctx.tracker.note_event(evt)
+
+    async def _finish(self, ctx: _TurnCtx) -> None:
+        if ctx.lazy_scope is not None:
+            ctx.lazy_scope.cancel()
+        if self.current is ctx:
+            self.current = None
+        try:
+            await self._close_progress(ctx)
+        except Exception:  # noqa: BLE001
+            logger.debug("live_turn.close_failed", turn=ctx.turn, exc_info=True)
+
+    async def aclose(self) -> None:
+        """Run end: a turn still open lost its process (closed / killed
+        mid-turn) — tell the user rather than leave it silent or orphaned."""
+        ctx = self.current
+        if ctx is None:
+            return
+        if not ctx.delivery["sent"]:
+            logger.info("live_turn.interrupted", turn=ctx.turn, reason=ctx.reason)
+            try:
+                await self._deliver(
+                    CompletedEvent(
+                        engine=ctx.tracker.engine,
+                        ok=False,
+                        answer="",
+                        error="the session ended before this turn finished",
+                    ),
+                    ctx,
+                )
+            except Exception:  # noqa: BLE001
+                logger.debug("live_turn.interrupt_delivery_failed", exc_info=True)
+        await self._finish(ctx)
 
 
 async def handle_message(
@@ -3914,6 +4136,29 @@ async def handle_message(
 
     # Apply watchdog settings to runner and edits
     watchdog = _load_watchdog_settings()
+
+    def _configure_edits(target: ProgressEdits) -> None:
+        # #776: shared by the run's edits and each follow-up turn's edits.
+        if watchdog is None:
+            return
+        target._stall_repeat_seconds = watchdog.stall_repeat_seconds
+        target._STALL_THRESHOLD_TOOL = watchdog.tool_timeout
+        target._STALL_THRESHOLD_MCP_TOOL = watchdog.mcp_tool_timeout
+        target._STALL_THRESHOLD_SUBAGENT = watchdog.subagent_timeout
+        target._stuck_after_tool_result_enabled = (
+            watchdog.detect_stuck_after_tool_result
+        )
+        target._stuck_after_tool_result_timeout = (
+            watchdog.stuck_after_tool_result_timeout
+        )
+        target._stuck_after_tool_result_recovery_enabled = (
+            watchdog.stuck_after_tool_result_recovery_enabled
+        )
+        target._stuck_after_tool_result_recovery_delay = (
+            watchdog.stuck_after_tool_result_recovery_delay
+        )
+        target._bash_grace_seconds = watchdog.bash_grace_seconds
+
     if watchdog is not None:
         edits._stall_repeat_seconds = watchdog.stall_repeat_seconds
         edits._STALL_THRESHOLD_TOOL = watchdog.tool_timeout
@@ -3963,15 +4208,27 @@ async def handle_message(
     empty_resume = {"pending": False}
 
     async def _deliver_final(
-        completed: CompletedEvent, run_outcome: RunOutcome
+        completed: CompletedEvent,
+        run_outcome: RunOutcome,
+        *,
+        turn: _TurnCtx | None = None,
     ) -> None:
+        # #776: ``turn`` is a follow-up turn of a live session (its own
+        # tracker / progress message / anchor / header); None is the run
+        # itself and behaves exactly as before.
+        delivery = turn.delivery if turn is not None else final_delivery
+        t_tracker = turn.tracker if turn is not None else progress_tracker
+        t_edits = turn.edits if turn is not None else edits
+        t_progress_ref = turn.progress_ref if turn is not None else progress_ref
+        t_reply_to = turn.reply_to if turn is not None else user_ref
+        t_notify = turn.notify if turn is not None else cfg.final_notify
         # Idempotence: the early path and the post-return path can both
         # reach here; only the first delivery wins.
-        if final_delivery["sent"]:
+        if delivery["sent"]:
             return
         run_ok = completed.ok
         run_error = completed.error
-        elapsed_final = clock() - started_at
+        elapsed_final = clock() - (turn.started_at if turn is not None else started_at)
 
         # #510: ``completed.answer`` already has the #508 ExitPlanMode
         # plan-body prepend applied at the runner level (claude.py, on the
@@ -3984,7 +4241,8 @@ async def handle_message(
         # Auto-clear broken session: if a resumed run failed with 0 turns,
         # clear the saved session so the next message starts fresh.
         if (
-            run_ok is False
+            turn is None
+            and run_ok is False
             and resume_token is not None
             and on_resume_failed is not None
         ):
@@ -4047,7 +4305,8 @@ async def handle_message(
         # engines without usage reporting never trip this.
         empty_result_anomaly = False
         if (
-            run_ok is True
+            turn is None
+            and run_ok is True
             and not run_outcome.cancelled
             and not final_answer.strip()
             and completed.usage
@@ -4195,24 +4454,24 @@ async def handle_message(
             error=run_error,
             answer_len=len(final_answer or ""),
             elapsed_s=round(elapsed_final, 2),
-            action_count=progress_tracker.action_count,
+            action_count=t_tracker.action_count,
             resume=resume_value,
             **usage_log,
             # #695: per-run model attribution. Also gives the cost fields
             # above something to attribute to — `total_cost_usd` was
             # previously logged with no record of which model produced it.
-            **_model_log_fields(progress_tracker.meta),
+            **_model_log_fields(t_tracker.meta),
         )
         # Record session stats for /stats command
         from .session_stats import record_run as _record_stats_run
 
         _record_stats_run(
             engine=runner.engine,
-            actions=progress_tracker.action_count,
+            actions=t_tracker.action_count,
             duration_ms=int(elapsed_final * 1000),
             triggered=bool(context and context.trigger_source),
         )
-        sync_resume_token(progress_tracker, final_resume)
+        sync_resume_token(t_tracker, final_resume)
 
         # Post-outline guidance: if the session was outline-pending (user
         # clicked "Pause & Outline Plan" but Claude Code ended the run
@@ -4232,7 +4491,14 @@ async def handle_message(
                     '"approved" to proceed, or send feedback to revise.'
                 )
 
-        state = progress_tracker.snapshot(
+        if turn is not None and turn.header:
+            final_answer = (
+                f"{turn.header}\n\n{final_answer}"
+                if final_answer.strip()
+                else turn.header
+            )
+
+        state = t_tracker.snapshot(
             resume_formatter=runner.format_resume,
             context_line=context_line,
             meta_formatter=format_meta_line,
@@ -4308,41 +4574,208 @@ async def handle_message(
             status=status,
         )
 
-        can_edit_final = progress_ref is not None
-        edit_ref = None if cfg.final_notify or not can_edit_final else progress_ref
+        can_edit_final = t_progress_ref is not None
+        edit_ref = None if t_notify or not can_edit_final else t_progress_ref
 
         # #591: stop progress repaints BEFORE the send so a queued render
         # can't overwrite the final message. (The early path already set
         # this via note_final; this covers the post-return path.)
-        edits._finalizing = True
+        if t_edits is not None:
+            t_edits._finalizing = True
 
         await send_result_message(
             cfg,
             channel_id=incoming.channel_id,
-            reply_to=user_ref,
-            progress_ref=progress_ref,
+            reply_to=t_reply_to,
+            progress_ref=t_progress_ref,
             message=final_rendered,
-            notify=cfg.final_notify,
+            notify=t_notify,
             edit_ref=edit_ref,
-            replace_ref=progress_ref,
+            replace_ref=t_progress_ref,
             delete_tag="final",
             thread_id=incoming.thread_id,
         )
-        final_delivery["sent"] = True
+        delivery["sent"] = True
 
         # Unregister progress persistence after the final message is sent.
         # Must happen AFTER send_result_message() so a crash between
         # delete_ephemeral() and here still has an orphan cleanup pointer.
-        if progress_ref is not None and _PROGRESS_PERSISTENCE_PATH is not None:
+        if t_progress_ref is not None and _PROGRESS_PERSISTENCE_PATH is not None:
             from .telegram.progress_persistence import unregister_progress
 
-            session_key = f"{incoming.channel_id}:{progress_ref.message_id}"
+            session_key = f"{incoming.channel_id}:{t_progress_ref.message_id}"
             unregister_progress(_PROGRESS_PERSISTENCE_PATH, session_key)
 
     running_task: RunningTask | None = None
     if running_tasks is not None and progress_ref is not None:
         running_task = RunningTask(context=context, edits=edits)
         running_tasks[progress_ref] = running_task
+
+    # ── #776 live-session follow-up turns ─────────────────────────────────
+    outbox_early = {"delivered": False}
+
+    def _is_live_run() -> bool:
+        engine_state = getattr(edits.stream, "engine_state", None)
+        return bool(getattr(engine_state, "live_mode", False))
+
+    async def _deliver_outbox_now(reply_to_msg_id: MessageId) -> None:
+        """Deliver ``.untether-outbox/`` right after a live turn's final —
+        a live run's generator only returns when the session closes, which
+        would hold turn files back until then."""
+        if cfg.send_file is None or cfg.outbox_config is None:
+            return
+        from .telegram.outbox_delivery import deliver_outbox_files
+        from .utils.paths import get_run_base_dir
+
+        run_root = get_run_base_dir()
+        if run_root is None:
+            return
+        oc = cfg.outbox_config
+        outbox_early["delivered"] = True
+        try:
+            result = await deliver_outbox_files(
+                send_file=cfg.send_file,
+                channel_id=incoming.channel_id,
+                thread_id=incoming.thread_id,
+                reply_to_msg_id=reply_to_msg_id,
+                run_root=run_root,
+                outbox_dir=oc.outbox_dir,
+                deny_globs=oc.deny_globs,
+                max_download_bytes=oc.max_download_bytes,
+                max_files=oc.outbox_max_files,
+                cleanup=oc.outbox_cleanup,
+                deliver_directories=getattr(oc, "outbox_deliver_directories", "off"),
+            )
+        except Exception:  # noqa: BLE001
+            logger.warning("outbox.delivery_failed", exc_info=True)
+            return
+        await _surface_outbox_skipped(cfg, incoming, user_ref, result.skipped, oc)
+
+    async def _on_live_notice(kind: str, payload: dict[str, Any]) -> None:
+        if kind != "closing":
+            return
+        tasks = [t for t in payload.get("tasks", []) if isinstance(t, str)]
+        if not tasks:
+            return
+        reason = payload.get("reason")
+        why = {
+            "max_hold": "still running after the background hold limit",
+            "abs_cap": "still running at the session time limit",
+            "drain": "still running — Untether is restarting",
+        }.get(str(reason), "still running")
+        names = ", ".join(t[:60] for t in tasks[:3])
+        more = f" (+{len(tasks) - 3} more)" if len(tasks) > 3 else ""
+        text = (
+            f"\N{HOURGLASS WITH FLOWING SAND} Closing session — {len(tasks)} "
+            f"background task{'s' if len(tasks) != 1 else ''} {why}: "
+            f"{names}{more}. They will be stopped; reply to continue."
+        )
+        try:
+            await cfg.transport.send(
+                channel_id=incoming.channel_id,
+                message=RenderedMessage(text=text),
+                options=SendOptions(
+                    reply_to=user_ref, notify=True, thread_id=incoming.thread_id
+                ),
+            )
+        except Exception:  # noqa: BLE001
+            logger.warning("live_session.notice_failed", exc_info=True)
+
+    async def _on_run_completed(
+        completed: CompletedEvent, run_outcome: RunOutcome
+    ) -> None:
+        await _deliver_final(completed, run_outcome)
+        if not _is_live_run():
+            return
+        await _deliver_outbox_now(user_ref.message_id)
+        sid = completed.resume or run_outcome.resume
+        if sid is not None and runner.engine == "claude":
+            from .runners.claude import add_live_session_listener
+
+            add_live_session_listener(sid.value, _on_live_notice)
+
+    def _new_turn_tracker() -> ProgressTracker:
+        tracker = ProgressTracker(engine=runner.engine, clock=clock)
+        if progress_tracker.meta:
+            tracker.meta = {
+                k: v for k, v in progress_tracker.meta.items() if k != "complete"
+            }
+        tracker.resume = progress_tracker.resume
+        return tracker
+
+    async def _create_turn_progress(ctx: _TurnCtx) -> None:
+        st = await send_initial_progress(
+            cfg,
+            channel_id=incoming.channel_id,
+            reply_to=ctx.reply_to,
+            label="working",
+            tracker=ctx.tracker,
+            resume_formatter=runner.format_resume,
+            context_line=context_line,
+            thread_id=incoming.thread_id,
+        )
+        if st.ref is None:
+            return
+        turn_edits = ProgressEdits(
+            transport=cfg.transport,
+            presenter=effective_presenter,
+            channel_id=incoming.channel_id,
+            progress_ref=st.ref,
+            tracker=ctx.tracker,
+            started_at=ctx.started_at,
+            clock=clock,
+            last_rendered=st.last_rendered,
+            resume_formatter=runner.format_resume,
+            context_line=context_line,
+            thread_id=incoming.thread_id,
+            min_render_interval=progress_cfg.min_render_interval,
+        )
+        _configure_edits(turn_edits)
+        turn_edits._heartbeat_interval = progress_cfg.heartbeat_interval
+        turn_edits.stream = edits.stream
+        turn_edits.pid = edits.pid
+        if running_task is not None:
+            turn_edits.cancel_event = running_task.cancel_requested
+        ctx.edits = turn_edits
+        ctx.progress_ref = st.ref
+        scope = anyio.CancelScope()
+        ctx.edits_scope = scope
+
+        async def _run_turn_edits() -> None:
+            try:
+                with scope:
+                    await turn_edits.run()
+            except cancel_exc_type:
+                return
+
+        if turn_task_group["tg"] is not None:
+            turn_task_group["tg"].start_soon(_run_turn_edits)
+        if running_task is not None and running_tasks is not None:
+            # Replies / /cancel on this turn's messages reach the live run.
+            running_tasks[st.ref] = running_task
+
+    async def _close_turn_progress(ctx: _TurnCtx) -> None:
+        if ctx.edits is not None:
+            await ctx.edits.delete_ephemeral()
+        if ctx.edits_scope is not None:
+            ctx.edits_scope.cancel()
+        if ctx.progress_ref is not None and running_tasks is not None:
+            running_tasks.pop(ctx.progress_ref, None)
+
+    async def _deliver_turn(completed: CompletedEvent, ctx: _TurnCtx) -> None:
+        await _deliver_final(completed, RunOutcome(resume=completed.resume), turn=ctx)
+        await _deliver_outbox_now(ctx.reply_to.message_id)
+
+    turn_task_group: dict[str, Any] = {"tg": None}
+    turn_router = FollowupTurnRouter(
+        new_tracker=_new_turn_tracker,
+        create_progress=_create_turn_progress,
+        close_progress=_close_turn_progress,
+        deliver=_deliver_turn,
+        default_reply_to=user_ref,
+        followup_notify=cfg.final_notify,
+        clock=clock,
+    )
 
     cancel_exc_type = anyio.get_cancelled_exc_class()
     edits_scope = anyio.CancelScope()
@@ -4361,6 +4794,8 @@ async def handle_message(
     async with anyio.create_task_group() as tg:
         if progress_ref is not None:
             tg.start_soon(run_edits)
+        turn_task_group["tg"] = tg
+        turn_router.bind_task_group(tg)
 
         try:
             outcome = await run_runner_with_cancel(
@@ -4371,7 +4806,8 @@ async def handle_message(
                 running_task=running_task,
                 on_thread_known=on_thread_known,
                 channel_id=incoming.channel_id,
-                on_completed=_deliver_final,
+                on_completed=_on_run_completed,
+                turn_router=turn_router,
             )
         except Exception as exc:
             error = exc
@@ -4381,6 +4817,10 @@ async def handle_message(
                 error_type=exc.__class__.__name__,
             )
         finally:
+            # #776: an unfinished follow-up turn (session closed mid-turn)
+            # still gets a final so its progress message isn't orphaned.
+            with anyio.CancelScope(shield=True):
+                await turn_router.aclose()
             if running_task is not None and running_tasks is not None:
                 running_task.done.set()
                 if progress_ref is not None:
@@ -4840,7 +5280,11 @@ async def handle_message(
     # Delivery of *sent* files still requires a successful run (failures
     # may leave the outbox in a partially-written state), but the user
     # should always learn what the agent intended to send.
-    if cfg.send_file is not None and cfg.outbox_config is not None:
+    if (
+        cfg.send_file is not None
+        and cfg.outbox_config is not None
+        and not outbox_early["delivered"]
+    ):
         from .telegram.outbox_delivery import (
             OutboxResult,
             deliver_outbox_files,
