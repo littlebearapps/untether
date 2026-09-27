@@ -2507,8 +2507,11 @@ def _open_followup_turn(
         detail["tasks"] = list(state.turn_notifications)
     elif command_uuid is not None:
         reason = "scheduled_wakeup"
-    elif any(_is_native_monitor(state, task) for task in _live_native_tasks(state)):
+    elif monitors := [
+        task for task in _live_native_tasks(state) if _is_native_monitor(state, task)
+    ]:
         reason = "monitor_event"
+        detail["tasks"] = [t.description or "Monitor" for t in monitors]
     if reason == "scheduled_wakeup":
         state.pending_wakeup_until = None
     if reason == "followup" and command_uuid is not None:

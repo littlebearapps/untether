@@ -3786,6 +3786,8 @@ def _turn_header(evt: TurnEvent) -> str | None:
         return None
     base = _TURN_HEADERS.get(evt.reason, _TURN_HEADERS["unknown"])
     tasks = [t for t in (evt.detail or {}).get("tasks", []) if isinstance(t, str)]
+    if evt.reason == "monitor_event" and len(tasks) == 1:
+        return f"{base} — {tasks[0][:80]}"
     if evt.reason == "task_finished" and tasks:
         if len(tasks) == 1:
             return f"{base} — {tasks[0][:80]}"

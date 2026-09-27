@@ -216,6 +216,11 @@ async def test_router_followup_turn_anchors_to_its_message() -> None:
     ("reason", "detail", "expected"),
     [
         ("scheduled_wakeup", {}, "\N{ALARM CLOCK} Scheduled wake-up"),
+        (
+            "monitor_event",
+            {"tasks": ["deploy log"]},
+            "\N{SATELLITE ANTENNA} Monitor — deploy log",
+        ),
         ("monitor_event", {}, "\N{SATELLITE ANTENNA} Monitor"),
         ("unknown", {}, "\N{BELL} Claude continued"),
         (
