@@ -1991,10 +1991,34 @@ async def run_main_loop(
 
             from ..live_followup import inject_live_followup
 
+            async def _job_run_options(job: ThreadJob) -> object:
+                # Same resolution as run_job (#776): a live process only
+                # takes a follow-up while the chat's options still match.
+                job_chat_id = cast(int, job.chat_id)
+                job_topic_key = (
+                    (job_chat_id, job.thread_id)
+                    if state.topic_store is not None
+                    and job.thread_id is not None
+                    and _topics_chat_allowed(
+                        cfg, job_chat_id, scope_chat_ids=state.topics_chat_ids
+                    )
+                    else None
+                )
+                options = await _resolve_engine_run_options(
+                    job_chat_id,
+                    job_topic_key[1] if job_topic_key is not None else None,
+                    job.resume_token.engine,
+                    chat_prefs=state.chat_prefs,
+                    topic_store=state.topic_store,
+                )
+                return _apply_trigger_permission_override(
+                    options, job.context, engine=job.resume_token.engine
+                )
+
             scheduler = ThreadScheduler(
                 task_group=tg,
                 run_job=run_thread_job,
-                inject_job=inject_live_followup,
+                inject_job=partial(inject_live_followup, options_for=_job_run_options),
             )
 
             # --- /at one-shot delayed runs (#288) ---

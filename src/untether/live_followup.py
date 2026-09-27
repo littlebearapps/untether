@@ -13,6 +13,8 @@ the unchanged resume path.
 from __future__ import annotations
 
 import uuid
+from collections.abc import Awaitable, Callable
+from typing import Any
 
 from .logging import get_logger
 from .scheduler import ThreadJob
@@ -21,7 +23,12 @@ from .transport import MessageRef
 logger = get_logger(__name__)
 
 
-async def inject_live_followup(job: ThreadJob) -> bool:
+OptionsFor = Callable[[ThreadJob], Awaitable[Any]]
+
+
+async def inject_live_followup(
+    job: ThreadJob, *, options_for: OptionsFor | None = None
+) -> bool:
     token = job.resume_token
     if token.engine != "claude":
         return False
@@ -42,6 +49,29 @@ async def inject_live_followup(job: ThreadJob) -> bool:
             closing=bool(live and live.closing),
         )
         return False
+    if options_for is not None:
+        live = get_live_session(session_id)
+        try:
+            wanted = await options_for(job)
+        except Exception:  # noqa: BLE001 — unknown options: don't inject
+            logger.warning("claude.live_session.options_resolve_failed", exc_info=True)
+            return False
+        if live is not None and wanted != live.state.spawn_run_options:
+            # The chat's settings changed since this process started
+            # (/planmode, /model, reasoning, /config toggles): a follow-up
+            # written into it would run with the old ones. Close it (once
+            # idle) so the message resumes a fresh process instead.
+            from .runners.claude import close_live_session
+
+            closed = await close_live_session(
+                session_id, "options_changed", notice=True, only_if_idle=True
+            )
+            logger.info(
+                "claude.live_session.options_changed",
+                session_id=session_id,
+                closed=closed,
+            )
+            return False
     command_uuid = str(uuid.uuid4())
     register_followup_anchor(
         command_uuid,

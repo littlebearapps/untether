@@ -857,6 +857,10 @@ class ClaudeStreamState:
     absorbed_results: int = 0
     absorbed_cost_baseline: float | None = None
     live_session_max_s: float = 14400.0
+    # #776: the per-chat run options this process was spawned with (CLI
+    # flags + runtime toggles). A follow-up is only written into the live
+    # process when the chat's current options still match.
+    spawn_run_options: Any = None
     # #776: a ScheduleWakeup the CLI will fire itself while stdin stays open
     # (F9). Monotonic deadline = announced fire time + 60 s grace; the
     # tool_use handle is cleared by its own confirmation tool_result, so it
@@ -5856,6 +5860,7 @@ class ClaudeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
                 if use_control_channel and live_sessions_enabled:
                     state.live_mode = True
                     stream.followup_turns = True
+                    state.spawn_run_options = get_run_options()
                 state.live_session_max_s = live_session_max_s
 
                 async with anyio.create_task_group() as tg:

@@ -306,3 +306,48 @@ async def test_scheduler_pump_keeps_job_queued_when_not_injectable() -> None:
         assert sched.queued_for_chat(123)  # still cancellable while queued
         release.set()
     assert ran == ["first", "second"]
+
+
+async def test_injects_when_chat_options_unchanged(cleanup) -> None:
+    from untether.runners.run_options import EngineRunOptions
+
+    live, pipe = _install("sid-inj", idle=True)
+    live.state.spawn_run_options = EngineRunOptions(permission_mode="plan")
+
+    async def same(job: ThreadJob) -> EngineRunOptions:
+        return EngineRunOptions(permission_mode="plan")
+
+    assert await inject_live_followup(_job("sid-inj"), options_for=same) is True
+    assert len(pipe.sent) == 1
+
+
+async def test_changed_chat_options_close_session_instead_of_injecting(
+    cleanup,
+) -> None:
+    """Found on the dev bot: after /planmode off, a follow-up injected into
+    the still-live plan-mode process ran under the old mode."""
+    from untether.runners.run_options import EngineRunOptions
+
+    live, pipe = _install("sid-inj", idle=True)
+    live.state.spawn_run_options = EngineRunOptions(permission_mode="plan")
+    closed: list[bool] = []
+
+    async def aclose() -> None:
+        closed.append(True)
+
+    pipe.aclose = aclose  # type: ignore[method-assign]
+
+    async def changed(job: ThreadJob) -> EngineRunOptions:
+        return EngineRunOptions(permission_mode="acceptEdits")
+
+    assert await inject_live_followup(_job("sid-inj"), options_for=changed) is False
+    assert pipe.sent == []
+    assert closed == [True]
+    assert live.state.live_close_reason == "options_changed"
+
+
+def test_options_changed_notice_wording() -> None:
+    assert rb._live_closing_notice("options_changed", ["x"]) == (
+        "\N{GEAR}\N{VARIATION SELECTOR-16} Settings changed — stopping 1 "
+        "background task: x. Your message starts with the new settings."
+    )

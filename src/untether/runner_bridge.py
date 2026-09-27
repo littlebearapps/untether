@@ -3773,6 +3773,11 @@ def _live_closing_notice(reason: str, tasks: list[str]) -> str:
     noun = f"{n} background task{'s' if n != 1 else ''}"
     if reason == "cancel":
         return f"\N{BLACK SQUARE FOR STOP} Stopped {noun}: {names}. Reply to continue."
+    if reason == "options_changed":
+        return (
+            f"\N{GEAR}\N{VARIATION SELECTOR-16} Settings changed — stopping {noun}: "
+            f"{names}. Your message starts with the new settings."
+        )
     if reason == "drain":
         return (
             f"\N{HOURGLASS WITH FLOWING SAND} Untether is restarting — stopping "
