@@ -57,6 +57,18 @@ def _isolated_quarantine_store(tmp_path):
 
 
 @pytest.fixture(autouse=True)
+def _isolated_session_cost_ledger():
+    """#778: in-memory ledger per test so the bridge never reads or writes
+    the real ``~/.untether/session_costs.json``."""
+    from untether.session_costs import SessionCostLedger, set_session_cost_ledger
+
+    ledger = SessionCostLedger(path=None)
+    set_session_cost_ledger(ledger)
+    yield ledger
+    set_session_cost_ledger(None)
+
+
+@pytest.fixture(autouse=True)
 def _clear_cancel_dedup() -> None:
     """#525: ``_RECENT_CANCELS`` is module-level state that persists across
     tests. Without an explicit clear, two tests using the same

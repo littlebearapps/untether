@@ -821,6 +821,54 @@ async def _maybe_append_usage_footer(
         return msg
 
 
+def _apply_cost_delta(
+    engine: str,
+    session_id: str | None,
+    usage: dict[str, Any] | None,
+    *,
+    resumed: bool,
+) -> dict[str, Any] | None:
+    """Return ``usage`` with ``total_cost_usd`` replaced by the spend since
+    the previous result of the same session (#778).
+
+    Claude only: its ``total_cost_usd`` is session-cumulative (probe F12).
+    Other engines' values are per-run as far as we know and pass through.
+    The cumulative value is kept as ``session_total_cost_usd``.
+    """
+    if engine != "claude" or not usage or not session_id:
+        return usage
+    raw = usage.get("total_cost_usd")
+    if not isinstance(raw, (int, float)):
+        return usage
+    from .session_costs import get_session_cost_ledger
+
+    baseline = usage.get("session_cost_baseline")
+    try:
+        result = get_session_cost_ledger().record(
+            engine,
+            session_id,
+            float(raw),
+            resumed=resumed,
+            baseline=float(baseline) if isinstance(baseline, (int, float)) else None,
+        )
+    except Exception:  # noqa: BLE001 — accounting must never break delivery
+        logger.warning("cost.delta_failed", exc_info=True)
+        return usage
+    logger.info(
+        "cost.turn_delta",
+        engine=engine,
+        session_id=session_id,
+        delta_usd=round(result.delta, 6),
+        cumulative_usd=round(result.cumulative, 6),
+        source=result.source,
+    )
+    return {
+        **usage,
+        "total_cost_usd": result.delta,
+        "session_total_cost_usd": result.cumulative,
+    }
+
+
 def _format_run_cost(usage: dict[str, Any] | None) -> str | None:
     """Format run cost/usage from CompletedEvent into a footer line."""
     if not usage:
@@ -4442,7 +4490,18 @@ async def handle_message(
         final_resume = completed.resume or run_outcome.resume
         if final_resume is not None:
             resume_value = final_resume.value
+        # #778: Claude's total_cost_usd is cumulative per session (across
+        # --resume and across a live session's turns) — cost consumers below
+        # read the per-run / per-turn delta instead.
+        run_usage = _apply_cost_delta(
+            runner.engine,
+            resume_value,
+            completed.usage,
+            resumed=turn is not None or resume_token is not None,
+        )
         usage_log: dict[str, object] = {}
+        if run_usage and run_usage is not completed.usage:
+            usage_log["turn_cost_usd"] = run_usage.get("total_cost_usd")
         if completed.usage:
             for key in ("num_turns", "total_cost_usd", "duration_api_ms"):
                 val = completed.usage.get(key)
@@ -4520,9 +4579,9 @@ async def handle_message(
         _show_cost = footer_cfg.show_api_cost
         if _footer_run_opts and _footer_run_opts.show_api_cost is not None:
             _show_cost = _footer_run_opts.show_api_cost
-        _cost_alert_text, _cost_alert_obj = _check_cost_budget(completed.usage)
+        _cost_alert_text, _cost_alert_obj = _check_cost_budget(run_usage)
         if _show_cost and run_ok is not False:
-            cost_line = _format_run_cost(completed.usage)
+            cost_line = _format_run_cost(run_usage)
             if cost_line:
                 budget_suffix = (
                     _format_budget_suffix(_cost_alert_obj)
@@ -4549,7 +4608,7 @@ async def handle_message(
         # the operator with the most need to know is the one who turned the
         # footer off. Suppressed only when a budget alert already surfaced this
         # run's spend, so a configured budget doesn't produce two lines.
-        _outlier_text = _check_run_cost_outlier(completed.usage)
+        _outlier_text = _check_run_cost_outlier(run_usage)
         if _outlier_text and _cost_alert_obj is None:
             final_rendered = RenderedMessage(
                 text=_insert_before_resume(final_rendered.text, f"\n{_outlier_text}"),

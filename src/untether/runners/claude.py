@@ -8,6 +8,7 @@ to prevent deadlock when keeping stdin open for control responses.
 from __future__ import annotations
 
 import contextlib
+import dataclasses
 import functools
 import html
 import json
@@ -2518,6 +2519,21 @@ def translate_claude_event(
         if any(isinstance(evt, CompletedEvent) for evt in events):
             state.completed_turns = 1
             state.turn_open = False
+            if state.absorbed_cost_baseline is not None:
+                # #778: the absorbed result carried the previous process's
+                # session total — hand it to the cost ledger as a baseline.
+                events = [
+                    dataclasses.replace(
+                        evt,
+                        usage={
+                            **(evt.usage or {}),
+                            "session_cost_baseline": state.absorbed_cost_baseline,
+                        },
+                    )
+                    if isinstance(evt, CompletedEvent)
+                    else evt
+                    for evt in events
+                ]
         return events
 
     # ── live session, after the run's own result (#776) ──────────────────
