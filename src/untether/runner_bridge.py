@@ -3644,6 +3644,45 @@ async def send_result_message(
 
 # ── #776 live-session follow-up turns ──────────────────────────────────────
 
+# command_uuid -> (session_id, reply_to, queued placeholder) for follow-ups
+# written into a live session (phase 06). The router consumes the anchor when
+# the matching turn opens; leftovers are resolved when the run ends.
+_FOLLOWUP_ANCHORS: dict[str, tuple[str, MessageRef, MessageRef | None]] = {}
+
+
+def register_followup_anchor(
+    command_uuid: str,
+    *,
+    session_id: str,
+    reply_to: MessageRef,
+    placeholder: MessageRef | None,
+) -> None:
+    _FOLLOWUP_ANCHORS[command_uuid] = (session_id, reply_to, placeholder)
+
+
+def pop_followup_anchor(
+    command_uuid: str | None,
+) -> tuple[MessageRef, MessageRef | None] | None:
+    if not command_uuid:
+        return None
+    entry = _FOLLOWUP_ANCHORS.pop(command_uuid, None)
+    return None if entry is None else (entry[1], entry[2])
+
+
+def drain_followup_anchors(
+    session_id: str,
+) -> list[tuple[MessageRef, MessageRef | None]]:
+    """Anchors whose follow-up never got a turn (the session ended first)."""
+    leftovers = [
+        (uuid, entry)
+        for uuid, entry in _FOLLOWUP_ANCHORS.items()
+        if entry[0] == session_id
+    ]
+    for uuid, _ in leftovers:
+        _FOLLOWUP_ANCHORS.pop(uuid, None)
+    return [(entry[1], entry[2]) for _, entry in leftovers]
+
+
 _TURN_HEADERS: dict[str, str] = {
     "task_finished": "\N{BELL} Background task finished",
     "scheduled_wakeup": "\N{ALARM CLOCK} Scheduled wake-up",
@@ -3708,7 +3747,8 @@ class FollowupTurnRouter:
         default_reply_to: MessageRef,
         followup_notify: bool,
         clock: Callable[[], float] = time.monotonic,
-        anchor_for: Callable[[str | None], MessageRef | None] | None = None,
+        anchor_for: Callable[[str | None], tuple[MessageRef, MessageRef | None] | None]
+        | None = pop_followup_anchor,
     ) -> None:
         self._new_tracker = new_tracker
         self._create_progress = create_progress
@@ -3730,9 +3770,12 @@ class FollowupTurnRouter:
         return self.current is not None
 
     def _open(self, evt: TurnEvent) -> _TurnCtx:
-        anchor = None
+        anchor: MessageRef | None = None
+        placeholder: MessageRef | None = None
         if self._anchor_for is not None and evt.command_uuid:
-            anchor = self._anchor_for(evt.command_uuid)
+            found = self._anchor_for(evt.command_uuid)
+            if found is not None:
+                anchor, placeholder = found
         notify = (
             self._followup_notify
             if evt.reason == "followup"
@@ -3747,6 +3790,9 @@ class FollowupTurnRouter:
             notify=notify,
             header=_turn_header(evt),
             command_uuid=evt.command_uuid,
+            # A follow-up's "⏳ queued" placeholder becomes its progress
+            # message (edited in place) and is replaced by its final.
+            progress_ref=placeholder,
         )
         self.current = ctx
         if self._tg is not None:
@@ -4769,6 +4815,7 @@ async def handle_message(
             reply_to=ctx.reply_to,
             label="working",
             tracker=ctx.tracker,
+            progress_ref=ctx.progress_ref,
             resume_formatter=runner.format_resume,
             context_line=context_line,
             thread_id=incoming.thread_id,
@@ -4825,6 +4872,40 @@ async def handle_message(
         await _deliver_final(completed, RunOutcome(resume=completed.resume), turn=ctx)
         await _deliver_outbox_now(ctx.reply_to.message_id)
 
+    async def _resolve_unrun_followups() -> None:
+        """Follow-ups written into the live session whose turn never started
+        (the session ended first) must not sit on "⏳ queued" forever."""
+        sid = progress_tracker.resume or getattr(
+            getattr(edits, "stream", None), "found_session", None
+        )
+        if sid is None:
+            return
+        for reply_to, placeholder in drain_followup_anchors(sid.value):
+            text = (
+                "\N{WARNING SIGN} The session ended before this message ran "
+                "— please send it again."
+            )
+            try:
+                if placeholder is not None:
+                    await cfg.transport.edit(
+                        ref=placeholder, message=RenderedMessage(text=text)
+                    )
+                else:
+                    await cfg.transport.send(
+                        channel_id=reply_to.channel_id,
+                        message=RenderedMessage(text=text),
+                        options=SendOptions(
+                            reply_to=reply_to, thread_id=reply_to.thread_id
+                        ),
+                    )
+            except Exception:  # noqa: BLE001
+                logger.debug("live_followup.unrun_notice_failed", exc_info=True)
+            logger.warning(
+                "claude.live_session.followup_not_run",
+                session_id=sid.value,
+                user_msg_id=reply_to.message_id,
+            )
+
     turn_task_group: dict[str, Any] = {"tg": None}
     turn_router = FollowupTurnRouter(
         new_tracker=_new_turn_tracker,
@@ -4880,6 +4961,7 @@ async def handle_message(
             # still gets a final so its progress message isn't orphaned.
             with anyio.CancelScope(shield=True):
                 await turn_router.aclose()
+                await _resolve_unrun_followups()
             if running_task is not None and running_tasks is not None:
                 running_task.done.set()
                 if progress_ref is not None:

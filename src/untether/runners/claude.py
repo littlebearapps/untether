@@ -279,6 +279,7 @@ async def write_user_message(session_id: str, text: str, *, command_uuid: str) -
     if state is not None:
         # Record before writing: command_lifecycle can race the send.
         state.injected_commands[command_uuid] = time.monotonic()
+        state.awaiting_injected[command_uuid] = time.monotonic()
     payload = {
         "type": "user",
         "uuid": command_uuid,
@@ -291,6 +292,7 @@ async def write_user_message(session_id: str, text: str, *, command_uuid: str) -
     except (OSError, anyio.ClosedResourceError, anyio.BrokenResourceError) as exc:
         if state is not None:
             state.injected_commands.pop(command_uuid, None)
+            state.awaiting_injected.pop(command_uuid, None)
         logger.warning(
             "claude.live_session.write_failed",
             session_id=session_id,
@@ -430,6 +432,59 @@ async def close_live_session(
             async with lock:
                 await live.stdin.aclose()
     return True
+
+
+_INJECTED_TURN_TIMEOUT_S = 120.0
+
+
+def _awaiting_injected(state: ClaudeStreamState) -> bool:
+    """True while an injected follow-up hasn't started its turn yet. Entries
+    expire (logged) so a line the CLI never picked up can't pin the session."""
+    if not state.awaiting_injected:
+        return False
+    now = time.monotonic()
+    for command_uuid, written_at in list(state.awaiting_injected.items()):
+        if now - written_at > _INJECTED_TURN_TIMEOUT_S:
+            state.awaiting_injected.pop(command_uuid, None)
+            logger.warning(
+                "claude.live_session.injected_turn_timeout",
+                command_uuid=command_uuid,
+                waited_s=round(now - written_at, 1),
+            )
+    return bool(state.awaiting_injected)
+
+
+async def inject_when_idle(
+    session_id: str,
+    text: str,
+    *,
+    command_uuid: str,
+    poll_s: float = 0.2,
+) -> bool:
+    """Queue-semantics follow-up (#776 phase 06): wait until the live session
+    is idle — its turn ended and no earlier injected line is still waiting to
+    start — then write ``text`` as a new turn. Returns False (caller falls
+    back to --resume) if the session is gone or starts closing first.
+
+    Writing mid-turn would fold the message into the running turn (probe F5
+    — that is #775's *steer*), which is why this waits.
+    """
+    while True:
+        live = _LIVE_SESSIONS.get(session_id)
+        if live is None or not live.accepting_input:
+            return False
+        if live.idle and not _awaiting_injected(live.state):
+            async with live.lock:
+                if not live.accepting_input:
+                    return False
+                if live.idle and not live.state.awaiting_injected:
+                    ok = await write_user_message(
+                        session_id, text, command_uuid=command_uuid
+                    )
+                    if ok:
+                        live.idle_since = time.monotonic()
+                    return ok
+        await anyio.sleep(poll_s)
 
 
 def is_session_alive(session_id: str) -> bool:
@@ -782,6 +837,9 @@ class ClaudeStreamState:
     turn_notifications: list[str] = field(default_factory=list)
     # uuid -> monotonic write time for user lines Untether injected (#776).
     injected_commands: dict[str, float] = field(default_factory=dict)
+    # Injected lines whose turn hasn't opened yet: the lifecycle must not
+    # close stdin under them, and the next queued follow-up waits for them.
+    awaiting_injected: dict[str, float] = field(default_factory=dict)
     # #776 resume guard (F11): the stopped-task replay + 0-turn result that
     # precede the real answer on --resume of a session whose previous
     # process ended with live background work.
@@ -2453,6 +2511,8 @@ def _open_followup_turn(
         reason = "monitor_event"
     if reason == "scheduled_wakeup":
         state.pending_wakeup_until = None
+    if reason == "followup" and command_uuid is not None:
+        state.awaiting_injected.pop(command_uuid, None)
     state.turn += 1
     state.turn_open = True
     state.turn_reason = reason
@@ -4531,6 +4591,11 @@ class ClaudeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
                 if not live.idle:
                     live.idle_since = None
                     live.hold_started = None
+                    continue
+                if _awaiting_injected(state):
+                    # A follow-up was written; its turn hasn't opened yet.
+                    live.idle_since = now
+                    live.hold_started = now
                     continue
                 if any(v == sid for v in _REQUEST_TO_SESSION.values()):
                     # A pending approval / ask pauses every timer.

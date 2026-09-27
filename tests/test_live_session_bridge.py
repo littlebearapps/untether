@@ -119,7 +119,10 @@ class _Recorder:
         )
 
 
-def _router(rec: _Recorder, anchors: dict[str, MessageRef] | None = None):
+def _router(
+    rec: _Recorder,
+    anchors: dict[str, tuple[MessageRef, MessageRef | None]] | None = None,
+):
     return rb.FollowupTurnRouter(
         new_tracker=lambda: ProgressTracker(engine="claude"),
         create_progress=rec.create,
@@ -200,7 +203,7 @@ async def test_router_interrupted_turn_delivers_error_on_aclose() -> None:
 async def test_router_followup_turn_anchors_to_its_message() -> None:
     rec = _Recorder()
     anchor = MessageRef(channel_id=1, message_id=55)
-    router = _router(rec, anchors={"cmd-1": anchor})
+    router = _router(rec, anchors={"cmd-1": (anchor, None)})
     await router.on_turn(_turn("started", reason="followup", command_uuid="cmd-1"))
     await router.on_turn(
         _turn("completed", reason="followup", command_uuid="cmd-1", ok=True, answer="a")

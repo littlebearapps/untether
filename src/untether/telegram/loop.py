@@ -1961,7 +1961,13 @@ async def run_main_loop(
                     job.progress_ref,
                 )
 
-            scheduler = ThreadScheduler(task_group=tg, run_job=run_thread_job)
+            from ..live_followup import inject_live_followup
+
+            scheduler = ThreadScheduler(
+                task_group=tg,
+                run_job=run_thread_job,
+                inject_job=inject_live_followup,
+            )
 
             # --- /at one-shot delayed runs (#288) ---
             from . import at_scheduler

@@ -28,6 +28,9 @@ class ThreadJob:
 
 
 RunJob = Callable[[ThreadJob], Awaitable[None]]
+# #776: returns True when the job was delivered into a live engine process
+# (so it must not also be run via --resume).
+InjectJob = Callable[[ThreadJob], Awaitable[bool]]
 
 
 class TaskGroup(Protocol):
@@ -37,9 +40,16 @@ class TaskGroup(Protocol):
 
 
 class ThreadScheduler:
-    def __init__(self, *, task_group: TaskGroup, run_job: RunJob) -> None:
+    def __init__(
+        self,
+        *,
+        task_group: TaskGroup,
+        run_job: RunJob,
+        inject_job: InjectJob | None = None,
+    ) -> None:
         self._task_group = task_group
         self._run_job = run_job
+        self._inject_job = inject_job
         self._lock = anyio.Lock()
         self._pending_by_thread: dict[str, deque[ThreadJob]] = {}
         self._queued_by_progress: dict[tuple[ChannelId, MessageId], ThreadJob] = {}
@@ -146,6 +156,20 @@ class ThreadScheduler:
                     if job.progress_ref is not None:
                         progress_key = (job.chat_id, job.progress_ref.message_id)
                         self._queued_by_progress.pop(progress_key, None)
+
+                # #776: a follow-up for a session whose process is still
+                # live goes into that process (queued until its turn ends)
+                # instead of waiting for it to exit and resuming.
+                if self._inject_job is not None:
+                    try:
+                        injected = await self._inject_job(job)
+                    except Exception:  # noqa: BLE001 — fall back to resume
+                        logger.warning(
+                            "scheduler.inject_failed", key=key, exc_info=True
+                        )
+                        injected = False
+                    if injected:
+                        continue
 
                 if done is not None and not done.is_set():
                     await done.wait()
