@@ -288,6 +288,8 @@ A companion runtime audit (gated by `[security] env_audit = true`, default true)
 
 ### Post-result idle timeout + "✓ turn complete" hint ([#333](https://github.com/littlebearapps/untether/issues/333))
 
+> **0.35.5rc11:** with live sessions on (the default) the post-result phase is owned by the live-session lifecycle below; this watchdog keeps only the pre-result silence cap ([#592](https://github.com/littlebearapps/untether/issues/592)). The text below describes `[watchdog] live_sessions = false`.
+
 After Claude Code emits its final `result` event the bidirectional CLI can sit alive for up to ~36 min before exiting on its own, leaving Untether's progress message looking stuck. The runner now closes that gap two ways:
 
 1. **Footer marker** — every successful `result` event arms a supplementary `StartedEvent` with `meta={"complete": "✓ turn complete"}`, which `markdown.format_meta_line` renders alongside model / effort / permission / trigger so the user sees the turn boundary immediately. Errored results don't emit the hint (no false "complete" tag on a failure).
@@ -328,9 +330,42 @@ Auto-retry on Type-A is deferred to v0.35.4 pending upstream Anthropic stabilisa
 
 When Anthropic throttles the API, Claude Code emits a `rate_limit_event` JSONL message. The runner translates this to a visible `note`-kind action rendered as `⏳ Rate limited — retrying in Xs` in Telegram (previously the runner returned an empty list and the session appeared to hang). `ClaudeStreamState.rate_limit_total_s` accumulates wait time across the session for future cost-footer annotation; structured `claude.rate_limit_event` logs `retry_after_s`, `count`, and `cumulative_s` for triage.
 
-### Per-session background-task tracking ([#346](https://github.com/littlebearapps/untether/issues/346) / [#347](https://github.com/littlebearapps/untether/issues/347))
+### Per-session background-task tracking ([#346](https://github.com/littlebearapps/untether/issues/346) / [#347](https://github.com/littlebearapps/untether/issues/347) / [#776](https://github.com/littlebearapps/untether/issues/776))
 
-Claude Code v2.1.72+ has primitives that arm long-running work and return the subprocess to "ready" while the primitive continues in the background: `Monitor`, `Bash run_in_background=true`, `Agent run_in_background=true`, `ScheduleWakeup`, `RemoteTrigger`. The runner tracks each by `tool_use_id` in `ClaudeStreamState.live_monitors` / `live_bg_bashes` / `live_bg_agents` / `live_wakeups` / `live_remote_triggers`. The wedge detector (`_detect_stuck_after_tool_result` from [#322](https://github.com/littlebearapps/untether/issues/322)) gates on `has_live_background_work()` so legitimate background primitives don't trip the SIGTERM path.
+Claude Code can arm long-running work and end its turn while the work continues: `Monitor`, `Bash run_in_background=true`, background `Agent`/`Task` (the default for subagents), `ScheduleWakeup`, `RemoteTrigger`.
+
+**Native task map (0.35.5rc11+).** Claude Code reports its own background-task lifecycle on stream-json (`system/task_started`, `task_progress`, `task_updated`, `task_notification`, `background_tasks_changed`; shapes in the [stream-json cheatsheet](stream-json-cheatsheet.md)). `translate_claude_event` folds them into `ClaudeStreamState.tasks` (`ClaudeTask` by `task_id`). A task is *live background work* iff `is_backgrounded and not owned_by_subagent` and its status is `running`/`pending`; `task_updated.patch.status` / `task_notification.status` end it, and the `background_tasks_changed` snapshot reconciles anything missed. Registration and end are logged as `claude.task.registered` / `claude.task.ended` ([#662](https://github.com/littlebearapps/untether/issues/662)).
+
+Once the CLI emits any task event, the native map is authoritative for Monitor / Bash-bg / Agent-bg liveness. The older tool_use handles (`live_monitors`, `live_bg_bashes`, `live_bg_agents` with their bounded age-outs, [#374](https://github.com/littlebearapps/untether/issues/374) / [#573](https://github.com/littlebearapps/untether/issues/573) / [#646](https://github.com/littlebearapps/untether/issues/646)) remain only as a fallback for CLIs that never emit task events. `ScheduleWakeup` and `RemoteTrigger` emit no task events, so they keep their handles, and a pending ScheduleWakeup is tracked from its confirmation text ("scheduled for … (in 94s)") plus a 60 s grace. `has_live_background_work()`, `session_live_bg_count()` and the `background_task_summary()` footer all read one counting function, so they can't disagree.
+
+### Live sessions ([#776](https://github.com/littlebearapps/untether/issues/776))
+
+In control-channel mode (a permission mode is set) the Claude CLI keeps running after a `result`: a finished background task, each Monitor line and a firing ScheduleWakeup each start a new turn by themselves, and a user line written to stdin while idle runs as another turn. Before 0.35.5rc11 Untether stopped reading at the first `result` and closed stdin, so those turns ran invisibly (or died — closing stdin stops background work), and SIGTERM/quarantine later sent the next follow-up to a fresh session. Probe evidence: [`docs/findings/2026-09-27-claude-live-session-probes.md`](../../../findings/2026-09-27-claude-live-session-probes.md).
+
+**Stream.** The run is still `StartedEvent → ActionEvent* → CompletedEvent` (turn 1, the user's message). The runner keeps reading; every later turn is a `TurnEvent(started) → ActionEvent* → TurnEvent(completed)` segment with a `reason`:
+
+| reason | trigger | Telegram header |
+|---|---|---|
+| `task_finished` | a `task_notification` preceded the turn | 🔔 Background task finished — <task> |
+| `monitor_event` | a Monitor task is live, no notification | 📡 Monitor — <monitor> (sent silently) |
+| `scheduled_wakeup` | `command_lifecycle(started)` with an unknown uuid | ⏰ Scheduled wake-up |
+| `followup` | `command_lifecycle.command_uuid` matches a line Untether injected | none — a normal reply under the follow-up |
+
+Background subagent events (tagged `parent_tool_use_id`) arriving while the parent is idle do not open a turn.
+
+**Delivery.** `FollowupTurnRouter` (bridge) gives each turn a fresh tracker, a progress message only if the turn runs >5 s, uses a tool or raises an approval (approval/plan/question keyboards attach to it), then a new final with the header; outbox files are delivered per turn; turn messages are aliases of the live run in `running_tasks` so replies and `/cancel` reach it.
+
+**Follow-ups.** A queued resume job for a session whose process is live is written into that process (`live_followup.inject_live_followup` → `inject_when_idle` → `write_user_message`), queue semantics: it waits until the current turn has ended (a mid-turn write would be folded into the running turn — that is steer, [#775](https://github.com/littlebearapps/untether/issues/775)). `ThreadScheduler` offers queued jobs to the injector while the live run is in flight. No live process, a closing one, or another engine → the unchanged `--resume` path.
+
+**Lifecycle** (`_live_session_lifecycle`, per run). While idle: nothing live for `post_result_limbo_grace` (60 s) → close stdin; background work still live `post_result_bg_max_hold` (1800 s, re-armed each turn) after the last turn → notice + close; `live_session_max_s` (4 h) from spawn → notice + close; a pending approval/ask or an injected line not yet started pauses the timers. Closing stdin makes the CLI stop its tasks and exit rc=0 (graceful — nothing quarantined); only if it hasn't exited 15 s later does SIGTERM/SIGKILL run, quarantining `forced_teardown_after_result`. `/cancel`, `/new` and drain/restart close idle live sessions the same way with a notice naming the stopped tasks; a turn in progress is still killed by `/cancel`.
+
+**Resume guard.** On `--resume` of a session whose previous process ended with background work still live, the CLI replays `task_notification{stopped}` and answers it with a 0-turn result before running the real turn. That result is absorbed (`claude.resume_guard.absorbed`), not delivered — no empty-resume quarantine or resend.
+
+**Cost.** `total_cost_usd` is cumulative per session (also across `--resume`); the bridge records per-turn deltas via `session_costs.json` ([#778](https://github.com/littlebearapps/untether/issues/778)). A turn's delta includes spend by background subagents during it.
+
+**Kill switch:** `[watchdog] live_sessions = false` restores the pre-rc11 "stop at the first result" behaviour. Legacy `-p` mode (no permission mode) is always single-result.
+
+Logs: `claude.turn.started|completed`, `live_turn.started|interrupted`, `claude.live_session.stdin_closed` (reason `idle_no_tasks|max_hold|abs_cap|cancel|drain`), `claude.live_session.injected|inject_unavailable|injected_turn_timeout|followup_not_run|forced_teardown`, `cost.turn_delta`, `cost.baseline_unknown`; `session.summary` carries `followup_turns`.
 
 ---
 

@@ -87,8 +87,12 @@ Claude Code emits a system init event early in the stream:
 **Mapping:**
 - Emit a Untether `started` event as soon as `session_id` is known.
 - Populate `meta` from `system.init` fields: `cwd`, `model`, `tools`, `permissionMode`, `output_style`. The `model` and `permissionMode` fields are used by the bridge to render the `🏷` footer line on final messages.
-- Assume only one `system.init` per run; if more appear, ignore the subsequent
-  ones to avoid re-locking.
+- The first `system.init` per run produces the `started` event. In a live
+  session (#776) every later turn begins with another `system.init`: it opens a
+  follow-up turn (see 4.5) and never re-emits `started`.
+- Background-task subtypes (`task_started`, `task_progress`, `task_updated`,
+  `task_notification`, `background_tasks_changed`) emit no Untether events;
+  they maintain the native task map (`ClaudeStreamState.tasks`).
 - Optional: emit a `note` action summarizing tools/MCP servers (debug-only).
 
 ### 4.2 `assistant` / `user` message events
@@ -148,8 +152,15 @@ The terminal event looks like:
 - `error = event.error` (if present)
 - `resume = ResumeToken(engine="claude", value=event.session_id)`
 - `usage = event.usage` (pass through)
-- Emit exactly one `completed` event; ignore any trailing JSON lines afterward.
-  No idle-timeout completion is used.
+- Emit exactly one `completed` event per run. With live sessions off (or in
+  legacy `-p` mode) trailing lines are ignored; with live sessions on (#776)
+  reading continues and later results close follow-up turns (4.5).
+- `total_cost_usd` is cumulative per session, across `--resume` too; the bridge
+  derives per-run/per-turn deltas (#778).
+- **Resume guard:** on a resumed run, a 0-turn result (`num_turns == 0`,
+  `duration_api_ms == 0`) that follows a replayed `task_notification{stopped}`
+  before any assistant output is absorbed — no `completed`; the next result is
+  the answer.
 
 #### Supplementary `started` event after `result` (`✓ turn complete`)
 
@@ -161,6 +172,23 @@ Every successful `result` (i.e. `is_error=false`) MAY also emit a supplementary 
 > `result.permission_denials` with blocked tool calls, but Untether's
 > `StreamResultMessage` schema does not capture this field and the runner does
 > not emit warning actions for denials. This is a candidate for future work.
+
+### 4.5 Follow-up turns in a live session (#776)
+
+After the run's `completed`, each later turn in the same process is emitted as
+
+```
+TurnEvent(phase="started", turn=N, reason=…) → ActionEvent* → TurnEvent(phase="completed", turn=N, ok, answer, usage)
+```
+
+built with `EventFactory.turn_started` / `turn_completed`. The turn opens on the
+first post-result `system.init`, assistant message, or non-tool-result user
+message; `reason` comes from what preceded it: an injected line's
+`command_lifecycle.command_uuid` (`followup`), a `task_notification`
+(`task_finished`), a `command_lifecycle(started)` with an unknown uuid
+(`scheduled_wakeup`), or a live Monitor task (`monitor_event`). Assistant/user
+events tagged `parent_tool_use_id` (a background subagent) never open a turn.
+`command_lifecycle` lines themselves emit nothing.
 
 ### 4.4 Error handling / malformed lines
 

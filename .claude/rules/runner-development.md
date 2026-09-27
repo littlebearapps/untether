@@ -9,9 +9,9 @@ applies_to: "src/untether/runners/**,src/untether/runner.py"
 Every run MUST emit exactly this sequence:
 1. `StartedEvent` — first, when session ID is known; additional `StartedEvent`s with the same resume but new `meta` are allowed for late-arriving metadata (e.g. pi.py ships the model from `message_end` via a supplementary event; #225). The base runner's `handle_started_event` emits duplicates through when `event.meta` is truthy; `ProgressTracker.note_event` merges meta idempotently. True duplicates (no meta) are still dropped.
 2. `ActionEvent(s)` — zero or more, phase: started/updated/completed
-3. `CompletedEvent` — exactly once, always the final event
+3. `CompletedEvent` — exactly once per run, always the run's final event
 
-After emitting `CompletedEvent`, drop all subsequent JSONL lines.
+After emitting `CompletedEvent`, drop all subsequent JSONL lines — **unless** the runner keeps its process live (#776): it sets `JsonlStreamState.followup_turns = True` and each later turn in the same process is a bracketed segment `TurnEvent(started) → ActionEvent* → TurnEvent(completed)`, built with `EventFactory.turn_started` / `turn_completed`. Never emit a second `CompletedEvent`. Only `ClaudeRunner` in control-channel mode opts in (kill switch `[watchdog] live_sessions`); every other runner keeps the drop-after-completed behaviour. A runner that reads past the result must keep the #505 inherited-fd protection — `_subprocess_watchdog` does it for opt-in runners (2 s post-exit drain, then close our stdout read end).
 
 ## Stream state tracking
 
@@ -20,6 +20,8 @@ After emitting `CompletedEvent`, drop all subsequent JSONL lines.
 ## Auto-continue
 
 When Claude Code exits with `last_event_type=user` (tool results sent but never processed), `runner_bridge.py` auto-resumes the session. Suppressed on signal deaths (rc=143/137) to prevent death spirals. Configure via `[auto_continue]` in `untether.toml` (`enabled`, `max_retries`).
+
+Live sessions (#776, Claude only): a run's process stays live after its result while background work or a follow-up keeps it busy; `_live_session_lifecycle` closes stdin (graceful — the CLI stops its tasks and exits rc=0) when idle, and a resumed run's replayed stopped-task 0-turn result is absorbed by the resume guard rather than treated as an empty resume. The quarantine paths below now mostly apply to `live_sessions = false` and to forced teardown after a close grace.
 
 Empty-resume recovery (#631/#632, Claude only): a resume returning 0 turns/$0 quarantines the session (`session_quarantine.py`, persisted to `session_quarantine.json`) and auto-resends once on a fresh session; forced teardown after a result quarantines proactively and the next message diverts fresh. Flags: `empty_resume_fresh`, `quarantine_on_forced_teardown` (both default true). Never retry the same poisoned session.
 

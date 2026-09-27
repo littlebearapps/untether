@@ -142,6 +142,44 @@ tail on long-running actions from its own clock (#481), so the upstream heartbea
 redundant for progress rendering — the schema entry exists so the line decodes instead of
 being dropped with a `jsonl.msgspec.invalid` warning ([#637](https://github.com/littlebearapps/untether/issues/637)).
 
+### Background-task lifecycle (`system` subtypes, CLI ≥ 2.1.28x) — #776
+
+Verified on 2.1.283 (see `docs/findings/2026-09-27-claude-live-session-probes.md`).
+
+```json
+{"type":"system","subtype":"background_tasks_changed","tasks":[{"task_id":"b1","task_type":"local_bash","description":"…"}]}
+{"type":"system","subtype":"task_started","task_id":"b1","tool_use_id":"toolu_…","description":"…","is_backgrounded":true,"task_type":"local_bash"}
+{"type":"system","subtype":"task_started","task_id":"a1","tool_use_id":"toolu_…","subagent_type":"general-purpose","is_backgrounded":true,"spawn_depth":1,"task_type":"local_agent","prompt":"…"}
+{"type":"system","subtype":"task_started","task_id":"f1","owned_by_subagent":true,"is_backgrounded":false,"task_type":"local_bash"}
+{"type":"system","subtype":"task_progress","task_id":"a1","usage":{"total_tokens":52470,"tool_uses":2,"duration_ms":4314},"last_tool_name":"Bash"}
+{"type":"system","subtype":"task_updated","task_id":"b1","patch":{"status":"completed","end_time":1790500249636}}
+{"type":"system","subtype":"task_notification","task_id":"b1","tool_use_id":"toolu_…","status":"completed","output_file":"…","summary":"…"}
+```
+
+- `background_tasks_changed` is a full snapshot of live background tasks (`[]` when none) and arrives just *before* `task_started` / `task_updated`.
+- `owned_by_subagent: true` with `is_backgrounded: false` is a subagent's own foreground tool — not background work.
+- `task_updated.patch.status`: `completed` | `killed`; `task_notification.status`: `completed` | `stopped`.
+- `Monitor` is `task_type: local_bash`; each streamed line starts a new turn with **no** per-line task event; the stream end emits `task_updated` + `task_notification`.
+- `ScheduleWakeup` / `RemoteTrigger` emit **no** task events.
+- Closing stdin stops live background tasks (`killed` / `stopped`) and the CLI exits rc=0 a few seconds later.
+- On `--resume` after such a stop, the CLI first emits `task_notification{status:"stopped", output_file:""}`, then `system/init`, then a **0-turn result**, then the real turn.
+
+### `command_lifecycle` (#776)
+
+One line per input command (user line or scheduled wake-up):
+
+```json
+{"type":"command_lifecycle","command_uuid":"<uuid>","state":"queued"}
+{"type":"command_lifecycle","command_uuid":"<uuid>","state":"started"}
+{"type":"command_lifecycle","command_uuid":"<uuid>","state":"completed"}
+```
+
+`command_uuid` echoes the `uuid` field of the stream-json `user` line that was written to stdin, so a turn can be attributed to the message that caused it. A ScheduleWakeup firing appears as `started` with a uuid Untether never wrote. `completed` for command N can arrive lazily (when command N+1 is queued).
+
+### Multi-result streams (#776)
+
+In control-channel mode the process does not exit after `result`: background-task completions, Monitor lines, ScheduleWakeup firings and user lines written while idle each produce another `system/init` → … → `result`. `total_cost_usd` is cumulative per session (including across `--resume`); `num_turns` is per result.
+
 ## Message object (`message` field)
 
 Fields:

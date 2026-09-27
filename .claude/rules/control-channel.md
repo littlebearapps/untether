@@ -124,6 +124,10 @@ Denial with message:
 {"type":"control_response","request_id":"req_1","approved":false,"denial_message":"..."}
 ```
 
+## Stdin writers and live sessions (#776)
+
+Stdin is written from several tasks (control responses, the auto-approve/deny/catalog drains, follow-up injection, the live-session close), so every write goes through `_locked_send` (a per-pipe `anyio.Lock`). `write_user_message(session_id, text, command_uuid=…)` writes a stream-json `user` line with `uuid` — the CLI echoes it as `command_lifecycle.command_uuid`, which attributes the turn. Never write a follow-up mid-turn outside steer mode: `inject_when_idle` waits until the session is idle (a mid-turn write is folded into the running turn). `LiveSession.lock` serialises injection against `close_live_session` (the race guard). `_SESSION_STDIN` still means "a process owns this session"; use `is_session_accepting()` to ask "can I write a follow-up into it".
+
 ## Parent-initiated control_requests (Untether → Claude)
 
 Untether can also *initiate* control_requests on stdin, following the wire format documented in Anthropic's [`claude-agent-sdk-python`](https://github.com/anthropics/claude-agent-sdk-python). Subtypes accepted by Claude Code include: `mcp_status`, `mcp_reconnect` (`serverName`), `mcp_toggle` (`serverName` + `enabled`), `set_permission_mode`, `interrupt`, `set_model`, `stop_task` (`task_id`).

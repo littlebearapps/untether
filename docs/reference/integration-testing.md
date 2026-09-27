@@ -254,6 +254,22 @@ lifecycle and the control channel (`.claude/rules/control-channel.md`).
 | 4 | **Negative control** — in a fresh exchange with no background agent involved, send a plain two-message conversation, e.g. `what's 2+2?` then reply to the resume line with `and 3+3?` | Both messages resume the SAME session id — a healthy resume must not trigger spurious quarantine or fresh-session diversion |
 | 5 | **Log verification**: `journalctl --user -u untether-dev --since "10 minutes ago" \| grep -E "runner.empty_result\|session.auto_resend_fresh\|session.quarantined\|session.resume_diverted_fresh"` | If steps 1-3 hit the dangling/empty-resume path, every `runner.empty_result` line is followed by `session.auto_resend_fresh` (or the session already carries `session.quarantined` + `session.resume_diverted_fresh` from a prior hit) — never a bare `runner.empty_result` with no recovery event after it |
 
+> **0.35.5rc11 (#776):** with live sessions a follow-up to a lingering session is normally *injected into it* (same session id, no resume), so steps 1–3 now expect the SAME session id and a real answer, with `claude.live_session.injected` in the log and no `runner.empty_result`. The quarantine/fresh path is only expected with `[watchdog] live_sessions = false`. The B-LIVE scenarios below cover the new behaviour directly.
+
+### B-LIVE: live-session scenarios (0.35.5rc11+, #776)
+
+Run in the Claude chat (`5284581592`). Prompts that background work should say *"end your turn immediately"* so the result lands before the work finishes. Log checks: `journalctl --user -u untether-dev -o cat | grep -E "claude.task|claude.turn|live_turn|live_session|resume_guard|cost.turn_delta"`.
+
+| # | Scenario | Prompt shape | Pass criteria |
+|---|---|---|---|
+| B-LIVE-1 | Background Bash wake | start `sleep 40 && echo X` with `run_in_background`, end turn; reply "GOT: <output>" when notified | turn-1 final at result time; a **new** message `🔔 Background task finished — <desc>` with the output ~40 s later; `claude.turn.started reason=task_finished`; `cost.turn_delta` for both |
+| B-LIVE-2 | Background Agent wake + follow-up while it runs | launch one background subagent (`sleep 45`, report), end turn; while it works send a quick question | the question is answered **immediately** under its own message (`claude.live_session.injected`); the agent's result arrives later with the 🔔 header (not "Claude continued") |
+| B-LIVE-3 | Follow-up into a live session | start a 50 s background task, end turn; send a follow-up | exactly **one** `subprocess.spawn` for the exchange; follow-up answered within seconds; wake delivered afterwards; no `session.resume_diverted_fresh` / `auto_resend_fresh` |
+| B-LIVE-4 | Restart with a live task | start a 600 s background task, end turn; `systemctl --user restart untether-dev` | restart completes in seconds (not the 120 s drain); `shutdown.live_sessions_closed count=1`; notice `⏳ Untether is restarting — stopping 1 background task: …`; rc=0, nothing quarantined |
+| B-LIVE-5 | Monitor ticks | Monitor a 3-tick loop (10 s apart), end turn; reply "TICK n" per tick | one silent `📡 Monitor — <desc>` message per tick; the stream end arrives as a 🔔 wake |
+| B-LIVE-6 | `/cancel` idle session, then resume | start a 600 s background task, end turn; `/cancel`; then ask a question | `⏹ Stopped 1 background task: …`; `claude.live_session.stdin_closed reason=cancel`; the question resumes the same session and gets a real answer; `claude.resume_guard.absorbed`; no `runner.empty_result` |
+| B-LIVE-7 | Approval inside a wake turn (plan mode) | start a 20 s background task, end turn; "when it finishes, create /tmp/x via ExitPlanMode" | the ExitPlanMode keyboard renders on the **wake turn's** progress message; Approve → file written; wake final delivered |
+
 **Required tiers:** rc7 → Tier 7 (command smoke) + Tier 1 (Claude only) + B-RESUME. rc8 → add Tier 1 (all 6 engines, confirm no cross-engine regression from the quarantine store) + Tier 2 (interactive/plan).
 
 Automate via Telegram MCP (`send_message`, `get_history`) + Bash (`journalctl --user -u untether-dev`) exactly as the other tiers. See `scripts/audit-noop-resume.sh` for the post-deploy fleet-wide correlation check (Layer 4 of the remediation plan) that runs the same five-event correlation across all hosts after rollout.
@@ -376,6 +392,7 @@ Integration tests are run by Claude Code via Telegram MCP tools (see "Automated 
 |---|---|
 | Runner code (`runners/*.py`) | U1-U4 (all engines), U6, U7 |
 | Runner bridge / auto-continue / no-op resume recovery (`runner_bridge.py`, `runners/claude.py`) | B-RESUME, U1-U4 (Claude), U6, U7 |
+| Live sessions / follow-up injection / scheduler (`runners/claude.py`, `runner_bridge.py`, `live_followup.py`, `scheduler.py`) | B-LIVE-1…7, C1-C6, S7, U1-U4 (Claude) |
 | Telegram transport (`telegram/*.py`) | T1-T10, S7, S8 |
 | Control channel (`claude_control.py`) | C1-C6, T8, S9 |
 | Config/settings (`settings.py`) | O1-O9, S5, upgrade path |
