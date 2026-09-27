@@ -255,28 +255,10 @@ def session_live_bg_count(session_id: str) -> int:
     diverting to a fresh contextless session after the base 30 s timeout.
     """
     state = _SESSION_BG_STATE.get(session_id)
-    if state is None or not has_live_background_work(state):
+    if state is None:
         return 0
-    count = (
-        _live_bg_agent_count(state)
-        + _live_bounded_handle_count(state.live_bg_bashes, state.bg_bash_deadlines)
-        + _live_bounded_handle_count(
-            state.live_remote_triggers, state.remote_trigger_deadlines
-        )
-        + sum(
-            1
-            for deadline in state.live_monitors.values()
-            if deadline == 0.0 or deadline > time.monotonic()
-        )
-        + sum(
-            1
-            for deadline in state.live_wakeups.values()
-            if deadline == 0.0 or deadline > time.monotonic()
-        )
-    )
-    # has_live_background_work() was True, so never report fewer than 1 even
-    # if the individual counts race to zero between the two reads.
-    return max(1, count)
+    watchers, bg_tasks = _live_background_counts(state)
+    return watchers + bg_tasks
 
 
 def session_linger_info(session_id: str) -> tuple[bool, int] | None:
@@ -464,6 +446,45 @@ _DISCUSS_ESCALATION_MESSAGE = (
 )
 
 
+# #776: task statuses that keep a native background task live. Anything else
+# reported by ``task_updated.patch.status`` / ``task_notification.status``
+# (completed, killed, stopped, failed, ...) is terminal — ending on an unknown
+# status is the safe direction, because the ``background_tasks_changed``
+# snapshot would otherwise be the only backstop against a pinned session.
+_TASK_LIVE_STATUSES = frozenset({"running", "pending"})
+
+
+@dataclass(slots=True)
+class ClaudeTask:
+    """One entry of the native task map, keyed by the CLI's ``task_id`` (#776).
+
+    Built from ``system/task_*`` events (verified on CLI 2.1.283). The CLI's
+    own lifecycle replaces the tool_use/tool_result guesses for Monitor,
+    background Bash and background Agent work.
+    """
+
+    task_id: str
+    task_type: str | None = None
+    tool_use_id: str | None = None
+    description: str | None = None
+    subagent_type: str | None = None
+    is_backgrounded: bool = False
+    owned_by_subagent: bool = False
+    status: str = "running"
+    started_at: float = field(default_factory=time.monotonic)
+    ended_at: float | None = None
+    last_usage: dict[str, Any] | None = None
+    last_tool_name: str | None = None
+
+    @property
+    def is_live_background(self) -> bool:
+        return (
+            self.is_backgrounded
+            and not self.owned_by_subagent
+            and self.status in _TASK_LIVE_STATUSES
+        )
+
+
 @dataclass(slots=True)
 class ClaudeStreamState:
     factory: EventFactory = field(default_factory=lambda: EventFactory(ENGINE))
@@ -535,6 +556,15 @@ class ClaudeStreamState:
     live_bg_agents: set[str] = field(default_factory=set)
     live_wakeups: dict[str, float] = field(default_factory=dict)
     live_remote_triggers: set[str] = field(default_factory=set)
+
+    # #776: native task map from ``system/task_*`` events, keyed by task_id.
+    # ``native_tasks_seen`` flips on the first such event; from then on the
+    # map is authoritative for Monitor / Bash-bg / Agent-bg liveness and the
+    # tool_use handles above only matter for ScheduleWakeup / RemoteTrigger,
+    # which emit no task events (F9). Before that (older CLI) the legacy
+    # handles decide, unchanged.
+    tasks: dict[str, ClaudeTask] = field(default_factory=dict)
+    native_tasks_seen: bool = False
 
     # #374 (rc7): deadline map paralleling `live_bg_agents`. Kept as a
     # separate dict (rather than converting `live_bg_agents` to
@@ -1477,64 +1507,71 @@ def _live_bounded_handle_count(handles: set[str], deadlines: dict[str, float]) -
     return sum(1 for tool_id in handles if deadlines.get(tool_id, 0.0) > now)
 
 
-def has_live_background_work(state: ClaudeStreamState) -> bool:
-    """Return True when the session has any background handle whose deadline
-    (if any) is still in the future (#346 gate).
+def _live_native_tasks(state: ClaudeStreamState) -> list[ClaudeTask]:
+    return [task for task in state.tasks.values() if task.is_live_background]
 
-    Monitors + wakeups with expired deadlines are treated as "no longer
-    live" — the primitive should have fired and emitted its result by then.
-    Agent/Task-bg handles (#374, rc7) follow the same rule via
-    ``_live_bg_agent_count`` — a handle past its ``BG_AGENT_MAX_KEEP_S``
-    deadline no longer counts as live, otherwise this gate would wait forever
-    for a tool_result that may never arrive. Bg bashes and remote triggers
-    have no deadline so any entry counts as live.
-    """
+
+def _is_native_monitor(state: ClaudeStreamState, task: ClaudeTask) -> bool:
+    # Monitor registers as ``task_type=local_bash`` (F10); the tool_use handle
+    # registered in ``live_monitors`` (keyed by tool_use_id) tells it apart
+    # from a ``Bash(run_in_background=true)``.
+    return task.tool_use_id is not None and task.tool_use_id in state.live_monitors
+
+
+def _live_deadline_count(deadlines: dict[str, float]) -> int:
     now = time.monotonic()
-    for deadline in state.live_monitors.values():
-        if deadline == 0.0 or deadline > now:
-            return True
-    for deadline in state.live_wakeups.values():
-        if deadline == 0.0 or deadline > now:
-            return True
-    if _live_bg_agent_count(state) > 0:
-        return True
-    # #573 (rc8 slice): bg-bashes and remote triggers previously had NO
-    # deadline, so a single entry pinned this gate True for the rest of the
-    # run. That keeps `has_live_background_work` true long after the work is
-    # gone, which suppresses the post-result watchdog and leaves the process
-    # lingering in limbo — the exact state that gets SIGTERM'd and poisons the
-    # session (#631/#632). Same bounded-keep treatment as Agent/Task-bg in
-    # rc7: age out on a deadline rather than trusting a terminal signal that
-    # may never arrive.
-    if _live_bounded_handle_count(state.live_bg_bashes, state.bg_bash_deadlines) > 0:
-        return True
-    return (
-        _live_bounded_handle_count(
-            state.live_remote_triggers, state.remote_trigger_deadlines
-        )
-        > 0
+    return sum(
+        1 for deadline in deadlines.values() if deadline == 0.0 or deadline > now
     )
+
+
+def _live_background_counts(state: ClaudeStreamState) -> tuple[int, int]:
+    """Return ``(watchers, bg_tasks)`` currently live — the single source for
+    every liveness consumer (#776, D-4).
+
+    ScheduleWakeup and RemoteTrigger always come from their tool_use handles
+    (no native events exist for them). Monitor / Bash-bg / Agent-bg come from
+    the native task map once the CLI has emitted any task event in this
+    process; otherwise from the legacy handles (older CLIs).
+    """
+    watchers = _live_deadline_count(state.live_wakeups)
+    bg_tasks = _live_bounded_handle_count(
+        state.live_remote_triggers, state.remote_trigger_deadlines
+    )
+    if state.native_tasks_seen:
+        for task in _live_native_tasks(state):
+            if _is_native_monitor(state, task):
+                watchers += 1
+            else:
+                bg_tasks += 1
+    else:
+        watchers += _live_deadline_count(state.live_monitors)
+        bg_tasks += _live_bg_agent_count(state) + _live_bounded_handle_count(
+            state.live_bg_bashes, state.bg_bash_deadlines
+        )
+    return watchers, bg_tasks
+
+
+def has_live_background_work(state: ClaudeStreamState) -> bool:
+    """Return True when the session has any live background work (#346 gate).
+
+    #776: native ``system/task_*`` events decide for Monitor / Bash-bg /
+    Agent-bg as soon as the CLI emits them; the bounded tool_use handles
+    (#374/#573) remain for ScheduleWakeup / RemoteTrigger and as the fallback
+    for CLIs that never emit task events. See ``_live_background_counts``.
+    """
+    watchers, bg_tasks = _live_background_counts(state)
+    return watchers + bg_tasks > 0
 
 
 def background_task_summary(state: ClaudeStreamState) -> str | None:
     """Return a compact "⏳ 2 watchers · 1 bg task" summary or None if empty.
 
     Used by progress footer rendering (#347 v2) and the `/background`
-    command. v1 of this PR only computes it; the footer wiring lands in
-    a follow-up once meta-threading from ClaudeStreamState to
-    `ProgressTracker.meta` is confirmed safe for the other 5 engines.
-
-    #374 (rc7): the bg-agent portion of ``bg_tasks`` uses
-    ``_live_bg_agent_count`` so an aged-out Agent/Task-bg handle (bounded by
-    ``BG_AGENT_MAX_KEEP_S``) stops appearing in the footer the same way it
-    stops counting as live work in ``has_live_background_work``.
+    command. Counts come from ``_live_background_counts`` so the footer and
+    the liveness gate can never disagree (#776).
     """
-    watchers = len(state.live_monitors) + len(state.live_wakeups)
-    bg_tasks = (
-        len(state.live_bg_bashes)
-        + _live_bg_agent_count(state)
-        + len(state.live_remote_triggers)
-    )
+    watchers, bg_tasks = _live_background_counts(state)
     if watchers == 0 and bg_tasks == 0:
         return None
     parts: list[str] = []
@@ -1543,6 +1580,135 @@ def background_task_summary(state: ClaudeStreamState) -> str | None:
     if bg_tasks:
         parts.append(f"{bg_tasks} bg task{'s' if bg_tasks != 1 else ''}")
     return "⏳ " + " · ".join(parts)
+
+
+def _end_task(
+    state: ClaudeStreamState, task: ClaudeTask, status: str, reason: str
+) -> None:
+    if task.ended_at is not None:
+        return
+    task.status = status
+    task.ended_at = time.monotonic()
+    log = logger.info if task.is_backgrounded else logger.debug
+    log(
+        "claude.task.ended",
+        task_id=task.task_id,
+        task_type=task.task_type,
+        status=status,
+        reason=reason,
+        duration_s=round(task.ended_at - task.started_at, 1),
+    )
+
+
+def _register_task(
+    state: ClaudeStreamState, event: claude_schema.StreamSystemMessage, source: str
+) -> ClaudeTask:
+    task_id = event.task_id or ""
+    task = state.tasks.get(task_id)
+    created = task is None
+    if task is None:
+        task = ClaudeTask(task_id=task_id)
+        state.tasks[task_id] = task
+    if event.task_type is not None:
+        task.task_type = event.task_type
+    if event.tool_use_id is not None:
+        task.tool_use_id = event.tool_use_id
+    if event.description is not None:
+        task.description = event.description
+    if event.subagent_type is not None:
+        task.subagent_type = event.subagent_type
+    if event.is_backgrounded is not None:
+        task.is_backgrounded = event.is_backgrounded
+    if event.owned_by_subagent is not None:
+        task.owned_by_subagent = event.owned_by_subagent
+    if task.is_live_background:
+        state.background_observed = True
+    if created or source == "task_started":
+        log = logger.info if task.is_backgrounded else logger.debug
+        log(
+            "claude.task.registered",
+            task_id=task_id,
+            task_type=task.task_type,
+            is_backgrounded=task.is_backgrounded,
+            owned_by_subagent=task.owned_by_subagent,
+            subagent_type=task.subagent_type,
+            description=(task.description or "")[:80],
+            source=source,
+        )
+    return task
+
+
+def _apply_task_event(
+    state: ClaudeStreamState, event: claude_schema.StreamSystemMessage
+) -> None:
+    """Fold one ``system/task_*`` / ``background_tasks_changed`` event into the
+    native task map (#776). Never emits Untether events."""
+    subtype = event.subtype
+    state.native_tasks_seen = True
+    if subtype == "background_tasks_changed":
+        snapshot = event.tasks or []
+        present: set[str] = set()
+        for entry in snapshot:
+            task_id = entry.get("task_id") if isinstance(entry, dict) else None
+            if not isinstance(task_id, str) or not task_id:
+                continue
+            present.add(task_id)
+            if task_id not in state.tasks:
+                # The snapshot lands a moment before task_started; register a
+                # background placeholder so the gap can't read as "idle".
+                task = ClaudeTask(
+                    task_id=task_id,
+                    task_type=entry.get("task_type"),
+                    description=entry.get("description"),
+                    is_backgrounded=True,
+                )
+                state.tasks[task_id] = task
+                state.background_observed = True
+                logger.info(
+                    "claude.task.registered",
+                    task_id=task_id,
+                    task_type=task.task_type,
+                    is_backgrounded=True,
+                    owned_by_subagent=False,
+                    subagent_type=None,
+                    description=(task.description or "")[:80],
+                    source="snapshot",
+                )
+        for task in list(state.tasks.values()):
+            if task.is_live_background and task.task_id not in present:
+                _end_task(state, task, "ended", "snapshot")
+        return
+    task_id = event.task_id
+    if not task_id:
+        return
+    if subtype == "task_started":
+        _register_task(state, event, "task_started")
+        return
+    task = state.tasks.get(task_id)
+    if task is None:
+        # e.g. the "stopped" notification the CLI replays on --resume for a
+        # previous process's task (F11) — nothing live to track.
+        logger.debug(
+            "claude.task.unknown", task_id=task_id, subtype=subtype, status=event.status
+        )
+        return
+    if subtype == "task_progress":
+        if event.usage is not None:
+            task.last_usage = dict(event.usage)
+        if event.last_tool_name is not None:
+            task.last_tool_name = event.last_tool_name
+        return
+    if subtype == "task_updated":
+        status = (event.patch or {}).get("status")
+        if isinstance(status, str) and status not in _TASK_LIVE_STATUSES:
+            _end_task(state, task, status, "task_updated")
+        return
+    if subtype == "task_notification":
+        if event.usage is not None:
+            task.last_usage = dict(event.usage)
+        status = event.status or "completed"
+        if status not in _TASK_LIVE_STATUSES:
+            _end_task(state, task, status, "task_notification")
 
 
 def _tool_result_event(
@@ -1982,6 +2148,9 @@ def translate_claude_event(
 ) -> list[UntetherEvent]:
     match event:
         case claude_schema.StreamSystemMessage(subtype=subtype):
+            if subtype.startswith("task_") or subtype == "background_tasks_changed":
+                _apply_task_event(state, event)
+                return []
             if subtype != "init":
                 logger.debug(
                     "claude.system_event.non_init",

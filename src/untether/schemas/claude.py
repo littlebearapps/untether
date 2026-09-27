@@ -144,6 +144,27 @@ class StreamSystemMessage(
     permissionMode: str | None = None
     output_style: str | None = None
     apiKeySource: str | None = None
+    # Background-task lifecycle subtypes (#776), verified on CLI 2.1.283:
+    # task_started / task_progress / task_updated / task_notification carry
+    # ``task_id``; background_tasks_changed carries a ``tasks`` snapshot.
+    # All optional so upstream shape drift degrades to "field missing"
+    # rather than a dropped line.
+    task_id: str | None = None
+    tool_use_id: str | None = None
+    description: str | None = None
+    task_type: str | None = None
+    is_backgrounded: bool | None = None
+    owned_by_subagent: bool | None = None
+    subagent_type: str | None = None
+    spawn_depth: int | None = None
+    prompt: str | None = None
+    status: str | None = None
+    patch: dict[str, Any] | None = None
+    summary: str | None = None
+    output_file: str | None = None
+    usage: dict[str, Any] | None = None
+    last_tool_name: str | None = None
+    tasks: list[dict[str, Any]] | None = None
 
 
 class StreamResultMessage(
@@ -327,6 +348,24 @@ class StreamToolProgressMessage(
     uuid: str | None = None
 
 
+# #776: one line per stdin input command, e.g.
+#   {"type":"command_lifecycle","command_uuid":"<uuid>","state":"queued"}
+# ``state`` is queued / started / completed. ``command_uuid`` echoes the
+# ``uuid`` Untether puts on an injected user line, which makes follow-up →
+# turn attribution exact; a ScheduleWakeup firing appears as ``started``
+# with an unknown uuid. Verified on CLI 2.1.283.
+class StreamCommandLifecycleMessage(
+    msgspec.Struct,
+    tag="command_lifecycle",
+    tag_field="type",
+    forbid_unknown_fields=False,
+):
+    command_uuid: str | None = None
+    state: str | None = None
+    session_id: str | None = None
+    uuid: str | None = None
+
+
 type StreamJsonMessage = (
     StreamUserMessage
     | StreamAssistantMessage
@@ -338,6 +377,7 @@ type StreamJsonMessage = (
     | StreamControlCancelRequest
     | StreamRateLimitMessage
     | StreamToolProgressMessage
+    | StreamCommandLifecycleMessage
 )
 
 

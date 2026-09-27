@@ -1044,6 +1044,10 @@ def test_background_task_summary_formatting() -> None:
 
     state.live_monitors["a"] = 0.0
     state.live_bg_bashes.add("b")
+    # #776: the footer now shares `has_live_background_work`'s counting, so a
+    # bg bash needs its parallel deadline (as registration always sets) to
+    # count — before, the footer counted it while the gate did not.
+    state.bg_bash_deadlines["b"] = time.monotonic() + 999.0
     summary = background_task_summary(state)
     assert summary is not None
     assert "⏳" in summary
