@@ -18,6 +18,7 @@ import signal
 import subprocess as subprocess_module
 import time
 import tty
+import weakref
 from collections import OrderedDict
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
@@ -229,6 +230,79 @@ _OUTLINE_MIN_CHARS = 200
 # When Claude Code asks a question, the user can reply via Telegram text.
 # Scoped by channel_id to prevent cross-chat message stealing (#144).
 _PENDING_ASK_REQUESTS: dict[str, tuple[int, str]] = {}
+
+
+# #776: stdin writes now come from several tasks (the reader's drains, the
+# control-response path, follow-up injection, the live-session lifecycle's
+# close), so every writer serialises on a per-pipe lock. Keyed weakly on the
+# stream object itself so the entry dies with the process's pipe.
+_STDIN_LOCKS: weakref.WeakKeyDictionary[Any, anyio.Lock] = weakref.WeakKeyDictionary()
+
+
+def _stdin_lock(stdin: Any) -> anyio.Lock | None:
+    try:
+        lock = _STDIN_LOCKS.get(stdin)
+        if lock is None:
+            lock = anyio.Lock()
+            _STDIN_LOCKS[stdin] = lock
+        return lock
+    except TypeError:  # not weak-referenceable (exotic test doubles)
+        return None
+
+
+async def _locked_send(stdin: Any, data: bytes) -> None:
+    lock = _stdin_lock(stdin)
+    if lock is None:
+        await stdin.send(data)
+        return
+    async with lock:
+        await stdin.send(data)
+
+
+async def write_user_message(session_id: str, text: str, *, command_uuid: str) -> bool:
+    """Write a user turn into the live Claude process that owns ``session_id``.
+
+    #776: the stream-json input shape is the one ``stdin_payload`` sends at
+    spawn, plus ``uuid`` — the CLI echoes it back as
+    ``command_lifecycle.command_uuid`` (F7), which is how the next turn is
+    attributed to this message. Written while the session is idle the CLI
+    runs it as its own turn (F6); written mid-turn it is folded into the
+    running turn (F5 — steer semantics, rc12), so callers decide *when*.
+    Returns False when there is no live stdin or the pipe is closed.
+    """
+    stdin = _SESSION_STDIN.get(session_id)
+    if stdin is None:
+        return False
+    state = _SESSION_BG_STATE.get(session_id)
+    if state is not None:
+        # Record before writing: command_lifecycle can race the send.
+        state.injected_commands[command_uuid] = time.monotonic()
+    payload = {
+        "type": "user",
+        "uuid": command_uuid,
+        "session_id": session_id,
+        "message": {"role": "user", "content": text},
+        "parent_tool_use_id": None,
+    }
+    try:
+        await _locked_send(stdin, (json.dumps(payload) + "\n").encode())
+    except (OSError, anyio.ClosedResourceError, anyio.BrokenResourceError) as exc:
+        if state is not None:
+            state.injected_commands.pop(command_uuid, None)
+        logger.warning(
+            "claude.live_session.write_failed",
+            session_id=session_id,
+            command_uuid=command_uuid,
+            error_type=exc.__class__.__name__,
+        )
+        return False
+    logger.info(
+        "claude.live_session.user_message_written",
+        session_id=session_id,
+        command_uuid=command_uuid,
+        text_len=len(text),
+    )
+    return True
 
 
 def is_session_alive(session_id: str) -> bool:
@@ -565,6 +639,30 @@ class ClaudeStreamState:
     # handles decide, unchanged.
     tasks: dict[str, ClaudeTask] = field(default_factory=dict)
     native_tasks_seen: bool = False
+
+    # #776 live-session turn segmentation. ``live_mode`` is armed by
+    # ``ClaudeRunner.run_impl`` in control-channel mode (kill switch
+    # ``[watchdog] live_sessions``). Turn 1 is the run itself; after its
+    # result every later turn is bracketed by TurnEvent(started/completed).
+    live_mode: bool = False
+    completed_turns: int = 0
+    turn: int = 1
+    turn_open: bool = True
+    turn_reason: str = "unknown"
+    turn_command_uuid: str | None = None
+    # Hints collected while idle, consumed when the next turn opens.
+    pending_command_uuid: str | None = None
+    turn_notifications: list[str] = field(default_factory=list)
+    # uuid -> monotonic write time for user lines Untether injected (#776).
+    injected_commands: dict[str, float] = field(default_factory=dict)
+    # #776 resume guard (F11): the stopped-task replay + 0-turn result that
+    # precede the real answer on --resume of a session whose previous
+    # process ended with live background work.
+    saw_assistant_output: bool = False
+    stopped_notification_pre_output: bool = False
+    absorbed_results: int = 0
+    absorbed_cost_baseline: float | None = None
+    live_session_max_s: float = 14400.0
 
     # #374 (rc7): deadline map paralleling `live_bg_agents`. Kept as a
     # separate dict (rather than converting `live_bg_agents` to
@@ -2139,7 +2237,209 @@ def _capture_orphan_descendants(
         )
 
 
+def _should_absorb_resume_result(
+    event: claude_schema.StreamResultMessage, state: ClaudeStreamState
+) -> bool:
+    """#776 resume guard (F11): on ``--resume`` of a session whose previous
+    process ended with background work still live, the CLI first replays a
+    ``task_notification{status: stopped}`` and answers it with a synthetic
+    0-turn result (~0.3 s, ``duration_api_ms == 0``) — only then does it run
+    the real turn. That first result is not the answer. At most once per run:
+    a second 0-turn result is a genuine empty result."""
+    return (
+        state.resumed
+        and state.completed_turns == 0
+        and state.absorbed_results == 0
+        and state.stopped_notification_pre_output
+        and not state.saw_assistant_output
+        and event.num_turns == 0
+        and event.duration_api_ms == 0
+        and not event.is_error
+    )
+
+
+def _open_followup_turn(
+    state: ClaudeStreamState, factory: EventFactory
+) -> UntetherEvent:
+    """Open turn N+1 after a result, attributing it from the idle-time hints."""
+    reason = "unknown"
+    command_uuid = state.pending_command_uuid
+    detail: dict[str, Any] = {}
+    if command_uuid is not None and command_uuid in state.injected_commands:
+        reason = "followup"
+    elif state.turn_notifications:
+        reason = "task_finished"
+        detail["tasks"] = list(state.turn_notifications)
+    elif command_uuid is not None:
+        reason = "scheduled_wakeup"
+    elif any(_is_native_monitor(state, task) for task in _live_native_tasks(state)):
+        reason = "monitor_event"
+    state.turn += 1
+    state.turn_open = True
+    state.turn_reason = reason
+    state.turn_command_uuid = command_uuid if reason == "followup" else None
+    state.pending_command_uuid = None
+    state.turn_notifications = []
+    # Per-turn scalars (see their field docs) start fresh for the new turn.
+    state.last_assistant_text = None
+    state.last_exitplanmode_plan = None
+    state.last_schedule_wakeup_arm_delay = None
+    state.last_bg_bash_launched_at = None
+    # Not idle any more: the stall / post-result logic keys off this.
+    state.result_received_at = None
+    logger.info(
+        "claude.turn.started",
+        session_id=factory.resume.value if factory.resume else None,
+        turn=state.turn,
+        reason=reason,
+        command_uuid=state.turn_command_uuid,
+    )
+    return factory.turn_started(
+        turn=state.turn,
+        reason=reason,  # type: ignore[arg-type]
+        command_uuid=state.turn_command_uuid,
+        detail=detail,
+    )
+
+
 def translate_claude_event(
+    event: claude_schema.StreamJsonMessage,
+    *,
+    title: str,
+    state: ClaudeStreamState,
+    factory: EventFactory,
+) -> list[UntetherEvent]:
+    """Translate one CLI line, adding #776 turn segmentation around
+    :func:`_translate_claude_event_base`."""
+    if (
+        isinstance(event, claude_schema.StreamSystemMessage)
+        and event.subtype == "task_notification"
+        and event.status == "stopped"
+        and state.completed_turns == 0
+        and not state.saw_assistant_output
+    ):
+        state.stopped_notification_pre_output = True
+    if isinstance(
+        event, claude_schema.StreamResultMessage
+    ) and _should_absorb_resume_result(event, state):
+        state.absorbed_results += 1
+        state.absorbed_cost_baseline = event.total_cost_usd
+        logger.info(
+            "claude.resume_guard.absorbed",
+            session_id=event.session_id,
+            total_cost_usd=event.total_cost_usd,
+        )
+        return []
+
+    if not state.live_mode or state.completed_turns == 0:
+        if isinstance(event, claude_schema.StreamAssistantMessage):
+            state.saw_assistant_output = True
+        events = _translate_claude_event_base(
+            event, title=title, state=state, factory=factory
+        )
+        if any(isinstance(evt, CompletedEvent) for evt in events):
+            state.completed_turns = 1
+            state.turn_open = False
+        return events
+
+    # ── live session, after the run's own result (#776) ──────────────────
+    match event:
+        case claude_schema.StreamCommandLifecycleMessage(state=cmd_state):
+            if cmd_state == "started" and not state.turn_open:
+                state.pending_command_uuid = event.command_uuid
+            return []
+        case claude_schema.StreamSystemMessage(subtype=subtype):
+            if subtype == "task_notification" and not state.turn_open:
+                label = event.summary or event.description
+                task = state.tasks.get(event.task_id or "")
+                if task is not None and task.description:
+                    label = task.description
+                state.turn_notifications.append(label or "background task")
+            out: list[UntetherEvent] = []
+            if subtype == "init" and not state.turn_open:
+                out.append(_open_followup_turn(state, factory))
+            # Keep the base side effects (task map, MCP catalog capture) but
+            # never re-emit a StartedEvent inside a live session.
+            out.extend(
+                evt
+                for evt in _translate_claude_event_base(
+                    event, title=title, state=state, factory=factory
+                )
+                if not isinstance(evt, (StartedEvent, CompletedEvent))
+            )
+            return out
+        case claude_schema.StreamResultMessage():
+            out = []
+            if not state.turn_open:
+                out.append(_open_followup_turn(state, factory))
+            base = _translate_claude_event_base(
+                event, title=title, state=state, factory=factory
+            )
+            completed = next(
+                (evt for evt in base if isinstance(evt, CompletedEvent)), None
+            )
+            state.turn_open = False
+            state.completed_turns += 1
+            if completed is not None:
+                logger.info(
+                    "claude.turn.completed",
+                    session_id=event.session_id,
+                    turn=state.turn,
+                    reason=state.turn_reason,
+                    ok=completed.ok,
+                    num_turns=event.num_turns,
+                )
+                out.append(
+                    factory.turn_completed(
+                        turn=state.turn,
+                        ok=completed.ok,
+                        answer=completed.answer,
+                        reason=state.turn_reason,  # type: ignore[arg-type]
+                        error=completed.error,
+                        usage=completed.usage,
+                        command_uuid=state.turn_command_uuid,
+                    )
+                )
+            return out
+        case claude_schema.StreamAssistantMessage() | claude_schema.StreamUserMessage():
+            out = []
+            if not state.turn_open and not _is_tool_result_only(event):
+                out.append(_open_followup_turn(state, factory))
+            out.extend(
+                evt
+                for evt in _translate_claude_event_base(
+                    event, title=title, state=state, factory=factory
+                )
+                if not isinstance(evt, (StartedEvent, CompletedEvent))
+            )
+            return out
+        case _:
+            return [
+                evt
+                for evt in _translate_claude_event_base(
+                    event, title=title, state=state, factory=factory
+                )
+                if not isinstance(evt, (StartedEvent, CompletedEvent))
+            ]
+
+
+def _is_tool_result_only(event: claude_schema.StreamJsonMessage) -> bool:
+    if not isinstance(event, claude_schema.StreamUserMessage):
+        return False
+    content = event.message.content
+    return isinstance(content, list) and all(
+        isinstance(
+            block,
+            (
+                claude_schema.StreamToolResultBlock,
+                claude_schema.StreamAdvisorToolResultBlock,
+            ),
+        )
+        for block in content
+    )
+
+
+def _translate_claude_event_base(
     event: claude_schema.StreamJsonMessage,
     *,
     title: str,
@@ -3306,7 +3606,7 @@ class ClaudeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
         stdin_to_use = session_stdin or self._proc_stdin
         if stdin_to_use is not None:
             try:
-                await stdin_to_use.send(jsonl_line.encode())
+                await _locked_send(stdin_to_use, jsonl_line.encode())
                 logger.info(
                     "control_response.sent",
                     request_id=request_id,
@@ -3720,7 +4020,9 @@ class ClaudeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
             # Claude Code's MCP server child processes may inherit the stdout pipe FD,
             # keeping it open even after Claude Code exits. Without this break,
             # we'd block forever waiting for EOF that never comes.
-            if stream.did_emit_completed:
+            # #776: a live session keeps reading; `_subprocess_watchdog`
+            # carries the #505 protection instead (post-exit drain + close).
+            if stream.did_emit_completed and not stream.followup_turns:
                 break
 
     async def _drain_auto_approve(
@@ -3747,7 +4049,7 @@ class ClaudeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
             payload = (json.dumps(response) + "\n").encode()
             try:
                 if pipe is not None:
-                    await pipe.send(payload)
+                    await _locked_send(pipe, payload)
                     logger.info(
                         "control_response.auto_approved",
                         request_id=req_id,
@@ -3792,7 +4094,7 @@ class ClaudeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
             payload = (json.dumps(response) + "\n").encode()
             try:
                 if pipe is not None:
-                    await pipe.send(payload)
+                    await _locked_send(pipe, payload)
                     logger.info(
                         "control_response.auto_denied",
                         request_id=req_id,
@@ -3843,7 +4145,7 @@ class ClaudeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
             payload = (json.dumps(request) + "\n").encode()
             try:
                 if pipe is not None:
-                    await pipe.send(payload)
+                    await _locked_send(pipe, payload)
                     logger.info(
                         "catalog.refresh_sent",
                         request_id=req_id,
@@ -5040,6 +5342,8 @@ class ClaudeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
                 post_result_limbo_grace_s = self._post_result_limbo_grace_s
                 pre_result_silence_timeout_s = 3600.0
                 post_result_bg_max_hold_s = self._post_result_bg_max_hold_s
+                live_sessions_enabled = True
+                live_session_max_s = 14400.0
                 try:
                     result = load_settings_if_exists()
                     if result is not None:
@@ -5059,10 +5363,23 @@ class ClaudeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
                         post_result_bg_max_hold_s = float(
                             settings_obj.watchdog.post_result_bg_max_hold
                         )
+                        live_sessions_enabled = bool(
+                            settings_obj.watchdog.live_sessions
+                        )
+                        live_session_max_s = float(
+                            settings_obj.watchdog.live_session_max_s
+                        )
                 except Exception:  # noqa: BLE001 — settings errors must not block a run
                     run_logger.debug(
                         "post_result_idle.settings_load_failed", exc_info=True
                     )
+
+                # #776: live-session model — keep reading after the result so
+                # background-wake / follow-up turns reach the bridge.
+                if use_control_channel and live_sessions_enabled:
+                    state.live_mode = True
+                    stream.followup_turns = True
+                state.live_session_max_s = live_session_max_s
 
                 async with anyio.create_task_group() as tg:
                     tg.start_soon(
@@ -5134,6 +5451,12 @@ class ClaudeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
                     # `proc.wait()` below is never reached.
                     with contextlib.suppress(Exception):
                         await proc.stderr.aclose()
+                    # #776: a live session's reader only ends at process exit
+                    # (EOF, or the post-exit drain closed stdout), so there is
+                    # no linger left for the post-result watchdog to police —
+                    # don't let the run wait out its next poll tick.
+                    if state.live_mode:
+                        tg.cancel_scope.cancel()
 
                 rc = await proc.wait()
                 # #640: mirror the base runner (runner.py:1362). ClaudeRunner

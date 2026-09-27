@@ -15,6 +15,8 @@ from .model import (
     EngineId,
     ResumeToken,
     StartedEvent,
+    TurnEvent,
+    TurnReason,
 )
 
 logger = get_logger(__name__)
@@ -180,4 +182,48 @@ class EventFactory:
             resume=resume,
             error=error,
             usage=usage,
+        )
+
+    def turn_started(
+        self,
+        *,
+        turn: int,
+        reason: TurnReason = "unknown",
+        command_uuid: str | None = None,
+        detail: dict[str, Any] | None = None,
+    ) -> TurnEvent:
+        return TurnEvent(
+            engine=self.engine,
+            phase="started",
+            turn=turn,
+            reason=reason,
+            resume=self._resume,
+            command_uuid=command_uuid,
+            detail=detail or {},
+        )
+
+    def turn_completed(
+        self,
+        *,
+        turn: int,
+        ok: bool,
+        answer: str,
+        reason: TurnReason = "unknown",
+        error: str | None = None,
+        usage: dict[str, Any] | None = None,
+        command_uuid: str | None = None,
+        detail: dict[str, Any] | None = None,
+    ) -> TurnEvent:
+        return TurnEvent(
+            engine=self.engine,
+            phase="completed",
+            turn=turn,
+            reason=reason,
+            resume=self._resume,
+            ok=ok,
+            answer=answer,
+            error=error,
+            usage=usage,
+            command_uuid=command_uuid,
+            detail=detail or {},
         )

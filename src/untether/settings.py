@@ -609,6 +609,16 @@ class WatchdogSettings(BaseModel):
     # (pre-rc10 fixed-cap behaviour). Range 0-2h.
     post_result_bg_max_hold: float = Field(default=1800.0, ge=0, le=7200)
 
+    # #776: live-session model for Claude (control-channel mode). The process
+    # stays live after its reply: background-task / scheduled-wakeup /
+    # Monitor turns are delivered to Telegram and follow-ups are written into
+    # the live process instead of resuming. Kill switch: false restores the
+    # pre-rc11 "stop reading at the first result" behaviour.
+    live_sessions: bool = True
+    # #776: absolute lifetime cap for one live Claude process, from spawn
+    # (backstop against e.g. an endless Monitor). Range 10 min - 24 h.
+    live_session_max_s: float = Field(default=14400.0, ge=600, le=86400)
+
     # #481: grace window for fresh Bash/BashOutput tool calls. When the most
     # recent action is Bash/BashOutput/KillShell and its age is less than
     # bash_grace_seconds, ProgressEdits._stall_monitor suppresses the Telegram

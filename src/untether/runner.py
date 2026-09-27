@@ -396,6 +396,14 @@ class JsonlStreamState:
     # records — set-only, so it states a fact about the run rather than
     # about frame ordering.
     saw_result: bool = False
+    # #776: set by runners that keep their process live after the first
+    # result (Claude control-channel mode). The base line handler then keeps
+    # translating after CompletedEvent instead of dropping lines, and later
+    # turns surface as TurnEvent segments.
+    followup_turns: bool = False
+    # #776 / #505: set when the post-exit drain had to close stdout because a
+    # grandchild still held the inherited fd.
+    stdout_held_after_exit: bool = False
     event_count: int = 0
     recent_events: deque[tuple[float, str]] = field(
         default_factory=lambda: deque(maxlen=10)
@@ -930,7 +938,7 @@ class JsonlSubprocessRunner(BaseRunner):
         logger: Any,
         pid: int,
     ) -> list[UntetherEvent]:
-        if stream.did_emit_completed:
+        if stream.did_emit_completed and not stream.followup_turns:
             if not stream.ignored_after_completed:
                 log_pipeline(
                     logger,
@@ -1037,6 +1045,10 @@ class JsonlSubprocessRunner(BaseRunner):
                     jsonl_seq=seq,
                 )
                 output.append(evt)
+                # #776: a live runner keeps translating after completion —
+                # later turns arrive as TurnEvent segments in later batches.
+                if stream.followup_turns:
+                    continue
                 break
             output.append(evt)
         return output
@@ -1072,6 +1084,8 @@ class JsonlSubprocessRunner(BaseRunner):
                 break
 
     _WATCHDOG_GRACE_SECONDS: float = 5.0
+    # #776: post-exit stdout drain for runners that read past the result.
+    _POST_EXIT_DRAIN_SECONDS: float = 2.0
 
     _WATCHDOG_POLL_SECONDS: float = 0.5
 
@@ -1329,7 +1343,26 @@ class JsonlSubprocessRunner(BaseRunner):
                         prev_diag = diag
 
             await anyio.sleep(self._WATCHDOG_POLL_SECONDS)
-        if stream.did_emit_completed or reader_done.is_set():
+        if reader_done.is_set():
+            return
+        if stream.did_emit_completed and stream.followup_turns:
+            # #776 / #505: a live runner keeps reading after the result, so
+            # the old "stop at the first result" protection no longer
+            # applies. Once the process is gone, give the reader a short
+            # drain for the final lines, then close our read end so a
+            # grandchild holding the inherited stdout fd can't block it.
+            with anyio.move_on_after(self._POST_EXIT_DRAIN_SECONDS):
+                await reader_done.wait()
+            if reader_done.is_set():
+                return
+            stream.stdout_held_after_exit = True
+            logger.warning("subprocess.stdout_held_after_exit", pid=pid)
+            stdout = getattr(proc, "stdout", None)
+            if stdout is not None:
+                with contextlib.suppress(Exception):
+                    await stdout.aclose()
+            return
+        if stream.did_emit_completed:
             return
         # Process is dead but reader hasn't finished — wait grace period.
         with anyio.move_on_after(self._WATCHDOG_GRACE_SECONDS):
