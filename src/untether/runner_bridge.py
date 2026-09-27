@@ -1733,6 +1733,7 @@ class ProgressEdits:
             _post_result_age = self._post_result_idle_age_seconds()
             _post_result_limbo = (
                 _post_result_idle
+                and not self._is_live_session_idle()
                 and _post_result_age is not None
                 and _post_result_age > self._POST_RESULT_LIMBO_THRESHOLD_S
             )
@@ -1978,7 +1979,9 @@ class ProgressEdits:
             # rather than merely skipping the escalation: otherwise the moment
             # the user finally clicks Approve, a counter of 85 would trip an
             # immediate false escalation on the very next tick.
-            if _expected_wait_reason:
+            if _expected_wait_reason or self._is_live_session_idle():
+                # #776: a live session between turns is silent by design —
+                # its runner lifecycle, not the stall detector, ends it.
                 self._frozen_ring_count = 0
 
             # Suppress Telegram notification when process is CPU-active
@@ -2350,12 +2353,28 @@ class ProgressEdits:
         stream = self.stream
         if stream is None:
             return False
+        engine_state = getattr(stream, "engine_state", None)
+        if self._is_live_session_idle():
+            # #776: a live Claude session between turns emits task /
+            # command_lifecycle lines while idle, so last_event_type is not a
+            # reliable "past the result" signal — the turn state is.
+            return True
         if getattr(stream, "last_event_type", None) != "result":
             return False
-        engine_state = getattr(stream, "engine_state", None)
         if engine_state is None:
             return False
         return getattr(engine_state, "result_received_at", None) is not None
+
+    def _is_live_session_idle(self) -> bool:
+        """#776: a live Claude session sitting between turns (the runner's
+        live-session lifecycle owns its teardown, so it is never limbo)."""
+        stream = self.stream
+        engine_state = getattr(stream, "engine_state", None) if stream else None
+        if engine_state is None or not getattr(engine_state, "live_mode", False):
+            return False
+        return bool(getattr(engine_state, "completed_turns", 0)) and not getattr(
+            engine_state, "turn_open", True
+        )
 
     def _post_result_idle_age_seconds(self) -> float | None:
         """#333 Tier 2: seconds since ``result_received_at`` was armed.

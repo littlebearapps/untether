@@ -8,6 +8,7 @@ to prevent deadlock when keeping stdin open for control responses.
 from __future__ import annotations
 
 import contextlib
+import functools
 import html
 import json
 import os
@@ -20,7 +21,7 @@ import time
 import tty
 import weakref
 from collections import OrderedDict
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass, field
 from datetime import UTC
 from pathlib import Path
@@ -302,6 +303,131 @@ async def write_user_message(session_id: str, text: str, *, command_uuid: str) -
         command_uuid=command_uuid,
         text_len=len(text),
     )
+    return True
+
+
+@dataclass(slots=True)
+class LiveSession:
+    """A Claude process kept live after its reply (#776).
+
+    The session is *accepting input* until the lifecycle (or /cancel, /new,
+    drain) starts closing it; ``lock`` serialises that transition against
+    follow-up injection so a message can never be written into a pipe that is
+    about to close (the #775 race guard, built here).
+    """
+
+    session_id: str
+    state: ClaudeStreamState
+    stdin: Any
+    pid: int | None = None
+    lock: anyio.Lock = field(default_factory=anyio.Lock)
+    spawned_at: float = field(default_factory=time.monotonic)
+    idle_since: float | None = None
+    hold_started: float | None = None
+    had_live_work: bool = False
+    closing: bool = False
+    close_reason: str | None = None
+    listeners: list[Callable[[str, dict[str, Any]], Any]] = field(default_factory=list)
+
+    @property
+    def idle(self) -> bool:
+        return self.state.completed_turns > 0 and not self.state.turn_open
+
+    @property
+    def accepting_input(self) -> bool:
+        return not self.closing
+
+
+_LIVE_SESSIONS: dict[str, LiveSession] = {}
+
+
+def get_live_session(session_id: str) -> LiveSession | None:
+    return _LIVE_SESSIONS.get(session_id)
+
+
+def is_session_accepting(session_id: str) -> bool:
+    """True when ``session_id`` has a live Claude process whose stdin is open
+    and not closing — i.e. a follow-up can be written into it (#776)."""
+    live = _LIVE_SESSIONS.get(session_id)
+    return live is not None and live.accepting_input
+
+
+def add_live_session_listener(
+    session_id: str, callback: Callable[[str, dict[str, Any]], Any]
+) -> bool:
+    """Subscribe to lifecycle notices (``"closing"``) for a live session.
+
+    Callbacks may be sync or async; exceptions are logged and swallowed."""
+    live = _LIVE_SESSIONS.get(session_id)
+    if live is None:
+        return False
+    live.listeners.append(callback)
+    return True
+
+
+def live_task_descriptions(state: ClaudeStreamState) -> list[str]:
+    return [
+        task.description or task.task_type or "task"
+        for task in _live_native_tasks(state)
+    ]
+
+
+async def _notify_live_listeners(
+    live: LiveSession, kind: str, payload: dict[str, Any]
+) -> None:
+    for callback in list(live.listeners):
+        try:
+            result = callback(kind, payload)
+            if hasattr(result, "__await__"):
+                await result
+        except Exception:  # noqa: BLE001 — a listener must never break teardown
+            logger.warning(
+                "claude.live_session.listener_failed",
+                session_id=live.session_id,
+                kind=kind,
+                exc_info=True,
+            )
+
+
+async def close_live_session(
+    session_id: str, reason: str, *, notice: bool = False
+) -> bool:
+    """Gracefully close a live session's stdin (#776).
+
+    The CLI then stops any live background task (recording the stop in the
+    transcript, F3) and exits rc=0 — no SIGTERM, no quarantine. Idempotent;
+    returns False when there is nothing (left) to close. With ``notice``
+    listeners get a ``"closing"`` event naming the tasks being stopped.
+    """
+    live = _LIVE_SESSIONS.get(session_id)
+    if live is None:
+        return False
+    async with live.lock:
+        if live.closing:
+            return False
+        live.closing = True
+        live.close_reason = reason
+        live.state.live_close_reason = reason
+    tasks = live_task_descriptions(live.state)
+    logger.info(
+        "claude.live_session.stdin_closed",
+        session_id=session_id,
+        reason=reason,
+        live_tasks=len(tasks),
+        turn=live.state.turn,
+        age_s=round(time.monotonic() - live.spawned_at, 1),
+    )
+    if notice:
+        await _notify_live_listeners(
+            live, "closing", {"reason": reason, "tasks": tasks}
+        )
+    lock = _stdin_lock(live.stdin)
+    with contextlib.suppress(Exception):
+        if lock is None:
+            await live.stdin.aclose()
+        else:
+            async with lock:
+                await live.stdin.aclose()
     return True
 
 
@@ -663,6 +789,14 @@ class ClaudeStreamState:
     absorbed_results: int = 0
     absorbed_cost_baseline: float | None = None
     live_session_max_s: float = 14400.0
+    # #776: a ScheduleWakeup the CLI will fire itself while stdin stays open
+    # (F9). Monotonic deadline = announced fire time + 60 s grace; the
+    # tool_use handle is cleared by its own confirmation tool_result, so it
+    # can't be what holds the session.
+    pending_wakeup_until: float | None = None
+    # #776: why the live session's stdin was closed (idle_no_tasks /
+    # max_hold / abs_cap / cancel / new / drain); None while still open.
+    live_close_reason: str | None = None
 
     # #374 (rc7): deadline map paralleling `live_bg_agents`. Kept as a
     # separate dict (rather than converting `live_bg_agents` to
@@ -1684,6 +1818,17 @@ def _end_task(
     state: ClaudeStreamState, task: ClaudeTask, status: str, reason: str
 ) -> None:
     if task.ended_at is not None:
+        # The CLI sends the empty background_tasks_changed snapshot a moment
+        # before task_updated (F1/F3): let the authoritative status replace
+        # the snapshot's provisional "ended".
+        if task.status == "ended" and status != "ended":
+            task.status = status
+            logger.debug(
+                "claude.task.status_refined",
+                task_id=task.task_id,
+                status=status,
+                reason=reason,
+            )
         return
     task.status = status
     task.ended_at = time.monotonic()
@@ -2258,6 +2403,37 @@ def _should_absorb_resume_result(
     )
 
 
+_WAKEUP_IN_RE = re.compile(r"\(in (\d+)\s*s\)")
+_WAKEUP_FIRE_GRACE_S = 60.0
+
+
+def _note_pending_wakeup(
+    state: ClaudeStreamState, tool_use_id: str, raw_result: Any
+) -> None:
+    """Record when a ScheduleWakeup will fire (#776, F9).
+
+    The confirmation reads e.g. "Next wakeup scheduled for 19:15:00 (in
+    94s)" — the CLI rounds to its own boundary, so the announced delay beats
+    the requested ``delaySeconds``. Falls back to the handle's deadline."""
+    now = time.monotonic()
+    match = _WAKEUP_IN_RE.search(_normalize_tool_result(raw_result) or "")
+    if match:
+        fire_at = now + float(match.group(1))
+    else:
+        deadline = state.live_wakeups.get(tool_use_id, 0.0)
+        fire_at = deadline if deadline > now else now + 60.0
+    until = fire_at + _WAKEUP_FIRE_GRACE_S
+    if state.pending_wakeup_until is None or until > state.pending_wakeup_until:
+        state.pending_wakeup_until = until
+
+
+def _has_pending_wakeup(state: ClaudeStreamState) -> bool:
+    return (
+        state.pending_wakeup_until is not None
+        and state.pending_wakeup_until > time.monotonic()
+    )
+
+
 def _open_followup_turn(
     state: ClaudeStreamState, factory: EventFactory
 ) -> UntetherEvent:
@@ -2274,6 +2450,8 @@ def _open_followup_turn(
         reason = "scheduled_wakeup"
     elif any(_is_native_monitor(state, task) for task in _live_native_tasks(state)):
         reason = "monitor_event"
+    if reason == "scheduled_wakeup":
+        state.pending_wakeup_until = None
     state.turn += 1
     state.turn_open = True
     state.turn_reason = reason
@@ -2598,6 +2776,8 @@ def _translate_claude_event_base(
                     continue
                 saw_tool_result = True
                 tool_use_id = content.tool_use_id
+                if tool_use_id in state.live_wakeups:
+                    _note_pending_wakeup(state, tool_use_id, content.content)
                 # #347/#374 clear a background-task entry only on a *terminal*
                 # tool_result — interim Monitor results keep the handle so the
                 # stall-suppression branch keeps firing while it runs.
@@ -4001,6 +4181,13 @@ class ClaudeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
                     # bridge's handoff wait. Cleared with the other
                     # registries in _cleanup_session_registries.
                     _SESSION_BG_STATE[registered_session_id] = state
+                    if state.live_mode and session_stdin is not None:
+                        _LIVE_SESSIONS[registered_session_id] = LiveSession(
+                            session_id=registered_session_id,
+                            state=state,
+                            stdin=session_stdin,
+                            pid=pid,
+                        )
                     logger.info(
                         "session_stdin.registered",
                         session_id=registered_session_id,
@@ -4266,6 +4453,153 @@ class ClaudeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
             signal_pid_group(proc.pid, signal.SIGKILL)
         return True
 
+    # #776 live-session lifecycle knobs (class attrs so tests can shrink them).
+    _live_poll_s: float = 1.0
+    _live_close_grace_s: float = 15.0
+
+    async def _live_session_lifecycle(
+        self,
+        *,
+        state: ClaudeStreamState,
+        reader_done: anyio.Event,
+        run_logger: Any,
+        proc: Any,
+        stream: Any,
+        idle_grace_s: float,
+        max_hold_s: float,
+        abs_cap_s: float,
+    ) -> None:
+        """Decide when a live session's stdin closes (#776, phase 03).
+
+        TURN_ACTIVE → IDLE on each result. While IDLE:
+        - pending approvals / asks pause every timer;
+        - nothing live (no native bg task, no pending ScheduleWakeup) for
+          ``idle_grace_s`` → graceful close (``idle_no_tasks``);
+        - work still live ``max_hold_s`` after the last turn ended → notice +
+          graceful close (``max_hold``; re-armed by every turn);
+        - ``abs_cap_s`` from spawn → notice + close (``abs_cap``).
+        Closing stdin makes the CLI stop its tasks and exit rc=0 (F3/F4). Only
+        if it doesn't exit within ``_live_close_grace_s`` does the old
+        SIGTERM + forced-teardown quarantine path run.
+        """
+        exit_reason = "reader_done"
+        try:
+            while not reader_done.is_set():
+                await anyio.sleep(self._live_poll_s)
+                if reader_done.is_set():
+                    return
+                sid = (
+                    state.factory.resume.value
+                    if state.factory.resume is not None
+                    else None
+                )
+                live = _LIVE_SESSIONS.get(sid) if sid else None
+                if live is None:
+                    continue
+                if live.closing:
+                    exit_reason = await self._await_live_exit_or_force(
+                        live=live,
+                        proc=proc,
+                        stream=stream,
+                        run_logger=run_logger,
+                        reader_done=reader_done,
+                    )
+                    return
+                now = time.monotonic()
+                live_work = has_live_background_work(state) or _has_pending_wakeup(
+                    state
+                )
+                if abs_cap_s > 0 and now - live.spawned_at >= abs_cap_s:
+                    await close_live_session(sid, "abs_cap", notice=live_work)
+                    continue
+                if not live.idle:
+                    live.idle_since = None
+                    live.hold_started = None
+                    continue
+                if any(v == sid for v in _REQUEST_TO_SESSION.values()):
+                    # A pending approval / ask pauses every timer.
+                    live.idle_since = now
+                    live.hold_started = now
+                    continue
+                if live.idle_since is None:
+                    live.idle_since = now
+                    live.hold_started = now
+                elif live.had_live_work and not live_work:
+                    # Work just ended without a wake turn: fresh idle grace.
+                    live.idle_since = now
+                live.had_live_work = live_work
+                if live_work:
+                    if (
+                        max_hold_s > 0
+                        and live.hold_started is not None
+                        and now - live.hold_started >= max_hold_s
+                    ):
+                        await close_live_session(sid, "max_hold", notice=True)
+                    continue
+                if now - live.idle_since >= idle_grace_s:
+                    await close_live_session(sid, "idle_no_tasks")
+        except (anyio.get_cancelled_exc_class(), KeyboardInterrupt):
+            exit_reason = "cancelled"
+            raise
+        finally:
+            run_logger.info(
+                "claude.live_session.lifecycle_exited",
+                session_id=(
+                    state.factory.resume.value
+                    if state.factory.resume is not None
+                    else None
+                ),
+                reason=exit_reason,
+            )
+
+    async def _await_live_exit_or_force(
+        self,
+        *,
+        live: LiveSession,
+        proc: Any,
+        stream: Any,
+        run_logger: Any,
+        reader_done: anyio.Event,
+    ) -> str:
+        with anyio.move_on_after(self._live_close_grace_s):
+            await reader_done.wait()
+        if reader_done.is_set() or proc is None or proc.returncode is not None:
+            return "exited_after_close"
+        sid = live.session_id
+        live_tasks = len(live_task_descriptions(live.state))
+        quarantined = False
+        if (
+            stream is not None
+            and stream.did_emit_completed
+            and _load_quarantine_on_forced_teardown()
+        ):
+            try:
+                get_quarantine_store().quarantine(
+                    self.engine, sid, reason="forced_teardown_after_result"
+                )
+                quarantined = True
+            except Exception:  # noqa: BLE001 — never break teardown
+                run_logger.debug("session.quarantine_record_failed", exc_info=True)
+        run_logger.warning(
+            "claude.live_session.forced_teardown",
+            session_id=sid,
+            pid=proc.pid,
+            close_reason=live.close_reason,
+            live_tasks=live_tasks,
+            quarantined=quarantined,
+        )
+        if stream is not None:
+            stream.sigterm_sent = True
+        signal_pid_group(proc.pid, signal.SIGTERM)
+        deadline = time.monotonic() + self._subcountdown_sigterm_grace_s
+        while time.monotonic() < deadline:
+            await anyio.sleep(self._subcountdown_sigterm_grace_poll_s)
+            if proc.returncode is not None:
+                return "sigterm"
+        if proc.returncode is None:
+            signal_pid_group(proc.pid, signal.SIGKILL)
+        return "sigkill"
+
     async def _post_result_idle_watchdog(
         self,
         state: ClaudeStreamState,
@@ -4462,6 +4796,11 @@ class ClaudeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
                         if killed:
                             exit_reason = "pre_result_silence_cancelled"
                             return
+                        continue
+                    if state.live_mode:
+                        # #776: after a result a live session belongs to
+                        # `_live_session_lifecycle`; this watchdog keeps only
+                        # the pre-result silence cap above.
                         continue
                     elapsed = time.monotonic() - armed_at
 
@@ -5415,6 +5754,20 @@ class ClaudeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
                             pre_result_silence_timeout_s,
                             post_result_bg_max_hold_s,
                         )
+                    if state.live_mode:
+                        tg.start_soon(
+                            functools.partial(
+                                self._live_session_lifecycle,
+                                state=state,
+                                reader_done=reader_done,
+                                run_logger=run_logger,
+                                proc=proc,
+                                stream=stream,
+                                idle_grace_s=post_result_limbo_grace_s,
+                                max_hold_s=post_result_bg_max_hold_s,
+                                abs_cap_s=live_session_max_s,
+                            )
+                        )
                     async for evt in self._iter_jsonl_events(
                         stdout=proc.stdout,
                         stream=stream,
@@ -5779,6 +6132,8 @@ def _cleanup_session_registries(session_id: str) -> None:
         cleaned.append("session_stdin")
     if _SESSION_BG_STATE.pop(session_id, None) is not None:
         cleaned.append("session_bg_state")
+    if _LIVE_SESSIONS.pop(session_id, None) is not None:
+        cleaned.append("live_session")
     if session_id in _DISCUSS_APPROVED:
         cleaned.append("discuss_approved")
     _DISCUSS_APPROVED.discard(session_id)

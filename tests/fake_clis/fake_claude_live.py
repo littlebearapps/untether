@@ -351,7 +351,18 @@ def scenario_inherited_fd_after_exit(first: dict) -> None:
     os._exit(0)
 
 
+def scenario_ignore_eof(first: dict) -> None:
+    # A wedged CLI: answers, then ignores stdin EOF (forces the SIGTERM path).
+    init()
+    text("stuck")
+    result("stuck")
+    while next_user(None) is not None:
+        pass
+    time.sleep(60)
+
+
 _SCENARIOS = {
+    "ignore_eof": scenario_ignore_eof,
     "bg_bash_wake": scenario_bg_bash_wake,
     "bg_agent_wake": scenario_bg_agent_wake,
     "monitor_ticks": scenario_monitor_ticks,
