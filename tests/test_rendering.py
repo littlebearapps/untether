@@ -235,3 +235,78 @@ def test_render_markdown_keeps_valid_link() -> None:
     link_entities = [e for e in entities if e.get("type") == "text_link"]
     assert len(link_entities) == 1
     assert link_entities[0]["url"] == "https://docs.example.com"
+
+
+# ---------------------------------------------------------------------------
+# #786 — model-emitted <br> renders as a line break, not literally
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("tag", ["<br>", "<br/>", "<br />", "<BR>", "<Br />"])
+def test_render_markdown_inline_br_becomes_newline(tag: str) -> None:
+    text, entities = render_markdown(f"line one{tag}line two")
+
+    assert text == "line one\nline two"
+    assert entities == []
+
+
+def test_render_markdown_br_inside_bold_keeps_entity() -> None:
+    text, entities = render_markdown("**a<br>b**")
+
+    assert text == "a\nb"
+    assert entities == [{"type": "bold", "offset": 0, "length": 3}]
+
+
+def test_render_markdown_br_only_paragraph_is_dropped() -> None:
+    """The observed #786 shape: a `<br>` spacer paragraph between the
+    answer and the footer."""
+    text, _ = render_markdown("The agents are still running.\n\n<br>\n\n🏷 footer")
+
+    assert "<br>" not in text
+    assert text == "The agents are still running.\n\n🏷 footer"
+
+
+def test_render_markdown_trailing_br_only_paragraph_dropped() -> None:
+    text, _ = render_markdown("answer\n\n<br>")
+
+    assert text == "answer"
+
+
+def test_render_markdown_br_in_pipe_table_row_becomes_space() -> None:
+    """commonmark renders no tables, so a pipe row stays one line of text —
+    a space keeps the row readable where a newline would split the cell."""
+    text, _ = render_markdown("| a<br>b | c |\n|---|---|\n| d | e |")
+
+    assert "<br>" not in text
+    assert "| a b | c |" in text
+
+
+def test_render_markdown_br_in_code_span_preserved() -> None:
+    text, entities = render_markdown("use `a<br>b` here")
+
+    assert text == "use a<br>b here"
+    assert {"type": "code", "offset": 4, "length": 6} in entities
+
+
+def test_render_markdown_br_in_fenced_block_preserved() -> None:
+    text, _ = render_markdown("```html\n<p>a<br>b</p>\n```")
+
+    assert text == "<p>a<br>b</p>"
+
+
+def test_render_markdown_br_in_indented_code_block_preserved() -> None:
+    text, _ = render_markdown("para\n\n    a<br>b\n")
+
+    assert text.endswith("a<br>b")
+
+
+def test_render_markdown_other_html_still_literal() -> None:
+    """#713 posture: only a bare <br> is normalised; every other tag —
+    including <br> look-alikes and <br> with attributes — stays text."""
+    text, _ = render_markdown('x <b>bold</b> <svg onload=1> <brx> <br class="c"> <br>y')
+
+    assert "<b>bold</b>" in text
+    assert "<svg onload=1>" in text
+    assert "<brx>" in text
+    assert '<br class="c">' in text
+    assert text.endswith("\ny")

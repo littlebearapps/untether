@@ -8,6 +8,7 @@ from typing import Any
 from urllib.parse import urlparse
 
 from markdown_it import MarkdownIt
+from markdown_it.token import Token
 from sulguk import transform_html
 
 from ..markdown import MarkdownParts, assemble_markdown_parts
@@ -83,8 +84,115 @@ def _normalize_nested_list_markers(md: str) -> str:
     return "".join(lines)
 
 
+# #786: a bare `<br>` / `<br/>` / `<br />` (any case, no attributes). Models
+# use it as a line break or spacer; with `html: False` it would otherwise be
+# escaped and shown literally. Nothing else HTML-shaped is let through (#713).
+_BR_TAG_RE = re.compile(r"<br\s*/?>", re.IGNORECASE)
+
+
+def _is_pipe_table_block(content: str) -> bool:
+    """True when every non-blank line of an inline block looks like a pipe
+    table row. commonmark renders no tables, so such rows stay plain text."""
+    lines = [line.strip() for line in content.splitlines() if line.strip()]
+    return bool(lines) and all(line.startswith("|") for line in lines)
+
+
+def _text_token(content: str) -> Token:
+    return Token("text", "", 0, content=content)
+
+
+def _split_br(content: str, *, table: bool) -> list[Token]:
+    """Split a text token's content on bare `<br>` tags (#786).
+
+    Outside pipe tables each tag becomes a ``hardbreak`` (a real newline in
+    Telegram); inside a pipe-table row it becomes a space so the row — which
+    renders as a single line of text — isn't split mid-cell.
+    """
+    if table:
+        return [_text_token(_BR_TAG_RE.sub(" ", content))]
+    parts = _BR_TAG_RE.split(content)
+    out: list[Token] = []
+    last = len(parts) - 1
+    for idx, part in enumerate(parts):
+        if idx > 0:
+            part = part.lstrip(" ")
+        if idx < last:
+            part = part.rstrip(" ")
+        if part:
+            out.append(_text_token(part))
+        if idx < last:
+            out.append(Token("hardbreak", "br", 0))
+    return out
+
+
+def _normalise_inline_children(inline: Token) -> bool:
+    """Rewrite one inline token's children in place.
+
+    Only ``text`` children are touched, so code spans (``code_inline``) and
+    code blocks (``fence`` / ``code_block``, which are block tokens with no
+    inline children) keep their content verbatim.
+
+    Returns True when the block was nothing but `<br>` tags (a spacer
+    paragraph) and should be dropped.
+    """
+    children = inline.children
+    if not children or not any(
+        c.type == "text" and _BR_TAG_RE.search(c.content) for c in children
+    ):
+        return False
+    table = _is_pipe_table_block(inline.content)
+    rewritten: list[Token] = []
+    for child in children:
+        if child.type == "text" and _BR_TAG_RE.search(child.content):
+            rewritten.extend(_split_br(child.content, table=table))
+            continue
+        if (
+            child.type == "softbreak"
+            and rewritten
+            and rewritten[-1].type == "hardbreak"
+        ):
+            # `text<br>\nmore`: the tag already broke the line.
+            continue
+        rewritten.append(child)
+    inline.children = rewritten
+    return all(
+        c.type in ("hardbreak", "softbreak")
+        or (c.type == "text" and not c.content.strip())
+        for c in rewritten
+    )
+
+
+def _normalise_tokens(tokens: list[Token]) -> list[Token]:
+    out: list[Token] = []
+    idx = 0
+    while idx < len(tokens):
+        tok = tokens[idx]
+        nxt = tokens[idx + 1] if idx + 1 < len(tokens) else None
+        if (
+            tok.type == "inline"
+            and _normalise_inline_children(tok)
+            and out
+            and out[-1].type == "paragraph_open"
+            and nxt is not None
+            and nxt.type == "paragraph_close"
+        ):
+            # Drop a paragraph that held only `<br>` spacers (#786).
+            out.pop()
+            idx += 2
+            continue
+        out.append(tok)
+        idx += 1
+    return out
+
+
+def _render_html(md: str) -> str:
+    env: dict[str, Any] = {}
+    tokens = _normalise_tokens(_MD_RENDERER.parse(md, env))
+    return _MD_RENDERER.renderer.render(tokens, _MD_RENDERER.options, env)
+
+
 def render_markdown(md: str) -> tuple[str, list[dict[str, Any]]]:
-    html = _MD_RENDERER.render(_normalize_nested_list_markers(md or ""))
+    html = _render_html(_normalize_nested_list_markers(md or ""))
     rendered = transform_html(html)
 
     text = _BULLET_RE.sub(r"\1-", rendered.text)
