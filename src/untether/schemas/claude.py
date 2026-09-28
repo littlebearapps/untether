@@ -298,7 +298,61 @@ class StreamControlCancelRequest(
     request_id: str | None = None
 
 
+# #790: `rate_limit_event` is a quota-status *snapshot*, not a throttle
+# notice. Real payload (CLI 2.1.283):
+#   {"type":"rate_limit_event","rate_limit_info":{"status":"allowed",
+#    "resetsAt":1790578200,"rateLimitType":"five_hour",
+#    "overageStatus":"rejected","overageDisabledReason":"out_of_credits",
+#    "isUsingOverage":false,"unifiedWindows":{"five_hour":{"utilization":0.09,
+#    "resetsAt":1790578200},"seven_day":{…}}},"uuid":…,"session_id":…}
+# The upstream zod enums are mirrored below and pinned by
+# tests/test_claude_cli_schema_drift.py. The struct fields stay plain `str`
+# (not Literal) so a new upstream value degrades to "unknown status" in the
+# runner instead of a dropped line.
+CLAUDE_RATE_LIMIT_STATUSES: tuple[str, ...] = ("allowed", "allowed_warning", "rejected")
+CLAUDE_RATE_LIMIT_TYPES: tuple[str, ...] = (
+    "five_hour",
+    "seven_day",
+    "seven_day_opus",
+    "seven_day_sonnet",
+    "seven_day_overage_included",
+    "overage",
+)
+CLAUDE_OVERAGE_STATUSES: tuple[str, ...] = CLAUDE_RATE_LIMIT_STATUSES
+
+
+class RateLimitWindow(msgspec.Struct, forbid_unknown_fields=False):
+    utilization: float | None = None
+    resets_at: float | None = msgspec.field(default=None, name="resetsAt")
+
+
+class RateLimitUnifiedWindows(msgspec.Struct, forbid_unknown_fields=False):
+    five_hour: RateLimitWindow | None = None
+    seven_day: RateLimitWindow | None = None
+    seven_day_overage_included: RateLimitWindow | None = None
+
+
 class RateLimitInfo(msgspec.Struct, forbid_unknown_fields=False):
+    # --- real snapshot shape (#790, CLI 2.1.283) ---
+    status: str | None = None
+    # epoch seconds
+    resets_at: float | None = msgspec.field(default=None, name="resetsAt")
+    rate_limit_type: str | None = msgspec.field(default=None, name="rateLimitType")
+    utilization: float | None = None
+    unified_windows: RateLimitUnifiedWindows | None = msgspec.field(
+        default=None, name="unifiedWindows"
+    )
+    overage_status: str | None = msgspec.field(default=None, name="overageStatus")
+    overage_resets_at: float | None = msgspec.field(
+        default=None, name="overageResetsAt"
+    )
+    overage_disabled_reason: str | None = msgspec.field(
+        default=None, name="overageDisabledReason"
+    )
+    is_using_overage: bool | None = msgspec.field(default=None, name="isUsingOverage")
+    error_code: str | None = msgspec.field(default=None, name="errorCode")
+    # --- legacy shape (#349/#518); never observed from a real CLI, kept so
+    # an older/alternative emitter still gets the precise countdown ---
     requests_limit: int | None = None
     requests_remaining: int | None = None
     requests_reset: str | None = None
@@ -315,6 +369,8 @@ class StreamRateLimitMessage(
     forbid_unknown_fields=False,
 ):
     rate_limit_info: RateLimitInfo | None = None
+    uuid: str | None = None
+    session_id: str | None = None
 
 
 # #637 — Claude Code emits a top-level `tool_progress` heartbeat while a

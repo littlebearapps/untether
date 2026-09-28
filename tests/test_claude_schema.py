@@ -70,6 +70,135 @@ def test_decode_rate_limit_event_bare() -> None:
 
 
 # ---------------------------------------------------------------------------
+# #790 — the real rate_limit_event is a quota-status snapshot (CLI 2.1.283)
+# ---------------------------------------------------------------------------
+
+# Captured 2026-09-28 on lba-1 from a one-turn Haiku probe (uuid/session_id
+# redacted). Every key below was silently dropped by the pre-#790 schema.
+REAL_ALLOWED_RATE_LIMIT_EVENT = {
+    "type": "rate_limit_event",
+    "rate_limit_info": {
+        "status": "allowed",
+        "resetsAt": 1790578200,
+        "rateLimitType": "five_hour",
+        "overageStatus": "rejected",
+        "overageDisabledReason": "out_of_credits",
+        "isUsingOverage": False,
+        "unifiedWindows": {
+            "five_hour": {"utilization": 0.09, "resetsAt": 1790578200},
+            "seven_day": {"utilization": 0.15, "resetsAt": 1791036000},
+        },
+    },
+    "uuid": "00000000-0000-0000-0000-000000000000",
+    "session_id": "11111111-1111-1111-1111-111111111111",
+}
+
+
+def test_decode_real_allowed_rate_limit_event() -> None:
+    decoded = claude_schema.decode_stream_json_line(
+        json.dumps(REAL_ALLOWED_RATE_LIMIT_EVENT).encode()
+    )
+    assert isinstance(decoded, claude_schema.StreamRateLimitMessage)
+    assert decoded.uuid == "00000000-0000-0000-0000-000000000000"
+    assert decoded.session_id == "11111111-1111-1111-1111-111111111111"
+    info = decoded.rate_limit_info
+    assert info is not None
+    assert info.status == "allowed"
+    assert info.resets_at == 1790578200
+    assert info.rate_limit_type == "five_hour"
+    assert info.overage_status == "rejected"
+    assert info.overage_disabled_reason == "out_of_credits"
+    assert info.is_using_overage is False
+    assert info.unified_windows is not None
+    assert info.unified_windows.five_hour is not None
+    assert info.unified_windows.five_hour.utilization == 0.09
+    assert info.unified_windows.five_hour.resets_at == 1790578200
+    assert info.unified_windows.seven_day is not None
+    assert info.unified_windows.seven_day.utilization == 0.15
+    assert info.unified_windows.seven_day_overage_included is None
+    # Legacy fields stay available and simply absent.
+    assert info.retry_after_ms is None
+    assert info.requests_reset is None
+
+
+def test_decode_allowed_warning_rate_limit_event() -> None:
+    payload = {
+        "type": "rate_limit_event",
+        "rate_limit_info": {
+            "status": "allowed_warning",
+            "resetsAt": 1790578200,
+            "rateLimitType": "seven_day_opus",
+            "utilization": 0.82,
+            "surpassedThreshold": 0.8,
+        },
+        "uuid": "u",
+        "session_id": "s",
+    }
+    decoded = claude_schema.decode_stream_json_line(json.dumps(payload).encode())
+    assert isinstance(decoded, claude_schema.StreamRateLimitMessage)
+    info = decoded.rate_limit_info
+    assert info is not None
+    assert info.status == "allowed_warning"
+    assert info.rate_limit_type == "seven_day_opus"
+    assert info.utilization == 0.82
+
+
+def test_decode_rejected_rate_limit_event_with_error_code() -> None:
+    payload = {
+        "type": "rate_limit_event",
+        "rate_limit_info": {
+            "status": "rejected",
+            "rateLimitType": "overage",
+            "overageStatus": "rejected",
+            "isUsingOverage": True,
+            "errorCode": "credits_required",
+            "unifiedWindows": {
+                "seven_day_overage_included": {
+                    "utilization": 1.0,
+                    "resetsAt": 1791036000,
+                }
+            },
+        },
+        "uuid": "u",
+        "session_id": "s",
+    }
+    decoded = claude_schema.decode_stream_json_line(json.dumps(payload).encode())
+    assert isinstance(decoded, claude_schema.StreamRateLimitMessage)
+    info = decoded.rate_limit_info
+    assert info is not None
+    assert info.status == "rejected"
+    assert info.error_code == "credits_required"
+    assert info.is_using_overage is True
+    assert info.resets_at is None
+    assert info.unified_windows is not None
+    window = info.unified_windows.seven_day_overage_included
+    assert window is not None
+    assert window.utilization == 1.0
+
+
+def test_decode_rate_limit_event_unknown_status_and_extra_keys() -> None:
+    """Upstream enum growth must degrade to "unknown value", never a dropped
+    line — status is a plain str, and unknown keys are ignored."""
+    payload = {
+        "type": "rate_limit_event",
+        "rate_limit_info": {
+            "status": "throttled_v2",
+            "rateLimitType": "one_hour",
+            "limitScope": "group_pool",
+            "brandNewKey": {"nested": [1, 2, 3]},
+            "unifiedWindows": {"one_hour": {"utilization": 0.5, "resetsAt": 1}},
+        },
+        "uuid": "u",
+        "session_id": "s",
+    }
+    decoded = claude_schema.decode_stream_json_line(json.dumps(payload).encode())
+    assert isinstance(decoded, claude_schema.StreamRateLimitMessage)
+    assert decoded.rate_limit_info is not None
+    assert decoded.rate_limit_info.status == "throttled_v2"
+    assert decoded.rate_limit_info.rate_limit_type == "one_hour"
+
+
+# ---------------------------------------------------------------------------
 # #489 — server_tool_use + advisor_tool_result content blocks
 # ---------------------------------------------------------------------------
 

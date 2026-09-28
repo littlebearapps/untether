@@ -796,12 +796,27 @@ class ClaudeStreamState:
     # approve, so this is the only path to retain the body.
     last_exitplanmode_plan: str | None = None
     # Cumulative seconds the session spent in Anthropic-side rate-limit waits (#349).
-    # Sum of every rate_limit_event's retry_after_ms, so the cost footer can annotate
-    # "(incl. Xm Ys rate-limited)" when a run finishes after one or more throttles.
+    # #790: only *throttling* events accrue (a `rejected` snapshot, or the
+    # legacy retry_after_ms/reset-ts shape) — `allowed` heartbeats never do.
+    # Repeats against one deadline accrue only the extension.
     rate_limit_total_s: float = 0.0
-    # Count of rate_limit_event emissions in this session — feeds a unit-test hook
-    # and future /stats surfacing (#349 v2).
+    # Count of throttling rate_limit_events in this session (#349 v2); `allowed`
+    # / `allowed_warning` snapshots and bare events are not counted (#790).
     rate_limit_count: int = 0
+    # #790: latest quota snapshot from any rate_limit_event — `status` plus the
+    # per-window {utilization, resets_at} from `unifiedWindows`, keyed by
+    # window name (five_hour / seven_day / seven_day_overage_included).
+    # Stashed for the subscription footer / #692 work; nothing reads it for
+    # throttle decisions.
+    rate_limit_status: str | None = None
+    rate_limit_windows: dict[str, dict[str, float | None]] = field(default_factory=dict)
+    # #790: (rate_limit_type, resets_at) pairs already announced by an
+    # `allowed_warning` note — one heads-up per window, not one per snapshot.
+    rate_limit_warned: set[tuple[str | None, float | None]] = field(default_factory=set)
+    # #790: the throttle note for the current deadline, so repeated
+    # `rejected` snapshots for one window update it in place.
+    rate_limit_action_id: str | None = None
+    rate_limit_action_deadline: float = 0.0
 
     # #347 per-session background-task tracking. Claude Code v2.1.72+ has
     # primitives that arm long-running work and return the subprocess to
@@ -1055,14 +1070,41 @@ class ClaudeStreamState:
         return self.rate_limit_wait_until > time.monotonic()
 
 
-# #657: conservative wait window latched when a `rate_limit_event` arrives with
-# no parseable timing at all (no `retry_after_ms`, no reset timestamps). Upstream
-# throttles are rarely sub-second, and without *some* deadline
-# `awaiting_rate_limit_retry()` reports False while the session genuinely is
-# waiting on upstream — making a throttled-but-healthy session indistinguishable
-# from a hung one. 60s is well under every stall threshold (600s+), so a wrong
-# guess can only delay a stall verdict, never mask one.
-DEFAULT_BARE_RATE_LIMIT_WAIT_S = 60.0
+# #657 → #790: conservative wait window latched when a *confirmed* rejection
+# (`status: "rejected"`) arrives with no parseable timing at all — no
+# `resetsAt`, no legacy `retry_after_ms` / reset timestamps, no harvested
+# #692 reset. Without *some* deadline `awaiting_rate_limit_retry()` reports
+# False while the session genuinely is waiting on upstream. 60s is well under
+# every stall threshold (600s+), so a wrong guess can only delay a stall
+# verdict, never mask one.
+#
+# #657 applied this to *bare* events (no status, no timing). That premise was
+# a schema-mismatch artefact: the real status snapshot decoded to all-None,
+# so every healthy `allowed` heartbeat faked a 60s throttle. Bare events no
+# longer latch anything (#790).
+DEFAULT_REJECTED_RATE_LIMIT_WAIT_S = 60.0
+
+# #790: a `rejected` window can reset days away (seven_day*). The stall latch
+# is clamped so one snapshot can't park the stall detector for a week; the
+# on-screen wait still shows the true time.
+MAX_RATE_LIMIT_LATCH_S = 24 * 3600.0
+
+# #790: upstream suppresses `allowed_warning` below ~70% utilization; mirror
+# that so the one-shot heads-up note only fires when it means something.
+RATE_LIMIT_WARNING_UTILIZATION = 0.7
+
+# #790: unknown `rate_limit_info.status` values already warned about, so a new
+# upstream enum member is surfaced once per process rather than per event.
+_UNKNOWN_RATE_LIMIT_STATUSES_LOGGED: set[str] = set()
+
+_RATE_LIMIT_WINDOW_LABELS: dict[str, str] = {
+    "five_hour": "5h",
+    "seven_day": "7-day",
+    "seven_day_opus": "7-day Opus",
+    "seven_day_sonnet": "7-day Sonnet",
+    "seven_day_overage_included": "7-day (incl. extra usage)",
+    "overage": "extra-usage",
+}
 
 # #692: subscription-cap reset deadlines harvested from result-error text
 # ("… resets 5:30pm (Australia/Melbourne)"), keyed by auth namespace
@@ -1072,7 +1114,7 @@ _RATE_LIMIT_RESET_LATCH: dict[str, tuple[float, str]] = {}
 
 # Case-insensitive; timezone REQUIRED — without an explicit zone the clock
 # time is unresolvable (containers commonly run UTC while the account does
-# not), so we fail closed to the #657 default rather than guess.
+# not), so we fail closed to the 60s default rather than guess.
 _RESET_CLAUSE_RE = re.compile(
     r"resets\s+(\d{1,2})(?::(\d{2}))?\s*([ap]m)\s*\(([^)]+)\)",
     re.IGNORECASE,
@@ -1082,7 +1124,7 @@ _RESET_CLAUSE_RE = re.compile(
 # #701: the OTHER cap class — "You've reached your Fable 5 limit. Run
 # /usage-credits to continue or switch models with /model." carries no time at
 # all, so #692's result_error tier has nothing to harvest and every subsequent
-# bare event falls through to the #657 60s default. Showing "~60s" for a cap
+# rejection without a reset fell through to the 60s default. Showing "~60s" for a cap
 # whose remedy is an action (not a wait) is not merely inaccurate — it is the
 # wrong *kind* of answer, and the user waits instead of acting.
 #
@@ -1098,7 +1140,7 @@ ACTION_REQUIRED_LATCH_TTL_S = 30 * 60.0
 
 # Both halves required: the "reached your <X> limit" phrasing alone also appears
 # on time-based caps, and it's the /usage-credits | /model remedy that marks this
-# as the action-required class. Fail closed to #657 when either is absent.
+# as the action-required class. Fail closed to the 60s default when either is absent.
 _ACTION_CAP_RE = re.compile(
     r"reached\s+your\s+(?P<model>[\w.\- ]{1,40}?)\s+limit",
     re.IGNORECASE,
@@ -1164,7 +1206,8 @@ def _maybe_latch_rate_limit_reset(
     result_text: str | None, *, state: ClaudeStreamState
 ) -> None:
     """#692: harvest the reset clause from a result error and latch it for
-    subsequent bare rate_limit_events (this run and the next ones in the
+    subsequent `rejected` rate_limit_events that carry no `resetsAt` of
+    their own (#790; this run and the next ones in the
     same process/auth namespace)."""
     parsed = _parse_rate_limit_reset_clause(result_text)
     if parsed is None:
@@ -1173,7 +1216,7 @@ def _maybe_latch_rate_limit_reset(
     deadline = time.monotonic() + wait_s
     _RATE_LIMIT_RESET_LATCH[_rate_limit_latch_key()] = (deadline, display)
     # Keep the stall detector's "throttled upstream, not hung" context alive
-    # for the whole window, not just 60s past the last bare event.
+    # for the whole window, not just 60s past the last rate_limit_event.
     state.rate_limit_wait_until = max(state.rate_limit_wait_until, deadline)
     logger.info(
         "claude.rate_limit_reset_latched",
@@ -1203,7 +1246,7 @@ def _parse_action_required_cap(text: str | None) -> str | None:
     ("Fable 5"), or "" when the remedy is present but no model is named.
 
     ``None`` means "not this cap class" — the caller falls through to the
-    #657 default rather than claiming an action is required.
+    60s default rather than claiming an action is required.
     """
     if not text or _ACTION_REMEDY_RE.search(text) is None:
         return None
@@ -1215,7 +1258,8 @@ def _parse_action_required_cap(text: str | None) -> str | None:
 
 def _maybe_latch_action_required(result_text: str | None) -> None:
     """#701: arm the action-required latch from a result error so subsequent
-    bare rate_limit_events render the remedy instead of a countdown."""
+    `rejected` rate_limit_events without a `resetsAt` render the remedy
+    instead of a countdown (#790)."""
     model = _parse_action_required_cap(result_text)
     if model is None:
         return
@@ -1266,6 +1310,76 @@ def _format_wait_approx(seconds: float) -> str:
     return f"~{hours}h {rem}m" if rem else f"~{hours}h"
 
 
+def _format_reset_clock(epoch_s: float) -> str:
+    """#790: render a `resetsAt` epoch as host-local wall-clock time —
+    "17:30 AEST" today, "Wed 17:30 AEST" on another day. The zone
+    abbreviation stays so a UTC-configured host can't mislead."""
+    from datetime import datetime
+
+    reset = datetime.fromtimestamp(epoch_s, UTC).astimezone()
+    now = datetime.now(UTC).astimezone()
+    clock = reset.strftime("%H:%M")
+    zone = reset.strftime("%Z")
+    if reset.date() != now.date():
+        clock = f"{reset.strftime('%a')} {clock}"
+    return f"{clock} {zone}".strip()
+
+
+def _rate_limit_window_label(rate_limit_type: str | None) -> str:
+    if not rate_limit_type:
+        return "Usage"
+    return _RATE_LIMIT_WINDOW_LABELS.get(rate_limit_type, rate_limit_type)
+
+
+def _rate_limit_utilization(info: claude_schema.RateLimitInfo) -> float | None:
+    """Utilization for the snapshot's own window: the top-level field when
+    present, else the matching `unifiedWindows` entry."""
+    if info.utilization is not None:
+        return info.utilization
+    windows = info.unified_windows
+    if windows is None or not info.rate_limit_type:
+        return None
+    window = getattr(windows, info.rate_limit_type, None)
+    if isinstance(window, claude_schema.RateLimitWindow):
+        return window.utilization
+    return None
+
+
+def _stash_rate_limit_snapshot(
+    info: claude_schema.RateLimitInfo, state: ClaudeStreamState
+) -> None:
+    """#790: keep the latest quota snapshot on the state (footer / #692)."""
+    state.rate_limit_status = info.status
+    windows = info.unified_windows
+    if windows is None:
+        return
+    for name in ("five_hour", "seven_day", "seven_day_overage_included"):
+        window = getattr(windows, name, None)
+        if window is not None:
+            state.rate_limit_windows[name] = {
+                "utilization": window.utilization,
+                "resets_at": window.resets_at,
+            }
+
+
+def _rejection_needs_action(info: claude_schema.RateLimitInfo) -> bool:
+    """#790 + #701: a rejection with no reset time whose remedy is an action
+    (buy credits / switch model) rather than a wait."""
+    return (
+        info.error_code == "credits_required"
+        or info.rate_limit_type == "overage"
+        or info.overage_disabled_reason == "out_of_credits"
+    )
+
+
+def _has_legacy_rate_limit_timing(info: claude_schema.RateLimitInfo | None) -> bool:
+    return info is not None and (
+        info.retry_after_ms is not None
+        or bool(info.requests_reset)
+        or bool(info.tokens_reset)
+    )
+
+
 def _derive_retry_after_s(info: claude_schema.RateLimitInfo | None) -> float | None:
     """#518: when `rate_limit_event` omits `retry_after_ms`, fall back to the
     earlier of `requests_reset` / `tokens_reset` ISO timestamps.
@@ -1301,6 +1415,295 @@ def _derive_retry_after_s(info: claude_schema.RateLimitInfo | None) -> float | N
     # Choose the EARLIER reset (smaller delta) — the rate limit lifts as
     # soon as one of the two budgets refills.
     return min(candidates)
+
+
+def _legacy_retry_after(
+    info: claude_schema.RateLimitInfo | None,
+) -> tuple[float, str] | None:
+    """#349/#518 timing from the legacy shape: explicit ``retry_after_ms``
+    first, then the earlier of the ISO reset timestamps."""
+    if info is None:
+        return None
+    if info.retry_after_ms is not None:
+        return info.retry_after_ms / 1000.0, "retry_after_ms"
+    derived = _derive_retry_after_s(info)
+    if derived is not None:
+        return derived, "reset_ts"
+    return None
+
+
+def _rate_limit_note(
+    factory: EventFactory,
+    *,
+    action_id: str,
+    title: str,
+    detail: dict[str, Any],
+) -> list[UntetherEvent]:
+    return [
+        factory.action_started(
+            action_id=action_id, kind="note", title=title, detail=detail
+        ),
+        factory.action_completed(
+            action_id=action_id,
+            kind="note",
+            title=title,
+            ok=True,
+            level="info",
+            detail=detail,
+        ),
+    ]
+
+
+def _rate_limit_log_fields(info: claude_schema.RateLimitInfo | None) -> dict[str, Any]:
+    """Structured fields for ``claude.rate_limit_*`` logs (#518: log what
+    upstream actually sent, not a back-inferred summary)."""
+    if info is None:
+        return {"status": None}
+    legacy: dict[str, Any] = {}
+    for field_name in (
+        "requests_limit",
+        "requests_remaining",
+        "requests_reset",
+        "tokens_limit",
+        "tokens_remaining",
+        "tokens_reset",
+        "retry_after_ms",
+    ):
+        value = getattr(info, field_name, None)
+        if value is not None:
+            legacy[field_name] = value
+    return {
+        "status": info.status,
+        "rate_limit_type": info.rate_limit_type,
+        "resets_at": info.resets_at,
+        "utilization": _rate_limit_utilization(info),
+        "overage_status": info.overage_status,
+        "is_using_overage": info.is_using_overage,
+        "error_code": info.error_code,
+        "info": legacy or None,
+    }
+
+
+def _rate_limit_warning_note(
+    info: claude_schema.RateLimitInfo,
+    *,
+    state: ClaudeStreamState,
+    factory: EventFactory,
+) -> list[UntetherEvent]:
+    """#790: `allowed_warning` — a heads-up, never a latch. One note per
+    (window, reset); silent below the upstream ~70% threshold or while paid
+    extra usage covers the overflow (mirrors the CLI's own banner logic,
+    which also warns when utilization is absent)."""
+    utilization = _rate_limit_utilization(info)
+    key = (info.rate_limit_type, info.resets_at)
+    if (
+        info.is_using_overage
+        or (utilization is not None and utilization < RATE_LIMIT_WARNING_UTILIZATION)
+        or key in state.rate_limit_warned
+    ):
+        logger.debug("claude.rate_limit_snapshot", **_rate_limit_log_fields(info))
+        return []
+    state.rate_limit_warned.add(key)
+    label = _rate_limit_window_label(info.rate_limit_type)
+    if utilization is not None:
+        title = f"⚠️ {label} limit {round(utilization * 100)}% used"
+    else:
+        title = f"⚠️ Approaching {label} limit"
+    if info.resets_at is not None and info.resets_at > time.time():
+        title += f" — resets {_format_reset_clock(info.resets_at)}"
+    logger.info("claude.rate_limit_warning", **_rate_limit_log_fields(info))
+    state.note_seq += 1
+    detail: dict[str, Any] = {"status": info.status}
+    if info.rate_limit_type:
+        detail["rate_limit_type"] = info.rate_limit_type
+    if utilization is not None:
+        detail["utilization"] = utilization
+    return _rate_limit_note(
+        factory,
+        action_id=f"rate_limit_warning_{state.note_seq}",
+        title=title,
+        detail=detail,
+    )
+
+
+def _translate_rate_limit_event(
+    info: claude_schema.RateLimitInfo | None,
+    *,
+    state: ClaudeStreamState,
+    factory: EventFactory,
+) -> list[UntetherEvent]:
+    """#349/#518/#692/#701/#790: `rate_limit_event` → throttle note + latch,
+    only when the snapshot says we are actually throttled.
+
+    The real event (CLI 2.1.283) is a quota-status snapshot sent on every
+    API response that moves a rounded utilization or reset. Decision table:
+
+    * ``allowed`` — snapshot only: stash windows, DEBUG log, nothing else.
+    * ``allowed_warning`` — optional one-shot heads-up note, no latch.
+    * ``rejected`` (not covered by overage, reset still ahead) — throttle:
+      latch until ``resetsAt`` (clamped 24h), extension-only accounting.
+      Without ``resetsAt``: legacy timing → action-required remedy
+      (credits_required / overage) → #692 harvested reset → #701 latch →
+      conservative 60s default.
+    * unknown status — WARN once per value, no latch.
+    * no status: legacy ``retry_after_ms`` / reset timestamps keep the #518
+      path; a truly bare event latches nothing (#657's 60s guess retired).
+    """
+    retry_s: float | None = None
+    source = ""
+    reset_display: str | None = None
+    action_display: str | None = None
+    extension_only = False
+
+    if info is None or info.status is None:
+        legacy = _legacy_retry_after(info)
+        if legacy is None:
+            logger.info(
+                "claude.rate_limit_event",
+                retry_after_s=None,
+                retry_after_source="bare",
+                count=state.rate_limit_count,
+                cumulative_s=state.rate_limit_total_s,
+                **_rate_limit_log_fields(info),
+            )
+            return []
+        retry_s, source = legacy
+    else:
+        status = info.status
+        _stash_rate_limit_snapshot(info, state)
+        if status == "allowed":
+            logger.debug("claude.rate_limit_snapshot", **_rate_limit_log_fields(info))
+            return []
+        if status == "allowed_warning":
+            return _rate_limit_warning_note(info, state=state, factory=factory)
+        if status != "rejected":
+            if status not in _UNKNOWN_RATE_LIMIT_STATUSES_LOGGED:
+                _UNKNOWN_RATE_LIMIT_STATUSES_LOGGED.add(status)
+                logger.warning(
+                    "claude.rate_limit_event.unknown_status",
+                    known=list(claude_schema.CLAUDE_RATE_LIMIT_STATUSES),
+                    **_rate_limit_log_fields(info),
+                )
+            return []
+        if info.is_using_overage:
+            # Paid extra usage covers the overflow — nothing is cut off.
+            logger.info(
+                "claude.rate_limit_event",
+                retry_after_s=None,
+                retry_after_source="covered_by_overage",
+                count=state.rate_limit_count,
+                cumulative_s=state.rate_limit_total_s,
+                **_rate_limit_log_fields(info),
+            )
+            return []
+        if info.resets_at is not None:
+            remaining = info.resets_at - time.time()
+            if remaining <= 0:
+                # Upstream treats a rejection whose reset has passed as stale.
+                logger.info(
+                    "claude.rate_limit_event",
+                    retry_after_s=None,
+                    retry_after_source="stale",
+                    count=state.rate_limit_count,
+                    cumulative_s=state.rate_limit_total_s,
+                    **_rate_limit_log_fields(info),
+                )
+                return []
+            # The stream's own reset time is authoritative — it beats the
+            # #692 result-text parse.
+            retry_s = remaining
+            source = "resets_at"
+            reset_display = _format_reset_clock(info.resets_at)
+            extension_only = True
+        elif (legacy := _legacy_retry_after(info)) is not None:
+            retry_s, source = legacy
+        elif _rejection_needs_action(info):
+            # #701 class, flagged by the stream itself: no countdown, but the
+            # stall detector still gets a deadline.
+            retry_s = DEFAULT_REJECTED_RATE_LIMIT_WAIT_S
+            source = "action_required"
+            action_display = _latched_action_required() or ""
+        elif (latched := _latched_rate_limit_reset()) is not None:
+            # #692: a reset deadline harvested from an earlier result error
+            # ("resets 5:30pm (…)") beats guessing.
+            retry_s, reset_display = latched
+            source = "result_error"
+            extension_only = True
+        elif (action_model := _latched_action_required()) is not None:
+            # #701: an action-required cap carries no reset time.
+            retry_s = DEFAULT_REJECTED_RATE_LIMIT_WAIT_S
+            source = "action_required"
+            action_display = action_model
+        else:
+            retry_s = DEFAULT_REJECTED_RATE_LIMIT_WAIT_S
+            source = "default"
+
+    now_mono = time.monotonic()
+    latch_s = min(retry_s, MAX_RATE_LIMIT_LATCH_S)
+    new_deadline = now_mono + latch_s
+    action_id: str | None = None
+    if extension_only:
+        # #692/#790: repeated events sharing ONE deadline accrue only the
+        # extension beyond the existing wait, and update the same note.
+        prev_deadline = max(state.rate_limit_wait_until, now_mono)
+        state.rate_limit_total_s += max(0.0, new_deadline - prev_deadline)
+        if (
+            state.rate_limit_action_id is not None
+            and abs(new_deadline - state.rate_limit_action_deadline) < 5.0
+        ):
+            action_id = state.rate_limit_action_id
+    else:
+        state.rate_limit_total_s += retry_s
+    # #495/#499/#500: latch a deadline so the stall detector can tell
+    # "throttled upstream, will resume by itself" apart from "hung".
+    state.rate_limit_wait_until = new_deadline
+    state.rate_limit_count += 1
+    if action_id is None:
+        state.note_seq += 1
+        action_id = f"rate_limit_{state.note_seq}"
+    state.rate_limit_action_id = action_id
+    state.rate_limit_action_deadline = new_deadline
+
+    display_s = int(retry_s) if retry_s >= 1 else f"{retry_s:.1f}"
+    if source in ("resets_at", "result_error"):
+        title = (
+            f"⏳ Rate limited until {reset_display} ({_format_wait_approx(retry_s)})"
+        )
+    elif source == "action_required":
+        # #701: no countdown at all — this cap wants an action.
+        title = _format_action_required_title(action_display or "")
+    elif source == "default":
+        # A guessed window is shown as an estimate, not as fact.
+        title = f"⏳ Rate limited — waiting to retry (~{display_s}s)"
+    else:
+        title = f"⏳ Rate limited — retrying in {display_s}s"
+
+    detail: dict[str, Any] = {}
+    if info is not None:
+        if info.status is not None:
+            detail["status"] = info.status
+        if info.rate_limit_type is not None:
+            detail["rate_limit_type"] = info.rate_limit_type
+        if info.resets_at is not None:
+            detail["resets_at"] = info.resets_at
+        if info.tokens_remaining is not None:
+            detail["tokens_remaining"] = info.tokens_remaining
+        if info.requests_remaining is not None:
+            detail["requests_remaining"] = info.requests_remaining
+        if info.retry_after_ms is not None:
+            detail["retry_after_ms"] = info.retry_after_ms
+    logger.info(
+        "claude.rate_limit_event",
+        retry_after_s=retry_s,
+        retry_after_source=source,
+        count=state.rate_limit_count,
+        cumulative_s=state.rate_limit_total_s,
+        # #701: greppable — `retry_after_source=action_required` says the wait
+        # was never going to help.
+        action_model=action_display or None,
+        **_rate_limit_log_fields(info),
+    )
+    return _rate_limit_note(factory, action_id=action_id, title=title, detail=detail)
 
 
 def _normalize_tool_result(content: Any) -> str:
@@ -2989,7 +3392,7 @@ def _translate_claude_event_base(
             if not ok:
                 # #692: the subscription-cap reset time lives only in the
                 # raw result-error text — harvest it for this run's stall
-                # context and for subsequent runs' bare rate_limit_events.
+                # context and for subsequent runs' reset-less rejections.
                 _maybe_latch_rate_limit_reset(event.result, state=state)
                 # #701: the other cap class — no time to harvest, but a
                 # remedy to name.
@@ -3648,137 +4051,7 @@ def _translate_claude_event_base(
                 ),
             ]
         case claude_schema.StreamRateLimitMessage(rate_limit_info=info):
-            # #349: surface rate_limit_event as a visible "waiting for API" note
-            # so the user sees a clear "Anthropic is throttling us, we're waiting"
-            # status instead of silent inactivity + eventual mystery cancel.
-            retry_ms = info.retry_after_ms if info is not None else None
-            retry_s = retry_ms / 1000.0 if retry_ms is not None else None
-            # #518: when retry_after_ms is missing, derive retry_after_s from
-            # the requests_reset / tokens_reset ISO timestamps so subscription-
-            # cap throttles (which the rc13 audit showed always emit "bare"
-            # rate_limit_events) still surface an actionable wait time and
-            # accumulate into cumulative_s.
-            retry_s_source = "retry_after_ms"
-            reset_display: str | None = None
-            action_display: str | None = None
-            if retry_s is None:
-                derived = _derive_retry_after_s(info)
-                if derived is not None:
-                    retry_s = derived
-                    retry_s_source = "reset_ts"
-                else:
-                    # #692: a reset deadline harvested from an earlier
-                    # result error ("resets 5:30pm (…)") beats guessing —
-                    # subscription caps emit bare events every time, and a
-                    # ~60s estimate against a ~33min reality makes users
-                    # re-send into a closed window.
-                    latched = _latched_rate_limit_reset()
-                    if latched is not None:
-                        retry_s, reset_display = latched
-                        retry_s_source = "result_error"
-                    elif (action_model := _latched_action_required()) is not None:
-                        # #701: an action-required cap carries no reset time,
-                        # so we still need SOME deadline for the stall
-                        # detector — but the user must not be shown a
-                        # countdown for a cap that a countdown won't clear.
-                        # Same 60s window as #657, different answer on screen.
-                        retry_s = DEFAULT_BARE_RATE_LIMIT_WAIT_S
-                        retry_s_source = "action_required"
-                        action_display = action_model
-                    else:
-                        # #657: no timing anywhere — latch a conservative
-                        # default so awaiting_rate_limit_retry() is
-                        # directionally correct. Source stays distinct so
-                        # audits can tell derived waits from guessed ones.
-                        retry_s = DEFAULT_BARE_RATE_LIMIT_WAIT_S
-                        retry_s_source = "default"
-            now_mono = time.monotonic()
-            if retry_s_source == "result_error":
-                # #692: repeated bare events share ONE latched deadline —
-                # accumulate only the extension beyond the existing wait,
-                # not the full remaining window per event.
-                prev_deadline = max(state.rate_limit_wait_until, now_mono)
-                state.rate_limit_total_s += max(
-                    0.0, (now_mono + retry_s) - prev_deadline
-                )
-            else:
-                state.rate_limit_total_s += retry_s
-            # #495/#499/#500: latch a deadline so the stall detector can
-            # tell "throttled upstream, will resume by itself" apart from
-            # "hung". Without this only a cumulative total existed, which
-            # says nothing about whether we are waiting *right now*.
-            state.rate_limit_wait_until = now_mono + retry_s
-            state.rate_limit_count += 1
-            state.note_seq += 1
-            action_id = f"rate_limit_{state.note_seq}"
-            # Round to nearest second for display but show fractional when < 1s
-            display_s = int(retry_s) if retry_s >= 1 else f"{retry_s:.1f}"
-            if retry_s_source == "result_error":
-                title = (
-                    f"⏳ Rate limited until {reset_display} "
-                    f"({_format_wait_approx(retry_s)})"
-                )
-            elif retry_s_source == "action_required":
-                # #701: no countdown at all — this cap wants an action.
-                title = _format_action_required_title(action_display or "")
-            elif retry_s_source == "default":
-                # A guessed window is shown as an estimate, not as fact
-                title = f"⏳ Rate limited — waiting to retry (~{display_s}s)"
-            else:
-                title = f"⏳ Rate limited — retrying in {display_s}s"
-            detail: dict[str, Any] = {}
-            if info is not None:
-                if info.tokens_remaining is not None:
-                    detail["tokens_remaining"] = info.tokens_remaining
-                if info.requests_remaining is not None:
-                    detail["requests_remaining"] = info.requests_remaining
-                if retry_ms is not None:
-                    detail["retry_after_ms"] = retry_ms
-            # #518: log all RateLimitInfo fields when present so future audits
-            # can see what upstream actually sent, instead of having to back-
-            # infer from the single-field log line that was here before.
-            info_payload: dict[str, Any] = {}
-            if info is not None:
-                for field_name in (
-                    "requests_limit",
-                    "requests_remaining",
-                    "requests_reset",
-                    "tokens_limit",
-                    "tokens_remaining",
-                    "tokens_reset",
-                    "retry_after_ms",
-                ):
-                    value = getattr(info, field_name, None)
-                    if value is not None:
-                        info_payload[field_name] = value
-            logger.info(
-                "claude.rate_limit_event",
-                retry_after_s=retry_s,
-                retry_after_source=retry_s_source,
-                count=state.rate_limit_count,
-                cumulative_s=state.rate_limit_total_s,
-                info=info_payload or None,
-                # #701: greppable the way `result_error` now is — a window of
-                # `retry_after_source=action_required` says the wait was never
-                # going to help, which `default` could not distinguish.
-                action_model=action_display or None,
-            )
-            return [
-                factory.action_started(
-                    action_id=action_id,
-                    kind="note",
-                    title=title,
-                    detail=detail,
-                ),
-                factory.action_completed(
-                    action_id=action_id,
-                    kind="note",
-                    title=title,
-                    ok=True,
-                    level="info",
-                    detail=detail,
-                ),
-            ]
+            return _translate_rate_limit_event(info, state=state, factory=factory)
         case _:
             logger.debug(
                 "claude.event.unrecognised",

@@ -326,9 +326,11 @@ When Claude fails with `API Error: Stream idle timeout - partial response receiv
 
 Auto-retry on Type-A is deferred to v0.35.4 pending upstream Anthropic stabilisation.
 
-### `rate_limit_event` surfacing ([#349](https://github.com/littlebearapps/untether/issues/349))
+### `rate_limit_event` surfacing ([#349](https://github.com/littlebearapps/untether/issues/349) / [#790](https://github.com/littlebearapps/untether/issues/790))
 
-When Anthropic throttles the API, Claude Code emits a `rate_limit_event` JSONL message. The runner translates this to a visible `note`-kind action rendered as `⏳ Rate limited — retrying in Xs` in Telegram (previously the runner returned an empty list and the session appeared to hang). `ClaudeStreamState.rate_limit_total_s` accumulates wait time across the session for future cost-footer annotation; structured `claude.rate_limit_event` logs `retry_after_s`, `count`, and `cumulative_s` for triage.
+Claude Code's `rate_limit_event` is a **quota-status snapshot** (`status` = `allowed` / `allowed_warning` / `rejected`, plus `resetsAt`, `rateLimitType` and per-window `unifiedWindows` utilization), sent whenever an API response moves the rounded usage — not only when throttled. Only a `rejected` snapshot that paid extra usage isn't covering is treated as a throttle: the runner renders `⏳ Rate limited until 17:30 AEST (~30 min)` from the stream's own `resetsAt` and latches `rate_limit_wait_until` (clamped to 24 h) so the stall detector treats the gap as an expected wait. `allowed` heartbeats are stashed on `ClaudeStreamState.rate_limit_windows` and otherwise ignored; `allowed_warning` produces at most one `⚠️ … limit N% used` note per window. Before #790 the schema modelled a shape the CLI never sends, so every heartbeat decoded as "bare" and the [#657](https://github.com/littlebearapps/untether/issues/657) fallback showed a fake `~60s` throttle every few minutes; bare events now latch nothing. Full decision table: [stream-json cheatsheet](stream-json-cheatsheet.md#rate_limit_event).
+
+`ClaudeStreamState.rate_limit_total_s` accumulates throttle time (extension-only for repeats against one deadline); structured `claude.rate_limit_event` logs `status`, `rate_limit_type`, `resets_at`, `retry_after_s`, `retry_after_source` (`resets_at` / `retry_after_ms` / `reset_ts` / `result_error` / `action_required` / `default` / `bare` / `stale` / `covered_by_overage`), `count` and `cumulative_s`.
 
 ### Per-session background-task tracking ([#346](https://github.com/littlebearapps/untether/issues/346) / [#347](https://github.com/littlebearapps/untether/issues/347) / [#776](https://github.com/littlebearapps/untether/issues/776))
 

@@ -91,30 +91,53 @@ by Untether's `StreamResultMessage` schema):
 
 ### `rate_limit_event`
 
-Informational event emitted when Claude Code hits or approaches a rate limit (CLI v2.1.45+).
-Purely informational — the run continues, it does not terminate the session.
+A **quota-status snapshot**, not a throttle notice ([#790](https://github.com/littlebearapps/untether/issues/790)).
+The CLI emits one whenever an API response moves the rounded utilization or a reset
+time of the account's subscription windows — so a healthy session sees a steady trickle
+of `status: "allowed"` events. The event never terminates the session.
 
-Fields:
-- `type`: `"rate_limit_event"`
-- `rate_limit_info` (optional): object with rate limit details
-
-`rate_limit_info` fields (all optional):
-- `requests_limit`, `requests_remaining`, `requests_reset` (ISO 8601)
-- `tokens_limit`, `tokens_remaining`, `tokens_reset` (ISO 8601)
-- `retry_after_ms`
-
-Example (full):
+Real payload (captured on CLI 2.1.283, one-turn Haiku probe):
 ```json
-{"type":"rate_limit_event","rate_limit_info":{"requests_limit":1000,"requests_remaining":0,"requests_reset":"2026-01-01T00:01:00Z","tokens_limit":50000,"tokens_remaining":0,"tokens_reset":"2026-01-01T00:01:00Z","retry_after_ms":60000}}
+{"type":"rate_limit_event","rate_limit_info":{"status":"allowed","resetsAt":1790578200,"rateLimitType":"five_hour","overageStatus":"rejected","overageDisabledReason":"out_of_credits","isUsingOverage":false,"unifiedWindows":{"five_hour":{"utilization":0.09,"resetsAt":1790578200},"seven_day":{"utilization":0.15,"resetsAt":1791036000}}},"uuid":"…","session_id":"…"}
 ```
 
-Example (bare):
-```json
-{"type":"rate_limit_event"}
-```
+`rate_limit_info` fields (upstream zod, CLI 2.1.283):
 
-**Untether handling**: Decoded by `StreamRateLimitMessage` schema, silently skipped in
-`translate_claude_event` (no Untether events emitted).
+| Field | Type | Notes |
+|---|---|---|
+| `status` | `"allowed"` \| `"allowed_warning"` \| `"rejected"` | always present |
+| `resetsAt` | int (epoch s) | reset time of the window named by `rateLimitType` |
+| `rateLimitType` | `five_hour` \| `seven_day` \| `seven_day_opus` \| `seven_day_sonnet` \| `seven_day_overage_included` \| `overage` | optional |
+| `utilization` | number (0–1) | optional; the warning window's utilization |
+| `unifiedWindows` | `{five_hour?, seven_day?, seven_day_overage_included?}: {utilization, resetsAt}` | absent for API-key / Bedrock / Vertex sessions |
+| `overageStatus` | same 3 values as `status` | paid extra-usage state |
+| `overageResetsAt` | int | optional |
+| `overageDisabledReason` | enum (13 values, e.g. `out_of_credits`, `org_level_disabled`) | optional |
+| `isUsingOverage` | bool | `rejected` + `isUsingOverage` is **not** a throttle — extra usage covers it |
+| `errorCode` | `"credits_required"` | optional |
+| `limitScope`, `surpassedThreshold`, `overageInUse`, … | | ignored by Untether |
+
+The enum lists are mirrored as `CLAUDE_RATE_LIMIT_STATUSES` / `CLAUDE_RATE_LIMIT_TYPES` /
+`CLAUDE_OVERAGE_STATUSES` in `schemas/claude.py` and pinned by the zero-token drift test
+`tests/test_claude_cli_schema_drift.py`, which reads them out of the installed CLI.
+
+**Legacy shape.** Earlier docs described `requests_limit` / `requests_remaining` /
+`requests_reset` / `tokens_limit` / `tokens_remaining` / `tokens_reset` / `retry_after_ms`.
+No real CLI has been observed sending these; the schema keeps them optional so such an
+emitter still gets a precise countdown ([#518](https://github.com/littlebearapps/untether/issues/518)).
+
+**Untether handling** (`_translate_rate_limit_event` in `runners/claude.py`):
+
+| Snapshot | Untether |
+|---|---|
+| `allowed` | Snapshot only — `unifiedWindows` stashed on `ClaudeStreamState.rate_limit_windows`, DEBUG `claude.rate_limit_snapshot`. No note, no latch, no `cumulative_s`. |
+| `allowed_warning` | One `⚠️ 5h limit 85% used — resets 17:30 AEST` note per (window, reset) when utilization ≥ 0.7 (or absent) and extra usage isn't covering it. No latch. |
+| `rejected`, not `isUsingOverage`, `resetsAt` in the future | Throttle: note `⏳ Rate limited until 17:30 AEST (~30 min)`, `rate_limit_wait_until` latched to `resetsAt` (clamped to 24 h), extension-only accounting so repeats don't double-count, and repeats update the same note. Beats the [#692](https://github.com/littlebearapps/untether/issues/692) result-text parse. |
+| `rejected` without `resetsAt` | Legacy timing if present → `errorCode: credits_required` / overage → [#701](https://github.com/littlebearapps/untether/issues/701) remedy title (`⛔ Model limit reached — …`) → #692 harvested reset → #701 latch → `⏳ Rate limited — waiting to retry (~60s)`. |
+| `rejected` with `isUsingOverage`, or `resetsAt` already past | Not a throttle (INFO log `retry_after_source=covered_by_overage` / `stale`). |
+| unknown `status` | WARN `claude.rate_limit_event.unknown_status` once per value; no latch. |
+| no `status`, legacy timing | #518 path: `⏳ Rate limited — retrying in Ns`. |
+| truly bare (`{"type":"rate_limit_event"}`) | Nothing — INFO `retry_after_source=bare`. The [#657](https://github.com/littlebearapps/untether/issues/657) "bare = 60 s throttle" guess is retired: bare was an artefact of the old schema decoding every real snapshot to all-`None`. |
 
 ### `tool_progress`
 

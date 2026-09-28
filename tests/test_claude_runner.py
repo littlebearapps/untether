@@ -8,6 +8,7 @@ from typing import cast
 
 import anyio
 import pytest
+import structlog
 
 import untether.runners.claude as claude_runner
 from untether.model import ActionEvent, CompletedEvent, ResumeToken, StartedEvent
@@ -1725,16 +1726,13 @@ def test_translate_rate_limit_event_accumulates_across_throttles() -> None:
     assert state.rate_limit_total_s == 45.0
 
 
-def test_translate_rate_limit_event_bare_event_latches_default_wait() -> None:
-    """#657: a bare rate_limit_event (no retry_after_ms, no reset timestamps)
-    latches a conservative default wait window instead of leaving
-    `rate_limit_wait_until` unset — otherwise `awaiting_rate_limit_retry()`
-    returns False while the session genuinely is throttled upstream, and the
-    #495/#499/#500 stall disambiguation silently doesn't apply."""
-    import time
-
-    from untether.runners.claude import DEFAULT_BARE_RATE_LIMIT_WAIT_S
-
+def test_translate_rate_limit_event_bare_event_does_not_latch() -> None:
+    """#790 (retires #657's premise): a bare rate_limit_event carries no
+    status and no timing, so it is NOT evidence of a throttle. #657 latched a
+    60 s guess here — but "bare" was a schema-mismatch artefact (the real
+    status snapshot decoded to all-None), so every healthy heartbeat faked a
+    throttle and kept ``awaiting_rate_limit_retry()`` True for most of a
+    long session, masking real hangs."""
     state = ClaudeStreamState()
     events = translate_claude_event(
         _decode_event({"type": "rate_limit_event"}),
@@ -1742,16 +1740,11 @@ def test_translate_rate_limit_event_bare_event_latches_default_wait() -> None:
         state=state,
         factory=state.factory,
     )
-    assert len(events) == 2
-    assert "⏳" in events[0].action.title
-    # The guessed wait is flagged as an estimate, not presented as fact
-    assert "~" in events[0].action.title
-    assert state.rate_limit_count == 1
-    # The default accrues so a repeatedly-throttled session no longer reports 0s
-    assert state.rate_limit_total_s == DEFAULT_BARE_RATE_LIMIT_WAIT_S
-    # The latch is armed: awaiting_rate_limit_retry() is directionally correct
-    assert state.rate_limit_wait_until > time.monotonic()
-    assert state.awaiting_rate_limit_retry() is True
+    assert events == []
+    assert state.rate_limit_count == 0
+    assert state.rate_limit_total_s == 0.0
+    assert state.rate_limit_wait_until == 0.0
+    assert state.awaiting_rate_limit_retry() is False
 
 
 def test_translate_rate_limit_event_derives_retry_after_from_reset_ts() -> None:
@@ -1846,11 +1839,9 @@ def test_translate_rate_limit_event_retry_after_ms_takes_precedence() -> None:
 
 
 def test_translate_rate_limit_event_handles_unparseable_reset_ts() -> None:
-    """#518/#657: garbage `requests_reset` is silently ignored — we fall
-    through to the conservative default wait (as if the event were bare)
-    rather than crashing the runner."""
-    from untether.runners.claude import DEFAULT_BARE_RATE_LIMIT_WAIT_S
-
+    """#518/#790: garbage `requests_reset` is silently ignored. With no
+    status and no parseable timing left, the event is bare — no latch, no
+    note (it used to fall through to #657's 60 s guess)."""
     state = ClaudeStreamState()
     events = translate_claude_event(
         _decode_event(
@@ -1863,10 +1854,333 @@ def test_translate_rate_limit_event_handles_unparseable_reset_ts() -> None:
         state=state,
         factory=state.factory,
     )
+    assert events == []
+    assert state.rate_limit_total_s == 0.0
+    assert state.awaiting_rate_limit_retry() is False
+
+
+# ---------------------------------------------------------------------------
+# #790 — the real rate_limit_event is a quota-status snapshot
+# ---------------------------------------------------------------------------
+
+
+def _real_rate_limit_event(**info_overrides) -> dict:
+    """The payload captured on CLI 2.1.283 (status=allowed heartbeat), with
+    per-test overrides applied to ``rate_limit_info``. ``None`` removes a key."""
+    info: dict = {
+        "status": "allowed",
+        "resetsAt": 1790578200,
+        "rateLimitType": "five_hour",
+        "overageStatus": "rejected",
+        "overageDisabledReason": "out_of_credits",
+        "isUsingOverage": False,
+        "unifiedWindows": {
+            "five_hour": {"utilization": 0.09, "resetsAt": 1790578200},
+            "seven_day": {"utilization": 0.15, "resetsAt": 1791036000},
+        },
+    }
+    for key, value in info_overrides.items():
+        if value is None:
+            info.pop(key, None)
+        else:
+            info[key] = value
+    return {"type": "rate_limit_event", "rate_limit_info": info}
+
+
+def _translate(state: ClaudeStreamState, payload: dict) -> list:
+    return translate_claude_event(
+        _decode_event(payload),
+        title="claude",
+        state=state,
+        factory=state.factory,
+    )
+
+
+def test_real_allowed_heartbeat_is_snapshot_only() -> None:
+    """#790 core regression: the captured `allowed` heartbeat must not show a
+    note, latch a wait, or accrue throttle time — at 9 % of the 5 h window
+    nothing is limited."""
+    state = ClaudeStreamState()
+    for _ in range(3):
+        assert _translate(state, _real_rate_limit_event()) == []
+    assert state.rate_limit_count == 0
+    assert state.rate_limit_total_s == 0.0
+    assert state.rate_limit_wait_until == 0.0
+    assert state.awaiting_rate_limit_retry() is False
+    # The snapshot is stashed for the footer / #692 work.
+    windows = state.rate_limit_windows
+    assert windows["five_hour"] == {"utilization": 0.09, "resets_at": 1790578200}
+    assert windows["seven_day"] == {"utilization": 0.15, "resets_at": 1791036000}
+    assert state.rate_limit_status == "allowed"
+
+
+def test_rejected_latches_until_resets_at() -> None:
+    """#790: a `rejected` snapshot latches until the stream's own resetsAt —
+    the honest wait, not a 60 s guess."""
+    import time
+
+    state = ClaudeStreamState()
+    resets_at = int(time.time()) + 1800
+    events = _translate(
+        state, _real_rate_limit_event(status="rejected", resetsAt=resets_at)
+    )
     assert len(events) == 2
-    assert "~" in events[0].action.title
-    assert state.rate_limit_total_s == DEFAULT_BARE_RATE_LIMIT_WAIT_S
+    title = events[0].action.title
+    assert title.startswith("⏳ Rate limited until ")
+    assert "(~30 min)" in title
+    assert events[0].action.kind == "note"
+    assert state.rate_limit_count == 1
     assert state.awaiting_rate_limit_retry() is True
+    remaining = state.rate_limit_wait_until - time.monotonic()
+    assert 1790 <= remaining <= 1800
+    assert 1790 <= state.rate_limit_total_s <= 1800
+
+
+def test_rejected_repeats_accumulate_extension_only_and_update_in_place() -> None:
+    """#790 (mirrors #692): repeated `rejected` snapshots for the same window
+    share one deadline — cumulative time accrues only the extension, and the
+    note updates in place instead of stacking a new line per event."""
+    import time
+
+    state = ClaudeStreamState()
+    resets_at = int(time.time()) + 600
+    first = _translate(
+        state, _real_rate_limit_event(status="rejected", resetsAt=resets_at)
+    )
+    total_after_first = state.rate_limit_total_s
+    second = _translate(
+        state, _real_rate_limit_event(status="rejected", resetsAt=resets_at)
+    )
+    assert state.rate_limit_count == 2
+    assert state.rate_limit_total_s - total_after_first < 2.0
+    assert first[0].action.id == second[0].action.id
+
+
+def test_rejected_while_using_overage_is_not_a_throttle() -> None:
+    """Upstream: rejected + isUsingOverage means paid extra usage covers the
+    overflow — nothing is cut off."""
+    import time
+
+    state = ClaudeStreamState()
+    events = _translate(
+        state,
+        _real_rate_limit_event(
+            status="rejected",
+            resetsAt=int(time.time()) + 900,
+            isUsingOverage=True,
+            overageStatus="allowed",
+        ),
+    )
+    assert events == []
+    assert state.awaiting_rate_limit_retry() is False
+    assert state.rate_limit_total_s == 0.0
+
+
+def test_rejected_with_stale_resets_at_is_ignored() -> None:
+    """Upstream treats a rejected snapshot whose resetsAt has passed as stale."""
+    import time
+
+    state = ClaudeStreamState()
+    events = _translate(
+        state,
+        _real_rate_limit_event(status="rejected", resetsAt=int(time.time()) - 60),
+    )
+    assert events == []
+    assert state.awaiting_rate_limit_retry() is False
+
+
+def test_rejected_far_reset_clamps_latch_to_24h() -> None:
+    """A seven_day rejection can be days away — the stall latch is clamped to
+    24 h, but the title still tells the truth about the wait."""
+    import time
+
+    state = ClaudeStreamState()
+    resets_at = int(time.time()) + 3 * 24 * 3600
+    events = _translate(
+        state,
+        _real_rate_limit_event(
+            status="rejected", resetsAt=resets_at, rateLimitType="seven_day"
+        ),
+    )
+    assert len(events) == 2
+    assert "~72h" in events[0].action.title
+    remaining = state.rate_limit_wait_until - time.monotonic()
+    assert remaining <= 24 * 3600 + 1
+
+
+def test_rejected_credits_required_without_reset_shows_remedy(
+    clean_action_latch, clean_reset_latch
+) -> None:
+    """#790 + #701: errorCode credits_required with no resetsAt is the
+    action-required class — name the remedy, not a countdown, but still give
+    the stall detector a deadline."""
+    state = ClaudeStreamState()
+    events = _translate(
+        state,
+        _real_rate_limit_event(
+            status="rejected",
+            resetsAt=None,
+            errorCode="credits_required",
+            unifiedWindows=None,
+        ),
+    )
+    assert len(events) == 2
+    title = events[0].action.title
+    assert title.startswith("⛔ Model limit reached")
+    assert "/usage-credits" in title
+    assert "retrying in" not in title
+    assert state.awaiting_rate_limit_retry() is True
+
+
+def test_rejected_without_reset_uses_result_error_latch(
+    clean_action_latch, clean_reset_latch
+) -> None:
+    """#692 kept as the fallback tier: a rejected snapshot with no resetsAt
+    uses the reset time harvested from an earlier result error."""
+    import time as _time
+
+    clean_reset_latch["default"] = (_time.monotonic() + 1800.0, "7:50pm (UTC)")
+    state = ClaudeStreamState()
+    events = _translate(
+        state,
+        _real_rate_limit_event(
+            status="rejected",
+            resetsAt=None,
+            overageDisabledReason=None,
+            unifiedWindows=None,
+        ),
+    )
+    assert "Rate limited until 7:50pm (UTC)" in events[0].action.title
+
+
+def test_stream_resets_at_beats_result_error_latch(
+    clean_action_latch, clean_reset_latch
+) -> None:
+    """#790: the stream's own resetsAt is authoritative over the #692
+    result-text parse."""
+    import time as _time
+
+    clean_reset_latch["default"] = (_time.monotonic() + 5 * 3600.0, "7:50pm (UTC)")
+    state = ClaudeStreamState()
+    events = _translate(
+        state,
+        _real_rate_limit_event(status="rejected", resetsAt=int(_time.time()) + 600),
+    )
+    title = events[0].action.title
+    assert "7:50pm (UTC)" not in title
+    assert "(~10 min)" in title
+    assert state.rate_limit_wait_until - _time.monotonic() <= 601
+
+
+def test_rejected_without_any_timing_uses_conservative_default(
+    clean_action_latch, clean_reset_latch
+) -> None:
+    """A *confirmed* rejection with no reset time anywhere still needs a
+    deadline for the stall detector; the copy flags it as an estimate."""
+    from untether.runners.claude import DEFAULT_REJECTED_RATE_LIMIT_WAIT_S
+
+    state = ClaudeStreamState()
+    events = _translate(
+        state,
+        _real_rate_limit_event(
+            status="rejected",
+            resetsAt=None,
+            overageDisabledReason=None,
+            unifiedWindows=None,
+        ),
+    )
+    assert "waiting to retry (~60s)" in events[0].action.title
+    assert state.rate_limit_total_s == DEFAULT_REJECTED_RATE_LIMIT_WAIT_S
+    assert state.awaiting_rate_limit_retry() is True
+
+
+def test_allowed_warning_notes_once_per_window_without_latch() -> None:
+    """#790: allowed_warning is a heads-up, not a throttle — one note per
+    (window, reset), never a latch."""
+    import time
+
+    state = ClaudeStreamState()
+    resets_at = int(time.time()) + 3600
+    payload = _real_rate_limit_event(
+        status="allowed_warning",
+        resetsAt=resets_at,
+        utilization=0.85,
+        overageDisabledReason=None,
+    )
+    events = _translate(state, payload)
+    assert len(events) == 2
+    title = events[0].action.title
+    assert title.startswith("⚠️ 5h limit 85% used")
+    assert "resets" in title
+    assert state.awaiting_rate_limit_retry() is False
+    assert state.rate_limit_total_s == 0.0
+    assert state.rate_limit_count == 0
+    # Same window again: no second note.
+    assert _translate(state, payload) == []
+
+
+def test_allowed_warning_below_threshold_or_on_overage_is_silent() -> None:
+    import time
+
+    state = ClaudeStreamState()
+    resets_at = int(time.time()) + 3600
+    assert (
+        _translate(
+            state,
+            _real_rate_limit_event(
+                status="allowed_warning", resetsAt=resets_at, utilization=0.5
+            ),
+        )
+        == []
+    )
+    assert (
+        _translate(
+            state,
+            _real_rate_limit_event(
+                status="allowed_warning",
+                resetsAt=resets_at + 1,
+                utilization=0.95,
+                isUsingOverage=True,
+            ),
+        )
+        == []
+    )
+    assert state.awaiting_rate_limit_retry() is False
+
+
+def test_unknown_rate_limit_status_warns_once_without_latch(monkeypatch) -> None:
+    from untether.runners import claude as claude_mod
+
+    monkeypatch.setattr(claude_mod, "_UNKNOWN_RATE_LIMIT_STATUSES_LOGGED", set())
+    state = ClaudeStreamState()
+    with structlog.testing.capture_logs() as logs:
+        for _ in range(3):
+            assert _translate(state, _real_rate_limit_event(status="paused")) == []
+    warnings = [
+        entry
+        for entry in logs
+        if entry.get("event") == "claude.rate_limit_event.unknown_status"
+    ]
+    assert len(warnings) == 1
+    assert warnings[0]["log_level"] == "warning"
+    assert warnings[0]["status"] == "paused"
+    assert state.awaiting_rate_limit_retry() is False
+
+
+def test_status_rejected_with_legacy_retry_after_uses_it(
+    clean_action_latch, clean_reset_latch
+) -> None:
+    """A rejected snapshot without resetsAt but with the legacy
+    retry_after_ms keeps the #518 precise countdown."""
+    state = ClaudeStreamState()
+    events = _translate(
+        state,
+        _real_rate_limit_event(
+            status="rejected", resetsAt=None, unifiedWindows=None, retry_after_ms=12_000
+        ),
+    )
+    assert "retrying in 12s" in events[0].action.title
+    assert state.rate_limit_total_s == 12.0
 
 
 def test_translate_thinking_block() -> None:
@@ -6417,6 +6731,14 @@ def test_654_session_linger_info_reads_registries() -> None:
 # ---------------------------------------------------------------------------
 
 
+# #790: a confirmed rejection that carries no resetsAt of its own — the shape
+# the #692/#701 fallback tiers still serve.
+_REJECTED_NO_RESET = {
+    "type": "rate_limit_event",
+    "rate_limit_info": {"status": "rejected", "rateLimitType": "five_hour"},
+}
+
+
 @pytest.fixture
 def clean_reset_latch(monkeypatch):
     """Isolate the module-level reset latch and pin the latch key."""
@@ -6513,13 +6835,15 @@ def test_format_wait_approx_rounds_up() -> None:
     assert _format_wait_approx(2 * 3600 + 5 * 60) == "~2h 5m"
 
 
-def test_result_error_latches_reset_and_bare_events_use_it(
+def test_result_error_latches_reset_and_rejected_events_without_reset_use_it(
     clean_reset_latch,
 ) -> None:
     """#692 end-to-end: an is_error result carrying the reset clause latches
-    the deadline; a subsequent bare rate_limit_event renders the honest
-    wait instead of the ~60s guess, and repeated bare events sharing the
-    latch accumulate only the extension, not the full window each time."""
+    the deadline; a subsequent rejected rate_limit_event that carries no
+    resetsAt of its own renders the honest wait instead of the ~60s guess,
+    and repeated events sharing the latch accumulate only the extension,
+    not the full window each time. (#790 re-scoped this from "bare" events:
+    those no longer imply a throttle.)"""
     import time as _time
     from datetime import UTC, datetime, timedelta
 
@@ -6544,12 +6868,12 @@ def test_result_error_latches_reset_and_bare_events_use_it(
     # Latched on the state for post-result stall context…
     assert state.awaiting_rate_limit_retry() is True
     assert state.rate_limit_wait_until - _time.monotonic() > 25 * 60
-    # …and process-wide for the NEXT run's bare events.
+    # …and process-wide for the NEXT run's rejected events.
     assert clean_reset_latch
 
     state2 = ClaudeStreamState()
     events = translate_claude_event(
-        _decode_event({"type": "rate_limit_event"}),
+        _decode_event(_REJECTED_NO_RESET),
         title="claude",
         state=state2,
         factory=state2.factory,
@@ -6563,9 +6887,9 @@ def test_result_error_latches_reset_and_bare_events_use_it(
     first_total = state2.rate_limit_total_s
     assert first_total > 25 * 60
 
-    # A second bare event against the same latch must not double-count.
+    # A second rejected event against the same latch must not double-count.
     translate_claude_event(
-        _decode_event({"type": "rate_limit_event"}),
+        _decode_event(_REJECTED_NO_RESET),
         title="claude",
         state=state2,
         factory=state2.factory,
@@ -6574,19 +6898,20 @@ def test_result_error_latches_reset_and_bare_events_use_it(
     assert state2.rate_limit_total_s - first_total < 5.0
 
 
-def test_bare_event_without_latch_keeps_default(clean_reset_latch) -> None:
-    """#657 regression guard: no latch → the conservative 60s default."""
-    from untether.runners.claude import DEFAULT_BARE_RATE_LIMIT_WAIT_S
+def test_rejected_without_latch_keeps_default(clean_reset_latch) -> None:
+    """#657 → #790: a confirmed rejection with no timing and no latch keeps
+    the conservative 60s default (bare events no longer latch at all)."""
+    from untether.runners.claude import DEFAULT_REJECTED_RATE_LIMIT_WAIT_S
 
     state = ClaudeStreamState()
     events = translate_claude_event(
-        _decode_event({"type": "rate_limit_event"}),
+        _decode_event(_REJECTED_NO_RESET),
         title="claude",
         state=state,
         factory=state.factory,
     )
     assert "waiting to retry" in events[0].action.title
-    assert state.rate_limit_total_s == DEFAULT_BARE_RATE_LIMIT_WAIT_S
+    assert state.rate_limit_total_s == DEFAULT_REJECTED_RATE_LIMIT_WAIT_S
 
 
 def test_expired_latch_pruned(clean_reset_latch) -> None:
@@ -6675,12 +7000,13 @@ def test_parse_action_required_cap_fail_closed() -> None:
     assert _parse_action_required_cap(None) is None
 
 
-def test_action_cap_result_latches_and_bare_events_show_remedy(
+def test_action_cap_result_latches_and_rejected_events_show_remedy(
     clean_action_latch, clean_reset_latch
 ) -> None:
-    """#701 end-to-end: the no-time cap latches, and the next bare
-    rate_limit_event names the remedy instead of implying a ~60s wait."""
-    from untether.runners.claude import DEFAULT_BARE_RATE_LIMIT_WAIT_S
+    """#701 end-to-end: the no-time cap latches, and the next rejected
+    rate_limit_event without a resetsAt names the remedy instead of
+    implying a ~60s wait."""
+    from untether.runners.claude import DEFAULT_REJECTED_RATE_LIMIT_WAIT_S
 
     state = ClaudeStreamState()
     translate_claude_event(
@@ -6706,7 +7032,7 @@ def test_action_cap_result_latches_and_bare_events_show_remedy(
 
     state2 = ClaudeStreamState()
     events = translate_claude_event(
-        _decode_event({"type": "rate_limit_event"}),
+        _decode_event(_REJECTED_NO_RESET),
         title="claude",
         state=state2,
         factory=state2.factory,
@@ -6721,7 +7047,7 @@ def test_action_cap_result_latches_and_bare_events_show_remedy(
     # …but the stall detector still gets a deadline so a throttled session is
     # not mistaken for a hung one.
     assert state2.rate_limit_wait_until > 0
-    assert state2.rate_limit_total_s == DEFAULT_BARE_RATE_LIMIT_WAIT_S
+    assert state2.rate_limit_total_s == DEFAULT_REJECTED_RATE_LIMIT_WAIT_S
 
 
 def test_reset_latch_beats_action_latch(clean_action_latch, clean_reset_latch) -> None:
@@ -6734,7 +7060,7 @@ def test_reset_latch_beats_action_latch(clean_action_latch, clean_reset_latch) -
 
     state = ClaudeStreamState()
     events = translate_claude_event(
-        _decode_event({"type": "rate_limit_event"}),
+        _decode_event(_REJECTED_NO_RESET),
         title="claude",
         state=state,
         factory=state.factory,
@@ -6753,7 +7079,27 @@ def test_expired_action_latch_pruned(clean_action_latch) -> None:
 
 
 def test_action_latch_falls_back_to_default_when_absent(clean_action_latch) -> None:
-    """#657 regression guard: an unlatched bare event keeps the 60s default."""
+    """#657 → #790: an unlatched rejection with no timing keeps the 60s
+    default."""
+    state = ClaudeStreamState()
+    events = translate_claude_event(
+        _decode_event(_REJECTED_NO_RESET),
+        title="claude",
+        state=state,
+        factory=state.factory,
+    )
+    assert "waiting to retry" in events[0].action.title
+
+
+def test_bare_event_ignores_armed_latches(
+    clean_action_latch, clean_reset_latch
+) -> None:
+    """#790: a bare event is not a throttle signal even while the #692/#701
+    latches are armed — the latches only enrich a *confirmed* rejection."""
+    import time as _time
+
+    clean_reset_latch["default"] = (_time.monotonic() + 1800.0, "7:50pm (UTC)")
+    clean_action_latch["default"] = (_time.monotonic() + 1800.0, "Fable 5")
     state = ClaudeStreamState()
     events = translate_claude_event(
         _decode_event({"type": "rate_limit_event"}),
@@ -6761,7 +7107,8 @@ def test_action_latch_falls_back_to_default_when_absent(clean_action_latch) -> N
         state=state,
         factory=state.factory,
     )
-    assert "waiting to retry" in events[0].action.title
+    assert events == []
+    assert state.awaiting_rate_limit_retry() is False
 
 
 def test_action_title_without_model_name() -> None:
