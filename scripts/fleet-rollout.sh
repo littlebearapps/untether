@@ -264,7 +264,7 @@ if (( IS_PRERELEASE == 1 )); then
     # "No solution found when resolving dependencies".
     # --prerelease=if-necessary-or-explicit, NOT allow: `allow` lets every
     # dependency resolve to a pre-release. On 2026-09-28 it put httpx
-    # 1.0.dev6 (no AsyncClient) on sl and crash-looped the rc11 roll.
+    # 1.0.dev6 (no AsyncClient) on sl and crash-looped the rc11 roll (#745).
     # The explicit untether==X.YrcN pin still admits the rc itself.
     UV_INDEX_ARGS='--default-index https://test.pypi.org/simple/ --index https://pypi.org/simple/ --prerelease=if-necessary-or-explicit --index-strategy unsafe-best-match'
 else
