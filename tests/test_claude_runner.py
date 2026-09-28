@@ -7383,3 +7383,131 @@ async def test_699_subcountdown_exit_carries_last_liveness_verdict(
     assert line["tree_active"] is False
     assert line["exit_reason"] == "subprocess_exited"
     assert line["polls"] >= 2
+
+
+# ---------------------------------------------------------------------------
+# #792 — system/api_retry: surface CLI back-offs as an expected wait
+# ---------------------------------------------------------------------------
+
+
+def _api_retry(
+    *,
+    attempt: int = 2,
+    max_retries: int = 10,
+    retry_delay_ms: int = 8000,
+    error_status: int | None = 529,
+    error: object = "overloaded",
+    no_response: dict | None = None,
+) -> dict:
+    payload: dict = {
+        "type": "system",
+        "subtype": "api_retry",
+        "attempt": attempt,
+        "max_retries": max_retries,
+        "retry_delay_ms": retry_delay_ms,
+        "error_status": error_status,
+        "error": error,
+    }
+    if no_response is not None:
+        payload["no_response"] = no_response
+    return payload
+
+
+def test_api_retry_renders_note_and_latches_expected_wait() -> None:
+    state = ClaudeStreamState()
+    events = _translate(state, _api_retry())
+    assert len(events) == 2
+    assert all(isinstance(e, ActionEvent) for e in events)
+    assert events[0].action.kind == "note"
+    assert events[0].action.title == (
+        "🔁 API error 529 (overloaded) — retrying in 8s (attempt 2/10)"
+    )
+    assert events[1].phase == "completed"
+    assert state.awaiting_api_retry() is True
+    remaining = state.api_retry_wait_until - time.monotonic()
+    assert 7.0 <= remaining <= 8.0
+    assert state.api_retry_count == 1
+    assert state.api_retry_total_s == 8.0
+    # A back-off is not a quota throttle — the rate-limit latch stays clear.
+    assert state.awaiting_rate_limit_retry() is False
+    assert state.rate_limit_count == 0
+
+
+def test_api_retry_sequence_updates_one_action() -> None:
+    """One updating note per retry sequence, not one line per attempt; a
+    fresh sequence (attempt resets) gets its own note."""
+    state = ClaudeStreamState()
+    ids = [
+        _translate(state, _api_retry(attempt=n, retry_delay_ms=1000))[0].action.id
+        for n in (1, 2, 3)
+    ]
+    assert len(set(ids)) == 1
+    later = _translate(state, _api_retry(attempt=1, retry_delay_ms=1000))
+    assert later[0].action.id != ids[0]
+    assert state.api_retry_count == 4
+    assert state.api_retry_total_s == 4.0
+
+
+def test_api_retry_without_http_status_wording() -> None:
+    state = ClaudeStreamState()
+    events = _translate(
+        state,
+        _api_retry(attempt=1, retry_delay_ms=5000, error_status=None, error="unknown"),
+    )
+    assert events[0].action.title == (
+        "🔁 API unreachable — retrying in 5s (attempt 1/10)"
+    )
+
+
+def test_api_retry_no_response_wording_and_latch() -> None:
+    """``no_response``: the attempt got no headers inside the first-byte
+    window; the retry may wait ``retry_wait_ms`` for headers, so the
+    expected-wait latch covers delay + that window."""
+    state = ClaudeStreamState()
+    events = _translate(
+        state,
+        _api_retry(
+            attempt=1,
+            max_retries=1,
+            retry_delay_ms=2000,
+            error_status=None,
+            error="unknown",
+            no_response={"waited_ms": 45000, "retry_wait_ms": 90000},
+        ),
+    )
+    assert events[0].action.title == (
+        "🔁 No response from API after 45s — retrying in 2s (attempt 1/1)"
+    )
+    remaining = state.api_retry_wait_until - time.monotonic()
+    assert 91.0 <= remaining <= 92.0
+
+
+def test_api_retry_latch_expires() -> None:
+    state = ClaudeStreamState()
+    _translate(state, _api_retry(retry_delay_ms=20))
+    assert state.awaiting_api_retry() is True
+    time.sleep(0.05)
+    assert state.awaiting_api_retry() is False
+
+
+def test_api_retry_logs_info_and_warns_on_final_attempt() -> None:
+    state = ClaudeStreamState()
+    with structlog.testing.capture_logs() as logs:
+        _translate(state, _api_retry(attempt=2, max_retries=10))
+        final = _translate(state, _api_retry(attempt=10, max_retries=10))
+    entries = [e for e in logs if e.get("event") == "claude.api_retry"]
+    assert [e["log_level"] for e in entries] == ["info", "warning"]
+    assert entries[0]["attempt"] == 2
+    assert entries[0]["max_retries"] == 10
+    assert entries[0]["retry_delay_ms"] == 8000
+    assert entries[0]["error_status"] == 529
+    # The final attempt is flagged on screen too.
+    assert final[1].level == "warning"
+
+
+def test_api_retry_object_error_does_not_break_title() -> None:
+    state = ClaudeStreamState()
+    events = _translate(state, _api_retry(error_status=500, error={"message": "boom"}))
+    assert events[0].action.title == (
+        "🔁 API error 500 — retrying in 8s (attempt 2/10)"
+    )

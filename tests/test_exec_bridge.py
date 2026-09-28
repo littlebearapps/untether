@@ -5705,6 +5705,8 @@ def _make_engine_state(**fields):
         # ClaudeStreamState methods.
         "awaiting_user_approval": lambda: False,
         "awaiting_rate_limit_retry": lambda: False,
+        # #792: CLI api_retry back-off window.
+        "awaiting_api_retry": lambda: False,
     }
     defaults.update(fields)
     return SimpleNamespace(**defaults)
@@ -7761,6 +7763,104 @@ def test_500_rate_limit_waiting_probe() -> None:
     assert edits._is_rate_limit_waiting() is True
     edits.stream = _make_stream(engine_state=None)
     assert edits._is_rate_limit_waiting() is False
+
+
+def test_792_api_retry_waiting_probe() -> None:
+    transport = FakeTransport()
+    edits = _make_edits(transport, _KeyboardPresenter())
+    edits.stream = _make_stream(
+        engine_state=_make_engine_state(awaiting_api_retry=lambda: True)
+    )
+    assert edits._is_api_retry_waiting() is True
+    # Independent of the quota-throttle probe.
+    assert edits._is_rate_limit_waiting() is False
+    edits.stream = _make_stream(engine_state=None)
+    assert edits._is_api_retry_waiting() is False
+
+
+def test_792_api_retry_probe_survives_exception() -> None:
+    def _boom() -> bool:
+        raise RuntimeError("engine state exploded")
+
+    transport = FakeTransport()
+    edits = _make_edits(transport, _KeyboardPresenter())
+    edits.stream = _make_stream(
+        engine_state=_make_engine_state(awaiting_api_retry=_boom)
+    )
+    assert edits._is_api_retry_waiting() is False
+
+
+def test_792_real_claude_state_drives_the_probe() -> None:
+    """End-to-end through the real ClaudeStreamState: an api_retry frame arms
+    the bridge's expected-wait probe; a real `allowed` rate-limit heartbeat
+    (#790) arms nothing."""
+    from untether.runners.claude import ClaudeStreamState, translate_claude_event
+    from untether.schemas import claude as claude_schema
+
+    state = ClaudeStreamState()
+    transport = FakeTransport()
+    edits = _make_edits(transport, _KeyboardPresenter())
+    edits.stream = _make_stream(engine_state=state)
+
+    heartbeat = claude_schema.decode_stream_json_line(
+        b'{"type":"rate_limit_event","rate_limit_info":{"status":"allowed",'
+        b'"resetsAt":1790578200,"rateLimitType":"five_hour","isUsingOverage":false,'
+        b'"unifiedWindows":{"five_hour":{"utilization":0.09,"resetsAt":1790578200}}},'
+        b'"uuid":"u","session_id":"s"}'
+    )
+    translate_claude_event(
+        heartbeat, title="claude", state=state, factory=state.factory
+    )
+    assert edits._is_rate_limit_waiting() is False
+    assert edits._is_api_retry_waiting() is False
+
+    retry = claude_schema.decode_stream_json_line(
+        b'{"type":"system","subtype":"api_retry","attempt":1,"max_retries":10,'
+        b'"retry_delay_ms":60000,"error_status":529,"error":"overloaded",'
+        b'"uuid":"u","session_id":"s"}'
+    )
+    translate_claude_event(retry, title="claude", state=state, factory=state.factory)
+    assert edits._is_api_retry_waiting() is True
+
+
+@pytest.mark.anyio
+async def test_792_api_retry_wait_emits_no_warn_and_no_count() -> None:
+    """A long CLI back-off is an expected wait: demoted INFO, no
+    stall_detected WARN, no stall_warnings metric."""
+    transport = FakeTransport()
+    presenter = _KeyboardPresenter()
+    clock = _FakeClock(start=100.0)
+    edits = _make_edits(transport, presenter, clock=clock)
+    edits._stall_check_interval = 0.01
+    edits._STALL_THRESHOLD_SECONDS = 0.05
+    edits._STALL_THRESHOLD_TOOL = 0.05
+    edits._STALL_THRESHOLD_APPROVAL = 0.05
+    edits._STALL_THRESHOLD_APPROVAL_FIRST = 0.05
+    edits._stall_repeat_seconds = 0.02
+
+    edits.stream = _make_stream(
+        last_event_type="system",
+        engine_state=_make_engine_state(awaiting_api_retry=lambda: True),
+    )
+
+    with structlog.testing.capture_logs() as logs:
+        async with anyio.create_task_group() as tg:
+
+            async def drive() -> None:
+                clock.set(110.0)
+                await anyio.sleep(0.25)
+                edits.signal_send.close()
+
+            tg.start_soon(edits.run)
+            tg.start_soon(drive)
+
+    events = [entry.get("event") for entry in logs]
+    assert "progress_edits.stall_detected" not in events
+    assert "progress_edits.frozen_ring_escalation" not in events
+    pending = [e for e in logs if e.get("event") == "subprocess.approval_pending"]
+    assert pending and pending[0]["reason"] == "api_retry_waiting"
+    assert edits._total_stall_warn_count == 0
+    assert edits._frozen_ring_count == 0
 
 
 @pytest.mark.anyio

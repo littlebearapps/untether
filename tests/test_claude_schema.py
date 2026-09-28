@@ -490,3 +490,74 @@ def test_tool_progress_translates_to_no_events() -> None:
         )
         == []
     )
+
+
+# ---------------------------------------------------------------------------
+# #792 — system/api_retry (CLI 2.1.283 zod: SDKAPIRetryMessage)
+# ---------------------------------------------------------------------------
+
+
+def test_decode_api_retry_with_http_status() -> None:
+    payload = {
+        "type": "system",
+        "subtype": "api_retry",
+        "attempt": 2,
+        "max_retries": 10,
+        "retry_delay_ms": 8000,
+        "error_status": 529,
+        "error": "overloaded",
+        "uuid": "u",
+        "session_id": "s",
+    }
+    decoded = claude_schema.decode_stream_json_line(json.dumps(payload).encode())
+    assert isinstance(decoded, claude_schema.StreamSystemMessage)
+    assert decoded.subtype == "api_retry"
+    assert decoded.attempt == 2
+    assert decoded.max_retries == 10
+    assert decoded.retry_delay_ms == 8000
+    assert decoded.error_status == 529
+    assert decoded.error == "overloaded"
+    assert decoded.no_response is None
+
+
+def test_decode_api_retry_no_response_and_null_status() -> None:
+    payload = {
+        "type": "system",
+        "subtype": "api_retry",
+        "attempt": 1,
+        "max_retries": 1,
+        "retry_delay_ms": 2000,
+        "error_status": None,
+        "error": "unknown",
+        "no_response": {"waited_ms": 45000, "retry_wait_ms": 90000},
+        "uuid": "u",
+        "session_id": "s",
+    }
+    decoded = claude_schema.decode_stream_json_line(json.dumps(payload).encode())
+    assert isinstance(decoded, claude_schema.StreamSystemMessage)
+    assert decoded.error_status is None
+    assert decoded.no_response is not None
+    assert decoded.no_response.waited_ms == 45000
+    assert decoded.no_response.retry_wait_ms == 90000
+
+
+def test_decode_api_retry_tolerates_drift() -> None:
+    """Unknown keys, an object-shaped ``error`` and extra ``no_response``
+    keys must never drop the line."""
+    payload = {
+        "type": "system",
+        "subtype": "api_retry",
+        "attempt": 3,
+        "max_retries": 10,
+        "retry_delay_ms": 16000,
+        "error_status": 500,
+        "error": {"message": "boom", "formatted": "API Error: 500"},
+        "no_response": {"waited_ms": 1, "retry_wait_ms": 2, "new_key": True},
+        "brand_new_field": [1, 2],
+        "uuid": "u",
+        "session_id": "s",
+    }
+    decoded = claude_schema.decode_stream_json_line(json.dumps(payload).encode())
+    assert isinstance(decoded, claude_schema.StreamSystemMessage)
+    assert decoded.attempt == 3
+    assert isinstance(decoded.error, dict)

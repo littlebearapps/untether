@@ -332,6 +332,10 @@ Claude Code's `rate_limit_event` is a **quota-status snapshot** (`status` = `all
 
 `ClaudeStreamState.rate_limit_total_s` accumulates throttle time (extension-only for repeats against one deadline); structured `claude.rate_limit_event` logs `status`, `rate_limit_type`, `resets_at`, `retry_after_s`, `retry_after_source` (`resets_at` / `retry_after_ms` / `reset_ts` / `result_error` / `action_required` / `default` / `bare` / `stale` / `covered_by_overage`), `count` and `cumulative_s`.
 
+### `system/api_retry` back-offs ([#792](https://github.com/littlebearapps/untether/issues/792))
+
+When an API call fails with a retryable error (429/529/5xx/connection), Claude Code emits `system/api_retry` with `attempt`, `max_retries`, `retry_delay_ms`, `error_status` and an `error` category before backing off. The runner renders one updating note per retry sequence (`🔁 API error 529 (overloaded) — retrying in 8s (attempt 2/10)`) and latches `api_retry_wait_until` so the bridge's stall monitor treats the back-off as an expected wait (`awaiting_api_retry()`, reason `api_retry_waiting`) rather than a hang. `claude.api_retry` logs at INFO, WARN on the final attempt. Shapes in the [stream-json cheatsheet](stream-json-cheatsheet.md).
+
 ### Per-session background-task tracking ([#346](https://github.com/littlebearapps/untether/issues/346) / [#347](https://github.com/littlebearapps/untether/issues/347) / [#776](https://github.com/littlebearapps/untether/issues/776))
 
 Claude Code can arm long-running work and end its turn while the work continues: `Monitor`, `Bash run_in_background=true`, background `Agent`/`Task` (the default for subagents), `ScheduleWakeup`, `RemoteTrigger`.

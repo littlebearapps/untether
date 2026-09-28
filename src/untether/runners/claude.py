@@ -1043,6 +1043,19 @@ class ClaudeStreamState:
     # window" as an expected wait, not a stall. ``0.0`` = not throttled.
     rate_limit_wait_until: float = 0.0
 
+    # #792: ``system/api_retry`` back-off tracking. ``api_retry_wait_until``
+    # is a monotonic deadline (retry delay, plus the retry's first-byte
+    # window when ``no_response`` is present) read by awaiting_api_retry().
+    # Kept apart from the rate-limit fields: a 529/5xx back-off is not a
+    # quota throttle, and conflating them would skew rate_limit_total_s.
+    api_retry_wait_until: float = 0.0
+    api_retry_count: int = 0
+    api_retry_total_s: float = 0.0
+    # One updating note per retry sequence: the action id is reused until
+    # the attempt counter goes backwards (a new sequence).
+    api_retry_action_id: str | None = None
+    api_retry_last_attempt: int = 0
+
     # #572: set when the run's StreamResultMessage was a Stream-idle-timeout
     # failure — "type_a" (mid-generation stall, retryable) or "type_b"
     # (cold-start zero-byte stall, never retried). runner_bridge reads this
@@ -1068,6 +1081,13 @@ class ClaudeStreamState:
     def awaiting_rate_limit_retry(self) -> bool:
         """True while Claude is inside an upstream rate-limit retry window."""
         return self.rate_limit_wait_until > time.monotonic()
+
+    def awaiting_api_retry(self) -> bool:
+        """#792: True while the CLI is backing off before retrying a failed
+        API call (``system/api_retry``). Probed by the bridge's stall
+        monitor via engine_state duck-typing, like
+        :meth:`awaiting_rate_limit_retry` — silence here is expected."""
+        return self.api_retry_wait_until > time.monotonic()
 
 
 # #657 → #790: conservative wait window latched when a *confirmed* rejection
@@ -1704,6 +1724,104 @@ def _translate_rate_limit_event(
         **_rate_limit_log_fields(info),
     )
     return _rate_limit_note(factory, action_id=action_id, title=title, detail=detail)
+
+
+def _format_retry_seconds(seconds: float) -> str:
+    if 0 < seconds < 1:
+        return f"{seconds:.1f}s"
+    if seconds < 120:
+        return f"{round(seconds)}s"
+    return _format_wait_approx(seconds).lstrip("~")
+
+
+def _translate_api_retry(
+    event: claude_schema.StreamSystemMessage,
+    *,
+    state: ClaudeStreamState,
+    factory: EventFactory,
+) -> list[UntetherEvent]:
+    """#792: ``system/api_retry`` → one updating progress note per retry
+    sequence plus a short expected-wait latch for the stall monitor.
+
+    The CLI emits this when an API call fails with a retryable error
+    (429/529/5xx/connection) and it is about to back off; before #792 the
+    frame was dropped, so a back-off looked like a silent hang.
+    """
+    attempt = event.attempt or 0
+    max_retries = event.max_retries or 0
+    delay_s = max(0.0, (event.retry_delay_ms or 0) / 1000.0)
+    no_response = event.no_response
+    header_wait_s = 0.0
+    if no_response is not None and no_response.retry_wait_ms:
+        header_wait_s = max(0.0, no_response.retry_wait_ms / 1000.0)
+
+    now_mono = time.monotonic()
+    # The retry itself may legitimately sit silent for the first-byte
+    # window, so the expected wait covers delay + that window.
+    state.api_retry_wait_until = max(
+        state.api_retry_wait_until, now_mono + delay_s + header_wait_s
+    )
+    state.api_retry_count += 1
+    state.api_retry_total_s += delay_s
+
+    if state.api_retry_action_id is None or attempt <= state.api_retry_last_attempt:
+        state.note_seq += 1
+        state.api_retry_action_id = f"api_retry_{state.note_seq}"
+    state.api_retry_last_attempt = attempt
+    action_id = state.api_retry_action_id
+
+    category = event.error if isinstance(event.error, str) else None
+    if event.error_status is not None:
+        head = f"API error {event.error_status}"
+        if category and category != "unknown":
+            head += f" ({category.replace('_', ' ')})"
+    elif no_response is not None and no_response.waited_ms:
+        head = (
+            "No response from API after "
+            f"{_format_retry_seconds(no_response.waited_ms / 1000.0)}"
+        )
+    else:
+        head = "API unreachable"
+    counter = (
+        f"attempt {attempt}/{max_retries}" if max_retries else f"attempt {attempt}"
+    )
+    title = f"🔁 {head} — retrying in {_format_retry_seconds(delay_s)} ({counter})"
+
+    final_attempt = max_retries > 0 and attempt >= max_retries
+    log = logger.warning if final_attempt else logger.info
+    log(
+        "claude.api_retry",
+        attempt=attempt,
+        max_retries=max_retries,
+        retry_delay_ms=event.retry_delay_ms,
+        error_status=event.error_status,
+        error=category,
+        no_response_waited_ms=no_response.waited_ms if no_response else None,
+        count=state.api_retry_count,
+        cumulative_s=round(state.api_retry_total_s, 1),
+        session_id=event.session_id,
+    )
+    detail: dict[str, Any] = {
+        "attempt": attempt,
+        "max_retries": max_retries,
+        "retry_delay_ms": event.retry_delay_ms,
+        "error_status": event.error_status,
+    }
+    if category:
+        detail["error"] = category
+    return [
+        factory.action_started(
+            action_id=action_id, kind="note", title=title, detail=detail
+        ),
+        factory.action_completed(
+            action_id=action_id,
+            kind="note",
+            title=title,
+            ok=True,
+            level="warning" if final_attempt else "info",
+            detail=detail,
+        ),
+    ]
 
 
 def _normalize_tool_result(content: Any) -> str:
@@ -3148,6 +3266,8 @@ def _translate_claude_event_base(
             if subtype.startswith("task_") or subtype == "background_tasks_changed":
                 _apply_task_event(state, event)
                 return []
+            if subtype == "api_retry":
+                return _translate_api_retry(event, state=state, factory=factory)
             if subtype != "init":
                 logger.debug(
                     "claude.system_event.non_init",

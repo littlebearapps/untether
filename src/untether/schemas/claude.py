@@ -131,6 +131,15 @@ class StreamAssistantMessage(
     session_id: str | None = None
 
 
+class ApiRetryNoResponse(msgspec.Struct, forbid_unknown_fields=False):
+    """#792: ``system/api_retry.no_response`` — the failed attempt waited
+    ``waited_ms`` for response headers; the retry will wait up to
+    ``retry_wait_ms`` for them."""
+
+    waited_ms: int | None = None
+    retry_wait_ms: int | None = None
+
+
 class StreamSystemMessage(
     msgspec.Struct, tag="system", tag_field="type", forbid_unknown_fields=False
 ):
@@ -165,6 +174,22 @@ class StreamSystemMessage(
     usage: dict[str, Any] | None = None
     last_tool_name: str | None = None
     tasks: list[dict[str, Any]] | None = None
+    # #792 ``api_retry`` (CLI 2.1.283, SDKAPIRetryMessage): an API call
+    # failed with a retryable error and the CLI is backing off, e.g.
+    #   {"type":"system","subtype":"api_retry","attempt":2,"max_retries":10,
+    #    "retry_delay_ms":8000,"error_status":529,"error":"overloaded",…}
+    # ``error_status`` is null for connection errors with no HTTP response;
+    # ``error`` is an upstream category string today (overloaded /
+    # rate_limit / server_error / …) — typed Any so a richer shape can't
+    # drop the line. ``no_response`` appears only when no headers arrived
+    # within CLAUDE_STREAM_FIRST_BYTE_TIMEOUT_MS. No other system subtype
+    # uses these keys with a conflicting type (checked on 2.1.283).
+    attempt: int | None = None
+    max_retries: int | None = None
+    retry_delay_ms: int | None = None
+    error_status: int | None = None
+    error: Any = None
+    no_response: ApiRetryNoResponse | None = None
 
 
 class StreamResultMessage(

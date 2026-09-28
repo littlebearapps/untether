@@ -139,6 +139,38 @@ emitter still gets a precise countdown ([#518](https://github.com/littlebearapps
 | no `status`, legacy timing | #518 path: `⏳ Rate limited — retrying in Ns`. |
 | truly bare (`{"type":"rate_limit_event"}`) | Nothing — INFO `retry_after_source=bare`. The [#657](https://github.com/littlebearapps/untether/issues/657) "bare = 60 s throttle" guess is retired: bare was an artefact of the old schema decoding every real snapshot to all-`None`. |
 
+### `system` / `api_retry` (#792)
+
+Emitted when an API request fails with a retryable error and the CLI will retry after a
+delay — the wire twin of the REPL's retry banner (`SDKAPIRetryMessage`, CLI 2.1.283).
+This, not `rate_limit_event`, is the real "backing off, retrying in N s" signal.
+
+```json
+{"type":"system","subtype":"api_retry","attempt":2,"max_retries":10,"retry_delay_ms":8000,"error_status":529,"error":"overloaded","uuid":"…","session_id":"…"}
+```
+
+| Field | Type | Notes |
+|---|---|---|
+| `attempt` / `max_retries` | int | retry counters |
+| `retry_delay_ms` | int | back-off before the next attempt |
+| `error_status` | int \| null | HTTP status; `null` for connection errors (timeouts) with no response |
+| `error` | string | category: `rate_limit`, `overloaded`, `server_error`, `authentication_failed`, `billing_error`, `invalid_request`, `unknown`, … |
+| `no_response` | `{waited_ms, retry_wait_ms}` (optional) | only when no response headers arrived within `CLAUDE_STREAM_FIRST_BYTE_TIMEOUT_MS`; `max_retries` is then this cause's own cap (normally 1) |
+
+A sibling `system/control_request_progress` with `status: "api_retry"` carries the same
+counters for client-originated control requests (side questions only) — not handled.
+
+**Untether handling** (`_translate_api_retry` in `runners/claude.py`): decoded into the
+flat `StreamSystemMessage` (all fields optional, `error` typed `Any`). Renders one note per
+retry sequence, updated in place as attempts climb — `🔁 API error 529 (overloaded) —
+retrying in 8s (attempt 2/10)`, `🔁 API unreachable — retrying in 5s (attempt 1/10)`
+(no status), or `🔁 No response from API after 45s — retrying in 2s (attempt 1/1)`
+(`no_response`). Latches `ClaudeStreamState.api_retry_wait_until` = now + delay (+ the
+retry's `retry_wait_ms` header window); the bridge's `awaiting_api_retry()` probe treats that
+window as an expected wait (`reason=api_retry_waiting`), like a rate-limit window. Logs
+`claude.api_retry` at INFO (WARN, and a `warning`-level note, on the final attempt). Retry
+time accrues in `api_retry_total_s`, kept separate from rate-limit time.
+
 ### `tool_progress`
 
 Heartbeat emitted periodically while a long-running tool is in flight (verified on CLI

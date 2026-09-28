@@ -117,3 +117,41 @@ def test_rate_limit_snapshot_keys_present(cli_blob: mmap.mmap) -> None:
         b'"rate_limit_event"',
     ):
         assert cli_blob.find(key) != -1, f"{key!r} missing from the installed CLI"
+
+
+# ---------------------------------------------------------------------------
+# #792 — system/api_retry
+# ---------------------------------------------------------------------------
+
+API_RETRY_KEYS = (
+    "attempt",
+    "max_retries",
+    "retry_delay_ms",
+    "error_status",
+    "error",
+    "no_response",
+    "waited_ms",
+    "retry_wait_ms",
+)
+
+
+def test_api_retry_subtype_and_counter_keys_present(cli_blob: mmap.mmap) -> None:
+    """The keys `_translate_api_retry` reads must still be declared on the
+    CLI's ``system/api_retry`` schema."""
+    m = re.search(rb'subtype:\w{1,4}\("api_retry"\)', cli_blob)
+    if m is None:
+        pytest.fail(
+            'installed CLI no longer declares subtype "api_retry" — #792 '
+            f"handling is dead code (last green on CLI {PROBED_CLI_VERSION})"
+        )
+    # The schema object follows the subtype literal; its describe() strings
+    # make it long, so take a generous window and strip them.
+    window = re.sub(
+        rb'\.describe\("(?:[^"\\]|\\.)*"\)', b"", cli_blob[m.end() : m.end() + 4000]
+    )
+    window = window.split(b"session_id:", 1)[0]
+    missing = [k for k in API_RETRY_KEYS if f"{k}:".encode() not in window]
+    assert not missing, (
+        f"system/api_retry schema lost keys {missing} "
+        f"(last green on CLI {PROBED_CLI_VERSION})"
+    )

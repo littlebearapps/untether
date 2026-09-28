@@ -1694,6 +1694,12 @@ class ProgressEdits:
                 # thresholds; this is an expected wait, not a stall.
                 threshold = self._STALL_THRESHOLD_APPROVAL
                 threshold_reason = "rate_limit_waiting"
+            elif self._is_api_retry_waiting():
+                # #792: the CLI is backing off before retrying a failed API
+                # call (``system/api_retry``) — same expected-wait handling
+                # as a rate-limit window.
+                threshold = self._STALL_THRESHOLD_APPROVAL
+                threshold_reason = "api_retry_waiting"
             elif mcp_server is not None:
                 threshold = self._STALL_THRESHOLD_MCP_TOOL
                 threshold_reason = "running_mcp_tool"
@@ -1813,6 +1819,7 @@ class ProgressEdits:
             _expected_wait_reason = threshold_reason in (
                 "pending_approval",
                 "rate_limit_waiting",
+                "api_retry_waiting",
             )
             _expected_wait = (
                 (_post_result_idle and not _post_result_limbo)
@@ -1859,7 +1866,11 @@ class ProgressEdits:
             # #495/#499/#500: ``rate_limit_waiting`` joins ``pending_approval``
             # as a demoted reason — an upstream throttle resumes by itself, so
             # it is by definition not a hang either.
-            if threshold_reason in ("pending_approval", "rate_limit_waiting"):
+            if threshold_reason in (
+                "pending_approval",
+                "rate_limit_waiting",
+                "api_retry_waiting",
+            ):
                 if (
                     self._last_approval_pending_emit_at == 0.0
                     or now - self._last_approval_pending_emit_at
@@ -2649,6 +2660,20 @@ class ProgressEdits:
                 return bool(probe())
             except Exception as exc:  # noqa: BLE001 - monitor loop must not die
                 logger.debug("progress_edits.rate_limit_probe_failed", error=str(exc))
+                return False
+        return False
+
+    def _is_api_retry_waiting(self) -> bool:
+        """#792: True while the engine is backing off before retrying a
+        failed API call (Claude's ``system/api_retry``). Duck-typed like
+        :meth:`_is_rate_limit_waiting`; engines without the probe → False."""
+        es = getattr(self.stream, "engine_state", None) if self.stream else None
+        probe = getattr(es, "awaiting_api_retry", None)
+        if callable(probe):
+            try:
+                return bool(probe())
+            except Exception as exc:  # noqa: BLE001 - monitor loop must not die
+                logger.debug("progress_edits.api_retry_probe_failed", error=str(exc))
                 return False
         return False
 
