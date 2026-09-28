@@ -603,3 +603,51 @@ def test_read_cmdline_argv_roundtrip() -> None:
     assert len(argv) >= 1
     # PID 0 has no /proc entry.
     assert read_cmdline_argv(0) is None
+
+
+# ── #791: close-grace diagnostic helpers ────────────────────────────────────
+
+
+def test_describe_process_redacts_secret_bearing_args(monkeypatch) -> None:
+    from untether.utils import proc_diag
+
+    argv = [
+        "/usr/bin/node",
+        "/opt/mcp-remote/index.js",
+        "https://mcp.example.com/sse",
+        "--header",
+        "Authorization:Bearer sk-live-abc",
+        "--api-key",
+        "plain-value-123",
+        "--verbose",
+    ]
+    monkeypatch.setattr(proc_diag, "read_cmdline_argv", lambda pid: argv)
+    out = proc_diag.describe_process(1, max_args=10)
+    assert out is not None
+    assert out.startswith("node /opt/mcp-remote/index.js https://mcp.example.com/sse")
+    assert "sk-live-abc" not in out
+    assert "plain-value-123" not in out
+    assert out.count("<redacted>") == 3  # Bearer arg, --api-key, its value
+    assert out.endswith("--verbose")
+
+
+def test_describe_process_truncates_and_counts_extra_args(monkeypatch) -> None:
+    from untether.utils import proc_diag
+
+    argv = ["python", "x" * 200, *[f"a{i}" for i in range(10)]]
+    monkeypatch.setattr(proc_diag, "read_cmdline_argv", lambda pid: argv)
+    out = proc_diag.describe_process(1, max_args=3, max_len=20)
+    assert out == f"python {'x' * 19}… a0 a1 (+8 args)"
+
+
+def test_describe_process_unreadable_returns_none(monkeypatch) -> None:
+    from untether.utils import proc_diag
+
+    monkeypatch.setattr(proc_diag, "read_cmdline_argv", lambda pid: None)
+    assert proc_diag.describe_process(1) is None
+
+
+def test_read_wchan_missing_pid_returns_none() -> None:
+    from untether.utils.proc_diag import read_wchan
+
+    assert read_wchan(2**22 + 12345) is None

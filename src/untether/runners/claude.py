@@ -331,6 +331,11 @@ class LiveSession:
     had_live_work: bool = False
     closing: bool = False
     close_reason: str | None = None
+    # #791: set when Untether closed stdin on an idle session (turn closed,
+    # no injected line pending) with no live background work — the
+    # transcript is complete, so a close that overruns its grace must not
+    # quarantine it.
+    closed_idle_clean: bool = False
     listeners: list[Callable[[str, dict[str, Any]], Any]] = field(default_factory=list)
 
     @property
@@ -421,6 +426,7 @@ async def close_live_session(
         live.closing = True
         live.close_reason = reason
         live.state.live_close_reason = reason
+        live.closed_idle_clean = _is_clean_idle(live)
     tasks = live_task_descriptions(live.state)
     logger.info(
         "claude.live_session.stdin_closed",
@@ -442,6 +448,62 @@ async def close_live_session(
             async with lock:
                 await live.stdin.aclose()
     return True
+
+
+def _is_clean_idle(live: LiveSession) -> bool:
+    """#791: the session sits between turns with nothing live or pending —
+    its last turn's transcript is complete (no dangling tool_use for a
+    SIGTERM to strand, the #632 concern)."""
+    state = live.state
+    return (
+        live.idle
+        and not state.awaiting_injected
+        and not _live_native_tasks(state)
+        and not has_live_background_work(state)
+    )
+
+
+def _close_grace_diag(pid: int, start: Any) -> dict[str, Any]:
+    """#791: a structured process snapshot for a live close that overran its
+    grace — what the CLI was doing when Untether had to signal it."""
+    from ..utils.proc_diag import (
+        collect_proc_diag,
+        describe_process,
+        format_diag,
+        is_cpu_active,
+        is_tree_cpu_active,
+        read_wchan,
+    )
+
+    fields: dict[str, Any] = {}
+    try:
+        diag = collect_proc_diag(pid)
+        if diag is None:
+            return {"diag": None}
+        fields["diag"] = format_diag(diag)
+        fields["process_state"] = diag.state
+        fields["wchan"] = read_wchan(pid)
+        fields["rss_kb"] = diag.rss_kb
+        fields["threads"] = diag.threads
+        fields["fd_count"] = diag.fd_count
+        fields["tcp_established"] = diag.tcp_established
+        fields["tcp_total"] = diag.tcp_total
+        # CPU across the whole grace window: busy (flushing / shutting MCP
+        # servers down) vs. blocked.
+        fields["cpu_active_during_grace"] = is_cpu_active(start, diag)
+        fields["tree_cpu_active_during_grace"] = is_tree_cpu_active(start, diag)
+        fields["children"] = [
+            {
+                "pid": child,
+                "wchan": read_wchan(child),
+                "cmd": describe_process(child),
+            }
+            for child in diag.child_pids[:12]
+        ]
+        fields["child_count"] = len(diag.child_pids)
+    except Exception:  # noqa: BLE001 — diagnostics must never break teardown
+        logger.debug("claude.live_session.close_diag_failed", exc_info=True)
+    return fields
 
 
 _INJECTED_TURN_TIMEOUT_S = 120.0
@@ -4985,6 +5047,9 @@ class ClaudeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
     # #776 live-session lifecycle knobs (class attrs so tests can shrink them).
     _live_poll_s: float = 1.0
     _live_close_grace_s: float = 15.0
+    # #791: after the close grace, SIGINT (the CLI's Ctrl-C path) gets this
+    # long before the SIGTERM escalation.
+    _live_close_sigint_grace_s: float = 5.0
 
     async def _live_session_lifecycle(
         self,
@@ -5097,15 +5162,39 @@ class ClaudeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
         run_logger: Any,
         reader_done: anyio.Event,
     ) -> str:
+        from ..utils.proc_diag import collect_proc_diag
+
+        grace_start_diag = None
+        if proc is not None and isinstance(getattr(proc, "pid", None), int):
+            with contextlib.suppress(Exception):
+                grace_start_diag = collect_proc_diag(proc.pid)
         with anyio.move_on_after(self._live_close_grace_s):
             await reader_done.wait()
         if reader_done.is_set() or proc is None or proc.returncode is not None:
             return "exited_after_close"
         sid = live.session_id
         live_tasks = len(live_task_descriptions(live.state))
+        # #791: a clean idle close (turn closed, nothing live, set when stdin
+        # was closed and still true now) left a complete transcript — the CLI
+        # is merely slow to exit (MCP shutdown, transcript flush, exit hook).
+        # Quarantining it would cost the user their context on the next
+        # message; #631 empty-resume recovery stays the backstop.
+        idle_clean = live.closed_idle_clean and _is_clean_idle(live)
+        # #791 (a): record what the CLI was doing before any signal changes it.
+        run_logger.warning(
+            "claude.live_session.close_grace_expired",
+            session_id=sid,
+            pid=proc.pid,
+            close_reason=live.close_reason,
+            grace_s=self._live_close_grace_s,
+            live_tasks=live_tasks,
+            idle_clean=idle_clean,
+            **_close_grace_diag(proc.pid, grace_start_diag),
+        )
         quarantined = False
         if (
-            stream is not None
+            not idle_clean
+            and stream is not None
             and stream.did_emit_completed
             and _load_quarantine_on_forced_teardown()
         ):
@@ -5116,12 +5205,27 @@ class ClaudeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
                 quarantined = True
             except Exception:  # noqa: BLE001 — never break teardown
                 run_logger.debug("session.quarantine_record_failed", exc_info=True)
+        # #791 (c): SIGINT first — the CLI's own Ctrl-C shutdown path (the
+        # whole process group, as a terminal Ctrl-C would) — then SIGTERM.
+        signal_pid_group(proc.pid, signal.SIGINT)
+        with anyio.move_on_after(self._live_close_sigint_grace_s):
+            await reader_done.wait()
+        if reader_done.is_set() or proc.returncode is not None:
+            run_logger.info(
+                "claude.live_session.exited_after_sigint",
+                session_id=sid,
+                pid=proc.pid,
+                close_reason=live.close_reason,
+                quarantined=quarantined,
+            )
+            return "sigint"
         run_logger.warning(
             "claude.live_session.forced_teardown",
             session_id=sid,
             pid=proc.pid,
             close_reason=live.close_reason,
             live_tasks=live_tasks,
+            idle_clean=idle_clean,
             quarantined=quarantined,
         )
         if stream is not None:

@@ -20,6 +20,7 @@ from __future__ import annotations
 import json
 import os
 import queue
+import signal
 import subprocess
 import sys
 import threading
@@ -401,11 +402,33 @@ def scenario_inherited_fd_after_exit(first: dict) -> None:
     os._exit(0)
 
 
+def _maybe_ignore_sigint() -> None:
+    # #791: FAKE_CLAUDE_IGNORE_SIGINT=1 models a CLI that is also deaf to
+    # the Ctrl-C path, so the close escalates on to SIGTERM.
+    if os.environ.get("FAKE_CLAUDE_IGNORE_SIGINT") == "1":
+        signal.signal(signal.SIGINT, signal.SIG_IGN)
+
+
 def scenario_ignore_eof(first: dict) -> None:
-    # A wedged CLI: answers, then ignores stdin EOF (forces the SIGTERM path).
+    # A wedged CLI: answers, then ignores stdin EOF (forces the signal path).
+    _maybe_ignore_sigint()
     init()
     text("stuck")
     result("stuck")
+    while next_user(None) is not None:
+        pass
+    time.sleep(60)
+
+
+def scenario_ignore_eof_with_task(first: dict) -> None:
+    # #791: wedged with a background task still live — the transcript has a
+    # dangling background tool_use, so a forced teardown must quarantine.
+    _maybe_ignore_sigint()
+    init()
+    tool_use("Bash", "toolu_bg", {"command": "sleep 60", "run_in_background": True})
+    start_bg("b1", "toolu_bg")
+    tool_result("toolu_bg", "Command running in background with ID: b1.")
+    result("waiting", turns=2)
     while next_user(None) is not None:
         pass
     time.sleep(60)
@@ -433,6 +456,7 @@ def scenario_error_first(first: dict) -> None:
 _SCENARIOS = {
     "error_first": scenario_error_first,
     "ignore_eof": scenario_ignore_eof,
+    "ignore_eof_with_task": scenario_ignore_eof_with_task,
     "bg_bash_wake": scenario_bg_bash_wake,
     "bg_agent_wake": scenario_bg_agent_wake,
     "monitor_ticks": scenario_monitor_ticks,

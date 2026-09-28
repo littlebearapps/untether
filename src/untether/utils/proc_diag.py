@@ -196,6 +196,54 @@ def read_cmdline_argv(pid: int) -> list[str] | None:
     ]
 
 
+def read_wchan(pid: int) -> str | None:
+    """Return the kernel wait channel (``/proc/<pid>/wchan``) or None.
+
+    #791: names what a sleeping process is blocked on (``ep_poll``,
+    ``do_wait``, ``futex_wait_queue``…) for the live-session close-grace
+    diagnostic. None on non-Linux platforms, missing PIDs, or when the
+    kernel hides it ("0").
+    """
+    try:
+        with open(f"/proc/{pid}/wchan") as f:
+            raw = f.read().strip()
+    except (OSError, FileNotFoundError, PermissionError):
+        return None
+    return raw if raw and raw != "0" else None
+
+
+_SECRETISH = ("token", "secret", "key", "auth", "bearer", "password", "passwd")
+
+
+def describe_process(pid: int, *, max_args: int = 5, max_len: int = 80) -> str | None:
+    """A short, redacted one-line command description for diagnostics.
+
+    #791: child processes of a wedged Claude CLI are usually MCP servers
+    whose argv can carry credentials (``--header Authorization:Bearer …``,
+    ``--api-key …``). Keeps the executable basename plus the first
+    ``max_args`` arguments, truncates each, and replaces any argument that
+    looks secret-bearing — and the one following a secret-looking flag —
+    with ``<redacted>``. Returns None when the cmdline is unreadable.
+    """
+    argv = read_cmdline_argv(pid)
+    if not argv:
+        return None
+    out = [os.path.basename(argv[0])[:max_len]]
+    redact_next = False
+    for arg in argv[1 : 1 + max_args]:
+        lowered = arg.lower()
+        if redact_next or any(word in lowered for word in _SECRETISH):
+            out.append("<redacted>")
+            # A bare flag (``--api-key``) hides the value that follows it.
+            redact_next = arg.startswith("-") and "=" not in arg
+            continue
+        redact_next = False
+        out.append(arg if len(arg) <= max_len else arg[: max_len - 1] + "…")
+    if len(argv) > 1 + max_args:
+        out.append(f"(+{len(argv) - 1 - max_args} args)")
+    return " ".join(out)
+
+
 def _find_children(pid: int) -> list[int]:
     """Find child PIDs via /proc/pid/task/*/children."""
     children: list[int] = []

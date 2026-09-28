@@ -31,15 +31,23 @@ pytestmark = pytest.mark.anyio
 
 FAKE_CLI = Path(__file__).parent / "fake_clis" / "fake_claude_live.py"
 SID = "fake-live-session"
-_ENV = ("FAKE_CLAUDE_SCENARIO", "FAKE_CLAUDE_WAKE_S")
+_ENV = ("FAKE_CLAUDE_SCENARIO", "FAKE_CLAUDE_WAKE_S", "FAKE_CLAUDE_IGNORE_SIGINT")
+
+
+# ClaudeRunner is a slots dataclass, so these knobs are instance fields: a
+# class-attribute override on a subclass is shadowed by the field default
+# (the old overrides here were silently inert — 15 s grace, 1 s poll).
+# ``_run`` applies them to the instance instead (#791).
+_TIMINGS = {
+    "_live_poll_s": 0.05,
+    "_live_close_grace_s": 0.8,
+    "_live_close_sigint_grace_s": 0.8,
+    "_subcountdown_sigterm_grace_s": 1.0,
+    "_subcountdown_sigterm_grace_poll_s": 0.1,
+}
 
 
 class _LiveRunner(ClaudeRunner):
-    _live_poll_s = 0.05
-    _live_close_grace_s = 0.8
-    _subcountdown_sigterm_grace_s = 1.0
-    _subcountdown_sigterm_grace_poll_s = 0.1
-
     def env(self, *, state: Any) -> dict[str, str] | None:
         base = super().env(state=state) or {}
         for key in _ENV:
@@ -86,6 +94,8 @@ async def _run(
     os.environ["FAKE_CLAUDE_SCENARIO"] = scenario
     os.environ["FAKE_CLAUDE_WAKE_S"] = str(wake_s)
     runner = _LiveRunner(claude_cmd=str(FAKE_CLI), permission_mode="bypassPermissions")
+    for name, value in _TIMINGS.items():
+        setattr(runner, name, value)
     events: list[Any] = []
     with anyio.fail_after(timeout):
         async for evt in runner.run("hello", None):
@@ -177,14 +187,80 @@ async def test_absolute_cap(monkeypatch: pytest.MonkeyPatch) -> None:
     assert _engine_state(runner).live_close_reason == "abs_cap"
 
 
-async def test_close_grace_escalates_to_sigterm_and_quarantines(
+def _events(logs: list[dict], name: str) -> list[dict]:
+    return [e for e in logs if e.get("event") == name]
+
+
+async def test_idle_close_overrunning_grace_logs_diag_sigterms_no_quarantine(
     monkeypatch: pytest.MonkeyPatch, quarantine: QuarantineStore
 ) -> None:
+    """#791: an idle, no-task close whose CLI won't exit (deaf to EOF and
+    SIGINT) is SIGTERM'd — but its transcript is complete, so the session is
+    NOT quarantined, and a process snapshot is logged before any signal."""
+    from structlog.testing import capture_logs
+
     _settings(monkeypatch)
-    runner, events = await _run("ignore_eof")
+    os.environ["FAKE_CLAUDE_IGNORE_SIGINT"] = "1"
+    with capture_logs() as logs:
+        runner, events = await _run("ignore_eof")
     assert isinstance(events[-1], CompletedEvent)
+    assert _engine_state(runner).live_close_reason == "idle_no_tasks"
+    assert runner.current_stream.sigterm_sent is True
+    assert not quarantine.is_quarantined("claude", SID)
+    expired = _events(logs, "claude.live_session.close_grace_expired")
+    assert len(expired) == 1
+    snap = expired[0]
+    assert snap["log_level"] == "warning"
+    assert snap["idle_clean"] is True
+    assert snap["close_reason"] == "idle_no_tasks"
+    assert snap["live_tasks"] == 0
+    assert snap["diag"] and snap["diag"] != "dead"
+    for key in ("process_state", "wchan", "fd_count", "children", "child_count"):
+        assert key in snap
+    teardown = _events(logs, "claude.live_session.forced_teardown")
+    assert len(teardown) == 1
+    assert teardown[0]["quarantined"] is False
+    assert teardown[0]["idle_clean"] is True
+    # The snapshot precedes the SIGTERM decision.
+    assert logs.index(expired[0]) < logs.index(teardown[0])
+
+
+async def test_idle_close_overrunning_grace_exits_on_sigint(
+    monkeypatch: pytest.MonkeyPatch, quarantine: QuarantineStore
+) -> None:
+    """#791 (c): SIGINT — the CLI's Ctrl-C path — comes before SIGTERM."""
+    from structlog.testing import capture_logs
+
+    _settings(monkeypatch)
+    with capture_logs() as logs:
+        runner, events = await _run("ignore_eof")
+    assert isinstance(events[-1], CompletedEvent)
+    assert runner.current_stream.sigterm_sent is False
+    assert not quarantine.is_quarantined("claude", SID)
+    assert len(_events(logs, "claude.live_session.close_grace_expired")) == 1
+    assert len(_events(logs, "claude.live_session.exited_after_sigint")) == 1
+    assert _events(logs, "claude.live_session.forced_teardown") == []
+
+
+async def test_forced_teardown_with_live_task_still_quarantines(
+    monkeypatch: pytest.MonkeyPatch, quarantine: QuarantineStore
+) -> None:
+    """#791: only the clean idle close is exempt — a wedged close over a
+    still-live background task keeps the #632 quarantine."""
+    from structlog.testing import capture_logs
+
+    _settings(monkeypatch, post_result_bg_max_hold=0.3)
+    os.environ["FAKE_CLAUDE_IGNORE_SIGINT"] = "1"
+    with capture_logs() as logs:
+        runner, events = await _run("ignore_eof_with_task")
+    assert isinstance(events[-1], CompletedEvent)
+    assert _engine_state(runner).live_close_reason == "max_hold"
     assert runner.current_stream.sigterm_sent is True
     assert quarantine.is_quarantined("claude", SID)
+    expired = _events(logs, "claude.live_session.close_grace_expired")
+    assert len(expired) == 1 and expired[0]["idle_clean"] is False
+    teardown = _events(logs, "claude.live_session.forced_teardown")
+    assert teardown and teardown[0]["quarantined"] is True
 
 
 async def test_accepting_input_false_once_closing() -> None:

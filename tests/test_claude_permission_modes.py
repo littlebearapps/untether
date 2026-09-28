@@ -243,16 +243,17 @@ def test_toml_auto_warns_once_and_keeps_the_new_meaning(tmp_path, monkeypatch) -
     import untether.runners.claude as claude_mod
 
     monkeypatch.setattr(claude_mod, "_LEGACY_AUTO_WARNED", False)
-    warnings: list[tuple[str, dict]] = []
-    monkeypatch.setattr(
-        claude_mod.logger,
-        "warning",
-        lambda event, **kw: warnings.append((event, kw)),
-    )
+    from structlog.testing import capture_logs
 
+    # capture_logs, not monkeypatch.setattr(claude_mod.logger, "warning", …):
+    # restoring an attribute on structlog's lazy proxy pins a bound method
+    # with the default processors, so later capture_logs() calls never see
+    # this module's warnings (#791 full-suite isolation bug).
     path = tmp_path / "untether.toml"
-    assert claude_mod._validate_permission_mode("auto", path) == "auto"
-    assert claude_mod._validate_permission_mode("auto", path) == "auto"
+    with capture_logs() as logs:
+        assert claude_mod._validate_permission_mode("auto", path) == "auto"
+        assert claude_mod._validate_permission_mode("auto", path) == "auto"
+    warnings = [(e["event"], e) for e in logs if e.get("log_level") == "warning"]
 
     # One-shot per process, not per run.
     assert len(warnings) == 1
