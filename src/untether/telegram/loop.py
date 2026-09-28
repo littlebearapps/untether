@@ -1218,13 +1218,24 @@ def _queued_wait_note(resume_token: ResumeToken) -> str | None:
     user why, or that /cancel was available. Returns ``None`` for non-Claude
     engines, unknown sessions, and normal mid-run queues (where the active
     progress message above already explains itself).
+
+    #781: with live sessions (#776) a follow-up to a session that is live
+    and accepting input is written into that same process as soon as its
+    current turn ends — background tasks keep running and are NOT waited
+    for, so the note says that instead. The background-wait wording is kept
+    for ``[watchdog] live_sessions = false`` and for live sessions that are
+    already closing, where the follow-up really does resume after the
+    process exits. The live note omits "/cancel to drop it": once the
+    scheduler hands the job to the injector it is no longer in the
+    cancellable queue.
     """
     if resume_token.engine != "claude":
         return None
     try:
-        from ..runners.claude import session_linger_info
+        from ..runners.claude import is_session_accepting, session_linger_info
 
         info = session_linger_info(resume_token.value)
+        live = info is not None and is_session_accepting(resume_token.value)
     except Exception:  # noqa: BLE001 — the note is best-effort decoration;
         # a registry hiccup must never break the queued send itself.
         logger.debug("queued_note.linger_info_failed", exc_info=True)
@@ -1234,6 +1245,13 @@ def _queued_wait_note(resume_token: ResumeToken) -> str | None:
     post_result, bg_count = info
     if not post_result:
         return None
+    if live:
+        if bg_count > 0:
+            return (
+                "⏳ Queued — sent as soon as Claude's current turn ends "
+                "(background tasks keep running)."
+            )
+        return "⏳ Queued — sent as soon as Claude's current turn ends."
     if bg_count > 0:
         plural = "s" if bg_count != 1 else ""
         return (

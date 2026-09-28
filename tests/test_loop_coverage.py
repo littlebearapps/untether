@@ -845,3 +845,67 @@ class TestQueuedWaitNote:
 
         monkeypatch.setattr("untether.runners.claude.session_linger_info", _boom)
         assert _queued_wait_note(self._token()) is None
+
+    # #781: under live sessions (#776) a follow-up is written into the live
+    # process when its current turn ends — it does NOT wait for background
+    # tasks. The note must say so, and must not promise the old wait.
+
+    def test_live_session_with_background_tasks_781(self, monkeypatch) -> None:
+        from untether.telegram.loop import _queued_wait_note
+
+        monkeypatch.setattr(
+            "untether.runners.claude.session_linger_info", lambda sid: (True, 2)
+        )
+        monkeypatch.setattr(
+            "untether.runners.claude.is_session_accepting", lambda sid: True
+        )
+        note = _queued_wait_note(self._token())
+        assert note is not None
+        assert "current turn" in note
+        assert "background tasks keep running" in note
+        assert "when they finish" not in note
+        assert "Queued behind" not in note
+
+    def test_live_session_without_background_tasks_781(self, monkeypatch) -> None:
+        from untether.telegram.loop import _queued_wait_note
+
+        monkeypatch.setattr(
+            "untether.runners.claude.session_linger_info", lambda sid: (True, 0)
+        )
+        monkeypatch.setattr(
+            "untether.runners.claude.is_session_accepting", lambda sid: True
+        )
+        note = _queued_wait_note(self._token())
+        assert note is not None
+        assert "current turn" in note
+        assert "background" not in note
+        assert "still finishing up" not in note
+
+    def test_live_session_mid_run_still_none_781(self, monkeypatch) -> None:
+        """Mid-run (no result yet): the active progress message explains the
+        queue, live or not."""
+        from untether.telegram.loop import _queued_wait_note
+
+        monkeypatch.setattr(
+            "untether.runners.claude.session_linger_info", lambda sid: (False, 1)
+        )
+        monkeypatch.setattr(
+            "untether.runners.claude.is_session_accepting", lambda sid: True
+        )
+        assert _queued_wait_note(self._token()) is None
+
+    def test_live_disabled_keeps_background_wait_wording_781(self, monkeypatch) -> None:
+        """`[watchdog] live_sessions = false` (or a closing live session):
+        the follow-up really does wait for the background work."""
+        from untether.telegram.loop import _queued_wait_note
+
+        monkeypatch.setattr(
+            "untether.runners.claude.session_linger_info", lambda sid: (True, 1)
+        )
+        monkeypatch.setattr(
+            "untether.runners.claude.is_session_accepting", lambda sid: False
+        )
+        note = _queued_wait_note(self._token())
+        assert note is not None
+        assert "Queued behind the previous run's 1 background task" in note
+        assert "/cancel" in note
