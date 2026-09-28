@@ -922,6 +922,21 @@ class ClaudeStreamState:
     # Hints collected while idle, consumed when the next turn opens.
     pending_command_uuid: str | None = None
     turn_notifications: list[str] = field(default_factory=list)
+    # #785: task ids behind ``turn_notifications`` (a notification for a task
+    # the map doesn't know contributes a label but no id).
+    turn_notification_ids: list[str] = field(default_factory=list)
+    # #785: the open turn's TurnEvent detail, re-sent on its completion.
+    turn_detail: dict[str, Any] = field(default_factory=dict)
+    # #785: top-level background tasks that ended while an ``unknown`` turn
+    # was open — the CLI starts the wake turn on an agent's result before any
+    # task event names it, so the turn is attributed at its completion.
+    turn_ended_tasks: list[tuple[str, str]] = field(default_factory=list)
+    # #785: tasks whose finish a wake turn already delivered; a later turn
+    # opened only by their notification is the same finish, not news.
+    announced_task_ids: set[str] = field(default_factory=set)
+    # #785: when the last wake turn completed still ``unknown``; a task
+    # ending within ``_WAKE_PAIR_WINDOW_S`` after it is paired with it.
+    unattributed_turn_completed_at: float | None = None
     # uuid -> monotonic write time for user lines Untether injected (#776).
     injected_commands: dict[str, float] = field(default_factory=dict)
     # Injected lines whose turn hasn't opened yet: the lifecycle must not
@@ -2470,6 +2485,65 @@ def background_task_summary(state: ClaudeStreamState) -> str | None:
     return "⏳ " + " · ".join(parts)
 
 
+# #785: a task ending this soon after an ``unknown`` wake turn completed is
+# taken to be what that turn answered (nsd evidence: ~8 s between the turn's
+# result and the task's ``background_tasks_changed`` end).
+_WAKE_PAIR_WINDOW_S = 30.0
+
+
+def _is_top_level_background(task: ClaudeTask) -> bool:
+    """A background task the parent session launched itself — not a
+    subagent's own (nested / foreground) tool."""
+    return task.is_backgrounded and not task.owned_by_subagent
+
+
+def _task_label(task: ClaudeTask) -> str:
+    return task.description or task.task_type or "background task"
+
+
+def _note_task_end(state: ClaudeStreamState, task: ClaudeTask) -> None:
+    """#785: attribute a top-level background task's end to the wake turn it
+    belongs to — the open ``unknown`` turn (retro-attributed at completion)
+    or an ``unknown`` turn that completed moments ago (paired: the task's own
+    notification turn that follows is then flagged as already announced)."""
+    if not state.live_mode or state.completed_turns == 0:
+        return
+    if not _is_top_level_background(task) or task.task_id in state.announced_task_ids:
+        return
+    if state.turn_open:
+        if state.turn_reason == "unknown" and all(
+            task.task_id != tid for tid, _ in state.turn_ended_tasks
+        ):
+            state.turn_ended_tasks.append((task.task_id, _task_label(task)))
+        return
+    at = state.unattributed_turn_completed_at
+    if at is None:
+        return
+    gap = time.monotonic() - at
+    if gap > _WAKE_PAIR_WINDOW_S:
+        return
+    state.unattributed_turn_completed_at = None
+    state.announced_task_ids.add(task.task_id)
+    logger.info(
+        "claude.turn.task_end_paired",
+        turn=state.turn,
+        task_id=task.task_id,
+        description=_task_label(task)[:80],
+        gap_s=round(gap, 1),
+    )
+
+
+def _notification_labels_turn(
+    event: claude_schema.StreamSystemMessage, task: ClaudeTask | None
+) -> bool:
+    """#785: only a top-level background task's notification may attribute a
+    wake turn. A subagent's own task (``owned_by_subagent`` / foreground)
+    finishing is not the parent's news and named the wrong task on nsd."""
+    if task is not None:
+        return _is_top_level_background(task)
+    return event.owned_by_subagent is not True and event.is_backgrounded is not False
+
+
 def _end_task(
     state: ClaudeStreamState, task: ClaudeTask, status: str, reason: str
 ) -> None:
@@ -2497,6 +2571,7 @@ def _end_task(
         reason=reason,
         duration_s=round(task.ended_at - task.started_at, 1),
     )
+    _note_task_end(state, task)
 
 
 def _register_task(
@@ -3114,6 +3189,12 @@ def _open_followup_turn(
     elif state.turn_notifications:
         reason = "task_finished"
         detail["tasks"] = list(state.turn_notifications)
+        ids = list(state.turn_notification_ids)
+        if ids and all(tid in state.announced_task_ids for tid in ids):
+            # #785: the second wake turn for one finish (the first opened as
+            # ``unknown`` and was attributed to it) — the bridge won't push.
+            detail["already_announced"] = True
+        state.announced_task_ids.update(ids)
     elif command_uuid is not None:
         reason = "scheduled_wakeup"
     elif monitors := [
@@ -3131,6 +3212,10 @@ def _open_followup_turn(
     state.turn_command_uuid = command_uuid if reason == "followup" else None
     state.pending_command_uuid = None
     state.turn_notifications = []
+    state.turn_notification_ids = []
+    state.turn_ended_tasks = []
+    state.turn_detail = detail
+    state.unattributed_turn_completed_at = None
     # Per-turn scalars (see their field docs) start fresh for the new turn.
     state.last_assistant_text = None
     state.last_exitplanmode_plan = None
@@ -3216,11 +3301,30 @@ def translate_claude_event(
             return []
         case claude_schema.StreamSystemMessage(subtype=subtype):
             if subtype == "task_notification" and not state.turn_open:
-                label = event.summary or event.description
                 task = state.tasks.get(event.task_id or "")
-                if task is not None and task.description:
-                    label = task.description
-                state.turn_notifications.append(label or "background task")
+                if _notification_labels_turn(event, task):
+                    label = event.summary or event.description
+                    if task is not None and task.description:
+                        # Prefer the registered top-level description (#785).
+                        label = task.description
+                    state.turn_notifications.append(label or "background task")
+                    if task is not None:
+                        state.turn_notification_ids.append(task.task_id)
+                else:
+                    logger.info(
+                        "claude.turn.notification_ignored",
+                        task_id=event.task_id,
+                        owned_by_subagent=(
+                            task.owned_by_subagent
+                            if task is not None
+                            else event.owned_by_subagent
+                        ),
+                        is_backgrounded=(
+                            task.is_backgrounded
+                            if task is not None
+                            else event.is_backgrounded
+                        ),
+                    )
             out: list[UntetherEvent] = []
             if subtype == "init" and not state.turn_open:
                 out.append(_open_followup_turn(state, factory))
@@ -3246,6 +3350,27 @@ def translate_claude_event(
             )
             state.turn_open = False
             state.completed_turns += 1
+            detail = dict(state.turn_detail)
+            if state.turn_reason == "unknown" and state.turn_ended_tasks:
+                # #785: the turn opened before any task event named what it
+                # answered; the task(s) ended during it — attribute it now so
+                # its final gets the real header.
+                detail["tasks"] = [label for _, label in state.turn_ended_tasks]
+                detail["retro_attributed"] = True
+                state.announced_task_ids.update(
+                    tid for tid, _ in state.turn_ended_tasks
+                )
+                state.turn_reason = "task_finished"
+                logger.info(
+                    "claude.turn.retro_attributed",
+                    session_id=event.session_id,
+                    turn=state.turn,
+                    task_ids=[tid for tid, _ in state.turn_ended_tasks],
+                )
+            state.turn_ended_tasks = []
+            state.unattributed_turn_completed_at = (
+                time.monotonic() if state.turn_reason == "unknown" else None
+            )
             if completed is not None:
                 logger.info(
                     "claude.turn.completed",
@@ -3264,6 +3389,7 @@ def translate_claude_event(
                         error=completed.error,
                         usage=completed.usage,
                         command_uuid=state.turn_command_uuid,
+                        detail=detail,
                     )
                 )
             return out

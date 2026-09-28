@@ -3969,6 +3969,9 @@ class FollowupTurnRouter:
             self._followup_notify
             if evt.reason == "followup"
             else evt.reason in _TURN_PUSH_REASONS
+            # #785: the second wake turn for one background-task finish
+            # (the first already reported it) arrives without a push.
+            and not (evt.detail or {}).get("already_announced")
         )
         ctx = _TurnCtx(
             turn=evt.turn,
@@ -4022,11 +4025,23 @@ class FollowupTurnRouter:
                 turn=ctx.turn,
                 reason=ctx.reason,
                 command_uuid=ctx.command_uuid,
+                push=ctx.notify,
             )
             return
         ctx = self.current
         if ctx is None or ctx.turn != evt.turn:
             ctx = self._open(evt)
+        elif ctx.reason == "unknown" and evt.reason not in ("unknown", "followup"):
+            # #785: the runner attributed the turn at its completion (the
+            # task it answered ended during it) — deliver the real header.
+            ctx.reason = evt.reason
+            ctx.header = _turn_header(evt)
+            logger.info(
+                "live_turn.retro_attributed",
+                turn=ctx.turn,
+                reason=ctx.reason,
+                header=ctx.header,
+            )
         completed = CompletedEvent(
             engine=evt.engine,
             ok=bool(evt.ok),

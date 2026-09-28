@@ -357,7 +357,7 @@ In control-channel mode (a permission mode is set) the Claude CLI keeps running 
 | `scheduled_wakeup` | `command_lifecycle(started)` with an unknown uuid | ⏰ Scheduled wake-up |
 | `followup` | `command_lifecycle.command_uuid` matches a line Untether injected | none — a normal reply under the follow-up |
 
-Background subagent events (tagged `parent_tool_use_id`) arriving while the parent is idle do not open a turn.
+Background subagent events (tagged `parent_tool_use_id`) arriving while the parent is idle do not open a turn. Only a top-level background task's `task_notification` attributes a turn — a subagent's own task (`owned_by_subagent`, or not `is_backgrounded`) is ignored for labels (`claude.turn.notification_ignored`), and the registered task description is preferred over the notification summary. The CLI often starts the wake turn on a background agent's result *before* any task event names it, so it opens `unknown`: if the task ends during that turn, the turn completes as `task_finished` for it (`claude.turn.retro_attributed`; the bridge delivers the real header); if it ends within 30 s after, it is paired with that turn (`claude.turn.task_end_paired`). Either way the task's own notification turn that follows carries `detail.already_announced` and is delivered without a push — one buzz per finish ([#785](https://github.com/littlebearapps/untether/issues/785)).
 
 **Delivery.** `FollowupTurnRouter` (bridge) gives each turn a fresh tracker, a progress message only if the turn runs >5 s, uses a tool or raises an approval (approval/plan/question keyboards attach to it), then a new final with the header; outbox files are delivered per turn; turn messages are aliases of the live run in `running_tasks` so replies and `/cancel` reach it.
 

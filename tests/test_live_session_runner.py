@@ -25,7 +25,12 @@ pytestmark = pytest.mark.anyio
 
 FAKE_CLI = Path(__file__).parent / "fake_clis" / "fake_claude_live.py"
 SID = "fake-live-session"
-_ENV = ("FAKE_CLAUDE_SCENARIO", "FAKE_CLAUDE_WAKE_S", "FAKE_CLAUDE_SESSION_ID")
+_ENV = (
+    "FAKE_CLAUDE_SCENARIO",
+    "FAKE_CLAUDE_WAKE_S",
+    "FAKE_CLAUDE_SESSION_ID",
+    "FAKE_CLAUDE_TASK_END",
+)
 
 
 class _LiveRunner(ClaudeRunner):
@@ -225,3 +230,60 @@ async def test_inherited_fd_reader_stops_after_exit_drain() -> None:
 
 async def test_write_user_message_returns_false_without_live_stdin() -> None:
     assert await write_user_message("no-such-session", "x", command_uuid="u") is False
+
+
+# ── #785: wake-turn attribution ─────────────────────────────────────────────
+
+
+def _labels(turn: TurnEvent) -> list[str]:
+    return list((turn.detail or {}).get("tasks", []))
+
+
+async def test_wake_turn_opened_before_task_end_is_retro_attributed() -> None:
+    """#785: the CLI opens the wake turn before any task event names the
+    finished agent (it opens as ``unknown``); the task ends inside that turn,
+    so the turn completes attributed to it. The notification's own turn that
+    follows is flagged as already announced (the bridge doesn't push it)."""
+    os.environ["FAKE_CLAUDE_TASK_END"] = "mid"
+    events = await _collect("agent_wake_unknown_first", until=3)
+    turns = _turns(events)
+    assert [(t.phase, t.reason) for t in turns] == [
+        ("started", "unknown"),
+        ("completed", "task_finished"),
+        ("started", "task_finished"),
+        ("completed", "task_finished"),
+    ]
+    assert _labels(turns[1]) == ["bg a1"]
+    assert turns[1].answer == "The sweep is back"
+    assert not turns[1].detail.get("already_announced")
+    assert _labels(turns[2]) == ["bg a1"]
+    assert turns[2].detail.get("already_announced") is True
+    assert turns[3].detail.get("already_announced") is True
+
+
+async def test_task_end_just_after_unknown_turn_marks_next_turn_announced() -> None:
+    """#785: the task ends a moment AFTER the unknown turn delivered — too
+    late to relabel it, but the notification turn for the same task is the
+    second buzz for one finish, so it is flagged as already announced."""
+    os.environ["FAKE_CLAUDE_TASK_END"] = "after"
+    events = await _collect("agent_wake_unknown_first", until=3)
+    turns = _turns(events)
+    assert [(t.phase, t.reason) for t in turns] == [
+        ("started", "unknown"),
+        ("completed", "unknown"),
+        ("started", "task_finished"),
+        ("completed", "task_finished"),
+    ]
+    assert _labels(turns[2]) == ["bg a1"]
+    assert turns[2].detail.get("already_announced") is True
+
+
+async def test_subagent_owned_notification_never_labels_a_turn() -> None:
+    """#785: a subagent's own (foreground, ``owned_by_subagent``) task
+    finishing while the parent idles must not attribute the next wake turn
+    — it named the wrong task in the nsd evidence."""
+    for mode in ("mid", "after"):
+        os.environ["FAKE_CLAUDE_TASK_END"] = mode
+        events = await _collect("agent_wake_unknown_first", until=3)
+        for turn in _turns(events):
+            assert "Inspect nested agents" not in _labels(turn), (mode, turn)

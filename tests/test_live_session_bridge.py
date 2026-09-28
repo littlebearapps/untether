@@ -252,6 +252,56 @@ async def test_router_creates_progress_on_first_action_and_routes_events() -> No
     assert router.active is False
 
 
+async def test_router_retro_attributed_turn_gets_the_task_header() -> None:
+    """#785: a wake turn that opened ``unknown`` and completed attributed to
+    the task that ended during it is delivered with that task's header."""
+    rec = _Recorder()
+    router = _router(rec)
+    await router.on_turn(_turn("started", reason="unknown"))
+    assert router.current is not None
+    assert router.current.header == "\N{BELL} Claude continued"
+    await router.on_turn(
+        _turn(
+            "completed",
+            reason="task_finished",
+            ok=True,
+            answer="report",
+            detail={"tasks": ["Stale sweep: Trello"], "retro_attributed": True},
+        )
+    )
+    assert rec.delivered == [
+        (
+            2,
+            True,
+            "report",
+            "\N{BELL} Background task finished — Stale sweep: Trello",
+            True,
+            10,
+        )
+    ]
+
+
+async def test_router_already_announced_turn_is_not_pushed() -> None:
+    """#785: the second wake turn for one background-task finish arrives
+    without a push (still delivered, with its header)."""
+    rec = _Recorder()
+    router = _router(rec)
+    detail = {"tasks": ["Stale sweep: Trello"], "already_announced": True}
+    await router.on_turn(_turn("started", detail=detail))
+    await router.on_turn(_turn("completed", ok=True, answer="again", detail=detail))
+    _turn_no, _ok, _answer, header, notify, _reply = rec.delivered[0]
+    assert header == "\N{BELL} Background task finished — Stale sweep: Trello"
+    assert notify is False
+
+
+async def test_router_completed_without_detail_keeps_open_header() -> None:
+    rec = _Recorder()
+    router = _router(rec)
+    await router.on_turn(_turn("started", detail={"tasks": ["build"]}))
+    await router.on_turn(_turn("completed", ok=True, answer="done"))
+    assert rec.delivered[0][3] == "\N{BELL} Background task finished — build"
+
+
 async def test_router_short_turn_without_actions_never_creates_progress() -> None:
     rec = _Recorder()
     router = _router(rec)

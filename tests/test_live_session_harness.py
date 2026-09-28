@@ -31,7 +31,7 @@ from untether.transport import MessageRef
 pytestmark = pytest.mark.anyio
 
 FAKE_CLI = Path(__file__).parent / "fake_clis" / "fake_claude_live.py"
-_ENV = ("FAKE_CLAUDE_SCENARIO", "FAKE_CLAUDE_WAKE_S")
+_ENV = ("FAKE_CLAUDE_SCENARIO", "FAKE_CLAUDE_WAKE_S", "FAKE_CLAUDE_TASK_END")
 
 
 class _OrderedTransport(FakeTransport):
@@ -178,6 +178,28 @@ async def test_tool_using_wake_turn_gets_progress_then_final(
     assert wake_final["options"].replace == wake_progress_ref
     # Every alias for the live run was released at the end.
     assert running_tasks == {}
+
+
+async def test_wake_turn_pair_one_push_and_real_header(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#785 end to end: the CLI answers a background agent's result in a
+    turn that opens before any task event names it, then again once the
+    task's notification lands. The first final carries the task's header
+    (not "Claude continued") and pushes; the second doesn't push; the
+    subagent-owned task never labels anything."""
+    _watchdog(monkeypatch)
+    os.environ["FAKE_CLAUDE_TASK_END"] = "mid"
+    transport = await _drive("agent_wake_unknown_first")
+    sends = transport.send_calls
+    first = next(c for c in sends if "The sweep is back" in c["message"].text)
+    second = next(c for c in sends if "The sweep has finished" in c["message"].text)
+    assert "Background task finished — bg a1" in first["message"].text
+    assert "Claude continued" not in first["message"].text
+    assert first["options"].notify is True
+    assert "Background task finished — bg a1" in second["message"].text
+    assert second["options"].notify is False
+    assert not any("Inspect nested agents" in c["message"].text for c in sends)
 
 
 async def test_max_hold_sends_closing_notice(monkeypatch: pytest.MonkeyPatch) -> None:

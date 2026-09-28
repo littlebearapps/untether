@@ -323,6 +323,81 @@ def scenario_bg_agent_wake(first: dict) -> None:
     serve_followups()
 
 
+def _end_quietly(task_id: str) -> None:
+    # The task ends (snapshot + task_updated) without its notification yet.
+    _live_tasks.pop(task_id)
+    snapshot()
+    emit(
+        {
+            "type": "system",
+            "subtype": "task_updated",
+            "task_id": task_id,
+            "patch": {"status": "completed", "end_time": int(time.time() * 1000)},
+        }
+    )
+
+
+def scenario_agent_wake_unknown_first(first: dict) -> None:
+    """#785: the CLI opens a wake turn on a background agent's result BEFORE
+    any task event names it, then a second turn once its task_notification
+    lands. ``FAKE_CLAUDE_TASK_END=mid`` ends the task inside the first turn;
+    ``after`` (default) just after it. A subagent-owned foreground task's
+    notification arrives while the parent idles (it must not label a turn)."""
+    mode = os.environ.get("FAKE_CLAUDE_TASK_END", "after")
+    init()
+    tool_use("Agent", "toolu_ag", {"description": "sweep", "prompt": "go"})
+    start_bg("a1", "toolu_ag", task_type="local_agent")
+    tool_result("toolu_ag", "Async agent launched successfully.")
+    result("agent started", turns=2)
+    emit(
+        {
+            "type": "system",
+            "subtype": "task_started",
+            "task_id": "n1",
+            "tool_use_id": "toolu_nested",
+            "description": "Inspect nested agents",
+            "owned_by_subagent": True,
+            "is_backgrounded": False,
+            "task_type": "local_agent",
+        }
+    )
+    emit(
+        {
+            "type": "system",
+            "subtype": "task_notification",
+            "task_id": "n1",
+            "tool_use_id": "toolu_nested",
+            "status": "completed",
+            "output_file": "",
+            "summary": "Inspect nested agents",
+        }
+    )
+    if wait_idle_or_eof(WAKE_S) is None:
+        shutdown()
+    init()
+    text("The sweep is back")
+    if mode == "mid":
+        _end_quietly("a1")
+    result("The sweep is back")
+    if mode != "mid":
+        _end_quietly("a1")
+    emit(
+        {
+            "type": "system",
+            "subtype": "task_notification",
+            "task_id": "a1",
+            "tool_use_id": "toolu_ag",
+            "status": "completed",
+            "output_file": "",
+            "summary": "sweep finished",
+        }
+    )
+    init()
+    text("The sweep has finished")
+    result("The sweep has finished")
+    serve_followups()
+
+
 def scenario_monitor_ticks(first: dict) -> None:
     init()
     tool_use("Monitor", "toolu_mon", {"command": "tick", "timeout_ms": 30000})
@@ -459,6 +534,7 @@ _SCENARIOS = {
     "ignore_eof_with_task": scenario_ignore_eof_with_task,
     "bg_bash_wake": scenario_bg_bash_wake,
     "bg_agent_wake": scenario_bg_agent_wake,
+    "agent_wake_unknown_first": scenario_agent_wake_unknown_first,
     "monitor_ticks": scenario_monitor_ticks,
     "scheduled_wakeup": scenario_scheduled_wakeup,
     "followup": scenario_followup,
