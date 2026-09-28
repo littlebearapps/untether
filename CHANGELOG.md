@@ -43,6 +43,7 @@
 
 ### changes
 
+- **fix(deps):** bound `httpx` to `<1`. httpx 1.x drops `AsyncClient`, which the Telegram client uses. With no upper bound, a stable httpx 1.0 would break every fresh install and upgrade at startup, and its `1.0.devN` pre-releases already crash-looped sl on two uv rollouts (#745). The locked version is unchanged at 0.28.1. [#782](https://github.com/littlebearapps/untether/issues/782)
 - **chore(deps):** bump `anyio` 4.12.0 → 4.15.1 in the lockfile (pulls `typing-extensions` 4.15.0 → 4.16.0). pip-audit flagged CVE-2026-63374 and CVE-2026-64847 against 4.12.0 (fixed in 4.14.2), failing CI on every PR. Full suite and a dev-bot live-session smoke (background wake + injected follow-up) pass on 4.15.1. [#773](https://github.com/littlebearapps/untether/issues/773)
 - **chore(deps):** bump `aiohttp` 3.14.1 → 3.14.3 in the lockfile. Three advisories against 3.14.1 (`PYSEC-2026-3545`, `PYSEC-2026-3546`, `PYSEC-2026-3547`) were published after the last `dev` CI run and failed `pip-audit` on this batch's PR; unrelated to the changes here, but `aiohttp` is a direct dependency (the webhook server), so the fix belongs in the release rather than a follow-up. Full suite green on the new pin [#742](https://github.com/littlebearapps/untether/issues/742)
 
