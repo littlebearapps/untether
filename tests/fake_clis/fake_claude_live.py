@@ -11,7 +11,8 @@ live background tasks (``task_updated{killed}`` + ``task_notification
 ``docs/findings/2026-09-27-claude-live-session-probes.md``).
 
 Scenario via ``FAKE_CLAUDE_SCENARIO``; timing via ``FAKE_CLAUDE_WAKE_S``
-(default 0.3 s). Test-only.
+(default 0.3 s) and ``FAKE_CLAUDE_RESULT_DELAY_S`` (``followup`` only: delay
+before the first result, default 0). Test-only.
 """
 
 from __future__ import annotations
@@ -26,6 +27,8 @@ import time
 
 SESSION_ID = os.environ.get("FAKE_CLAUDE_SESSION_ID", "fake-live-session")
 WAKE_S = float(os.environ.get("FAKE_CLAUDE_WAKE_S", "0.3"))
+# #510: hold the first turn's result so a concurrent spawn lands in between.
+RESULT_DELAY_S = float(os.environ.get("FAKE_CLAUDE_RESULT_DELAY_S", "0"))
 
 _cost = 0.0
 _lines: queue.Queue[dict | None] = queue.Queue()
@@ -357,6 +360,8 @@ def scenario_scheduled_wakeup(first: dict) -> None:
 def scenario_followup(first: dict) -> None:
     init()
     text("FIRST")
+    if RESULT_DELAY_S > 0:
+        time.sleep(RESULT_DELAY_S)
     result("FIRST")
     serve_followups()
 

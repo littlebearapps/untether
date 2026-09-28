@@ -1087,42 +1087,75 @@ async def test_watchdog_warn_still_fires_when_no_control_request(tmp_path) -> No
 
 
 # ===========================================================================
-# Phase 2e: _ResumeLineProxy.current_stream forwarding (#98)
+# #510 — base runner publishes pid + stream together to the per-run handle
 # ===========================================================================
 
 
-def test_resume_line_proxy_current_stream_forwarding() -> None:
-    """_ResumeLineProxy.current_stream returns inner runner's stream."""
-    from untether.runner import JsonlStreamState
-    from untether.telegram.commands.executor import _ResumeLineProxy
+@pytest.mark.anyio
+async def test_base_runner_publishes_paired_pid_and_stream(tmp_path) -> None:
+    """#510: the base runner publishes THIS spawn's pid and stream to the
+    bridge's per-run handle together, before the payload is sent — never a
+    new pid paired with a previous spawn's stream."""
+    from untether.runner import (
+        JsonlStreamState,
+        RunStreamHandle,
+        bind_run_stream_handle,
+        current_run_stream_handle,
+    )
 
-    runner = CodexRunner(codex_cmd="codex", extra_args=[])
-    stream = JsonlStreamState(expected_session=None)
-    runner.current_stream = stream
+    thread_id = "019b73c4-0c3f-7701-a0bb-aac6b4d8a3bc"
+    codex_path = tmp_path / "codex"
+    codex_path.write_text(
+        "#!/usr/bin/env python3\n"
+        "import json, sys\n"
+        "sys.stdin.read()\n"
+        f"print(json.dumps({{'type': 'thread.started', 'thread_id': '{thread_id}'}}), flush=True)\n"
+        "print(json.dumps({'type': 'item.completed', 'item': {'id': 'item_0', 'type': 'agent_message', 'text': 'ok'}}), flush=True)\n",
+        encoding="utf-8",
+    )
+    codex_path.chmod(0o755)
 
-    proxy = _ResumeLineProxy(runner=runner)
-    assert proxy.current_stream is stream
+    seen_at_send: list[tuple[object, object]] = []
+
+    class _Probe(CodexRunner):
+        async def _send_payload(self, proc, payload, *, logger, resume) -> None:
+            handle = current_run_stream_handle()
+            assert handle is not None
+            seen_at_send.append((handle.pid, handle.stream))
+            await CodexRunner._send_payload(
+                self, proc, payload, logger=logger, resume=resume
+            )
+
+    runner = _Probe(codex_cmd=str(codex_path), extra_args=[])
+    stale = JsonlStreamState(expected_session=None)
+    runner.current_stream = stale
+    runner.last_pid = 999
+
+    handle = RunStreamHandle()
+    with bind_run_stream_handle(handle):
+        events = [evt async for evt in runner.run("hi", None)]
+
+    started = next(e for e in events if isinstance(e, StartedEvent))
+    assert handle.ready.is_set()
+    assert handle.pid == started.meta["pid"]
+    assert handle.stream is runner.current_stream
+    assert handle.stream is not stale
+    # Already paired when the payload went out.
+    assert seen_at_send == [(handle.pid, handle.stream)]
+    # Unbound after the context exits: publishing is then a no-op.
+    assert current_run_stream_handle() is None
 
 
-def test_resume_line_proxy_current_stream_none() -> None:
-    """_ResumeLineProxy.current_stream returns None when runner has no stream."""
-    from untether.telegram.commands.executor import _ResumeLineProxy
+def test_publish_run_stream_without_handle_is_noop() -> None:
+    from untether.runner import (
+        JsonlStreamState,
+        current_run_stream_handle,
+        publish_run_stream,
+    )
 
-    runner = CodexRunner(codex_cmd="codex", extra_args=[])
-    runner.current_stream = None
-
-    proxy = _ResumeLineProxy(runner=runner)
-    assert proxy.current_stream is None
-
-
-def test_resume_line_proxy_current_stream_no_attr() -> None:
-    """_ResumeLineProxy.current_stream returns None for runners without the attr."""
-    from untether.runners.mock import MockRunner
-    from untether.telegram.commands.executor import _ResumeLineProxy
-
-    runner = MockRunner(engine="mock")
-    proxy = _ResumeLineProxy(runner=runner)
-    assert proxy.current_stream is None
+    assert current_run_stream_handle() is None
+    publish_run_stream(JsonlStreamState(expected_session=None), 123)
+    assert current_run_stream_handle() is None
 
 
 # ===========================================================================

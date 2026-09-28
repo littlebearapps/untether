@@ -187,3 +187,79 @@ async def test_max_hold_sends_closing_notice(monkeypatch: pytest.MonkeyPatch) ->
     assert len(notices) == 1
     assert "1 background task still running" in notices[0]
     assert "bg b1" in notices[0] and "Stopping it" in notices[0]
+
+
+class _PerSpawnEnvRunner(_LiveRunner):
+    """Hands each spawn its own env overrides, in spawn order (#510)."""
+
+    def env(self, *, state: Any) -> dict[str, str] | None:
+        base = super().env(state=state) or {}
+        spawn_env: list[dict[str, str]] = self._spawn_env  # type: ignore[attr-defined]
+        base.update(spawn_env[self.spawned])  # type: ignore[has-type]
+        self.spawned += 1  # type: ignore[has-type]
+        return base
+
+
+async def test_510_concurrent_chats_each_bind_their_own_stream(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#510 D3: two chats share ONE ClaudeRunner. Chat A's first result lands
+    after chat B's spawn; A's supplementary ``StartedEvent(meta=complete)``
+    must not rebind A's progress to B's stream (which then feeds A's stall
+    monitor, wake-up countdowns, ``session.summary`` and auto-continue)."""
+    import untether.runner_bridge as bridge_mod
+
+    _watchdog(monkeypatch)
+    os.environ["FAKE_CLAUDE_SCENARIO"] = "followup"
+    runner = _PerSpawnEnvRunner(
+        claude_cmd=str(FAKE_CLI), permission_mode="bypassPermissions"
+    )
+    runner.spawned = 0  # type: ignore[attr-defined]
+    runner._spawn_env = [  # type: ignore[attr-defined]
+        {
+            "FAKE_CLAUDE_SESSION_ID": "sess-510-a",
+            "FAKE_CLAUDE_RESULT_DELAY_S": "1.5",
+        },
+        {"FAKE_CLAUDE_SESSION_ID": "sess-510-b"},
+    ]
+
+    bound: list[tuple[Any, Any]] = []
+    real_run = bridge_mod.run_runner_with_cancel
+
+    async def spy(*args: Any, **kwargs: Any) -> Any:
+        outcome = await real_run(*args, **kwargs)
+        bound.append((outcome, kwargs["edits"]))
+        return outcome
+
+    monkeypatch.setattr(bridge_mod, "run_runner_with_cancel", spy)
+    transport = _OrderedTransport()
+    cfg = ExecBridgeConfig(
+        transport=transport, presenter=MarkdownPresenter(), final_notify=False
+    )
+
+    async def chat(channel_id: int) -> None:
+        await handle_message(
+            cfg,
+            runner=runner,
+            incoming=IncomingMessage(channel_id=channel_id, message_id=10, text="go"),
+            resume_token=None,
+        )
+
+    with anyio.fail_after(25):
+        async with anyio.create_task_group() as tg:
+            tg.start_soon(chat, 123)
+            while runner.spawned < 1:  # type: ignore[attr-defined]
+                await anyio.sleep(0.02)
+            # Let A's init land so A is bound before B spawns.
+            await anyio.sleep(0.3)
+            tg.start_soon(chat, 456)
+
+    assert len(bound) == 2
+    sessions = set()
+    for outcome, edits in bound:
+        assert outcome.resume is not None
+        assert edits.stream is not None
+        assert edits.stream.found_session is not None
+        assert edits.stream.found_session.value == outcome.resume.value
+        sessions.add(outcome.resume.value)
+    assert sessions == {"sess-510-a", "sess-510-b"}

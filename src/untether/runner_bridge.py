@@ -26,7 +26,13 @@ from .model import (
 )
 from .presenter import Presenter
 from .progress import ProgressTracker
-from .runner import _APPROVAL_PENDING_REFIRE_S, Runner
+from .runner import (
+    _APPROVAL_PENDING_REFIRE_S,
+    Runner,
+    RunStreamHandle,
+    reset_run_stream_handle,
+    set_run_stream_handle,
+)
 from .session_quarantine import QuarantineStore, get_quarantine_store
 from .transport import (
     ChannelId,
@@ -3412,6 +3418,23 @@ async def run_runner_with_cancel(
     outcome = RunOutcome()
     start_time = time.monotonic()
     runner_finished = anyio.Event()
+    # #510: this run's own stream + pid. The runner instance is shared
+    # across chats, so ``runner.current_stream`` / ``runner.last_pid`` are
+    # "latest spawn in ANY chat" and must never be read here. The handle is
+    # bound to the context BEFORE the task group starts so ``run_runner``
+    # (which iterates the generator, i.e. executes ``run_impl``) inherits it.
+    stream_handle = RunStreamHandle()
+    stream_token = set_run_stream_handle(stream_handle)
+
+    def bind_run_stream() -> None:
+        """Bind edits to this run's published stream/pid. Idempotent, so a
+        supplementary ``StartedEvent`` (e.g. Claude's per-result
+        ``meta={"complete": ...}``) can never rebind to another chat."""
+        if stream_handle.stream is not None:
+            edits.stream = stream_handle.stream
+        if isinstance(stream_handle.pid, int):
+            edits.pid = stream_handle.pid
+
     try:
         async with anyio.create_task_group() as tg:
 
@@ -3440,9 +3463,7 @@ async def run_runner_with_cancel(
                                 pid = evt.meta.get("pid")
                                 if isinstance(pid, int):
                                     edits.pid = pid
-                            _cs = getattr(runner, "current_stream", None)
-                            if _cs is not None:
-                                edits.stream = _cs
+                            bind_run_stream()
                             if running_task is not None and running_task.resume is None:
                                 running_task.resume = evt.resume
                                 try:
@@ -3539,16 +3560,13 @@ async def run_runner_with_cancel(
                 tg.cancel_scope.cancel()
 
             async def thread_pid() -> None:
-                """Poll for early PID from subprocess spawn before StartedEvent."""
-                for _ in range(50):  # poll up to 5s
-                    pid = getattr(runner, "last_pid", None)
-                    if isinstance(pid, int):
-                        edits.pid = pid
-                        cs = getattr(runner, "current_stream", None)
-                        if cs is not None:
-                            edits.stream = cs
-                        return
-                    await anyio.sleep(0.1)
+                """Bind this run's PID + stream as soon as the runner publishes
+                them at spawn — before any StartedEvent, so stall diagnostics
+                aren't blind when a run never gets that far (#593). Bounded:
+                runners that never publish leave edits unbound (#510)."""
+                with anyio.move_on_after(5):
+                    await stream_handle.ready.wait()
+                    bind_run_stream()
 
             tg.start_soon(run_runner)
             tg.start_soon(thread_pid)
@@ -3567,6 +3585,8 @@ async def run_runner_with_cancel(
         ]
         if non_cancelled:
             raise non_cancelled[0] from eg
+    finally:
+        reset_run_stream_handle(stream_token)
 
     # Session completion summary
     duration = time.monotonic() - start_time

@@ -52,6 +52,7 @@ from ..runner import (
     _rc_label,
     _session_label,
     _stderr_excerpt,
+    publish_run_stream,
 )
 from ..schemas import claude as claude_schema
 from ..session_quarantine import get_quarantine_store
@@ -5806,13 +5807,14 @@ class ClaudeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
                 # #361 stash PID so the env audit in translate_claude_event
                 # can sample /proc/<pid>/environ on system.init.
                 state.pid = proc.pid
-                # #593: the base runner sets last_pid but this override never
-                # did — the bridge's thread_pid() early-poll returned None for
-                # Claude, so stall diagnostics ran blind (pid=None
-                # process_alive=None) exactly when a run never emitted a
-                # StartedEvent (the only other PID source).
+                # #593/#510: hand the bridge THIS run's pid + stream through
+                # the per-run handle. ``last_pid`` / ``current_stream`` stay
+                # as diagnostics-only attributes — the runner instance is
+                # shared across chats, so they describe the latest spawn in
+                # ANY chat and must never feed per-run monitoring.
                 self.last_pid = proc.pid
                 self.current_stream = stream
+                publish_run_stream(stream, proc.pid)
                 reader_done = anyio.Event()
 
                 # #333: load post-result idle settings before the task group

@@ -9,7 +9,8 @@ import signal
 import subprocess
 import time
 from collections import deque
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncIterator, Callable, Iterator
+from contextvars import ContextVar, Token
 from dataclasses import dataclass, field, replace
 from typing import Any, Protocol, cast
 from weakref import WeakValueDictionary
@@ -458,8 +459,75 @@ class JsonlStreamState:
     stall_suppression_counts: dict[str, int] = field(default_factory=dict)
 
 
+@dataclass(slots=True)
+class RunStreamHandle:
+    """Per-run binding of a spawn's ``JsonlStreamState`` and PID (#510).
+
+    Runner instances are shared across chats, so anything stored on the
+    runner (``current_stream`` / ``last_pid``) describes *the most recent
+    spawn in any chat*. The bridge instead creates one handle per
+    ``run_runner_with_cancel`` call and exposes it through ``_RUN_STREAM``;
+    the runner's ``run_impl`` — which executes in the task iterating the run
+    generator, so it inherits the bridge's context — publishes its own
+    stream and PID into it via :func:`publish_run_stream`.
+    """
+
+    stream: JsonlStreamState | None = None
+    pid: int | None = None
+    ready: anyio.Event = field(default_factory=anyio.Event)
+
+
+_RUN_STREAM: ContextVar[RunStreamHandle | None] = ContextVar(
+    "untether.run_stream", default=None
+)
+
+
+def current_run_stream_handle() -> RunStreamHandle | None:
+    return _RUN_STREAM.get()
+
+
+def set_run_stream_handle(handle: RunStreamHandle | None) -> Token:
+    """Bind ``handle`` as the current run's stream handle for this context.
+
+    Must be called BEFORE the task that iterates the runner is started:
+    anyio child tasks copy the context at spawn time.
+    """
+    return _RUN_STREAM.set(handle)
+
+
+def reset_run_stream_handle(token: Token) -> None:
+    _RUN_STREAM.reset(token)
+
+
+@contextlib.contextmanager
+def bind_run_stream_handle(handle: RunStreamHandle) -> Iterator[RunStreamHandle]:
+    """Context-manager form of :func:`set_run_stream_handle`."""
+    token = set_run_stream_handle(handle)
+    try:
+        yield handle
+    finally:
+        reset_run_stream_handle(token)
+
+
+def publish_run_stream(stream: JsonlStreamState, pid: int | None) -> None:
+    """Publish this run's stream + PID (together) to the bridge's handle.
+
+    No-op when no handle is bound (e.g. a runner driven directly by a test
+    or a CLI path that doesn't go through the bridge). Re-publishing (a
+    second spawn inside one run) overwrites — it is still this run's process.
+    """
+    handle = _RUN_STREAM.get()
+    if handle is None:
+        return
+    handle.stream = stream
+    handle.pid = pid
+    handle.ready.set()
+
+
 class JsonlSubprocessRunner(BaseRunner):
-    # Exposed for diagnostics — set during run_impl, cleared on exit
+    # Diagnostics only: the most recent spawn on this (shared) runner
+    # instance, in ANY chat. Never cleared, and never read by the bridge —
+    # per-run binding goes through ``publish_run_stream`` (#510).
     current_stream: JsonlStreamState | None = None
     last_pid: int | None = None
 
@@ -1446,7 +1514,6 @@ class JsonlSubprocessRunner(BaseRunner):
                 )
                 raise RuntimeError(self.pipes_error_message())
 
-            self.last_pid = proc.pid
             logger.info(
                 "subprocess.spawn",
                 cmd=cmd[0] if cmd else None,
@@ -1454,10 +1521,16 @@ class JsonlSubprocessRunner(BaseRunner):
                 pid=proc.pid,
             )
 
+            # #510: create the stream before sending the payload and publish
+            # pid + stream together, so nobody ever sees this spawn's pid
+            # paired with a previous spawn's stream.
+            stream = JsonlStreamState(expected_session=resume)
+            self.last_pid = proc.pid
+            self.current_stream = stream
+            publish_run_stream(stream, proc.pid)
+
             await self._send_payload(proc, payload, logger=logger, resume=resume)
 
-            stream = JsonlStreamState(expected_session=resume)
-            self.current_stream = stream
             reader_done = anyio.Event()
 
             async with anyio.create_task_group() as tg:

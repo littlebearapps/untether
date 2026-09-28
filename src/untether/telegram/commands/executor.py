@@ -3,7 +3,7 @@ from __future__ import annotations
 from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
 from dataclasses import dataclass
 from functools import partial
-from typing import Any, cast
+from typing import cast
 
 import anyio
 
@@ -47,10 +47,6 @@ class _ResumeLineProxy:
     def engine(self) -> str:
         return self.runner.engine
 
-    @property
-    def current_stream(self) -> Any:
-        return getattr(self.runner, "current_stream", None)
-
     def is_resume_line(self, line: str) -> bool:
         return self.runner.is_resume_line(line)
 
@@ -74,10 +70,6 @@ class _PreludeRunner:
     @property
     def engine(self) -> str:
         return self.runner.engine
-
-    @property
-    def current_stream(self) -> Any:
-        return getattr(self.runner, "current_stream", None)
 
     def is_resume_line(self, line: str) -> bool:
         return self.runner.is_resume_line(line)
