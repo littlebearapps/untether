@@ -60,6 +60,93 @@ async def test_stall_monitor_no_autocancel_or_warning_while_live_idle() -> None:
     assert stall_msgs == []
 
 
+@pytest.mark.parametrize("run_level", [True, False])
+async def test_live_idle_hold_with_children_is_silent_and_not_peak_idle(
+    run_level: bool,
+) -> None:
+    """#787: a live session held between turns — result delivered, several
+    short wake turns done, only a pending ScheduleWakeup keeping it open,
+    its MCP servers showing up as 8 CPU-ticking children — must not emit a
+    "⏳ Waiting for child processes … /cancel to stop" warning, must not log
+    ``progress_edits.stall_detected`` or count a stall warning, and must not
+    report the hold as ``peak_idle`` (it goes to ``peak_live_idle`` instead)."""
+    from unittest.mock import patch
+
+    from structlog.testing import capture_logs
+
+    from untether.utils.proc_diag import ProcessDiag
+
+    transport = FakeTransport()
+    clock = _FakeClock(start=100.0)
+    edits = _make_edits(transport, _KeyboardPresenter(), clock=clock)
+    edits.run_level = run_level
+    edits._stall_check_interval = 0.01
+    edits._STALL_THRESHOLD_SECONDS = 0.05
+    edits._STALL_THRESHOLD_SUBAGENT = 0.05
+    edits._STALL_THRESHOLD_TOOL = 0.05
+    edits._STALL_THRESHOLD_APPROVAL = 10.0
+    edits._stall_repeat_seconds = 0.0
+    edits.pid = 4242
+    edits.event_seq = 123
+    cancel_event = anyio.Event()
+    edits.cancel_event = cancel_event
+    edits.stream = _make_stream(
+        last_event_type="user",
+        engine_state=_make_engine_state(
+            live_mode=True,
+            completed_turns=6,
+            turn_open=False,
+            live_wakeups={"wk1": 0.0},
+        ),
+    )
+    ticks = {"n": 0}
+
+    def busy_children(pid: int) -> ProcessDiag:
+        ticks["n"] += 1
+        n = ticks["n"]
+        return ProcessDiag(
+            pid=pid,
+            alive=True,
+            state="S",
+            cpu_utime=1000,
+            cpu_stime=200,
+            child_pids=[5001 + i for i in range(8)],
+            tree_cpu_utime=3000 + n * 50,
+            tree_cpu_stime=600 + n * 10,
+        )
+
+    with (
+        patch("untether.utils.proc_diag.collect_proc_diag", side_effect=busy_children),
+        capture_logs() as logs,
+    ):
+        async with anyio.create_task_group() as tg:
+
+            async def drive() -> None:
+                for step in range(1, 20):
+                    clock.set(100.0 + step * 120.0)  # a 38-minute hold
+                    await anyio.sleep(0.02)
+                edits.signal_send.close()
+
+            tg.start_soon(edits.run)
+            tg.start_soon(drive)
+
+    assert not cancel_event.is_set()
+    stall_msgs = [c for c in transport.send_calls if "min" in c["message"].text]
+    assert stall_msgs == []
+    for noisy in (
+        "progress_edits.stall_detected",
+        "progress_edits.stall_threshold_selected",
+    ):
+        assert [e for e in logs if e.get("event") == noisy] == []
+    suppressed = [
+        e for e in logs if e.get("event") == "progress_edits.stall_live_idle_suppressed"
+    ]
+    assert len(suppressed) == 1  # once per live-idle episode, not per tick
+    assert edits._total_stall_warn_count == 0
+    assert edits._peak_idle == 0.0
+    assert edits._peak_live_idle > 1000.0
+
+
 async def test_live_turn_active_is_not_post_result_idle() -> None:
     transport = FakeTransport()
     edits = _make_edits(transport, _KeyboardPresenter(), clock=_FakeClock(start=0.0))

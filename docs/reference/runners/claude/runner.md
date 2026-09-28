@@ -371,7 +371,7 @@ Background subagent events (tagged `parent_tool_use_id`) arriving while the pare
 
 **Kill switch:** `[watchdog] live_sessions = false` restores the pre-rc11 "stop at the first result" behaviour. Legacy `-p` mode (no permission mode) is always single-result.
 
-Logs: `claude.turn.started|completed`, `live_turn.started|interrupted`, `claude.live_session.stdin_closed` (reason `idle_no_tasks|max_hold|abs_cap|cancel|drain`), `claude.live_session.injected|inject_unavailable|injected_turn_timeout|followup_not_run|forced_teardown`, `cost.turn_delta`, `cost.baseline_unknown`; `session.summary` carries `followup_turns`.
+Logs: `claude.turn.started|completed`, `live_turn.started|interrupted`, `claude.live_session.stdin_closed` (reason `idle_no_tasks|max_hold|abs_cap|cancel|drain`), `claude.live_session.injected|inject_unavailable|injected_turn_timeout|followup_not_run|forced_teardown`, `cost.turn_delta`, `cost.baseline_unknown`; `session.summary` carries `followup_turns` and `peak_live_idle_seconds` (live-idle holds are kept out of `peak_idle_seconds`, and the stall monitor stays silent while live-idle — [#787](https://github.com/littlebearapps/untether/issues/787)).
 
 ---
 

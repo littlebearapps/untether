@@ -1379,6 +1379,11 @@ class ProgressEdits:
         self._total_stall_warn_count: int = 0
         self._last_stall_warn_at: float = 0.0
         self._peak_idle: float = 0.0
+        # #787: the longest event gap seen while a live Claude session sat
+        # between turns. Kept apart from ``_peak_idle`` so that metric keeps
+        # meaning "longest stall"; a live-idle hold is silent by design.
+        self._peak_live_idle: float = 0.0
+        self._live_idle_logged: bool = False
         self._prev_diag: Any = None
         # #650/#593: clock() timestamp of the last stall tick that observed
         # the subprocess alive. Once the process is gone every /proc-derived
@@ -1654,7 +1659,15 @@ class ProgressEdits:
             # periodic tick.  Cheap when idle (empty dicts → early return).
             sweep_stale_registries()
             elapsed = self.clock() - self._last_event_at
-            self._peak_idle = max(self._peak_idle, elapsed)
+            # #787: a live session between turns is silent by design (its
+            # runner lifecycle owns teardown). Its hold must not read as a
+            # stall in ``session.summary peak_idle_seconds``.
+            live_idle = self._is_live_session_idle()
+            if live_idle:
+                self._peak_live_idle = max(self._peak_live_idle, elapsed)
+            else:
+                self._peak_idle = max(self._peak_idle, elapsed)
+                self._live_idle_logged = False
 
             # Collect diagnostics on every cycle so we always have a CPU
             # baseline for the next check (fixes cpu_active=None on first
@@ -1714,13 +1727,6 @@ class ProgressEdits:
                 threshold_reason = "normal"
             if elapsed < threshold:
                 continue
-            logger.info(
-                "progress_edits.stall_threshold_selected",
-                channel_id=self.channel_id,
-                threshold=threshold,
-                reason=threshold_reason,
-                elapsed=round(elapsed, 1),
-            )
 
             # #650: a dead subprocess whose run already emitted its final
             # CompletedEvent is a normally-completed run being reaped late,
@@ -1757,6 +1763,36 @@ class ProgressEdits:
                 await self._enforce_cancel_teardown()
                 self.signal_send.close()
                 return
+
+            if live_idle and not (diag is not None and diag.alive is False):
+                # #787: no stall WARN, no stall_warnings count, no chat
+                # warning while live-idle — whatever the child-process or
+                # wake-up state. Before #510 the run-level monitor could read
+                # another chat's stream here; now it reads its own, and a
+                # live hold (pending ScheduleWakeup, background tasks) is by
+                # definition not a hang. A dead process still falls through
+                # to the process_dead arm below.
+                self._frozen_ring_count = 0
+                if not self._live_idle_logged:
+                    self._live_idle_logged = True
+                    self._bump_stall_suppression("live_idle")
+                    logger.info(
+                        "progress_edits.stall_live_idle_suppressed",
+                        channel_id=self.channel_id,
+                        seconds_since_last_event=round(elapsed, 1),
+                        threshold_reason=threshold_reason,
+                        run_level=self.run_level,
+                        pid=self.pid,
+                    )
+                continue
+
+            logger.info(
+                "progress_edits.stall_threshold_selected",
+                channel_id=self.channel_id,
+                threshold=threshold,
+                reason=threshold_reason,
+                elapsed=round(elapsed, 1),
+            )
 
             now = self.clock()
             if (
@@ -3633,6 +3669,9 @@ async def run_runner_with_cancel(
         # #494: subprocess-health canary, separate from user-facing stall_warnings
         liveness_stalls=edits.stream.liveness_stalls if edits.stream else 0,
         peak_idle_seconds=round(edits._peak_idle, 1),
+        # #787: live-session holds between turns, reported apart from
+        # peak_idle so the stall metric isn't inflated by by-design waits.
+        peak_live_idle_seconds=round(edits._peak_live_idle, 1),
         last_event_type=edits.stream.last_event_type if edits.stream else None,
         # #716: `last_event_type` alone cannot answer "did this run reach its
         # result?" — a trailing frame overwrites it. Logging the latch makes

@@ -897,24 +897,25 @@ class TestMaybeAppendUsageFooterAlwaysShow:
             "untether.telegram.commands.usage.fetch_claude_usage", _fake_fetch
         )
 
-        warn_calls: list[tuple[str, dict]] = []
+        from structlog.testing import capture_logs
 
-        def _warn(event: str, **kwargs) -> None:
-            warn_calls.append((event, kwargs))
-
-        monkeypatch.setattr(rb.logger, "warning", _warn)
-
-        # Call _validate_usage_schema directly to exercise per-call behaviour
-        # (the cached fetcher path memoises within the TTL window).
-        rb._validate_usage_schema(
-            {"five_hour": {"utilization": 25.0}, "seven_day": {"utilization": 10.0}}
-        )
-        rb._validate_usage_schema(
-            {"five_hour": {"utilization": 25.0}, "seven_day": {"utilization": 10.0}}
-        )
-        rb._validate_usage_schema(
-            {"five_hour": {"utilization": 25.0}, "seven_day": {"utilization": 10.0}}
-        )
+        # capture_logs, not monkeypatch.setattr(rb.logger, "warning", …):
+        # restoring an attribute on structlog's lazy proxy pins a bound
+        # method with the default processors, silently hiding every later
+        # runner_bridge warning from capture_logs() in the same process.
+        with capture_logs() as logs:
+            # Call _validate_usage_schema directly to exercise per-call
+            # behaviour (the cached fetcher path memoises within the TTL).
+            rb._validate_usage_schema(
+                {"five_hour": {"utilization": 25.0}, "seven_day": {"utilization": 10.0}}
+            )
+            rb._validate_usage_schema(
+                {"five_hour": {"utilization": 25.0}, "seven_day": {"utilization": 10.0}}
+            )
+            rb._validate_usage_schema(
+                {"five_hour": {"utilization": 25.0}, "seven_day": {"utilization": 10.0}}
+            )
+        warn_calls = [(e["event"], e) for e in logs if e.get("log_level") == "warning"]
 
         mismatch = [c for c in warn_calls if c[0] == "claude_usage.schema_mismatch"]
         assert len(mismatch) == 3  # one per call now, not one per process
