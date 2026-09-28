@@ -125,6 +125,8 @@ voice_transcription_model = "gpt-4o-mini-transcribe"
 2. Transcribe with OpenAI-compatible API (or local Whisper server)
 3. Route transcript through same command/directive pipeline as typed text
 
+Optional `voice_transcription_language` (ISO-639-1 hint) and `voice_transcription_prompt` (vocabulary bias). Unset prompt → `DEFAULT_VOICE_TRANSCRIPTION_PROMPT` in `telegram/voice.py` (engine names + `CLAUDE.md`, `AGENTS.md`, #789); a value replaces it, `""` disables it.
+
 ## Forum topics
 
 Topics bind Telegram forum threads to a project/branch:
@@ -152,6 +154,12 @@ Comment + forwarded messages arrive as separate updates:
 - Default: split across multiple messages with "continued (N/M)" headers (~3500 chars per chunk)
 - Trim mode: truncate to single message (~3500 chars)
 - Configure via `message_overflow = "split" | "trim"`
+
+## Markdown rendering quirks (`telegram/render.py`)
+
+`render_markdown()` rewrites markdown-it text tokens before rendering (code spans/blocks untouched):
+- Bare `<br>`, `<br/>`, `<br />` → line break (a space inside a table row); other tags stay escaped text (#786)
+- Bare filenames ending `.md`, `.sh`, `.py` (country-code TLDs) → inline code, so neither linkify nor Telegram clients turn `CLAUDE.md` into `http://claude.md/` (#788)
 
 ## Approval push notifications
 

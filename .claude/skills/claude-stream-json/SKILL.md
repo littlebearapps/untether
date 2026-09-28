@@ -100,11 +100,35 @@ Content blocks in `message.content[]`:
 
 - `is_error`: authoritative error indicator
 - `result`: final answer string
-- Untether emits exactly one `CompletedEvent` here
-- Lines after `result` are dropped
+- Untether emits exactly one `CompletedEvent` here (the run's first result)
+- In control-channel mode with live sessions (#776, default on) the process keeps
+  running after `result`; each later turn is a `TurnEvent(started) → ActionEvent* →
+  TurnEvent(completed)` segment. With `[watchdog] live_sessions = false` (or legacy
+  `-p` mode) lines after `result` are dropped
 
 Fields NOT in Untether's `StreamResultMessage` schema (silently ignored by msgspec):
 - `error`, `permission_denials`, `modelUsage`
+
+### `rate_limit_event` (#790)
+
+A **quota-status snapshot**, not a throttle notice: `rate_limit_info.status` is
+`allowed` / `allowed_warning` / `rejected`, plus `resetsAt`, `rateLimitType`,
+`unifiedWindows` and overage fields. `allowed` → stashed, nothing rendered;
+`allowed_warning` → one `⚠️ 5h limit N% used — resets HH:MM` note per window, no
+latch; only `rejected` not covered by overage latches an expected wait until
+`resetsAt` (`⏳ Rate limited until …`). Bare events latch nothing — the #657
+"bare = 60 s throttle" guess is retired. `tests/test_claude_cli_schema_drift.py`
+re-reads the enums from the installed CLI.
+
+### `system` / `api_retry` (#792)
+
+Emitted before Claude Code backs off a retryable API error (`attempt`,
+`max_retries`, `retry_delay_ms`, `error_status`, `error`). Rendered as one
+updating `🔁 API error 529 (overloaded) — retrying in 8s (attempt 2/10)` note and
+latched as an expected wait (bridge threshold reason `api_retry_waiting`), kept
+apart from rate-limit time.
+
+Full shapes and decision tables: `docs/reference/runners/claude/stream-json-cheatsheet.md`.
 
 ## Tool name to ActionKind mapping
 

@@ -215,6 +215,20 @@ The stall watchdog monitors engine subprocesses for periods of inactivity (no JS
 
 **Tuning:** All thresholds are configurable via `[watchdog]` in `untether.toml`. Use `tool_timeout` to increase the initial threshold for local tools (default 10 min), and `mcp_tool_timeout` for MCP tools (default 15 min). See the [config reference](../reference/config.md#watchdog).
 
+**Expected waits don't warn.** A Claude rate-limit rejection, an API retry back-off and a live session waiting between turns for background work are all silent by design, so no stall warning fires for them (see the next section, and *Messages arrive after the run finished* below). A live session's idle hold is reported separately as `peak_live_idle_seconds` in the `session.summary` log line, not as `peak_idle_seconds` ([#787](https://github.com/littlebearapps/untether/issues/787)).
+
+## Rate-limit and API-retry notes (Claude)
+
+**Symptoms:** The progress message shows one of these lines:
+
+| Note | Meaning |
+|---|---|
+| `⚠️ 5h limit 85% used — resets 17:30` | Heads-up only. Your subscription window is nearly used up; the run keeps going. Shown at most once per window ([#790](https://github.com/littlebearapps/untether/issues/790)). |
+| `⏳ Rate limited until 17:30 (~30 min)` | Claude Code reported the limit as reached and extra usage isn't covering it. Untether treats the wait as expected until the reset time, so no stall warning fires. |
+| `🔁 API error 529 (overloaded) — retrying in 8s (attempt 2/10)` | Anthropic's API returned a retryable error and Claude Code is backing off before retrying. The line updates in place for each attempt ([#792](https://github.com/littlebearapps/untether/issues/792)). |
+
+Before v0.35.5 Untether misread Claude Code's routine usage snapshots and showed a brief `Rate limited` note every few minutes on healthy sessions. That no longer happens: routine snapshots are recorded but not shown.
+
 ## Claude Code hangs after an MCP tool_result
 
 **Symptoms:** Claude Code goes silent immediately after an MCP tool returns — the `tool_result` arrives in the JSONL stream but the assistant never responds. Ring buffer fills with `user`/`tool_result` events and stays there. Often hits Cloudflare's remote MCP servers via `mcp-remote`.
@@ -411,7 +425,7 @@ Run `untether doctor` to validate voice configuration.
 
 - **Chat mode** (`session_mode = "chat"`): Just send another message — it auto-resumes. Use `/new` to start fresh.
 - **Stateless mode** (`session_mode = "stateless"`): You must **reply** to a message that contains a resume token. Plain messages start new sessions.
-- If resume fails silently, the previous session may be **poisoned** by an upstream turn-state bug (a resume that returns 0 turns / an empty answer). Untether detects this, quarantines that session so it is never resumed again, and automatically re-sends your message on a **fresh** session — you'll see a short notice that it did so ([#631](https://github.com/littlebearapps/untether/issues/631), [#632](https://github.com/littlebearapps/untether/issues/632)). A session force-killed after delivering its result is quarantined proactively, so your *next* message diverts fresh before any empty result appears. Since v0.35.5 sessions normally close gracefully, so this fresh-session divert is rare.
+- If resume fails silently, the previous session may be **poisoned** by an upstream turn-state bug (a resume that returns 0 turns / an empty answer). Untether detects this, quarantines that session so it is never resumed again, and automatically re-sends your message on a **fresh** session — you'll see a short notice that it did so ([#631](https://github.com/littlebearapps/untether/issues/631), [#632](https://github.com/littlebearapps/untether/issues/632)). A session force-killed after delivering its result is quarantined proactively, so your *next* message diverts fresh before any empty result appears. Since v0.35.5 sessions normally close gracefully, so this fresh-session divert is rare, and an idle session that is merely slow to exit is no longer quarantined ([#791](https://github.com/littlebearapps/untether/issues/791)).
 
 ## Follow-up message says it's "queued"
 
@@ -423,7 +437,7 @@ A follow-up waits for the current Claude turn to finish; it isn't mixed into a t
 
 **Symptoms:** After Claude's answer, more messages appear on their own: `🔔 Background task finished — …`, `📡 Monitor — …`, or `⏰ Scheduled wake-up`.
 
-This is expected since v0.35.5. When Claude starts a background task, a subagent, a `Monitor` or a `ScheduleWakeup` and ends its turn, Untether keeps the session open. Claude then carries on by itself when the work finishes, and each of those turns is delivered as its own message. Before v0.35.5 these turns ran with nothing shown in Telegram. Monitor updates arrive silently (no notification); the others notify. Approval buttons work inside these turns as normal ([#776](https://github.com/littlebearapps/untether/issues/776)).
+This is expected since v0.35.5. When Claude starts a background task, a subagent, a `Monitor` or a `ScheduleWakeup` and ends its turn, Untether keeps the session open. Claude then carries on by itself when the work finishes, and each of those turns is delivered as its own message. Before v0.35.5 these turns ran with nothing shown in Telegram. Monitor updates arrive silently (no notification); the others notify, once per finished task ([#785](https://github.com/littlebearapps/untether/issues/785)). Approval buttons work inside these turns as normal ([#776](https://github.com/littlebearapps/untether/issues/776)).
 
 The session stays open while background work is live, up to 30 minutes after the last turn (`[watchdog] post_result_bg_max_hold`) and 4 hours in total (`live_session_max_s`). With no background work it closes about a minute after the reply. When it closes over running tasks you get a notice naming them, such as `⏳ Closing session — 1 background task still running at the background hold limit: … Stopping it; reply to continue.` Replying resumes the same conversation. `/cancel`, changing settings (`/planmode`, model) and Untether restarts close the session the same way, with a notice.
 

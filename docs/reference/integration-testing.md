@@ -192,6 +192,8 @@ Harder to trigger but catches the most production bugs.
 | S8 | **Very long prompt** | Paste 4000+ characters as a single message | Prompt reaches engine intact, no truncation | Telegram message limits, prompt forwarding |
 | S9 | **Concurrent button clicks** | Two rapid clicks on the same Approve button | Only one approval processed, second gets toast, no double-execute | Callback deduplication |
 
+> **S7 and [#794](https://github.com/littlebearapps/untether/issues/794) (open, targeted at 0.35.5rc13):** prompts sent inside the `forward_coalesce_s` window can currently be **silently replaced** — only the last one runs and the earlier ones never appear in any run or queue note. "No double-spawn, no crash" is not enough: for each of the 5 messages, confirm it was answered, queued with a visible note, or visibly merged into another prompt. Until #794 ships, record a silent drop as *known issue #794*, not a pass. After the fix lands, a silent drop is a **FAIL**.
+
 ### Tier 7: Command Smoke Tests (quick, any engine)
 
 Run quickly to verify all commands respond.
@@ -273,6 +275,27 @@ Run in the Claude chat (`5284581592`). Prompts that background work should say *
 **Required tiers:** rc7 → Tier 7 (command smoke) + Tier 1 (Claude only) + B-RESUME. rc8 → add Tier 1 (all 6 engines, confirm no cross-engine regression from the quarantine store) + Tier 2 (interactive/plan).
 
 Automate via Telegram MCP (`send_message`, `get_history`) + Bash (`journalctl --user -u untether-dev`) exactly as the other tiers. See `scripts/audit-noop-resume.sh` for the post-deploy fleet-wide correlation check (Layer 4 of the remediation plan) that runs the same five-event correlation across all hosts after rollout.
+
+---
+
+## rc12 scenarios (0.35.5rc12)
+
+Run these in addition to the standard tiers and B-LIVE for rc12. Unless noted, use the Claude chat (`5284581592`). Log checks: `journalctl --user -u untether-dev -o cat --since "30 minutes ago" | grep -E "<pattern>"`.
+
+| # | Scenario | What to do | Pass criteria |
+|---|---|---|---|
+| RC12-1 | **Per-run stream binding ([#510](https://github.com/littlebearapps/untether/issues/510))** | Start a long Claude run in the Claude chat (e.g. `run sleep 90 in the foreground, then say DONE`). While it runs, send a short Claude prompt in a second chat (the Codex chat with a `/claude` directive, see T9). | Two `session.summary` lines with **different** `session_id`s; the short run's `event_count` / `duration_seconds` are its own (small), and the long run's summary, written after the short one finished, shows its own `event_count` and `last_event_type=result` — never the short run's values. The long run shows no stall warning or wake-up countdown borrowed from the other chat. |
+| RC12-2 | **No false rate-limit notes ([#790](https://github.com/littlebearapps/untether/issues/790))** | Run U1-U4 and B-LIVE-1 in the Claude chat; also `uv run pytest tests/test_claude_cli_schema_drift.py` against the installed CLI. | No `⏳ Rate limited` note on healthy runs; no `claude.rate_limit_event` line with `retry_after_source=bare` or `default` unless a real `rejected` snapshot arrived. A `⚠️ 5h limit N% used — resets HH:MM` note appears at most once per window, and only if utilisation is ≥ 70%. Drift test passes (or skips when the CLI is absent). |
+| RC12-3 | **API-retry note ([#792](https://github.com/littlebearapps/untether/issues/792))** | Opportunistic: only if a `claude.api_retry` line appears during the session (Anthropic 429/529/5xx). | The progress message shows one `🔁 API error <status> (<category>) — retrying in Ns (attempt n/m)` line that updates in place; no stall WARN during the back-off (`threshold_reason=api_retry_waiting`); `claude.api_retry` is INFO, WARN only on the final attempt. If no retry occurs, mark *not exercised*, not fail. |
+| RC12-4 | **Live-idle hold is not a stall ([#787](https://github.com/littlebearapps/untether/issues/787))** | Start `sleep 300` with `run_in_background`, end the turn; wait for the 🔔 wake. | No `progress_edits.stall_detected` and no stall message during the hold; one `progress_edits.stall_live_idle_suppressed` INFO; the run's `session.summary` has `stall_warnings=0`, `peak_live_idle_seconds` close to the hold, and a small `peak_idle_seconds`. |
+| RC12-5 | **Close-grace overrun, no quarantine ([#791](https://github.com/littlebearapps/untether/issues/791))** | Passive: after any idle close, check `close_grace_expired`. Forced repro (optional): after a plain reply with no background work, find the Claude PID and `kill -STOP <pid>` so it can't honour stdin EOF; wait ~80 s (60 s idle + 15 s grace + 5 s); then send a follow-up. | Any `claude.live_session.close_grace_expired` WARN carries a proc snapshot (state, wchan, CPU, children) and `idle_clean=true` for an idle close; it is followed by SIGINT, then `claude.live_session.forced_teardown ... quarantined=false`. No `session.quarantined reason=forced_teardown_after_result` for that session; the follow-up resumes the **same** session id with no `session.resume_diverted_fresh`. A close over a live task (not idle) is still quarantined. |
+| RC12-6 | **Wake-turn attribution, one push per finish ([#785](https://github.com/littlebearapps/untether/issues/785))** | Launch one background subagent that runs 2-3 tool calls and reports, end the turn. | Exactly **one** notifying `🔔 Background task finished — <task description>` message per finish (not `🔔 Claude continued`, and not a subagent's inner task name); any second turn for the same task arrives silently. Logs may show `claude.turn.retro_attributed`, `claude.turn.task_end_paired`, `live_turn.retro_attributed` or `claude.turn.notification_ignored`. |
+| RC12-7 | **Queued note under a live session ([#781](https://github.com/littlebearapps/untether/issues/781))** | Start a 60 s background task, end the turn; immediately send a follow-up. | The follow-up shows `⏳ Queued — sent as soon as Claude's current turn ends (background tasks keep running).` (no `/cancel to drop it`) and is answered within seconds in the same session. With `live_sessions = false` the old `⏳ Queued behind the previous run's N background task(s) …` wording returns. |
+| RC12-8 | **`<br>` rendering ([#786](https://github.com/littlebearapps/untether/issues/786))** | `Reply with exactly: first line<br>second line, then a two-row markdown table with a <br> inside one cell, then the literal text <br> inside backticks` | The first `<br>` renders as a line break; the table cell shows a space, not `<br>`; the backticked `<br>` stays literal code; no other HTML tag is interpreted. |
+| RC12-9 | **Filenames not auto-linked ([#788](https://github.com/littlebearapps/untether/issues/788))** | `Mention CLAUDE.md, scripts/healthcheck.sh:12, src/untether/runner.py and https://example.com/notes.md in plain text, no code formatting` | The three filenames render as inline code, not links (no `claude.md` domain link); the `https://` URL stays a clickable link. |
+| RC12-10 | **Voice vocabulary ([#789](https://github.com/littlebearapps/untether/issues/789))** | `send_voice` a clip saying *"open CLAUDE dot MD and AGENTS dot MD and summarise them"* with no `voice_transcription_prompt` set in the dev config. | Transcript contains `CLAUDE.md` and `AGENTS.md` (not "Claw.md"); both render as inline code in the echoed transcript. Effect is model-dependent, so a near-miss is a soft fail: note it and don't block the release. |
+
+**Required for rc12:** Tier 7 + Tier 1 (all 4 supported engines, because #510 changed the base `run_impl` spawn order) + B-LIVE-1…7 + RC12-1…9, RC12-10 if a voice clip is available.
 
 ---
 
@@ -391,16 +414,18 @@ Integration tests are run by Claude Code via Telegram MCP tools (see "Automated 
 | Changed area | Must-run tests |
 |---|---|
 | Runner code (`runners/*.py`) | U1-U4 (all engines), U6, U7 |
+| Per-run stream binding (`runner.py` `RunStreamHandle` / `publish_run_stream`, `runner_bridge.py` stall monitor) | RC12-1, S1, S2, U1-U4 (all engines), B-LIVE-1 |
+| Claude stream schema / rate-limit / API-retry handling (`schemas/claude.py`, `runners/claude.py`) | `uv run pytest tests/test_claude_cli_schema_drift.py`, RC12-2, RC12-3, S1 |
 | Runner bridge / auto-continue / no-op resume recovery (`runner_bridge.py`, `runners/claude.py`) | B-RESUME, U1-U4 (Claude), U6, U7 |
-| Live sessions / follow-up injection / scheduler (`runners/claude.py`, `runner_bridge.py`, `live_followup.py`, `scheduler.py`) | B-LIVE-1…7, C1-C6, S7, U1-U4 (Claude) |
+| Live sessions / follow-up injection / scheduler (`runners/claude.py`, `runner_bridge.py`, `live_followup.py`, `scheduler.py`) | B-LIVE-1…7, RC12-4…7, C1-C6, S7, U1-U4 (Claude) |
 | Telegram transport (`telegram/*.py`) | T1-T10, S7, S8 |
 | Control channel (`claude_control.py`) | C1-C6, T8, S9 |
 | Config/settings (`settings.py`) | O1-O9, S5, upgrade path |
 | Cost tracking (`cost_tracker.py`) | B1-B3, U8 |
-| Progress/formatting (`markdown.py`) | U3, T6, T7, S4, S8 |
+| Progress/formatting (`markdown.py`, `telegram/render.py`) | U3, T6, T7, S4, S8, RC12-8, RC12-9 |
 | Commands (`commands/*.py`) | Tier 7 (all), specific command test |
 | File transfer (`file_transfer.py`) | T2, T3, T5 |
-| Voice (`voice.py`) | T1 |
+| Voice (`voice.py`) | T1, RC12-10 |
 | Topics (`topics.py`, `topic_state.py`) | O1, O5, O6, O8 |
 | Directives (`directives.py`) | T9, T10 |
 | Shutdown (`shutdown.py`) | S3, B4 |

@@ -141,6 +141,8 @@ Locking rules:
 2. build_args(prompt, resume, state)   → construct CLI command
 3. stdin_payload(prompt, resume, state) → optional stdin data
 4. manage_subprocess(cmd, ...)         → spawn with PIPE for stdin/stdout/stderr
+   publish_run_stream(stream, pid)     → create JsonlStreamState, publish stream + PID
+                                          together to the per-run RunStreamHandle (#510)
 5. _send_payload(proc, payload)        → send stdin, close stdin
 6. drain_stderr(proc.stderr)           → log stderr concurrently (task group)
 7. _iter_jsonl_events(proc.stdout)     → parse JSONL, call translate()
@@ -162,7 +164,8 @@ class JsonlStreamState:
 ```
 
 Key invariants:
-- **Exactly one CompletedEvent per run** — after emitting, all subsequent lines are dropped
+- **Exactly one CompletedEvent per run** — after emitting, all subsequent lines are dropped, unless the runner sets `followup_turns = True` (Claude live sessions, #776), where later turns become `TurnEvent` segments
+- **Per-run stream binding (#510)** — runner instances are shared across chats, so `runner.current_stream` / `runner.last_pid` are diagnostics only ("latest spawn in any chat"). The bridge binds a `RunStreamHandle` via ContextVar in `run_runner_with_cancel`; runners publish into it with `publish_run_stream()`. Bridge code reads the handle, never the runner attributes
 - **Session verification** — if expected_session is set and stream yields a different session_id, raise RuntimeError
 - **Duplicate StartedEvent suppression** — only the first StartedEvent is yielded
 

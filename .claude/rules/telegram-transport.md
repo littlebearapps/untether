@@ -75,6 +75,10 @@ Agents write files to `.untether-outbox/` during a run. On completion, `outbox_d
 
 `telegram/at_scheduler.py` is a module-level holder for the task group + `run_job` closure; `install()` is called from `run_main_loop` once both are available. `AtCommand.handle` calls `schedule_delayed_run(chat_id, thread_id, delay_s, prompt)` which starts an anyio task that sleeps then dispatches. Pending delays tracked in `_PENDING`; `/cancel` drops them via `cancel_pending_for_chat(chat_id)`. Drain integration via `at_scheduler.active_count()`. No persistence — restart cancels all pending delays (documented in issue body).
 
+## Markdown rendering (`telegram/render.py`)
+
+`render_markdown()` rewrites markdown-it `text` tokens only — never code spans or code blocks. A bare `<br>` / `<br/>` / `<br />` becomes a line break (a space in a table row); every other tag stays escaped text (#786, keeps #713's posture). Bare filenames ending `.md` / `.sh` / `.py` become inline code so neither linkify nor Telegram clients auto-link them as domains (#788); explicit link text and real URLs are left alone.
+
 ## Plan outline rendering
 
 Plan outlines render as formatted Telegram text via `render_markdown()` + `split_markdown_body()`. Approval buttons (✅/❌/📋) appear on the last outline message. Outline and notification messages are cleaned up on approve/deny via `_OUTLINE_REGISTRY`.

@@ -25,7 +25,8 @@ Telegram <-> TelegramPresenter <-> RunnerBridge <-> Runner
 
 ## Key rules
 
-- Runner 3-event contract: StartedEvent -> ActionEvent(s) -> CompletedEvent (always)
+- Runner 3-event contract: StartedEvent -> ActionEvent(s) -> CompletedEvent (always); Claude live sessions (#776) may follow it with TurnEvent(started) -> ActionEvent(s) -> TurnEvent(completed) segments, never a second CompletedEvent
+- Runner instances are shared across chats: bridge code reads the per-run RunStreamHandle, never runner.current_stream / runner.last_pid (#510)
 - Use EventFactory for event construction, never construct dataclasses directly
 - ALL Telegram writes go through TelegramOutbox (never call Bot API directly)
 - Callback data max 64 bytes (Telegram-enforced)

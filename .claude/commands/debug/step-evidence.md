@@ -100,6 +100,10 @@ For any matching line, pull these fields when present (JSON or `key=value`):
 
 `peak_idle` excessive + `last_event_type=user` is the auto-continue trigger
 signature. `last_event_type=result` with `proc_returncode!=0` is a hard error.
+Since 0.35.5rc12 (#787) a live session's between-turn hold is reported as
+`peak_live_idle_seconds`, not `peak_idle_seconds` — a long live-idle hold is
+by-design, not a stall. Summaries written before rc12 may carry another chat's
+stream values (#510); don't correlate them across concurrent chats.
 
 ## 2e. State files
 

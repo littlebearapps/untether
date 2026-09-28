@@ -35,6 +35,8 @@ Exception (Claude live sessions, #776): after `CompletedEvent` a runner that kee
 
 Use `EventFactory` for event construction. Never construct event dataclasses directly.
 
+Runner instances are shared across chats: bridge code reads the per-run `RunStreamHandle` (filled by `publish_run_stream()`), never `runner.current_stream` / `runner.last_pid`, which are diagnostics only (#510).
+
 ## Telegram transport rules
 
 - ALL writes go through `TelegramOutbox` (never call Bot API directly)
@@ -60,7 +62,7 @@ uv run pytest tests/test_*.py -x # specific file
 | `/cancel` | Stop the running agent |
 | `/agent` | Show or set engine for this chat |
 | `/model` | Override the model for an engine |
-| `/planmode` | Toggle plan mode (on/auto/off) |
+| `/planmode` | Toggle permission mode (on/plan-auto/auto/off) |
 | `/usage` | Show API costs for the current session |
 | `/stats` | Per-engine session statistics (today/week/all-time) |
 | `/auth` | Codex device re-authentication |

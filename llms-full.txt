@@ -7512,7 +7512,7 @@ The preview is appended to the `warning_text` in the progress message. Only appl
 
 ---
 
-# Claude `stream-json` event cheatsheet
+# Claude Code `stream-json` event cheatsheet
 
 `claude -p --output-format stream-json --input-format stream-json --verbose` writes
 **one JSON object per line** (JSONL) with a required `type` field.
@@ -7597,7 +7597,7 @@ Example (error):
 {"type":"result","subtype":"error","session_id":"session_02","total_cost_usd":0.001,"is_error":true,"duration_ms":2000,"duration_api_ms":1800,"num_turns":1,"result":""}
 ```
 
-Optional fields (may appear in upstream Claude CLI output but are **not** captured
+Optional fields (may appear in upstream Claude Code CLI output but are **not** captured
 by Untether's `StreamResultMessage` schema):
 - `error`: error description string
 - `permission_denials`: array of `{tool_name, tool_use_id, tool_input}`
@@ -7605,30 +7605,149 @@ by Untether's `StreamResultMessage` schema):
 
 ### `rate_limit_event`
 
-Informational event emitted when Claude Code hits or approaches a rate limit (CLI v2.1.45+).
-Purely informational — the run continues, it does not terminate the session.
+A **quota-status snapshot**, not a throttle notice ([#790](https://github.com/littlebearapps/untether/issues/790)).
+The CLI emits one whenever an API response moves the rounded utilization or a reset
+time of the account's subscription windows — so a healthy session sees a steady trickle
+of `status: "allowed"` events. The event never terminates the session.
 
-Fields:
-- `type`: `"rate_limit_event"`
-- `rate_limit_info` (optional): object with rate limit details
-
-`rate_limit_info` fields (all optional):
-- `requests_limit`, `requests_remaining`, `requests_reset` (ISO 8601)
-- `tokens_limit`, `tokens_remaining`, `tokens_reset` (ISO 8601)
-- `retry_after_ms`
-
-Example (full):
+Real payload (captured on CLI 2.1.283, one-turn Haiku probe):
 ```json
-{"type":"rate_limit_event","rate_limit_info":{"requests_limit":1000,"requests_remaining":0,"requests_reset":"2026-01-01T00:01:00Z","tokens_limit":50000,"tokens_remaining":0,"tokens_reset":"2026-01-01T00:01:00Z","retry_after_ms":60000}}
+{"type":"rate_limit_event","rate_limit_info":{"status":"allowed","resetsAt":1790578200,"rateLimitType":"five_hour","overageStatus":"rejected","overageDisabledReason":"out_of_credits","isUsingOverage":false,"unifiedWindows":{"five_hour":{"utilization":0.09,"resetsAt":1790578200},"seven_day":{"utilization":0.15,"resetsAt":1791036000}}},"uuid":"…","session_id":"…"}
 ```
 
-Example (bare):
+`rate_limit_info` fields (upstream zod, CLI 2.1.283):
+
+| Field | Type | Notes |
+|---|---|---|
+| `status` | `"allowed"` \| `"allowed_warning"` \| `"rejected"` | always present |
+| `resetsAt` | int (epoch s) | reset time of the window named by `rateLimitType` |
+| `rateLimitType` | `five_hour` \| `seven_day` \| `seven_day_opus` \| `seven_day_sonnet` \| `seven_day_overage_included` \| `overage` | optional |
+| `utilization` | number (0–1) | optional; the warning window's utilization |
+| `unifiedWindows` | `{five_hour?, seven_day?, seven_day_overage_included?}: {utilization, resetsAt}` | absent for API-key / Bedrock / Vertex sessions |
+| `overageStatus` | same 3 values as `status` | paid extra-usage state |
+| `overageResetsAt` | int | optional |
+| `overageDisabledReason` | enum (13 values, e.g. `out_of_credits`, `org_level_disabled`) | optional |
+| `isUsingOverage` | bool | `rejected` + `isUsingOverage` is **not** a throttle — extra usage covers it |
+| `errorCode` | `"credits_required"` | optional |
+| `limitScope`, `surpassedThreshold`, `overageInUse`, … | | ignored by Untether |
+
+The enum lists are mirrored as `CLAUDE_RATE_LIMIT_STATUSES` / `CLAUDE_RATE_LIMIT_TYPES` /
+`CLAUDE_OVERAGE_STATUSES` in `schemas/claude.py` and pinned by the zero-token drift test
+`tests/test_claude_cli_schema_drift.py`, which reads them out of the installed CLI.
+
+**Legacy shape.** Earlier docs described `requests_limit` / `requests_remaining` /
+`requests_reset` / `tokens_limit` / `tokens_remaining` / `tokens_reset` / `retry_after_ms`.
+No real CLI has been observed sending these; the schema keeps them optional so such an
+emitter still gets a precise countdown ([#518](https://github.com/littlebearapps/untether/issues/518)).
+
+**Untether handling** (`_translate_rate_limit_event` in `runners/claude.py`):
+
+| Snapshot | Untether |
+|---|---|
+| `allowed` | Snapshot only — `unifiedWindows` stashed on `ClaudeStreamState.rate_limit_windows`, DEBUG `claude.rate_limit_snapshot`. No note, no latch, no `cumulative_s`. |
+| `allowed_warning` | One `⚠️ 5h limit 85% used — resets 17:30 AEST` note per (window, reset) when utilization ≥ 0.7 (or absent) and extra usage isn't covering it. No latch. |
+| `rejected`, not `isUsingOverage`, `resetsAt` in the future | Throttle: note `⏳ Rate limited until 17:30 AEST (~30 min)`, `rate_limit_wait_until` latched to `resetsAt` (clamped to 24 h), extension-only accounting so repeats don't double-count, and repeats update the same note. Beats the [#692](https://github.com/littlebearapps/untether/issues/692) result-text parse. |
+| `rejected` without `resetsAt` | Legacy timing if present → `errorCode: credits_required` / overage → [#701](https://github.com/littlebearapps/untether/issues/701) remedy title (`⛔ Model limit reached — …`) → #692 harvested reset → #701 latch → `⏳ Rate limited — waiting to retry (~60s)`. |
+| `rejected` with `isUsingOverage`, or `resetsAt` already past | Not a throttle (INFO log `retry_after_source=covered_by_overage` / `stale`). |
+| unknown `status` | WARN `claude.rate_limit_event.unknown_status` once per value; no latch. |
+| no `status`, legacy timing | #518 path: `⏳ Rate limited — retrying in Ns`. |
+| truly bare (`{"type":"rate_limit_event"}`) | Nothing — INFO `retry_after_source=bare`. The [#657](https://github.com/littlebearapps/untether/issues/657) "bare = 60 s throttle" guess is retired: bare was an artefact of the old schema decoding every real snapshot to all-`None`. |
+
+### `system` / `api_retry` (#792)
+
+Emitted when an API request fails with a retryable error and the CLI will retry after a
+delay — the wire twin of the REPL's retry banner (`SDKAPIRetryMessage`, CLI 2.1.283).
+This, not `rate_limit_event`, is the real "backing off, retrying in N s" signal.
+
 ```json
-{"type":"rate_limit_event"}
+{"type":"system","subtype":"api_retry","attempt":2,"max_retries":10,"retry_delay_ms":8000,"error_status":529,"error":"overloaded","uuid":"…","session_id":"…"}
 ```
 
-**Untether handling**: Decoded by `StreamRateLimitMessage` schema, silently skipped in
-`translate_claude_event` (no Untether events emitted).
+| Field | Type | Notes |
+|---|---|---|
+| `attempt` / `max_retries` | int | retry counters |
+| `retry_delay_ms` | int | back-off before the next attempt |
+| `error_status` | int \| null | HTTP status; `null` for connection errors (timeouts) with no response |
+| `error` | string | category: `rate_limit`, `overloaded`, `server_error`, `authentication_failed`, `billing_error`, `invalid_request`, `unknown`, … |
+| `no_response` | `{waited_ms, retry_wait_ms}` (optional) | only when no response headers arrived within `CLAUDE_STREAM_FIRST_BYTE_TIMEOUT_MS`; `max_retries` is then this cause's own cap (normally 1) |
+
+A sibling `system/control_request_progress` with `status: "api_retry"` carries the same
+counters for client-originated control requests (side questions only) — not handled.
+
+**Untether handling** (`_translate_api_retry` in `runners/claude.py`): decoded into the
+flat `StreamSystemMessage` (all fields optional, `error` typed `Any`). Renders one note per
+retry sequence, updated in place as attempts climb — `🔁 API error 529 (overloaded) —
+retrying in 8s (attempt 2/10)`, `🔁 API unreachable — retrying in 5s (attempt 1/10)`
+(no status), or `🔁 No response from API after 45s — retrying in 2s (attempt 1/1)`
+(`no_response`). Latches `ClaudeStreamState.api_retry_wait_until` = now + delay (+ the
+retry's `retry_wait_ms` header window); the bridge's `awaiting_api_retry()` probe treats that
+window as an expected wait (`reason=api_retry_waiting`), like a rate-limit window. Logs
+`claude.api_retry` at INFO (WARN, and a `warning`-level note, on the final attempt). Retry
+time accrues in `api_retry_total_s`, kept separate from rate-limit time.
+
+### `tool_progress`
+
+Heartbeat emitted periodically while a long-running tool is in flight (verified on CLI
+2.1.214 by running a Bash command longer than ~30 s). Purely informational — it carries no
+result data and the tool's real `tool_result` still arrives separately.
+
+Fields (all optional in Untether's schema):
+- `type`: `"tool_progress"`
+- `tool_use_id`: the heartbeat's own id, of the form `<parent_tool_use_id>-heartbeat-<n>`
+- `tool_name`: the in-flight tool, e.g. `"Bash"`
+- `parent_tool_use_id`: the `tool_use` this heartbeat belongs to
+- `elapsed_time_seconds`: seconds since the tool started
+- `heartbeat`: `true`
+- `session_id`, `uuid`
+
+Example:
+```json
+{"type":"tool_progress","tool_use_id":"toolu_011cbTyUrSBE4D28tMCVqRSt-heartbeat-0","tool_name":"Bash","parent_tool_use_id":"toolu_011cbTyUrSBE4D28tMCVqRSt","elapsed_time_seconds":30,"heartbeat":true,"session_id":"8e8245e8-952c-4b70-9c6f-4c1cb4d4a687","uuid":"a9786562-4e78-418e-b48a-b14e57a1076d"}
+```
+
+**Untether handling**: Decoded by `StreamToolProgressMessage` schema, silently skipped in
+`translate_claude_event` (no Untether events emitted). Untether renders its own elapsed-time
+tail on long-running actions from its own clock (#481), so the upstream heartbeat is
+redundant for progress rendering — the schema entry exists so the line decodes instead of
+being dropped with a `jsonl.msgspec.invalid` warning ([#637](https://github.com/littlebearapps/untether/issues/637)).
+
+### Background-task lifecycle (`system` subtypes, CLI ≥ 2.1.28x) — #776
+
+Verified on 2.1.283 (see `docs/findings/2026-09-27-claude-live-session-probes.md`).
+
+```json
+{"type":"system","subtype":"background_tasks_changed","tasks":[{"task_id":"b1","task_type":"local_bash","description":"…"}]}
+{"type":"system","subtype":"task_started","task_id":"b1","tool_use_id":"toolu_…","description":"…","is_backgrounded":true,"task_type":"local_bash"}
+{"type":"system","subtype":"task_started","task_id":"a1","tool_use_id":"toolu_…","subagent_type":"general-purpose","is_backgrounded":true,"spawn_depth":1,"task_type":"local_agent","prompt":"…"}
+{"type":"system","subtype":"task_started","task_id":"f1","owned_by_subagent":true,"is_backgrounded":false,"task_type":"local_bash"}
+{"type":"system","subtype":"task_progress","task_id":"a1","usage":{"total_tokens":52470,"tool_uses":2,"duration_ms":4314},"last_tool_name":"Bash"}
+{"type":"system","subtype":"task_updated","task_id":"b1","patch":{"status":"completed","end_time":1790500249636}}
+{"type":"system","subtype":"task_notification","task_id":"b1","tool_use_id":"toolu_…","status":"completed","output_file":"…","summary":"…"}
+```
+
+- `background_tasks_changed` is a full snapshot of live background tasks (`[]` when none) and arrives just *before* `task_started` / `task_updated`.
+- `owned_by_subagent: true` with `is_backgrounded: false` is a subagent's own foreground tool — not background work.
+- `task_updated.patch.status`: `completed` | `killed`; `task_notification.status`: `completed` | `stopped`.
+- `Monitor` is `task_type: local_bash`; each streamed line starts a new turn with **no** per-line task event; the stream end emits `task_updated` + `task_notification`.
+- `ScheduleWakeup` / `RemoteTrigger` emit **no** task events.
+- Closing stdin stops live background tasks (`killed` / `stopped`) and the CLI exits rc=0 a few seconds later.
+- On `--resume` after such a stop, the CLI first emits `task_notification{status:"stopped", output_file:""}`, then `system/init`, then a **0-turn result**, then the real turn.
+
+### `command_lifecycle` (#776)
+
+One line per input command (user line or scheduled wake-up):
+
+```json
+{"type":"command_lifecycle","command_uuid":"<uuid>","state":"queued"}
+{"type":"command_lifecycle","command_uuid":"<uuid>","state":"started"}
+{"type":"command_lifecycle","command_uuid":"<uuid>","state":"completed"}
+```
+
+`command_uuid` echoes the `uuid` field of the stream-json `user` line that was written to stdin, so a turn can be attributed to the message that caused it. A ScheduleWakeup firing appears as `started` with a uuid Untether never wrote. `completed` for command N can arrive lazily (when command N+1 is queued).
+
+### Multi-result streams (#776)
+
+In control-channel mode the process does not exit after `result`: background-task completions, Monitor lines, ScheduleWakeup firings and user lines written while idle each produce another `system/init` → … → `result`. `total_cost_usd` is cumulative per session (including across `--resume`); `num_turns` is per result.
 
 ## Message object (`message` field)
 
@@ -7650,6 +7769,20 @@ Fields:
 {"type":"tool_use","id":"toolu_1","name":"Bash","input":{"command":"ls -la"}}
 ```
 
+#### `ScheduleWakeup` (session-scoped scheduling)
+
+Claude Code 2.1.x emits `ScheduleWakeup` `tool_use` blocks when the model parks itself for a delay (`/loop`'s no-interval dynamic mode and similar). Untether observes these for [Loop mode](../../../how-to/inline-settings.md#loop-mode) and the long-running tool tail.
+
+```json
+{"type":"tool_use","id":"toolu_3","name":"ScheduleWakeup","input":{"delaySeconds":300,"reason":"build check","prompt":"check if the build finished"}}
+```
+
+* `delaySeconds` (int, 60–3600) — wall-clock delay before wakeup. Untether reads this field for countdown rendering ([#481](https://github.com/littlebearapps/untether/issues/481) fixed; pre-rc7 reads `delay_ms`/`timeout_ms` were always 0.0 in production).
+* `reason` (string) — short human label rendered in verbose mode (`→ fires in 4m 12s · "build check"`).
+* `prompt` (string) — the prompt the model wants to fire on wakeup (loop iteration body).
+
+`CronCreate` follows the same shape with a `cron` field (5-field expression) instead of `delaySeconds`. The Loop observer parses `cron` (not `cron_expression`) and `id` (not `taskId`/`cronId`); upstream 8-character cron IDs bind via `\bjob ([0-9a-f]{8})\b` from the assistant text.
+
 ### Tool result
 String content:
 ```json
@@ -7661,21 +7794,40 @@ Array content (Task tool format):
 {"type":"tool_result","tool_use_id":"toolu_2","content":[{"type":"text","text":"Task done"}]}
 ```
 
+### Image / document blocks (binary media echoes)
+
+`Read` on an image or PDF echoes the content back inside the user-role
+message as `image` / `document` blocks alongside the `tool_result`
+([#597](https://github.com/littlebearapps/untether/issues/597) — the schema
+must accept them or msgspec drops the whole line):
+
+```json
+{"type":"image","source":{"type":"base64","media_type":"image/jpeg","data":"…"}}
+```
+
+```json
+{"type":"document","source":{"type":"base64","media_type":"application/pdf","data":"…"},"title":"report.pdf"}
+```
+
+* `source` — `{"type":"base64"|"url", "media_type": …, "data"|"url": …}`.
+  Untether never renders the payload; the blocks exist so the surrounding
+  message parses. Translation treats them as non-`tool_result` content.
+
 ---
 
 # Claude Code -> Untether event mapping (spec)
 
-This document describes how the Claude Code runner translates Claude CLI JSONL events into Untether events.
+This document describes how the Claude Code runner translates Claude Code CLI JSONL events into Untether events.
 
 > **Authoritative source:** The schema definitions are in `src/untether/schemas/claude.py` and the translation logic is in `src/untether/runners/claude.py`. When in doubt, refer to the code.
 
-The goal is to make a Claude runner feel identical to the Codex runner from the bridge/renderer point of view while preserving Untether invariants (stable action ids, per-session serialization, single completed event).
+The goal is to make a Claude Code runner feel identical to the Codex runner from the bridge/renderer point of view while preserving Untether invariants (stable action ids, per-session serialization, single completed event).
 
 ---
 
-## 1. Input stream contract (Claude CLI)
+## 1. Input stream contract (Claude Code CLI)
 
-Claude Code CLI emits **one JSON object per line** (JSONL) when invoked with
+The Claude Code CLI emits **one JSON object per line** (JSONL) when invoked with
 `--output-format stream-json`.
 
 Non-interactive invocation:
@@ -7716,7 +7868,7 @@ Runner must implement its own regex because the resume format is
 (?im)^\s*`?claude\s+(?:--resume|-r)\s+(?P<token>[^`\s]+)`?\s*$
 ```
 
-**Note:** Claude session IDs should be treated as opaque strings.
+**Note:** Claude Code session IDs should be treated as opaque strings.
 
 Resume rules:
 - If a resume token is provided to `run()`, the runner MUST verify that any
@@ -7739,11 +7891,11 @@ This matches the Codex runner behavior in `untether/runners/codex.py`.
 
 ---
 
-## 4. Event translation (Claude JSONL -> Untether)
+## 4. Event translation (Claude Code JSONL -> Untether)
 
 ### 4.1 Top-level `system` events
 
-Claude emits a system init event early in the stream:
+Claude Code emits a system init event early in the stream:
 
 ```
 {"type":"system","subtype":"init","session_id":"...", ...}
@@ -7752,13 +7904,28 @@ Claude emits a system init event early in the stream:
 **Mapping:**
 - Emit a Untether `started` event as soon as `session_id` is known.
 - Populate `meta` from `system.init` fields: `cwd`, `model`, `tools`, `permissionMode`, `output_style`. The `model` and `permissionMode` fields are used by the bridge to render the `🏷` footer line on final messages.
-- Assume only one `system.init` per run; if more appear, ignore the subsequent
-  ones to avoid re-locking.
+- The first `system.init` per run produces the `started` event. In a live
+  session (#776) every later turn begins with another `system.init`: it opens a
+  follow-up turn (see 4.5) and never re-emits `started`.
+- Background-task subtypes (`task_started`, `task_progress`, `task_updated`,
+  `task_notification`, `background_tasks_changed`) emit no Untether events;
+  they maintain the native task map (`ClaudeStreamState.tasks`).
+- `system/api_retry` (#792) emits one `note` action per retry sequence,
+  updated in place (`🔁 API error 529 (overloaded) — retrying in 8s (attempt
+  2/10)`; level `warning` on the final attempt) and latches an expected wait
+  so the stall monitor stays quiet during the back-off.
 - Optional: emit a `note` action summarizing tools/MCP servers (debug-only).
+
+The top-level `rate_limit_event` line (#790) is a quota snapshot, not a
+throttle notice: `allowed` emits nothing; `allowed_warning` emits at most one
+`note` per window (`⚠️ 5h limit N% used — resets HH:MM`); only `rejected` not
+covered by overage emits a `⏳ Rate limited until …` note and latches the wait
+until `resetsAt`. Bare events emit nothing. Decision table:
+[stream-json cheatsheet](stream-json-cheatsheet.md#rate_limit_event).
 
 ### 4.2 `assistant` / `user` message events
 
-Claude messages include a `message` object with a `content[]` array. Each content
+Claude Code messages include a `message` object with a `content[]` array. Each content
 block can represent text, tool usage, or tool results.
 
 For each content block:
@@ -7813,15 +7980,53 @@ The terminal event looks like:
 - `error = event.error` (if present)
 - `resume = ResumeToken(engine="claude", value=event.session_id)`
 - `usage = event.usage` (pass through)
-- Emit exactly one `completed` event; ignore any trailing JSON lines afterward.
-  No idle-timeout completion is used.
+- Emit exactly one `completed` event per run. With live sessions off (or in
+  legacy `-p` mode) trailing lines are ignored; with live sessions on (#776)
+  reading continues and later results close follow-up turns (4.5).
+- `total_cost_usd` is cumulative per session, across `--resume` too; the bridge
+  derives per-run/per-turn deltas (#778).
+- **Resume guard:** on a resumed run, a 0-turn result (`num_turns == 0`,
+  `duration_api_ms == 0`) that follows a replayed `task_notification{stopped}`
+  before any assistant output is absorbed — no `completed`; the next result is
+  the answer.
+
+#### Supplementary `started` event after `result` (`✓ turn complete`)
+
+Every successful `result` (i.e. `is_error=false`) MAY also emit a supplementary `started` event carrying late-arriving meta — `meta={"complete": "✓ turn complete"}` ([#333](https://github.com/littlebearapps/untether/issues/333)). This is the supported pattern for late-arriving meta documented in `runner-development.md`: `ProgressTracker.note_event` merges meta idempotently so the marker shows up in the footer (`format_meta_line`) alongside model / effort / permission / trigger without duplicating the StartedEvent. Errored results do **not** emit the marker — no false "complete" tag on a failure.
 
 #### Permission denials
 
-> **Not yet implemented.** The upstream Claude CLI may include
+> **Not yet implemented.** The upstream Claude Code CLI may include
 > `result.permission_denials` with blocked tool calls, but Untether's
 > `StreamResultMessage` schema does not capture this field and the runner does
 > not emit warning actions for denials. This is a candidate for future work.
+
+### 4.5 Follow-up turns in a live session (#776)
+
+After the run's `completed`, each later turn in the same process is emitted as
+
+```
+TurnEvent(phase="started", turn=N, reason=…) → ActionEvent* → TurnEvent(phase="completed", turn=N, ok, answer, usage)
+```
+
+built with `EventFactory.turn_started` / `turn_completed`. The turn opens on the
+first post-result `system.init`, assistant message, or non-tool-result user
+message; `reason` comes from what preceded it: an injected line's
+`command_lifecycle.command_uuid` (`followup`), a `task_notification`
+(`task_finished`), a `command_lifecycle(started)` with an unknown uuid
+(`scheduled_wakeup`), or a live Monitor task (`monitor_event`). Assistant/user
+events tagged `parent_tool_use_id` (a background subagent) never open a turn.
+`command_lifecycle` lines themselves emit nothing.
+
+Attribution (#785): a `task_notification` only labels the next turn when the
+task is top-level background work (`is_backgrounded` and not
+`owned_by_subagent`); others are logged `claude.turn.notification_ignored`.
+A turn that opened `unknown` (the CLI often starts it on a background agent's
+result before any task event) completes as `task_finished` if a top-level task
+ends during it (`detail.retro_attributed`), or is paired with a task ending
+within 30 s after it. The task's own notification turn that follows carries
+`detail.already_announced` and the bridge delivers it without a push.
+`TurnEvent(completed)` carries the turn's `detail`.
 
 ### 4.4 Error handling / malformed lines
 
@@ -7834,7 +8039,7 @@ The terminal event looks like:
 
 ## 5. Tool name -> ActionKind mapping heuristics
 
-Claude tool names can evolve. The runner SHOULD map based on tool name and input
+Claude Code tool names can evolve. The runner SHOULD map based on tool name and input
 shape. Suggested rules:
 
 | Tool name pattern | ActionKind | Title logic |
@@ -7854,7 +8059,7 @@ If a tool name is unknown, map to `tool` and include the full input in `detail`.
 
 ## 6. Usage mapping
 
-Untether `completed.usage` should mirror the Claude `result.usage` object
+Untether `completed.usage` should mirror the Claude Code `result.usage` object
 without transformation. Optionally include `modelUsage` inside `usage` or
 `detail` if downstream consumers want it (currently unused by renderers).
 
@@ -7862,7 +8067,7 @@ without transformation. Optionally include `modelUsage` inside `usage` or
 
 ## 7. Implementation checklist (v0.3.0)
 
-Claude runner implementation summary (no Untether domain model changes):
+Claude Code runner implementation summary (no Untether domain model changes):
 
 1. [x] Create `untether/runners/claude.py` implementing `Runner` and (custom)
    resume parsing.
@@ -7871,14 +8076,14 @@ Claude runner implementation summary (no Untether domain model changes):
    - `build_runner`: read `[claude]` config + construct runner
 3. [x] Add new docs (this file + `stream-json-cheatsheet.md`).
 4. [x] Add fixtures in `tests/fixtures/` (see below).
-5. [x] Add unit tests mirroring `tests/test_codex_*` but for Claude translation
+5. [x] Add unit tests mirroring `tests/test_codex_*` but for Claude Code translation
    and resume parsing (recommended, not required for initial handoff).
 
 ---
 
 ## 8. Suggested Untether config keys
 
-A minimal TOML config for Claude:
+A minimal TOML config for Claude Code:
 
 === "untether config"
 
@@ -7901,9 +8106,9 @@ A minimal TOML config for Claude:
     use_api_billing = false
     ```
 
-Untether only maps these keys to Claude CLI flags; other options should be configured in Claude Code settings.
+Untether only maps these keys to Claude Code CLI flags; other options should be configured in Claude Code settings.
 If `allowed_tools` is omitted, Untether defaults to `["Bash", "Read", "Edit", "Write"]`.
-When `use_api_billing` is false (default), Untether strips `ANTHROPIC_API_KEY` from the Claude subprocess environment to prefer subscription billing.
+When `use_api_billing` is false (default), Untether strips `ANTHROPIC_API_KEY` from the Claude Code subprocess environment to prefer subscription billing.
 
 ---
 

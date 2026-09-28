@@ -17,13 +17,15 @@ After emitting `CompletedEvent`, drop all subsequent JSONL lines — **unless** 
 
 `JsonlStreamState` (defined in `src/untether/runner.py`) captures subprocess lifecycle data including `proc_returncode`. Signal deaths (rc>128 or rc<0) are NOT auto-continued — see `_is_signal_death()` in `runner_bridge.py`.
 
+Runner instances are **shared across chats**, so `runner.current_stream` / `runner.last_pid` mean "latest spawn in any chat" and are diagnostics only (#510). Each run's `run_impl` publishes its own stream + PID together via `publish_run_stream(stream, pid)` into the per-run `RunStreamHandle` that `runner_bridge.run_runner_with_cancel` binds through a ContextVar. Bridge code must read the handle, never the runner attributes. A new runner that spawns its own process outside the base `run_impl` must call `publish_run_stream` at spawn.
+
 ## Auto-continue
 
 When Claude Code exits with `last_event_type=user` (tool results sent but never processed), `runner_bridge.py` auto-resumes the session. Suppressed on signal deaths (rc=143/137) to prevent death spirals. Configure via `[auto_continue]` in `untether.toml` (`enabled`, `max_retries`).
 
-Live sessions (#776, Claude only): a run's process stays live after its result while background work or a follow-up keeps it busy; `_live_session_lifecycle` closes stdin (graceful — the CLI stops its tasks and exits rc=0) when idle, and a resumed run's replayed stopped-task 0-turn result is absorbed by the resume guard rather than treated as an empty resume. The quarantine paths below now mostly apply to `live_sessions = false` and to forced teardown after a close grace.
+Live sessions (#776, Claude only): a run's process stays live after its result while background work or a follow-up keeps it busy; `_live_session_lifecycle` closes stdin (graceful — the CLI stops its tasks and exits rc=0) when idle, and a resumed run's replayed stopped-task 0-turn result is absorbed by the resume guard rather than treated as an empty resume. The quarantine paths below now mostly apply to `live_sessions = false` and to forced teardown after a close grace. A close that overruns its 15 s grace logs `claude.live_session.close_grace_expired` (proc snapshot) and escalates SIGINT → SIGTERM 5 s later; a clean idle close (turn closed, no live background work) is **not** quarantined even then (#791).
 
-Empty-resume recovery (#631/#632, Claude only): a resume returning 0 turns/$0 quarantines the session (`session_quarantine.py`, persisted to `session_quarantine.json`) and auto-resends once on a fresh session; forced teardown after a result quarantines proactively and the next message diverts fresh. Flags: `empty_resume_fresh`, `quarantine_on_forced_teardown` (both default true). Never retry the same poisoned session.
+Empty-resume recovery (#631/#632, Claude only): a resume returning 0 turns/$0 quarantines the session (`session_quarantine.py`, persisted to `session_quarantine.json`) and auto-resends once on a fresh session; forced teardown after a result quarantines proactively (except a clean idle live-session close, #791) and the next message diverts fresh. Flags: `empty_resume_fresh`, `quarantine_on_forced_teardown` (both default true). Never retry the same poisoned session.
 
 ## Event creation
 

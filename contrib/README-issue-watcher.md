@@ -45,6 +45,16 @@ vice versa):**
    EOF
    ```
 
+## Candidate signatures (not yet in the watcher)
+
+Documented here so the next watcher edit picks them up; add each to the
+out-of-repo script's `WARNING_EVENTS` **and** reconcile `already_tracked`
+per the contract above.
+
+| Signature | Level | Since | Why |
+|---|---|---|---|
+| `claude.live_session.close_grace_expired` | WARN | 0.35.5rc12 ([#791](https://github.com/littlebearapps/untether/issues/791)) | A live session didn't exit within 15 s of stdin EOF and had to be signalled (SIGINT, then SIGTERM). Carries a proc snapshot (state, wchan, CPU, children). A clean idle close is no longer quarantined, so this line is the only trace of a slow-exiting CLI; recurring hits point at an upstream exit-path hang worth filing. |
+
 ## msgspec dedup signature (#639)
 
 For `jsonl.msgspec.invalid` events the dedup signature includes the invalid

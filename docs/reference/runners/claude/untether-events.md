@@ -93,7 +93,18 @@ Claude Code emits a system init event early in the stream:
 - Background-task subtypes (`task_started`, `task_progress`, `task_updated`,
   `task_notification`, `background_tasks_changed`) emit no Untether events;
   they maintain the native task map (`ClaudeStreamState.tasks`).
+- `system/api_retry` (#792) emits one `note` action per retry sequence,
+  updated in place (`🔁 API error 529 (overloaded) — retrying in 8s (attempt
+  2/10)`; level `warning` on the final attempt) and latches an expected wait
+  so the stall monitor stays quiet during the back-off.
 - Optional: emit a `note` action summarizing tools/MCP servers (debug-only).
+
+The top-level `rate_limit_event` line (#790) is a quota snapshot, not a
+throttle notice: `allowed` emits nothing; `allowed_warning` emits at most one
+`note` per window (`⚠️ 5h limit N% used — resets HH:MM`); only `rejected` not
+covered by overage emits a `⏳ Rate limited until …` note and latches the wait
+until `resetsAt`. Bare events emit nothing. Decision table:
+[stream-json cheatsheet](stream-json-cheatsheet.md#rate_limit_event).
 
 ### 4.2 `assistant` / `user` message events
 
@@ -189,6 +200,16 @@ message; `reason` comes from what preceded it: an injected line's
 (`scheduled_wakeup`), or a live Monitor task (`monitor_event`). Assistant/user
 events tagged `parent_tool_use_id` (a background subagent) never open a turn.
 `command_lifecycle` lines themselves emit nothing.
+
+Attribution (#785): a `task_notification` only labels the next turn when the
+task is top-level background work (`is_backgrounded` and not
+`owned_by_subagent`); others are logged `claude.turn.notification_ignored`.
+A turn that opened `unknown` (the CLI often starts it on a background agent's
+result before any task event) completes as `task_finished` if a top-level task
+ends during it (`detail.retro_attributed`), or is paired with a task ending
+within 30 s after it. The task's own notification turn that follows carries
+`detail.already_announced` and the bridge delivers it without a push.
+`TurnEvent(completed)` carries the turn's `detail`.
 
 ### 4.4 Error handling / malformed lines
 

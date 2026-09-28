@@ -5199,8 +5199,10 @@ class ClaudeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
           graceful close (``max_hold``; re-armed by every turn);
         - ``abs_cap_s`` from spawn → notice + close (``abs_cap``).
         Closing stdin makes the CLI stop its tasks and exit rc=0 (F3/F4). Only
-        if it doesn't exit within ``_live_close_grace_s`` does the old
-        SIGTERM + forced-teardown quarantine path run.
+        if it doesn't exit within ``_live_close_grace_s`` does
+        ``_await_live_exit_or_force`` log ``close_grace_expired`` and escalate
+        (SIGINT, then SIGTERM/SIGKILL); a clean idle close is not quarantined
+        (#791).
         """
         exit_reason = "reader_done"
         try:

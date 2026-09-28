@@ -65,10 +65,10 @@ class Runner(Protocol):
 ### UntetherEvent (discriminated union)
 
 ```python
-type UntetherEvent = StartedEvent | ActionEvent | CompletedEvent
+type UntetherEvent = StartedEvent | ActionEvent | CompletedEvent | TurnEvent
 ```
 
-Every run emits: `StartedEvent` (once) -> `ActionEvent`s (zero+) -> `CompletedEvent` (once, always last).
+Every run emits: `StartedEvent` (once) -> `ActionEvent`s (zero+) -> `CompletedEvent` (once). A Claude live session (#776) may follow it with `TurnEvent(started) -> ActionEvent* -> TurnEvent(completed)` segments, delivered by `FollowupTurnRouter` as separate Telegram messages.
 
 ### RunnerBridge (`runner_bridge.py`)
 
@@ -102,6 +102,8 @@ Live-updates the Telegram progress message:
 - Detects approval button transitions for push notifications
 - Manages `_approval_notified` flag and `_approval_notify_ref`
 - `delete_ephemeral()` cleans up notification messages on run completion
+- Stall monitor reads the run's **own** `JsonlStreamState`/PID from the per-run `RunStreamHandle` (ContextVar bound in `run_runner_with_cancel`), never the shared `runner.current_stream`/`last_pid` (#510)
+- Expected waits (rate-limit `rejected` latch #790, `api_retry` back-off #792, approvals) demote stall warnings; live-idle holds between turns raise no stall WARN and are reported as `peak_live_idle_seconds` in `session.summary`, not `peak_idle_seconds` (#787)
 
 ### TelegramPresenter (`telegram/bridge.py`)
 
