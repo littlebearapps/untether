@@ -46,7 +46,7 @@ This line is parsed from replies and takes precedence over new directives. For b
 | `/ctx set <project> @branch` | Update context binding. |
 | `/ctx clear` | Remove context binding. |
 | `/planmode` | Toggle Claude Code permission mode (on/plan-auto/auto/off/show/clear). `plan-auto` is plan mode with the plan gate auto-approved; `auto` is Claude Code's own classifier-gated mode. Claude Code only — non-Claude engines are directed to `/config` → Approval policy. |
-| `/usage` | Show Claude Code subscription usage (5h window, weekly, per-model). Claude Code only. Requires Claude Code OAuth credentials (see [troubleshooting](../how-to/troubleshooting.md#claude-code-credentials)). `/usage debug` appends a `🔧 debug` block with last-fetch wall time and freshness label, last-error class+message, OAuth token expiry, and the cumulative `claude_usage.schema_mismatch` counter ([#410](https://github.com/littlebearapps/untether/issues/410)). |
+| `/usage` | Show Claude Code subscription usage (5h window, weekly, per-model). Claude Code only. Requires Claude Code OAuth credentials (see [troubleshooting](../how-to/troubleshooting.md#macos-and-linux-credential-differences)). `/usage debug` appends a `🔧 debug` block with last-fetch wall time and freshness label, last-error class+message, OAuth token expiry, and the cumulative `claude_usage.schema_mismatch` counter ([#410](https://github.com/littlebearapps/untether/issues/410)). |
 | `/export` | Export last session transcript as Markdown or JSON. |
 | `/browse` | Browse project files with inline keyboard navigation. |
 | `/ping` | Health check — replies with uptime since last (re)start. Shows trigger summary if triggers target the current chat. |

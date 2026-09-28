@@ -294,6 +294,12 @@ Budget alerts always appear regardless of `[footer]` settings.
     `max_cost_per_session` knob is not currently provided; file a
     feature request if your workflow needs one.
 
+    Since v0.35.5, Claude run costs are per run: Claude reports a running
+    total for the whole session, and Untether records the difference since
+    the previous run in `session_costs.json`. Earlier versions counted a
+    resumed session's whole history against each run's budget, `/stats` and
+    daily total ([#778](https://github.com/littlebearapps/untether/issues/778)).
+
 ## `watchdog`
 
 === "toml"
@@ -322,6 +328,8 @@ Budget alerts always appear regardless of `[footer]` settings.
     pre_result_silence_timeout = 3600.0
     post_result_limbo_grace = 60.0
     post_result_bg_max_hold = 1800.0
+    live_sessions = true
+    live_session_max_s = 14400.0
     ```
 
 | Key | Type | Default | Notes |
@@ -350,6 +358,8 @@ Budget alerts always appear regardless of `[footer]` settings.
 | `pre_result_silence_timeout` | float | `3600.0` | ([#592](https://github.com/littlebearapps/untether/issues/592)) Bounds the *pre-result* dead zone — a run whose stream goes silent **before its first `result` event** is SIGTERMed after this many seconds (0–86400; `0` disables). Suppressed while a permission/ask request is pending, so plan-approval waits stay safe. Catches zombie subprocesses that never produced output (an 8-day idle Claude on mac leaked its session lock and MCP children). |
 | `post_result_limbo_grace` | float | `60.0` | ([#591](https://github.com/littlebearapps/untether/issues/591)) After a successful `result`, a *fully quiescent* limbo subprocess (no live background work, not CPU/tree-active) is SIGTERMed after this grace instead of waiting the full `post_result_idle_timeout` (0–600; `0` = wait the full timeout). A demonstrably-busy process is exempt ([#655](https://github.com/littlebearapps/untether/issues/655)). |
 | `post_result_bg_max_hold` | float | `1800.0` | ([#647](https://github.com/littlebearapps/untether/issues/647)) Upper bound on how long the post-result ceiling defers its SIGTERM while `/proc` evidence shows the subagent tree still working (0–7200; `0` disables the hold). Independently bounded by the `BG_AGENT_MAX_KEEP_S` handle age-out. Stops the 600s ceiling killing live background subagent work. |
+| `live_sessions` | bool | `true` | ([#776](https://github.com/littlebearapps/untether/issues/776)) Claude only. Keep the session open after its answer while background work runs: background-task, Monitor and scheduled-wake-up turns are delivered as their own Telegram messages, and follow-ups are written into the open session instead of resuming it. With live sessions on, `post_result_limbo_grace` is the idle close (stdin closed gracefully, nothing quarantined) and `post_result_bg_max_hold` is how long background work may run after the last turn. `false` restores the pre-v0.35.5 "stop at the first answer" behaviour. |
+| `live_session_max_s` | float | `14400.0` | ([#776](https://github.com/littlebearapps/untether/issues/776)) Absolute lifetime of one live Claude process from spawn (600–86400). The session is closed with a notice when reached, as a backstop against an endless `Monitor`. |
 
 !!! note "The post-result watchdog is a permanent mitigation ([#569](https://github.com/littlebearapps/untether/issues/569))"
 

@@ -274,6 +274,9 @@ Type-B (cold-start zero-byte) is **never** retried — retrying just hammers a d
 
 **Symptoms:** Claude has clearly finished the turn (you can see the final answer in Telegram), but the session metadata indicates it's still running. The bidirectional Claude CLI is sitting idle holding stdin open.
 
+!!! note "v0.35.5 and later"
+    With live sessions on (the default), a session that stays open after its answer is usually doing background work, and it closes itself about a minute after that work ends. See [Messages arrive after the run finished](#messages-arrive-after-the-run-finished). The post-result watchdog settings below apply when `[watchdog] live_sessions = false`.
+
 The post-result idle watchdog ([#333](https://github.com/littlebearapps/untether/issues/333)) closes the gap: every successful `result` event arms `[watchdog] post_result_idle_timeout` (default 600s / 10 min, range 30s–1h). Once the deadline passes the runner closes stdin and the CLI exits cleanly (rc=0). The footer also shows a `✓ turn complete` marker on every successful turn so you have an immediate visual confirmation that the turn has ended even if the process is still alive briefly.
 
 **To disable the timer entirely** (Claude CLI handles its own exit):
@@ -408,13 +411,23 @@ Run `untether doctor` to validate voice configuration.
 
 - **Chat mode** (`session_mode = "chat"`): Just send another message — it auto-resumes. Use `/new` to start fresh.
 - **Stateless mode** (`session_mode = "stateless"`): You must **reply** to a message that contains a resume token. Plain messages start new sessions.
-- If resume fails silently, the previous session may be **poisoned** by an upstream turn-state bug (a resume that returns 0 turns / an empty answer). Untether detects this, quarantines that session so it is never resumed again, and automatically re-sends your message on a **fresh** session — you'll see a short notice that it did so ([#631](https://github.com/littlebearapps/untether/issues/631), [#632](https://github.com/littlebearapps/untether/issues/632)). A session force-killed after delivering its result is quarantined proactively, so your *next* message diverts fresh before any empty result appears.
+- If resume fails silently, the previous session may be **poisoned** by an upstream turn-state bug (a resume that returns 0 turns / an empty answer). Untether detects this, quarantines that session so it is never resumed again, and automatically re-sends your message on a **fresh** session — you'll see a short notice that it did so ([#631](https://github.com/littlebearapps/untether/issues/631), [#632](https://github.com/littlebearapps/untether/issues/632)). A session force-killed after delivering its result is quarantined proactively, so your *next* message diverts fresh before any empty result appears. Since v0.35.5 sessions normally close gracefully, so this fresh-session divert is rare.
 
 ## Follow-up message says it's "queued"
 
-**Symptoms:** You send a follow-up (or voice note) and it sits on a `queued` notice for a while instead of running immediately.
+**Symptoms:** You send a follow-up (or voice note) and it shows a `queued` notice instead of running immediately.
 
-This is expected when the previous Claude turn is still doing background work (subagents, a `Monitor`, background Bash) after delivering its answer. Since v0.35.4 the notice tells you why — the live background-task count, that your context will carry over, and a `/cancel` hint if you'd rather interrupt ([#654](https://github.com/littlebearapps/untether/issues/654)). The message runs automatically once the prior work finishes; it is not a hang. If the wait is genuinely stuck, `/cancel` and resend.
+A follow-up waits for the current Claude turn to finish; it isn't mixed into a turn that's still running. Since v0.35.5, if the session is still open (for example, background tasks are running after the reply), the message goes into **that same session** as soon as the turn ends, usually within seconds, even while the background tasks keep going ([#776](https://github.com/littlebearapps/untether/issues/776), [#647](https://github.com/littlebearapps/untether/issues/647)). The notice may mention the background tasks, but your message doesn't wait for them to finish. If you see `⚠️ The session ended before this message ran — please send it again`, the session closed before your message started; resend it. If a queue is genuinely stuck, `/cancel` and resend.
+
+## Messages arrive after the run finished (🔔 / 📡 / ⏰)
+
+**Symptoms:** After Claude's answer, more messages appear on their own: `🔔 Background task finished — …`, `📡 Monitor — …`, or `⏰ Scheduled wake-up`.
+
+This is expected since v0.35.5. When Claude starts a background task, a subagent, a `Monitor` or a `ScheduleWakeup` and ends its turn, Untether keeps the session open. Claude then carries on by itself when the work finishes, and each of those turns is delivered as its own message. Before v0.35.5 these turns ran with nothing shown in Telegram. Monitor updates arrive silently (no notification); the others notify. Approval buttons work inside these turns as normal ([#776](https://github.com/littlebearapps/untether/issues/776)).
+
+The session stays open while background work is live, up to 30 minutes after the last turn (`[watchdog] post_result_bg_max_hold`) and 4 hours in total (`live_session_max_s`). With no background work it closes about a minute after the reply. When it closes over running tasks you get a notice naming them, such as `⏳ Closing session — 1 background task still running at the background hold limit: … Stopping it; reply to continue.` Replying resumes the same conversation. `/cancel`, changing settings (`/planmode`, model) and Untether restarts close the session the same way, with a notice.
+
+To turn this off and get the pre-v0.35.5 behaviour back (stop at the first answer), set `live_sessions = false` under `[watchdog]`.
 
 ## Claude Code plugin interference
 

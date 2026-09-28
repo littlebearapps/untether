@@ -19,7 +19,7 @@
 - [Projects](https://github.com/littlebearapps/untether/blob/master/docs/how-to/projects.md): Register and manage project aliases
 - [Worktrees](https://github.com/littlebearapps/untether/blob/master/docs/how-to/worktrees.md): Isolated git worktrees for parallel branch work
 - [Interactive approval](https://github.com/littlebearapps/untether/blob/master/docs/how-to/interactive-approval.md): Approve, deny, and discuss tool calls from Telegram
-- [Plan mode](https://github.com/littlebearapps/untether/blob/master/docs/how-to/plan-mode.md): Control plan transitions with progressive cooldown
+- [Plan mode](https://github.com/littlebearapps/untether/blob/master/docs/how-to/plan-mode.md): Permission modes (on / plan-auto / auto / off) and plan-outline approval
 - [Cost budgets](https://github.com/littlebearapps/untether/blob/master/docs/how-to/cost-budgets.md): Per-run and daily budget limits, warnings, and auto-cancel
 - [Inline settings](https://github.com/littlebearapps/untether/blob/master/docs/how-to/inline-settings.md): /config button menu with Cost & Usage page
 - [Session statistics](https://github.com/littlebearapps/untether/blob/master/docs/how-to/session-statistics.md): /stats per-engine run counts, actions, and duration

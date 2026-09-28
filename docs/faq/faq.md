@@ -80,9 +80,9 @@ If you click "Pause & Outline Plan", Claude writes a plain-language summary of w
 Per-chat permission mode (`/planmode on/plan-auto/auto/off`, or `/config → Permission mode`) controls when the buttons appear:
 
 - **on** — every plan transition prompts for approval.
-- **plan-auto** — plan transitions auto-approve, but tool approvals still appear.
+- **plan-auto** — plan mode, with the plan transition approved for you, so no buttons appear.
 - **auto** — Claude Code's own auto mode: a classifier approves routine work and blocks risky actions such as sending sensitive data to external endpoints. Questions the agent asks you still come through as buttons.
-- **off** — no plan phase; tools auto-execute (subject to engine policy).
+- **off** — no plan phase; file edits run freely, and other actions (most shell commands, web fetches, MCP tools) ask for approval unless your Claude Code settings allow them.
 
 The **plan-auto** mode was called `auto` before v0.35.5. It was renamed because Claude Code introduced its own `auto` mode, and the two names collided. If you set `permission_mode = "auto"` in `untether.toml` and want the old behaviour, change it to `"plan-auto"` — Untether logs a warning at startup if it spots the ambiguous value. Per-chat settings you made through the buttons are migrated for you.
 
@@ -119,7 +119,7 @@ Cost tracking is most accurate for Claude (full USD reporting via API metadata) 
 
 ## Does /loop work via Untether?
 
-By default, no — Claude Code's `/loop` and `ScheduleWakeup` are session-scoped, and the Untether subprocess exits when each turn finishes. Schedules registered by Claude don't fire afterwards.
+Partly, by default. Claude Code's `/loop` and `ScheduleWakeup` are session-scoped. Since v0.35.5 Untether keeps a Claude session open after its reply while a wake-up is pending (up to 30 minutes), so short waits fire on their own and arrive as a `⏰ Scheduled wake-up` message. Longer schedules still end with the session.
 
 To enable end-to-end /loop support, turn on **Loop mode** in `/config → 🔁 Loop mode`. When on, Untether observes Claude's schedule registrations and re-fires each iteration when due, spawning a fresh `claude --resume` subprocess per fire.
 

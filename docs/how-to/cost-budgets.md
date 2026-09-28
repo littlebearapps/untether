@@ -49,6 +49,9 @@ After each run completes, Untether checks the reported cost against your budgets
 2. **Daily check**: if the cumulative daily cost exceeds `max_cost_per_day`, you get an alert
 3. **Warning threshold**: at `warn_at_pct` (default 70%) of either budget, you get an early warning
 
+!!! note "Claude costs are per run"
+    Claude reports a running total for the whole session, including earlier runs you resumed. Since v0.35.5 Untether subtracts what the session had already cost, so budgets, `/stats` and the footer see only this run's spend. A turn that Claude runs on its own after a background task counts as its own small run ([#778](https://github.com/littlebearapps/untether/issues/778)).
+
 !!! note "Token-only engines"
     Engines that don't report USD costs (Codex, Pi, and OpenCode on its free tier) show token counts in the footer instead (e.g. `💰 26.0k in / 71 out`). Gemini CLI and AMP surface `total_cost_usd` when their CLI reports one; on the free tier they render tokens only. Budget alerts apply only to the USD-reporting path.
 
@@ -56,8 +59,8 @@ After each run completes, Untether checks the reported cost against your budgets
 
 | Alert | Icon | Meaning |
 |-------|------|---------|
-| Warning | `???` | Cost is approaching the budget threshold |
-| Exceeded | `????` | Cost has exceeded the budget |
+| Warning | ⚠️ | Cost is approaching the budget threshold |
+| Exceeded | 🛑 | Cost has exceeded the budget |
 
 When `auto_cancel = true` and a budget is exceeded, Untether cancels the run automatically. Otherwise, you see the alert but the run continues.
 

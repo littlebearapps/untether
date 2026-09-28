@@ -11,7 +11,7 @@ Buttons appear when Claude Code wants to:
 - **Exit plan mode** (ExitPlanMode)
 - **Ask you a question** (AskUserQuestion)
 
-Other tool calls (Read, Glob, Grep, WebSearch, etc.) are auto-approved — they don't change anything, so you won't be interrupted for them.
+Other tool calls (Read, Glob, Grep, WebSearch, etc.) are auto-approved in plan mode — they don't change anything, so you won't be interrupted for them. In **Accept edits** (`/planmode off`), any action the mode doesn't cover asks for approval, whatever the tool ([#749](https://github.com/littlebearapps/untether/issues/749)).
 
 ## The three buttons
 
@@ -108,7 +108,7 @@ Approval-related messages (notifications, button messages) are automatically del
 
 ## Auto-approve configuration
 
-You can configure which tools require approval and which are auto-approved. By default, only `ExitPlanMode` and `AskUserQuestion` require user interaction — all other tools are approved automatically.
+Which tools need approval depends on the permission mode. In plan mode, plan-auto and auto, only `ExitPlanMode` and `AskUserQuestion` reach you; everything else is decided by Claude Code. In Accept edits (and `default`/`manual` set in `untether.toml`), every tool Claude Code would prompt for becomes an Approve / Deny message. Allow rules in your Claude Code settings, or `[engines.claude] allowed_tools`, pre-approve tools in any mode.
 
 To change this behaviour, adjust the permission mode. See [Plan mode](plan-mode.md) for details.
 

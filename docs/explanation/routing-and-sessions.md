@@ -32,7 +32,7 @@ Reply-to-continue works even if topics or chat sessions are enabled.
 
 Before routing, Untether checks the chat's **listen mode** (renamed from "trigger mode" in v0.35.3 — [#297](https://github.com/littlebearapps/untether/issues/297)). In `mentions` mode, messages that don't @mention the bot, reply to the bot, or start with a known slash command are silently dropped — they never reach the router. In the default `all` mode, every message passes through.
 
-Listen mode is configured per chat via `/listen` (or the deprecated `/trigger` alias) or `/config`, with optional per-topic overrides in forum groups. See [Group chat](../how-to/group-chat.md#set-trigger-mode-for-groups) for details.
+Listen mode is configured per chat via `/listen` (or the deprecated `/trigger` alias) or `/config`, with optional per-topic overrides in forum groups. See [Group chat](../how-to/group-chat.md#set-listen-mode-for-groups) for details.
 
 ## Routing (how Untether picks a runner)
 

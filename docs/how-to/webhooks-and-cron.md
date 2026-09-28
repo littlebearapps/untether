@@ -310,6 +310,9 @@ permission_mode = "auto"
 !!! warning "`auto` changed meaning in v0.35.5"
     Before v0.35.5, `permission_mode = "auto"` meant plan mode with the plan gate auto-approved. It now selects Claude Code's own classifier-gated auto mode, which has no plan phase. Existing crons keep running but behave differently — set `"plan-auto"` to restore the previous behaviour. Untether logs a warning at startup when it sees `"auto"` in a config file.
 
+!!! warning "Prompting modes wait for a tap"
+    Since v0.35.5, `default`, `manual` and `acceptEdits` (what `/planmode off` sets) show Approve / Deny buttons for any tool call the mode doesn't cover ([#749](https://github.com/littlebearapps/untether/issues/749)). An unattended cron that inherits one of them will wait on that button. Set `permission_mode` on the cron to `plan-auto`, `auto`, `dontAsk` or `bypassPermissions` for hands-off runs.
+
 Precedence (Claude only): cron `permission_mode` > per-chat `/planmode` > engine config default. Every run that actually changes the resolved value logs `trigger.cron.permission_mode_override` for staging observability. Valid values: `default` (alias `manual`), `plan`, `plan-auto`, `auto`, `acceptEdits`, `dontAsk`, `bypassPermissions`. Other engines (Codex, Gemini, OpenCode, Pi, AMP) silently ignore this field — full coverage is tracked in [#332](https://github.com/littlebearapps/untether/issues/332). See [Schedule tasks — Autonomous crons](schedule-tasks.md#autonomous-crons) for the everyday framing.
 
 ## Delayed runs with `/at`

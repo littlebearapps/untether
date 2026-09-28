@@ -38,6 +38,16 @@ systemctl --user restart untether
     npm update -g @sourcegraph/amp
     ```
 
+## Upgrading to v0.35.5
+
+v0.35.5 is in release-candidate testing; see the unreleased section of the [changelog](https://github.com/littlebearapps/untether/blob/dev/CHANGELOG.md). Behaviour changes that may affect operators:
+
+- **`auto` permission mode renamed `plan-auto` (breaking).** `/planmode auto` now selects Claude Code's own classifier-gated auto mode. Per-chat settings migrate automatically; if `untether.toml` sets `permission_mode = "auto"` and you want the old behaviour, change it to `"plan-auto"`. See [Plan mode](plan-mode.md). ([#741](https://github.com/littlebearapps/untether/issues/741))
+- **`/planmode off` (Accept edits) now asks before shell commands.** Prompting modes (`acceptEdits`, `default`, `manual`) previously approved every tool silently. Anything the mode doesn't cover now shows Approve / Deny buttons unless your Claude Code settings allow it. ([#749](https://github.com/littlebearapps/untether/issues/749))
+- **Claude sessions stay open after the answer while background work runs.** Background-task, Monitor and scheduled-wake-up turns arrive as their own messages, and follow-ups go into the same session instead of a fresh one. Set `[watchdog] live_sessions = false` to restore the old behaviour. See [Troubleshooting](troubleshooting.md#messages-arrive-after-the-run-finished). ([#776](https://github.com/littlebearapps/untether/issues/776))
+- **Claude per-run costs are now per run.** A resumed session's earlier spend no longer counts against each run's budget or `/stats`, so per-run and daily figures may drop. ([#778](https://github.com/littlebearapps/untether/issues/778))
+- **Gemini CLI and Amp are deprecated**, targeted for removal in 0.36.0.
+
 ## Upgrading to v0.35.4
 
 See the [v0.35.4 changelog entry](https://github.com/littlebearapps/untether/blob/master/CHANGELOG.md#v0354) for the full list. Behaviour changes that may affect operators:

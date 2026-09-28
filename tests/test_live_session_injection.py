@@ -301,7 +301,11 @@ async def test_scheduler_pump_keeps_job_queued_when_not_injectable() -> None:
         await sched.enqueue(_job(text="first"))
         await anyio.sleep(0.03)
         await sched.enqueue(_job(text="second"))
-        await anyio.sleep(0.1)
+        # Poll rather than sleep a fixed 0.1s: under full-suite load two pump
+        # ticks may not fit in a fixed window.
+        with anyio.fail_after(5):
+            while attempts < 2:
+                await anyio.sleep(0.01)
         assert ran == ["first"] and attempts >= 2
         assert sched.queued_for_chat(123)  # still cancellable while queued
         release.set()

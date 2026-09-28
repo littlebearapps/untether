@@ -9,14 +9,14 @@ This tutorial walks you through Untether's interactive permission system — app
 
 ## 1. Understand permission modes
 
-Untether offers three permission modes that control how much oversight you have:
+Untether offers four permission modes that control how much oversight you have:
 
 | Mode | Command | What happens |
 |------|---------|-------------|
 | **Plan** | `/planmode on` | Every tool call shows Approve / Deny buttons. Full control. |
 | **Plan-auto** | `/planmode plan-auto` | Tools are auto-approved. Plan transitions are also auto-approved. Hands-off. |
 | **Auto** | `/planmode auto` | Claude Code's own auto mode — a classifier approves routine work and blocks risky actions. No plan phase. |
-| **Accept edits** | `/planmode off` | No approval buttons at all. Claude Code runs autonomously. |
+| **Accept edits** | `/planmode off` | No plan phase. File edits run freely; other actions (shell commands, web fetches, MCP tools) show Approve / Deny buttons unless your Claude Code settings already allow them. |
 
 For this tutorial, we'll use **Plan** mode so you can see every interaction.
 
@@ -183,20 +183,22 @@ You can also tap **Deny** to dismiss the question if it's not relevant.
 !!! tip "Ask mode toggle"
     Control whether Claude Code asks interactive questions via `/config` → **Ask mode**. When off, Claude Code proceeds with reasonable defaults instead of asking.
 
-## 9. Switch to auto mode
+## 9. Switch to plan-auto mode
 
-Once you're comfortable with how Claude Code works, you might want less interruption. Switch to auto mode:
+Once you're comfortable with how Claude Code works, you might want less interruption. Switch to plan-auto mode:
 
 ```
-/planmode auto
+/planmode plan-auto
 ```
 
 !!! untether "Untether"
-    plan mode: **auto**
+    plan mode: **plan-auto** (plan mode, auto-approve ExitPlanMode)
 
 <img src="../assets/screenshots/planmode-auto.jpg" alt="/planmode auto confirmation" width="360" loading="lazy" />
 
-In auto mode, tool calls (Edit, Write, Bash) are still auto-approved — Claude Code works without interruption. Plan transitions are also auto-approved, so you won't see ExitPlanMode buttons. The agent preamble still requests summaries and structured output.
+In plan-auto mode, tool calls (Edit, Write, Bash) are auto-approved — Claude Code works without interruption. Plan transitions are also auto-approved, so you won't see ExitPlanMode buttons. The agent preamble still requests summaries and structured output.
+
+`/planmode auto` is different: it hands approval to Claude Code's own classifier, which runs routine work and blocks risky actions. See [Plan mode](../how-to/plan-mode.md).
 
 ## 10. Return to default
 
@@ -206,7 +208,7 @@ To turn off plan mode entirely:
 /planmode off
 ```
 
-This sets Claude Code to `acceptEdits` mode — no approval buttons at all. Claude Code runs autonomously, which is the fastest option for trusted tasks.
+This sets Claude Code to `acceptEdits` mode: no plan phase, and file edits run without buttons. Since v0.35.5, anything `acceptEdits` doesn't cover (most shell commands, web fetches, MCP tools) shows Approve / Deny buttons, unless your Claude Code `permissions.allow` rules already allow it.
 
 To check your current mode at any time:
 
@@ -215,7 +217,7 @@ To check your current mode at any time:
 ```
 
 !!! untether "Untether"
-    plan mode: **auto** (plan mode, auto-approve ExitPlanMode)
+    plan mode: **plan-auto** (plan mode, auto-approve ExitPlanMode)
 
 <img src="../assets/screenshots/planmode-show.jpg" alt="/planmode show output showing current mode" width="360" loading="lazy" />
 

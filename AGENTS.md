@@ -31,6 +31,8 @@ Every run MUST emit exactly:
 2. `ActionEvent(s)` — zero or more
 3. `CompletedEvent` — exactly once, always final
 
+Exception (Claude live sessions, #776): after `CompletedEvent` a runner that keeps its process live may emit later turns as `TurnEvent(started) → ActionEvent* → TurnEvent(completed)` segments. Never a second `CompletedEvent`. See `.claude/rules/runner-development.md`.
+
 Use `EventFactory` for event construction. Never construct event dataclasses directly.
 
 ## Telegram transport rules
