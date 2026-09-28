@@ -31,10 +31,12 @@ __all__ = [
 # fleet's own nouns don't belong in a PyPI wheel, and every extra term widens
 # the hallucination surface on short or silent clips. These are also the words
 # that carry the *referent* of a spoken instruction ("run it on Codex"), so
-# they're the highest-value ones to protect.
+# they're the highest-value ones to protect. #789 adds the agent context files
+# (CLAUDE.md, AGENTS.md) — every user's agents work with them, and "CLAUDE.md"
+# was otherwise heard as "Claw.md".
 DEFAULT_VOICE_TRANSCRIPTION_PROMPT = (
     "Untether, Telegram, Claude Code, Codex, OpenCode, Gemini, Amp, Pi, "
-    "MCP, CLI, repo, changelog, PyPI"
+    "MCP, CLI, repo, changelog, PyPI, CLAUDE.md, AGENTS.md"
 )
 
 

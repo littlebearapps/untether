@@ -81,7 +81,7 @@ Since v0.35.5 the key is **not** inert when unset
 product-generic default covering the terms every user speaks —
 
 ```
-Untether, Telegram, Claude Code, Codex, OpenCode, Gemini, Amp, Pi, MCP, CLI, repo, changelog, PyPI
+Untether, Telegram, Claude Code, Codex, OpenCode, Gemini, Amp, Pi, MCP, CLI, repo, changelog, PyPI, CLAUDE.md, AGENTS.md
 ```
 
 Deployment-specific nouns (your project names, hostnames, third-party tools) are

@@ -449,6 +449,10 @@ def test_resolve_transcription_prompt_unset_uses_shipped_default() -> None:
     # Engine names are the words carrying a spoken instruction's referent.
     for term in ("Untether", "Codex", "OpenCode", "Claude Code"):
         assert term in DEFAULT_VOICE_TRANSCRIPTION_PROMPT
+    # #789: the agent context files every user dictates about ("update
+    # CLAUDE.md") — "CLAUDE.md" was transcribed as "Claw.md" without them.
+    for term in ("CLAUDE.md", "AGENTS.md"):
+        assert term in DEFAULT_VOICE_TRANSCRIPTION_PROMPT
     # Product-generic only — no deployment-specific nouns in a PyPI wheel.
     for term in ("lba-1", "nsd", "channelo", "Trello"):
         assert term not in DEFAULT_VOICE_TRANSCRIPTION_PROMPT
