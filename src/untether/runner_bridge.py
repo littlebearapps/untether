@@ -3997,6 +3997,9 @@ class _TurnCtx:
     notify: bool
     header: str | None
     command_uuid: str | None = None
+    # The TurnEvent detail (task labels / ids / origin turn, #785/#795);
+    # replaced by the completion's detail when the runner retro-attributes.
+    detail: dict[str, Any] = field(default_factory=dict)
     edits: ProgressEdits | None = None
     progress_ref: MessageRef | None = None
     edits_scope: anyio.CancelScope | None = None
@@ -4043,6 +4046,10 @@ class FollowupTurnRouter:
         # The message the live session's latest turn answered — where
         # session-level notices (closing, restart) belong.
         self.last_reply_to: MessageRef = default_reply_to
+        # #795: turn number -> the message that turn answered (turn 1 is the
+        # run's prompt). A wake turn replies to the turn that launched the
+        # task it reports on.
+        self._turn_anchors: dict[int, MessageRef] = {1: default_reply_to}
 
     def bind_task_group(self, tg: Any) -> None:
         self._tg = tg
@@ -4051,6 +4058,18 @@ class FollowupTurnRouter:
     def active(self) -> bool:
         return self.current is not None
 
+    def anchor_for_turn(self, turn: int | None) -> MessageRef:
+        """#795: the message turn ``turn`` answered (default: the run's)."""
+        if turn is None:
+            return self._default_reply_to
+        return self._turn_anchors.get(turn, self._default_reply_to)
+
+    def _origin_anchor(self, detail: dict[str, Any] | None) -> MessageRef | None:
+        origin = (detail or {}).get("origin_turn")
+        if isinstance(origin, int) and not isinstance(origin, bool):
+            return self._turn_anchors.get(origin)
+        return None
+
     def _open(self, evt: TurnEvent) -> _TurnCtx:
         anchor: MessageRef | None = None
         placeholder: MessageRef | None = None
@@ -4058,6 +4077,10 @@ class FollowupTurnRouter:
             found = self._anchor_for(evt.command_uuid)
             if found is not None:
                 anchor, placeholder = found
+        if anchor is None and evt.reason != "followup":
+            # #795: a wake turn about a background task replies to the
+            # message whose turn launched that task.
+            anchor = self._origin_anchor(evt.detail)
         notify = (
             self._followup_notify
             if evt.reason == "followup"
@@ -4075,12 +4098,14 @@ class FollowupTurnRouter:
             notify=notify,
             header=_turn_header(evt),
             command_uuid=evt.command_uuid,
+            detail=dict(evt.detail or {}),
             # A follow-up's "⏳ queued" placeholder becomes its progress
             # message (edited in place) and is replaced by its final.
             progress_ref=placeholder,
         )
         self.current = ctx
         self.last_reply_to = ctx.reply_to
+        self._turn_anchors[ctx.turn] = ctx.reply_to
         if self._tg is not None:
             self._tg.start_soon(self._lazy_progress, ctx)
         return ctx
@@ -4129,6 +4154,13 @@ class FollowupTurnRouter:
             # task it answered ended during it) — deliver the real header.
             ctx.reason = evt.reason
             ctx.header = _turn_header(evt)
+            ctx.detail = dict(evt.detail or {})
+            # #795: now that the task is known, reply to the message that
+            # launched it (the final hasn't been sent yet).
+            if (origin := self._origin_anchor(ctx.detail)) is not None:
+                ctx.reply_to = origin
+                self.last_reply_to = origin
+                self._turn_anchors[ctx.turn] = origin
             logger.info(
                 "live_turn.retro_attributed",
                 turn=ctx.turn,
@@ -5239,12 +5271,18 @@ async def handle_message(
         clock=clock,
     )
 
+    def _bg_status_anchor(live: list[Any]) -> MessageRef:
+        # #795: reply to the prompt that launched the (most recent) tasks.
+        latest = max(live, key=lambda t: getattr(t, "started_at", 0.0) or 0.0)
+        origin = getattr(latest, "origin_turn", None)
+        return turn_router.anchor_for_turn(origin if isinstance(origin, int) else None)
+
     bg_status = BackgroundStatusManager(
         transport=cfg.transport,
         channel_id=incoming.channel_id,
         thread_id=incoming.thread_id,
         tasks_source=_bg_tasks,
-        anchor_for=lambda _live: turn_router.last_reply_to,
+        anchor_for=_bg_status_anchor,
         settings_source=_load_progress_settings,
         persistence_path=_PROGRESS_PERSISTENCE_PATH,
     )

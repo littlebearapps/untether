@@ -610,3 +610,85 @@ async def test_interrupted_turn_final_has_no_turn_complete_marker(
     )
     assert TURN_COMPLETE_MARKER not in final
     assert all(TURN_COMPLETE_MARKER not in t for t in progress)
+
+
+# ── #795 wake-turn reply anchor ──────────────────────────────────────────────
+
+FOLLOWUP_REF = MessageRef(channel_id=1, message_id=20)
+
+
+async def _followup_turn(router, turn: int = 2) -> None:
+    await router.on_turn(
+        _turn("started", turn=turn, reason="followup", command_uuid="u1")
+    )
+    await router.on_turn(
+        _turn(
+            "completed",
+            turn=turn,
+            reason="followup",
+            ok=True,
+            answer="ok",
+            command_uuid="u1",
+        )
+    )
+
+
+async def test_795_wake_turn_replies_to_the_turn_that_launched_its_task() -> None:
+    rec = _Recorder()
+    router = _router(rec, anchors={"u1": (FOLLOWUP_REF, None)})
+    await _followup_turn(router)
+    detail = {"tasks": ["bg b2"], "task_ids": ["b2"], "origin_turn": 2}
+    await router.on_turn(_turn("started", turn=3, detail=detail))
+    await router.on_turn(
+        _turn("completed", turn=3, ok=True, answer="done", detail=detail)
+    )
+    assert rec.delivered[-1][5] == 20
+    assert router.anchor_for_turn(3) == FOLLOWUP_REF
+    assert router.last_reply_to == FOLLOWUP_REF
+
+
+async def test_795_task_from_the_run_itself_replies_to_the_run_prompt() -> None:
+    rec = _Recorder()
+    router = _router(rec, anchors={"u1": (FOLLOWUP_REF, None)})
+    await _followup_turn(router)
+    detail = {"tasks": ["bg b1"], "task_ids": ["b1"], "origin_turn": 1}
+    await router.on_turn(_turn("started", turn=3, detail=detail))
+    await router.on_turn(
+        _turn("completed", turn=3, ok=True, answer="done", detail=detail)
+    )
+    assert rec.delivered[-1][5] == 10
+
+
+async def test_795_retro_attributed_turn_moves_its_reply_to_the_origin() -> None:
+    """An ``unknown`` wake turn only learns its task at completion; its final
+    (not yet sent) then replies to the launching follow-up."""
+    rec = _Recorder()
+    router = _router(rec, anchors={"u1": (FOLLOWUP_REF, None)})
+    await _followup_turn(router)
+    await router.on_turn(_turn("started", turn=3, reason="unknown"))
+    assert router.current is not None and router.current.reply_to == USER_REF
+    await router.on_turn(
+        _turn(
+            "completed",
+            turn=3,
+            reason="task_finished",
+            ok=True,
+            answer="report",
+            detail={
+                "tasks": ["bg b2"],
+                "task_ids": ["b2"],
+                "origin_turn": 2,
+                "retro_attributed": True,
+            },
+        )
+    )
+    assert rec.delivered[-1][5] == 20
+
+
+@pytest.mark.parametrize("detail", [{}, {"origin_turn": 9}, {"origin_turn": True}])
+async def test_795_unknown_origin_falls_back_to_the_default(detail: dict) -> None:
+    rec = _Recorder()
+    router = _router(rec)
+    await router.on_turn(_turn("started", turn=2, detail=detail))
+    await router.on_turn(_turn("completed", turn=2, ok=True, answer="x", detail=detail))
+    assert rec.delivered[-1][5] == 10

@@ -248,6 +248,45 @@ async def test_followup_to_live_session_is_injected_not_resumed(
     os.environ.pop("FAKE_CLAUDE_SCENARIO", None)
 
 
+async def test_795_wake_turn_replies_to_the_followup_that_launched_the_task(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#795: a follow-up injected into the live session launches a background
+    task; the task's 🔔 wake message replies to that follow-up (msg 20), not
+    to the run's first prompt (msg 10)."""
+    _watchdog(monkeypatch, post_result_limbo_grace=1.0)
+
+    async def run_job(job: ThreadJob) -> None:  # pragma: no cover
+        raise AssertionError("follow-up should be injected, not resumed")
+
+    holder: dict[str, Any] = {}
+    async with anyio.create_task_group() as tg:
+        sched = ThreadScheduler(
+            task_group=tg, run_job=run_job, inject_job=inject_live_followup
+        )
+
+        async def follow_up() -> None:
+            with anyio.fail_after(20):
+                while True:
+                    live = claude_mod.get_live_session(SID)
+                    if live is not None and live.idle:
+                        break
+                    await anyio.sleep(0.02)
+            await sched.enqueue(_job(text="launch it"))
+
+        async def drive() -> None:
+            holder["transport"] = await _drive("followup_launches_bg", wake_s=0.5)
+
+        tg.start_soon(follow_up)
+        tg.start_soon(drive)
+
+    transport = holder["transport"]
+    wake = next(c for c in transport.send_calls if "GOT: B2" in c["message"].text)
+    assert "Background task finished — bg b2" in wake["message"].text
+    assert wake["options"].reply_to.message_id == 20
+    os.environ.pop("FAKE_CLAUDE_SCENARIO", None)
+
+
 async def test_scheduler_offers_next_job_while_a_live_run_is_in_flight() -> None:
     """Regression (found on @untether_dev_bot): the worker awaited run_job for
     the whole live run, so a follow-up for the same session never reached the

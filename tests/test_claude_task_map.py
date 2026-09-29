@@ -599,3 +599,26 @@ def test_revival_clears_a_prior_announcement() -> None:
     started = [e for e in events if getattr(e, "phase", None) == "started"]
     assert started[0].reason == "task_finished"
     assert not started[0].detail.get("already_announced")
+
+
+def test_795_task_records_the_turn_it_was_launched_in() -> None:
+    state = ClaudeStreamState()
+    _feed(state, _snapshot(("b1", "local_bash", "sleep 20")))
+    _feed(state, _started_bash("b1", "toolu_b"))
+    assert state.tasks["b1"].origin_turn == 1
+    state.turn = 3
+    _feed(state, _started_bash("b2", "toolu_c"))
+    assert state.tasks["b2"].origin_turn == 3
+    # Later events for the same task never move its origin.
+    _feed(state, _started_bash("b1", "toolu_b"))
+    assert state.tasks["b1"].origin_turn == 1
+
+
+def test_795_revived_task_answers_the_turn_that_resumed_it() -> None:
+    state = ClaudeStreamState()
+    _feed(state, _started_agent("a1", "toolu_a"))
+    _feed(state, _updated("a1", "completed"))
+    assert state.tasks["a1"].origin_turn == 1
+    state.turn = 4
+    _feed(state, _started_agent("a1", "toolu_a"))  # #801 revival
+    assert state.tasks["a1"].origin_turn == 4

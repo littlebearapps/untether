@@ -470,6 +470,33 @@ def scenario_followup(first: dict) -> None:
     serve_followups()
 
 
+def scenario_followup_launches_bg(first: dict) -> None:
+    """#795: the run answers; a follow-up (injected user line) launches a
+    background Bash; that task's wake turn must reply to the follow-up."""
+    init()
+    text("FIRST")
+    result("FIRST")
+    obj = next_user(None)
+    if not isinstance(obj, dict):
+        shutdown()
+    cmd = obj.get("uuid")
+    lifecycle(cmd, "queued")
+    lifecycle(cmd, "started")
+    init()
+    tool_use("Bash", "toolu_bg2", {"command": "sleep 20", "run_in_background": True})
+    start_bg("b2", "toolu_bg2")
+    tool_result("toolu_bg2", "Command running in background with ID: b2.")
+    text("launched")
+    result("launched", turns=2)
+    if wait_idle_or_eof(WAKE_S) is None:
+        shutdown()
+    end_bg("b2")
+    init()
+    text("GOT: B2")
+    result("GOT: B2")
+    serve_followups()
+
+
 def scenario_resume_after_killed_task(first: dict) -> None:
     resumed = "--resume" in sys.argv or "-r" in sys.argv
     if resumed:
@@ -567,6 +594,7 @@ _SCENARIOS = {
     "monitor_ticks": scenario_monitor_ticks,
     "scheduled_wakeup": scenario_scheduled_wakeup,
     "followup": scenario_followup,
+    "followup_launches_bg": scenario_followup_launches_bg,
     "resume_after_killed_task": scenario_resume_after_killed_task,
     "inherited_fd_after_exit": scenario_inherited_fd_after_exit,
 }

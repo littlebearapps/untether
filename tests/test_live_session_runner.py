@@ -256,6 +256,11 @@ async def test_wake_turn_opened_before_task_end_is_retro_attributed() -> None:
     assert _labels(turns[1]) == ["bg a1"]
     assert turns[1].answer == "The sweep is back"
     assert not turns[1].detail.get("already_announced")
+    # #795/#785: the attributed task and the turn that launched it (the run).
+    assert turns[1].detail["task_ids"] == ["a1"]
+    assert turns[1].detail["origin_turn"] == 1
+    assert turns[2].detail["task_ids"] == ["a1"]
+    assert turns[2].detail["origin_turn"] == 1
     assert _labels(turns[2]) == ["bg a1"]
     assert turns[2].detail.get("already_announced") is True
     assert turns[3].detail.get("already_announced") is True

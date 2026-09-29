@@ -819,6 +819,9 @@ class ClaudeTask:
     # #777: the agent's current step from ``task_progress.description``
     # ("Running <step>") — kept apart from ``description`` (the task's label).
     last_step: str | None = None
+    # #795: the live-session turn the task was launched in (1 = the run's
+    # own prompt), so its wake turn can reply to the message that asked.
+    origin_turn: int | None = None
 
     @property
     def is_live_background(self) -> bool:
@@ -2610,6 +2613,8 @@ def _revive_task(
     task.ended_at = None
     task.started_at = time.monotonic()
     task.revived_count += 1
+    # #795: the turn that resumed it is the one its next wake turn answers.
+    task.origin_turn = state.turn
     # Its next end is a new finish (#785): a wake turn may announce it again.
     state.announced_task_ids.discard(task.task_id)
     if task.is_live_background:
@@ -2679,6 +2684,24 @@ def _register_task(
     return task
 
 
+def _stamp_task_origin(state: ClaudeStreamState, task: ClaudeTask) -> None:
+    """#795: remember the turn a task was launched in (first sighting wins)."""
+    if task.origin_turn is None:
+        task.origin_turn = state.turn
+
+
+def _task_attribution(state: ClaudeStreamState, task_ids: list[str]) -> dict[str, Any]:
+    """#795/#785: TurnEvent detail naming the tasks a wake turn answers and
+    the turn that launched them (the bridge replies to that turn's message)."""
+    detail: dict[str, Any] = {"task_ids": list(task_ids)}
+    for tid in task_ids:
+        task = state.tasks.get(tid)
+        if task is not None and task.origin_turn is not None:
+            detail["origin_turn"] = task.origin_turn
+            break
+    return detail
+
+
 def _apply_task_event(
     state: ClaudeStreamState, event: claude_schema.StreamSystemMessage
 ) -> None:
@@ -2720,6 +2743,7 @@ def _apply_task_event(
                 )
                 state.tasks[task_id] = task
                 state.background_observed = True
+                _stamp_task_origin(state, task)
                 logger.info(
                     "claude.task.registered",
                     task_id=task_id,
@@ -2747,7 +2771,7 @@ def _apply_task_event(
     if not task_id:
         return
     if subtype == "task_started":
-        _register_task(state, event, "task_started")
+        _stamp_task_origin(state, _register_task(state, event, "task_started"))
         return
     task = state.tasks.get(task_id)
     if task is None:
@@ -3353,6 +3377,7 @@ def _open_followup_turn(
         reason = "task_finished"
         detail["tasks"] = list(state.turn_notifications)
         ids = list(state.turn_notification_ids)
+        detail.update(_task_attribution(state, ids))
         if ids and all(tid in state.announced_task_ids for tid in ids):
             # #785: the second wake turn for one finish (the first opened as
             # ``unknown`` and was attributed to it) — the bridge won't push.
@@ -3365,6 +3390,7 @@ def _open_followup_turn(
     ]:
         reason = "monitor_event"
         detail["tasks"] = [t.description or "Monitor" for t in monitors]
+        detail.update(_task_attribution(state, [t.task_id for t in monitors]))
     if reason == "scheduled_wakeup":
         state.pending_wakeup_until = None
     if reason == "followup" and command_uuid is not None:
@@ -3520,6 +3546,9 @@ def translate_claude_event(
                 # its final gets the real header.
                 detail["tasks"] = [label for _, label in state.turn_ended_tasks]
                 detail["retro_attributed"] = True
+                detail.update(
+                    _task_attribution(state, [tid for tid, _ in state.turn_ended_tasks])
+                )
                 _mark_announced(state, (tid for tid, _ in state.turn_ended_tasks))
                 state.turn_reason = "task_finished"
                 logger.info(
