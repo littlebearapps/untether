@@ -3599,6 +3599,7 @@ async def run_runner_with_cancel(
                 try:
                     async for evt in events:
                         _log_runner_event(evt)
+                        _consume_absorbed_anchor(evt)
                         # #776: follow-up turns of a live session get their
                         # own messages; the run's progress/final stay put.
                         if isinstance(evt, TurnEvent):
@@ -3701,6 +3702,13 @@ async def run_runner_with_cancel(
             async def wait_cancel(task: RunningTask) -> None:
                 await task.cancel_requested.wait()
                 outcome.cancelled = True
+                if task.resume is not None and task.resume.engine == "claude":
+                    # #775: no steer may land in a run being cancelled — it
+                    # would be killed with the process. Later messages fall
+                    # back to the queue path (and --resume).
+                    from .runners.claude import close_steer_window
+
+                    await close_steer_window(task.resume.value, "cancel")
                 # #776: /cancel (or /new) on a live session that is only
                 # holding between turns closes its stdin — the CLI stops its
                 # background tasks and exits cleanly (no SIGTERM, nothing
@@ -3912,6 +3920,18 @@ def pop_followup_anchor(
         return None
     entry = _FOLLOWUP_ANCHORS.pop(command_uuid, None)
     return None if entry is None else (entry[1], entry[2])
+
+
+def _consume_absorbed_anchor(evt: UntetherEvent) -> None:
+    """#775: a steered/injected line the CLI folded into an already-running
+    turn never opens a turn of its own — drop its anchor so the run-end sweep
+    doesn't report it as "not run". Its answer is that turn's answer."""
+    if not isinstance(evt, ActionEvent):
+        return
+    detail = evt.action.detail or {}
+    command_uuid = detail.get("absorbed_command_uuid")
+    if isinstance(command_uuid, str) and pop_followup_anchor(command_uuid):
+        logger.info("live_followup.anchor_absorbed", command_uuid=command_uuid)
 
 
 def drain_followup_anchors(

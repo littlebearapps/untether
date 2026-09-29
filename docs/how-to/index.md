@@ -30,6 +30,7 @@ If you need exact options and defaults, use **[Reference](../reference/index.md)
 - [Model and reasoning overrides](model-reasoning.md) (customise model and reasoning level)
 - [Verbose progress](verbose-progress.md) (control progress message detail)
 - [Inline settings menu](inline-settings.md) (`/config` — toggle settings with buttons)
+- [Steer follow-ups](steer-follow-ups.md) (`/steer` — send a message into a running Claude run)
 
 ## Messaging extras
 

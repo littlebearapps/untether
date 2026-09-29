@@ -97,6 +97,10 @@ Untether is built around the assumption that your phone is unreliable but your c
 
 Everything important — Telegram update offsets, active progress message references, trigger fire history — is persisted to disk so a restart picks up where you left off without dropping or duplicating messages.
 
+## Can I change Claude's instructions while it's still working?
+
+Yes, with Claude Code. By default a message you send while a run is working is queued: it runs as the next turn once the current one finishes. Send `/steer <text>` instead and the message goes straight into the running turn. Claude reads it the next time a tool finishes and folds it into the answer it's already writing. You get a `↪️ Steered into the current run.` reply, and the progress message shows when Claude has picked it up. To make steer the default for a chat, send `/steer` on its own or use `/config` → Follow-up. `/queue` switches back, and `/queue <text>` queues a single message. Steering needs a permission mode (`/planmode`) so the session stays live. Files, forwards and other engines always queue, and Untether tells you when a steer couldn't be delivered. Full guide: [Steer follow-ups](https://untether.littlebearapps.com/how-to/steer-follow-ups/).
+
 ## How do I keep agents from spending too much money?
 
 Untether ships per-run and per-day cost budgets. In `untether.toml`:

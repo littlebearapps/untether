@@ -45,7 +45,7 @@ restart.
 
 | Section | Restart-required fields | Hot-reload |
 |---|---|---|
-| `transports.telegram` | `bot_token`, `chat_id`, `session_mode`, `topics`, `message_overflow` | everything else (`voice_*`, `show_resume_line`, `forward_coalesce_s`, `media_group_debounce_s`, `allowed_user_ids`, `files.*`) |
+| `transports.telegram` | `bot_token`, `chat_id`, `session_mode`, `topics`, `message_overflow` | everything else (`voice_*`, `show_resume_line`, `followup_mode`, `forward_coalesce_s`, `media_group_debounce_s`, `allowed_user_ids`, `files.*`) |
 | `transports.telegram.topics` | whole section (treated as one unit) | — |
 | top-level `transport` | changing transport id | — |
 | `triggers` | `enabled` (master switch initialises the cron scheduler + webhook server at startup); `server.host`, `server.port` (socket bind at startup) | cron add/remove/edit, webhook add/remove/edit, `rate_limit`, `max_body_bytes`, `default_timezone`, per-cron `timezone`/`run_once`/`permission_mode` |
@@ -92,6 +92,7 @@ systemctl --user restart untether-dev    # dev
 | `voice_transcription_prompt` | string\|null | `null` (→ built-in) | ([#691](https://github.com/littlebearapps/untether/issues/691), [#703](https://github.com/littlebearapps/untether/issues/703)) Vocabulary-bias prompt (≤1000 chars) passed to the transcription `prompt` param — steers the decoder toward domain proper nouns (`"Trello, Untether, Claude Code"`). Effect is model-dependent; keep it to high-frequency nouns (overstuffing can induce hallucinated terms). **Unset = a shipped product-generic default** (engine + tool names, plus `CLAUDE.md` / `AGENTS.md` since [#789](https://github.com/littlebearapps/untether/issues/789)); a value **replaces** that default; `""` disables the bias and omits the parameter. Hot-reloadable. |
 | `session_mode` | `"stateless"`\|`"chat"` | `"stateless"` | 🔄 Auto-resume mode. See [workflow modes](modes.md) — `"chat"` for assistant/workspace, `"stateless"` for handoff. Restart-required. |
 | `show_resume_line` | bool | `true` | Show resume line in message footer. See [workflow modes](modes.md) — `false` for assistant/workspace, `true` for handoff. |
+| `followup_mode` | `"queue"`\|`"steer"` | `"queue"` | ([#775](https://github.com/littlebearapps/untether/issues/775)) Default for messages sent while a Claude Code run is working: `queue` waits for the turn to end; `steer` writes the message into the running turn. Overridden per chat (`/config` → Follow-up, bare `/steer` / `/queue`), per forum topic (bare `/steer` / `/queue` in the topic) and per message (`/steer <text>`, `/queue <text>`). Claude Code only — other engines always queue. Hot-reloadable. See [steer follow-ups](../how-to/steer-follow-ups.md). |
 
 When `allowed_user_ids` is set, updates without a sender id (for example, some channel posts) are ignored.
 

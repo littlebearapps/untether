@@ -26,7 +26,7 @@ from collections.abc import AsyncIterator, Callable, Iterable
 from dataclasses import dataclass, field
 from datetime import UTC
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 import anyio
 import msgspec
@@ -337,6 +337,12 @@ class LiveSession:
     # transcript is complete, so a close that overruns its grace must not
     # quarantine it.
     closed_idle_clean: bool = False
+    # #775: the steer window. Set (under ``lock``) when /cancel or /new
+    # interrupts an active turn — the process is about to be killed, so a
+    # steer must fall back to the queue path instead of being written into a
+    # pipe nobody will answer. Closing stdin (``closing``) shuts it too.
+    steer_closed: bool = False
+    steer_closed_reason: str | None = None
     listeners: list[Callable[[str, dict[str, Any]], Any]] = field(default_factory=list)
 
     @property
@@ -346,6 +352,10 @@ class LiveSession:
     @property
     def accepting_input(self) -> bool:
         return not self.closing
+
+    @property
+    def accepting_steer(self) -> bool:
+        return not self.closing and not self.steer_closed
 
 
 _LIVE_SESSIONS: dict[str, LiveSession] = {}
@@ -558,6 +568,89 @@ async def inject_when_idle(
                         live.idle_since = time.monotonic()
                     return ok
         await anyio.sleep(poll_s)
+
+
+SteerOutcome = Literal[
+    "steered", "no_live_session", "window_closed", "options_changed", "write_failed"
+]
+
+_UNSET_OPTIONS: Any = object()
+
+
+async def close_steer_window(session_id: str, reason: str) -> bool:
+    """Stop accepting steers into ``session_id`` (#775 race guard).
+
+    Taken under ``LiveSession.lock`` — the same lock :func:`steer_into_session`
+    holds while it checks the window and writes — so a steer either lands
+    before this returns or sees the window closed and falls back to the queue
+    path. Idempotent; False when there is no live session.
+    """
+    live = _LIVE_SESSIONS.get(session_id)
+    if live is None:
+        return False
+    async with live.lock:
+        if live.steer_closed:
+            return True
+        live.steer_closed = True
+        live.steer_closed_reason = reason
+    logger.info(
+        "claude.live_session.steer_window_closed", session_id=session_id, reason=reason
+    )
+    return True
+
+
+async def steer_into_session(
+    session_id: str,
+    text: str,
+    *,
+    command_uuid: str,
+    run_options: Any = _UNSET_OPTIONS,
+) -> SteerOutcome:
+    """Steer mode (#775): write ``text`` into the live session *now*.
+
+    Unlike :func:`inject_when_idle` this does not wait for the turn to end:
+    written mid-turn the CLI folds it into the running turn at the next tool
+    boundary (F5; the fold is confirmed by ``command_lifecycle{started}``
+    arriving while the turn is open — see :func:`_absorb_injected`); written
+    after the turn's last tool call or between turns it becomes the next turn
+    in the same process (F6), delivered as a follow-up turn.
+
+    The window check and the write happen under ``LiveSession.lock``, which
+    :func:`close_live_session` and :func:`close_steer_window` also take, so a
+    steer can never be written into a pipe that is closing (no orphan turns).
+    ``run_options``: when given and the session is idle between turns, a
+    mismatch with the options the process was spawned with returns
+    ``options_changed`` — the queue path then restarts it with the new ones.
+    """
+    live = _LIVE_SESSIONS.get(session_id)
+    if live is None:
+        return "no_live_session"
+    async with live.lock:
+        if not live.accepting_steer:
+            return "window_closed"
+        if (
+            run_options is not _UNSET_OPTIONS
+            and live.idle
+            and run_options != live.state.spawn_run_options
+        ):
+            return "options_changed"
+        state = live.state
+        # Record before writing: command_lifecycle can race the send.
+        state.steered_commands[command_uuid] = text
+        ok = await write_user_message(session_id, text, command_uuid=command_uuid)
+        if not ok:
+            state.steered_commands.pop(command_uuid, None)
+            return "write_failed"
+        if live.idle:
+            live.idle_since = time.monotonic()
+    logger.info(
+        "claude.live_session.steered",
+        session_id=session_id,
+        command_uuid=command_uuid,
+        mid_turn=not live.idle,
+        turn=live.state.turn,
+    )
+    return "steered"
 
 
 def is_session_alive(session_id: str) -> bool:
@@ -969,6 +1062,11 @@ class ClaudeStreamState:
     # Injected lines whose turn hasn't opened yet: the lifecycle must not
     # close stdin under them, and the next queued follow-up waits for them.
     awaiting_injected: dict[str, float] = field(default_factory=dict)
+    # #775: uuid -> text of lines written in steer mode (a subset of
+    # ``injected_commands``), used to label the "steer received" row.
+    steered_commands: dict[str, str] = field(default_factory=dict)
+    # #775: injected lines the CLI folded into an already-open turn.
+    absorbed_commands: set[str] = field(default_factory=set)
     # #776 resume guard (F11): the stopped-task replay + 0-turn result that
     # precede the real answer on --resume of a session whose previous
     # process ended with live background work.
@@ -3427,6 +3525,56 @@ def _open_followup_turn(
     )
 
 
+_STEER_SNIPPET_CHARS = 80
+
+
+def _absorb_injected(
+    state: ClaudeStreamState, factory: EventFactory, command_uuid: str
+) -> list[UntetherEvent]:
+    """#775: an injected line the CLI picked up while a turn was already open
+    — it was folded into that turn (F5) instead of starting its own.
+
+    Clears the awaiting marker (so the idle close and the next queued
+    follow-up aren't held for a turn that will never open) and surfaces a
+    "steer received" row in the running turn's progress. The bridge pops the
+    line's reply anchor on seeing ``detail["absorbed_command_uuid"]`` — its
+    answer is this turn's answer, so no separate reply is owed.
+    """
+    state.absorbed_commands.add(command_uuid)
+    state.awaiting_injected.pop(command_uuid, None)
+    steer_text = state.steered_commands.get(command_uuid)
+    label = "steer" if steer_text is not None else "follow-up"
+    title = f"\N{RIGHTWARDS ARROW WITH HOOK}\N{VARIATION SELECTOR-16} {label} received"
+    if steer_text:
+        snippet = " ".join(steer_text.split())
+        if len(snippet) > _STEER_SNIPPET_CHARS:
+            snippet = snippet[: _STEER_SNIPPET_CHARS - 1] + "…"
+        title = f"{title}: {snippet}"
+    logger.info(
+        "claude.live_session.injected_absorbed",
+        session_id=factory.resume.value if factory.resume else None,
+        command_uuid=command_uuid,
+        steer=steer_text is not None,
+        turn=state.turn,
+    )
+    state.note_seq += 1
+    action_id = f"claude.steer.{state.note_seq}"
+    detail = {"absorbed_command_uuid": command_uuid, "steer": steer_text is not None}
+    return [
+        factory.action_started(
+            action_id=action_id, kind="note", title=title, detail=detail
+        ),
+        factory.action_completed(
+            action_id=action_id,
+            kind="note",
+            title=title,
+            ok=True,
+            level="info",
+            detail=detail,
+        ),
+    ]
+
+
 def translate_claude_event(
     event: claude_schema.StreamJsonMessage,
     *,
@@ -3436,6 +3584,17 @@ def translate_claude_event(
 ) -> list[UntetherEvent]:
     """Translate one CLI line, adding #776 turn segmentation around
     :func:`_translate_claude_event_base`."""
+    if (
+        isinstance(event, claude_schema.StreamCommandLifecycleMessage)
+        and event.state == "started"
+        and state.turn_open
+        and event.command_uuid is not None
+        and event.command_uuid in state.injected_commands
+        and event.command_uuid not in state.absorbed_commands
+    ):
+        # #775: started while a turn is open → folded into it (probed on CLI
+        # 2.1.284: queued at write, started after the running tool's result).
+        return _absorb_injected(state, factory, event.command_uuid)
     if (
         isinstance(event, claude_schema.StreamSystemMessage)
         and event.subtype == "task_notification"

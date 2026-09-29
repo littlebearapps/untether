@@ -60,6 +60,7 @@ from .context import _merge_topic_context, _usage_ctx_set, _usage_topic
 from .engine_defaults import resolve_engine_for_message
 from .engine_overrides import merge_overrides
 from .listen_mode import resolve_listen_mode, should_trigger_run
+from .steer import FOLLOWUP_COMMAND_IDS, maybe_steer, split_followup_command
 from .topic_state import TopicStateStore, resolve_state_path
 from .topics import (
     _maybe_rename_topic,
@@ -491,6 +492,24 @@ def _dispatch_builtin_command(
         task_group.start_soon(handler)
         return True
 
+    if command_id in FOLLOWUP_COMMAND_IDS and not args_text.strip():
+        # #775: bare /steer or /queue sets the default (the `<text>` form is
+        # split off in route_message and runs as a prompt).
+        from .commands.followup import handle_followup_default_command
+
+        handler = partial(
+            handle_followup_default_command,
+            cfg,
+            msg,
+            command_id,
+            ambient_context,
+            topic_store,
+            chat_prefs,
+            scope_chat_ids=scope_chat_ids,
+        )
+        task_group.start_soon(handler)
+        return True
+
     if command_id in {"listen", "trigger"}:
         # #297: /trigger is a deprecated alias for /listen. The handler
         # prepends a deprecation notice when invoked_as="trigger".
@@ -678,6 +697,8 @@ class _PendingPrompt:
     cancel_scope: anyio.CancelScope | None = None
     # #794: ids of earlier prompt messages whose text was merged into this one.
     merged_message_ids: list[int] = field(default_factory=list)
+    # #775: "steer"/"queue" from `/steer <text>` / `/queue <text>`.
+    followup_override: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -822,6 +843,10 @@ def _merge_block_reason(existing: _PendingPrompt, new: _PendingPrompt) -> str | 
         return "context"
     if existing.is_voice_transcribed != new.is_voice_transcribed:
         return "voice"
+    if existing.followup_override != new.followup_override:
+        # #775: a `/steer <text>` and a plain (or `/queue`) prompt must not
+        # share a run — the override would apply to both texts.
+        return "followup_mode"
     if new.text.lstrip().startswith(("/", "@")):
         return "directive"
     return None
@@ -1109,6 +1134,21 @@ class ResumeResolver:
                     prompt_text,
                 )
                 return ResumeDecision(resume_token=None, handled_by_running_task=True)
+        resume_token = await self.stored_token(
+            chat_session_key=chat_session_key,
+            topic_key=topic_key,
+            engine_for_session=engine_for_session,
+        )
+        return ResumeDecision(resume_token=resume_token, handled_by_running_task=False)
+
+    async def stored_token(
+        self,
+        *,
+        chat_session_key: tuple[int, int | None] | None,
+        topic_key: tuple[int, int] | None,
+        engine_for_session: EngineId,
+    ) -> ResumeToken | None:
+        """The topic's (else the chat's) stored session for this engine."""
         if self._topic_store is not None and topic_key is not None:
             stored = await self._topic_store.get_session_resume(
                 topic_key[0],
@@ -1116,20 +1156,14 @@ class ResumeResolver:
                 engine_for_session,
             )
             if stored is not None:
-                resume_token = stored
-        if (
-            resume_token is None
-            and self._chat_session_store is not None
-            and chat_session_key is not None
-        ):
-            stored = await self._chat_session_store.get_session_resume(
+                return stored
+        if self._chat_session_store is not None and chat_session_key is not None:
+            return await self._chat_session_store.get_session_resume(
                 chat_session_key[0],
                 chat_session_key[1],
                 engine_for_session,
             )
-            if stored is not None:
-                resume_token = stored
-        return ResumeDecision(resume_token=resume_token, handled_by_running_task=False)
+        return None
 
 
 class MediaGroupBuffer:
@@ -2324,6 +2358,8 @@ async def run_main_loop(
                 chat_session_key: tuple[int, int | None] | None,
                 reply_ref: MessageRef | None,
                 reply_id: int | None,
+                steerable: bool = False,
+                followup_override: str | None = None,
             ) -> None:
                 chat_id = msg.chat_id
                 user_msg_id = msg.message_id
@@ -2335,6 +2371,17 @@ async def run_main_loop(
                     topic_key=topic_key,
                 )
                 engine_override = engine_resolution.engine
+                if steerable and await _try_steer(
+                    msg=msg,
+                    prompt_text=prompt_text,
+                    resolved=resolved,
+                    engine=engine_override,
+                    topic_key=topic_key,
+                    chat_session_key=chat_session_key,
+                    reply_id=reply_id,
+                    followup_override=followup_override,
+                ):
+                    return
                 resume_decision = await resume_resolver.resolve(
                     resume_token=resolved.resume_token,
                     reply_id=reply_id,
@@ -2380,6 +2427,67 @@ async def run_main_loop(
                     msg.thread_id,
                     chat_session_key,
                     progress_ref,
+                )
+
+            async def _try_steer(
+                *,
+                msg: TelegramIncomingMessage,
+                prompt_text: str,
+                resolved: ResolvedMessage,
+                engine: EngineId,
+                topic_key: tuple[int, int] | None,
+                chat_session_key: tuple[int, int | None] | None,
+                reply_id: int | None,
+                followup_override: str | None,
+            ) -> bool:
+                """#775: steer a plain-text/voice prompt into the chat's live
+                Claude session when the follow-up mode says so. The target is
+                the session this prompt would otherwise queue behind."""
+
+                async def steer_target() -> ResumeToken | None:
+                    token = resolved.resume_token
+                    if token is None and reply_id is not None:
+                        running = state.running_tasks.get(
+                            MessageRef(channel_id=msg.chat_id, message_id=reply_id)
+                        )
+                        token = running.resume if running is not None else None
+                    if token is None:
+                        token = await resume_resolver.stored_token(
+                            chat_session_key=chat_session_key,
+                            topic_key=topic_key,
+                            engine_for_session=engine,
+                        )
+                    return token
+
+                topic_thread_id = topic_key[1] if topic_key is not None else None
+
+                async def run_options_for(target: ResumeToken) -> object:
+                    options = await _resolve_engine_run_options(
+                        msg.chat_id,
+                        topic_thread_id,
+                        target.engine,
+                        chat_prefs=state.chat_prefs,
+                        topic_store=state.topic_store,
+                    )
+                    return _apply_trigger_permission_override(
+                        options, resolved.context, engine=target.engine
+                    )
+
+                return await maybe_steer(
+                    cfg,
+                    chat_id=msg.chat_id,
+                    user_msg_id=msg.message_id,
+                    thread_id=msg.thread_id,
+                    topic_thread_id=topic_thread_id,
+                    prompt_text=prompt_text,
+                    engine=engine,
+                    resume_token=None,
+                    resolve_token=steer_target,
+                    override=followup_override,
+                    running_tasks=state.running_tasks,
+                    chat_prefs=state.chat_prefs,
+                    topic_store=state.topic_store,
+                    run_options=run_options_for,
                 )
 
             async def run_prompt_from_upload(
@@ -2464,6 +2572,10 @@ async def run_main_loop(
                     chat_session_key=pending.chat_session_key,
                     reply_ref=pending.reply_ref,
                     reply_id=pending.reply_id,
+                    # #775: plain text / voice transcripts may steer;
+                    # anything carrying forwards always queues.
+                    steerable=not pending.forwards,
+                    followup_override=pending.followup_override,
                 )
 
             forward_coalescer = ForwardCoalescer(
@@ -2593,6 +2705,14 @@ async def run_main_loop(
 
                 command_id = classification.command_id
                 args_text = classification.args_text
+                # #775: `/steer <text>` / `/queue <text>` — the text runs as a
+                # prompt with a one-message follow-up mode override.
+                followup_override: str | None = None
+                followup_split = split_followup_command(command_id, args_text)
+                if followup_split is not None:
+                    followup_override, text = followup_split
+                    command_id = None
+                    args_text = ""
                 if command_id == "continue":
                     forward_coalescer.cancel(forward_key)
                     prompt_text = args_text.strip() if args_text else ""
@@ -2873,6 +2993,7 @@ async def run_main_loop(
                     reply_id=reply_id,
                     is_voice_transcribed=is_voice_transcribed,
                     forwards=[],
+                    followup_override=followup_override,
                 )
                 if reply_id is not None and state.running_tasks.get(
                     MessageRef(channel_id=chat_id, message_id=reply_id)
@@ -3026,7 +3147,9 @@ async def run_main_loop(
             # dispatch → resolve → run_engine) register in
             # running_tasks, then wait for them to complete before
             # triggering shutdown so _drain_and_exit() can exit.
-            for _ in range(10):
+            # #775: 50, not 10 — the dispatch chain now also resolves the
+            # follow-up mode (chat/topic prefs reads) before queueing.
+            for _ in range(50):
                 await anyio.lowlevel.checkpoint()
             while state.running_tasks:
                 await sleep(0.1)

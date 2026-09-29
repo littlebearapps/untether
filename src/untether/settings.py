@@ -185,6 +185,10 @@ class TelegramTransportSettings(BaseModel):
     voice_transcription_url_allowlist: list[str] = Field(default_factory=list)
     session_mode: Literal["stateless", "chat"] = "stateless"
     show_resume_line: bool = True
+    # #775: what a message sent during a live Claude run does by default —
+    # "queue" (wait for the turn to end) or "steer" (fold it into the running
+    # turn). Per-chat / per-topic overrides via /config, /steer and /queue.
+    followup_mode: Literal["queue", "steer"] = "queue"
     forward_coalesce_s: float = Field(default=1.0, ge=0)
     media_group_debounce_s: float = Field(default=1.0, ge=0)
     topics: TelegramTopicsSettings = Field(default_factory=TelegramTopicsSettings)

@@ -13,6 +13,7 @@ from .engine_overrides import (
     migrate_legacy_overrides,
     normalize_overrides,
 )
+from .followup_mode import FollowupMode, normalize_followup_mode
 from .state_store import JsonStateStore
 
 logger = get_logger(__name__)
@@ -29,6 +30,8 @@ class _ChatPrefs(msgspec.Struct, forbid_unknown_fields=False):
     context_project: str | None = None
     context_branch: str | None = None
     engine_overrides: dict[str, EngineOverrides] = msgspec.field(default_factory=dict)
+    # #775: "queue" | "steer" — kept out of EngineOverrides on purpose.
+    followup_mode: str | None = None
 
 
 class _ChatPrefsState(msgspec.Struct, forbid_unknown_fields=False):
@@ -188,6 +191,36 @@ class ChatPrefsStore(JsonStateStore[_ChatPrefsState]):
     async def clear_listen_mode(self, chat_id: ChannelId) -> None:
         await self.set_listen_mode(chat_id, None)
 
+    async def get_followup_mode(self, chat_id: ChannelId) -> FollowupMode | None:
+        async with self._lock:
+            self._reload_locked_if_needed()
+            chat = self._get_chat_locked(chat_id)
+            if chat is None:
+                return None
+            return normalize_followup_mode(chat.followup_mode)
+
+    async def set_followup_mode(self, chat_id: ChannelId, mode: str | None) -> None:
+        normalized = normalize_followup_mode(mode)
+        async with self._lock:
+            self._reload_locked_if_needed()
+            chat = self._get_chat_locked(chat_id)
+            if normalized is None:
+                if chat is None:
+                    return
+                chat.followup_mode = None
+                if self._chat_is_empty(chat):
+                    self._remove_chat_locked(chat_id)
+                self._save_locked()
+                logger.info("prefs.followup.cleared", chat_id=chat_id)
+                return
+            chat = self._ensure_chat_locked(chat_id)
+            chat.followup_mode = normalized
+            self._save_locked()
+            logger.info("prefs.followup.set", chat_id=chat_id, mode=normalized)
+
+    async def clear_followup_mode(self, chat_id: ChannelId) -> None:
+        await self.set_followup_mode(chat_id, None)
+
     # #297: legacy method aliases preserved so any external/uncovered call
     # site keeps working. Remove after one release cycle (v0.36.x).
     async def get_trigger_mode(self, chat_id: ChannelId) -> str | None:
@@ -302,6 +335,7 @@ class ChatPrefsStore(JsonStateStore[_ChatPrefsState]):
             and _normalize_listen_mode(chat.trigger_mode) is None
             and _normalize_text(chat.context_project) is None
             and _normalize_text(chat.context_branch) is None
+            and normalize_followup_mode(chat.followup_mode) is None
             and not self._has_engine_overrides(chat.engine_overrides)
         )
 

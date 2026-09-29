@@ -277,6 +277,7 @@ class TelegramBackend(TransportBackend):
             exec_cfg=exec_cfg,
             session_mode=settings.session_mode,
             show_resume_line=settings.show_resume_line,
+            followup_mode=settings.followup_mode,
             voice_transcription=settings.voice_transcription,
             voice_max_bytes=int(settings.voice_max_bytes),
             voice_transcription_model=settings.voice_transcription_model,

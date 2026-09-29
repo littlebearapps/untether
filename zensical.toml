@@ -40,6 +40,7 @@ nav = [
     { "Plan mode" = "how-to/plan-mode.md" },
     { "Model & reasoning" = "how-to/model-reasoning.md" },
     { "Verbose progress" = "how-to/verbose-progress.md" },
+    { "Steer follow-ups" = "how-to/steer-follow-ups.md" },
     { "Voice notes" = "how-to/voice-notes.md" },
     { "File transfer" = "how-to/file-transfer.md" },
     { "Schedule tasks" = "how-to/schedule-tasks.md" },

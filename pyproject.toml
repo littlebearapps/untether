@@ -80,6 +80,8 @@ auth = "untether.telegram.commands.auth:BACKEND"
 threads = "untether.telegram.commands.threads:BACKEND"
 at = "untether.telegram.commands.at:BACKEND"
 health = "untether.telegram.commands.health:BACKEND"
+steer = "untether.telegram.commands.followup:STEER_BACKEND"
+queue = "untether.telegram.commands.followup:QUEUE_BACKEND"
 
 [build-system]
 requires = ["uv_build>=0.9.18,<0.12.0"]

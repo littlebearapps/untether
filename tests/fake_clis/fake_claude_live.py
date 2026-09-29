@@ -31,6 +31,9 @@ WAKE_S = float(os.environ.get("FAKE_CLAUDE_WAKE_S", "0.3"))
 # #510: hold the first turn's result so a concurrent spawn lands in between.
 RESULT_DELAY_S = float(os.environ.get("FAKE_CLAUDE_RESULT_DELAY_S", "0"))
 
+# #775: how long the steer scenarios wait for a steered user line.
+STEER_WAIT_S = float(os.environ.get("FAKE_CLAUDE_STEER_WAIT_S", "5"))
+
 _cost = 0.0
 _lines: queue.Queue[dict | None] = queue.Queue()
 _live_tasks: dict[str, str] = {}  # task_id -> tool_use_id
@@ -633,7 +636,64 @@ def scenario_error_first(first: dict) -> None:
     serve_followups()
 
 
+def _collect_steers() -> tuple[list[dict], bool]:
+    """Wait for steered user lines (#775): the first within STEER_WAIT_S,
+    then any more until a short quiet gap. Returns (steers, eof)."""
+    steers: list[dict] = []
+    got = next_user(STEER_WAIT_S)
+    while isinstance(got, dict):
+        steers.append(got)
+        lifecycle(got.get("uuid"), "queued")
+        got = next_user(0.3)
+    return steers, got is None
+
+
+def scenario_steer_mid_tool(first: dict) -> None:
+    """#775 / probe F5: user lines written while a tool runs are folded into
+    the SAME turn at the next tool boundary — one result that honours them.
+    The CLI reports each as ``command_lifecycle{started}`` after the tool's
+    result, while the turn is still open (probed on CLI 2.1.284)."""
+    init()
+    tool_use("Bash", "toolu_sleep", {"command": "sleep 8"})
+    steers, eof = _collect_steers()
+    tool_result("toolu_sleep", "slept")
+    for steer in steers:
+        lifecycle(steer.get("uuid"), "started")
+    answer = "DONE"
+    if steers:
+        answer += " + " + " | ".join(user_text(s) for s in steers)
+    text(answer)
+    result(answer, turns=2)
+    for steer in steers:
+        lifecycle(steer.get("uuid"), "completed")
+    if eof:
+        shutdown()
+    serve_followups()
+
+
+def scenario_steer_post_last_tool(first: dict) -> None:
+    """#775 / probe F6: a user line written after the turn's last tool call
+    (during text generation) becomes the NEXT turn in the same process — a
+    second result, started only after the first one."""
+    init()
+    tool_use("Bash", "toolu_echo", {"command": "echo hi"})
+    tool_result("toolu_echo", "hi")
+    steers, eof = _collect_steers()
+    text("FIRST")
+    result("FIRST", turns=2)
+    for steer in steers:
+        lifecycle(steer.get("uuid"), "started")
+        init()
+        text(f"ECHO: {user_text(steer)}")
+        result(f"ECHO: {user_text(steer)}")
+    if eof:
+        shutdown()
+    serve_followups()
+
+
 _SCENARIOS = {
+    "steer_mid_tool": scenario_steer_mid_tool,
+    "steer_post_last_tool": scenario_steer_post_last_tool,
     "error_first": scenario_error_first,
     "ignore_eof": scenario_ignore_eof,
     "ignore_eof_with_task": scenario_ignore_eof_with_task,
