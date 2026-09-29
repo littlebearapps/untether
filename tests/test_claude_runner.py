@@ -6336,8 +6336,14 @@ async def test_592_pre_result_silence_cap_kills_silent_run(monkeypatch) -> None:
             0.0,  # limbo grace off
             0.15,  # pre_result_silence_timeout_s — the cap under test
         )
+        # Wait for the watchdog's own exit log, not just the SIGTERM: it
+        # logs task_exited only after its grace poll, so cancelling on the
+        # signal alone raced it under load.
         with anyio.move_on_after(3.0):
-            while signal.SIGTERM not in killed_signals:
+            while not any(
+                e == "claude.post_result_idle.task_exited"
+                for _lvl, e, _kw in logger.records
+            ):
                 await anyio.sleep(0.02)
         tg.cancel_scope.cancel()
 

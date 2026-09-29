@@ -180,7 +180,12 @@ async def test_steer_after_cancel_falls_back_to_queue(
     texts = _all_texts(transport)
     assert STEERED_ACK not in texts
     assert not any("too late" in t for t in texts)
-    # Either the window-closed notice (run still tearing down) or nothing —
-    # never a steer written into the cancelled process.
+    # The window-closed notice (run still tearing down), the no-live notice
+    # (process already gone — which one depends on teardown timing), or
+    # nothing — never a steer written into the cancelled process.
     notices = [t for t in texts if t.startswith("↪️")]
-    assert notices in ([], [fallback_notice("closing", "claude")])
+    assert notices in (
+        [],
+        [fallback_notice("closing", "claude")],
+        [fallback_notice("no_live", "claude")],
+    )
