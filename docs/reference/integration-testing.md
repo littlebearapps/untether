@@ -300,6 +300,26 @@ Run these in addition to the standard tiers and B-LIVE for rc12. Unless noted, u
 
 ---
 
+## rc13 scenarios (0.35.5rc13)
+
+Claude chat (`5284581592`) unless noted. Background prompts should use `python3 -c "import time; time.sleep(N)"` rather than a bare `sleep N`: the CLI blocks long foreground `sleep` calls inside subagents. Log checks: `journalctl --user -u untether-dev -o cat --since "30 minutes ago" | grep -E "<pattern>"`.
+
+| # | Scenario | What to do | Pass criteria |
+|---|---|---|---|
+| RC13-1 | **Background status ([#777](https://github.com/littlebearapps/untether/issues/777))** | `/planmode auto`; launch a background Agent (40 s Python sleep) plus two background Bash jobs (25 s, 75 s), reply "launched", end the turn; send `/ping` while they run | The progress message shows `⏳ background (N)` rows; after the answer, one **silent** status message replies to the prompt and is edited in place (`🤖 … · tok · tools`, `🐚 … · elapsed`); `/ping` shows `⏳ background: 3 tasks running`; the message finalises to `✅ all 3 background tasks done`. Logs: `background_status.opened` / `.finalised` |
+| RC13-2 | **Wake-ack consolidation ([#785](https://github.com/littlebearapps/untether/issues/785))** | Same as RC13-1, asking for one short sentence per finish and a summary at the end | Short acks appear as `↳` lines in the status message (`live_turn.fold_decision decision=fold`); only the final summary arrives as a new **pushed** 🔔 message; no `🔔 Claude continued` no-op push after it |
+| RC13-3 | **Wake reply anchor ([#795](https://github.com/littlebearapps/untether/issues/795))** | Launch background work from a follow-up that was injected into a live session | The 🔔 message and the status message reply to the follow-up that launched the task, not to the run's first prompt |
+| RC13-4 | **Resumed / orphaned agent ([#801](https://github.com/littlebearapps/untether/issues/801))** | Background Agent prints `first`; on notify, SendMessage it back to run a 60 s Python sleep with `run_in_background=true`; reply with the output | `claude.task.revived`; the orphaned bash (`owned_by_subagent=True`) is listed in the status message and ends `status=completed` (never `killed`); `stdin_closed reason=idle_no_tasks` only after it; the output reaches the chat |
+| RC13-5 | **Steer ([#775](https://github.com/littlebearapps/untether/issues/775))** | (a) run a 40 s foreground Python sleep, then `/steer also tell me the hostname`; (b) `/config` → ↪️ Follow-up → Steer, run `echo hi` + a 400-word story, send a plain message while the story streams; (c) with steer on, `/cancel` a run then send a question; (d) Codex chat: `/steer hi`; then `/queue` to reset | (a) `↪️ Steered into the current run.`, a `↪️ steer received` progress row, one final answering both (`claude.live_session.injected_absorbed`); (b) toast `Follow-up: steer`, the plain message runs as its own turn replying to it; (c) `steer_window_closed reason=cancel` then `↪️ No live Claude run to steer — queued instead.` and a normal resumed answer; (d) `↪️ Steer isn't supported on codex — queued instead.`; an idle live session gets no steer ack |
+| RC13-6 | **Plan label ([#793](https://github.com/littlebearapps/untether/issues/793))** | `/planmode on`: plan A, tap ❌ Deny; in the same session plan B, tap ✅ Approve | The deny final has no `📋 Plan (approved):`; the approve final shows **plan B**; any `claude.plan.stale_input` line shows the file won |
+| RC13-7 | **Turn complete + footer ([#798](https://github.com/littlebearapps/untether/issues/798), [#770](https://github.com/littlebearapps/untether/issues/770))** | Reply to a short prompt, then send a follow-up within 60 s; run U3 | The injected follow-up final ends `· ✓ turn complete`; on U3 only the last chunk has `💰`/`⚡`/`🏷`/`↩️` |
+| RC13-8 | **Rapid prompts + tables ([#794](https://github.com/littlebearapps/untether/issues/794), [#797](https://github.com/littlebearapps/untether/issues/797))** | Send `rapid 1`, `rapid 2`, `rapid 3 — reply with the numbers` back to back; then `ALPHA` + `/codex … BETA` back to back; ask for a 3-row markdown table | One run answering 1, 2, 3 (`forward.prompt.merged merged_count=3`); ALPHA and BETA answered separately (`forward.prompt.flushed reason=directive`); every table row on its own line |
+| RC13-9 | **Logs ([#799](https://github.com/littlebearapps/untether/issues/799), [#800](https://github.com/littlebearapps/untether/issues/800))** | After the above, count `claude.post_result_idle.tick` lines; grep for `Bearer [^[<]` and `eyJ[A-Za-z0-9_-]{10}` | Ticks appear only while an approval or question is pending; no credential shapes in the journal |
+
+**Required for rc13:** Tier 7 + Tier 1 (all 4 supported engines) + Tier 2 (C1, C2, plan approve/deny) + B-LIVE + RC13-1…9.
+
+---
+
 ## Upgrade Path Testing
 
 Run before **minor and major** releases to verify backward compatibility.
