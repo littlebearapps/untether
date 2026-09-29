@@ -893,5 +893,6 @@ def chat_live_background_count(channel_id: Any) -> int:
         try:
             total += int(source())
         except Exception:  # noqa: BLE001
-            continue
+            # A run that is tearing down can't be counted; /ping must not fail.
+            logger.debug("background_status.count_source_failed", exc_info=True)
     return total
