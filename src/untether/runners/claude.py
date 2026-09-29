@@ -969,14 +969,20 @@ class ClaudeStreamState:
     # deleted on approve, so this is the only path to retain the body.
     # #793: set only when a request is approved — never from a denied one.
     last_exitplanmode_plan: str | None = None
-    # #793: plan body per ExitPlanMode control request awaiting a decision
-    # (request_id -> body). Promoted to ``last_exitplanmode_plan`` on
-    # approval, dropped on any denial / timeout.
+    # #793: ExitPlanMode ``input.plan`` per control request awaiting a
+    # decision (request_id -> input, "" when absent). Resolved to the plan
+    # body at decision time — see ``_resolve_exitplanmode_plan``.
     exitplanmode_plans: dict[str, str] = field(default_factory=dict)
     # #793: plan bodies the user explicitly rejected (❌ Deny) in this
-    # process. An approved request whose input is byte-identical is the
-    # CLI's stale-input quirk, not the plan the user just approved.
+    # process — only consulted when the body had to come from the
+    # (possibly stale) ``input.plan`` fallback.
     rejected_exitplanmode_plans: set[str] = field(default_factory=set)
+    # #793: the plan file (``…/.claude/plans/*.md``) this session writes, and
+    # its content when the last write was a full ``Write``. The plan file is
+    # the source of truth: on plan-file CLIs ExitPlanMode's ``input.plan``
+    # lags it by one write when both are issued in the same message.
+    plan_file_path: str | None = None
+    plan_file_content: str | None = None
     # Cumulative seconds the session spent in Anthropic-side rate-limit waits (#349).
     # #790: only *throttling* events accrue (a `rejected` snapshot, or the
     # legacy retry_after_ms/reset-ts shape) — `allowed` heartbeats never do.
@@ -3144,6 +3150,94 @@ def _exitplanmode_plan_input(raw_input: Any) -> str | None:
     return plan if isinstance(plan, str) and plan.strip() else None
 
 
+_PLAN_FILE_MAX_BYTES = 256 * 1024
+_PLAN_FILE_TOOLS = frozenset({"Write", "Edit", "MultiEdit"})
+
+
+def _is_plan_file_path(path: Path) -> bool:
+    """A Claude Code plan file: ``<config dir>/plans/<name>.md`` where the
+    config dir is ``~/.claude`` (any home) or ``$CLAUDE_CONFIG_DIR``."""
+    if not path.is_absolute() or path.suffix != ".md":
+        return False
+    plans = path.parent
+    if plans.name != "plans":
+        return False
+    if plans.parent.name == ".claude":
+        return True
+    config_dir = os.environ.get("CLAUDE_CONFIG_DIR")
+    return bool(config_dir) and plans.parent == Path(config_dir).expanduser()
+
+
+def _observe_plan_file_write(
+    state: ClaudeStreamState, tool_name: str, raw_input: Any
+) -> None:
+    """#793: remember the session's plan file, and its full content when the
+    CLI writes it whole — that content is the plan the next ExitPlanMode is
+    about, whatever its lagging ``input.plan`` says."""
+    if tool_name not in _PLAN_FILE_TOOLS or not isinstance(raw_input, dict):
+        return
+    file_path = raw_input.get("file_path")
+    if not isinstance(file_path, str) or not _is_plan_file_path(Path(file_path)):
+        return
+    state.plan_file_path = file_path
+    content = raw_input.get("content") if tool_name == "Write" else None
+    # An Edit/MultiEdit changes part of the file: read it from disk later.
+    state.plan_file_content = content if isinstance(content, str) else None
+
+
+def _read_plan_file(path_str: str) -> str | None:
+    """Read the plan file, bounded and only if it still resolves to a plan
+    file (no symlink escape). ``None`` on any problem."""
+    try:
+        path = Path(path_str).resolve(strict=True)
+        if not _is_plan_file_path(path) or not path.is_file():
+            return None
+        if path.stat().st_size > _PLAN_FILE_MAX_BYTES:
+            return None
+        return path.read_text(encoding="utf-8", errors="replace")
+    except (OSError, ValueError):
+        return None
+
+
+def _resolve_exitplanmode_plan(
+    state: ClaudeStreamState,
+    request_id: str,
+    input_body: str,
+    *,
+    session_id: str | None,
+    decision: str,
+) -> tuple[str | None, str]:
+    """#793: the plan body a decision on ``request_id`` is about, and where
+    it came from (``write`` / ``file`` / ``input``).
+
+    The plan file wins over ExitPlanMode's ``input.plan``: when the CLI
+    issues the plan-file Write and ExitPlanMode in one message, the input is
+    read before the Write lands and carries the PREVIOUS plan (CLI 2.1.284,
+    dev-bot transcript). A disagreement is logged as the stale-input quirk.
+    """
+    file_body: str | None = None
+    source = "input"
+    if state.plan_file_content is not None and state.plan_file_content.strip():
+        file_body, source = state.plan_file_content, "write"
+    elif state.plan_file_path is not None:
+        disk = _read_plan_file(state.plan_file_path)
+        if disk is not None and disk.strip():
+            file_body, source = disk, "file"
+    if file_body is None:
+        return (input_body or None), "input"
+    if input_body and input_body.strip() != file_body.strip():
+        logger.info(
+            "claude.plan.stale_input",
+            request_id=request_id,
+            session_id=session_id,
+            decision=decision,
+            plan_source=source,
+            input_chars=len(input_body),
+            file_chars=len(file_body),
+        )
+    return file_body, source
+
+
 def _approve_exitplanmode_plan(
     state: ClaudeStreamState,
     request_id: str,
@@ -3154,20 +3248,28 @@ def _approve_exitplanmode_plan(
     """#793: the user approved ExitPlanMode request ``request_id`` (Telegram
     Approve, the ``plan-auto`` stamp, or the post-outline auto-approve) —
     its plan body becomes the one the final answer may re-show."""
-    body = state.exitplanmode_plans.pop(request_id, None)
+    input_body = state.exitplanmode_plans.pop(request_id, None)
+    if input_body is None:
+        return
+    body, plan_source = _resolve_exitplanmode_plan(
+        state, request_id, input_body, session_id=session_id, decision="approved"
+    )
     if body is None:
         return
-    if body in state.rejected_exitplanmode_plans:
-        # The CLI re-sent a plan input the user already denied (seen after a
-        # plan-file rewrite). Labelling it "approved" would be wrong, and an
-        # earlier approved body isn't what the agent now executes — show none.
+    if plan_source == "input" and body in state.rejected_exitplanmode_plans:
+        # No plan file to check against, and the input repeats a plan the
+        # user denied — the stale-input quirk. Labelling it "approved" would
+        # be wrong, and an earlier approved body isn't what the agent now
+        # executes, so show none.
         state.last_exitplanmode_plan = None
         logger.info(
             "claude.plan.stale_input",
             request_id=request_id,
             session_id=session_id,
-            source=source,
-            plan_chars=len(body),
+            decision="approved",
+            plan_source="input",
+            reason="matches_rejected",
+            input_chars=len(body),
         )
         return
     state.last_exitplanmode_plan = body
@@ -3176,28 +3278,39 @@ def _approve_exitplanmode_plan(
         request_id=request_id,
         session_id=session_id,
         source=source,
+        plan_source=plan_source,
         plan_chars=len(body),
     )
 
 
 def _drop_exitplanmode_plan(
-    state: ClaudeStreamState, request_id: str, *, rejected: bool, reason: str
+    state: ClaudeStreamState,
+    request_id: str,
+    *,
+    rejected: bool,
+    reason: str,
+    session_id: str | None = None,
 ) -> None:
     """#793: ExitPlanMode request ``request_id`` was not approved — its body
     is never re-shown. ``rejected`` is the user's explicit ❌ Deny; procedural
     denials (Pause & Outline, Let's discuss, outline guard, timeout) are not
     a verdict on the plan, so a later identical approval still counts."""
-    body = state.exitplanmode_plans.pop(request_id, None)
-    if body is None:
+    input_body = state.exitplanmode_plans.pop(request_id, None)
+    if input_body is None:
         return
+    plan_source = None
     if rejected:
-        state.rejected_exitplanmode_plans.add(body)
+        body, plan_source = _resolve_exitplanmode_plan(
+            state, request_id, input_body, session_id=session_id, decision="denied"
+        )
+        if body is not None:
+            state.rejected_exitplanmode_plans.add(body)
     logger.debug(
         "claude.plan.not_approved",
         request_id=request_id,
         rejected=rejected,
         reason=reason,
-        plan_chars=len(body),
+        plan_source=plan_source,
     )
 
 
@@ -3871,7 +3984,12 @@ def _translate_claude_event_base(
                         # #508/#793: the ExitPlanMode plan body is recorded
                         # from its control_request (keyed by request_id) and
                         # kept only if that request is approved — not here,
-                        # where the user hasn't decided yet.
+                        # where the user hasn't decided yet. The parent's
+                        # plan-file writes are tracked as its source of truth.
+                        if parent_tool_use_id is None:
+                            _observe_plan_file_write(
+                                state, str(content.name or ""), content.input
+                            )
                         out.append(
                             factory.action_started(
                                 action_id=action.id,
@@ -4156,9 +4274,11 @@ def _translate_claude_event_base(
                 isinstance(request, claude_schema.ControlCanUseToolRequest)
                 and getattr(request, "tool_name", "") == "ExitPlanMode"
             ):
-                _epm_body = _exitplanmode_plan_input(getattr(request, "input", {}))
-                if _epm_body is not None:
-                    state.exitplanmode_plans[request_id] = _epm_body
+                # Recorded even without an input body: the plan file may
+                # still supply one at decision time.
+                state.exitplanmode_plans[request_id] = (
+                    _exitplanmode_plan_input(getattr(request, "input", {})) or ""
+                )
 
             # Auto-approve tool requests that don't need user interaction.
             # _DIFF_PREVIEW_TOOLS is module-scoped — see top of file.
@@ -4834,6 +4954,7 @@ class ClaudeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
                     request_id,
                     rejected=rejects_plan,
                     reason="telegram_deny" if rejects_plan else "telegram_procedural",
+                    session_id=plan_session,
                 )
         if approved:
             inner: dict[str, Any] = {"behavior": "allow"}

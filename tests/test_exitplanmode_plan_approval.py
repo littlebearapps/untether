@@ -6,12 +6,17 @@ that repeats a denied plan — reached the final answer labelled "approved".
 The body is now recorded per control ``request_id`` and promoted only when
 that request is approved: the Telegram Approve button, the ``plan-auto``
 rubber stamp, or the post-outline ``_DISCUSS_APPROVED`` auto-approve.
+
+The plan FILE is the source of truth: on plan-file CLIs (2.1.284 dev-bot
+transcript) the plan-file Write and ExitPlanMode are issued in one message and
+``input.plan`` is read before the Write lands, so it carries the previous plan.
 """
 
 from __future__ import annotations
 
 import json
 import time
+from pathlib import Path
 from typing import Any
 from unittest.mock import AsyncMock
 
@@ -224,10 +229,9 @@ async def test_latest_approved_request_wins() -> None:
 
 
 async def test_stale_input_repeating_a_denied_plan_is_not_labelled_approved() -> None:
-    """#793 C1b: the CLI's ExitPlanMode ``plan`` input still carried the
-    denied C2 text although the plan file had been rewritten. Approving that
-    request must not re-show the denied plan as approved — the prepend is
-    skipped and the quirk is logged."""
+    """#793, no plan file known (fallback path): the input repeats a plan the
+    user denied. Approving that request must not re-show the denied plan as
+    approved — the prepend is skipped and the quirk is logged."""
     state, _ = _live_session()
     _exit_plan_mode(state, "req-c2", PLAN_C2)
     await _tap("deny", "req-c2")
@@ -242,7 +246,8 @@ async def test_stale_input_repeating_a_denied_plan_is_not_labelled_approved() ->
     assert stale[0]["log_level"] == "info"
     assert stale[0]["request_id"] == "req-c1b"
     assert stale[0]["session_id"] == SID
-    assert stale[0]["source"] == "telegram"
+    assert stale[0]["plan_source"] == "input"
+    assert stale[0]["reason"] == "matches_rejected"
 
 
 async def test_stale_input_also_clears_an_earlier_approved_plan() -> None:
@@ -383,3 +388,231 @@ async def test_plan_decision_is_turn_scoped() -> None:
         e for e in events if isinstance(e, TurnEvent) and e.phase == "completed"
     ]
     assert turn_done and LABEL not in (turn_done[0].answer or "")
+
+
+# ── the plan file is the source of truth (lagging input.plan) ──────────────
+
+
+def _plans_dir(tmp_path: Path) -> Path:
+    plans = tmp_path / ".claude" / "plans"
+    plans.mkdir(parents=True)
+    return plans
+
+
+def _plan_message(
+    state: ClaudeStreamState,
+    request_id: str,
+    *,
+    tool: str,
+    tool_input: dict[str, Any],
+    epm_input: str,
+    parent_tool_use_id: str | None = None,
+) -> list:
+    """One assistant message carrying the plan-file write AND ExitPlanMode
+    (as observed on CLI 2.1.284), then the ExitPlanMode control_request whose
+    ``input.plan`` is whatever the CLI read — possibly the previous plan."""
+    payload: dict[str, Any] = {
+        "type": "assistant",
+        "message": {
+            "id": f"msg_{request_id}",
+            "role": "assistant",
+            "model": "claude",
+            "content": [
+                {
+                    "type": "tool_use",
+                    "id": f"tu_w_{request_id}",
+                    "name": tool,
+                    "input": tool_input,
+                },
+                {
+                    "type": "tool_use",
+                    "id": f"tu_{request_id}",
+                    "name": "ExitPlanMode",
+                    "input": {"plan": epm_input},
+                },
+            ],
+        },
+    }
+    if parent_tool_use_id is not None:
+        payload["parent_tool_use_id"] = parent_tool_use_id
+    _feed(state, payload)
+    return _feed(
+        state,
+        {
+            "type": "control_request",
+            "request_id": request_id,
+            "request": {
+                "subtype": "can_use_tool",
+                "tool_name": "ExitPlanMode",
+                "input": {"plan": epm_input},
+            },
+        },
+    )
+
+
+PLAN_OLD = "# Plan: create approve-me.txt (rc12-it C1b)\n"
+PLAN_A = "# Plan: create deny-me.txt (rc13-793a)\n"
+PLAN_B = "# Plan: create approve-me.txt (rc13-793b)\n"
+
+
+async def test_lagging_input_approved_plan_comes_from_the_plan_file(
+    tmp_path: Path,
+) -> None:
+    """#793 live repro (CLI 2.1.284): write A + EPM(input=old) → Deny;
+    write B + EPM(input=A) → Approve. The final must show B, never A."""
+    plan_file = str(_plans_dir(tmp_path) / "quiet-bubble.md")
+    state, _ = _live_session()
+    with capture_logs() as logs:
+        _plan_message(
+            state,
+            "req-a",
+            tool="Write",
+            tool_input={"file_path": plan_file, "content": PLAN_A},
+            epm_input=PLAN_OLD,
+        )
+        await _tap("deny", "req-a")
+        _plan_message(
+            state,
+            "req-b",
+            tool="Write",
+            tool_input={"file_path": plan_file, "content": PLAN_B},
+            epm_input=PLAN_A,
+        )
+        await _tap("approve", "req-b")
+    answer = _final(state)
+    assert answer.startswith(LABEL)
+    assert "rc13-793b" in answer
+    assert "deny-me.txt" not in answer
+    stale = [e for e in logs if e["event"] == "claude.plan.stale_input"]
+    assert [(e["request_id"], e["decision"]) for e in stale] == [
+        ("req-a", "denied"),
+        ("req-b", "approved"),
+    ]
+    assert all(e["log_level"] == "info" for e in stale)
+    assert stale[1]["plan_source"] == "write"
+    assert stale[1]["input_chars"] == len(PLAN_A)
+    assert stale[1]["file_chars"] == len(PLAN_B)
+
+
+async def test_plan_auto_with_lagging_input_uses_the_written_plan(
+    tmp_path: Path,
+) -> None:
+    """plan-auto approves at control_request time, possibly before the Write
+    reaches disk — the Write's own content is still the right body."""
+    plan_file = str(_plans_dir(tmp_path) / "p.md")  # never written to disk
+    state, _ = _live_session()
+    state.auto_approve_exit_plan_mode = True
+    _plan_message(
+        state,
+        "req-auto",
+        tool="Write",
+        tool_input={"file_path": plan_file, "content": PLAN_B},
+        epm_input=PLAN_A,
+    )
+    answer = _final(state)
+    assert "rc13-793b" in answer and "deny-me.txt" not in answer
+
+
+async def test_edited_plan_file_is_read_from_disk(tmp_path: Path) -> None:
+    plan_path = _plans_dir(tmp_path) / "p.md"
+    plan_path.write_text(PLAN_B)
+    state, _ = _live_session()
+    with capture_logs() as logs:
+        _plan_message(
+            state,
+            "req-e",
+            tool="Edit",
+            tool_input={
+                "file_path": str(plan_path),
+                "old_string": "rc13-793a",
+                "new_string": "rc13-793b",
+            },
+            epm_input=PLAN_A,
+        )
+        await _tap("approve", "req-e")
+    assert "rc13-793b" in _final(state)
+    stale = [e for e in logs if e["event"] == "claude.plan.stale_input"]
+    assert stale and stale[0]["plan_source"] == "file"
+
+
+async def test_matching_input_logs_nothing(tmp_path: Path) -> None:
+    plan_file = str(_plans_dir(tmp_path) / "p.md")
+    state, _ = _live_session()
+    with capture_logs() as logs:
+        _plan_message(
+            state,
+            "req-ok",
+            tool="Write",
+            tool_input={"file_path": plan_file, "content": PLAN_B},
+            epm_input=PLAN_B,
+        )
+        await _tap("approve", "req-ok")
+    assert "rc13-793b" in _final(state)
+    assert not [e for e in logs if e["event"] == "claude.plan.stale_input"]
+
+
+async def test_unreadable_plan_file_falls_back_to_input(tmp_path: Path) -> None:
+    missing = str(_plans_dir(tmp_path) / "gone.md")
+    state, _ = _live_session()
+    _plan_message(
+        state,
+        "req-m",
+        tool="Edit",
+        tool_input={"file_path": missing, "old_string": "x", "new_string": "y"},
+        epm_input=PLAN_B,
+    )
+    await _tap("approve", "req-m")
+    assert "rc13-793b" in _final(state)
+
+
+async def test_non_plan_file_writes_are_not_tracked(tmp_path: Path) -> None:
+    state, _ = _live_session()
+    _plan_message(
+        state,
+        "req-n",
+        tool="Write",
+        tool_input={"file_path": str(tmp_path / "notes.md"), "content": PLAN_A},
+        epm_input=PLAN_B,
+    )
+    assert state.plan_file_path is None
+    await _tap("approve", "req-n")
+    assert "rc13-793b" in _final(state)
+
+
+async def test_subagent_plan_file_write_is_ignored(tmp_path: Path) -> None:
+    plan_file = str(_plans_dir(tmp_path) / "p.md")
+    state, _ = _live_session()
+    _plan_message(
+        state,
+        "req-s",
+        tool="Write",
+        tool_input={"file_path": plan_file, "content": PLAN_A},
+        epm_input=PLAN_B,
+        parent_tool_use_id="toolu_agent",
+    )
+    assert state.plan_file_path is None
+
+
+def test_plan_file_symlink_escape_and_oversize_are_not_read(tmp_path: Path) -> None:
+    plans = _plans_dir(tmp_path)
+    secret = tmp_path / "secret.md"
+    secret.write_text("secret")
+    link = plans / "link.md"
+    link.symlink_to(secret)
+    assert claude_mod._read_plan_file(str(link)) is None
+    big = plans / "big.md"
+    big.write_text("x" * (claude_mod._PLAN_FILE_MAX_BYTES + 1))
+    assert claude_mod._read_plan_file(str(big)) is None
+    ok = plans / "ok.md"
+    ok.write_text(PLAN_B)
+    assert claude_mod._read_plan_file(str(ok)) == PLAN_B
+
+
+def test_plan_file_path_accepts_claude_config_dir(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config = tmp_path / "cfg"
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(config))
+    assert claude_mod._is_plan_file_path(config / "plans" / "p.md")
+    assert not claude_mod._is_plan_file_path(tmp_path / "other" / "plans" / "p.md")
+    assert not claude_mod._is_plan_file_path(config / "plans" / "p.txt")

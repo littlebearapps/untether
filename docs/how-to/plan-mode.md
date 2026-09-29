@@ -144,7 +144,7 @@ Untether deletes the plan messages once you tap a button. If Claude Code then fi
 
 Only a plan you actually approved gets that header. That means you tapped Approve, `plan-auto` approved it for you, or you tapped Approve Plan after an outline. A plan you denied is never shown there, and neither is one that timed out. **Pause & Outline Plan** and **Let's discuss** don't reject the plan, so if you approve the same plan after the outline or the discussion, it is shown as usual.
 
-Claude Code sometimes sends the text of a plan you already denied along with its next plan request, even though it has rewritten the plan file. When the plan you approve matches a denied one exactly, Untether leaves the plan out of the final message rather than label the denied text as approved ([#793](https://github.com/littlebearapps/untether/issues/793)).
+Claude Code keeps the plan in a plan file and also sends a copy with its plan request. When it writes the file and asks for approval in the same step, that copy can still hold the *previous* plan. Untether takes the plan from the file instead, so the plan under the header is the one you approved. If Claude Code doesn't use a plan file and the copy matches a plan you denied, Untether leaves the plan out rather than label the denied text as approved ([#793](https://github.com/littlebearapps/untether/issues/793)).
 
 ## Per-cron override (scheduled runs) {#cron-override}
 

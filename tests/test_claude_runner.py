@@ -2316,8 +2316,11 @@ def test_translate_exitplanmode_records_plan_body_pending_approval() -> None:
 
 
 def test_translate_exitplanmode_ignores_empty_plan_body() -> None:
-    """#508 — empty/whitespace-only plan bodies are NOT recorded, so an
-    inadvertent retry/empty call can't replace a real approved value."""
+    """#508 — an empty/whitespace-only plan input can't replace a real
+    approved value. (#793: the request is still recorded, with an empty
+    input, because a plan file may supply the body at decision time.)"""
+    from untether.runners.claude import _approve_exitplanmode_plan
+
     state = ClaudeStreamState()
     state.factory._resume = ResumeToken(engine="claude", value="sess-508")
     state.last_exitplanmode_plan = "earlier plan body"
@@ -2338,7 +2341,8 @@ def test_translate_exitplanmode_ignores_empty_plan_body() -> None:
         factory=state.factory,
     )
 
-    assert state.exitplanmode_plans == {}
+    assert state.exitplanmode_plans == {"req_epm_2": ""}
+    _approve_exitplanmode_plan(state, "req_epm_2", session_id=None, source="test")
     assert state.last_exitplanmode_plan == "earlier plan body"
 
 
