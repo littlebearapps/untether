@@ -216,6 +216,7 @@ Verified on 2.1.283 (see `docs/findings/2026-09-27-claude-live-session-probes.md
 - `task_updated.patch.status`: `completed` | `killed`; `task_notification.status`: `completed` | `stopped`.
 - `Monitor` is `task_type: local_bash`; each streamed line starts a new turn with **no** per-line task event; the stream end emits `task_updated` + `task_notification`.
 - `ScheduleWakeup` / `RemoteTrigger` emit **no** task events.
+- Resuming a finished background agent (e.g. `SendMessage` to it) **reuses its `task_id`**: a fresh snapshot lists it again and a new `task_started` follows. Untether revives the ended task instead of leaving it terminal ([#801](https://github.com/littlebearapps/untether/issues/801)).
 - Closing stdin stops live background tasks (`killed` / `stopped`) and the CLI exits rc=0 a few seconds later.
 - On `--resume` after such a stop, the CLI first emits `task_notification{status:"stopped", output_file:""}`, then `system/init`, then a **0-turn result**, then the real turn.
 

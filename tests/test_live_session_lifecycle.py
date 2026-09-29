@@ -131,6 +131,42 @@ async def test_live_task_holds_stdin_open_past_grace_until_wake(
     assert _engine_state(runner).live_close_reason == "idle_no_tasks"
 
 
+async def test_resumed_agent_holds_stdin_open_until_it_finishes(
+    monkeypatch: pytest.MonkeyPatch, quarantine: QuarantineStore
+) -> None:
+    """#801: Claude sends a finished background agent back to work (same
+    task_id). The live session must not idle-close under the resumed agent —
+    it closes only after the re-check finishes and its wake turn delivers."""
+    from structlog.testing import capture_logs
+
+    _settings(monkeypatch)  # 0.3 s idle grace, well under the 1.2 s re-check
+    with capture_logs() as logs:
+        runner, events = await _run("agent_resumed", wake_s=1.2)
+    finals = [e for e in events if isinstance(e, TurnEvent) and e.phase == "completed"]
+    assert [f.answer for f in finals] == [
+        "I've sent it back to re-check, it's running now",
+        "RECHECK DONE",
+    ]
+    state = _engine_state(runner)
+    assert state.live_close_reason == "idle_no_tasks"
+    task = state.tasks["a1"]
+    assert task.revived_count == 1
+    assert task.status == "completed"  # finished itself, not killed on EOF
+    assert runner.current_stream.sigterm_sent is False
+    assert not quarantine.is_quarantined("claude", SID)
+    revived = _events(logs, "claude.task.revived")
+    assert len(revived) == 1 and revived[0]["source"] == "task_started"
+    # Stdin was closed only after the re-check's wake turn.
+    closes = _events(logs, "claude.live_session.stdin_closed")
+    assert len(closes) == 1 and closes[0]["live_tasks"] == 0
+    recheck = next(
+        e
+        for e in logs
+        if e.get("event") == "claude.turn.completed" and e.get("turn") == 3
+    )
+    assert logs.index(recheck) < logs.index(closes[0])
+
+
 async def test_max_hold_emits_notice_then_graceful_close_no_quarantine(
     monkeypatch: pytest.MonkeyPatch, quarantine: QuarantineStore
 ) -> None:

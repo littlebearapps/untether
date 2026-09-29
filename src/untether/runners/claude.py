@@ -22,7 +22,7 @@ import time
 import tty
 import weakref
 from collections import OrderedDict
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncIterator, Callable, Iterable
 from dataclasses import dataclass, field
 from datetime import UTC
 from pathlib import Path
@@ -781,6 +781,13 @@ _DISCUSS_ESCALATION_MESSAGE = (
 # snapshot would otherwise be the only backstop against a pinned session.
 _TASK_LIVE_STATUSES = frozenset({"running", "pending"})
 
+# #801: a snapshot is a provisional signal next to the authoritative
+# task_started / task_updated. Within this window of an end (or a revival) a
+# snapshot that disagrees is taken to straddle those events, not to revive
+# (or re-end) the task: it can neither pin a just-finished task open nor end
+# a just-resumed one. task_started / task_updated always apply at once.
+_TASK_REVIVE_GRACE_S = 5.0
+
 
 @dataclass(slots=True)
 class ClaudeTask:
@@ -803,6 +810,11 @@ class ClaudeTask:
     ended_at: float | None = None
     last_usage: dict[str, Any] | None = None
     last_tool_name: str | None = None
+    # #801: times this task_id came back after ending — Claude resuming a
+    # finished agent (SendMessage) reuses its id. ``started_at`` is reset to
+    # the latest revival, so ``started_at``/``ended_at`` describe the current
+    # run only.
+    revived_count: int = 0
 
     @property
     def is_live_background(self) -> bool:
@@ -2574,6 +2586,47 @@ def _end_task(
     _note_task_end(state, task)
 
 
+def _revive_task(
+    state: ClaudeStreamState, task: ClaudeTask, source: str, status: str = "running"
+) -> None:
+    """#801: bring an ended task back to life. Claude resuming a finished
+    agent reuses its ``task_id``; left terminal, the task reads as idle and
+    the live session closes under the resumed agent."""
+    prior_status = task.status
+    ended_at = task.ended_at
+    task.status = status
+    task.ended_at = None
+    task.started_at = time.monotonic()
+    task.revived_count += 1
+    # Its next end is a new finish (#785): a wake turn may announce it again.
+    state.announced_task_ids.discard(task.task_id)
+    if task.is_live_background:
+        state.background_observed = True
+    log = logger.info if task.is_backgrounded else logger.debug
+    log(
+        "claude.task.revived",
+        task_id=task.task_id,
+        task_type=task.task_type,
+        prior_status=prior_status,
+        ended_ago_s=(
+            round(task.started_at - ended_at, 1) if ended_at is not None else None
+        ),
+        revived_count=task.revived_count,
+        description=(task.description or "")[:80],
+        source=source,
+    )
+
+
+def _mark_announced(state: ClaudeStreamState, task_ids: Iterable[str]) -> None:
+    """#785: record finishes a wake turn delivered — except a task that has
+    been revived since (#801): its next end is news, not the same finish."""
+    for task_id in task_ids:
+        task = state.tasks.get(task_id)
+        if task is not None and task.ended_at is None:
+            continue
+        state.announced_task_ids.add(task_id)
+
+
 def _register_task(
     state: ClaudeStreamState, event: claude_schema.StreamSystemMessage, source: str
 ) -> ClaudeTask:
@@ -2583,6 +2636,8 @@ def _register_task(
     if task is None:
         task = ClaudeTask(task_id=task_id)
         state.tasks[task_id] = task
+    elif task.ended_at is not None and source == "task_started":
+        _revive_task(state, task, source)
     if event.task_type is not None:
         task.task_type = event.task_type
     if event.tool_use_id is not None:
@@ -2622,12 +2677,27 @@ def _apply_task_event(
     if subtype == "background_tasks_changed":
         snapshot = event.tasks or []
         present: set[str] = set()
+        now = time.monotonic()
         for entry in snapshot:
             task_id = entry.get("task_id") if isinstance(entry, dict) else None
             if not isinstance(task_id, str) or not task_id:
                 continue
             present.add(task_id)
-            if task_id not in state.tasks:
+            known = state.tasks.get(task_id)
+            if known is not None and known.ended_at is not None:
+                # #801: a finished task listed again — Claude resumed it (the
+                # snapshot precedes its task_started). A listing moments
+                # after its end straddles the end events instead.
+                if now - known.ended_at >= _TASK_REVIVE_GRACE_S:
+                    _revive_task(state, known, "snapshot")
+                else:
+                    logger.debug(
+                        "claude.task.snapshot_revive_skipped",
+                        task_id=task_id,
+                        status=known.status,
+                        ended_ago_s=round(now - known.ended_at, 1),
+                    )
+            elif known is None:
                 # The snapshot lands a moment before task_started; register a
                 # background placeholder so the gap can't read as "idle".
                 task = ClaudeTask(
@@ -2650,6 +2720,15 @@ def _apply_task_event(
                 )
         for task in list(state.tasks.values()):
             if task.is_live_background and task.task_id not in present:
+                if task.revived_count and now - task.started_at < _TASK_REVIVE_GRACE_S:
+                    # #801: a snapshot from before the revival; the resumed
+                    # run's own task_updated (or a later snapshot) ends it.
+                    logger.debug(
+                        "claude.task.snapshot_end_deferred",
+                        task_id=task.task_id,
+                        revived_ago_s=round(now - task.started_at, 1),
+                    )
+                    continue
                 _end_task(state, task, "ended", "snapshot")
         return
     task_id = event.task_id
@@ -2667,6 +2746,9 @@ def _apply_task_event(
         )
         return
     if subtype == "task_progress":
+        # #801: progress carries no status, so it never revives an ended task
+        # — a straggler must not pin the session; a real resume sends
+        # task_started (and a snapshot listing the id).
         if event.usage is not None:
             task.last_usage = dict(event.usage)
         if event.last_tool_name is not None:
@@ -2676,6 +2758,9 @@ def _apply_task_event(
         status = (event.patch or {}).get("status")
         if isinstance(status, str) and status not in _TASK_LIVE_STATUSES:
             _end_task(state, task, status, "task_updated")
+        elif isinstance(status, str) and task.ended_at is not None:
+            # #801: the CLI's own status patch says it runs again.
+            _revive_task(state, task, "task_updated", status)
         return
     if subtype == "task_notification":
         if event.usage is not None:
@@ -3194,7 +3279,7 @@ def _open_followup_turn(
             # #785: the second wake turn for one finish (the first opened as
             # ``unknown`` and was attributed to it) — the bridge won't push.
             detail["already_announced"] = True
-        state.announced_task_ids.update(ids)
+        _mark_announced(state, ids)
     elif command_uuid is not None:
         reason = "scheduled_wakeup"
     elif monitors := [
@@ -3357,9 +3442,7 @@ def translate_claude_event(
                 # its final gets the real header.
                 detail["tasks"] = [label for _, label in state.turn_ended_tasks]
                 detail["retro_attributed"] = True
-                state.announced_task_ids.update(
-                    tid for tid, _ in state.turn_ended_tasks
-                )
+                _mark_announced(state, (tid for tid, _ in state.turn_ended_tasks))
                 state.turn_reason = "task_finished"
                 logger.info(
                     "claude.turn.retro_attributed",

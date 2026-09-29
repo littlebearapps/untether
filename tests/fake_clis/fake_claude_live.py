@@ -398,6 +398,34 @@ def scenario_agent_wake_unknown_first(first: dict) -> None:
     serve_followups()
 
 
+def scenario_agent_resumed(first: dict) -> None:
+    """#801: a background agent finishes, the wake turn sends it back to
+    re-check (SendMessage) — the CLI reuses the SAME task_id with a fresh
+    snapshot + task_started — and the parent goes idle while it works. The
+    re-check finishes ``FAKE_CLAUDE_WAKE_S`` later and wakes a third turn."""
+    init()
+    tool_use("Agent", "toolu_ag", {"description": "verify", "prompt": "go"})
+    start_bg("a1", "toolu_ag", task_type="local_agent")
+    tool_result("toolu_ag", "Async agent launched successfully.")
+    result("agent started", turns=2)
+    if wait_idle_or_eof(WAKE_S) is None:
+        shutdown()
+    end_bg("a1")
+    init()
+    tool_use("SendMessage", "toolu_sm", {"to": "a1", "message": "re-check 5b"})
+    start_bg("a1", "toolu_ag", task_type="local_agent")
+    tool_result("toolu_sm", "Message sent; agent a1 resumed in the background.")
+    text("I've sent it back to re-check, it's running now")
+    result("I've sent it back to re-check, it's running now", turns=2)
+    if wait_idle_or_eof(WAKE_S) is None:
+        shutdown()
+    end_bg("a1")
+    init()
+    text("RECHECK DONE")
+    result("RECHECK DONE")
+    serve_followups()
+
+
 def scenario_monitor_ticks(first: dict) -> None:
     init()
     tool_use("Monitor", "toolu_mon", {"command": "tick", "timeout_ms": 30000})
@@ -535,6 +563,7 @@ _SCENARIOS = {
     "bg_bash_wake": scenario_bg_bash_wake,
     "bg_agent_wake": scenario_bg_agent_wake,
     "agent_wake_unknown_first": scenario_agent_wake_unknown_first,
+    "agent_resumed": scenario_agent_resumed,
     "monitor_ticks": scenario_monitor_ticks,
     "scheduled_wakeup": scenario_scheduled_wakeup,
     "followup": scenario_followup,
