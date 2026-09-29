@@ -302,7 +302,7 @@ Configure via `[watchdog]`:
 
 Approval-state guard: if `_REQUEST_TO_SESSION` or `_PENDING_ASK_REQUESTS` has live entries for the session the timer re-arms instead of closing — prevents orphaning a button-click `control_response` mid-flight.
 
-Two structlog events for ops: `claude.post_result_idle.deferred` (approval guard fired) and `claude.post_result_idle.closing_stdin` (deadline passed cleanly).
+Two structlog events for ops: `claude.post_result_idle.deferred` (approval guard fired) and `claude.post_result_idle.closing_stdin` (deadline passed cleanly). The per-poll `claude.post_result_idle.tick` (every ≤30 s) logs at INFO only while the timer is armed, or while an approval/ask is pending (`pending_requests`/`pending_asks` > 0 — the "waiting on the user" marker, [#696](https://github.com/littlebearapps/untether/issues/696)); an unarmed tick — every in-progress turn, and every tick of a live session, whose post-result idle `_live_session_lifecycle` owns — is DEBUG. Arming emits one INFO `claude.post_result_idle.armed` edge ([#799](https://github.com/littlebearapps/untether/issues/799)). With live sessions on, the watchdog still owns the #592 pre-result silence cap (each turn) and the #333 stdout-closed-but-alive subcountdown; only its post-result close branch stands down.
 
 #### This watchdog is PERMANENT, not a transitional workaround ([#569](https://github.com/littlebearapps/untether/issues/569))
 

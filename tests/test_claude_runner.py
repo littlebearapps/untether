@@ -4377,6 +4377,134 @@ async def test_post_result_idle_watchdog_exits_reader_done_on_reader_done(
     assert exit_log["reason"] == "reader_done"
 
 
+# ── #799: unarmed post_result_idle ticks are DEBUG, not INFO ────────────────
+
+
+async def _run_idle_watchdog_ticks(
+    monkeypatch, state: ClaudeStreamState, *, timeout_s: float = 600.0
+) -> list[dict]:
+    """Drive ``_post_result_idle_watchdog`` for many fast ticks through a
+    real structlog logger and return the captured log entries."""
+    from untether.runners.claude import ClaudeRunner
+
+    real_sleep = anyio.sleep
+
+    async def fast_sleep(s: float) -> None:
+        await real_sleep(0)
+
+    monkeypatch.setattr("untether.runners.claude.anyio.sleep", fast_sleep)
+
+    class FakeStdin:
+        async def aclose(self) -> None:
+            pass
+
+    reader_done = anyio.Event()
+    runner = ClaudeRunner(claude_cmd="claude")
+    with structlog.testing.capture_logs() as logs:
+        async with anyio.create_task_group() as tg:
+            tg.start_soon(
+                runner._post_result_idle_watchdog,
+                state,
+                FakeStdin(),
+                reader_done,
+                structlog.get_logger("untether.test"),
+                timeout_s,
+            )
+            await real_sleep(0.05)
+            reader_done.set()
+    return logs
+
+
+def _ticks(logs: list[dict]) -> list[dict]:
+    return [lg for lg in logs if lg["event"] == "claude.post_result_idle.tick"]
+
+
+@pytest.mark.anyio
+async def test_post_result_idle_unarmed_tick_logs_at_debug(monkeypatch) -> None:
+    claude_runner._REQUEST_TO_SESSION.clear()
+    claude_runner._PENDING_ASK_REQUESTS.clear()
+    state = ClaudeStreamState()
+    state.factory.started(ResumeToken(engine="claude", value="unarmed-799"))
+
+    logs = await _run_idle_watchdog_ticks(monkeypatch, state)
+
+    ticks = _ticks(logs)
+    assert len(ticks) >= 2, "watchdog should have ticked several times"
+    assert all(t["armed"] is False for t in ticks)
+    assert all(t["log_level"] == "debug" for t in ticks), [
+        t["log_level"] for t in ticks
+    ]
+    assert not any(lg["event"] == "claude.post_result_idle.armed" for lg in logs)
+    # Lifecycle bookends stay INFO.
+    levels = {lg["event"]: lg["log_level"] for lg in logs}
+    assert levels["claude.post_result_idle.task_started"] == "info"
+    assert levels["claude.post_result_idle.task_exited"] == "info"
+
+
+@pytest.mark.anyio
+async def test_post_result_idle_unarmed_tick_waiting_on_user_stays_info(
+    monkeypatch,
+) -> None:
+    # #696's greppable "this run is waiting on the user" marker survives.
+    claude_runner._REQUEST_TO_SESSION.clear()
+    claude_runner._PENDING_ASK_REQUESTS.clear()
+    claude_runner._REQUEST_TO_SESSION["req_799"] = "waiting-799"
+    claude_runner._PENDING_ASK_REQUESTS["req_799"] = (123, "Which one?")
+    try:
+        state = ClaudeStreamState()
+        state.factory.started(ResumeToken(engine="claude", value="waiting-799"))
+        logs = await _run_idle_watchdog_ticks(monkeypatch, state)
+    finally:
+        claude_runner._REQUEST_TO_SESSION.clear()
+        claude_runner._PENDING_ASK_REQUESTS.clear()
+
+    ticks = _ticks(logs)
+    assert ticks
+    assert all(t["log_level"] == "info" for t in ticks)
+    assert all(t["pending_asks"] == 1 for t in ticks)
+
+
+@pytest.mark.anyio
+async def test_post_result_idle_armed_ticks_info_with_single_armed_edge(
+    monkeypatch,
+) -> None:
+    claude_runner._REQUEST_TO_SESSION.clear()
+    claude_runner._PENDING_ASK_REQUESTS.clear()
+    state = ClaudeStreamState()
+    state.factory.started(ResumeToken(engine="claude", value="armed-799"))
+    state.result_received_at = time.monotonic()  # armed, far from timeout
+
+    logs = await _run_idle_watchdog_ticks(monkeypatch, state)
+
+    armed_edges = [lg for lg in logs if lg["event"] == "claude.post_result_idle.armed"]
+    assert len(armed_edges) == 1
+    assert armed_edges[0]["log_level"] == "info"
+    assert armed_edges[0]["session_id"] == "armed-799"
+    ticks = _ticks(logs)
+    assert len(ticks) >= 2
+    assert all(t["armed"] is True and t["log_level"] == "info" for t in ticks)
+    # The edge precedes the first armed tick.
+    assert logs.index(armed_edges[0]) < logs.index(ticks[0])
+
+
+@pytest.mark.anyio
+async def test_post_result_idle_live_mode_never_arms_or_ticks_info(
+    monkeypatch,
+) -> None:
+    # #776: a live session's post-result idle is owned by the lifecycle.
+    claude_runner._REQUEST_TO_SESSION.clear()
+    claude_runner._PENDING_ASK_REQUESTS.clear()
+    state = ClaudeStreamState()
+    state.factory.started(ResumeToken(engine="claude", value="live-799"))
+    state.live_mode = True
+    state.result_received_at = time.monotonic()
+
+    logs = await _run_idle_watchdog_ticks(monkeypatch, state)
+
+    assert not any(lg["event"] == "claude.post_result_idle.armed" for lg in logs)
+    assert not any(t["log_level"] == "info" for t in _ticks(logs))
+
+
 def test_meta_line_renders_turn_complete_marker() -> None:
     """format_meta_line includes the `complete` hint when set on meta."""
     from untether.markdown import format_meta_line

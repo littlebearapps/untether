@@ -5418,7 +5418,9 @@ class ClaudeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
         # started. Without entry/exit/tick logs we can't discriminate
         # them. These logs are intentionally verbose for rc17 — at 30 s
         # poll x hours of session = O(120) lines, trivial; rate-limiting
-        # now would create ambiguity in the next reproduction.
+        # now would create ambiguity in the next reproduction. #799: that
+        # held per session but not per fleet — unarmed ticks are now DEBUG,
+        # with one INFO ``armed`` edge; armed ticks stay INFO.
         #
         # Exception strategy mirrors ``_subprocess_watchdog``
         # (src/untether/runner.py:1010-1079) and
@@ -5438,6 +5440,9 @@ class ClaudeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
             poll_interval_s=poll_interval,
         )
         exit_reason = "loop_exited"
+        # #799: edge-triggered INFO for the idle timer arming, so the
+        # per-tick log can drop to DEBUG while nothing is armed.
+        was_armed = False
         try:
             # #333 Tier 1 entry check: if ``reader_done`` is already set
             # before the first poll (e.g. the JSONL reader finished
@@ -5498,6 +5503,20 @@ class ClaudeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
                         exit_reason = "reader_done"
                         return
                     armed_at = state.result_received_at
+                    # A live session's post-result idle belongs to
+                    # `_live_session_lifecycle` (#776), so it never arms here.
+                    armed_now = armed_at is not None and not state.live_mode
+                    if armed_now and not was_armed:
+                        run_logger.info(
+                            "claude.post_result_idle.armed",
+                            session_id=(
+                                state.factory.resume.value
+                                if state.factory.resume is not None
+                                else None
+                            ),
+                            timeout_s=timeout_s,
+                        )
+                    was_armed = armed_now
                     if armed_at is None:
                         # Pre-result: tick log still useful so we can
                         # confirm the watchdog is alive even before the
@@ -5535,7 +5554,17 @@ class ClaudeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
                             if pre_sid
                             else []
                         )
-                        run_logger.info(
+                        # #799: an unarmed tick is a no-op heartbeat — every
+                        # session, every 30 s, for the whole turn (a quarter
+                        # of nsd's journal on rc12). DEBUG, unless it carries
+                        # the #696 "waiting on the user" signal, which stays
+                        # greppable at INFO.
+                        tick_log = (
+                            run_logger.info
+                            if pre_pending_requests or pre_pending_asks
+                            else run_logger.debug
+                        )
+                        tick_log(
                             "claude.post_result_idle.tick",
                             session_id=pre_sid,
                             armed=False,
