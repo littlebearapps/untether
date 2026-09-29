@@ -36,6 +36,7 @@ from ..config import ConfigError
 from ..events import EventFactory
 from ..logging import get_logger
 from ..model import (
+    TURN_COMPLETE_MARKER,
     Action,
     ActionKind,
     CompletedEvent,
@@ -3879,7 +3880,7 @@ def _translate_claude_event_base(
                     factory.started(
                         resume,
                         title=None,
-                        meta={"complete": "✓ turn complete"},
+                        meta={"complete": TURN_COMPLETE_MARKER},
                     )
                 )
             events_out.append(

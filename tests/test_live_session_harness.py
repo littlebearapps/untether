@@ -202,6 +202,31 @@ async def test_wake_turn_pair_one_push_and_real_header(
     assert not any("Inspect nested agents" in c["message"].text for c in sends)
 
 
+async def test_wake_turn_final_shows_turn_complete_not_its_progress(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#798 end to end: turn 1's final and the wake turn's final both carry
+    the #333 "✓ turn complete" marker; the wake turn's in-flight progress
+    message never does."""
+    from untether.model import TURN_COMPLETE_MARKER
+
+    _watchdog(monkeypatch)
+    transport = await _drive("bg_agent_wake")
+    turn1_final = [
+        c for c in transport.edit_calls if "agent started" in c["message"].text
+    ]
+    assert turn1_final and TURN_COMPLETE_MARKER in turn1_final[-1]["message"].text
+    wake_progress_ref = transport.send_calls[1]["ref"]
+    wake_progress = [transport.send_calls[1]["message"].text] + [
+        c["message"].text for c in transport.edit_calls if c["ref"] == wake_progress_ref
+    ]
+    assert all(TURN_COMPLETE_MARKER not in t for t in wake_progress)
+    wake_final = next(
+        c for c in transport.send_calls if "REPORT: all good" in c["message"].text
+    )
+    assert TURN_COMPLETE_MARKER in wake_final["message"].text
+
+
 async def test_max_hold_sends_closing_notice(monkeypatch: pytest.MonkeyPatch) -> None:
     _watchdog(monkeypatch, post_result_bg_max_hold=0.5)
     transport = await _drive("bg_bash_wake", wake_s=30)

@@ -6,7 +6,7 @@ import signal as _signal
 import threading
 import time
 from collections.abc import Awaitable, Callable, Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
@@ -17,6 +17,7 @@ from .error_hints import get_error_hint as _get_error_hint
 from .logging import bind_run_context, get_logger
 from .markdown import _short_model_name, format_meta_line, render_event_cli
 from .model import (
+    TURN_COMPLETE_MARKER,
     ActionEvent,
     CompletedEvent,
     ResumeToken,
@@ -4826,6 +4827,17 @@ async def handle_message(
             context_line=context_line,
             meta_formatter=format_meta_line,
         )
+        if turn is not None and run_ok is True:
+            # #798: the #333 footer marker. The runner only emits it on the
+            # run's first result, so a live follow-up / wake turn adds it
+            # here — to the final's snapshot only: the turn's tracker (read
+            # by its still-running progress edits) never carries it.
+            state = replace(
+                state,
+                meta_line=format_meta_line(
+                    {**(t_tracker.meta or {}), "complete": TURN_COMPLETE_MARKER}
+                ),
+            )
         final_rendered = effective_presenter.render_final(
             state,
             elapsed_s=elapsed_final,

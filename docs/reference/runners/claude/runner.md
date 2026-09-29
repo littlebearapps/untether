@@ -293,7 +293,7 @@ A companion runtime audit (gated by `[security] env_audit = true`, default true)
 
 After Claude Code emits its final `result` event the bidirectional CLI can sit alive for up to ~36 min before exiting on its own, leaving Untether's progress message looking stuck. The runner now closes that gap two ways:
 
-1. **Footer marker** — every successful `result` event arms a supplementary `StartedEvent` with `meta={"complete": "✓ turn complete"}`, which `markdown.format_meta_line` renders alongside model / effort / permission / trigger so the user sees the turn boundary immediately. Errored results don't emit the hint (no false "complete" tag on a failure).
+1. **Footer marker** — every successful `result` event arms a supplementary `StartedEvent` with `meta={"complete": "✓ turn complete"}`, which `markdown.format_meta_line` renders alongside model / effort / permission / trigger so the user sees the turn boundary immediately. Errored results don't emit the hint (no false "complete" tag on a failure). Live-session follow-up and wake turns get the same marker on their finals from the bridge ([#798](https://github.com/littlebearapps/untether/issues/798)).
 2. **Server-side timer** — `_post_result_idle_watchdog` arms `result_received_at` and closes stdin (`this_proc_stdin.aclose()`) once the deadline passes, after which the CLI hits stdin EOF and exits cleanly (rc=0). Claude's auto-continue safety gate already excludes `last_event_type == "result"` so the clean exit will not phantom-resume the session.
 
 Configure via `[watchdog]`:

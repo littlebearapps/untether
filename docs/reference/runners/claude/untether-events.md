@@ -177,6 +177,8 @@ The terminal event looks like:
 
 Every successful `result` (i.e. `is_error=false`) MAY also emit a supplementary `started` event carrying late-arriving meta — `meta={"complete": "✓ turn complete"}` ([#333](https://github.com/littlebearapps/untether/issues/333)). This is the supported pattern for late-arriving meta documented in `runner-development.md`: `ProgressTracker.note_event` merges meta idempotently so the marker shows up in the footer (`format_meta_line`) alongside model / effort / permission / trigger without duplicating the StartedEvent. Errored results do **not** emit the marker — no false "complete" tag on a failure.
 
+The runner emits this supplementary event only for the result that closes the run. Later turns of a live session ([#776](https://github.com/littlebearapps/untether/issues/776)) end in a `TurnEvent(phase="completed")` instead, so the bridge adds the marker itself: `handle_message`'s `_deliver_final` adds `meta["complete"]` (the shared `untether.model.TURN_COMPLETE_MARKER`) to the final's snapshot for every `ok=True` turn, whatever started it (follow-up, queued follow-up, background-task wake, Monitor tick, scheduled wake-up). The turn's tracker is left alone, so the turn's in-flight progress message never shows the marker; failed and interrupted turns don't get it ([#798](https://github.com/littlebearapps/untether/issues/798)).
+
 #### Permission denials
 
 > **Not yet implemented.** The upstream Claude Code CLI may include

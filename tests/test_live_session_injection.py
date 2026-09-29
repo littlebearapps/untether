@@ -12,7 +12,7 @@ import pytest
 from tests.test_live_session_harness import _drive, _watchdog
 from untether import runner_bridge as rb
 from untether.live_followup import inject_live_followup
-from untether.model import ResumeToken
+from untether.model import TURN_COMPLETE_MARKER, ResumeToken
 from untether.runners import claude as claude_mod
 from untether.runners.claude import (
     ClaudeStreamState,
@@ -242,6 +242,8 @@ async def test_followup_to_live_session_is_injected_not_resumed(
     placeholder = MessageRef(channel_id=123, message_id=99)
     edits = [c for c in transport.edit_calls if "ECHO: again" in c["message"].text]
     assert edits and edits[-1]["ref"] == placeholder
+    # #798: the injected follow-up's final shows "✓ turn complete" too.
+    assert TURN_COMPLETE_MARKER in edits[-1]["message"].text
     assert rb._FOLLOWUP_ANCHORS == {}
     os.environ.pop("FAKE_CLAUDE_SCENARIO", None)
 

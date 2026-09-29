@@ -453,3 +453,160 @@ def test_run_level_edits_stand_down_during_followup_turns() -> None:
     assert edits._is_live_session_idle() is False  # a turn's own edits
     edits.run_level = True
     assert edits._is_live_session_idle() is True  # the run's edits stand down
+
+
+# ── #798: "✓ turn complete" on live follow-up / wake turn finals ────────────
+#
+# Driven through the real handle_message → FollowupTurnRouter → _deliver_final
+# path: ScriptRunner's TurnEvents reach the router exactly like a live
+# ClaudeRunner's do.
+
+from untether.markdown import MarkdownPresenter  # noqa: E402
+from untether.model import (  # noqa: E402
+    TURN_COMPLETE_MARKER,
+    CompletedEvent,
+    ResumeToken,
+    StartedEvent,
+)
+from untether.runner_bridge import (  # noqa: E402
+    ExecBridgeConfig,
+    IncomingMessage,
+    handle_message,
+)
+from untether.runners.mock import Emit, Return, ScriptRunner  # noqa: E402
+
+_TOKEN = ResumeToken(engine="claude", value="sess-798")
+
+
+def _no_usage_fetch(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def _raise() -> dict:
+        raise RuntimeError("no usage API in tests")
+
+    monkeypatch.setattr("untether.utils.usage_cache.fetch_claude_usage_cached", _raise)
+
+
+async def _run_with_turn(
+    *turn_steps: Emit, end_mid_turn: bool = False
+) -> tuple[FakeTransport, MessageRef]:
+    """A run whose first result carried the #333 marker (as the Claude runner
+    sends it), then one live turn. ``end_mid_turn``: the run's result comes
+    first (the real live order) and the stream ends with the turn still open.
+    Returns the transport and the run's own progress ref."""
+    first = CompletedEvent(engine="claude", resume=_TOKEN, ok=True, answer="FIRST")
+    transport = FakeTransport()
+    runner = ScriptRunner(
+        [
+            Emit(StartedEvent(engine="claude", resume=_TOKEN, meta={"model": "opus"})),
+            Emit(
+                StartedEvent(
+                    engine="claude",
+                    resume=_TOKEN,
+                    meta={"complete": TURN_COMPLETE_MARKER},
+                )
+            ),
+            *([Emit(first)] if end_mid_turn else []),
+            *turn_steps,
+            # (end_mid_turn: ScriptRunner's closing CompletedEvent lands in
+            # the still-open turn, as any late event would.)
+            *([] if end_mid_turn else [Return(answer="FIRST")]),
+        ],
+        engine="claude",
+        resume_value=_TOKEN.value,
+    )
+    cfg = ExecBridgeConfig(
+        transport=transport, presenter=MarkdownPresenter(), final_notify=True
+    )
+    await handle_message(
+        cfg,
+        runner=runner,
+        incoming=IncomingMessage(channel_id=1, message_id=10, text="go"),
+        resume_token=None,
+    )
+    return transport, transport.send_calls[0]["ref"]
+
+
+def _turn_texts(
+    transport: FakeTransport, run_progress: MessageRef, answer: str
+) -> tuple[str, list[str]]:
+    """(the turn's final text, every text its progress message showed before
+    it). A pushed final is a new message; a silent one (Monitor tick) edits
+    the progress message in place."""
+    calls = [*transport.send_calls, *transport.edit_calls]
+    finals = [c["message"].text for c in calls if answer in c["message"].text]
+    assert len(finals) == 1
+    progress_refs = {
+        c["ref"]
+        for c in transport.send_calls
+        if c["ref"] != run_progress
+        and answer not in c["message"].text
+        and "FIRST" not in c["message"].text
+    }
+    assert progress_refs, "the turn never showed a progress message"
+    progress = [
+        c["message"].text
+        for c in calls
+        if c["ref"] in progress_refs and answer not in c["message"].text
+    ]
+    return finals[0], progress
+
+
+@pytest.mark.parametrize(
+    "reason",
+    ["followup", "task_finished", "scheduled_wakeup", "monitor_event", "unknown"],
+)
+async def test_turn_final_carries_turn_complete_marker(
+    reason: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#798: every successful live turn final shows the #333 marker, whatever
+    started the turn; the turn's in-flight progress never does (the run's
+    marker is stripped from the turn tracker and the final adds its own to
+    the snapshot only)."""
+    _no_usage_fetch(monkeypatch)
+    transport, run_progress = await _run_with_turn(
+        Emit(_turn("started", reason=reason)),
+        Emit(_action()),
+        Emit(_turn("completed", reason=reason, ok=True, answer="TURN-2-ANSWER")),
+    )
+    final, progress = _turn_texts(transport, run_progress, "TURN-2-ANSWER")
+    assert final.count(TURN_COMPLETE_MARKER) == 1
+    assert "opus" in final  # the run's meta is kept alongside the marker
+    assert all(TURN_COMPLETE_MARKER not in t for t in progress)
+
+
+async def test_failed_turn_final_has_no_turn_complete_marker(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _no_usage_fetch(monkeypatch)
+    transport, run_progress = await _run_with_turn(
+        Emit(_turn("started", reason="followup")),
+        Emit(_action()),
+        Emit(
+            _turn(
+                "completed",
+                reason="followup",
+                ok=False,
+                answer="TURN-2-ANSWER",
+                error="API Error: overloaded",
+            )
+        ),
+    )
+    final, progress = _turn_texts(transport, run_progress, "TURN-2-ANSWER")
+    assert TURN_COMPLETE_MARKER not in final
+    assert all(TURN_COMPLETE_MARKER not in t for t in progress)
+
+
+async def test_interrupted_turn_final_has_no_turn_complete_marker(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A turn the session ended under (router.aclose) is not "complete"."""
+    _no_usage_fetch(monkeypatch)
+    transport, run_progress = await _run_with_turn(
+        Emit(_turn("started", reason="task_finished", detail={"tasks": ["b1"]})),
+        Emit(_action()),
+        end_mid_turn=True,
+    )
+    final, progress = _turn_texts(
+        transport, run_progress, "the session ended before this turn finished"
+    )
+    assert TURN_COMPLETE_MARKER not in final
+    assert all(TURN_COMPLETE_MARKER not in t for t in progress)

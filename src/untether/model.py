@@ -35,6 +35,11 @@ type TurnReason = Literal[
     "unknown",
 ]
 
+# #333: footer marker (``meta["complete"]``) for a finished turn — the session
+# is idle and waiting for the next prompt. The Claude runner adds it on the
+# run's first result; the bridge adds it on each live follow-up turn (#798).
+TURN_COMPLETE_MARKER = "\N{CHECK MARK} turn complete"
+
 type ActionPhase = Literal["started", "updated", "completed"]
 type ActionLevel = Literal["debug", "info", "warning", "error"]
 
