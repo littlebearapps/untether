@@ -249,8 +249,14 @@ trimming instead:
     message_overflow = "trim" # trim | split
     ```
 
-Split mode sends multiple messages. Each chunk includes the footer; follow-up
-chunks add a "continued (N/M)" header.
+Split mode sends multiple messages (~3500 body characters each). Follow-up
+chunks add a "continued (N/M)" header, and only the last chunk carries the
+footer: the meta line, the cost line (`💰`), a budget or run-outlier alert,
+the subscription usage line (`⚡`) and the resume line, in that order
+([#770](https://github.com/littlebearapps/untether/issues/770)). The ~600
+characters of headroom under the limit leave room for every footer line; in
+the rare case one still wouldn't fit, it's sent as a short extra message
+rather than risk Telegram rejecting the whole reply.
 
 ## Forum topics (workspace mode)
 

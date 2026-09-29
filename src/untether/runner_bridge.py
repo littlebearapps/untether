@@ -791,11 +791,7 @@ async def _maybe_append_usage_footer(
         if always_show:
             compact = format_usage_compact(data)
             if compact:
-                footer = f"\n\u26a1 {compact}"
-                return RenderedMessage(
-                    text=_insert_before_resume(msg.text, footer),
-                    extra=msg.extra,
-                )
+                return _insert_footer_line(msg, f"\n\u26a1 {compact}")
             return msg
 
         # Threshold-based warning (existing behaviour)
@@ -820,9 +816,7 @@ async def _maybe_append_usage_footer(
             _7d_part = f" | 7d: {pct_7d:.0f}%" if pct_7d else ""
             footer = f"\n\u26a15h: {pct_5h:.0f}% ({reset}){_7d_part}"
 
-        return RenderedMessage(
-            text=_insert_before_resume(msg.text, footer), extra=msg.extra
-        )
+        return _insert_footer_line(msg, footer)
     except Exception:  # noqa: BLE001 — cosmetic footer must never block final message
         logger.debug("usage_footer.failed", exc_info=True)
         return msg
@@ -1212,12 +1206,80 @@ def _flatten_exception_group(error: BaseException) -> list[BaseException]:
 _RESUME_LINE_MARKER = "\n\n\u21a9\ufe0f "  # ↩️ with variation selector
 
 
-def _insert_before_resume(text: str, insertion: str) -> str:
-    """Insert text before the resume line, or append at end if no resume line."""
-    if _RESUME_LINE_MARKER in text:
-        idx = text.index(_RESUME_LINE_MARKER)
-        return text[:idx] + insertion + text[idx:]
-    return text + insertion
+# Telegram's message text limit; measured in UTF-16 code units here, which is
+# never less than the character count Telegram applies.
+_TELEGRAM_TEXT_LIMIT = 4096
+
+
+def _utf16_len(text: str) -> int:
+    return len(text.encode("utf-16-le")) // 2
+
+
+def _insert_into_chunk(msg: RenderedMessage, insertion: str) -> RenderedMessage:
+    """Insert text before the message's resume line (or at its end if it has
+    none), keeping its entities aligned: those after the insertion point (the
+    resume line's ``code`` span) move by the inserted UTF-16 length."""
+    text = msg.text
+    idx = text.index(_RESUME_LINE_MARKER) if _RESUME_LINE_MARKER in text else len(text)
+    extra = dict(msg.extra)
+    entities = extra.get("entities")
+    if isinstance(entities, list) and entities:
+        at = _utf16_len(text[:idx])
+        delta = _utf16_len(insertion)
+        shifted: list[Any] = []
+        for entity in entities:
+            if isinstance(entity, dict):
+                entity = dict(entity)
+                offset = entity.get("offset", 0)
+                length = entity.get("length", 0)
+                if offset >= at:
+                    entity["offset"] = offset + delta
+                elif offset + length > at:
+                    entity["length"] = length + delta
+            shifted.append(entity)
+        extra["entities"] = shifted
+    return RenderedMessage(text=text[:idx] + insertion + text[idx:], extra=extra)
+
+
+def _insert_footer_line(msg: RenderedMessage, insertion: str) -> RenderedMessage:
+    """Add a footer line (cost, budget alert, #702 outlier, usage) to a final.
+
+    #770: a split final keeps chunk 1 in ``msg.text`` and the rest — the
+    last of which carries the meta/resume footer — in ``extra["followups"]``,
+    so the line goes into the LAST chunk, before its resume line. A line that
+    would push that chunk past Telegram's limit is sent as its own trailing
+    message instead of risking the whole final being rejected.
+    """
+    followups = msg.extra.get("followups")
+    has_followups = (
+        isinstance(followups, list)
+        and bool(followups)
+        and isinstance(followups[-1], RenderedMessage)
+    )
+    last = followups[-1] if has_followups else msg
+    if _utf16_len(last.text) + _utf16_len(insertion) > _TELEGRAM_TEXT_LIMIT:
+        logger.warning(
+            "final.footer_overflow",
+            chunk_len=_utf16_len(last.text),
+            insertion_len=_utf16_len(insertion),
+        )
+        extra_chunk = RenderedMessage(
+            text=insertion.lstrip("\n"),
+            extra={"entities": [], "reply_markup": msg.extra.get("reply_markup")},
+        )
+        return RenderedMessage(
+            text=msg.text,
+            extra={
+                **msg.extra,
+                "followups": [*(followups if has_followups else []), extra_chunk],
+            },
+        )
+    updated = _insert_into_chunk(last, insertion)
+    if not has_followups:
+        return updated
+    return RenderedMessage(
+        text=msg.text, extra={**msg.extra, "followups": [*followups[:-1], updated]}
+    )
 
 
 def _format_error(error: BaseException) -> str:
@@ -4864,20 +4926,14 @@ async def handle_message(
                     if _cost_alert_obj is not None
                     else ""
                 )
-                final_rendered = RenderedMessage(
-                    text=_insert_before_resume(
-                        final_rendered.text,
-                        f"\n\U0001f4b0{cost_line}{budget_suffix}",
-                    ),
-                    extra=final_rendered.extra,
+                # #770: footer lines go on the LAST chunk of a split final.
+                final_rendered = _insert_footer_line(
+                    final_rendered, f"\n\U0001f4b0{cost_line}{budget_suffix}"
                 )
         elif _cost_alert_text:
             # Budget exceeded but cost display is off — show standalone alert
-            final_rendered = RenderedMessage(
-                text=_insert_before_resume(
-                    final_rendered.text, f"\n{_cost_alert_text}"
-                ),
-                extra=final_rendered.extra,
+            final_rendered = _insert_footer_line(
+                final_rendered, f"\n{_cost_alert_text}"
             )
 
         # #702: the outlier notice is deliberately NOT gated on `_show_cost` —
@@ -4886,10 +4942,7 @@ async def handle_message(
         # run's spend, so a configured budget doesn't produce two lines.
         _outlier_text = _check_run_cost_outlier(run_usage)
         if _outlier_text and _cost_alert_obj is None:
-            final_rendered = RenderedMessage(
-                text=_insert_before_resume(final_rendered.text, f"\n{_outlier_text}"),
-                extra=final_rendered.extra,
-            )
+            final_rendered = _insert_footer_line(final_rendered, f"\n{_outlier_text}")
 
         # Append usage footer for Claude Code engine runs
         if runner.engine == "claude":
