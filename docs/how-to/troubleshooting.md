@@ -590,7 +590,7 @@ Look for `handle.worker_failed`, `handle.runner_failed`, or `config.read.toml_er
 
 All logs include `session_id` once a session starts, enabling per-session filtering with `grep` or `jq`.
 
-Telegram bot tokens, OpenAI API keys (`sk-...`), and GitHub tokens (`ghp_`, `ghs_`, `github_pat_`) are automatically redacted in all log output.
+Telegram bot tokens, OpenAI API keys (`sk-...`), GitHub tokens (`ghp_`, `ghs_`, `github_pat_`), `Authorization:`/`Bearer` credentials, JWTs, and `api_key=`/`token=`/`secret=`/`password=` values are automatically redacted in all log output. Token *counts* such as `total_tokens=52000` are left alone.
 
 ## Error hints
 

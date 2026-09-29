@@ -627,8 +627,12 @@ def test_describe_process_redacts_secret_bearing_args(monkeypatch) -> None:
     assert out.startswith("node /opt/mcp-remote/index.js https://mcp.example.com/sse")
     assert "sk-live-abc" not in out
     assert "plain-value-123" not in out
-    assert out.count("<redacted>") == 3  # Bearer arg, --api-key, its value
-    assert out.endswith("--verbose")
+    # #800: the header value, --api-key and its value form one contiguous
+    # redacted run, collapsed to a single marker.
+    assert out == (
+        "node /opt/mcp-remote/index.js https://mcp.example.com/sse"
+        " --header <redacted> --verbose"
+    )
 
 
 def test_describe_process_truncates_and_counts_extra_args(monkeypatch) -> None:
@@ -645,6 +649,107 @@ def test_describe_process_unreadable_returns_none(monkeypatch) -> None:
 
     monkeypatch.setattr(proc_diag, "read_cmdline_argv", lambda pid: None)
     assert proc_diag.describe_process(1) is None
+
+
+# ── #800: argv[0] process titles and truncation must not leak secrets ────────
+
+_FAKE_HEX = "FAKEFAKEFAKE0123456789abcdef0123"
+_FAKE_JWT = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJmYWtlIn0.c2lnbmF0dXJl"
+
+
+def _describe(monkeypatch, argv: list[str], **kwargs) -> str:
+    from untether.utils import proc_diag
+
+    monkeypatch.setattr(proc_diag, "read_cmdline_argv", lambda pid: argv)
+    out = proc_diag.describe_process(1, **kwargs)
+    assert out is not None
+    return out
+
+
+def _assert_no_prefix_leak(out: str, secret: str, min_prefix: int = 4) -> None:
+    """No prefix of ``secret`` of ``min_prefix``+ chars may survive."""
+    for n in range(min_prefix, len(secret) + 1):
+        assert secret[:n] not in out, f"{secret[:n]!r} leaked in {out!r}"
+
+
+def test_describe_process_redacts_argv0_process_title(monkeypatch) -> None:
+    # The nsd repro: the whole command line lives in argv[0] (setproctitle
+    # style), so the old argv[1:]-only scan emitted it verbatim.
+    title = (
+        "mcp --allow-http --transport http-only "
+        f"--header Authorization:Bearer {_FAKE_HEX}"
+    )
+    out = _describe(monkeypatch, [title], max_args=10)
+    _assert_no_prefix_leak(out, _FAKE_HEX)
+    assert out == "mcp --allow-http --transport http-only --header <redacted>"
+    # Default max_args: the token falls past the cut and is only counted.
+    out = _describe(monkeypatch, [title])
+    _assert_no_prefix_leak(out, _FAKE_HEX)
+    assert out == (
+        "mcp --allow-http --transport http-only --header <redacted> (+1 args)"
+    )
+
+
+def test_describe_process_argv0_title_token_early(monkeypatch) -> None:
+    out = _describe(monkeypatch, [f"mcp --header Authorization:Bearer {_FAKE_JWT}"])
+    _assert_no_prefix_leak(out, _FAKE_JWT)
+    assert out == "mcp --header <redacted>"
+
+
+def test_describe_process_argv0_title_token_late(monkeypatch) -> None:
+    # Secret beyond max_args: never shown, only counted.
+    title = f"/usr/bin/mcp a b c d e f --header Authorization:Bearer {_FAKE_HEX}"
+    out = _describe(monkeypatch, [title])
+    _assert_no_prefix_leak(out, _FAKE_HEX)
+    assert out == "mcp a b c d e (+4 args)"
+
+
+def test_describe_process_argv0_title_with_path_in_args(monkeypatch) -> None:
+    # basename() used to run over the whole title, so a later "/" in the
+    # arguments chopped the executable off and left the tail (header and
+    # all) visible — the third nsd child line.
+    title = f"node /srv/mcp/index.js --header Authorization:Bearer a/{_FAKE_HEX}"
+    out = _describe(monkeypatch, [title])
+    _assert_no_prefix_leak(out, _FAKE_HEX)
+    assert out == "node /srv/mcp/index.js --header <redacted>"
+
+
+def test_describe_process_space_separated_bearer_in_one_arg(monkeypatch) -> None:
+    out = _describe(
+        monkeypatch,
+        ["npx", "mcp-remote", "--header", f"Authorization: Bearer {_FAKE_HEX}"],
+    )
+    _assert_no_prefix_leak(out, _FAKE_HEX)
+    assert out == "npx mcp-remote --header <redacted>"
+
+
+def test_describe_process_redacts_before_truncating(monkeypatch) -> None:
+    # A short max_len must not keep the first max_len chars of a secret.
+    out = _describe(
+        monkeypatch,
+        ["srv", f"--token={_FAKE_HEX}", f"Bearer{_FAKE_HEX}", "--verbose"],
+        max_len=12,
+    )
+    _assert_no_prefix_leak(out, _FAKE_HEX)
+    assert out == "srv <redacted> --verbose"
+
+
+def test_describe_process_long_argv0_title_truncation_no_leak(monkeypatch) -> None:
+    # Even when the executable token itself is secret-bearing and long.
+    out = _describe(monkeypatch, [f"Bearer:{_FAKE_HEX} --x"], max_len=10)
+    _assert_no_prefix_leak(out, _FAKE_HEX)
+    assert out == "<redacted> --x"
+
+
+def test_describe_process_redacts_bare_jwt(monkeypatch) -> None:
+    out = _describe(monkeypatch, ["mcp-proxy", _FAKE_JWT, "--port", "8080"])
+    _assert_no_prefix_leak(out, _FAKE_JWT)
+    assert out == "mcp-proxy <redacted> --port 8080"
+
+
+def test_describe_process_keeps_benign_title(monkeypatch) -> None:
+    out = _describe(monkeypatch, ["npm exec firecrawl-mcp"])
+    assert out == "npm exec firecrawl-mcp"
 
 
 def test_read_wchan_missing_pid_returns_none() -> None:

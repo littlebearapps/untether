@@ -212,7 +212,59 @@ def read_wchan(pid: int) -> str | None:
     return raw if raw and raw != "0" else None
 
 
-_SECRETISH = ("token", "secret", "key", "auth", "bearer", "password", "passwd")
+_SECRETISH = (
+    "token",
+    "secret",
+    "key",
+    "auth",
+    "bearer",
+    "password",
+    "passwd",
+    "credential",
+    "cookie",
+)
+# Flags whose value is a header line ("Name: value"): the value is hidden
+# whatever the header name, the flag itself stays visible.
+_HEADER_FLAGS = frozenset({"-H", "--header", "--headers", "--http-header"})
+# Auth schemes that precede the credential proper ("Bearer <token>").
+_AUTH_SCHEMES = ("bearer", "basic", "token", "digest")
+_REDACTED = "<redacted>"
+
+
+def _is_secret_token(token: str) -> bool:
+    lowered = token.lower()
+    if any(word in lowered for word in _SECRETISH):
+        return True
+    # A JWT (base64url JSON header) needs no keyword to be a credential.
+    return token.strip("\"'").startswith("eyJ") and len(token) >= 16
+
+
+def _opens_secret_value(token: str) -> bool:
+    """Does a redacted ``token`` introduce a value that must also go?
+
+    ``--api-key`` (bare flag), ``Authorization:`` / ``X-Api-Key=`` (a name
+    awaiting its value) and ``Bearer`` (a scheme awaiting its credential).
+    """
+    if token.startswith("-") and "=" not in token:
+        return True
+    lowered = token.lower().strip("\"'")
+    return lowered.endswith((":", "=")) or lowered.endswith(_AUTH_SCHEMES)
+
+
+def _argv_tokens(argv: list[str]) -> list[str]:
+    """Whitespace-split every argv element.
+
+    #800: some processes (setproctitle-style MCP servers) carry their whole
+    command line in ``argv[0]``, and a single element can hold a full
+    header line (``"Authorization: Bearer …"``). Splitting first means the
+    executable is just the first word — not ``basename()`` of the title,
+    which a later ``/`` in the arguments would cut mid-string — and every
+    word goes through the redaction scan.
+    """
+    tokens: list[str] = []
+    for arg in argv:
+        tokens.extend(arg.split())
+    return tokens
 
 
 def describe_process(pid: int, *, max_args: int = 5, max_len: int = 80) -> str | None:
@@ -221,26 +273,43 @@ def describe_process(pid: int, *, max_args: int = 5, max_len: int = 80) -> str |
     #791: child processes of a wedged Claude CLI are usually MCP servers
     whose argv can carry credentials (``--header Authorization:Bearer …``,
     ``--api-key …``). Keeps the executable basename plus the first
-    ``max_args`` arguments, truncates each, and replaces any argument that
-    looks secret-bearing — and the one following a secret-looking flag —
-    with ``<redacted>``. Returns None when the cmdline is unreadable.
+    ``max_args`` arguments and replaces any argument that looks
+    secret-bearing — and the value a secret-looking flag, header name or
+    auth scheme introduces — with ``<redacted>`` (a contiguous run collapses
+    to one marker). #800: ``argv[0]`` is scanned too, elements are split on
+    whitespace first, and redaction is decided on the whole token *before*
+    truncating to ``max_len``, so no prefix of a secret survives the cut.
+    Returns None when the cmdline is unreadable.
     """
     argv = read_cmdline_argv(pid)
     if not argv:
         return None
-    out = [os.path.basename(argv[0])[:max_len]]
+    tokens = _argv_tokens(argv)
+    if not tokens:
+        return None
+
+    def _shown(token: str) -> str:
+        return token if len(token) <= max_len else token[: max_len - 1] + "…"
+
+    exe = os.path.basename(tokens[0]) or tokens[0]
+    out: list[str] = []
     redact_next = False
-    for arg in argv[1 : 1 + max_args]:
-        lowered = arg.lower()
-        if redact_next or any(word in lowered for word in _SECRETISH):
-            out.append("<redacted>")
-            # A bare flag (``--api-key``) hides the value that follows it.
-            redact_next = arg.startswith("-") and "=" not in arg
+    if _is_secret_token(tokens[0]):
+        out.append(_REDACTED)
+        redact_next = _opens_secret_value(tokens[0])
+    else:
+        out.append(_shown(exe))
+    rest = tokens[1:]
+    for token in rest[:max_args]:
+        if redact_next or _is_secret_token(token):
+            if out[-1] != _REDACTED:
+                out.append(_REDACTED)
+            redact_next = _opens_secret_value(token)
             continue
-        redact_next = False
-        out.append(arg if len(arg) <= max_len else arg[: max_len - 1] + "…")
-    if len(argv) > 1 + max_args:
-        out.append(f"(+{len(argv) - 1 - max_args} args)")
+        out.append(_shown(token))
+        redact_next = token in _HEADER_FLAGS
+    if len(rest) > max_args:
+        out.append(f"(+{len(rest) - max_args} args)")
     return " ".join(out)
 
 
