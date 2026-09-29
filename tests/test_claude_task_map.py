@@ -227,6 +227,9 @@ def test_task_progress_records_usage() -> None:
         "duration_ms": 4314,
     }
     assert task.last_tool_name == "Bash"
+    # #777: the progress description is the current step, not the label.
+    assert task.last_step == "Running step"
+    assert task.description == "Research the thing"
 
 
 def test_background_tasks_changed_snapshot_reconciles_missing_task() -> None:

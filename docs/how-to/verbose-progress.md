@@ -80,7 +80,7 @@ Control how many actions appear in the progress message. Actions beyond this lim
 Set to `0` to hide the action list entirely, or increase it to see more history.
 
 !!! tip "Hot-reload"
-    `[progress]` settings (`verbosity`, `max_actions`, `heartbeat_interval`, `min_render_interval`, `group_chat_rps`) hot-reload — editing them in `untether.toml` applies on the next run without restart ([#269](https://github.com/littlebearapps/untether/issues/269)).
+    `[progress]` settings (`verbosity`, `max_actions`, `heartbeat_interval`, `min_render_interval`, `group_chat_rps`, `show_background_tasks`, `background_tasks_max_rows`) hot-reload — editing them in `untether.toml` applies on the next run without restart ([#269](https://github.com/littlebearapps/untether/issues/269)).
 
 ## Long-running tool tail (heartbeat)
 
@@ -94,6 +94,38 @@ In **verbose** mode the tool's `format_verbose_detail` line additionally renders
 - `KillShell` — target shell id
 
 Tune the heartbeat tick via `[progress] heartbeat_interval` (5–120 s, default 30 s) — every tick walks the open-action set and forces a re-render whenever any action is older than 60 s. Strict "rolling stdout sub-line every 5 s" cannot be achieved without upstream Claude Code changes; the BashOutput-polling path is the proxy and refreshes at each polling cycle (~15 s in practice).
+
+## Background tasks (Claude)
+
+When Claude launches background work — a background `Agent`, `Bash run_in_background`, or a `Monitor` — Untether shows it live, using the task events Claude Code already reports ([#777](https://github.com/littlebearapps/untether/issues/777)).
+
+**While the run is working**, the progress message gets a block below the action lines, one row per running background task:
+
+```
+⏳ background (2)
+🤖 verifier · 3m12s · 52k tok · 7 tools · Running tests
+🐚 gh run watch · 1m05s
+```
+
+Agents (🤖) show elapsed time, tokens, tool calls and the current step; shell tasks and Monitors (🐚) show elapsed time. Only tasks Claude launched itself are listed — a subagent's own tool calls are not. "tok" counts tokens (it includes cached and system-prompt tokens), not cost. The block refreshes with the progress message and on the heartbeat tick.
+
+**After Claude answers**, if background work is still running, Untether sends one silent status message replying to the prompt that launched it and edits it in place — at most every 30 s, sooner when a task finishes:
+
+```
+⏳ background (1) · 1 done
+🤖 verifier · 4m02s · 58k tok · 9 tools · Running tests
+✅ gh run watch done · 1m40s
+```
+
+When the last task finishes the message is finalised (`✅ all 2 background tasks done`, with ❌ failed / ⏹️ stopped rows where relevant). If the session closes first — `/cancel`, `/new`, the background hold limit, a restart — the remaining rows are marked ⏹️ stopped with the reason, so the message never keeps saying "running". Claude's own report on a finished task still arrives as a normal message. `/ping` shows `⏳ background: N tasks running` for the chat while any are live.
+
+=== "toml"
+
+    ```toml title="~/.untether/untether.toml"
+    [progress]
+    show_background_tasks = true      # default true
+    background_tasks_max_rows = 5     # 1-20; "+N more" beyond it
+    ```
 
 ## Per-chat override
 

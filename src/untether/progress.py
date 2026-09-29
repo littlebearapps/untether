@@ -35,6 +35,8 @@ class ProgressState:
     resume_line: str | None
     context_line: str | None
     meta_line: str | None = None
+    # #777: pre-result background-task block (markdown), set by the bridge.
+    background: str | None = None
 
 
 class ProgressTracker:

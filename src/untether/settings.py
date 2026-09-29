@@ -659,6 +659,11 @@ class ProgressSettings(BaseModel):
     # stall_check_interval) and only runs the threshold check at the slower
     # cadence. Range 5s-120s.
     heartbeat_interval: float = Field(default=30.0, ge=5, le=120)
+    # #777: live background-task status (Claude). The pre-result block in the
+    # progress message plus the post-result status message, and its row cap
+    # ("+N more" beyond it).
+    show_background_tasks: bool = True
+    background_tasks_max_rows: int = Field(default=5, ge=1, le=20)
 
 
 _ENV_NAME_RE = re.compile(r"^[A-Z_][A-Z0-9_]*$")

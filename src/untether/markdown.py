@@ -495,6 +495,9 @@ class MarkdownFormatter:
             engine=state.engine,
         )
         body = self._assemble_body(self._format_actions(state, now=now))
+        if state.background:
+            # #777: live background tasks, below the action lines.
+            body = f"{body}\n\n{state.background}" if body else state.background
         return MarkdownParts(
             header=header, body=body, footer=self._format_footer(state)
         )

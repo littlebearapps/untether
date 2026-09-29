@@ -816,6 +816,9 @@ class ClaudeTask:
     # the latest revival, so ``started_at``/``ended_at`` describe the current
     # run only.
     revived_count: int = 0
+    # #777: the agent's current step from ``task_progress.description``
+    # ("Running <step>") — kept apart from ``description`` (the task's label).
+    last_step: str | None = None
 
     @property
     def is_live_background(self) -> bool:
@@ -2762,6 +2765,10 @@ def _apply_task_event(
             task.last_usage = dict(event.usage)
         if event.last_tool_name is not None:
             task.last_tool_name = event.last_tool_name
+        if event.description:
+            # #777: on task_progress the description is the agent's current
+            # step ("Running tests"), not the task's label.
+            task.last_step = event.description
         return
     if subtype == "task_updated":
         status = (event.patch or {}).get("status")

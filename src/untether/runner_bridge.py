@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import contextlib
+import dataclasses
 import os
 import signal as _signal
 import threading
@@ -12,6 +13,13 @@ from typing import Any
 
 import anyio
 
+from .background_status import (
+    BackgroundStatusManager,
+    live_top_level,
+    register_live_count_source,
+    render_background_block,
+    unregister_live_count_source,
+)
 from .context import RunContext
 from .error_hints import get_error_hint as _get_error_hint
 from .logging import bind_run_context, get_logger
@@ -1490,6 +1498,19 @@ class ProgressEdits:
         self._outline_refs: list[MessageRef] = []
         self._outline_just_resolved: bool = False
         self.signal_send, self.signal_recv = anyio.create_memory_object_stream(1)
+        # #777: renders the pre-result "⏳ background (N)" block (markdown)
+        # from the run's native task map; None when off / not Claude.
+        self.background_provider: Callable[[], str | None] | None = None
+
+    def _background_block(self) -> str | None:
+        provider = self.background_provider
+        if provider is None:
+            return None
+        try:
+            return provider()
+        except Exception:  # noqa: BLE001 — cosmetic; never break a render
+            logger.debug("progress_edits.background_block_failed", exc_info=True)
+            return None
 
     async def run(self) -> None:
         if self.progress_ref is None:
@@ -1577,6 +1598,13 @@ class ProgressEdits:
             # Hand the message off to the bridge's async send via a
             # one-element queue field.
             self._pending_closing_message = text
+
+        # 4) #777: live background tasks report progress via system events
+        #    that produce no Untether event — refresh their block (elapsed,
+        #    tokens, current step) on the heartbeat.
+        if not self._finalizing and self._background_block() is not None:
+            self._bump_heartbeat()
+            return
 
         # 3) Long-running tail refresh — bump event_seq so the renderer
         #    redraws with the fresh elapsed-time tail.
@@ -3046,6 +3074,8 @@ class ProgressEdits:
                 context_line=self.context_line,
                 meta_formatter=format_meta_line,
             )
+            if (block := self._background_block()) is not None:
+                state = dataclasses.replace(state, background=block)
             rendered = self.presenter.render_progress(
                 state,
                 elapsed_s=now - self.started_at,
@@ -4566,6 +4596,21 @@ async def handle_message(
     # pattern above).
     edits._heartbeat_interval = progress_cfg.heartbeat_interval
 
+    # ── #777 live background-task status ──────────────────────────────────
+    def _bg_tasks() -> list[Any]:
+        # The run's own native task map (Claude); empty for other engines.
+        tasks = getattr(getattr(edits.stream, "engine_state", None), "tasks", None)
+        return list(tasks.values()) if isinstance(tasks, dict) else []
+
+    if progress_cfg.show_background_tasks:
+        _bg_max_rows = progress_cfg.background_tasks_max_rows
+        edits.background_provider = lambda: render_background_block(
+            _bg_tasks(), now=time.monotonic(), max_rows=_bg_max_rows
+        )
+    _bg_count_token = register_live_count_source(
+        incoming.channel_id, lambda: len(live_top_level(_bg_tasks()))
+    )
+
     # #591: early final-answer delivery. The answer exists the moment the
     # CompletedEvent arrives, but the run generator may not return for up to
     # the post-result limbo window (MCP children holding the subprocess open
@@ -5071,6 +5116,8 @@ async def handle_message(
             from .runners.claude import add_live_session_listener
 
             add_live_session_listener(sid.value, _on_live_notice)
+        # #777: background work outlives the answer — open its status message.
+        await _bg_after_turn()
 
     def _new_turn_tracker() -> ProgressTracker:
         tracker = ProgressTracker(engine=runner.engine, clock=clock)
@@ -5144,6 +5191,8 @@ async def handle_message(
     async def _deliver_turn(completed: CompletedEvent, ctx: _TurnCtx) -> None:
         await _deliver_final(completed, RunOutcome(resume=completed.resume), turn=ctx)
         await _deliver_outbox_now(ctx.reply_to.message_id)
+        # #777: a later turn may have launched (more) background work.
+        await _bg_after_turn()
 
     async def _resolve_unrun_followups() -> None:
         """Follow-ups written into the live session whose turn never started
@@ -5190,6 +5239,39 @@ async def handle_message(
         clock=clock,
     )
 
+    bg_status = BackgroundStatusManager(
+        transport=cfg.transport,
+        channel_id=incoming.channel_id,
+        thread_id=incoming.thread_id,
+        tasks_source=_bg_tasks,
+        anchor_for=lambda _live: turn_router.last_reply_to,
+        settings_source=_load_progress_settings,
+        persistence_path=_PROGRESS_PERSISTENCE_PATH,
+    )
+    bg_status_scope = anyio.CancelScope()
+
+    async def _bg_after_turn() -> None:
+        try:
+            await bg_status.after_turn()
+        except Exception:  # noqa: BLE001 — the status message is best-effort
+            logger.warning("background_status.after_turn_failed", exc_info=True)
+
+    async def _run_bg_status() -> None:
+        try:
+            with bg_status_scope:
+                await bg_status.run()
+        except cancel_exc_type:
+            return
+
+    def _bg_close_reason() -> str | None:
+        engine_state = getattr(edits.stream, "engine_state", None)
+        reason = getattr(engine_state, "live_close_reason", None)
+        if isinstance(reason, str):
+            return reason
+        if running_task is not None and running_task.cancel_requested.is_set():
+            return "cancel"
+        return None
+
     cancel_exc_type = anyio.get_cancelled_exc_class()
     edits_scope = anyio.CancelScope()
 
@@ -5207,6 +5289,7 @@ async def handle_message(
     async with anyio.create_task_group() as tg:
         if progress_ref is not None:
             tg.start_soon(run_edits)
+        tg.start_soon(_run_bg_status)
         turn_task_group["tg"] = tg
         turn_router.bind_task_group(tg)
 
@@ -5235,6 +5318,13 @@ async def handle_message(
             with anyio.move_on_after(60, shield=True):
                 await turn_router.aclose()
                 await _resolve_unrun_followups()
+                # #777: never leave a status message saying "running".
+                try:
+                    await bg_status.aclose(_bg_close_reason())
+                except Exception:  # noqa: BLE001
+                    logger.warning("background_status.close_failed", exc_info=True)
+            bg_status_scope.cancel()
+            unregister_live_count_source(_bg_count_token)
             if running_task is not None and running_tasks is not None:
                 running_task.done.set()
                 if progress_ref is not None:

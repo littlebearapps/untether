@@ -239,11 +239,13 @@ Controls progress message rendering during agent runs.
 | `verbosity` | `"compact"` \| `"verbose"` | `"compact"` | `compact` shows status + title only. `verbose` adds tool detail lines (file paths, commands, patterns). |
 | `max_actions` | int (0–50) | `5` | Maximum action lines shown in the progress message. |
 | `heartbeat_interval` | int (5–120) | `30` | Heartbeat tick that re-renders progress messages so long-running tools surface an elapsed-time tail (e.g. `▸ Bash · 3m 47s · npm run build`) without waiting for the next JSONL event ([#481](https://github.com/littlebearapps/untether/issues/481)). |
+| `show_background_tasks` | bool | `true` | Claude only. Show live background tasks (background agents, background Bash, Monitors): a `⏳ background (N)` block in the progress message, then one silent status message after the answer, edited in place and finalised when the tasks end ([#777](https://github.com/littlebearapps/untether/issues/777)). |
+| `background_tasks_max_rows` | int (1–20) | `5` | Row cap for the background block and status message; extra tasks collapse into `+N more`. |
 
 Per-chat override: `/verbose on` and `/verbose off` override the config default for the current chat without editing the TOML file. `/verbose clear` removes the override.
 
 !!! tip "Hot-reload"
-    Editing `[progress]` in `untether.toml` applies on the next run without restart ([#269](https://github.com/littlebearapps/untether/issues/269)). The default presenter and per-chat `/verbose` overrides both pick up the new values.
+    Editing `[progress]` in `untether.toml` applies on the next run without restart ([#269](https://github.com/littlebearapps/untether/issues/269)). The default presenter and per-chat `/verbose` overrides both pick up the new values. The background-task keys are re-read at each turn of a live session and on each status-message refresh.
 
 ## `cost_budget`
 
