@@ -439,3 +439,198 @@ def test_render_markdown_non_target_names_unchanged(md: str) -> None:
 
     assert text == md
     assert _code_spans(text, entities) == []
+
+
+# ---------------------------------------------------------------------------
+# #797 — markdown pipe tables keep one row per line (commonmark has no table
+# rule, so rows used to collapse into one run-on line of pipes)
+# ---------------------------------------------------------------------------
+
+
+def _bold_spans(text: str, entities: list[dict]) -> list[str]:
+    return [
+        text[e["offset"] : e["offset"] + e["length"]]
+        for e in entities
+        if e.get("type") == "bold"
+    ]
+
+
+def test_render_markdown_pipe_table_rows_stay_on_own_lines() -> None:
+    """The issue's local repro."""
+    text, entities = render_markdown(
+        "Intro line.\n\n| A | B |\n|---|---|\n| 1 | 2 |\n| 3 | 4 |\n\nAfter."
+    )
+
+    assert text == "Intro line.\n\n| A | B |\n| 1 | 2 |\n| 3 | 4 |\n\nAfter."
+    # The separator row carries no content; the header is bolded instead.
+    assert _bold_spans(text, entities) == ["| A | B |"]
+
+
+def test_render_markdown_pipe_table_live_example_research() -> None:
+    """nsd-research msg 7736 (#797): a 3-column comparison table."""
+    md = (
+        "| What the report says | With Search Console + DataForSEO "
+        "| DataForSEO only |\n"
+        "|---|---|---|\n"
+        "| Where you show up today | High: Google's own record "
+        "| Directional: estimates |\n"
+        "| Pages to build (demand with no page) | High | Medium: modelled |\n"
+        "| Pages to improve (ranking but not well) | High: exact | Low: sampled |\n"
+        "| Measuring results after changes | Possible | Not possible |"
+    )
+    text, _ = render_markdown(md)
+
+    lines = text.split("\n")
+    assert lines == [
+        "| What the report says | With Search Console + DataForSEO | DataForSEO only |",
+        "| Where you show up today | High: Google's own record "
+        "| Directional: estimates |",
+        "| Pages to build (demand with no page) | High | Medium: modelled |",
+        "| Pages to improve (ranking but not well) | High: exact | Low: sampled |",
+        "| Measuring results after changes | Possible | Not possible |",
+    ]
+    assert "---" not in text
+
+
+def test_render_markdown_pipe_table_live_example_answers() -> None:
+    """nsd-main msg 10234 (#797): 2 columns, underscores/parens in cells."""
+    md = (
+        "The four answers:\n\n"
+        "| Answer | Meaning |\n"
+        "|---|---|\n"
+        "| Found them (VERIFIED_RELEVANT_PERSON) | A named person in a deciding role |\n"
+        "| Role unclear (ROLE_UNRESOLVED) | Someone found, role not confirmed |\n"
+        "| Looked, nobody listed (NOT_FOUND) | Searched, no one listed |\n"
+        "| Never looked (NOT_CHECKED, now also NOT_RUN) | Not searched yet |\n\n"
+        "Pick one."
+    )
+    text, entities = render_markdown(md)
+
+    assert text == (
+        "The four answers:\n\n"
+        "| Answer | Meaning |\n"
+        "| Found them (VERIFIED_RELEVANT_PERSON) | A named person in a deciding role |\n"
+        "| Role unclear (ROLE_UNRESOLVED) | Someone found, role not confirmed |\n"
+        "| Looked, nobody listed (NOT_FOUND) | Searched, no one listed |\n"
+        "| Never looked (NOT_CHECKED, now also NOT_RUN) | Not searched yet |\n\n"
+        "Pick one."
+    )
+    assert _bold_spans(text, entities) == ["| Answer | Meaning |"]
+
+
+def test_render_markdown_pipe_table_inline_code_and_formatting_kept() -> None:
+    md = "| Cmd | Effect |\n|:--|--:|\n| `a|b` | **bold** and CLAUDE.md |\n| `x` | y |"
+    text, entities = render_markdown(md)
+
+    assert text.split("\n") == [
+        "| Cmd | Effect |",
+        "| a|b | bold and CLAUDE.md |",
+        "| x | y |",
+    ]
+    assert _code_spans(text, entities) == ["a|b", "CLAUDE.md", "x"]
+    assert "bold" in _bold_spans(text, entities)
+
+
+def test_render_markdown_pipe_table_header_already_bold_not_double_wrapped() -> None:
+    text, entities = render_markdown("| **A** | B |\n|---|---|\n| 1 | 2 |")
+
+    assert text == "| A | B |\n| 1 | 2 |"
+    assert _bold_spans(text, entities) == ["A"]
+
+
+def test_render_markdown_pipe_table_br_in_cell_stays_space() -> None:
+    """#786 kept: a `<br>` in a cell is a space so the row isn't split."""
+    text, _ = render_markdown("| a<br>b | c |\n|---|---|\n| d<br/>e | f |")
+
+    assert text == "| a b | c |\n| d e | f |"
+
+
+def test_render_markdown_pipe_table_directly_after_paragraph() -> None:
+    """No blank line: commonmark folds the table into the paragraph."""
+    text, _ = render_markdown(
+        "Here is the comparison:\n| A | B |\n|---|---|\n| 1 | 2 |\nThat's it."
+    )
+
+    assert text == "Here is the comparison:\n| A | B |\n| 1 | 2 |\nThat's it."
+
+
+def test_render_markdown_br_before_table_in_same_paragraph_single_break() -> None:
+    text, _ = render_markdown("Intro<br>\n| A | B |\n|---|---|\n| 1 | 2 |")
+
+    assert text == "Intro\n| A | B |\n| 1 | 2 |"
+
+
+def test_render_markdown_pipe_table_without_outer_pipes() -> None:
+    text, _ = render_markdown("A | B\n--- | ---\n1 | 2\n3 | 4")
+
+    assert text == "A | B\n1 | 2\n3 | 4"
+
+
+@pytest.mark.parametrize(
+    "md",
+    [
+        # A pipe in prose: no delimiter row, so not a table.
+        "Use a | b to pipe\nand then stop.",
+        # A lone pipe-led line.
+        "| not a table\nnext line",
+        # Pipe-led rows with no delimiter row stay as they always were.
+        "| a | b |\n| c | d |",
+    ],
+)
+def test_render_markdown_pipe_lines_without_delimiter_not_a_table(md: str) -> None:
+    text, entities = render_markdown(md)
+
+    assert text == md.replace("\n", " ")
+    assert _bold_spans(text, entities) == []
+
+
+def test_render_markdown_pipe_table_in_fenced_block_untouched() -> None:
+    md = "```\n| A | B |\n|---|---|\n| 1 | 2 |\n```"
+    text, entities = render_markdown(md)
+
+    assert text == "| A | B |\n|---|---|\n| 1 | 2 |"
+    assert _bold_spans(text, entities) == []
+
+
+def test_render_markdown_pipe_table_html_stays_escaped() -> None:
+    """#713 posture: only `<br>` is normalised, even inside a table."""
+    text, _ = render_markdown("| <b>x</b> | <svg onload=1> |\n|---|---|\n| 1 | 2 |")
+
+    assert text.split("\n")[0] == "| <b>x</b> | <svg onload=1> |"
+
+
+def test_split_markdown_body_keeps_small_table_in_one_chunk() -> None:
+    table = "| A | B |\n|---|---|\n" + "".join(f"| r{i} | v{i} |\n" for i in range(5))
+    body = ("x" * 60) + "\n\n" + table + "\nafter"
+
+    chunks = split_markdown_body(body, max_chars=len(table) + 10)
+
+    assert any(table.rstrip("\n") in chunk for chunk in chunks)
+
+
+def test_split_markdown_body_repeats_table_header_when_table_is_split() -> None:
+    header = "| Key | Value |\n|---|---|\n"
+    rows = "".join(f"| row{i:02d} | value{i:02d} |\n" for i in range(20))
+    chunks = split_markdown_body(header + rows, max_chars=120)
+
+    assert len(chunks) > 1
+    for chunk in chunks:
+        assert chunk.startswith(header)
+    # No row lost or duplicated across chunks.
+    seen = [line for chunk in chunks for line in chunk.splitlines() if "row" in line]
+    assert seen == rows.splitlines()
+    # And each chunk renders as a table.
+    for chunk in chunks:
+        text, _ = render_markdown(chunk)
+        assert "---" not in text
+        assert all(line.startswith("|") for line in text.split("\n"))
+
+
+def test_split_markdown_body_table_in_fence_not_given_header() -> None:
+    body = "```\n| A | B |\n|---|---|\n" + "| x | y |\n" * 20 + "```"
+
+    chunks = split_markdown_body(body, max_chars=80)
+
+    assert len(chunks) > 1
+    # Continuations reopen the fence but never gain a repeated table header.
+    assert sum(chunk.count("| A | B |") for chunk in chunks) == 1

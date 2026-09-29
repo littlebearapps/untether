@@ -77,7 +77,7 @@ Agents write files to `.untether-outbox/` during a run. On completion, `outbox_d
 
 ## Markdown rendering (`telegram/render.py`)
 
-`render_markdown()` rewrites markdown-it `text` tokens only — never code spans or code blocks. A bare `<br>` / `<br/>` / `<br />` becomes a line break (a space in a table row); every other tag stays escaped text (#786, keeps #713's posture). Bare filenames ending `.md` / `.sh` / `.py` become inline code so neither linkify nor Telegram clients auto-link them as domains (#788); explicit link text and real URLs are left alone.
+`render_markdown()` rewrites markdown-it `text` tokens only — never code spans or code blocks. A bare `<br>` / `<br/>` / `<br />` becomes a line break (a space in a table row); every other tag stays escaped text (#786, keeps #713's posture). Bare filenames ending `.md` / `.sh` / `.py` become inline code so neither linkify nor Telegram clients auto-link them as domains (#788); explicit link text and real URLs are left alone. A GFM pipe table (a `|` line followed by a `|---|` delimiter row) keeps one row per line: row breaks become hardbreaks, the delimiter row is dropped and the header row is bolded; `split_markdown_body()` repeats the header when a table is split across chunks (#797).
 
 ## Plan outline rendering
 

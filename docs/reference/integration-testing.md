@@ -147,6 +147,7 @@ Tests specific to how Untether uses Telegram — message formatting, media, inpu
 | T8 | **Stale button click** | Wait for a session to complete + clean up, then click an old Approve button | Toast "Expired" or similar, no crash, no spinner hang | Stale callback_data, cleaned-up session registry |
 | T9 | **Directive routing** | `/codex list the files here` (in Claude chat) | Codex runs instead of Claude, correct project context | Directive parsing, engine override |
 | T10 | **Branch directive** | `/claude @develop create hello.txt` | Run uses `develop` branch, not default | Branch directive, context resolution |
+| T11 | **Markdown table** ([#797](https://github.com/littlebearapps/untether/issues/797)) | `Reply with a 3-row, 3-column markdown table comparing tea, coffee and water (columns: drink, caffeine, notes), with inline code in one cell, then one sentence after it` | Each row on its own line; header row bold; no `|---|` separator line; inline code still renders as code; the sentence after the table is on its own line | commonmark has no table rule — rows used to collapse into one run-on line of pipes |
 
 ### Tier 4: Configuration and Overrides
 
