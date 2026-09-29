@@ -296,11 +296,29 @@ async def test_chat_pref_steer_used_when_no_override(tmp_path: Path) -> None:
     assert len(pipe.sent) == 1
 
 
-async def test_idle_live_session_is_steered_too() -> None:
+@pytest.mark.parametrize("override", [None, "steer"])
+async def test_idle_live_session_written_without_steer_ack(
+    override: str | None,
+) -> None:
+    """Between turns nothing is running: the line is written (it runs as the
+    next turn, replying to the message) but it is not acked as a steer."""
     live, pipe = _install(idle=True)
-    assert await _steer(_cfg("steer")) is True
+    cfg = _cfg("steer")
+    assert await _steer(cfg, override=override) is True
     assert len(pipe.sent) == 1
     assert live.idle_since is not None
+    assert _texts(cfg) == []
+    # The anchor stays so the follow-up turn replies to this message.
+    assert len(rb._FOLLOWUP_ANCHORS) == 1
+
+
+async def test_steer_outcome_reports_idle_vs_mid_turn() -> None:
+    from untether.runners.claude import steer_into_session
+
+    live, _pipe = _install(idle=True)
+    assert await steer_into_session(SID, "a", command_uuid="u1") == "written_idle"
+    live.state.turn_open = True
+    assert await steer_into_session(SID, "b", command_uuid="u2") == "steered"
 
 
 @pytest.mark.parametrize("explicit", [True, False])

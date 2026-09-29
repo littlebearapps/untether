@@ -214,7 +214,8 @@ async def maybe_steer(
             if has_options:
                 kwargs["run_options"] = options
             outcome = await steer_into_session(session_id, prompt_text, **kwargs)
-            if outcome == "steered":
+            if outcome in ("steered", "written_idle"):
+                mid_turn = outcome == "steered"
                 logger.info(
                     "steer.written",
                     chat_id=chat_id,
@@ -222,15 +223,20 @@ async def maybe_steer(
                     session_id=session_id,
                     command_uuid=command_uuid,
                     explicit=explicit is not None,
+                    mid_turn=mid_turn,
                     text_len=len(prompt_text),
                 )
-                await _send(
-                    cfg,
-                    chat_id=chat_id,
-                    user_msg_id=user_msg_id,
-                    thread_id=thread_id,
-                    text=STEERED_ACK,
-                )
+                if mid_turn:
+                    # Only a line that joined a running turn was steered. Into
+                    # an idle live session it is an ordinary follow-up: its own
+                    # turn's progress/final replies to the message (#775).
+                    await _send(
+                        cfg,
+                        chat_id=chat_id,
+                        user_msg_id=user_msg_id,
+                        thread_id=thread_id,
+                        text=STEERED_ACK,
+                    )
                 return True
             pop_followup_anchor(command_uuid)
             if outcome == "options_changed":

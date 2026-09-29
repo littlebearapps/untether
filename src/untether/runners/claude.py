@@ -570,8 +570,17 @@ async def inject_when_idle(
         await anyio.sleep(poll_s)
 
 
+# ``steered``: written while a turn was open (folded into it, or run as the
+# next turn if it arrived after the last tool call). ``written_idle``: the
+# session sat between turns, so the line simply runs as the next turn — an
+# ordinary follow-up, nothing was steered.
 SteerOutcome = Literal[
-    "steered", "no_live_session", "window_closed", "options_changed", "write_failed"
+    "steered",
+    "written_idle",
+    "no_live_session",
+    "window_closed",
+    "options_changed",
+    "write_failed",
 ]
 
 _UNSET_OPTIONS: Any = object()
@@ -641,16 +650,17 @@ async def steer_into_session(
         if not ok:
             state.steered_commands.pop(command_uuid, None)
             return "write_failed"
-        if live.idle:
+        mid_turn = not live.idle
+        if not mid_turn:
             live.idle_since = time.monotonic()
     logger.info(
         "claude.live_session.steered",
         session_id=session_id,
         command_uuid=command_uuid,
-        mid_turn=not live.idle,
+        mid_turn=mid_turn,
         turn=live.state.turn,
     )
-    return "steered"
+    return "steered" if mid_turn else "written_idle"
 
 
 def is_session_alive(session_id: str) -> bool:
