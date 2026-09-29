@@ -138,6 +138,14 @@ Once you approve a plan outline (via "Approve Plan"), subsequent tool calls in t
 
 This applies whether you approve via "Approve Plan" after an outline or by directly approving an ExitPlanMode request. Starting a new session (via `/new` or a new message) restores normal approval behaviour.
 
+## The plan in the final message
+
+Untether deletes the plan messages once you tap a button. If Claude Code then finishes with only a short reply, Untether adds the plan to the top of the final message under **📋 Plan (approved):** so you still have it on your phone.
+
+Only a plan you actually approved gets that header. That means you tapped Approve, `plan-auto` approved it for you, or you tapped Approve Plan after an outline. A plan you denied is never shown there, and neither is one that timed out. **Pause & Outline Plan** and **Let's discuss** don't reject the plan, so if you approve the same plan after the outline or the discussion, it is shown as usual.
+
+Claude Code sometimes sends the text of a plan you already denied along with its next plan request, even though it has rewritten the plan file. When the plan you approve matches a denied one exactly, Untether leaves the plan out of the final message rather than label the denied text as approved ([#793](https://github.com/littlebearapps/untether/issues/793)).
+
 ## Per-cron override (scheduled runs) {#cron-override}
 
 When a scheduled cron fires into a plan-mode chat, the default behaviour is to inherit the chat's plan mode — which means the cron run pauses for an approval nobody's awake to give. Set `permission_mode` on the cron itself to override just that run:

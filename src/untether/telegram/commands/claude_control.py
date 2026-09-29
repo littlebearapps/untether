@@ -134,9 +134,14 @@ class ClaudeControlCommand:
             # Grab session_id before send_claude_control_response deletes it
             session_id = _REQUEST_TO_SESSION.get(request_id)
 
-            # Deny with a message asking Claude Code to outline the plan
+            # Deny with a message asking Claude Code to outline the plan.
+            # Procedural, not a verdict on the plan (#793): approving the same
+            # plan after the outline is a real approval.
             success = await send_claude_control_response(
-                request_id, approved=False, deny_message=_DISCUSS_DENY_MESSAGE
+                request_id,
+                approved=False,
+                deny_message=_DISCUSS_DENY_MESSAGE,
+                rejects_plan=False,
             )
             if not success:
                 logger.warning(
@@ -374,7 +379,10 @@ class ClaudeControlCommand:
         session_id = _REQUEST_TO_SESSION.get(request_id)
 
         success = await send_claude_control_response(
-            request_id, approved=False, deny_message=_CHAT_DENY_MESSAGE
+            request_id,
+            approved=False,
+            deny_message=_CHAT_DENY_MESSAGE,
+            rejects_plan=False,  # #793: wants to talk, not a rejection
         )
         if not success:
             logger.warning(

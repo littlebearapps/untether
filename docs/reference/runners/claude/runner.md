@@ -59,6 +59,7 @@ Key control channel features:
 * `ExitPlanMode` requests shown as Telegram inline buttons (Approve / Deny / Pause & Outline Plan) in `plan` mode; post-outline buttons add **Let's discuss** for plan discussion before approval
 * `ExitPlanMode` requests silently auto-approved in `plan-auto` mode (no buttons shown)
 * Text-based outline gate on ExitPlanMode after "Pause & Outline Plan" — retries without written outline text are auto-denied; the former time-based progressive cooldown was retired in [#570](https://github.com/littlebearapps/untether/issues/570) (upstream retry loop fixed in Claude Code ≥ 2.1.215)
+* `📋 Plan (approved)` re-emit (#508): each `ExitPlanMode` control request's `plan` input is recorded per `request_id` (`ClaudeStreamState.exitplanmode_plans`). It becomes `last_exitplanmode_plan`, the prepend source, only when that request is approved: by Telegram Approve (`write_control_response`), by the `plan-auto` stamp, or by the post-outline `_DISCUSS_APPROVED` auto-approve. It is dropped on any denial or timeout. Bodies you explicitly deny (❌ Deny) are remembered for the process. If an approved input is byte-identical to one of them (the CLI's stale plan input), Untether logs `claude.plan.stale_input` (INFO) and prepends nothing. Pause & Outline and Let's discuss denials pass `rejects_plan=False`: they are procedural, not a verdict on the plan ([#793](https://github.com/littlebearapps/untether/issues/793))
 
 **Safety note:** `-p/--print` skips the workspace trust dialog; only use this flag in trusted directories.
 

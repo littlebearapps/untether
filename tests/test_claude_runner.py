@@ -2255,11 +2255,14 @@ def test_translate_server_tool_use_block() -> None:
     assert state.last_tool_use_id == "stu_01"
 
 
-def test_translate_exitplanmode_captures_plan_body() -> None:
-    """#508 — translating a tool_use(name='ExitPlanMode', input.plan='...')
-    captures the plan body onto state.last_exitplanmode_plan so the bridge
-    can re-emit it in the final answer if the post-approval result is
-    brief.  Regression for the live research-task short-final-message bug.
+def test_translate_exitplanmode_records_plan_body_pending_approval() -> None:
+    """#508 / #793 — the ExitPlanMode plan body is recorded against its
+    control request so the final answer can re-emit it if the post-approval
+    result is brief (the live research-task short-final-message bug). Until
+    that request is approved it is NOT the approved plan: the tool_use alone
+    never sets state.last_exitplanmode_plan (#793 showed denied plans as
+    "📋 Plan (approved)"). Full decision matrix in
+    tests/test_exitplanmode_plan_approval.py.
     """
     state = ClaudeStreamState()
     state.factory._resume = ResumeToken(engine="claude", value="sess-508")
@@ -2290,28 +2293,41 @@ def test_translate_exitplanmode_captures_plan_body() -> None:
         state=state,
         factory=state.factory,
     )
+    assert state.last_exitplanmode_plan is None  # not approved yet
 
-    assert state.last_exitplanmode_plan == plan_body
+    control = {
+        "type": "control_request",
+        "request_id": "req_epm_1",
+        "request": {
+            "subtype": "can_use_tool",
+            "tool_name": "ExitPlanMode",
+            "input": {"plan": plan_body},
+        },
+    }
+    translate_claude_event(
+        _decode_event(control),
+        title="claude",
+        state=state,
+        factory=state.factory,
+    )
+
+    assert state.exitplanmode_plans == {"req_epm_1": plan_body}
+    assert state.last_exitplanmode_plan is None
 
 
 def test_translate_exitplanmode_ignores_empty_plan_body() -> None:
-    """#508 — empty/whitespace-only plan bodies are NOT captured. Avoids
-    overwriting a real prior value with an inadvertent retry/empty call."""
+    """#508 — empty/whitespace-only plan bodies are NOT recorded, so an
+    inadvertent retry/empty call can't replace a real approved value."""
     state = ClaudeStreamState()
     state.factory._resume = ResumeToken(engine="claude", value="sess-508")
     state.last_exitplanmode_plan = "earlier plan body"
     event = {
-        "type": "assistant",
-        "message": {
-            "id": "msg_2",
-            "content": [
-                {
-                    "type": "tool_use",
-                    "id": "tu_epm_2",
-                    "name": "ExitPlanMode",
-                    "input": {"plan": "   "},
-                }
-            ],
+        "type": "control_request",
+        "request_id": "req_epm_2",
+        "request": {
+            "subtype": "can_use_tool",
+            "tool_name": "ExitPlanMode",
+            "input": {"plan": "   "},
         },
     }
 
@@ -2322,6 +2338,7 @@ def test_translate_exitplanmode_ignores_empty_plan_body() -> None:
         factory=state.factory,
     )
 
+    assert state.exitplanmode_plans == {}
     assert state.last_exitplanmode_plan == "earlier plan body"
 
 

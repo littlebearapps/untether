@@ -862,13 +862,21 @@ class ClaudeStreamState:
     max_text_len_since_cooldown: int = 0
     # Store outline text for embedding in synthetic approve/deny action
     outline_text: str | None = None
-    # #508 ExitPlanMode plan body — captured from the tool_use input on
-    # every ExitPlanMode call so the bridge can re-emit it as part of the
-    # final answer when the post-approval result is brief or empty
-    # (research/audit tasks where Claude has nothing left to say after
-    # the user approves).  Plan messages on Telegram are deleted on
-    # approve, so this is the only path to retain the body.
+    # #508 ExitPlanMode plan body the user APPROVED in this turn, re-emitted
+    # as "📋 Plan (approved)" in the final answer when the post-approval
+    # result is brief or empty (research/audit tasks where Claude has nothing
+    # left to say after the user approves).  Plan messages on Telegram are
+    # deleted on approve, so this is the only path to retain the body.
+    # #793: set only when a request is approved — never from a denied one.
     last_exitplanmode_plan: str | None = None
+    # #793: plan body per ExitPlanMode control request awaiting a decision
+    # (request_id -> body). Promoted to ``last_exitplanmode_plan`` on
+    # approval, dropped on any denial / timeout.
+    exitplanmode_plans: dict[str, str] = field(default_factory=dict)
+    # #793: plan bodies the user explicitly rejected (❌ Deny) in this
+    # process. An approved request whose input is byte-identical is the
+    # CLI's stale-input quirk, not the plan the user just approved.
+    rejected_exitplanmode_plans: set[str] = field(default_factory=set)
     # Cumulative seconds the session spent in Anthropic-side rate-limit waits (#349).
     # #790: only *throttling* events accrue (a `rejected` snapshot, or the
     # legacy retry_after_ms/reset-ts shape) — `allowed` heartbeats never do.
@@ -3001,6 +3009,68 @@ def _prepend_exitplanmode_plan(final_answer: str | None, plan_body: str | None) 
     return f"📋 Plan (approved):\n\n{body}"
 
 
+def _exitplanmode_plan_input(raw_input: Any) -> str | None:
+    plan = raw_input.get("plan") if isinstance(raw_input, dict) else None
+    return plan if isinstance(plan, str) and plan.strip() else None
+
+
+def _approve_exitplanmode_plan(
+    state: ClaudeStreamState,
+    request_id: str,
+    *,
+    session_id: str | None,
+    source: str,
+) -> None:
+    """#793: the user approved ExitPlanMode request ``request_id`` (Telegram
+    Approve, the ``plan-auto`` stamp, or the post-outline auto-approve) —
+    its plan body becomes the one the final answer may re-show."""
+    body = state.exitplanmode_plans.pop(request_id, None)
+    if body is None:
+        return
+    if body in state.rejected_exitplanmode_plans:
+        # The CLI re-sent a plan input the user already denied (seen after a
+        # plan-file rewrite). Labelling it "approved" would be wrong, and an
+        # earlier approved body isn't what the agent now executes — show none.
+        state.last_exitplanmode_plan = None
+        logger.info(
+            "claude.plan.stale_input",
+            request_id=request_id,
+            session_id=session_id,
+            source=source,
+            plan_chars=len(body),
+        )
+        return
+    state.last_exitplanmode_plan = body
+    logger.debug(
+        "claude.plan.approved",
+        request_id=request_id,
+        session_id=session_id,
+        source=source,
+        plan_chars=len(body),
+    )
+
+
+def _drop_exitplanmode_plan(
+    state: ClaudeStreamState, request_id: str, *, rejected: bool, reason: str
+) -> None:
+    """#793: ExitPlanMode request ``request_id`` was not approved — its body
+    is never re-shown. ``rejected`` is the user's explicit ❌ Deny; procedural
+    denials (Pause & Outline, Let's discuss, outline guard, timeout) are not
+    a verdict on the plan, so a later identical approval still counts."""
+    body = state.exitplanmode_plans.pop(request_id, None)
+    if body is None:
+        return
+    if rejected:
+        state.rejected_exitplanmode_plans.add(body)
+    logger.debug(
+        "claude.plan.not_approved",
+        request_id=request_id,
+        rejected=rejected,
+        reason=reason,
+        plan_chars=len(body),
+    )
+
+
 def _maybe_audit_env(state: ClaudeStreamState, session_id: str) -> None:
     """One-shot ``/proc/<pid>/environ`` audit on first system.init (#361).
 
@@ -3602,19 +3672,10 @@ def _translate_claude_event_base(
                         # (master toggle gate inside).  Sibling of, not
                         # replacement for, _register_background_handle.
                         _observe_loop_tool_use(state, content)
-                        # #508 capture ExitPlanMode plan body so the bridge
-                        # can re-emit it in the final answer when the
-                        # post-approval result is brief/empty (research
-                        # tasks).  Only captures from the regular Approve
-                        # flow — Pause-and-Outline outlines go via
-                        # state.outline_text and a different code path.
-                        if str(content.name or "") == "ExitPlanMode":
-                            _epm_input = (
-                                content.input if isinstance(content.input, dict) else {}
-                            )
-                            _plan_body = _epm_input.get("plan")
-                            if isinstance(_plan_body, str) and _plan_body.strip():
-                                state.last_exitplanmode_plan = _plan_body
+                        # #508/#793: the ExitPlanMode plan body is recorded
+                        # from its control_request (keyed by request_id) and
+                        # kept only if that request is approved — not here,
+                        # where the user hasn't decided yet.
                         out.append(
                             factory.action_started(
                                 action_id=action.id,
@@ -3892,6 +3953,17 @@ def _translate_claude_event_base(
                 state.auto_approve_queue.append(request_id)
                 return []
 
+            # #793: record every ExitPlanMode plan body against its request;
+            # the approval paths below (and write_control_response) promote
+            # it, every denial path drops it.
+            if (
+                isinstance(request, claude_schema.ControlCanUseToolRequest)
+                and getattr(request, "tool_name", "") == "ExitPlanMode"
+            ):
+                _epm_body = _exitplanmode_plan_input(getattr(request, "input", {}))
+                if _epm_body is not None:
+                    state.exitplanmode_plans[request_id] = _epm_body
+
             # Auto-approve tool requests that don't need user interaction.
             # _DIFF_PREVIEW_TOOLS is module-scoped — see top of file.
             #
@@ -3981,6 +4053,9 @@ def _translate_claude_event_base(
                     auto_session = factory.resume.value if factory.resume else None
                     if auto_session is not None:
                         _PLAN_EXIT_APPROVED.add(auto_session)
+                    _approve_exitplanmode_plan(
+                        state, request_id, session_id=auto_session, source="plan_auto"
+                    )
                     _REQUEST_TO_INPUT[request_id] = getattr(request, "input", {})
                     state.auto_approve_queue.append(request_id)
                     return []
@@ -4000,6 +4075,12 @@ def _translate_claude_event_base(
                             "control_request.discuss_approved",
                             request_id=request_id,
                             session_id=session_id,
+                        )
+                        _approve_exitplanmode_plan(
+                            state,
+                            request_id,
+                            session_id=session_id,
+                            source="discuss_approved",
                         )
                         _REQUEST_TO_INPUT[request_id] = getattr(request, "input", {})
                         state.auto_approve_queue.append(request_id)
@@ -4086,6 +4167,12 @@ def _translate_claude_event_base(
                                 "control_request.outline_guard_deny",
                                 request_id=request_id,
                                 session_id=session_id,
+                            )
+                            _drop_exitplanmode_plan(
+                                state,
+                                request_id,
+                                rejected=False,
+                                reason="outline_guard",
                             )
                             _REQUEST_TO_INPUT.pop(request_id, None)
                             _REQUEST_TO_TOOL_NAME.pop(request_id, None)
@@ -4276,6 +4363,7 @@ def _translate_claude_event_base(
             ]
             for rid in expired:
                 del state.pending_control_requests[rid]
+                _drop_exitplanmode_plan(state, rid, rejected=False, reason="timeout")
                 _REQUEST_TO_INPUT.pop(rid, None)
                 _REQUEST_TO_TOOL_NAME.pop(rid, None)
                 state.request_to_action.pop(rid, None)
@@ -4519,13 +4607,38 @@ class ClaudeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
         ) or self.permission_mode
 
     async def write_control_response(
-        self, request_id: str, approved: bool, *, deny_message: str | None = None
+        self,
+        request_id: str,
+        approved: bool,
+        *,
+        deny_message: str | None = None,
+        rejects_plan: bool = True,
     ) -> bool:
         """Write a control response to the Claude Code process via PIPE or PTY.
 
         Uses _SESSION_STDIN to find the correct stdin for the session,
         supporting concurrent sessions on the same runner instance.
+
+        ``rejects_plan`` (#793): whether a denial of an ExitPlanMode request
+        is the user rejecting the plan (❌ Deny) rather than a procedural
+        denial (Pause & Outline, Let's discuss).
         """
+        # #793: settle the request's recorded plan body on the run's own
+        # state (per-session, never the shared runner attributes).
+        plan_session = _REQUEST_TO_SESSION.get(request_id)
+        plan_state = _SESSION_BG_STATE.get(plan_session) if plan_session else None
+        if plan_state is not None:
+            if approved:
+                _approve_exitplanmode_plan(
+                    plan_state, request_id, session_id=plan_session, source="telegram"
+                )
+            else:
+                _drop_exitplanmode_plan(
+                    plan_state,
+                    request_id,
+                    rejected=rejects_plan,
+                    reason="telegram_deny" if rejects_plan else "telegram_procedural",
+                )
         if approved:
             inner: dict[str, Any] = {"behavior": "allow"}
             # Claude Code CLI requires updatedInput for can_use_tool responses
@@ -6919,7 +7032,11 @@ BACKEND = EngineBackend(
 
 # Phase 2: Public API for sending control responses
 async def send_claude_control_response(
-    request_id: str, approved: bool, *, deny_message: str | None = None
+    request_id: str,
+    approved: bool,
+    *,
+    deny_message: str | None = None,
+    rejects_plan: bool = True,
 ) -> bool:
     """Send a control response to an active Claude Code session.
 
@@ -6927,6 +7044,8 @@ async def send_claude_control_response(
         request_id: The control request ID
         approved: Whether to approve (True) or deny (False) the request
         deny_message: Custom denial message (used when approved=False)
+        rejects_plan: For an ExitPlanMode denial, whether it rejects the plan
+            (❌ Deny) or is procedural (Pause & Outline / Let's discuss) — #793
 
     Returns:
         True if the response was sent successfully, False if the request is not found
@@ -6959,7 +7078,7 @@ async def send_claude_control_response(
 
     runner, _ = _ACTIVE_RUNNERS[session_id]
     success = await runner.write_control_response(
-        request_id, approved, deny_message=deny_message
+        request_id, approved, deny_message=deny_message, rejects_plan=rejects_plan
     )
 
     # Clean up the mapping after use
