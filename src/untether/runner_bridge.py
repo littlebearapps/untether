@@ -14,11 +14,13 @@ from typing import Any
 import anyio
 
 from .background_status import (
+    FOLDABLE_REASONS,
     BackgroundStatusManager,
     live_top_level,
     register_live_count_source,
     render_background_block,
     unregister_live_count_source,
+    wake_fold_decision,
 )
 from .context import RunContext
 from .error_hints import get_error_hint as _get_error_hint
@@ -4031,6 +4033,7 @@ class FollowupTurnRouter:
         clock: Callable[[], float] = time.monotonic,
         anchor_for: Callable[[str | None], tuple[MessageRef, MessageRef | None] | None]
         | None = pop_followup_anchor,
+        progress_for: Callable[[ActionEvent], bool] | None = None,
     ) -> None:
         self._new_tracker = new_tracker
         self._create_progress = create_progress
@@ -4040,6 +4043,9 @@ class FollowupTurnRouter:
         self._followup_notify = followup_notify
         self._clock = clock
         self._anchor_for = anchor_for
+        # #785 part 2: which actions force a turn's progress message into
+        # existence (None = every action, the rc11 behaviour).
+        self._progress_for = progress_for
         self._tg: Any = None
         self.current: _TurnCtx | None = None
         self.turns_delivered = 0
@@ -4193,7 +4199,11 @@ class FollowupTurnRouter:
         ctx = self.current
         if ctx is None:
             return
-        if isinstance(evt, ActionEvent) and ctx.edits is None:
+        if (
+            isinstance(evt, ActionEvent)
+            and ctx.edits is None
+            and (self._progress_for is None or self._progress_for(evt))
+        ):
             await self._ensure_progress(ctx)
         if ctx.edits is not None:
             await ctx.edits.on_event(evt)
@@ -5039,6 +5049,32 @@ async def handle_message(
             status=status,
         )
 
+        # #785 part 2: a short "ack" wake turn is folded into the background
+        # status message (an edit — no new message, no push). Accounting
+        # above has already run; only the send is replaced.
+        if (
+            turn is not None
+            and _cost_alert_obj is None
+            and not _outlier_text
+            and await _fold_wake_turn(turn, completed)
+        ):
+            delivery["sent"] = True
+            if t_edits is not None:
+                t_edits._finalizing = True
+            if t_progress_ref is not None:
+                with contextlib.suppress(Exception):
+                    await cfg.transport.delete(ref=t_progress_ref)
+                if _PROGRESS_PERSISTENCE_PATH is not None:
+                    from .telegram.progress_persistence import unregister_progress
+
+                    unregister_progress(
+                        _PROGRESS_PERSISTENCE_PATH,
+                        f"{incoming.channel_id}:{t_progress_ref.message_id}",
+                    )
+            return
+        if turn is not None:
+            t_notify = turn.notify  # the fold decision may have promoted it
+
         can_edit_final = t_progress_ref is not None
         edit_ref = None if t_notify or not can_edit_final else t_progress_ref
 
@@ -5061,6 +5097,9 @@ async def handle_message(
             thread_id=incoming.thread_id,
         )
         delivery["sent"] = True
+        if turn is not None and turn.notify and turn.reason in FOLDABLE_REASONS:
+            # #785 part 2: this batch of background work has pushed once.
+            bg_status.note_breakout()
 
         # Unregister progress persistence after the final message is sent.
         # Must happen AFTER send_result_message() so a crash between
@@ -5269,6 +5308,9 @@ async def handle_message(
         default_reply_to=user_ref,
         followup_notify=cfg.final_notify,
         clock=clock,
+        # #785 part 2: a thinking note alone doesn't open a progress message
+        # for a wake turn that may fold into the status message.
+        progress_for=lambda evt: evt.action.kind != "note" or not _consolidating(),
     )
 
     def _bg_status_anchor(live: list[Any]) -> MessageRef:
@@ -5300,6 +5342,50 @@ async def handle_message(
                 await bg_status.run()
         except cancel_exc_type:
             return
+
+    def _consolidating() -> bool:
+        settings = bg_status.settings()
+        return bool(getattr(settings, "consolidate_wake_turns", True))
+
+    def _substantive_actions(tracker: ProgressTracker) -> int:
+        # Tools, approvals and questions — not thinking / rate-limit notes.
+        return sum(1 for a in tracker.snapshot().actions if a.action.kind != "note")
+
+    async def _fold_wake_turn(ctx: _TurnCtx, completed: CompletedEvent) -> bool:
+        target = bg_status.fold_target
+        if target is None or not _consolidating():
+            return False
+        detail = ctx.detail or {}
+        already = bool(detail.get("already_announced"))
+        decision = wake_fold_decision(
+            reason=ctx.reason,
+            ok=completed.ok and not completed.error,
+            answer=completed.answer or "",
+            substantive_actions=_substantive_actions(ctx.tracker),
+            already_announced=already,
+            live_tasks_remaining=len(live_top_level(_bg_tasks())),
+            batch_announced=target.breakouts > 0,
+        )
+        task_ids = [t for t in detail.get("task_ids", []) if isinstance(t, str)]
+        if decision == "last_task" and already:
+            # The finish this turn restates was folded silently (the report
+            # turn raced the task's end): this is the batch's one push, and
+            # the earlier ack belongs on the task's row.
+            ctx.notify = True
+            await bg_status.attribute_last_note(task_ids)
+        folded = decision == "fold" and await bg_status.fold(
+            completed.answer or "",
+            task_ids=task_ids,
+            already_announced=already,
+        )
+        logger.info(
+            "live_turn.fold_decision",
+            turn=ctx.turn,
+            reason=ctx.reason,
+            decision=decision,
+            folded=folded,
+        )
+        return folded
 
     def _bg_close_reason() -> str | None:
         engine_state = getattr(edits.stream, "engine_state", None)

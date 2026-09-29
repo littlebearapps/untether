@@ -664,6 +664,9 @@ class ProgressSettings(BaseModel):
     # ("+N more" beyond it).
     show_background_tasks: bool = True
     background_tasks_max_rows: int = Field(default=5, ge=1, le=20)
+    # #785 part 2: fold short wake-turn acks (no tools, no approval, short
+    # answer) into that status message instead of a new pushed message.
+    consolidate_wake_turns: bool = True
 
 
 _ENV_NAME_RE = re.compile(r"^[A-Z_][A-Z0-9_]*$")

@@ -620,3 +620,188 @@ async def test_ping_shows_the_chats_live_background_count() -> None:
         unregister_live_count_source(token_b)
     result = await PING.handle(_ping_ctx(77))
     assert "background" not in result.text
+
+
+# ── #785 part 2: wake-turn consolidation ─────────────────────────────────────
+
+from untether.background_status import (  # noqa: E402
+    FOLD_MAX_CHARS,
+    wake_fold_decision,
+)
+
+
+def _decide(**overrides: Any) -> str:
+    values: dict[str, Any] = {
+        "reason": "task_finished",
+        "ok": True,
+        "answer": "Sweep one is back; waiting on the others.",
+        "substantive_actions": 0,
+        "already_announced": False,
+        "live_tasks_remaining": 2,
+        "batch_announced": False,
+    }
+    values.update(overrides)
+    return wake_fold_decision(**values)
+
+
+@pytest.mark.parametrize(
+    ("overrides", "expected"),
+    [
+        ({}, "fold"),
+        ({"reason": "unknown"}, "fold"),
+        ({"reason": "scheduled_wakeup", "live_tasks_remaining": 0}, "fold"),
+        ({"reason": "monitor_event"}, "fold"),
+        ({"reason": "followup"}, "not_wake"),
+        ({"ok": False}, "error"),
+        ({"substantive_actions": 1}, "tools"),
+        ({"answer": "x" * (FOLD_MAX_CHARS + 1)}, "long_answer"),
+        ({"answer": "x" * FOLD_MAX_CHARS}, "fold"),
+        ({"answer": ""}, "fold"),
+        # the last task's turn is the report: it breaks out…
+        ({"live_tasks_remaining": 0}, "last_task"),
+        ({"reason": "unknown", "live_tasks_remaining": 0}, "last_task"),
+        # …but its restatement folds once the batch has pushed,
+        (
+            {
+                "live_tasks_remaining": 0,
+                "already_announced": True,
+                "batch_announced": True,
+            },
+            "fold",
+        ),
+        # and carries the push when the report itself folded (raced).
+        (
+            {"live_tasks_remaining": 0, "already_announced": True},
+            "last_task",
+        ),
+        # substantive content always wins over "last task"
+        ({"live_tasks_remaining": 0, "substantive_actions": 2}, "tools"),
+    ],
+)
+def test_wake_fold_decision(overrides: dict[str, Any], expected: str) -> None:
+    assert _decide(**overrides) == expected
+
+
+async def _open_panel(transport: FakeTransport, clock: _Clock, *tasks: Any):
+    panel = _panel(transport, clock)
+    panel.track(tasks)
+    await panel.open(None)
+    return panel
+
+
+async def test_fold_puts_the_ack_on_the_task_row_in_full() -> None:
+    transport = FakeTransport()
+    clock = _Clock()
+    a1, a2 = _agent("a1", "sweep one"), _agent("a2", "sweep two")
+    panel = await _open_panel(transport, clock, a1, a2)
+    a1.status, a1.ended_at = "completed", clock.t + 60
+    ack = "Sweep one is back —\nwaiting on sweep two. " + "y" * 200
+    assert await panel.fold(ack, task_ids=["a1"])
+    text = transport.edit_calls[-1]["message"].text
+    lines = text.splitlines()
+    row = lines.index(next(ln for ln in lines if ln.startswith("✅ sweep one done")))
+    assert lines[row + 1] == "   ↳ " + " ".join(ack.split())
+    assert not panel.finalised  # sweep two still running
+
+
+async def test_fold_without_a_task_is_a_note_then_filed_by_the_restatement() -> None:
+    transport = FakeTransport()
+    clock = _Clock()
+    a1, a2 = _agent("a1", "sweep one"), _agent("a2", "sweep two")
+    panel = await _open_panel(transport, clock, a1, a2)
+    assert await panel.fold("Sweep one is back.")
+    assert transport.edit_calls[-1]["message"].text.endswith("💬 Sweep one is back.")
+    a1.status, a1.ended_at = "completed", clock.t + 1
+    assert await panel.fold(
+        "Sweep one finished.", task_ids=["a1"], already_announced=True
+    )
+    lines = transport.edit_calls[-1]["message"].text.splitlines()
+    row = lines.index(next(ln for ln in lines if ln.startswith("✅ sweep one done")))
+    assert lines[row + 1 : row + 3] == [
+        "   ↳ Sweep one is back.",
+        "   ↳ Sweep one finished.",
+    ]
+    assert not any(ln.startswith("💬") for ln in lines)
+
+
+async def test_fold_ending_the_last_task_finalises() -> None:
+    transport = FakeTransport()
+    clock = _Clock()
+    a1 = _agent("a1", "sweep one")
+    panel = await _open_panel(transport, clock, a1)
+    a1.status, a1.ended_at = "completed", clock.t + 1
+    assert await panel.fold("done.", task_ids=["a1"], already_announced=True)
+    assert panel.finalised
+    assert transport.edit_calls[-1]["message"].text.startswith(
+        "✅ background task done"
+    )
+
+
+async def test_fold_into_a_finalised_status_message_still_edits_it() -> None:
+    transport = FakeTransport()
+    clock = _Clock()
+    a1 = _bash("b1", "sleep 20", status="completed", ended=clock.t)
+    panel = await _open_panel(transport, clock, _bash("b0", started=clock.t))
+    panel.tasks = {"b1": a1}
+    await panel.finalise()
+    assert await panel.fold("Nothing new since then.")
+    assert transport.edit_calls[-1]["message"].text.endswith(
+        "💬 Nothing new since then."
+    )
+
+
+async def test_fold_refuses_what_it_cannot_show_in_full() -> None:
+    transport = FakeTransport()
+    clock = _Clock()
+    tasks = [_agent(f"a{i}", f"agent {i}") for i in range(12)]
+    panel = await _open_panel(transport, clock, *tasks)
+    for i, task in enumerate(tasks):
+        task.status, task.ended_at = "completed", clock.t + 1
+        ok = await panel.fold("z" * 290 + f" {i}", task_ids=[task.task_id])
+        if not ok:
+            break
+    else:  # pragma: no cover
+        raise AssertionError("expected the message to fill up")
+    # The refused ack left nothing behind, and every accepted one is shown.
+    text = transport.edit_calls[-1]["message"].text
+    assert len(text) < 3500
+    assert text.count("↳") == i
+    assert f" {i}" not in text.split("\n")[-1]
+
+
+async def test_fold_rows_survive_the_row_cap() -> None:
+    transport = FakeTransport()
+    clock = _Clock()
+    tasks = [_bash(f"b{i}", f"job {i}", started=float(i)) for i in range(8)]
+    panel = await _open_panel(transport, clock, *tasks)
+    panel.max_rows = 2
+    for t in tasks:
+        t.status, t.ended_at = "completed", 20.0
+    assert await panel.fold("first job ack", task_ids=["b0"])
+    lines = transport.edit_calls[-1]["message"].text.splitlines()
+    assert "✅ job 0 done · 20s" in lines  # the oldest row, kept for its ack
+    assert "   ↳ first job ack" in lines
+    assert "+6 more ended" in lines
+
+
+async def test_manager_fold_adds_a_known_task_missing_from_the_message() -> None:
+    transport = FakeTransport()
+    first = _bash("b1", started=0.0)
+    store = _Store([first])
+    manager = _manager(transport, store)
+    await manager.after_turn()
+    late = _agent("a9", "late", status="completed", ended=5.0)
+    store.tasks.append(late)
+    assert await manager.fold("late one done", task_ids=["a9"])
+    text = transport.edit_calls[-1]["message"].text
+    assert "✅ late done" in text and "   ↳ late one done" in text
+
+
+async def test_manager_fold_without_status_message_is_refused() -> None:
+    manager = _manager(FakeTransport(), _Store())
+    assert manager.fold_target is None
+    assert await manager.fold("ack") is False
+
+
+def test_consolidate_setting_default_on() -> None:
+    assert ProgressSettings().consolidate_wake_turns is True

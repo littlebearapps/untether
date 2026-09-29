@@ -470,6 +470,56 @@ def scenario_followup(first: dict) -> None:
     serve_followups()
 
 
+def _notify(task_id: str, tool_id: str) -> None:
+    emit(
+        {
+            "type": "system",
+            "subtype": "task_notification",
+            "task_id": task_id,
+            "tool_use_id": tool_id,
+            "status": "completed",
+            "output_file": "",
+            "summary": f"bg {task_id} finished",
+        }
+    )
+
+
+def scenario_multi_agent_acks(first: dict) -> None:
+    """#785 part 2 (the nsd blogs shape): two background agents. Each finish
+    produces the CLI's pair of wake turns — an ``unknown`` one opened before
+    the task's end lands (the end arrives mid-turn), then the task's own
+    notification turn restating it. The first finish is a short ack while the
+    other agent still runs; the second finish's first turn is the compiled
+    report (long). ``FAKE_CLAUDE_ACK_TOOL=1`` makes the first ack use a tool."""
+    init()
+    tool_use("Agent", "toolu_a1", {"description": "sweep one", "prompt": "go"})
+    start_bg("a1", "toolu_a1", task_type="local_agent")
+    tool_result("toolu_a1", "Async agent launched successfully.")
+    tool_use("Agent", "toolu_a2", {"description": "sweep two", "prompt": "go"})
+    start_bg("a2", "toolu_a2", task_type="local_agent")
+    tool_result("toolu_a2", "Async agent launched successfully.")
+    text("Two sweeps running in the background; I'll report back.")
+    result("Two sweeps running in the background; I'll report back.", turns=3)
+    for task_id, tool_id, first_answer in (
+        ("a1", "toolu_a1", "Sweep one is back; waiting on sweep two."),
+        ("a2", "toolu_a2", "REPORT: " + "all findings compiled. " * 30),
+    ):
+        if wait_idle_or_eof(WAKE_S) is None:
+            shutdown()
+        init()
+        if task_id == "a1" and os.environ.get("FAKE_CLAUDE_ACK_TOOL") == "1":
+            tool_use("Read", "toolu_rd", {"file_path": "/tmp/out.md"})
+            tool_result("toolu_rd", "notes")
+        text(first_answer)
+        _end_quietly(task_id)
+        result(first_answer)
+        _notify(task_id, tool_id)
+        init()
+        text(f"{task_id} finished (again).")
+        result(f"{task_id} finished (again).")
+    serve_followups()
+
+
 def scenario_followup_launches_bg(first: dict) -> None:
     """#795: the run answers; a follow-up (injected user line) launches a
     background Bash; that task's wake turn must reply to the follow-up."""
@@ -595,6 +645,7 @@ _SCENARIOS = {
     "scheduled_wakeup": scenario_scheduled_wakeup,
     "followup": scenario_followup,
     "followup_launches_bg": scenario_followup_launches_bg,
+    "multi_agent_acks": scenario_multi_agent_acks,
     "resume_after_killed_task": scenario_resume_after_killed_task,
     "inherited_fd_after_exit": scenario_inherited_fd_after_exit,
 }

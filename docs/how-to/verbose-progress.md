@@ -80,7 +80,7 @@ Control how many actions appear in the progress message. Actions beyond this lim
 Set to `0` to hide the action list entirely, or increase it to see more history.
 
 !!! tip "Hot-reload"
-    `[progress]` settings (`verbosity`, `max_actions`, `heartbeat_interval`, `min_render_interval`, `group_chat_rps`, `show_background_tasks`, `background_tasks_max_rows`) hot-reload — editing them in `untether.toml` applies on the next run without restart ([#269](https://github.com/littlebearapps/untether/issues/269)).
+    `[progress]` settings (`verbosity`, `max_actions`, `heartbeat_interval`, `min_render_interval`, `group_chat_rps`, `show_background_tasks`, `background_tasks_max_rows`, `consolidate_wake_turns`) hot-reload — editing them in `untether.toml` applies on the next run without restart ([#269](https://github.com/littlebearapps/untether/issues/269)).
 
 ## Long-running tool tail (heartbeat)
 
@@ -119,12 +119,26 @@ Agents (🤖) show elapsed time, tokens, tool calls and the current step; shell 
 
 When the last task finishes the message is finalised (`✅ all 2 background tasks done`, with ❌ failed / ⏹️ stopped rows where relevant). If the session closes first — `/cancel`, `/new`, the background hold limit, a restart — the remaining rows are marked ⏹️ stopped with the reason, so the message never keeps saying "running". Claude's own report on a finished task still arrives as a normal message. `/ping` shows `⏳ background: N tasks running` for the chat while any are live.
 
+### Quiet acknowledgements
+
+Claude often answers each background task finishing with a one-liner — "the lint sweep is back, waiting on the others" — and the CLI tends to answer the same finish twice. With `consolidate_wake_turns` on (the default), those short replies don't arrive as separate pushed messages: they are added, in full, under the task's row in the status message, which is edited silently ([#785](https://github.com/littlebearapps/untether/issues/785)):
+
+```
+⏳ background (1) · 1 done
+🤖 sweep two · 2m40s · 61k tok · 12 tools · Running checks
+✅ sweep one done · 1m55s · 48k tok
+   ↳ Sweep one is back; waiting on sweep two.
+```
+
+A wake turn still arrives as its own message when it runs a tool, asks for an approval or a question, writes more than ~300 characters, fails, or finishes the last running task (normally Claude's compiled report) — so each batch of background work still gets the push you're waiting for, once. A short reply to a Monitor tick or a `ScheduleWakeup` that fired with nothing new folds the same way (shown as a 💬 line).
+
 === "toml"
 
     ```toml title="~/.untether/untether.toml"
     [progress]
     show_background_tasks = true      # default true
     background_tasks_max_rows = 5     # 1-20; "+N more" beyond it
+    consolidate_wake_turns = true     # default true; false = one message per wake turn
     ```
 
 ## Per-chat override

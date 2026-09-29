@@ -41,6 +41,7 @@ HOURGLASS = "\N{HOURGLASS WITH FLOWING SAND}"
 DONE_MARK = "\N{WHITE HEAVY CHECK MARK}"
 FAIL_MARK = "\N{CROSS MARK}"
 STOP_MARK = "\N{BLACK SQUARE FOR STOP}\N{VARIATION SELECTOR-16}"
+NOTE_MARK = "\N{SPEECH BALLOON}"
 
 LIVE_STATUSES = frozenset({"running", "pending"})
 _DONE_STATUSES = frozenset({"completed", "ended", "done", "success"})
@@ -226,6 +227,61 @@ def _start_key(task: Any) -> float:
     return started if isinstance(started, (int, float)) else 0.0
 
 
+# #785 part 2: a wake turn whose whole answer fits in this many characters
+# is an "ack" ("The Trello sweep is back — waiting on the other three.") and
+# can fold into the status message. nsd's acks were ~60-150 chars; the one
+# compiled report was 6826. 300 is two or three sentences — the whole answer
+# is shown on one line, so nothing is lost — and keeps a 5-row message well
+# under Telegram's limit. The owner's suggested threshold.
+FOLD_MAX_CHARS = 300
+# Reasons a turn can fold for: a background finish (or a turn the CLI opened
+# on one before naming it), a Monitor tick, a ScheduleWakeup firing.
+FOLDABLE_REASONS = frozenset(
+    {"task_finished", "unknown", "scheduled_wakeup", "monitor_event"}
+)
+
+
+def wake_fold_decision(
+    *,
+    reason: str,
+    ok: bool,
+    answer: str,
+    substantive_actions: int,
+    already_announced: bool,
+    live_tasks_remaining: int,
+    batch_announced: bool = True,
+) -> str:
+    """``"fold"`` or why the turn breaks out as its own (pushed) message.
+
+    Decided on content first — tools / approvals / questions (any non-note
+    action), a substantive answer, an error — because the CLI often opens the
+    compiled-report turn as ``unknown`` before the last task's end event
+    lands, so "is this the last task?" can't be known when the turn opens.
+    At completion, though, a task_finished / unknown turn that left no
+    background work running is treated as the report (``last_task``): it
+    still breaks out, so the finish the user was waiting for pushes — unless
+    it only repeats a finish already announced *and* this batch of background
+    work already had a pushed wake message (``batch_announced``). That keeps
+    one push per batch even when the report turn raced the task's end and
+    folded as a short unattributed ack.
+    """
+    if reason not in FOLDABLE_REASONS:
+        return "not_wake"
+    if not ok:
+        return "error"
+    if substantive_actions > 0:
+        return "tools"
+    if len((answer or "").strip()) > FOLD_MAX_CHARS:
+        return "long_answer"
+    if (
+        reason in ("task_finished", "unknown")
+        and live_tasks_remaining == 0
+        and (not already_announced or not batch_announced)
+    ):
+        return "last_task"
+    return "fold"
+
+
 _CLOSE_REASONS = {
     "max_hold": "background hold limit reached",
     "abs_cap": "session time limit reached",
@@ -272,6 +328,15 @@ class BackgroundStatusPanel:
         self._last_edit_at = 0.0
         self._last_sig: tuple[Any, ...] | None = None
         self._edits = 0
+        # #785 part 2: short wake-turn acks folded in instead of pushed —
+        # per task row, or unattributed (a turn no task event named).
+        self.acks: dict[str, list[str]] = {}
+        self.notes: list[str] = []
+        self._last_note: str | None = None
+        self.folds = 0
+        # Wake turns delivered as their own pushed message while this was the
+        # run's status message (see ``wake_fold_decision``'s batch rule).
+        self.breakouts = 0
 
     # ── model ────────────────────────────────────────────────────────────
     def track(self, tasks: Iterable[Any]) -> bool:
@@ -292,6 +357,7 @@ class BackgroundStatusPanel:
             tuple((tid, getattr(t, "status", None)) for tid, t in self.tasks.items()),
             self.finalised,
             self.close_reason,
+            self.folds,
         )
 
     def _header(self, now: float) -> str:
@@ -324,16 +390,103 @@ class BackgroundStatusPanel:
         live_ids = {id(t) for t in live}
         done = [t for t in ordered if id(t) not in live_ids]
         lines = [self._header(now)]
-        lines.extend(_live_rows(live, now, self.max_rows, markdown=False))
-        shown = done[-self.max_rows :]
-        hidden = len(done) - len(shown)
+        live_rows = _live_rows(live, now, self.max_rows, markdown=False)
+        for task, row in zip(live, live_rows, strict=False):
+            lines.append(row)
+            lines.extend(self._ack_lines(task))
+        lines.extend(live_rows[len(live) :])  # "+N more"
+        # Rows carrying a folded ack are always shown — folding must never
+        # lose content (#785); the rest collapse beyond the row cap.
+        acked = [t for t in done if self.acks.get(self._tid(t))]
+        plain = [t for t in done if not self.acks.get(self._tid(t))]
+        keep = max(0, self.max_rows - len(acked))
+        kept_ids = {id(t) for t in acked} | {
+            id(t) for t in (plain[-keep:] if keep else [])
+        }
+        hidden = len(done) - len(kept_ids)
         if hidden > 0:
             lines.append(f"+{hidden} more ended")
-        lines.extend(format_done_row(t, now) for t in shown)
+        for task in done:
+            if id(task) in kept_ids:
+                lines.append(format_done_row(task, now))
+                lines.extend(self._ack_lines(task))
+        lines.extend(f"{NOTE_MARK} {note}" for note in self.notes)
         text = "\n".join(lines)
         if len(text) > STATUS_MAX_CHARS:
             text = text[: STATUS_MAX_CHARS - 1] + "…"
         return text
+
+    def _tid(self, task: Any) -> str:
+        return str(getattr(task, "task_id", "") or id(task))
+
+    def _ack_lines(self, task: Any) -> list[str]:
+        return [f"   ↳ {ack}" for ack in self.acks.get(self._tid(task), [])]
+
+    def _claim_last_note(self, target: str) -> bool:
+        """Move the latest unattributed ack onto ``target``'s row: the CLI
+        answered one finish twice — first in a turn no task event named, then
+        in the task's own turn."""
+        note, self._last_note = self._last_note, None
+        if note is None or note not in self.notes or target not in self.tasks:
+            return False
+        self.notes.remove(note)
+        bucket = self.acks.setdefault(target, [])
+        if note not in bucket:
+            bucket.append(note)
+        return True
+
+    async def attribute_last_note(self, task_ids: Iterable[str]) -> None:
+        """A task's own (already-announced) turn broke out as a message:
+        still file the earlier unattributed ack under that task's row."""
+        target = next((tid for tid in task_ids if tid in self.tasks), None)
+        if target is not None and self._claim_last_note(target):
+            await self._edit(self.render())
+
+    async def fold(
+        self,
+        text: str,
+        *,
+        task_ids: Iterable[str] = (),
+        already_announced: bool = False,
+    ) -> bool:
+        """#785 part 2: record a short wake-turn answer on this message
+        instead of a new pushed one. False (nothing changed) when it can't be
+        shown in full — the caller then delivers the turn normally."""
+        if self.ref is None:
+            return False
+        saved = ({k: list(v) for k, v in self.acks.items()}, list(self.notes))
+        saved_last = self._last_note
+        ack = _one_line(text)
+        target = next((tid for tid in task_ids if tid in self.tasks), None)
+        if target is not None and already_announced:
+            self._claim_last_note(target)
+        self._last_note = None
+        if ack:
+            if target is not None:
+                bucket = self.acks.setdefault(target, [])
+                if ack not in bucket:
+                    bucket.append(ack)
+            elif ack not in self.notes:
+                self.notes.append(ack)
+                self._last_note = ack
+        if len(self.render()) >= STATUS_MAX_CHARS:  # would be truncated
+            self.acks, self.notes = saved
+            self._last_note = saved_last
+            return False
+        self.folds += 1
+        if not self.finalised and not self.live():
+            await self.finalise()
+        else:
+            await self._edit(self.render())
+        logger.info(
+            "background_status.folded",
+            channel_id=self._channel_id,
+            message_id=self.ref.message_id,
+            task_id=target,
+            ack_len=len(ack),
+            finalised=self.finalised,
+        )
+        return True
 
     # ── transport ────────────────────────────────────────────────────────
     async def open(self, reply_to: MessageRef | None) -> bool:
@@ -551,6 +704,46 @@ class BackgroundStatusManager:
                 await self.poll_once()
             except Exception:  # noqa: BLE001 — never break the run
                 logger.debug("background_status.poll_failed", exc_info=True)
+
+    @property
+    def fold_target(self) -> BackgroundStatusPanel | None:
+        """The run's latest status message (active or finalised) — where a
+        short wake-turn ack folds (#785 part 2)."""
+        panel = self.panel
+        return panel if panel is not None and panel.ref is not None else None
+
+    def note_breakout(self) -> None:
+        if (panel := self.fold_target) is not None:
+            panel.breakouts += 1
+
+    async def attribute_last_note(self, task_ids: Iterable[str]) -> None:
+        async with self._lock:
+            if (panel := self.fold_target) is not None:
+                await panel.attribute_last_note([str(t) for t in task_ids])
+
+    async def fold(
+        self,
+        text: str,
+        *,
+        task_ids: Iterable[str] = (),
+        already_announced: bool = False,
+    ) -> bool:
+        async with self._lock:
+            panel = self.fold_target
+            if panel is None:
+                return False
+            ids = [str(t) for t in task_ids]
+            by_id = {
+                str(getattr(t, "task_id", "")): t
+                for t in self._tasks()
+                if is_top_level_background(t)
+            }
+            for tid in ids:
+                if tid not in panel.tasks and tid in by_id:
+                    panel.tasks[tid] = by_id[tid]
+            return await panel.fold(
+                text, task_ids=ids, already_announced=already_announced
+            )
 
     async def aclose(self, reason: str | None) -> None:
         async with self._lock:

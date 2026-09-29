@@ -692,3 +692,33 @@ async def test_795_unknown_origin_falls_back_to_the_default(detail: dict) -> Non
     await router.on_turn(_turn("started", turn=2, detail=detail))
     await router.on_turn(_turn("completed", turn=2, ok=True, answer="x", detail=detail))
     assert rec.delivered[-1][5] == 10
+
+
+async def test_785_thinking_note_alone_opens_no_progress_when_filtered() -> None:
+    """#785 part 2: with consolidation on, a wake turn's thinking note must
+    not open a progress message (it may fold into the status message); a
+    tool call still does."""
+    rec = _Recorder()
+    router = rb.FollowupTurnRouter(
+        new_tracker=lambda: ProgressTracker(engine="claude"),
+        create_progress=rec.create,
+        close_progress=rec.close,
+        deliver=rec.deliver,
+        default_reply_to=USER_REF,
+        followup_notify=False,
+        anchor_for=None,
+        progress_for=lambda evt: evt.action.kind != "note",
+    )
+    await router.on_turn(_turn("started", detail={"tasks": ["build"]}))
+    note = ActionEvent(
+        engine="claude",
+        action=Action(id="claude.thinking.1", kind="note", title="hmm"),
+        phase="completed",
+        ok=True,
+    )
+    await router.on_event(note)
+    assert rec.created == []
+    assert router.current is not None
+    assert router.current.tracker.action_count == 1  # still tracked
+    await router.on_event(_action())
+    assert rec.created == [2]

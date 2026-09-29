@@ -31,7 +31,12 @@ from untether.transport import MessageRef
 pytestmark = pytest.mark.anyio
 
 FAKE_CLI = Path(__file__).parent / "fake_clis" / "fake_claude_live.py"
-_ENV = ("FAKE_CLAUDE_SCENARIO", "FAKE_CLAUDE_WAKE_S", "FAKE_CLAUDE_TASK_END")
+_ENV = (
+    "FAKE_CLAUDE_SCENARIO",
+    "FAKE_CLAUDE_WAKE_S",
+    "FAKE_CLAUDE_TASK_END",
+    "FAKE_CLAUDE_ACK_TOOL",
+)
 
 
 class _OrderedTransport(FakeTransport):
@@ -74,9 +79,10 @@ def _progress(monkeypatch: pytest.MonkeyPatch, **values: Any) -> None:
 
 @pytest.fixture(autouse=True)
 def _isolate(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
-    # The rc11/rc12 assertions below predate the #777 status message: pin it
-    # off (= rc12 delivery) unless a test opts in via ``_progress``.
-    _progress(monkeypatch, show_background_tasks=False)
+    # The rc11/rc12 assertions below predate the #777 status message and the
+    # #785 wake-ack consolidation: pin both off (= rc12 delivery) unless a
+    # test opts in via ``_progress``.
+    _progress(monkeypatch, show_background_tasks=False, consolidate_wake_turns=False)
     set_quarantine_store(QuarantineStore(tmp_path / "q.json"))
     yield
     set_quarantine_store(None)
