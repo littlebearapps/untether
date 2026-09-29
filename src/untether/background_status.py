@@ -190,9 +190,12 @@ def _end_mark(task: Any) -> tuple[str, str]:
 
 
 def format_done_row(task: Any, now: float) -> str:
-    """``✅ verifier done · 4m20s · 61k tok`` (❌ failed, ⏹ stopped)."""
+    """``✅ verifier · 4m20s · 61k tok`` / ``❌ verifier failed · …`` /
+    ``⏹️ verifier stopped · …`` — ✅ already says "done", so a description
+    ending in "done" doesn't read "done done"."""
     mark, word = _end_mark(task)
-    parts = [f"{mark} {task_label(task)} {word}"]
+    label = task_label(task)
+    parts = [f"{mark} {label}" if word == "done" else f"{mark} {label} {word}"]
     parts.append(format_bg_elapsed(task_elapsed(task, now)))
     tokens = _usage(task, "total_tokens")
     if tokens is not None:

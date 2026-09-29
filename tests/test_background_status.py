@@ -161,9 +161,14 @@ def test_long_description_and_step_are_shortened_to_one_line() -> None:
 )
 def test_done_row_marks(status: str, mark: str, word: str) -> None:
     task = _agent(status=status, started=0.0, ended=260.0, tokens=61_000)
-    assert format_done_row(task, now=999.0) == (
-        f"{mark} verifier {word} · 4m20s · 61k tok"
-    )
+    label = "verifier" if word == "done" else f"verifier {word}"
+    assert format_done_row(task, now=999.0) == f"{mark} {label} · 4m20s · 61k tok"
+
+
+def test_done_row_never_says_done_twice() -> None:
+    task = _agent(desc="Run python sleep 40 agent done", status="completed", ended=50.0)
+    row = format_done_row(task, now=99.0)
+    assert row == "✅ Run python sleep 40 agent done · 50s · 52k tok"
 
 
 def test_block_lists_only_live_top_level_background_tasks() -> None:
@@ -391,7 +396,7 @@ async def test_status_message_lifecycle(tmp_path: Path) -> None:
     assert len(transport.edit_calls) == 2
     text = transport.edit_calls[-1]["message"].text
     assert text.splitlines()[0] == "⏳ background (1) · 1 done"
-    assert "✅ gh run watch done · 1m04s" in text
+    assert "✅ gh run watch · 1m04s" in text
 
     # The set empties: finalised, persistence entry dropped.
     clock.t += 5
@@ -399,7 +404,7 @@ async def test_status_message_lifecycle(tmp_path: Path) -> None:
     await panel.sync([agent, bash])
     final = transport.edit_calls[-1]["message"].text
     assert final.splitlines()[0] == "✅ all 2 background tasks done"
-    assert "✅ verifier done · 1m39s · 61k tok" in final
+    assert "✅ verifier · 1m39s · 61k tok" in final
     assert panel.finalised
     assert load_active_progress(tmp_path / "ap.json") == {}
     # Finalised panels don't edit again.
@@ -699,7 +704,7 @@ async def test_fold_puts_the_ack_on_the_task_row_in_full() -> None:
     assert await panel.fold(ack, task_ids=["a1"])
     text = transport.edit_calls[-1]["message"].text
     lines = text.splitlines()
-    row = lines.index(next(ln for ln in lines if ln.startswith("✅ sweep one done")))
+    row = lines.index(next(ln for ln in lines if ln.startswith("✅ sweep one ·")))
     assert lines[row + 1] == "   ↳ " + " ".join(ack.split())
     assert not panel.finalised  # sweep two still running
 
@@ -716,7 +721,7 @@ async def test_fold_without_a_task_is_a_note_then_filed_by_the_restatement() -> 
         "Sweep one finished.", task_ids=["a1"], already_announced=True
     )
     lines = transport.edit_calls[-1]["message"].text.splitlines()
-    row = lines.index(next(ln for ln in lines if ln.startswith("✅ sweep one done")))
+    row = lines.index(next(ln for ln in lines if ln.startswith("✅ sweep one ·")))
     assert lines[row + 1 : row + 3] == [
         "   ↳ Sweep one is back.",
         "   ↳ Sweep one finished.",
@@ -779,7 +784,7 @@ async def test_fold_rows_survive_the_row_cap() -> None:
         t.status, t.ended_at = "completed", 20.0
     assert await panel.fold("first job ack", task_ids=["b0"])
     lines = transport.edit_calls[-1]["message"].text.splitlines()
-    assert "✅ job 0 done · 20s" in lines  # the oldest row, kept for its ack
+    assert "✅ job 0 · 20s" in lines  # the oldest row, kept for its ack
     assert "   ↳ first job ack" in lines
     assert "+6 more ended" in lines
 
@@ -794,7 +799,7 @@ async def test_manager_fold_adds_a_known_task_missing_from_the_message() -> None
     store.tasks.append(late)
     assert await manager.fold("late one done", task_ids=["a9"])
     text = transport.edit_calls[-1]["message"].text
-    assert "✅ late done" in text and "   ↳ late one done" in text
+    assert "✅ late ·" in text and "   ↳ late one done" in text
 
 
 async def test_manager_fold_without_status_message_is_refused() -> None:

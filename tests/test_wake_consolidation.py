@@ -62,7 +62,7 @@ async def test_ack_turns_fold_and_only_the_report_pushes(
     final = _status_text(transport)
     lines = final.splitlines()
     assert lines[0] == "✅ all 2 background tasks done"
-    a1 = lines.index(next(ln for ln in lines if ln.startswith("✅ bg a1 done")))
+    a1 = lines.index(next(ln for ln in lines if ln.startswith("✅ bg a1 ·")))
     assert lines[a1 + 1] == "   ↳ Sweep one is back; waiting on sweep two."
     assert lines[a1 + 2] == "   ↳ a1 finished (again)."
 
@@ -146,7 +146,26 @@ async def test_single_agent_pair_pushes_once(
     assert "bg a1" in pushed[0]["message"].text
     lines = _status_text(transport).splitlines()
     assert lines[0] == "✅ background task done"
-    row = lines.index(next(ln for ln in lines if ln.startswith("✅ bg a1 done")))
+    row = lines.index(next(ln for ln in lines if ln.startswith("✅ bg a1 ·")))
     folded = "The sweep has finished" if task_end == "mid" else "The sweep is back"
     assert lines[row + 1] == f"   ↳ {folded}"
     assert not any(ln.startswith("💬") for ln in lines)
+
+
+async def test_quiet_batch_report_pushes_even_if_already_announced(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Dev-bot regression (#785): every earlier wake turn folded, and the
+    shell task's end was paired with the last folded ``unknown`` ack, so its
+    report turn arrived ``already_announced`` (no push) — a long report
+    breaking out of a batch that had never pushed must push."""
+    _progress(monkeypatch, show_background_tasks=True, consolidate_wake_turns=True)
+    transport = await _drive("quiet_batch_report", wake_s=0.6)
+    for ack in ("a1 is back.", "a2 is back.", "Still waiting on the shell job."):
+        assert _sent(transport, ack) == [], ack
+    report = _sent(transport, "REPORT: all three jobs finished cleanly.")
+    assert len(report) == 1
+    assert report[0]["options"].notify is True
+    pushed = [c for c in transport.send_calls if c["options"].notify]
+    assert pushed == report
+    assert _status_text(transport).startswith("✅ all 3 background tasks done")

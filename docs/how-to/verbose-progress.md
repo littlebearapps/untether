@@ -114,7 +114,7 @@ Agents (🤖) show elapsed time, tokens, tool calls and the current step; shell 
 ```
 ⏳ background (1) · 1 done
 🤖 verifier · 4m02s · 58k tok · 9 tools · Running tests
-✅ gh run watch done · 1m40s
+✅ gh run watch · 1m40s
 ```
 
 When the last task finishes the message is finalised (`✅ all 2 background tasks done`, with ❌ failed / ⏹️ stopped rows where relevant). If the session closes first — `/cancel`, `/new`, the background hold limit, a restart — the remaining rows are marked ⏹️ stopped with the reason, so the message never keeps saying "running". Claude's own report on a finished task still arrives as a normal message. `/ping` shows `⏳ background: N tasks running` for the chat while any are live.
@@ -126,7 +126,7 @@ Claude often answers each background task finishing with a one-liner — "the li
 ```
 ⏳ background (1) · 1 done
 🤖 sweep two · 2m40s · 61k tok · 12 tools · Running checks
-✅ sweep one done · 1m55s · 48k tok
+✅ sweep one · 1m55s · 48k tok
    ↳ Sweep one is back; waiting on sweep two.
 ```
 

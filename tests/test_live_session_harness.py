@@ -355,6 +355,6 @@ async def test_777_status_message_opens_after_answer_and_finalises(
         c["message"].text for c in transport.edit_calls if c["ref"] == status["ref"]
     ][-1]
     assert final.splitlines()[0] == "✅ background task done"
-    assert "✅ bg a1 done" in final
+    assert "✅ bg a1 ·" in final
     # The wake turn's report still arrives as its own message.
     assert any("REPORT: all good" in c["message"].text for c in sends)

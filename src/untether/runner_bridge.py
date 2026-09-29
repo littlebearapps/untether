@@ -5093,7 +5093,8 @@ async def handle_message(
                     )
             return
         if turn is not None:
-            t_notify = turn.notify  # the fold decision may have promoted it
+            _promote_quiet_breakout(turn)
+            t_notify = turn.notify  # a quiet batch's breakout always pushes
 
         can_edit_final = t_progress_ref is not None
         edit_ref = None if t_notify or not can_edit_final else t_progress_ref
@@ -5389,9 +5390,8 @@ async def handle_message(
         task_ids = [t for t in detail.get("task_ids", []) if isinstance(t, str)]
         if decision == "last_task" and already:
             # The finish this turn restates was folded silently (the report
-            # turn raced the task's end): this is the batch's one push, and
-            # the earlier ack belongs on the task's row.
-            ctx.notify = True
+            # turn raced the task's end): the earlier ack belongs on the
+            # task's row. (Its push comes from _promote_quiet_breakout.)
             await bg_status.attribute_last_note(task_ids)
         folded = decision == "fold" and await bg_status.fold(
             completed.answer or "",
@@ -5406,6 +5406,30 @@ async def handle_message(
             folded=folded,
         )
         return folded
+
+    def _promote_quiet_breakout(ctx: _TurnCtx) -> None:
+        """#785: while consolidating, a wake turn that is delivered as its own
+        message (any non-fold outcome — report, long answer, tools, approval,
+        error, a budget notice) pushes if its batch hasn't pushed yet. Its
+        ``already_announced`` flag (router: no push) may refer to a finish that
+        was only folded silently — or was paired with an unrelated ``unknown``
+        turn — so it must never leave a batch with content but no push."""
+        target = bg_status.fold_target
+        if (
+            ctx.notify
+            or target is None
+            or target.breakouts > 0
+            or ctx.reason not in FOLDABLE_REASONS
+            or not _consolidating()
+        ):
+            return
+        ctx.notify = True
+        logger.info(
+            "live_turn.push_promoted",
+            turn=ctx.turn,
+            reason=ctx.reason,
+            already_announced=bool((ctx.detail or {}).get("already_announced")),
+        )
 
     def _bg_close_reason() -> str | None:
         engine_state = getattr(edits.stream, "engine_state", None)

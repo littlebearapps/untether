@@ -523,6 +523,43 @@ def scenario_multi_agent_acks(first: dict) -> None:
     serve_followups()
 
 
+def scenario_quiet_batch_report(first: dict) -> None:
+    """#785 dev-bot regression (session 09ab089b): three background tasks;
+    two short acks fold; an ``unknown`` ack turn completes while the shell
+    task still runs; the shell task then ends moments later (the runner pairs
+    that end with the ack turn, so the task counts as announced); its own
+    notification turn is the batch's only real content — a long report."""
+    init()
+    for task_id, tool_id, kind in (
+        ("a1", "toolu_a1", "local_agent"),
+        ("a2", "toolu_a2", "local_agent"),
+        ("b3", "toolu_b3", "local_bash"),
+    ):
+        tool_use("Agent" if kind == "local_agent" else "Bash", tool_id, {})
+        start_bg(task_id, tool_id, task_type=kind)
+        tool_result(tool_id, "launched")
+    result("Three jobs running; I'll report back.", turns=4)
+    for task_id in ("a1", "a2"):
+        if wait_idle_or_eof(WAKE_S) is None:
+            shutdown()
+        init()
+        text(f"{task_id} is back.")
+        _end_quietly(task_id)
+        result(f"{task_id} is back.")
+    if wait_idle_or_eof(WAKE_S) is None:
+        shutdown()
+    init()
+    text("Still waiting on the shell job.")
+    result("Still waiting on the shell job.")
+    _end_quietly("b3")
+    _notify("b3", "toolu_b3")
+    init()
+    report = "REPORT: " + "all three jobs finished cleanly. " * 20
+    text(report)
+    result(report)
+    serve_followups()
+
+
 def scenario_followup_launches_bg(first: dict) -> None:
     """#795: the run answers; a follow-up (injected user line) launches a
     background Bash; that task's wake turn must reply to the follow-up."""
@@ -706,6 +743,7 @@ _SCENARIOS = {
     "followup": scenario_followup,
     "followup_launches_bg": scenario_followup_launches_bg,
     "multi_agent_acks": scenario_multi_agent_acks,
+    "quiet_batch_report": scenario_quiet_batch_report,
     "resume_after_killed_task": scenario_resume_after_killed_task,
     "inherited_fd_after_exit": scenario_inherited_fd_after_exit,
 }
