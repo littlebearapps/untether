@@ -140,6 +140,18 @@ Behavior:
 - Forwarded messages arriving during the window are appended to the prompt
   (separated by blank lines) and do not start their own runs.
 - Forwarded messages by themselves do not start runs.
+- Another plain prompt from the same sender inside the window is **merged**:
+  the texts are joined in order with a blank line and run once, anchored on the
+  latest message (logged at INFO as `forward.prompt.merged` with
+  `merged_count`). Earlier releases replaced the pending prompt and silently
+  dropped its text ([#794](https://github.com/littlebearapps/untether/issues/794)).
+- A prompt that can't share a run with the pending one — it replies to a
+  different message, it's a voice transcript while the other isn't, it starts
+  with a directive (`/codex …`, `/project …`, `@branch …`), or the chat's
+  context changed in between — sends the pending prompt straight away as its own
+  run (`forward.prompt.flushed` with a `reason`). Nothing is dropped.
+- Slash commands are never merged into a prompt; they run as soon as they
+  arrive. Replies to a message whose run is still going bypass the window.
 
 Configuration (under `[transports.telegram]`):
 

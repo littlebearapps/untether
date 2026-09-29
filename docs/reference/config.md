@@ -81,7 +81,7 @@ systemctl --user restart untether-dev    # dev
 | `allowed_user_ids` | int[] | (required, non-empty) | Allowed sender user ids. **Required for security as of v0.35.3** ([#377](https://github.com/littlebearapps/untether/issues/377)) — set to a non-empty list of Telegram user IDs (your own user id is the typical minimum). An empty list now triggers a hard `ConfigError` at startup unless you opt in to `allow_any_user = true` (see below). |
 | `allow_any_user` | bool | `false` | **Dev/demo escape hatch** ([#377](https://github.com/littlebearapps/untether/issues/377)). Set to `true` to keep the prior insecure-default behaviour where any Telegram user who knows the bot username can send commands. Logged at INFO on every boot (`security.allow_any_user`) so the deviation is visible in `journalctl`. Use only for hackathons, demos, or local dev. |
 | `message_overflow` | `"trim"`\|`"split"` | `"split"` | 🔄 How to handle long final responses. Restart-required. |
-| `forward_coalesce_s` | float | `1.0` | Quiet window for combining a prompt with immediately-following forwarded messages; set `0` to disable. |
+| `forward_coalesce_s` | float | `1.0` | Quiet window for combining a prompt with immediately-following forwarded messages, and for merging rapid back-to-back prompts into one run (#794); set `0` to disable. |
 | `voice_transcription` | bool | `false` | Enable voice note transcription. |
 | `voice_max_bytes` | int | `10485760` | Max voice note size (bytes). |
 | `voice_transcription_model` | string | `"gpt-4o-mini-transcribe"` | OpenAI transcription model name. |

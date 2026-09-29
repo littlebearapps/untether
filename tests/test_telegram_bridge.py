@@ -2630,6 +2630,143 @@ async def test_run_main_loop_debounces_forwarded_messages_preserves_directives()
     assert prompt_text.endswith("summarize these\n\na\n\nb\n\nc")
 
 
+def _coalesce_cfg(runtime: TransportRuntime) -> TelegramBridgeConfig:
+    # A finite poller only waits for *running* tasks before shutting down, so
+    # the #794 pollers below sleep out the coalesce window after their last
+    # message.
+    return TelegramBridgeConfig(
+        bot=FakeBot(),
+        runtime=runtime,
+        chat_id=123,
+        startup_msg="",
+        exec_cfg=ExecBridgeConfig(
+            transport=FakeTransport(),
+            presenter=MarkdownPresenter(),
+            final_notify=True,
+        ),
+        forward_coalesce_s=DEBOUNCE_FORWARD_COALESCE_S,
+        media_group_debounce_s=FAST_MEDIA_GROUP_DEBOUNCE_S,
+    )
+
+
+def _user_msg(
+    message_id: int,
+    text: str,
+    *,
+    reply_to_message_id: int | None = None,
+) -> TelegramIncomingMessage:
+    return TelegramIncomingMessage(
+        transport="telegram",
+        chat_id=123,
+        message_id=message_id,
+        text=text,
+        reply_to_message_id=reply_to_message_id,
+        reply_to_text=None,
+        sender_id=123,
+    )
+
+
+@pytest.mark.anyio
+async def test_run_main_loop_merges_rapid_prompts_in_order() -> None:
+    """#794: prompts inside the coalesce window used to replace each other,
+    so only the last one ran. All three texts now reach one run, in order."""
+    runner = ScriptRunner([Return(answer="ok")], engine=CODEX_ENGINE)
+    runtime = TransportRuntime(router=_make_router(runner), projects=_empty_projects())
+    cfg = _coalesce_cfg(runtime)
+
+    async def poller(_cfg: TelegramBridgeConfig):
+        yield _user_msg(1, "rapid 1")
+        await anyio.sleep(_cfg.forward_coalesce_s / 4)
+        yield _user_msg(2, "rapid 2")
+        await anyio.sleep(_cfg.forward_coalesce_s / 4)
+        yield _user_msg(3, "rapid 3")
+        await anyio.sleep(_cfg.forward_coalesce_s * 4)
+
+    await run_main_loop(cfg, poller)
+
+    assert len(runner.calls) == 1
+    prompt_text, _ = runner.calls[0]
+    assert prompt_text.endswith("rapid 1\n\nrapid 2\n\nrapid 3")
+
+
+@pytest.mark.anyio
+async def test_run_main_loop_command_between_prompts_not_merged() -> None:
+    """A slash command inside the window runs as a command; its text never
+    joins the prompt, and neither surrounding prompt is lost."""
+    runner = ScriptRunner([Return(answer="ok")], engine=CODEX_ENGINE)
+    runtime = TransportRuntime(router=_make_router(runner), projects=_empty_projects())
+    cfg = _coalesce_cfg(runtime)
+
+    async def poller(_cfg: TelegramBridgeConfig):
+        yield _user_msg(1, "first")
+        yield _user_msg(2, "/file get x")
+        yield _user_msg(3, "second")
+        await anyio.sleep(_cfg.forward_coalesce_s * 4)
+
+    await run_main_loop(cfg, poller)
+
+    assert len(runner.calls) == 1
+    prompt_text, _ = runner.calls[0]
+    assert prompt_text.endswith("first\n\nsecond")
+    assert "/file get x" not in prompt_text
+    transport = cast(FakeTransport, cfg.exec_cfg.transport)
+    assert any(
+        "file transfer disabled" in call["message"].text
+        for call in transport.send_calls
+    )
+
+
+@pytest.mark.anyio
+async def test_run_main_loop_prompts_with_different_reply_targets_run_separately() -> (
+    None
+):
+    runner = ScriptRunner(
+        [Return(answer="one"), Return(answer="two")], engine=CODEX_ENGINE
+    )
+    runtime = TransportRuntime(router=_make_router(runner), projects=_empty_projects())
+    cfg = _coalesce_cfg(runtime)
+
+    async def poller(_cfg: TelegramBridgeConfig):
+        yield _user_msg(1, "about this one", reply_to_message_id=500)
+        yield _user_msg(2, "about that one", reply_to_message_id=600)
+        await anyio.sleep(_cfg.forward_coalesce_s * 4)
+
+    await run_main_loop(cfg, poller)
+
+    prompts = sorted(call[0] for call in runner.calls)
+    assert len(prompts) == 2
+    assert prompts[0].endswith("about that one")
+    assert prompts[1].endswith("about this one")
+
+
+@pytest.mark.anyio
+async def test_run_main_loop_directive_prompt_not_merged_into_previous() -> None:
+    codex_runner = ScriptRunner([Return(answer="codex")], engine=CODEX_ENGINE)
+    claude_runner = ScriptRunner([Return(answer="claude")], engine="claude")
+    router = AutoRouter(
+        entries=[
+            RunnerEntry(engine=claude_runner.engine, runner=claude_runner),
+            RunnerEntry(engine=codex_runner.engine, runner=codex_runner),
+        ],
+        default_engine=claude_runner.engine,
+    )
+    runtime = TransportRuntime(router=router, projects=_empty_projects())
+    cfg = _coalesce_cfg(runtime)
+
+    async def poller(_cfg: TelegramBridgeConfig):
+        yield _user_msg(1, "hello claude")
+        yield _user_msg(2, "/codex list the files")
+        await anyio.sleep(_cfg.forward_coalesce_s * 4)
+
+    await run_main_loop(cfg, poller)
+
+    assert len(claude_runner.calls) == 1
+    assert claude_runner.calls[0][0].endswith("hello claude")
+    assert len(codex_runner.calls) == 1
+    assert codex_runner.calls[0][0].endswith("list the files")
+    assert "hello claude" not in codex_runner.calls[0][0]
+
+
 @pytest.mark.anyio
 async def test_run_main_loop_ignores_forwarded_without_prompt() -> None:
     runner = ScriptRunner([Return(answer="ok")], engine=CODEX_ENGINE)

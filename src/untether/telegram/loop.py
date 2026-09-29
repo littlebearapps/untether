@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from collections import deque
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from functools import partial
 from pathlib import Path
 from typing import TYPE_CHECKING, cast
@@ -676,6 +676,8 @@ class _PendingPrompt:
     is_voice_transcribed: bool
     forwards: list[tuple[int, str]]
     cancel_scope: anyio.CancelScope | None = None
+    # #794: ids of earlier prompt messages whose text was merged into this one.
+    merged_message_ids: list[int] = field(default_factory=list)
 
 
 @dataclass(frozen=True, slots=True)
@@ -790,13 +792,39 @@ def _forward_key(msg: TelegramIncomingMessage) -> ForwardKey:
 def _is_forwarded(raw: dict[str, object] | None) -> bool:
     if not isinstance(raw, dict):
         return False
-    return any(raw.get(field) is not None for field in _FORWARD_FIELDS)
+    return any(raw.get(name) is not None for name in _FORWARD_FIELDS)
 
 
 def _forward_fields_present(raw: dict[str, object] | None) -> list[str]:
     if not isinstance(raw, dict):
         return []
-    return [field for field in _FORWARD_FIELDS if raw.get(field) is not None]
+    return [name for name in _FORWARD_FIELDS if raw.get(name) is not None]
+
+
+def _merge_block_reason(existing: _PendingPrompt, new: _PendingPrompt) -> str | None:
+    """Why ``existing`` can't be folded into ``new`` (None when it can, #794).
+
+    Prompts are merged only when they would have run the same way on their
+    own: same reply target (a reply carries its own resume token), same
+    topic / session / context, same voice-transcript status. A later prompt
+    led by a directive (``/engine``, ``/project``, ``@branch``) is kept apart
+    too — merged behind the earlier text its directive would no longer lead
+    the prompt and would be silently ignored.
+    """
+    if existing.reply_id != new.reply_id:
+        return "reply_target"
+    if (
+        existing.topic_key != new.topic_key
+        or existing.chat_session_key != new.chat_session_key
+        or existing.chat_project != new.chat_project
+        or existing.ambient_context != new.ambient_context
+    ):
+        return "context"
+    if existing.is_voice_transcribed != new.is_voice_transcribed:
+        return "voice"
+    if new.text.lstrip().startswith(("/", "@")):
+        return "directive"
+    return None
 
 
 def _format_forwarded_prompt(forwarded: list[str], prompt: str) -> str:
@@ -866,19 +894,14 @@ class ForwardCoalescer:
         key = _forward_key(pending.msg)
         existing = self._pending.get(key)
         if existing is not None:
-            if existing.cancel_scope is not None:
-                existing.cancel_scope.cancel()
-            if existing.forwards:
-                pending.forwards = list(existing.forwards)
-            logger.debug(
-                "forward.prompt.replace",
-                chat_id=pending.msg.chat_id,
-                thread_id=pending.msg.thread_id,
-                sender_id=pending.msg.sender_id,
-                old_message_id=existing.msg.message_id,
-                new_message_id=pending.msg.message_id,
-                forward_count=len(pending.forwards),
-            )
+            # #794: a newer prompt inside the window used to *replace* the
+            # pending one, silently dropping its text. Merge it instead, or,
+            # when the two can't share a run, send the earlier one now.
+            reason = _merge_block_reason(existing, pending)
+            if reason is None:
+                self._merge(existing, pending)
+            else:
+                self._flush(key, existing, reason=reason)
         self._pending[key] = pending
         logger.debug(
             "forward.prompt.schedule",
@@ -889,6 +912,49 @@ class ForwardCoalescer:
             debounce_s=self._debounce_s,
         )
         self._reschedule(key, pending)
+
+    def _merge(self, existing: _PendingPrompt, pending: _PendingPrompt) -> None:
+        """Fold ``existing`` into ``pending``: its text goes first, its
+        forwards are kept. The run anchors on the newer message."""
+        if existing.cancel_scope is not None:
+            existing.cancel_scope.cancel()
+        parts = [text for text in (existing.text, pending.text) if text.strip()]
+        pending.text = "\n\n".join(parts)
+        pending.forwards = [*existing.forwards, *pending.forwards]
+        pending.merged_message_ids = [
+            *existing.merged_message_ids,
+            existing.msg.message_id,
+            *pending.merged_message_ids,
+        ]
+        logger.info(
+            "forward.prompt.merged",
+            chat_id=pending.msg.chat_id,
+            thread_id=pending.msg.thread_id,
+            sender_id=pending.msg.sender_id,
+            message_id=pending.msg.message_id,
+            merged_message_ids=pending.merged_message_ids,
+            merged_count=len(pending.merged_message_ids) + 1,
+            forward_count=len(pending.forwards),
+            text_len=len(pending.text),
+        )
+
+    def _flush(self, key: ForwardKey, pending: _PendingPrompt, *, reason: str) -> None:
+        """Dispatch a pending prompt now, without waiting out its window."""
+        if self._pending.get(key) is pending:
+            self._pending.pop(key, None)
+        if pending.cancel_scope is not None:
+            pending.cancel_scope.cancel()
+        logger.info(
+            "forward.prompt.flushed",
+            chat_id=pending.msg.chat_id,
+            thread_id=pending.msg.thread_id,
+            sender_id=pending.msg.sender_id,
+            message_id=pending.msg.message_id,
+            merged_count=len(pending.merged_message_ids) + 1,
+            forward_count=len(pending.forwards),
+            reason=reason,
+        )
+        self._task_group.start_soon(self._dispatch, pending)
 
     def attach_forward(self, msg: TelegramIncomingMessage) -> None:
         if msg.sender_id is None:
@@ -967,6 +1033,7 @@ class ForwardCoalescer:
             sender_id=pending.msg.sender_id,
             message_id=pending.msg.message_id,
             forward_count=len(pending.forwards),
+            merged_count=len(pending.merged_message_ids) + 1,
             debounce_s=self._debounce_s,
         )
         await self._dispatch(pending)

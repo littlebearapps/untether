@@ -148,6 +148,7 @@ Comment + forwarded messages arrive as separate updates:
 - Wait `forward_coalesce_s` seconds for additional forwards
 - Forwards appended to the prompt; don't start their own runs
 - Forwarded messages alone don't start runs
+- A second plain prompt in the window is merged into the pending one (texts joined in order), never replacing it (#794); an unmergeable one (different reply target, voice vs text, leading directive, changed context) flushes the pending prompt as its own run first
 
 ## Message overflow
 

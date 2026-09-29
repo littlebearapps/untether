@@ -13,6 +13,7 @@ from typing import Any
 
 import anyio
 import pytest
+from structlog.testing import capture_logs
 
 from untether.runners.run_options import EngineRunOptions
 from untether.telegram.engine_overrides import EngineOverrides
@@ -59,6 +60,8 @@ def _pending(
     msg: TelegramIncomingMessage | None = None,
     text: str = "hello",
     forwards: list[tuple[int, str]] | None = None,
+    reply_id: int | None = None,
+    is_voice_transcribed: bool = False,
 ) -> _PendingPrompt:
     if msg is None:
         msg = _msg()
@@ -70,8 +73,8 @@ def _pending(
         topic_key=None,
         chat_session_key=None,
         reply_ref=None,
-        reply_id=None,
-        is_voice_transcribed=False,
+        reply_id=reply_id,
+        is_voice_transcribed=is_voice_transcribed,
         forwards=forwards if forwards is not None else [],
     )
 
@@ -660,6 +663,194 @@ class TestForwardCoalescer:
             await anyio.sleep(0.15)
 
         assert len(dispatched) == 2
+
+
+# ---------------------------------------------------------------------------
+# #794 — prompts inside the coalesce window are merged, never dropped
+# ---------------------------------------------------------------------------
+
+
+async def _run_schedules(
+    prompts: list[_PendingPrompt],
+    *,
+    debounce_s: float = 0.1,
+    gap_s: float = 0.02,
+) -> list[_PendingPrompt]:
+    dispatched: list[_PendingPrompt] = []
+
+    async def dispatch(p: _PendingPrompt) -> None:
+        dispatched.append(p)
+
+    pending: dict[ForwardKey, _PendingPrompt] = {}
+    async with anyio.create_task_group() as tg:
+        coalescer = ForwardCoalescer(
+            task_group=tg,
+            debounce_s=debounce_s,
+            dispatch=dispatch,
+            pending=pending,
+        )
+        for idx, prompt in enumerate(prompts):
+            if idx:
+                await anyio.sleep(gap_s)
+            coalescer.schedule(prompt)
+        await anyio.sleep(debounce_s * 3)
+    return dispatched
+
+
+class TestForwardCoalescerMerge:
+    @pytest.mark.anyio
+    async def test_two_plain_prompts_merged_in_order(self) -> None:
+        with capture_logs() as logs:
+            dispatched = await _run_schedules(
+                [
+                    _pending(msg=_msg(message_id=1), text="first thought"),
+                    _pending(msg=_msg(message_id=2), text="second thought"),
+                ]
+            )
+
+        assert len(dispatched) == 1
+        assert dispatched[0].text == "first thought\n\nsecond thought"
+        # The run anchors on the latest message, as before.
+        assert dispatched[0].msg.message_id == 2
+        merged = [e for e in logs if e["event"] == "forward.prompt.merged"]
+        assert len(merged) == 1
+        assert merged[0]["log_level"] == "info"
+        assert merged[0]["merged_count"] == 2
+        assert merged[0]["merged_message_ids"] == [1]
+        assert not [e for e in logs if e["event"] == "forward.prompt.replace"]
+
+    @pytest.mark.anyio
+    async def test_three_prompts_merged_in_order(self) -> None:
+        with capture_logs() as logs:
+            dispatched = await _run_schedules(
+                [
+                    _pending(msg=_msg(message_id=1), text="one"),
+                    _pending(msg=_msg(message_id=2), text="two"),
+                    _pending(msg=_msg(message_id=3), text="three"),
+                ]
+            )
+
+        assert len(dispatched) == 1
+        assert dispatched[0].text == "one\n\ntwo\n\nthree"
+        merged = [e for e in logs if e["event"] == "forward.prompt.merged"]
+        assert [e["merged_count"] for e in merged] == [2, 3]
+        assert merged[-1]["merged_message_ids"] == [1, 2]
+        run = [e for e in logs if e["event"] == "forward.prompt.run"]
+        assert run[0]["merged_count"] == 3
+
+    @pytest.mark.anyio
+    async def test_merge_keeps_forwards_of_earlier_prompt(self) -> None:
+        """Forward + caption: the caption's forwards survive a merge."""
+        dispatched = await _run_schedules(
+            [
+                _pending(
+                    msg=_msg(message_id=1),
+                    text="summarise these",
+                    forwards=[(10, "fwd a"), (11, "fwd b")],
+                ),
+                _pending(msg=_msg(message_id=12), text="in one line"),
+            ]
+        )
+
+        assert len(dispatched) == 1
+        assert dispatched[0].text == "summarise these\n\nin one line"
+        assert dispatched[0].forwards == [(10, "fwd a"), (11, "fwd b")]
+
+    @pytest.mark.anyio
+    async def test_blank_earlier_text_not_joined(self) -> None:
+        dispatched = await _run_schedules(
+            [
+                _pending(msg=_msg(message_id=1), text="   "),
+                _pending(msg=_msg(message_id=2), text="real prompt"),
+            ]
+        )
+
+        assert len(dispatched) == 1
+        assert dispatched[0].text == "real prompt"
+
+    @pytest.mark.anyio
+    @pytest.mark.parametrize(
+        ("first", "second", "reason"),
+        [
+            (
+                _pending(msg=_msg(message_id=1), text="one", reply_id=None),
+                _pending(msg=_msg(message_id=2), text="two", reply_id=500),
+                "reply_target",
+            ),
+            (
+                _pending(msg=_msg(message_id=1), text="one", reply_id=400),
+                _pending(msg=_msg(message_id=2), text="two", reply_id=500),
+                "reply_target",
+            ),
+            (
+                _pending(msg=_msg(message_id=1), text="one"),
+                _pending(msg=_msg(message_id=2), text="/codex two"),
+                "directive",
+            ),
+            (
+                _pending(msg=_msg(message_id=1), text="one"),
+                _pending(msg=_msg(message_id=2), text="@feature two"),
+                "directive",
+            ),
+            (
+                _pending(msg=_msg(message_id=1), text="one"),
+                _pending(msg=_msg(message_id=2), text="two", is_voice_transcribed=True),
+                "voice",
+            ),
+        ],
+    )
+    async def test_unmergeable_prompt_flushes_earlier_one(
+        self, first: _PendingPrompt, second: _PendingPrompt, reason: str
+    ) -> None:
+        """An earlier prompt that can't be merged runs on its own, first —
+        never dropped."""
+        with capture_logs() as logs:
+            dispatched = await _run_schedules([first, second])
+
+        assert [p.text for p in dispatched] == [first.text, second.text]
+        assert [p.msg.message_id for p in dispatched] == [1, 2]
+        flushed = [e for e in logs if e["event"] == "forward.prompt.flushed"]
+        assert len(flushed) == 1
+        assert flushed[0]["log_level"] == "info"
+        assert flushed[0]["reason"] == reason
+        assert flushed[0]["message_id"] == 1
+
+    @pytest.mark.anyio
+    async def test_same_reply_target_merged(self) -> None:
+        dispatched = await _run_schedules(
+            [
+                _pending(msg=_msg(message_id=1), text="one", reply_id=500),
+                _pending(msg=_msg(message_id=2), text="two", reply_id=500),
+            ]
+        )
+
+        assert len(dispatched) == 1
+        assert dispatched[0].text == "one\n\ntwo"
+
+    @pytest.mark.anyio
+    async def test_directive_first_then_plain_merged_under_directive(self) -> None:
+        dispatched = await _run_schedules(
+            [
+                _pending(msg=_msg(message_id=1), text="/codex fix the bug"),
+                _pending(msg=_msg(message_id=2), text="and add a test"),
+            ]
+        )
+
+        assert len(dispatched) == 1
+        assert dispatched[0].text == "/codex fix the bug\n\nand add a test"
+
+    @pytest.mark.anyio
+    async def test_prompts_outside_window_run_separately(self) -> None:
+        dispatched = await _run_schedules(
+            [
+                _pending(msg=_msg(message_id=1), text="one"),
+                _pending(msg=_msg(message_id=2), text="two"),
+            ],
+            debounce_s=0.05,
+            gap_s=0.2,
+        )
+
+        assert [p.text for p in dispatched] == ["one", "two"]
 
 
 # ---------------------------------------------------------------------------
