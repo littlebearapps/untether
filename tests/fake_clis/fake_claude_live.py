@@ -238,6 +238,16 @@ def shutdown() -> None:
     # Stdin closed: stop live background work, as the real CLI does (F3).
     for task_id in list(_live_tasks):
         end_bg(task_id, status="killed")
+    for task_id in list(_orphans):  # a subagent's bg task dies too (#801)
+        _orphans.discard(task_id)
+        emit(
+            {
+                "type": "system",
+                "subtype": "task_updated",
+                "task_id": task_id,
+                "patch": {"status": "killed", "end_time": int(time.time() * 1000)},
+            }
+        )
     sys.exit(0)
 
 
@@ -426,6 +436,65 @@ def scenario_agent_resumed(first: dict) -> None:
     init()
     text("RECHECK DONE")
     result("RECHECK DONE")
+    serve_followups()
+
+
+_orphans: set[str] = set()  # subagent-owned bg tasks (not in the snapshot)
+
+
+def scenario_agent_orphans_bg_task(first: dict) -> None:
+    """#801 follow-up (dev bot 2026-09-29): a background agent backgrounds a
+    ``sleep`` of its own (``owned_by_subagent`` + ``is_backgrounded``) and
+    ends; the parent's wake turn says the re-check is still running and goes
+    idle. The orphaned task finishes ``FAKE_CLAUDE_WAKE_S`` later — only if
+    stdin is still open; on EOF it is killed like any live task (F3)."""
+    init()
+    tool_use("Agent", "toolu_ag", {"description": "recheck", "prompt": "go"})
+    start_bg("a1", "toolu_ag", task_type="local_agent")
+    tool_result("toolu_ag", "Async agent launched successfully.")
+    result("agent started", turns=2)
+    _orphans.add("bz1")
+    emit(
+        {
+            "type": "system",
+            "subtype": "task_started",
+            "task_id": "bz1",
+            "tool_use_id": "toolu_sub_sleep",
+            "description": 'Wait 75 seconds then print "recheck"',
+            "owned_by_subagent": True,
+            "is_backgrounded": True,
+            "task_type": "local_bash",
+        }
+    )
+    end_bg("a1")  # the agent ends; its backgrounded sleep carries on
+    init()
+    text("The re-check is still running, I'll report when it finishes")
+    result("The re-check is still running, I'll report when it finishes")
+    if wait_idle_or_eof(WAKE_S) is None:
+        shutdown()
+    _orphans.discard("bz1")
+    emit(
+        {
+            "type": "system",
+            "subtype": "task_updated",
+            "task_id": "bz1",
+            "patch": {"status": "completed", "end_time": int(time.time() * 1000)},
+        }
+    )
+    emit(
+        {
+            "type": "system",
+            "subtype": "task_notification",
+            "task_id": "bz1",
+            "tool_use_id": "toolu_sub_sleep",
+            "status": "completed",
+            "output_file": "",
+            "summary": "recheck",
+        }
+    )
+    init()
+    text("RECHECK: recheck")
+    result("RECHECK: recheck")
     serve_followups()
 
 
@@ -738,6 +807,7 @@ _SCENARIOS = {
     "bg_agent_wake": scenario_bg_agent_wake,
     "agent_wake_unknown_first": scenario_agent_wake_unknown_first,
     "agent_resumed": scenario_agent_resumed,
+    "agent_orphans_bg_task": scenario_agent_orphans_bg_task,
     "monitor_ticks": scenario_monitor_ticks,
     "scheduled_wakeup": scenario_scheduled_wakeup,
     "followup": scenario_followup,

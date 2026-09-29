@@ -918,11 +918,23 @@ class ClaudeTask:
 
     @property
     def is_live_background(self) -> bool:
+        """A live background task the parent session launched itself — the
+        ones the parent's ``background_tasks_changed`` snapshot lists and
+        wake turns are attributed to (#785)."""
         return (
             self.is_backgrounded
             and not self.owned_by_subagent
             and self.status in _TASK_LIVE_STATUSES
         )
+
+    @property
+    def holds_session(self) -> bool:
+        """#801: live background work the live session must stay open for,
+        whoever launched it. A subagent's backgrounded task (``Bash
+        run_in_background`` inside an agent) outlives the agent that started
+        it; closing stdin under it kills it. A subagent's foreground tools
+        (``is_backgrounded=False``) die with the subagent and don't count."""
+        return self.is_backgrounded and self.status in _TASK_LIVE_STATUSES
 
 
 @dataclass(slots=True)
@@ -2542,7 +2554,9 @@ def _live_bounded_handle_count(handles: set[str], deadlines: dict[str, float]) -
 
 
 def _live_native_tasks(state: ClaudeStreamState) -> list[ClaudeTask]:
-    return [task for task in state.tasks.values() if task.is_live_background]
+    """Live background tasks that hold the session open — top-level ones and
+    a subagent's backgrounded tasks alike (#801)."""
+    return [task for task in state.tasks.values() if task.holds_session]
 
 
 def _is_native_monitor(state: ClaudeStreamState, task: ClaudeTask) -> bool:
@@ -2721,7 +2735,7 @@ def _revive_task(
     task.origin_turn = state.turn
     # Its next end is a new finish (#785): a wake turn may announce it again.
     state.announced_task_ids.discard(task.task_id)
-    if task.is_live_background:
+    if task.holds_session:
         state.background_observed = True
     log = logger.info if task.is_backgrounded else logger.debug
     log(
@@ -2771,7 +2785,7 @@ def _register_task(
         task.is_backgrounded = event.is_backgrounded
     if event.owned_by_subagent is not None:
         task.owned_by_subagent = event.owned_by_subagent
-    if task.is_live_background:
+    if task.holds_session:
         state.background_observed = True
     if created or source == "task_started":
         log = logger.info if task.is_backgrounded else logger.debug
@@ -3597,7 +3611,9 @@ def _open_followup_turn(
     elif command_uuid is not None:
         reason = "scheduled_wakeup"
     elif monitors := [
-        task for task in _live_native_tasks(state) if _is_native_monitor(state, task)
+        task
+        for task in _live_native_tasks(state)
+        if task.is_live_background and _is_native_monitor(state, task)
     ]:
         reason = "monitor_event"
         detail["tasks"] = [t.description or "Monitor" for t in monitors]

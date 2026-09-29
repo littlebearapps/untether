@@ -181,6 +181,44 @@ def test_subagent_owned_foreground_task_is_not_live() -> None:
     assert has_live_background_work(state) is False
 
 
+def _started_subagent_bg(task_id: str) -> dict:
+    return {
+        "type": "system",
+        "subtype": "task_started",
+        "task_id": task_id,
+        "tool_use_id": "toolu_sub",
+        "description": 'Wait 75 seconds then print "recheck"',
+        "owned_by_subagent": True,
+        "is_backgrounded": True,
+        "task_type": "local_bash",
+    }
+
+
+def test_subagent_backgrounded_task_holds_the_session() -> None:
+    """#801 follow-up: a subagent's own backgrounded task outlives the agent
+    that started it — it counts as live background work until it ends."""
+    state = ClaudeStreamState()
+    _feed(state, _started_agent("a1", "toolu_a"))
+    _feed(state, _started_subagent_bg("bz1"))
+    _feed(state, _snapshot())  # the agent ends; the parent's list is empty
+    _feed(state, _updated("a1", "completed"))
+    task = state.tasks["bz1"]
+    assert task.holds_session is True
+    assert task.is_live_background is False  # still not a top-level task
+    assert has_live_background_work(state) is True
+    assert background_task_summary(state) == "⏳ 1 bg task"
+    _feed(state, _updated("bz1", "completed"))
+    assert has_live_background_work(state) is False
+
+
+def test_subagent_backgrounded_task_ends_on_its_notification() -> None:
+    state = ClaudeStreamState()
+    _feed(state, _started_subagent_bg("bz1"))
+    assert has_live_background_work(state) is True
+    _feed(state, _notification("bz1", "toolu_sub", "completed"))
+    assert has_live_background_work(state) is False
+
+
 @pytest.mark.parametrize("status", ["completed", "killed"])
 def test_task_updated_terminal_ends_task(status: str) -> None:
     state = ClaudeStreamState()

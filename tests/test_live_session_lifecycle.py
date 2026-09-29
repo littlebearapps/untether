@@ -167,6 +167,37 @@ async def test_resumed_agent_holds_stdin_open_until_it_finishes(
     assert logs.index(recheck) < logs.index(closes[0])
 
 
+async def test_subagent_orphaned_bg_task_holds_stdin_open_until_it_ends(
+    monkeypatch: pytest.MonkeyPatch, quarantine: QuarantineStore
+) -> None:
+    """#801 follow-up: a background agent backgrounds its own ``sleep`` and
+    ends. That subagent-owned task outlives it — the session must not
+    idle-close (and kill it) while it runs, and must close once it ends."""
+    from structlog.testing import capture_logs
+
+    _settings(monkeypatch)  # 0.3 s idle grace, well under the 1.2 s sleep
+    with capture_logs() as logs:
+        runner, events = await _run("agent_orphans_bg_task", wake_s=1.2)
+    finals = [e for e in events if isinstance(e, TurnEvent) and e.phase == "completed"]
+    assert [f.answer for f in finals] == [
+        "The re-check is still running, I'll report when it finishes",
+        "RECHECK: recheck",
+    ]
+    state = _engine_state(runner)
+    assert state.tasks["bz1"].status == "completed"  # finished, not killed
+    assert state.live_close_reason == "idle_no_tasks"
+    assert runner.current_stream.sigterm_sent is False
+    assert not quarantine.is_quarantined("claude", SID)
+    closes = _events(logs, "claude.live_session.stdin_closed")
+    assert len(closes) == 1 and closes[0]["live_tasks"] == 0
+    orphan_end = next(
+        e
+        for e in logs
+        if e.get("event") == "claude.task.ended" and e.get("task_id") == "bz1"
+    )
+    assert logs.index(orphan_end) < logs.index(closes[0])
+
+
 async def test_max_hold_emits_notice_then_graceful_close_no_quarantine(
     monkeypatch: pytest.MonkeyPatch, quarantine: QuarantineStore
 ) -> None:
