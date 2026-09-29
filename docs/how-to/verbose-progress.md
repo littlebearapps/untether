@@ -107,7 +107,7 @@ When Claude launches background work — a background `Agent`, `Bash run_in_back
 🐚 gh run watch · 1m05s
 ```
 
-Agents (🤖) show elapsed time, tokens, tool calls and the current step; shell tasks and Monitors (🐚) show elapsed time. Only tasks Claude launched itself are listed — a subagent's own tool calls are not. "tok" counts tokens (it includes cached and system-prompt tokens), not cost. The block refreshes with the progress message and on the heartbeat tick.
+Agents (🤖) show elapsed time, tokens, tool calls and the current step; shell tasks and Monitors (🐚) show elapsed time. Only background work is listed — a subagent's own tool calls are not, and a subagent's background task is folded into its agent's row until that agent ends (then it gets its own row, since it still keeps the session open). "tok" counts tokens (it includes cached and system-prompt tokens), not cost. The block refreshes with the progress message and on the heartbeat tick.
 
 **After Claude answers**, if background work is still running, Untether sends one silent status message replying to the prompt that launched it and edits it in place — at most every 30 s, sooner when a task finishes:
 
@@ -130,7 +130,7 @@ Claude often answers each background task finishing with a one-liner — "the li
    ↳ Sweep one is back; waiting on sweep two.
 ```
 
-A wake turn still arrives as its own message when it runs a tool, asks for an approval or a question, writes more than ~300 characters, fails, or finishes the last running task (normally Claude's compiled report) — so each batch of background work still gets the push you're waiting for, once. A short reply to a Monitor tick or a `ScheduleWakeup` that fired with nothing new folds the same way (shown as a 💬 line).
+A wake turn still arrives as its own message when it runs a tool, asks for an approval or a question, writes more than ~300 characters, fails, or finishes the last running task (normally Claude's compiled report) — so each batch of background work still gets the push you're waiting for, once. If every reply in a batch folded, a short pushed `✅ all N background tasks done` notice arrives when the last task ends. A short reply to a Monitor tick or a `ScheduleWakeup` that fired with nothing new folds the same way (shown as a 💬 line).
 
 === "toml"
 

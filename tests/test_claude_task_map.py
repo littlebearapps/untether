@@ -660,3 +660,25 @@ def test_795_revived_task_answers_the_turn_that_resumed_it() -> None:
     state.turn = 4
     _feed(state, _started_agent("a1", "toolu_a"))  # #801 revival
     assert state.tasks["a1"].origin_turn == 4
+
+
+def test_777_subagent_task_is_linked_to_its_agent() -> None:
+    state = ClaudeStreamState()
+    _feed(state, _started_agent("a1", "toolu_a"))
+    sub_tool = _tool_use("Bash", "toolu_sub", {"command": "sleep 75"})
+    sub_tool["parent_tool_use_id"] = "toolu_a"
+    _feed(state, sub_tool)
+    _feed(
+        state,
+        {
+            "type": "system",
+            "subtype": "task_started",
+            "task_id": "s1",
+            "tool_use_id": "toolu_sub",
+            "description": "sleep 75",
+            "owned_by_subagent": True,
+            "is_backgrounded": True,
+            "task_type": "local_bash",
+        },
+    )
+    assert state.tasks["s1"].owner_tool_use_id == "toolu_a"

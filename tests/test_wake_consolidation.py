@@ -169,3 +169,62 @@ async def test_quiet_batch_report_pushes_even_if_already_announced(
     pushed = [c for c in transport.send_calls if c["options"].notify]
     assert pushed == report
     assert _status_text(transport).startswith("✅ all 3 background tasks done")
+
+
+async def test_batch_of_folded_acks_still_pushes_once(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#785: the only wake turn folded and the last task ended without a turn
+    after it — when the status message finalises, one short pushed notice
+    replies to the launching prompt."""
+    _progress(monkeypatch, show_background_tasks=True, consolidate_wake_turns=True)
+    transport = await _drive("acks_only_batch", wake_s=0.6)
+    assert _sent(transport, "b1 done; waiting on b2.") == []
+    pushed = [c for c in transport.send_calls if c["options"].notify]
+    assert len(pushed) == 1
+    assert pushed[0]["message"].text == "✅ all 2 background tasks done"
+    assert pushed[0]["options"].reply_to.message_id == 10
+
+
+async def test_orphaned_subagent_task_is_listed_while_it_holds_the_session(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#801 + #777: the agent ends but its own backgrounded sleep carries on
+    (owner unknown here) — the status message lists it instead of claiming
+    nothing runs; the ack about it folds; its report pushes once."""
+    _progress(monkeypatch, show_background_tasks=True, consolidate_wake_turns=True)
+    transport = await _drive("agent_orphans_bg_task", wake_s=1.5)
+    ref = _status_ref(transport)
+    texts = [c["message"].text for c in transport.edit_calls if c["ref"] == ref]
+    held = [t for t in texts if "🐚 Wait 75 seconds" in t]
+    assert held, texts
+    assert held[0].startswith("⏳ background (1) · 1 done")
+    assert _sent(transport, "The re-check is still running") == []
+    final = texts[-1]
+    assert final.startswith("✅ all 2 background tasks done")
+    report = _sent(transport, "RECHECK: recheck")
+    assert len(report) == 1 and report[0]["options"].notify is True
+    pushed = [c for c in transport.send_calls if c["options"].notify]
+    assert pushed == report
+
+
+async def test_noop_turns_after_the_report_fold_silently(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#785 dev bot (session 4b3a2ab8): after the report pushed, an unnamed
+    ``unknown`` no-op turn and a late ScheduleWakeup no-op are folded into the
+    (finalised) status message — never a second push, never a lone
+    "🔔 Claude continued"."""
+    _progress(monkeypatch, show_background_tasks=True, consolidate_wake_turns=True)
+    transport = await _drive("report_then_noop", wake_s=0.6)
+    report = _sent(transport, "REPORT: the job finished cleanly.")
+    assert len(report) == 1 and report[0]["options"].notify is True
+    for noop in ("nothing new.", "Wake-up: still nothing new."):
+        assert _sent(transport, noop) == [], noop
+    assert not _sent(transport, "Claude continued")
+    lines = _status_text(transport).splitlines()
+    assert lines[0] == "✅ background task done"
+    assert "💬 I already posted its output above; nothing new." in lines
+    assert "💬 Wake-up: still nothing new." in lines
+    pushed = [c for c in transport.send_calls if c["options"].notify]
+    assert pushed == report

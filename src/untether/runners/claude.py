@@ -925,6 +925,11 @@ class ClaudeTask:
     # #795: the live-session turn the task was launched in (1 = the run's
     # own prompt), so its wake turn can reply to the message that asked.
     origin_turn: int | None = None
+    # #777: for a subagent's own task, the ``tool_use_id`` of the Agent call
+    # that spawned the subagent (from the subagent's tool_use
+    # ``parent_tool_use_id``) — the status panel only lists such a task on
+    # its own once that agent is gone. None = unknown.
+    owner_tool_use_id: str | None = None
 
     @property
     def is_live_background(self) -> bool:
@@ -1056,6 +1061,9 @@ class ClaudeStreamState:
     # handles decide, unchanged.
     tasks: dict[str, ClaudeTask] = field(default_factory=dict)
     native_tasks_seen: bool = False
+    # #777: subagent tool_use id -> the parent Agent's tool_use id (from
+    # ``parent_tool_use_id``), linking a subagent-owned task to its agent.
+    tool_parents: dict[str, str] = field(default_factory=dict)
 
     # #776 live-session turn segmentation. ``live_mode`` is armed by
     # ``ClaudeRunner.run_impl`` in control-channel mode (kill switch
@@ -2899,7 +2907,10 @@ def _apply_task_event(
     if not task_id:
         return
     if subtype == "task_started":
-        _stamp_task_origin(state, _register_task(state, event, "task_started"))
+        task = _register_task(state, event, "task_started")
+        _stamp_task_origin(state, task)
+        if task.owned_by_subagent and task.tool_use_id:
+            task.owner_tool_use_id = state.tool_parents.get(task.tool_use_id)
         return
     task = state.tasks.get(task_id)
     if task is None:
@@ -3997,6 +4008,8 @@ def _translate_claude_event_base(
                             content,
                             parent_tool_use_id=parent_tool_use_id,
                         )
+                        if parent_tool_use_id and content.id:
+                            state.tool_parents[content.id] = parent_tool_use_id
                         state.pending_actions[action.id] = action
                         state.last_tool_use_id = content.id
                         # #347 track long-running primitives that outlive

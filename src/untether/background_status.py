@@ -55,6 +55,11 @@ STEP_WIDTH = 40
 STATUS_THROTTLE_S = 30.0
 STATUS_MIN_EDIT_S = 2.0
 STATUS_POLL_S = 1.0
+# #785: a batch whose wake turns all folded (no pushed message) gets one
+# pushed "done" notice once its status message has finalised and the session
+# has sat idle this long — long enough for the report turn the CLI usually
+# opens right after the last task ends to break out (and push) instead.
+QUIET_NOTICE_IDLE_S = 5.0
 # Headroom under Telegram's 4096-char limit for the plain-text status message.
 STATUS_MAX_CHARS = 3500
 
@@ -111,6 +116,30 @@ def is_live(task: Any) -> bool:
 
 def live_top_level(tasks: Iterable[Any]) -> list[Any]:
     return [t for t in tasks if is_top_level_background(t) and is_live(t)]
+
+
+def live_shown(tasks: Iterable[Any]) -> list[Any]:
+    """The live background tasks to list: everything that holds the live
+    session open (#801 ``holds_session`` — backgrounded and live, whoever
+    launched it), except a subagent's own task while the agent that spawned
+    it is itself listed — that agent's row (tokens, tools, current step)
+    already covers it, and listing both double-counts one piece of work. Once
+    the agent has ended, or its owner is unknown, the task is listed on its
+    own: the panel must never say nothing is running while the session is
+    held open (the resumed-agent ``sleep 75`` orphan, #801)."""
+    held = [
+        t for t in tasks if bool(getattr(t, "is_backgrounded", False)) and is_live(t)
+    ]
+    top = [t for t in held if not getattr(t, "owned_by_subagent", False)]
+    covering = {getattr(t, "tool_use_id", None) for t in top} - {None}
+    shown = list(top)
+    for task in held:
+        if not getattr(task, "owned_by_subagent", False):
+            continue
+        owner = getattr(task, "owner_tool_use_id", None)
+        if owner is None or owner not in covering:
+            shown.append(task)
+    return shown
 
 
 def _is_agent(task: Any) -> bool:
@@ -217,7 +246,7 @@ def render_background_block(
     tasks: Iterable[Any], *, now: float, max_rows: int = 5
 ) -> str | None:
     """The pre-result progress block (markdown; descriptions escaped)."""
-    live = sorted(live_top_level(tasks), key=_start_key)
+    live = sorted(live_shown(tasks), key=_start_key)
     if not live:
         return None
     lines = [f"{HOURGLASS} background ({len(live)})"]
@@ -276,11 +305,14 @@ def wake_fold_decision(
         return "tools"
     if len((answer or "").strip()) > FOLD_MAX_CHARS:
         return "long_answer"
-    if (
-        reason in ("task_finished", "unknown")
-        and live_tasks_remaining == 0
-        and (not already_announced or not batch_announced)
+    if live_tasks_remaining == 0 and (
+        # a genuinely new finish (the report) — or any finish-ish turn in a
+        # batch that hasn't pushed yet — breaks out;
+        (reason == "task_finished" and not already_announced)
+        or (reason in ("task_finished", "unknown") and not batch_announced)
     ):
+        # an unnamed ``unknown`` turn after the batch already pushed is the
+        # CLI's no-op follow-up ("nothing new since the report") and folds.
         return "last_task"
     return "fold"
 
@@ -340,12 +372,14 @@ class BackgroundStatusPanel:
         # Wake turns delivered as their own pushed message while this was the
         # run's status message (see ``wake_fold_decision``'s batch rule).
         self.breakouts = 0
+        self.reply_to: MessageRef | None = None
+        self.quiet_notice_sent = False
 
     # ── model ────────────────────────────────────────────────────────────
     def track(self, tasks: Iterable[Any]) -> bool:
-        """Add live top-level background tasks not yet on the panel."""
+        """Add the listed live background tasks not yet on the panel."""
         added = False
-        for task in live_top_level(tasks):
+        for task in live_shown(tasks):
             tid = str(getattr(task, "task_id", "") or id(task))
             if tid not in self.tasks:
                 self.tasks[tid] = task
@@ -508,6 +542,7 @@ class BackgroundStatusPanel:
         if ref is None:
             return False
         self.ref = ref
+        self.reply_to = reply_to
         self.last_text = text
         self._last_edit_at = self._clock()
         self._last_sig = self._signature()
@@ -572,6 +607,40 @@ class BackgroundStatusPanel:
             edits=self._edits,
         )
 
+    @property
+    def owes_quiet_notice(self) -> bool:
+        """Finalised on its own (not closed early) after folding acks, and no
+        wake turn of this batch ever pushed."""
+        return (
+            self.finalised
+            and self.close_reason is None
+            and self.folds > 0
+            and self.breakouts == 0
+            and not self.quiet_notice_sent
+        )
+
+    async def send_quiet_notice(self) -> bool:
+        self.quiet_notice_sent = True
+        text = self._header(self._clock())
+        try:
+            await self._transport.send(
+                channel_id=self._channel_id,
+                message=RenderedMessage(text=text),
+                options=SendOptions(
+                    reply_to=self.reply_to, notify=True, thread_id=self._thread_id
+                ),
+            )
+        except Exception:  # noqa: BLE001
+            logger.warning("background_status.quiet_notice_failed", exc_info=True)
+            return False
+        logger.info(
+            "background_status.quiet_notice",
+            channel_id=self._channel_id,
+            message_id=self.ref.message_id if self.ref else None,
+            folds=self.folds,
+        )
+        return True
+
     def _persist(self, *, register: bool) -> None:
         if self._persistence_path is None or self.ref is None:
             return
@@ -616,6 +685,8 @@ class BackgroundStatusManager:
         clock: Callable[[], float] = time.monotonic,
         persistence_path: Path | None = None,
         poll_s: float = STATUS_POLL_S,
+        idle_source: Callable[[], bool] | None = None,
+        quiet_notice_idle_s: float = QUIET_NOTICE_IDLE_S,
         throttle_s: float = STATUS_THROTTLE_S,
         min_edit_s: float = STATUS_MIN_EDIT_S,
         sleep: Callable[[float], Awaitable[None]] = anyio.sleep,
@@ -629,6 +700,10 @@ class BackgroundStatusManager:
         self._clock = clock
         self._persistence_path = persistence_path
         self._poll_s = poll_s
+        # True while the live session sits between turns (no turn running).
+        self._idle_source = idle_source
+        self._quiet_notice_idle_s = quiet_notice_idle_s
+        self._idle_since: float | None = None
         self._throttle_s = throttle_s
         self._min_edit_s = min_edit_s
         self._sleep = sleep
@@ -653,7 +728,7 @@ class BackgroundStatusManager:
             return []
 
     def live_count(self) -> int:
-        return len(live_top_level(self._tasks()))
+        return len(live_shown(self._tasks()))
 
     @property
     def active(self) -> BackgroundStatusPanel | None:
@@ -674,7 +749,7 @@ class BackgroundStatusManager:
                 )
                 await panel.sync(tasks, force=panel.track(tasks))
                 return
-            live = live_top_level(tasks)
+            live = live_shown(tasks)
             if not live:
                 return
             panel = BackgroundStatusPanel(
@@ -698,6 +773,36 @@ class BackgroundStatusManager:
             panel = self.active
             if panel is not None:
                 await panel.sync(self._tasks())
+            await self._maybe_quiet_notice()
+
+    def _session_idle(self) -> bool:
+        if self._idle_source is None:
+            return True
+        try:
+            return bool(self._idle_source())
+        except Exception:  # noqa: BLE001
+            return False
+
+    async def _maybe_quiet_notice(self, *, now_if_owed: bool = False) -> None:
+        """#785: never let a batch whose acks all folded end without a push.
+        Waits for the session to stay idle a moment after the status message
+        finalised: the report turn usually follows the last task's end, and
+        if it breaks out it pushes (and cancels this)."""
+        panel = self.panel
+        if panel is None or not panel.owes_quiet_notice:
+            self._idle_since = None
+            return
+        if now_if_owed:
+            await panel.send_quiet_notice()
+            return
+        if not self._session_idle():
+            self._idle_since = None
+            return
+        now = self._clock()
+        if self._idle_since is None:
+            self._idle_since = now
+        if now - self._idle_since >= self._quiet_notice_idle_s:
+            await panel.send_quiet_notice()
 
     async def run(self) -> None:
         await self._opened.wait()
@@ -735,11 +840,15 @@ class BackgroundStatusManager:
             panel = self.fold_target
             if panel is None:
                 return False
+            if not panel.finalised:
+                # Pick up tasks launched since the last poll first, or a fold
+                # could finalise a message while new work still runs.
+                panel.track(self._tasks())
             ids = [str(t) for t in task_ids]
             by_id = {
                 str(getattr(t, "task_id", "")): t
                 for t in self._tasks()
-                if is_top_level_background(t)
+                if getattr(t, "is_backgrounded", False)
             }
             for tid in ids:
                 if tid not in panel.tasks and tid in by_id:
@@ -751,10 +860,12 @@ class BackgroundStatusManager:
     async def aclose(self, reason: str | None) -> None:
         async with self._lock:
             panel = self.active
-            if panel is None:
-                return
-            panel.track(self._tasks())
-            await panel.finalise(reason)
+            if panel is not None:
+                panel.track(self._tasks())
+                await panel.finalise(reason)
+            if reason in (None, "idle_no_tasks"):
+                # The run ended normally before the idle wait ran out.
+                await self._maybe_quiet_notice(now_if_owed=True)
 
 
 # ── /ping: live background count per chat (#777) ─────────────────────────────

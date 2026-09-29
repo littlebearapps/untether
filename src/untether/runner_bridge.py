@@ -16,7 +16,7 @@ import anyio
 from .background_status import (
     FOLDABLE_REASONS,
     BackgroundStatusManager,
-    live_top_level,
+    live_shown,
     register_live_count_source,
     render_background_block,
     unregister_live_count_source,
@@ -4670,7 +4670,7 @@ async def handle_message(
             _bg_tasks(), now=time.monotonic(), max_rows=_bg_max_rows
         )
     _bg_count_token = register_live_count_source(
-        incoming.channel_id, lambda: len(live_top_level(_bg_tasks()))
+        incoming.channel_id, lambda: len(live_shown(_bg_tasks()))
     )
 
     # #591: early final-answer delivery. The answer exists the moment the
@@ -5334,6 +5334,16 @@ async def handle_message(
         progress_for=lambda evt: evt.action.kind != "note" or not _consolidating(),
     )
 
+    def _bg_session_idle() -> bool:
+        # The live session sits between turns: no wake / follow-up turn is
+        # running that could still break out and push (#785).
+        engine_state = getattr(edits.stream, "engine_state", None)
+        return (
+            bool(getattr(engine_state, "completed_turns", 0))
+            and not getattr(engine_state, "turn_open", True)
+            and not turn_router.active
+        )
+
     def _bg_status_anchor(live: list[Any]) -> MessageRef:
         # #795: reply to the prompt that launched the (most recent) tasks.
         latest = max(live, key=lambda t: getattr(t, "started_at", 0.0) or 0.0)
@@ -5348,6 +5358,7 @@ async def handle_message(
         anchor_for=_bg_status_anchor,
         settings_source=_load_progress_settings,
         persistence_path=_PROGRESS_PERSISTENCE_PATH,
+        idle_source=_bg_session_idle,
     )
     bg_status_scope = anyio.CancelScope()
 
@@ -5384,7 +5395,7 @@ async def handle_message(
             answer=completed.answer or "",
             substantive_actions=_substantive_actions(ctx.tracker),
             already_announced=already,
-            live_tasks_remaining=len(live_top_level(_bg_tasks())),
+            live_tasks_remaining=len(live_shown(_bg_tasks())),
             batch_announced=target.breakouts > 0,
         )
         task_ids = [t for t in detail.get("task_ids", []) if isinstance(t, str)]
@@ -5398,6 +5409,10 @@ async def handle_message(
             task_ids=task_ids,
             already_announced=already,
         )
+        if decision == "fold" and not folded and target.breakouts > 0:
+            # An ack the status message couldn't take, after the batch has
+            # pushed: deliver it, but never as a second push for a no-op.
+            ctx.notify = False
         logger.info(
             "live_turn.fold_decision",
             turn=ctx.turn,

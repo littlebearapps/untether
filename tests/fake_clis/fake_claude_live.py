@@ -629,6 +629,53 @@ def scenario_quiet_batch_report(first: dict) -> None:
     serve_followups()
 
 
+def scenario_acks_only_batch(first: dict) -> None:
+    """#785: every wake turn of the batch is a short ack that folds, and the
+    last task ends with no turn after it — the batch still needs one push."""
+    init()
+    for task_id, tool_id in (("b1", "toolu_b1"), ("b2", "toolu_b2")):
+        tool_use("Bash", tool_id, {"command": "sleep 20", "run_in_background": True})
+        start_bg(task_id, tool_id)
+        tool_result(tool_id, "running")
+    result("Two jobs running.", turns=3)
+    if wait_idle_or_eof(WAKE_S) is None:
+        shutdown()
+    end_bg("b1")
+    init()
+    text("b1 done; waiting on b2.")
+    result("b1 done; waiting on b2.")
+    if wait_idle_or_eof(WAKE_S) is None:
+        shutdown()
+    _end_quietly("b2")
+    serve_followups()
+
+
+def scenario_report_then_noop(first: dict) -> None:
+    """#785 dev bot (session 4b3a2ab8): the task's report pushes; two seconds
+    later the CLI runs an unnamed ``unknown`` no-op turn ("nothing new"), and
+    later a ScheduleWakeup fires with nothing new either."""
+    init()
+    tool_use("Bash", "toolu_b1", {"command": "sleep 20", "run_in_background": True})
+    start_bg("b1", "toolu_b1")
+    tool_result("toolu_b1", "running")
+    result("One job running.", turns=2)
+    if wait_idle_or_eof(WAKE_S) is None:
+        shutdown()
+    end_bg("b1")
+    init()
+    report = "REPORT: " + "the job finished cleanly. " * 20
+    text(report)
+    result(report)
+    init()
+    text("I already posted its output above; nothing new.")
+    result("I already posted its output above; nothing new.")
+    lifecycle("wake-cmd-late", "started")
+    init()
+    text("Wake-up: still nothing new.")
+    result("Wake-up: still nothing new.")
+    serve_followups()
+
+
 def scenario_followup_launches_bg(first: dict) -> None:
     """#795: the run answers; a follow-up (injected user line) launches a
     background Bash; that task's wake turn must reply to the follow-up."""
@@ -814,6 +861,8 @@ _SCENARIOS = {
     "followup_launches_bg": scenario_followup_launches_bg,
     "multi_agent_acks": scenario_multi_agent_acks,
     "quiet_batch_report": scenario_quiet_batch_report,
+    "acks_only_batch": scenario_acks_only_batch,
+    "report_then_noop": scenario_report_then_noop,
     "resume_after_killed_task": scenario_resume_after_killed_task,
     "inherited_fd_after_exit": scenario_inherited_fd_after_exit,
 }

@@ -679,6 +679,13 @@ def _decide(**overrides: Any) -> str:
             {"live_tasks_remaining": 0, "already_announced": True},
             "last_task",
         ),
+        # after the batch pushed, an unnamed no-op turn folds…
+        (
+            {"reason": "unknown", "live_tasks_remaining": 0, "batch_announced": True},
+            "fold",
+        ),
+        # …while a genuinely new finish still breaks out.
+        ({"live_tasks_remaining": 0, "batch_announced": True}, "last_task"),
         # substantive content always wins over "last task"
         ({"live_tasks_remaining": 0, "substantive_actions": 2}, "tools"),
     ],
@@ -810,3 +817,111 @@ async def test_manager_fold_without_status_message_is_refused() -> None:
 
 def test_consolidate_setting_default_on() -> None:
     assert ProgressSettings().consolidate_wake_turns is True
+
+
+# ── #801 orphans + #785 quiet-batch notice ─────────────────────────────────
+
+from untether.background_status import live_shown  # noqa: E402
+
+
+def _owned_bash(tid: str, owner: str | None, *, status: str = "running"):
+    task = _bash(tid, f"sub {tid}", status=status)
+    task.owned_by_subagent = True
+    task.owner_tool_use_id = owner
+    return task
+
+
+def test_live_shown_lists_what_holds_the_session() -> None:
+    agent = _agent("a1")
+    agent.tool_use_id = "toolu_A"
+    covered = _owned_bash("s1", "toolu_A")
+    orphan = _owned_bash("s2", "toolu_GONE")
+    unknown = _owned_bash("s3", None)
+    foreground = _owned_bash("s4", None)
+    foreground.is_backgrounded = False
+    shown = live_shown([agent, covered, orphan, unknown, foreground])
+    assert [t.task_id for t in shown] == ["a1", "s2", "s3"]
+    # Once the agent has ended, its own task is listed on its own.
+    agent.status = "completed"
+    assert [t.task_id for t in live_shown([agent, covered])] == ["s1"]
+
+
+def test_block_lists_an_orphaned_subagent_task() -> None:
+    block = render_background_block([_owned_bash("s2", None)], now=5.0)
+    assert block is not None
+    assert block.split("  \n")[1] == "🐚 sub s2 · 5s"
+
+
+def _quiet_manager(transport, store, clock, idle):
+    return BackgroundStatusManager(
+        transport=transport,
+        channel_id=123,
+        tasks_source=lambda: store.tasks,
+        anchor_for=lambda _live: MessageRef(channel_id=123, message_id=10),
+        settings_source=lambda: ProgressSettings(),
+        clock=clock,
+        idle_source=lambda: idle["v"],
+        quiet_notice_idle_s=5.0,
+    )
+
+
+async def _folded_then_done(manager, store, clock):
+    await manager.after_turn()
+    b1, b2 = store.tasks
+    b1.status, b1.ended_at = "completed", clock.t
+    assert await manager.fold("b1 done", task_ids=["b1"])
+    b2.status, b2.ended_at = "completed", clock.t
+    await manager.poll_once()
+    assert manager.panel is not None and manager.panel.finalised
+
+
+async def test_quiet_batch_pushes_one_notice_after_idle() -> None:
+    transport = FakeTransport()
+    clock = _Clock()
+    store = _Store([_bash("b1"), _bash("b2", "other")])
+    idle = {"v": False}
+    manager = _quiet_manager(transport, store, clock, idle)
+    await _folded_then_done(manager, store, clock)
+    pushed = lambda: [c for c in transport.send_calls if c["options"].notify]  # noqa: E731
+    await manager.poll_once()
+    assert pushed() == []  # a turn is still running: it may break out
+    idle["v"] = True
+    await manager.poll_once()
+    clock.t += 4
+    await manager.poll_once()
+    assert pushed() == []
+    clock.t += 1.5
+    await manager.poll_once()
+    assert len(pushed()) == 1
+    notice = pushed()[0]
+    assert notice["message"].text == "✅ all 2 background tasks done"
+    assert notice["options"].reply_to.message_id == 10
+    clock.t += 30
+    await manager.poll_once()
+    await manager.aclose(None)
+    assert len(pushed()) == 1  # once only
+
+
+async def test_no_quiet_notice_when_a_wake_turn_pushed() -> None:
+    transport = FakeTransport()
+    clock = _Clock()
+    store = _Store([_bash("b1"), _bash("b2", "other")])
+    manager = _quiet_manager(transport, store, clock, {"v": True})
+    await _folded_then_done(manager, store, clock)
+    manager.note_breakout()
+    clock.t += 10
+    await manager.poll_once()
+    await manager.poll_once()
+    await manager.aclose(None)
+    assert not [c for c in transport.send_calls if c["options"].notify]
+
+
+@pytest.mark.parametrize(("reason", "sent"), [("idle_no_tasks", 1), ("cancel", 0)])
+async def test_run_end_sends_an_owed_quiet_notice(reason: str, sent: int) -> None:
+    transport = FakeTransport()
+    clock = _Clock()
+    store = _Store([_bash("b1"), _bash("b2", "other")])
+    manager = _quiet_manager(transport, store, clock, {"v": False})
+    await _folded_then_done(manager, store, clock)
+    await manager.aclose(reason)
+    assert len([c for c in transport.send_calls if c["options"].notify]) == sent
