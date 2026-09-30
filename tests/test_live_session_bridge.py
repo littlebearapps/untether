@@ -895,6 +895,75 @@ async def test_806_aborted_terminal_reason_turn_renders_cancelled() -> None:
     assert not any(TURN_COMPLETE_MARKER in t and "cancelled" in t for t in texts)
 
 
+async def test_806_aborted_turn_still_accounts_its_cost(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#806 review: an aborted turn skips ``_deliver_final`` for its render,
+    but its spend must still reach the #778 ledger, the daily total and the
+    ``runner.completed`` log — otherwise it is lost if the session closes."""
+    from structlog.testing import capture_logs
+
+    from untether import cost_tracker
+    from untether.session_costs import get_session_cost_ledger
+
+    monkeypatch.setattr(cost_tracker, "_daily_cost", ("", 0.0))
+    first = CompletedEvent(
+        engine="claude",
+        resume=_TOKEN,
+        ok=True,
+        answer="FIRST",
+        usage={"total_cost_usd": 1.0, "num_turns": 1},
+    )
+    transport = FakeTransport()
+    runner = ScriptRunner(
+        [
+            Emit(StartedEvent(engine="claude", resume=_TOKEN)),
+            Emit(first),
+            Emit(_turn("started", reason="followup")),
+            Emit(_action()),
+            Emit(
+                _turn(
+                    "completed",
+                    reason="followup",
+                    ok=True,
+                    answer="PARTIAL-ANSWER",
+                    resume=_TOKEN,
+                    usage={
+                        "terminal_reason": "aborted_tools",
+                        "total_cost_usd": 1.5,
+                        "num_turns": 2,
+                    },
+                )
+            ),
+        ],
+        engine="claude",
+        resume_value=_TOKEN.value,
+    )
+    cfg = ExecBridgeConfig(
+        transport=transport, presenter=MarkdownPresenter(), final_notify=True
+    )
+    with capture_logs() as logs:
+        await handle_message(
+            cfg,
+            runner=runner,
+            incoming=IncomingMessage(channel_id=1, message_id=10, text="go"),
+            resume_token=None,
+        )
+
+    # Rendering is unchanged: cancelled, never the partial answer.
+    texts = [c["message"].text for c in (*transport.send_calls, *transport.edit_calls)]
+    assert not any("PARTIAL-ANSWER" in t for t in texts)
+    assert any("cancelled" in t for t in texts)
+    # Accounting: first result $1.00 + the aborted turn's $0.50 delta.
+    assert get_session_cost_ledger().last("claude", _TOKEN.value) == pytest.approx(1.5)
+    assert cost_tracker.get_daily_cost() == pytest.approx(1.5)
+    completed_logs = [e for e in logs if e["event"] == "runner.completed"]
+    assert [e.get("turn_cost_usd") for e in completed_logs] == [
+        pytest.approx(1.0),
+        pytest.approx(0.5),
+    ]
+
+
 # ── #795 wake-turn reply anchor ──────────────────────────────────────────────
 
 FOLLOWUP_REF = MessageRef(channel_id=1, message_id=20)

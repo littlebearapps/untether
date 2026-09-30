@@ -1133,6 +1133,19 @@ def _check_cost_budget(
         return None, None
 
 
+@dataclass(frozen=True, slots=True)
+class _CompletionAccounting:
+    """What ``_account_completion`` settled for one result (#806): the
+    per-run / per-turn usage (#778 delta applied) plus the budget and
+    outlier notices the final message may render."""
+
+    resume_value: str | None
+    run_usage: dict[str, Any] | None
+    cost_alert_text: str | None
+    cost_alert: object | None
+    outlier_text: str | None
+
+
 def _format_budget_suffix(alert: object) -> str:
     """Format a CostAlert as an inline suffix for the cost line."""
     level = getattr(alert, "level", "")
@@ -4892,6 +4905,72 @@ async def handle_message(
                 message_id=ref.message_id,
             )
 
+    def _account_completion(
+        completed: CompletedEvent,
+        final_resume: ResumeToken | None,
+        *,
+        turn: _TurnCtx | None,
+        elapsed_s: float,
+        answer_len: int,
+    ) -> _CompletionAccounting:
+        """#806: the accounting every delivered result owes, whatever it
+        renders as — the #778 session-cost delta (and its ledger write), the
+        daily total / budget check, ``cost.run_outlier``, the
+        ``runner.completed`` log and /stats. Shared by ``_deliver_final`` and
+        the aborted-turn path, which renders ``cancelled`` instead of a final
+        but still spent money."""
+        t_tracker = turn.tracker if turn is not None else progress_tracker
+        resume_value = final_resume.value if final_resume is not None else None
+        # #778: Claude's total_cost_usd is cumulative per session (across
+        # --resume and across a live session's turns) — cost consumers below
+        # read the per-run / per-turn delta instead.
+        run_usage = _apply_cost_delta(
+            runner.engine,
+            resume_value,
+            completed.usage,
+            resumed=turn is not None or resume_token is not None,
+        )
+        usage_log: dict[str, object] = {}
+        if run_usage and run_usage is not completed.usage:
+            usage_log["turn_cost_usd"] = run_usage.get("total_cost_usd")
+        if completed.usage:
+            for key in ("num_turns", "total_cost_usd", "duration_api_ms"):
+                val = completed.usage.get(key)
+                if val is not None:
+                    usage_log[key] = val
+        logger.info(
+            "runner.completed",
+            ok=completed.ok,
+            error=completed.error,
+            answer_len=answer_len,
+            elapsed_s=round(elapsed_s, 2),
+            action_count=t_tracker.action_count,
+            resume=resume_value,
+            **usage_log,
+            # #695: per-run model attribution. Also gives the cost fields
+            # above something to attribute to — `total_cost_usd` was
+            # previously logged with no record of which model produced it.
+            **_model_log_fields(t_tracker.meta),
+        )
+        # Record session stats for /stats command
+        from .session_stats import record_run as _record_stats_run
+
+        _record_stats_run(
+            engine=runner.engine,
+            actions=t_tracker.action_count,
+            duration_ms=int(elapsed_s * 1000),
+            triggered=bool(context and context.trigger_source),
+        )
+        # Records the daily total (record_run_cost) as well as checking it.
+        alert_text, alert = _check_cost_budget(run_usage)
+        return _CompletionAccounting(
+            resume_value=resume_value,
+            run_usage=run_usage,
+            cost_alert_text=alert_text,
+            cost_alert=alert,
+            outlier_text=_check_run_cost_outlier(run_usage),
+        )
+
     async def _deliver_final(
         completed: CompletedEvent,
         run_outcome: RunOutcome,
@@ -5132,50 +5211,16 @@ async def handle_message(
                 else ("done" if final_answer.strip() else "error")
             )
         )
-        resume_value = None
         final_resume = completed.resume or run_outcome.resume
-        if final_resume is not None:
-            resume_value = final_resume.value
-        # #778: Claude's total_cost_usd is cumulative per session (across
-        # --resume and across a live session's turns) — cost consumers below
-        # read the per-run / per-turn delta instead.
-        run_usage = _apply_cost_delta(
-            runner.engine,
-            resume_value,
-            completed.usage,
-            resumed=turn is not None or resume_token is not None,
-        )
-        usage_log: dict[str, object] = {}
-        if run_usage and run_usage is not completed.usage:
-            usage_log["turn_cost_usd"] = run_usage.get("total_cost_usd")
-        if completed.usage:
-            for key in ("num_turns", "total_cost_usd", "duration_api_ms"):
-                val = completed.usage.get(key)
-                if val is not None:
-                    usage_log[key] = val
-        logger.info(
-            "runner.completed",
-            ok=run_ok,
-            error=run_error,
+        acct = _account_completion(
+            completed,
+            final_resume,
+            turn=turn,
+            elapsed_s=elapsed_final,
             answer_len=len(final_answer or ""),
-            elapsed_s=round(elapsed_final, 2),
-            action_count=t_tracker.action_count,
-            resume=resume_value,
-            **usage_log,
-            # #695: per-run model attribution. Also gives the cost fields
-            # above something to attribute to — `total_cost_usd` was
-            # previously logged with no record of which model produced it.
-            **_model_log_fields(t_tracker.meta),
         )
-        # Record session stats for /stats command
-        from .session_stats import record_run as _record_stats_run
-
-        _record_stats_run(
-            engine=runner.engine,
-            actions=t_tracker.action_count,
-            duration_ms=int(elapsed_final * 1000),
-            triggered=bool(context and context.trigger_source),
-        )
+        resume_value = acct.resume_value
+        run_usage = acct.run_usage
         sync_resume_token(t_tracker, final_resume)
 
         # Post-outline guidance: if the session was outline-pending (user
@@ -5236,7 +5281,7 @@ async def handle_message(
         _show_cost = footer_cfg.show_api_cost
         if _footer_run_opts and _footer_run_opts.show_api_cost is not None:
             _show_cost = _footer_run_opts.show_api_cost
-        _cost_alert_text, _cost_alert_obj = _check_cost_budget(run_usage)
+        _cost_alert_text, _cost_alert_obj = acct.cost_alert_text, acct.cost_alert
         if _show_cost and run_ok is not False:
             cost_line = _format_run_cost(run_usage)
             if cost_line:
@@ -5259,7 +5304,7 @@ async def handle_message(
         # the operator with the most need to know is the one who turned the
         # footer off. Suppressed only when a budget alert already surfaced this
         # run's spend, so a configured budget doesn't produce two lines.
-        _outlier_text = _check_run_cost_outlier(run_usage)
+        _outlier_text = acct.outlier_text
         if _outlier_text and _cost_alert_obj is None:
             final_rendered = _insert_footer_line(final_rendered, f"\n{_outlier_text}")
 
@@ -5540,6 +5585,16 @@ async def handle_message(
                 reason=terminal_reason,
                 turn_reason=ctx.reason,
             )
+            if not ctx.delivery["sent"]:
+                # It still spent money: account it before rendering
+                # ``cancelled`` (budget/outlier notices are not rendered).
+                _account_completion(
+                    completed,
+                    completed.resume,
+                    turn=ctx,
+                    elapsed_s=clock() - ctx.started_at,
+                    answer_len=len(completed.answer or ""),
+                )
             await _deliver_turn_cancelled(ctx)
             await _deliver_outbox_now(ctx.reply_to.message_id)
             await _bg_after_turn()
