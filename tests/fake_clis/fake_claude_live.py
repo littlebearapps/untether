@@ -1171,6 +1171,53 @@ def scenario_async_hook_post_result_response(first: dict) -> None:
     serve_followups()
 
 
+# Seconds between a turn's UserPromptSubmit hooks and its Stop hooks.
+TURN_S = float(os.environ.get("FAKE_CLAUDE_TURN_S", "0"))
+
+
+def _mixed_hooks_turn(*, ups_s: float, stop_rewake: bool) -> None:
+    """Live regression (CLI 2.1.285, @untether_dev_bot): the user-global
+    plain ``async: true`` hook (``moshi-hook``) on UserPromptSubmit + Stop —
+    its process exits at once and the CLI withholds its response while idle
+    — next to a sync Stop hook and (``stop_rewake``) a project
+    ``asyncRewake`` Stop hook still running (``sleep 120``). ``ups_s`` is
+    how long the UserPromptSubmit hook's process lives (a long one is the
+    still-running hook instead)."""
+    fast = 0.01
+    spawn_hook("h-ups", ups_s)
+    hook_started("h-ups", "UserPromptSubmit")
+    if ups_s == fast:
+        _withheld.append(("h-ups", "UserPromptSubmit"))
+    init()
+    time.sleep(TURN_S)
+    text("DONE")
+    spawn_hook("h-stop-plain", fast)
+    hook_started("h-stop-plain", "Stop")  # plain async, response withheld
+    _withheld.append(("h-stop-plain", "Stop"))
+    if stop_rewake:
+        spawn_hook("h-stop-rewake", 600)
+        hook_started("h-stop-rewake", "Stop")  # asyncRewake, still running
+    hook_started("h-stop-sync", "Stop")
+    hook_response("h-stop-sync", "Stop")
+    result("DONE")
+    while next_user(None) is not None:
+        pass
+    # EOF: the withheld plain responses flush; a hook still running is
+    # killed with no response (§A1 P3/P5-B).
+    _eof_with_pending_rewake()
+
+
+def scenario_async_hook_mixed_live(first: dict) -> None:
+    # Fast plain UPS + fast plain Stop; the asyncRewake Stop hook runs on.
+    _mixed_hooks_turn(ups_s=0.01, stop_rewake=True)
+
+
+def scenario_async_hook_old_hook_live(first: dict) -> None:
+    # The OLDER hook is the running one: a long UserPromptSubmit hook started
+    # ``TURN_S`` before the fast plain Stop hook.
+    _mixed_hooks_turn(ups_s=600, stop_rewake=False)
+
+
 def scenario_async_hook_no_response(first: dict) -> None:
     # A hook that never reports back (exercises the hold bound).
     _stop_turn("DONE", ("h-stop", "Stop"), hook_s=600)
@@ -1211,6 +1258,8 @@ _SCENARIOS = {
     "async_rewake_idle": scenario_async_rewake_idle,
     "async_hook_success": scenario_async_hook_success,
     "async_hook_post_result_response": scenario_async_hook_post_result_response,
+    "async_hook_mixed_live": scenario_async_hook_mixed_live,
+    "async_hook_old_hook_live": scenario_async_hook_old_hook_live,
     "async_hook_no_response": scenario_async_hook_no_response,
     "plain_async_cancelled_on_eof": scenario_plain_async_cancelled_on_eof,
     "hook_flood": scenario_hook_flood,

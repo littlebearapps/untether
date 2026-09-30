@@ -12,6 +12,7 @@ import dataclasses
 import functools
 import html
 import json
+import math
 import os
 import pty
 import re
@@ -22,7 +23,7 @@ import time
 import tty
 import weakref
 from collections import OrderedDict
-from collections.abc import AsyncIterator, Callable, Iterable
+from collections.abc import AsyncIterator, Callable, Iterable, Mapping
 from dataclasses import dataclass, field
 from datetime import UTC
 from pathlib import Path
@@ -509,12 +510,14 @@ async def close_live_session(
     if (
         live.idle
         and not live.closing
-        and live.state.pending_hooks
-        and await _no_hook_processes(live.pid)
+        and (live.state.pending_hooks or live.state.expired_hooks)
     ):
-        # #812: plain ``async`` hooks that already finished (their response
-        # is withheld until the next turn) are not cut short by this close.
-        defer_settled_async_hooks(live.state)
+        # #812: hooks that already finished (a plain ``async`` hook's
+        # response is withheld until the next turn) are not cut short by
+        # this close — only the ones still running get named.
+        release_finished_async_hooks(
+            live.state, await _hook_shells(live.pid), immediate=True
+        )
     async with live.lock:
         if live.closing:
             return False
@@ -543,6 +546,7 @@ async def close_live_session(
             live,
             hook_names=[h.name or h.label for h in live.close_hooks],
             hook_events=[h.event for h in live.close_hooks],
+            hook_ids=[h.hook_id for h in live.close_hooks],
             source="stream",
         )
     # #812: an automatic close over a background hook tells the user its
@@ -568,21 +572,20 @@ async def close_live_session(
 _USER_CLOSE_REASONS = frozenset({"cancel", "new", "drain", "options_changed"})
 
 
-async def _no_hook_processes(pid: int | None) -> bool:
-    """#812: True only when the CLI's process table was read and it has no
-    ``<shell> -c`` child (every command hook runs as one). Unknown (no pid,
-    unreadable table, other platforms) → False, so the hold stays bounded by
-    ``async_hook_max_hold_s`` as before."""
+async def _hook_shells(pid: int | None) -> dict[int, float | None] | None:
+    """#812: the CLI's live hook shells (``<shell> -c`` children; every
+    command hook runs as one) → spawn time. None when unknown (no pid,
+    unreadable table, other platforms): the caller must not assume no hook
+    is running, so the hold stays bounded by ``async_hook_max_hold_s``."""
     if not isinstance(pid, int):
-        return False
-    from ..utils.proc_diag import hook_shell_children
+        return None
+    from ..utils.proc_diag import hook_shell_processes
 
     try:
-        children = await anyio.to_thread.run_sync(hook_shell_children, pid)
+        return await anyio.to_thread.run_sync(hook_shell_processes, pid)
     except Exception:  # noqa: BLE001 — a scan failure must not break a close
         logger.debug("claude.hook.proc_scan_failed", exc_info=True)
-        return False
-    return children is not None and not children
+        return None
 
 
 def _hooks_at_close(live: LiveSession) -> list[PendingHook]:
@@ -602,6 +605,7 @@ def _log_async_hook_killed(
     hook_names: list[str],
     hook_events: list[str | None],
     source: str,
+    hook_ids: list[str] | None = None,
 ) -> None:
     reason = live.close_reason
     log = logger.info if reason in _USER_CLOSE_REASONS else logger.warning
@@ -611,6 +615,7 @@ def _log_async_hook_killed(
         close_reason=reason,
         hook_names=hook_names,
         hook_events=hook_events,
+        hook_ids=hook_ids or [],
         source=source,
     )
 
@@ -1185,6 +1190,11 @@ class PendingHook:
     # The turn the hook belongs to: the open turn, or — when it started
     # while idle (the next turn's UserPromptSubmit) — the upcoming one.
     turn: int
+    # The ``<shell> -c`` child the last process scan attributed to this hook
+    # (see ``release_finished_async_hooks``), and when a scan first found no
+    # live process that could be it (None while one could).
+    pid: int | None = None
+    unmatched_since: float | None = None
 
     @property
     def label(self) -> str:
@@ -1557,11 +1567,8 @@ class ClaudeStreamState:
     # (docs: "If the session is idle, the response waits until the next
     # user interaction"), so they must not hold the session. Only
     # ``asyncRewake`` hooks report back while idle — and a finished process
-    # can no longer rewake. See ``defer_settled_async_hooks``.
+    # can no longer rewake. See ``release_finished_async_hooks``.
     deferred_hooks: dict[str, PendingHook] = field(default_factory=dict)
-    # Monotonic time the live-session lifecycle first found no hook process
-    # under the CLI while hooks were pending (None once one is seen again).
-    hook_procs_gone_since: float | None = None
     # (hook name, hook event, monotonic ts) of an async hook that exited 2
     # (the asyncRewake wake signal) while idle; the next turn opening within
     # ``_HOOK_REWAKE_HINT_TTL_S`` is its rewake. Cleared on every turn open.
@@ -2855,7 +2862,10 @@ def has_pending_async_hooks(state: ClaudeStreamState) -> bool:
         if _hook_never_holds(hook.event):
             continue
         held = now - hook.started_at
-        if held >= max_hold:
+        # A hook a process scan already found finished is released on the
+        # next scan (``release_finished_async_hooks``), not expired as if it
+        # were still running.
+        if held >= max_hold and hook.unmatched_since is None:
             state.pending_hooks.pop(hook_id, None)
             if len(state.expired_hooks) >= _PENDING_HOOKS_MAX:
                 state.expired_hooks.pop(next(iter(state.expired_hooks)))
@@ -2867,6 +2877,7 @@ def has_pending_async_hooks(state: ClaudeStreamState) -> bool:
                     if state.factory.resume is not None
                     else None
                 ),
+                hook_id=hook_id,
                 hook_name=hook.name,
                 hook_event=hook.event,
                 held_s=round(held, 1),
@@ -2877,36 +2888,111 @@ def has_pending_async_hooks(state: ClaudeStreamState) -> bool:
     return holding
 
 
-# A pending hook younger than this is never deferred on a process scan (its
-# ``/bin/sh -c`` child may not be visible yet), and the lifecycle defers only
-# after finding no hook process for this long (a hook that just exited may
-# not have reported back yet).
+# A hook younger than this is never judged finished on a process scan (its
+# ``/bin/sh -c`` child may not be visible yet), and one no live process can
+# be is released only after this long (a hook that just exited may not have
+# reported back yet).
 _HOOK_PROC_SETTLE_S = 1.0
+# A hook shell spawned within this long of a hook's ``hook_started`` frame is
+# preferably attributed to that hook (the CLI emits the frame, then spawns
+# the shell — ms apart). Only a preference: see
+# ``release_finished_async_hooks``.
+_HOOK_BIND_WINDOW_S = 2.0
 
 
-def defer_settled_async_hooks(state: ClaudeStreamState) -> list[PendingHook]:
-    """#812: the CLI has no hook process left, so every pending hook (older
-    than ``_HOOK_PROC_SETTLE_S``) has finished. The ones still unpaired are
-    plain ``async: true`` hooks — the CLI withholds their ``hook_response``
-    until the next turn or teardown, so waiting for it would hold the
-    session to ``async_hook_max_hold_s`` for nothing. An ``asyncRewake``
-    hook reports back as soon as it exits (and a finished process can't
-    rewake), so none is lost. Moves them to ``deferred_hooks`` (still
-    paired when the response finally lands; never "killed" at a close) and
-    returns them."""
-    if not state.pending_hooks:
+def release_finished_async_hooks(
+    state: ClaudeStreamState,
+    shells: Mapping[int, float | None] | None,
+    *,
+    now: float | None = None,
+    immediate: bool = False,
+) -> list[PendingHook]:
+    """#812: release, per hook, the unpaired hooks whose process has finished.
+
+    ``shells`` is the CLI's live hook shells (``<shell> -c`` children, pid →
+    spawn time on the monotonic scale, or None where the platform can't
+    tell); None = process table unreadable → nothing is released (the hold
+    stays bounded by ``async_hook_max_hold_s``).
+
+    The frames carry no pid, so each live shell is attributed to one hook:
+    newest shell first, it takes the latest-started unattributed hook whose
+    ``hook_started`` landed within ``_HOOK_BIND_WINDOW_S`` of its spawn, else
+    the latest-started unattributed hook at all. A hook left with no live
+    shell (never seen alive, or its shell exited) for ``_HOOK_PROC_SETTLE_S``
+    has finished: the CLI withholds a plain ``async`` hook's response until
+    the next turn or teardown, and an ``asyncRewake`` hook reports back as
+    soon as it exits (a finished process can't rewake), so none is lost. It
+    moves to ``deferred_hooks`` (still paired when the response lands; never
+    "killed" at a close).
+
+    Why this is safe when attribution guesses wrong (same-event hooks
+    started in the same millisecond are indistinguishable): every live shell
+    keeps one hook, and "latest-started" means the kept set's newest start
+    is never older than the newest truly-running hook's — so the hold never
+    ends before the running hook's own ``async_hook_max_hold_s`` would. The
+    cost of a wrong guess is a label, not a lost rewake. (The window
+    preference can bend that only if the stream reader lags the CLI by more
+    than the window.)
+
+    Expired hooks take part in the attribution (a close names the ones still
+    running) but are never logged as released. Returns the pending hooks
+    released. ``immediate`` (a close) skips the no-process settle.
+    """
+    if shells is None:
+        for hook in (*state.pending_hooks.values(), *state.expired_hooks.values()):
+            hook.unmatched_since = None
         return []
-    now = time.monotonic()
-    moved: list[PendingHook] = []
-    for hook_id, hook in list(state.pending_hooks.items()):
-        if _hook_never_holds(hook.event) or now - hook.started_at < _HOOK_PROC_SETTLE_S:
+    now = time.monotonic() if now is None else now
+    hooks = sorted(
+        (
+            hook
+            for hook in (*state.pending_hooks.values(), *state.expired_hooks.values())
+            if not _hook_never_holds(hook.event)
+        ),
+        key=lambda h: h.started_at,
+    )
+    remaining = list(hooks)
+    newest_first = sorted(
+        shells.items(),
+        key=lambda kv: (kv[1] if kv[1] is not None else math.inf, kv[0]),
+        reverse=True,
+    )
+    for pid, spawned in newest_first:
+        if not remaining:
+            break
+        pick = remaining[-1]
+        if spawned is not None:
+            near = [
+                h
+                for h in remaining
+                if abs(h.started_at - spawned) <= _HOOK_BIND_WINDOW_S
+            ]
+            if near:
+                pick = near[-1]
+        remaining.remove(pick)
+        pick.pid = pid
+        pick.unmatched_since = None
+    released: list[PendingHook] = []
+    for hook in remaining:
+        if hook.unmatched_since is None:
+            hook.unmatched_since = now
+        if now - hook.started_at < _HOOK_PROC_SETTLE_S:
+            continue  # its process may not be visible yet
+        if not immediate and now - hook.unmatched_since < _HOOK_PROC_SETTLE_S:
             continue
-        state.pending_hooks.pop(hook_id, None)
+        if state.pending_hooks.pop(hook.hook_id, None) is not None:
+            released.append(hook)
+        else:
+            state.expired_hooks.pop(hook.hook_id, None)
+            logger.debug(
+                "claude.hook.expired_hook_finished",
+                hook_id=hook.hook_id,
+                hook_event=hook.event,
+            )
         if len(state.deferred_hooks) >= _PENDING_HOOKS_MAX:
             state.deferred_hooks.pop(next(iter(state.deferred_hooks)))
-        state.deferred_hooks[hook_id] = hook
-        moved.append(hook)
-    return moved
+        state.deferred_hooks[hook.hook_id] = hook
+    return released
 
 
 def _hooks_outstanding(state: ClaudeStreamState) -> list[PendingHook]:
@@ -6772,32 +6858,42 @@ class ClaudeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
                 now = time.monotonic()
                 # #812: a hook still running in the background holds stdin
                 # open too (sibling predicate, D-1) — closing it would make
-                # the CLI drop an asyncRewake hook's findings.
-                hooks_pending = live.idle and has_pending_async_hooks(state)
-                if not hooks_pending or not await _no_hook_processes(
-                    getattr(proc, "pid", None)
-                    if getattr(proc, "returncode", None) is None
-                    else None
+                # the CLI drop an asyncRewake hook's findings. Per hook: a
+                # finished one (plain ``async``: response withheld by the
+                # CLI until the next turn) is released before the expiry
+                # check, so only hooks still running hold, expire or get
+                # named at the close.
+                if (
+                    live.idle
+                    and state.hold_for_async_hooks
+                    and state.async_hook_max_hold_s > 0
+                    and state.pending_hooks
                 ):
-                    state.hook_procs_gone_since = None
-                elif state.hook_procs_gone_since is None:
-                    # First scan with no hook process: give a hook that just
-                    # exited a moment to report back (exit → hook_response
-                    # is not atomic) before deciding.
-                    state.hook_procs_gone_since = now
-                elif now - state.hook_procs_gone_since >= _HOOK_PROC_SETTLE_S:
-                    # Plain ``async`` hooks: finished, response withheld by
-                    # the CLI until the next turn — nothing left to wait for.
-                    deferred = defer_settled_async_hooks(state)
-                    if deferred:
+                    shells = await _hook_shells(
+                        getattr(proc, "pid", None)
+                        if getattr(proc, "returncode", None) is None
+                        else None
+                    )
+                    released = release_finished_async_hooks(state, shells, now=now)
+                    if released:
+                        still = [
+                            h.label
+                            for h in state.pending_hooks.values()
+                            if not _hook_never_holds(h.event)
+                        ]
                         run_logger.info(
                             "claude.hook.hold_released",
                             session_id=sid,
-                            hook_names=[h.label for h in deferred],
-                            reason="no_hook_process",
-                            held_s=round(now - min(h.started_at for h in deferred), 1),
+                            hook_names=[h.label for h in released],
+                            hook_ids=[h.hook_id for h in released],
+                            # No hook shell left at all, or others still run.
+                            reason="hook_process_exited"
+                            if shells
+                            else "no_hook_process",
+                            still_running=still,
+                            held_s=round(now - min(h.started_at for h in released), 1),
                         )
-                        hooks_pending = has_pending_async_hooks(state)
+                hooks_pending = live.idle and has_pending_async_hooks(state)
                 live_work = (
                     has_live_background_work(state)
                     or _has_pending_wakeup(state)

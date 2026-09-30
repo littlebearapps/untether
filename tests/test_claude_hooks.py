@@ -18,9 +18,9 @@ from untether.model import TurnEvent
 from untether.runners import claude as claude_mod
 from untether.runners.claude import (
     ClaudeStreamState,
-    defer_settled_async_hooks,
     has_live_background_work,
     has_pending_async_hooks,
+    release_finished_async_hooks,
     translate_claude_event,
 )
 from untether.schemas import claude as claude_schema
@@ -203,16 +203,27 @@ def test_pending_hook_holds_and_is_separate_from_background_work() -> None:
     assert has_pending_async_hooks(state) is False
 
 
-def test_defer_settled_async_hooks_releases_the_hold() -> None:
+def _age(state: ClaudeStreamState, **ages: float) -> float:
+    """Backdate hooks' ``started_at``; returns the shared ``now``."""
+    now = time.monotonic()
+    for hook_id, age in ages.items():
+        hook = state.pending_hooks.get(hook_id) or state.expired_hooks[hook_id]
+        hook.started_at = now - age
+    return now
+
+
+def test_release_with_no_hook_shell_left_defers_and_still_pairs() -> None:
     """Plain ``async`` hooks: the CLI withholds their response while idle.
-    With no hook process left they are deferred — no hold, not reported as
-    cut short at a close — and still pair when the response finally lands."""
+    With no hook process left they are deferred after the settle — no hold,
+    not reported as cut short at a close — and still pair when the
+    response finally lands."""
     state, factory = _state()
     _first_turn(state, factory, "h-plain", "h-young")
-    for hook in state.pending_hooks.values():
-        hook.started_at = time.monotonic() - 5.0
-    state.pending_hooks["h-young"].started_at = time.monotonic()
-    moved = defer_settled_async_hooks(state)
+    now = _age(state, **{"h-plain": 5.0, "h-young": 0.2})
+    # First scan: no live shell could be theirs — settle before deciding.
+    assert release_finished_async_hooks(state, {}, now=now) == []
+    state.pending_hooks["h-young"].started_at = now + 0.8  # still 0.2 s old
+    moved = release_finished_async_hooks(state, {}, now=now + 1.0)
     assert [h.hook_id for h in moved] == ["h-plain"]
     assert set(state.deferred_hooks) == {"h-plain"}
     # Too young to judge: its process may not be visible yet.
@@ -223,14 +234,114 @@ def test_defer_settled_async_hooks_releases_the_hold() -> None:
     # The withheld response lands at the next turn / teardown.
     _feed(state, factory, _response("h-plain", "Stop"))
     assert state.deferred_hooks == {}
-    assert defer_settled_async_hooks(state) == []
+    assert release_finished_async_hooks(state, {}) == []
+
+
+def test_release_keeps_one_hook_per_live_shell_latest_first() -> None:
+    """The live regression: one hook shell still up (``sleep 120``) next to
+    finished plain async hooks. Without spawn times (macOS) each live shell
+    keeps the latest-started hook — the hold can't end before the running
+    hook's own bound — and the rest are released."""
+    state, factory = _state()
+    _feed(state, factory, _started("h-ups", "UserPromptSubmit"))
+    _first_turn(state, factory, "h-plain", "h-rewake")
+    now = _age(state, **{"h-ups": 12.0, "h-plain": 2.0, "h-rewake": 2.0})
+    shells: dict[int, float | None] = {4242: None}
+    release_finished_async_hooks(state, shells, now=now)
+    moved = release_finished_async_hooks(state, shells, now=now + 1.0)
+    assert sorted(h.hook_id for h in moved) == ["h-plain", "h-ups"]
+    assert list(state.pending_hooks) == ["h-rewake"]
+    assert state.pending_hooks["h-rewake"].pid == 4242
+    assert [h.hook_id for h in claude_mod._hooks_outstanding(state)] == ["h-rewake"]
+    # Its shell exits: released too (reason hook_process_exited upstream).
+    release_finished_async_hooks(state, {}, now=now + 2.0)
+    assert release_finished_async_hooks(state, {}, now=now + 3.0)[0].hook_id == (
+        "h-rewake"
+    )
+    assert state.pending_hooks == {}
+
+
+def test_release_prefers_the_hook_started_when_the_shell_spawned() -> None:
+    """With spawn times (Linux) an OLDER running hook keeps its own hold."""
+    state, factory = _state()
+    _feed(state, factory, _started("h-ups", "UserPromptSubmit"))
+    _first_turn(state, factory, "h-plain")
+    now = _age(state, **{"h-ups": 10.0, "h-plain": 2.0})
+    shells = {4242: now - 10.0}
+    release_finished_async_hooks(state, shells, now=now)
+    moved = release_finished_async_hooks(state, shells, now=now + 1.0)
+    assert [h.hook_id for h in moved] == ["h-plain"]
+    assert list(state.pending_hooks) == ["h-ups"]
+    # No hook_started near the spawn (a foreign ``sh -c``): still keeps the
+    # latest hook rather than letting it go — fail safe.
+    state2, factory2 = _state()
+    _first_turn(state2, factory2, "h-a", "h-b")
+    now = _age(state2, **{"h-a": 3.0, "h-b": 3.0})
+    release_finished_async_hooks(state2, {77: now - 500.0}, now=now)
+    moved = release_finished_async_hooks(state2, {77: now - 500.0}, now=now + 1.0)
+    assert [h.hook_id for h in moved] == ["h-a"]
+    assert list(state2.pending_hooks) == ["h-b"]
+
+
+def test_release_unreadable_table_keeps_the_bounded_hold() -> None:
+    state, factory = _state()
+    _first_turn(state, factory, "h-stop")
+    now = _age(state, **{"h-stop": 5.0})
+    release_finished_async_hooks(state, {}, now=now)
+    assert state.pending_hooks["h-stop"].unmatched_since is not None
+    assert release_finished_async_hooks(state, None, now=now + 5.0) == []
+    assert state.pending_hooks["h-stop"].unmatched_since is None
+
+
+def test_release_immediate_skips_the_settle_but_not_the_age() -> None:
+    state, factory = _state()
+    _first_turn(state, factory, "h-old", "h-young")
+    now = _age(state, **{"h-old": 5.0, "h-young": 0.1})
+    moved = release_finished_async_hooks(state, {}, now=now, immediate=True)
+    assert [h.hook_id for h in moved] == ["h-old"]
+    assert list(state.pending_hooks) == ["h-young"]
+
+
+def test_finished_hook_is_not_expired_while_awaiting_release() -> None:
+    """A hook a scan found finished isn't WARN'd as hold_expired just
+    because a long turn already took it past the bound."""
+    state, factory = _state()
+    state.async_hook_max_hold_s = 5.0
+    _first_turn(state, factory, "h-plain")
+    now = _age(state, **{"h-plain": 60.0})
+    release_finished_async_hooks(state, {}, now=now)
+    with capture_logs() as logs:
+        assert has_pending_async_hooks(state) is True
+    assert [e for e in logs if e["event"] == "claude.hook.hold_expired"] == []
+    assert release_finished_async_hooks(state, {}, now=now + 1.0)
+    assert has_pending_async_hooks(state) is False
+
+
+def test_release_attributes_expired_hooks_but_never_reports_them() -> None:
+    """An expired hook still running keeps its shell (a close names it); an
+    expired hook whose shell is gone leaves silently (not "killed")."""
+    state, factory = _state()
+    state.async_hook_max_hold_s = 5.0
+    _first_turn(state, factory, "h-live", "h-done")
+    _age(state, **{"h-live": 6.0, "h-done": 6.5})
+    with capture_logs():
+        assert has_pending_async_hooks(state) is False
+    assert set(state.expired_hooks) == {"h-live", "h-done"}
+    now = time.monotonic()
+    shells = {4242: None}
+    release_finished_async_hooks(state, shells, now=now)
+    assert release_finished_async_hooks(state, shells, now=now + 1.0) == []
+    assert set(state.expired_hooks) == {"h-live"}
+    assert set(state.deferred_hooks) == {"h-done"}
+    assert len(claude_mod._hooks_outstanding(state)) == 1
 
 
 def test_deferred_hook_exit_2_still_arms_the_rewake_hint() -> None:
     state, factory = _state()
     _first_turn(state, factory, "h-stop")
-    state.pending_hooks["h-stop"].started_at = time.monotonic() - 5.0
-    defer_settled_async_hooks(state)
+    now = _age(state, **{"h-stop": 5.0})
+    release_finished_async_hooks(state, {}, now=now, immediate=True)
+    assert "h-stop" in state.deferred_hooks
     _feed(state, factory, _response("h-stop", "Stop", outcome="error", exit_code=2))
     assert state.hook_rewake_hint is not None
     assert state.deferred_hooks == {}
