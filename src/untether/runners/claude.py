@@ -83,13 +83,12 @@ from .extra_args_guard import (
     iter_option_tokens,
 )
 from .run_options import (
-    CLAUDE_PLAN_AUTO_MODE,
-    LEGACY_CLAUDE_PLAN_AUTO_MODE,
     VALID_PERMISSION_MODES_BY_ENGINE,
     claude_cli_permission_mode,
     get_run_options,
     is_claude_plan_auto,
     is_claude_prompting_mode,
+    normalise_claude_cli_mode,
 )
 from .tool_actions import tool_input_path, tool_kind_and_title
 
@@ -1546,6 +1545,14 @@ class ClaudeStreamState:
     # `is_claude_prompting_mode`.  Default False keeps the legacy `-p` path
     # (no control channel, no requests) and every autonomous mode unchanged.
     prompting_mode: bool = False
+    # #751 the mode this process asked the CLI for, normalised to what
+    # `system/init.permissionMode` reports when honoured (`manual`→`default`,
+    # `plan-auto`→`plan`, `bypassPermissions` under
+    # `--dangerously-skip-permissions`). None on the legacy `-p` path.
+    requested_permission_mode: str | None = None
+    # #751 the first init has been compared with the request (once per
+    # process: compaction re-emits `init`, live turns re-emit it too).
+    permission_mode_checked: bool = False
     # #383: the run's configured mode maps to CLI `plan` (`plan` or
     # `plan-auto`). Armed in `new_state()`; drives the approval caption.
     configured_plan_mode: bool = False
@@ -3154,6 +3161,78 @@ def _translate_model_fallback(
             title=title,
             ok=True,
             level="info",
+            detail=detail,
+        ),
+    ]
+
+
+def _permission_mode_mismatch_rows(
+    event: claude_schema.StreamSystemMessage,
+    *,
+    state: ClaudeStreamState,
+    factory: EventFactory,
+) -> list[UntetherEvent]:
+    """#751: compare the first ``system/init.permissionMode`` with the mode
+    this process asked for, once per process.
+
+    The CLI does not warn when it can't honour ``--permission-mode`` (findings
+    Q3: ``auto`` on Haiku silently runs as ``default``). A mismatch logs
+    ``claude.permission_mode.mismatch`` and returns a warning ``note`` row.
+
+    Enforcement: when the CLI actually runs a prompting mode but the run was
+    classed autonomous at ``new_state`` (so ``--allowedTools`` went out and
+    stage 6 would blanket-approve), ``prompting_mode`` is re-armed so every
+    later ``can_use_tool`` routes to Telegram. ``system/init`` precedes every
+    control request of the run. A gate is never disarmed on a CLI report.
+    """
+    if state.permission_mode_checked:
+        return []
+    requested = state.requested_permission_mode
+    reported = event.permissionMode
+    if requested is None or not isinstance(reported, str) or not reported:
+        return []
+    state.permission_mode_checked = True
+    effective = normalise_claude_cli_mode(reported) or reported
+    if effective == requested:
+        return []
+    rearmed = False
+    if is_claude_prompting_mode(effective) and not state.prompting_mode:
+        state.prompting_mode = True
+        rearmed = True
+    logger.warning(
+        "claude.permission_mode.mismatch",
+        session_id=event.session_id,
+        requested=requested,
+        effective=reported,
+        model=_str_or_none(event.model),
+        resumed=state.resumed,
+        prompting_rearmed=rearmed,
+    )
+    title = (
+        f"\N{WARNING SIGN}\N{VARIATION SELECTOR-16} Asked for {requested} mode"
+        f" \N{EM DASH} Claude Code is running {reported}"
+    )
+    if requested == "auto":
+        title += " (auto mode isn't available for this model)"
+    if rearmed:
+        title += "; approvals will be requested"
+    state.note_seq += 1
+    action_id = f"claude.permission_mode_mismatch.{state.note_seq}"
+    detail: dict[str, Any] = {
+        "requested": requested,
+        "effective": reported,
+        "prompting_rearmed": rearmed,
+    }
+    return [
+        factory.action_started(
+            action_id=action_id, kind="note", title=title, detail=detail
+        ),
+        factory.action_completed(
+            action_id=action_id,
+            kind="note",
+            title=title,
+            ok=True,
+            level="warning",
             detail=detail,
         ),
     ]
@@ -6457,6 +6536,11 @@ def _translate_claude_event_base(
                 _note_permission_mode(
                     state, event.permissionMode, source="init", session_id=session_id
                 )
+            # #751: the CLI can silently run a different mode than requested
+            # (`auto` on Haiku → `default`); surface it and re-arm the gate.
+            mismatch_rows = _permission_mode_mismatch_rows(
+                event, state=state, factory=factory
+            )
             meta: dict[str, Any] = {}
             for key in (
                 "cwd",
@@ -6479,7 +6563,10 @@ def _translate_claude_event_base(
                 state.ctx_init_model = model  # #819
             token = ResumeToken(engine=ENGINE, value=session_id)
             event_title = str(model) if isinstance(model, str) and model else title
-            return [factory.started(token, title=event_title, meta=meta or None)]
+            return [
+                factory.started(token, title=event_title, meta=meta or None),
+                *mismatch_rows,
+            ]
         case claude_schema.StreamAssistantMessage(
             message=message, parent_tool_use_id=parent_tool_use_id
         ):
@@ -7898,6 +7985,15 @@ class ClaudeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
         state.prompting_mode = is_claude_prompting_mode(
             self._effective_permission_mode()
         )
+        # #751: what the first `system/init` should report if the CLI honours
+        # the request; compared once in the init branch.
+        requested_mode = self._effective_permission_mode()
+        if requested_mode is not None:
+            state.requested_permission_mode = (
+                "bypassPermissions"
+                if self.dangerously_skip_permissions is True
+                else normalise_claude_cli_mode(requested_mode)
+            )
         # #383: a plan chat — the approval caption and the plan re-arm key
         # off the configured mode, never the CLI's current one.
         state.configured_plan_mode = (
@@ -10232,7 +10328,6 @@ class ClaudeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
             self._pty_master_fd = None
 
 
-_LEGACY_AUTO_WARNED = False
 _DSP_WARNED = False
 
 
@@ -10260,8 +10355,6 @@ def _validate_permission_mode(value: object, config_path: Path) -> str | None:
     failure the cron-side validator exists to prevent.  Both paths now share
     ``VALID_PERMISSION_MODES_BY_ENGINE["claude"]``.
     """
-    global _LEGACY_AUTO_WARNED
-
     if value is None:
         return None
     if not isinstance(value, str) or not value.strip():
@@ -10276,22 +10369,10 @@ def _validate_permission_mode(value: object, config_path: Path) -> str | None:
             f"Unknown `claude.permission_mode` {mode!r} in {config_path};"
             f" allowed values: {sorted(allowed)}."
         )
-    # #741 `auto` used to mean "plan mode + rubber-stamp the plan gate".  It
-    # now passes through to the CLI's own classifier-gated auto mode, which
-    # has no plan gate at all.  TOML is hand-authored, so we don't rewrite it
-    # — we warn once per process and let the new meaning stand.
-    if mode == LEGACY_CLAUDE_PLAN_AUTO_MODE and not _LEGACY_AUTO_WARNED:
-        _LEGACY_AUTO_WARNED = True
-        logger.warning(
-            "claude.permission_mode.auto_semantics_changed",
-            config_path=str(config_path),
-            note=(
-                "permission_mode = 'auto' now selects Claude Code's own auto"
-                " mode (classifier-gated, no plan gate). Set"
-                f" permission_mode = '{CLAUDE_PLAN_AUTO_MODE}' to keep the"
-                " previous behaviour (plan mode + auto-approved ExitPlanMode)."
-            ),
-        )
+    # #741 `auto` used to mean "plan mode + rubber-stamp the plan gate"; it
+    # now passes through to the CLI's own auto mode. TOML is hand-authored,
+    # so it is never rewritten. The operator WARN moved to the config audit
+    # (#751, `untether.permission_audit`), which covers crons and reloads too.
     return mode
 
 

@@ -222,3 +222,41 @@ async def test_209_watch_keeps_previous_runtime_on_blocked_flag(
     assert len(failed) == 1
     assert "--yolo" in failed[0]["error"]
     assert not [e for e in logs if e.get("event") == "config.reload.applied"]
+
+
+def test_751_reload_passes_reason_reload(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A reload that gains an `auto` cron re-emits with reason=reload."""
+    from structlog.testing import capture_logs
+
+    import untether.runtime_loader as runtime_loader
+    from untether.permission_audit import reset_permission_audit_state
+
+    monkeypatch.setattr(runtime_loader.shutil, "which", lambda _cmd: "/bin/echo")
+    reset_permission_audit_state()
+    path = tmp_path / "untether.toml"
+    base = (
+        'default_engine = "claude"\ntransport = "telegram"\n'
+        "[transports.telegram]\n"
+        'bot_token = "token"\nchat_id = 123\nallow_any_user = true\n'
+    )
+    path.write_text(base, encoding="utf-8")
+    try:
+        with capture_logs() as logs:
+            config_watch._reload_config(path, None, ())
+            path.write_text(
+                base + "[triggers]\nenabled = true\n"
+                '[[triggers.crons]]\nid = "a"\nschedule = "0 0 1 1 *"\n'
+                'prompt = "p"\npermission_mode = "auto"\n',
+                encoding="utf-8",
+            )
+            config_watch._reload_config(path, None, ())
+    finally:
+        reset_permission_audit_state()
+    auto = [
+        e for e in logs if e["event"] == "claude.permission_mode.auto_semantics_changed"
+    ]
+    assert [(e["reason"], e["entries"]) for e in auto] == [
+        ("reload", ["triggers.crons[a]"])
+    ]

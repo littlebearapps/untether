@@ -872,3 +872,15 @@ def test_684_stdin_close_rejection_text_present(cli_blob: mmap.mmap) -> None:
             "installed CLI — re-check Q1 §6 (last green on CLI "
             f"{PROBED_CLI_VERSION})"
         )
+
+
+def test_init_frame_carries_permission_mode(cli_blob: mmap.mmap) -> None:
+    """#751: ``system/init`` still declares ``permissionMode`` — the only
+    signal of the mode the CLI actually runs (``auto`` on Haiku silently
+    runs as ``default``, findings Q3). The runtime mismatch check and its
+    stage-6 re-arm depend on it."""
+    window = _schema_window(cli_blob, "init")
+    assert b"permissionMode:" in window, (
+        "system/init no longer declares permissionMode "
+        f"(last green on CLI {PROBED_CLI_VERSION})"
+    )

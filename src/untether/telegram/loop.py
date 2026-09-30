@@ -20,7 +20,7 @@ from ..ids import RESERVED_CHAT_COMMANDS, RESERVED_COMMAND_IDS
 from ..logging import get_logger
 from ..model import EngineId, ResumeToken
 from ..progress import ProgressTracker
-from ..runners.run_options import EngineRunOptions
+from ..runners.run_options import EngineRunOptions, claude_tap_waits_for
 from ..scheduler import ThreadJob, ThreadScheduler
 from ..settings import TelegramTransportSettings
 from ..transport import MessageRef, RenderedMessage, SendOptions
@@ -209,6 +209,62 @@ def _apply_trigger_permission_override(
             engine=engine,
         )
     return new_options
+
+
+# #751: (trigger_source, mode) pairs already warned about, per process.
+_UNATTENDED_RISK_WARNED: set[tuple[str, str]] = set()
+_UNATTENDED_RISK_WARNED_MAX = 256
+# `at:` is excluded on purpose: a human scheduled it from the chat and is
+# around to tap (Decision 7). `loop:` re-fires follow a human's /loop.
+_UNATTENDED_TRIGGER_PREFIXES = ("cron:", "webhook:")
+
+
+def _note_unattended_approval_risk(
+    context: RunContext | None,
+    engine: EngineId | None,
+    run_options: EngineRunOptions | None,
+    engine_default_mode: Callable[[], str | None],
+) -> None:
+    """#751: warn once per (trigger, mode) when a cron or webhook run goes to
+    Claude in a mode that waits for a Telegram tap nobody is there to give.
+
+    Sees the real resolved mode — the cron's own, else the chat/topic
+    preference, else engine config — which the config-time audit can't.
+    Log only: the run's approval buttons already reach the chat with a push.
+    """
+    if context is None or engine != "claude":
+        return
+    source = context.trigger_source
+    if not source or not source.startswith(_UNATTENDED_TRIGGER_PREFIXES):
+        return
+    mode = run_options.permission_mode if run_options is not None else None
+    if context.permission_mode is not None:
+        origin = "cron"
+    elif mode is not None:
+        origin = "chat_pref"
+    else:
+        origin = "engine_config"
+        try:
+            mode = engine_default_mode()
+        except Exception:  # noqa: BLE001 — a warning must never break a run
+            return
+    waits_for = claude_tap_waits_for(mode)
+    if mode is None or waits_for is None:
+        return
+    key = (source, mode)
+    if key in _UNATTENDED_RISK_WARNED:
+        return
+    if len(_UNATTENDED_RISK_WARNED) >= _UNATTENDED_RISK_WARNED_MAX:
+        _UNATTENDED_RISK_WARNED.clear()
+    _UNATTENDED_RISK_WARNED.add(key)
+    logger.warning(
+        "trigger.unattended_approval_risk",
+        phase="dispatch",
+        trigger=source,
+        mode=mode,
+        source=origin,
+        waits_for=waits_for,
+    )
 
 
 def _allowed_chat_ids(cfg: TelegramBridgeConfig) -> set[int]:
@@ -2224,6 +2280,19 @@ async def run_main_loop(
                 # runner's _effective_permission_mode() picks it up.
                 run_options = _apply_trigger_permission_override(
                     run_options, context, engine=engine_for_overrides
+                )
+                _note_unattended_approval_risk(
+                    context,
+                    engine_for_overrides,
+                    run_options,
+                    lambda: getattr(
+                        cfg.runtime.resolve_runner(
+                            resume_token=resume_token,
+                            engine_override=engine_for_overrides,
+                        ).runner,
+                        "permission_mode",
+                        None,
+                    ),
                 )
                 await run_engine(
                     exec_cfg=cfg.exec_cfg,

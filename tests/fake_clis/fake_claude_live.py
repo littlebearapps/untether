@@ -48,6 +48,10 @@ _mode = os.environ.get("FAKE_CLAUDE_START_MODE", "bypassPermissions")
 # Test knobs: refuse every set_permission_mode; emit no system/status frames.
 REARM_ERROR = bool(os.environ.get("FAKE_CLAUDE_REARM_ERROR"))
 NO_STATUS = bool(os.environ.get("FAKE_CLAUDE_NO_STATUS"))
+# #751: report this in the FIRST system/init only (like `auto` on Haiku,
+# which the real CLI silently runs as `default`); later inits report _mode.
+_INIT_MODE_OVERRIDE = os.environ.get("FAKE_CLAUDE_INIT_PERMISSION_MODE")
+_init_count = 0
 # A queued wake turn starts this long after the result, without reading stdin.
 WAKE_AFTER_RESULT_S = float(os.environ.get("FAKE_CLAUDE_WAKE_AFTER_RESULT_S", "0.05"))
 STDIN_LOG = os.environ.get("FAKE_CLAUDE_STDIN_LOG")
@@ -159,6 +163,11 @@ def next_user(timeout: float | None) -> dict | None | str:
 
 
 def init() -> None:
+    global _init_count
+    _init_count += 1
+    mode = _mode
+    if _INIT_MODE_OVERRIDE and _init_count == 1:
+        mode = _INIT_MODE_OVERRIDE
     emit(
         {
             "type": "system",
@@ -166,7 +175,7 @@ def init() -> None:
             "cwd": os.getcwd(),
             "model": "claude-haiku-fake",
             "tools": ["Bash", "Agent", "Monitor", "ScheduleWakeup"],
-            "permissionMode": _mode,
+            "permissionMode": mode,
         }
     )
 

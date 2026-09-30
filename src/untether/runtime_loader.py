@@ -244,6 +244,7 @@ def build_runtime_spec(
     config_path: Path,
     default_engine_override: str | None = None,
     reserved: Iterable[str] = RESERVED_CHAT_COMMANDS,
+    audit_reason: str = "startup",
 ) -> RuntimeSpec:
     allowlist = resolve_plugins_allowlist(settings)
     engine_ids = list_backend_ids(allowlist=allowlist)
@@ -269,6 +270,13 @@ def build_runtime_spec(
         backends=backends,
         default_engine=default_engine,
     )
+    _audit_permission_modes(
+        settings=settings,
+        config_path=config_path,
+        router=router,
+        projects=projects,
+        reason=audit_reason,
+    )
     return RuntimeSpec(
         router=router,
         projects=projects,
@@ -276,3 +284,48 @@ def build_runtime_spec(
         plugin_configs=settings.plugins.model_extra,
         watch_config=settings.watch_config,
     )
+
+
+def _audit_permission_modes(
+    *,
+    settings: UntetherSettings,
+    config_path: Path,
+    router: AutoRouter,
+    projects: ProjectsConfig,
+    reason: str,
+) -> None:
+    """#751: one pass over the parsed config at startup and on every reload
+    (the only two callers of :func:`build_runtime_spec`)."""
+    from .permission_audit import (
+        CLAUDE_ENGINE,
+        audit_runtime_permission_modes,
+        make_engine_resolver,
+    )
+
+    # The validated engine-level mode, from the router's Claude runner, so
+    # both `[engines.claude]` and flat `[claude]` layouts are covered. If that
+    # table failed to build, the router fell back to `build_runner({})` and
+    # the mode reads None: the table is already reported as misconfigured, and
+    # `auto` itself is valid, so it can't be what broke it.
+    engine_mode: str | None = None
+    for entry in router.entries:
+        if entry.engine == CLAUDE_ENGINE:
+            mode = getattr(entry.runner, "permission_mode", None)
+            engine_mode = mode if isinstance(mode, str) else None
+            break
+    try:
+        audit_runtime_permission_modes(
+            raw_triggers=(settings.model_extra or {}).get("triggers"),
+            engine_mode=engine_mode,
+            resolve_engine=make_engine_resolver(
+                default_engine=router.default_engine,
+                project_engines={
+                    alias: project.default_engine
+                    for alias, project in projects.projects.items()
+                },
+            ),
+            config_path=config_path,
+            reason=reason,
+        )
+    except Exception:  # noqa: BLE001 — an audit must never block a config load
+        logger.warning("permission_audit.failed", exc_info=True)

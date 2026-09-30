@@ -1211,6 +1211,12 @@ class TestClaudeAllowedToolsByMode:
         assert "--allowedTools" in self._args(CLAUDE_PLAN_AUTO_MODE)
 
     def test_749_allowed_tools_present_for_auto(self) -> None:
+        """#751 probe P2 (CLI 2.1.285, zero-token): `--allowedTools Bash` does
+        not skip auto mode's classifier — an allowlisted `rm -rf` outside the
+        project was still sent to the classifier and denied, exactly as
+        without the flag — so the allowlist stays. Residual (#835): a run the
+        CLI downgrades to `default` (auto on Haiku) keeps it at stage 5; the
+        #751 re-arm gates stage 6 only."""
         assert "--allowedTools" in self._args("auto")
 
     def test_749_allowed_tools_present_for_dont_ask(self) -> None:

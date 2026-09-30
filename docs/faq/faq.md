@@ -81,10 +81,10 @@ Per-chat permission mode (`/planmode on/plan-auto/auto/off`, or `/config → Per
 
 - **on** — every plan transition prompts for approval.
 - **plan-auto** — plan mode, with the plan transition approved for you, so no buttons appear.
-- **auto** — Claude Code's own auto mode: a classifier approves routine work and blocks risky actions such as sending sensitive data to external endpoints. Questions the agent asks you still come through as buttons.
+- **auto** — Claude Code's own auto mode: a classifier approves routine work and blocks risky actions such as sending sensitive data to external endpoints. Questions the agent asks you still come through as buttons. Auto mode needs a model that supports it: on one that doesn't (such as Haiku), Claude Code quietly runs in its ordinary ask-first mode instead, so Untether shows a `⚠️ Asked for auto mode — Claude Code is running default` line in the run and sends the remaining permission requests to Telegram for approval instead of approving them. Shell commands and file edits stay pre-approved by the default tool allowlist in that case, so pick a model that supports auto mode for anything you wouldn't let run unchecked.
 - **off** — no plan phase; file edits run freely, and other actions (most shell commands, web fetches, MCP tools) ask for approval unless your Claude Code settings allow them.
 
-The **plan-auto** mode was called `auto` before v0.35.5. It was renamed because Claude Code introduced its own `auto` mode, and the two names collided. If you set `permission_mode = "auto"` in `untether.toml` and want the old behaviour, change it to `"plan-auto"` — Untether logs a warning at startup if it spots the ambiguous value. Per-chat settings you made through the buttons are migrated for you.
+The **plan-auto** mode was called `auto` before v0.35.5. It was renamed because Claude Code introduced its own `auto` mode, and the two names collided. If you set `permission_mode = "auto"` in `untether.toml` and want the old behaviour, change it to `"plan-auto"`. Untether logs one warning at startup (and again if a config reload changes the list) naming every engine setting and cron that uses `"auto"`. Per-chat settings you made through the buttons are migrated for you.
 
 For non-Claude engines, approval is enforced per-engine pre-run — Codex runs inside its sandbox (`/config` → Approval policy: **safe** = read-only), Gemini uses `--approval-mode` — rather than via mid-run buttons. Full guide: [Interactive approval](https://untether.littlebearapps.com/how-to/interactive-approval/).
 

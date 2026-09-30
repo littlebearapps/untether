@@ -60,6 +60,7 @@ def _reload_config(
         config_path=resolved_path,
         default_engine_override=default_engine_override,
         reserved=reserved,
+        audit_reason="reload",
     )
     return ConfigReload(
         settings=settings,
