@@ -22,7 +22,7 @@ Emitted once **as soon as you know the resume token** (Codex: `thread.started.th
 }
 ```
 
-Note: Codex JSONL does not include model or permission info in its event stream. The runner populates `meta.model` from run options (CLI `--model` flag) and `meta.permissionMode` when approval policy is set to "safe" (non-default).
+Note: Codex JSONL does not include model or permission info in its event stream. The runner populates `meta.model` from run options (CLI `--model` flag) and `meta.permissionMode` when approval policy is set to "safe" (non-default). Safe ⇒ `codex exec --sandbox read-only` (exec-level, before `resume`); Untether never passes `--ask-for-approval` ([#830](https://github.com/littlebearapps/untether/issues/830)).
 
 ### 2) `action`
 

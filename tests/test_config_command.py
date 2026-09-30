@@ -613,6 +613,45 @@ class TestCodexApprovalPolicy:
         msg = _last_send_msg(ctx)
         assert "safe" in msg.text.lower()
 
+    @pytest.mark.anyio
+    async def test_codex_page_copy_describes_sandbox(self, tmp_path):
+        """#830: the page describes the real sandbox behaviour, not a placebo."""
+        state_path = tmp_path / "prefs.json"
+        cmd = ConfigCommand()
+        ctx = _make_ctx(
+            args_text="pm",
+            text="config:pm",
+            config_path=state_path,
+            default_engine="codex",
+        )
+        await cmd.handle(ctx)
+        text = _last_edit_msg(ctx).text
+        assert "read-only" in text
+        assert "sandbox" in text
+        assert "/tmp" in text
+        assert "untrusted" not in text
+
+    @pytest.mark.anyio
+    async def test_codex_home_hint_safe_read_only(self, tmp_path):
+        from untether.telegram.chat_prefs import ChatPrefsStore, resolve_prefs_path
+        from untether.telegram.engine_overrides import EngineOverrides
+
+        state_path = tmp_path / "prefs.json"
+        cmd = ConfigCommand()
+        ctx = _make_ctx(config_path=state_path, default_engine="codex")
+        await cmd.handle(ctx)
+        assert "Codex's own sandbox" in _last_send_msg(ctx).text
+
+        prefs = ChatPrefsStore(resolve_prefs_path(state_path))
+        await prefs.set_engine_override(
+            123, "codex", EngineOverrides(permission_mode="safe")
+        )
+        ctx = _make_ctx(config_path=state_path, default_engine="codex")
+        await cmd.handle(ctx)
+        text = _last_send_msg(ctx).text
+        assert "read-only sandbox" in text
+        assert "untrusted" not in text
+
 
 # ---------------------------------------------------------------------------
 # Gemini approval mode (via plan mode page)

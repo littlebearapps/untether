@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 # (pattern_substring, hint_text) — first match wins.
-# Order: end-of-life/unsupported-client → auth → subscription/billing
+# Order: end-of-life/unsupported-client → CLI argv/config drift (#830) → the
+# generic "no longer supported" fallback → auth → subscription/billing
 # → overload/server → rate limits → session → network → signals → execution.
 _HINT_PATTERNS: list[tuple[str, str]] = [
     # --- Engine end-of-life / unsupported client ---
@@ -30,6 +31,37 @@ _HINT_PATTERNS: list[tuple[str, str]] = [
         "AMP is refusing this client version. Run `amp update` to upgrade."
         " The `amp` engine is deprecated in Untether and may stop working again"
         " without notice.",
+    ),
+    # --- CLI argv / config drift (#830) ---
+    # Codex's config loader rejects a retired key with this wording (e.g.
+    # `approval_policy = "untrusted"` from 0.149.0). It must outrank the
+    # generic "no longer supported" end-of-life fallback below, which would
+    # otherwise blame the client version.
+    (
+        "is no longer supported; remove this setting",
+        "A setting in your Codex config (`~/.codex/config.toml`, a `--profile`"
+        " file, or `[engines.codex] extra_args`) is no longer supported by the"
+        " installed Codex CLI \N{EM DASH} remove the key the error names.",
+    ),
+    # clap argv rejections. Kept to clap's exact shapes (a quote before `for`,
+    # a dash after the quote) so agent/API prose doesn't match.
+    (
+        "' for '--",
+        "The engine CLI rejected a command-line flag \N{EM DASH} this Untether"
+        " version may not match the installed CLI. Update Untether, and report"
+        " it if the problem persists.",
+    ),
+    (
+        "a value is required for '--",
+        "The engine CLI rejected a command-line flag \N{EM DASH} this Untether"
+        " version may not match the installed CLI. Update Untether, and report"
+        " it if the problem persists.",
+    ),
+    (
+        "error: unexpected argument '-",
+        "The engine CLI rejected a command-line flag \N{EM DASH} this Untether"
+        " version may not match the installed CLI. Update Untether, and report"
+        " it if the problem persists.",
     ),
     (
         "no longer supported",

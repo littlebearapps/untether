@@ -163,7 +163,7 @@ These two engines still load and run, but are no longer supported and are **targ
 ¹ Amp model override maps to `--mode` (deep/free/rush/smart).
 ² Defaults to full access (`--approval-mode=yolo`, all tools auto-approved); toggle via `/config` to edit files (`auto_edit`, files OK but no shell) or read-only; pre-run policy, not interactive mid-run approval.
 ³ Token usage counts only — no USD cost reporting.
-⁴ Toggle via `/config` between full auto (default) and safe (`--ask-for-approval=untrusted`, untrusted tools blocked); pre-run policy, not interactive mid-run approval.
+⁴ Toggle via `/config` between full auto (default; Codex's own sandbox setting) and safe (`--sandbox read-only`: read-only, edits blocked); pre-run policy, not interactive mid-run approval.
 ⁵ Pi requires `provider = "openai-codex"` in engine config for OAuth subscriptions in headless mode.
 ⁶ AMP requires an explicit thread ID; no "most recent" mode.
 ⁷ **Deprecated** — see [Deprecated engines](#deprecated-engines) above. The ticks below describe what the integration does today; they are not a support commitment, and these engines are targeted for removal in 0.36.0.

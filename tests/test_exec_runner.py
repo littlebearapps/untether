@@ -138,8 +138,6 @@ def test_codex_exec_flags_after_exec() -> None:
     assert args == [
         "-c",
         "notify=[]",
-        "--ask-for-approval",
-        "never",
         "exec",
         "--json",
         "--skip-git-repo-check",

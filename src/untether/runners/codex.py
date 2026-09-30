@@ -29,6 +29,7 @@ logger = get_logger(__name__)
 ENGINE: EngineId = "codex"
 
 __all__ = [
+    "CODEX_SAFE_PERMISSION_MODE",
     "ENGINE",
     "CodexRunner",
     "find_exec_only_flag",
@@ -40,6 +41,10 @@ _RECONNECTING_RE = re.compile(
     r"^Reconnecting\.{3}\s*(?P<attempt>\d+)/(?P<max>\d+)\s*$",
     re.IGNORECASE,
 )
+# Flags Untether manages, rejected in ``extra_args`` (#407). NB the name is
+# historical: ``--ask-for-approval`` is top-level only — ``codex exec`` never
+# reads it and forces approval=never itself (#830), so Untether no longer
+# passes it at all. It stays rejected here; #209 reclassifies it.
 _EXEC_ONLY_FLAGS = {
     "--ask-for-approval",
     "--skip-git-repo-check",
@@ -54,6 +59,49 @@ _EXEC_ONLY_PREFIXES = (
     "--output-last-message=",
     "--color=",
 )
+
+
+# #830: Codex ``safe`` approval policy. `codex exec` hard-codes
+# approval=never and ignores the root ``-a`` (and codex-cli 0.149.0 removed
+# ``untrusted`` outright), so the only lever exec enforces is the sandbox.
+CODEX_SAFE_PERMISSION_MODE = "safe"
+# Exec-level (after ``exec``, before ``resume``) so it outranks any root-level
+# --sandbox / --yolo / --approve-for-me in extra_args (upstream
+# shared_options.rs inherit_exec_root_options) and config.toml sandbox_mode.
+_CODEX_SAFE_SANDBOX = "read-only"
+# Values that mean "full auto" (no sandbox flag). `/config` maps its Full auto
+# button to "auto" (stored as None); engine_overrides documents it too.
+_CODEX_FULL_AUTO_MODES = frozenset({"auto"})
+_UNKNOWN_PM_WARNED: set[str] = set()
+
+
+def _warn_unknown_permission_mode(mode: str) -> None:
+    """Once per distinct value per process: an unknown Codex mode runs full auto."""
+    if mode in _UNKNOWN_PM_WARNED:
+        return
+    _UNKNOWN_PM_WARNED.add(mode)
+    logger.warning(
+        "codex.permission_mode.unknown",
+        mode=mode,
+        note="unknown Codex permission_mode runs as full auto; valid: safe",
+    )
+
+
+# clap's argv-rejection lines (#830): a removed/renamed flag or value exits
+# rc=2 before any JSONL, so this is the crisp signature for the next drift.
+_CLAP_ARGV_ERROR_PREFIXES = (
+    "error: invalid value ",
+    "error: unexpected argument ",
+    "error: a value is required for ",
+)
+
+
+def _clap_argv_error_line(stderr_lines: list[str] | None) -> str | None:
+    for line in stderr_lines or ():
+        stripped = line.strip()
+        if stripped.startswith(_CLAP_ARGV_ERROR_PREFIXES):
+            return stripped[:200]
+    return None
 
 
 def find_exec_only_flag(extra_args: list[str]) -> str | None:
@@ -457,6 +505,9 @@ class CodexRunState:
     final_answer: str | None = None
     turn_agent_messages: list[_AgentMessageSummary] = field(default_factory=list)
     turn_index: int = 0
+    # The argv build_args produced for this run (the prompt goes via stdin),
+    # kept for the #830 `codex.argv.rejected` diagnostic.
+    argv: list[str] | None = None
 
 
 class CodexRunner(ResumeTokenMixin, JsonlSubprocessRunner):
@@ -498,10 +549,8 @@ class CodexRunner(ResumeTokenMixin, JsonlSubprocessRunner):
                         f"model_reasoning_effort={run_options.reasoning}",
                     ]
                 )
-        if run_options is not None and run_options.permission_mode == "safe":
-            args.extend(["--ask-for-approval", "untrusted"])
-        else:
-            args.extend(["--ask-for-approval", "never"])
+        # No --ask-for-approval: `codex exec` never reads the root -a and forces
+        # approval=never itself; `untrusted` is rejected from 0.149.0 (#830).
         args.extend(
             [
                 "exec",
@@ -510,6 +559,12 @@ class CodexRunner(ResumeTokenMixin, JsonlSubprocessRunner):
                 "--color=never",
             ]
         )
+        mode = run_options.permission_mode if run_options is not None else None
+        if mode == CODEX_SAFE_PERMISSION_MODE:
+            # Must sit before `resume`: `codex exec resume` has no --sandbox.
+            args.extend(["--sandbox", _CODEX_SAFE_SANDBOX])
+        elif mode is not None and mode not in _CODEX_FULL_AUTO_MODES:
+            _warn_unknown_permission_mode(mode)
         if resume:
             if resume.is_continue:
                 args.extend(["resume", "--last", "-"])
@@ -517,6 +572,8 @@ class CodexRunner(ResumeTokenMixin, JsonlSubprocessRunner):
                 args.extend(["resume", resume.value, "-"])
         else:
             args.append("-")
+        if isinstance(state, CodexRunState):
+            state.argv = list(args)
         return args
 
     def new_state(self, prompt: str, resume: ResumeToken | None) -> CodexRunState:
@@ -644,10 +701,13 @@ class CodexRunner(ResumeTokenMixin, JsonlSubprocessRunner):
             if meta is None:
                 meta = {}
             meta["effort"] = run_options.reasoning
-        if run_options is not None and run_options.permission_mode == "safe":
+        if (
+            run_options is not None
+            and run_options.permission_mode == CODEX_SAFE_PERMISSION_MODE
+        ):
             if meta is None:
                 meta = {}
-            meta["permissionMode"] = "safe"
+            meta["permissionMode"] = CODEX_SAFE_PERMISSION_MODE
 
         return translate_codex_event(
             data,
@@ -673,6 +733,14 @@ class CodexRunner(ResumeTokenMixin, JsonlSubprocessRunner):
         if excerpt:
             parts.append(excerpt)
         message = "\n".join(parts)
+        argv_error = _clap_argv_error_line(stderr_lines) if rc == 2 else None
+        if argv_error is not None:
+            logger.error(
+                "codex.argv.rejected",
+                rc=rc,
+                first_error_line=argv_error,
+                args=state.argv,
+            )
         logger.error(
             "codex.process.failed",
             rc=rc,

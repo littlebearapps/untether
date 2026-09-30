@@ -172,7 +172,13 @@ Switch to `claude`, `codex`, `opencode`, or `pi` via `/config → Engine & model
 
 ### Codex: approval hang
 
-Codex may block waiting for terminal approval in headless mode if no `--ask-for-approval` flag is passed. **Fix:** upgrade to Untether v0.35.0+ which always passes `--ask-for-approval never` (or `untrusted` in safe permission mode). Older versions may not pass this flag, causing Codex to use its default terminal-based approval flow.
+`codex exec` (the headless mode Untether runs) always runs with approval `never` and never waits for terminal approval, so an approval hang is not expected on any recent Codex CLI. Untether v0.35.5+ no longer passes `--ask-for-approval` at all; the Codex **safe** policy picks the read-only sandbox instead (`--sandbox read-only`). If Codex still stalls, check the stall diagnostics and your MCP servers.
+
+### Codex: `invalid value 'untrusted'` / `is no longer supported; remove this setting`
+
+- `error: invalid value 'untrusted' for '--ask-for-approval'` (rc=2, every run in a chat set to **Safe**): Untether before v0.35.5 passed `--ask-for-approval untrusted`, which codex-cli 0.149.0+ removed. **Fix:** upgrade Untether ([#830](https://github.com/littlebearapps/untether/issues/830)), or switch the chat to **Full auto** in `/config` → Approval policy until you can.
+- `approval_policy = "untrusted" is no longer supported; remove this setting` (every Codex run, Full auto included): your own `~/.codex/config.toml` (or a `--profile` file) sets the retired value. **Fix:** remove the `approval_policy = "untrusted"` line. Untether's error hint names this case.
+- A `sandbox_mode` and `default_permissions` conflict is possible if `[engines.codex] extra_args` sets `-c default_permissions=…` while the chat is in **Safe** (Safe sets the sandbox itself). Drop the `-c default_permissions` override, or use Full auto.
 
 ### OpenCode: unsupported event warning
 

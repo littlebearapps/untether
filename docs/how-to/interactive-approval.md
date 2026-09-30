@@ -122,10 +122,16 @@ Toggle via `/config` → **Approval policy**:
 
 | Policy | CLI flag | Behaviour |
 |--------|----------|-----------|
-| **Full auto** (default) | (none) | All tools approved — Codex runs without restriction |
-| **Safe** | `--ask-for-approval untrusted` | Only trusted commands run; untrusted tools are blocked |
+| **Full auto** (default) | (none) | Codex uses your own Codex sandbox setting (`sandbox_mode` in `~/.codex/config.toml`, or the project's trust level). For a trusted project that is usually `workspace-write`, so Codex can edit files there |
+| **Safe** | `codex exec --sandbox read-only` | Reads and read-only commands only. Edits and writes fail and are reported back to the model; shell network access is blocked |
 
-This is a pre-run policy — Codex doesn't pause mid-run to ask for permission. The policy is set before the run starts.
+This is a pre-run policy — Codex doesn't pause mid-run to ask for permission. `codex exec` never asks for approval, so the policy picks Codex's sandbox before the run starts.
+
+!!! warning "Safe blocks every sandboxed write"
+    The read-only sandbox blocks **all** filesystem writes from Codex's commands, not just edits inside the project: caches (`.pytest_cache`, `__pycache__`, `npm`/`uv` caches), build output and `/tmp` too. Tests, builds and package installs fail in Safe. Switch the chat to **Full auto** when you want Codex to run them. MCP tools run outside Codex's command sandbox, so Safe does not restrict what an MCP server does.
+
+!!! note "Before v0.35.5"
+    Safe used to pass `--ask-for-approval untrusted`. `codex exec` never applied that flag, so Safe ran exactly like Full auto, and codex-cli 0.149.0+ rejects it outright, so every Safe run failed at startup ([#830](https://github.com/littlebearapps/untether/issues/830)).
 
 ### Gemini CLI — Approval mode
 
