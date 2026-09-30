@@ -77,7 +77,7 @@ If a new engine or MCP genuinely needs a variable that isn't allowlisted (sympto
 
 2. **For names that benefit every Untether user**: add to `_EXACT_ALLOW` / `_PREFIX_ALLOW` in `src/untether/utils/env_policy.py` and submit a PR. `BWS_ACCESS_TOKEN` (Bitwarden Secrets Manager) was promoted into the built-in defaults in v0.35.3 by exactly this path.
 
-Other engines (Codex, Gemini, OpenCode, AMP) still inherit the full parent env — extending the allowlist to them is tracked in [#332](https://github.com/littlebearapps/untether/issues/332).
+Codex and OpenCode (and the deprecated Gemini and AMP) still inherit Untether's full environment; per-runner filtering for them is tracked in [#375](https://github.com/littlebearapps/untether/issues/375). Codex itself starts its MCP servers with a minimal env, so a credential needs `env_vars` — see [Env for Codex and OpenCode](../reference/env-vars.md#env-codex-opencode).
 
 ### Boundary enforcement on Claude exec ([#361](https://github.com/littlebearapps/untether/issues/361))
 

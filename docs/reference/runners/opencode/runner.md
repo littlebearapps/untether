@@ -69,3 +69,4 @@ If OpenCode adds compaction events in the future, Untether will need schema and 
 ## See also
 
 - [Error Reference](../../errors.md) — actionable hints for common engine errors
+- [Env for Codex and OpenCode](../../env-vars.md#env-codex-opencode) — what OpenCode and its MCP servers inherit, and the `set -u` wrapper pattern
