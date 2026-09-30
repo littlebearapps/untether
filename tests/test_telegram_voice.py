@@ -446,18 +446,82 @@ def test_resolve_transcription_prompt_unset_uses_shipped_default() -> None:
     )
 
     assert resolve_transcription_prompt(None) == DEFAULT_VOICE_TRANSCRIPTION_PROMPT
-    # Engine names are the words carrying a spoken instruction's referent.
-    for term in ("Untether", "Codex", "OpenCode", "Claude Code"):
-        assert term in DEFAULT_VOICE_TRANSCRIPTION_PROMPT
-    # #789: the agent context files every user dictates about ("update
-    # CLAUDE.md") — "CLAUDE.md" was transcribed as "Claw.md" without them.
-    for term in ("CLAUDE.md", "AGENTS.md"):
-        assert term in DEFAULT_VOICE_TRANSCRIPTION_PROMPT
     # Product-generic only — no deployment-specific nouns in a PyPI wheel.
     for term in ("lba-1", "nsd", "channelo", "Trello"):
         assert term not in DEFAULT_VOICE_TRANSCRIPTION_PROMPT
-    # Well inside the ~224-token Whisper prompt window.
-    assert len(DEFAULT_VOICE_TRANSCRIPTION_PROMPT) <= 1000
+
+
+def _default_prompt_terms() -> list[str]:
+    from untether.telegram.voice import DEFAULT_VOICE_TRANSCRIPTION_PROMPT
+
+    # Exact elements: a substring check can't tell "Claude" from "Claude Code".
+    return DEFAULT_VOICE_TRANSCRIPTION_PROMPT.split(", ")
+
+
+def test_default_voice_prompt_includes_bare_claude() -> None:
+    """#789 regression guard: rc14 had "Claude" only inside "Claude Code" and
+    "CLAUDE.md" (tokenised C|LAU|DE), so nsd still heard "Clawde". V1 order
+    (Claude first) per the rc15 plan; the recorded-clip A/B (R15-11) is owed."""
+    terms = _default_prompt_terms()
+    assert "Claude" in terms
+    assert terms[0] == "Claude"
+
+
+def test_default_voice_prompt_keeps_referent_terms() -> None:
+    """Engine names and the agent context files carry a spoken instruction's
+    referent ("run it on Codex", "update CLAUDE.md")."""
+    assert {
+        "Claude Code",
+        "CLAUDE.md",
+        "AGENTS.md",
+        "Codex",
+        "OpenCode",
+        "Untether",
+    } <= set(_default_prompt_terms())
+
+
+def test_default_voice_prompt_drops_deprecated_and_out_of_scope_engines() -> None:
+    from untether.telegram.voice import DEFAULT_VOICE_TRANSCRIPTION_PROMPT
+
+    terms = _default_prompt_terms()
+    for term in ("Gemini", "Amp", "Pi"):
+        assert term not in terms
+    # Substring check too, except "Pi" (it's inside "PyPI").
+    for term in ("Gemini", "Amp"):
+        assert term not in DEFAULT_VOICE_TRANSCRIPTION_PROMPT
+
+
+def test_default_voice_prompt_excludes_non_canonical_filename() -> None:
+    """Mixed-case "Claude.md" would bias towards a filename no repo uses."""
+    from untether.telegram.voice import DEFAULT_VOICE_TRANSCRIPTION_PROMPT
+
+    assert "Claude.md" not in _default_prompt_terms()
+    assert "Claude.md" not in DEFAULT_VOICE_TRANSCRIPTION_PROMPT
+
+
+def test_default_voice_prompt_well_inside_whisper_window() -> None:
+    """≤300 chars ≈ ≤130 Whisper tokens at ~2.3 chars/token, against the
+    224-token prompt window (Whisper keeps only the last 224)."""
+    from untether.telegram.voice import DEFAULT_VOICE_TRANSCRIPTION_PROMPT
+
+    terms = _default_prompt_terms()
+    assert len(DEFAULT_VOICE_TRANSCRIPTION_PROMPT) <= 300
+    assert len(terms) == len(set(terms))
+    for term in terms:
+        assert term
+        assert term == term.strip()
+    assert not DEFAULT_VOICE_TRANSCRIPTION_PROMPT.rstrip().endswith(",")
+
+
+def test_default_voice_prompt_documented_verbatim() -> None:
+    """#789 D4: the transport reference quotes the default verbatim, so a
+    constant change without a docs change fails here (the FAQ drifted once)."""
+    from pathlib import Path
+
+    from untether.telegram.voice import DEFAULT_VOICE_TRANSCRIPTION_PROMPT
+
+    doc = Path(__file__).parents[1] / "docs/reference/transports/telegram.md"
+    assert DEFAULT_VOICE_TRANSCRIPTION_PROMPT in doc.read_text(encoding="utf-8")
 
 
 def test_resolve_transcription_prompt_empty_string_opts_out() -> None:

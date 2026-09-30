@@ -76,18 +76,25 @@ to genuinely high-frequency nouns — provider prompt windows are token-capped
 (~224 tokens for Whisper), the effect is model-dependent, and an overstuffed
 prompt can induce hallucinated terms on short or silent clips.
 
+The default list is short and its order doesn't matter much. Only if your
+override is longer than Whisper's ~224-token prompt window (roughly 500
+characters of a comma-separated list): OpenAI Whisper keeps only the **last**
+224 tokens, so put your most important terms at the end. Other providers may
+truncate or reject an over-long prompt, so keep it under that size.
+
 Since v0.35.5 the key is **not** inert when unset
 ([#703](https://github.com/littlebearapps/untether/issues/703)): Untether ships a
 product-generic default covering the terms every user speaks —
 
 ```
-Untether, Telegram, Claude Code, Codex, OpenCode, Gemini, Amp, Pi, MCP, CLI, repo, changelog, PyPI, CLAUDE.md, AGENTS.md
+Claude, Claude Code, CLAUDE.md, AGENTS.md, Codex, OpenCode, Untether, Telegram, MCP, CLI, repo, changelog, PyPI
 ```
 
 Deployment-specific nouns (your project names, hostnames, third-party tools) are
 deliberately **not** in the default — add them yourself. Setting the key
 **replaces** the default rather than extending it, so include the engine names
-you care about in your own value. Set it to an empty string (`""`) to disable the
+you care about in your own value (the default no longer lists Gemini, Amp or Pi,
+[#789](https://github.com/littlebearapps/untether/issues/789)). Set it to an empty string (`""`) to disable the
 bias entirely and omit the parameter, the same way `[preamble] text = ""` works.
 
 ### Trigger mode (mentions-only)

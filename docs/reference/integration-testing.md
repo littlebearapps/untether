@@ -294,7 +294,7 @@ Run these in addition to the standard tiers and B-LIVE for rc12. Unless noted, u
 | RC12-7 | **Queued note under a live session ([#781](https://github.com/littlebearapps/untether/issues/781))** | Start a 60 s background task, end the turn; immediately send a follow-up. | The follow-up shows `⏳ Queued — sent as soon as Claude's current turn ends (background tasks keep running).` (no `/cancel to drop it`) and is answered within seconds in the same session. With `live_sessions = false` the old `⏳ Queued behind the previous run's N background task(s) …` wording returns. |
 | RC12-8 | **`<br>` rendering ([#786](https://github.com/littlebearapps/untether/issues/786))** | `Reply with exactly: first line<br>second line, then a two-row markdown table with a <br> inside one cell, then the literal text <br> inside backticks` | The first `<br>` renders as a line break; the table cell shows a space, not `<br>`; the backticked `<br>` stays literal code; no other HTML tag is interpreted. |
 | RC12-9 | **Filenames not auto-linked ([#788](https://github.com/littlebearapps/untether/issues/788))** | `Mention CLAUDE.md, scripts/healthcheck.sh:12, src/untether/runner.py and https://example.com/notes.md in plain text, no code formatting` | The three filenames render as inline code, not links (no `claude.md` domain link); the `https://` URL stays a clickable link. |
-| RC12-10 | **Voice vocabulary ([#789](https://github.com/littlebearapps/untether/issues/789))** | `send_voice` a clip saying *"open CLAUDE dot MD and AGENTS dot MD and summarise them"* with no `voice_transcription_prompt` set in the dev config. | Transcript contains `CLAUDE.md` and `AGENTS.md` (not "Claw.md"); both render as inline code in the echoed transcript. Effect is model-dependent, so a near-miss is a soft fail: note it and don't block the release. |
+| RC12-10 | **Voice vocabulary ([#789](https://github.com/littlebearapps/untether/issues/789))** — *superseded by R15-11 (its "no prompt set" precondition wasn't true on the dev bot)* | `send_voice` a clip saying *"open CLAUDE dot MD and AGENTS dot MD and summarise them"* with no `voice_transcription_prompt` set in the dev config. | Transcript contains `CLAUDE.md` and `AGENTS.md` (not "Claw.md"); both render as inline code in the echoed transcript. Effect is model-dependent, so a near-miss is a soft fail: note it and don't block the release. |
 
 **Required for rc12:** Tier 7 + Tier 1 (all 4 supported engines, because #510 changed the base `run_impl` spawn order) + B-LIVE-1…7 + RC12-1…9, RC12-10 if a voice clip is available.
 
@@ -471,7 +471,7 @@ Integration tests are run by Claude Code via Telegram MCP tools (see "Automated 
 | Progress/formatting (`markdown.py`, `telegram/render.py`) | U3, T6, T7, S4, S8, RC12-8, RC12-9 |
 | Commands (`commands/*.py`) | Tier 7 (all), specific command test |
 | File transfer (`file_transfer.py`) | T2, T3, T5 |
-| Voice (`voice.py`) | T1, RC12-10, R15-10 (endpoint) |
+| Voice (`voice.py`) | T1, R15-11 (vocabulary), R15-10 (endpoint) |
 | Topics (`topics.py`, `topic_state.py`) | O1, O5, O6, O8 |
 | Directives (`directives.py`) | T9, T10 |
 | Shutdown (`shutdown.py`) | S3, B4 |
@@ -698,3 +698,16 @@ R15-10c–d if anything is listening. For steps c–d also set
 | R15-10g | Restore: `cp /tmp/untether-dev.toml.r15-10.bak ~/.untether-dev/untether.toml`, then `send_voice` | A normal `🎙 <transcript>` echo and a normal run (T1 regression) | `voice.base_url.permitted phase=reload host=api.groq.com`; no `not_permitted` |
 
 Then run Tier 7 (`/ping`, `/config`) to confirm nothing else regressed.
+
+### #789 — default voice prompt vocabulary
+
+Needs recorded clips (Nathan records them once as Telegram voice notes to Saved Messages): C2a–h
+(bare "Claude" in varied positions), C3 (*"Yes, continue."*) and C5a–c ("cloud" controls). Clips live
+only in `~/.untether-dev/test-clips/789/` and are deleted when the run ends. Never send client-chat
+audio (C1) to the bot or Groq; score it offline with local Whisper, counts only. The plan's
+pre-registered A/B criteria (offline, Groq + local Whisper, V0/V1/V2/no prompt) decide
+ship / tie / no-improvement before this live row runs.
+
+| # | Scenario | Steps | Pass criteria |
+|---|---|---|---|
+| R15-11 | **Voice vocabulary: bare "Claude" ([#789](https://github.com/littlebearapps/untether/issues/789))** | Back up the dev TOML (`cp -p ~/.untether-dev/untether.toml ~/.untether-dev/untether.toml.bak-789-$(date +%Y%m%dT%H%M%S)`) and set a restore trap. Comment out `voice_transcription_prompt` with `sed -i 's/^voice_transcription_prompt/# &/'` (never echo the value), and prove via `load_settings()` + `resolve_transcription_prompt()` that it resolves to the shipped default (print booleans only). Restart `untether-dev`. With `/planmode on`, `send_voice` C2a–h, C3 and C5a–c in the Claude chat, sending `/cancel` after each `🎙` echo. Then set a throwaway override (one hot-reload line, `keys=['voice_transcription_prompt']`, send C2c) and `""` (one hot-reload line, send C3). Restore the TOML from the backup even if the run aborts, re-run the loader check (expect `resolved_to_default=False`) and restart. | Every bare "Claude" is echoed as `Claude`, and `CLAUDE.md`/`AGENTS.md` appear as inline code. "cloud" is never turned into `Claude`. The short clip has no inserted terms. No `voice.transcribe.error`/`timeout`/`unexpected` or `config.read.toml_error`. `journalctl --user -u untether-dev --since "60 minutes ago" \| grep -c "AGENTS.md, Codex, OpenCode"` prints `0` (the prompt is never logged). Restored TOML `sha256sum` matches the backup. |

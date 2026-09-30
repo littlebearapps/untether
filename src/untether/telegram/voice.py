@@ -51,9 +51,17 @@ __all__ = [
 # they're the highest-value ones to protect. #789 adds the agent context files
 # (CLAUDE.md, AGENTS.md) — every user's agents work with them, and "CLAUDE.md"
 # was otherwise heard as "Claw.md".
+#
+# #789 (rc15): a bare "Claude" is needed too. Whisper tokenises "CLAUDE.md" as
+# C|LAU|DE, which shares nothing with the spoken name, and "Claude" otherwise
+# only appeared inside "Claude Code" — so nsd still heard "Clawde". The three
+# Claude forms are grouped first. Gemini/Amp (deprecated) and Pi (out of
+# scope) are dropped to keep the list short. Whisper keeps only the LAST ~224
+# prompt tokens; this list is ~47, well inside. Mixed-case "Claude.md" is
+# deliberately absent: it would bias towards a filename no repo uses.
 DEFAULT_VOICE_TRANSCRIPTION_PROMPT = (
-    "Untether, Telegram, Claude Code, Codex, OpenCode, Gemini, Amp, Pi, "
-    "MCP, CLI, repo, changelog, PyPI, CLAUDE.md, AGENTS.md"
+    "Claude, Claude Code, CLAUDE.md, AGENTS.md, Codex, OpenCode, "
+    "Untether, Telegram, MCP, CLI, repo, changelog, PyPI"
 )
 
 
