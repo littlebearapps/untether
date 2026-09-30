@@ -260,11 +260,11 @@ Key test files:
 - `test_loop_coverage.py` — 67 tests: update loop edge cases, message routing, callback dispatch, shutdown integration; `ForwardCoalescer` merges rapid prompts in order instead of dropping them and flushes on reply-target/context/voice/directive mismatch (#794); commands are a coalesce barrier — `/cancel`/`/new`/`/continue` drop the pending prompt with a notice, other commands flush it first, directives and `/steer <text>` stay prompts (#807)
 - `test_telegram_topics_command.py` — 16 tests: `/new` cancellation (cancel helper, chat/topic modes, running task cleanup), `/ctx` binding, `/topic` command
 - `test_trigger_server.py` — 34 tests: health, auth, event filter, multipart (file upload, form fields, size limit, filename sanitisation, auth rejection), rate limit burst 429, fire-and-forget dispatch
-- `test_trigger_actions.py` — 32 tests: file_write (traversal, deny globs, symlink to `.env` denied on the resolved path (#390), size, conflicts, multipart short-circuit), http_forward (SSRF, retries, headers), notify_only
+- `test_trigger_actions.py` — 37 tests: file_write (traversal, deny globs incl. deep `.git`/`.ssh` paths and case-insensitive `.git` (#831), symlink to `.env` denied on the resolved path (#390), size, conflicts, multipart short-circuit), http_forward (SSRF, retries, headers), notify_only
 - `test_trigger_cron.py` — 27 tests: 5-field cron matching, timezone conversion (Melbourne, DST, per-cron/default override), step validation
 - `test_trigger_settings.py` — 58 tests: CronConfig/WebhookConfig/CronFetchConfig/TriggersSettings validation, action fields, multipart defaults, timezone
 - `test_trigger_ssrf.py` — 73 tests: IPv4/IPv6 blocking, URL validation, DNS resolution, allowlist overrides
-- `test_trigger_fetch.py` — 25 tests: HTTP GET/POST, file read, parse modes, failure handling, prompt building
+- `test_trigger_fetch.py` — 28 tests: HTTP GET/POST, file read (deep `.git`/`.ssh` denial, symlink to a denied file, #831), parse modes, failure handling, prompt building
 - `test_trigger_auth.py` — 16 tests: bearer token, HMAC-SHA256/SHA1, timing-safe comparison
 - `test_trigger_rate_limit.py` — 4 tests: token bucket fill/drain, per-key isolation, refill timing
 - `test_trigger_manager.py` — 35 tests: TriggerManager init/update/clear, webhook server hot-reload (add/remove/update routes, secret changes, health count), cron schedule swapping, timezone updates; rc4 helpers (crons_for_chat, webhooks_for_chat, cron_ids, webhook_ids, remove_cron, atomic iteration)

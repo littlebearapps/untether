@@ -79,6 +79,23 @@ class TestDenyReason:
     def test_normal_path_allowed(self) -> None:
         assert _deny_reason(Path("data/output.json")) is None
 
+    # #831: PurePosixPath.match treated ``**`` as one segment, so only direct
+    # children of ``.git`` / ``.ssh`` were denied on the absolute paths the
+    # trigger actions check.
+    def test_deep_git_denied(self) -> None:
+        assert _deny_reason(Path("/proj/.git/objects/ab/cd")) == ".git/**"
+        assert _deny_reason(Path("/proj/.git/hooks/post-checkout")) == ".git/**"
+
+    def test_git_casefold_denied(self) -> None:
+        assert _deny_reason(Path("/proj/.GIT/hooks/pre-commit")) == ".git/**"
+
+    def test_deep_ssh_denied(self) -> None:
+        assert _deny_reason(Path("/home/x/.ssh/a/b")) == "**/.ssh/**"
+        assert _deny_reason(Path("/home/x/.ssh/config")) == "**/.ssh/**"
+
+    def test_gitconfig_not_a_git_component(self) -> None:
+        assert _deny_reason(Path("/home/x/.gitconfig")) is None
+
     def test_nested_data_allowed(self) -> None:
         assert _deny_reason(Path("incoming/batch-2026-04-12.json")) is None
 
@@ -396,3 +413,16 @@ async def test_file_write_symlink_to_env_rejected(tmp_path: Path) -> None:
     assert ok is False
     assert "deny glob" in msg
     assert env.read_text(encoding="utf-8") == "SECRET"
+
+
+@pytest.mark.anyio
+async def test_file_write_templated_deep_git_path_denied(tmp_path: Path) -> None:
+    """#831: a payload-controlled name can't reach ``.git/hooks`` any more."""
+    (tmp_path / ".git" / "hooks").mkdir(parents=True)
+    webhook = _make_webhook(file_path=str(tmp_path) + "/{{name}}")
+    ok, msg = await execute_file_write(
+        webhook, {"name": ".git/hooks/post-checkout"}, b"#!/bin/sh\n"
+    )
+    assert ok is False
+    assert "deny glob" in msg
+    assert not (tmp_path / ".git" / "hooks" / "post-checkout").exists()

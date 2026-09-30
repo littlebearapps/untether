@@ -421,7 +421,7 @@ prompt_template = "Batch {{form.batch_id}} uploaded: {{file.saved_path}}. Valida
 ```
 
 - Filenames are sanitised (only `a-zA-Z0-9._-` allowed).
-- File writes use atomic writes with deny-glob and path traversal protection.
+- File writes use atomic writes with deny-glob and path traversal protection. The deny check runs on the resolved path and denies any `.git` component and anything under a `.ssh/` directory at any depth ([#831](https://github.com/littlebearapps/untether/issues/831)).
 - Form fields are available as `{{field_name}}` in templates.
 - `max_file_size_bytes` defaults to 50 MB (max 100 MB).
 - When combined with `action = "file_write"`, the extracted file part is
@@ -455,7 +455,7 @@ prompt_template = "Open issues for triage:\n{{issues}}\n\nReview and propose lab
 
 - **`http_get`** / **`http_post`** -- fetch a URL with optional headers.
   SSRF-protected (private IP ranges blocked). Response parsed per `parse_as`.
-- **`file_read`** -- read a local file. Path traversal and deny-glob protected.
+- **`file_read`** -- read a local file. Path traversal and deny-glob protected (resolved path, any depth; [#831](https://github.com/littlebearapps/untether/issues/831)).
 
 ### Parse modes
 
