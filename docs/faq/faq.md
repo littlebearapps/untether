@@ -65,7 +65,7 @@ The one exception is voice transcription: Untether ships with optional Whisper-v
 Untether runs entirely on your machine (or your server). Your repo, your environment, your authenticated agent — Untether is just a transport.
 
 - **Telegram** sees the messages you exchange with your bot — that's the user-content channel by design. Messages are encrypted in transit but Telegram does have access to them on its servers, so treat the bot like any other chat: don't paste production secrets into prompts.
-- **Your agent CLI** sees whatever you send in the message plus your project's filesystem (subject to whatever permission controls the engine has — Claude's `--permission-mode`, Codex's `--ask-for-approval`, etc.).
+- **Your agent CLI** sees whatever you send in the message plus your project's filesystem (subject to whatever permission controls the engine has — Claude's `--permission-mode`, Codex's sandbox (`--sandbox`), etc.).
 - **The agent's vendor** (Anthropic / OpenAI / Google / Sourcegraph / etc.) sees whatever the agent CLI sends to its API — same as if you ran the CLI directly in a terminal.
 - **Untether itself** doesn't phone home, doesn't send analytics, doesn't have a remote service. Crash logs stay on your machine. The bot token, allowlisted user IDs, and any optional voice-transcription API key live in your local `untether.toml` and are masked in operational logs.
 
@@ -86,7 +86,7 @@ Per-chat permission mode (`/planmode on/plan-auto/auto/off`, or `/config → Per
 
 The **plan-auto** mode was called `auto` before v0.35.5. It was renamed because Claude Code introduced its own `auto` mode, and the two names collided. If you set `permission_mode = "auto"` in `untether.toml` and want the old behaviour, change it to `"plan-auto"` — Untether logs a warning at startup if it spots the ambiguous value. Per-chat settings you made through the buttons are migrated for you.
 
-For non-Claude engines, approval is enforced per-engine pre-run (Codex `--ask-for-approval`, Gemini `--approval-mode`) rather than via mid-run buttons. Full guide: [Interactive approval](https://untether.littlebearapps.com/how-to/interactive-approval/).
+For non-Claude engines, approval is enforced per-engine pre-run — Codex runs inside its sandbox (`/config` → Approval policy: **safe** = read-only), Gemini uses `--approval-mode` — rather than via mid-run buttons. Full guide: [Interactive approval](https://untether.littlebearapps.com/how-to/interactive-approval/).
 
 ## What happens if my agent crashes or my phone loses signal mid-run?
 

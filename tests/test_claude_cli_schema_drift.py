@@ -14,6 +14,7 @@ import mmap
 import os
 import re
 import shutil
+import subprocess
 from collections.abc import Iterator
 
 import pytest
@@ -394,3 +395,238 @@ def test_hook_started_precedes_a_detached_hook_spawn(cli_blob: mmap.mmap) -> Non
             rb'`Hook "\$\{\w+\.command\}" requires bash but Git Bash',
             window,
         ), "hook spawn detached flag no longer keyed on the Windows/Git Bash check"
+
+
+# --- #209: extra_args deny-list stays current with the CLI -------------------
+
+# Long flags the #209 deny-list refuses in `[claude] extra_args`.
+_209_BLOCKED = (
+    "--dangerously-skip-permissions",
+    "--allow-dangerously-skip-permissions",
+    "--permission-prompts",
+    "--allowedTools",
+    "--allowed-tools",
+)
+_209_MANAGED = (
+    "--print",
+    "--output-format",
+    "--input-format",
+    "--resume",
+    "--continue",
+    "--permission-mode",
+    "--permission-prompt-tool",
+)
+
+# Every long flag `claude --help` lists on 2.1.285, classified for #209.
+# blocked  — refused in extra_args (bypass / approval wiring)
+# managed  — Untether sets it; refused in extra_args
+# allowed  — passes through; documented in docs/how-to/security.md
+# d10      — allowed today but replaces/breaks the stream-json run (interactive,
+#            cloud, background, TUI); candidates for the v0.35.6 follow-up #851
+CLAUDE_FLAGS_CLASSIFIED_2_1_285: dict[str, str] = {
+    **dict.fromkeys(_209_BLOCKED, "blocked"),
+    **dict.fromkeys(_209_MANAGED, "managed"),
+    # allowed (documented; some can't be fully denylisted — security.md)
+    "--add-dir": "allowed",  # D4: widening, not a bypass
+    "--agent": "allowed",
+    "--agents": "allowed",
+    "--append-system-prompt": "allowed",
+    "--autocompact": "allowed",  # rc15 #819 R15-19e relies on it
+    "--bare": "allowed",
+    "--betas": "allowed",
+    "--brief": "allowed",
+    "--chrome": "allowed",
+    "--client-data-url": "allowed",
+    "--debug": "allowed",
+    "--debug-file": "allowed",
+    "--disable-slash-commands": "allowed",
+    "--disallowed-tools": "allowed",
+    "--disallowedTools": "allowed",
+    "--effort": "allowed",
+    "--exclude-dynamic-system-prompt-sections": "allowed",
+    "--fallback-model": "allowed",
+    "--file": "allowed",
+    "--forward-subagent-text": "allowed",
+    "--include-hook-events": "allowed",  # #812: deduped, never reserved
+    "--include-partial-messages": "allowed",
+    "--json-schema": "allowed",
+    "--max-budget-usd": "allowed",
+    "--mcp-config": "allowed",
+    "--model": "allowed",
+    "--name": "allowed",
+    "--no-chrome": "allowed",
+    "--plugin-dir": "allowed",
+    "--plugin-url": "allowed",
+    "--prompt-suggestions": "allowed",
+    "--restricted": "allowed",
+    "--safe-mode": "allowed",
+    "--setting-sources": "allowed",
+    "--settings": "allowed",
+    "--strict-mcp-config": "allowed",
+    "--system-prompt": "allowed",
+    "--system-prompt-snapshot": "allowed",
+    "--tools": "allowed",
+    "--verbose": "allowed",
+    "--ax-screen-reader": "allowed",
+    "--help": "allowed",
+    "--version": "allowed",
+    "--worktree": "allowed",
+    # d10: protocol-breaking, not a security bypass (follow-up #851)
+    "--background": "d10",
+    "--bg": "d10",
+    "--cloud": "d10",
+    "--desktop": "d10",
+    "--environment": "d10",
+    "--fork-session": "d10",
+    "--from-pr": "d10",
+    "--ide": "d10",
+    "--no-session-persistence": "d10",
+    "--remote-control": "d10",
+    "--remote-control-session-name-prefix": "d10",
+    "--replay-user-messages": "d10",
+    "--session-id": "d10",
+    "--teleport": "d10",
+    "--tmux": "d10",
+}
+
+_HELP_FLAG_RE = re.compile(
+    r"^  (?:-\w, )?(--[A-Za-z][\w-]*)(?:, (--[A-Za-z][\w-]*))?", re.MULTILINE
+)
+
+
+def _claude_help() -> str:
+    text = _real_probe_cli_help(shutil.which("claude") or "claude")
+    if not text:
+        pytest.skip("`claude --help` could not be run")
+    return text
+
+
+def _probe_env() -> dict[str, str]:
+    # Unroutable API base + no nonessential traffic: argv errors only, never a turn.
+    return {
+        **os.environ,
+        "ANTHROPIC_BASE_URL": "http://127.0.0.1:9",
+        "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1",
+    }
+
+
+def test_209_blocked_flags_listed_in_help() -> None:
+    text = _claude_help()
+    for flag in (*_209_BLOCKED, "--print", "--output-format", "--input-format"):
+        assert flag in text, (
+            f"`claude --help` no longer lists {flag} — renamed or removed upstream; "
+            f"update the #209 deny-list (last green on CLI {PROBED_CLI_VERSION})"
+        )
+
+
+@pytest.mark.parametrize(
+    "flag",
+    [
+        *_209_BLOCKED,
+        "--print",
+        "--output-format",
+        "--input-format",
+        "--permission-mode",
+        "--permission-prompt-tool",
+    ],
+)
+def test_209_blocked_flags_recognised_by_parser(flag: str, tmp_path) -> None:
+    """Known boolean flag → the `-p` input error; known value flag → commander's
+    `argument missing`; gone → `unknown option`. Never a prompt (that bills).
+    `--resume`/`--continue` are excluded: without a value they look up a
+    session instead of failing at parse time."""
+    claude = shutil.which("claude")
+    assert claude is not None
+    try:
+        proc = subprocess.run(
+            [claude, "-p", flag],
+            capture_output=True,
+            text=True,
+            timeout=60,
+            stdin=subprocess.DEVNULL,
+            cwd=tmp_path,
+            env=_probe_env(),
+        )
+    except subprocess.TimeoutExpired:
+        pytest.fail(f"`claude -p {flag}` did not exit within 60 s")
+    blob = f"{proc.stderr}\n{proc.stdout}"
+    if f"unknown option '{flag}'" in blob:
+        pytest.fail(
+            f"flag {flag} is gone upstream — drop it from the #209 deny-list or "
+            f"it was renamed (last green on CLI {PROBED_CLI_VERSION})"
+        )
+    if "Input must be provided" in blob or "argument missing" in blob:
+        return
+    pytest.skip(
+        f"unexpected wording for {flag}: {blob.strip()[:200]!r} — re-derive the "
+        f"probe (last green on CLI {PROBED_CLI_VERSION})"
+    )
+
+
+def test_209_commander_expands_short_clusters(tmp_path) -> None:
+    """Pins extra_args_guard rule 3: `-pv` is `--print --version`, so clusters
+    must be walked (`-pc` would otherwise slip a managed flag through)."""
+    claude = shutil.which("claude")
+    assert claude is not None
+    proc = subprocess.run(
+        [claude, "-pv"],
+        capture_output=True,
+        text=True,
+        timeout=60,
+        stdin=subprocess.DEVNULL,
+        cwd=tmp_path,
+        env=_probe_env(),
+    )
+    assert re.search(r"\d+\.\d+\.\d+", proc.stdout), (proc.stdout, proc.stderr)
+
+
+def test_209_bypass_launch_gate_literal_present(cli_blob: mmap.mmap) -> None:
+    """Why `--allow-dangerously-skip-permissions` is blocked too: without it the
+    CLI refuses to enter bypassPermissions later in the session."""
+    literal = (
+        b"Cannot set permission mode to bypassPermissions because the session"
+        b" was not launched with --dangerously-skip-permissions"
+    )
+    if cli_blob.find(literal) == -1:
+        pytest.skip(
+            "bypass launch-gate literal moved — re-derive (last green on CLI "
+            f"{PROBED_CLI_VERSION})"
+        )
+
+
+def test_209_claude_flag_snapshot() -> None:
+    """Every long flag in `claude --help` must be classified for #209.
+
+    A new flag fails here until someone decides block / allow (+ document);
+    a keyword filter would miss run-replacing flags like `--remote-control`.
+    Removals only warn."""
+    text = _claude_help().split("\nCommands:")[0]
+    listed: set[str] = set()
+    for m in _HELP_FLAG_RE.finditer(text):
+        listed.update(f for f in m.groups() if f)
+    assert listed, "parsed no flags from `claude --help` — the help layout moved"
+    unclassified = sorted(listed - CLAUDE_FLAGS_CLASSIFIED_2_1_285.keys())
+    assert not unclassified, (
+        f"new Claude flag(s) {unclassified} on the installed CLI — classify each "
+        "for #209 (block / allow + document in docs/how-to/security.md) and add "
+        f"it to CLAUDE_FLAGS_CLASSIFIED_2_1_285 (last green on CLI "
+        f"{PROBED_CLI_VERSION})"
+    )
+    removed = sorted(CLAUDE_FLAGS_CLASSIFIED_2_1_285.keys() - listed)
+    hidden_ok = {"--permission-prompt-tool"}  # hidden since before 2.1.228 (#750)
+    if set(removed) - hidden_ok:
+        import warnings
+
+        warnings.warn(
+            f"Claude flags no longer in --help: {sorted(set(removed) - hidden_ok)}",
+            stacklevel=1,
+        )
+
+
+def test_209_snapshot_matches_the_deny_list() -> None:
+    """The snapshot's blocked/managed rows are exactly what the guard refuses."""
+    from untether.runners.claude import find_blocked_claude_args
+
+    for flag, cls in CLAUDE_FLAGS_CLASSIFIED_2_1_285.items():
+        refused = bool(find_blocked_claude_args([flag]))
+        assert refused is (cls in {"blocked", "managed"}), (flag, cls)

@@ -288,6 +288,338 @@ class TestClaudeBuildRunner:
             runner = self._call({"extra_args": [flag]})
             assert flag in runner.extra_args
 
+    # --- #209: bypass/managed flags in every spelling --------------------
+
+    @pytest.mark.parametrize(
+        "extra",
+        [
+            ["--dangerously-skip-permissions"],
+            ["--allow-dangerously-skip-permissions"],
+            ["--dangerously-skip-permissions=true"],
+        ],
+    )
+    def test_209_bypass_flags_rejected(self, extra: list[str]) -> None:
+        from untether.config import ConfigError
+
+        with pytest.raises(ConfigError, match="approvals") as excinfo:
+            self._call({"extra_args": extra})
+        msg = str(excinfo.value)
+        assert "security.md" in msg
+        # The refusal must not point at the bypass opt-in.
+        assert "dangerously_skip_permissions" not in msg
+        assert "bypassPermissions" not in msg
+
+    @pytest.mark.parametrize(
+        "extra", [["--permission-prompts", "none"], ["--permission-prompts=host"]]
+    )
+    def test_209_permission_prompts_rejected(self, extra: list[str]) -> None:
+        from untether.config import ConfigError
+
+        with pytest.raises(ConfigError, match="permission prompts"):
+            self._call({"extra_args": extra})
+
+    @pytest.mark.parametrize(
+        "extra", [["--allowedTools", "Bash"], ["--allowed-tools=Bash"]]
+    )
+    def test_209_allowed_tools_flag_rejected_points_at_key(
+        self, extra: list[str]
+    ) -> None:
+        from untether.config import ConfigError
+
+        with pytest.raises(ConfigError, match="`\\[claude\\] allowed_tools`"):
+            self._call({"extra_args": extra})
+
+    @pytest.mark.parametrize("extra", [["-pc"], ["-vp"], ["-rabc"], ["-cv"]])
+    def test_209_short_clusters_rejected(self, extra: list[str]) -> None:
+        from untether.config import ConfigError
+
+        with pytest.raises(ConfigError, match="managed by Untether"):
+            self._call({"extra_args": extra})
+
+    def test_209_double_dash_rejected(self) -> None:
+        from untether.config import ConfigError
+
+        with pytest.raises(ConfigError, match="bare `--`"):
+            self._call({"extra_args": ["--"]})
+        with pytest.raises(ConfigError) as excinfo:
+            self._call(
+                {
+                    "extra_args": [
+                        "--mcp-config",
+                        "x.json",
+                        "--",
+                        "--dangerously-skip-permissions",
+                    ]
+                }
+            )
+        msg = str(excinfo.value)
+        assert "'--'" in msg
+        assert "'--dangerously-skip-permissions'" in msg
+
+    def test_209_all_hits_listed_once(self) -> None:
+        from untether.config import ConfigError
+
+        with pytest.raises(ConfigError) as excinfo:
+            self._call(
+                {
+                    "extra_args": [
+                        "--yolo-ish",
+                        "--dangerously-skip-permissions",
+                        "--dangerously-skip-permissions",
+                        "-p",
+                    ]
+                }
+            )
+        msg = str(excinfo.value)
+        assert msg.count("'--dangerously-skip-permissions'") == 1
+        assert msg.count("'--print'") == 1
+        assert "--yolo-ish" not in msg
+
+    def test_209_error_and_log_omit_values(self) -> None:
+        from structlog.testing import capture_logs
+
+        from untether.config import ConfigError
+
+        with capture_logs() as logs, pytest.raises(ConfigError) as excinfo:
+            self._call({"extra_args": ["--permission-prompts=sEcReT"]})
+        assert "sEcReT" not in str(excinfo.value)
+        assert all("sEcReT" not in repr(entry) for entry in logs)
+        warn = next(e for e in logs if e["event"] == "claude.config.invalid")
+        assert warn["flags"] == ["--permission-prompts"]
+        assert warn["categories"] == ["managed"]
+        assert warn["log_level"] == "warning"
+
+    def test_209_blocked_error_type(self) -> None:
+        from untether.runners.extra_args_guard import BlockedExtraArgsError
+
+        with pytest.raises(BlockedExtraArgsError):
+            self._call({"extra_args": ["--dangerously-skip-permissions"]})
+
+    @pytest.mark.parametrize(
+        "extra",
+        [
+            ["--chrome"],
+            ["--no-chrome"],
+            ["--strict-mcp-config"],
+            ["--mcp-config", "x.json"],
+            ["--settings", "s.json"],
+            ["--setting-sources", "user"],
+            ["--plugin-dir", "p"],
+            ["--add-dir", "/x"],
+            ["--disallowedTools", "Bash"],
+            ["--append-system-prompt", "be brief"],
+            ["-d", "api"],
+            ["--include-hook-events"],
+            ["--autocompact", "100k"],
+        ],
+    )
+    def test_209_documented_passthrough_still_accepted(self, extra: list[str]) -> None:
+        runner = self._call({"extra_args": extra})
+        assert runner.extra_args == extra
+
+    def test_209_dsp_key_emits_flag_and_warns_once(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from structlog.testing import capture_logs
+
+        import untether.runners.claude as claude_mod
+
+        monkeypatch.setattr(claude_mod, "_DSP_WARNED", False)
+        with capture_logs() as logs:
+            first = self._call({"dangerously_skip_permissions": True})
+            self._call({"dangerously_skip_permissions": True})
+        args = first.build_args("hi", None, state=first.new_state("hi", None))
+        assert "--dangerously-skip-permissions" in args
+        warns = [
+            e
+            for e in logs
+            if e["event"] == "claude.config.dangerously_skip_permissions"
+        ]
+        assert len(warns) == 1
+        assert warns[0]["log_level"] == "warning"
+        assert "/planmode" in warns[0]["note"]
+
+    def test_209_dsp_absent_by_default(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from structlog.testing import capture_logs
+
+        import untether.runners.claude as claude_mod
+
+        monkeypatch.setattr(claude_mod, "_DSP_WARNED", False)
+        with capture_logs() as logs:
+            runner = self._call({})
+        args = runner.build_args("hi", None, state=runner.new_state("hi", None))
+        assert "--dangerously-skip-permissions" not in args
+        assert not [
+            e
+            for e in logs
+            if e["event"] == "claude.config.dangerously_skip_permissions"
+        ]
+
+
+class TestCodexBuildRunnerDenylist:
+    """#209: `[codex] extra_args` bypass/managed/workspace flags."""
+
+    def _call(self, config: dict[str, Any]):
+        from pathlib import Path
+
+        from untether.runners.codex import build_runner
+
+        return build_runner(config, Path("/tmp/untether.toml"))
+
+    def _rejected(self, extra: list[str], match: str | None = None) -> str:
+        from untether.runners.extra_args_guard import BlockedExtraArgsError
+
+        with pytest.raises(BlockedExtraArgsError, match=match) as excinfo:
+            self._call({"extra_args": extra})
+        return str(excinfo.value)
+
+    @pytest.mark.parametrize(
+        "flag",
+        [
+            "--dangerously-bypass-approvals-and-sandbox",
+            "--yolo",
+            "--approve-for-me",
+            "--not-so-yolo",
+            "--dangerously-bypass-hook-trust",
+        ],
+    )
+    def test_209_codex_bypass_flags_rejected(self, flag: str) -> None:
+        msg = self._rejected([flag], match="bypass")
+        assert "security.md" in msg
+        assert "config.toml" not in msg
+
+    @pytest.mark.parametrize(
+        "extra",
+        [
+            ["-s", "danger-full-access"],
+            ["-sdanger-full-access"],
+            ["-s=danger-full-access"],
+            ["--sandbox", "danger-full-access"],
+            ["--sandbox=danger-full-access"],
+            ["--sandbox", "DANGER-FULL-ACCESS"],
+            ["-s", " danger-full-access "],
+            ['--sandbox="danger-full-access"'],
+        ],
+    )
+    def test_209_codex_danger_sandbox_all_spellings(self, extra: list[str]) -> None:
+        msg = self._rejected(extra, match="'--sandbox'")
+        assert "bypass" in msg
+
+    @pytest.mark.parametrize(
+        "extra", [["-s", "workspace-write"], ["--sandbox=read-only"], ["-sread-only"]]
+    )
+    def test_209_codex_safe_sandbox_values_accepted(self, extra: list[str]) -> None:
+        runner = self._call({"extra_args": extra})
+        assert runner.extra_args == extra
+
+    @pytest.mark.parametrize(
+        "extra",
+        [
+            ["-c", 'sandbox_mode="danger-full-access"'],
+            ["-c", "sandbox_mode=danger-full-access"],
+            ['-csandbox_mode="danger-full-access"'],
+            ["--config", "sandbox_mode = 'DANGER-FULL-ACCESS'"],
+            ['--config=sandbox_mode="danger-full-access"'],
+            ["-c", 'profiles.x.sandbox_mode="danger-full-access"'],
+            ["-c", 'profiles.x={sandbox_mode="danger-full-access"}'],
+            ["-c", 'default_permissions=":danger-full-access"'],
+            ["-c", 'permission_profile=":danger-no-sandbox"'],
+            ["-c", "bypass_hook_trust=true"],
+            ["-c", "bypass_hook_trust=false"],
+            ["-c", "sandbox_workspace_write.dangerously_allow_all_unix_sockets=true"],
+            ["-c", "network.dangerously_allow_non_loopback_proxy=true"],
+        ],
+    )
+    def test_209_codex_config_substring_rule(self, extra: list[str]) -> None:
+        self._rejected(extra, match="'--config'")
+
+    @pytest.mark.parametrize(
+        "extra",
+        [
+            ["-c", "notify=[]"],
+            ["-c", 'sandbox_mode="workspace-write"'],
+            ["-c", "model_reasoning_effort=high"],
+            ["-c", 'approval_policy="never"'],
+            ["-c", "shell_environment_policy.inherit=all"],
+            ["-c", "sandbox_workspace_write.network_access=true"],
+        ],
+    )
+    def test_209_codex_config_keys_allowed(self, extra: list[str]) -> None:
+        runner = self._call({"extra_args": extra})
+        assert runner.extra_args == extra
+
+    @pytest.mark.parametrize(
+        "extra", [["-C", "/x"], ["-C/x"], ["--cd", "/x"], ["--cd=/x"], ["--worktree"]]
+    )
+    def test_209_codex_workspace_flags_rejected(self, extra: list[str]) -> None:
+        self._rejected(extra, match="working directory")
+
+    @pytest.mark.parametrize(
+        "extra",
+        [
+            ["-a", "never"],
+            ["-anever"],
+            ["--ask-for-approval=never"],
+            ["--ignore-rules"],
+            ["--ignore-user-config"],
+            ["-oout.txt"],
+        ],
+    )
+    def test_209_codex_managed_additions_rejected(self, extra: list[str]) -> None:
+        self._rejected(extra, match="managed by Untether")
+
+    def test_209_codex_double_dash_rejected(self) -> None:
+        self._rejected(["--"], match="bare `--`")
+
+    def test_209_codex_root_sandbox_coexists_with_safe_mode(self) -> None:
+        from untether.runners.run_options import EngineRunOptions, apply_run_options
+
+        runner = self._call({"extra_args": ["-s", "workspace-write"]})
+        with apply_run_options(EngineRunOptions(permission_mode="safe")):
+            args = runner.build_args("hi", None, state=runner.new_state("hi", None))
+        exec_idx = args.index("exec")
+        assert args.index("-s") < exec_idx
+        assert args[args.index("--sandbox") + 1] == "read-only"
+        assert args.index("--sandbox") > exec_idx
+        assert args.count("--sandbox") + args.count("-s") == 2
+
+    @pytest.mark.parametrize(
+        "extra",
+        [
+            ["--model", "gpt-5.5"],
+            ["-m", "x"],
+            ["--profile", "work"],
+            ["--oss"],
+            ["--enable", "foo"],
+            ["--add-dir", "/x"],
+            ["-i", "img.png"],
+            ["--strict-config"],
+        ],
+    )
+    def test_209_codex_passthrough_still_accepted(self, extra: list[str]) -> None:
+        runner = self._call({"extra_args": extra})
+        assert runner.extra_args == extra
+
+    def test_209_codex_default_and_profile_unchanged(self) -> None:
+        assert self._call({}).extra_args == ["-c", "notify=[]"]
+        assert self._call({"profile": "work"}).extra_args[-2:] == [
+            "--profile",
+            "work",
+        ]
+
+    def test_209_codex_error_omits_values(self) -> None:
+        from structlog.testing import capture_logs
+
+        from untether.config import ConfigError
+
+        with capture_logs() as logs, pytest.raises(ConfigError) as excinfo:
+            self._call({"extra_args": ["-c", "bypass_hook_trust=sEcReT"]})
+        assert "sEcReT" not in str(excinfo.value)
+        assert all("sEcReT" not in repr(entry) for entry in logs)
+        warn = next(e for e in logs if e["event"] == "codex.config.invalid")
+        assert warn["flags"] == ["--config"]
+        assert warn["categories"] == ["bypass"]
+
 
 # ---------------------------------------------------------------------------
 # Codex
@@ -354,38 +686,113 @@ class TestCodexBuildArgs:
         assert "-c" in args
         assert "notify=[]" in args
 
-    def test_permission_mode_safe(self) -> None:
-        runner = self._runner()
+    # --- #830: safe → exec-level `--sandbox read-only`; no --ask-for-approval ---
+
+    def _safe_args(self, resume: ResumeToken | None = None, **kwargs: Any):
+        runner = self._runner(**kwargs)
+        state = runner.new_state("hello", None)
+        opts = RunOptions(permission_mode="safe")
+        with patch("untether.runners.codex.get_run_options", return_value=opts):
+            return runner.build_args("hello", resume, state=state)
+
+    def test_permission_mode_safe_uses_read_only_sandbox(self) -> None:
+        args = self._safe_args()
+        i = args.index("--sandbox")
+        assert args[i : i + 2] == ["--sandbox", "read-only"]
+        # Exec-level: after `exec`, so it outranks any root-level sandbox flag.
+        assert i > args.index("exec")
+        assert args[-1] == "-"
+        # Regression for #830: `untrusted` was removed in codex-cli 0.149.0.
+        assert "--ask-for-approval" not in args
+        assert "-a" not in args
+        assert "untrusted" not in args
+
+    def test_permission_mode_safe_resume_sandbox_before_resume(self) -> None:
+        args = self._safe_args(ResumeToken(engine="codex", value="abc"))
+        assert args[-5:] == ["--sandbox", "read-only", "resume", "abc", "-"]
+
+    def test_permission_mode_safe_continue(self) -> None:
+        args = self._safe_args(ResumeToken(engine="codex", value="", is_continue=True))
+        assert args[-5:] == ["--sandbox", "read-only", "resume", "--last", "-"]
+
+    def test_safe_sandbox_is_exec_level_despite_root_extra_args(self) -> None:
+        from untether.runners.codex import CodexRunner
+
+        runner = CodexRunner(
+            codex_cmd="codex", extra_args=["--sandbox", "danger-full-access"]
+        )
         state = runner.new_state("hello", None)
         opts = RunOptions(permission_mode="safe")
         with patch("untether.runners.codex.get_run_options", return_value=opts):
             args = runner.build_args("hello", None, state=state)
-        assert "--ask-for-approval" in args
-        idx = args.index("--ask-for-approval")
-        assert args[idx + 1] == "untrusted"
-        # Must come before "exec" (top-level flag, not exec subcommand flag)
-        assert idx < args.index("exec")
+        exec_idx = args.index("exec")
+        # The root copy stays before `exec` (upstream precedence: an exec-level
+        # --sandbox wins, R4) and Untether's read-only follows `exec`.
+        assert args[:2] == ["--sandbox", "danger-full-access"]
+        tail = args[exec_idx:]
+        assert tail[tail.index("--sandbox") + 1] == "read-only"
 
-    def test_permission_mode_none_defaults_to_never(self) -> None:
+    def test_permission_mode_none_passes_no_policy_flags(self) -> None:
         runner = self._runner()
         state = runner.new_state("hello", None)
         opts = RunOptions(permission_mode=None)
         with patch("untether.runners.codex.get_run_options", return_value=opts):
             args = runner.build_args("hello", None, state=state)
-        assert "--ask-for-approval" in args
-        idx = args.index("--ask-for-approval")
-        assert args[idx + 1] == "never"
-        assert idx < args.index("exec")
+        assert "--ask-for-approval" not in args
+        assert "-a" not in args
+        assert "--sandbox" not in args
 
-    def test_run_options_none_defaults_to_never(self) -> None:
-        """When run_options is None (no /config overrides), default to never."""
+    def test_run_options_none_passes_no_policy_flags(self) -> None:
+        """No /config overrides: full auto, Codex's own sandbox setting."""
         runner = self._runner()
         state = runner.new_state("hello", None)
         args = runner.build_args("hello", None, state=state)
-        assert "--ask-for-approval" in args
-        idx = args.index("--ask-for-approval")
-        assert args[idx + 1] == "never"
-        assert idx < args.index("exec")
+        assert "--ask-for-approval" not in args
+        assert "-a" not in args
+        assert "--sandbox" not in args
+
+    def test_permission_mode_auto_is_full_auto_without_warn(
+        self, reset_codex_pm_warned: None
+    ) -> None:
+        from structlog.testing import capture_logs
+
+        runner = self._runner()
+        state = runner.new_state("hello", None)
+        opts = RunOptions(permission_mode="auto")
+        with (
+            capture_logs() as logs,
+            patch("untether.runners.codex.get_run_options", return_value=opts),
+        ):
+            args = runner.build_args("hello", None, state=state)
+        assert "--sandbox" not in args
+        assert not [e for e in logs if e["event"] == "codex.permission_mode.unknown"]
+
+    def test_unknown_permission_mode_warns_once_and_runs_default(
+        self, reset_codex_pm_warned: None
+    ) -> None:
+        from structlog.testing import capture_logs
+
+        runner = self._runner()
+        opts = RunOptions(permission_mode="read-only")
+        with (
+            capture_logs() as logs,
+            patch("untether.runners.codex.get_run_options", return_value=opts),
+        ):
+            first = runner.build_args("hello", None, state=runner.new_state("h", None))
+            second = runner.build_args("hello", None, state=runner.new_state("h", None))
+        assert "--sandbox" not in first
+        assert "--sandbox" not in second
+        warns = [e for e in logs if e["event"] == "codex.permission_mode.unknown"]
+        assert len(warns) == 1
+        assert warns[0]["mode"] == "read-only"
+        assert warns[0]["log_level"] == "warning"
+
+
+@pytest.fixture
+def reset_codex_pm_warned(monkeypatch: pytest.MonkeyPatch) -> None:
+    import untether.runners.codex as codex_mod
+
+    monkeypatch.setattr(codex_mod, "_UNKNOWN_PM_WARNED", set())
 
 
 # ---------------------------------------------------------------------------

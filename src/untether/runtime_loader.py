@@ -12,6 +12,7 @@ from .engines import get_backend, list_backend_ids
 from .ids import RESERVED_CHAT_COMMANDS
 from .logging import get_logger
 from .router import AutoRouter, EngineStatus, RunnerEntry
+from .runners.extra_args_guard import BlockedExtraArgsError
 from .settings import UntetherSettings
 from .transport_runtime import TransportRuntime
 
@@ -110,7 +111,21 @@ def build_router(
             if engine_id == default_engine:
                 raise
             issue = issue or str(exc)
-            if engine_cfg:
+            if isinstance(exc, BlockedExtraArgsError):
+                # #209 D15: a refused extra_args flag disables the engine.
+                # Rebuilding it from `{}` (the bad_config fallback) would also
+                # drop *restrictive* settings, and on hot-reload the only
+                # signal would be a log line. The defaults-built runner is
+                # kept only so the entry exists (startup "failed to load:",
+                # a clear "unavailable" reply naming the flag); `load_error`
+                # entries are never available, so it never runs.
+                try:
+                    runner = backend.build_runner({}, config_path)
+                except Exception:  # noqa: BLE001
+                    issues.append((engine_id, issue, True))
+                    continue
+                status = "load_error"
+            elif engine_cfg:
                 try:
                     runner = backend.build_runner({}, config_path)
                 except Exception as fallback_exc:  # noqa: BLE001
@@ -125,7 +140,7 @@ def build_router(
                 continue
 
         cmd = backend.cli_cmd or backend.id
-        if shutil.which(cmd) is None:
+        if status != "load_error" and shutil.which(cmd) is None:
             status = "missing_cli"
             if issue:
                 issue = f"{issue}; {cmd} not found on PATH"

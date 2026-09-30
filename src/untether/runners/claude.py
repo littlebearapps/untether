@@ -69,6 +69,15 @@ from ..utils.subprocess import (
     signal_pid_group,
     wrap_with_env_i,
 )
+from .extra_args_guard import (
+    SECURITY_DOC_REF,
+    BlockedArg,
+    BlockedCategory,
+    BlockedExtraArgsError,
+    dedupe_hits,
+    format_blocked,
+    iter_option_tokens,
+)
 from .run_options import (
     CLAUDE_PLAN_AUTO_MODE,
     LEGACY_CLAUDE_PLAN_AUTO_MODE,
@@ -89,42 +98,85 @@ _RESUME_RE = re.compile(
     r"(?im)^\s*`?claude\s+(?:--resume|-r)\s+(?P<token>[^`\s]+)`?\s*$"
 )
 
-# Flags that Untether sets on every spawn (stream-json I/O, resume tokens,
-# permission wiring). A user-supplied copy in `[claude].extra_args` would
-# either duplicate the arg or collide with Untether's expected value, so
-# `build_runner` rejects any entry matching this set or one of the equivalent
-# `key=value` prefixes below. Mirrors `codex._EXEC_ONLY_FLAGS` (#407).
+# `[claude] extra_args` deny-list (#407, #209). Matched through the shared
+# tokeniser in `extra_args_guard`, so every spelling is caught: `--flag=value`,
+# short clusters (`-pc`, commander expands them) and a bare `--`.
+#
+# Managed: flags Untether sets on every spawn (stream-json I/O, resume tokens,
+# permission wiring). A user copy would duplicate or collide with Untether's
+# value. Mirrors `codex.find_blocked_codex_args`.
 _RESERVED_FLAGS: frozenset[str] = frozenset(
     {
-        "-p",
         "--print",
         "--output-format",
         "--input-format",
         "--resume",
-        "-r",
         "--continue",
-        "-c",
         "--permission-mode",
         "--permission-prompt-tool",
     }
 )
-_RESERVED_PREFIXES: tuple[str, ...] = (
-    "--output-format=",
-    "--input-format=",
-    "--resume=",
-    "--permission-mode=",
-    "--permission-prompt-tool=",
+_MANAGED_HINT = "is managed by Untether and cannot be overridden"
+# #209 (Claude findings Q3): `--dangerously-skip-permissions` outranks
+# `--permission-mode` (a probe shows plan + skip → init `bypassPermissions`),
+# and `--allow-dangerously-skip-permissions` makes bypass reachable later.
+# Either one voids every Telegram approval, #749 and `/planmode`. The hint is
+# deliberately neutral: it never names the explicit opt-in key.
+_BYPASS_HINT = (
+    "bypasses Untether's Telegram approvals and is not accepted in"
+    f" `extra_args`; see {SECURITY_DOC_REF}"
 )
+_CLAUDE_BLOCKED: dict[str, tuple[BlockedCategory, str]] = {
+    **dict.fromkeys(_RESERVED_FLAGS, ("managed", _MANAGED_HINT)),
+    "--permission-prompts": (
+        "managed",
+        "is managed by Untether: Untether answers permission prompts itself",
+    ),
+    "--allowedTools": (
+        "managed",
+        "is managed by Untether: use `[claude] allowed_tools` — it is"
+        " permission-mode aware (#749)",
+    ),
+    "--allowed-tools": (
+        "managed",
+        "is managed by Untether: use `[claude] allowed_tools` — it is"
+        " permission-mode aware (#749)",
+    ),
+    "--dangerously-skip-permissions": ("bypass", _BYPASS_HINT),
+    "--allow-dangerously-skip-permissions": ("bypass", _BYPASS_HINT),
+    "--": (
+        "separator",
+        "is not accepted: a bare `--` turns Untether's own flags into prompt text",
+    ),
+}
+# commander short options per `claude --help` (2.1.285); d/n/r/w take a value
+# (optional or required), so the rest of a cluster after them is that value.
+_CLAUDE_SHORT_ALIASES: dict[str, str] = {
+    "p": "--print",
+    "r": "--resume",
+    "c": "--continue",
+    "d": "--debug",
+    "n": "--name",
+    "w": "--worktree",
+    "v": "--version",
+    "h": "--help",
+}
+_CLAUDE_SHORT_VALUE_FLAGS: frozenset[str] = frozenset({"d", "n", "r", "w"})
 
 
-def _find_reserved_flag(extra_args: list[str]) -> str | None:
-    for arg in extra_args:
-        if arg in _RESERVED_FLAGS:
-            return arg
-        for prefix in _RESERVED_PREFIXES:
-            if arg.startswith(prefix):
-                return arg
-    return None
+def find_blocked_claude_args(extra_args: list[str]) -> list[BlockedArg]:
+    """Every blocked flag in *extra_args* (#209), deduped, in order."""
+    hits: list[BlockedArg] = []
+    for tok in iter_option_tokens(
+        extra_args,
+        short_aliases=_CLAUDE_SHORT_ALIASES,
+        short_value_flags=_CLAUDE_SHORT_VALUE_FLAGS,
+    ):
+        rule = _CLAUDE_BLOCKED.get(tok.flag)
+        if rule is not None:
+            category, hint = rule
+            hits.append(BlockedArg(flag=tok.flag, category=category, hint=hint))
+    return dedupe_hits(hits)
 
 
 def _load_env_extras() -> tuple[tuple[str, ...], tuple[str, ...]]:
@@ -150,7 +202,8 @@ def _load_env_extras() -> tuple[tuple[str, ...], tuple[str, ...]]:
 
 
 # #812: ``--include-hook-events`` (listed in ``claude --help`` on 2.1.284,
-# findings §A2). Not in ``_RESERVED_FLAGS`` (D-2): a config that already
+# findings §A2). Not in ``_RESERVED_FLAGS`` / the #209 deny-list (D-2): a
+# config that already
 # passes it must keep working, so ``_build_args`` dedupes instead.
 _HOOK_EVENTS_FLAG = "--include-hook-events"
 _CLI_HELP_TIMEOUT_S = 15.0
@@ -8535,6 +8588,23 @@ class ClaudeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
 
 
 _LEGACY_AUTO_WARNED = False
+_DSP_WARNED = False
+
+
+def _warn_dangerously_skip_permissions(config_path: Path) -> None:
+    """#209 D6: the explicit opt-in key silently overrides every mode; say so once."""
+    global _DSP_WARNED
+    if _DSP_WARNED:
+        return
+    _DSP_WARNED = True
+    logger.warning(
+        "claude.config.dangerously_skip_permissions",
+        config_path=str(config_path),
+        note=(
+            "--dangerously-skip-permissions overrides permission_mode and every"
+            " /planmode choice; no Telegram approvals will be shown"
+        ),
+    )
 
 
 def _validate_permission_mode(value: object, config_path: Path) -> str | None:
@@ -8615,17 +8685,20 @@ def build_runner(config: EngineConfig, config_path: Path) -> Runner:
             f"Invalid `claude.extra_args` in {config_path}; expected a list of strings."
         )
 
-    reserved_flag = _find_reserved_flag(extra_args)
-    if reserved_flag:
+    blocked = find_blocked_claude_args(extra_args)
+    if blocked:
+        # Flag names only — never the values (#209).
         logger.warning(
             "claude.config.invalid",
-            error=f"reserved flag {reserved_flag!r} is managed by Untether",
+            error="blocked extra_args flag",
+            flags=[hit.flag for hit in blocked],
+            categories=[hit.category for hit in blocked],
             config_path=str(config_path),
         )
-        raise ConfigError(
-            f"Invalid `claude.extra_args` in {config_path}; flag {reserved_flag!r} "
-            f"is managed by Untether and cannot be overridden."
-        )
+        raise BlockedExtraArgsError(format_blocked("claude", config_path, blocked))
+
+    if dangerously_skip_permissions:
+        _warn_dangerously_skip_permissions(config_path)
 
     return ClaudeRunner(
         claude_cmd=claude_cmd,

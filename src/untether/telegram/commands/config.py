@@ -115,8 +115,8 @@ _HOME_HINTS: dict[str, dict[str, str]] = {
         "plan-auto": "auto-approve plans",
         "auto": "classifier-gated",
         "default": "agent decides",
-        "full auto": "all tools approved",
-        "safe": "untrusted tools blocked",
+        "full auto": "Codex's own sandbox",
+        "safe": "read-only sandbox",
         "full access": "all tools approved",
         "edit files": "files ok, no shell",
         "read-only": "write tools blocked",
@@ -768,11 +768,14 @@ async def _page_planmode(ctx: CommandContext, action: str | None = None) -> None
         lines = [
             "<b>📋 Approval policy</b>",
             "",
-            "Control which tools Codex can use.",
-            "Codex runs non-interactively — approval is set before the run.",
+            "Codex runs unattended — it never stops to ask."
+            " This picks its sandbox before the run.",
             "",
-            "• <b>full auto</b> — all tools approved (default)",
-            "• <b>safe</b> — only trusted commands run, untrusted denied",
+            "• <b>full auto</b> — uses your Codex sandbox setting; for a trusted"
+            " project that usually means it can edit files there (default)",
+            "• <b>safe</b> — read-only: Codex can read files and run read-only"
+            " commands; edits, writes and network access are blocked — including"
+            " caches and /tmp, so tests, builds and installs will fail",
             "",
             f"Current: <b>{current_label}</b>",
             "",

@@ -324,3 +324,60 @@ class TestDeprecatedEngineEndOfLife:
 
     def test_unrelated_message_still_unmatched(self):
         assert get_error_hint("everything is fine, supported and happy") is None
+
+
+class TestCliArgvDrift:
+    """#830: a CLI flag removal (Codex `-a untrusted`, 0.149.0) must get an
+    actionable hint, and Codex's retired-config-key error must not be read as a
+    client end-of-life."""
+
+    def test_clap_invalid_value_hint(self):
+        msg = (
+            "codex exec failed (rc=2).\n"
+            "error: invalid value 'untrusted' for '--ask-for-approval"
+            " <APPROVAL_POLICY>'\n  [possible values: on-request, never]"
+        )
+        hint = get_error_hint(msg)
+        assert hint is not None
+        assert "rejected a command-line flag" in hint
+        assert "Update Untether" in hint
+
+    def test_clap_unexpected_argument_hint(self):
+        hint = get_error_hint("error: unexpected argument '--full-auto' found")
+        assert hint is not None
+        assert "Update Untether" in hint
+
+    def test_clap_value_required_hint(self):
+        hint = get_error_hint(
+            "error: a value is required for '--sandbox <SANDBOX_MODE>' but none"
+            " was supplied"
+        )
+        assert hint is not None
+        assert "rejected a command-line flag" in hint
+
+    def test_codex_config_key_no_longer_supported_hint_outranks_eol(self):
+        msg = (
+            'Error loading config.toml: approval_policy = "untrusted" is no longer'
+            " supported; remove this setting"
+        )
+        hint = get_error_hint(msg)
+        assert hint is not None
+        assert "~/.codex/config.toml" in hint
+        assert "remove the key" in hint
+        assert "no longer supported by its provider" not in hint
+
+    def test_argv_hint_pattern_ignores_prose(self):
+        for msg in (
+            "the model asked for '--verbose' output",
+            "Error: unexpected argument 'foo' in tool call payload",
+        ):
+            hint = get_error_hint(msg)
+            assert hint is None or "command-line flag" not in hint, msg
+
+    def test_openai_invalid_value_prose_not_argv_hint(self):
+        msg = (
+            "Invalid value: 'minimal'. Supported values are: 'low', 'medium', and"
+            " 'high'."
+        )
+        hint = get_error_hint(msg)
+        assert hint is None or "command-line flag" not in hint
