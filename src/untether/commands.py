@@ -82,6 +82,10 @@ class CommandContext:
     # rc15 (#389): the live ``[transports.telegram.files] deny_globs`` so
     # /browse applies the same policy as /file. ``None`` = defaults.
     file_deny_globs: tuple[str, ...] | None = None
+    # rc15 (#685): the callback query id of a button tap, so a backend whose
+    # early toast reserved a claim can recognise its own claim in ``handle``.
+    # ``None`` for text commands and callbacks without an id.
+    callback_query_id: str | None = None
 
 
 @dataclass(frozen=True, slots=True)

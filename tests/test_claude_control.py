@@ -16,6 +16,7 @@ from untether.runners.claude import (
     _ACTIVE_RUNNERS,
     _DISCUSS_APPROVED,
     _HANDLED_REQUESTS,
+    _INFLIGHT_CONTROL_RESPONSES,
     _OUTLINE_PENDING,
     _PLAN_EXIT_APPROVED,
     _REQUEST_TO_INPUT,
@@ -84,6 +85,7 @@ def _clear_registries():
         _REQUEST_TO_SESSION.clear()
         _REQUEST_TO_INPUT.clear()
         _HANDLED_REQUESTS.clear()
+        _INFLIGHT_CONTROL_RESPONSES.clear()
         _PLAN_EXIT_APPROVED.clear()
         _DISCUSS_FEEDBACK_REFS.clear()
 
@@ -332,7 +334,13 @@ async def test_send_control_response_success() -> None:
 
 @pytest.mark.anyio
 async def test_duplicate_request_returns_true() -> None:
-    """Already-handled request_id returns True (duplicate callback)."""
+    """Already-handled request_id returns True (duplicate callback).
+
+    #685: ``send_claude_control_response`` is a bool wrapper kept for the
+    AskUserQuestion callers — a benign duplicate still reads as success there.
+    Callers that must tell sent / already handled / not found apart use
+    ``respond_to_control_request``.
+    """
     _HANDLED_REQUESTS["req-dup"] = None
     result = await send_claude_control_response("req-dup", approved=True)
     assert result is True
@@ -770,16 +778,31 @@ async def test_send_control_response_default_deny_message() -> None:
 
 
 def test_early_answer_toast_values() -> None:
-    """early_answer_toast returns correct toast for each action."""
+    """early_answer_toast reflects the request's state, not just the label (#685)."""
+    from untether.runners.claude import mark_request_handled
     from untether.telegram.commands.claude_control import ClaudeControlCommand
 
     cmd = ClaudeControlCommand()
+    # Pending request: the action labels are unchanged.
+    _REQUEST_TO_SESSION["req-1"] = "sess-toast"
     assert cmd.early_answer_toast("approve:req-1") == "Approved"
     assert cmd.early_answer_toast("deny:req-1") == "Denied"
     assert cmd.early_answer_toast("discuss:req-1") == "Outlining plan..."
     assert cmd.early_answer_toast("chat:req-1") == "Let's discuss..."
+    # Unregistered and never handled → expired.
+    assert cmd.early_answer_toast("approve:req-gone") == "This request has expired"
+    # Handled → already answered.
+    mark_request_handled("req-done", action="approve")
+    assert cmd.early_answer_toast("approve:req-done") == "Already answered"
+    # Withdrawn by the CLI (#684) → no longer needed.
+    mark_request_handled("req-cxl", action="cancelled", outcome="cancelled")
+    assert cmd.early_answer_toast("deny:req-cxl") == "No longer needed"
     assert cmd.early_answer_toast("unknown:req-1") is None
     assert cmd.early_answer_toast("") is None
+    # Malformed args never raise.
+    assert cmd.early_answer_toast("approve") is None
+    assert cmd.early_answer_toast(":::") is None
+    assert cmd.early_answer_toast(None) is None  # type: ignore[arg-type]
 
 
 @pytest.mark.anyio
@@ -1867,6 +1890,9 @@ async def test_discuss_approve_edits_feedback_message() -> None:
     runner = ClaudeRunner(claude_cmd="claude")
     session_id = "sess-skip"
     _ACTIVE_RUNNERS[session_id] = (runner, 0.0)
+    # The keyboard exists only while da:<sid> is registered (#685 classifies
+    # before acting, so an unregistered da: tap is "not found").
+    _REQUEST_TO_SESSION[f"da:{session_id}"] = session_id
 
     # Simulate a stored discuss feedback ref
     feedback_ref = MessageRef(channel_id=123, message_id=99)
@@ -1913,6 +1939,9 @@ async def test_discuss_deny_edits_feedback_message() -> None:
     runner = ClaudeRunner(claude_cmd="claude")
     session_id = "sess-skip-deny"
     _ACTIVE_RUNNERS[session_id] = (runner, 0.0)
+    # The keyboard exists only while da:<sid> is registered (#685 classifies
+    # before acting, so an unregistered da: tap is "not found").
+    _REQUEST_TO_SESSION[f"da:{session_id}"] = session_id
 
     # Simulate a stored discuss feedback ref
     feedback_ref = MessageRef(channel_id=123, message_id=99)
@@ -1956,6 +1985,9 @@ async def test_discuss_approve_falls_back_without_stored_ref() -> None:
     runner = ClaudeRunner(claude_cmd="claude")
     session_id = "sess-no-ref"
     _ACTIVE_RUNNERS[session_id] = (runner, 0.0)
+    # The keyboard exists only while da:<sid> is registered (#685 classifies
+    # before acting, so an unregistered da: tap is "not found").
+    _REQUEST_TO_SESSION[f"da:{session_id}"] = session_id
     # No _DISCUSS_FEEDBACK_REFS entry
 
     ctx = CommandContext(
@@ -2597,6 +2629,7 @@ async def test_outline_flow_approve_feedback_text(
     _SESSION_BG_STATE[session_id] = state
     _ACTIVE_RUNNERS[session_id] = (ClaudeRunner(claude_cmd="claude"), 0.0)
     _DISCUSS_FEEDBACK_REFS[session_id] = MessageRef(channel_id=123, message_id=99)
+    _REQUEST_TO_SESSION[f"da:{session_id}"] = session_id  # #685: registered
     executor = AsyncMock()
     try:
         result = await ClaudeControlCommand().handle(
@@ -2607,3 +2640,500 @@ async def test_outline_flow_approve_feedback_text(
         _DISCUSS_APPROVED.discard(session_id)
     assert result is None
     assert executor.edit.call_args[0][1] == expected
+
+
+# ===========================================================================
+# #685 — three-way tap result (sent / already handled / not found)
+# ===========================================================================
+
+
+def _ctl_ctx(
+    action: str,
+    request_id: str,
+    executor: Any = None,
+    *,
+    channel_id: int = 123,
+    callback_query_id: str | None = None,
+) -> Any:
+    from untether.commands import CommandContext
+    from untether.transport import MessageRef
+
+    return CommandContext(
+        command="claude_control",
+        text=f"claude_control:{action}:{request_id}",
+        args_text=f"{action}:{request_id}",
+        args=(f"{action}:{request_id}",),
+        message=MessageRef(channel_id=channel_id, message_id=1),
+        reply_to=None,
+        reply_text=None,
+        config_path=None,
+        plugin_config=None,  # type: ignore[arg-type]
+        runtime=None,  # type: ignore[arg-type]
+        executor=executor if executor is not None else AsyncMock(),
+        callback_query_id=callback_query_id,
+    )
+
+
+def _register_live_request(
+    request_id: str, session_id: str = "sess-685", *, tool_name: str = "Bash"
+) -> AsyncMock:
+    runner = ClaudeRunner(claude_cmd="claude")
+    _ACTIVE_RUNNERS[session_id] = (runner, 0.0)
+    fake_stdin = _SESSION_STDIN.get(session_id) or AsyncMock()
+    _SESSION_STDIN[session_id] = fake_stdin
+    _REQUEST_TO_SESSION[request_id] = session_id
+    _REQUEST_TO_INPUT[request_id] = {"command": "ls"}
+    _REQUEST_TO_TOOL_NAME[request_id] = tool_name
+    return fake_stdin
+
+
+def _events_named(logs: list[dict[str, Any]], name: str) -> list[dict[str, Any]]:
+    return [e for e in logs if e.get("event") == name]
+
+
+def test_685_classify_pending_inflight_handled_cancelled_notfound() -> None:
+    from untether.runners.claude import (
+        ControlRequestStatus,
+        InflightClaim,
+        classify_control_request,
+        mark_request_handled,
+    )
+
+    _REQUEST_TO_SESSION["r-pend"] = "s"
+    assert classify_control_request("r-pend").status is ControlRequestStatus.PENDING
+
+    _REQUEST_TO_SESSION["r-fly"] = "s"
+    _INFLIGHT_CONTROL_RESPONSES["r-fly"] = InflightClaim(
+        action="deny", owner="cb-1", channel_id=None, at=0.0
+    )
+    lookup = classify_control_request("r-fly")
+    assert lookup.status is ControlRequestStatus.IN_FLIGHT
+    assert lookup.prior is not None and lookup.prior.action == "deny"
+
+    mark_request_handled("r-done", action="approve", channel_id=5)
+    lookup = classify_control_request("r-done", channel_id=5)
+    assert lookup.status is ControlRequestStatus.ALREADY_HANDLED
+    assert lookup.prior is not None and lookup.prior.action == "approve"
+
+    mark_request_handled("r-cxl", action="cancelled", outcome="cancelled")
+    assert classify_control_request("r-cxl").status is ControlRequestStatus.CANCELLED
+
+    lookup = classify_control_request("r-never")
+    assert lookup.status is ControlRequestStatus.NOT_FOUND
+    assert lookup.reason == "unknown"
+
+    # Legacy None-valued entries read as "answered, details unknown".
+    _HANDLED_REQUESTS["r-legacy"] = None
+    lookup = classify_control_request("r-legacy", channel_id=9)
+    assert lookup.status is ControlRequestStatus.ALREADY_HANDLED
+    assert lookup.prior is None
+
+
+def test_685_classify_channel_mismatch_is_not_found() -> None:
+    from untether.runners.claude import (
+        ControlRequestStatus,
+        classify_control_request,
+        mark_request_handled,
+    )
+
+    mark_request_handled("r-a", action="approve", channel_id=111)
+    other = classify_control_request("r-a", channel_id=222)
+    assert other.status is ControlRequestStatus.NOT_FOUND
+    assert other.reason == "channel_mismatch"
+    same = classify_control_request("r-a", channel_id=111)
+    assert same.status is ControlRequestStatus.ALREADY_HANDLED
+
+
+@pytest.mark.anyio
+async def test_685_respond_duplicate_writes_nothing() -> None:
+    from untether.runners.claude import (
+        ControlRequestStatus,
+        respond_to_control_request,
+    )
+
+    fake_stdin = _register_live_request("r-dup")
+    first = await respond_to_control_request("r-dup", True, action="approve")
+    assert first.sent is True
+    assert first.status is ControlRequestStatus.PENDING
+    second = await respond_to_control_request("r-dup", True, action="approve")
+    assert second.status is ControlRequestStatus.ALREADY_HANDLED
+    assert second.sent is False
+    assert second.prior is not None and second.prior.action == "approve"
+    assert fake_stdin.send.await_count == 1
+    assert _INFLIGHT_CONTROL_RESPONSES == {}
+
+
+@pytest.mark.anyio
+async def test_685_concurrent_taps_single_write_no_keyerror() -> None:
+    """Two concurrent answers for one request: one write, no KeyError.
+
+    Written against ``send_claude_control_response`` so it failed on the bug
+    itself (two writes, then a KeyError from the second ``del``)."""
+    fake_stdin = _register_live_request("r-race")
+    release = anyio.Event()
+    writes: list[bytes] = []
+
+    async def _gated_send(data: bytes) -> None:
+        writes.append(data)
+        await release.wait()
+
+    fake_stdin.send = AsyncMock(side_effect=_gated_send)
+    errors: list[BaseException] = []
+    results: list[bool] = []
+
+    async def _tap() -> None:
+        try:
+            results.append(await send_claude_control_response("r-race", True))
+        except Exception as exc:  # noqa: BLE001
+            errors.append(exc)
+
+    async with anyio.create_task_group() as tg:
+        tg.start_soon(_tap)
+        tg.start_soon(_tap)
+        for _ in range(50):
+            await anyio.sleep(0)
+            if writes:
+                break
+        release.set()
+
+    assert errors == []
+    assert fake_stdin.send.await_count == 1
+    assert len(writes) == 1
+    assert results == [True, True]  # the duplicate is benign for the bool API
+    assert list(_HANDLED_REQUESTS).count("r-race") == 1
+    assert _INFLIGHT_CONTROL_RESPONSES == {}
+
+
+@pytest.mark.anyio
+async def test_685_inflight_claim_released_on_write_error() -> None:
+    from untether.runners.claude import (
+        ControlRequestStatus,
+        respond_to_control_request,
+    )
+
+    fake_stdin = _register_live_request("r-closed")
+    fake_stdin.send.side_effect = anyio.ClosedResourceError()
+    result = await respond_to_control_request("r-closed", True, action="approve")
+    assert result.sent is False
+    assert result.status is ControlRequestStatus.PENDING
+    assert result.reason == "write_failed"
+    assert _INFLIGHT_CONTROL_RESPONSES == {}
+    assert "r-closed" not in _REQUEST_TO_SESSION
+    assert "r-closed" in _HANDLED_REQUESTS  # preserves the #61 behaviour
+
+
+def test_685_tap_never_overwrites_terminal_record() -> None:
+    from structlog.testing import capture_logs
+
+    from untether.runners.claude import mark_request_handled
+
+    mark_request_handled("r-to", action="timeout", outcome="expired")
+    with capture_logs() as logs:
+        mark_request_handled("r-to", action="approve")
+    record = _HANDLED_REQUESTS["r-to"]
+    assert record is not None
+    assert (record.action, record.outcome) == ("timeout", "expired")
+    assert _events_named(logs, "control_response.terminal_kept")
+
+    mark_request_handled("r-cx", action="cancelled", outcome="cancelled")
+    mark_request_handled("r-cx", action="deny")
+    record = _HANDLED_REQUESTS["r-cx"]
+    assert record is not None
+    assert (record.action, record.outcome) == ("cancelled", "cancelled")
+
+
+@pytest.mark.anyio
+async def test_685_send_wrapper_cancelled_returns_false() -> None:
+    """A withdrawn request is not "answered": an ask text reply must fall
+    through to a normal prompt (#684 contract)."""
+    from untether.runners.claude import mark_request_handled
+
+    mark_request_handled("r-wd", action="cancelled", outcome="cancelled")
+    assert await send_claude_control_response("r-wd", True) is False
+
+
+def _drive_sweep(
+    state: ClaudeStreamState, factory: EventFactory, old_id: str, new_id: str
+) -> list[Any]:
+    import time as _time
+
+    evt_data, _ = state.pending_control_requests[old_id]
+    state.pending_control_requests[old_id] = (evt_data, _time.time() - 301.0)
+    new_event = _decode_event(
+        {
+            "type": "control_request",
+            "request_id": new_id,
+            "request": {
+                "subtype": "can_use_tool",
+                "tool_name": "ExitPlanMode",
+                "input": {},
+            },
+        }
+    )
+    return translate_claude_event(
+        new_event, title="claude", state=state, factory=factory
+    )
+
+
+def _raise_exit_plan(
+    state: ClaudeStreamState, factory: EventFactory, request_id: str
+) -> list[Any]:
+    event = _decode_event(
+        {
+            "type": "control_request",
+            "request_id": request_id,
+            "request": {
+                "subtype": "can_use_tool",
+                "tool_name": "ExitPlanMode",
+                "input": {},
+            },
+        }
+    )
+    return translate_claude_event(event, title="claude", state=state, factory=factory)
+
+
+def test_685_swept_request_is_expired_not_pending() -> None:
+    from untether.runners.claude import (
+        ControlRequestStatus,
+        classify_control_request,
+        pending_control_requests_for_session,
+    )
+    from untether.telegram.commands.claude_control import ClaudeControlCommand
+
+    state, factory = _make_state_with_session("sess-sweep")
+    _raise_exit_plan(state, factory, "r-old")
+    assert _REQUEST_TO_SESSION["r-old"] == "sess-sweep"
+    _drive_sweep(state, factory, "r-old", "r-new")
+
+    assert "r-old" in [rid for rid, _ in state.auto_deny_queue]
+    assert "r-old" not in _REQUEST_TO_SESSION
+    lookup = classify_control_request("r-old")
+    assert lookup.status is ControlRequestStatus.ALREADY_HANDLED
+    assert lookup.prior is not None and lookup.prior.outcome == "expired"
+    assert (
+        ClaudeControlCommand.early_answer_toast("approve:r-old")
+        == "This request has expired"
+    )
+    assert pending_control_requests_for_session("sess-sweep") == 1
+
+
+def test_685_sweep_strips_keyboard_and_records_channel() -> None:
+    from untether.utils.paths import reset_run_channel_id, set_run_channel_id
+
+    state, factory = _make_state_with_session("sess-strip")
+    started = _raise_exit_plan(state, factory, "r-kb")
+    kb_action_id = next(e.action.id for e in started if isinstance(e, ActionEvent))
+    token = set_run_channel_id(4242)
+    try:
+        events = _drive_sweep(state, factory, "r-kb", "r-kb2")
+    finally:
+        reset_run_channel_id(token)
+    completed = [
+        e
+        for e in events
+        if isinstance(e, ActionEvent)
+        and e.phase == "completed"
+        and e.action.id == kb_action_id
+    ]
+    assert completed, "the swept request's keyboard must be stripped"
+    assert "Timed out" in completed[0].action.title
+    record = _HANDLED_REQUESTS["r-kb"]
+    assert record is not None and record.channel_id == 4242
+    assert record.action == "timeout"
+
+
+def test_685_tap_vs_sweep_inflight_wins() -> None:
+    from untether.runners.claude import claim_control_request, mark_request_handled
+
+    state, factory = _make_state_with_session("sess-tvs")
+    _raise_exit_plan(state, factory, "r-tvs")
+    # A tap holds the claim (its write is in flight).
+    claim_control_request("r-tvs", action="approve", owner="cb-tvs")
+    _drive_sweep(state, factory, "r-tvs", "r-tvs-2")
+    assert "r-tvs" not in [rid for rid, _ in state.auto_deny_queue]
+    assert "r-tvs" in state.pending_control_requests
+    # The write completes: the record is the user's answer.
+    _REQUEST_TO_SESSION.pop("r-tvs", None)
+    mark_request_handled("r-tvs", action="approve")
+    _INFLIGHT_CONTROL_RESPONSES.pop("r-tvs", None)
+    record = _HANDLED_REQUESTS["r-tvs"]
+    assert record is not None and record.outcome == "answered"
+    # A later sweep does nothing for it (reconciled, never auto-denied).
+    state.auto_deny_queue.clear()
+    _raise_exit_plan(state, factory, "r-tvs-3")
+    assert "r-tvs" not in [rid for rid, _ in state.auto_deny_queue]
+    assert "r-tvs" not in state.pending_control_requests
+
+
+def test_685_cleanup_drops_claims_for_session() -> None:
+    from untether.runners.claude import claim_control_request
+
+    _REQUEST_TO_SESSION["r-cl"] = "sess-cl"
+    claim_control_request("r-cl", action="approve", owner="cb-cl")
+    assert "r-cl" in _INFLIGHT_CONTROL_RESPONSES
+    _cleanup_session_registries("sess-cl")
+    assert "r-cl" not in _INFLIGHT_CONTROL_RESPONSES
+
+
+def test_685_superseded_label_is_expired() -> None:
+    """#684 D5 contract: a superseded request reads as expired."""
+    from untether.runners.claude import (
+        ControlRequestStatus,
+        classify_control_request,
+        mark_request_handled,
+    )
+    from untether.telegram.commands.claude_control import (
+        ClaudeControlCommand,
+        _already_handled_result,
+    )
+
+    mark_request_handled("da:s", action="superseded", outcome="expired")
+    assert (
+        ClaudeControlCommand.early_answer_toast("approve:da:s")
+        == "This request has expired"
+    )
+    lookup = classify_control_request("da:s")
+    result = _already_handled_result(lookup.status, lookup.prior, "da:s", "approve")
+    assert lookup.status is ControlRequestStatus.ALREADY_HANDLED
+    assert result.text == "ℹ️ This request has expired — replaced by the outlined plan"
+    assert result.notify is False
+
+
+def test_685_early_toast_channel_scoped() -> None:
+    from untether.runners.claude import mark_request_handled
+    from untether.telegram.commands.claude_control import ClaudeControlCommand
+
+    mark_request_handled("r-ch", action="approve", channel_id=100)
+    toast = ClaudeControlCommand.early_answer_toast
+    assert toast("approve:r-ch", channel_id=200) == "This request has expired"
+    assert toast("approve:r-ch", channel_id=100) == "Already answered"
+
+
+@pytest.mark.anyio
+async def test_685_second_approve_after_approve_is_silent_and_truthful() -> None:
+    """The issue's acceptance test: a second Approve logs no second
+    ``claude_control.sent`` and says what the first tap did."""
+    from structlog.testing import capture_logs
+
+    from untether.telegram.commands.claude_control import ClaudeControlCommand
+
+    fake_stdin = _register_live_request("r-twice")
+    cmd = ClaudeControlCommand()
+    with capture_logs() as logs:
+        first = await cmd.handle(_ctl_ctx("approve", "r-twice"))
+        second = await cmd.handle(_ctl_ctx("approve", "r-twice"))
+
+    assert first is not None and first.text == "✅ Approved permission request"
+    assert second is not None
+    assert second.text.startswith("ℹ️ Already answered — approved")
+    assert second.notify is False
+    sent = _events_named(logs, "claude_control.sent")
+    assert len(sent) == 1 and sent[0]["approved"] is True
+    handled = _events_named(logs, "claude_control.already_handled")
+    assert len(handled) == 1
+    assert handled[0]["log_level"] == "info"
+    assert handled[0]["first_action"] == "approve"
+    assert fake_stdin.send.await_count == 1
+
+
+@pytest.mark.anyio
+async def test_685_approve_after_discuss_reports_outline_requested() -> None:
+    """The nsd 2026-07-25 sequence: Pause & Outline, then Approve 300 ms later."""
+    from structlog.testing import capture_logs
+
+    from untether.telegram.commands.claude_control import ClaudeControlCommand
+
+    fake_stdin = _register_live_request("r-epm", "sess-epm", tool_name="ExitPlanMode")
+    cmd = ClaudeControlCommand()
+    with capture_logs() as logs:
+        await cmd.handle(_ctl_ctx("discuss", "r-epm"))
+        second = await cmd.handle(_ctl_ctx("approve", "r-epm"))
+
+    assert second is not None
+    assert second.text == "ℹ️ Already answered — outline requested"
+    assert "sess-epm" not in _PLAN_EXIT_APPROVED
+    assert fake_stdin.send.await_count == 1
+    assert not [
+        e for e in _events_named(logs, "claude_control.sent") if e.get("approved")
+    ]
+
+
+@pytest.mark.anyio
+async def test_685_chat_hold_open_double_tap(monkeypatch) -> None:
+    from untether.telegram.commands import claude_control as cc
+
+    deleted = AsyncMock()
+    monkeypatch.setattr(cc, "delete_outline_messages", deleted)
+    fake_stdin = _register_live_request("r-chat", "sess-chat", tool_name="ExitPlanMode")
+    cmd = cc.ClaudeControlCommand()
+    await cmd.handle(_ctl_ctx("chat", "r-chat"))
+    mark_outline_pending("sess-chat")
+    second = await cmd.handle(_ctl_ctx("chat", "r-chat"))
+    assert second is not None
+    assert second.text == "ℹ️ Already answered — discussion requested"
+    assert deleted.await_count == 1
+    # The second tap didn't re-run the outline side effects.
+    assert "sess-chat" in _OUTLINE_PENDING
+    assert fake_stdin.send.await_count == 1
+    _OUTLINE_PENDING.discard("sess-chat")
+
+
+@pytest.mark.anyio
+async def test_685_unknown_request_warns_not_found() -> None:
+    from structlog.testing import capture_logs
+
+    from untether.telegram.commands.claude_control import ClaudeControlCommand
+
+    with capture_logs() as logs:
+        result = await ClaudeControlCommand().handle(
+            _ctl_ctx("approve", "00000000-0000-4000-8000-000000000000")
+        )
+    assert result is not None
+    assert result.text == "⚠️ Control request not found or session ended"
+    assert result.notify is True
+    not_found = _events_named(logs, "claude_control.not_found")
+    assert len(not_found) == 1
+    assert not_found[0]["log_level"] == "warning"
+    assert not_found[0]["reason"] == "unknown"
+    assert not _events_named(logs, "claude_control.sent")
+
+
+@pytest.mark.anyio
+async def test_685_no_active_session_keeps_failed_warning() -> None:
+    from structlog.testing import capture_logs
+
+    from untether.telegram.commands.claude_control import ClaudeControlCommand
+
+    _REQUEST_TO_SESSION["r-orphan"] = "sess-gone"  # no _ACTIVE_RUNNERS entry
+    with capture_logs() as logs:
+        result = await ClaudeControlCommand().handle(_ctl_ctx("deny", "r-orphan"))
+    assert result is not None
+    assert result.text == "⚠️ Control request not found or session ended"
+    failed = _events_named(logs, "claude_control.failed")
+    assert len(failed) == 1 and failed[0]["reason"] == "no_active_session"
+    assert not _events_named(logs, "claude_control.already_handled")
+
+
+@pytest.mark.anyio
+async def test_685_handle_uses_the_early_toast_claim() -> None:
+    """A dispatcher-reserved claim is honoured by the same tap's handle, and a
+    second tap that raced past sees the request in flight."""
+    from untether.runners.claude import ControlRequestStatus, classify_control_request
+    from untether.telegram.commands.claude_control import ClaudeControlCommand
+
+    fake_stdin = _register_live_request("r-own")
+    cmd = ClaudeControlCommand()
+    assert cmd.early_answer_toast("approve:r-own", claim_owner="cb-1") == "Approved"
+    assert (
+        cmd.early_answer_toast("approve:r-own", claim_owner="cb-2")
+        == "Already answered"
+    )
+    assert classify_control_request("r-own").status is ControlRequestStatus.IN_FLIGHT
+    second = await cmd.handle(_ctl_ctx("approve", "r-own", callback_query_id="cb-2"))
+    assert second is not None
+    assert second.text == "ℹ️ Already answered — approved"
+    assert fake_stdin.send.await_count == 0
+    first = await cmd.handle(_ctl_ctx("approve", "r-own", callback_query_id="cb-1"))
+    assert first is not None and first.text == "✅ Approved permission request"
+    assert fake_stdin.send.await_count == 1
+    assert _INFLIGHT_CONTROL_RESPONSES == {}

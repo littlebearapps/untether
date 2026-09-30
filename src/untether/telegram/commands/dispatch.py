@@ -38,7 +38,12 @@ def _parse_callback_data(data: str) -> tuple[str, str]:
     return command_id, args_text
 
 
-def _early_answer_toast(backend: object, args_text: str, chat_id: int) -> str | None:
+def _early_answer_toast(
+    backend: object,
+    args_text: str,
+    chat_id: int,
+    claim_owner: str | None = None,
+) -> str | None:
     """Call a backend's ``early_answer_toast`` hook, passing the chat it fired in.
 
     #715: the toast is chosen from registry state (is there a live flow? was
@@ -46,20 +51,44 @@ def _early_answer_toast(backend: object, args_text: str, chat_id: int) -> str | 
     see which chat tapped can only answer globally, and in a fleet running
     concurrent chats it answers about someone else's run.
 
+    #685: ``claim_owner`` (the callback query id) lets a hook reserve the
+    request synchronously, before the first ``await`` of the dispatch, so two
+    concurrent taps can't both toast success. A hook that reserves must also
+    expose ``release_early_claim(owner)``; the dispatch ``finally`` calls it.
+
     ``early_answer_toast`` is an internal duck-typed hook, not part of the
-    ``CommandBackend`` Protocol, so a backend may still carry the older
-    ``(args_text)`` signature. Fall back to it rather than letting a
-    ``TypeError`` escape: this runs before ``backend.handle`` inside the
-    dispatch ``try``, and an exception here would take out the whole
-    callback — a strictly worse outcome than a slightly less specific toast.
+    ``CommandBackend`` Protocol, so a backend may still carry an older
+    ``(args_text, *, channel_id)`` or ``(args_text)`` signature. Fall back to
+    them rather than letting a ``TypeError`` escape: this runs before
+    ``backend.handle`` inside the dispatch ``try``, and an exception here would
+    take out the whole callback — a strictly worse outcome than a slightly
+    less specific toast.
     """
     hook = getattr(backend, "early_answer_toast", None)
     if hook is None:
         return None
+    if claim_owner is not None:
+        try:
+            return hook(args_text, channel_id=chat_id, claim_owner=claim_owner)
+        except TypeError:
+            pass
     try:
         return hook(args_text, channel_id=chat_id)
     except TypeError:
         return hook(args_text)
+
+
+def _release_early_claim(backend: object, owner: str | None) -> None:
+    """Release any claim ``owner``'s early toast reserved (#685). Never raises."""
+    if backend is None or owner is None:
+        return
+    release = getattr(backend, "release_early_claim", None)
+    if release is None:
+        return
+    try:
+        release(owner)
+    except Exception:  # noqa: BLE001
+        logger.debug("callback.release_claim_failed", exc_info=True)
 
 
 async def _dispatch_command(
@@ -246,6 +275,7 @@ async def _dispatch_callback(
     dispatch_start = time.monotonic()
     logger.info("callback.dispatch", command=command_id, chat_id=chat_id)
     _answered = False
+    backend: object | None = None
 
     # #247: instrument the early-answer path so we can observe actual latency
     # to Telegram's answerCallbackQuery in the field. `BotResponseTimeoutError`
@@ -309,7 +339,9 @@ async def _dispatch_callback(
         # entry); the `early=True` flag lets us split the metric by branch
         # when grepping.
         if getattr(backend, "answer_early", False) and callback_query_id is not None:
-            toast = _early_answer_toast(backend, args_text, chat_id)
+            toast = _early_answer_toast(
+                backend, args_text, chat_id, claim_owner=callback_query_id
+            )
             # Always answer early when the backend opts in, even if the toast
             # is None — clearing the spinner before backend.handle() is the
             # whole point. A None toast just means no toast text will appear.
@@ -332,6 +364,7 @@ async def _dispatch_callback(
             trigger_manager=cfg.trigger_manager,
             default_chat_id=cfg.chat_id,
             file_deny_globs=tuple(cfg.files.deny_globs),
+            callback_query_id=callback_query_id,
         )
         try:
             result = await backend.handle(ctx)
@@ -376,4 +409,7 @@ async def _dispatch_callback(
             if sent_ref is not None and callback_query_id is not None:
                 register_ephemeral_message(chat_id, user_msg_id, sent_ref)
     finally:
+        # #685: a claim the early toast reserved must never outlive this
+        # callback — even when handle raised or was cancelled.
+        _release_early_claim(backend, callback_query_id)
         await _answer_callback()

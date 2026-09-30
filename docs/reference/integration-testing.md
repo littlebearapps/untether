@@ -465,7 +465,7 @@ Integration tests are run by Claude Code via Telegram MCP tools (see "Automated 
 | Runner bridge / auto-continue / no-op resume recovery (`runner_bridge.py`, `runners/claude.py`) | B-RESUME, U1-U4 (Claude), U6, U7 |
 | Live sessions / follow-up injection / scheduler (`runners/claude.py`, `runner_bridge.py`, `live_followup.py`, `scheduler.py`) | B-LIVE-1…7, RC12-4…7, C1-C6, S7, U1-U4 (Claude) |
 | Telegram transport (`telegram/*.py`) | T1-T10, S7, S8, R15-9-1 (benign edit/delete 400s at startup) |
-| Control channel (`claude_control.py`) | C1-C6, T8, S9 |
+| Control channel (`claude_control.py`) | C1-C6, T8, S9, R15-5 |
 | Config/settings (`settings.py`) | O1-O9, S5, upgrade path, R15-13a…d (settings parse cache) |
 | Cost tracking (`cost_tracker.py`) | B1-B3, U8 |
 | Progress/formatting (`markdown.py`, `telegram/render.py`) | U3, T6, T7, S4, S8, RC12-8, RC12-9 |
@@ -855,3 +855,17 @@ Chats: **Codex** `4929463515`, **OpenCode** `5200822877`, **Claude** `5284581592
 | R15-16c | **No history after restart** | `systemctl --user restart untether-dev`, then `/usage` in the Codex chat before any prompt | `…not available for the codex engine, and this chat has no completed codex run since Untether last started…` |
 | R15-16d | **OpenCode session totals** | OpenCode chat: U1 prompt, then reply to it with `now rename hello.txt to greetings.txt`, then `/usage`, then `/export` | `/usage` shows `2 runs`, a `Session total:` equal to the sum of the two runs' footers (within rounding), and `Last run cost: $…` if the model is priced. Logs: two `usage.token_delta engine=opencode source=per_run`. `/export` header shows cost, or tokens when the model is free |
 | R15-16e | **Claude `/usage` unchanged** | Claude chat: `/usage` and `/usage debug` | Same subscription view as rc14 (C7); no `📊 claude · last session` text |
+
+### #685 — control-button double tap
+
+Tier 2 (Claude interactive) + T8 (stale button) + S9 (concurrent clicks). Claude `ut-dev` chat `5284581592` (Bot API `-5284581592`), `/planmode on`. Logs: `journalctl --user -u untether-dev -o cat --since "15 minutes ago" | grep -E "claude_control\.|control_response\.|callback\.answered"`.
+
+| ID | Telegram action | Expected in Telegram | Expected in logs |
+|---|---|---|---|
+| **R15-5a** Approve twice | Send `run ls -la /tmp with Bash`; when the Approve/Deny keyboard appears, `press_inline_button` **Approve twice back to back** (two calls, no wait) | First press toast `Approved`; second press toast `Already answered` (or `Approved`, if both were in flight); a silent `ℹ️ Already answered — approved` line; the tool runs once | Exactly **one** `control_response.sent approved=True request_id=<X>` and **one** `claude_control.sent approved=True request_id=<X>`; one `claude_control.already_handled request_id=<X> first_action=approve`; **no** `callback.failed` |
+| **R15-5b** Outline, then Approve | A prompt that triggers ExitPlanMode (C3 shape); press **📋 Pause & Outline Plan**, then at once **✅ Approve Plan** on the same keyboard | Second press toast `Already answered`; silent line `ℹ️ Already answered — outline requested`; Claude writes the outline (not an approval) | One `control_response.sent approved=False`; `claude_control.already_handled first_action=discuss`; **no** `claude_control.sent approved=True` for `<X>` |
+| **R15-5c** Stale tap | After the run finishes, `/new`, then replay the old callback. If `press_inline_button` can't reach a stripped keyboard, use the Telethon venv fallback (`GetBotCallbackAnswerRequest(peer, msg_id, data=b"claude_control:approve:<X>")`) | Toast `Already answered` (the id is still in the LRU) | `claude_control.already_handled`; no WARNING |
+| **R15-5d** Unknown id | Replay a made-up id: `data=b"claude_control:approve:00000000-0000-4000-8000-000000000000"` | Toast `This request has expired`; message `⚠️ Control request not found or session ended` | WARNING `claude_control.not_found reason=unknown` |
+| **R15-5e** `da:` Deny → Approve (opportunistic) | If the escalation path is reachable (Pause & Outline, then Claude calls ExitPlanMode without an outline): press **❌ Deny** then **✅ Approve Plan** on the `da:` keyboard | Second press `Already answered — denied`; the next ExitPlanMode shows buttons again (not auto-approved) | No `control_request.discuss_approved` after the deny; `claude_control.already_handled first_action=deny`. Record "not exercised" if Claude always writes the outline first |
+
+Pass = R15-5a–d match, plus C1/C2/C3/C6/T8/S9 unchanged. Post-rollout invariant (nsd, 24 h): every `claude_control.sent` has a `control_response.sent` for the same `request_id` within 1 s before it — unpaired count must be 0.

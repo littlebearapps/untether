@@ -731,3 +731,151 @@ async def test_command_context_carries_file_deny_globs(monkeypatch) -> None:
     await _dispatch()
 
     assert [c.file_deny_globs for c in backend.contexts] == [("x/**",), ("w",)]
+
+
+# ---------------------------------------------------------------------------
+# #685 — the claude_control early toast reads (and reserves) the request
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def _control_registries():
+    from untether.runners import claude as claude_mod
+
+    def _wipe() -> None:
+        for reg in (
+            claude_mod._ACTIVE_RUNNERS,
+            claude_mod._SESSION_STDIN,
+            claude_mod._REQUEST_TO_SESSION,
+            claude_mod._REQUEST_TO_INPUT,
+            claude_mod._REQUEST_TO_TOOL_NAME,
+            claude_mod._HANDLED_REQUESTS,
+            claude_mod._INFLIGHT_CONTROL_RESPONSES,
+        ):
+            reg.clear()
+
+    _wipe()
+    _EPHEMERAL_MSGS.clear()
+    yield claude_mod
+    _wipe()
+    _EPHEMERAL_MSGS.clear()
+
+
+def _register_request(claude_mod, request_id: str) -> AsyncMock:
+    session_id = "sess-dispatch-685"
+    claude_mod._ACTIVE_RUNNERS[session_id] = (
+        claude_mod.ClaudeRunner(claude_cmd="claude"),
+        0.0,
+    )
+    stdin = AsyncMock()
+    claude_mod._SESSION_STDIN[session_id] = stdin
+    claude_mod._REQUEST_TO_SESSION[request_id] = session_id
+    claude_mod._REQUEST_TO_INPUT[request_id] = {}
+    claude_mod._REQUEST_TO_TOOL_NAME[request_id] = "Bash"
+    return stdin
+
+
+async def _dispatch_control(cfg, data: str, callback_query_id: str) -> None:
+    command_id, args_text = _parse_callback_data(data)
+    await _dispatch_callback(
+        cfg,
+        _make_callback_query(data),
+        command_id,
+        args_text,
+        None,
+        {},
+        AsyncMock(),
+        None,
+        False,
+        None,
+        callback_query_id,
+    )
+
+
+@pytest.mark.anyio
+async def test_685_claude_control_early_toast_uses_registry(
+    monkeypatch, _control_registries
+) -> None:
+    from untether.telegram.commands.claude_control import ClaudeControlCommand
+
+    claude_mod = _control_registries
+    claude_mod.mark_request_handled("req-done", action="approve", channel_id=123)
+    transport = FakeTransport()
+    cfg = make_cfg(transport)
+    bot: FakeBot = cfg.bot  # type: ignore[assignment]
+    monkeypatch.setattr(
+        dispatch_mod, "get_command", lambda *a, **kw: ClaudeControlCommand()
+    )
+
+    await _dispatch_control(cfg, "claude_control:approve:req-done", "cb-late")
+
+    assert [c["text"] for c in bot.callback_calls] == ["Already answered"]
+    assert len(transport.send_calls) == 1
+    sent = transport.send_calls[0]
+    assert sent["message"].text == "ℹ️ Already answered — approved"
+    assert sent["options"].notify is False
+
+
+@pytest.mark.anyio
+async def test_685_dispatch_reserves_claim_before_early_answer(
+    monkeypatch, _control_registries
+) -> None:
+    """Two taps started together: the first toasts Approved, the second
+    Already answered — decided before either early answer is awaited."""
+    from untether.telegram.commands.claude_control import ClaudeControlCommand
+
+    claude_mod = _control_registries
+    stdin = _register_request(claude_mod, "req-both")
+    transport = FakeTransport()
+    cfg = make_cfg(transport)
+    bot: FakeBot = cfg.bot  # type: ignore[assignment]
+    monkeypatch.setattr(
+        dispatch_mod, "get_command", lambda *a, **kw: ClaudeControlCommand()
+    )
+    gate = anyio.Event()
+    toasts: dict[str, str | None] = {}
+    orig_answer = bot.answer_callback_query
+
+    async def _gated_answer(query_id, text=None):
+        toasts.setdefault(query_id, text)
+        await gate.wait()
+        return await orig_answer(query_id, text=text)
+
+    bot.answer_callback_query = _gated_answer  # type: ignore[assignment]
+
+    async with anyio.create_task_group() as tg:
+        tg.start_soon(_dispatch_control, cfg, "claude_control:approve:req-both", "cb-1")
+        tg.start_soon(_dispatch_control, cfg, "claude_control:approve:req-both", "cb-2")
+        for _ in range(50):
+            await anyio.sleep(0)
+            if len(toasts) == 2:
+                break
+        gate.set()
+
+    assert toasts == {"cb-1": "Approved", "cb-2": "Already answered"}
+    assert stdin.send.await_count == 1
+    assert claude_mod._INFLIGHT_CONTROL_RESPONSES == {}
+
+
+@pytest.mark.anyio
+async def test_685_claim_released_when_handle_raises(
+    monkeypatch, _control_registries
+) -> None:
+    from untether.runners.claude import ControlRequestStatus
+    from untether.telegram.commands.claude_control import ClaudeControlCommand
+
+    claude_mod = _control_registries
+    _register_request(claude_mod, "req-boom")
+    cfg = make_cfg(FakeTransport())
+
+    class _Exploding(ClaudeControlCommand):
+        async def handle(self, ctx: CommandContext) -> CommandResult | None:
+            raise RuntimeError("boom")
+
+    monkeypatch.setattr(dispatch_mod, "get_command", lambda *a, **kw: _Exploding())
+
+    await _dispatch_control(cfg, "claude_control:approve:req-boom", "cb-boom")
+
+    assert claude_mod._INFLIGHT_CONTROL_RESPONSES == {}
+    lookup = claude_mod.classify_control_request("req-boom")
+    assert lookup.status is ControlRequestStatus.PENDING

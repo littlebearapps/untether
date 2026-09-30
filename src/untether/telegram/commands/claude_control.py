@@ -11,12 +11,21 @@ from ...runners.claude import (
     _OUTLINE_PENDING,
     _REQUEST_TO_SESSION,
     _REQUEST_TO_TOOL_NAME,
+    ControlLookup,
+    ControlRequestStatus,
+    ControlSendResult,
+    HandledControl,
+    claim_control_request,
+    classify_control_request,
     mark_outline_pending,
     mark_request_handled,
+    new_control_claim_owner,
     plan_approved_feedback,
-    send_claude_control_response,
+    release_control_claims,
+    respond_to_control_request,
 )
 from ...transport import MessageRef
+from .ask_question import _ALREADY_ANSWERED_TOAST
 
 logger = get_logger(__name__)
 
@@ -73,6 +82,141 @@ _EARLY_TOASTS: dict[str, str] = {
     "chat": "Let's discuss...",
 }
 
+# #685: a tap on a request that is no longer pending says so, instead of
+# toasting success for a tap that writes nothing.
+_NO_LONGER_NEEDED_TOAST = "No longer needed"
+_EXPIRED_TOAST = "This request has expired"
+_NOT_FOUND_TEXT = "⚠️ Control request not found or session ended"
+_CANCELLED_TEXT = "⏹️ Claude Code withdrew this request — nothing to answer."
+
+# #685: what the first resolution did, for the silent "already answered" line.
+# Shared with #684 (cancelled / superseded).
+_PRIOR_LABELS: dict[str, str] = {
+    "approve": "approved",
+    "deny": "denied",
+    "discuss": "outline requested",
+    "chat": "discussion requested",
+    "auto": "answered automatically",
+    "answer": "answered",
+    "timeout": "timed out after 5 min (auto-denied)",
+    "superseded": "replaced by the outlined plan",
+}
+
+
+def _prior_label(prior: HandledControl | None) -> str:
+    if prior is None or prior.action is None:
+        return "answered"
+    return _PRIOR_LABELS.get(prior.action, "answered")
+
+
+def _is_expired(prior: HandledControl | None) -> bool:
+    return prior is not None and prior.outcome == "expired"
+
+
+def _toast_for(lookup: ControlLookup, action: str) -> str | None:
+    """Early toast for a tap on a request in state ``lookup`` (#685)."""
+    match lookup.status:
+        case ControlRequestStatus.PENDING:
+            return _EARLY_TOASTS.get(action)
+        case ControlRequestStatus.CANCELLED:
+            return _NO_LONGER_NEEDED_TOAST
+        case ControlRequestStatus.NOT_FOUND:
+            return _EXPIRED_TOAST
+        case _:  # IN_FLIGHT / ALREADY_HANDLED
+            if _is_expired(lookup.prior):
+                return _EXPIRED_TOAST
+            return _ALREADY_ANSWERED_TOAST
+
+
+def _already_handled_result(
+    status: ControlRequestStatus,
+    prior: HandledControl | None,
+    request_id: str,
+    action: str,
+) -> CommandResult:
+    """The silent line for a tap on a request that was already resolved (#685).
+
+    An expected user race (double tap, a tap that lost to the keyboard strip),
+    so INFO and ``notify=False`` — mirrors #698's ask-flow late tap. It never
+    logs ``claude_control.sent``: that line means a response was written.
+    """
+    logger.info(
+        "claude_control.already_handled",
+        request_id=request_id,
+        action=action,
+        status=str(status),
+        first_action=prior.action if prior is not None else None,
+        outcome=prior.outcome if prior is not None else None,
+    )
+    if status is ControlRequestStatus.CANCELLED:
+        text = _CANCELLED_TEXT
+    elif _is_expired(prior):
+        text = f"ℹ️ {_EXPIRED_TOAST} — {_prior_label(prior)}"
+    else:
+        text = f"ℹ️ {_ALREADY_ANSWERED_TOAST} — {_prior_label(prior)}"
+    return CommandResult(text=text, notify=False)
+
+
+def _not_found_result(
+    request_id: str, action: str, reason: str | None
+) -> CommandResult:
+    logger.warning(
+        "claude_control.not_found",
+        request_id=request_id,
+        action=action,
+        reason=reason,
+    )
+    return CommandResult(text=_NOT_FOUND_TEXT, notify=True)
+
+
+def _unsent_result(
+    result: ControlSendResult, request_id: str, action: str
+) -> CommandResult:
+    """Result for a tap whose response was not written (#685)."""
+    if result.status is ControlRequestStatus.NOT_FOUND:
+        return _not_found_result(request_id, action, result.reason)
+    if result.status is not ControlRequestStatus.PENDING:
+        return _already_handled_result(result.status, result.prior, request_id, action)
+    # Ours to answer, but the session was gone or the write failed.
+    logger.warning(
+        "claude_control.failed",
+        request_id=request_id,
+        action=action,
+        reason=result.reason,
+    )
+    return CommandResult(text=_NOT_FOUND_TEXT, notify=True)
+
+
+def _claim_synthetic(
+    ctx: CommandContext, request_id: str, action: str
+) -> CommandResult | None:
+    """Claim and resolve a synthetic ``da:<session>`` button (#685).
+
+    These buttons answer nothing on the wire (the underlying ExitPlanMode was
+    already auto-denied); the verdict is applied in Untether. So "was it still
+    pending?" must be checked here, before acting — otherwise a Deny → Approve
+    double tap re-applied the verdict and turned the deny into an approval.
+    Everything between the check and the resolution is synchronous, so a
+    concurrent tap can't slip in. Returns the result to send when the button
+    was already resolved, or ``None`` when this tap now owns it.
+    """
+    channel_id = ctx.message.channel_id
+    owner = ctx.callback_query_id or new_control_claim_owner()
+    lookup = claim_control_request(
+        request_id, action=action, owner=owner, channel_id=channel_id
+    )
+    if lookup.status is ControlRequestStatus.NOT_FOUND:
+        return _not_found_result(request_id, action, lookup.reason)
+    if lookup.status is not ControlRequestStatus.PENDING:
+        return _already_handled_result(lookup.status, lookup.prior, request_id, action)
+    # Resolve before the first await: pop the registration and record the
+    # verdict. #683: marking it handled also lets the reconcile loop complete
+    # the synthetic claude.discuss_approve.N action it belongs to.
+    _REQUEST_TO_SESSION.pop(request_id, None)
+    mark_request_handled(request_id, action=action, channel_id=channel_id)
+    release_control_claims(owner)
+    return None
+
 
 class ClaudeControlCommand:
     """Command backend for Claude Code permission approval/denial."""
@@ -83,16 +227,44 @@ class ClaudeControlCommand:
 
     @staticmethod
     def early_answer_toast(
-        args_text: str, *, channel_id: int | None = None
+        args_text: str,
+        *,
+        channel_id: int | None = None,
+        claim_owner: str | None = None,
     ) -> str | None:
         """Return a toast string for immediate callback answering, or None.
 
-        ``channel_id`` is accepted for the shared hook signature (#715);
-        this toast is a pure action-label lookup and does not consult any
-        per-chat registry, so it does not use it.
+        #685: the toast reflects the request's real state, not just the
+        button's label — ``Already answered`` / ``No longer needed`` /
+        ``This request has expired`` for a tap that will write nothing. With
+        ``claim_owner`` (the callback query id) a pending request is reserved
+        for this tap, synchronously, before the dispatcher's first ``await``;
+        a concurrent second tap then sees it in flight. ``channel_id`` scopes
+        the resolved-request lookup (#715). Never raises.
         """
-        action = args_text.split(":", 1)[0].lower() if args_text else ""
-        return _EARLY_TOASTS.get(action)
+        action, _, request_id = (args_text or "").partition(":")
+        action = action.lower()
+        if action not in _EARLY_TOASTS or not request_id:
+            return None
+        try:
+            if claim_owner is not None:
+                lookup = claim_control_request(
+                    request_id,
+                    action=action,
+                    owner=claim_owner,
+                    channel_id=channel_id,
+                )
+            else:
+                lookup = classify_control_request(request_id, channel_id=channel_id)
+            return _toast_for(lookup, action)
+        except Exception:  # noqa: BLE001 — a toast must never take out the tap
+            logger.debug("claude_control.early_toast_failed", exc_info=True)
+            return _EARLY_TOASTS.get(action)
+
+    @staticmethod
+    def release_early_claim(owner: str) -> None:
+        """Drop any claim ``owner``'s early toast still holds (#685)."""
+        release_control_claims(owner)
 
     async def handle(self, ctx: CommandContext) -> CommandResult | None:
         """Handle callback from approve/deny/discuss/chat buttons.
@@ -131,29 +303,24 @@ class ClaudeControlCommand:
                 notify=False,
             )
 
-        if action == "discuss":
-            # Grab session_id before send_claude_control_response deletes it
-            session_id = _REQUEST_TO_SESSION.get(request_id)
+        channel_id = ctx.message.channel_id
 
+        if action == "discuss":
             # Deny with a message asking Claude Code to outline the plan.
             # Procedural, not a verdict on the plan (#793): approving the same
             # plan after the outline is a real approval.
-            success = await send_claude_control_response(
+            sent = await respond_to_control_request(
                 request_id,
-                approved=False,
+                False,
+                action=action,
+                channel_id=channel_id,
                 deny_message=_DISCUSS_DENY_MESSAGE,
                 rejects_plan=False,
+                claim_owner=ctx.callback_query_id,
             )
-            if not success:
-                logger.warning(
-                    "claude_control.failed",
-                    request_id=request_id,
-                    action=action,
-                )
-                return CommandResult(
-                    text="⚠️ Control request not found or session ended",
-                    notify=True,
-                )
+            if not sent.sent:
+                return _unsent_result(sent, request_id, action)
+            session_id = sent.session_id
 
             # Arm the outline gate: ExitPlanMode is auto-denied until Claude
             # writes enough visible outline text (#570 retired the extra
@@ -188,13 +355,10 @@ class ClaudeControlCommand:
         # Handle synthetic discuss-approval buttons (post-outline Approve/Deny)
         if request_id.startswith("da:"):
             session_id = request_id.removeprefix("da:")
-            # Clean up the synthetic request registration
-            _REQUEST_TO_SESSION.pop(request_id, None)
-            # #683: this button never reaches send_claude_control_response
-            # (the underlying request was already auto-denied), so mark it
-            # handled here — otherwise the reconcile loop can never complete
-            # the synthetic claude.discuss_approve.N action it belongs to.
-            mark_request_handled(request_id)
+            # #685: classify + claim + resolve before acting, so a second tap
+            # (e.g. Deny then Approve) can't re-apply — or flip — the verdict.
+            if (done := _claim_synthetic(ctx, request_id, action)) is not None:
+                return done
 
             # Check if session is still alive — it may have ended
             # (context exhaustion) before the user clicked the button
@@ -250,9 +414,7 @@ class ClaudeControlCommand:
                 skip_reply=True,
             )
 
-        # Grab session_id and tool name before send_claude_control_response
-        # deletes them
-        session_id = _REQUEST_TO_SESSION.get(request_id)
+        # Grab the tool name before the write pops it
         tool_name = _REQUEST_TO_TOOL_NAME.get(request_id, "")
 
         # Send control response via the public API
@@ -264,20 +426,19 @@ class ClaudeControlCommand:
             )
         else:
             deny_message = None
-        success = await send_claude_control_response(
-            request_id, approved, deny_message=deny_message
+        sent = await respond_to_control_request(
+            request_id,
+            approved,
+            action=action,
+            channel_id=channel_id,
+            deny_message=deny_message,
+            claim_owner=ctx.callback_query_id,
         )
-
-        if not success:
-            logger.warning(
-                "claude_control.failed",
-                request_id=request_id,
-                approved=approved,
-            )
-            return CommandResult(
-                text="⚠️ Control request not found or session ended",
-                notify=True,
-            )
+        if not sent.sent:
+            # #685: never log claude_control.sent (or say "Approved") for a
+            # tap that wrote nothing.
+            return _unsent_result(sent, request_id, action)
+        session_id = sent.session_id
 
         # Clear outline-pending state on explicit approve/deny
         had_outline = False
@@ -343,7 +504,9 @@ class ClaudeControlCommand:
         # Synthetic da: prefix path (request already auto-denied)
         if request_id.startswith("da:"):
             session_id = request_id.removeprefix("da:")
-            _REQUEST_TO_SESSION.pop(request_id, None)
+            # #685: same claim-before-acting guard as the da: approve/deny.
+            if (done := _claim_synthetic(ctx, request_id, "chat")) is not None:
+                return done
 
             if session_id not in _ACTIVE_RUNNERS:
                 logger.warning(
@@ -384,24 +547,18 @@ class ClaudeControlCommand:
             )
 
         # Hold-open path (real request_id, control request still pending)
-        session_id = _REQUEST_TO_SESSION.get(request_id)
-
-        success = await send_claude_control_response(
+        sent = await respond_to_control_request(
             request_id,
-            approved=False,
+            False,
+            action="chat",
+            channel_id=ctx.message.channel_id,
             deny_message=_CHAT_DENY_MESSAGE,
             rejects_plan=False,  # #793: wants to talk, not a rejection
+            claim_owner=ctx.callback_query_id,
         )
-        if not success:
-            logger.warning(
-                "claude_control.failed",
-                request_id=request_id,
-                action="chat",
-            )
-            return CommandResult(
-                text="⚠️ Control request not found or session ended",
-                notify=True,
-            )
+        if not sent.sent:
+            return _unsent_result(sent, request_id, "chat")
+        session_id = sent.session_id
 
         if session_id:
             _OUTLINE_PENDING.discard(session_id)
