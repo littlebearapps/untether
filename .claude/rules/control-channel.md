@@ -23,11 +23,16 @@ _DISCUSS_APPROVED: set[str]                            # sessions with post-outl
 _DISCUSS_CARRY: set[str]                               # #383: approvals already carried one boundary
 _PLAN_EXIT_APPROVED: set[str]                          # #283 diff-preview skip — turn-scoped (#383)
 _PENDING_ASK_REQUESTS: dict[str, tuple[int, str]]       # request_id -> (channel_id, question)
+_HANDLED_REQUESTS: dict[str, HandledControl | None]    # #685: answered/cancelled/expired record (action, outcome, channel)
+_INFLIGHT_CONTROL_RESPONSES: dict[str, str]            # #685: request_id -> claim owner while a tap is being written
+_CANCELLED_DURING_WRITE: set[str]                      # #684: CLI withdrew the request while a tap was mid-write
 ```
 
 - Register on first `system.init` event (when session_id is known)
 - Clean up all registries in the `finally` block of `run_impl` (including outline and approval state)
 - All control responses go through `write_control_response(session_id, request_id, approved, deny_message)`
+- Taps go through `respond_to_control_request()` (#685): `claim_control_request()` reserves the id before the dispatcher's first `await` (early-toast hook), and the result is three-way — sent / already handled (`Already answered`, silent `ℹ️` line) / not found or expired. `classify_control_request()` is channel-scoped. `send_claude_control_response()` is the bool wrapper. Never write a response without a claim
+- The CLI can withdraw a pending request with `control_cancel_request` (#684): `_handle_control_cancel` retires it from every registry, strips its keyboard and records `cancelled` (a late tap toasts `No longer needed`); nothing is written to the CLI. A cancel racing an in-flight tap defers via `_CANCELLED_DURING_WRITE`
 
 ## Auto-approve
 
@@ -128,7 +133,7 @@ control_request via the Telegram buttons and watch for an immediate re-issue.
 After the outline-gate auto-deny, synthetic Approve/Deny/Let's discuss buttons (✅/❌/📋 emoji prefixes) appear in Telegram:
 - User clicks "Approve Plan" → session added to `_DISCUSS_APPROVED`, outline-pending cleared
 - User clicks "Deny" → outline-pending cleared, no auto-approve flag set
-- User clicks "Let's discuss" → control request held open (never responded to) so Claude stays alive; 5-minute safety timeout (`CONTROL_REQUEST_TIMEOUT_SECONDS = 300.0`) cleans up stale held requests
+- User clicks "Let's discuss" → control request held open (never responded to) so Claude stays alive; the 5-minute sweep (`CONTROL_REQUEST_TIMEOUT_SECONDS = 300.0`) is event-driven (it runs when the next control event arrives, not on a timer) and records the request `expired`; a request nothing can answer is logged `control_request.unanswerable` by the bridge (#684, detect-only, `[watchdog] detect_unanswerable_control_requests`)
 - Next `ExitPlanMode` checks `_DISCUSS_APPROVED` → auto-approves if present
 - #383: an approval not consumed when its turn ends survives exactly ONE live turn boundary (`_DISCUSS_CARRY`), then is cleared; consuming it discards both sets
 - Synthetic callback_data prefix: `da:` (fits 64-byte Telegram limit)
