@@ -62,9 +62,10 @@ class TelegramFilesSettings(BaseModel):
     allowed_user_ids: list[StrictInt] = Field(default_factory=list)
     # Secret/credential patterns never delivered from the outbox. Broadened
     # for #628 recursive directory (zip) delivery, which makes shipping a
-    # nested secret far easier than the old flat scan — matched right-to-left
-    # by ``deny_reason`` (PurePosixPath.match), so bare names like ``.env``
-    # also match nested members.
+    # nested secret far easier than the old flat scan. Matched by
+    # ``deny_reason`` (``telegram/files.py:_glob_matches``): bare names like
+    # ``.env`` still match right-anchored at any depth, and ``**`` is
+    # recursive, so ``**/*.pem`` also denies a root-level ``key.pem`` (#831).
     deny_globs: list[NonEmptyStr] = Field(
         default_factory=lambda: [
             ".git/**",

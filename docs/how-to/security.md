@@ -99,8 +99,19 @@ File transfer includes a deny list that blocks access to sensitive paths. The de
 
 ```toml title="~/.untether/untether.toml"
 [transports.telegram.files]
-deny_globs = [".git/**", ".env", ".envrc", "**/*.pem", "**/.ssh/**"]
+deny_globs = [
+    ".git/**", ".env", "**/.env", "**/.env.*", ".envrc", "**/.envrc",
+    "**/*.pem", "**/*.key", "**/id_rsa", "**/id_ed25519", "**/.ssh/**",
+    "**/.netrc", "**/.npmrc", "**/.pypirc",
+]
 ```
+
+How patterns match ([#831](https://github.com/littlebearapps/untether/issues/831)):
+
+- `**` matches any number of directories, including none, so `**/*.pem` also covers a `key.pem` at the project root and `**/.ssh/**` covers `.ssh/config` as well as `a/b/.ssh/x/y`.
+- A pattern without a leading `**/` still matches at the end of a path, so `.env` denies `.env` and `app/.env` alike, and `secrets/**` denies everything under any `secrets/` directory.
+- Any `.git` path component is always denied, whatever its case (`.GIT` on macOS counts).
+- A project-root `.env.example` matches `**/.env.*`. Replace that pattern with narrower ones if you need to fetch it.
 
 Add more patterns as needed:
 

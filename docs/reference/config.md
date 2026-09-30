@@ -114,7 +114,7 @@ When `allowed_user_ids` is set, updates without a sender id (for example, some c
 | `auto_put_mode` | `"upload"`\|`"prompt"` | `"upload"` | Whether uploads also start a run. |
 | `uploads_dir` | string | `"incoming"` | Relative path inside the repo/worktree. |
 | `allowed_user_ids` | int[] | `[]` | Allowed senders for file transfer; empty allows private chats (group usage requires admin). |
-| `deny_globs` | string[] | (defaults) | Glob denylist (e.g. `.git/**`, `**/*.pem`). |
+| `deny_globs` | string[] | (defaults) | Glob denylist (e.g. `.git/**`, `**/*.pem`). `**` matches any number of directories, including none, so `**/*.pem` also denies a root-level `key.pem` ([#831](https://github.com/littlebearapps/untether/issues/831)). |
 | `outbox_enabled` | bool | `true` | Enable agent-initiated file delivery via `.untether-outbox/`. Requires `enabled = true`. |
 | `outbox_dir` | string | `".untether-outbox"` | Relative outbox directory name (must not be absolute). |
 | `outbox_max_files` | int (1–50) | `10` | Max files sent per run. |
