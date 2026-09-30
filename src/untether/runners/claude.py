@@ -8032,7 +8032,8 @@ class ClaudeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
             found_session.value if found_session else (resume.value if resume else None)
         )
         if session_id:
-            _cleanup_session_registries(session_id)
+            # #816: never deregister a newer process that owns the session.
+            _cleanup_session_registries(session_id, owner_state=state)
 
         parts = [f"Claude Code failed ({_rc_label(rc)})."]
         session = _session_label(found_session, resume)
@@ -8064,7 +8065,8 @@ class ClaudeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
             found_session.value if found_session else (resume.value if resume else None)
         )
         if session_id:
-            _cleanup_session_registries(session_id)
+            # #816: never deregister a newer process that owns the session.
+            _cleanup_session_registries(session_id, owner_state=state)
 
         if not found_session:
             parts = ["Claude Code finished but no session_id was captured"]

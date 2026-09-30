@@ -476,3 +476,31 @@ async def test_816_cleanup_skips_session_owned_by_another_run() -> None:
         assert sid not in claude_mod._SESSION_BG_STATE
     finally:
         claude_mod._cleanup_session_registries(sid)
+
+
+@pytest.mark.parametrize("hook", ["stream_end_events", "process_error_events"])
+async def test_816_stream_end_and_error_cleanup_keep_a_newer_owner(hook: str) -> None:
+    """#816 review: ``stream_end_events`` / ``process_error_events`` run for
+    the finishing process and must pass its state as the owner — otherwise
+    they deregister a newer process that now owns the same session id."""
+    sid = "owned-by-newer"
+    runner = ClaudeRunner(claude_cmd="claude")
+    old_state = claude_mod.ClaudeStreamState()
+    new_state = claude_mod.ClaudeStreamState()
+    claude_mod._SESSION_BG_STATE[sid] = new_state
+    claude_mod._SESSION_STDIN[sid] = object()  # type: ignore[assignment]
+    token = ResumeToken(engine=ENGINE, value=sid)
+    try:
+        if hook == "stream_end_events":
+            runner.stream_end_events(resume=None, found_session=token, state=old_state)
+        else:
+            runner.process_error_events(
+                1, resume=None, found_session=token, state=old_state
+            )
+        assert claude_mod.is_session_alive(sid)
+        assert claude_mod._SESSION_BG_STATE[sid] is new_state
+        # The owner's own end still cleans up.
+        runner.stream_end_events(resume=None, found_session=token, state=new_state)
+        assert not claude_mod.is_session_alive(sid)
+    finally:
+        claude_mod._cleanup_session_registries(sid)
