@@ -120,3 +120,105 @@ async def test_watch_config_applies_runtime(
         tg.cancel_scope.cancel()
 
     assert runtime.default_engine == "pi"
+
+
+# --- #209: a blocked extra_args flag never takes effect on reload -----------
+
+_BLOCKED_TOML = (
+    'transport = "telegram"\ndefault_engine = "codex"\n\n'
+    "[transports.telegram]\n"
+    'bot_token = "token"\nchat_id = 123\nallow_any_user = true\n\n'
+    "[engines.codex]\n"
+)
+
+
+def test_209_real_reload_rejects_blocked_flag(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    import untether.runtime_loader as runtime_loader
+    from untether.config import ConfigError
+
+    monkeypatch.setattr(runtime_loader.shutil, "which", lambda _cmd: "/bin/echo")
+    config_path = tmp_path / "untether.toml"
+    config_path.write_text(
+        _BLOCKED_TOML + 'extra_args = ["-c", "notify=[]", "--yolo"]\n',
+        encoding="utf-8",
+    )
+    with pytest.raises(ConfigError, match="--yolo"):
+        config_watch._reload_config(config_path, None, ())
+
+    # Negative control: the same file without the flag reloads normally.
+    config_path.write_text(
+        _BLOCKED_TOML + 'extra_args = ["-c", "notify=[]"]\n', encoding="utf-8"
+    )
+    reload = config_watch._reload_config(config_path, None, ())
+    runner = reload.runtime_spec.router.entry_for_engine("codex").runner
+    assert runner.extra_args == ["-c", "notify=[]"]
+
+
+@pytest.mark.anyio
+async def test_209_watch_keeps_previous_runtime_on_blocked_flag(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from structlog.testing import capture_logs
+
+    import untether.runtime_loader as runtime_loader
+
+    monkeypatch.setattr(runtime_loader.shutil, "which", lambda _cmd: "/bin/echo")
+    config_path = tmp_path / "untether.toml"
+    config_path.write_text('default_engine = "codex"\n', encoding="utf-8")
+    resolved_path = config_path.resolve()
+
+    codex_runner = ScriptRunner([Return(answer="ok")], engine="codex")
+    router = AutoRouter(
+        entries=[RunnerEntry(engine=codex_runner.engine, runner=codex_runner)],
+        default_engine=codex_runner.engine,
+    )
+    runtime = TransportRuntime(
+        router=router,
+        projects=ProjectsConfig(projects={}, default_project=None),
+        config_path=resolved_path,
+    )
+    original_router = runtime._router
+
+    ready = anyio.Event()
+    watching = anyio.Event()
+    delivered = anyio.Event()
+
+    async def fake_awatch(_path: Path):
+        watching.set()
+        await ready.wait()
+        yield {(None, str(resolved_path))}
+        delivered.set()
+        await anyio.sleep_forever()
+
+    monkeypatch.setattr(config_watch, "awatch", fake_awatch)
+
+    async def on_reload(_payload: ConfigReload) -> None:  # pragma: no cover
+        raise AssertionError("a blocked flag must never apply")
+
+    with capture_logs() as logs:
+        async with anyio.create_task_group() as tg:
+
+            async def run_watch() -> None:
+                await watch_config(
+                    config_path=resolved_path, runtime=runtime, on_reload=on_reload
+                )
+
+            tg.start_soon(run_watch)
+            with anyio.fail_after(2):
+                await watching.wait()
+            config_path.write_text(
+                _BLOCKED_TOML + 'extra_args = ["-c", "notify=[]", "--yolo"]\n',
+                encoding="utf-8",
+            )
+            ready.set()
+            with anyio.fail_after(2):
+                await delivered.wait()
+            tg.cancel_scope.cancel()
+
+    assert runtime._router is original_router
+    failed = [e for e in logs if e.get("event") == "config.reload.failed"]
+    assert len(failed) == 1
+    assert "--yolo" in failed[0]["error"]
+    assert not [e for e in logs if e.get("event") == "config.reload.applied"]

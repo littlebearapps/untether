@@ -4,6 +4,7 @@ import pytest
 
 import untether.runtime_loader as runtime_loader
 from untether.config import ConfigError
+from untether.model import ResumeToken
 from untether.settings import UntetherSettings
 
 
@@ -212,3 +213,86 @@ def test_setup_summary_all_engines_present(
     assert summary[0]["missing_on_path"] == []
     assert summary[0]["bad_config"] == []
     assert [e for e in logs if e.get("event") == "setup.warning"] == []
+
+
+# --- #209: extra_args deny-list at config load (D15) -------------------------
+
+
+def _build(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, engines: dict):
+    config_path = tmp_path / "untether.toml"
+    config_path.touch()
+    monkeypatch.setattr(runtime_loader.shutil, "which", lambda _cmd: "/bin/echo")
+    backends = runtime_loader.load_backends(
+        engine_ids=["claude", "codex"], allowlist=None, default_engine="claude"
+    )
+    return runtime_loader.build_router(
+        settings=_settings_with_engines(engines),
+        config_path=config_path,
+        backends=backends,
+        default_engine="claude",
+    )
+
+
+def test_209_default_engine_with_bypass_flag_refuses_to_start(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    with pytest.raises(ConfigError, match="--dangerously-skip-permissions"):
+        _build(
+            monkeypatch,
+            tmp_path,
+            {"claude": {"extra_args": ["--dangerously-skip-permissions"]}},
+        )
+
+
+def test_209_non_default_engine_with_bypass_flag_is_disabled(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from structlog.testing import capture_logs
+
+    from untether.router import RunnerUnavailableError
+
+    with capture_logs() as logs:
+        router = _build(
+            monkeypatch,
+            tmp_path,
+            {"codex": {"extra_args": ["-s", "read-only", "--yolo"]}},
+        )
+    entry = router.entry_for_engine("codex")
+    # D15: disabled (load_error), NOT rebuilt from `{}` as bad_config.
+    assert entry.status == "load_error"
+    assert not entry.available
+    assert "codex" not in [e.engine for e in router.available_entries]
+    with pytest.raises(RunnerUnavailableError, match="--yolo"):
+        router.runner_for(ResumeToken(engine="codex", value="t"))
+    summary = next(e for e in logs if e.get("event") == "setup.summary")
+    assert "codex" not in summary["found"]
+    warn = next(e for e in logs if e.get("event") == "setup.warning")
+    assert warn["engine"] == "codex"
+    assert "--yolo" in warn["issue"]
+    assert "read-only" not in warn["issue"]
+
+
+def test_209_other_config_errors_keep_bad_config_fallback(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    router = _build(monkeypatch, tmp_path, {"codex": {"extra_args": "not-a-list"}})
+    entry = router.entry_for_engine("codex")
+    assert entry.status == "bad_config"
+    assert entry.available
+    assert entry.runner.extra_args == ["-c", "notify=[]"]
+
+
+def test_209_load_error_shows_in_startup_status(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from untether.config import ProjectsConfig
+    from untether.transport_runtime import TransportRuntime
+
+    router = _build(monkeypatch, tmp_path, {"codex": {"extra_args": ["--yolo"]}})
+    runtime = TransportRuntime(
+        router=router,
+        projects=ProjectsConfig(projects={}, default_project=None),
+        config_path=tmp_path / "untether.toml",
+    )
+    assert runtime.engine_ids_with_status("load_error") == ("codex",)
+    assert "codex" not in runtime.available_engine_ids()

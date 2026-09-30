@@ -467,7 +467,7 @@ here; plugin engines should document their own keys.
 
 | Key | Type | Default | Notes |
 |-----|------|---------|-------|
-| `extra_args` | string[] | `["-c", "notify=[]"]` | Extra CLI args for `codex` (exec-only flags are rejected). |
+| `extra_args` | string[] | `["-c", "notify=[]"]` | Extra CLI args for `codex`, placed before `exec`. Flags Untether manages and flags that bypass Codex's sandbox/approvals (`--dangerously-bypass-approvals-and-sandbox`/`--yolo`, `--approve-for-me`, `--dangerously-bypass-hook-trust`, `--sandbox danger-full-access`, a `-c` value mentioning `danger-full-access`, `:danger`, `bypass` or `dangerously`, `-C`/`--cd`, `--worktree`, `-a`, `--ignore-rules`, `--ignore-user-config`, a bare `--`) are rejected at config-load — see [Security → Engine CLI flags](../how-to/security.md#engine-cli-flags-extra_args). |
 | `profile` | string | (unset) | Passed as `--profile <name>` and used as the session title. |
 
 === "untether config"
@@ -491,8 +491,8 @@ here; plugin engines should document their own keys.
 |-----|------|---------|-------|
 | `model` | string | (unset) | Optional model override. |
 | `allowed_tools` | string[] | `["Bash", "Read", "Edit", "Write"]` | Tools pre-approved via `--allowedTools`. **Since 0.35.5rc9 the default is not sent in `default` / `manual` / `acceptEdits`** — pre-approving these would defeat the approval prompt those modes exist to give ([#749](https://github.com/littlebearapps/untether/issues/749)). Setting the key explicitly still applies in every mode, and logs `claude.allowed_tools.prompting_mode_override` once. |
-| `extra_args` | string[] | `[]` | Extra CLI args passed to `claude` (e.g. `["--chrome"]` to opt into the Claude-in-Chrome extension). Flags Untether manages internally (`-p`, `--print`, `--output-format`, `--input-format`, `--resume`/`-r`, `--continue`/`-c`, `--permission-mode`, `--permission-prompt-tool`) are rejected at config-load. |
-| `dangerously_skip_permissions` | bool | `false` | Skip Claude Code permissions prompts. |
+| `extra_args` | string[] | `[]` | Extra CLI args passed to `claude` (e.g. `["--chrome"]` to opt into the Claude-in-Chrome extension). Flags Untether manages internally (`-p`, `--print`, `--output-format`, `--input-format`, `--resume`/`-r`, `--continue`/`-c`, `--permission-mode`, `--permission-prompt-tool`, `--permission-prompts`, `--allowedTools`/`--allowed-tools` — use `allowed_tools`) and the approval bypasses (`--dangerously-skip-permissions`, `--allow-dangerously-skip-permissions`, a bare `--`) are rejected at config-load, in every spelling (`--flag=value`, short clusters like `-pc`). See [Security → Engine CLI flags](../how-to/security.md#engine-cli-flags-extra_args). |
+| `dangerously_skip_permissions` | bool | `false` | Adds `--dangerously-skip-permissions`, which overrides `permission_mode` **and every `/planmode` choice** — no Telegram approvals are shown. Logs `claude.config.dangerously_skip_permissions` once at startup. |
 | `use_api_billing` | bool | `false` | Keep `ANTHROPIC_API_KEY` for API billing. |
 
 === "untether config"

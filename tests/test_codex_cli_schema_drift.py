@@ -152,3 +152,144 @@ def test_config_route_untrusted_rejected(tmp_path: Path) -> None:
         pytest.skip("`codex features list` is gone; pick another config-loading probe")
     assert proc.returncode != 0
     assert "is no longer supported; remove this setting" in proc.stderr, proc.stderr
+
+
+# --- #209: extra_args deny-list stays current with the CLI -------------------
+
+# Flags #209 refuses that are hidden aliases or exec-level only; probed with
+# `codex exec <flag> --help` (clap reports unknown args even with --help).
+_209_EXEC_FLAGS = (
+    "--dangerously-bypass-approvals-and-sandbox",
+    "--yolo",
+    "--approve-for-me",
+    "--not-so-yolo",
+    "--dangerously-bypass-hook-trust",
+    "--worktree",
+    "--ignore-rules",
+    "--ignore-user-config",
+    "--ephemeral",
+)
+# Inherited into exec from the ROOT position, where extra_args sit.
+_209_ROOT_LIVE = (
+    "--dangerously-bypass-approvals-and-sandbox",
+    "--yolo",
+    "--approve-for-me",
+    "--not-so-yolo",
+    "--dangerously-bypass-hook-trust",
+    "--worktree",
+)
+# Exec-only: at the root they already fail every run loudly.
+_209_ROOT_REJECTED = ("--ignore-rules", "--ignore-user-config", "--ephemeral")
+
+# Every long flag in `codex --help` plus `codex exec --help` on 0.157.1, classified
+# for #209: blocked (bypass/workspace), managed (Untether sets it / exec-only),
+# allowed (documented passthrough), d16 (non-security, deferred to #851), and
+# root-only (TUI/top-level; rejected or ignored by exec).
+CODEX_FLAGS_CLASSIFIED_0_157_1: dict[str, str] = {
+    "--dangerously-bypass-approvals-and-sandbox": "blocked",
+    "--approve-for-me": "blocked",
+    "--dangerously-bypass-hook-trust": "blocked",
+    "--cd": "blocked",
+    "--worktree": "blocked",
+    "--sandbox": "allowed",  # only the danger-full-access value is blocked (D3)
+    "--config": "allowed",  # substring rule on the value (D5)
+    "--ask-for-approval": "managed",
+    "--ignore-rules": "managed",
+    "--ignore-user-config": "managed",
+    "--skip-git-repo-check": "managed",
+    "--json": "managed",
+    "--output-schema": "managed",
+    "--output-last-message": "managed",
+    "--color": "managed",
+    "--add-dir": "allowed",  # D4
+    "--enable": "allowed",
+    "--disable": "allowed",
+    "--strict-config": "allowed",
+    "--image": "allowed",
+    "--model": "allowed",
+    "--oss": "allowed",
+    "--local-provider": "allowed",
+    "--profile": "allowed",
+    "--search": "allowed",
+    "--help": "allowed",
+    "--version": "allowed",
+    "--ephemeral": "d16",
+    "--thread-source": "d16",
+    "--remote": "root-only",
+    "--remote-auth-token-env": "root-only",
+    "--no-alt-screen": "root-only",
+    "--no-daemon": "root-only",
+}
+
+_CODEX_HELP_FLAG_RE = re.compile(r"^  (?:-\w, |    )(--[A-Za-z][\w-]*)", re.MULTILINE)
+
+
+@pytest.mark.parametrize("flag", _209_EXEC_FLAGS)
+def test_209_exec_bypass_flags_exist(tmp_path: Path, flag: str) -> None:
+    proc = _run_codex(["exec", flag, "--help"], tmp_path)
+    assert proc.returncode == 0, (
+        f"`codex exec {flag}` is no longer accepted — renamed/removed upstream; "
+        f"update the #209 deny-list: {_clap_error(proc.stderr)} "
+        f"(last green on codex-cli {PROBED_CLI_VERSION})"
+    )
+
+
+@pytest.mark.parametrize("flag", [*_209_ROOT_LIVE, *_209_ROOT_REJECTED])
+def test_209_root_placement_semantics(tmp_path: Path, flag: str) -> None:
+    proc = _run_codex([flag, "exec", "--help"], tmp_path)
+    if flag in _209_ROOT_LIVE:
+        assert proc.returncode == 0, (
+            f"root-level {flag} is no longer accepted: {_clap_error(proc.stderr)}"
+        )
+    else:
+        assert proc.returncode == 2, (
+            f"root-level {flag} is now accepted — the #209 'exec-only, codex "
+            "rejects it before exec' hint is wrong; reword it"
+        )
+        assert f"unexpected argument '{flag}'" in proc.stderr
+
+
+def test_209_sandbox_value_set_includes_danger(tmp_path: Path) -> None:
+    proc = _run_codex(["exec", "--sandbox", "__untether_probe__", "--help"], tmp_path)
+    assert "danger-full-access" in _possible_values(proc.stderr)
+
+
+def test_209_root_and_exec_sandbox_coexist(tmp_path: Path) -> None:
+    """A root `-s` (where extra_args sit) coexists with #830's exec-level
+    `--sandbox read-only`; a second exec-level `-s` is a clap error."""
+    ok = _run_codex(
+        ["-s", "workspace-write", "exec", "-s", "read-only", "--help"], tmp_path
+    )
+    assert ok.returncode == 0, _clap_error(ok.stderr)
+    dup = _run_codex(["exec", "-s", "read-only", "-s", "read-only", "--help"], tmp_path)
+    assert dup.returncode == 2
+    assert "cannot be used multiple times" in dup.stderr
+
+
+def test_209_codex_flag_snapshot(tmp_path: Path) -> None:
+    listed: set[str] = set()
+    for args in (["--help"], ["exec", "--help"]):
+        proc = _run_codex(args, tmp_path)
+        assert proc.returncode == 0, _clap_error(proc.stderr)
+        listed.update(_CODEX_HELP_FLAG_RE.findall(proc.stdout))
+    assert listed, "parsed no flags from `codex --help` — the help layout moved"
+    unclassified = sorted(listed - CODEX_FLAGS_CLASSIFIED_0_157_1.keys())
+    assert not unclassified, (
+        f"new Codex flag(s) {unclassified} on the installed CLI — classify each "
+        "for #209 (block / allow + document in docs/how-to/security.md) and add "
+        "it to CODEX_FLAGS_CLASSIFIED_0_157_1 (last green on codex-cli "
+        f"{PROBED_CLI_VERSION})"
+    )
+    removed = sorted(CODEX_FLAGS_CLASSIFIED_0_157_1.keys() - listed)
+    if removed:
+        import warnings
+
+        warnings.warn(f"Codex flags no longer in --help: {removed}", stacklevel=1)
+
+
+def test_209_snapshot_matches_the_deny_list() -> None:
+    from untether.runners.codex import find_blocked_codex_args
+
+    for flag, cls in CODEX_FLAGS_CLASSIFIED_0_157_1.items():
+        refused = bool(find_blocked_codex_args([flag]))
+        assert refused is (cls in {"blocked", "managed"}), (flag, cls)

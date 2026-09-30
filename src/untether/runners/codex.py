@@ -22,6 +22,17 @@ from ..runner import (
 )
 from ..schemas import codex as codex_schema
 from ..utils.paths import relativize_command
+from .extra_args_guard import (
+    SECURITY_DOC_REF,
+    BlockedArg,
+    BlockedCategory,
+    BlockedExtraArgsError,
+    dedupe_hits,
+    format_blocked,
+    iter_option_tokens,
+    normalise_value,
+    option_value,
+)
 from .run_options import get_run_options
 
 logger = get_logger(__name__)
@@ -32,6 +43,7 @@ __all__ = [
     "CODEX_SAFE_PERMISSION_MODE",
     "ENGINE",
     "CodexRunner",
+    "find_blocked_codex_args",
     "find_exec_only_flag",
     "translate_codex_event",
 ]
@@ -44,7 +56,8 @@ _RECONNECTING_RE = re.compile(
 # Flags Untether manages, rejected in ``extra_args`` (#407). NB the name is
 # historical: ``--ask-for-approval`` is top-level only — ``codex exec`` never
 # reads it and forces approval=never itself (#830), so Untether no longer
-# passes it at all. It stays rejected here; #209 reclassifies it.
+# passes it at all. #209's `find_blocked_codex_args` rejects every spelling
+# (`-a`, `-aVALUE`, `--ask-for-approval=…`).
 _EXEC_ONLY_FLAGS = {
     "--ask-for-approval",
     "--skip-git-repo-check",
@@ -112,6 +125,135 @@ def find_exec_only_flag(extra_args: list[str]) -> str | None:
             if arg.startswith(prefix):
                 return arg
     return None
+
+
+# --- #209: `[codex] extra_args` deny-list -----------------------------------
+# `find_exec_only_flag` above is kept for back-compat (tests pin its raw-token
+# return); `build_runner` uses `find_blocked_codex_args`, a superset.
+# extra_args sit at the ROOT (before `exec`), where clap inherits the
+# bypass/workspace flags into exec (upstream shared_options.rs
+# inherit_exec_root_options). Codex findings Q1; probes in plan 01 §3.3.
+_CODEX_MANAGED_HINT = "is managed by Untether and cannot be overridden"
+_CODEX_BYPASS_HINT = (
+    "bypasses Codex's sandbox/approval/hook-trust checks and is not accepted in"
+    f" `extra_args`; see {SECURITY_DOC_REF}"
+)
+_CODEX_WORKSPACE_HINT = (
+    "is managed by Untether: Untether sets the working directory from the"
+    " project (`/ctx`, worktrees)"
+)
+_CODEX_BLOCKED: dict[str, tuple[BlockedCategory, str]] = {
+    # managed (existing #407 set, every spelling)
+    "--skip-git-repo-check": ("managed", _CODEX_MANAGED_HINT),
+    "--json": ("managed", _CODEX_MANAGED_HINT),
+    "--output-schema": ("managed", _CODEX_MANAGED_HINT),
+    "--output-last-message": ("managed", _CODEX_MANAGED_HINT),
+    "--color": ("managed", _CODEX_MANAGED_HINT),
+    # managed (new): top-level only and ignored by `codex exec` (#830)
+    "--ask-for-approval": (
+        "managed",
+        "is managed by Untether: `codex exec` ignores it — use /config →"
+        " Approval policy",
+    ),
+    # exec-only: before `exec`, codex rejects them (rc=2 on every run)
+    "--ignore-rules": (
+        "managed",
+        "is managed by Untether: it is exec-only, and before `exec` codex rejects it",
+    ),
+    "--ignore-user-config": (
+        "managed",
+        "is managed by Untether: it is exec-only, and before `exec` codex rejects it",
+    ),
+    # bypass
+    "--dangerously-bypass-approvals-and-sandbox": ("bypass", _CODEX_BYPASS_HINT),
+    "--yolo": ("bypass", _CODEX_BYPASS_HINT),
+    "--approve-for-me": ("bypass", _CODEX_BYPASS_HINT),
+    "--not-so-yolo": ("bypass", _CODEX_BYPASS_HINT),
+    "--dangerously-bypass-hook-trust": ("bypass", _CODEX_BYPASS_HINT),
+    # workspace
+    "--cd": ("workspace", _CODEX_WORKSPACE_HINT),
+    "--worktree": ("workspace", _CODEX_WORKSPACE_HINT),
+    "--": (
+        "separator",
+        "is not accepted: a bare `--` would turn `exec …` into prompt text",
+    ),
+}
+_CODEX_DANGER_SANDBOX = "danger-full-access"
+# D5: case-insensitive substring over the whole `-c key=value` — catches
+# sandbox_mode, permission profiles (`:danger-full-access`,
+# `:danger-no-sandbox`), inline tables, `bypass_hook_trust` and the
+# `dangerously_allow_*` keys without parsing TOML keys.
+_CODEX_CONFIG_DANGER_SUBSTRINGS: tuple[str, ...] = (
+    "danger-full-access",
+    ":danger",
+    "bypass",
+    "dangerously",
+)
+# clap short options per `codex --help` / `codex exec --help` (0.157.1).
+_CODEX_SHORT_ALIASES: dict[str, str] = {
+    "c": "--config",
+    "i": "--image",
+    "m": "--model",
+    "p": "--profile",
+    "s": "--sandbox",
+    "C": "--cd",
+    "a": "--ask-for-approval",
+    "o": "--output-last-message",
+    "h": "--help",
+    "V": "--version",
+}
+_CODEX_SHORT_VALUE_FLAGS: frozenset[str] = frozenset(
+    {"c", "i", "m", "p", "s", "C", "a", "o"}
+)
+
+
+def find_blocked_codex_args(extra_args: list[str]) -> list[BlockedArg]:
+    """Every blocked flag in *extra_args* (#209), deduped, in order.
+
+    Root `-s/--sandbox read-only|workspace-write` stays allowed: it is the
+    documented way to pick a full-auto sandbox, and safe mode's exec-level
+    `--sandbox read-only` outranks it (#830 R4). Only `danger-full-access`
+    is refused (D3).
+    """
+    hits: list[BlockedArg] = []
+    for tok in iter_option_tokens(
+        extra_args,
+        short_aliases=_CODEX_SHORT_ALIASES,
+        short_value_flags=_CODEX_SHORT_VALUE_FLAGS,
+    ):
+        rule = _CODEX_BLOCKED.get(tok.flag)
+        if rule is not None:
+            category, hint = rule
+            hits.append(BlockedArg(flag=tok.flag, category=category, hint=hint))
+            continue
+        if tok.flag == "--sandbox":
+            value = option_value(extra_args, tok)
+            if value is not None and normalise_value(value) == _CODEX_DANGER_SANDBOX:
+                hits.append(
+                    BlockedArg(
+                        flag="--sandbox",
+                        category="bypass",
+                        hint=f"with `{_CODEX_DANGER_SANDBOX}` {_CODEX_BYPASS_HINT}",
+                    )
+                )
+        elif tok.flag == "--config":
+            value = option_value(extra_args, tok)
+            lowered = value.lower() if value is not None else ""
+            matched = next(
+                (sub for sub in _CODEX_CONFIG_DANGER_SUBSTRINGS if sub in lowered),
+                None,
+            )
+            if matched is not None:
+                hits.append(
+                    BlockedArg(
+                        flag="--config",
+                        category="bypass",
+                        hint=(
+                            f"with a value mentioning `{matched}` {_CODEX_BYPASS_HINT}"
+                        ),
+                    )
+                )
+    return dedupe_hits(hits)
 
 
 def _parse_reconnect_message(message: str) -> tuple[int, int] | None:
@@ -812,17 +954,17 @@ def build_runner(config: EngineConfig, config_path: Path) -> Runner:
             f"Invalid `codex.extra_args` in {config_path}; expected a list of strings."
         )
 
-    exec_only_flag = find_exec_only_flag(extra_args)
-    if exec_only_flag:
+    blocked = find_blocked_codex_args(extra_args)
+    if blocked:
+        # Flag names only — never the values (a `-c` value can hold a secret).
         logger.warning(
             "codex.config.invalid",
-            error=f"exec-only flag {exec_only_flag!r} is managed by Untether",
+            error="blocked extra_args flag",
+            flags=[hit.flag for hit in blocked],
+            categories=[hit.category for hit in blocked],
             config_path=str(config_path),
         )
-        raise ConfigError(
-            f"Invalid `codex.extra_args` in {config_path}; exec-only flag "
-            f"{exec_only_flag!r} is managed by Untether."
-        )
+        raise BlockedExtraArgsError(format_blocked("codex", config_path, blocked))
 
     title = "Codex"
     profile_value = config.get("profile")
