@@ -157,7 +157,11 @@ _RESULT_EVENT_TYPE = "result"
 # requests like mcp_status). Skip when computing last_event_type so the
 # session.summary reflects the last *stream* event, not the last frame
 # the parser saw. recent_events still records them for diagnostics.
-_CONTROL_CHANNEL_EVENT_TYPES = frozenset({"control_request", "control_response"})
+# #684: ``control_cancel_request`` (the CLI withdrawing a request) is control
+# traffic too — it must never become ``last_event_type``.
+_CONTROL_CHANNEL_EVENT_TYPES = frozenset(
+    {"control_request", "control_response", "control_cancel_request"}
+)
 
 # #812: Claude's ``--include-hook-events`` lifecycle frames
 # (``{"type":"system","subtype":"hook_started|hook_progress|hook_response"}``)
@@ -192,7 +196,11 @@ _APPROVAL_PENDING_REFIRE_S = 1800.0
 # the turn ended, or Claude answered on the control channel. Every other
 # label (``rate_limit_event``, ``assistant``, ``tool:*``, ``system``) is
 # transparent to the backward scan below.
-_APPROVAL_RESOLVING_EVENT_LABELS = frozenset({"control_response", "user", "result"})
+# #684: a ``control_cancel_request`` resolves the wait as well — the CLI
+# withdrew the request, so nothing is pending any more.
+_APPROVAL_RESOLVING_EVENT_LABELS = frozenset(
+    {"control_response", "control_cancel_request", "user", "result"}
+)
 
 
 def _approval_pending(stream: JsonlStreamState, logger: Any = None) -> bool:

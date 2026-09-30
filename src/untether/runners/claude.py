@@ -41,6 +41,7 @@ from ..markdown import _short_model_name
 from ..model import (
     TURN_COMPLETE_MARKER,
     Action,
+    ActionEvent,
     ActionKind,
     CompletedEvent,
     EngineId,
@@ -392,6 +393,14 @@ class InflightClaim:
 # claimed id, and ``_cleanup_session_registries`` drops the session's claims.
 _INFLIGHT_CONTROL_RESPONSES: dict[str, InflightClaim] = {}
 _DIRECT_CLAIM_SEQ = itertools.count(1)
+
+# #684: request ids the CLI withdrew (``control_cancel_request``) while a tap
+# was writing its answer. The cancel handler leaves the ``_REQUEST_TO_*``
+# entries to that writer (it still reads them) and parks the id here;
+# ``respond_to_control_request`` consumes it in its ``finally`` and records
+# ``outcome="cancelled"``. Bounded: the writer always discards its id, and
+# session cleanup drops any leftover.
+_CANCELLED_DURING_WRITE: set[str] = set()
 
 # NOTE (#570): the time-based progressive discuss cooldown (_DISCUSS_COOLDOWN,
 # 30/60/90/120s escalation) that lived here was a workaround for Claude Code
@@ -1264,6 +1273,26 @@ def pending_control_requests_for_session(session_id: str | None) -> int:
     return pending
 
 
+@dataclass(frozen=True, slots=True)
+class ControlRequestSnapshot:
+    """One control request still registered for a user answer (#684).
+
+    Read by the bridge's ``control_request.unanswerable`` detector.
+    ``kind``: ``tool`` | ``ask`` | ``outline_hold`` | ``synthetic`` (``da:``).
+    ``answerable_by_text``: a text reply in the chat routes to it (a pending
+    AskUserQuestion). ``writer_ok``: a live stdin writer exists for the
+    session.
+    """
+
+    request_id: str
+    session_id: str
+    age_s: float
+    tool_name: str
+    kind: str
+    answerable_by_text: bool
+    writer_ok: bool
+
+
 @dataclass(slots=True)
 class AskQuestionState:
     """Tracks multi-question AskUserQuestion flow state."""
@@ -1287,9 +1316,16 @@ _ASK_QUESTION_FLOWS: dict[str, AskQuestionState] = {}
 # group chat where the edit queues behind other traffic). Remembering the
 # answered flow briefly lets a late tap resolve to "already answered" instead
 # of looking like an unexplained missing flow.
-_ANSWERED_ASK_FLOWS: dict[str, tuple[int, float]] = {}
+# #684: values are (channel_id, ts, outcome) — ``outcome`` is ``answered``
+# or ``cancelled`` (the CLI withdrew the question), so a late tap can say
+# "No longer needed" rather than "Already answered".
+_ANSWERED_ASK_FLOWS: dict[str, tuple[int, float, str]] = {}
 ANSWERED_ASK_FLOW_TTL_S: float = 300.0
 _ANSWERED_ASK_FLOWS_MAX = 32
+# Untether policy, event-driven: swept only when another interactive
+# control_request arrives (#684) — a lone request never expires. The CLI has
+# no deadline on a permission prompt (findings 2026-09-30 Q1 §5); a request
+# that can't be answered is reported by ``control_request.unanswerable``.
 CONTROL_REQUEST_TIMEOUT_SECONDS: float = 300.0  # 5 minutes
 
 # #374 (rc7): bounded keep for background-agent handles (Agent/Task
@@ -1491,6 +1527,9 @@ class ClaudeStreamState:
     control_action_for_tool: dict[str, str] = field(default_factory=dict)
     # Map request_id -> action_id for reconciling callback-handled requests (#229)
     request_to_action: dict[str, str] = field(default_factory=dict)
+    # #684: request_id -> time.monotonic() when it was registered for a user
+    # answer (normal, hold-open and ``da:``), for the unanswerable detector.
+    control_registered_at: dict[str, float] = field(default_factory=dict)
     # Auto-approve ExitPlanMode when permission_mode is `plan-auto` (#741;
     # spelled `auto` before 0.35.5rc8)
     auto_approve_exit_plan_mode: bool = False
@@ -1929,6 +1968,56 @@ class ClaudeStreamState:
         """
         sid = self.factory.resume.value if self.factory.resume is not None else None
         return pending_control_requests_for_session(sid) > 0
+
+    def control_request_snapshot(
+        self, now: float | None = None
+    ) -> list[ControlRequestSnapshot]:
+        """#684: this session's still-registered control requests, with age.
+
+        Pure read of the registries (plus pruning of stale
+        ``control_registered_at`` keys). A request with no registration time
+        (unknown age) is skipped rather than guessed.
+        """
+        sid = self.factory.resume.value if self.factory.resume is not None else None
+        if not sid:
+            return []
+        now = time.monotonic() if now is None else now
+        registered = self.control_registered_at
+        for rid in [r for r in registered if r not in _REQUEST_TO_SESSION]:
+            del registered[rid]
+        writer_ok = sid in _SESSION_STDIN and sid in _ACTIVE_RUNNERS
+        snaps: list[ControlRequestSnapshot] = []
+        for rid, owner in list(_REQUEST_TO_SESSION.items()):
+            if owner != sid:
+                continue
+            at = registered.get(rid)
+            if at is None:
+                continue
+            synthetic = rid.startswith("da:")
+            if synthetic:
+                kind = "synthetic"
+            elif self.request_to_action.get(rid, "").startswith(
+                "claude.discuss_approve."
+            ):
+                kind = "outline_hold"
+            elif rid in _PENDING_ASK_REQUESTS:
+                kind = "ask"
+            else:
+                kind = "tool"
+            snaps.append(
+                ControlRequestSnapshot(
+                    request_id=rid,
+                    session_id=sid,
+                    age_s=max(0.0, now - at),
+                    tool_name="DiscussApproval"
+                    if synthetic
+                    else _REQUEST_TO_TOOL_NAME.get(rid, ""),
+                    kind=kind,
+                    answerable_by_text=rid in _PENDING_ASK_REQUESTS,
+                    writer_ok=writer_ok,
+                )
+            )
+        return snaps
 
     def awaiting_rate_limit_retry(self) -> bool:
         """True while Claude is inside an upstream rate-limit retry window."""
@@ -5075,6 +5164,166 @@ def _drop_exitplanmode_plan(
     )
 
 
+def _complete_control_action(
+    state: ClaudeStreamState, request_id: str, *, title: str
+) -> ActionEvent | None:
+    """Complete the action that carries *request_id*'s keyboard (#684).
+
+    The presenter's newest-incomplete rule then drops the keyboard on the
+    next render — the only way buttons go (runner ``translate`` is sync and
+    never calls Telegram).
+    """
+    action_id = state.request_to_action.pop(request_id, None)
+    if not action_id:
+        return None
+    state.control_action_for_tool = {
+        k: v for k, v in state.control_action_for_tool.items() if v != action_id
+    }
+    return state.factory.action_completed(
+        action_id=action_id, kind="warning", title=title, ok=True
+    )
+
+
+def _retire_superseded_discuss_approval(
+    state: ClaudeStreamState, *, session_id: str
+) -> list[UntetherEvent]:
+    """#684 D5: retire the outline-guard ``da:<session>`` escalation button
+    once the same session's real ExitPlanMode is held open with its own
+    buttons. Left alone it stays in ``_REQUEST_TO_SESSION`` for the process's
+    lifetime, pausing the live-session timers until the 4 h cap. A late tap
+    on it reads "This request has expired — replaced by the outlined plan".
+    """
+    stale = f"da:{session_id}"
+    if _REQUEST_TO_SESSION.get(stale) != session_id:
+        return []
+    del _REQUEST_TO_SESSION[stale]
+    state.control_registered_at.pop(stale, None)
+    mark_request_handled(stale, action="superseded", outcome="expired")
+    logger.info("control_request.da_superseded", session_id=session_id)
+    completed = _complete_control_action(
+        state, stale, title="Superseded by the outlined plan"
+    )
+    return [completed] if completed is not None else []
+
+
+def _handle_control_cancel(
+    request_id: str | None,
+    *,
+    state: ClaudeStreamState,
+    factory: EventFactory,
+) -> list[UntetherEvent]:
+    """#684: the CLI withdrew a pending request (``control_cancel_request``).
+
+    The CLI stops waiting at once and ignores any answer that still arrives,
+    and there is no reply to the cancel itself — so nothing is written. The
+    request is retired locally: registries cleared, keyboard stripped (its
+    action completed), a later tap answers "No longer needed", and a pending
+    question stops capturing the chat's next message. The frame carries no
+    ``session_id``: only this run's own state scopes it (#510).
+    """
+    if not request_id:
+        logger.debug("control_request.cancel_without_id")
+        return []
+    rid = request_id
+    sid = factory.resume.value if factory.resume else None
+    # A queued auto-answer would be ignored by the CLI; skipping it avoids a
+    # misleading ``control_response.sent``.
+    state.auto_approve_queue[:] = [r for r in state.auto_approve_queue if r != rid]
+    state.auto_deny_queue[:] = [e for e in state.auto_deny_queue if e[0] != rid]
+
+    known = (
+        rid in state.pending_control_requests
+        or rid in state.request_to_action
+        or (sid is not None and _REQUEST_TO_SESSION.get(rid) == sid)
+    )
+    inflight = rid in _INFLIGHT_CONTROL_RESPONSES
+    if not known:
+        logger.debug(
+            "control_request.cancel_after_answer"
+            if rid in _HANDLED_REQUESTS
+            else "control_request.cancel_unknown",
+            request_id=rid,
+            session_id=sid,
+        )
+        return []
+
+    registered_at = state.control_registered_at.pop(rid, None)
+    age_s = (
+        round(time.monotonic() - registered_at, 1)
+        if registered_at is not None
+        else None
+    )
+    tool_name = _REQUEST_TO_TOOL_NAME.get(rid)
+    action_for_rid = state.request_to_action.get(rid, "")
+    is_ask = rid in _PENDING_ASK_REQUESTS or rid in _ASK_QUESTION_FLOWS
+    kind = (
+        "ask"
+        if is_ask
+        else "outline_hold"
+        if action_for_rid.startswith("claude.discuss_approve.")
+        else "tool"
+    )
+
+    # State-side retirement (always ours, whoever owns the registries).
+    state.pending_control_requests.pop(rid, None)
+    _PENDING_ASK_REQUESTS.pop(rid, None)
+    flow = _ASK_QUESTION_FLOWS.pop(rid, None)
+    _drop_exitplanmode_plan(
+        state, rid, rejected=False, reason="cancelled", session_id=sid
+    )
+
+    still_registered = sid is not None and _REQUEST_TO_SESSION.get(rid) == sid
+    if rid in _HANDLED_REQUESTS and not inflight and not still_registered:
+        # Our answer was written before the abort reached us (an answer pops
+        # the registration): the record stays what it is — a terminal record
+        # is never downgraded, and an answer isn't rewritten as cancelled.
+        # Just finish the keyboard.
+        completed = _complete_control_action(state, rid, title="Permission resolved")
+        logger.debug(
+            "control_request.cancel_after_answer",
+            request_id=rid,
+            session_id=sid,
+        )
+        return [completed] if completed is not None else []
+
+    if flow is not None:
+        _record_answered_ask_flow(rid, flow.channel_id, outcome="cancelled")
+
+    if inflight:
+        # A tap is writing its answer right now: ``write_control_response``
+        # still reads ``_REQUEST_TO_*``, so leave them to the writer and let
+        # it record the ``cancelled`` outcome (#685 respond path).
+        _CANCELLED_DURING_WRITE.add(rid)
+    else:
+        if still_registered:
+            del _REQUEST_TO_SESSION[rid]
+        _REQUEST_TO_INPUT.pop(rid, None)
+        _REQUEST_TO_TOOL_NAME.pop(rid, None)
+        mark_request_handled(
+            rid,
+            action="cancelled",
+            outcome="cancelled",
+            channel_id=get_run_channel_id(),
+        )
+
+    completed = _complete_control_action(
+        state,
+        rid,
+        title="⏹️ Permission request withdrawn — Claude Code no longer needs an answer",
+    )
+    logger.info(
+        "control_request.cancelled_by_cli",
+        request_id=rid,
+        session_id=sid,
+        tool_name=tool_name,
+        kind=kind,
+        age_s=age_s,
+        had_action=completed is not None,
+        inflight=inflight,
+    )
+    return [completed] if completed is not None else []
+
+
 def _maybe_audit_env(state: ClaudeStreamState, session_id: str) -> None:
     """One-shot ``/proc/<pid>/environ`` audit on first system.init (#361).
 
@@ -6320,6 +6569,7 @@ def _translate_claude_event_base(
                     )
 
                     if outline_guard or outline_ready:
+                        pre_events: list[UntetherEvent] = []
                         if text_len >= _OUTLINE_MIN_CHARS:
                             # Outline was written — hold the request open.
                             # Don't auto-deny; keep the control request pending
@@ -6342,11 +6592,21 @@ def _translate_claude_event_base(
                                 time.time(),
                             )
                             _REQUEST_TO_SESSION[request_id] = session_id
+                            state.control_registered_at[request_id] = time.monotonic()
                             _REQUEST_TO_INPUT[request_id] = getattr(
                                 request, "input", {}
                             )
                             _REQUEST_TO_TOOL_NAME[request_id] = getattr(
                                 request, "tool_name", ""
+                            )
+                            # #684 D5: the real request now carries the
+                            # buttons; an earlier outline-guard ``da:`` entry
+                            # would otherwise pause the live session until
+                            # the 4 h cap.
+                            pre_events.extend(
+                                _retire_superseded_discuss_approval(
+                                    state, session_id=session_id
+                                )
                             )
                         else:
                             # Retry without outline — auto-deny with the
@@ -6381,6 +6641,9 @@ def _translate_claude_event_base(
                         else:
                             button_request_id = f"da:{session_id}"
                             _REQUEST_TO_SESSION[button_request_id] = session_id
+                            state.control_registered_at[button_request_id] = (
+                                time.monotonic()
+                            )
                             # #685: the id is shared by every outline round in
                             # the session. Drop round 1's handled record, or
                             # the reconcile loop completes round 2's synthetic
@@ -6412,6 +6675,7 @@ def _translate_claude_event_base(
                             synth_title = f"{synth_title}\n{caption}"
 
                         return [
+                            *pre_events,
                             state.factory.action_started(
                                 action_id=synth_action_id,
                                 kind="warning",
@@ -6498,6 +6762,7 @@ def _translate_claude_event_base(
             if factory.resume:
                 session_id = factory.resume.value
                 _REQUEST_TO_SESSION[request_id] = session_id
+                state.control_registered_at[request_id] = time.monotonic()  # #684
                 # Store original tool input and tool name for response handling
                 if isinstance(request, claude_schema.ControlCanUseToolRequest):
                     _REQUEST_TO_INPUT[request_id] = getattr(request, "input", {})
@@ -6771,6 +7036,9 @@ def _translate_claude_event_base(
                 session_id=factory.resume.value if factory.resume else None,
             )
             return []
+        case claude_schema.StreamControlCancelRequest(request_id=cancel_rid):
+            # #684: the CLI withdrew a request it no longer needs.
+            return _handle_control_cancel(cancel_rid, state=state, factory=factory)
         case _:
             logger.debug(
                 "claude.event.unrecognised",
@@ -6804,8 +7072,6 @@ class ClaudeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
     supports_control_channel: bool = True
     _pty_master_fd: int | None = None  # legacy PTY approach (non-permission mode)
     _proc_stdin: Any | None = None  # PIPE stdin for control channel (permission mode)
-    _control_timeout_seconds: float = CONTROL_REQUEST_TIMEOUT_SECONDS
-    _max_pending_control_requests: int = 100
     # #333 Tier 1 / Tier 3: subcountdown tuning constants. Class-level so
     # tests can override via monkeypatch without touching production code.
     _subcountdown_poll_interval_s: float = 5.0
@@ -9878,6 +10144,21 @@ async def respond_to_control_request(
         # Clean up the mapping after use. ``pop``, not ``del``: the claim
         # makes a concurrent delete impossible, but it is cheap insurance.
         _REQUEST_TO_SESSION.pop(request_id, None)
+        if request_id in _CANCELLED_DURING_WRITE:
+            # #684: the CLI withdrew the request while we were writing; it
+            # ignores our answer, so say so rather than "approved".
+            mark_request_handled(
+                request_id,
+                action="cancelled",
+                outcome="cancelled",
+                channel_id=channel_id,
+            )
+            return ControlSendResult(
+                status=ControlRequestStatus.CANCELLED,
+                sent=success,
+                session_id=session_id,
+                prior=_HANDLED_REQUESTS.get(request_id),
+            )
         # A written *or* attempted write marks it handled (a closed pipe
         # means the session is gone either way).
         mark_request_handled(request_id, action=action, channel_id=channel_id)
@@ -9888,6 +10169,7 @@ async def respond_to_control_request(
             reason=None if success else "write_failed",
         )
     finally:
+        _CANCELLED_DURING_WRITE.discard(request_id)
         claim = _INFLIGHT_CONTROL_RESPONSES.get(request_id)
         if claim is not None and claim.owner == owner:
             del _INFLIGHT_CONTROL_RESPONSES[request_id]
@@ -9923,6 +10205,8 @@ async def send_claude_control_response(
         deny_message=deny_message,
         rejects_plan=rejects_plan,
     )
+    if result.status is ControlRequestStatus.CANCELLED:
+        return False  # #684: even when written — the CLI ignored it
     return result.sent or result.status in (
         ControlRequestStatus.IN_FLIGHT,
         ControlRequestStatus.ALREADY_HANDLED,
@@ -9998,6 +10282,7 @@ def _cleanup_session_registries(
         # #685: a claim on a request whose session is gone can never
         # complete — drop it so the id doesn't read "in flight" for ever.
         _INFLIGHT_CONTROL_RESPONSES.pop(k, None)
+        _CANCELLED_DURING_WRITE.discard(k)  # #684
         # Also clean up any pending ask requests and flows for stale requests
         _PENDING_ASK_REQUESTS.pop(k, None)
         _ASK_QUESTION_FLOWS.pop(k, None)
@@ -10041,13 +10326,16 @@ async def answer_ask_question(request_id: str, answer: str) -> bool:
     )
 
 
-def _record_answered_ask_flow(request_id: str, channel_id: int) -> None:
-    """Remember that *request_id*'s AskUserQuestion flow was answered (#698)."""
+def _record_answered_ask_flow(
+    request_id: str, channel_id: int, *, outcome: str = "answered"
+) -> None:
+    """Remember that *request_id*'s AskUserQuestion flow was answered (#698)
+    — or withdrawn by the CLI (``outcome="cancelled"``, #684)."""
     now = time.monotonic()
-    for rid, (_ch, ts) in list(_ANSWERED_ASK_FLOWS.items()):
+    for rid, (_ch, ts, _outcome) in list(_ANSWERED_ASK_FLOWS.items()):
         if now - ts > ANSWERED_ASK_FLOW_TTL_S:
             del _ANSWERED_ASK_FLOWS[rid]
-    _ANSWERED_ASK_FLOWS[request_id] = (channel_id, now)
+    _ANSWERED_ASK_FLOWS[request_id] = (channel_id, now, outcome)
     while len(_ANSWERED_ASK_FLOWS) > _ANSWERED_ASK_FLOWS_MAX:
         _ANSWERED_ASK_FLOWS.pop(next(iter(_ANSWERED_ASK_FLOWS)))
 
@@ -10060,14 +10348,26 @@ def recently_answered_ask_flow(channel_id: int | None = None) -> str | None:
     missing flow (WARNING). Scoped by channel so one chat's late tap cannot
     claim another chat's answer.
     """
+    resolved = recently_resolved_ask_flow(channel_id)
+    return resolved[0] if resolved is not None else None
+
+
+def recently_resolved_ask_flow(
+    channel_id: int | None = None,
+) -> tuple[str, str] | None:
+    """Like :func:`recently_answered_ask_flow`, with the outcome (#684).
+
+    Returns ``(request_id, outcome)`` — ``answered`` or ``cancelled`` (the
+    CLI withdrew the question) — or None.
+    """
     now = time.monotonic()
-    for rid, (ch, ts) in list(_ANSWERED_ASK_FLOWS.items()):
+    for rid, (ch, ts, outcome) in list(_ANSWERED_ASK_FLOWS.items()):
         if now - ts > ANSWERED_ASK_FLOW_TTL_S:
             del _ANSWERED_ASK_FLOWS[rid]
             continue
         if channel_id is not None and ch != channel_id:
             continue
-        return rid
+        return rid, outcome
     return None
 
 

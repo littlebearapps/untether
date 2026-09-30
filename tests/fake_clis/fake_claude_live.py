@@ -1907,7 +1907,102 @@ def scenario_plan_approve_monitor_ticks(first: dict) -> None:
     serve_mode_followups()
 
 
+# ── #684: a control request the CLI withdraws / never gets answered ─────────
+
+# How long ``control_cancel`` waits for a host answer before withdrawing.
+CANCEL_AFTER_S = float(os.environ.get("FAKE_CLAUDE_CANCEL_AFTER_S", "0.3"))
+# ``control_unanswered``: emit a result this long after the request (a
+# background agent's request pending across the turn's end); unset = never.
+UNANSWERED_RESULT_S = os.environ.get("FAKE_CLAUDE_UNANSWERED_RESULT_S")
+# ``control_cancel``: pause between the cancel frame and the tool_result, so
+# the host re-renders its progress message in between.
+AFTER_CANCEL_S = float(os.environ.get("FAKE_CLAUDE_AFTER_CANCEL_S", "0"))
+
+
+def _raise_can_use_tool(req_id: str, tool_id: str) -> None:
+    tool_use("Bash", tool_id, {"command": "touch x"})
+    emit(
+        {
+            "type": "control_request",
+            "request_id": req_id,
+            "request": {
+                "subtype": "can_use_tool",
+                "tool_name": "Bash",
+                "input": {"command": "touch x"},
+                "tool_use_id": tool_id,
+            },
+        }
+    )
+    log_stdin(f"can_use_tool:{req_id}")
+
+
+def _cancel_turn(req_id: str = "req-cancel-1") -> None:
+    """A Bash permission request the CLI withdraws (interrupt / turn abort):
+    ``control_cancel_request`` then the synthetic rejection tool_result, as
+    probed on CLI 2.1.285 (findings 2026-09-30 Z4). Any host answer is
+    recorded in FAKE_CLAUDE_STDIN_LOG (``control_response``) and ignored."""
+    tool_id = "toolu_c"
+    _raise_can_use_tool(req_id, tool_id)
+    with contextlib.suppress(queue.Empty):
+        _responses.get(timeout=CANCEL_AFTER_S)
+        log_stdin("answered_before_cancel")
+    emit({"type": "control_cancel_request", "request_id": req_id})
+    log_stdin(f"cancel_sent:{req_id}")
+    if AFTER_CANCEL_S > 0:
+        time.sleep(AFTER_CANCEL_S)
+    tool_result(
+        tool_id,
+        "The user doesn't want to proceed with this tool use. The tool use was "
+        "rejected (eg. if it was a file edit, the new_string was NOT written to "
+        "the file). STOP what you are doing and wait for the user to tell you "
+        "how to proceed.",
+    )
+    text("Stopped.")
+    result("Stopped.")
+
+
+def scenario_control_cancel(first: dict) -> None:
+    init()
+    _cancel_turn()
+    serve_followups()
+
+
+def scenario_control_cancel_followup(first: dict) -> None:
+    """Turn 1 answers; the injected follow-up's turn raises and withdraws the
+    request (a follow-up turn is translated by the run's reader tasks)."""
+    init()
+    text("ready")
+    result("ready")
+    obj = next_user(None)
+    if isinstance(obj, dict):
+        cmd = obj.get("uuid")
+        lifecycle(cmd, "queued")
+        lifecycle(cmd, "started")
+        init()
+        _cancel_turn()
+    serve_followups()
+
+
+def scenario_control_unanswered(first: dict) -> None:
+    """A Bash permission request nobody answers: never cancelled. With
+    FAKE_CLAUDE_UNANSWERED_RESULT_S the turn still ends (the request stays
+    pending across the result); otherwise the CLI waits until stdin EOF."""
+    init()
+    _raise_can_use_tool("req-unanswered-1", "toolu_u")
+    if UNANSWERED_RESULT_S is not None:
+        time.sleep(float(UNANSWERED_RESULT_S))
+        text("waiting on approval")
+        result("waiting on approval")
+    while True:
+        obj = next_user(None)
+        if obj is None or obj == "timeout":
+            break
+
+
 _SCENARIOS = {
+    "control_cancel": scenario_control_cancel,
+    "control_cancel_followup": scenario_control_cancel_followup,
+    "control_unanswered": scenario_control_unanswered,
     "bg_agent_progressing": scenario_bg_agent_progressing,
     "bg_agent_silent": scenario_bg_agent_silent,
     "bg_agent_long_tool": scenario_bg_agent_long_tool,

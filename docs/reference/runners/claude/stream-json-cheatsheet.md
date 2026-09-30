@@ -277,6 +277,20 @@ Untether's plan re-arm (host → CLI, handled inline by the CLI's stdin reader, 
 
 A real change is followed by the `system/status` frame above; `plan` while already `plan` is acked with no status frame. Refusal codes (2.1.285): `invalid_mode`, `bypass_*` (target `bypassPermissions`) and `auto_mode_*` (target `auto`) — `plan` is never refused.
 
+### `control_cancel_request` (CLI → host) — #684
+
+The CLI withdraws a pending `can_use_tool` it no longer needs (interrupt, turn abort). No
+`session_id`, and no reply is expected — a `control_response` that still arrives for that id is
+ignored (CLI 2.1.285, findings 2026-09-30 probe Z4). It is followed by a synthetic rejection
+`tool_result`. Closing stdin with a request pending sends **no** cancel frame (probe Z5).
+
+```json
+{"type":"control_cancel_request","request_id":"<id>"}
+```
+
+Untether retires the request (registries, keyboard, `cancelled` record) and writes nothing; see
+`untether-events.md` §4.1.
+
 ### Hook lifecycle (`system` subtypes, `--include-hook-events`) — #812
 
 Emitted only when Untether passes `--include-hook-events` (control-channel mode, CLI lists the

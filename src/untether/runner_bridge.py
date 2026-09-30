@@ -271,6 +271,59 @@ def sweep_stale_registries(now: float | None = None) -> int:
     return pruned
 
 
+# #684: callback-data prefixes of buttons that can answer a Claude control
+# request (approval / plan buttons, AskUserQuestion options).
+_CONTROL_CALLBACK_PREFIXES = ("claude_control:", "aq:")
+
+
+def control_callbacks_in(rendered: RenderedMessage | None) -> frozenset[str]:
+    """callback_data of every ``claude_control:`` / ``aq:`` button on a
+    rendered message (#684). The cancel row and other buttons are ignored."""
+    if rendered is None:
+        return frozenset()
+    markup = rendered.extra.get("reply_markup")
+    rows = markup.get("inline_keyboard") if isinstance(markup, dict) else None
+    if not isinstance(rows, list):
+        return frozenset()
+    found: set[str] = set()
+    for row in rows:
+        if not isinstance(row, list):
+            continue
+        for button in row:
+            data = button.get("callback_data") if isinstance(button, dict) else None
+            if isinstance(data, str) and data.startswith(_CONTROL_CALLBACK_PREFIXES):
+                found.add(data)
+    return frozenset(found)
+
+
+def build_control_surface_probe(
+    edits: ProgressEdits, turn_router: Any
+) -> Callable[[], frozenset[str]]:
+    """#684: a probe for the control buttons the user can see right now —
+    turn 1's progress message (until the run's result), the open follow-up /
+    wake turn's progress message (``turn_router.current``), and ``"outline"``
+    while an outline message is up (the Pause & Outline Approve/Deny keyboard
+    lives there, not on the progress message; bound to the message's
+    lifetime, not the TTL-swept ``_OUTLINE_REGISTRY``)."""
+
+    def _probe() -> frozenset[str]:
+        callbacks: set[str] = set()
+        engine_state = getattr(edits.stream, "engine_state", None)
+        if not getattr(engine_state, "completed_turns", 0):
+            callbacks |= control_callbacks_in(edits.last_rendered)
+        current = getattr(turn_router, "current", None)
+        turn_edits = getattr(current, "edits", None)
+        if turn_edits is not None:
+            callbacks |= control_callbacks_in(turn_edits.last_rendered)
+        if edits.has_outline_messages or (
+            turn_edits is not None and turn_edits.has_outline_messages
+        ):
+            callbacks.add("outline")
+        return frozenset(callbacks)
+
+    return _probe
+
+
 # ---------------------------------------------------------------------------
 # Progress message persistence (orphan cleanup across restarts)
 # ---------------------------------------------------------------------------
@@ -1661,6 +1714,20 @@ class ProgressEdits:
         # #777: renders the pre-result "⏳ background (N)" block (markdown)
         # from the run's native task map; None when off / not Claude.
         self.background_provider: Callable[[], str | None] | None = None
+        # #684: detect-only ``control_request.unanswerable``. The probe
+        # returns the control callbacks visible on the run's messages (plus
+        # "outline" while an outline message is up); None = unknown, so only
+        # ``no_session_writer`` can fire. Wired by ``handle_message``.
+        self.control_surface_probe: Callable[[], frozenset[str]] | None = None
+        self._detect_unanswerable: bool = True
+        self._unanswerable_warned: set[str] = set()
+
+    @property
+    def has_outline_messages(self) -> bool:
+        """#684: True exactly while this run's Pause & Outline messages (and
+        their Approve/Deny buttons) are on screen. Unlike ``_OUTLINE_REGISTRY``
+        it is not TTL-swept after an hour."""
+        return bool(self._outline_refs)
 
     def _background_block(self) -> str | None:
         provider = self.background_provider
@@ -1909,6 +1976,9 @@ class ProgressEdits:
             # #203: piggy-back a TTL sweep of module-level registries on this
             # periodic tick.  Cheap when idle (empty dicts → early return).
             sweep_stale_registries()
+            # #684: before the live-idle ``continue`` below, so it also covers
+            # a live session held open by a request nobody can answer.
+            self._check_unanswerable_control_requests()
             elapsed = self.clock() - self._last_event_at
             # #787: a live session between turns is silent by design (its
             # runner lifecycle owns teardown). Its hold must not read as a
@@ -2916,6 +2986,63 @@ class ProgressEdits:
             if (now - action_state.last_update_at) < freshness_s:
                 return True
         return False
+
+    def _check_unanswerable_control_requests(self) -> None:
+        """#684: WARN once per request that has waited past ``tool_timeout``
+        with nothing that can answer it — no approval/option button on any
+        live message of the run and no text-reply route (``no_keyboard``), or
+        no stdin writer for the session (``no_session_writer``).
+
+        Detect-only: no auto-deny, no registry change, no chat message, and
+        the live-session hold is untouched (decisions D3/D4). Run-level only:
+        this monitor lives for the whole run (pre-result, follow-up turns,
+        live idle) and reads the run's own stream (#510).
+        """
+        if not (self.run_level and self._detect_unanswerable):
+            return
+        try:
+            es = getattr(self.stream, "engine_state", None) if self.stream else None
+            probe = getattr(es, "control_request_snapshot", None)
+            if not callable(probe):
+                return
+            snaps = [
+                snap
+                for snap in probe()
+                if snap.request_id not in self._unanswerable_warned
+                and snap.age_s >= self._STALL_THRESHOLD_TOOL
+            ]
+            if not snaps:
+                return
+            surface = self.control_surface_probe
+            visible = surface() if surface is not None else None
+            live_idle = self._is_live_session_idle()
+            for snap in snaps:
+                reasons: list[str] = []
+                if not snap.writer_ok:
+                    reasons.append("no_session_writer")
+                # A request shadowed by a newer pending one's buttons is not
+                # unanswerable: answering that one brings its keyboard back.
+                if visible is not None and not visible and not snap.answerable_by_text:
+                    reasons.append("no_keyboard")
+                if not reasons:
+                    continue
+                self._unanswerable_warned.add(snap.request_id)
+                logger.warning(
+                    "control_request.unanswerable",
+                    request_id=snap.request_id,
+                    session_id=snap.session_id,
+                    channel_id=self.channel_id,
+                    tool_name=snap.tool_name,
+                    kind=snap.kind,
+                    age_s=round(snap.age_s, 1),
+                    reasons=reasons,
+                    live_idle=live_idle,
+                    holds_live_session=live_idle,
+                    visible_buttons=len(visible or ()),
+                    pid=self.pid,
+                )
+        except Exception as exc:  # noqa: BLE001 - monitor loop must not die
+            logger.debug("progress_edits.unanswerable_probe_failed", error=str(exc))
 
     def _has_pending_approval(self) -> bool:
         """True while the run is blocked on a user approval.
@@ -3972,6 +4099,8 @@ async def run_runner_with_cancel(
         # #776: turns delivered after the run's own result (live session).
         followup_turns=turn_router.turns_delivered if turn_router else 0,
         stall_suppressions=suppression_summary,
+        # #684: requests flagged by the detect-only unanswerable canary.
+        unanswerable_control_requests=len(edits._unanswerable_warned),
         # #695: both events carry the model so a single grep over either
         # answers "which model ran this session?".
         **_model_log_fields(edits.tracker.meta),
@@ -4942,6 +5071,7 @@ async def handle_message(
             watchdog.stuck_after_tool_result_recovery_delay
         )
         target._bash_grace_seconds = watchdog.bash_grace_seconds
+        target._detect_unanswerable = watchdog.detect_unanswerable_control_requests
 
     if watchdog is not None:
         edits._stall_repeat_seconds = watchdog.stall_repeat_seconds
@@ -4961,6 +5091,8 @@ async def handle_message(
         )
         # #481: bash grace window for the stall_bash_grace_suppressed branch.
         edits._bash_grace_seconds = watchdog.bash_grace_seconds
+        # #684: kill switch for the detect-only unanswerable canary.
+        edits._detect_unanswerable = watchdog.detect_unanswerable_control_requests
         if hasattr(runner, "_LIVENESS_TIMEOUT_SECONDS"):
             runner._LIVENESS_TIMEOUT_SECONDS = watchdog.liveness_timeout
         if hasattr(runner, "_stall_auto_kill"):
@@ -5864,6 +5996,8 @@ async def handle_message(
         ),
         deliver_cancelled=_deliver_turn_cancelled,
     )
+
+    edits.control_surface_probe = build_control_surface_probe(edits, turn_router)
 
     def _bg_session_idle() -> bool:
         # The live session sits between turns: no wake / follow-up turn is

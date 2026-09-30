@@ -2,6 +2,7 @@ import contextlib
 import os
 import sys
 import uuid
+from types import SimpleNamespace
 
 import anyio
 import pytest
@@ -9730,3 +9731,320 @@ async def test_810_final_path_still_unregisters_once(progress_store) -> None:
     assert [(r["reason"], r["message_id"]) for r in _810_released(logs)] == [
         ("final", progress_id)
     ]
+
+
+# ---------------------------------------------------------------------------
+# #684: detect-only control_request.unanswerable (run-level monitor)
+# ---------------------------------------------------------------------------
+
+
+def _snap_684(
+    request_id: str = "r-1",
+    *,
+    age_s: float = 700.0,
+    kind: str = "tool",
+    answerable_by_text: bool = False,
+    writer_ok: bool = True,
+):
+    from untether.runners.claude import ControlRequestSnapshot
+
+    return ControlRequestSnapshot(
+        request_id=request_id,
+        session_id="sess-684",
+        age_s=age_s,
+        tool_name="Bash",
+        kind=kind,
+        answerable_by_text=answerable_by_text,
+        writer_ok=writer_ok,
+    )
+
+
+def _edits_684(snaps, visible=frozenset(), *, run_level=True):
+    edits = _make_edits(FakeTransport(), _KeyboardPresenter())
+    edits.run_level = run_level
+    edits._STALL_THRESHOLD_TOOL = 600.0
+    calls = {"probe": 0}
+
+    def _snapshot(now=None):
+        calls["probe"] += 1
+        return list(snaps)
+
+    edits.stream = _make_stream(
+        engine_state=_make_engine_state(control_request_snapshot=_snapshot)
+    )
+    if visible is not None:
+        edits.control_surface_probe = lambda: frozenset(visible)
+    return edits, calls
+
+
+def _unanswerable(logs):
+    return [e for e in logs if e.get("event") == "control_request.unanswerable"]
+
+
+def test_684_unanswerable_warns_once_without_keyboard() -> None:
+    edits, _ = _edits_684([_snap_684()])
+    with structlog.testing.capture_logs() as logs:
+        edits._check_unanswerable_control_requests()
+        edits._check_unanswerable_control_requests()
+    hits = _unanswerable(logs)
+    assert len(hits) == 1
+    assert hits[0]["log_level"] == "warning"
+    assert hits[0]["reasons"] == ["no_keyboard"]
+    assert hits[0]["request_id"] == "r-1" and hits[0]["kind"] == "tool"
+    assert hits[0]["visible_buttons"] == 0
+    assert edits._unanswerable_warned == {"r-1"}
+
+
+def test_684_no_warn_when_keyboard_visible() -> None:
+    edits, _ = _edits_684([_snap_684()], {"claude_control:approve:r-1"})
+    with structlog.testing.capture_logs() as logs:
+        edits._check_unanswerable_control_requests()
+    assert _unanswerable(logs) == []
+
+
+def test_684_no_warn_when_newer_request_shows_buttons() -> None:
+    edits, _ = _edits_684(
+        [_snap_684("r-old", age_s=900.0), _snap_684("r-new", age_s=650.0)],
+        {"claude_control:approve:r-new"},
+    )
+    with structlog.testing.capture_logs() as logs:
+        edits._check_unanswerable_control_requests()
+    assert _unanswerable(logs) == []
+
+
+def test_684_no_warn_below_threshold() -> None:
+    edits, _ = _edits_684([_snap_684(age_s=599.0)])
+    with structlog.testing.capture_logs() as logs:
+        edits._check_unanswerable_control_requests()
+    assert _unanswerable(logs) == []
+
+
+def test_684_ask_answerable_by_text_not_flagged() -> None:
+    edits, _ = _edits_684([_snap_684(kind="ask", answerable_by_text=True)])
+    with structlog.testing.capture_logs() as logs:
+        edits._check_unanswerable_control_requests()
+    assert _unanswerable(logs) == []
+
+
+def test_684_no_session_writer_flagged_even_with_keyboard() -> None:
+    edits, _ = _edits_684([_snap_684(writer_ok=False)], {"claude_control:approve:r-1"})
+    with structlog.testing.capture_logs() as logs:
+        edits._check_unanswerable_control_requests()
+    (hit,) = _unanswerable(logs)
+    assert hit["reasons"] == ["no_session_writer"]
+
+
+def test_684_no_probe_only_writer_reason_can_fire() -> None:
+    edits, _ = _edits_684([_snap_684()], visible=None)
+    with structlog.testing.capture_logs() as logs:
+        edits._check_unanswerable_control_requests()
+    assert _unanswerable(logs) == []
+
+
+def test_684_turn_level_edits_never_check() -> None:
+    edits, calls = _edits_684([_snap_684()], run_level=False)
+    with structlog.testing.capture_logs() as logs:
+        edits._check_unanswerable_control_requests()
+    assert calls["probe"] == 0 and _unanswerable(logs) == []
+
+
+def test_684_kill_switch() -> None:
+    edits, calls = _edits_684([_snap_684()])
+    edits._detect_unanswerable = False
+    with structlog.testing.capture_logs() as logs:
+        edits._check_unanswerable_control_requests()
+    assert calls["probe"] == 0 and _unanswerable(logs) == []
+
+
+def test_684_non_claude_engine_noop() -> None:
+    edits = _make_edits(FakeTransport(), _KeyboardPresenter())
+    edits.run_level = True
+    edits.stream = _make_stream(engine_state=_make_engine_state())
+    edits.control_surface_probe = frozenset
+    with structlog.testing.capture_logs() as logs:
+        edits._check_unanswerable_control_requests()
+    assert _unanswerable(logs) == []
+
+
+@pytest.mark.anyio
+async def test_684_fires_while_live_idle() -> None:
+    """The check runs before the live-idle ``continue``, so a live session
+    held open by a request nobody can answer is reported."""
+    clock = _FakeClock(start=100.0)
+    edits = _make_edits(FakeTransport(), _KeyboardPresenter(), clock=clock)
+    edits.run_level = True
+    edits._stall_check_interval = 0.01
+    edits._STALL_THRESHOLD_SECONDS = 0.05
+    edits._STALL_THRESHOLD_TOOL = 600.0
+    edits._STALL_THRESHOLD_APPROVAL = 0.05
+    edits._STALL_THRESHOLD_APPROVAL_FIRST = 0.05
+    edits.stream = _make_stream(
+        last_event_type="result",
+        engine_state=_make_engine_state(
+            live_mode=True,
+            completed_turns=1,
+            turn_open=False,
+            awaiting_user_approval=lambda: True,
+            control_request_snapshot=lambda now=None: [_snap_684()],
+        ),
+    )
+    edits.control_surface_probe = frozenset
+
+    with structlog.testing.capture_logs() as logs:
+        async with anyio.create_task_group() as tg:
+
+            async def drive() -> None:
+                clock.set(110.0)
+                await anyio.sleep(0.2)
+                edits.signal_send.close()
+
+            tg.start_soon(edits.run)
+            tg.start_soon(drive)
+
+    (hit,) = _unanswerable(logs)
+    assert hit["live_idle"] is True and hit["holds_live_session"] is True
+    events = [e.get("event") for e in logs]
+    assert "progress_edits.stall_live_idle_suppressed" in events
+
+
+@pytest.mark.anyio
+async def test_684_probe_exception_does_not_kill_monitor() -> None:
+    clock = _FakeClock(start=100.0)
+    edits = _make_edits(FakeTransport(), _KeyboardPresenter(), clock=clock)
+    edits.run_level = True
+    edits._stall_check_interval = 0.01
+    ticks = {"n": 0}
+
+    def _boom(now=None):
+        ticks["n"] += 1
+        raise RuntimeError("boom")
+
+    edits.stream = _make_stream(
+        engine_state=_make_engine_state(control_request_snapshot=_boom)
+    )
+    with structlog.testing.capture_logs() as logs:
+        async with anyio.create_task_group() as tg:
+
+            async def drive() -> None:
+                await anyio.sleep(0.1)
+                edits.signal_send.close()
+
+            tg.start_soon(edits.run)
+            tg.start_soon(drive)
+
+    assert ticks["n"] >= 2  # the loop kept ticking
+    assert any(
+        e.get("event") == "progress_edits.unanswerable_probe_failed" for e in logs
+    )
+
+
+def _outline_edits_684():
+    from untether.runner_bridge import (
+        _OUTLINE_REGISTRY,
+        _OUTLINE_REGISTRY_TS,
+        build_control_surface_probe,
+    )
+
+    edits = _make_edits(FakeTransport(), _KeyboardPresenter())
+    edits.run_level = True
+    edits._STALL_THRESHOLD_TOOL = 600.0
+    ref = MessageRef(channel_id=123, message_id=77)
+    edits._outline_refs.append(ref)
+    _OUTLINE_REGISTRY["sess-684"] = (FakeTransport(), edits._outline_refs)
+    _OUTLINE_REGISTRY_TS["sess-684"] = 0.0
+    edits.stream = _make_stream(
+        engine_state=_make_engine_state(
+            completed_turns=0,
+            control_request_snapshot=lambda now=None: [
+                _snap_684(age_s=4000.0, kind="outline_hold")
+            ],
+        )
+    )
+    edits.control_surface_probe = build_control_surface_probe(
+        edits, SimpleNamespace(current=None)
+    )
+    return edits
+
+
+def test_684_outline_reader_over_one_hour_not_flagged() -> None:
+    from untether.runner_bridge import _OUTLINE_REGISTRY, sweep_stale_registries
+
+    edits = _outline_edits_684()
+    sweep_stale_registries(now=3601.0)
+    assert "sess-684" not in _OUTLINE_REGISTRY
+    assert edits.has_outline_messages
+    assert "outline" in edits.control_surface_probe()
+    with structlog.testing.capture_logs() as logs:
+        edits._check_unanswerable_control_requests()
+    assert _unanswerable(logs) == []
+
+
+def test_684_outline_deleted_then_flagged() -> None:
+    from untether.runner_bridge import _OUTLINE_REGISTRY, _OUTLINE_REGISTRY_TS
+
+    edits = _outline_edits_684()
+    edits._outline_refs.clear()
+    _OUTLINE_REGISTRY.pop("sess-684", None)
+    _OUTLINE_REGISTRY_TS.pop("sess-684", None)
+    with structlog.testing.capture_logs() as logs:
+        edits._check_unanswerable_control_requests()
+    (hit,) = _unanswerable(logs)
+    assert hit["reasons"] == ["no_keyboard"] and hit["kind"] == "outline_hold"
+
+
+def test_684_surface_probe_reads_turn_edits_after_result() -> None:
+    from untether.runner_bridge import build_control_surface_probe
+
+    run_edits = _make_edits(FakeTransport(), _KeyboardPresenter())
+    run_edits.last_rendered = RenderedMessage(
+        text="x",
+        extra={
+            "reply_markup": {
+                "inline_keyboard": [
+                    [{"text": "A", "callback_data": "claude_control:approve:old"}]
+                ]
+            }
+        },
+    )
+    run_edits.stream = _make_stream(engine_state=_make_engine_state(completed_turns=1))
+    turn_edits = _make_edits(FakeTransport(), _KeyboardPresenter())
+    turn_edits.last_rendered = RenderedMessage(
+        text="y",
+        extra={
+            "reply_markup": {
+                "inline_keyboard": [[{"text": "o", "callback_data": "aq:opt:0"}]]
+            }
+        },
+    )
+    router = SimpleNamespace(current=SimpleNamespace(edits=turn_edits))
+    probe = build_control_surface_probe(run_edits, router)
+    # After the run's result the run message's (stale) keyboard is ignored.
+    assert probe() == frozenset({"aq:opt:0"})
+    router.current = None
+    assert probe() == frozenset()
+
+
+def test_684_control_callbacks_in() -> None:
+    from untether.runner_bridge import control_callbacks_in
+
+    assert control_callbacks_in(None) == frozenset()
+    assert control_callbacks_in(RenderedMessage(text="x")) == frozenset()
+    msg = RenderedMessage(
+        text="x",
+        extra={
+            "reply_markup": {
+                "inline_keyboard": [
+                    [
+                        {"text": "A", "callback_data": "claude_control:approve:r"},
+                        {"text": "D", "callback_data": "claude_control:deny:r"},
+                    ],
+                    [{"text": "o", "callback_data": "aq:opt:0"}],
+                    [{"text": "Cancel", "callback_data": "untether:cancel"}],
+                    [{"text": "no data"}],
+                ]
+            }
+        },
+    )
+    assert control_callbacks_in(msg) == frozenset(
+        {"claude_control:approve:r", "claude_control:deny:r", "aq:opt:0"}
+    )

@@ -26,6 +26,7 @@ from untether.runners import claude as claude_mod
 from untether.runners.claude import ClaudeRunner
 from untether.session_quarantine import QuarantineStore, set_quarantine_store
 from untether.settings import ProgressSettings, WatchdogSettings
+from untether.telegram.bridge import TelegramPresenter
 from untether.transport import MessageRef
 
 pytestmark = pytest.mark.anyio
@@ -38,6 +39,9 @@ _ENV = (
     "FAKE_CLAUDE_ACK_TOOL",
     "FAKE_CLAUDE_EOF_MODE",
     "FAKE_CLAUDE_SIGINT_RC",
+    # #684
+    "FAKE_CLAUDE_CANCEL_AFTER_S",
+    "FAKE_CLAUDE_AFTER_CANCEL_S",
 )
 
 
@@ -533,3 +537,199 @@ async def test_383_queued_wake_with_slow_final_delivery(
     assert wake and "MODE: plan" in wake[-1]
     # Approved (not timed out): the plan was re-shown as approved.
     assert any("Plan (approved)" in t for _, t, _ in transport.log)
+
+
+# ---------------------------------------------------------------------------
+# #684: control_request.unanswerable + withdrawn requests, end to end
+# ---------------------------------------------------------------------------
+
+
+class _RenderLog(_OrderedTransport):
+    """Keeps every rendered message (sends and edits) in order."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.rendered: list[Any] = []
+
+    async def send(self, *, channel_id, message, options=None):  # type: ignore[override]
+        self.rendered.append(message)
+        return await super().send(
+            channel_id=channel_id, message=message, options=options
+        )
+
+    async def edit(self, *, ref, message, wait=True):  # type: ignore[override]
+        self.rendered.append(message)
+        return await super().edit(ref=ref, message=message, wait=wait)
+
+
+class _SwallowingPresenter(TelegramPresenter):
+    """A #683-style swallowed keyboard: control rows never reach Telegram
+    (the cancel row stays)."""
+
+    def render_progress(self, *args: Any, **kwargs: Any):  # type: ignore[override]
+        rendered = super().render_progress(*args, **kwargs)
+        markup = rendered.extra.get("reply_markup")
+        if isinstance(markup, dict):
+            rows = [
+                row
+                for row in markup.get("inline_keyboard", [])
+                if not any(
+                    str(b.get("callback_data", "")).startswith(
+                        ("claude_control:", "aq:")
+                    )
+                    for b in row
+                )
+            ]
+            rendered.extra["reply_markup"] = {**markup, "inline_keyboard": rows}
+        return rendered
+
+
+def _fast_684(monkeypatch: pytest.MonkeyPatch, **watchdog: Any) -> None:
+    """Tiny tool_timeout and heartbeat so the run-level monitor checks fast."""
+    import untether.runner_bridge as bridge_mod
+
+    _watchdog(monkeypatch)
+    progress = ProgressSettings.model_construct(
+        **{
+            **ProgressSettings().model_dump(),
+            "heartbeat_interval": 0.05,
+            "min_render_interval": 0.0,
+            "show_background_tasks": False,
+            "consolidate_wake_turns": False,
+        }
+    )
+    monkeypatch.setattr(bridge_mod, "_load_progress_settings", lambda: progress)
+    wd = WatchdogSettings.model_construct(
+        **{**WatchdogSettings().model_dump(), "tool_timeout": 0.5, **watchdog}
+    )
+    monkeypatch.setattr(bridge_mod, "_load_watchdog_settings", lambda: wd)
+
+
+async def _drive_684(
+    scenario: str,
+    *,
+    presenter: Any = None,
+    cancel_after: float | None = None,
+    timeout: float = 20.0,
+) -> _RenderLog:
+    """Drive a Bash-approval scenario (permission_mode=default, #749) through
+    the real handle_message; optionally /cancel the run after a delay."""
+    from untether.runner_bridge import unique_running_tasks
+
+    os.environ["FAKE_CLAUDE_SCENARIO"] = scenario
+    transport = _RenderLog()
+    cfg = ExecBridgeConfig(
+        transport=transport,
+        # TelegramPresenter attaches the approval keyboard (MarkdownPresenter
+        # renders none).
+        presenter=presenter or TelegramPresenter(),
+        final_notify=False,
+    )
+    runner = _LiveRunner(claude_cmd=str(FAKE_CLI), permission_mode="default")
+    running: dict[MessageRef, RunningTask] = {}
+
+    async def _cancel() -> None:
+        assert cancel_after is not None
+        await anyio.sleep(cancel_after)
+        while not running:
+            await anyio.sleep(0.02)
+        (_, task), *_ = unique_running_tasks(running)
+        task.cancel_requested.set()
+
+    with anyio.fail_after(timeout):
+        async with anyio.create_task_group() as tg:
+            if cancel_after is not None:
+                tg.start_soon(_cancel)
+            await handle_message(
+                cfg,
+                runner=runner,
+                incoming=IncomingMessage(channel_id=123, message_id=10, text="go"),
+                resume_token=None,
+                running_tasks=running,
+            )
+    return transport
+
+
+def _control_cbs(msg: Any) -> frozenset[str]:
+    from untether.runner_bridge import control_callbacks_in
+
+    return control_callbacks_in(msg)
+
+
+def _unanswerable(logs: list[dict]) -> list[dict]:
+    return [e for e in logs if e.get("event") == "control_request.unanswerable"]
+
+
+async def test_684_harness_rendered_keyboard_suppresses_unanswerable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Negative: the approval keyboard is on the progress message, so a wait
+    past tool_timeout is a healthy one — ``control_surface_probe`` sees the
+    real render."""
+    from structlog.testing import capture_logs
+
+    _fast_684(monkeypatch)
+    with capture_logs() as logs:
+        transport = await _drive_684("control_unanswered", cancel_after=1.5)
+    assert any(
+        "claude_control:approve:req-unanswered-1" in _control_cbs(m)
+        for m in transport.rendered
+    )
+    assert _unanswerable(logs) == []
+    (summary,) = [e for e in logs if e.get("event") == "session.summary"]
+    assert summary["unanswerable_control_requests"] == 0
+
+
+async def test_684_harness_swallowed_keyboard_warns(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Forced positive (R15-6e/f are opportunistic live): the keyboard never
+    reaches Telegram, so the pending Bash approval is unanswerable."""
+    from structlog.testing import capture_logs
+
+    _fast_684(monkeypatch)
+    with capture_logs() as logs:
+        transport = await _drive_684(
+            "control_unanswered", presenter=_SwallowingPresenter(), cancel_after=1.5
+        )
+    assert not any(_control_cbs(m) for m in transport.rendered)
+    (hit,) = _unanswerable(logs)
+    assert hit["log_level"] == "warning"
+    assert hit["reasons"] == ["no_keyboard"] and hit["kind"] == "tool"
+    assert hit["request_id"] == "req-unanswered-1" and hit["live_idle"] is False
+    (summary,) = [e for e in logs if e.get("event") == "session.summary"]
+    assert summary["unanswerable_control_requests"] == 1
+
+
+async def test_684_harness_kill_switch(monkeypatch: pytest.MonkeyPatch) -> None:
+    from structlog.testing import capture_logs
+
+    _fast_684(monkeypatch, detect_unanswerable_control_requests=False)
+    with capture_logs() as logs:
+        await _drive_684(
+            "control_unanswered", presenter=_SwallowingPresenter(), cancel_after=1.0
+        )
+    assert _unanswerable(logs) == []
+
+
+async def test_684_harness_cancel_strips_keyboard(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The CLI withdraws the request: the progress message is re-rendered
+    without the approval keyboard before the turn's answer lands."""
+    from structlog.testing import capture_logs
+
+    _fast_684(monkeypatch)
+    os.environ["FAKE_CLAUDE_CANCEL_AFTER_S"] = "0.8"
+    os.environ["FAKE_CLAUDE_AFTER_CANCEL_S"] = "0.8"
+    with capture_logs() as logs:
+        transport = await _drive_684("control_cancel")
+    with_kb = [i for i, m in enumerate(transport.rendered) if _control_cbs(m)]
+    assert with_kb, "the approval keyboard was rendered first"
+    later = transport.rendered[with_kb[-1] + 1 :]
+    assert any("withdrawn" in m.text and "Stopped." not in m.text for m in later), (
+        "a keyboard-free progress render must precede the answer"
+    )
+    assert any("Stopped." in m.text for m in later)
+    # A healthy wait (keyboard on screen), then retired: never unanswerable.
+    assert _unanswerable(logs) == []

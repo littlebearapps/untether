@@ -20,6 +20,14 @@ _EARLY_TOASTS: dict[str, str] = {
 
 # #698: shown for a tap that lands after the flow was answered and torn down.
 _ALREADY_ANSWERED_TOAST = "Already answered"
+# #684: shown when the CLI withdrew the question (control_cancel_request).
+_NO_LONGER_NEEDED_TOAST = "No longer needed"
+
+
+def _resolved_toast(outcome: str) -> str:
+    return (
+        _NO_LONGER_NEEDED_TOAST if outcome == "cancelled" else _ALREADY_ANSWERED_TOAST
+    )
 
 
 async def send_next_ask_question_message(
@@ -76,7 +84,7 @@ class AskQuestionCommand:
     def early_answer_toast(
         args_text: str, *, channel_id: int | None = None
     ) -> str | None:
-        from ...runners.claude import get_ask_question_flow, recently_answered_ask_flow
+        from ...runners.claude import get_ask_question_flow, recently_resolved_ask_flow
 
         action = args_text.split(":", 1)[0].lower() if args_text else ""
         # #698: the early answer fires before `handle` runs, so this toast is
@@ -85,11 +93,10 @@ class AskQuestionCommand:
         # #715: both lookups are channel-scoped. Unscoped, a chat with no
         # outstanding question would see another chat's live flow and toast
         # "Selected" for a tap that `handle` then rejects.
-        if (
-            get_ask_question_flow(channel_id=channel_id) is None
-            and recently_answered_ask_flow(channel_id=channel_id) is not None
-        ):
-            return _ALREADY_ANSWERED_TOAST
+        if get_ask_question_flow(channel_id=channel_id) is None:
+            resolved = recently_resolved_ask_flow(channel_id=channel_id)
+            if resolved is not None:
+                return _resolved_toast(resolved[1])
         return _EARLY_TOASTS.get(action)
 
     async def handle(self, ctx: CommandContext) -> CommandResult | None:
@@ -99,7 +106,7 @@ class AskQuestionCommand:
             format_question_message,
             get_ask_question_flow,
             get_question_option_buttons,
-            recently_answered_ask_flow,
+            recently_resolved_ask_flow,
         )
 
         parts = ctx.args_text.split(":", 1)
@@ -119,14 +126,16 @@ class AskQuestionCommand:
             # #698: an option tap that lost the race against the (async, outbox-
             # queued) keyboard strip is an expected user race, not an unexplained
             # missing flow — INFO, and say something true.
-            answered = recently_answered_ask_flow(channel_id=channel_id)
-            if answered is not None:
+            resolved = recently_resolved_ask_flow(channel_id=channel_id)
+            if resolved is not None:
+                answered, outcome = resolved
                 logger.info(
                     "ask_question.flow_already_answered",
                     action=action,
                     request_id=answered,
+                    outcome=outcome,
                 )
-                return CommandResult(text=_ALREADY_ANSWERED_TOAST, notify=False)
+                return CommandResult(text=_resolved_toast(outcome), notify=False)
             logger.warning("ask_question.flow_missing", action=action)
             return CommandResult(text="No active question", notify=False)
 

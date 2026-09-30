@@ -3137,3 +3137,440 @@ async def test_685_handle_uses_the_early_toast_claim() -> None:
     assert first is not None and first.text == "✅ Approved permission request"
     assert fake_stdin.send.await_count == 1
     assert _INFLIGHT_CONTROL_RESPONSES == {}
+
+
+# ===========================================================================
+# #684 — control_cancel_request, stale da: supersede, snapshot
+# ===========================================================================
+
+
+@pytest.fixture
+def _clean_684():
+    from untether.runners import claude as claude_mod
+
+    def _wipe() -> None:
+        claude_mod._CANCELLED_DURING_WRITE.clear()
+        claude_mod._PENDING_ASK_REQUESTS.clear()
+        claude_mod._ASK_QUESTION_FLOWS.clear()
+        claude_mod._ANSWERED_ASK_FLOWS.clear()
+        _REQUEST_TO_TOOL_NAME.clear()
+        _OUTLINE_PENDING.clear()
+
+    _wipe()
+    yield
+    _wipe()
+
+
+pytest_684 = pytest.mark.usefixtures("_clean_684")
+
+
+def _cancel_frame(request_id: str | None) -> claude_schema.StreamJsonMessage:
+    payload: dict[str, Any] = {"type": "control_cancel_request"}
+    if request_id is not None:
+        payload["request_id"] = request_id
+    return claude_schema.decode_stream_json_line(json.dumps(payload).encode())
+
+
+def _raise_bash(
+    state: ClaudeStreamState, factory: EventFactory, request_id: str
+) -> list[Any]:
+    """A Bash can_use_tool that reaches Telegram (prompting mode, #749)."""
+    state.prompting_mode = True
+    return translate_claude_event(
+        _can_use_tool_event(request_id, "Bash", command="touch x"),
+        title="claude",
+        state=state,
+        factory=factory,
+    )
+
+
+def _started_action_id(events: list[Any]) -> str:
+    return next(
+        e.action.id
+        for e in events
+        if isinstance(e, ActionEvent) and e.phase == "started"
+    )
+
+
+def _translate_cancel(
+    state: ClaudeStreamState, factory: EventFactory, request_id: str | None
+) -> list[Any]:
+    return translate_claude_event(
+        _cancel_frame(request_id), title="claude", state=state, factory=factory
+    )
+
+
+def test_684_cancel_frame_decodes() -> None:
+    evt = _cancel_frame("r")
+    assert isinstance(evt, claude_schema.StreamControlCancelRequest)
+    assert evt.request_id == "r"
+    assert _cancel_frame(None).request_id is None
+
+
+@pytest_684
+def test_684_cancel_retires_pending_tool_request() -> None:
+    from structlog.testing import capture_logs
+
+    from untether.runners.claude import pending_control_requests_for_session
+
+    state, factory = _make_state_with_session("sess-c1")
+    action_id = _started_action_id(_raise_bash(state, factory, "r-c1"))
+    assert pending_control_requests_for_session("sess-c1") == 1
+    assert "r-c1" in state.control_registered_at
+
+    with capture_logs() as logs:
+        events = _translate_cancel(state, factory, "r-c1")
+
+    assert len(events) == 1
+    evt = events[0]
+    assert isinstance(evt, ActionEvent)
+    assert evt.phase == "completed" and evt.action.id == action_id
+    assert "withdrawn" in evt.action.title
+    for registry in (_REQUEST_TO_SESSION, _REQUEST_TO_INPUT, _REQUEST_TO_TOOL_NAME):
+        assert "r-c1" not in registry
+    assert "r-c1" not in state.pending_control_requests
+    assert "r-c1" not in state.request_to_action
+    assert "r-c1" not in state.control_registered_at
+    assert action_id not in state.control_action_for_tool.values()
+    assert pending_control_requests_for_session("sess-c1") == 0
+    info = _events_named(logs, "control_request.cancelled_by_cli")
+    assert len(info) == 1
+    assert info[0]["kind"] == "tool" and info[0]["tool_name"] == "Bash"
+    assert info[0]["had_action"] is True and info[0]["inflight"] is False
+
+
+@pytest_684
+@pytest.mark.anyio
+async def test_684_cancel_marks_cancelled_for_taps() -> None:
+    from untether.runners.claude import ControlRequestStatus, classify_control_request
+    from untether.telegram.commands.claude_control import ClaudeControlCommand
+
+    state, factory = _make_state_with_session("sess-c2")
+    _raise_bash(state, factory, "r-c2")
+    fake_stdin = AsyncMock()
+    _SESSION_STDIN["sess-c2"] = fake_stdin
+    _ACTIVE_RUNNERS["sess-c2"] = (ClaudeRunner(claude_cmd="claude"), 0.0)
+    _translate_cancel(state, factory, "r-c2")
+
+    assert classify_control_request("r-c2").status is ControlRequestStatus.CANCELLED
+    assert ClaudeControlCommand.early_answer_toast("approve:r-c2") == "No longer needed"
+    assert await send_claude_control_response("r-c2", True) is False
+    result = await ClaudeControlCommand().handle(_ctl_ctx("approve", "r-c2"))
+    assert result is not None and result.text.startswith("⏹️")
+    fake_stdin.send.assert_not_awaited()
+
+
+@pytest_684
+def test_684_cancel_releases_ask_text_routing() -> None:
+    from untether.runners import claude as claude_mod
+    from untether.runners.claude import get_pending_ask_request
+    from untether.telegram.commands.ask_question import AskQuestionCommand
+    from untether.utils.paths import reset_run_channel_id, set_run_channel_id
+
+    chat = 7684
+    state, factory = _make_state_with_session("sess-ask")
+    token = set_run_channel_id(chat)
+    try:
+        translate_claude_event(
+            _can_use_tool_event(
+                "r-ask",
+                "AskUserQuestion",
+                questions=[
+                    {
+                        "question": "Which colour?",
+                        "options": [{"label": "Red"}, {"label": "Blue"}],
+                    }
+                ],
+            ),
+            title="claude",
+            state=state,
+            factory=factory,
+        )
+        assert get_pending_ask_request(chat) is not None
+        _translate_cancel(state, factory, "r-ask")
+    finally:
+        reset_run_channel_id(token)
+
+    assert get_pending_ask_request(chat) is None
+    assert claude_mod._ASK_QUESTION_FLOWS == {}
+    assert (
+        AskQuestionCommand.early_answer_toast("opt:0", channel_id=chat)
+        == "No longer needed"
+    )
+    record = _HANDLED_REQUESTS["r-ask"]
+    assert record is not None and record.channel_id == chat
+    assert record.outcome == "cancelled"
+
+
+@pytest_684
+@pytest.mark.anyio
+async def test_684_ask_late_tap_after_cancel_says_no_longer_needed() -> None:
+    from untether.runners.claude import _record_answered_ask_flow
+    from untether.telegram.commands.ask_question import AskQuestionCommand
+
+    _record_answered_ask_flow("r-ask2", 55, outcome="cancelled")
+    ctx = _ctl_ctx("opt", "0", channel_id=55)
+    object.__setattr__(ctx, "args_text", "opt:0")
+    result = await AskQuestionCommand().handle(ctx)
+    assert result is not None and result.text == "No longer needed"
+
+
+@pytest_684
+def test_684_cancel_hold_open_exitplanmode() -> None:
+    state, factory = _make_state_with_session("sess-ho")
+    mark_outline_pending("sess-ho")
+    state.max_text_len_since_cooldown = 500
+    started = _raise_exit_plan(state, factory, "r-ho")
+    synth = _started_action_id(started)
+    assert synth.startswith("claude.discuss_approve.")
+    assert "r-ho" in state.exitplanmode_plans
+
+    events = _translate_cancel(state, factory, "r-ho")
+    assert [e.action.id for e in events if e.phase == "completed"] == [synth]
+    assert "r-ho" not in state.exitplanmode_plans
+    assert "r-ho" not in _REQUEST_TO_SESSION
+
+
+@pytest_684
+@pytest.mark.anyio
+async def test_684_tap_vs_cancel_inflight() -> None:
+    from untether.runners import claude as claude_mod
+    from untether.runners.claude import (
+        ControlRequestStatus,
+        respond_to_control_request,
+    )
+
+    state, factory = _make_state_with_session("sess-fly")
+    action_id = _started_action_id(_raise_bash(state, factory, "r-fly"))
+    release = anyio.Event()
+    writing = anyio.Event()
+
+    async def _gated_send(data: bytes) -> None:
+        writing.set()
+        await release.wait()
+
+    fake_stdin = AsyncMock()
+    fake_stdin.send = AsyncMock(side_effect=_gated_send)
+    _SESSION_STDIN["sess-fly"] = fake_stdin
+    _ACTIVE_RUNNERS["sess-fly"] = (ClaudeRunner(claude_cmd="claude"), 0.0)
+    results: list[Any] = []
+
+    async def _tap() -> None:
+        results.append(
+            await respond_to_control_request("r-fly", True, action="approve")
+        )
+
+    async with anyio.create_task_group() as tg:
+        tg.start_soon(_tap)
+        await writing.wait()
+        events = _translate_cancel(state, factory, "r-fly")
+        assert [e.action.id for e in events] == [action_id]
+        assert "r-fly" not in state.pending_control_requests
+        # The writer still owns the registry entry until its write returns.
+        assert _REQUEST_TO_SESSION.get("r-fly") == "sess-fly"
+        assert "r-fly" in claude_mod._CANCELLED_DURING_WRITE
+        release.set()
+
+    (result,) = results
+    assert result.status is ControlRequestStatus.CANCELLED
+    assert result.sent is True
+    record = _HANDLED_REQUESTS["r-fly"]
+    assert record is not None and record.outcome == "cancelled"
+    assert not claude_mod._CANCELLED_DURING_WRITE
+    assert "r-fly" not in _REQUEST_TO_SESSION
+    assert _INFLIGHT_CONTROL_RESPONSES == {}
+
+
+@pytest_684
+@pytest.mark.anyio
+async def test_684_inflight_cancel_tap_line_says_withdrawn() -> None:
+    """The tap whose write raced the cancel reports it, not "Approved"."""
+    from untether.runners import claude as claude_mod
+    from untether.telegram.commands.claude_control import ClaudeControlCommand
+
+    fake_stdin = _register_live_request("r-fly2")
+
+    async def _send(data: bytes) -> None:
+        claude_mod._CANCELLED_DURING_WRITE.add("r-fly2")
+
+    fake_stdin.send = AsyncMock(side_effect=_send)
+    result = await ClaudeControlCommand().handle(_ctl_ctx("approve", "r-fly2"))
+    assert result is not None and result.text.startswith("⏹️")
+
+
+@pytest_684
+def test_684_cancel_after_timeout_keeps_expired() -> None:
+    from structlog.testing import capture_logs
+
+    state, factory = _make_state_with_session("sess-to")
+    _raise_exit_plan(state, factory, "r-to")
+    _drive_sweep(state, factory, "r-to", "r-to-2")
+    with capture_logs() as logs:
+        assert _translate_cancel(state, factory, "r-to") == []
+    record = _HANDLED_REQUESTS["r-to"]
+    assert record is not None and record.outcome == "expired"
+    assert _events_named(logs, "control_request.cancel_after_answer")
+
+
+@pytest_684
+def test_684_cancel_unknown_id_is_quiet() -> None:
+    from structlog.testing import capture_logs
+
+    from untether.runners.claude import mark_request_handled
+
+    state, factory = _make_state_with_session("sess-unk")
+    mark_request_handled("r-done", action="approve")
+    with capture_logs() as logs:
+        assert _translate_cancel(state, factory, "r-nope") == []
+        assert _translate_cancel(state, factory, "r-done") == []
+        assert _translate_cancel(state, factory, None) == []
+    assert _events_named(logs, "control_request.cancel_unknown")
+    assert _events_named(logs, "control_request.cancel_after_answer")
+    assert _events_named(logs, "control_request.cancel_without_id")
+    assert not [e for e in logs if e.get("log_level") == "warning"]
+
+
+@pytest_684
+def test_684_cancel_drops_queued_auto_response() -> None:
+    state, factory = _make_state_with_session("sess-q")
+    state.auto_approve_queue.extend(["r-q", "r-keep"])
+    state.auto_deny_queue.extend([("r-q", "no"), ("r-keep2", "no")])
+    _translate_cancel(state, factory, "r-q")
+    assert state.auto_approve_queue == ["r-keep"]
+    assert state.auto_deny_queue == [("r-keep2", "no")]
+
+
+@pytest_684
+def test_684_cancel_scoped_to_own_session() -> None:
+    state, factory = _make_state_with_session("sess-mine")
+    _REQUEST_TO_SESSION["r-other"] = "other-session"
+    assert _translate_cancel(state, factory, "r-other") == []
+    assert _REQUEST_TO_SESSION["r-other"] == "other-session"
+    assert "r-other" not in _HANDLED_REQUESTS
+
+
+@pytest_684
+def test_684_cancel_after_tap_not_yet_reconciled_keeps_answer() -> None:
+    from untether.runners.claude import mark_request_handled
+
+    state, factory = _make_state_with_session("sess-tap")
+    action_id = _started_action_id(_raise_bash(state, factory, "r-tap"))
+    # The tap wrote its answer; reconcile hasn't run yet.
+    _REQUEST_TO_SESSION.pop("r-tap")
+    mark_request_handled("r-tap", action="approve")
+    events = _translate_cancel(state, factory, "r-tap")
+    assert [e.action.id for e in events] == [action_id]
+    record = _HANDLED_REQUESTS["r-tap"]
+    assert record is not None and record.outcome == "answered"
+
+
+@pytest_684
+def test_684_registered_at_set_on_all_three_paths() -> None:
+    state, factory = _make_state_with_session("sess-reg")
+    _raise_bash(state, factory, "r-normal")
+    assert "r-normal" in state.control_registered_at
+
+    state.prompting_mode = False
+    mark_outline_pending("sess-reg")
+    state.max_text_len_since_cooldown = 0
+    _raise_exit_plan(state, factory, "r-guard")  # outline guard → da:
+    assert "da:sess-reg" in state.control_registered_at
+
+    state.max_text_len_since_cooldown = 500
+    _raise_exit_plan(state, factory, "r-hold")  # outline ready → hold-open
+    assert "r-hold" in state.control_registered_at
+
+
+@pytest_684
+def test_684_snapshot_kinds_and_flags() -> None:
+    from untether.runners import claude as claude_mod
+
+    state, factory = _make_state_with_session("sess-snap")
+    _raise_bash(state, factory, "r-tool")
+    translate_claude_event(
+        _can_use_tool_event("r-q", "AskUserQuestion", question="Why?"),
+        title="claude",
+        state=state,
+        factory=factory,
+    )
+    state.prompting_mode = False
+    mark_outline_pending("sess-snap")
+    _raise_exit_plan(state, factory, "r-g")  # → da:sess-snap
+    state.max_text_len_since_cooldown = 500
+    mark_outline_pending("sess-snap")
+    _raise_exit_plan(state, factory, "r-h")  # hold-open (supersedes da:)
+    # Re-register a da: entry to see the synthetic kind.
+    _REQUEST_TO_SESSION["da:sess-snap"] = "sess-snap"
+    state.control_registered_at["da:sess-snap"] = 0.0
+    # A stale timestamp for an answered request is pruned.
+    state.control_registered_at["r-gone"] = 0.0
+
+    snaps = {s.request_id: s for s in state.control_request_snapshot(now=1e9)}
+    assert snaps["r-tool"].kind == "tool" and snaps["r-tool"].tool_name == "Bash"
+    assert snaps["r-q"].kind == "ask" and snaps["r-q"].answerable_by_text
+    assert snaps["r-h"].kind == "outline_hold"
+    assert snaps["da:sess-snap"].kind == "synthetic"
+    assert snaps["da:sess-snap"].tool_name == "DiscussApproval"
+    assert not snaps["r-tool"].answerable_by_text
+    assert all(not s.writer_ok for s in snaps.values())
+    assert "r-gone" not in state.control_registered_at
+    assert snaps["r-tool"].age_s > 0
+
+    _SESSION_STDIN["sess-snap"] = AsyncMock()
+    _ACTIVE_RUNNERS["sess-snap"] = (ClaudeRunner(claude_cmd="claude"), 0.0)
+    assert all(s.writer_ok for s in state.control_request_snapshot())
+    # An answered request is absent.
+    _REQUEST_TO_SESSION.pop("r-tool")
+    assert "r-tool" not in {s.request_id for s in state.control_request_snapshot()}
+    claude_mod._PENDING_ASK_REQUESTS.clear()
+
+
+@pytest_684
+def test_684_da_superseded_by_hold_open() -> None:
+    from structlog.testing import capture_logs
+
+    from untether.runners.claude import (
+        ControlRequestStatus,
+        classify_control_request,
+        pending_control_requests_for_session,
+    )
+
+    state, factory = _make_state_with_session("sess")
+    mark_outline_pending("sess")
+    guard = _raise_exit_plan(state, factory, "r-guard")
+    da_action = _started_action_id(guard)
+    assert _REQUEST_TO_SESSION["da:sess"] == "sess"
+
+    state.max_text_len_since_cooldown = 500
+    with capture_logs() as logs:
+        events = _raise_exit_plan(state, factory, "r-real")
+    assert "da:sess" not in _REQUEST_TO_SESSION
+    completed = [e for e in events if e.phase == "completed"]
+    assert [e.action.id for e in completed] == [da_action]
+    assert events[0].phase == "completed"  # prepended before the new keyboard
+    assert _events_named(logs, "control_request.da_superseded")
+    assert pending_control_requests_for_session("sess") == 1
+    lookup = classify_control_request("da:sess")
+    assert lookup.status is ControlRequestStatus.ALREADY_HANDLED
+    assert lookup.prior is not None
+    assert (lookup.prior.action, lookup.prior.outcome) == ("superseded", "expired")
+
+
+def test_684_dead_timeout_attrs_removed() -> None:
+    assert not hasattr(ClaudeRunner, "_control_timeout_seconds")
+    assert not hasattr(ClaudeRunner, "_max_pending_control_requests")
+
+
+@pytest_684
+def test_684_cancel_ignores_stale_record_for_a_reused_id() -> None:
+    """A registered request is pending even if an old handled record shares
+    its id (answering pops the registration) — the cancel still retires it."""
+    from untether.runners.claude import mark_request_handled
+
+    mark_request_handled("r-reuse", action="approve")
+    state, factory = _make_state_with_session("sess-reuse")
+    _raise_bash(state, factory, "r-reuse")
+    _translate_cancel(state, factory, "r-reuse")
+    assert "r-reuse" not in _REQUEST_TO_SESSION
+    record = _HANDLED_REQUESTS["r-reuse"]
+    assert record is not None and record.outcome == "cancelled"

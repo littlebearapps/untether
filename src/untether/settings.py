@@ -514,6 +514,11 @@ class WatchdogSettings(BaseModel):
     tool_timeout: float = Field(default=600.0, ge=60, le=7200)
     mcp_tool_timeout: float = Field(default=900.0, ge=60, le=7200)
     subagent_timeout: float = Field(default=900.0, ge=60, le=7200)
+    # #684: detect-only WARNING ``control_request.unanswerable`` for a control
+    # request pending past ``tool_timeout`` with nothing on screen that can
+    # answer it (no approval/option button, no text-reply route) or no stdin
+    # writer. Never denies, never releases a live-session hold. Kill switch.
+    detect_unanswerable_control_requests: bool = True
 
     # Engine-agnostic "stuck after tool_result" detector (issue #322).
     # Default threshold of 300s matches undici's non-configurable 5-min
