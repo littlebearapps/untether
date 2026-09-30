@@ -122,7 +122,7 @@ These work identically in all three modes:
 - AskUserQuestion with option buttons
 - `/continue` cross-environment resume
 - `/config` inline settings menu
-- `/browse` file browser
+- `/browse` file browser (in assistant mode it needs `default_project` or a project-bound chat)
 - `/export` session transcript
 - `/usage` cost stats
 - File upload and outbox delivery

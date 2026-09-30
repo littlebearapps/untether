@@ -79,6 +79,9 @@ class CommandContext:
     # rc4 (#271): the default chat_id that unscoped triggers fall back to
     # (Telegram transport: cfg.chat_id).
     default_chat_id: int | None = None
+    # rc15 (#389): the live ``[transports.telegram.files] deny_globs`` so
+    # /browse applies the same policy as /file. ``None`` = defaults.
+    file_deny_globs: tuple[str, ...] | None = None
 
 
 @dataclass(frozen=True, slots=True)

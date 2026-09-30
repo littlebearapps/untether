@@ -50,7 +50,7 @@ This line is parsed from replies and takes precedence over new directives. For b
 | `/planmode` | Toggle Claude Code permission mode (on/plan-auto/auto/off/show/clear). `plan-auto` is plan mode with the plan gate auto-approved; `auto` is Claude Code's own classifier-gated mode. Claude Code only — non-Claude engines are directed to `/config` → Approval policy. |
 | `/usage` | Show Claude Code subscription usage (5h window, weekly, per-model). Claude Code only. Requires Claude Code OAuth credentials (see [troubleshooting](../how-to/troubleshooting.md#macos-and-linux-credential-differences)). `/usage debug` appends a `🔧 debug` block with last-fetch wall time and freshness label, last-error class+message, OAuth token expiry, and the cumulative `claude_usage.schema_mismatch` counter ([#410](https://github.com/littlebearapps/untether/issues/410)). |
 | `/export` | Export last session transcript as Markdown or JSON. |
-| `/browse` | Browse project files with inline keyboard navigation. |
+| `/browse` | Browse project files with inline keyboard navigation (project chats or `default_project` only; respects `files.deny_globs` and hides dotfiles except `.github`/`.gitignore`). |
 | `/ping` | Health check — replies with uptime since last (re)start. Shows trigger summary if triggers target the current chat. |
 | `/health` | System + triggers + cost snapshot — RAM/swap, Untether process (PID, RSS, FDs, children), trigger counts, today's API cost, uptime. Compact 6-line HTML message; sections degrade gracefully when sources are unavailable. See [operations](../how-to/operations.md#health-snapshot). |
 | `/restart` | Gracefully drain active runs and restart Untether. |

@@ -151,6 +151,7 @@ async def _dispatch_command(
         executor=executor,
         trigger_manager=cfg.trigger_manager,
         default_chat_id=cfg.chat_id,
+        file_deny_globs=tuple(cfg.files.deny_globs),
     )
     try:
         result = await backend.handle(ctx)
@@ -330,6 +331,7 @@ async def _dispatch_callback(
             executor=executor,
             trigger_manager=cfg.trigger_manager,
             default_chat_id=cfg.chat_id,
+            file_deny_globs=tuple(cfg.files.deny_globs),
         )
         try:
             result = await backend.handle(ctx)

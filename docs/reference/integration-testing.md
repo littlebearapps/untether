@@ -470,6 +470,7 @@ Integration tests are run by Claude Code via Telegram MCP tools (see "Automated 
 | Cost tracking (`cost_tracker.py`) | B1-B3, U8 |
 | Progress/formatting (`markdown.py`, `telegram/render.py`) | U3, T6, T7, S4, S8, RC12-8, RC12-9 |
 | Commands (`commands/*.py`) | Tier 7 (all), specific command test |
+| `/browse` + shared path checks (`commands/browse.py`, `telegram/files.py`) | Q5, U10, T2, T3, R15-2 |
 | File transfer (`file_transfer.py`) | T2, T3, T5, R15-3 |
 | Voice (`voice.py`) | T1, RC12-10 |
 | Topics (`topics.py`, `topic_state.py`) | O1, O5, O6, O8 |
@@ -628,3 +629,18 @@ printf 'r15 ok\n' > /tmp/r15-ok.txt
 | R15-3h | `/file get r15/link/ok.txt` | Document `ok.txt` delivered, content `r15 ok` | `file_transfer.sent filename=ok.txt` |
 
 Regression: T2, T3 (use `CLAUDE.md` in test-claude) and T5 as written, plus Q13 `/file` → usage. Global negative grep: `journalctl --user -u untether-dev -o cat --since "30 minutes ago" | grep -E "Traceback|ValueError|RuntimeError|handle.worker_failed"` must be empty. Not live-testable (unit-only, say so in the attestation notes): the symlinked `run_root` crash (F5) and the symlink loop (F6). Cleanup: `rm -rf ~/untether/test-projects/test-claude/r15 /tmp/r15-ok.txt` and any `incoming/r15-ok*.txt`.
+
+### #389 — `/browse` explicit root, deny globs and per-chat ids
+
+Setup in `test-projects/test-claude` (remove afterwards): `.env` with `RC15_FAKE=do-not-leak`, `key.pem` with `-----BEGIN FAKE-----`, `mkdir -p .untether && echo 'bot_token = "FAKE"' > .untether/untether.toml`, `ln -s /home/nathan rc15-home`, `ln -s .env rc15-notes.txt`. Then `systemctl --user restart untether-dev`.
+
+| # | Where | Steps | Pass criteria |
+|---|---|---|---|
+| R15-2a | Owner DM with the dev bot (unbound; dev cwd = repo root) | `/browse`, then `/browse .envrc` | Both reply `No project directory for this chat. Bind the chat …`; nothing from the untether repo is listed; `browse.no_project_root` in logs |
+| R15-2b | Claude chat | `/browse .env`, `/browse key.pem`, `/browse .untether/untether.toml`, `/browse rc15-notes.txt`, `/browse src/../.env` | `Path denied by rule: …` / `Hidden paths can't be browsed.`; neither `do-not-leak` nor `FAKE` appears; `browse.path_denied` × 5 |
+| R15-2c | Claude chat | `/browse`; inspect buttons with `list_inline_buttons` | No button for `.env`, `key.pem`, `.untether/`, `rc15-home/`, `rc15-notes.txt`; `.github/` and ordinary dirs present; tapping `.github/` lists it |
+| R15-2d | Claude chat | `/browse rc15-home` | `Path outside project.`; `browse.path_escape_attempted via=arg` |
+| R15-2e | Claude chat → Codex chat | In the Claude chat send `/browse` and read a file button's `callback_data` (`browse:f:<pid>`) with `list_inline_buttons`; in the Codex chat send `/browse f:<pid>` as text | Codex chat replies `Path expired. Use /browse to start over.`; the same `/browse f:<pid>` in the Claude chat previews the file |
+| R15-2f | Claude chat | `/file get key.pem` (T3 variant, #831) | `path denied by rule: **/*.pem` (rc14 delivered it) |
+
+Regression: U10 navigation (dir → subdir → `..` → file preview → Back) in the Claude and Codex chats; Q5 in every supported engine chat. Logs: `journalctl --user -u untether-dev -o cat --since "30 minutes ago" | grep -E "browse\.(no_project_root|path_denied|path_escape_attempted|project_root\.error)|command\.failed|callback\.failed"` — no `command.failed` / `callback.failed`. Clean up the fixtures and confirm `git -C /home/nathan/untether status --short test-projects/` shows nothing new.

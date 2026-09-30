@@ -638,3 +638,96 @@ async def test_callback_allowed_when_no_user_restriction() -> None:
         )
 
     assert backend._handle_called == 1
+
+
+# ---------------------------------------------------------------------------
+# #389: CommandContext carries the live files.deny_globs
+# ---------------------------------------------------------------------------
+
+
+class _CapturingBackend:
+    id = "test_cmd"
+    description = "stub"
+
+    def __init__(self) -> None:
+        self.contexts: list[CommandContext] = []
+
+    async def handle(self, ctx: CommandContext) -> CommandResult | None:
+        self.contexts.append(ctx)
+        return None
+
+
+def _with_deny_globs(cfg: TelegramBridgeConfig, globs: list[str]) -> None:
+    # In-place swap mirrors TelegramBridgeConfig.update_from (hot reload).
+    cfg.files = cfg.files.model_copy(update={"deny_globs": globs})
+
+
+@pytest.mark.anyio
+async def test_callback_context_carries_file_deny_globs(monkeypatch) -> None:
+    cfg = make_cfg(FakeTransport())
+    backend = _CapturingBackend()
+    monkeypatch.setattr(dispatch_mod, "get_command", lambda *a, **kw: backend)
+
+    async def _dispatch() -> None:
+        await _dispatch_callback(
+            cfg,
+            _make_callback_query(),
+            "test_cmd",
+            "args",
+            None,
+            {},
+            AsyncMock(),
+            None,
+            False,
+            None,
+            "cb-123",
+        )
+
+    _with_deny_globs(cfg, ["x/**"])
+    await _dispatch()
+    _with_deny_globs(cfg, ["y/**", "z"])
+    await _dispatch()
+
+    assert backend.contexts[0].file_deny_globs == ("x/**",)
+    assert backend.contexts[1].file_deny_globs == ("y/**", "z")
+
+
+@pytest.mark.anyio
+async def test_command_context_carries_file_deny_globs(monkeypatch) -> None:
+    from untether.telegram.commands.dispatch import _dispatch_command
+    from untether.telegram.types import TelegramIncomingMessage
+
+    cfg = make_cfg(FakeTransport())
+    backend = _CapturingBackend()
+    monkeypatch.setattr(dispatch_mod, "get_command", lambda *a, **kw: backend)
+    msg = TelegramIncomingMessage(
+        transport="telegram",
+        chat_id=123,
+        message_id=7,
+        text="/test_cmd",
+        reply_to_message_id=None,
+        reply_to_text=None,
+        sender_id=1,
+    )
+
+    async def _dispatch() -> None:
+        await _dispatch_command(
+            cfg,
+            msg,
+            "/test_cmd",
+            "test_cmd",
+            "",
+            {},
+            AsyncMock(),
+            None,
+            False,
+            None,
+            None,
+        )
+
+    _with_deny_globs(cfg, ["x/**"])
+    await _dispatch()
+    _with_deny_globs(cfg, ["w"])
+    await _dispatch()
+
+    assert [c.file_deny_globs for c in backend.contexts] == [("x/**",), ("w",)]
