@@ -1,18 +1,27 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Literal
 
 import msgspec
 
+from ..runners.run_options import EngineRunOptions
+
 OverrideSource = Literal["topic_override", "chat_default", "default"]
 
-REASONING_LEVELS: tuple[str, ...] = ("minimal", "low", "medium", "high", "xhigh", "max")
+# Fallback for engines without an entry below (they don't support reasoning).
+# #416: no `minimal` — every allowed tuple must only hold levels that have a
+# /config button.
+REASONING_LEVELS: tuple[str, ...] = ("low", "medium", "high", "xhigh", "max")
 REASONING_SUPPORTED_ENGINES = frozenset({"claude", "codex"})
 
 _ENGINE_REASONING_LEVELS: dict[str, tuple[str, ...]] = {
     "claude": ("low", "medium", "high", "xhigh", "max"),
-    "codex": ("minimal", "low", "medium", "high", "xhigh"),
+    # #416: no model in Codex 0.157.1's catalogue lists `minimal`, and the
+    # server rejects it alongside the default web_search tool. Pinned by
+    # test_codex_cli_schema_drift.py::test_bundled_catalogue_has_no_minimal
+    # (and ::test_listed_models_support_untether_codex_levels).
+    "codex": ("low", "medium", "high", "xhigh"),
 }
 
 
@@ -257,6 +266,28 @@ def allowed_reasoning_levels(engine: str) -> tuple[str, ...]:
 
 def supports_reasoning(engine: str) -> bool:
     return engine in REASONING_SUPPORTED_ENGINES
+
+
+def drop_unsupported_reasoning(
+    engine: str, options: EngineRunOptions | None
+) -> EngineRunOptions | None:
+    """#416: drop a stored reasoning level the engine no longer allows.
+
+    A chat or topic can hold a level saved before it was retired (Codex
+    ``minimal``). The run uses the engine default instead, and
+    ``ignored_reasoning`` carries the dropped level so the executor can tell
+    the user. Engines without reasoning support are left alone (the executor
+    notes and ignores their override). Pure and idempotent — it runs on every
+    resolution, including the live follow-up / steer option comparisons, so
+    it must not log.
+    """
+    if options is None or not options.reasoning:
+        return options
+    if not supports_reasoning(engine):
+        return options
+    if options.reasoning in allowed_reasoning_levels(engine):
+        return options
+    return replace(options, reasoning=None, ignored_reasoning=options.reasoning)
 
 
 _ENGINE_REASONING_LABEL: dict[str, str] = {

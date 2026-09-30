@@ -476,6 +476,7 @@ Integration tests are run by Claude Code via Telegram MCP tools (see "Automated 
 | Topics (`topics.py`, `topic_state.py`) | O1, O5, O6, O8 |
 | Directives (`directives.py`) | T9, T10 |
 | Shutdown (`shutdown.py`) | S3, B4 |
+| Error hints / reasoning levels (`error_hints.py`, `engine_overrides.py`, `commands/config.py`, `commands/executor.py`) | Tier 7 Q2, Tier 4 O2 (Codex), U7, R15-14a…e |
 | `extra_args` guard (`runners/extra_args_guard.py`, Claude/Codex `build_runner`, `runtime_loader.py`) | R15-1-1…4, U1 (Claude, Codex), C1, drift tests (`tests/test_claude_cli_schema_drift.py`, `tests/test_codex_cli_schema_drift.py`) |
 
 ---
@@ -740,3 +741,20 @@ Codex chat `4929463515` (Bot API `-4929463515`), project `codex-test` → `/home
 | R15-1-4 | **Legitimate passthrough still works** | Set `[engines.claude] extra_args = ["--strict-mcp-config"]` and `[engines.codex] extra_args = ["-c", "notify=[]", "-s", "workspace-write"]`; save; run U1 in both chats. Then `/config` → Codex Approval policy → Safe and send `print the first line of README.md`; set it back. Restore | `config.reload.applied`, `bad_config=[]`; both U1 pass; `runner.start` argv contains the passed flags. Safe variant: the run completes (no `cannot be used multiple times`), argv has `-s workspace-write` before `exec` and `--sandbox read-only` after it |
 | R15-1-5 *(optional, startup path)* | **Default engine with a blocked flag refuses to start** | From the terminal: set R15-1-2's `--yolo` config, `systemctl --user restart untether-dev`, wait 10 s, `systemctl --user status untether-dev`; then restore and restart | Service not active / restarting; journal shows ``Invalid `codex.extra_args` in …; flag '--yolo' …``. After restore: startup message arrives, `/ping` answers |
 | R15-1-cleanup | **Always** | `cp /tmp/r15-1-dev.toml.bak ~/.untether-dev/untether.toml`; if R15-1-5 ran, restart dev from the terminal | `diff /tmp/r15-1-dev.toml.bak ~/.untether-dev/untether.toml` empty; `/ping` in the Claude chat answers; the startup message has no `misconfigured:` / `failed to load:` note |
+
+### #416 — Codex reasoning `minimal` retired
+
+Codex chat `4929463515` (Bot API `-4929463515`). **Precondition (read-only):** the chat must not be in `safe` mode — `jq '.chats["-4929463515"].engine_overrides.codex' ~/.untether-dev/telegram_chat_prefs_state.json` → `null`, and `grep -A8 '^\[engines.codex\]' ~/.untether-dev/untether.toml` shows no `permission_mode = "safe"`. If it ever does, record the value, switch to full auto via `/config`, run the rows, then restore it. Logs: `journalctl --user -u untether-dev -o cat --since "15 minutes ago" | grep -E "run.reasoning.unsupported_level_ignored|config.reasoning|model_reasoning_effort=minimal|session.auto_cleared|handle.(runner|worker)_failed"`.
+
+| # | Scenario | What to do | Pass criteria |
+|---|---|---|---|
+| R15-14a | **No `Minimal` button ([#416](https://github.com/littlebearapps/untether/issues/416))** | `/config` → Reasoning | Buttons `Low · Medium · High` / `Xhigh`, then `Clear override` / `← Back`. No `Minimal`, no "fastest responses" line |
+| R15-14b | **`/reasoning` lists four levels** | `/reasoning` | `available levels: low, medium, high, xhigh` |
+| R15-14c | **`/reasoning set minimal` refused** | `/reasoning set minimal` | `unknown reasoning level minimal` + the available levels; `/config` home unchanged |
+| R15-14d | **Stale saved `minimal` is ignored with a note** | `/config` → Reasoning → **Low** (creates the override), then `jq '(.chats["-4929463515"].engine_overrides.codex.reasoning) = "minimal"' ~/.untether-dev/telegram_chat_prefs_state.json > /tmp/p && mv /tmp/p ~/.untether-dev/telegram_chat_prefs_state.json`; send `In one sentence: what is 2+2?` | Progress shows ``reasoning level `minimal` isn't supported for `codex` any more; using the engine default. …``; the run **succeeds**; footer has no `· minimal`; `/config` home shows `Reasoning: default · minimal not supported`. Exactly one `run.reasoning.unsupported_level_ignored engine=codex level=minimal`; `grep -c 'model_reasoning_effort=minimal'` → 0; no `session.auto_cleared engine=codex` |
+| R15-14e | **Picking a level clears it** | `/config` → Reasoning → **Low**, send the same prompt | No note; footer `· low`; `config.reasoning.set engine=codex level=low`; no further `unsupported_level_ignored` |
+| R15-14f *(optional)* | **Stale `Minimal` button from a pre-upgrade message** | Needs rc14 on the dev bot first (`git switch --detach 11cbee3`, restart dev, open `/config` → Reasoning so a `Minimal` button exists), then back to the rc15 branch, restart dev, tap that old **Minimal** | No "Reasoning: minimal" toast; the Reasoning page re-renders with current buttons; prefs hold no `minimal`; no `config.reasoning.unsupported_level` log. Unit test `test_reasoning_set_min_rejected_for_codex` covers the same callback |
+| R15-14g *(optional, paid ≈ 1c)* | **U4 capture of the 400 wording** | Done during implementation (2026-09-30, codex-cli 0.157.1, gpt-5.5): `tests/fixtures/codex_turn_failed_minimal_reasoning.jsonl` | Specific hint for the web_search 400; broad hint for the unsupported-value 400 (`minimal` is rejected even with `-c web_search="disabled"`) |
+| R15-14-cleanup | **Always** | `/config` → Reasoning → **Clear override** | `jq '.chats["-4929463515"].engine_overrides.codex'` back to its pre-run value |
+
+Offline evidence (AC5, lba-1 only — CI has no `codex`, so a skip there is not evidence): `uv run pytest tests/test_codex_cli_schema_drift.py -v -rs -k "catalogue or listed_models or minimal"` shows `PASSED` for `test_bundled_catalogue_has_no_minimal`, `test_listed_models_support_untether_codex_levels` and `test_client_passes_minimal_unvalidated`.

@@ -308,3 +308,106 @@ def test_loop_supported_engines_constant_is_claude_only() -> None:
     from untether.telegram.engine_overrides import LOOP_SUPPORTED_ENGINES
 
     assert frozenset({"claude"}) == LOOP_SUPPORTED_ENGINES
+
+
+# --- #416: Codex `minimal` retired; stale prefs sanitised at resolution ---
+
+
+def test_codex_reasoning_levels_exclude_minimal() -> None:
+    from untether.telegram.engine_overrides import allowed_reasoning_levels
+
+    assert "minimal" not in allowed_reasoning_levels("codex")
+    assert allowed_reasoning_levels("codex") == ("low", "medium", "high", "xhigh")
+
+
+def test_no_engine_offers_minimal() -> None:
+    from untether.telegram.engine_overrides import (
+        REASONING_LEVELS,
+        REASONING_SUPPORTED_ENGINES,
+        allowed_reasoning_levels,
+    )
+
+    assert "minimal" not in REASONING_LEVELS
+    for engine in REASONING_SUPPORTED_ENGINES:
+        assert "minimal" not in allowed_reasoning_levels(engine), engine
+
+
+def test_claude_reasoning_levels_unchanged() -> None:
+    from untether.telegram.engine_overrides import allowed_reasoning_levels
+
+    assert allowed_reasoning_levels("claude") == (
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max",
+    )
+
+
+def test_drop_unsupported_reasoning_codex_minimal() -> None:
+    from untether.runners.run_options import EngineRunOptions
+    from untether.telegram.engine_overrides import drop_unsupported_reasoning
+
+    raw = EngineRunOptions(model="gpt-5.5", reasoning="minimal", permission_mode="x")
+    out = drop_unsupported_reasoning("codex", raw)
+    assert out is not None
+    assert out.reasoning is None
+    assert out.ignored_reasoning == "minimal"
+    assert out.model == "gpt-5.5"
+    assert out.permission_mode == "x"
+
+
+def test_drop_unsupported_reasoning_idempotent() -> None:
+    from untether.runners.run_options import EngineRunOptions
+    from untether.telegram.engine_overrides import drop_unsupported_reasoning
+
+    once = drop_unsupported_reasoning("codex", EngineRunOptions(reasoning="minimal"))
+    twice = drop_unsupported_reasoning("codex", once)
+    assert twice == once
+    assert twice is once
+
+
+def test_drop_unsupported_reasoning_allowed_level_same_object() -> None:
+    from untether.runners.run_options import EngineRunOptions
+    from untether.telegram.engine_overrides import drop_unsupported_reasoning
+
+    opts = EngineRunOptions(reasoning="high")
+    assert drop_unsupported_reasoning("codex", opts) is opts
+
+
+def test_drop_unsupported_reasoning_unsupported_engine_untouched() -> None:
+    from untether.runners.run_options import EngineRunOptions
+    from untether.telegram.engine_overrides import drop_unsupported_reasoning
+
+    opts = EngineRunOptions(reasoning="high")
+    assert drop_unsupported_reasoning("opencode", opts) is opts
+
+
+def test_drop_unsupported_reasoning_none() -> None:
+    from untether.telegram.engine_overrides import drop_unsupported_reasoning
+
+    assert drop_unsupported_reasoning("codex", None) is None
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("level", ["chat", "topic"])
+async def test_resolve_engine_run_options_sanitises_stale_chat_and_topic_minimal(
+    tmp_path, level: str
+) -> None:
+    from untether.telegram.loop import _resolve_engine_run_options
+
+    chat_prefs = ChatPrefsStore(tmp_path / "telegram_chat_prefs_state.json")
+    topic_store = TopicStateStore(tmp_path / "telegram_topics_state.json")
+    stale = EngineOverrides(model="gpt-5.5", reasoning="minimal")
+    if level == "chat":
+        await chat_prefs.set_engine_override(1, "codex", stale)
+    else:
+        await topic_store.set_engine_override(1, 10, "codex", stale)
+
+    first = await _resolve_engine_run_options(1, 10, "codex", chat_prefs, topic_store)
+    second = await _resolve_engine_run_options(1, 10, "codex", chat_prefs, topic_store)
+    assert first is not None
+    assert first.reasoning is None
+    assert first.ignored_reasoning == "minimal"
+    assert first.model == "gpt-5.5"
+    assert first == second

@@ -5,7 +5,9 @@ from __future__ import annotations
 # (pattern_substring, hint_text) — first match wins.
 # Order: end-of-life/unsupported-client → CLI argv/config drift (#830) → the
 # generic "no longer supported" fallback → auth → subscription/billing
-# → overload/server → rate limits → session → network → signals → execution.
+# → overload/server → rate limits → model → context → content safety
+# → setting compatibility (#416) → invalid request → session → network
+# → signals → execution.
 _HINT_PATTERNS: list[tuple[str, str]] = [
     # --- Engine end-of-life / unsupported client ---
     # These MUST stay first. Both signatures are emitted by CLIs that exit
@@ -236,10 +238,36 @@ _HINT_PATTERNS: list[tuple[str, str]] = [
         "safety_block",
         "Request blocked by content safety filter. Try rephrasing your prompt.",
     ),
+    # --- Reasoning level / tool compatibility (#416) ---
+    # These MUST stay ahead of the generic "invalid_request_error" below: both
+    # 400 bodies carry that type, and the generic hint would send users to
+    # update a CLI that isn't outdated. The hints are engine-neutral on
+    # purpose: get_error_hint() only sees the message, `reasoning.effort` is an
+    # OpenAI Responses-API parameter (an OpenCode run on an OpenAI provider can
+    # hit it too, with no /config Reasoning page), and the level may come from
+    # the engine's own config file rather than an Untether override. Verbatim
+    # codex-cli 0.157.1 bodies: tests/fixtures/codex_turn_failed_minimal_reasoning.jsonl.
+    (
+        "cannot be used with reasoning.effort",
+        "The model's reasoning level can't be combined with a tool that is"
+        " switched on (usually web search). Raise the reasoning level: in"
+        " /config \N{RIGHTWARDS ARROW} Reasoning if this engine offers it there,"
+        " otherwise in the engine's own config file (for Codex,"
+        " model_reasoning_effort in ~/.codex/config.toml).",
+    ),
+    (
+        "reasoning.effort",
+        "The model doesn't accept this reasoning level. Choose another one: in"
+        " /config \N{RIGHTWARDS ARROW} Reasoning if this engine offers it there,"
+        " otherwise in the engine's own config file (for Codex,"
+        " model_reasoning_effort in ~/.codex/config.toml).",
+    ),
     # --- Invalid request ---
     (
         "invalid_request_error",
-        "Invalid API request. Try updating the engine CLI to the latest version.",
+        "The API rejected the request (invalid_request_error) \N{EM DASH} the"
+        " error below says why. Check the model and reasoning settings in"
+        " /config; if they look right, update the engine CLI.",
     ),
     # --- Session errors ---
     (

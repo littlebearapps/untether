@@ -69,7 +69,7 @@ Some settings have more than two states and use a different layout:
 - **Permission mode** (Claude Code) — four options shown in a 2+2+1 split: `[Off] [On]` on the first row, `[Plan-auto] [Auto]` on the second, `[Clear override]` on the third
 - **Approval mode** (Gemini) — three options (read-only / edit files / full access)
 - **Effort** (Claude Code) — low / medium / high / xhigh / max
-- **Reasoning** (Codex) — minimal / low / medium / high / xhigh
+- **Reasoning** (Codex) — low / medium / high / xhigh
 
 The active option is marked with a ✓ prefix. Tap a different option to switch.
 
@@ -98,7 +98,7 @@ When you switch engines via the Engine & model page, the home page automatically
 | Verbose | off, on | Yes (chat prefs) |
 | Diff preview | off, on | Yes (chat prefs) |
 | Engine & model | any configured engine + model | Yes (chat prefs) |
-| Effort / Reasoning | Claude: low, medium, high, xhigh, max; Codex: minimal, low, medium, high, xhigh | Yes (chat prefs) |
+| Effort / Reasoning | Claude: low, medium, high, xhigh, max; Codex: low, medium, high, xhigh | Yes (chat prefs) |
 | Cost & usage | API cost, subscription usage, budget, auto-cancel | Yes (chat prefs) |
 | Resume line | off, on | Yes (chat prefs) |
 | Listen | all, mentions | Yes (chat prefs) |

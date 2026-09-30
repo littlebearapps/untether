@@ -1554,10 +1554,12 @@ class TestReasoning:
         await cmd.handle(ctx)
         msg = _last_edit_msg(ctx)
         assert "Reasoning" in msg.text
-        assert "config:rs:min" in _buttons_data(msg)
+        assert "config:rs:low" in _buttons_data(msg)
+        # #416: Codex `minimal` is retired.
+        assert "config:rs:min" not in _buttons_data(msg)
 
     @pytest.mark.anyio
-    async def test_reasoning_shows_all_codex_levels(self, tmp_path):
+    async def test_reasoning_shows_codex_levels(self, tmp_path):
         state_path = tmp_path / "prefs.json"
         cmd = ConfigCommand()
         ctx = _make_ctx(
@@ -1567,12 +1569,15 @@ class TestReasoning:
             default_engine="codex",
         )
         await cmd.handle(ctx)
-        data = _buttons_data(_last_edit_msg(ctx))
-        assert "config:rs:min" in data
+        msg = _last_edit_msg(ctx)
+        data = _buttons_data(msg)
         assert "config:rs:low" in data
         assert "config:rs:med" in data
         assert "config:rs:hi" in data
         assert "config:rs:xhi" in data
+        assert "config:rs:min" not in data
+        assert "config:rs:max" not in data
+        assert "minimal" not in msg.text
 
     @pytest.mark.anyio
     async def test_reasoning_shows_claude_levels(self, tmp_path):
@@ -1640,7 +1645,6 @@ class TestReasoning:
 
         per_engine: dict[str, dict[str, str]] = {
             "codex": {
-                "min": "minimal",
                 "low": "low",
                 "med": "medium",
                 "hi": "high",
@@ -1693,6 +1697,100 @@ class TestReasoning:
         override = await prefs.get_engine_override(123, "codex")
         # Either no override at all, or reasoning is None — but never `max`.
         assert override is None or override.reasoning != "max"
+
+    @pytest.mark.anyio
+    async def test_reasoning_set_min_rejected_for_codex(self, tmp_path):
+        """#416: a stale `config:rs:min` (a pre-upgrade /config message)
+        persists nothing and re-renders the Reasoning page."""
+        from untether.telegram.chat_prefs import ChatPrefsStore, resolve_prefs_path
+
+        state_path = tmp_path / "prefs.json"
+        cmd = ConfigCommand()
+        ctx = _make_ctx(
+            args_text="rs:min",
+            text="config:rs:min",
+            config_path=state_path,
+            default_engine="codex",
+        )
+        await cmd.handle(ctx)
+        prefs = ChatPrefsStore(resolve_prefs_path(state_path))
+        override = await prefs.get_engine_override(123, "codex")
+        assert override is None or override.reasoning != "minimal"
+        data = _buttons_data(_last_edit_msg(ctx))
+        assert "config:rs:low" in data
+        assert "config:rs:min" not in data
+
+    @pytest.mark.anyio
+    async def test_reasoning_page_stale_minimal_pref(self, tmp_path):
+        """#416: a saved `minimal` shows as the default it runs on, with no
+        button checked."""
+        from untether.telegram.chat_prefs import ChatPrefsStore, resolve_prefs_path
+        from untether.telegram.engine_overrides import EngineOverrides
+
+        state_path = tmp_path / "prefs.json"
+        prefs = ChatPrefsStore(resolve_prefs_path(state_path))
+        await prefs.set_engine_override(
+            123, "codex", EngineOverrides(reasoning="minimal")
+        )
+        cmd = ConfigCommand()
+        ctx = _make_ctx(
+            args_text="rs",
+            text="config:rs",
+            config_path=state_path,
+            default_engine="codex",
+        )
+        await cmd.handle(ctx)
+        msg = _last_edit_msg(ctx)
+        assert "minimal not supported" in msg.text
+        assert "Current: <b>default" in msg.text
+        assert not any("✓" in label for label in _buttons_labels(msg))
+
+    @pytest.mark.anyio
+    async def test_home_stale_minimal_pref_shows_default(self, tmp_path):
+        from untether.telegram.chat_prefs import ChatPrefsStore, resolve_prefs_path
+        from untether.telegram.engine_overrides import EngineOverrides
+
+        state_path = tmp_path / "prefs.json"
+        prefs = ChatPrefsStore(resolve_prefs_path(state_path))
+        await prefs.set_engine_override(
+            123, "codex", EngineOverrides(reasoning="minimal")
+        )
+        cmd = ConfigCommand()
+        ctx = _make_ctx(config_path=state_path, default_engine="codex")
+        await cmd.handle(ctx)
+        text = _last_send_msg(ctx).text
+        assert "Reasoning: <b>default</b>" in text
+        assert "minimal not supported" in text
+
+    @pytest.mark.anyio
+    @pytest.mark.parametrize("engine", ["claude", "codex"])
+    async def test_reasoning_page_renders_every_allowed_level(self, tmp_path, engine):
+        """Guards the `_LEVEL_BUTTON_MAP[level]` lookup against tuple edits."""
+        from untether.telegram.engine_overrides import (
+            REASONING_SUPPORTED_ENGINES,
+            allowed_reasoning_levels,
+        )
+
+        assert engine in REASONING_SUPPORTED_ENGINES
+        cmd = ConfigCommand()
+        ctx = _make_ctx(
+            args_text="rs",
+            text="config:rs",
+            config_path=tmp_path / "prefs.json",
+            default_engine=engine,
+        )
+        await cmd.handle(ctx)
+        level_buttons = [
+            d
+            for d in _buttons_data(_last_edit_msg(ctx))
+            if d.startswith("config:rs:") and d != "config:rs:clr"
+        ]
+        assert len(level_buttons) == len(allowed_reasoning_levels(engine))
+
+    def test_reasoning_supported_engines_all_parametrised(self):
+        from untether.telegram.engine_overrides import REASONING_SUPPORTED_ENGINES
+
+        assert set(REASONING_SUPPORTED_ENGINES) == {"claude", "codex"}
 
     @pytest.mark.anyio
     async def test_reasoning_clear_returns_home(self, tmp_path):
@@ -1920,8 +2018,9 @@ class TestReasoning:
 
 
 class TestReasoningToasts:
-    def test_toast_reasoning_minimal(self):
-        assert ConfigCommand.early_answer_toast("rs:min") == "Reasoning: minimal"
+    def test_toast_reasoning_minimal_removed(self):
+        # #416: no toast for the retired `min` action.
+        assert ConfigCommand.early_answer_toast("rs:min") is None
 
     def test_toast_reasoning_low(self):
         assert ConfigCommand.early_answer_toast("rs:low") == "Reasoning: low"

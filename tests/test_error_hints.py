@@ -2,7 +2,21 @@
 
 from __future__ import annotations
 
-from untether.error_hints import get_error_hint
+import json
+from pathlib import Path
+
+from untether.error_hints import _HINT_PATTERNS, get_error_hint
+
+_FIXTURES = Path(__file__).parent / "fixtures"
+
+
+def _hint_for(pattern: str) -> str:
+    """The hint text registered for ``pattern`` (never a duplicated literal)."""
+    return next(hint for pat, hint in _HINT_PATTERNS if pat == pattern)
+
+
+def _generic_hint() -> str:
+    return _hint_for("invalid_request_error")
 
 
 class TestGetErrorHint:
@@ -312,7 +326,9 @@ class TestDeprecatedEngineEndOfLife:
         hint = get_error_hint(msg)
         assert hint is not None
         assert "amp update" in hint
-        assert "Invalid API request" not in hint
+        # #416: compare against the registered generic text so the assertion
+        # can't go vacuous when that wording changes.
+        assert hint != _generic_hint()
 
     def test_generic_unsupported_client_fallback(self):
         """An unrecognised vendor wording still gets an actionable hint."""
@@ -381,3 +397,146 @@ class TestCliArgvDrift:
         )
         hint = get_error_hint(msg)
         assert hint is None or "command-line flag" not in hint
+
+
+class TestReasoningEffortHints:
+    """#416: a Codex ``reasoning.effort`` 400 gets a specific hint ahead of
+    the generic ``invalid_request_error`` one, which no longer leads with
+    "update the CLI"."""
+
+    ISSUE_BODY = (
+        '{"type":"error","error":{"type":"invalid_request_error","message":'
+        "\"The following tools cannot be used with reasoning.effort 'minimal':"
+        ' web_search.","param":"tools"},"status":400}'
+    )
+    UNSUPPORTED_VALUE = (
+        '{"error":{"message":"Unsupported value: \'reasoning.effort\' does not'
+        " support 'minimal' with this model. Supported values are: 'low',"
+        ' \'medium\', and \'high\'.","type":"invalid_request_error","param":'
+        '"reasoning.effort","code":"unsupported_value"}}'
+    )
+
+    @property
+    def specific(self) -> str:
+        return _hint_for("cannot be used with reasoning.effort")
+
+    @property
+    def broad(self) -> str:
+        return _hint_for("reasoning.effort")
+
+    def test_minimal_web_search_issue_body_verbatim(self):
+        hint = get_error_hint(self.ISSUE_BODY)
+        assert hint is not None
+        assert "web search" in hint
+        assert "/config" in hint
+        assert "update" not in hint.lower()
+
+    def test_minimal_web_search_outranks_generic_invalid_request_error(self):
+        assert get_error_hint(self.ISSUE_BODY) == self.specific
+
+    def test_minimal_web_search_plain_turn_failed_message(self):
+        msg = (
+            "The following tools cannot be used with reasoning.effort 'minimal':"
+            " web_search."
+        )
+        assert get_error_hint(msg) == self.specific
+
+    def test_minimal_web_search_with_details_suffix(self):
+        msg = (
+            "The following tools cannot be used with reasoning.effort 'minimal':"
+            " web_search. (status 400 Bad Request)"
+        )
+        assert get_error_hint(msg) == self.specific
+
+    def test_unsupported_effort_value_wording(self):
+        hint = get_error_hint(self.UNSUPPORTED_VALUE)
+        assert hint == self.broad
+        assert hint != _generic_hint()
+
+    def test_reasoning_effort_case_insensitive(self):
+        assert (
+            get_error_hint("tools CANNOT BE USED WITH REASONING.EFFORT 'minimal'")
+            == self.specific
+        )
+        assert get_error_hint("bad param REASONING.EFFORT") == self.broad
+
+    def test_reasoning_hints_make_no_session_saved_claim(self):
+        # A resumed run failing with 0 turns auto-clears the session.
+        for hint in (self.specific, self.broad):
+            assert "saved" not in hint.lower()
+
+    def test_reasoning_hint_does_not_match_prose(self):
+        assert (
+            get_error_hint("the model spent more reasoning effort than expected")
+            is None
+        )
+
+    def test_claude_effort_flag_error_not_matched(self):
+        hint = get_error_hint(
+            "error: option '--effort <level>' argument 'bogus' is invalid"
+        )
+        assert hint not in (self.specific, self.broad)
+
+    def test_generic_invalid_request_softened(self):
+        hint = get_error_hint(
+            '{"type":"invalid_request_error","message":"messages: text content'
+            ' blocks must be non-empty"}'
+        )
+        assert hint == _generic_hint()
+        assert "/config" in hint
+        assert not hint.startswith("Invalid API request. Try updating")
+        assert "update the engine CLI" in hint
+        # The CLI update is the last resort, not the lead.
+        assert hint.index("/config") < hint.index("update the engine CLI")
+
+    def test_reasoning_hints_are_engine_neutral(self):
+        for hint in (self.specific, self.broad):
+            assert "/config" in hint
+            assert "if this engine offers it" in hint
+            assert "~/.codex/config.toml" in hint
+            assert "model_reasoning_effort" in hint
+            assert "clear the override" not in hint.lower()
+            assert "update" not in hint.lower()
+
+    def test_opencode_openai_reasoning_effort_error_gets_neutral_hint(self):
+        hint = get_error_hint(
+            "AI_APICallError: Unsupported value: 'reasoning.effort' does not"
+            " support 'minimal' with this model."
+        )
+        # Same string as for Codex: no engine-specific branch, and /config is
+        # only named conditionally (OpenCode has no Reasoning page).
+        assert hint == self.broad
+        assert "if this engine offers it" in hint
+
+    def test_codex_minimal_turn_failed_fixture_gets_specific_hint(self):
+        """Verbatim codex-cli 0.157.1 capture (U4, 2026-09-30, gpt-5.5): with
+        web search on, the tools 400; with it off, the effort is still
+        rejected as an unsupported value."""
+        from untether.model import CompletedEvent
+        from untether.runners.codex import CodexRunner
+        from untether.schemas import codex as codex_schema
+
+        runner = CodexRunner(codex_cmd="codex", extra_args=[])
+        lines = (
+            (_FIXTURES / "codex_turn_failed_minimal_reasoning.jsonl")
+            .read_text()
+            .splitlines()
+        )
+        completed: list[CompletedEvent] = []
+        for line in lines:
+            if not line.strip():
+                continue
+            state = runner.new_state("hi", None)
+            events = runner.translate(
+                codex_schema.decode_event(line),
+                state=state,
+                resume=None,
+                found_session=None,
+            )
+            completed.extend(e for e in events if isinstance(e, CompletedEvent))
+        assert len(completed) == 2
+        with_search, without_search = completed
+        assert with_search.ok is False and with_search.error
+        assert get_error_hint(with_search.error) == self.specific
+        assert "unsupported_value" in json.dumps(without_search.error)
+        assert get_error_hint(without_search.error) == self.broad
