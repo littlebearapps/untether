@@ -18,6 +18,7 @@ from untether.model import TurnEvent
 from untether.runners import claude as claude_mod
 from untether.runners.claude import (
     ClaudeStreamState,
+    defer_settled_async_hooks,
     has_live_background_work,
     has_pending_async_hooks,
     translate_claude_event,
@@ -200,6 +201,39 @@ def test_pending_hook_holds_and_is_separate_from_background_work() -> None:
     assert claude_mod.background_task_summary(state) is None
     _feed(state, factory, _response("h-stop", "Stop"))
     assert has_pending_async_hooks(state) is False
+
+
+def test_defer_settled_async_hooks_releases_the_hold() -> None:
+    """Plain ``async`` hooks: the CLI withholds their response while idle.
+    With no hook process left they are deferred — no hold, not reported as
+    cut short at a close — and still pair when the response finally lands."""
+    state, factory = _state()
+    _first_turn(state, factory, "h-plain", "h-young")
+    for hook in state.pending_hooks.values():
+        hook.started_at = time.monotonic() - 5.0
+    state.pending_hooks["h-young"].started_at = time.monotonic()
+    moved = defer_settled_async_hooks(state)
+    assert [h.hook_id for h in moved] == ["h-plain"]
+    assert set(state.deferred_hooks) == {"h-plain"}
+    # Too young to judge: its process may not be visible yet.
+    assert has_pending_async_hooks(state) is True
+    assert [h.hook_id for h in claude_mod._hooks_outstanding(state)] == ["h-young"]
+    _feed(state, factory, _response("h-young", "Stop"))
+    assert has_pending_async_hooks(state) is False
+    # The withheld response lands at the next turn / teardown.
+    _feed(state, factory, _response("h-plain", "Stop"))
+    assert state.deferred_hooks == {}
+    assert defer_settled_async_hooks(state) == []
+
+
+def test_deferred_hook_exit_2_still_arms_the_rewake_hint() -> None:
+    state, factory = _state()
+    _first_turn(state, factory, "h-stop")
+    state.pending_hooks["h-stop"].started_at = time.monotonic() - 5.0
+    defer_settled_async_hooks(state)
+    _feed(state, factory, _response("h-stop", "Stop", outcome="error", exit_code=2))
+    assert state.hook_rewake_hint is not None
+    assert state.deferred_hooks == {}
 
 
 def test_kill_switch_off_never_holds() -> None:

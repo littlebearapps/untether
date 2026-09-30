@@ -17,6 +17,7 @@ before the first result, default 0). Test-only.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import queue
@@ -228,6 +229,7 @@ def serve_followups() -> None:
         cmd = obj.get("uuid")
         lifecycle(cmd, "queued")
         lifecycle(cmd, "started")
+        flush_withheld()  # #812: withheld async-hook responses land now
         init()
         text(f"ECHO: {user_text(obj)}")
         result(f"ECHO: {user_text(obj)}")
@@ -236,6 +238,8 @@ def serve_followups() -> None:
 
 def shutdown() -> None:
     # Stdin closed: stop live background work, as the real CLI does (F3).
+    flush_withheld()  # #812: plain async hooks report at teardown
+    kill_hooks()
     for task_id in list(_live_tasks):
         end_bg(task_id, status="killed")
     for task_id in list(_orphans):  # a subagent's bg task dies too (#801)
@@ -1024,6 +1028,49 @@ def hook_response(
     emit(payload)
 
 
+# ── hook processes ──
+# The real CLI runs every command hook as a ``/bin/sh -c <command>`` child;
+# Untether's hold reads that (#812): no shell child left → nothing can
+# still rewake. So background hooks here run a real ``sh -c`` process.
+_hook_procs: dict[str, subprocess.Popen] = {}
+# Plain ``async: true`` hooks' responses: the CLI withholds them while the
+# session is idle ("the response waits until the next user interaction")
+# and flushes them at the next turn or at teardown (probed on CLI 2.1.285).
+_withheld: list[tuple[str, str]] = []
+
+
+def spawn_hook(hook_id: str, seconds: float) -> subprocess.Popen:
+    proc = subprocess.Popen(  # the real CLI's hook shape: sh -c
+        f"sleep {seconds}; true",
+        shell=True,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    _hook_procs[hook_id] = proc
+    return proc
+
+
+def wait_hook(hook_id: str) -> None:
+    proc = _hook_procs.pop(hook_id, None)
+    if proc is not None:
+        proc.wait()
+
+
+def flush_withheld() -> None:
+    while _withheld:
+        hook_id, event = _withheld.pop(0)
+        hook_response(hook_id, event)
+
+
+def kill_hooks() -> None:
+    for proc in _hook_procs.values():
+        with contextlib.suppress(OSError):
+            proc.kill()
+        proc.wait()
+    _hook_procs.clear()
+
+
 def _eof_with_pending_rewake() -> None:
     # P5-B: the CLI waits for the pending asyncRewake hook, then exits
     # without running (or even reporting) it.
@@ -1031,14 +1078,15 @@ def _eof_with_pending_rewake() -> None:
     shutdown()
 
 
-def _stop_turn(answer: str, *hooks: tuple[str, str]) -> None:
-    """A turn whose Stop hook(s) start before the result (as async hooks do:
-    started at the turn's end, their response lands after the result)."""
+def _stop_turn(answer: str, *hooks: tuple[str, str], hook_s: float = WAKE_S) -> None:
+    """A turn whose background Stop hook(s) start before the result (their
+    ``sh -c`` process outlives it; the response lands after the result)."""
     init()
     hook_started("h-ups-1", "UserPromptSubmit")
     hook_response("h-ups-1", "UserPromptSubmit")
     text(answer)
     for hook_id, event in hooks:
+        spawn_hook(hook_id, hook_s)
         hook_started(hook_id, event)
     result(answer)
 
@@ -1048,6 +1096,7 @@ def scenario_async_rewake_idle(first: dict) -> None:
     got = wait_idle_or_eof(WAKE_S)
     if got is None:
         _eof_with_pending_rewake()
+    wait_hook("h-stop")
     # stdin still open: the rewake exits 2 and the CLI wakes itself (P5-A).
     hook_response(
         "h-stop", "Stop", outcome="error", exit_code=2, stderr="finding: key leak\n"
@@ -1080,13 +1129,51 @@ def scenario_async_hook_success(first: dict) -> None:
     got = wait_idle_or_eof(WAKE_S)
     if got is None:
         _eof_with_pending_rewake()
+    wait_hook("h-stop")
     hook_response("h-stop", "Stop", outcome="success", exit_code=0)
+    serve_followups()
+
+
+def scenario_async_hook_post_result_response(first: dict) -> None:
+    """Live regression (CLI 2.1.285): plain ``async: true`` hooks (e.g.
+    ``moshi-hook claude-hook``) on UserPromptSubmit + Stop next to sync
+    hooks and one ``asyncRewake`` Stop hook, in the probe's frame order.
+    The sync hooks answer before the result; the rewake hook answers
+    ``WAKE_S`` after it, while idle; the plain async hooks' processes exit
+    at once but their responses are withheld until stdin closes."""
+    hook_started("h-ss", "SessionStart", name="SessionStart:startup")
+    hook_response("h-ss", "SessionStart", name="SessionStart:startup")
+    hook_started("h-ups-a", "UserPromptSubmit")
+    spawn_hook("h-ups-b", 0.01)
+    hook_started("h-ups-b", "UserPromptSubmit")  # plain async
+    _withheld.append(("h-ups-b", "UserPromptSubmit"))
+    hook_started("h-ups-c", "UserPromptSubmit")
+    hook_response("h-ups-a", "UserPromptSubmit")
+    hook_response("h-ups-c", "UserPromptSubmit")
+    init()
+    text("DONE")
+    hook_started("h-stop-a", "Stop")
+    spawn_hook("h-stop-b", 0.01)
+    hook_started("h-stop-b", "Stop")  # plain async
+    _withheld.append(("h-stop-b", "Stop"))
+    spawn_hook("h-stop-c", WAKE_S)
+    hook_started("h-stop-c", "Stop")  # asyncRewake, exits 0
+    hook_started("h-stop-d", "Stop")
+    hook_response("h-stop-a", "Stop")
+    hook_response("h-stop-d", "Stop")
+    result("DONE")
+    wait_hook("h-ups-b")
+    wait_hook("h-stop-b")
+    if wait_idle_or_eof(WAKE_S) is None:
+        shutdown()
+    wait_hook("h-stop-c")
+    hook_response("h-stop-c", "Stop")
     serve_followups()
 
 
 def scenario_async_hook_no_response(first: dict) -> None:
     # A hook that never reports back (exercises the hold bound).
-    _stop_turn("DONE", ("h-stop", "Stop"))
+    _stop_turn("DONE", ("h-stop", "Stop"), hook_s=600)
     while next_user(None) is not None:
         pass
     _eof_with_pending_rewake()
@@ -1095,7 +1182,7 @@ def scenario_async_hook_no_response(first: dict) -> None:
 def scenario_plain_async_cancelled_on_eof(first: dict) -> None:
     # A plain `async` hook: the CLI kills it at stdin close and reports it
     # cancelled (§A1 P3), then exits.
-    _stop_turn("DONE", ("h-async", "PostToolUse"))
+    _stop_turn("DONE", ("h-async", "PostToolUse"), hook_s=600)
     while next_user(None) is not None:
         pass
     hook_response("h-async", "PostToolUse", outcome="cancelled", exit_code=1)
@@ -1123,6 +1210,7 @@ def scenario_hook_flood(first: dict) -> None:
 _SCENARIOS = {
     "async_rewake_idle": scenario_async_rewake_idle,
     "async_hook_success": scenario_async_hook_success,
+    "async_hook_post_result_response": scenario_async_hook_post_result_response,
     "async_hook_no_response": scenario_async_hook_no_response,
     "plain_async_cancelled_on_eof": scenario_plain_async_cancelled_on_eof,
     "hook_flood": scenario_hook_flood,

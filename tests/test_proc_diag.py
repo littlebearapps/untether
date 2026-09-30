@@ -819,3 +819,83 @@ def test_812_hook_script_label_unreadable_pid() -> None:
 
     with mock.patch.object(proc_diag, "read_cmdline_argv", return_value=None):
         assert proc_diag.hook_script_label(1) is None
+
+
+# ── #812: hook_shell_children ────────────────────────────────────────────────
+
+
+@pytest.mark.skipif(not sys.platform.startswith("linux"), reason="/proc backend")
+def test_812_hook_shell_children_finds_sh_c_children_only() -> None:
+    """Claude Code runs every command hook as ``/bin/sh -c <command>``; a
+    direct non-shell child (an MCP server) is not one."""
+    import subprocess
+
+    from untether.utils.proc_diag import hook_shell_children
+
+    hook = subprocess.Popen("sleep 5; true", shell=True)
+    other = subprocess.Popen(["sleep", "5"])
+    try:
+        found = hook_shell_children(os.getpid())
+        assert found is not None
+        assert hook.pid in found
+        assert other.pid not in found
+    finally:
+        for proc in (hook, other):
+            proc.kill()
+            proc.wait()
+    assert hook.pid not in (hook_shell_children(os.getpid()) or [])
+
+
+@pytest.mark.parametrize(
+    ("argv", "expected"),
+    [
+        (["/bin/sh", "-c", "moshi-hook claude-hook"], True),
+        (["/usr/bin/bash", "-c", "x"], True),
+        (["/usr/bin/zsh", "-l", "-c", "x"], True),
+        (["npm exec firecrawl-mcp"], False),
+        (["node", "/usr/bin/mcp-server-trello"], False),
+        (["/bin/sh", "/x/script.sh"], False),
+    ],
+)
+def test_812_is_shell_c(argv: list[str], expected: bool) -> None:
+    from untether.utils.proc_diag import _is_shell_c
+
+    assert _is_shell_c(argv) is expected
+
+
+def test_812_hook_shell_children_unknown_pid_is_none_off_darwin(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Unreadable table → None: the caller must not assume no hook runs."""
+    from untether.utils import proc_diag
+
+    monkeypatch.setattr(proc_diag.sys, "platform", "linux")
+    assert proc_diag.hook_shell_children(2**22 + 12345) is None
+
+
+def test_812_hook_shell_children_darwin_ps(monkeypatch: pytest.MonkeyPatch) -> None:
+    import subprocess
+
+    from untether.utils import proc_diag
+
+    ps_out = (
+        "  100     1 /Users/u/.local/bin/claude --output-format stream-json\n"
+        "  200   100 /bin/sh -c '/Users/u/.local/bin/moshi-hook' claude-hook\n"
+        "  201   100 npm exec firecrawl-mcp\n"
+        "  300   999 /bin/sh -c unrelated\n"
+        "garbage\n"
+    )
+    monkeypatch.setattr(proc_diag.sys, "platform", "darwin")
+    monkeypatch.setattr(proc_diag.os.path, "isdir", lambda p: False)
+    monkeypatch.setattr(
+        proc_diag.subprocess,
+        "run",
+        lambda *a, **k: subprocess.CompletedProcess(a, 0, stdout=ps_out, stderr=""),
+    )
+    assert proc_diag.hook_shell_children(100) == [200]
+    monkeypatch.setattr(
+        proc_diag.subprocess,
+        "run",
+        lambda *a, **k: subprocess.CompletedProcess(a, 1, stdout="", stderr="x"),
+    )
+    assert proc_diag.hook_shell_children(100) is None

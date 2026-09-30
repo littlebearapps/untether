@@ -451,6 +451,96 @@ async def test_812_pending_hook_holds_idle_close(
     assert state.tasks == {}
 
 
+async def test_812_plain_async_hooks_do_not_hold_past_their_process(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Live regression (CLI 2.1.285, ``moshi-hook`` ``async: true`` on
+    UserPromptSubmit + Stop): the CLI withholds a plain async hook's
+    ``hook_response`` while the session is idle — it lands only at the next
+    turn or at teardown — so waiting for it held every session to the
+    630 s bound. Once no hook process is left, the stragglers are deferred
+    and the idle close proceeds at the idle grace; the asyncRewake hook
+    alongside still holds until it reports back."""
+    from structlog.testing import capture_logs
+
+    _settings(monkeypatch, async_hook_max_hold=5.0)
+    started = anyio.current_time()
+    with capture_logs() as logs:
+        runner, events = await _run(
+            "async_hook_post_result_response", wake_s=1.0, timeout=15
+        )
+    elapsed = anyio.current_time() - started
+    state = _engine_state(runner)
+    holds = _events(logs, "claude.hook.pending_hold")
+    assert len(holds) == 1
+    assert sorted(holds[0]["hook_names"]) == ["Stop", "Stop", "UserPromptSubmit"]
+    released = _events(logs, "claude.hook.hold_released")
+    assert len(released) == 1
+    assert released[0]["reason"] == "no_hook_process"
+    assert sorted(released[0]["hook_names"]) == ["Stop", "UserPromptSubmit"]
+    closed = _events(logs, "claude.live_session.stdin_closed")
+    assert len(closed) == 1 and closed[0]["reason"] == "idle_no_tasks"
+    assert logs.index(holds[0]) < logs.index(released[0]) < logs.index(closed[0])
+    assert state.live_close_reason == "idle_no_tasks"
+    # The rewake hook held (1 s), no hook process for the 1 s settle, then
+    # the plain 0.3 s idle grace — well short of the 5 s bound.
+    assert 2.0 <= elapsed < 4.5
+    assert _events(logs, "claude.hook.hold_expired") == []
+    assert _events(logs, "claude.live_session.async_hook_killed") == []
+    assert _events(logs, "claude.live_session.close_grace_expired") == []
+    # The withheld responses arrived at teardown and paired off.
+    assert state.pending_hooks == {}
+    assert state.deferred_hooks == {}
+    assert state.expired_hooks == {}
+    assert runner.current_stream.proc_returncode == 0
+    assert not any(isinstance(e, TurnEvent) for e in events)
+
+
+async def test_812_cancel_does_not_report_finished_plain_async_hooks_killed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """/cancel before the lifecycle's next scan: plain async hooks whose
+    process already exited are not "killed" — the close re-checks the
+    process table itself (their withheld responses land at teardown)."""
+    from structlog.testing import capture_logs
+
+    _settings(monkeypatch)
+    # The lifecycle never polls in time: only the close-time check can tell.
+    monkeypatch.setitem(_TIMINGS, "_live_poll_s", 30.0)
+
+    completed = anyio.Event()
+    result: list[Any] = []
+
+    async def note_result(evt: Any) -> None:
+        if isinstance(evt, CompletedEvent):
+            completed.set()
+
+    async def drive() -> None:
+        result.append(
+            await _run(
+                "async_hook_post_result_response",
+                wake_s=1.0,
+                timeout=15,
+                on_event=note_result,
+            )
+        )
+
+    async def cancel_later() -> None:
+        await completed.wait()
+        await anyio.sleep(1.4)  # the rewake hook (1 s) has reported back
+        assert await close_live_session(SID, "cancel") is True
+
+    with capture_logs() as logs:
+        async with anyio.create_task_group() as tg:
+            tg.start_soon(drive)
+            tg.start_soon(cancel_later)
+    runner, _ = result[0]
+    state = _engine_state(runner)
+    assert state.live_close_reason == "cancel"
+    assert _events(logs, "claude.live_session.async_hook_killed") == []
+    assert state.pending_hooks == {} and state.deferred_hooks == {}
+
+
 async def test_812_hook_hold_expiry_logs_async_hook_killed(
     monkeypatch: pytest.MonkeyPatch, quarantine: QuarantineStore
 ) -> None:

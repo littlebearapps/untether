@@ -506,6 +506,15 @@ async def close_live_session(
     live = _LIVE_SESSIONS.get(session_id)
     if live is None:
         return False
+    if (
+        live.idle
+        and not live.closing
+        and live.state.pending_hooks
+        and await _no_hook_processes(live.pid)
+    ):
+        # #812: plain ``async`` hooks that already finished (their response
+        # is withheld until the next turn) are not cut short by this close.
+        defer_settled_async_hooks(live.state)
     async with live.lock:
         if live.closing:
             return False
@@ -557,6 +566,23 @@ async def close_live_session(
 # #812: closes the user (or an operator restart) asked for — a hook they
 # cut short is expected, so it logs at INFO and gets no extra notice.
 _USER_CLOSE_REASONS = frozenset({"cancel", "new", "drain", "options_changed"})
+
+
+async def _no_hook_processes(pid: int | None) -> bool:
+    """#812: True only when the CLI's process table was read and it has no
+    ``<shell> -c`` child (every command hook runs as one). Unknown (no pid,
+    unreadable table, other platforms) → False, so the hold stays bounded by
+    ``async_hook_max_hold_s`` as before."""
+    if not isinstance(pid, int):
+        return False
+    from ..utils.proc_diag import hook_shell_children
+
+    try:
+        children = await anyio.to_thread.run_sync(hook_shell_children, pid)
+    except Exception:  # noqa: BLE001 — a scan failure must not break a close
+        logger.debug("claude.hook.proc_scan_failed", exc_info=True)
+        return False
+    return children is not None and not children
 
 
 def _hooks_at_close(live: LiveSession) -> list[PendingHook]:
@@ -1526,6 +1552,16 @@ class ClaudeStreamState:
     # move to ``expired_hooks`` so a later close can still name them.
     pending_hooks: dict[str, PendingHook] = field(default_factory=dict)
     expired_hooks: dict[str, PendingHook] = field(default_factory=dict)
+    # Plain ``async: true`` hooks whose process has already exited: the CLI
+    # withholds their ``hook_response`` until the next turn or teardown
+    # (docs: "If the session is idle, the response waits until the next
+    # user interaction"), so they must not hold the session. Only
+    # ``asyncRewake`` hooks report back while idle — and a finished process
+    # can no longer rewake. See ``defer_settled_async_hooks``.
+    deferred_hooks: dict[str, PendingHook] = field(default_factory=dict)
+    # Monotonic time the live-session lifecycle first found no hook process
+    # under the CLI while hooks were pending (None once one is seen again).
+    hook_procs_gone_since: float | None = None
     # (hook name, hook event, monotonic ts) of an async hook that exited 2
     # (the asyncRewake wake signal) while idle; the next turn opening within
     # ``_HOOK_REWAKE_HINT_TTL_S`` is its rewake. Cleared on every turn open.
@@ -2738,7 +2774,8 @@ def _apply_hook_event(
         return  # hook_progress: output polling, nothing to track.
     pending = state.pending_hooks.pop(hook_id, None) if hook_id else None
     expired = state.expired_hooks.pop(hook_id, None) if hook_id else None
-    known = pending or expired
+    deferred = state.deferred_hooks.pop(hook_id, None) if hook_id else None
+    known = pending or expired or deferred
     outcome = _str_or_none(event.outcome)
     exit_code = event.exit_code
     is_rewake_signal = (
@@ -2838,6 +2875,38 @@ def has_pending_async_hooks(state: ClaudeStreamState) -> bool:
             continue
         holding = True
     return holding
+
+
+# A pending hook younger than this is never deferred on a process scan (its
+# ``/bin/sh -c`` child may not be visible yet), and the lifecycle defers only
+# after finding no hook process for this long (a hook that just exited may
+# not have reported back yet).
+_HOOK_PROC_SETTLE_S = 1.0
+
+
+def defer_settled_async_hooks(state: ClaudeStreamState) -> list[PendingHook]:
+    """#812: the CLI has no hook process left, so every pending hook (older
+    than ``_HOOK_PROC_SETTLE_S``) has finished. The ones still unpaired are
+    plain ``async: true`` hooks — the CLI withholds their ``hook_response``
+    until the next turn or teardown, so waiting for it would hold the
+    session to ``async_hook_max_hold_s`` for nothing. An ``asyncRewake``
+    hook reports back as soon as it exits (and a finished process can't
+    rewake), so none is lost. Moves them to ``deferred_hooks`` (still
+    paired when the response finally lands; never "killed" at a close) and
+    returns them."""
+    if not state.pending_hooks:
+        return []
+    now = time.monotonic()
+    moved: list[PendingHook] = []
+    for hook_id, hook in list(state.pending_hooks.items()):
+        if _hook_never_holds(hook.event) or now - hook.started_at < _HOOK_PROC_SETTLE_S:
+            continue
+        state.pending_hooks.pop(hook_id, None)
+        if len(state.deferred_hooks) >= _PENDING_HOOKS_MAX:
+            state.deferred_hooks.pop(next(iter(state.deferred_hooks)))
+        state.deferred_hooks[hook_id] = hook
+        moved.append(hook)
+    return moved
 
 
 def _hooks_outstanding(state: ClaudeStreamState) -> list[PendingHook]:
@@ -6705,6 +6774,30 @@ class ClaudeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
                 # open too (sibling predicate, D-1) — closing it would make
                 # the CLI drop an asyncRewake hook's findings.
                 hooks_pending = live.idle and has_pending_async_hooks(state)
+                if not hooks_pending or not await _no_hook_processes(
+                    getattr(proc, "pid", None)
+                    if getattr(proc, "returncode", None) is None
+                    else None
+                ):
+                    state.hook_procs_gone_since = None
+                elif state.hook_procs_gone_since is None:
+                    # First scan with no hook process: give a hook that just
+                    # exited a moment to report back (exit → hook_response
+                    # is not atomic) before deciding.
+                    state.hook_procs_gone_since = now
+                elif now - state.hook_procs_gone_since >= _HOOK_PROC_SETTLE_S:
+                    # Plain ``async`` hooks: finished, response withheld by
+                    # the CLI until the next turn — nothing left to wait for.
+                    deferred = defer_settled_async_hooks(state)
+                    if deferred:
+                        run_logger.info(
+                            "claude.hook.hold_released",
+                            session_id=sid,
+                            hook_names=[h.label for h in deferred],
+                            reason="no_hook_process",
+                            held_s=round(now - min(h.started_at for h in deferred), 1),
+                        )
+                        hooks_pending = has_pending_async_hooks(state)
                 live_work = (
                     has_live_background_work(state)
                     or _has_pending_wakeup(state)

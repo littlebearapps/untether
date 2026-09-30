@@ -123,6 +123,14 @@ hook-message, interrupt, TaskOutput/TaskStop and origin sections, not the whole 
     hooks and no user message, the process stayed up until both 45 s hooks finished (46.6 s). The
     plain async hook was *not* cancelled. `SessionStart` has a special in-band settle path
     (`Settling … pending async ${e} hook(s)` @205740323). Don't generalise from SessionStart.
+- **Plain `async` responses are withheld while idle. VERIFIED-PROBE (CLI 2.1.285, 2026-09-30,
+  stdin open 30 s, user's `moshi-hook` `async: true` on UserPromptSubmit + Stop).** The hook
+  processes exit within a second, but their `hook_response` (`outcome:"success"`) lands only when
+  stdin closes (30.01 s), or at the next turn. The `asyncRewake` Stop hook (security-guidance) and
+  the sync hooks report at once (the rewake 0.28 s after the result, while idle). So an unpaired
+  `hook_started` after the result isn't proof of a running hook. Untether's hold (#812) releases
+  once the CLI has no `<shell> -c` child left (every command hook runs as `/bin/sh -c <command>`),
+  logging `claude.hook.hold_released reason=no_hook_process`.
 
 ### A2. `--include-hook-events`
 

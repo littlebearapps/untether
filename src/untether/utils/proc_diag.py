@@ -341,6 +341,64 @@ def hook_script_label(pid: int) -> str | None:
     return None
 
 
+# #812: Claude Code runs command hooks as ``/bin/sh -c <command>`` direct
+# children (Node ``spawn(..., {shell: true})``, observed on CLI 2.1.285). Any
+# POSIX shell counts, so a CLI change of hook shell fails safe (a longer
+# hold), never early.
+_HOOK_SHELLS = frozenset({"sh", "bash", "dash", "zsh", "ksh", "ash"})
+
+
+def _is_shell_c(argv: list[str]) -> bool:
+    return (
+        len(argv) >= 2
+        and os.path.basename(argv[0]) in _HOOK_SHELLS
+        and "-c" in argv[1:3]
+    )
+
+
+def hook_shell_children(pid: int) -> list[int] | None:
+    """#812: direct children of ``pid`` running ``<shell> -c …`` — the shape
+    every Claude Code command hook runs as. Returns None when the process
+    table can't be read (then the caller can't tell, and must not assume
+    no hook is running). Blocking (``ps`` on macOS): call from a thread."""
+    if os.path.isdir(f"/proc/{pid}"):
+        found: list[int] = []
+        for child in _find_children(pid):
+            argv = read_cmdline_argv(child)
+            if argv and _is_shell_c(argv):
+                found.append(child)
+        return found
+    if sys.platform != "darwin":
+        return None
+    try:
+        out = subprocess.run(  # nosec B603 — fixed argv, no shell
+            ["/bin/ps", "-axo", "pid=,ppid=,command="],
+            capture_output=True,
+            text=True,
+            timeout=2.0,
+            env={**os.environ, "LC_ALL": "C"},
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if out.returncode != 0 or not out.stdout:
+        return None
+    found = []
+    for line in out.stdout.splitlines():
+        fields = line.split(None, 2)
+        if len(fields) != 3:
+            continue
+        try:
+            row_pid, row_ppid = int(fields[0]), int(fields[1])
+        except ValueError:
+            continue
+        # ``command=`` joins argv with spaces; the shell and ``-c`` are the
+        # leading tokens.
+        if row_ppid == pid and _is_shell_c(fields[2].split()[:3]):
+            found.append(row_pid)
+    return found
+
+
 def _find_children(pid: int) -> list[int]:
     """Find child PIDs via /proc/pid/task/*/children."""
     children: list[int] = []
