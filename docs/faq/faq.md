@@ -123,9 +123,9 @@ warn_run_above_usd = 20.00   # USD; alert on any single expensive run — works 
 
 If you set no budget at all, Untether still flags a single run that costs more than `warn_run_above_usd` (default US$20) with a chat line and a `cost.run_outlier` log entry, so a costly session can't pass silently. Set `notify_run_outlier = false` to keep the log entry without the chat line.
 
-`/usage` shows the current run's cost; `/usage debug` shows OAuth token expiry, schema-mismatch counters, and cache freshness — useful when the subscription footer goes silent. `/stats` reports per-engine totals across today, this week, and all time.
+`/usage` shows your Claude subscription quota; in Codex and OpenCode chats it shows the token totals of the chat's last session. `/usage debug` shows OAuth token expiry, schema-mismatch counters, and cache freshness — useful when the subscription footer goes silent. `/stats` reports per-engine totals across today, this week, and all time.
 
-Cost tracking is most accurate for Claude (full USD reporting via API metadata) and OpenCode. For Claude, the figure on each reply is what that reply cost — Claude reports a running total for the whole session, so Untether records the difference since the previous reply (resumed sessions are no longer counted twice). Codex, Pi, Gemini, and Amp report tokens-only. Subscription users (Claude Pro/Max, ChatGPT, Gemini, Amp) see a `5h: N% / 7d: N%` indicator instead of dollars. See the [cost-budgets guide](https://untether.littlebearapps.com/how-to/cost-budgets/) for tuning.
+Cost tracking is most accurate for Claude (full USD reporting via API metadata) and OpenCode. For Claude, the figure on each reply is what that reply cost — Claude reports a running total for the whole session, so Untether records the difference since the previous reply (resumed sessions are no longer counted twice). Codex reports tokens only — as a running total for the whole thread, so Untether records each run's difference (resumed runs aren't counted twice). Pi, Gemini, and Amp report tokens-only. Subscription users (Claude Pro/Max, ChatGPT, Gemini, Amp) see a `5h: N% / 7d: N%` indicator instead of dollars. See the [cost-budgets guide](https://untether.littlebearapps.com/how-to/cost-budgets/) for tuning.
 
 ## Does /loop work via Untether?
 

@@ -397,7 +397,6 @@ def test_apply_token_delta_codex_rewrites_flat_fields() -> None:
     ("engine", "session_id", "usage"),
     [
         ("claude", "s", {"input_tokens": 5, "output_tokens": 1}),
-        ("opencode", "s", {"usage": {"input_tokens": 5, "output_tokens": 1}}),
         ("pi", "s", {"input_tokens": 5, "output_tokens": 1}),
         ("codex", None, {"input_tokens": 5, "output_tokens": 1}),
         ("codex", "", {"input_tokens": 5, "output_tokens": 1}),
@@ -426,3 +425,18 @@ def test_apply_token_delta_failure_is_swallowed(
         out = rb._apply_token_delta("codex", "t", usage, resumed=False)
     assert out is usage
     assert any(e["event"] == "usage.token_delta_failed" for e in logs)
+
+
+def test_apply_token_delta_opencode_per_run() -> None:
+    """#417: OpenCode joins the ledger as ``per_run`` — per-run figures stay
+    as reported, the session total is added alongside."""
+    first = {"total_cost_usd": 0.01, "usage": {"input_tokens": 5, "output_tokens": 1}}
+    rb._apply_token_delta("opencode", "s", first, resumed=False)
+    usage = {"usage": {"input_tokens": 7, "output_tokens": 2}}
+    out = rb._apply_token_delta("opencode", "s", usage, resumed=True)
+    assert out is not usage
+    assert out is not None
+    assert out["usage"] == {"input_tokens": 7, "output_tokens": 2}
+    assert out["session_total_usage"] == {"input_tokens": 12, "output_tokens": 3}
+    assert "token_delta_source" not in out
+    assert "input_tokens" not in out

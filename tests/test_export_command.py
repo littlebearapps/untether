@@ -11,6 +11,7 @@ from untether.telegram.commands.export import (
     ExportCommand,
     _format_export_json,
     _format_export_markdown,
+    latest_session_for_chat,
     record_session_event,
     record_session_usage,
 )
@@ -253,3 +254,110 @@ class TestFormatExportJson:
         assert parsed["session_id"] == "s1"
         assert len(parsed["events"]) == 1
         assert parsed["usage"]["cost"] == 0.1
+
+
+# --- #417: nested token header, latest = last activity, engine filter -------
+
+
+class _Clock:
+    def __init__(self) -> None:
+        self.now = 1000.0
+
+    def time(self) -> float:
+        self.now += 1.0
+        return self.now
+
+
+@pytest.fixture
+def clock(monkeypatch: pytest.MonkeyPatch) -> _Clock:
+    from untether.telegram.commands import export as export_mod
+
+    c = _Clock()
+    monkeypatch.setattr(export_mod, "time", c)
+    _reset()
+    yield c
+    _reset()
+
+
+def test_header_nested_tokens_without_cost() -> None:
+    """OpenCode's nested usage with no cost still gets a token line."""
+    md = _format_export_markdown(
+        "s1",
+        [{"type": "completed", "ok": True, "answer": "ok", "error": None}],
+        {"usage": {"input_tokens": 5000, "output_tokens": 1200}},
+    )
+    assert "5000 in / 1200 out tokens" in md
+
+
+def test_latest_session_uses_last_activity(clock: _Clock) -> None:
+    record_session_event("A", {"type": "started", "engine": "codex"}, channel_id=CHAT_A)
+    record_session_event("B", {"type": "started", "engine": "codex"}, channel_id=CHAT_A)
+    record_session_event("A", {"type": "action", "phase": "started"}, channel_id=CHAT_A)
+    latest = latest_session_for_chat(CHAT_A)
+    assert latest is not None and latest.session_id == "A"
+    record_session_usage("B", {"input_tokens": 1}, channel_id=CHAT_A)
+    latest = latest_session_for_chat(CHAT_A)
+    assert latest is not None and latest.session_id == "B"
+    assert latest.usage == {"input_tokens": 1}
+
+
+def test_latest_session_filters_by_engine(clock: _Clock) -> None:
+    record_session_event(
+        "cx", {"type": "started", "engine": "codex"}, channel_id=CHAT_A
+    )
+    record_session_event(
+        "cl", {"type": "started", "engine": "claude"}, channel_id=CHAT_A
+    )
+    codex = latest_session_for_chat(CHAT_A, engine="codex")
+    assert codex is not None
+    assert (codex.session_id, codex.engine) == ("cx", "codex")
+    anything = latest_session_for_chat(CHAT_A)
+    assert anything is not None and anything.session_id == "cl"
+    assert latest_session_for_chat(CHAT_A, engine="opencode") is None
+    assert latest_session_for_chat(CHAT_B) is None
+
+
+@pytest.mark.anyio
+async def test_export_command_selects_latest_after_refactor(clock: _Clock) -> None:
+    record_session_event(
+        "old", {"type": "started", "engine": "codex", "title": "t"}, channel_id=CHAT_A
+    )
+    record_session_event(
+        "new", {"type": "started", "engine": "codex", "title": "t"}, channel_id=CHAT_A
+    )
+    # Resume the older session: it becomes the most recently active.
+    record_session_event(
+        "old",
+        {"type": "completed", "ok": True, "answer": "resumed", "error": None},
+        channel_id=CHAT_A,
+    )
+
+    @dataclass
+    class FakeMessage:
+        channel_id: int = CHAT_A
+        message_id: int = 1
+
+    @dataclass
+    class FakeCtx:
+        args_text: str = "json"
+        message: FakeMessage = None  # type: ignore[assignment]
+
+        def __post_init__(self):
+            if self.message is None:
+                self.message = FakeMessage()
+
+    result = await ExportCommand().handle(FakeCtx())  # type: ignore[arg-type]
+    assert result is not None
+    assert '"session_id": "old"' in result.text
+    assert "resumed" in result.text
+
+
+def test_trim_evicts_least_recently_active(clock: _Clock) -> None:
+    for i in range(20):
+        record_session_event(f"s{i}", {"type": "started"}, channel_id=CHAT_A)
+    # s0 was created first but is now the most recently active.
+    record_session_event("s0", {"type": "action"}, channel_id=CHAT_A)
+    record_session_event("s20", {"type": "started"}, channel_id=CHAT_A)
+    assert len(_SESSION_HISTORY) == 20
+    assert (CHAT_A, "s0") in _SESSION_HISTORY
+    assert (CHAT_A, "s1") not in _SESSION_HISTORY

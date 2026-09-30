@@ -78,6 +78,35 @@ def test_translate_success_fixture() -> None:
     assert completed.answer == "```\nhello\n```"
 
 
+def test_opencode_two_runs_through_real_translation() -> None:
+    """#417: the real nested OpenCode usage shape accumulates as ``per_run``
+    in the session ledger (two runs of the success fixture)."""
+    from untether import runner_bridge as rb
+    from untether.session_costs import get_session_cost_ledger
+
+    sid = "ses_417_two_runs"
+    for i in range(2):
+        state = OpenCodeStreamState()
+        events: list = []
+        for event in _load_fixture("opencode_stream_success.jsonl"):
+            events.extend(
+                translate_opencode_event(event, title="opencode", state=state)
+            )
+        completed = next(evt for evt in events if isinstance(evt, CompletedEvent))
+        usage = completed.usage
+        assert usage is not None
+        out = rb._apply_token_delta("opencode", sid, usage, resumed=i > 0)
+        assert out is not None
+        assert out["usage"] == usage["usage"]
+        assert "session_total_usage" in out
+    tokens = get_session_cost_ledger().session_tokens("opencode", sid)
+    assert tokens is not None
+    assert tokens.totals["input_tokens"] == 44886
+    assert tokens.totals["cache_read_tokens"] == 42830
+    assert tokens.totals["output_tokens"] == 236
+    assert tokens.runs == 2
+
+
 def test_translate_missing_reason_success() -> None:
     state = OpenCodeStreamState()
     events: list = []

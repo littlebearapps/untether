@@ -4,16 +4,20 @@ from __future__ import annotations
 
 import json
 import time
+from dataclasses import dataclass
 from datetime import UTC, datetime
 
 from ...commands import CommandBackend, CommandContext, CommandResult
 from ...logging import get_logger
+from ...session_costs import token_counts
 from ...transport import ChannelId
 
 logger = get_logger(__name__)
 
 # Store recent completed events for export
-# Keyed by (channel_id, session_id) -> (timestamp, events_list, usage_dict)
+# Keyed by (channel_id, session_id) -> (last_activity_ts, events_list, usage_dict)
+# #417: the timestamp is refreshed on every event/usage record, so "latest"
+# means most recently *active* and trimming is LRU by activity.
 _SessionKey = tuple[ChannelId, str]
 _SESSION_HISTORY: dict[_SessionKey, tuple[float, list[dict], dict | None]] = {}
 _MAX_SESSIONS = 20
@@ -29,9 +33,9 @@ def record_session_event(
         logger.debug("export.session.new", session_id=session_id, channel_id=channel_id)
         _SESSION_HISTORY[key] = (time.time(), [event], None)
     else:
-        ts, events, usage = entry
+        _ts, events, usage = entry
         events.append(event)
-        _SESSION_HISTORY[key] = (ts, events, usage)
+        _SESSION_HISTORY[key] = (time.time(), events, usage)
     # Trim old sessions
     if len(_SESSION_HISTORY) > _MAX_SESSIONS:
         oldest_key = min(_SESSION_HISTORY, key=lambda k: _SESSION_HISTORY[k][0])
@@ -46,8 +50,48 @@ def record_session_usage(
     key: _SessionKey = (channel_id, session_id)
     entry = _SESSION_HISTORY.get(key)
     if entry is not None:
-        ts, events, _ = entry
-        _SESSION_HISTORY[key] = (ts, events, usage)
+        _ts, events, _ = entry
+        _SESSION_HISTORY[key] = (time.time(), events, usage)
+
+
+@dataclass(frozen=True, slots=True)
+class ExportSession:
+    session_id: str
+    engine: str | None
+    usage: dict | None
+    events: list[dict]
+    ts: float
+
+
+def _session_engine(events: list[dict]) -> str | None:
+    for evt in events:
+        if evt.get("type") == "started":
+            engine = evt.get("engine")
+            return engine if isinstance(engine, str) else None
+    return None
+
+
+def latest_session_for_chat(
+    channel_id: ChannelId, *, engine: str | None = None
+) -> ExportSession | None:
+    """The chat's most recently active recorded session (#417), optionally
+    only among sessions whose first ``started`` event names ``engine``."""
+    best: ExportSession | None = None
+    for (chat, session_id), (ts, events, usage) in _SESSION_HISTORY.items():
+        if chat != channel_id:
+            continue
+        sess_engine = _session_engine(events)
+        if engine is not None and sess_engine != engine:
+            continue
+        if best is None or ts > best.ts:
+            best = ExportSession(
+                session_id=session_id,
+                engine=sess_engine,
+                usage=usage,
+                events=events,
+                ts=ts,
+            )
+    return best
 
 
 def _format_export_markdown(
@@ -65,8 +109,10 @@ def _format_export_markdown(
         cost = usage.get("total_cost_usd")
         turns = usage.get("num_turns")
         duration_ms = usage.get("duration_ms")
-        input_tokens = usage.get("input_tokens")
-        output_tokens = usage.get("output_tokens")
+        # #417: flat (Codex) or nested (Claude/OpenCode) token counts.
+        counts = token_counts(usage) or {}
+        input_tokens = counts.get("input_tokens")
+        output_tokens = counts.get("output_tokens")
         parts: list[str] = []
         if cost is not None:
             parts.append(f"${cost:.4f}")
@@ -164,20 +210,14 @@ class ExportCommand:
         args = ctx.args_text.strip().lower()
         fmt = "json" if args == "json" else "md"
 
-        # Filter sessions belonging to this chat
-        chat_id = ctx.message.channel_id
-        chat_sessions = {k: v for k, v in _SESSION_HISTORY.items() if k[0] == chat_id}
-
-        if not chat_sessions:
+        # The chat's most recently active session (#417 D10).
+        latest = latest_session_for_chat(ctx.message.channel_id)
+        if latest is None:
             return CommandResult(
                 text="No session history available to export.",
                 notify=True,
             )
-
-        # Get the most recent session for this chat
-        key = max(chat_sessions, key=lambda k: chat_sessions[k][0])
-        session_id = key[1]
-        _ts, events, usage = chat_sessions[key]
+        session_id, events, usage = latest.session_id, latest.events, latest.usage
 
         if not events:
             return CommandResult(

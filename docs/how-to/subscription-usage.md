@@ -2,6 +2,8 @@
 
 Keep tabs on your Claude Code subscription from anywhere — Untether surfaces usage directly in [Telegram](https://telegram.org). This guide covers checking usage on demand and enabling automatic usage footers after every run.
 
+In Codex, OpenCode and other non-Claude chats, `/usage` shows the token totals of the chat's last session instead — see [Cost budgets → Other engines](cost-budgets.md#other-engines).
+
 ## Check usage with /usage
 
 Send `/usage` in any chat to see a full breakdown of your Claude Code subscription usage:
