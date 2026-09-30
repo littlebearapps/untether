@@ -1907,7 +1907,105 @@ def scenario_plan_approve_monitor_ticks(first: dict) -> None:
     serve_mode_followups()
 
 
+def _launch_bg_agent(task_id: str) -> None:
+    tool_id = f"toolu_{task_id}"
+    tool_use("Agent", tool_id, {"description": f"work {task_id}", "prompt": "go"})
+    start_bg(task_id, tool_id, task_type="local_agent")
+    tool_result(tool_id, "Async agent launched successfully.")
+
+
+def _answer_while_agents_run(seconds: float, *, launch: str | None = None) -> None:
+    """#383 C4: the approved plan's agents work for ``seconds``; each user
+    line meanwhile runs at once as its own turn answering ``MODE: <mode>``
+    (the real CLI does not hold a follow-up behind a background agent). The
+    first such turn launches agent ``launch`` when given."""
+    deadline = time.monotonic() + seconds
+    while True:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return
+        obj = next_user(remaining)
+        if obj is None:
+            shutdown()
+        if obj == "timeout":
+            return
+        cmd = obj.get("uuid")
+        lifecycle(cmd, "queued")
+        lifecycle(cmd, "started")
+        mode = _mode
+        log_stdin(f"turn_start:{mode}")
+        init()
+        if launch is not None:
+            _launch_bg_agent(launch)
+            launch = None
+        text(f"MODE: {mode}")
+        result(f"MODE: {mode}")
+
+
+def _agent_finishes(task_id: str) -> None:
+    """The agent ends (recording the mode it ran its last step in) and the
+    CLI starts its wake turn by itself after WAKE_AFTER_RESULT_S, reading no
+    stdin line first — so the turn answers ``MODE: plan`` only if the host
+    re-armed on the task's end frames."""
+    log_stdin(f"agent_end:{task_id}:{_mode}")
+    end_bg(task_id)
+    time.sleep(WAKE_AFTER_RESULT_S)
+    mode_turn(sample=_mode)
+
+
+def scenario_plan_approve_agent_wake(first: dict) -> None:
+    """#383 C4: the approved turn launches a background agent. Follow-ups
+    while it works run unplanned; its wake turn and later follow-ups are
+    planned again."""
+    _plan_first_turn()
+    _launch_bg_agent("a1")
+    result("PLANNED", turns=3)
+    _answer_while_agents_run(WAKE_S)
+    _agent_finishes("a1")
+    serve_mode_followups()
+
+
+def scenario_plan_approve_agent_chain(first: dict) -> None:
+    """#383 C4: a deferred (unplanned) follow-up launches a second agent; it
+    never extends the deferral — the first agent's end re-arms plan while
+    the second still runs."""
+    _plan_first_turn()
+    _launch_bg_agent("a1")
+    result("PLANNED", turns=3)
+    _answer_while_agents_run(WAKE_S, launch="a2")
+    _agent_finishes("a1")
+    if wait_idle_or_eof(WAKE_S) is None:
+        shutdown()
+    _agent_finishes("a2")
+    serve_mode_followups()
+
+
+def scenario_plan_approve_agent_before(first: dict) -> None:
+    """#383 C4: an agent launched in an earlier (planning) turn doesn't hold
+    the re-arm back — it ran under plan mode anyway."""
+    init()
+    _launch_bg_agent("a0")
+    text("PLANNING")
+    result("PLANNING", turns=2)
+    obj = next_user(None)
+    if not isinstance(obj, dict):
+        shutdown()
+    cmd = obj.get("uuid")
+    lifecycle(cmd, "queued")
+    lifecycle(cmd, "started")
+    init()
+    ask_exit_plan_mode("req-epm-2")
+    text("PLANNED")
+    result("PLANNED", turns=2)
+    _answer_while_agents_run(WAKE_S)
+    _agent_finishes("a0")
+    serve_mode_followups()
+
+
 _SCENARIOS = {
+    "plan_approve_agent_wake": scenario_plan_approve_agent_wake,
+    "plan_approve_agent_chain": scenario_plan_approve_agent_chain,
+    "plan_approve_agent_before": scenario_plan_approve_agent_before,
     "bg_agent_progressing": scenario_bg_agent_progressing,
     "bg_agent_silent": scenario_bg_agent_silent,
     "bg_agent_long_tool": scenario_bg_agent_long_tool,

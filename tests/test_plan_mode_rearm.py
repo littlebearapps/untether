@@ -815,3 +815,384 @@ async def test_idle_steer_after_failed_rearm_falls_back() -> None:
     _register_live(state, stdin)
     assert await steer_into_session(SID, "x", command_uuid="c1") == "options_changed"
     assert _kinds(stdin) == []
+
+
+# ── C4: defer the re-arm while the approved plan's agents run ───────────────
+#
+# Probe P-3 (findings addendum, CLI 2.1.285): a running background subagent
+# inherits the parent's live mode, so re-arming plan under it would switch
+# the approved plan's workers back into planning. The re-arm waits for the
+# agents launched in the plan-exit turn (``origin_turn``), bounded by their
+# inactivity (``post_result_bg_max_hold``, plan 21 D7) and, as a ceiling,
+# ``live_session_max_s``.
+
+
+def _task_started(
+    state: ClaudeStreamState,
+    task_id: str = "a1",
+    *,
+    task_type: str = "local_agent",
+    tool: str | None = None,
+) -> Any:
+    payload: dict[str, Any] = {
+        "type": "system",
+        "subtype": "task_started",
+        "task_id": task_id,
+        "tool_use_id": tool or f"toolu_{task_id}",
+        "description": f"worker {task_id}",
+        "task_type": task_type,
+        "is_backgrounded": True,
+    }
+    if task_type == "local_agent":
+        payload["subagent_type"] = "general-purpose"
+    _feed(state, payload)
+    return state.tasks[task_id]
+
+
+def _task_done(state: ClaudeStreamState, task_id: str = "a1") -> None:
+    _feed(
+        state,
+        {
+            "type": "system",
+            "subtype": "task_updated",
+            "task_id": task_id,
+            "patch": {"status": "completed"},
+        },
+    )
+
+
+def _task_progress(state: ClaudeStreamState, task_id: str = "a1") -> None:
+    _feed(
+        state,
+        {
+            "type": "system",
+            "subtype": "task_progress",
+            "task_id": task_id,
+            "tool_use_id": f"toolu_{task_id}",
+            "description": "Running step",
+            "usage": {"total_tokens": 1200, "tool_uses": 2, "duration_ms": 5},
+        },
+    )
+
+
+def _approved_with_agent(state: ClaudeStreamState) -> Any:
+    """Turn 1: plan approved (status default), then the approved work
+    launches a background agent; the turn closes."""
+    _left_plan(state)
+    agent = _task_started(state)
+    _result(state)
+    return agent
+
+
+def _deferred_logs(logs: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [e for e in logs if e["event"] == "claude.permission_mode.rearm_deferred"]
+
+
+def test_agent_launched_in_exit_turn_defers_rearm() -> None:
+    state, _ = _live_session()
+    with capture_logs() as logs:
+        agent = _approved_with_agent(state)
+        assert agent.origin_turn == state.plan_exit_turn
+        assert state.plan_rearm_pending  # the turn close still asks
+        assert _claim_plan_rearm(state, SID, reason="idle") is None
+        assert _claim_plan_rearm(state, SID, reason="followup") is None
+    deferred = _deferred_logs(logs)
+    assert len(deferred) == 1  # once per boundary
+    assert deferred[0]["reason"] == "live_agents"
+    assert deferred[0]["agents"] == 1
+    assert deferred[0]["plan_exit_turn"] == state.plan_exit_turn
+    assert state.plan_rearm_deferred == 1
+    assert state.plan_rearm_inflight is None
+    # The agent finishes: the next claim goes out.
+    _task_done(state)
+    with capture_logs() as logs:
+        payload = _claim_plan_rearm(state, SID, reason="idle")
+    assert payload is not None
+    ended = [
+        e for e in logs if e["event"] == "claude.permission_mode.rearm_deferral_ended"
+    ]
+    assert ended and ended[0]["reason"] == "agents_done"
+    assert state.plan_rearm_deferred == 0
+
+
+def test_agent_started_before_approval_in_same_turn_counts_but_earlier_turn_does_not() -> (
+    None
+):
+    # Same turn, launched while still planning: it will run the approved work.
+    state, _ = _live_session()
+    _init(state, "plan")
+    _task_started(state)
+    _status(state, "default")
+    _result(state)
+    assert _claim_plan_rearm(state, SID, reason="idle") is None
+    _cleanup_session_registries(SID)
+
+    # An agent from an EARLIER turn ran under plan mode anyway.
+    state, _ = _live_session()
+    _init(state, "plan")
+    _task_started(state, "a0")
+    _result(state)
+    _open_turn(state)
+    _status(state, "default")  # the plan is approved in turn 2
+    _result(state)
+    assert state.tasks["a0"].origin_turn != state.plan_exit_turn
+    assert _claim_plan_rearm(state, SID, reason="idle") is not None
+
+
+def test_deferral_does_not_chain() -> None:
+    """While deferred, an unplanned follow-up turn launches a second agent;
+    it carries a later ``origin_turn`` and never extends the deferral."""
+    state, _ = _live_session()
+    _approved_with_agent(state)
+    assert _claim_plan_rearm(state, SID, reason="idle") is None
+    _open_turn(state)
+    _task_started(state, "a2")
+    _result(state)
+    assert state.tasks["a2"].origin_turn == state.turn
+    assert _claim_plan_rearm(state, SID, reason="idle") is None  # a1 still runs
+    _task_done(state, "a1")
+    assert state.tasks["a2"].holds_session
+    assert _claim_plan_rearm(state, SID, reason="idle") is not None
+
+
+def test_revived_agent_in_later_turn_stops_deferring() -> None:
+    state, _ = _live_session()
+    agent = _approved_with_agent(state)
+    _task_done(state)
+    _open_turn(state)  # still unplanned: e.g. the re-arm write failed
+    # #801: Claude resumes the finished agent in this later turn.
+    agent.ended_at = time.monotonic() - 10.0
+    _task_started(state)
+    assert agent.revived_count == 1
+    assert agent.origin_turn == state.turn != state.plan_exit_turn
+    _result(state)
+    assert _claim_plan_rearm(state, SID, reason="idle") is not None
+
+
+def test_deferral_hard_bound() -> None:
+    """Plan 21 D7: the deferral ends when the exit-turn agents show no
+    activity for ``post_result_bg_max_hold`` — not a fixed time since the
+    plan exit — with ``live_session_max_s`` as the ceiling."""
+    state, _ = _live_session()
+    state.bg_max_hold_s = 1800.0
+    state.live_session_max_s = 14400.0
+    agent = _approved_with_agent(state)
+    now = time.monotonic()
+    # An hour past the exit but still working: the rc15 plan's old bound
+    # (now - plan_exited_at > max_hold) would have re-armed under it.
+    state.plan_exited_at = now - 3600.0
+    agent.last_progress_at = now - 60.0
+    _task_progress(state)  # a fresh frame
+    assert _claim_plan_rearm(state, SID, reason="idle") is None
+    # Quiet for the whole hold: the bound lifts the deferral.
+    agent.last_progress_at = now - 1801.0
+    with capture_logs() as logs:
+        assert _claim_plan_rearm(state, SID, reason="idle") is not None
+    ended = [
+        e for e in logs if e["event"] == "claude.permission_mode.rearm_deferral_ended"
+    ]
+    assert ended and ended[0]["reason"] == "agents_idle"
+
+
+def test_deferral_ceiling_and_unbounded_hold() -> None:
+    state, _ = _live_session()
+    state.bg_max_hold_s = 0.0  # no inactivity bound (as the lifecycle)
+    state.live_session_max_s = 14400.0
+    agent = _approved_with_agent(state)
+    agent.last_progress_at = time.monotonic() - 10_000.0
+    assert claude_mod._rearm_deferral(state) == (1, "live_agents")
+    state.plan_exited_at = time.monotonic() - 14401.0
+    assert claude_mod._rearm_deferral(state) == (0, "ceiling")
+
+
+def test_agent_with_live_foreground_tool_counts_as_active() -> None:
+    """#829 A.2 reused: an agent inside one long foreground tool sends no
+    ``task_progress`` but is working — the bound must not lift."""
+    state, _ = _live_session()
+    state.bg_max_hold_s = 60.0
+    agent = _approved_with_agent(state)
+    agent.last_progress_at = time.monotonic() - 3600.0
+    _feed(
+        state,
+        {
+            "type": "system",
+            "subtype": "task_started",
+            "task_id": "fg1",
+            "tool_use_id": "toolu_sub_bash",
+            "description": "sleep 150",
+            "task_type": "local_bash",
+            "is_backgrounded": False,
+            "owned_by_subagent": True,
+        },
+    )
+    state.tasks["fg1"].owner_tool_use_id = agent.tool_use_id
+    assert claude_mod._rearm_deferral(state) == (1, "live_agents")
+
+
+@pytest.mark.parametrize("monitor", [False, True])
+def test_bg_bash_and_monitor_do_not_defer(monitor: bool) -> None:
+    """Shells make no permission checks: they never hold the re-arm back."""
+    state, _ = _live_session()
+    _left_plan(state)
+    task = _task_started(state, "b1", task_type="local_bash")
+    if monitor:
+        state.live_monitors[task.tool_use_id] = time.monotonic() + 600
+    _result(state)
+    assert _claim_plan_rearm(state, SID, reason="idle") is not None
+
+
+async def test_deferred_followup_turn_carries_plan_deferred_detail() -> None:
+    state, stdin = _live_session()
+    _approved_with_agent(state)
+    state.plan_rearm_pending = False
+    _register_live(state, stdin)
+    assert await inject_when_idle(SID, "quick question", command_uuid="cmd-d")
+    assert _kinds(stdin) == ["user"]  # no re-arm under the running agent
+    state.pending_command_uuid = "cmd-d"
+    events = _open_turn(state)
+    started = next(e for e in events if isinstance(e, TurnEvent))
+    assert started.reason == "followup"
+    assert started.detail["plan_deferred"] == {"agents": 1}
+    assert "cmd-d" not in state.unplanned_commands
+    _result(state)
+    # The agent finishes, the re-arm goes out; the next follow-up is plain.
+    _task_done(state)
+    state.plan_rearm_pending = False
+    stdin.send.reset_mock()
+    assert await inject_when_idle(SID, "again", command_uuid="cmd-e")
+    assert _kinds(stdin) == ["set_permission_mode", "user"]
+    state.pending_command_uuid = "cmd-e"
+    events = _open_turn(state)
+    started = next(e for e in events if isinstance(e, TurnEvent))
+    assert "plan_deferred" not in started.detail
+
+
+def test_wake_turn_during_deferral_is_flagged() -> None:
+    state, _ = _live_session()
+    _approved_with_agent(state)
+    assert _claim_plan_rearm(state, SID, reason="idle") is None
+    _hint_task(state)  # a different background job finished
+    events = _open_turn(state)
+    started = next(e for e in events if isinstance(e, TurnEvent))
+    assert started.reason == "task_finished"
+    assert started.detail["plan_deferred"] == {"agents": 1}
+
+
+async def test_plan_auto_deferral_flags_followups_not_wakes() -> None:
+    """Decision 6: plan-auto wake turns are never re-armed, so they carry no
+    "not re-planned" line; a deferred follow-up does."""
+    state, stdin = _live_session()
+    state.auto_approve_exit_plan_mode = True
+    _approved_with_agent(state)
+    assert not state.plan_rearm_pending
+    _register_live(state, stdin)
+    assert await inject_when_idle(SID, "next", command_uuid="cmd-pa")
+    assert _kinds(stdin) == ["user"]
+    assert state.unplanned_commands == {"cmd-pa": 1}
+    _hint_task(state)
+    events = _open_turn(state)
+    started = next(e for e in events if isinstance(e, TurnEvent))
+    assert "plan_deferred" not in started.detail
+
+
+def test_agent_end_while_idle_queues_rearm_right_away() -> None:
+    """The exit-turn agent ending while the session idles queues the re-arm
+    for the post-line drain — ahead of the wake turn the CLI starts for it,
+    not at that wake turn's close."""
+    state, _ = _live_session()
+    _approved_with_agent(state)
+    assert _claim_plan_rearm(state, SID, reason="idle") is None
+    assert not state.plan_rearm_pending
+    _task_done(state)
+    assert state.plan_rearm_pending
+    assert state.plan_rearm_pending_reason == "agents_done"
+
+
+def test_agent_end_mid_turn_waits_for_the_turn_close() -> None:
+    state, _ = _live_session()
+    _approved_with_agent(state)
+    assert _claim_plan_rearm(state, SID, reason="idle") is None
+    _open_turn(state)
+    _task_done(state)
+    assert not state.plan_rearm_pending  # never re-armed mid-turn
+    _result(state)
+    assert state.plan_rearm_pending
+    assert state.plan_rearm_pending_reason == "idle"
+
+
+async def test_drain_uses_the_pending_reason() -> None:
+    state, stdin = _live_session()
+    _approved_with_agent(state)
+    assert _claim_plan_rearm(state, SID, reason="idle") is None
+    _register_live(state, stdin)
+    _task_done(state)
+    with capture_logs() as logs:
+        await ClaudeRunner(claude_cmd="claude")._drain_plan_rearm(state, stdin=stdin)
+    assert _kinds(stdin) == ["set_permission_mode"]
+    sent = [e for e in logs if e["event"] == "claude.permission_mode.rearm_sent"]
+    assert [e["reason"] for e in sent] == ["agents_done"]
+    assert state.plan_rearm_pending_reason == "idle"
+
+
+async def test_lifecycle_lifts_a_deferral_the_agents_went_quiet_on() -> None:
+    state, stdin = _live_session()
+    state.bg_max_hold_s = 60.0
+    agent = _approved_with_agent(state)
+    assert _claim_plan_rearm(state, SID, reason="idle") is None
+    live = _register_live(state, stdin)
+    runner = ClaudeRunner(claude_cmd="claude")
+    now = time.monotonic()
+    await runner._lift_idle_plan_deferral(live, now=now)
+    assert _kinds(stdin) == []  # still working
+    agent.last_progress_at = now - 61.0
+    with capture_logs() as logs:
+        await runner._lift_idle_plan_deferral(live, now=now)
+    assert _kinds(stdin) == ["set_permission_mode"]
+    sent = [e for e in logs if e["event"] == "claude.permission_mode.rearm_sent"]
+    assert [e["reason"] for e in sent] == ["agents_idle"]
+
+
+async def test_lifecycle_lift_skips_plan_auto_and_a_closing_session() -> None:
+    state, stdin = _live_session()
+    state.auto_approve_exit_plan_mode = True
+    state.bg_max_hold_s = 60.0
+    agent = _approved_with_agent(state)
+    assert _claim_plan_rearm(state, SID, reason="followup") is None
+    live = _register_live(state, stdin)
+    agent.last_progress_at = time.monotonic() - 61.0
+    runner = ClaudeRunner(claude_cmd="claude")
+    await runner._lift_idle_plan_deferral(live, now=time.monotonic())
+    assert _kinds(stdin) == []
+    assert state.plan_rearm_deferred == 0
+
+    state, stdin = _live_session()
+    state.bg_max_hold_s = 60.0
+    agent = _approved_with_agent(state)
+    assert _claim_plan_rearm(state, SID, reason="idle") is None
+    live = _register_live(state, stdin)
+    live.closing = True
+    agent.last_progress_at = time.monotonic() - 61.0
+    await runner._lift_idle_plan_deferral(live, now=time.monotonic())
+    assert _kinds(stdin) == []
+
+
+def test_plan_observed_ends_the_deferral() -> None:
+    state, _ = _live_session()
+    _approved_with_agent(state)
+    assert _claim_plan_rearm(state, SID, reason="idle") is None
+    _status(state, "plan")  # e.g. Claude re-entered plan mode itself
+    assert state.plan_rearm_deferred == 0
+    assert state.plan_exit_turn is None
+    assert claude_mod._rearm_deferral(state) == (0, "agents_done")
+
+
+async def test_idle_steer_during_deferral_is_flagged() -> None:
+    state, stdin = _live_session()
+    _approved_with_agent(state)
+    state.plan_rearm_pending = False
+    _register_live(state, stdin)
+    assert await steer_into_session(SID, "status?", command_uuid="c-s") == (
+        "written_idle"
+    )
+    assert _kinds(stdin) == ["user"]
+    assert state.unplanned_commands == {"c-s": 1}

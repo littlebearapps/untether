@@ -121,6 +121,13 @@ Claude Code emits a system init event early in the stream:
   `set_permission_mode`, request id `ut_plan_rearm_…`). Seeing `plan`
   clears the session's `_PLAN_EXIT_APPROVED`; a plan chat seeing any other
   mode records `plan_exited_at` / `plan_exit_turn`.
+- `TurnEvent(started).detail["plan_deferred"] = {"agents": N}` (#383 C4): the
+  turn runs unplanned because the plan re-arm is deferred while background
+  agents launched in the plan-exit turn still work — set on a follow-up /
+  idle steer written during the deferral and, in `plan` chats, on a wake
+  turn opened during it. The bridge adds `⚠️ Not re-planned: the approved
+  plan's background agents are still running. Plan mode resumes when they
+  finish.` under the turn header (the whole header for a follow-up).
 - Optional: emit a `note` action summarizing tools/MCP servers (debug-only).
 
 The top-level `rate_limit_event` line (#790) is a quota snapshot, not a

@@ -218,7 +218,7 @@ AUTO_APPROVE_TOOLS = {"Grep", "Glob", "Read", "LS", "Bash", "BashOutput",
 ## ExitPlanMode handling
 
 When Claude requests `ExitPlanMode`:
-1. Inline keyboard shown: **Approve Plan** / **Deny** / **Pause & Outline Plan** (#383: plus a caption saying what approving does; "Plan mode resumes when this reply ends." only when true)
+1. Inline keyboard shown: **Approve Plan** / **Deny** / **Pause & Outline Plan** (#383: plus a caption saying what approving does; "Plan mode resumes when this reply ends, or after the background agents it starts have finished." only when true)
 2. "Pause & Outline Plan" sends a deny with a detailed message asking Claude to write a step-by-step plan
 3. After outline is written, post-outline buttons appear: **Approve Plan** / **Deny** / **Let's discuss**
 4. "Let's discuss" sends a deny asking Claude to discuss the plan (action: `chat`)
@@ -236,7 +236,12 @@ When Claude requests `ExitPlanMode`:
   frame when already plan. `plan-auto`: follow-ups/idle steers only.
 - Kill switch `[watchdog] rearm_plan_mode`. Residual: a wake turn the CLI starts
   ~20 ms after the result (notification already queued) has an unplanned first
-  model call (probe P-6). Running background agents inherit the mode (P-3).
+  model call (probe P-6). Running background agents inherit the mode (P-3), so
+  the re-arm is deferred while agents launched in the plan-exit turn
+  (`origin_turn == plan_exit_turn`) run — until they end, go quiet for
+  `post_result_bg_max_hold` (`latest_background_progress`) or hit
+  `live_session_max_s`; turns meanwhile carry `detail.plan_deferred`
+  (`⚠️ Not re-planned …` header line).
 
 ### Outline gate (#570 retired the progressive cooldown)
 

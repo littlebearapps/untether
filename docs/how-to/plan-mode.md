@@ -48,13 +48,13 @@ When Claude Code tries to exit plan mode (ExitPlanMode), you see three buttons i
 - **Deny** — block and ask Claude Code to explain
 - **Pause & Outline Plan** — require a written plan first
 
-In a plan chat the request also says what approving does: *Approving lets Claude carry out this plan without further prompts. Plan mode resumes when this reply ends.* In a chat where Claude Code switched to plan mode on its own (`/planmode off`), it reads *Approving ends planning; Claude still asks before each action.*
+In a plan chat the request also says what approving does: *Approving lets Claude carry out this plan without further prompts. Plan mode resumes when this reply ends, or after the background agents it starts have finished.* In a chat where Claude Code switched to plan mode on its own (`/planmode off`), it reads *Approving ends planning; Claude still asks before each action.*
 
 <div markdown>
 
 !!! untether "Untether"
     ▸ Permission Request [CanUseTool] - tool: ExitPlanMode<br>
-    Approving lets Claude carry out this plan without further prompts. Plan mode resumes when this reply ends.
+    Approving lets Claude carry out this plan without further prompts. Plan mode resumes when this reply ends, or after the background agents it starts have finished.
 
 <div class="tg-buttons">
 <span class="tg-btn">Approve Plan</span>
@@ -145,7 +145,9 @@ The approval ends with that reply. Claude Code keeps its process open after repl
 - an **Approve Plan** tapped after an outline also covers your *next* message, so "outline → Approve Plan → go ahead" still needs only one tap. The second message after it asks again;
 - **plan mode resumes when the reply ends.** Approving a plan takes Claude Code out of plan mode, and an open session used to stay out of it. Untether now switches it back when the reply ends, so your next message is planned again, and in a `plan` chat so is a background job's wake-up (a finished background task, a Monitor line, a scheduled wake-up): if it wants to act, you get a new plan to approve. In a `plan-auto` chat your messages are re-planned (and approved for you) but wake-ups aren't, since planning them would add cost and no check.
 
-Two limits. Background agents the approved reply started follow the session back into plan mode, so from their next step they are told to plan rather than carry on. And a wake-up that starts the very moment the reply ends can take its first step before plan mode is back; it is planned from its next step.
+- **background agents the approved reply starts finish the job unplanned.** A background agent follows the session's mode, so switching back to plan mode under it would tell it to stop and plan halfway through the work you approved. Untether waits instead: plan mode comes back once those agents have finished (or have shown no activity for the background hold, `post_result_bg_max_hold`, 30 minutes by default). Anything that runs in the meantime, such as a message you send or another background job reporting back, is not re-planned, and its reply starts with *⚠️ Not re-planned: the approved plan's background agents are still running. Plan mode resumes when they finish.* Agents started by a later reply don't extend the wait.
+
+One limit. A wake-up that starts the very moment the reply ends (or the moment the approved agents finish) can take its first step before plan mode is back; it is planned from its next step.
 
 To turn the switch-back off, set `rearm_plan_mode = false` under `[watchdog]` in `untether.toml` (read at each new session). An approval then lasts until the session closes, as before v0.35.5.
 
