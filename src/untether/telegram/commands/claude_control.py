@@ -13,6 +13,7 @@ from ...runners.claude import (
     _REQUEST_TO_TOOL_NAME,
     mark_outline_pending,
     mark_request_handled,
+    plan_approved_feedback,
     send_claude_control_response,
 )
 from ...transport import MessageRef
@@ -221,7 +222,7 @@ class ClaudeControlCommand:
                     "claude_control.discuss_plan_approved",
                     session_id=session_id,
                 )
-                action_text = "✅ Plan approved — Claude Code will proceed"
+                action_text = plan_approved_feedback(session_id)
             else:
                 _OUTLINE_PENDING.discard(session_id)
                 logger.info(
@@ -249,12 +250,13 @@ class ClaudeControlCommand:
                 skip_reply=True,
             )
 
-        # Grab session_id before send_claude_control_response deletes it
+        # Grab session_id and tool name before send_claude_control_response
+        # deletes them
         session_id = _REQUEST_TO_SESSION.get(request_id)
+        tool_name = _REQUEST_TO_TOOL_NAME.get(request_id, "")
 
         # Send control response via the public API
         if not approved:
-            tool_name = _REQUEST_TO_TOOL_NAME.get(request_id, "")
             deny_message = (
                 _EXIT_PLAN_DENY_MESSAGE
                 if tool_name == "ExitPlanMode"
@@ -294,7 +296,7 @@ class ClaudeControlCommand:
             existing_ref = _DISCUSS_FEEDBACK_REFS.pop(session_id, None)
             if existing_ref:
                 action_text = (
-                    "✅ Plan approved — Claude Code will proceed"
+                    plan_approved_feedback(session_id)
                     if approved
                     else "❌ Plan denied — send a follow-up message with feedback"
                 )
@@ -313,15 +315,21 @@ class ClaudeControlCommand:
                         exc_info=True,
                     )
 
-        action_text = "✅ Approved" if approved else "❌ Denied"
         logger.info(
             "claude_control.sent",
             request_id=request_id,
             approved=approved,
         )
+        if approved and tool_name == "ExitPlanMode":
+            # #383: a plan approval says so, not "permission request".
+            feedback = "✅ Plan approved"
+        else:
+            feedback = (
+                f"{'✅ Approved' if approved else '❌ Denied'} permission request"
+            )
 
         return CommandResult(
-            text=f"{action_text} permission request",
+            text=feedback,
             notify=True,
             skip_reply=had_outline,
         )

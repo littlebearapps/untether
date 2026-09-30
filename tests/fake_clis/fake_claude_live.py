@@ -40,14 +40,83 @@ FOLLOWUP_DELAY_S = float(os.environ.get("FAKE_CLAUDE_FOLLOWUP_DELAY_S", "0"))
 # #775: how long the steer scenarios wait for a steered user line.
 STEER_WAIT_S = float(os.environ.get("FAKE_CLAUDE_STEER_WAIT_S", "5"))
 
+# #383: the CLI's permission mode. Changed by an approved ExitPlanMode
+# (-> "default", the `prePlanMode ?? "default"` path) and by a
+# `set_permission_mode` control_request, which — like the real CLI — is
+# handled inline by the stdin reader, not queued behind a turn.
+_mode = os.environ.get("FAKE_CLAUDE_START_MODE", "bypassPermissions")
+# Test knobs: refuse every set_permission_mode; emit no system/status frames.
+REARM_ERROR = bool(os.environ.get("FAKE_CLAUDE_REARM_ERROR"))
+NO_STATUS = bool(os.environ.get("FAKE_CLAUDE_NO_STATUS"))
+# A queued wake turn starts this long after the result, without reading stdin.
+WAKE_AFTER_RESULT_S = float(os.environ.get("FAKE_CLAUDE_WAKE_AFTER_RESULT_S", "0.05"))
+STDIN_LOG = os.environ.get("FAKE_CLAUDE_STDIN_LOG")
+
 _cost = 0.0
 _lines: queue.Queue[dict | None] = queue.Queue()
+_responses: queue.Queue[dict] = queue.Queue()
 _live_tasks: dict[str, str] = {}  # task_id -> tool_use_id
+_emit_lock = threading.Lock()
 
 
 def emit(obj: dict) -> None:
     obj.setdefault("session_id", SESSION_ID)
-    print(json.dumps(obj), flush=True)
+    with _emit_lock:  # the stdin reader emits too (#383 acks)
+        print(json.dumps(obj), flush=True)
+
+
+def log_stdin(kind: str) -> None:
+    """Append one ``<monotonic> <kind>`` line to FAKE_CLAUDE_STDIN_LOG."""
+    if STDIN_LOG:
+        with open(STDIN_LOG, "a") as fh:
+            fh.write(f"{time.monotonic():.6f} {kind}\n")
+
+
+def status_frame() -> None:
+    if not NO_STATUS:
+        emit(
+            {
+                "type": "system",
+                "subtype": "status",
+                "status": None,
+                "permissionMode": _mode,
+            }
+        )
+
+
+def _handle_control_request(obj: dict) -> None:
+    global _mode
+    request = obj.get("request") or {}
+    if request.get("subtype") != "set_permission_mode":
+        return
+    request_id = obj.get("request_id")
+    if REARM_ERROR:
+        emit(
+            {
+                "type": "control_response",
+                "response": {
+                    "subtype": "error",
+                    "request_id": request_id,
+                    "error": "Cannot set permission mode (fake)",
+                    "error_code": "invalid_mode",
+                },
+            }
+        )
+        return
+    changed = request.get("mode") != _mode
+    _mode = request.get("mode") or _mode
+    emit(
+        {
+            "type": "control_response",
+            "response": {
+                "subtype": "success",
+                "request_id": request_id,
+                "response": {"mode": _mode},
+            },
+        }
+    )
+    if changed:
+        status_frame()
 
 
 def _reader() -> None:
@@ -56,9 +125,20 @@ def _reader() -> None:
         if not raw:
             continue
         try:
-            _lines.put(json.loads(raw))
+            obj = json.loads(raw)
         except json.JSONDecodeError:
             continue
+        kind = obj.get("type", "?")
+        if kind == "control_request":
+            kind = f"control_request:{(obj.get('request') or {}).get('subtype')}"
+        log_stdin(kind)
+        if obj.get("type") == "control_request":
+            _handle_control_request(obj)
+            continue
+        if obj.get("type") == "control_response":
+            _responses.put(obj)
+            continue
+        _lines.put(obj)
     _lines.put(None)  # EOF
 
 
@@ -86,7 +166,7 @@ def init() -> None:
             "cwd": os.getcwd(),
             "model": "claude-haiku-fake",
             "tools": ["Bash", "Agent", "Monitor", "ScheduleWakeup"],
-            "permissionMode": "bypassPermissions",
+            "permissionMode": _mode,
         }
     )
 
@@ -1661,12 +1741,184 @@ def scenario_bg_bash_printing(first: dict) -> None:
     _silent_until_eof()
 
 
+# ── #383: plan approval and the plan re-arm ─────────────────────────────────
+
+
+def ask_exit_plan_mode(req_id: str, *, timeout: float = 10.0) -> bool:
+    """ExitPlanMode round trip: tool_use, can_use_tool control_request, wait
+    for the host's answer. An allow moves the mode to ``default`` (a session
+    started in plan has no prePlanMode) and emits the status frame BEFORE the
+    tool_result, as probed on CLI 2.1.285."""
+    global _mode
+    tool_id = f"toolu_{req_id}"
+    tool_use("ExitPlanMode", tool_id, {"plan": "# Plan\n1. do it"})
+    emit(
+        {
+            "type": "control_request",
+            "request_id": req_id,
+            "request": {
+                "subtype": "can_use_tool",
+                "tool_name": "ExitPlanMode",
+                "input": {"plan": "# Plan\n1. do it"},
+                "tool_use_id": tool_id,
+            },
+        }
+    )
+    log_stdin(f"can_use_tool:{req_id}")
+    deadline = time.monotonic() + timeout
+    while True:
+        try:
+            resp = _responses.get(timeout=max(0.0, deadline - time.monotonic()))
+        except queue.Empty:
+            tool_result(tool_id, "timed out")
+            return False
+        inner = resp.get("response") or {}
+        if inner.get("request_id") != req_id:
+            continue
+        allowed = (inner.get("response") or {}).get("behavior") == "allow"
+        break
+    if allowed:
+        _mode = "default"
+        status_frame()
+        tool_result(tool_id, "User has approved your plan. You can now start coding.")
+    else:
+        tool_result(tool_id, "User denied")
+    return allowed
+
+
+def mode_turn(*, reply: str | None = None, sample: str | None = None) -> None:
+    """One turn answering ``MODE: <mode>`` — the mode the turn STARTED in."""
+    mode = sample if sample is not None else _mode
+    log_stdin(f"turn_start:{mode}")
+    init()
+    text(reply or f"MODE: {mode}")
+    result(reply or f"MODE: {mode}")
+
+
+def serve_mode_followups() -> None:
+    """Like serve_followups, but each follow-up answers ``MODE: <mode>``."""
+    while _deferred:
+        _lines.put(_deferred.pop(0))
+    while True:
+        obj = next_user(None)
+        if obj is None or obj == "timeout":
+            break
+        cmd = obj.get("uuid")
+        lifecycle(cmd, "queued")
+        lifecycle(cmd, "started")
+        mode_turn()
+    shutdown()
+
+
+def _plan_first_turn() -> bool:
+    init()
+    allowed = ask_exit_plan_mode("req-epm-1")
+    text("PLANNED")
+    return allowed
+
+
+def scenario_plan_approve_followup(first: dict) -> None:
+    _plan_first_turn()
+    result("PLANNED", turns=2)
+    serve_mode_followups()
+
+
+def scenario_plan_approve_error_turn(first: dict) -> None:
+    """#383: a live follow-up turn approves a plan and then ends in an error
+    — it left plan mode all the same."""
+    init()
+    text("FIRST")
+    result("FIRST")
+    obj = next_user(None)
+    if not isinstance(obj, dict):
+        shutdown()
+    cmd = obj.get("uuid")
+    lifecycle(cmd, "queued")
+    lifecycle(cmd, "started")
+    init()
+    ask_exit_plan_mode("req-epm-err")
+    emit(
+        {
+            "type": "result",
+            "subtype": "error_during_execution",
+            "is_error": True,
+            "duration_ms": 1000,
+            "duration_api_ms": 900,
+            "num_turns": 2,
+            "result": "",
+            "total_cost_usd": 0.02,
+        }
+    )
+    serve_mode_followups()
+
+
+def scenario_plan_approve_bg_bash_wake(first: dict) -> None:
+    _plan_first_turn()
+    tool_use("Bash", "toolu_bg", {"command": "sleep 20", "run_in_background": True})
+    start_bg("b1", "toolu_bg")
+    tool_result("toolu_bg", "Command running in background with ID: b1.")
+    result("PLANNED", turns=3)
+    if wait_idle_or_eof(WAKE_S) is None:
+        shutdown()
+    end_bg("b1")
+    mode_turn()
+    serve_mode_followups()
+
+
+def scenario_plan_approve_queued_wake(first: dict) -> None:
+    """#383 wake-turn race: the bg task's notification is already queued when
+    the result is emitted, so the CLI starts the wake turn by itself after
+    WAKE_AFTER_RESULT_S without waiting for any stdin line. The stdin reader
+    keeps applying set_permission_mode meanwhile — the turn samples the mode
+    only when it starts, so it answers ``MODE: plan`` only if the host's
+    re-arm beat it."""
+    _plan_first_turn()
+    tool_use("Bash", "toolu_bg", {"command": "true", "run_in_background": True})
+    start_bg("b1", "toolu_bg")
+    tool_result("toolu_bg", "Command running in background with ID: b1.")
+    result("PLANNED", turns=3)
+    time.sleep(WAKE_AFTER_RESULT_S)
+    mode = _mode
+    end_bg("b1")
+    mode_turn(sample=mode)
+    serve_mode_followups()
+
+
+def scenario_plan_approve_monitor_ticks(first: dict) -> None:
+    """#383: Monitor ticks after an approval. An acting tick that starts in
+    plan mode calls ExitPlanMode first (and waits for the host)."""
+    _plan_first_turn()
+    tool_use("Monitor", "toolu_mon", {"command": "tick", "timeout_ms": 30000})
+    start_bg("m1", "toolu_mon")
+    tool_result("toolu_mon", "Monitor started (task m1).")
+    result("PLANNED", turns=3)
+    for tick in (1, 2, 3):
+        if wait_idle_or_eof(WAKE_S) is None:
+            shutdown()
+        started_in = _mode
+        log_stdin(f"turn_start:{started_in}")
+        init()
+        if started_in == "plan":
+            ask_exit_plan_mode(f"req-tick-{tick}")
+        if tick == 3:
+            end_bg("m1")
+        text(f"TICK {tick} MODE: {started_in}")
+        result(f"TICK {tick} MODE: {started_in}")
+    serve_mode_followups()
+
+
 _SCENARIOS = {
     "bg_agent_progressing": scenario_bg_agent_progressing,
     "bg_agent_silent": scenario_bg_agent_silent,
     "bg_agent_long_tool": scenario_bg_agent_long_tool,
     "nonholding_progress": scenario_nonholding_progress,
     "bg_bash_printing": scenario_bg_bash_printing,
+    "plan_approve_followup": scenario_plan_approve_followup,
+    "plan_deny_followup": scenario_plan_approve_followup,  # the host denies
+    "plan_approve_error_turn": scenario_plan_approve_error_turn,
+    "plan_approve_bg_bash_wake": scenario_plan_approve_bg_bash_wake,
+    "plan_approve_queued_wake": scenario_plan_approve_queued_wake,
+    "plan_approve_monitor_ticks": scenario_plan_approve_monitor_ticks,
     "async_rewake_idle": scenario_async_rewake_idle,
     "async_hook_success": scenario_async_hook_success,
     "async_hook_post_result_response": scenario_async_hook_post_result_response,

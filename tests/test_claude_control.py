@@ -125,8 +125,10 @@ def test_can_use_tool_produces_warning_with_inline_keyboard() -> None:
     buttons = kb["buttons"]
     assert len(buttons) == 2  # two rows for ExitPlanMode
     assert len(buttons[0]) == 2  # Approve + Deny
-    assert buttons[0][0]["text"] == "✅ Approve"
-    assert "req-1" in buttons[0][0]["callback_data"]
+    # #383: the plan button names what it approves; callback data unchanged.
+    assert buttons[0][0]["text"] == "✅ Approve Plan"
+    assert buttons[0][0]["callback_data"] == "claude_control:approve:req-1"
+    assert len(buttons[0][0]["callback_data"].encode()) <= 64
     assert buttons[0][1]["text"] == "❌ Deny"
     assert "req-1" in buttons[0][1]["callback_data"]
     # Second row: Outline Plan
@@ -2399,3 +2401,209 @@ def test_749_new_state_arms_prompting_mode_from_effective_mode() -> None:
     # No mode at all => legacy `-p` path, no control channel, no requests.
     runner = ClaudeRunner(claude_cmd="claude")
     assert runner.new_state("hi", None).prompting_mode is False
+
+
+# ---------------------------------------------------------------------------
+# #383 — the plan approval says what approving does, and never claims more
+# ---------------------------------------------------------------------------
+
+
+def _exit_plan_request(request_id: str = "req-383") -> claude_schema.StreamJsonMessage:
+    return _decode_event(
+        {
+            "type": "control_request",
+            "request_id": request_id,
+            "request": {
+                "subtype": "can_use_tool",
+                "tool_name": "ExitPlanMode",
+                "input": {},
+            },
+        }
+    )
+
+
+_CARRY_OUT = "Approving lets Claude carry out this plan without further prompts."
+_RESUMES = " Plan mode resumes when this reply ends."
+_PROMPTING = "Approving ends planning; Claude still asks before each action."
+
+
+@pytest.mark.parametrize(
+    ("configured_plan", "prompting", "live", "rearm", "expected"),
+    [
+        # Plan chat, live session, re-arm on: plan mode comes back.
+        (True, False, True, True, _CARRY_OUT + _RESUMES),
+        # Plan chat, live session, re-arm switched off: it does NOT.
+        (True, False, True, False, _CARRY_OUT),
+        # Plan chat, live sessions off: every message respawns in plan.
+        (True, False, False, True, _CARRY_OUT + _RESUMES),
+        (True, False, False, False, _CARRY_OUT + _RESUMES),
+        # Prompting-mode chat: Claude entered plan mode itself.
+        (False, True, True, True, _PROMPTING),
+        (False, True, False, False, _PROMPTING),
+        # Other autonomous modes (auto / dontAsk / bypassPermissions): none.
+        (False, False, True, True, None),
+    ],
+)
+def test_exitplanmode_caption_matrix(
+    configured_plan: bool,
+    prompting: bool,
+    live: bool,
+    rearm: bool,
+    expected: str | None,
+) -> None:
+    state, factory = _make_state_with_session("sess-caption")
+    state.configured_plan_mode = configured_plan
+    state.prompting_mode = prompting
+    state.live_mode = live
+    state.rearm_plan_mode = rearm
+    events = translate_claude_event(
+        _exit_plan_request(), title="claude", state=state, factory=factory
+    )
+    title = events[-1].action.title
+    first_line, _, caption = title.partition("\n")
+    assert first_line == "Permission Request [CanUseTool] - tool: ExitPlanMode"
+    assert (caption or None) == expected
+
+
+def test_non_exitplanmode_approval_unchanged() -> None:
+    """A prompting-mode Bash request keeps "✅ Approve" and gets no caption."""
+    state, factory = _make_state_with_session("sess-bash")
+    state.prompting_mode = True
+    state.configured_plan_mode = True  # even in a plan chat
+    event = _decode_event(
+        {
+            "type": "control_request",
+            "request_id": "req-bash-383",
+            "request": {
+                "subtype": "can_use_tool",
+                "tool_name": "Bash",
+                "input": {"command": "ls"},
+            },
+        }
+    )
+    events = translate_claude_event(event, title="claude", state=state, factory=factory)
+    action = events[-1].action
+    assert action.detail["inline_keyboard"]["buttons"][0][0]["text"] == "✅ Approve"
+    assert _CARRY_OUT not in action.title
+    assert _PROMPTING not in action.title
+
+
+@pytest.mark.parametrize("outline_written", [True, False])
+def test_post_outline_title_has_caption(outline_written: bool) -> None:
+    session_id = "sess-outline-383"
+    state, factory = _make_state_with_session(session_id)
+    state.configured_plan_mode = True
+    state.live_mode = True
+    mark_outline_pending(session_id)
+    if outline_written:
+        state.max_text_len_since_cooldown = 500
+        state.outline_text = "x" * 300
+    events = translate_claude_event(
+        _exit_plan_request("req-outline-383"),
+        title="claude",
+        state=state,
+        factory=factory,
+    )
+    action = events[-1].action
+    head, _, caption = action.title.partition("\n")
+    assert head in {"📋 Plan outline (see above)", "Plan outlined — approve to proceed"}
+    assert caption == _CARRY_OUT + _RESUMES
+    assert action.detail["inline_keyboard"]["buttons"][0][0]["text"] == (
+        "✅ Approve Plan"
+    )
+
+
+def _approve_ctx(request_id: str, executor: Any) -> Any:
+    from untether.commands import CommandContext
+    from untether.transport import MessageRef
+
+    return CommandContext(
+        command="claude_control",
+        text=f"claude_control:approve:{request_id}",
+        args_text=f"approve:{request_id}",
+        args=(f"approve:{request_id}",),
+        message=MessageRef(channel_id=123, message_id=1),
+        reply_to=None,
+        reply_text=None,
+        config_path=None,
+        plugin_config=None,  # type: ignore[arg-type]
+        runtime=None,  # type: ignore[arg-type]
+        executor=executor,
+    )
+
+
+@pytest.mark.parametrize(
+    ("tool_name", "expected"),
+    [
+        ("ExitPlanMode", "✅ Plan approved"),
+        ("Bash", "✅ Approved permission request"),
+    ],
+)
+@pytest.mark.anyio
+async def test_approve_feedback_text_exitplanmode_vs_tool(
+    tool_name: str, expected: str
+) -> None:
+    from untether.telegram.commands.claude_control import ClaudeControlCommand
+
+    session_id = f"sess-fb-{tool_name}"
+    request_id = f"req-fb-{tool_name}"
+    _ACTIVE_RUNNERS[session_id] = (ClaudeRunner(claude_cmd="claude"), 0.0)
+    _SESSION_STDIN[session_id] = AsyncMock()
+    _REQUEST_TO_SESSION[request_id] = session_id
+    _REQUEST_TO_INPUT[request_id] = {}
+    _REQUEST_TO_TOOL_NAME[request_id] = tool_name
+
+    result = await ClaudeControlCommand().handle(_approve_ctx(request_id, AsyncMock()))
+    assert result is not None
+    assert result.text == expected
+
+
+@pytest.mark.parametrize(
+    ("live", "rearm", "expected"),
+    [
+        (True, False, "✅ Plan approved — Claude will carry it out now"),
+        (
+            True,
+            True,
+            "✅ Plan approved — Claude will carry it out now"
+            " · plan mode resumes when it's done",
+        ),
+        (
+            False,
+            False,
+            "✅ Plan approved — Claude will carry it out now"
+            " · plan mode resumes when it's done",
+        ),
+    ],
+)
+@pytest.mark.anyio
+async def test_outline_flow_approve_feedback_text(
+    live: bool, rearm: bool, expected: str
+) -> None:
+    """The post-outline Approve Plan edit carries the new wording, with the
+    "resumes" suffix only when it is true (#383)."""
+    from untether.runners.claude import _SESSION_BG_STATE
+    from untether.telegram.commands.claude_control import (
+        _DISCUSS_FEEDBACK_REFS,
+        ClaudeControlCommand,
+    )
+    from untether.transport import MessageRef
+
+    session_id = f"sess-outline-fb-{live}-{rearm}"
+    state = ClaudeStreamState()
+    state.configured_plan_mode = True
+    state.live_mode = live
+    state.rearm_plan_mode = rearm
+    _SESSION_BG_STATE[session_id] = state
+    _ACTIVE_RUNNERS[session_id] = (ClaudeRunner(claude_cmd="claude"), 0.0)
+    _DISCUSS_FEEDBACK_REFS[session_id] = MessageRef(channel_id=123, message_id=99)
+    executor = AsyncMock()
+    try:
+        result = await ClaudeControlCommand().handle(
+            _approve_ctx(f"da:{session_id}", executor)
+        )
+    finally:
+        _SESSION_BG_STATE.pop(session_id, None)
+        _DISCUSS_APPROVED.discard(session_id)
+    assert result is None
+    assert executor.edit.call_args[0][1] == expected

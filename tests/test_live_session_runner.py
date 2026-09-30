@@ -31,6 +31,12 @@ _ENV = (
     "FAKE_CLAUDE_SESSION_ID",
     "FAKE_CLAUDE_TASK_END",
     "FAKE_CLAUDE_FOLLOWUP_DELAY_S",
+    # #383
+    "FAKE_CLAUDE_START_MODE",
+    "FAKE_CLAUDE_REARM_ERROR",
+    "FAKE_CLAUDE_NO_STATUS",
+    "FAKE_CLAUDE_WAKE_AFTER_RESULT_S",
+    "FAKE_CLAUDE_STDIN_LOG",
 )
 
 
@@ -54,11 +60,12 @@ async def _collect(
     resume: ResumeToken | None = None,
     on_event: Any = None,
     timeout: float = 15.0,
+    runner: ClaudeRunner | None = None,
 ) -> list[Any]:
     """Run the fake scenario and collect events until ``until`` completions
     (the run's CompletedEvent counts as 1, each TurnEvent(completed) as 1)."""
     os.environ["FAKE_CLAUDE_SCENARIO"] = scenario
-    runner = _runner()
+    runner = runner if runner is not None else _runner()
     events: list[Any] = []
     done = 0
     with anyio.fail_after(timeout):
@@ -504,3 +511,301 @@ async def test_816_stream_end_and_error_cleanup_keep_a_newer_owner(hook: str) ->
         assert not claude_mod.is_session_alive(sid)
     finally:
         claude_mod._cleanup_session_registries(sid)
+
+
+# ── #383: a plan approval must not outlive its turn ─────────────────────────
+
+
+def _plan_runner(
+    mode: str = "plan", cls: type[ClaudeRunner] = _LiveRunner
+) -> ClaudeRunner:
+    return cls(claude_cmd=str(FAKE_CLI), permission_mode=mode)
+
+
+def _plan_env(tmp_path: Path, **extra: str) -> Path:
+    log = tmp_path / "stdin.log"
+    os.environ["FAKE_CLAUDE_START_MODE"] = "plan"
+    os.environ["FAKE_CLAUDE_STDIN_LOG"] = str(log)
+    os.environ.update(extra)
+    return log
+
+
+def _stdin_kinds(log: Path) -> list[str]:
+    if not log.exists():
+        return []
+    return [line.split(" ", 1)[1] for line in log.read_text().splitlines()]
+
+
+def _answers(events: list[Any]) -> list[str | None]:
+    """Turn answers without #793's `📋 Plan (approved)` preamble."""
+    return [
+        (t.answer or "").rsplit("---\n\n", 1)[-1]
+        for t in _turns(events)
+        if t.phase == "completed"
+    ]
+
+
+async def _answer_plans(evt: Any, *, approve: bool = True) -> None:
+    """Tap Approve (or Deny) on every ExitPlanMode approval that surfaces."""
+    action = getattr(evt, "action", None)
+    if action is None or getattr(evt, "phase", None) != "started":
+        return
+    detail = action.detail or {}
+    request_id = detail.get("request_id")
+    if request_id and "ExitPlanMode" in (action.title or ""):
+        from untether.runners.claude import send_claude_control_response
+
+        assert await send_claude_control_response(request_id, approve)
+
+
+def _followup_after(n_completions: int, *, approve: bool = True) -> Any:
+    """on_event: answer plans; after ``n_completions`` turn closes, inject one
+    follow-up via the queue path (it writes at once: the session is idle)."""
+    seen = {"done": 0}
+
+    async def on_event(evt: Any, runner: ClaudeRunner) -> None:
+        await _answer_plans(evt, approve=approve)
+        if isinstance(evt, CompletedEvent) or (
+            isinstance(evt, TurnEvent) and evt.phase == "completed"
+        ):
+            seen["done"] += 1
+            if seen["done"] == n_completions:
+                assert await claude_mod.inject_when_idle(
+                    SID, "next", command_uuid=str(uuid.uuid4())
+                )
+
+    return on_event
+
+
+def _rearm_logs(logs: list[dict[str, Any]], event: str = "rearm_sent") -> list[Any]:
+    return [e for e in logs if e["event"] == f"claude.permission_mode.{event}"]
+
+
+async def test_383_followup_after_approval_runs_in_plan(tmp_path: Path) -> None:
+    log = _plan_env(tmp_path)
+    with capture_logs() as logs:
+        events = await _collect(
+            "plan_approve_followup",
+            until=2,
+            on_event=_followup_after(1),
+            runner=_plan_runner(),
+        )
+    completed = next(e for e in events if isinstance(e, CompletedEvent))
+    assert completed.answer.endswith("PLANNED")  # (#793 re-shows the plan)
+    assert _answers(events) == ["MODE: plan"]
+    kinds = _stdin_kinds(log)
+    rearm = kinds.index("control_request:set_permission_mode")
+    assert rearm < len(kinds) - 1 - kinds[::-1].index("user")  # before the follow-up
+    sent = _rearm_logs(logs)
+    assert [e["reason"] for e in sent] == ["idle"]
+    assert _rearm_logs(logs, "rearm_ack")
+    assert SID not in claude_mod._PLAN_EXIT_APPROVED
+
+
+async def test_383_wake_turn_after_approval_runs_in_plan(tmp_path: Path) -> None:
+    _plan_env(tmp_path)
+
+    async def on_event(evt: Any, runner: ClaudeRunner) -> None:
+        await _answer_plans(evt)
+
+    with capture_logs() as logs:
+        events = await _collect(
+            "plan_approve_bg_bash_wake",
+            until=2,
+            on_event=on_event,
+            runner=_plan_runner(),
+        )
+    starts = [t for t in _turns(events) if t.phase == "started"]
+    assert starts[0].reason == "task_finished"
+    assert _answers(events) == ["MODE: plan"]
+    assert [e["reason"] for e in _rearm_logs(logs)] == ["idle"]
+
+
+class _LateRearmRunner(_LiveRunner):
+    """The rejected placement (#383 §4 alt. 10): the idle re-arm only goes
+    out with the post-yield drains, i.e. after the bridge's on_completed."""
+
+    async def _drain_plan_rearm_pre_yield(
+        self, state: Any, *, stdin: Any = None
+    ) -> None:
+        return None
+
+
+@pytest.mark.parametrize(
+    ("cls", "expected"),
+    [(_LiveRunner, "MODE: plan"), (_LateRearmRunner, "MODE: default")],
+)
+async def test_383_queued_wake_beats_a_slow_consumer(
+    tmp_path: Path, cls: type[ClaudeRunner], expected: str
+) -> None:
+    """The wake-turn race: the CLI starts a queued wake turn 50 ms after the
+    result, reading no stdin line first, while the bridge sits in
+    on_completed for 2 s. Only the pre-yield re-arm wins; the negative
+    control proves the test detects the late placement."""
+    log = _plan_env(tmp_path, FAKE_CLAUDE_WAKE_AFTER_RESULT_S="0.05")
+
+    async def on_event(evt: Any, runner: ClaudeRunner) -> None:
+        await _answer_plans(evt)
+        if isinstance(evt, CompletedEvent):
+            await anyio.sleep(2.0)  # the bridge's on_completed
+
+    events = await _collect(
+        "plan_approve_queued_wake",
+        until=2,
+        on_event=on_event,
+        runner=_plan_runner(cls=cls),
+    )
+    assert _answers(events) == [expected]
+    lines = log.read_text().splitlines()
+    rearm_at = next(float(ln.split()[0]) for ln in lines if "set_permission_mode" in ln)
+    wake_at = next(float(ln.split()[0]) for ln in lines if "turn_start:" in ln)
+    assert (rearm_at < wake_at) is (expected == "MODE: plan")
+
+
+async def test_383_errored_turn_still_rearms(tmp_path: Path) -> None:
+    _plan_env(tmp_path)
+    seen = {"done": 0}
+
+    async def on_event(evt: Any, runner: ClaudeRunner) -> None:
+        await _answer_plans(evt)
+        if isinstance(evt, CompletedEvent) or (
+            isinstance(evt, TurnEvent) and evt.phase == "completed"
+        ):
+            seen["done"] += 1
+            if seen["done"] in (1, 2):
+                assert await claude_mod.inject_when_idle(
+                    SID, f"msg {seen['done']}", command_uuid=str(uuid.uuid4())
+                )
+
+    events = await _collect(
+        "plan_approve_error_turn", until=3, on_event=on_event, runner=_plan_runner()
+    )
+    finals = [t for t in _turns(events) if t.phase == "completed"]
+    assert finals[0].ok is False  # the approved turn errored
+    assert finals[1].answer == "MODE: plan"
+
+
+async def test_383_monitor_ticks_after_approval_run_in_plan(tmp_path: Path) -> None:
+    _plan_env(tmp_path)
+
+    async def on_event(evt: Any, runner: ClaudeRunner) -> None:
+        await _answer_plans(evt)
+
+    events = await _collect(
+        "plan_approve_monitor_ticks",
+        until=4,
+        on_event=on_event,
+        runner=_plan_runner(),
+    )
+    assert _answers(events) == [
+        "TICK 1 MODE: plan",
+        "TICK 2 MODE: plan",
+        "TICK 3 MODE: plan",
+    ]
+
+
+async def test_383_plan_auto_monitor_ticks(tmp_path: Path) -> None:
+    """Decision 6: plan-auto ticks are not re-armed (no gate to add, only
+    cost); the user's follow-up is."""
+    _plan_env(tmp_path)
+    with capture_logs() as logs:
+        events = await _collect(
+            "plan_approve_monitor_ticks",
+            until=5,
+            on_event=_followup_after(4),
+            runner=_plan_runner("plan-auto"),
+        )
+    assert _answers(events) == [
+        "TICK 1 MODE: default",
+        "TICK 2 MODE: default",
+        "TICK 3 MODE: default",
+        "MODE: plan",
+    ]
+    assert [e["reason"] for e in _rearm_logs(logs)] == ["followup"]
+
+
+async def test_383_denied_plan_sends_no_rearm(tmp_path: Path) -> None:
+    log = _plan_env(tmp_path)
+    events = await _collect(
+        "plan_deny_followup",
+        until=2,
+        on_event=_followup_after(1, approve=False),
+        runner=_plan_runner(),
+    )
+    assert _answers(events) == ["MODE: plan"]
+    assert "control_request:set_permission_mode" not in _stdin_kinds(log)
+
+
+async def test_383_bypass_chat_sends_no_rearm(tmp_path: Path) -> None:
+    log = tmp_path / "stdin.log"
+    os.environ["FAKE_CLAUDE_STDIN_LOG"] = str(log)
+
+    async def inject(evt: Any, runner: ClaudeRunner) -> None:
+        if isinstance(evt, CompletedEvent):
+            assert await claude_mod.inject_when_idle(
+                SID, "second", command_uuid=str(uuid.uuid4())
+            )
+
+    await _collect("followup", until=2, on_event=inject)
+    kinds = _stdin_kinds(log)
+    assert kinds.count("user") == 2
+    assert "control_request:set_permission_mode" not in kinds
+
+
+async def test_383_no_status_frames_still_rearms(tmp_path: Path) -> None:
+    _plan_env(tmp_path, FAKE_CLAUDE_NO_STATUS="1")
+    with capture_logs() as logs:
+        events = await _collect(
+            "plan_approve_followup",
+            until=2,
+            on_event=_followup_after(1),
+            runner=_plan_runner(),
+        )
+    assert _answers(events) == ["MODE: plan"]
+    acks = _rearm_logs(logs, "rearm_ack")
+    assert acks and acks[0]["mode"] == "plan"
+    assert not [
+        e
+        for e in logs
+        if e["event"] == "claude.permission_mode.changed" and e["source"] == "status"
+    ]
+
+
+async def test_383_rearm_error_closes_live_session_when_idle(tmp_path: Path) -> None:
+    _plan_env(tmp_path, FAKE_CLAUDE_REARM_ERROR="1")
+    runner = _plan_runner()
+    runner._live_poll_s = 0.05
+
+    async def on_event(evt: Any, runner: ClaudeRunner) -> None:
+        await _answer_plans(evt)
+
+    with capture_logs() as logs:
+        events = await _collect(
+            "plan_approve_followup", until=99, on_event=on_event, runner=runner
+        )
+    failed = _rearm_logs(logs, "rearm_failed")
+    assert failed and failed[0]["log_level"] == "warning"
+    closed = [e for e in logs if e["event"] == "claude.live_session.stdin_closed"]
+    assert [e["reason"] for e in closed] == ["plan_rearm_failed"]
+    completed = next(e for e in events if isinstance(e, CompletedEvent))
+    assert completed.ok
+    assert not [e for e in logs if e["event"] == "session.quarantined"]
+
+
+class _NoRearmRunner(_LiveRunner):
+    def new_state(self, prompt: str, resume: ResumeToken | None) -> Any:
+        state = super().new_state(prompt, resume)
+        state.rearm_plan_mode = False  # `[watchdog] rearm_plan_mode = false`
+        return state
+
+
+async def test_383_kill_switch(tmp_path: Path) -> None:
+    log = _plan_env(tmp_path)
+    events = await _collect(
+        "plan_approve_followup",
+        until=2,
+        on_event=_followup_after(1),
+        runner=_plan_runner(cls=_NoRearmRunner),
+    )
+    assert _answers(events) == ["MODE: default"]
+    assert "control_request:set_permission_mode" not in _stdin_kinds(log)

@@ -115,6 +115,12 @@ Claude Code emits a system init event early in the stream:
   `scope == "local"`. `system/model_fallback` (not a safeguard stop) emits a
   `note` action `↪️ Switched model <a> → <b> (<trigger>)` and logs
   `claude.model_fallback`.
+- `system/status` with a string `permissionMode` (#383) emits no Untether
+  event; it updates `ClaudeStreamState.effective_permission_mode` (as does
+  every `system.init.permissionMode` and the ack of Untether's own
+  `set_permission_mode`, request id `ut_plan_rearm_…`). Seeing `plan`
+  clears the session's `_PLAN_EXIT_APPROVED`; a plan chat seeing any other
+  mode records `plan_exited_at` / `plan_exit_turn`.
 - Optional: emit a `note` action summarizing tools/MCP servers (debug-only).
 
 The top-level `rate_limit_event` line (#790) is a quota snapshot, not a
