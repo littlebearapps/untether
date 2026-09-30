@@ -44,17 +44,20 @@ Mode is stored per chat and persists across sessions. New runs in the chat use t
 
 When Claude Code tries to exit plan mode (ExitPlanMode), you see three buttons instead of two:
 
-- **Approve** — let Claude Code proceed to execution
+- **Approve Plan** — let Claude Code carry out the plan
 - **Deny** — block and ask Claude Code to explain
 - **Pause & Outline Plan** — require a written plan first
+
+In a plan chat the request also says what approving does: *Approving lets Claude carry out this plan without further prompts.* In a chat where Claude Code switched to plan mode on its own (`/planmode off`), it reads *Approving ends planning; Claude still asks before each action.*
 
 <div markdown>
 
 !!! untether "Untether"
-    ▸ Permission Request [CanUseTool] - tool: ExitPlanMode
+    ▸ Permission Request [CanUseTool] - tool: ExitPlanMode<br>
+    Approving lets Claude carry out this plan without further prompts.
 
 <div class="tg-buttons">
-<span class="tg-btn">Approve</span>
+<span class="tg-btn">Approve Plan</span>
 <span class="tg-btn">Deny</span>
 <span class="tg-btn">Pause &amp; Outline Plan</span>
 </div>
@@ -134,9 +137,12 @@ Either way, **Approve Plan / Let's discuss / Deny buttons** appear in Telegram s
 
 ## Auto-approval after plan approval
 
-Once you approve a plan outline (via "Approve Plan"), subsequent tool calls in the same session — Edit, Write, Bash — are auto-approved without showing individual diff preview buttons. You have already reviewed the plan, so per-tool approval is skipped.
+A plan approval covers the reply it was given in. Once you approve a plan, whether directly or with **Approve Plan** after an outline, the Edit, Write and Bash calls in the rest of that reply skip their per-tool diff previews. You have already reviewed the plan, so asking again for each tool would be redundant.
 
-This applies whether you approve via "Approve Plan" after an outline or by directly approving an ExitPlanMode request. Starting a new session (via `/new` or a new message) restores normal approval behaviour.
+The approval ends with that reply. Claude Code keeps its process open after replying, so background jobs can report back and your next message goes straight in. Before v0.35.5 an approval carried on through every later message in that process, for up to four hours. Now:
+
+- your next message, and any background wake-up, gets per-tool approvals again ([#383](https://github.com/littlebearapps/untether/issues/383));
+- an **Approve Plan** tapped after an outline also covers your *next* message, so "outline → Approve Plan → go ahead" still needs only one tap. The second message after it asks again.
 
 ## The plan in the final message
 

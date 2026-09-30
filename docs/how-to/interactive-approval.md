@@ -67,7 +67,7 @@ You can toggle diff previews on or off via `/config` → **Diff preview**. When 
 <img src="../assets/screenshots/approval-diff-preview.jpg" alt="Approval message with compact diff preview showing removed and added lines" width="360" loading="lazy" />
 
 !!! note "After plan approval"
-    When you approve a plan outline (see [Plan mode](plan-mode.md#auto-approval-after-plan-approval)), diff previews are skipped for the rest of the session — tools are auto-approved since you already reviewed the plan.
+    When you approve a plan outline (see [Plan mode](plan-mode.md#auto-approval-after-plan-approval)), diff previews are skipped for the rest of that reply — tools are auto-approved since you already reviewed the plan. Your next message gets diff previews again.
 
 ## Answering questions
 

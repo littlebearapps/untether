@@ -75,7 +75,7 @@ If you want stricter sandboxing, run Untether inside a container or on a VM. The
 
 When Claude Code wants to run a tool that needs approval — write a file, run a shell command in plan mode, etc. — Untether posts the request to your Telegram chat with inline buttons: ✅ Approve / ❌ Deny / 📋 Pause & Outline Plan. Tap a button and the agent continues immediately.
 
-If you click "Pause & Outline Plan", Claude writes a plain-language summary of what it's about to do, and you get a second round of buttons: ✅ Approve Plan / ❌ Deny / 💬 Let's discuss. Approving here also auto-approves the next plan-exit so you don't get prompted twice for the same plan.
+If you click "Pause & Outline Plan", Claude writes a plain-language summary of what it's about to do, and you get a second round of buttons: ✅ Approve Plan / ❌ Deny / 💬 Let's discuss. Approving here also auto-approves the next plan-exit so you don't get prompted twice for the same plan. An approval covers that reply only: your next message gets the usual approvals again.
 
 Per-chat permission mode (`/planmode on/plan-auto/auto/off`, or `/config → Permission mode`) controls when the buttons appear:
 
