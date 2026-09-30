@@ -363,6 +363,9 @@ def test_client_passes_minimal_unvalidated(tmp_path: Path) -> None:
     assert proc.returncode == 0, (
         "codex now rejects model_reasoning_effort=minimal client-side — revisit "
         f"the #416 hint wording: {proc.stderr[-300:]}"
+    )
+
+
 # --- #419: Usage fields + web-search action types ----------------------------
 #
 # D8 greps the native binary (mmap + fixed-string find — never a regex over a
