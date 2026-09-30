@@ -877,8 +877,10 @@ def _apply_command_barrier(
 
     ``/cancel``, ``/new`` and ``/continue`` drop the pending prompt and
     return it with the command name, so the caller can tell the user. Any
-    other command flushes it first, keeping the order the user typed. Prompt
-    directives (``/<engine>``, ``/<project>``) and ``/steer <text>`` (already
+    other command flushes it first — best-effort ordering: the prompt is
+    dispatched before the command is handled, but its run starts via
+    ``start_soon`` and awaits prefs/context, so a ``/model`` or ``/planmode``
+    right behind it can still apply to it. Prompt directives (``/<engine>``, ``/<project>``) and ``/steer <text>`` (already
     split to ``command_id=None``) are prompts and are left alone.
     """
     command = "cancel" if is_cancel else command_id
@@ -934,8 +936,10 @@ class ForwardCoalescer:
     def flush(self, key: ForwardKey, *, reason: str) -> bool:
         """Dispatch the prompt pending for ``key`` now (#807).
 
-        Returns whether anything was pending. Used as a barrier ahead of a
-        command so the prompt typed before it keeps its place in line.
+        Returns whether anything was pending. Used as a best-effort barrier
+        ahead of a command: the prompt is dispatched before the command is
+        handled, but dispatch runs via ``start_soon`` and awaits prefs /
+        context, so a setting command right behind it may still apply to it.
         """
         pending = self._pending.get(key)
         if pending is None:
@@ -2784,7 +2788,8 @@ async def run_main_loop(
 
                 # #807: a command is a barrier for the coalesce window. Session
                 # control drops the pending prompt (visibly); any other command
-                # sends it first so it keeps the order the user typed.
+                # dispatches it first (best-effort: the prompt is dispatched
+                # before the command is handled, not guaranteed to run first).
                 barrier_drop = _apply_command_barrier(
                     forward_coalescer,
                     forward_key,
