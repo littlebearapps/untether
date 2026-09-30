@@ -11,6 +11,7 @@ import contextlib
 import dataclasses
 import functools
 import html
+import itertools
 import json
 import os
 import pty
@@ -25,8 +26,9 @@ from collections import OrderedDict
 from collections.abc import AsyncIterator, Callable, Iterable
 from dataclasses import dataclass, field
 from datetime import UTC
+from enum import StrEnum
 from pathlib import Path
-from typing import Any, Literal, Protocol
+from typing import Any, Literal, NamedTuple, Protocol
 
 import anyio
 import msgspec
@@ -61,7 +63,7 @@ from ..schemas import claude as claude_schema
 from ..session_quarantine import get_quarantine_store
 from ..settings import load_settings_if_exists
 from ..utils.env_audit import audit_proc_env
-from ..utils.paths import get_run_base_dir
+from ..utils.paths import get_run_base_dir, get_run_channel_id
 from ..utils.proc_diag import CliScan, hook_clock
 from ..utils.streams import drain_stderr
 from ..utils.subprocess import (
@@ -329,7 +331,67 @@ _REQUEST_TO_TOOL_NAME: dict[str, str] = {}
 # rather than being recognised as duplicates.  Now an LRU OrderedDict that
 # evicts oldest-first at _HANDLED_REQUESTS_MAX entries.
 _HANDLED_REQUESTS_MAX = 200
-_HANDLED_REQUESTS: OrderedDict[str, None] = OrderedDict()
+
+
+class ControlRequestStatus(StrEnum):
+    """Where a control request stands when a button is tapped (#685).
+
+    The user-facing grouping is three-way: **sent** (a ``PENDING`` request we
+    answered) / **already handled** (``IN_FLIGHT``, ``ALREADY_HANDLED``,
+    ``CANCELLED``) / **not found**. The CLI gives no feedback on a duplicate
+    answer, so this status comes from Untether's own registries.
+    """
+
+    PENDING = "pending"  # in _REQUEST_TO_SESSION, not claimed
+    IN_FLIGHT = "in_flight"  # another tap is writing its answer right now
+    ALREADY_HANDLED = "already_handled"  # answered earlier (Telegram / auto)
+    CANCELLED = "cancelled"  # the CLI withdrew it (control_cancel_request)
+    NOT_FOUND = "not_found"  # unknown: restart, LRU-evicted, session gone, other chat
+
+
+@dataclass(frozen=True, slots=True)
+class HandledControl:
+    """How and where a control request was resolved (#685).
+
+    ``action``: approve | deny | discuss | chat | auto | cancelled | timeout |
+    superseded (``None`` when unknown). ``outcome``: answered | cancelled |
+    expired. ``channel_id``: the chat that resolved it (scopes the memo, #715).
+    """
+
+    action: str | None
+    outcome: str
+    channel_id: int | None
+    at: float
+
+
+# Outcomes that record a request Untether can no longer answer; a later tap
+# never overwrites them with "answered" (#685).
+_TERMINAL_CONTROL_OUTCOMES = frozenset({"cancelled", "expired"})
+
+# Values are ``HandledControl`` records; ``None`` is tolerated (legacy/tests)
+# and reads as "answered, details unknown".
+_HANDLED_REQUESTS: OrderedDict[str, HandledControl | None] = OrderedDict()
+
+
+@dataclass(slots=True)
+class InflightClaim:
+    """A tap that is answering a request right now (#685)."""
+
+    action: str
+    owner: str
+    channel_id: int | None
+    at: float
+
+
+# #685 §2.4: request_id -> the claim of the tap currently answering it.
+# Callbacks are dispatched concurrently, and the gap between "is it pending?"
+# and the registry cleanup spans an ``await`` (the stdin lock), so without a
+# synchronous claim two taps could both write — and the loser's ``del`` raised
+# KeyError. The dispatcher reserves the claim before its early answer, so the
+# toast reflects it too. Every writer respects it: the 5-min sweep skips a
+# claimed id, and ``_cleanup_session_registries`` drops the session's claims.
+_INFLIGHT_CONTROL_RESPONSES: dict[str, InflightClaim] = {}
+_DIRECT_CLAIM_SEQ = itertools.count(1)
 
 # NOTE (#570): the time-based progressive discuss cooldown (_DISCUSS_COOLDOWN,
 # 30/60/90/120s escalation) that lived here was a workaround for Claude Code
@@ -6319,6 +6381,12 @@ def _translate_claude_event_base(
                         else:
                             button_request_id = f"da:{session_id}"
                             _REQUEST_TO_SESSION[button_request_id] = session_id
+                            # #685: the id is shared by every outline round in
+                            # the session. Drop round 1's handled record, or
+                            # the reconcile loop completes round 2's synthetic
+                            # action (strips its keyboard) at the next
+                            # control_request while it is still pending.
+                            _HANDLED_REQUESTS.pop(button_request_id, None)
                         # #683: map the button's request_id to this synthetic
                         # action so the reconcile loop can COMPLETE it once the
                         # user taps Approve/Deny. The early return below skips
@@ -6496,13 +6564,36 @@ def _translate_claude_event_base(
                 for rid, (_, timestamp) in state.pending_control_requests.items()
                 if current_time - timestamp > CONTROL_REQUEST_TIMEOUT_SECONDS
                 and rid not in _HANDLED_REQUESTS  # belt-and-suspenders (#229)
+                # #685: a user's answer being written right now wins; the
+                # next sweep catches the id if it is somehow still pending.
+                and rid not in _INFLIGHT_CONTROL_RESPONSES
             ]
             for rid in expired:
                 del state.pending_control_requests[rid]
                 _drop_exitplanmode_plan(state, rid, rejected=False, reason="timeout")
                 _REQUEST_TO_INPUT.pop(rid, None)
                 _REQUEST_TO_TOOL_NAME.pop(rid, None)
-                state.request_to_action.pop(rid, None)
+                # #685: the request is no longer answerable — drop the
+                # mapping (a later tap reads "expired", not "pending", and the
+                # entry stops pausing the live session) and record why.
+                _REQUEST_TO_SESSION.pop(rid, None)
+                mark_request_handled(rid, action="timeout", outcome="expired")
+                expired_action_id = state.request_to_action.pop(rid, None)
+                if expired_action_id:
+                    # #685: strip the swept request's Approve/Deny keyboard.
+                    state.control_action_for_tool = {
+                        k: v
+                        for k, v in state.control_action_for_tool.items()
+                        if v != expired_action_id
+                    }
+                    reconciled_events.append(
+                        factory.action_completed(
+                            action_id=expired_action_id,
+                            kind="warning",
+                            title="⏱️ Timed out: auto-denied after 5 min",
+                            ok=True,
+                        )
+                    )
                 state.auto_deny_queue.append(
                     (rid, "Request timed out — no response from user within 5 minutes.")
                 )
@@ -9551,6 +9642,257 @@ BACKEND = EngineBackend(
 )
 
 
+class ControlLookup(NamedTuple):
+    """Result of classifying a control request id (#685)."""
+
+    status: ControlRequestStatus
+    prior: HandledControl | None = None
+    reason: str | None = None  # NOT_FOUND detail: unknown | channel_mismatch
+
+
+@dataclass(frozen=True, slots=True)
+class ControlSendResult:
+    """Outcome of :func:`respond_to_control_request` (#685).
+
+    ``status`` is ``PENDING`` when the request was ours to answer (``sent``
+    says whether the response line was actually written). ``prior`` is set
+    for ``IN_FLIGHT`` / ``ALREADY_HANDLED`` / ``CANCELLED``. ``reason``:
+    unknown | channel_mismatch | no_active_session | write_failed.
+    """
+
+    status: ControlRequestStatus
+    sent: bool
+    session_id: str | None = None
+    prior: HandledControl | None = None
+    reason: str | None = None
+
+
+def mark_request_handled(
+    request_id: str,
+    *,
+    action: str | None = None,
+    outcome: str = "answered",
+    channel_id: int | None = None,
+) -> None:
+    """Record *request_id* as resolved so the reconcile loop can retire it.
+
+    The reconcile loop in ``translate`` emits ``action_completed`` for every
+    handled request it can resolve to an action id, which is what clears the
+    stale inline keyboard (#229) and, since #683, the synthetic
+    ``claude.discuss_approve.N`` action from the Pause & Outline hold-open path.
+
+    #685: the record says *how* (``action`` / ``outcome``) and *where*
+    (``channel_id``, defaulting to the run's chat) it was resolved, so a later
+    tap on the same button can say what actually happened. A ``cancelled`` or
+    ``expired`` record is terminal: a later "answered" never overwrites it.
+
+    #197: LRU-evict oldest entries instead of clear()-ing the whole set.
+    """
+    existing = _HANDLED_REQUESTS.get(request_id)
+    if (
+        existing is not None
+        and existing.outcome in _TERMINAL_CONTROL_OUTCOMES
+        and outcome == "answered"
+    ):
+        logger.debug(
+            "control_response.terminal_kept",
+            request_id=request_id,
+            kept_outcome=existing.outcome,
+            kept_action=existing.action,
+            ignored_action=action,
+        )
+        return
+    if channel_id is None:
+        channel_id = get_run_channel_id()
+    _HANDLED_REQUESTS[request_id] = HandledControl(
+        action=action, outcome=outcome, channel_id=channel_id, at=time.monotonic()
+    )
+    _HANDLED_REQUESTS.move_to_end(request_id)
+    while len(_HANDLED_REQUESTS) > _HANDLED_REQUESTS_MAX:
+        _HANDLED_REQUESTS.popitem(last=False)
+
+
+def classify_control_request(
+    request_id: str, *, channel_id: int | None = None
+) -> ControlLookup:
+    """Classify *request_id* for a tap from *channel_id* (#685). Pure and sync.
+
+    Order: an in-flight claim → ``IN_FLIGHT``; registered → ``PENDING``; a
+    handled record → ``CANCELLED`` / ``ALREADY_HANDLED``; else ``NOT_FOUND``.
+    A handled record from another chat reads ``NOT_FOUND`` (reason
+    ``channel_mismatch``) — one chat can't read another's resolution (#715).
+    """
+    claim = _INFLIGHT_CONTROL_RESPONSES.get(request_id)
+    if claim is not None:
+        return ControlLookup(
+            ControlRequestStatus.IN_FLIGHT,
+            HandledControl(
+                action=claim.action,
+                outcome="answered",
+                channel_id=claim.channel_id,
+                at=claim.at,
+            ),
+        )
+    if request_id in _REQUEST_TO_SESSION:
+        return ControlLookup(ControlRequestStatus.PENDING)
+    if request_id in _HANDLED_REQUESTS:
+        record = _HANDLED_REQUESTS[request_id]
+        if (
+            record is not None
+            and record.channel_id is not None
+            and channel_id is not None
+            and record.channel_id != channel_id
+        ):
+            return ControlLookup(
+                ControlRequestStatus.NOT_FOUND, reason="channel_mismatch"
+            )
+        if record is not None and record.outcome == "cancelled":
+            return ControlLookup(ControlRequestStatus.CANCELLED, record)
+        return ControlLookup(ControlRequestStatus.ALREADY_HANDLED, record)
+    return ControlLookup(ControlRequestStatus.NOT_FOUND, reason="unknown")
+
+
+def claim_control_request(
+    request_id: str,
+    *,
+    action: str,
+    owner: str | None,
+    channel_id: int | None = None,
+) -> ControlLookup:
+    """Classify *request_id* and, if it is ``PENDING``, reserve it (#685).
+
+    Synchronous — nothing is awaited between the check and the reservation,
+    so two concurrent taps serialise on the event loop: the first gets
+    ``PENDING`` and holds the claim, the second sees ``IN_FLIGHT``. A caller
+    that already holds the claim (same ``owner``) gets ``PENDING`` again.
+    ``owner=None`` only classifies.
+    """
+    existing = _INFLIGHT_CONTROL_RESPONSES.get(request_id)
+    if existing is not None and owner is not None and existing.owner == owner:
+        if request_id in _REQUEST_TO_SESSION:
+            return ControlLookup(ControlRequestStatus.PENDING)
+        # The request vanished under our claim (session cleanup) — drop it
+        # and report what the registries say now.
+        del _INFLIGHT_CONTROL_RESPONSES[request_id]
+    lookup = classify_control_request(request_id, channel_id=channel_id)
+    if lookup.status is ControlRequestStatus.PENDING and owner is not None:
+        _INFLIGHT_CONTROL_RESPONSES[request_id] = InflightClaim(
+            action=action, owner=owner, channel_id=channel_id, at=time.monotonic()
+        )
+    return lookup
+
+
+def release_control_claims(owner: str | None) -> None:
+    """Drop every in-flight claim *owner* still holds (idempotent, #685)."""
+    if owner is None:
+        return
+    for rid in [
+        rid for rid, c in _INFLIGHT_CONTROL_RESPONSES.items() if c.owner == owner
+    ]:
+        del _INFLIGHT_CONTROL_RESPONSES[rid]
+
+
+def new_control_claim_owner() -> str:
+    """A unique claim owner for a caller without a callback query id (#685)."""
+    return f"direct:{next(_DIRECT_CLAIM_SEQ)}"
+
+
+async def respond_to_control_request(
+    request_id: str,
+    approved: bool,
+    *,
+    action: str,
+    channel_id: int | None = None,
+    deny_message: str | None = None,
+    rejects_plan: bool = True,
+    claim_owner: str | None = None,
+) -> ControlSendResult:
+    """Answer a control request, reporting what actually happened (#685).
+
+    Writes **nothing** unless the request is ``PENDING`` and this caller holds
+    (or can take) its in-flight claim. ``claim_owner`` is the callback query id
+    whose early toast already reserved the claim; without it a unique owner
+    is used. The claim is released in ``finally``.
+
+    Args:
+        request_id: The control request ID
+        approved: Whether to approve (True) or deny (False) the request
+        action: What the tap did (approve / deny / discuss / chat / auto …),
+            recorded so a later tap can say it
+        channel_id: The chat the tap came from (scopes the handled record)
+        deny_message: Custom denial message (used when approved=False)
+        rejects_plan: For an ExitPlanMode denial, whether it rejects the plan
+            (❌ Deny) or is procedural (Pause & Outline / Let's discuss) — #793
+        claim_owner: The dispatcher's callback query id, if it reserved the
+            claim before the early answer
+    """
+    owner = claim_owner if claim_owner is not None else new_control_claim_owner()
+    lookup = claim_control_request(
+        request_id, action=action, owner=owner, channel_id=channel_id
+    )
+    if lookup.status is not ControlRequestStatus.PENDING:
+        if lookup.status is ControlRequestStatus.NOT_FOUND:
+            logger.warning(
+                "control_response.request_not_found",
+                request_id=request_id,
+                reason=lookup.reason,
+            )
+        else:
+            # Duplicate callback (a double tap, or Telegram long-polling
+            # delivering the same update twice) — nothing is written.
+            logger.debug(
+                "control_response.already_handled",
+                request_id=request_id,
+                status=str(lookup.status),
+            )
+        return ControlSendResult(
+            status=lookup.status,
+            sent=False,
+            prior=lookup.prior,
+            reason=lookup.reason,
+        )
+    try:
+        session_id = _REQUEST_TO_SESSION[request_id]
+        if session_id not in _ACTIVE_RUNNERS:
+            logger.warning(
+                "control_response.no_active_session",
+                session_id=session_id,
+                request_id=request_id,
+            )
+            # Clean up stale mappings
+            _REQUEST_TO_SESSION.pop(request_id, None)
+            _REQUEST_TO_INPUT.pop(request_id, None)
+            _REQUEST_TO_TOOL_NAME.pop(request_id, None)
+            return ControlSendResult(
+                status=ControlRequestStatus.PENDING,
+                sent=False,
+                session_id=session_id,
+                reason="no_active_session",
+            )
+
+        runner, _ = _ACTIVE_RUNNERS[session_id]
+        success = await runner.write_control_response(
+            request_id, approved, deny_message=deny_message, rejects_plan=rejects_plan
+        )
+
+        # Clean up the mapping after use. ``pop``, not ``del``: the claim
+        # makes a concurrent delete impossible, but it is cheap insurance.
+        _REQUEST_TO_SESSION.pop(request_id, None)
+        # A written *or* attempted write marks it handled (a closed pipe
+        # means the session is gone either way).
+        mark_request_handled(request_id, action=action, channel_id=channel_id)
+        return ControlSendResult(
+            status=ControlRequestStatus.PENDING,
+            sent=success,
+            session_id=session_id,
+            reason=None if success else "write_failed",
+        )
+    finally:
+        claim = _INFLIGHT_CONTROL_RESPONSES.get(request_id)
+        if claim is not None and claim.owner == owner:
+            del _INFLIGHT_CONTROL_RESPONSES[request_id]
+
+
 # Phase 2: Public API for sending control responses
 async def send_claude_control_response(
     request_id: str,
@@ -9558,71 +9900,33 @@ async def send_claude_control_response(
     *,
     deny_message: str | None = None,
     rejects_plan: bool = True,
+    action: str | None = None,
 ) -> bool:
     """Send a control response to an active Claude Code session.
 
-    Args:
-        request_id: The control request ID
-        approved: Whether to approve (True) or deny (False) the request
-        deny_message: Custom denial message (used when approved=False)
-        rejects_plan: For an ExitPlanMode denial, whether it rejects the plan
-            (❌ Deny) or is procedural (Pause & Outline / Let's discuss) — #793
+    Thin bool wrapper over :func:`respond_to_control_request`, kept for the
+    AskUserQuestion callers (#685). A caller that needs to tell *sent* from
+    *already handled* from *not found* must call that function instead.
+    ``action`` is recorded on the handled record (default: approve / deny).
 
     Returns:
-        True if the response was sent successfully, False if the request is not found
+        True if the response was written, or the request was already answered
+        (in flight / handled — a benign duplicate). False if it is unknown,
+        its session is gone, the write failed, or the CLI withdrew it
+        (cancelled: a text reply to a withdrawn question must fall through to
+        a normal prompt, not be swallowed).
     """
-    # Look up session_id from request_id
-    if request_id not in _REQUEST_TO_SESSION:
-        # Duplicate callback (Telegram long-polling can deliver the same update twice)
-        if request_id in _HANDLED_REQUESTS:
-            logger.debug("control_response.duplicate", request_id=request_id)
-            return True
-        logger.warning(
-            "control_response.request_not_found",
-            request_id=request_id,
-        )
-        return False
-
-    session_id = _REQUEST_TO_SESSION[request_id]
-
-    if session_id not in _ACTIVE_RUNNERS:
-        logger.warning(
-            "control_response.no_active_session",
-            session_id=session_id,
-            request_id=request_id,
-        )
-        # Clean up stale mappings
-        del _REQUEST_TO_SESSION[request_id]
-        _REQUEST_TO_INPUT.pop(request_id, None)
-        _REQUEST_TO_TOOL_NAME.pop(request_id, None)
-        return False
-
-    runner, _ = _ACTIVE_RUNNERS[session_id]
-    success = await runner.write_control_response(
-        request_id, approved, deny_message=deny_message, rejects_plan=rejects_plan
+    result = await respond_to_control_request(
+        request_id,
+        approved,
+        action=action or ("approve" if approved else "deny"),
+        deny_message=deny_message,
+        rejects_plan=rejects_plan,
     )
-
-    # Clean up the mapping after use
-    del _REQUEST_TO_SESSION[request_id]
-    mark_request_handled(request_id)
-
-    return success
-
-
-def mark_request_handled(request_id: str) -> None:
-    """Record *request_id* as answered so the reconcile loop can retire it.
-
-    The reconcile loop in ``translate`` emits ``action_completed`` for every
-    handled request it can resolve to an action id, which is what clears the
-    stale inline keyboard (#229) and, since #683, the synthetic
-    ``claude.discuss_approve.N`` action from the Pause & Outline hold-open path.
-
-    #197: LRU-evict oldest entries instead of clear()-ing the whole set.
-    """
-    _HANDLED_REQUESTS[request_id] = None
-    _HANDLED_REQUESTS.move_to_end(request_id)
-    while len(_HANDLED_REQUESTS) > _HANDLED_REQUESTS_MAX:
-        _HANDLED_REQUESTS.popitem(last=False)
+    return result.sent or result.status in (
+        ControlRequestStatus.IN_FLIGHT,
+        ControlRequestStatus.ALREADY_HANDLED,
+    )
 
 
 def mark_outline_pending(session_id: str) -> None:
@@ -9691,6 +9995,9 @@ def _cleanup_session_registries(
         cleaned.append(f"requests({len(stale)})")
     for k in stale:
         del _REQUEST_TO_SESSION[k]
+        # #685: a claim on a request whose session is gone can never
+        # complete — drop it so the id doesn't read "in flight" for ever.
+        _INFLIGHT_CONTROL_RESPONSES.pop(k, None)
         # Also clean up any pending ask requests and flows for stale requests
         _PENDING_ASK_REQUESTS.pop(k, None)
         _ASK_QUESTION_FLOWS.pop(k, None)
@@ -9730,7 +10037,7 @@ async def answer_ask_question(request_id: str, answer: str) -> bool:
         f"for this same question."
     )
     return await send_claude_control_response(
-        request_id, approved=False, deny_message=deny_message
+        request_id, approved=False, deny_message=deny_message, action="answer"
     )
 
 
@@ -9796,7 +10103,9 @@ async def answer_ask_question_with_options(request_id: str) -> bool:
     if stored_input is not None:
         stored_input["answers"] = flow.answers
 
-    return await send_claude_control_response(request_id, approved=True)
+    return await send_claude_control_response(
+        request_id, approved=True, action="answer"
+    )
 
 
 def format_question_message(

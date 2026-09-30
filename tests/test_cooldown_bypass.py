@@ -23,6 +23,8 @@ from untether.model import ActionEvent, ResumeToken
 from untether.runners.claude import (
     _ACTIVE_RUNNERS,
     _DISCUSS_APPROVED,
+    _HANDLED_REQUESTS,
+    _INFLIGHT_CONTROL_RESPONSES,
     _OUTLINE_MIN_CHARS,
     _OUTLINE_PENDING,
     _REQUEST_TO_INPUT,
@@ -48,6 +50,8 @@ def _clear_registries():
     _REQUEST_TO_TOOL_NAME.clear()
     _ACTIVE_RUNNERS.clear()
     _SESSION_STDIN.clear()
+    _HANDLED_REQUESTS.clear()
+    _INFLIGHT_CONTROL_RESPONSES.clear()
     yield
     _DISCUSS_APPROVED.clear()
     _OUTLINE_PENDING.clear()
@@ -56,6 +60,8 @@ def _clear_registries():
     _REQUEST_TO_TOOL_NAME.clear()
     _ACTIVE_RUNNERS.clear()
     _SESSION_STDIN.clear()
+    _HANDLED_REQUESTS.clear()
+    _INFLIGHT_CONTROL_RESPONSES.clear()
 
 
 def _make_resume(session_id: str) -> ResumeToken:
@@ -830,3 +836,131 @@ def test_reconcile_completes_synthetic_discuss_approve_action():
     assert ask_actions
     buttons = ask_actions[0].action.detail["inline_keyboard"]["buttons"]
     assert buttons[0][0]["callback_data"] == "aq:opt:0"
+
+
+# --- #685: synthetic da: buttons classify before acting ---
+
+
+def _da_ctx(action: str, session_id: str):
+    from untether.commands import CommandContext
+    from untether.transport import MessageRef
+
+    request_id = f"da:{session_id}"
+    return CommandContext(
+        command="claude_control",
+        text=f"claude_control:{action}:{request_id}",
+        args_text=f"{action}:{request_id}",
+        args=(f"{action}:{request_id}",),
+        message=MessageRef(channel_id=123, message_id=1),
+        reply_to=None,
+        reply_text=None,
+        config_path=None,
+        plugin_config=None,  # type: ignore[arg-type]
+        runtime=None,  # type: ignore[arg-type]
+        executor=AsyncMock(),
+    )
+
+
+@pytest.mark.anyio
+async def test_685_da_deny_then_approve_does_not_flip(monkeypatch):
+    """A Deny → Approve double tap on the post-outline keyboard must not turn
+    the deny into an approval (the next ExitPlanMode would be auto-approved)."""
+    from structlog.testing import capture_logs
+
+    from untether.telegram.commands import claude_control as cc
+
+    deleted = AsyncMock()
+    monkeypatch.setattr(cc, "delete_outline_messages", deleted)
+    session_id = "sess-flip"
+    _ACTIVE_RUNNERS[session_id] = (ClaudeRunner(claude_cmd="claude"), 0.0)
+    _REQUEST_TO_SESSION[f"da:{session_id}"] = session_id
+
+    cmd = cc.ClaudeControlCommand()
+    with capture_logs() as logs:
+        first = await cmd.handle(_da_ctx("deny", session_id))
+        second = await cmd.handle(_da_ctx("approve", session_id))
+
+    assert first is not None and "denied" in first.text.lower()
+    assert session_id not in _DISCUSS_APPROVED
+    assert second is not None
+    assert second.text == "ℹ️ Already answered — denied"
+    assert second.notify is False
+    assert deleted.await_count == 1
+    handled = [e for e in logs if e["event"] == "claude_control.already_handled"]
+    assert len(handled) == 1 and handled[0]["first_action"] == "deny"
+    assert not [e for e in logs if e["event"] == "claude_control.discuss_plan_approved"]
+
+
+@pytest.mark.anyio
+async def test_685_da_chat_double_tap(monkeypatch):
+    from structlog.testing import capture_logs
+
+    from untether.telegram.commands import claude_control as cc
+
+    monkeypatch.setattr(cc, "delete_outline_messages", AsyncMock())
+    session_id = "sess-da-chat"
+    _ACTIVE_RUNNERS[session_id] = (ClaudeRunner(claude_cmd="claude"), 0.0)
+    _REQUEST_TO_SESSION[f"da:{session_id}"] = session_id
+
+    cmd = cc.ClaudeControlCommand()
+    with capture_logs() as logs:
+        await cmd.handle(_da_ctx("chat", session_id))
+        second = await cmd.handle(_da_ctx("chat", session_id))
+
+    assert second is not None
+    assert second.text == "ℹ️ Already answered — discussion requested"
+    chats = [e for e in logs if e["event"] == "claude_control.discuss_plan_chat"]
+    assert len(chats) == 1
+    # The chat tap marks the button handled, so the reconcile loop can retire it.
+    assert f"da:{session_id}" in _HANDLED_REQUESTS
+
+
+def test_685_da_reregistration_clears_stale_handled():
+    """Round 2 re-registers the shared da:<sid> id; round 1's handled record
+    must not let the reconcile loop complete round 2's synthetic action."""
+    session_id = "sess-round2"
+    state = _make_state(session_id)
+
+    # Round 1: escalation path, then the user answers it.
+    mark_outline_pending(session_id)
+    state.max_text_len_since_cooldown = 50
+    translate_claude_event(
+        _make_exit_plan_mode_request("req_r1"),
+        title="claude",
+        state=state,
+        factory=state.factory,
+    )
+    _REQUEST_TO_SESSION.pop(f"da:{session_id}", None)
+    mark_request_handled(f"da:{session_id}", action="deny")
+
+    # Round 2: another escalation re-registers the same id.
+    mark_outline_pending(session_id)
+    state.max_text_len_since_cooldown = 50
+    r2 = translate_claude_event(
+        _make_exit_plan_mode_request("req_r2"),
+        title="claude",
+        state=state,
+        factory=state.factory,
+    )
+    r2_action = next(
+        e.action.id for e in r2 if isinstance(e, ActionEvent) and e.phase == "started"
+    )
+    assert state.request_to_action[f"da:{session_id}"] == r2_action
+
+    # An ordinary control_request arrives: round 2's action must survive.
+    ordinary = claude_schema.StreamControlRequest(
+        request_id="req_bash",
+        request=claude_schema.ControlCanUseToolRequest(
+            tool_name="AskUserQuestion", input={"question": "Proceed?"}
+        ),
+    )
+    events = translate_claude_event(
+        ordinary, title="claude", state=state, factory=state.factory
+    )
+    completed_ids = [
+        e.action.id
+        for e in events
+        if isinstance(e, ActionEvent) and e.phase == "completed"
+    ]
+    assert r2_action not in completed_ids
+    assert f"da:{session_id}" in _REQUEST_TO_SESSION
