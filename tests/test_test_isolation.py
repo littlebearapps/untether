@@ -20,13 +20,17 @@ import pytest
 
 from tests.conftest import HOME_CONFIG_PATH_MODULES
 from tests.telegram_fakes import FakeTransport
+from untether import settings as settings_mod
 from untether.markdown import MarkdownPresenter
 from untether.model import CompletedEvent, ResumeToken, StartedEvent
 from untether.runner_bridge import ExecBridgeConfig, IncomingMessage, handle_message
 from untether.runners.mock import Emit, ScriptRunner
 from untether.settings import FooterSettings, _resolve_config_path
 
+pytest_plugins = ["pytester"]
+
 _SRC = Path(__file__).resolve().parents[1] / "src" / "untether"
+_CONFTEST = Path(__file__).resolve().parent / "conftest.py"
 
 
 def test_config_resolves_under_tmp(tmp_path: Path) -> None:
@@ -171,3 +175,53 @@ async def test_usage_footer_makes_no_request(monkeypatch: pytest.MonkeyPatch) ->
     finals += [c["message"].text for c in transport.edit_calls]
     final = next(t for t in finals if "DONE" in t)
     assert "⚡" not in final
+
+
+_INNER_CACHE_TESTS = """
+from untether import settings
+
+CFG = (
+    'transport = "telegram"\\n[transports.telegram]\\n'
+    'bot_token = "1:test"\\nchat_id = 1\\nallow_any_user = true\\n'
+)
+
+
+def test_a_populates_cache():
+    path = settings.HOME_CONFIG_PATH
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(CFG)
+    assert settings.load_settings_if_exists() is not None
+    settings._bound_settings_class(path)
+    assert settings._SETTINGS_CACHE
+
+
+def test_b_sees_empty_cache():
+    assert settings._SETTINGS_CACHE == {}
+    assert settings._bound_settings_class.cache_info().currsize == 0
+"""
+
+
+def test_settings_cache_cleared_between_tests(pytester: pytest.Pytester) -> None:
+    """#506: ``_isolated_config`` clears the process-wide settings parse
+    cache per test. Order-independent: the two inner tests run in a fresh
+    pytester session under a copy of the real conftest."""
+    pytester.makeconftest(_CONFTEST.read_text(encoding="utf-8"))
+    pytester.makepyfile(test_inner_cache=_INNER_CACHE_TESTS)
+    result = pytester.runpytest("-p", "no:cacheprovider", "-p", "no:randomly")
+    result.assert_outcomes(passed=2)
+
+
+def test_settings_cache_clear_helper(tmp_path: Path) -> None:
+    """Same-process complement: the helper the fixture calls empties both
+    the entry cache and the bound-class cache."""
+    cfg = tmp_path / "u.toml"
+    cfg.write_text(
+        'transport = "telegram"\n[transports.telegram]\n'
+        'bot_token = "1:test"\nchat_id = 1\nallow_any_user = true\n'
+    )
+    assert settings_mod.load_settings_if_exists(cfg) is not None
+    settings_mod._bound_settings_class(cfg)
+    assert settings_mod._SETTINGS_CACHE
+    settings_mod.clear_settings_cache()
+    assert settings_mod._SETTINGS_CACHE == {}
+    assert settings_mod._bound_settings_class.cache_info().currsize == 0

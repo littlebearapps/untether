@@ -24,6 +24,8 @@ rely on the host config or the live network**:
   binding (`HOME_CONFIG_PATH_MODULES`) to a per-test tmp path, deletes
   `UNTETHER_CONFIG_PATH`, and points `/usage`'s OAuth credentials path at tmp.
   A test that needs a config writes its own, or passes a path explicitly.
+  It also calls `settings.clear_settings_cache()` before and after every test,
+  so no test is served another test's parsed config (#506).
 - `_no_live_network` (autouse) refuses non-loopback requests at
   `httpx.HTTPTransport` / `AsyncHTTPTransport` (`MockTransport` and loopback
   still work) and resets the usage cache. Opt out per test with

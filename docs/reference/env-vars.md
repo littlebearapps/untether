@@ -18,6 +18,7 @@ Untether supports a small set of environment variables for logging and runtime b
 |----------|-------------|
 | `TAKOPI_NO_INTERACTIVE` | Disable interactive prompts (useful for CI / non-TTY). |
 | `UNTETHER_CONFIG_PATH` | Override config file location (default `~/.untether/untether.toml`). Useful for running multiple instances or testing with alternate configs. |
+| `UNTETHER_SETTINGS_CACHE` | Set to `0` (or `false`/`off`/`no`) to turn off the settings parse cache ([#506](https://github.com/littlebearapps/untether/issues/506)). By default `untether.toml` is parsed once per edit: every read compares the file's bytes (and the `UNTETHER__*` env vars) with the last parse and re-parses only when they differ, so edits still apply on the next read. Turning the cache off re-parses on every read, as before 0.35.5. Set it in a systemd drop-in (`Environment=UNTETHER_SETTINGS_CACHE=0`) for a per-host rollback. |
 
 ## Engine-specific
 

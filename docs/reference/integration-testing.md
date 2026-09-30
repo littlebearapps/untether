@@ -466,7 +466,7 @@ Integration tests are run by Claude Code via Telegram MCP tools (see "Automated 
 | Live sessions / follow-up injection / scheduler (`runners/claude.py`, `runner_bridge.py`, `live_followup.py`, `scheduler.py`) | B-LIVE-1…7, RC12-4…7, C1-C6, S7, U1-U4 (Claude) |
 | Telegram transport (`telegram/*.py`) | T1-T10, S7, S8 |
 | Control channel (`claude_control.py`) | C1-C6, T8, S9 |
-| Config/settings (`settings.py`) | O1-O9, S5, upgrade path |
+| Config/settings (`settings.py`) | O1-O9, S5, upgrade path, R15-13a…d (settings parse cache) |
 | Cost tracking (`cost_tracker.py`) | B1-B3, U8 |
 | Progress/formatting (`markdown.py`, `telegram/render.py`) | U3, T6, T7, S4, S8, RC12-8, RC12-9 |
 | Commands (`commands/*.py`) | Tier 7 (all), specific command test |
@@ -594,3 +594,19 @@ When detected, note the engine, chat ID, message IDs, and exact behaviour. Creat
 - **4096-char limit** applies after entity parsing, not before. Splitting must account for entity boundaries.
 - **Voice messages (T1)** require Opus/OGG format, max 10MB by default. Transcription depends on configured API endpoint being accessible.
 - **429 rate limits** block ALL Telegram sends for the full `retry_after` duration, not just the rate-limited chat. Monitor logs for 429s during high-volume testing.
+
+## rc15 scenarios (0.35.5rc15)
+
+Release-specific scenarios for 0.35.5rc15, run on `@untether_dev_bot` on top of the tiers the
+release type requires. Each subsection is one issue; keep the scenario IDs when attesting.
+
+### #506 — settings parse cache
+
+Log check: `journalctl --user -u untether-dev -o cat --since "30 minutes ago" | grep -E "config\.loaded|config\.read\.|_settings\.load_failed|config\.reload\."`
+
+| # | Scenario | Steps | Pass criteria |
+|---|---|---|---|
+| R15-13a | **Config edit applies mid-live-session ([#506](https://github.com/littlebearapps/untether/issues/506))** | Claude chat. (1) Send `reply with the single word ALPHA`. The final shows the `💰` cost line. (2) Within 60 s, while the session is live-idle (`claude.live_session.*` shows no idle close yet), edit `~/.untether-dev/untether.toml`: set `[footer] show_api_cost = false` (add the table if it's absent). Use `sed -i`, which is an atomic rename. (3) Reply to the ALPHA final: `reply with the single word BETA`. (4) Revert the edit. | The BETA turn (injected into the live session, `followup_turns=1` in `session.summary`) renders **without** the `💰` line. Exactly one `config.loaded reason=content_changed` between the two turns. No restart. If the dev chat has a per-chat footer override, clear it first via `/config`. |
+| R15-13b | **No re-parse without edits** | Note the restart time, restart `untether-dev`, then run Q2 (`/config`, open two sub-pages), U2 (multi-tool prompt) and U4 (resume) in the Claude chat with no config edits. | `journalctl --user -u untether-dev -o cat --since "<restart time>" \| grep 'config.loaded' \| grep -c 'reason=first_load'` is **1**, and there are 0 `reason=content_changed` or `reason=env_changed` lines. Every startup read (`cli/run.py:30`, `telegram/backend.py:42`), the `/config` renders (`telegram/commands/config.py:293,351,…`) and every run read share one cache entry for the dev config path, so only the earliest read parses. The strict `load_settings()` path logs only at DEBUG (`reason=uncached`) and isn't counted. The count must not grow with tool calls, turns or page renders. Unit test #2 covers the same property deterministically. |
+| R15-13c | **Kill switch** | Never open, `cat` or `systemctl cat` the unit (it holds secrets). Create a drop-in with a heredoc: `mkdir -p ~/.config/systemd/user/untether-dev.service.d && cat > ~/.config/systemd/user/untether-dev.service.d/r15-13c-settings-cache.conf <<'EOF'` / `[Service]` / `Environment=UNTETHER_SETTINGS_CACHE=0` / `EOF`, then `systemctl --user daemon-reload && systemctl --user restart untether-dev`, and run U1. Afterwards: `rm ~/.config/systemd/user/untether-dev.service.d/r15-13c-settings-cache.conf && systemctl --user daemon-reload && systemctl --user restart untether-dev`. | U1 passes. There are no INFO `config.loaded reason=…` lines since the restart (the cached path is off), and the behaviour matches rc14. After removing the drop-in, the next message logs one `reason=first_load`. |
+| R15-13d | **Invalid edit is not masked** | Introduce a TOML syntax error in the dev config (for example a stray `[[`), send `ping` in the Claude chat, then fix it. | The run still completes on defaults. The logs show `config.read.toml_error` plus the helpers' `*_settings.load_failed` warnings (today's behaviour), **not** a silent stale config. After the fix, the next message logs `config.loaded reason=content_changed`. |
