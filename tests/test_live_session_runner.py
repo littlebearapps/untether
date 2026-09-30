@@ -37,6 +37,8 @@ _ENV = (
     "FAKE_CLAUDE_NO_STATUS",
     "FAKE_CLAUDE_WAKE_AFTER_RESULT_S",
     "FAKE_CLAUDE_STDIN_LOG",
+    # #751
+    "FAKE_CLAUDE_INIT_PERMISSION_MODE",
 )
 
 
@@ -947,3 +949,36 @@ async def test_684_cancel_in_followup_turn_records_channel() -> None:
     lookup = classify_control_request("req-cancel-1", channel_id=68_400)
     assert lookup.status is ControlRequestStatus.CANCELLED
     assert any(e["event"] == "control_request.cancelled_by_cli" for e in logs)
+
+
+async def test_751_fake_cli_init_reports_different_mode() -> None:
+    """`auto` requested, the CLI's first init reports `default` (as on
+    Haiku): a warning row right after StartedEvent, the gate re-armed, and no
+    re-check on the follow-up turn's init."""
+    from untether.model import ActionEvent
+
+    os.environ["FAKE_CLAUDE_INIT_PERMISSION_MODE"] = "default"
+    runner = _LiveRunner(claude_cmd=str(FAKE_CLI), permission_mode="auto")
+    cmd = str(uuid.uuid4())
+
+    async def inject(evt: Any, _runner: ClaudeRunner) -> None:
+        if isinstance(evt, CompletedEvent):
+            assert await write_user_message(SID, "second", command_uuid=cmd)
+
+    with capture_logs() as logs:
+        events = await _collect("followup", until=2, on_event=inject, runner=runner)
+    assert isinstance(events[0], StartedEvent)
+    rows = [
+        e
+        for e in events
+        if isinstance(e, ActionEvent)
+        and e.action.id.startswith("claude.permission_mode_mismatch")
+    ]
+    assert [r.phase for r in rows] == ["started", "completed"]
+    assert events.index(rows[0]) == 1
+    assert rows[-1].action.title.endswith("approvals will be requested")
+    assert any(isinstance(e, CompletedEvent) for e in events)
+    assert _turns(events)[-1].answer == "ECHO: second"
+    mismatch = [e for e in logs if e["event"] == "claude.permission_mode.mismatch"]
+    assert len(mismatch) == 1
+    assert mismatch[0]["prompting_rearmed"] is True

@@ -296,3 +296,94 @@ def test_209_load_error_shows_in_startup_status(
     )
     assert runtime.engine_ids_with_status("load_error") == ("codex",)
     assert "codex" not in runtime.available_engine_ids()
+
+
+# ---------------------------------------------------------------------------
+# #751: the permission audit runs from build_runtime_spec (startup + reload)
+# ---------------------------------------------------------------------------
+
+
+def _751_config(tmp_path: Path, triggers: str) -> Path:
+    path = tmp_path / "untether.toml"
+    path.write_text(
+        'default_engine = "claude"\ntransport = "telegram"\n'
+        "[transports.telegram]\n"
+        'bot_token = "token"\nchat_id = 123\nallow_any_user = true\n'
+        '[claude]\npermission_mode = "auto"\n' + triggers,
+        encoding="utf-8",
+    )
+    return path
+
+
+@pytest.fixture(autouse=True)
+def _751_reset():
+    from untether.permission_audit import reset_permission_audit_state
+
+    reset_permission_audit_state()
+    yield
+    reset_permission_audit_state()
+
+
+def test_751_build_runtime_spec_emits_exactly_one_auto_warn(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from structlog.testing import capture_logs
+
+    from untether.settings import load_settings
+
+    monkeypatch.setattr(runtime_loader.shutil, "which", lambda _cmd: "/bin/echo")
+    path = _751_config(
+        tmp_path,
+        "[triggers]\nenabled = true\n"
+        '[[triggers.crons]]\nid = "c1"\nschedule = "0 0 1 1 *"\nprompt = "p"\n'
+        'permission_mode = "auto"\n'
+        '[[triggers.crons]]\nid = "c2"\nengine = "claude"\nschedule = "0 0 1 1 *"\n'
+        'prompt = "p"\npermission_mode = "default"\n'
+        '[[triggers.crons]]\nid = "c3"\nschedule = "0 0 1 1 *"\nprompt = "p"\n'
+        'permission_mode = "bogus-typo"\n',
+    )
+    settings, resolved = load_settings(path)
+    with capture_logs() as logs:
+        runtime_loader.build_runtime_spec(settings=settings, config_path=resolved)
+        runtime_loader.build_runtime_spec(settings=settings, config_path=resolved)
+    auto = [
+        e for e in logs if e["event"] == "claude.permission_mode.auto_semantics_changed"
+    ]
+    assert len(auto) == 1
+    assert auto[0]["entries"] == ["engines.claude", "triggers.crons[c1]"]
+    assert auto[0]["reason"] == "startup"
+    risk = [e for e in logs if e["event"] == "trigger.unattended_approval_risk"]
+    assert [r["entries"] for r in risk] == [
+        [{"trigger": "cron:c2", "mode": "default", "waits_for": "tool approval"}]
+    ]
+    invalid = [e for e in logs if e["event"] == "trigger.cron.permission_mode_invalid"]
+    assert [(e["trigger"], e["mode"]) for e in invalid] == [("cron:c3", "bogus-typo")]
+
+
+def test_751_unparseable_triggers_do_not_break_spec(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from structlog.testing import capture_logs
+
+    from untether.settings import load_settings
+
+    monkeypatch.setattr(runtime_loader.shutil, "which", lambda _cmd: "/bin/echo")
+    path = _751_config(
+        tmp_path,
+        '[triggers]\nenabled = true\ndefault_timezone = "Mars/Olympus"\n'
+        '[[triggers.crons]]\nid = "c1"\nschedule = "0 0 1 1 *"\nprompt = "p"\n'
+        'permission_mode = "auto"\n',
+    )
+    settings, resolved = load_settings(path)
+    with capture_logs() as logs:
+        spec = runtime_loader.build_runtime_spec(
+            settings=settings, config_path=resolved
+        )
+    assert spec.router.default_engine == "claude"
+    auto = [
+        e for e in logs if e["event"] == "claude.permission_mode.auto_semantics_changed"
+    ]
+    assert [e["entries"] for e in auto] == [["engines.claude"]]
+    assert not [e for e in logs if e["event"] == "permission_audit.failed"]

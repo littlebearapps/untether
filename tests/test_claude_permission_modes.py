@@ -238,12 +238,16 @@ def test_engine_config_error_names_the_key_and_path(tmp_path) -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_toml_auto_warns_once_and_keeps_the_new_meaning(tmp_path, monkeypatch) -> None:
-    """Hand-authored TOML is not rewritten — the operator gets a WARN."""
-    import untether.runners.claude as claude_mod
+def test_751_validate_permission_mode_no_longer_warns(tmp_path) -> None:
+    """Hand-authored TOML `auto` keeps its new meaning and is not rewritten.
 
-    monkeypatch.setattr(claude_mod, "_LEGACY_AUTO_WARNED", False)
+    #751: the operator WARN moved to the config audit (startup + reload,
+    crons included); validation itself must stay silent so the two can't
+    double-fire and the old reload-swallowing process latch can't return.
+    """
     from structlog.testing import capture_logs
+
+    import untether.runners.claude as claude_mod
 
     # capture_logs, not monkeypatch.setattr(claude_mod.logger, "warning", …):
     # restoring an attribute on structlog's lazy proxy pins a bound method
@@ -253,13 +257,8 @@ def test_toml_auto_warns_once_and_keeps_the_new_meaning(tmp_path, monkeypatch) -
     with capture_logs() as logs:
         assert claude_mod._validate_permission_mode("auto", path) == "auto"
         assert claude_mod._validate_permission_mode("auto", path) == "auto"
-    warnings = [(e["event"], e) for e in logs if e.get("log_level") == "warning"]
-
-    # One-shot per process, not per run.
-    assert len(warnings) == 1
-    event, kwargs = warnings[0]
-    assert event == "claude.permission_mode.auto_semantics_changed"
-    assert CLAUDE_PLAN_AUTO_MODE in kwargs["note"]
+    assert [e for e in logs if e.get("log_level") == "warning"] == []
+    assert not hasattr(claude_mod, "_LEGACY_AUTO_WARNED")
 
 
 def test_chat_prefs_auto_migrates_to_plan_auto() -> None:
@@ -541,3 +540,380 @@ def test_750_permission_prompt_tool_flag_still_accepted() -> None:
             "'unknown option'; commander's error wording has changed and the "
             f"probe needs re-deriving (last green on CLI {PROBED_CLI_VERSION})"
         )
+
+
+# ---------------------------------------------------------------------------
+# #751 — config-time permission audit (startup + reload, crons included)
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture(autouse=True)
+def _audit_state():
+    from untether.permission_audit import reset_permission_audit_state
+
+    reset_permission_audit_state()
+    yield
+    reset_permission_audit_state()
+
+
+def _triggers(*crons: dict, enabled: bool = True):
+    from untether.triggers.settings import parse_trigger_config
+
+    return parse_trigger_config(
+        {
+            "enabled": enabled,
+            "crons": [
+                {"schedule": "0 0 1 1 *", "prompt": "hi", **cron} for cron in crons
+            ],
+        }
+    )
+
+
+def _resolver(default: str = "claude", **projects: str | None):
+    from untether.permission_audit import make_engine_resolver
+
+    return make_engine_resolver(default_engine=default, project_engines=projects)
+
+
+def _audit(engine_mode=None, triggers=None, resolver=None, spent=()):
+    from untether.permission_audit import audit_claude_permission_modes
+
+    return audit_claude_permission_modes(
+        engine_mode=engine_mode,
+        triggers=triggers,
+        resolve_engine=resolver or _resolver(),
+        spent_cron_ids=spent,
+    )
+
+
+def _warnings(logs: list[dict], event: str) -> list[dict]:
+    return [e for e in logs if e["event"] == event and e["log_level"] == "warning"]
+
+
+def test_751_audit_engine_auto_single_event() -> None:
+    from structlog.testing import capture_logs
+
+    from untether.permission_audit import log_permission_audit
+
+    audit = _audit(engine_mode="auto")
+    assert audit.auto_entries == ("engines.claude",)
+    with capture_logs() as logs:
+        log_permission_audit(audit, config_path="/x/untether.toml", reason="startup")
+    (event,) = _warnings(logs, "claude.permission_mode.auto_semantics_changed")
+    assert event["entries"] == ["engines.claude"]
+    assert event["count"] == 1
+    assert event["reason"] == "startup"
+    assert CLAUDE_PLAN_AUTO_MODE in event["note"]
+
+
+def test_751_audit_lists_engine_and_crons_in_one_event() -> None:
+    from structlog.testing import capture_logs
+
+    from untether.permission_audit import log_permission_audit
+
+    audit = _audit(
+        engine_mode="auto",
+        triggers=_triggers(
+            {"id": "a1", "permission_mode": "auto"},
+            {"id": "a2", "engine": "claude", "permission_mode": "auto"},
+        ),
+    )
+    with capture_logs() as logs:
+        log_permission_audit(audit, config_path=None, reason="startup")
+    (event,) = _warnings(logs, "claude.permission_mode.auto_semantics_changed")
+    assert event["entries"] == [
+        "engines.claude",
+        "triggers.crons[a1]",
+        "triggers.crons[a2]",
+    ]
+    assert event["count"] == 3
+
+
+def test_751_audit_resolves_engine_like_runtime() -> None:
+    """Cron engine → project default_engine → default, as at dispatch."""
+    from pathlib import Path
+
+    from untether.config import ProjectConfig, ProjectsConfig
+    from untether.context import RunContext
+    from untether.router import AutoRouter, RunnerEntry
+    from untether.runners.mock import ScriptRunner
+    from untether.transport_runtime import TransportRuntime
+
+    crons = _triggers(
+        {"id": "p_codex", "project": "cx", "permission_mode": "auto"},
+        {"id": "p_claude", "project": "cl", "permission_mode": "auto"},
+        {"id": "explicit_codex", "engine": "codex", "permission_mode": "auto"},
+        {"id": "no_project", "permission_mode": "auto"},
+    )
+    audit = _audit(triggers=crons, resolver=_resolver("codex", cx="codex", cl="claude"))
+    assert audit.auto_entries == ("triggers.crons[p_claude]",)
+
+    # Parity with the real resolver the dispatcher uses.
+    entries = [
+        RunnerEntry(engine=e, runner=ScriptRunner([], engine=e))
+        for e in ("codex", "claude")
+    ]
+    projects = ProjectsConfig(
+        projects={
+            alias: ProjectConfig(
+                alias=alias,
+                path=Path("/tmp"),
+                worktrees_dir=Path(".w"),
+                default_engine=engine,
+            )
+            for alias, engine in (("cx", "codex"), ("cl", "claude"))
+        }
+    )
+    runtime = TransportRuntime(
+        router=AutoRouter(entries=entries, default_engine="codex"),
+        projects=projects,
+        allowlist=None,
+        config_path=None,
+        plugin_configs=None,
+        watch_config=False,
+    )
+    resolve = _resolver("codex", cx="codex", cl="claude")
+    for cron in crons.crons:
+        assert resolve(cron.engine, cron.project) == runtime.resolve_engine(
+            engine_override=cron.engine,
+            context=RunContext(project=cron.project),
+        )
+
+
+@pytest.mark.parametrize(
+    "mode", ["plan-auto", "dontAsk", "bypassPermissions", "auto", None]
+)
+def test_751_audit_silent_when_no_auto_and_no_risk(mode) -> None:
+    from structlog.testing import capture_logs
+
+    from untether.permission_audit import log_permission_audit
+
+    cron = {"id": "c"} if mode is None else {"id": "c", "permission_mode": mode}
+    audit = _audit(engine_mode="plan", triggers=_triggers(cron))
+    assert audit.unattended == ()
+    assert audit.invalid == ()
+    with capture_logs() as logs:
+        log_permission_audit(audit, config_path=None, reason="startup")
+    names = {e["event"] for e in logs if e["log_level"] == "warning"}
+    if mode == "auto":
+        assert names == {"claude.permission_mode.auto_semantics_changed"}
+    else:
+        assert names == set()
+
+
+def test_751_audit_skips_crons_when_triggers_disabled() -> None:
+    audit = _audit(
+        triggers=_triggers(
+            {"id": "a", "permission_mode": "auto"},
+            {"id": "d", "permission_mode": "default"},
+            enabled=False,
+        )
+    )
+    assert audit.empty
+
+
+def test_751_audit_does_not_rewrite_toml(tmp_path, monkeypatch) -> None:
+    import hashlib
+    import os
+
+    import untether.runtime_loader as runtime_loader
+    from untether.runtime_loader import build_runtime_spec
+    from untether.settings import load_settings
+
+    monkeypatch.setattr(runtime_loader.shutil, "which", lambda _cmd: "/bin/echo")
+
+    path = _write_config(
+        tmp_path,
+        engine_mode="auto",
+        crons=[{"id": "c1", "permission_mode": "auto"}],
+    )
+    before = (hashlib.sha256(path.read_bytes()).hexdigest(), os.stat(path).st_mtime_ns)
+    settings, resolved = load_settings(path)
+    build_runtime_spec(settings=settings, config_path=resolved)
+    after = (hashlib.sha256(path.read_bytes()).hexdigest(), os.stat(path).st_mtime_ns)
+    assert before == after
+
+
+@pytest.mark.parametrize(
+    ("mode", "waits_for"),
+    [
+        ("default", "tool approval"),
+        ("manual", "tool approval"),
+        ("acceptEdits", "tool approval"),
+        ("plan", "plan approval"),
+        ("plan-auto", None),
+        ("auto", None),
+        ("dontAsk", None),
+        ("bypassPermissions", None),
+    ],
+)
+def test_751_unattended_modes_matrix(mode, waits_for) -> None:
+    from structlog.testing import capture_logs
+
+    from untether.permission_audit import log_permission_audit
+
+    audit = _audit(triggers=_triggers({"id": "c2", "permission_mode": mode}))
+    with capture_logs() as logs:
+        log_permission_audit(audit, config_path=None, reason="startup")
+    risk = _warnings(logs, "trigger.unattended_approval_risk")
+    if waits_for is None:
+        assert audit.unattended == ()
+        assert risk == []
+    else:
+        assert audit.unattended == (("cron:c2", mode),)
+        (event,) = risk
+        assert event["phase"] == "config"
+        assert event["entries"] == [
+            {"trigger": "cron:c2", "mode": mode, "waits_for": waits_for}
+        ]
+
+
+def test_751_tap_required_modes_superset_of_prompting() -> None:
+    from untether.runners.run_options import (
+        _CLAUDE_PROMPTING_MODES,
+        CLAUDE_TAP_REQUIRED_MODES,
+    )
+
+    assert _CLAUDE_PROMPTING_MODES | {"plan"} == CLAUDE_TAP_REQUIRED_MODES
+    assert CLAUDE_PLAN_AUTO_MODE not in CLAUDE_TAP_REQUIRED_MODES
+
+
+def test_751_spent_run_once_cron_not_an_unattended_risk() -> None:
+    """Decision 10: a spent one-shot no longer fires; `auto` stays listed."""
+    crons = _triggers(
+        {"id": "once", "run_once": True, "permission_mode": "default"},
+        {"id": "once_auto", "run_once": True, "permission_mode": "auto"},
+        {"id": "again", "run_once": True, "permission_mode": "plan"},
+    )
+    audit = _audit(triggers=crons, spent={"once", "once_auto"})
+    assert audit.unattended == (("cron:again", "plan"),)
+    assert audit.auto_entries == ("triggers.crons[once_auto]",)
+
+
+def test_751_invalid_cron_mode_for_resolved_claude_warns() -> None:
+    """The cron validator can't know the default engine — the audit can."""
+    from structlog.testing import capture_logs
+
+    from untether.permission_audit import log_permission_audit
+
+    crons = _triggers({"id": "c3", "permission_mode": "bogus-typo"})
+    audit = _audit(triggers=crons)
+    assert audit.invalid == (("cron:c3", "bogus-typo"),)
+    with capture_logs() as logs:
+        log_permission_audit(audit, config_path=None, reason="startup")
+    (event,) = _warnings(logs, "trigger.cron.permission_mode_invalid")
+    assert event["trigger"] == "cron:c3"
+    assert event["mode"] == "bogus-typo"
+    assert "plan-auto" in event["allowed"]
+
+    # Resolves to codex → not Claude's business.
+    assert _audit(triggers=crons, resolver=_resolver("codex")).empty
+
+
+def test_751_reload_same_findings_no_repeat() -> None:
+    from structlog.testing import capture_logs
+
+    from untether.permission_audit import log_permission_audit
+
+    audit = _audit(engine_mode="auto")
+    with capture_logs() as logs:
+        log_permission_audit(audit, config_path=None, reason="startup")
+        log_permission_audit(audit, config_path=None, reason="reload")
+    assert len(_warnings(logs, "claude.permission_mode.auto_semantics_changed")) == 1
+
+
+def test_751_reload_new_entry_reemits_with_reason_reload() -> None:
+    from structlog.testing import capture_logs
+
+    from untether.permission_audit import log_permission_audit
+
+    with capture_logs() as logs:
+        log_permission_audit(
+            _audit(engine_mode="auto"), config_path=None, reason="startup"
+        )
+        log_permission_audit(
+            _audit(
+                engine_mode="auto",
+                triggers=_triggers({"id": "n", "permission_mode": "auto"}),
+            ),
+            config_path=None,
+            reason="reload",
+        )
+    first, second = _warnings(logs, "claude.permission_mode.auto_semantics_changed")
+    assert first["reason"] == "startup"
+    assert second["reason"] == "reload"
+    assert second["entries"] == ["engines.claude", "triggers.crons[n]"]
+
+
+def test_751_reload_cleared_then_readded_reemits() -> None:
+    from structlog.testing import capture_logs
+
+    from untether.permission_audit import log_permission_audit
+
+    with capture_logs() as logs:
+        log_permission_audit(
+            _audit(engine_mode="auto"), config_path=None, reason="startup"
+        )
+        log_permission_audit(
+            _audit(engine_mode="plan"), config_path=None, reason="reload"
+        )
+        log_permission_audit(
+            _audit(engine_mode="auto"), config_path=None, reason="reload"
+        )
+    events = _warnings(logs, "claude.permission_mode.auto_semantics_changed")
+    assert [e["reason"] for e in events] == ["startup", "reload"]
+
+
+def test_751_audit_entries_capped() -> None:
+    from structlog.testing import capture_logs
+
+    from untether.permission_audit import MAX_LOGGED_ENTRIES, log_permission_audit
+
+    crons = _triggers(*({"id": f"c{i}", "permission_mode": "auto"} for i in range(60)))
+    with capture_logs() as logs:
+        log_permission_audit(_audit(triggers=crons), config_path=None, reason="startup")
+    (event,) = _warnings(logs, "claude.permission_mode.auto_semantics_changed")
+    assert len(event["entries"]) == MAX_LOGGED_ENTRIES
+    assert event["count"] == 60
+
+
+def test_751_normalise_manual_to_default() -> None:
+    from untether.runners.run_options import normalise_claude_cli_mode
+
+    # Probe P1b (CLI 2.1.285): `--permission-mode manual` reports `default`.
+    assert normalise_claude_cli_mode("manual") == "default"
+    assert normalise_claude_cli_mode("default") == "default"
+    assert normalise_claude_cli_mode(None) is None
+
+
+def test_751_normalise_plan_auto_to_plan() -> None:
+    from untether.runners.run_options import normalise_claude_cli_mode
+
+    assert normalise_claude_cli_mode("plan-auto") == "plan"
+    for mode in ("plan", "auto", "acceptEdits", "dontAsk", "bypassPermissions"):
+        assert normalise_claude_cli_mode(mode) == mode
+
+
+def _write_config(tmp_path, *, engine_mode=None, crons=(), extra: str = ""):
+    """A minimal real untether.toml (claude default engine)."""
+    import json as _json
+
+    lines = [
+        'default_engine = "claude"',
+        'transport = "telegram"',
+        "[transports.telegram]",
+        'bot_token = "123:abc"',
+        "chat_id = 1",
+        "allowed_user_ids = [1]",
+    ]
+    if engine_mode is not None:
+        lines += ["[claude]", f"permission_mode = {_json.dumps(engine_mode)}"]
+    if crons:
+        lines += ["[triggers]", "enabled = true"]
+        for cron in crons:
+            lines.append("[[triggers.crons]]")
+            body = {"schedule": "0 0 1 1 *", "prompt": "hi", **cron}
+            lines += [f"{k} = {_json.dumps(v)}" for k, v in body.items()]
+    path = tmp_path / "untether.toml"
+    path.write_text("\n".join(lines) + "\n" + extra)
+    return path

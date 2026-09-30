@@ -141,8 +141,71 @@ reaches the CLI verbatim.
 > rename `auto` is a value the user can legitimately *choose* from the UI, and
 > a per-read rewrite would make the new mode permanently unreachable. A TOML
 > `permission_mode = "auto"` is never rewritten: it now means the CLI's auto
-> mode and logs a one-shot `claude.permission_mode.auto_semantics_changed`
-> WARN.
+> mode. See "Config audit" below for the WARN that says so.
+
+**Config audit ([#751](https://github.com/littlebearapps/untether/issues/751), 0.35.5rc15).**
+`build_runtime_spec` runs `untether.permission_audit` against the *parsed*
+config at startup and on every config reload (`config_watch` passes
+`reason="reload"`). Crons are resolved to their engine the way the dispatcher
+does (`engine` → the project's `default_engine` → the default engine) and only
+Claude ones count; crons are skipped while `[triggers] enabled = false`. Three
+WARNs, each logged once per change of its entry set (an unrelated reload is
+silent; a reload that adds an entry re-emits the whole list; a reload that
+clears it resets silently), and TOML is never rewritten:
+
+* `claude.permission_mode.auto_semantics_changed` — `entries`
+  (`engines.claude`, `triggers.crons[<id>]`; capped at 50, `count` is the
+  total), `reason` (`startup` / `reload`), `config_path`, `note`. Log-only;
+  it is kept through 0.35.x and removed in 0.36.0. It replaces the old
+  one-shot WARN in `_validate_permission_mode`, whose process latch swallowed
+  every reload and which never saw crons.
+* `trigger.unattended_approval_risk phase=config` — crons whose explicit mode
+  waits for a tap nobody gives: `default` / `manual` / `acceptEdits`
+  (`waits_for="tool approval"`) and `plan` (`"plan approval"`; its
+  `ExitPlanMode` is never auto-approved). `plan-auto`, `auto`, `dontAsk` and
+  `bypassPermissions` never warn (`CLAUDE_TAP_REQUIRED_MODES` in
+  `run_options.py`). Spent `run_once` crons are skipped (they no longer fire).
+  A cron without a mode inherits the chat's `/planmode` or engine config,
+  which the static audit doesn't guess at: `telegram/loop.py` logs the same
+  event with `phase=dispatch`, `trigger`, `mode` and `source`
+  (`cron` / `chat_pref` / `engine_config`) when a `cron:` or `webhook:` run
+  reaches Claude in one of those modes, once per (trigger, mode) per process.
+  `/at` and `/loop` runs are excluded — a person scheduled them from the chat.
+* `trigger.cron.permission_mode_invalid` — a cron with no `engine` that
+  resolves to Claude and whose mode Claude doesn't accept (e.g.
+  `"bogus-typo"`). The cron validator can't catch this without knowing the
+  default engine, and a `ConfigError` would disable every trigger, so it is a
+  WARN; the run would fail at spawn.
+
+**Requested vs effective mode ([#751](https://github.com/littlebearapps/untether/issues/751), security).**
+The CLI does not warn when it can't honour `--permission-mode`: `auto` on a
+model that doesn't support it (Haiku) silently runs as `default`, with nothing
+on stderr (findings Q3, probe Z9). `new_state` records the mode the first
+`system/init.permissionMode` should report
+(`ClaudeStreamState.requested_permission_mode`: `plan-auto` → `plan`,
+`manual` → `default` — probe P1b shows `--permission-mode manual` reports
+`default` — and `bypassPermissions` whenever
+`dangerously_skip_permissions = true`, which overrides the mode). On the
+**first** init of the process only (compaction and live turns re-emit `init`;
+mode changes after start arrive as `system/status`), a difference logs
+`claude.permission_mode.mismatch` (`requested`, `effective`, `model`,
+`resumed`, `prompting_rearmed`) and adds a warning row after the
+`StartedEvent`: `⚠️ Asked for <requested> mode — Claude Code is running
+<effective>`, plus ` (auto mode isn't available for this model)` when `auto`
+was asked for. Resumed runs are checked too: a `--resume` reports the flag's
+mode, not the stored one (probe P1). If the effective mode is a prompting mode
+(`default` / `acceptEdits`) and the run was classed autonomous,
+`state.prompting_mode` is **re-armed** (row suffix `; approvals will be
+requested`): every later stage-6 `can_use_tool` routes to Telegram instead of
+being blanket-approved. `system/init` precedes every control request, so no
+request slips through first. A gate is never disarmed on a CLI report (e.g.
+`default` asked, `bypassPermissions` reported). **Residual (#835):** the
+default `--allowedTools Bash,Read,Edit,Write` still goes out for `auto`, so on
+a downgraded run those four tools stay pre-approved at stage 5. Probe P2
+(zero-token, CLI 2.1.285) showed the allowlist does *not* bypass auto mode's
+classifier on a supported model — an allowlisted `rm -rf` outside the project
+was sent to the classifier exactly as without the flag — so dropping it for
+`auto` would buy nothing there, and the flag is kept.
 
 **Interaction with `--permission-prompt-tool stdio`.** Untether passes the
 prompt tool alongside *every* mode, and the two compose rather than conflict:
@@ -169,9 +232,10 @@ prompt tool alongside *every* mode, and the two compose rather than conflict:
 **Plan re-arm in live sessions ([#383](https://github.com/littlebearapps/untether/issues/383), 0.35.5rc15).** An approved `ExitPlanMode` moves the CLI to `prePlanMode ?? "default"` — `default` for a session started in plan — and reports it as `system/status{status:null,permissionMode:"default"}`. A live session (#776) used to stay there for every later turn. The runner now tracks the effective mode (`ClaudeStreamState.effective_permission_mode`, from every `system/init.permissionMode`, `system/status` frames with a `permissionMode`, and the ack of its own request; `claude.permission_mode.changed`) and, in a chat whose configured mode maps to CLI `plan` (`plan`, `plan-auto`), sends the parent-initiated `{"type":"control_request","request_id":"ut_plan_rearm_<sid>_<n>","request":{"subtype":"set_permission_mode","mode":"plan"}}` when the session has left plan. Never for prompting modes (`default` / `manual` / `acceptEdits`) or the other autonomous modes (`auto` / `dontAsk` / `bypassPermissions`), never outside a live session, and never unless the CLI reported `plan` at least once in this process (so it can't fight `--dangerously-skip-permissions`, which overrides `plan`). One request in flight at a time. `plan-auto` is re-armed before follow-ups and idle steers only, not at the idle boundary (Decision 6: its rubber stamp would approve a planned wake turn anyway, so planning it costs a plan-model call and an `ExitPlanMode` round trip for no check). Logs `claude.permission_mode.rearm_sent` (`reason` = `idle` / `followup` / `steer`), `rearm_ack`, `rearm_failed` (WARN; the session is closed once idle and the next message resumes a fresh `--permission-mode plan` process), `rearm_write_failed`. Kill switch `[watchdog] rearm_plan_mode = false`. Plan mode switches a haiku session's model to `claude-sonnet-5-5` while planning, so re-planned follow-ups cost what they did before live sessions. **Known limit (CLI 2.1.285):** plan mode no longer blocks a `Write` internally — it raises `can_use_tool` with `decision_reason_type:"mode"`, which Untether's autonomous-mode stage-6 handler approves; the model's plan-mode instructions are what hold it back (see the findings addendum in `docs/findings/2026-09-30-claude-sdk-control-permissions-context.md`).
 
 Auto mode requires a supported model (Opus 4.6+/Sonnet 4.6+/Fable 5) and an
-organisation that has not set `permissions.disableAutoMode`. Where it is
-unavailable the CLI rejects `--permission-mode auto` at startup with rc=1 and
-a stderr message, which Untether surfaces through the normal fatal-error path.
+organisation that has not set `permissions.disableAutoMode`. On CLI 2.1.285
+an unsupported model does **not** fail the run: the CLI starts in `default`
+and says so only in `system/init.permissionMode`, which Untether compares
+with the request (see "Requested vs effective mode" above).
 
 #### The six-stage permission pipeline, and where Untether sits ([#749](https://github.com/littlebearapps/untether/issues/749))
 

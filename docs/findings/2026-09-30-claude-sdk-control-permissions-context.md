@@ -611,3 +611,19 @@ Script: lane-c3 scratch (not committed).
 So the rc16 cross-check (#684 D2 → #837) needs no guard against a re-emitted `system/init`, but
 must tolerate the extra `background_tasks_changed` snapshot and the response still resets the
 runner watchdog's idle clock (risk 3).
+
+## Addendum (2026-10-01, rc15 implementation): §Q3a — #751 probes P1, P1b, P2 and the plan-mode write
+
+Zero token cost. CLI 2.1.285 on lba-1, fake Messages API on 127.0.0.1 (harness (b); the first
+main-loop call returns a Bash `tool_use`, later calls a text reply; the classifier's
+non-streaming "security monitor" requests are logged separately), argv `-p --input-format
+stream-json --output-format stream-json --verbose --permission-prompt-tool stdio
+--setting-sources local --strict-mcp-config --tools Bash` plus the flags below, `HOME` a temp
+dir. Scripts: lane-c5 scratch (not committed).
+
+| Probe | Setup | `system/init.permissionMode` / observation | Consequence for #751 |
+|---|---|---|---|
+| **P1** resume | fresh `--permission-mode plan --model haiku` (session persisted), then `--resume <sid>` with `auto --model opus`, `auto --model haiku`, and no mode flag + haiku | `plan`; resume → `auto` / `default` / `default` | a resume reports the **flag's** mode, never the stored one → the mismatch check runs on resumed runs too (no `not state.resumed` gate) |
+| **P1b** `manual` | `--permission-mode manual`, haiku and opus, fresh | `default` both | `normalise_claude_cli_mode("manual") == "default"`; `manual` requested + `default` reported is no mismatch |
+| **P2** allowlist vs classifier | `--permission-mode auto --model opus`, Bash `rm -rf <dir>` with and without `--allowedTools Bash` | target **inside** the cwd: runs in both, no classifier call (auto's in-project fast path). Target **outside** the cwd: in **both** runs the CLI sends the command to the classifier (`claude-sonnet-5`, then the session model, system prompt "You are a security monitor for autonomous AI coding agents", transcript `{"Bash":"rm -rf …"}`); the fake's reply isn't a valid verdict, so both fail closed (`permission_denials` lists the Bash call, tool_result "… auto mode cannot determine the safety of Bash right now") and the target survives | the allowlist does **not** bypass auto mode's classifier → `--allowedTools` stays for `auto` (plan §4.4 fallback); residual documented: on a run the CLI downgrades to `default`, Bash/Read/Edit/Write stay pre-approved at stage 5 (#835) |
+| plan-mode write | `--permission-mode plan --allowedTools Bash,Read,Edit,Write --model haiku --tools Bash,Read,Edit,Write,ExitPlanMode`; step 1 `Write` to the plan file named in the plan-mode reminder (`$HOME/.claude/plans/<slug>.md`), step 2 `Write` to `<cwd>/code.txt`; host denies every `can_use_tool` | plan-file `Write`: **no** `can_use_tool`, the file is created (the CLI allows it internally). `code.txt` `Write`: `can_use_tool` with `decision_reason_type:"mode"`, `display_name:"Write"`, `permission_suggestions: null`, **despite** `Write` being in `--allowedTools` (the mode check runs before the allow rules); denied → not created | confirms the #383 addendum's Probe-G regression and bounds its fix: the plan file never reaches stage 6, so a stage-6 rule on `decision_reason_type == "mode"` in plan chats needs no plan-file exemption |
