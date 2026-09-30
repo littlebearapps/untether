@@ -61,6 +61,7 @@ from ..session_quarantine import get_quarantine_store
 from ..settings import load_settings_if_exists
 from ..utils.env_audit import audit_proc_env
 from ..utils.paths import get_run_base_dir
+from ..utils.proc_diag import CliScan, hook_clock
 from ..utils.streams import drain_stderr
 from ..utils.subprocess import (
     manage_subprocess,
@@ -587,7 +588,7 @@ async def close_live_session(
 _USER_CLOSE_REASONS = frozenset({"cancel", "new", "drain", "options_changed"})
 
 
-async def _cli_children(pid: int | None) -> dict[int, list[str]] | None:
+async def _cli_children(pid: int | None) -> CliScan | None:
     if not isinstance(pid, int):
         return None
     from ..utils.proc_diag import cli_children
@@ -599,40 +600,61 @@ async def _cli_children(pid: int | None) -> dict[int, list[str]] | None:
         return None
 
 
+def _oldest_unpaired_hook_at(state: ClaudeStreamState) -> float | None:
+    """#812: when (``hook_clock()``) the oldest hook still unpaired — pending
+    or expired — was seen starting; no hook process of theirs can predate
+    it. None when there is none or a start is unknown (no timing
+    exemption)."""
+    starts = [h.started_clock for h in _hooks_outstanding(state)]
+    if not starts or any(t is None for t in starts):
+        return None
+    return min(t for t in starts if t is not None)
+
+
 async def _hook_processes(
     state: ClaudeStreamState, pid: int | None
 ) -> list[int] | None:
     """#812: the CLI children that may be a running command hook — any
-    direct child except the session's baseline (MCP servers), Bash-tool
-    shells and late service-looking children (see
+    direct child except Bash-tool shells, children older than the oldest
+    unpaired hook, and non-detached ones that are in the session baseline
+    (MCP servers) or look like a service (see
     ``proc_diag.hook_evidence_children``). A shell that execs a single hook
     command (bash/zsh — macOS) leaves no ``<shell> -c`` behind, so the
     wrapper alone isn't enough. None when unknown (no pid, unreadable
     table): the caller must not assume no hook is running, so the hold
     stays bounded by ``async_hook_max_hold_s``."""
-    children = await _cli_children(pid)
-    if children is None:
+    scan = await _cli_children(pid)
+    if scan is None:
         return None
     from ..utils.proc_diag import hook_evidence_children
 
-    return hook_evidence_children(children, state.cli_baseline_children)
+    return hook_evidence_children(
+        scan, state.cli_baseline_children, since=_oldest_unpaired_hook_at(state)
+    )
 
 
 async def capture_cli_baseline(state: ClaudeStreamState, pid: int | None) -> None:
-    """#812: record the CLI's children right after ``system/init`` — its
-    long-lived MCP servers (started before init) — so they are never taken
-    for a running hook. Once per process; a failed scan leaves None (then
-    nothing is exempt: the hold errs long, bounded)."""
+    """#812: record the CLI's non-detached children right after
+    ``system/init`` — its long-lived MCP servers (started before init) — so
+    they are never taken for a running hook. Hooks are spawned detached, so
+    one still running at init (a ``UserPromptSubmit`` hook starts before it)
+    is left out; entries are (pid, start time), so a reused PID isn't
+    exempt. Once per process; a failed scan leaves None (then nothing is
+    exempt: the hold errs long, bounded)."""
     if state.cli_baseline_children is not None:
         return
-    children = await _cli_children(pid)
-    if children is None:
+    scan = await _cli_children(pid)
+    if scan is None:
         return
-    state.cli_baseline_children = frozenset(children)
+    from ..utils.proc_diag import baseline_ids
+
+    state.cli_baseline_children = baseline_ids(scan)
     logger.debug(
         "claude.hook.cli_baseline",
         pid=pid,
-        children=len(children),
+        cli_pid=scan.cli_pid,
+        children=len(scan.children),
+        baselined=len(state.cli_baseline_children),
     )
 
 
@@ -1254,6 +1276,9 @@ class PendingHook:
     # The turn the hook belongs to: the open turn, or — when it started
     # while idle (the next turn's UserPromptSubmit) — the upcoming one.
     turn: int
+    # ``proc_diag.hook_clock()`` when the frame was read (counts through
+    # system sleep; compared with CLI children's start times). None: unknown.
+    started_clock: float | None = None
 
     @property
     def label(self) -> str:
@@ -1639,9 +1664,10 @@ class ClaudeStreamState:
     # Live hook processes at the lifecycle's last scan (None: unreadable /
     # not scanned). Labels a hold expiry — never more hooks than this.
     live_hook_processes: int | None = None
-    # CLI children present right after ``system/init`` (MCP servers): never
-    # hook evidence (None: not captured — nothing exempt).
-    cli_baseline_children: frozenset[int] | None = None
+    # (pid, start) of the CLI's non-detached children right after
+    # ``system/init`` (MCP servers): never hook evidence (None: not captured
+    # — nothing exempt).
+    cli_baseline_children: frozenset[tuple[int, int | None]] | None = None
     # (hook name, hook event, monotonic ts) of an async hook that exited 2
     # (the asyncRewake wake signal) while idle; the next turn opening within
     # ``_HOOK_REWAKE_HINT_TTL_S`` is its rewake. Cleared on every turn open.
@@ -2848,6 +2874,7 @@ def _apply_hook_event(
             # Started while idle → the upcoming turn's hook (e.g. its
             # UserPromptSubmit, emitted before ``system/init``).
             turn=state.turn if state.turn_open else state.turn + 1,
+            started_clock=hook_clock(),
         )
         return
     if subtype != "hook_response":

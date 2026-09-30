@@ -655,13 +655,63 @@ async def test_812_execd_hook_command_is_held_until_its_rewake(
     assert runner.current_stream.proc_returncode == 0
 
 
+@pytest.mark.parametrize(
+    ("scenario", "hook_id"),
+    [
+        # #812 review 2: UserPromptSubmit's hook_started precedes
+        # system/init, so an exec'd asyncRewake UPS hook is still alive when
+        # the baseline is taken — it used to be baselined (never evidence)
+        # and released at ~1 s, losing the rewake.
+        ("async_hook_ups_rewake", "h-ups-rewake"),
+        # #812 review 3: a hook whose argv looks like an MCP server
+        # (``… mcp-scan``) used to be exempt as a "late service".
+        ("async_hook_service_named_rewake", "h-stop-rewake"),
+    ],
+)
+async def test_812_hook_that_looks_exempt_is_held_until_its_rewake(
+    monkeypatch: pytest.MonkeyPatch,
+    quarantine: QuarantineStore,
+    scenario: str,
+    hook_id: str,
+) -> None:
+    """Hooks are spawned detached (their own process group): neither the
+    init baseline nor the MCP/LSP-name heuristic may exempt one."""
+    from structlog.testing import capture_logs
+
+    _settings(monkeypatch)
+    started = anyio.current_time()
+    with capture_logs() as logs:
+        runner, events = await _run(scenario, wake_s=3.0, timeout=20)
+    elapsed = anyio.current_time() - started
+    state = _engine_state(runner)
+    for released in _events(logs, "claude.hook.hold_released"):
+        assert hook_id not in released["hook_ids"]
+    rewake = [
+        e
+        for e in events
+        if isinstance(e, TurnEvent)
+        and e.phase == "started"
+        and e.reason == "hook_rewake"
+    ]
+    assert len(rewake) == 1
+    finals = [e for e in events if isinstance(e, TurnEvent) and e.phase == "completed"]
+    assert [f.answer for f in finals] == ["HOOK: finding: key leak"]
+    assert elapsed >= 3.0
+    assert _events(logs, "claude.live_session.async_hook_killed") == []
+    assert state.pending_hooks == {} and state.deferred_hooks == {}
+    assert runner.current_stream.proc_returncode == 0
+
+
 async def test_812_mcp_like_children_never_hold(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A long-lived child present at ``system/init`` (an MCP server, the
-    session baseline) and an MCP-looking child started later (a reconnect)
-    are not hook evidence: the finished plain async hooks are released on
-    the normal settle and the session idles out, far inside the bound."""
+    session baseline — one behind a non-exec'ing ``sh -c``, #812 review 4)
+    and an MCP-looking child started later (a reconnect) are not hook
+    evidence: the finished plain async hooks are released on the normal
+    settle and the session idles out, far inside the bound. (A baselined
+    ``sh -c`` used to count forever: a hold to the bound and a false
+    "feedback wasn't delivered" notice on every session.)"""
     from structlog.testing import capture_logs
 
     _settings(monkeypatch, async_hook_max_hold=8.0)

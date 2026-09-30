@@ -1037,9 +1037,11 @@ def hook_response(
 
 
 # ── hook processes ──
-# The real CLI runs every command hook as a ``/bin/sh -c <command>`` child;
-# Untether's hold reads that (#812): no shell child left → nothing can
-# still rewake. So background hooks here run a real ``sh -c`` process.
+# The real CLI runs every command hook as a ``/bin/sh -c <command>`` child,
+# spawned detached (its own session / process group; CLI 2.1.285), right
+# after emitting ``hook_started``. Untether's hold reads the process table
+# (#812): no hook process left → nothing can still rewake. So background
+# hooks here run a real, detached process; MCP-like services do not.
 _hook_procs: dict[str, subprocess.Popen] = {}
 # Plain ``async: true`` hooks' responses: the CLI withholds them while the
 # session is idle ("the response waits until the next user interaction")
@@ -1048,12 +1050,13 @@ _withheld: list[tuple[str, str]] = []
 
 
 def spawn_hook(hook_id: str, seconds: float) -> subprocess.Popen:
-    proc = subprocess.Popen(  # the real CLI's hook shape: sh -c
+    proc = subprocess.Popen(  # the real CLI's hook shape: sh -c, detached
         f"sleep {seconds}; true",
         shell=True,
         stdin=subprocess.DEVNULL,
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
+        start_new_session=True,
     )
     _hook_procs[hook_id] = proc
     return proc
@@ -1071,8 +1074,22 @@ def flush_withheld() -> None:
         hook_response(hook_id, event)
 
 
+def _kill_children(pid: int) -> None:
+    with contextlib.suppress(OSError):
+        for tid in os.listdir(f"/proc/{pid}/task"):
+            with open(f"/proc/{pid}/task/{tid}/children") as f:
+                for tok in f.read().split():
+                    with contextlib.suppress(OSError, ValueError):
+                        os.kill(int(tok), signal.SIGKILL)
+
+
 def kill_hooks() -> None:
     for proc in _hook_procs.values():
+        with contextlib.suppress(OSError):
+            # A detached hook leads its own group: take its children too.
+            if os.getpgid(proc.pid) == proc.pid:
+                os.killpg(proc.pid, signal.SIGKILL)
+        _kill_children(proc.pid)  # e.g. a service shell's command
         with contextlib.suppress(OSError):
             proc.kill()
         proc.wait()
@@ -1199,6 +1216,7 @@ def spawn_exec_hook(hook_id: str, seconds: float) -> subprocess.Popen:
         stdin=subprocess.DEVNULL,
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
+        start_new_session=True,
     )
     _hook_procs[hook_id] = proc
     return proc
@@ -1280,6 +1298,7 @@ def spawn_execd_hook(hook_id: str, seconds: float) -> subprocess.Popen:
         stdin=subprocess.DEVNULL,
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
+        start_new_session=True,
     )
     _hook_procs[hook_id] = proc
     return proc
@@ -1312,16 +1331,22 @@ def scenario_async_hook_exec_rewake(first: dict) -> None:
     proc = spawn_execd_hook("h-stop-rewake", WAKE_S)
     hook_started("h-stop-rewake", "Stop")
     result("DONE")
+    _rewake_when_done(proc, "h-stop-rewake", "Stop")
+
+
+def _rewake_when_done(proc: subprocess.Popen, hook_id: str, event: str) -> None:
+    """While idle, wait for an asyncRewake hook's process; it exits 2 and
+    the CLI wakes itself (P5-A) — or, after stdin EOF, drops it (P5-B)."""
     while proc.poll() is None:
         got = next_user(0.05)
         if got is None:
             _eof_with_pending_rewake()
         if isinstance(got, dict):
             _deferred.append(got)
-    wait_hook("h-stop-rewake")
+    wait_hook(hook_id)
     hook_response(
-        "h-stop-rewake",
-        "Stop",
+        hook_id,
+        event,
         outcome="error",
         exit_code=2,
         stderr="finding: key leak\n",
@@ -1330,11 +1355,55 @@ def scenario_async_hook_exec_rewake(first: dict) -> None:
     serve_followups()
 
 
+def scenario_async_hook_ups_rewake(first: dict) -> None:
+    """#812 review: an asyncRewake UserPromptSubmit hook (its shell exec'd
+    the command) is still running at ``system/init``, where Untether takes
+    its baseline — ``hook_started`` for UserPromptSubmit precedes init. It
+    must not be baselined: held until its rewake ``WAKE_S`` after spawn."""
+    hook_started("h-ups-rewake", "UserPromptSubmit")  # frame, then spawn
+    proc = spawn_execd_hook("h-ups-rewake", WAKE_S)
+    time.sleep(0.2)  # let the exec land before init
+    init()
+    time.sleep(MODEL_S)
+    text("DONE")
+    result("DONE")
+    _rewake_when_done(proc, "h-ups-rewake", "UserPromptSubmit")
+
+
+def scenario_async_hook_service_named_rewake(first: dict) -> None:
+    """#812 review: an asyncRewake Stop hook whose argv happens to look like
+    an MCP server (``uvx mcp-scan``, a script in an ``acme-mcp/`` repo) —
+    still a hook (detached), so held until its rewake."""
+    init()
+    time.sleep(MODEL_S)
+    text("DONE")
+    hook_started("h-stop-rewake", "Stop")
+    proc = subprocess.Popen(
+        [sys.executable, "-c", f"import time; time.sleep({WAKE_S})", "mcp-scan"],
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        start_new_session=True,
+    )
+    _hook_procs["h-stop-rewake"] = proc
+    result("DONE")
+    _rewake_when_done(proc, "h-stop-rewake", "Stop")
+
+
 def scenario_async_hook_with_services(first: dict) -> None:
-    """MCP servers up before ``system/init`` (the baseline) and one started
-    later (a reconnect) must never read as a running hook: the plain async
-    hooks are released once their own processes are gone."""
+    """MCP servers up before ``system/init`` (the baseline — one wrapped in
+    a non-exec'ing ``sh -c``) and one started later (a reconnect) must never
+    read as a running hook: the plain async hooks are released once their
+    own processes are gone."""
     spawn_service("svc-baseline", "trello-server")
+    # ``"command": "sh", "args": ["-c", "cd srv && node x.js"]``: the shell
+    # stays as the CLI's (non-detached) child.
+    _hook_procs["svc-shell"] = subprocess.Popen(
+        ["/bin/sh", "-c", "sleep 600; true", "wrapped-server"],
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
     spawn_hook("h-ups", 0.01)
     hook_started("h-ups", "UserPromptSubmit")
     _withheld.append(("h-ups", "UserPromptSubmit"))
@@ -1394,6 +1463,8 @@ _SCENARIOS = {
     "async_hook_live_mix_running": scenario_async_hook_live_mix_running,
     "async_hook_exec_rewake": scenario_async_hook_exec_rewake,
     "async_hook_with_services": scenario_async_hook_with_services,
+    "async_hook_ups_rewake": scenario_async_hook_ups_rewake,
+    "async_hook_service_named_rewake": scenario_async_hook_service_named_rewake,
     "async_hook_no_response": scenario_async_hook_no_response,
     "plain_async_cancelled_on_eof": scenario_plain_async_cancelled_on_eof,
     "hook_flood": scenario_hook_flood,

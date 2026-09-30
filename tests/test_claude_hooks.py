@@ -530,21 +530,43 @@ def test_session_summary_hook_fields() -> None:
     assert _hook_summary_fields(None) == {}
 
 
+def _cli_scan(children: dict[int, tuple[list[str], int, float]]) -> Any:
+    """CLI pid/pgid 4242; children: pid -> (argv, pgid, started_by)."""
+    from untether.utils.proc_diag import CliChild, CliScan
+
+    return CliScan(
+        cli_pid=4242,
+        cli_pgid=4242,
+        children={
+            pid: CliChild(argv=argv, pgid=pgid, start_id=pid * 7, started_by=start)
+            for pid, (argv, pgid, start) in children.items()
+        },
+    )
+
+
 @pytest.mark.anyio
 async def test_capture_cli_baseline_once_and_unreadable_leaves_none(
     monkeypatch: Any,
 ) -> None:
     """#812: the baseline (MCP servers up by system/init) is recorded once
-    per process; an unreadable table leaves None, so nothing is exempt and
-    the hold errs long (bounded)."""
+    per process, as (pid, start) of the CLI's non-detached children; an
+    unreadable table leaves None, so nothing is exempt and the hold errs
+    long (bounded)."""
     scans: list[int | None] = []
-    tables: list[dict[int, list[str]] | None] = [
+    tables: list[Any] = [
         None,
-        {10: ["node", "srv.js"], 11: ["npm", "exec", "x-mcp"]},
-        {99: ["sleep", "1"]},
+        _cli_scan(
+            {
+                10: (["node", "srv.js"], 4242, 1.0),
+                11: (["npm", "exec", "x-mcp"], 4242, 1.0),
+                # A hook alive at init (UserPromptSubmit): detached.
+                12: (["sleep", "30"], 12, 2.0),
+            }
+        ),
+        _cli_scan({99: (["sleep", "1"], 99, 3.0)}),
     ]
 
-    async def fake_children(pid: int | None) -> dict[int, list[str]] | None:
+    async def fake_children(pid: int | None) -> Any:
         scans.append(pid)
         return tables[len(scans) - 1]
 
@@ -553,11 +575,83 @@ async def test_capture_cli_baseline_once_and_unreadable_leaves_none(
     await claude_mod.capture_cli_baseline(state, 4242)
     assert state.cli_baseline_children is None
     await claude_mod.capture_cli_baseline(state, 4242)
-    assert state.cli_baseline_children == frozenset({10, 11})
+    assert state.cli_baseline_children == frozenset({(10, 70), (11, 77)})
     await claude_mod.capture_cli_baseline(state, 4242)  # already captured
-    assert state.cli_baseline_children == frozenset({10, 11})
+    assert state.cli_baseline_children == frozenset({(10, 70), (11, 77)})
     assert scans == [4242, 4242]
-    # The baseline feeds the evidence filter.
+    # The baseline feeds the evidence filter; the hook alive at init counts.
     scans.clear()
-    tables[:] = [{10: ["node", "srv.js"], 12: ["sleep", "120"]}]
-    assert await claude_mod._hook_processes(state, 4242) == [12]
+    tables[:] = [
+        _cli_scan(
+            {
+                10: (["node", "srv.js"], 4242, 1.0),
+                12: (["sleep", "30"], 12, 2.0),
+                13: (["sleep", "120"], 13, 5.0),
+            }
+        )
+    ]
+    assert sorted(await claude_mod._hook_processes(state, 4242) or []) == [12, 13]
+
+
+@pytest.mark.anyio
+async def test_hook_processes_ignore_children_older_than_the_oldest_hook(
+    monkeypatch: Any,
+) -> None:
+    """#812: ``since`` is the oldest unpaired (pending or expired) hook's
+    ``hook_started``; a detached child that started well before it can't be
+    any unpaired hook's process."""
+    from untether.utils.proc_diag import hook_clock
+
+    now = hook_clock()
+    table = _cli_scan(
+        {
+            20: (["sleep", "600"], 20, now - 120),  # long before any hook
+            21: (["sleep", "600"], 21, now - 1),  # the hook
+        }
+    )
+
+    async def fake_children(pid: int | None) -> Any:
+        return table
+
+    monkeypatch.setattr(claude_mod, "_cli_children", fake_children)
+    state, _ = _state()
+    # No unpaired hook: no timing exemption.
+    assert sorted(await claude_mod._hook_processes(state, 4242) or []) == [20, 21]
+    state.pending_hooks["h1"] = claude_mod.PendingHook(
+        hook_id="h1",
+        name="Stop",
+        event="Stop",
+        started_at=time.monotonic(),
+        turn=1,
+        started_clock=now - 2,
+    )
+    assert await claude_mod._hook_processes(state, 4242) == [21]
+    # An older expired hook widens the window back.
+    state.expired_hooks["h0"] = claude_mod.PendingHook(
+        hook_id="h0",
+        name="Stop",
+        event="Stop",
+        started_at=time.monotonic(),
+        turn=1,
+        started_clock=now - 200,
+    )
+    assert sorted(await claude_mod._hook_processes(state, 4242) or []) == [20, 21]
+    # A hook with no recorded clock start: no timing exemption at all.
+    state.expired_hooks.clear()
+    state.pending_hooks["h2"] = claude_mod.PendingHook(
+        hook_id="h2", name="Stop", event="Stop", started_at=time.monotonic(), turn=1
+    )
+    assert sorted(await claude_mod._hook_processes(state, 4242) or []) == [20, 21]
+
+
+def test_hook_started_records_the_shared_clock() -> None:
+    """#812: a pending hook's start is also taken on ``hook_clock()`` (the
+    clock child start times use; it counts through system sleep)."""
+    from untether.utils.proc_diag import hook_clock
+
+    state, factory = _state()
+    before = hook_clock()
+    _feed(state, factory, _started("h9", "Stop"))
+    hook = state.pending_hooks["h9"]
+    assert hook.started_clock is not None
+    assert before <= hook.started_clock <= hook_clock()

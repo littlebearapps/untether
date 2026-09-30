@@ -344,3 +344,53 @@ def test_help_probe_detects_hook_events_flag(monkeypatch: pytest.MonkeyPatch) ->
         "`claude --help` no longer lists --include-hook-events "
         f"(last green on CLI {PROBED_CLI_VERSION})"
     )
+
+
+def test_hook_started_precedes_a_detached_hook_spawn(cli_blob: mmap.mmap) -> None:
+    """#812: the hook-process evidence rests on two CLI facts — the CLI
+    emits ``hook_started`` *before* spawning the hook (so a hook's process
+    never predates its frame: ``HOOK_START_SLACK_S``), and it spawns command
+    hooks ``detached`` off Windows (own process group: the baseline and the
+    MCP/LSP-name exemptions only apply to the CLI's own group). If either
+    moves, those exemptions could release a running ``asyncRewake`` hook."""
+    emitter = re.search(
+        rb"function (\w+)\(\w+,\w+,\w+\)\{if\(!\w+\(\w+\)\)return;"
+        rb'\w+\(\{type:"system",subtype:"hook_started"',
+        cli_blob,
+    )
+    if emitter is None:
+        pytest.skip(
+            "hook_started emitter not found — re-derive the probe "
+            f"(last green on CLI {PROBED_CLI_VERSION})"
+        )
+    name = re.escape(emitter.group(1))
+    command_spawns: list[tuple[bytes, bytes]] = []
+    for call in re.finditer(
+        rb"[;,{}]" + name + rb"\(\w+,\w+,\w+\);let \w+=await (\w+)\(", cli_blob
+    ):
+        fn = re.search(
+            rb"async function " + re.escape(call.group(1)) + rb"\(", cli_blob
+        )
+        if fn is None:
+            continue
+        window = cli_blob[fn.start() : fn.start() + 12000]
+        command_spawns.extend(
+            (detached, window)
+            for detached in set(re.findall(rb"detached:(\w+)", window))
+        )
+    if not command_spawns:
+        pytest.skip(
+            "no emit-then-spawn hook call site with a spawn option found — "
+            f"re-derive the probe (last green on CLI {PROBED_CLI_VERSION})"
+        )
+    for detached, window in command_spawns:
+        assigned = re.search(rb"[,;]" + re.escape(detached) + rb"=!(\w+)[,;]", window)
+        assert assigned is not None, (
+            f"hook spawn detached:{detached.decode()} is no longer `!<windows>`"
+        )
+        windows = re.escape(assigned.group(1))
+        assert re.search(
+            windows + rb"\?\w+\(\):null;if\(" + windows + rb"&&!\w+\)throw Error\("
+            rb'`Hook "\$\{\w+\.command\}" requires bash but Git Bash',
+            window,
+        ), "hook spawn detached flag no longer keyed on the Windows/Git Bash check"

@@ -129,10 +129,16 @@ hook-message, interrupt, TaskOutput/TaskStop and origin sections, not the whole 
   stdin closes (30.01 s), or at the next turn. The `asyncRewake` Stop hook (security-guidance) and
   the sync hooks report at once (the rewake 0.28 s after the result, while idle). So an unpaired
   `hook_started` after the result isn't proof of a running hook. Untether's hold (#812) counts
-  **hook processes**: any direct child of the CLI except the session baseline (children present
-  right after `system/init` — MCP servers), Bash-tool shells (which end `&& pwd -P >| …-cwd`) and
-  later children whose argv looks like an MCP/LSP server. A `<shell> -c` child or a `/hooks/`
-  argv token always counts. The `-c` wrapper alone isn't enough: every command hook is spawned as
+  **hook processes**: any direct child of the CLI except Bash-tool shells (which end
+  `&& pwd -P >| …-cwd`), children older than the oldest unpaired hook's `hook_started` by more
+  than 5 s, and children in the CLI's own process group that are in the session baseline (pid +
+  start time right after `system/init` — MCP servers) or whose argv looks like an MCP/LSP server.
+  **VERIFIED-BINARY (CLI 2.1.285):** the hook runner calls the `hook_started` emitter and then
+  `await`s the spawn (`QQ(id,name,event);let r=await xU(…)`), and `xU` spawns with
+  `detached:_n` where `_n=!<Windows/Git-Bash>` — so a hook's process never predates its frame and
+  always leads its own process group. **VERIFIED-PROBE (lba-1, 2026-09-30):** MCP servers share
+  the CLI's process group (`pgid` = CLI pid) and start 3–18 s after it; the Bash tool's shell
+  leads its own. `test_claude_cli_schema_drift.py` re-checks the binary facts. The `-c` wrapper alone isn't enough: every command hook is spawned as
   `/bin/sh -c <command>`, but bash (macOS `/bin/sh`) and zsh exec a single command, so the
   security-guidance hook (`bash "${CLAUDE_PLUGIN_ROOT}/hooks/sg-python.sh" …`) runs on the Mac as
   `bash …/sg-python.sh` with no shell wrapper (Linux dash keeps `sh -c`). The hold is

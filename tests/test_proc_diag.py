@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import os
 import sys
 from typing import Any
@@ -824,33 +825,167 @@ def test_812_hook_script_label_unreadable_pid() -> None:
 
 # ── #812: CLI children as hook-process evidence ────────────────────────────
 
+CLI_PGID = 100
+
+
+def _child(
+    argv: list[str],
+    *,
+    pgid: int | None = CLI_PGID,
+    start_id: int | None = 1,
+    started_by: float | None = 50.0,
+) -> Any:
+    from untether.utils.proc_diag import CliChild
+
+    return CliChild(argv=argv, pgid=pgid, start_id=start_id, started_by=started_by)
+
+
+def _scan(children: dict[int, Any], cli_pgid: int | None = CLI_PGID) -> Any:
+    from untether.utils.proc_diag import CliScan
+
+    return CliScan(cli_pid=100, cli_pgid=cli_pgid, children=children)
+
+
+def _wait_for(pred: Any, timeout: float = 5.0) -> None:
+    import time
+
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if pred():
+            return
+        time.sleep(0.05)
+    raise AssertionError("condition not met")
+
 
 @pytest.mark.skipif(not sys.platform.startswith("linux"), reason="/proc backend")
 def test_812_cli_children_lists_live_children_with_argv() -> None:
-    """Live direct children with their argv; an exited-but-unreaped child
-    (zombie) is left out."""
+    """Live direct children with argv, process group and start time; an
+    exited-but-unreaped child (zombie) is left out. A detached child leads
+    its own process group; a plain one shares ours."""
     import subprocess
-    import time
+
+    from untether.utils.proc_diag import cli_children, hook_clock
+
+    before = hook_clock()
+    live = subprocess.Popen(["sleep", "5"])
+    detached = subprocess.Popen(["sleep", "5"], start_new_session=True)
+    dead = subprocess.Popen(["true"])
+    try:
+
+        def dead_gone() -> bool:
+            scan = cli_children(os.getpid())
+            assert scan is not None
+            return dead.pid not in scan.children
+
+        _wait_for(dead_gone)
+        scan = cli_children(os.getpid())
+        assert scan is not None
+        assert scan.cli_pid == os.getpid()
+        assert scan.cli_pgid == os.getpgid(0)
+        child = scan.children[live.pid]
+        assert child.argv == ["sleep", "5"]
+        assert child.pgid == os.getpgid(0)
+        assert scan.in_cli_group(live.pid)
+        assert scan.children[detached.pid].pgid == detached.pid
+        assert not scan.in_cli_group(detached.pid)
+        # Start time: after we took ``before`` (within the tick slack) and
+        # no later than now.
+        assert child.started_by is not None
+        assert before - 0.1 <= child.started_by <= hook_clock() + 0.05
+        assert isinstance(child.start_id, int)
+    finally:
+        for proc in (live, detached, dead):
+            proc.kill()
+            proc.wait()
+    scan = cli_children(os.getpid())
+    assert scan is not None and live.pid not in scan.children
+
+
+@pytest.mark.skipif(not sys.platform.startswith("linux"), reason="/proc backend")
+def test_812_cli_children_without_children_files_falls_back_to_ppid_scan(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#812 review: a kernel without CONFIG_PROC_CHILDREN has no
+    ``/proc/<pid>/task/<tid>/children``. That used to read as "no children"
+    — {} = "no hook running" → early release. Now the /proc parent-pid scan
+    finds them; with /proc unlistable too the answer is None (unknown)."""
+    import builtins
+    import subprocess
+
+    from untether.utils import proc_diag
+
+    real_open = builtins.open
+
+    def no_children_files(path: Any, *args: Any, **kwargs: Any) -> Any:
+        if isinstance(path, str) and path.endswith("/children"):
+            raise FileNotFoundError(path)
+        return real_open(path, *args, **kwargs)
+
+    live = subprocess.Popen(["sleep", "5"])
+    try:
+        monkeypatch.setattr(builtins, "open", no_children_files)
+        assert proc_diag._children_from_task_files(os.getpid()) is None
+        scan = proc_diag.cli_children(os.getpid())
+        assert scan is not None
+        assert scan.children[live.pid].argv == ["sleep", "5"]
+        assert live.pid in proc_diag._find_children(os.getpid())
+
+        real_listdir = os.listdir
+
+        def no_proc_listing(path: Any = ".") -> list[str]:
+            if path == "/proc":
+                raise PermissionError(path)
+            return real_listdir(path)
+
+        monkeypatch.setattr(proc_diag.os, "listdir", no_proc_listing)
+        assert proc_diag.cli_children(os.getpid()) is None
+    finally:
+        monkeypatch.undo()
+        live.kill()
+        live.wait()
+
+
+@pytest.mark.skipif(not sys.platform.startswith("linux"), reason="/proc backend")
+def test_812_cli_children_resolves_a_forking_wrapper() -> None:
+    """A wrapper script that forks the CLI instead of exec'ing it puts every
+    hook one level down: the spawned pid (a shell with one live child) is
+    resolved to that child, whose children are the ones listed."""
+    import signal
+    import subprocess
 
     from untether.utils.proc_diag import cli_children
 
-    live = subprocess.Popen(["sleep", "5"])
-    dead = subprocess.Popen(["true"])
+    cli_code = (
+        "import subprocess, time;"
+        "subprocess.Popen(['sleep', '7'], start_new_session=True);"
+        "time.sleep(7)"
+    )
+    wrapper = subprocess.Popen(
+        ["/bin/sh", "-c", f'{sys.executable} -c "{cli_code}"; true'],
+    )
+    to_kill: list[int] = []
     try:
-        deadline = time.monotonic() + 5
-        while time.monotonic() < deadline:
-            found = cli_children(os.getpid())
-            assert found is not None
-            if dead.pid not in found:
-                break
-            time.sleep(0.05)
-        assert found[live.pid] == ["sleep", "5"]
-        assert dead.pid not in found  # zombie until wait()
+
+        def hook_visible() -> bool:
+            scan = cli_children(wrapper.pid)
+            return scan is not None and any(
+                c.argv == ["sleep", "7"] for c in scan.children.values()
+            )
+
+        _wait_for(hook_visible)
+        scan = cli_children(wrapper.pid)
+        assert scan is not None
+        assert scan.cli_pid != wrapper.pid
+        to_kill.append(scan.cli_pid)
+        (hook_pid,) = [p for p, c in scan.children.items() if c.argv[:1] == ["sleep"]]
+        to_kill.append(hook_pid)
+        assert not scan.in_cli_group(hook_pid)  # detached, like a hook
     finally:
-        live.kill()
-        live.wait()
-        dead.wait()
-    assert live.pid not in (cli_children(os.getpid()) or {})
+        for pid in to_kill:
+            with contextlib.suppress(OSError):
+                os.kill(pid, signal.SIGKILL)
+        wrapper.kill()
+        wrapper.wait()
 
 
 @pytest.mark.skipif(not sys.platform.startswith("linux"), reason="/proc backend")
@@ -863,21 +998,22 @@ def test_812_execd_hook_is_evidence_but_a_tool_shell_is_not() -> None:
 
     from untether.utils.proc_diag import cli_children, hook_evidence_children
 
-    hook = subprocess.Popen("sleep 5; true", shell=True)
-    execd = subprocess.Popen("exec sleep 5", shell=True)
+    hook = subprocess.Popen("sleep 5; true", shell=True, start_new_session=True)
+    execd = subprocess.Popen("exec sleep 5", shell=True, start_new_session=True)
     tool = subprocess.Popen(
         [
             "/bin/sh",
             "-c",
             "eval 'sleep 5' < /dev/null && pwd -P >| /tmp/claude-ab12-cwd",
-        ]
+        ],
+        start_new_session=True,
     )
     try:
         time.sleep(0.2)  # let the exec land
-        children = cli_children(os.getpid())
-        assert children is not None
-        assert children[execd.pid] == ["sleep", "5"]
-        found = hook_evidence_children(children, frozenset())
+        scan = cli_children(os.getpid())
+        assert scan is not None
+        assert scan.children[execd.pid].argv == ["sleep", "5"]
+        found = hook_evidence_children(scan, frozenset(), since=time.monotonic())
         assert set(found) & {hook.pid, execd.pid, tool.pid} == {hook.pid, execd.pid}
     finally:
         for proc in (hook, execd, tool):
@@ -885,30 +1021,107 @@ def test_812_execd_hook_is_evidence_but_a_tool_shell_is_not() -> None:
             proc.wait()
 
 
-def test_812_hook_evidence_baseline_and_services() -> None:
+def test_812_hook_evidence_baseline_group_and_services() -> None:
+    """Baseline and MCP/LSP exemptions apply only to children in the CLI's
+    process group (the CLI spawns every hook detached)."""
     from untether.utils.proc_diag import hook_evidence_children
 
+    detached = {"pgid": None}
     children = {
-        10: ["node", "/x/trello-server.js"],  # baseline MCP server
-        11: ["/bin/sh", "-c", "moshi-hook claude-hook"],  # a shell: always
-        12: ["bash", "/p/hooks/sg-python.sh", "/p/hooks/review.py"],  # hook
-        13: ["npm", "exec", "firecrawl-mcp"],  # late MCP (reconnect)
-        14: ["/usr/bin/typescript-language-server", "--stdio"],  # late LSP
-        15: ["sleep", "120"],  # an exec'd inline hook command
-        16: [],  # argv unreadable: unknown counts
-        17: ["/bin/zsh", "-c", "eval 'ls' && pwd -P >| /tmp/claude-1f-cwd"],
-        18: ["python3", "/home/alsparks/review.py"],  # "lsp" inside a word
+        10: _child(["node", "/x/trello-server.js"]),  # baseline MCP server
+        # #812 review 4: an MCP server behind a non-exec'ing ``sh -c``.
+        11: _child(["/bin/sh", "-c", "cd srv && node x.js; true"]),
+        12: _child(["bash", "/p/hooks/sg-python.sh"], **detached),  # hook
+        13: _child(["npm", "exec", "firecrawl-mcp"]),  # late MCP (reconnect)
+        14: _child(["/usr/bin/typescript-language-server", "--stdio"]),
+        15: _child(["sleep", "120"], **detached),  # exec'd inline hook
+        16: _child([], **detached),  # argv unreadable: unknown counts
+        17: _child(["/bin/zsh", "-c", "eval 'ls' && pwd -P >| /tmp/claude-1f-cwd"]),
+        18: _child(["python3", "/home/alsparks/review.py"], **detached),
+        # #812 review 3: a hook whose argv looks like a service — detached,
+        # so never exempt.
+        19: _child(["uvx", "mcp-scan"], **detached),
+        20: _child(["python3", "/w/acme-mcp/scripts/check.py"], **detached),
+        # #812 review 2: a hook alive at init (in the baseline set by pid,
+        # but detached → not exempt).
+        21: _child(["sleep", "30"], **detached),
+        # A /hooks/ script in our group still counts.
+        22: _child(["python3", "/u/.claude/hooks/mcp_guard.py"]),
+        # Unknown group: nothing is exempt.
+        23: _child(["npm", "exec", "x-mcp"], pgid=None),
     }
-    baseline = frozenset({10, 11, 12})
-    assert sorted(hook_evidence_children(children, baseline)) == [
-        11,
+    baseline = frozenset({(10, 1), (11, 1), (21, 1)})
+    assert sorted(hook_evidence_children(_scan(children), baseline)) == [
         12,
         15,
         16,
         18,
+        19,
+        20,
+        21,
+        22,
+        23,
     ]
     # No baseline captured: nothing is exempt for being early.
-    assert 10 in hook_evidence_children(children, None)
+    assert 10 in hook_evidence_children(_scan(children), None)
+    # CLI group unknown: no group exemption at all.
+    assert 13 in hook_evidence_children(_scan(children, cli_pgid=None), baseline)
+
+
+def test_812_baseline_is_pid_and_start_time() -> None:
+    """#812 review 2: a baselined PID reused later by another process (a
+    4 h session) is not exempt — the start time differs."""
+    from untether.utils.proc_diag import hook_evidence_children
+
+    baseline = frozenset({(10, 111)})
+    same = _scan({10: _child(["node", "srv.js"], start_id=111)})
+    reused = _scan({10: _child(["node", "srv.js"], start_id=222)})
+    assert hook_evidence_children(same, baseline) == []
+    assert hook_evidence_children(reused, baseline) == [10]
+
+
+def test_812_baseline_ids_keep_only_the_cli_group() -> None:
+    from untether.utils.proc_diag import baseline_ids
+
+    scan = _scan(
+        {
+            10: _child(["node", "srv.js"], start_id=5),
+            11: _child(["sleep", "30"], pgid=11, start_id=6),  # a hook
+            12: _child(["x"], pgid=None, start_id=7),
+        }
+    )
+    assert baseline_ids(scan) == frozenset({(10, 5)})
+    assert baseline_ids(_scan(scan.children, cli_pgid=None)) == frozenset()
+
+
+def test_812_children_older_than_the_oldest_unpaired_hook_never_count() -> None:
+    """No unpaired hook's process can predate its own ``hook_started`` (the
+    CLI emits the frame, then spawns): a child that started more than the
+    slack before the oldest one is not evidence, whatever its argv. Within
+    the slack, or with no start time, it still counts."""
+    from untether.utils.proc_diag import HOOK_START_SLACK_S, hook_evidence_children
+
+    since = 1000.0
+    children = {
+        30: _child(["sleep", "600"], pgid=None, started_by=since - 60),
+        31: _child(["bash", "/p/hooks/x.sh"], pgid=None, started_by=since - 60),
+        32: _child(["sleep", "600"], pgid=None, started_by=since - 1),
+        33: _child(["sleep", "600"], pgid=None, started_by=since + 3),
+        34: _child(["sleep", "600"], pgid=None, started_by=None),
+        35: _child(
+            ["sleep", "600"],
+            pgid=None,
+            started_by=since - HOOK_START_SLACK_S + 0.01,
+        ),
+    }
+    assert sorted(hook_evidence_children(_scan(children), None, since=since)) == [
+        32,
+        33,
+        34,
+        35,
+    ]
+    # No unpaired hook: no timing exemption.
+    assert 30 in hook_evidence_children(_scan(children), None, since=None)
 
 
 @pytest.mark.parametrize(
@@ -959,22 +1172,33 @@ def test_812_cli_children_unknown_pid_is_none_off_darwin(
 
 
 def test_812_cli_children_darwin_ps(monkeypatch: pytest.MonkeyPatch) -> None:
-    """macOS: one ``ps`` listing (pid, ppid, stat, command) — direct
-    children only, zombies skipped — then the same classification: bash's
-    exec'd hook command counts, the baseline MCP server doesn't."""
+    """macOS: one ``ps`` listing (pid, ppid, pgid, stat, etime, lstart,
+    command) — direct children only, zombies skipped, a forking wrapper
+    resolved — then the same classification: bash's exec'd (detached) hook
+    command counts, the baseline MCP server (the CLI's group) doesn't."""
     import subprocess
+    import time
 
     from untether.utils import proc_diag
 
     ps_out = (
-        "  100     1 Ss   /Users/u/.local/bin/claude --output-format stream-json\n"
-        "  200   100 S    /bin/sh -c '/Users/u/.local/bin/moshi-hook' claude-hook\n"
-        "  201   100 S    npm exec firecrawl-mcp\n"
-        "  202   100 S    /bin/zsh -c eval 'ls' && pwd -P >| /tmp/claude-1f-cwd\n"
-        "  203   100 S+   bash /p/hooks/sg-python.sh /p/hooks/review.py\n"
-        "  204   100 Z    <defunct>\n"
-        "  205   100 S    node /x/trello-server.js\n"
-        "  300   999 S    /bin/sh -c unrelated\n"
+        "   90     1    90 Ss   1-00:10:00 Wed Sep 30 17:00:00 2026 "
+        "/bin/sh /u/bin/claude-wrap\n"
+        "  100    90    90 S       10:00 Wed Sep 30 17:00:01 2026 "
+        "/Users/u/.local/bin/claude --output-format stream-json\n"
+        "  200   100   200 Ss      00:05 Wed Sep 30 17:05:00 2026 "
+        "/bin/sh -c '/Users/u/.local/bin/moshi-hook' claude-hook\n"
+        "  201   100    90 S       09:58 Wed Sep 30 17:00:02 2026 "
+        "npm exec firecrawl-mcp\n"
+        "  202   100   202 Ss      00:05 Wed Sep 30 17:05:00 2026 "
+        "/bin/zsh -c eval 'ls' && pwd -P >| /tmp/claude-1f-cwd\n"
+        "  203   100   203 Ss+  01:02:05 Wed Sep 30 17:05:00 2026 "
+        "bash /p/hooks/sg-python.sh /p/hooks/review.py\n"
+        "  204   100   204 Z       00:05 Wed Sep 30 17:05:00 2026 <defunct>\n"
+        "  205   100    90 S       09:58 Wed Sep 30 17:00:02 2026 "
+        "node /x/trello-server.js\n"
+        "  300   999   300 S       00:05 Wed Sep 30 17:05:00 2026 "
+        "/bin/sh -c unrelated\n"
         "garbage\n"
     )
     calls: list[list[str]] = []
@@ -986,17 +1210,49 @@ def test_812_cli_children_darwin_ps(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(proc_diag.sys, "platform", "darwin")
     monkeypatch.setattr(proc_diag.os.path, "isdir", lambda p: False)
     monkeypatch.setattr(proc_diag.subprocess, "run", fake_run)
-    children = proc_diag.cli_children(100)
-    assert calls[0] == ["/bin/ps", "-axo", "pid=,ppid=,stat=,command="]
-    assert children is not None
-    assert sorted(children) == [200, 201, 202, 203, 205]
-    assert children[203] == ["bash", "/p/hooks/sg-python.sh", "/p/hooks/review.py"]
-    assert sorted(
-        proc_diag.hook_evidence_children(children, frozenset({201, 205}))
-    ) == [200, 203]
+    monkeypatch.setattr(proc_diag, "hook_clock", lambda: 100_000.0)
+    scan = proc_diag.cli_children(90)  # the wrapper shell's one child: the CLI
+    assert calls[0] == [
+        "/bin/ps",
+        "-axo",
+        "pid=,ppid=,pgid=,stat=,etime=,lstart=,command=",
+    ]
+    assert scan is not None
+    assert scan.cli_pid == 100 and scan.cli_pgid == 90
+    assert sorted(scan.children) == [200, 201, 202, 203, 205]
+    hook = scan.children[203]
+    assert hook.argv == ["bash", "/p/hooks/sg-python.sh", "/p/hooks/review.py"]
+    lstart = time.mktime(time.strptime("Sep 30 17:05:00 2026", "%b %d %H:%M:%S %Y"))
+    assert hook.start_id == int(lstart)
+    # etime 01:02:05 → 3725 s old; + 1 s resolution.
+    assert hook.started_by == pytest.approx(100_000.0 - 3725 + 1.0)
+    assert scan.children[200].started_by == pytest.approx(100_000.0 - 5 + 1.0)
+    assert scan.in_cli_group(201) and not scan.in_cli_group(203)
+    baseline = proc_diag.baseline_ids(scan)
+    assert baseline == frozenset(
+        {(201, scan.children[201].start_id), (205, scan.children[205].start_id)}
+    )
+    assert sorted(proc_diag.hook_evidence_children(scan, baseline)) == [200, 203]
     monkeypatch.setattr(
         proc_diag.subprocess,
         "run",
         lambda *a, **k: subprocess.CompletedProcess(a, 1, stdout="", stderr="x"),
     )
     assert proc_diag.cli_children(100) is None
+
+
+@pytest.mark.parametrize(
+    ("token", "expected"),
+    [
+        ("00:05", 5),
+        ("10:00", 600),
+        ("01:02:05", 3725),
+        ("1-00:10:00", 87000),
+        ("x", None),
+        ("1:2:3:4", None),
+    ],
+)
+def test_812_parse_etime(token: str, expected: int | None) -> None:
+    from untether.utils.proc_diag import _parse_etime
+
+    assert _parse_etime(token) == expected

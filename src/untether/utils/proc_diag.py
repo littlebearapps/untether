@@ -13,6 +13,8 @@ import os
 import re
 import subprocess
 import sys
+import time
+from collections.abc import Callable
 from dataclasses import dataclass, field
 
 
@@ -369,24 +371,252 @@ def _is_tool_shell(command: str) -> bool:
     return _TOOL_SHELL_MARKER in command
 
 
-def cli_children(pid: int) -> dict[int, list[str]] | None:
-    """#812: live (non-zombie) direct children of ``pid`` → argv (``[]`` when
-    unreadable; on macOS the ``ps`` command line split on whitespace).
-    Returns None when the process table can't be read. Blocking (``ps`` on
-    macOS): call from a thread."""
-    if os.path.isdir(f"/proc/{pid}"):
-        found: dict[int, list[str]] = {}
-        for child in _find_children(pid):
-            state = _read_stat(child)[0]
-            if state is None or state.startswith("Z"):
-                continue  # gone, or exited and not reaped yet
-            found[child] = read_cmdline_argv(child) or []
-        return found
-    if sys.platform != "darwin":
+# #812: a live session's hook-process view is only as good as its child
+# list. Untether spawns ``env -i … claude`` (env execs, so the spawned pid IS
+# the CLI) and a native/Node CLI; a user wrapper script that forks instead of
+# exec'ing would put the CLI — and every hook — one level down. A spawned pid
+# whose argv[0] is a shell or ``env`` with exactly one live child is treated
+# as such a wrapper and resolved to that child (at most 3 levels).
+_WRAPPER_EXES = frozenset({"sh", "bash", "dash", "zsh", "ksh", "ash", "env"})
+_WRAPPER_MAX_DEPTH = 3
+
+# /proc start times are in clock ticks (10 ms); macOS ``etime`` in whole
+# seconds. A start time is only ever used as "the latest moment this process
+# can have started", so the resolution is added on.
+_LINUX_START_RESOLUTION_S = 0.02
+_DARWIN_START_RESOLUTION_S = 1.0
+
+try:
+    _CLK_TCK: int | None = os.sysconf("SC_CLK_TCK")
+except (AttributeError, ValueError, OSError):  # pragma: no cover — non-POSIX
+    _CLK_TCK = None
+
+# #812: hook frames and child start times are compared on a clock that keeps
+# counting through system sleep — a process's age does, and
+# ``time.monotonic()`` doesn't (a Mac asleep mid-hook would make the hook
+# look older than its frame). CLOCK_BOOTTIME on Linux (the /proc starttime
+# clock); on macOS CLOCK_MONOTONIC counts during sleep.
+if sys.platform.startswith("linux") and hasattr(time, "CLOCK_BOOTTIME"):
+    _HOOK_CLOCK_ID: int | None = time.CLOCK_BOOTTIME
+elif sys.platform == "darwin" and hasattr(time, "CLOCK_MONOTONIC"):
+    _HOOK_CLOCK_ID = time.CLOCK_MONOTONIC
+else:  # pragma: no cover — other platforms have no hook-process backend
+    _HOOK_CLOCK_ID = None
+
+
+def hook_clock() -> float:
+    """#812: now, on the clock ``CliChild.started_by`` and a pending hook's
+    ``started_clock`` share (counts through system sleep)."""
+    if _HOOK_CLOCK_ID is None:  # pragma: no cover
+        return time.monotonic()
+    return time.clock_gettime(_HOOK_CLOCK_ID)
+
+
+@dataclass(frozen=True, slots=True)
+class CliChild:
+    """#812: one live direct child of the Claude CLI."""
+
+    argv: list[str]  # [] when unreadable
+    pgid: int | None  # process group (None: unknown)
+    # Stable birth token for PID-reuse checks: /proc starttime ticks (Linux),
+    # ``lstart`` epoch seconds (macOS). None: unknown.
+    start_id: int | None
+    # The latest ``hook_clock()`` moment it can have started (None: unknown).
+    started_by: float | None
+
+
+@dataclass(frozen=True, slots=True)
+class CliScan:
+    """#812: the CLI's live direct children at one moment."""
+
+    cli_pid: int  # the CLI itself (the spawned pid, or a wrapper's child)
+    cli_pgid: int | None
+    children: dict[int, CliChild]
+
+    def in_cli_group(self, pid: int) -> bool:
+        """The child shares the CLI's process group — spawned without
+        ``detached`` — which no command hook is (see ``hook_evidence``)."""
+        child = self.children.get(pid)
+        return (
+            child is not None
+            and child.pgid is not None
+            and self.cli_pgid is not None
+            and child.pgid == self.cli_pgid
+        )
+
+
+def _stat_fields(pid: int) -> list[str] | None:
+    """/proc/<pid>/stat fields after ``(comm)``: [0] state, [1] ppid,
+    [2] pgrp, [3] session, …, [19] starttime. None when unreadable."""
+    try:
+        with open(f"/proc/{pid}/stat", encoding="utf-8") as f:
+            data = f.read()
+    except (OSError, ValueError):
+        return None
+    close_paren = data.rfind(")")
+    if close_paren < 0:
+        return None
+    fields = data[close_paren + 2 :].split()
+    return fields or None
+
+
+def _int_field(fields: list[str] | None, index: int) -> int | None:
+    if fields is None or len(fields) <= index:
         return None
     try:
+        return int(fields[index])
+    except ValueError:
+        return None
+
+
+def _read_uptime() -> float | None:
+    try:
+        with open("/proc/uptime", encoding="utf-8") as f:
+            return float(f.read().split()[0])
+    except (OSError, ValueError, IndexError):
+        return None
+
+
+def _children_from_task_files(pid: int) -> list[int] | None:
+    """Children via /proc/<pid>/task/<tid>/children. None when that file is
+    missing or unreadable for a thread that still exists — a kernel built
+    without CONFIG_PROC_CHILDREN has no such file, and "no children" must
+    never be inferred from its absence (#812 review)."""
+    task_dir = f"/proc/{pid}/task"
+    try:
+        tids = os.listdir(task_dir)
+    except OSError:
+        return None
+    children: list[int] = []
+    for tid in tids:
+        try:
+            with open(f"{task_dir}/{tid}/children", encoding="utf-8") as f:
+                data = f.read()
+        except OSError:
+            if os.path.isdir(f"{task_dir}/{tid}"):
+                return None  # the thread is there; its children file isn't
+            continue  # the thread exited meanwhile
+        for tok in data.split():
+            with contextlib.suppress(ValueError):
+                children.append(int(tok))
+    return children
+
+
+def _children_from_ppid_scan(pid: int) -> list[int] | None:
+    """Children via a /proc/*/stat parent-pid scan (the fallback). None when
+    /proc can't be listed."""
+    try:
+        entries = os.listdir("/proc")
+    except OSError:
+        return None
+    children: list[int] = []
+    for name in entries:
+        if not name.isdigit():
+            continue
+        if _int_field(_stat_fields(int(name)), 1) == pid:
+            children.append(int(name))
+    return children
+
+
+def direct_children(pid: int) -> list[int] | None:
+    """Direct child PIDs of ``pid`` (Linux /proc). Reads the per-thread
+    ``children`` files and falls back to a /proc parent-pid scan when they
+    are unavailable. None when neither source can be read (or ``pid`` has
+    no /proc entry)."""
+    children = _children_from_task_files(pid)
+    if children is None and os.path.isdir(f"/proc/{pid}"):
+        children = _children_from_ppid_scan(pid)
+    return children
+
+
+def _live_children_linux(pid: int) -> list[int] | None:
+    children = direct_children(pid)
+    if children is None:
+        return None
+    live: list[int] = []
+    for child in children:
+        state = (_stat_fields(child) or [None])[0]
+        if state is None or state.startswith("Z"):
+            continue  # gone, or exited and not reaped yet
+        live.append(child)
+    return live
+
+
+def _resolve_wrapper(
+    pid: int,
+    argv_of: Callable[[int], list[str] | None],
+    live_children_of: Callable[[int], list[int] | None],
+) -> int:
+    cur = pid
+    for _ in range(_WRAPPER_MAX_DEPTH):
+        argv = argv_of(cur)
+        if not argv or os.path.basename(argv[0]) not in _WRAPPER_EXES:
+            break
+        kids = live_children_of(cur)
+        if not kids or len(kids) != 1:
+            break
+        cur = kids[0]
+    return cur
+
+
+def _cli_children_linux(pid: int) -> CliScan | None:
+    cli = _resolve_wrapper(pid, read_cmdline_argv, _live_children_linux)
+    children = direct_children(cli)
+    if children is None:
+        return None
+    uptime = _read_uptime()
+    now = hook_clock()
+    found: dict[int, CliChild] = {}
+    for child in children:
+        fields = _stat_fields(child)
+        if fields is None or fields[0].startswith("Z"):
+            continue  # gone, or exited and not reaped yet
+        start = _int_field(fields, 19)
+        started_by: float | None = None
+        if start is not None and uptime is not None and _CLK_TCK:
+            age = max(0.0, uptime - start / _CLK_TCK)
+            started_by = now - age + _LINUX_START_RESOLUTION_S
+        found[child] = CliChild(
+            argv=read_cmdline_argv(child) or [],
+            pgid=_int_field(fields, 2),
+            start_id=start,
+            started_by=started_by,
+        )
+    return CliScan(
+        cli_pid=cli, cli_pgid=_int_field(_stat_fields(cli), 2), children=found
+    )
+
+
+def _parse_lstart(tokens: list[str]) -> int | None:
+    """``lstart`` under LC_ALL=C (``Wed Sep 30 17:06:50 2026``) → epoch
+    seconds. Only an identity token (same process → same string): timing
+    uses ``etime``, which has no DST ambiguity."""
+    try:
+        parsed = time.strptime(" ".join(tokens[1:5]), "%b %d %H:%M:%S %Y")
+        return int(time.mktime(parsed))
+    except (ValueError, OverflowError, IndexError):
+        return None
+
+
+def _parse_etime(token: str) -> int | None:
+    """``etime`` (``[[dd-]hh:]mm:ss``) → elapsed seconds."""
+    days, _, rest = token.rpartition("-")
+    parts = rest.split(":")
+    if not 2 <= len(parts) <= 3:
+        return None
+    try:
+        secs = 0
+        for part in parts:
+            secs = secs * 60 + int(part)
+        return secs + (int(days) * 86400 if days else 0)
+    except ValueError:
+        return None
+
+
+def _cli_children_darwin(pid: int) -> CliScan | None:
+    try:
         out = subprocess.run(  # nosec B603 — fixed argv, no shell
-            ["/bin/ps", "-axo", "pid=,ppid=,stat=,command="],
+            ["/bin/ps", "-axo", "pid=,ppid=,pgid=,stat=,etime=,lstart=,command="],
             capture_output=True,
             text=True,
             timeout=2.0,
@@ -397,19 +627,67 @@ def cli_children(pid: int) -> dict[int, list[str]] | None:
         return None
     if out.returncode != 0 or not out.stdout:
         return None
-    found = {}
+    now = hook_clock()
+    # pid -> (ppid, pgid, stat, etime s, lstart epoch, argv)
+    rows: dict[int, tuple[int, int, str, int | None, int | None, list[str]]] = {}
     for line in out.stdout.splitlines():
-        fields = line.split(None, 3)
-        if len(fields) < 3:
+        fields = line.split(None, 10)
+        if len(fields) < 10:
             continue
         try:
-            row_pid, row_ppid = int(fields[0]), int(fields[1])
+            row_pid, row_ppid, row_pgid = (int(f) for f in fields[:3])
         except ValueError:
             continue
-        if row_ppid != pid or fields[2].startswith("Z"):
-            continue
-        found[row_pid] = fields[3].split() if len(fields) == 4 else []
-    return found
+        rows[row_pid] = (
+            row_ppid,
+            row_pgid,
+            fields[3],
+            _parse_etime(fields[4]),
+            _parse_lstart(fields[5:10]),
+            # ``command=`` joins argv with spaces: split on whitespace.
+            fields[10].split() if len(fields) == 11 else [],
+        )
+
+    def live_children(parent: int) -> list[int]:
+        return [
+            p for p, r in rows.items() if r[0] == parent and not r[2].startswith("Z")
+        ]
+
+    cli = _resolve_wrapper(
+        pid,
+        lambda p: rows[p][5] if p in rows else None,
+        live_children,
+    )
+    found: dict[int, CliChild] = {}
+    for child in live_children(cli):
+        _, pgid, _, etime, lstart, argv = rows[child]
+        found[child] = CliChild(
+            argv=argv,
+            pgid=pgid,
+            start_id=lstart,
+            started_by=(
+                None if etime is None else now - etime + _DARWIN_START_RESOLUTION_S
+            ),
+        )
+    return CliScan(
+        cli_pid=cli,
+        cli_pgid=rows[cli][1] if cli in rows else None,
+        children=found,
+    )
+
+
+def cli_children(pid: int) -> CliScan | None:
+    """#812: the Claude CLI's live (non-zombie) direct children — argv,
+    process group, start time — plus the CLI's own process group. ``pid`` is
+    the spawned process; a forking shell/``env`` wrapper is resolved to the
+    CLI beneath it. Returns None when the process table can't be read (then
+    the caller can't tell, and must not assume no hook is running).
+    Blocking (``ps`` on macOS): call from a thread."""
+    if os.path.isdir(f"/proc/{pid}"):
+        return _cli_children_linux(pid)
+    if sys.platform != "darwin":
+        return None
+    return _cli_children_darwin(pid)
 
 
 # #812: long-lived CLI children that appear after the session baseline and
@@ -429,8 +707,35 @@ def looks_like_service(argv: list[str]) -> bool:
     return any(_SERVICE_TOKEN.search(t) for t in lowered)
 
 
+# #812: the CLI emits ``hook_started`` and only then spawns the hook
+# (CLI 2.1.285: ``QQ(id,name,event); let r = await xU(…)``), so a hook's
+# process can't have started before its frame — give or take how late
+# Untether read the frame. A child that started more than this long before
+# the oldest unpaired hook's frame was read is not any unpaired hook.
+HOOK_START_SLACK_S = 5.0
+
+BaselineId = tuple[int, int | None]  # (pid, start_id)
+
+
+def baseline_ids(scan: CliScan) -> frozenset[BaselineId]:
+    """#812: identities of the children a session baseline may exempt — only
+    those in the CLI's own process group. The CLI spawns every command hook
+    ``detached`` (its own session and process group — CLI 2.1.285
+    ``detached: !isWindows``); MCP servers are not detached. So a hook that
+    happens to be alive at ``system/init`` (a ``UserPromptSubmit`` hook
+    starts before it) is never baselined. (pid, start) guards PID reuse."""
+    return frozenset(
+        (pid, child.start_id)
+        for pid, child in scan.children.items()
+        if scan.in_cli_group(pid)
+    )
+
+
 def hook_evidence_children(
-    children: dict[int, list[str]], baseline: frozenset[int] | None
+    scan: CliScan,
+    baseline: frozenset[BaselineId] | None,
+    *,
+    since: float | None = None,
 ) -> list[int]:
     """#812: the CLI children that may be a running command hook.
 
@@ -440,48 +745,43 @@ def hook_evidence_children(
     direct child counts, except:
 
     - a Bash-tool shell (``… && pwd -P >| <tmp>/claude-<id>-cwd``);
-    - a non-shell child already present at the session baseline (MCP
-      servers, spawned before ``system/init``) — a ``<shell> -c`` child or
-      one with a ``/hooks/`` argv token always counts, baseline or not;
-    - a later non-shell child that looks like a service (MCP / LSP argv).
+    - one that started more than ``HOOK_START_SLACK_S`` before ``since``
+      (when the oldest unpaired hook's ``hook_started`` was read, on
+      ``hook_clock()``) — no unpaired hook's process can predate its frame;
+    - one in the CLI's own process group (hooks never are — they are
+      spawned detached) that is in the session ``baseline`` (same pid and
+      start time: MCP servers up at ``system/init``) or whose argv looks
+      like an MCP / LSP server. A ``/hooks/`` argv token always counts.
 
-    Unknown argv counts. ``baseline`` None (never captured) exempts nothing.
-    Wrong guesses err towards holding (bounded by ``async_hook_max_hold``)."""
+    Unknown argv / start time / group counts. ``baseline`` None (never
+    captured) exempts nothing. Wrong guesses err towards holding (bounded by
+    ``async_hook_max_hold``)."""
     found: list[int] = []
-    for child, argv in children.items():
-        if argv and _is_shell_c(argv):
-            if not _is_tool_shell(" ".join(argv[1:])):
-                found.append(child)
+    for pid, child in scan.children.items():
+        argv = child.argv
+        if argv and _is_shell_c(argv) and _is_tool_shell(" ".join(argv[1:])):
+            continue
+        if (
+            since is not None
+            and child.started_by is not None
+            and child.started_by < since - HOOK_START_SLACK_S
+        ):
             continue
         if any(_HOOK_PATH_MARKER in t for t in argv):
-            found.append(child)  # a hook script, whenever it started
+            found.append(pid)  # a hook script
             continue
-        if baseline is not None and child in baseline:
+        if scan.in_cli_group(pid) and (
+            (baseline is not None and (pid, child.start_id) in baseline)
+            or (argv and looks_like_service(argv))
+        ):
             continue
-        if argv and looks_like_service(argv):
-            continue
-        found.append(child)
+        found.append(pid)
     return found
 
 
 def _find_children(pid: int) -> list[int]:
-    """Find child PIDs via /proc/pid/task/*/children."""
-    children: list[int] = []
-    try:
-        task_dir = f"/proc/{pid}/task"
-        for tid in os.listdir(task_dir):
-            try:
-                data = open(  # noqa: SIM115
-                    f"{task_dir}/{tid}/children", encoding="utf-8"
-                ).read()
-                for tok in data.split():
-                    with contextlib.suppress(ValueError):
-                        children.append(int(tok))
-            except (OSError, FileNotFoundError, PermissionError):
-                continue
-    except (OSError, FileNotFoundError, PermissionError):
-        pass
-    return children
+    """Direct child PIDs (``[]`` when unreadable) — see ``direct_children``."""
+    return direct_children(pid) or []
 
 
 def find_descendants(pid: int, *, _depth: int = 0, _max_depth: int = 4) -> list[int]:

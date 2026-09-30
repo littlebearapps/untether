@@ -152,11 +152,22 @@ hook's rewake once stdin has closed (`docs/findings/2026-09-29-claude-rc14-cli-s
 - The CLI withholds a plain `async` hook's `hook_response` until the next turn
   or stdin close. Each idle tick counts **hook processes**
   (`proc_diag.cli_children()` → `hook_evidence_children()`): any direct CLI
-  child except the baseline captured at `system/init`
-  (`capture_cli_baseline()`, MCP servers), Bash-tool shells and late
-  MCP/LSP-looking argv; a `<shell> -c` child or a `/hooks/` token always
-  counts. Never rely on `sh -c` alone: bash (macOS `/bin/sh`) and zsh exec a
-  single hook command (security-guidance's `bash …/sg-python.sh …`).
+  child except (a) Bash-tool shells, (b) children that started more than
+  `HOOK_START_SLACK_S` (5 s) before the oldest unpaired hook's
+  `hook_started` (the CLI emits the frame, *then* spawns the hook; compared
+  on `hook_clock()`, which counts through sleep), and (c) children **in the
+  CLI's own process group** that are in the `system/init` baseline
+  (`capture_cli_baseline()`, (pid, start time) — MCP servers) or have
+  MCP/LSP-looking argv. The CLI spawns every command hook `detached` (own
+  process group; drift-tested), so a hook alive at init, a baselined PID
+  reused later, or a hook named like `mcp-scan` is never exempt, while a
+  non-detached `sh -c`-wrapped MCP server is. A `/hooks/` token counts
+  unless (b). Never rely on `sh -c` alone: bash (macOS `/bin/sh`) and zsh
+  exec a single hook command (security-guidance's `bash …/sg-python.sh …`).
+  Children come from `/proc/<pid>/task/*/children`, falling back to a
+  /proc ppid scan when that file doesn't exist (no `CONFIG_PROC_CHILDREN`) —
+  never read "no children file" as "no hook"; a forking shell/`env` wrapper
+  around the CLI is resolved to the CLI (Untether's own `env -i` execs).
   **All-or-nothing — never bind a process to a hook** (frames carry no pid;
   a turn's hooks start in the same ms; the per-hook binding in 271bb96
   released a live `asyncRewake` hook and lost its rewake): any hook process
