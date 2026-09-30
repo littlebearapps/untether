@@ -407,3 +407,24 @@ def test_progress_renderer_ignores_missing_action_id() -> None:
         formatter.render_progress_parts(tracker.snapshot(), elapsed_s=0.0)
     )
     assert header.startswith("working · codex · 0s")
+
+
+def _ws_title(detail: dict) -> str:
+    from untether.markdown import format_action_title
+
+    action = Action(id="w", kind="web_search", title="t", detail=detail)
+    return format_action_title(action, command_width=None)
+
+
+def test_format_action_title_web_search_prefixes() -> None:
+    """#419 D3: verb prefix per Codex web-search action type."""
+    assert _ws_title({"action_type": "search"}) == "searched: t"
+    assert _ws_title({"action_type": "open_page"}) == "opened: t"
+    assert _ws_title({"action_type": "find_in_page"}) == "find in page: t"
+    assert _ws_title({"action_type": "other"}) == "t"
+
+
+def test_format_action_title_web_search_claude_unchanged() -> None:
+    """Regression: Claude's WebSearch has no action_type → ``searched:``."""
+    assert _ws_title({}) == "searched: t"
+    assert _ws_title({"query": "t"}) == "searched: t"

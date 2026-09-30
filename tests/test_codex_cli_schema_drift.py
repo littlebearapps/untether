@@ -1,4 +1,4 @@
-"""Zero-token drift checks against the installed Codex CLI (#830).
+"""Zero-token drift checks against the installed Codex CLI (#830, #209, #419).
 
 Codex parses argv (clap) before it reads the prompt, loads auth or touches the
 network, so the exact argv Untether builds can be run against the installed
@@ -28,6 +28,7 @@ import pytest
 from untether.model import ResumeToken
 from untether.runners.codex import CodexRunner
 from untether.runners.run_options import EngineRunOptions, apply_run_options
+from untether.schemas.codex import CODEX_USAGE_FIELDS
 
 # Last CLI these probes were re-derived against.
 PROBED_CLI_VERSION = "0.157.1"
@@ -293,3 +294,91 @@ def test_209_snapshot_matches_the_deny_list() -> None:
     for flag, cls in CODEX_FLAGS_CLASSIFIED_0_157_1.items():
         refused = bool(find_blocked_codex_args([flag]))
         assert refused is (cls in {"blocked", "managed"}), (flag, cls)
+
+
+# --- #419: Usage fields + web-search action types ----------------------------
+#
+# D8 greps the native binary (mmap + fixed-string find — never a regex over a
+# ~285 MB file); D12 pins the exact usage field set via the app-server's
+# generated JSON schema (zero-token, fast, skips on a non-zero rc — plan D8).
+
+
+def _native_codex_binary() -> Path | None:
+    """The Rust binary behind the npm ``codex`` shim (or ``codex`` itself)."""
+    found = shutil.which("codex")
+    if found is None:
+        return None
+    real = Path(os.path.realpath(found))
+    if real.suffix != ".js":
+        return real
+    pkg = real.parent.parent  # …/@openai/codex/bin/codex.js → …/@openai/codex
+    candidates = sorted(
+        pkg.glob("node_modules/@openai/codex-*/vendor/*/bin/codex")
+    ) + sorted(pkg.parent.glob("codex-*/vendor/*/bin/codex"))
+    return candidates[0] if candidates else None
+
+
+@pytest.fixture(scope="module")
+def codex_blob():
+    import mmap
+
+    binary = _native_codex_binary()
+    if binary is None or not binary.is_file():
+        pytest.skip("native codex binary not found behind the npm shim")
+    with (
+        binary.open("rb") as fh,
+        mmap.mmap(fh.fileno(), 0, access=mmap.ACCESS_READ) as mm,
+    ):
+        yield mm
+
+
+@pytest.mark.parametrize(
+    "needle",
+    [
+        *CODEX_USAGE_FIELDS,
+        "open_page",
+        "find_in_page",
+    ],
+)
+def test_419_usage_and_web_search_names_in_binary(codex_blob, needle: str) -> None:
+    """D8: a removed/renamed usage field or web-search action type fails loudly."""
+    assert codex_blob.find(needle.encode()) != -1, (
+        f"{needle!r} no longer appears in the codex binary — re-derive "
+        f"schemas/codex.py Usage/WebSearchItem (last green on codex-cli "
+        f"{PROBED_CLI_VERSION})"
+    )
+
+
+def _camel_to_snake(name: str) -> str:
+    return re.sub(r"(?<!^)(?=[A-Z])", "_", name).lower()
+
+
+def test_419_app_server_usage_field_set_matches_schema(tmp_path: Path) -> None:
+    """D12: the app-server's TokenUsageBreakdown (minus totalTokens) is
+    exactly the exec ``Usage`` field set — a new usage field fails here."""
+    import json
+
+    out = tmp_path / "schema"
+    proc = _run_codex(
+        ["app-server", "generate-json-schema", "--out", str(out)], tmp_path
+    )
+    if proc.returncode != 0:
+        pytest.skip(f"app-server generate-json-schema rc={proc.returncode}")
+    breakdown = None
+    for path in sorted(out.glob("*.json")):
+        data = json.loads(path.read_text())
+        defs = data.get("definitions") or data.get("$defs") or {}
+        if "TokenUsageBreakdown" in defs:
+            breakdown = defs["TokenUsageBreakdown"]
+            break
+    assert breakdown is not None, "TokenUsageBreakdown missing from app-server schema"
+    fields = {
+        _camel_to_snake(k)
+        for k in breakdown.get("properties", {})
+        if k != "totalTokens"
+    }
+    assert fields == set(CODEX_USAGE_FIELDS), (
+        f"codex usage fields drifted: schema {sorted(fields)} vs "
+        f"Usage {sorted(CODEX_USAGE_FIELDS)} (last green on codex-cli "
+        f"{PROBED_CLI_VERSION})"
+    )

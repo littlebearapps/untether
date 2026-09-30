@@ -14,6 +14,7 @@ from untether import runner_bridge as rb
 from untether.session_costs import (
     SessionCostLedger,
     get_session_cost_ledger,
+    token_counts,
 )
 
 
@@ -145,3 +146,283 @@ async def test_live_followup_turn_budget_sees_delta(
         await _drive("followup")
     assert seen == [pytest.approx(0.01), pytest.approx(0.01)]
     assert get_session_cost_ledger().last("claude", sid) == pytest.approx(0.02)
+
+
+# --- #419: per-session token ledger ------------------------------------------
+
+
+def _tok(inp: int, out: int, **extra: int) -> dict[str, int]:
+    return {"input_tokens": inp, "output_tokens": out, **extra}
+
+
+def test_token_ledger_new_session_delta_equals_total() -> None:
+    ledger = SessionCostLedger(path=None)
+    r = ledger.record_tokens(
+        "codex", "t", _tok(100, 10), scope="thread_cumulative", resumed=False
+    )
+    assert r.source == "new_session"
+    assert r.delta == _tok(100, 10)
+    assert r.cumulative == _tok(100, 10)
+    assert r.runs == 1
+
+
+def test_token_ledger_resumed_uses_previous_total() -> None:
+    ledger = SessionCostLedger(path=None)
+    ledger.record_tokens(
+        "codex", "t", _tok(100, 10), scope="thread_cumulative", resumed=False
+    )
+    r = ledger.record_tokens(
+        "codex", "t", _tok(250, 30), scope="thread_cumulative", resumed=True
+    )
+    assert (r.delta["input_tokens"], r.delta["output_tokens"]) == (150, 20)
+    assert r.source == "ledger"
+    assert r.runs == 2
+
+
+def test_token_ledger_triangular_overcount_fixed() -> None:
+    ledger = SessionCostLedger(path=None)
+    deltas = [
+        ledger.record_tokens(
+            "codex", "t", _tok(total, 1), scope="thread_cumulative", resumed=i > 0
+        ).delta["input_tokens"]
+        for i, total in enumerate([100, 250, 420])
+    ]
+    assert sum(deltas) == 420  # raw summing would give 770
+
+
+def test_token_ledger_first_sight_resumed_is_baseline_unknown() -> None:
+    from structlog.testing import capture_logs
+
+    ledger = SessionCostLedger(path=None)
+    with capture_logs() as logs:
+        r = ledger.record_tokens(
+            "codex", "t", _tok(900, 9), scope="thread_cumulative", resumed=True
+        )
+    assert r.source == "baseline_unknown"
+    assert r.delta == _tok(900, 9)
+    assert any(e["event"] == "usage.token_baseline_unknown" for e in logs)
+
+
+def test_token_ledger_zero_total_keeps_baseline() -> None:
+    ledger = SessionCostLedger(path=None)
+    ledger.record_tokens(
+        "codex", "t", _tok(100, 5), scope="thread_cumulative", resumed=False
+    )
+    zero = ledger.record_tokens(
+        "codex",
+        "t",
+        _tok(0, 0, cached_input_tokens=0, reasoning_output_tokens=0),
+        scope="thread_cumulative",
+        resumed=True,
+    )
+    assert zero.source == "zero_total"
+    assert not any(zero.delta.values())
+    tokens = ledger.session_tokens("codex", "t")
+    assert tokens is not None and tokens.runs == 1  # no write
+    r = ledger.record_tokens(
+        "codex", "t", _tok(130, 6), scope="thread_cumulative", resumed=True
+    )
+    assert r.delta["input_tokens"] == 30
+
+
+def test_token_ledger_field_going_backwards_keeps_max_baseline() -> None:
+    ledger = SessionCostLedger(path=None)
+    ledger.record_tokens(
+        "codex", "t", _tok(100, 10), scope="thread_cumulative", resumed=False
+    )
+    back = ledger.record_tokens(
+        "codex", "t", _tok(80, 12), scope="thread_cumulative", resumed=True
+    )
+    assert (back.delta["input_tokens"], back.delta["output_tokens"]) == (0, 2)
+    assert back.cumulative == _tok(100, 12)
+    r = ledger.record_tokens(
+        "codex", "t", _tok(130, 15), scope="thread_cumulative", resumed=True
+    )
+    assert (r.delta["input_tokens"], r.delta["output_tokens"]) == (30, 3)
+
+
+def test_token_ledger_external_spend_lands_in_next_delta() -> None:
+    """Tokens spent on the thread outside Untether land in the next delta,
+    as ``ledger`` (plan #419 §4.4) — exact in aggregate, not per run."""
+    ledger = SessionCostLedger(path=None)
+    ledger.record_tokens(
+        "codex", "t", _tok(100, 1), scope="thread_cumulative", resumed=False
+    )
+    r = ledger.record_tokens(
+        "codex", "t", _tok(400, 1), scope="thread_cumulative", resumed=True
+    )
+    assert (r.delta["input_tokens"], r.source) == (300, "ledger")
+
+
+def test_token_ledger_per_run_scope_accumulates() -> None:
+    ledger = SessionCostLedger(path=None)
+    ledger.record_tokens("opencode", "s", _tok(5, 3), scope="per_run", resumed=False)
+    r = ledger.record_tokens("opencode", "s", _tok(2, 1), scope="per_run", resumed=True)
+    assert r.source == "per_run"
+    assert r.delta == _tok(2, 1)
+    assert r.cumulative == _tok(7, 4)
+    assert r.runs == 2
+
+
+def test_token_ledger_ignores_non_int_and_bool_values() -> None:
+    ledger = SessionCostLedger(path=None)
+    r = ledger.record_tokens(
+        "codex",
+        "t",
+        {"input_tokens": 10, "output_tokens": True, "cached_input_tokens": "5"},
+        scope="thread_cumulative",
+        resumed=False,
+    )
+    assert r.delta == {"input_tokens": 10}
+
+
+@pytest.mark.parametrize(
+    ("usage", "expected"),
+    [
+        (
+            {"total_cost_usd": 0.1, "usage": {"input_tokens": 5, "output_tokens": 2}},
+            {"input_tokens": 5, "output_tokens": 2},
+        ),
+        (
+            {
+                "input_tokens": 10,
+                "cached_input_tokens": 4,
+                "cache_write_input_tokens": 1,
+                "output_tokens": 3,
+                "reasoning_output_tokens": 2,
+            },
+            {
+                "input_tokens": 10,
+                "cached_input_tokens": 4,
+                "cache_write_input_tokens": 1,
+                "output_tokens": 3,
+                "reasoning_output_tokens": 2,
+            },
+        ),
+        ({"total_cost_usd": 1.0}, None),
+        (
+            {"input_tokens": 7, "output_tokens": "x", "cached_input_tokens": False},
+            {"input_tokens": 7},
+        ),
+        ({"input_tokens": 0, "output_tokens": 0}, None),
+        (
+            {"input_tokens": -4, "output_tokens": 3},
+            {"input_tokens": 0, "output_tokens": 3},
+        ),
+        (None, None),
+    ],
+)
+def test_token_counts_shapes(usage: Any, expected: Any) -> None:
+    assert token_counts(usage) == expected
+
+
+def test_record_cost_preserves_token_fields_and_vice_versa() -> None:
+    ledger = SessionCostLedger(path=None)
+    ledger.record_tokens(
+        "x", "s", _tok(10, 1), scope="thread_cumulative", resumed=False
+    )
+    ledger.record("x", "s", 0.5, resumed=False)
+    tokens = ledger.session_tokens("x", "s")
+    assert tokens is not None and tokens.totals == _tok(10, 1)
+    ledger.record_tokens("x", "s", _tok(20, 2), scope="thread_cumulative", resumed=True)
+    assert ledger.last("x", "s") == 0.5
+
+
+def test_last_returns_none_for_token_only_entry() -> None:
+    ledger = SessionCostLedger(path=None)
+    ledger.record_tokens(
+        "codex", "t", _tok(10, 1), scope="thread_cumulative", resumed=False
+    )
+    assert ledger.last("codex", "t") is None
+
+
+def test_session_tokens_roundtrip_persists_across_reload(tmp_path: Path) -> None:
+    path = tmp_path / "session_costs.json"
+    ledger = SessionCostLedger.load(path)
+    ledger.record_tokens(
+        "codex", "t", _tok(100, 10), scope="thread_cumulative", resumed=False
+    )
+    ledger.record_tokens(
+        "codex", "t", _tok(250, 30), scope="thread_cumulative", resumed=True
+    )
+    reloaded = SessionCostLedger.load(path)
+    tokens = reloaded.session_tokens("codex", "t")
+    assert tokens is not None
+    assert tokens.totals == _tok(250, 30)
+    assert tokens.last_run == _tok(150, 20)
+    assert tokens.runs == 2
+    assert tokens.last_source == "ledger"
+    assert tokens.updated_ts > 0
+    assert reloaded.session_tokens("codex", "missing") is None
+
+
+def test_legacy_rc14_file_loads_and_claude_delta_unchanged(tmp_path: Path) -> None:
+    path = tmp_path / "session_costs.json"
+    path.write_text(json.dumps({"claude:s": {"cost": 3.23, "ts": time.time()}}))
+    ledger = SessionCostLedger.load(path)
+    assert ledger.session_tokens("claude", "s") is None
+    result = ledger.record("claude", "s", 3.48, resumed=True)
+    assert result.delta == pytest.approx(0.25)
+    assert result.source == "ledger"
+    data = json.loads(path.read_text())
+    assert set(data["claude:s"]) == {"cost", "ts"}
+
+
+def test_apply_token_delta_codex_rewrites_flat_fields() -> None:
+    first = {
+        "input_tokens": 100,
+        "cached_input_tokens": 40,
+        "output_tokens": 10,
+        "reasoning_output_tokens": 4,
+    }
+    rb._apply_token_delta("codex", "t", first, resumed=False)
+    usage = {
+        "input_tokens": 250,
+        "cached_input_tokens": 90,
+        "output_tokens": 30,
+        "reasoning_output_tokens": 9,
+    }
+    snapshot = dict(usage)
+    out = rb._apply_token_delta("codex", "t", usage, resumed=True)
+    assert out is not usage
+    assert usage == snapshot  # input not mutated
+    assert out is not None
+    assert (out["input_tokens"], out["cached_input_tokens"]) == (150, 50)
+    assert (out["output_tokens"], out["reasoning_output_tokens"]) == (20, 5)
+    assert out["thread_total_usage"]["input_tokens"] == 250
+    assert out["token_delta_source"] == "ledger"
+
+
+@pytest.mark.parametrize(
+    ("engine", "session_id", "usage"),
+    [
+        ("claude", "s", {"input_tokens": 5, "output_tokens": 1}),
+        ("opencode", "s", {"usage": {"input_tokens": 5, "output_tokens": 1}}),
+        ("pi", "s", {"input_tokens": 5, "output_tokens": 1}),
+        ("codex", None, {"input_tokens": 5, "output_tokens": 1}),
+        ("codex", "", {"input_tokens": 5, "output_tokens": 1}),
+        ("codex", "s", {"total_cost_usd": 1.0}),
+    ],
+)
+def test_apply_token_delta_passthrough_cases(
+    engine: str, session_id: str | None, usage: dict[str, Any]
+) -> None:
+    out = rb._apply_token_delta(engine, session_id, usage, resumed=False)
+    assert out is usage
+    assert "token_delta_source" not in usage
+
+
+def test_apply_token_delta_failure_is_swallowed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from structlog.testing import capture_logs
+
+    def boom(*_a: object, **_k: object) -> None:
+        raise RuntimeError("disk full")
+
+    monkeypatch.setattr(get_session_cost_ledger(), "record_tokens", boom)
+    usage = {"input_tokens": 5, "output_tokens": 1}
+    with capture_logs() as logs:
+        out = rb._apply_token_delta("codex", "t", usage, resumed=False)
+    assert out is usage
+    assert any(e["event"] == "usage.token_delta_failed" for e in logs)

@@ -131,6 +131,14 @@ def format_file_change_title(action: Action, *, command_width: int | None) -> st
     return f"files: {shorten(fallback, command_width)}"
 
 
+_WEB_SEARCH_PREFIX: dict[str, str] = {
+    "search": "searched: ",
+    "open_page": "opened: ",
+    "find_in_page": "find in page: ",
+    "other": "",
+}
+
+
 def format_action_title(action: Action, *, command_width: int | None) -> str:
     title = str(action.title or "")
     kind = action.kind
@@ -142,7 +150,14 @@ def format_action_title(action: Action, *, command_width: int | None) -> str:
         return f"tool: {title}"
     if kind == "web_search":
         title = shorten(title, command_width)
-        return f"searched: {title}"
+        # #419: Codex tags each web_search with its action type; Claude's
+        # WebSearch has none and keeps the ``searched:`` prefix byte-for-byte.
+        detail = action.detail if isinstance(action.detail, dict) else {}
+        action_type = detail.get("action_type")
+        prefix = _WEB_SEARCH_PREFIX.get(
+            action_type if isinstance(action_type, str) else "search", "searched: "
+        )
+        return f"{prefix}{title}"
     if kind == "subagent":
         title = shorten(title, command_width)
         return f"subagent: {title}"

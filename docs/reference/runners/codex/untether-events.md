@@ -57,7 +57,8 @@ Emitted once at end-of-run with the **final answer** (from `agent_message`) and 
   "ok": true,
   "answer": "Done. I updated the docs...",
   "error": null,
-  "usage": { "input_tokens": 24763, "cached_input_tokens": 24448, "output_tokens": 122 }  // optional
+  "usage": { "input_tokens": 24763, "cached_input_tokens": 24448, "cache_write_input_tokens": 0,
+             "output_tokens": 122, "reasoning_output_tokens": 64 }  // optional; THREAD running total
 }
 ```
 
@@ -299,17 +300,29 @@ Recommendation: **do not dump** full `result.content` into `detail` if it can co
 
 ---
 
-### 6) `web_search` (only `item.completed`)
+### 6) `web_search` (`item.started` and `item.completed`)
 
-Codex includes `query`. 
+Codex includes `query` (empty on `item.started`), an untyped `action`
+(`{"type": "search"|"open_page"|"find_in_page"|"other", …}`) and, on
+completion, opaque `results`. The schema keeps `action`/`results` as `Any` so an
+unknown future action type never drops the line (#419).
 
-→ Untether `action`:
+→ Untether `action` (same raw id on both phases, so the started row completes in place):
 
 * `kind="web_search"`
-* `title="web search"`
-* `detail={ query }`
-* `phase="completed"`
-* `ok=true` (this is just “it did a search”; success/failure is typically not expressed here)
+* `phase="started"` / `"completed"`, `ok=true` on completion
+* `title` from `runners/codex.py:_web_search_title()`:
+
+  | `action.type` | title | `detail.action_type` | rendered prefix |
+  |---|---|---|---|
+  | `search` | `action.query` → `query` → first 3 `queries` joined with ` · ` (+ ` (+N more)`) | `search` | `searched: ` |
+  | `open_page` | `action.url` → `query` → `page` | `open_page` | `opened: ` |
+  | `find_in_page` | `"<pattern>" in <url>` (either side optional) | `find_in_page` | `find in page: ` |
+  | `other` / absent / unknown | `query` if non-empty (type `search`), else `web search` | `other` | none |
+
+* `detail={ query, action_type, url?, result_count? }` — raw `results` are never
+  copied (only their count).
+* Claude's `WebSearch` sets no `action_type` and keeps the `searched: ` prefix.
 
 ---
 

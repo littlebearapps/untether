@@ -1562,6 +1562,83 @@ async def test_cost_footer_shown_on_success_run(monkeypatch) -> None:
 
 
 # ===========================================================================
+# #419: Codex thread-cumulative token usage → per-run delta
+# ===========================================================================
+
+
+async def _run_codex_usage(
+    usage: dict, *, session_id: str, resume: bool, transport: "FakeTransport"
+) -> None:
+    runner = ScriptRunner(
+        [Return(answer="done", usage=usage)],
+        engine=CODEX_ENGINE,
+        resume_value=session_id,
+    )
+    cfg = ExecBridgeConfig(
+        transport=transport, presenter=MarkdownPresenter(), final_notify=True
+    )
+    await handle_message(
+        cfg,
+        runner=runner,
+        incoming=IncomingMessage(channel_id=123, message_id=10, text="go"),
+        resume_token=(
+            ResumeToken(engine=CODEX_ENGINE, value=session_id) if resume else None
+        ),
+    )
+
+
+@pytest.mark.anyio
+async def test_codex_resumed_run_accounts_token_delta() -> None:
+    from untether.session_costs import get_session_cost_ledger
+
+    sid = f"codex-419-{uuid.uuid4().hex[:8]}"
+    transport = FakeTransport()
+    with structlog.testing.capture_logs() as logs:
+        await _run_codex_usage(
+            {"input_tokens": 100, "cached_input_tokens": 0, "output_tokens": 10},
+            session_id=sid,
+            resume=False,
+            transport=transport,
+        )
+        await _run_codex_usage(
+            {"input_tokens": 250, "cached_input_tokens": 0, "output_tokens": 30},
+            session_id=sid,
+            resume=True,
+            transport=transport,
+        )
+    deltas = [e for e in logs if e["event"] == "usage.token_delta"]
+    assert [e["source"] for e in deltas] == ["new_session", "ledger"]
+    assert deltas[1]["input_delta"] == 150
+    assert deltas[1]["cumulative_input"] == 250
+    completed = [e for e in logs if e["event"] == "runner.completed"]
+    assert completed[-1]["input_tokens"] == 150
+    assert completed[-1]["token_delta_source"] == "ledger"
+    assert "turn_cost_usd" not in completed[-1]
+    tokens = get_session_cost_ledger().session_tokens(CODEX_ENGINE, sid)
+    assert tokens is not None
+    assert (tokens.totals["input_tokens"], tokens.totals["output_tokens"]) == (
+        250,
+        30,
+    )
+    assert tokens.runs == 2
+
+
+@pytest.mark.anyio
+async def test_codex_usage_accounted_once_per_run() -> None:
+    from untether.session_costs import get_session_cost_ledger
+
+    sid = f"codex-419-{uuid.uuid4().hex[:8]}"
+    await _run_codex_usage(
+        {"input_tokens": 100, "cached_input_tokens": 0, "output_tokens": 10},
+        session_id=sid,
+        resume=False,
+        transport=FakeTransport(),
+    )
+    tokens = get_session_cost_ledger().session_tokens(CODEX_ENGINE, sid)
+    assert tokens is not None and tokens.runs == 1
+
+
+# ===========================================================================
 # Post-outline flow guidance
 # ===========================================================================
 

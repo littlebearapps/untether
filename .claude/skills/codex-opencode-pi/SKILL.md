@@ -72,7 +72,7 @@ codex exec --json --skip-git-repo-check --color=never \
 | `command_execution` | `command` | ok = (status=="completed" && exit_code==0) |
 | `mcp_tool_call` | `tool` | Title: `server.tool` |
 | `file_change` | `file_change` | `detail.changes = [{path, kind}]` |
-| `web_search` | `web_search` | Title: query |
+| `web_search` | `web_search` | Title: query / url / pattern from the untyped `action`; placeholder `web search` on started (#419) |
 | `todo_list` | `note` | `detail.done`, `detail.total` |
 | `reasoning` | `note` | Reasoning text |
 | `agent_message` | (not emitted) | Stored as final answer candidate |
