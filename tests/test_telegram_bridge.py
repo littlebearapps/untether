@@ -1620,7 +1620,40 @@ async def test_reasoning_command_show_reports_overrides(tmp_path: Path) -> None:
     assert "engine: codex (global default)" in text
     assert "reasoning: high (topic override)" in text
     assert "defaults: topic: high, chat: low" in text
-    assert "available levels: minimal, low, medium, high, xhigh" in text
+    assert "available levels: low, medium, high, xhigh" in text
+
+
+@pytest.mark.anyio
+async def test_reasoning_command_set_minimal_rejected_for_codex(tmp_path: Path) -> None:
+    """#416: `/reasoning set minimal` is refused for Codex."""
+    transport = FakeTransport()
+    cfg = make_cfg(transport)
+    chat_prefs = ChatPrefsStore(tmp_path / "telegram_chat_prefs_state.json")
+    msg = TelegramIncomingMessage(
+        transport="telegram",
+        chat_id=123,
+        message_id=10,
+        text="/reasoning set minimal",
+        reply_to_message_id=None,
+        reply_to_text=None,
+        sender_id=123,
+    )
+
+    await _handle_reasoning_command(
+        cfg,
+        msg,
+        "set minimal",
+        ambient_context=None,
+        topic_store=None,
+        chat_prefs=chat_prefs,
+        resolved_scope=None,
+        scope_chat_ids=frozenset({123}),
+    )
+
+    text = transport.send_calls[-1]["message"].text
+    assert "unknown reasoning level minimal" in text
+    assert "available levels: low, medium, high, xhigh" in text
+    assert await chat_prefs.get_engine_override(123, CODEX_ENGINE) is None
 
 
 @pytest.mark.anyio
@@ -1793,6 +1826,163 @@ async def test_run_engine_hides_resume_line_in_topics() -> None:
 
     assert transport.last_message is not None
     assert "resume-123" not in transport.last_message.text
+
+
+class _RecordingTransport(_CaptureTransport):
+    def __init__(self) -> None:
+        super().__init__()
+        self.texts: list[str] = []
+
+    async def send(self, *, channel_id, message, options=None):  # type: ignore[override]
+        self.texts.append(message.text)
+        return await super().send(
+            channel_id=channel_id, message=message, options=options
+        )
+
+    async def edit(self, *, ref, message, wait=True):  # type: ignore[override]
+        self.texts.append(message.text)
+        return await super().edit(ref=ref, message=message, wait=wait)
+
+
+class _OptionsRecordingRunner(ScriptRunner):
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self.seen_options: list[Any] = []
+
+    async def run(self, prompt, resume):  # type: ignore[override]
+        from untether.runners.run_options import get_run_options
+
+        self.seen_options.append(get_run_options())
+        async for event in super().run(prompt, resume):
+            yield event
+
+
+@pytest.mark.anyio
+async def test_run_engine_drops_stale_minimal_before_runner() -> None:
+    """#416: a stale `minimal` never reaches the runner (build_args, footer)
+    and the user is told once, in the run's own progress."""
+    from untether.runners.run_options import EngineRunOptions
+
+    transport = _RecordingTransport()
+    runner = _OptionsRecordingRunner(
+        [Return(answer="ok")],
+        engine=CODEX_ENGINE,
+        resume_value="resume-416",
+    )
+    exec_cfg = ExecBridgeConfig(
+        transport=transport,
+        presenter=MarkdownPresenter(),
+        final_notify=True,
+    )
+    runtime = TransportRuntime(
+        router=_make_router(runner),
+        projects=_empty_projects(),
+    )
+
+    with capture_logs() as logs:
+        await _run_engine(
+            exec_cfg=exec_cfg,
+            runtime=runtime,
+            running_tasks={},
+            chat_id=123,
+            user_msg_id=1,
+            text="hello",
+            resume_token=None,
+            context=None,
+            run_options=EngineRunOptions(reasoning="minimal", model="gpt-5.5"),
+        )
+
+    assert len(runner.seen_options) == 1
+    seen = runner.seen_options[0]
+    assert seen is not None
+    assert seen.reasoning is None
+    assert seen.model == "gpt-5.5"
+    assert seen.ignored_reasoning == "minimal"
+    assert any("isn't supported for" in t for t in transport.texts), transport.texts
+    ignored = [
+        e for e in logs if e["event"] == "run.reasoning.unsupported_level_ignored"
+    ]
+    assert len(ignored) == 1
+    assert ignored[0]["engine"] == CODEX_ENGINE
+    assert ignored[0]["level"] == "minimal"
+
+
+def test_resolve_reasoning_override_unsupported_level_is_dropped() -> None:
+    from untether.runners.run_options import EngineRunOptions
+    from untether.telegram.commands.executor import _resolve_reasoning_override
+
+    with capture_logs() as logs:
+        opts, note = _resolve_reasoning_override(
+            engine="codex", run_options=EngineRunOptions(reasoning="minimal")
+        )
+    assert opts is not None
+    assert opts.reasoning is None
+    assert opts.ignored_reasoning == "minimal"
+    assert note is not None
+    assert "`minimal`" in note.action.title
+    assert "/config" in note.action.title
+    events = [
+        e for e in logs if e["event"] == "run.reasoning.unsupported_level_ignored"
+    ]
+    assert len(events) == 1
+    assert events[0]["engine"] == "codex"
+    assert events[0]["level"] == "minimal"
+
+
+def test_resolve_reasoning_override_presanitised_input_same_note() -> None:
+    from untether.runners.run_options import EngineRunOptions
+    from untether.telegram.commands.executor import _resolve_reasoning_override
+    from untether.telegram.engine_overrides import drop_unsupported_reasoning
+
+    pre = drop_unsupported_reasoning("codex", EngineRunOptions(reasoning="minimal"))
+    raw_opts, raw_note = _resolve_reasoning_override(
+        engine="codex", run_options=EngineRunOptions(reasoning="minimal")
+    )
+    with capture_logs() as logs:
+        opts, note = _resolve_reasoning_override(engine="codex", run_options=pre)
+    assert opts is pre
+    assert note is not None and raw_note is not None
+    assert note.action.title == raw_note.action.title
+    assert opts == raw_opts
+    assert (
+        len(
+            [e for e in logs if e["event"] == "run.reasoning.unsupported_level_ignored"]
+        )
+        == 1
+    )
+
+
+def test_resolve_reasoning_override_allowed_level_untouched() -> None:
+    from untether.runners.run_options import EngineRunOptions
+    from untether.telegram.commands.executor import _resolve_reasoning_override
+
+    raw = EngineRunOptions(reasoning="high")
+    with capture_logs() as logs:
+        opts, note = _resolve_reasoning_override(engine="codex", run_options=raw)
+    assert opts is raw
+    assert note is None
+    assert not [
+        e for e in logs if e["event"] == "run.reasoning.unsupported_level_ignored"
+    ]
+
+
+def test_resolve_reasoning_override_unsupported_engine_note_unchanged() -> None:
+    from untether.runners.run_options import EngineRunOptions
+    from untether.telegram.commands.executor import _resolve_reasoning_override
+
+    raw = EngineRunOptions(reasoning="high")
+    opts, note = _resolve_reasoning_override(engine="opencode", run_options=raw)
+    assert opts is raw
+    assert note is not None
+    assert note.action.title == (
+        "reasoning override is not supported for `opencode`; ignoring."
+    )
+
+
+def test_resolve_reasoning_override_none_options() -> None:
+    from untether.telegram.commands.executor import _resolve_reasoning_override
+
+    assert _resolve_reasoning_override(engine="codex", run_options=None) == (None, None)
 
 
 @pytest.mark.anyio

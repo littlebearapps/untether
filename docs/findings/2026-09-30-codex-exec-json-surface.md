@@ -476,6 +476,15 @@ Run these in a scratch git dir with `CODEX_HOME` untouched, `--skip-git-repo-che
   (default web_search=cached), then the same with `-c 'web_search="disabled"'`. The server may now
   reject `minimal` itself on gpt-5.5, with different wording. Capture the exact `error` and `turn.failed`
   lines and any `Reconnecting… n/m` retries.
+  **Resolved 2026-09-30 (codex-cli 0.157.1, gpt-5.5, #416 implementation; both runs rejected before
+  inference, so no tokens billed).** No reconnect retries; `error` and `turn.failed.error.message` both
+  carry the whole pretty-printed JSON body. With the default web_search: `invalid_request_error`,
+  `code: null`, `param: "tools"`, message `The following tools cannot be used with reasoning.effort
+  'minimal': web_search.` With `-c web_search="disabled"`: still a 400 — `invalid_request_error`,
+  `code: "unsupported_value"`, `param: "reasoning.effort"`, message `Unsupported value: 'minimal' is
+  not supported with the 'gpt-5.5' model. Supported values are: 'none', 'low', 'medium', 'high', and
+  'xhigh'.` So disabling web search does not rescue `minimal` (retro-validates rejecting #416's B1).
+  Verbatim lines: `tests/fixtures/codex_turn_failed_minimal_reasoning.jsonl`.
 - **U5 — safe-mode replacement semantics:** with `--sandbox read-only` after `exec`, confirm that a
   write attempt produces a failed `command_execution`/`file_change` item and not a hang. Exec rejects
   approval requests, so this is expected but unverified.

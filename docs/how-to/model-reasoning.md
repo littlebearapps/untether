@@ -58,7 +58,9 @@ Some engines support reasoning levels that control how much thinking the model d
 Valid levels depend on the engine:
 
 - **Claude Code**: `low`, `medium`, `high`, `xhigh`, `max` (passed as `--effort`)
-- **Codex CLI**: `minimal`, `low`, `medium`, `high`, `xhigh`
+- **Codex CLI**: `low`, `medium`, `high`, `xhigh`
+
+`minimal` was removed for Codex in 0.35.5: no current Codex model supports it, and it fails alongside Codex's default web search. A saved `minimal` is ignored with a one-line note on each run, and the run uses the engine default until you pick another level.
 
 Other engines (OpenCode, Pi, Gemini, Amp) ignore this setting.
 

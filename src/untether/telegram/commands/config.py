@@ -209,6 +209,7 @@ async def _page_home(ctx: CommandContext) -> None:
     followup_label = _followup_default()
     model_label = "default"
     reasoning_label = "default"
+    rs_ignored: str | None = None
     aq_label = "default"
     dp_label = "default"
     cu_label = "default"
@@ -252,9 +253,15 @@ async def _page_home(ctx: CommandContext) -> None:
         if engine_override and engine_override.model:
             model_label = engine_override.model
 
-        # Reasoning override for current engine
+        # Reasoning override for current engine (#416: a retired level
+        # renders as the default it actually runs on)
         if engine_override and engine_override.reasoning:
-            reasoning_label = engine_override.reasoning
+            effective_rs, ignored_rs = _effective_reasoning(
+                current_engine, engine_override.reasoning
+            )
+            if effective_rs:
+                reasoning_label = effective_rs
+            rs_ignored = ignored_rs
 
         # Ask questions override for current engine
         if engine_override and engine_override.ask_questions is not None:
@@ -402,7 +409,9 @@ async def _page_home(ctx: CommandContext) -> None:
         lines.append(triggers_indicator)
     if show_reasoning:
         home_rs_label = get_reasoning_label(current_engine)
-        if reasoning_label == "default":
+        if rs_ignored is not None:
+            rs_hint = f"  · {rs_ignored} not supported"
+        elif reasoning_label == "default":
             engine_default = get_engine_default_reasoning(current_engine)
             rs_hint = f"  · {engine_default}" if engine_default else ""
         else:
@@ -1371,8 +1380,9 @@ async def _page_model(ctx: CommandContext, action: str | None = None) -> None:
 # Reasoning
 # ---------------------------------------------------------------------------
 
+# #416: no `min` — Codex `minimal` is retired. A stale `config:rs:min` from a
+# pre-upgrade message falls through to the page render (nothing persisted).
 _RS_ACTIONS: dict[str, str] = {
-    "min": "minimal",
     "low": "low",
     "med": "medium",
     "hi": "high",
@@ -1381,6 +1391,23 @@ _RS_ACTIONS: dict[str, str] = {
 }
 
 _RS_LABELS: dict[str, str] = {v: k for k, v in _RS_ACTIONS.items()}
+
+
+def _effective_reasoning(
+    engine: str, stored: str | None
+) -> tuple[str | None, str | None]:
+    """#416: ``(effective, ignored)`` for a stored reasoning level.
+
+    A level the engine no longer allows runs on the engine default, so it is
+    shown as the default with the ignored value named alongside.
+    """
+    from ..engine_overrides import allowed_reasoning_levels, supports_reasoning
+
+    if not stored:
+        return None, None
+    if supports_reasoning(engine) and stored not in allowed_reasoning_levels(engine):
+        return None, stored
+    return stored, None
 
 
 async def _page_reasoning(ctx: CommandContext, action: str | None = None) -> None:
@@ -1478,9 +1505,13 @@ async def _page_reasoning(ctx: CommandContext, action: str | None = None) -> Non
     from ..engine_overrides import get_engine_default_reasoning
 
     override = await prefs.get_engine_override(chat_id, current_engine)
-    reasoning = override.reasoning if override else None
+    reasoning, ignored = _effective_reasoning(
+        current_engine, override.reasoning if override else None
+    )
     if reasoning:
         current_label = reasoning
+    elif ignored:
+        current_label = f"default ({ignored} not supported \N{EM DASH} ignored)"
     else:
         engine_default = get_engine_default_reasoning(current_engine)
         current_label = f"default ({engine_default})" if engine_default else "default"
@@ -1488,8 +1519,6 @@ async def _page_reasoning(ctx: CommandContext, action: str | None = None) -> Non
     levels = allowed_reasoning_levels(current_engine)
 
     level_descriptions: list[str] = []
-    if "minimal" in levels:
-        level_descriptions.append("• <b>minimal</b> — fastest responses")
     if "low" in levels or "medium" in levels or "high" in levels:
         present = [f"<b>{lv}</b>" for lv in ("low", "medium", "high") if lv in levels]
         level_descriptions.append(f"• {' · '.join(present)} — balanced options")
@@ -1521,7 +1550,6 @@ async def _page_reasoning(ctx: CommandContext, action: str | None = None) -> Non
 
     # Build level buttons dynamically based on engine
     _LEVEL_BUTTON_MAP: dict[str, tuple[str, str]] = {
-        "minimal": ("Minimal", "min"),
         "low": ("Low", "low"),
         "medium": ("Medium", "med"),
         "high": ("High", "hi"),
@@ -2401,7 +2429,6 @@ class ConfigCommand:
             },
             "md": {"clr": "Model: cleared"},
             "rs": {
-                "min": "Reasoning: minimal",
                 "low": "Reasoning: low",
                 "med": "Reasoning: medium",
                 "hi": "Reasoning: high",

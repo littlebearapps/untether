@@ -58,7 +58,7 @@ from .commands.parse import is_cancel_command, parse_dot_typo
 from .commands.reply import make_reply
 from .context import _merge_topic_context, _usage_ctx_set, _usage_topic
 from .engine_defaults import resolve_engine_for_message
-from .engine_overrides import merge_overrides
+from .engine_overrides import drop_unsupported_reasoning, merge_overrides
 from .listen_mode import resolve_listen_mode, should_trigger_run
 from .steer import FOLLOWUP_COMMAND_IDS, maybe_steer, split_followup_command
 from .topic_state import TopicStateStore, resolve_state_path
@@ -155,18 +155,25 @@ async def _resolve_engine_run_options(
     merged = merge_overrides(topic_override, chat_override)
     if merged is None:
         return None
-    return EngineRunOptions(
-        model=merged.model,
-        reasoning=merged.reasoning,
-        permission_mode=merged.permission_mode,
-        ask_questions=merged.ask_questions,
-        diff_preview=merged.diff_preview,
-        show_api_cost=merged.show_api_cost,
-        show_subscription_usage=merged.show_subscription_usage,
-        show_resume_line=merged.show_resume_line,
-        budget_enabled=merged.budget_enabled,
-        budget_auto_cancel=merged.budget_auto_cancel,
-        loop_enabled=merged.loop_enabled,
+    # #416: sanitise a retired reasoning level HERE, the single producer of
+    # per-chat options, so run_job, the live follow-up / steer comparisons and
+    # the command resolver all see identical options (a stale level must never
+    # fake an `options_changed`). The executor adds the user-facing note.
+    return drop_unsupported_reasoning(
+        engine,
+        EngineRunOptions(
+            model=merged.model,
+            reasoning=merged.reasoning,
+            permission_mode=merged.permission_mode,
+            ask_questions=merged.ask_questions,
+            diff_preview=merged.diff_preview,
+            show_api_cost=merged.show_api_cost,
+            show_subscription_usage=merged.show_subscription_usage,
+            show_resume_line=merged.show_resume_line,
+            budget_enabled=merged.budget_enabled,
+            budget_auto_cancel=merged.budget_auto_cancel,
+            loop_enabled=merged.loop_enabled,
+        ),
     )
 
 

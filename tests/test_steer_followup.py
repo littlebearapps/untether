@@ -420,6 +420,34 @@ async def test_options_changed_on_idle_session_defers_to_queue() -> None:
     assert pipe.sent == [] and _texts(cfg) == []
 
 
+async def test_stale_reasoning_steer_not_options_changed(monkeypatch) -> None:
+    """#416: an idle live session spawned from the sanitising resolver is not
+    `options_changed` by a steer whose options come from the same resolver,
+    even when the stored level has been retired."""
+    from untether.runners.run_options import EngineRunOptions
+    from untether.telegram import engine_overrides
+    from untether.telegram.engine_overrides import drop_unsupported_reasoning
+
+    monkeypatch.setitem(
+        engine_overrides._ENGINE_REASONING_LEVELS, "claude", ("low", "medium", "high")
+    )
+    live, pipe = _install(idle=True)
+
+    def resolved() -> EngineRunOptions | None:
+        return drop_unsupported_reasoning(
+            "claude",
+            EngineRunOptions(reasoning="retired-level", permission_mode="plan"),
+        )
+
+    live.state.spawn_run_options = resolved()
+
+    async def opts(_token: ResumeToken) -> object:
+        return resolved()
+
+    assert await _steer(_cfg("steer"), run_options=opts) is True
+    assert len(pipe.sent) == 1
+
+
 async def test_options_changed_mid_turn_still_steers() -> None:
     """Mid-turn the steer joins the turn that is already running with the
     old options — that is the point of steering."""

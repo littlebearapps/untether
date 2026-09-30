@@ -293,3 +293,73 @@ def test_209_snapshot_matches_the_deny_list() -> None:
     for flag, cls in CODEX_FLAGS_CLASSIFIED_0_157_1.items():
         refused = bool(find_blocked_codex_args([flag]))
         assert refused is (cls in {"blocked", "managed"}), (flag, cls)
+
+
+# --- #416: Codex reasoning levels vs the bundled model catalogue -------------
+# `codex debug models --bundled` dumps the catalogue shipped in the binary
+# without a network refresh. A temp CODEX_HOME writes a "PATH aliases" warning
+# to stderr, so parse stdout only.
+
+
+def _bundled_models(tmp_path: Path) -> list[dict[str, object]]:
+    import json
+
+    proc = _run_codex(["debug", "models", "--bundled"], tmp_path)
+    if "unrecognized subcommand" in proc.stderr:
+        pytest.fail(
+            "`codex debug models` is gone — re-derive the #416 catalogue probe "
+            f"(last green on codex-cli {PROBED_CLI_VERSION})"
+        )
+    assert proc.returncode == 0, _clap_error(proc.stderr)
+    models = json.loads(proc.stdout)["models"]
+    assert models, "bundled catalogue is empty"
+    return models
+
+
+def _levels(model: dict[str, object]) -> list[str]:
+    raw = model.get("supported_reasoning_levels") or []
+    assert isinstance(raw, list)
+    return [str(level["effort"]) for level in raw]
+
+
+def test_bundled_catalogue_has_no_minimal(tmp_path: Path) -> None:
+    """D12: no Codex model lists `minimal`, so Untether doesn't offer it."""
+    offenders = [
+        m["slug"] for m in _bundled_models(tmp_path) if "minimal" in _levels(m)
+    ]
+    assert not offenders, (
+        f"Codex's catalogue lists `minimal` again ({offenders}): revisit #416 / "
+        "the per-model reasoning levels follow-up"
+    )
+
+
+def test_listed_models_support_untether_codex_levels(tmp_path: Path) -> None:
+    """D13: every user-visible model accepts every level /config offers."""
+    from untether.telegram.engine_overrides import allowed_reasoning_levels
+
+    wanted = set(allowed_reasoning_levels("codex"))
+    listed = [m for m in _bundled_models(tmp_path) if m.get("visibility") == "list"]
+    assert listed, "no `visibility == list` models in the bundled catalogue"
+    missing = {
+        str(m["slug"]): sorted(wanted - set(_levels(m)))
+        for m in listed
+        if not wanted <= set(_levels(m))
+    }
+    assert not missing, (
+        f"listed Codex model(s) lack a level /config offers: {missing} — a "
+        "button would fail like #416; derive levels per model (follow-up)"
+    )
+
+
+def test_client_passes_minimal_unvalidated(tmp_path: Path) -> None:
+    """D7: the client loads `minimal` without complaint — the 400 is
+    server-side, so only the error hint can explain it."""
+    proc = _run_codex(
+        ["-c", 'model_reasoning_effort="minimal"', "features", "list"], tmp_path
+    )
+    if "unrecognized subcommand" in proc.stderr:
+        pytest.skip("`codex features list` is gone; pick another config-loading probe")
+    assert proc.returncode == 0, (
+        "codex now rejects model_reasoning_effort=minimal client-side — revisit "
+        f"the #416 hint wording: {proc.stderr[-300:]}"
+    )

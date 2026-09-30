@@ -22,6 +22,10 @@ class EngineRunOptions:
     # means "follow global ``[loop] enabled``"; True/False is an explicit
     # per-chat override set via ``/config → 🔁 Loop mode``.
     loop_enabled: bool | None = None
+    # #416 — a stored reasoning level the engine no longer allows, dropped by
+    # ``drop_unsupported_reasoning`` at resolution time. Only carries the
+    # dropped value to the executor's one-line note; runners never read it.
+    ignored_reasoning: str | None = None
 
 
 # Permission modes the Claude Code CLI accepts for ``--permission-mode``.

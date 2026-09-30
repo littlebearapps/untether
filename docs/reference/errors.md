@@ -73,11 +73,20 @@ This page lists all recognised error patterns grouped by category. Hints are mat
 | `prompt_blocked` | Request blocked by content safety filter. Try rephrasing your prompt. | Gemini |
 | `safety_block` | Request blocked by content safety filter. Try rephrasing your prompt. | Gemini |
 
+## Reasoning level
+
+These are checked before the generic `invalid_request_error` pattern, because the same 400 carries that type too. The hints are engine-neutral: `reasoning.effort` is an OpenAI Responses-API parameter, so an OpenCode run on an OpenAI provider can hit it as well.
+
+| Pattern | Hint | Engines |
+|---------|------|---------|
+| `cannot be used with reasoning.effort` | The model's reasoning level can't be combined with a tool that is switched on (usually web search). Raise the reasoning level: in /config → Reasoning if this engine offers it there, otherwise in the engine's own config file (for Codex, model_reasoning_effort in ~/.codex/config.toml). | Codex, OpenCode (OpenAI) |
+| `reasoning.effort` | The model doesn't accept this reasoning level. Choose another one: in /config → Reasoning if this engine offers it there, otherwise in the engine's own config file (for Codex, model_reasoning_effort in ~/.codex/config.toml). | Codex, OpenCode (OpenAI) |
+
 ## Invalid request
 
 | Pattern | Hint | Engines |
 |---------|------|---------|
-| `invalid_request_error` | Invalid API request. Try updating the engine CLI to the latest version. | Claude, Codex |
+| `invalid_request_error` | The API rejected the request (invalid_request_error) — the error below says why. Check the model and reasoning settings in /config; if they look right, update the engine CLI. | Claude, Codex |
 
 ## Session errors
 

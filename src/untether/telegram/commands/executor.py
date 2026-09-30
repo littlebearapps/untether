@@ -34,7 +34,11 @@ from ...utils.paths import (
     set_run_channel_id,
 )
 from ..bridge import send_plain
-from ..engine_overrides import supports_reasoning
+from ..engine_overrides import (
+    allowed_reasoning_levels,
+    drop_unsupported_reasoning,
+    supports_reasoning,
+)
 
 logger = get_logger(__name__)
 
@@ -89,14 +93,7 @@ class _PreludeRunner:
             yield event
 
 
-def _reasoning_warning(
-    *, engine: str, run_options: EngineRunOptions | None
-) -> ActionEvent | None:
-    if run_options is None or not run_options.reasoning:
-        return None
-    if supports_reasoning(engine):
-        return None
-    message = f"reasoning override is not supported for `{engine}`; ignoring."
+def _reasoning_note(engine: str, message: str) -> ActionEvent:
     return ActionEvent(
         engine=engine,
         action=Action(
@@ -108,6 +105,39 @@ def _reasoning_warning(
         phase="completed",
         ok=True,
     )
+
+
+def _resolve_reasoning_override(
+    *, engine: str, run_options: EngineRunOptions | None
+) -> tuple[EngineRunOptions | None, ActionEvent | None]:
+    """Sanitise the run's reasoning level and build the note to show, if any.
+
+    ``_resolve_engine_run_options`` already drops a retired level (#416);
+    re-applying the pure helper here covers callers that pass raw options and
+    is a no-op for resolver output. The INFO log lives here, not in the
+    helper, so it fires once per run and never per option comparison.
+    """
+    run_options = drop_unsupported_reasoning(engine, run_options)
+    if run_options is None:
+        return None, None
+    if run_options.ignored_reasoning:
+        level = run_options.ignored_reasoning
+        logger.info(
+            "run.reasoning.unsupported_level_ignored",
+            engine=engine,
+            level=level,
+            allowed=list(allowed_reasoning_levels(engine)),
+        )
+        message = (
+            f"reasoning level `{level}` isn't supported for `{engine}` any more;"
+            " using the engine default. Pick a level in /config \N{RIGHTWARDS ARROW}"
+            " Reasoning."
+        )
+        return run_options, _reasoning_note(engine, message)
+    if run_options.reasoning and not supports_reasoning(engine):
+        message = f"reasoning override is not supported for `{engine}`; ignoring."
+        return run_options, _reasoning_note(engine, message)
+    return run_options, None
 
 
 def _should_show_resume_line(
@@ -204,7 +234,11 @@ async def _run_engine(
             effective_resume = run_options.show_resume_line
         if not effective_resume:
             runner = cast(Runner, _ResumeLineProxy(runner))
-        warning = _reasoning_warning(engine=runner.engine, run_options=run_options)
+        # #416: reassign before apply_run_options so build_args, the footer,
+        # runner_bridge and spawn_run_options all see the sanitised level.
+        run_options, warning = _resolve_reasoning_override(
+            engine=runner.engine, run_options=run_options
+        )
         if warning is not None:
             runner = cast(Runner, _PreludeRunner(runner, [warning]))
         if not entry.available:

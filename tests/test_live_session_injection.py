@@ -391,6 +391,69 @@ async def test_changed_chat_options_close_session_instead_of_injecting(
     assert live.state.live_close_reason == "options_changed"
 
 
+def _retire_claude_level(monkeypatch) -> None:
+    """Simulate a future retired Claude reasoning level (live sessions are
+    Claude-only, so a stale Codex level can't reach them) (#416)."""
+    from untether.telegram import engine_overrides
+
+    monkeypatch.setitem(
+        engine_overrides._ENGINE_REASONING_LEVELS, "claude", ("low", "medium", "high")
+    )
+
+
+async def test_stale_reasoning_does_not_fake_options_changed(
+    cleanup, monkeypatch
+) -> None:
+    """#416: spawn options and follow-up options both come from the
+    sanitising resolver, so a retired level compares equal."""
+    from untether.runners.run_options import EngineRunOptions
+    from untether.telegram.engine_overrides import drop_unsupported_reasoning
+
+    _retire_claude_level(monkeypatch)
+    live, pipe = _install("sid-inj", idle=True)
+    live.state.spawn_run_options = drop_unsupported_reasoning(
+        "claude", EngineRunOptions(reasoning="retired-level", permission_mode="plan")
+    )
+
+    async def resolver_equivalent(job: ThreadJob) -> EngineRunOptions | None:
+        return drop_unsupported_reasoning(
+            "claude",
+            EngineRunOptions(reasoning="retired-level", permission_mode="plan"),
+        )
+
+    assert (
+        await inject_live_followup(_job("sid-inj"), options_for=resolver_equivalent)
+        is True
+    )
+    assert len(pipe.sent) == 1
+    assert live.state.live_close_reason != "options_changed"
+
+
+async def test_raw_vs_sanitised_options_would_mismatch(cleanup, monkeypatch) -> None:
+    """#416 negative control: raw (unsanitised) follow-up options WOULD close
+    the session — why sanitising must happen in the producer, not only in the
+    executor."""
+    from untether.runners.run_options import EngineRunOptions
+    from untether.telegram.engine_overrides import drop_unsupported_reasoning
+
+    _retire_claude_level(monkeypatch)
+    live, pipe = _install("sid-inj", idle=True)
+    live.state.spawn_run_options = drop_unsupported_reasoning(
+        "claude", EngineRunOptions(reasoning="retired-level", permission_mode="plan")
+    )
+
+    async def aclose() -> None:
+        return None
+
+    pipe.aclose = aclose  # type: ignore[method-assign]
+
+    async def raw(job: ThreadJob) -> EngineRunOptions:
+        return EngineRunOptions(reasoning="retired-level", permission_mode="plan")
+
+    assert await inject_live_followup(_job("sid-inj"), options_for=raw) is False
+    assert live.state.live_close_reason == "options_changed"
+
+
 def test_options_changed_notice_wording() -> None:
     assert rb._live_closing_notice("options_changed", ["x"]) == (
         "\N{GEAR}\N{VARIATION SELECTOR-16} Settings changed — stopping 1 "
