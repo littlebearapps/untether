@@ -49,6 +49,22 @@ async def inject_live_followup(
             closing=bool(live and live.closing),
         )
         return False
+    live = get_live_session(session_id)
+    if live is not None and live.state.plan_rearm_failed:
+        # #383: the CLI refused to go back into plan mode — close the live
+        # process once idle so this message resumes a fresh one spawned with
+        # --permission-mode plan (same fallback as options_changed).
+        from .runners.claude import close_live_session
+
+        closed = await close_live_session(
+            session_id, "plan_rearm_failed", notice=False, only_if_idle=True
+        )
+        logger.info(
+            "claude.live_session.plan_rearm_failed_closed",
+            session_id=session_id,
+            closed=closed,
+        )
+        return False
     if options_for is not None:
         live = get_live_session(session_id)
         try:

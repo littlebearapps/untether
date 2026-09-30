@@ -194,6 +194,8 @@ ClaudeRunner uses `pty.openpty()` instead of `subprocess.PIPE` for stdin:
 ```python
 _SESSION_STDIN: dict[str, anyio.abc.ByteSendStream]   # session_id -> stdin pipe
 _REQUEST_TO_SESSION: dict[str, str]                    # request_id -> session_id
+_PLAN_EXIT_APPROVED: set[str]                          # #283 diff-preview skip — cleared at every live turn open (#383)
+_DISCUSS_APPROVED / _DISCUSS_CARRY: set[str]           # post-outline approval; carried ONE boundary (#383)
 ```
 
 - Registered in `_iter_jsonl_events` when session_id is first seen
@@ -216,11 +218,25 @@ AUTO_APPROVE_TOOLS = {"Grep", "Glob", "Read", "LS", "Bash", "BashOutput",
 ## ExitPlanMode handling
 
 When Claude requests `ExitPlanMode`:
-1. Inline keyboard shown: **Approve** / **Deny** / **Pause & Outline Plan**
+1. Inline keyboard shown: **Approve Plan** / **Deny** / **Pause & Outline Plan** (#383: plus a caption saying what approving does; "Plan mode resumes when this reply ends." only when true)
 2. "Pause & Outline Plan" sends a deny with a detailed message asking Claude to write a step-by-step plan
 3. After outline is written, post-outline buttons appear: **Approve Plan** / **Deny** / **Let's discuss**
 4. "Let's discuss" sends a deny asking Claude to discuss the plan (action: `chat`)
 5. Text-based outline gate: retries without written outline text are auto-denied
+
+### After approval: the plan re-arm (#383)
+
+- Approval moves the CLI to `prePlanMode ?? "default"` and emits
+  `system/status{status:null,permissionMode:"default"}` before the tool_result.
+- In a live session of a `plan` / `plan-auto` chat the runner sends
+  `{"type":"control_request","request_id":"ut_plan_rearm_<sid>_<n>","request":{"subtype":"set_permission_mode","mode":"plan"}}`
+  at every turn close, **before yielding the turn-closing event** (never after —
+  see `.claude/rules/control-channel.md`), and again before a follow-up / idle
+  steer if still needed. Ack `{"mode":"plan"}` + `system/status plan`; no status
+  frame when already plan. `plan-auto`: follow-ups/idle steers only.
+- Kill switch `[watchdog] rearm_plan_mode`. Residual: a wake turn the CLI starts
+  ~20 ms after the result (notification already queued) has an unplanned first
+  model call (probe P-6). Running background agents inherit the mode (P-3).
 
 ### Outline gate (#570 retired the progressive cooldown)
 

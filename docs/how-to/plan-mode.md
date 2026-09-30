@@ -48,13 +48,13 @@ When Claude Code tries to exit plan mode (ExitPlanMode), you see three buttons i
 - **Deny** — block and ask Claude Code to explain
 - **Pause & Outline Plan** — require a written plan first
 
-In a plan chat the request also says what approving does: *Approving lets Claude carry out this plan without further prompts.* In a chat where Claude Code switched to plan mode on its own (`/planmode off`), it reads *Approving ends planning; Claude still asks before each action.*
+In a plan chat the request also says what approving does: *Approving lets Claude carry out this plan without further prompts. Plan mode resumes when this reply ends.* In a chat where Claude Code switched to plan mode on its own (`/planmode off`), it reads *Approving ends planning; Claude still asks before each action.*
 
 <div markdown>
 
 !!! untether "Untether"
     ▸ Permission Request [CanUseTool] - tool: ExitPlanMode<br>
-    Approving lets Claude carry out this plan without further prompts.
+    Approving lets Claude carry out this plan without further prompts. Plan mode resumes when this reply ends.
 
 <div class="tg-buttons">
 <span class="tg-btn">Approve Plan</span>
@@ -142,7 +142,12 @@ A plan approval covers the reply it was given in. Once you approve a plan, wheth
 The approval ends with that reply. Claude Code keeps its process open after replying, so background jobs can report back and your next message goes straight in. Before v0.35.5 an approval carried on through every later message in that process, for up to four hours. Now:
 
 - your next message, and any background wake-up, gets per-tool approvals again ([#383](https://github.com/littlebearapps/untether/issues/383));
-- an **Approve Plan** tapped after an outline also covers your *next* message, so "outline → Approve Plan → go ahead" still needs only one tap. The second message after it asks again.
+- an **Approve Plan** tapped after an outline also covers your *next* message, so "outline → Approve Plan → go ahead" still needs only one tap. The second message after it asks again;
+- **plan mode resumes when the reply ends.** Approving a plan takes Claude Code out of plan mode, and an open session used to stay out of it. Untether now switches it back when the reply ends, so your next message is planned again, and in a `plan` chat so is a background job's wake-up (a finished background task, a Monitor line, a scheduled wake-up): if it wants to act, you get a new plan to approve. In a `plan-auto` chat your messages are re-planned (and approved for you) but wake-ups aren't, since planning them would add cost and no check.
+
+Two limits. Background agents the approved reply started follow the session back into plan mode, so from their next step they are told to plan rather than carry on. And a wake-up that starts the very moment the reply ends can take its first step before plan mode is back; it is planned from its next step.
+
+To turn the switch-back off, set `rearm_plan_mode = false` under `[watchdog]` in `untether.toml` (read at each new session). An approval then lasts until the session closes, as before v0.35.5.
 
 ## The plan in the final message
 

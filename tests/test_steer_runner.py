@@ -221,3 +221,43 @@ async def test_steer_cannot_race_a_closing_session() -> None:
 
 async def _steer_into(out: list[str], sid: str, text: str, cmd: str) -> None:
     out.append(await steer_into_session(sid, text, command_uuid=cmd))
+
+
+@pytest.mark.parametrize("late", [False, True])
+async def test_383_idle_steer_after_approval_rearms(tmp_path: Any, late: bool) -> None:
+    """#383: an idle steer after a plan approval runs in plan mode. With the
+    idle re-arm already out (``late=False``) nothing extra is written; when it
+    isn't (``late=True``: the pre-yield drain is skipped), the steer path
+    writes it first — FIFO puts plan ahead of the steer's turn."""
+    from tests.test_live_session_runner import (
+        _answer_plans,
+        _answers,
+        _LateRearmRunner,
+        _LiveRunner,
+        _plan_env,
+        _plan_runner,
+    )
+
+    _plan_env(tmp_path)
+    outcomes: list[str] = []
+
+    async def on_event(evt: Any, runner: ClaudeRunner) -> None:
+        await _answer_plans(evt)
+        if isinstance(evt, CompletedEvent):
+            outcomes.append(
+                await steer_into_session(
+                    SID, "and then this", command_uuid=str(uuid.uuid4())
+                )
+            )
+
+    with capture_logs() as logs:
+        events = await _collect(
+            "plan_approve_followup",
+            until=2,
+            on_event=on_event,
+            runner=_plan_runner(cls=_LateRearmRunner if late else _LiveRunner),
+        )
+    assert outcomes == ["written_idle"]
+    assert _answers(events) == ["MODE: plan"]
+    sent = [e for e in logs if e["event"] == "claude.permission_mode.rearm_sent"]
+    assert [e["reason"] for e in sent] == (["steer"] if late else ["idle"])

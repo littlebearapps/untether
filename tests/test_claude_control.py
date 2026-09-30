@@ -2428,26 +2428,34 @@ _PROMPTING = "Approving ends planning; Claude still asks before each action."
 
 
 @pytest.mark.parametrize(
-    ("configured_plan", "prompting", "live", "expected"),
+    ("configured_plan", "prompting", "live", "rearm", "expected"),
     [
-        # Plan chat, live session: plan mode does NOT come back by itself.
-        (True, False, True, _CARRY_OUT),
+        # Plan chat, live session, re-arm on: plan mode comes back.
+        (True, False, True, True, _CARRY_OUT + _RESUMES),
+        # Plan chat, live session, re-arm switched off: it does NOT.
+        (True, False, True, False, _CARRY_OUT),
         # Plan chat, live sessions off: every message respawns in plan.
-        (True, False, False, _CARRY_OUT + _RESUMES),
+        (True, False, False, True, _CARRY_OUT + _RESUMES),
+        (True, False, False, False, _CARRY_OUT + _RESUMES),
         # Prompting-mode chat: Claude entered plan mode itself.
-        (False, True, True, _PROMPTING),
-        (False, True, False, _PROMPTING),
+        (False, True, True, True, _PROMPTING),
+        (False, True, False, False, _PROMPTING),
         # Other autonomous modes (auto / dontAsk / bypassPermissions): none.
-        (False, False, True, None),
+        (False, False, True, True, None),
     ],
 )
 def test_exitplanmode_caption_matrix(
-    configured_plan: bool, prompting: bool, live: bool, expected: str | None
+    configured_plan: bool,
+    prompting: bool,
+    live: bool,
+    rearm: bool,
+    expected: str | None,
 ) -> None:
     state, factory = _make_state_with_session("sess-caption")
     state.configured_plan_mode = configured_plan
     state.prompting_mode = prompting
     state.live_mode = live
+    state.rearm_plan_mode = rearm
     events = translate_claude_event(
         _exit_plan_request(), title="claude", state=state, factory=factory
     )
@@ -2499,7 +2507,7 @@ def test_post_outline_title_has_caption(outline_written: bool) -> None:
     action = events[-1].action
     head, _, caption = action.title.partition("\n")
     assert head in {"📋 Plan outline (see above)", "Plan outlined — approve to proceed"}
-    assert caption == _CARRY_OUT
+    assert caption == _CARRY_OUT + _RESUMES
     assert action.detail["inline_keyboard"]["buttons"][0][0]["text"] == (
         "✅ Approve Plan"
     )
@@ -2551,10 +2559,17 @@ async def test_approve_feedback_text_exitplanmode_vs_tool(
 
 
 @pytest.mark.parametrize(
-    ("live", "expected"),
+    ("live", "rearm", "expected"),
     [
-        (True, "✅ Plan approved — Claude will carry it out now"),
+        (True, False, "✅ Plan approved — Claude will carry it out now"),
         (
+            True,
+            True,
+            "✅ Plan approved — Claude will carry it out now"
+            " · plan mode resumes when it's done",
+        ),
+        (
+            False,
             False,
             "✅ Plan approved — Claude will carry it out now"
             " · plan mode resumes when it's done",
@@ -2562,7 +2577,9 @@ async def test_approve_feedback_text_exitplanmode_vs_tool(
     ],
 )
 @pytest.mark.anyio
-async def test_outline_flow_approve_feedback_text(live: bool, expected: str) -> None:
+async def test_outline_flow_approve_feedback_text(
+    live: bool, rearm: bool, expected: str
+) -> None:
     """The post-outline Approve Plan edit carries the new wording, with the
     "resumes" suffix only when it is true (#383)."""
     from untether.runners.claude import _SESSION_BG_STATE
@@ -2572,10 +2589,11 @@ async def test_outline_flow_approve_feedback_text(live: bool, expected: str) -> 
     )
     from untether.transport import MessageRef
 
-    session_id = f"sess-outline-fb-{live}"
+    session_id = f"sess-outline-fb-{live}-{rearm}"
     state = ClaudeStreamState()
     state.configured_plan_mode = True
     state.live_mode = live
+    state.rearm_plan_mode = rearm
     _SESSION_BG_STATE[session_id] = state
     _ACTIVE_RUNNERS[session_id] = (ClaudeRunner(claude_cmd="claude"), 0.0)
     _DISCUSS_FEEDBACK_REFS[session_id] = MessageRef(channel_id=123, message_id=99)

@@ -18,6 +18,7 @@ from structlog.testing import capture_logs
 
 from untether.commands import CommandContext
 from untether.model import ActionEvent, ResumeToken, TurnEvent
+from untether.runners import claude as claude_mod
 from untether.runners.claude import (
     _ACTIVE_RUNNERS,
     _DISCUSS_APPROVED,
@@ -34,12 +35,18 @@ from untether.runners.claude import (
     ENGINE,
     ClaudeRunner,
     ClaudeStreamState,
+    LiveSession,
     _absorb_injected,
+    _claim_plan_rearm,
     _cleanup_session_registries,
     _open_followup_turn,
+    inject_when_idle,
+    steer_into_session,
     translate_claude_event,
 )
+from untether.live_followup import inject_live_followup
 from untether.runners.run_options import EngineRunOptions, apply_run_options
+from untether.scheduler import ThreadJob
 from untether.schemas import claude as claude_schema
 from untether.telegram.commands.claude_control import (
     _DISCUSS_FEEDBACK_REFS,
@@ -452,7 +459,9 @@ def test_plan_observed_clears_plan_exit_approved(via: str) -> None:
         if via == "status":
             _status(state, "plan")
         else:
+            state.plan_rearm_inflight = "ut_plan_rearm_sess-383_1"
             _ack(state, "ut_plan_rearm_sess-383_1")
+            assert state.plan_rearm_inflight is None
     assert SID not in _PLAN_EXIT_APPROVED
     assert SID in _DISCUSS_APPROVED  # pre-exit approval: carry rule only
     assert state.plan_exited_at is None
@@ -480,8 +489,9 @@ def test_non_plan_chat_never_stamps_exit() -> None:
     assert state.plan_exited_at is None
 
 
-def test_error_ack_logs_rearm_failed() -> None:
+def test_error_ack_marks_failed() -> None:
     state, _ = _live_session()
+    state.plan_rearm_inflight = "ut_plan_rearm_sess-383_1"
     with capture_logs() as logs:
         _feed(
             state,
@@ -498,3 +508,310 @@ def test_error_ack_logs_rearm_failed() -> None:
     failed = [e for e in logs if e["event"] == "claude.permission_mode.rearm_failed"]
     assert failed and failed[0]["error_code"] == "invalid_mode"
     assert failed[0]["log_level"] == "warning"
+    assert state.plan_rearm_failed
+    assert state.plan_rearm_inflight is None
+
+
+# ── C3: the plan re-arm ──────────────────────────────────────────────────────
+
+
+def _left_plan(state: ClaudeStreamState) -> None:
+    """Turn 1 started in plan and an approval moved the CLI to default."""
+    _init(state, "plan")
+    _status(state, "default")
+
+
+def _register_live(state: ClaudeStreamState, stdin: AsyncMock) -> LiveSession:
+    live = LiveSession(session_id=SID, state=state, stdin=stdin)
+    _LIVE_SESSIONS[SID] = live
+    return live
+
+
+def _lines(stdin: AsyncMock) -> list[dict[str, Any]]:
+    return [json.loads(call.args[0]) for call in stdin.send.await_args_list]
+
+
+def _kinds(stdin: AsyncMock) -> list[str]:
+    out = []
+    for line in _lines(stdin):
+        if line["type"] == "control_request":
+            out.append(line["request"]["subtype"])
+        else:
+            out.append(line["type"])
+    return out
+
+
+async def test_turn_close_queues_rearm_after_plan_exit() -> None:
+    state, _ = _live_session()
+    _init(state, "plan")
+    _control(state, "req-epm", "ExitPlanMode")
+    await _tap("approve", "req-epm")
+    _status(state, "default")
+    _result(state)
+    assert state.plan_rearm_pending
+
+
+@pytest.mark.parametrize(
+    "result_extra",
+    [
+        {"is_error": True, "subtype": "error_during_execution"},
+        {
+            "is_error": True,
+            "subtype": "error_during_execution",
+            "terminal_reason": "aborted_tools",
+        },
+    ],
+)
+def test_turn_close_queues_rearm_whatever_the_outcome(
+    result_extra: dict[str, Any],
+) -> None:
+    state, _ = _live_session()
+    _left_plan(state)
+    _result(state, **result_extra)  # first turn, errored / interrupted
+    assert state.plan_rearm_pending
+    state.plan_rearm_pending = False
+    _open_turn(state)
+    _result(state, **result_extra)  # a live follow-up turn, cancelled
+    assert state.plan_rearm_pending
+
+
+async def test_denied_plan_queues_nothing() -> None:
+    state, _ = _live_session()
+    _init(state, "plan")
+    _control(state, "req-epm", "ExitPlanMode")
+    await _tap("deny", "req-epm")
+    _result(state)
+    assert not state.plan_rearm_pending
+
+
+@pytest.mark.parametrize(
+    "mode",
+    ["auto", "dontAsk", "bypassPermissions", "default", "manual", "acceptEdits", None],
+)
+def test_non_plan_modes_never_rearm(mode: str | None) -> None:
+    state, _ = _live_session()
+    state.configured_plan_mode = False
+    state.prompting_mode = mode in {"default", "manual", "acceptEdits"}
+    _init(state, "plan")  # Claude entered plan mode itself
+    _status(state, "default")
+    with capture_logs() as logs:
+        _result(state)
+    assert not state.plan_rearm_pending
+    assert _claim_plan_rearm(state, SID, reason="followup") is None
+    assert not [
+        e for e in logs if e["event"].startswith("claude.permission_mode.rearm")
+    ]
+
+
+def test_plan_never_observed_never_rearms() -> None:
+    """--dangerously-skip-permissions overrides plan: never fight it."""
+    state, _ = _live_session()
+    _init(state, "bypassPermissions")
+    _result(state)
+    assert not state.plan_mode_observed
+    assert not state.plan_rearm_pending
+    assert _claim_plan_rearm(state, SID, reason="followup") is None
+
+
+async def test_plan_auto_rearms_on_followup_only() -> None:
+    """Decision 6: plan-auto is re-armed before follow-ups, never at idle."""
+    state, stdin = _live_session()
+    state.auto_approve_exit_plan_mode = True
+    _init(state, "plan")
+    assert _control(state, "req-pa", "ExitPlanMode") == []  # the stamp
+    _status(state, "default")
+    _result(state)
+    assert not state.plan_rearm_pending
+    _register_live(state, stdin)
+    assert await inject_when_idle(SID, "next", command_uuid="cmd-pa")
+    assert _kinds(stdin) == ["set_permission_mode", "user"]
+    # The next ExitPlanMode is still rubber-stamped.
+    state.plan_rearm_inflight = None
+    _open_turn(state)
+    assert _control(state, "req-pa-2", "ExitPlanMode") == []
+    assert "req-pa-2" in state.auto_approve_queue
+
+
+def test_plan_auto_idle_rearm_when_decision_flips(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(claude_mod, "_PLAN_AUTO_REARM_AT_IDLE", True)
+    state, _ = _live_session()
+    state.auto_approve_exit_plan_mode = True
+    _left_plan(state)
+    _result(state)
+    assert state.plan_rearm_pending
+
+
+def test_claim_is_single_flight() -> None:
+    state, _ = _live_session()
+    _left_plan(state)
+    _result(state)
+    assert _claim_plan_rearm(state, SID, reason="idle") is not None
+    assert _claim_plan_rearm(state, SID, reason="followup") is None
+
+
+def test_rearm_request_shape_and_namespace() -> None:
+    state, _ = _live_session()
+    _left_plan(state)
+    _result(state)
+    payload = _claim_plan_rearm(state, SID, reason="idle")
+    assert payload is not None and payload.endswith(b"\n")
+    line = json.loads(payload)
+    assert line == {
+        "type": "control_request",
+        "request_id": line["request_id"],
+        "request": {"subtype": "set_permission_mode", "mode": "plan"},
+    }
+    import re
+
+    assert re.fullmatch(rf"ut_plan_rearm_{SID}_\d+", line["request_id"])
+    assert not line["request_id"].startswith("req_")
+    assert state.plan_rearm_inflight == line["request_id"]
+    assert not state.plan_rearm_pending
+
+
+def test_stale_ack_ignored() -> None:
+    state, _ = _live_session()
+    _left_plan(state)
+    state.plan_rearm_inflight = "ut_plan_rearm_sess-383_2"
+    _ack(state, "ut_plan_rearm_sess-383_1")  # an older request
+    assert state.plan_rearm_inflight == "ut_plan_rearm_sess-383_2"
+    assert state.effective_permission_mode == "default"
+
+
+async def test_inject_writes_rearm_before_user_line() -> None:
+    state, stdin = _live_session()
+    _left_plan(state)
+    _result(state)
+    state.plan_rearm_pending = False  # e.g. the idle write failed
+    _register_live(state, stdin)
+    with capture_logs() as logs:
+        assert await inject_when_idle(SID, "next", command_uuid="cmd-1")
+    assert _kinds(stdin) == ["set_permission_mode", "user"]
+    sent = [e for e in logs if e["event"] == "claude.permission_mode.rearm_sent"]
+    assert sent and sent[0]["reason"] == "followup"
+
+
+async def test_inject_without_need_writes_only_user_line() -> None:
+    state, stdin = _live_session()
+    _init(state, "plan")
+    _result(state)
+    _register_live(state, stdin)
+    assert await inject_when_idle(SID, "next", command_uuid="cmd-1")
+    assert _kinds(stdin) == ["user"]
+
+
+def _thread_job() -> ThreadJob:
+    return ThreadJob(
+        chat_id=123,
+        user_msg_id=20,
+        text="again",
+        resume_token=ResumeToken(engine="claude", value=SID),
+        progress_ref=MessageRef(channel_id=123, message_id=99),
+    )
+
+
+async def test_inject_refuses_after_failed_rearm(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    state, stdin = _live_session()
+    _left_plan(state)
+    _result(state)
+    state.plan_rearm_failed = True
+    _register_live(state, stdin)
+    assert not await inject_when_idle(SID, "next", command_uuid="cmd-1")
+    close = AsyncMock(return_value=True)
+    monkeypatch.setattr(claude_mod, "close_live_session", close)
+    assert not await inject_live_followup(_thread_job())
+    close.assert_awaited_once_with(
+        SID, "plan_rearm_failed", notice=False, only_if_idle=True
+    )
+    assert _kinds(stdin) == []
+
+
+async def test_idle_steer_rearms_mid_turn_steer_does_not() -> None:
+    state, stdin = _live_session()
+    _left_plan(state)
+    _result(state)
+    state.plan_rearm_pending = False
+    _register_live(state, stdin)
+    assert await steer_into_session(SID, "idle steer", command_uuid="c1") == (
+        "written_idle"
+    )
+    assert _kinds(stdin) == ["set_permission_mode", "user"]
+    # Mid-turn: a fold, not a boundary.
+    stdin.send.reset_mock()
+    state.plan_rearm_inflight = None
+    _open_turn(state)
+    _status(state, "default")
+    assert await steer_into_session(SID, "mid steer", command_uuid="c2") == "steered"
+    assert _kinds(stdin) == ["user"]
+
+
+def test_rearm_only_in_live_mode() -> None:
+    state, _ = _live_session()
+    state.live_mode = False
+    _left_plan(state)
+    _result(state)
+    assert not state.plan_rearm_pending
+    assert _claim_plan_rearm(state, SID, reason="followup") is None
+
+
+async def test_kill_switch_disables_rearm_but_not_clearing() -> None:
+    state, stdin = _live_session()
+    state.rearm_plan_mode = False
+    _init(state, "plan")
+    _control(state, "req-epm", "ExitPlanMode")
+    await _tap("approve", "req-epm")
+    _status(state, "default")
+    _result(state)
+    assert not state.plan_rearm_pending
+    _register_live(state, stdin)
+    stdin.send.reset_mock()
+    assert await inject_when_idle(SID, "next", command_uuid="cmd-1")
+    assert _kinds(stdin) == ["user"]
+    _open_turn(state)
+    assert SID not in _PLAN_EXIT_APPROVED
+
+
+async def test_followup_after_idle_rearm_writes_nothing_extra() -> None:
+    state, stdin = _live_session()
+    _left_plan(state)
+    _result(state)
+    payload = _claim_plan_rearm(state, SID, reason="idle")
+    assert payload is not None
+    _ack(state, state.plan_rearm_inflight or "")
+    _status(state, "plan")
+    assert state.effective_permission_mode == "plan"
+    _register_live(state, stdin)
+    assert await inject_when_idle(SID, "next", command_uuid="cmd-1")
+    assert _kinds(stdin) == ["user"]
+
+
+async def test_rearm_write_failure_resets_inflight() -> None:
+    state, stdin = _live_session()
+    _left_plan(state)
+    _result(state)
+    state.plan_rearm_pending = False
+    stdin.send.side_effect = [OSError("closed"), None]
+    live = _register_live(state, stdin)
+    with capture_logs() as logs:
+        assert not await claude_mod._write_plan_rearm_if_needed(live, reason="x")
+    assert state.plan_rearm_inflight is None
+    assert [
+        e for e in logs if e["event"] == "claude.permission_mode.rearm_write_failed"
+    ]
+
+
+async def test_idle_steer_after_failed_rearm_falls_back() -> None:
+    """A refused re-arm must not let an idle steer run unplanned: it falls
+    back to the queue path, which closes the session and resumes fresh."""
+    state, stdin = _live_session()
+    _left_plan(state)
+    _result(state)
+    state.plan_rearm_pending = False
+    state.plan_rearm_failed = True
+    _register_live(state, stdin)
+    assert await steer_into_session(SID, "x", command_uuid="c1") == "options_changed"
+    assert _kinds(stdin) == []

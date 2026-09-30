@@ -622,6 +622,12 @@ class WatchdogSettings(BaseModel):
     # #776: absolute lifetime cap for one live Claude process, from spawn
     # (backstop against e.g. an endless Monitor). Range 10 min - 24 h.
     live_session_max_s: float = Field(default=14400.0, ge=600, le=86400)
+    # #383: in a plan / plan-auto chat, put a live Claude session back into
+    # plan mode (the CLI's own ``set_permission_mode``) when an approved plan
+    # took it out, so later follow-ups (and, in plan chats, background
+    # wake-ups) are planned again. Read per spawn. Kill switch: false = never
+    # sent (pre-rc15 behaviour; each plan approval then lasts the process).
+    rearm_plan_mode: bool = True
     # #812: keep a live Claude session's stdin open while a hook the CLI
     # runs in the background (``async`` / ``asyncRewake``) is still pending,
     # so an ``asyncRewake`` hook's findings arrive as their own wake turn

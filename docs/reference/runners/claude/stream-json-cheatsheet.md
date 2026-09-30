@@ -267,6 +267,16 @@ Emitted on **every** change of the CLI's permission mode — an approved `ExitPl
 
 `system/init.permissionMode` reports the mode each turn starts in (live follow-up turns included on 2.1.285). Untether tracks the effective mode from both (`claude.permission_mode.changed`); neither produces an Untether event.
 
+Untether's plan re-arm (host → CLI, handled inline by the CLI's stdin reader, not queued behind a turn) and its answers:
+
+```json
+{"type":"control_request","request_id":"ut_plan_rearm_<sid>_1","request":{"subtype":"set_permission_mode","mode":"plan"}}
+{"type":"control_response","response":{"subtype":"success","request_id":"ut_plan_rearm_<sid>_1","response":{"mode":"plan"}}}
+{"type":"control_response","response":{"subtype":"error","request_id":"…","error":"…","error_code":"invalid_mode"}}
+```
+
+A real change is followed by the `system/status` frame above; `plan` while already `plan` is acked with no status frame. Refusal codes (2.1.285): `invalid_mode`, `bypass_*` (target `bypassPermissions`) and `auto_mode_*` (target `auto`) — `plan` is never refused.
+
 ### Hook lifecycle (`system` subtypes, `--include-hook-events`) — #812
 
 Emitted only when Untether passes `--include-hook-events` (control-channel mode, CLI lists the

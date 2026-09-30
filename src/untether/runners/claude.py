@@ -44,6 +44,7 @@ from ..model import (
     EngineId,
     ResumeToken,
     StartedEvent,
+    TurnEvent,
     UntetherEvent,
 )
 from ..runner import (
@@ -841,6 +842,11 @@ async def inject_when_idle(
                 if not live.accepting_input:
                     return False
                 if live.idle and not live.state.awaiting_injected:
+                    if live.state.plan_rearm_failed:
+                        # #383: the CLI refused the plan re-arm — resume a
+                        # fresh plan-mode process instead.
+                        return False
+                    await _write_plan_rearm_if_needed(live, reason="followup")
                     ok = await write_user_message(
                         session_id, text, command_uuid=command_uuid
                     )
@@ -924,6 +930,14 @@ async def steer_into_session(
         ):
             return "options_changed"
         state = live.state
+        if live.idle and state.plan_rearm_failed:
+            # #383: the CLI refused the plan re-arm — never run this turn
+            # unplanned; the queue path closes the session and resumes fresh.
+            return "options_changed"
+        if live.idle:
+            # #383: an idle steer runs as the next turn — re-arm first. A
+            # mid-turn fold is not a boundary.
+            await _write_plan_rearm_if_needed(live, reason="steer")
         # Record before writing: command_lifecycle can race the send.
         state.steered_commands[command_uuid] = text
         ok = await write_user_message(session_id, text, command_uuid=command_uuid)
@@ -1341,6 +1355,17 @@ class ClaudeStreamState:
     # CLIs that emit no status frames.
     plan_exited_at: float | None = None
     plan_exit_turn: int | None = None
+    # #383 plan re-arm (`[watchdog] rearm_plan_mode`, read per spawn).
+    rearm_plan_mode: bool = True
+    plan_rearm_seq: int = 0
+    # Set at a live turn close when the session must go back to plan mode;
+    # drained before the turn-closing event is yielded.
+    plan_rearm_pending: bool = False
+    # Request id of the one re-arm on the wire (single flight).
+    plan_rearm_inflight: str | None = None
+    # The CLI refused a re-arm: the session is closed once idle and the next
+    # message resumes a fresh `--permission-mode plan` process.
+    plan_rearm_failed: bool = False
     # Whether this run is a resume (for error diagnostics)
     resumed: bool = False
     # Track max text block length seen (for cooldown bypass — survives overwrites)
@@ -3087,10 +3112,11 @@ _PLAN_APPROVED_FEEDBACK_RESUMES = " · plan mode resumes when it's done"
 def _plan_mode_resumes(state: ClaudeStreamState) -> bool:
     """True when the chat is a plan chat AND plan mode really comes back once
     the approved reply ends: live sessions off (every message respawns with
-    ``--permission-mode plan``). The approval UI only claims it when true."""
+    ``--permission-mode plan``), or the live-session re-arm is on. The
+    approval UI only claims it when true."""
     if not state.configured_plan_mode:
         return False
-    return not state.live_mode
+    return not state.live_mode or state.rearm_plan_mode
 
 
 def _plan_approve_caption(state: ClaudeStreamState) -> str | None:
@@ -3186,6 +3212,7 @@ def _note_permission_mode(
         state.plan_mode_observed = True
         state.plan_exited_at = None
         state.plan_exit_turn = None
+        state.plan_rearm_failed = False
         # Back in plan mode: nothing the old approval covered is running
         # unplanned any more. `_DISCUSS_APPROVED` is a pre-exit approval
         # and follows only the one-boundary carry.
@@ -3229,9 +3256,20 @@ def _handle_plan_rearm_ack(
     *,
     session_id: str | None,
 ) -> None:
-    """#383: the CLI's answer to our ``set_permission_mode`` request."""
+    """#383: the CLI's answer to our ``set_permission_mode`` request. Only
+    the one in flight counts; a stale id is logged and ignored."""
+    request_id = response.request_id
+    if request_id != state.plan_rearm_inflight:
+        logger.debug(
+            "claude.permission_mode.rearm_ack_stale",
+            session_id=session_id,
+            request_id=request_id,
+            inflight=state.plan_rearm_inflight,
+        )
+        return
+    state.plan_rearm_inflight = None
     match response:
-        case claude_schema.ControlSuccessResponse(request_id=request_id):
+        case claude_schema.ControlSuccessResponse():
             body = response.response or {}
             mode = body.get("mode") if isinstance(body, dict) else None
             logger.info(
@@ -3242,7 +3280,8 @@ def _handle_plan_rearm_ack(
             )
             if isinstance(mode, str):
                 _note_permission_mode(state, mode, source="ack", session_id=session_id)
-        case claude_schema.ControlErrorResponse(request_id=request_id):
+        case claude_schema.ControlErrorResponse():
+            state.plan_rearm_failed = True
             logger.warning(
                 "claude.permission_mode.rearm_failed",
                 session_id=session_id,
@@ -3250,6 +3289,100 @@ def _handle_plan_rearm_ack(
                 error=response.error,
                 error_code=response.error_code,
             )
+
+
+# #383 Decision 6: plan-auto re-arms before follow-ups and idle steers only.
+# Its rubber stamp approves every ExitPlanMode, so planning a wake turn adds
+# no gate — only a plan-model call and an ExitPlanMode round trip per tick.
+_PLAN_AUTO_REARM_AT_IDLE = False
+
+
+def _plan_rearm_needed(state: ClaudeStreamState, *, reason: str) -> bool:
+    """#383: should this live session be put back into CLI plan mode?
+
+    ``reason``: ``idle`` (a turn just closed), ``followup`` or ``steer``
+    (a user line is about to be written). Never for non-plan chats, never
+    outside a live session, never when the CLI never reported plan (its own
+    precedence won, e.g. --dangerously-skip-permissions), never twice."""
+    if not (state.rearm_plan_mode and state.live_mode):
+        return False
+    if not state.configured_plan_mode:
+        return False
+    if (
+        reason == "idle"
+        and state.auto_approve_exit_plan_mode
+        and not _PLAN_AUTO_REARM_AT_IDLE
+    ):
+        return False
+    if not state.plan_mode_observed or state.plan_rearm_failed:
+        return False
+    if state.plan_rearm_inflight is not None:
+        return False
+    return state.effective_permission_mode != "plan" or state.plan_exited_at is not None
+
+
+def _claim_plan_rearm(
+    state: ClaudeStreamState, session_id: str, *, reason: str
+) -> bytes | None:
+    """Claim the (single-flight) re-arm synchronously — before any await, so
+    two writers can't both send — and return the request line, or None."""
+    if not _plan_rearm_needed(state, reason=reason):
+        return None
+    state.plan_rearm_seq += 1
+    request_id = f"{_PLAN_REARM_ID_PREFIX}{session_id}_{state.plan_rearm_seq}"
+    state.plan_rearm_inflight = request_id
+    state.plan_rearm_pending = False
+    request = {
+        "type": "control_request",
+        "request_id": request_id,
+        "request": {"subtype": "set_permission_mode", "mode": "plan"},
+    }
+    return (json.dumps(request) + "\n").encode()
+
+
+async def _send_plan_rearm(
+    state: ClaudeStreamState,
+    stdin: Any,
+    payload: bytes,
+    *,
+    session_id: str,
+    reason: str,
+) -> bool:
+    request_id = state.plan_rearm_inflight
+    try:
+        await _locked_send(stdin, payload)
+    except (OSError, anyio.ClosedResourceError, anyio.BrokenResourceError) as exc:
+        state.plan_rearm_inflight = None
+        logger.warning(
+            "claude.permission_mode.rearm_write_failed",
+            session_id=session_id,
+            request_id=request_id,
+            reason=reason,
+            error_type=exc.__class__.__name__,
+        )
+        return False
+    logger.info(
+        "claude.permission_mode.rearm_sent",
+        session_id=session_id,
+        request_id=request_id,
+        reason=reason,
+        effective=state.effective_permission_mode,
+        turn=state.turn,
+    )
+    return True
+
+
+async def _write_plan_rearm_if_needed(live: LiveSession, *, reason: str) -> bool:
+    """#383 backstop before a follow-up / idle steer is written: FIFO on
+    stdin makes the CLI apply plan before it starts that line's turn (a
+    ``plan`` request can't be refused on 2.1.285, so no ack wait). Call it
+    under ``live.lock``, immediately before ``write_user_message``."""
+    payload = _claim_plan_rearm(live.state, live.session_id, reason=reason)
+    if payload is None:
+        return False
+    return await _send_plan_rearm(
+        live.state, live.stdin, payload, session_id=live.session_id, reason=reason
+    )
 
 
 class _SystemSubtypeHandler(Protocol):
@@ -5064,6 +5197,10 @@ def translate_claude_event(
         if any(isinstance(evt, CompletedEvent) for evt in events):
             state.completed_turns = 1
             state.turn_open = False
+            if state.live_mode:
+                # #383: whatever the outcome — a failed turn can have left
+                # plan mode too.
+                state.plan_rearm_pending = _plan_rearm_needed(state, reason="idle")
             if state.absorbed_cost_baseline is not None:
                 # #778: the absorbed result carried the previous process's
                 # session total — hand it to the cost ledger as a baseline.
@@ -5140,6 +5277,8 @@ def translate_claude_event(
             )
             state.turn_open = False
             state.completed_turns += 1
+            # #383: re-arm plan mode at every live turn close.
+            state.plan_rearm_pending = _plan_rearm_needed(state, reason="idle")
             detail = dict(state.turn_detail)
             if state.turn_reason == "unknown" and state.turn_ended_tasks:
                 # #785: the turn opened before any task event named what it
@@ -6843,11 +6982,23 @@ class ClaudeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
                         session_id=sid,
                         ok=evt.ok,
                     )
+                if state.plan_rearm_pending and (
+                    isinstance(evt, CompletedEvent)
+                    or (isinstance(evt, TurnEvent) and evt.phase == "completed")
+                ):
+                    # #383: put the session back into plan mode BEFORE the
+                    # turn close reaches the bridge — its shielded
+                    # on_completed / turn router can hold this yield for up
+                    # to 60 s, and a wake turn the CLI starts from an
+                    # already-queued notification needs no stdin line.
+                    await self._drain_plan_rearm_pre_yield(state, stdin=session_stdin)
                 yield evt
             # Drain auto-approve and auto-deny queues after EVERY line, even if no events
             # were yielded.  This prevents deadlock when auto-handled requests produce no events.
             await self._drain_auto_approve(state, stdin=session_stdin)
             await self._drain_auto_deny(state, stdin=session_stdin)
+            # #383 backstop: a re-arm the pre-yield drain couldn't write.
+            await self._drain_plan_rearm(state, stdin=session_stdin)
             # #365 fire-and-forget mcp_status control_requests queued by
             # translate_claude_event on tool_result. Drain last so the
             # response (if any) arrives after Claude has processed the
@@ -6953,6 +7104,34 @@ class ClaudeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
                     error=str(e),
                 )
         state.auto_deny_queue.clear()
+
+    async def _drain_plan_rearm_pre_yield(
+        self, state: ClaudeStreamState, *, stdin: Any = None
+    ) -> None:
+        """#383: the idle-boundary re-arm, written before the turn-closing
+        event is yielded (a separate hook so a test can prove the placement
+        matters)."""
+        await self._drain_plan_rearm(state, stdin=stdin)
+
+    async def _drain_plan_rearm(
+        self, state: ClaudeStreamState, *, stdin: Any = None
+    ) -> None:
+        """#383: write the pending idle-boundary ``set_permission_mode plan``
+        re-arm. No-op unless one is pending; skips a closing session or one
+        without stdin."""
+        if not state.plan_rearm_pending:
+            return
+        state.plan_rearm_pending = False
+        session_id = state.factory.resume.value if state.factory.resume else None
+        live = _LIVE_SESSIONS.get(session_id) if session_id else None
+        if session_id is None or live is None or live.closing or stdin is None:
+            return
+        payload = _claim_plan_rearm(state, session_id, reason="idle")
+        if payload is None:
+            return
+        await _send_plan_rearm(
+            state, stdin, payload, session_id=session_id, reason="idle"
+        )
 
     async def _drain_catalog_refresh(
         self, state: ClaudeStreamState, *, stdin: Any = None
@@ -7233,6 +7412,14 @@ class ClaudeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
                 if not live.idle:
                     live.idle_since = None
                     live.hold_started = None
+                    continue
+                if state.plan_rearm_failed:
+                    # #383: the CLI refused the plan re-arm; don't let wake
+                    # turns keep running unplanned. The next message resumes
+                    # a fresh `--permission-mode plan` process.
+                    await close_live_session(
+                        sid, "plan_rearm_failed", only_if_idle=True
+                    )
                     continue
                 if _awaiting_injected(state):
                     # A follow-up was written; its turn hasn't opened yet.
@@ -8556,6 +8743,10 @@ class ClaudeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
                         )
                         live_session_max_s = float(
                             settings_obj.watchdog.live_session_max_s
+                        )
+                        # #383: read per spawn like live_sessions.
+                        state.rearm_plan_mode = bool(
+                            getattr(settings_obj.watchdog, "rearm_plan_mode", True)
                         )
                         # #812: read per spawn like live_sessions.
                         state.hold_for_async_hooks = bool(

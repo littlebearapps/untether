@@ -408,3 +408,75 @@ def test_permission_mode_status_frame_present(cli_blob: mmap.mmap) -> None:
             "installed CLI — #383's effective-mode tracking falls back to the "
             f"approval stamps (last green on CLI {PROBED_CLI_VERSION})"
         )
+
+
+def test_set_permission_mode_subtype_handled(cli_blob: mmap.mmap) -> None:
+    """#383 re-arms plan mode with the parent-initiated set_permission_mode."""
+    for literal in (
+        b'subtype==="set_permission_mode"',
+        b'subtype:"set_permission_mode"',
+    ):
+        if cli_blob.find(literal) == -1:
+            pytest.fail(
+                f"{literal.decode()} is gone from the installed CLI — the #383 "
+                "plan re-arm would go unanswered; re-derive (last green on CLI "
+                f"{PROBED_CLI_VERSION})"
+            )
+
+
+def test_exit_plan_mode_restores_pre_plan_mode(cli_blob: mmap.mmap) -> None:
+    """Approving ExitPlanMode moves the CLI to ``prePlanMode ?? "default"`` —
+    the reason a live session stays out of plan mode (#383)."""
+    for literal in (b'prePlanMode??"default"', b'trigger:"exit_plan_mode"'):
+        if cli_blob.find(literal) == -1:
+            pytest.fail(
+                f"{literal.decode()} is gone from the installed CLI — re-check "
+                "what an approved plan leaves the session in (#383; last green "
+                f"on CLI {PROBED_CLI_VERSION})"
+            )
+
+
+_SET_MODE_VALIDATOR_RE = re.compile(
+    rb"function \w{1,4}\(\w,\w\)\{let \w=\w{1,4}\(\w\);if\(\w===void 0\)"
+    rb'return\{ok:!1,error:\w{1,4},code:"invalid_mode"\}(.{0,1500}?)'
+    rb"return\{ok:!0,mode:\w\}\}"
+)
+
+
+def test_set_permission_mode_refusal_codes(cli_blob: mmap.mmap) -> None:
+    """Guards #383's no-wait FIFO decision (plan §4 alt. 7): the follow-up is
+    written right behind the re-arm without waiting for its ack, which is only
+    safe while the CLI can't refuse a ``plan`` request."""
+    hint = (
+        "re-derive; if plan can now be refused, revisit §4 alternative 7 of the "
+        f"#383 plan (last green on CLI {PROBED_CLI_VERSION})"
+    )
+    match = _SET_MODE_VALIDATOR_RE.search(cli_blob)
+    if match is None:
+        pytest.fail(f"set_permission_mode validator not found — {hint}")
+    body = match.group(1)
+    codes = {"invalid_mode"}
+    codes.update(c.decode() for c in re.findall(rb'code:"([a-z_]+)"', body))
+    codes.update(c.decode() for c in re.findall(rb'"(auto_mode_[a-z_]+)"', body))
+    auto_map = re.search(rb'\{settings:"auto_mode_settings",[^}]*\}', cli_blob)
+    if auto_map is None:
+        pytest.fail(f"auto-mode refusal-code map not found — {hint}")
+    codes.update(
+        c.decode() for c in re.findall(rb'"(auto_mode_[a-z_]+)"', auto_map.group(0))
+    )
+    expected = {
+        "invalid_mode",
+        "bypass_restricted",
+        "bypass_disabled",
+        "bypass_not_launched",
+        "auto_mode_settings",
+        "auto_mode_circuit_breaker",
+        "auto_mode_fast_mode",
+        "auto_mode_model",
+        "auto_mode_unavailable",
+    }
+    if codes != expected:
+        pytest.fail(f"refusal codes {sorted(codes)} != {sorted(expected)} — {hint}")
+    guarded = {m.decode() for m in re.findall(rb'if\(\w==="(\w+)"', body)}
+    if guarded != {"bypassPermissions", "auto"}:
+        pytest.fail(f"guarded target modes {sorted(guarded)} — {hint}")

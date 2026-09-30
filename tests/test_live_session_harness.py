@@ -393,3 +393,84 @@ async def test_812_async_rewake_arrives_as_pushed_hook_feedback(
     assert "\N{HOOK} Hook feedback — Stop" in wake["message"].text
     assert wake["options"].notify is True
     assert wake["options"].reply_to.message_id == 10
+
+
+# ── #383: a queued wake turn after a plan approval starts in plan mode ──────
+
+
+class _PlanTransport(_OrderedTransport):
+    """Taps Approve on the ExitPlanMode keyboard and delivers turn 1's final
+    slowly (2 s), so the bridge's on_completed genuinely holds the yield."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.approved: set[str] = set()
+
+    async def _tap_approvals(self, message: Any) -> None:
+        # MarkdownPresenter renders no keyboard; tap on the approval's text
+        # (the fake's ExitPlanMode request id is fixed).
+        from untether.runners.claude import send_claude_control_response
+
+        if "tool: ExitPlanMode" in (message.text or "") and not self.approved:
+            self.approved.add("req-epm-1")
+            assert "Approve" not in message.text  # the caption, not a button
+            assert await send_claude_control_response("req-epm-1", True)
+
+    async def _slow_final(self, message: Any) -> None:
+        if "PLANNED" in (message.text or ""):
+            await anyio.sleep(2.0)
+
+    async def send(self, *, channel_id, message, options=None):  # type: ignore[override]
+        await self._slow_final(message)
+        ref = await super().send(
+            channel_id=channel_id, message=message, options=options
+        )
+        await self._tap_approvals(message)
+        return ref
+
+    async def edit(self, *, ref, message, wait=True):  # type: ignore[override]
+        await self._slow_final(message)
+        out = await super().edit(ref=ref, message=message, wait=wait)
+        await self._tap_approvals(message)
+        return out
+
+
+class _PlanLiveRunner(_LiveRunner):
+    def env(self, *, state: Any) -> dict[str, str] | None:
+        base = super().env(state=state) or {}
+        for key in (
+            "FAKE_CLAUDE_START_MODE",
+            "FAKE_CLAUDE_WAKE_AFTER_RESULT_S",
+        ):
+            if key in os.environ:
+                base[key] = os.environ[key]
+        return base
+
+
+async def test_383_queued_wake_with_slow_final_delivery(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _watchdog(monkeypatch)
+    monkeypatch.setenv("FAKE_CLAUDE_SCENARIO", "plan_approve_queued_wake")
+    monkeypatch.setenv("FAKE_CLAUDE_START_MODE", "plan")
+    # The bridge consumes the events before the result at its own pace (one
+    # run measured ~100 ms), so the wake turn starts 0.5 s after the result:
+    # still far inside the 2 s slow final, which a post-yield re-arm misses.
+    monkeypatch.setenv("FAKE_CLAUDE_WAKE_AFTER_RESULT_S", "0.5")
+    transport = _PlanTransport()
+    cfg = ExecBridgeConfig(
+        transport=transport, presenter=MarkdownPresenter(), final_notify=False
+    )
+    runner = _PlanLiveRunner(claude_cmd=str(FAKE_CLI), permission_mode="plan")
+    with anyio.fail_after(25.0):
+        await handle_message(
+            cfg,
+            runner=runner,
+            incoming=IncomingMessage(channel_id=123, message_id=10, text="go"),
+            resume_token=None,
+        )
+    assert transport.approved  # the plan was approved from the keyboard
+    wake = [t for k, t, _ in transport.log if k == "send" and "Background task" in t]
+    assert wake and "MODE: plan" in wake[-1]
+    # Approved (not timed out): the plan was re-shown as approved.
+    assert any("Plan (approved)" in t for _, t, _ in transport.log)

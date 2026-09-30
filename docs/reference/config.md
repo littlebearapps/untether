@@ -334,6 +334,7 @@ Budget alerts always appear regardless of `[footer]` settings.
     post_result_bg_max_hold = 1800.0
     live_sessions = true
     live_session_max_s = 14400.0
+    rearm_plan_mode = true
     ```
 
 | Key | Type | Default | Notes |
@@ -364,6 +365,7 @@ Budget alerts always appear regardless of `[footer]` settings.
 | `post_result_bg_max_hold` | float | `1800.0` | ([#647](https://github.com/littlebearapps/untether/issues/647)) Upper bound on how long the post-result ceiling defers its SIGTERM while `/proc` evidence shows the subagent tree still working (0–7200; `0` disables the hold). Independently bounded by the `BG_AGENT_MAX_KEEP_S` handle age-out. Stops the 600s ceiling killing live background subagent work. |
 | `live_sessions` | bool | `true` | ([#776](https://github.com/littlebearapps/untether/issues/776)) Claude only. Keep the session open after its answer while background work runs: background-task, Monitor and scheduled-wake-up turns are delivered as their own Telegram messages, and follow-ups are written into the open session instead of resuming it. With live sessions on, `post_result_limbo_grace` is the idle close (stdin closed gracefully, nothing quarantined) and `post_result_bg_max_hold` is how long background work may run after the last turn. `false` restores the pre-v0.35.5 "stop at the first answer" behaviour. |
 | `live_session_max_s` | float | `14400.0` | ([#776](https://github.com/littlebearapps/untether/issues/776)) Absolute lifetime of one live Claude process from spawn (600–86400). The session is closed with a notice when reached, as a backstop against an endless `Monitor`. |
+| `rearm_plan_mode` | bool | `true` | ([#383](https://github.com/littlebearapps/untether/issues/383)) Claude only, live sessions only. In a `plan` / `plan-auto` chat, approving a plan takes the open Claude session out of plan mode; with this on, Untether puts it back (the CLI's own `set_permission_mode`) when the reply ends, so your next message — and, in `plan` chats, a background wake-up — is planned again. `plan-auto` re-plans your messages only, not wake-ups. Read at each new session. `false` = never sent (an approval then lasts the whole session). |
 
 !!! note "The post-result watchdog is a permanent mitigation ([#569](https://github.com/littlebearapps/untether/issues/569))"
 

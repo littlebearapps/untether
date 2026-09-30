@@ -20,6 +20,8 @@ _SESSION_STDIN: dict[str, anyio.abc.ByteSendStream]   # session_id -> stdin
 _REQUEST_TO_SESSION: dict[str, str]                    # request_id -> session_id
 _OUTLINE_PENDING: set[str]                             # sessions awaiting outline text
 _DISCUSS_APPROVED: set[str]                            # sessions with post-outline approval
+_DISCUSS_CARRY: set[str]                               # #383: approvals already carried one boundary
+_PLAN_EXIT_APPROVED: set[str]                          # #283 diff-preview skip — turn-scoped (#383)
 _PENDING_ASK_REQUESTS: dict[str, tuple[int, str]]       # request_id -> (channel_id, question)
 ```
 
@@ -59,6 +61,21 @@ verbatim.
   to `CLAUDE_CLI_PERMISSION_MODES`; the drift test in
   `tests/test_claude_permission_modes.py` re-derives that set from the
   installed CLI and fails when it rots.
+- **Plan re-arm (#383).** An approved `ExitPlanMode` moves the CLI to
+  `prePlanMode ?? "default"`; a live session used to stay there. The runner
+  tracks the effective mode (`_note_permission_mode` ← `system/init`,
+  `system/status` via `_SYSTEM_SUBTYPE_HANDLERS["status"]`, and our ack) and
+  re-arms with `set_permission_mode plan` **only** when the configured mode
+  maps to CLI `plan` (`state.configured_plan_mode`), the session is live, the
+  CLI reported `plan` at least once (`plan_mode_observed` — never fight
+  `--dangerously-skip-permissions`), it has left plan, and nothing is in
+  flight. Never for prompting modes or the other autonomous modes (`auto`,
+  `dontAsk`, `bypassPermissions`); `plan-auto` only before follow-ups/idle
+  steers (`_PLAN_AUTO_REARM_AT_IDLE = False`, Decision 6). Kill switch
+  `[watchdog] rearm_plan_mode` (read per spawn). Approval flags are
+  turn-scoped regardless: every `_open_followup_turn` clears
+  `_PLAN_EXIT_APPROVED`; an unconsumed `_DISCUSS_APPROVED` survives one
+  boundary (`_DISCUSS_CARRY`). A mid-turn steer fold is never a boundary.
 
 ## AskUserQuestion flow
 
@@ -102,6 +119,7 @@ After the outline-gate auto-deny, synthetic Approve/Deny/Let's discuss buttons (
 - User clicks "Deny" → outline-pending cleared, no auto-approve flag set
 - User clicks "Let's discuss" → control request held open (never responded to) so Claude stays alive; 5-minute safety timeout (`CONTROL_REQUEST_TIMEOUT_SECONDS = 300.0`) cleans up stale held requests
 - Next `ExitPlanMode` checks `_DISCUSS_APPROVED` → auto-approves if present
+- #383: an approval not consumed when its turn ends survives exactly ONE live turn boundary (`_DISCUSS_CARRY`), then is cleared; consuming it discards both sets
 - Synthetic callback_data prefix: `da:` (fits 64-byte Telegram limit)
 - Handled in `claude_control.py` before the normal approve/deny flow
 - Outlines rendered as formatted text via `render_markdown()` + `split_markdown_body()` — approval buttons on last message
@@ -202,7 +220,17 @@ Untether uses this direction in [#365](https://github.com/littlebearapps/untethe
 {"type":"control_request","request_id":"ut_catalog_refresh_<sid>_<seq>","request":{"subtype":"mcp_status"}}
 ```
 
-Drained via `ClaudeRunner._drain_catalog_refresh` alongside `_drain_auto_approve` / `_drain_auto_deny`. **Fire-and-forget** — Untether does not register a pending response entry or parse the eventual `control_response` today. Request IDs use the `ut_<feature>_<session_id>_<seq>` namespace so they can't collide with Claude Code's own `req_*` IDs. If you add another parent-initiated subtype, reuse this namespace convention and extend this section.
+Drained via `ClaudeRunner._drain_catalog_refresh` alongside `_drain_auto_approve` / `_drain_auto_deny`. **Fire-and-forget** — Untether does not register a pending response entry or parse the eventual `control_response`. Request IDs use the `ut_<feature>_<session_id>_<seq>` namespace so they can't collide with Claude Code's own `req_*` IDs. If you add another parent-initiated subtype, reuse this namespace convention and extend this section.
+
+The second user is the **#383 plan re-arm**:
+```json
+{"type":"control_request","request_id":"ut_plan_rearm_<sid>_<seq>","request":{"subtype":"set_permission_mode","mode":"plan"}}
+```
+- **Not** fire-and-forget: the ack is parsed (`StreamControlResponse` arm in `_translate_claude_event_base`, `ut_plan_rearm_` ids only, matched against `state.plan_rearm_inflight`; stale ids are ignored). Success `{"mode":"plan"}` counts as observing plan; an error (`error_code`) logs `claude.permission_mode.rearm_failed` WARN and sets `plan_rearm_failed` → `inject_live_followup` closes the session (`plan_rearm_failed`, `only_if_idle=True`) and the lifecycle does the same once idle.
+- Claimed synchronously (`_claim_plan_rearm`, single flight) and written via `_locked_send`.
+- **Idle boundary: written BEFORE the turn-closing `CompletedEvent` / `TurnEvent(completed)` is yielded** (`_drain_plan_rearm_pre_yield` in `_iter_jsonl_events`), at every live turn close whatever the outcome. Never move it to the post-yield drains: the bridge's `on_completed` / turn router run inside the yield (up to 60 s), and a wake turn the CLI starts from a queued notification reads no stdin line first. A post-yield `_drain_plan_rearm` is only a backstop.
+- Follow-up (`inject_when_idle`) and idle steer (`steer_into_session`) write it again under `live.lock` immediately before the user line if still needed — FIFO on stdin; no ack wait (a `plan` request can't be refused on 2.1.285; drift test `test_set_permission_mode_refusal_codes`).
+- Its `system/status` / `control_response` frames arrive while idle; that is only safe because re-arms are live-only (the #470 `last_event_type` check).
 
 ## After changes
 
