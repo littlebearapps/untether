@@ -541,9 +541,9 @@ Runs initiated by a cron, webhook, or `/at` show provenance in the meta footer a
 - `⚡ webhook:<id>` for webhook-initiated runs
 - `⏰ at:<token>` for `/at <duration>` one-shot delayed runs ([#271](https://github.com/littlebearapps/untether/issues/271) follow-up)
 
-### `/config` → 📡 Triggers page (Tier 2)
+### `/config` → ⏰ Triggers page (Tier 2)
 
-`/config` → **📡 Triggers** (`config:tg`) lists every cron and webhook configured for the current chat ([#271](https://github.com/littlebearapps/untether/issues/271) Tier 2):
+`/config` → **⏰ Triggers** (`config:tg`) lists every cron and webhook configured for the current chat ([#271](https://github.com/littlebearapps/untether/issues/271) Tier 2):
 
 - **Crons**: human-readable `describe_cron(schedule, timezone)`, project, engine, last-fired relative time
 - **Webhooks**: path, auth scheme, project, engine, last-fired
@@ -624,7 +624,7 @@ Use this for uptime monitoring or reverse proxy health checks.
 Pause/resume is wired into `/config` two ways:
 
 1. **Home-page button row** — appears at the bottom of the `/config` home page only when triggers are configured. One-tap toggle.
-2. **Dedicated 📡 Triggers page** (`config:tg`) — shows current state and counts, with a Pause/Resume button at the top. The same page lists per-chat crons and webhooks.
+2. **Dedicated ⏰ Triggers page** (`config:tg`) — shows current state and counts, with a Pause/Resume button at the top. The same page lists per-chat crons and webhooks.
 
 ### Persistence
 

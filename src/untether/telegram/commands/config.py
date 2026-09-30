@@ -20,7 +20,28 @@ from ._permission_mode_text import (
 
 logger = get_logger(__name__)
 
-_DOCS_BASE = "https://littlebearapps.com/tools/untether/how-to/"
+# #296: the help centre is the marketing-site docs sync
+# (littlebearapps.com ``scripts/docs-sync.config.ts``): every top-level page in
+# docs/{tutorials,how-to,reference,explanation,faq} is published flat at
+# ``/help/untether/<file-stem>/``, synced from ``master``.  Anchors are
+# GitHub-slugger heading ids; Zensical ``{#id}`` attr_list ids are NOT
+# honoured there, so never link one.  ``tests/test_config_help_links.py``
+# maps every rendered link to exactly one doc file + heading.
+_HELP_BASE = "https://littlebearapps.com/help/untether/"
+_BUG_REPORT_URL = (
+    "https://github.com/littlebearapps/untether/issues/new?template=bug_report.yml"
+)
+
+
+def _help_url(slug: str, anchor: str | None = None) -> str:
+    """Help-centre URL for a doc file stem (optionally with a heading anchor)."""
+    url = f"{_HELP_BASE}{slug}/"
+    return f"{url}#{anchor}" if anchor else url
+
+
+def _learn_more(slug: str, anchor: str | None = None, label: str = "Learn more") -> str:
+    """``📖 Learn more`` line linking a help-centre page."""
+    return f'📖 <a href="{_help_url(slug, anchor)}">{label}</a>'
 
 
 def _is_callback(ctx: CommandContext) -> bool:
@@ -419,16 +440,11 @@ async def _page_home(ctx: CommandContext) -> None:
             rs_hint = _home_hint("rs", reasoning_label)
         lines.append(f"{home_rs_label}: <b>{reasoning_label}</b>{rs_hint}")
 
-    _HELP_URL = (
-        "https://github.com/littlebearapps/untether?tab=readme-ov-file#-help-guides"
-    )
-    _BUG_URL = (
-        "https://github.com/littlebearapps/untether?tab=readme-ov-file#-contributing"
-    )
+    # #296 D3: the help-centre index, and the same bug template as About.
     lines.append("")
     lines.append(
-        f'📖 <a href="{_HELP_URL}">Help guides</a>'
-        f' · 🐛 <a href="{_BUG_URL}">Report a bug</a>'
+        f'📖 <a href="{_HELP_BASE}">Help guides</a>'
+        f' · 🐛 <a href="{_BUG_REPORT_URL}">Report a bug</a>'
     )
 
     buttons: list[list[dict[str, str]]] = []
@@ -535,17 +551,22 @@ async def _page_home(ctx: CommandContext) -> None:
         buttons.append(row3)
         buttons.append([{"text": "ℹ️ About", "callback_data": "config:ab"}])
 
-    # #294: master trigger pause toggle row — only when triggers are configured
-    # for this transport. Sits below the per-engine layout so it doesn't
-    # crowd the existing rows. Label reflects current state.
-    if triggers_has_any:
-        if triggers_paused:
-            tg_label = "▶️ Resume triggers"
-            tg_action = "config:tg:resume"
-        else:
-            tg_label = "⏸ Pause triggers"
-            tg_action = "config:tg:pause"
-        buttons.append([{"text": tg_label, "callback_data": tg_action}])
+    # #296: a ⏰ Triggers navigation button whenever triggers are enabled
+    # (even with none configured, D2 — the page explains how to add one),
+    # next to #294's one-tap pause/resume toggle when any are configured.
+    # No row when [triggers] is disabled (no manager).
+    if ctx.trigger_manager is not None:
+        tg_row = [{"text": "⏰ Triggers", "callback_data": "config:tg"}]
+        if triggers_has_any:
+            if triggers_paused:
+                tg_row.append(
+                    {"text": "▶️ Resume triggers", "callback_data": "config:tg:resume"}
+                )
+            else:
+                tg_row.append(
+                    {"text": "⏸ Pause triggers", "callback_data": "config:tg:pause"}
+                )
+        buttons.append(tg_row)
 
     await _respond(ctx, "\n".join(lines), buttons)
 
@@ -736,7 +757,7 @@ async def _page_planmode(ctx: CommandContext, action: str | None = None) -> None
             "",
             f"Current: <b>{current_label}</b>",
             "",
-            f'📖 <a href="{_DOCS_BASE}plan-mode/">Learn more</a>',
+            _learn_more("plan-mode"),
         ]
 
         buttons = [
@@ -783,7 +804,7 @@ async def _page_planmode(ctx: CommandContext, action: str | None = None) -> None
             "",
             f"Current: <b>{current_label}</b>",
             "",
-            f'📖 <a href="{_DOCS_BASE}inline-settings/">Learn more</a>',
+            _learn_more("interactive-approval", "codex-cli--approval-policy"),
         ]
 
         buttons = [
@@ -822,7 +843,7 @@ async def _page_planmode(ctx: CommandContext, action: str | None = None) -> None
             "",
             f"Current: <b>{current_label}</b>",
             "",
-            f'📖 <a href="{_DOCS_BASE}inline-settings/">Learn more</a>',
+            _learn_more("interactive-approval", "gemini-cli--approval-mode"),
         ]
 
         buttons = [
@@ -958,7 +979,8 @@ async def _page_loop(ctx: CommandContext, action: str | None = None) -> None:
         f"subscription quota. A 24h <code>/loop 1m</code> can fire up to "
         f"1440 times. Set a budget in 💰 Cost &amp; usage <i>before</i> "
         f"turning Loop mode on — the same daily cost cap applies to loop "
-        f"fires automatically."
+        f"fires automatically.\n\n"
+        f"{_learn_more('schedule-tasks', 'loop-mode')}"
     )
     buttons = [
         [
@@ -1024,7 +1046,7 @@ async def _page_verbose(ctx: CommandContext, action: str | None = None) -> None:
         "",
         f"Current: <b>{current_label}</b>",
         "",
-        f'📖 <a href="{_DOCS_BASE}verbose-progress/">Learn more</a>',
+        _learn_more("verbose-progress"),
     ]
 
     is_on = current == "verbose"
@@ -1131,7 +1153,8 @@ async def _page_engine(ctx: CommandContext, action: str | None = None) -> None:
 
     lines += [
         "",
-        f'📖 <a href="{_DOCS_BASE}switch-engines/">Learn more</a>',
+        f'📖 <a href="{_help_url("switch-engines")}">Engines</a>'
+        f' · <a href="{_help_url("model-reasoning")}">Models</a>',
     ]
 
     engine_buttons = [
@@ -1210,7 +1233,7 @@ async def _page_trigger(ctx: CommandContext, action: str | None = None) -> None:
         "",
         f"Current: <b>{current_label}</b>",
         "",
-        f'📖 <a href="{_DOCS_BASE}group-chat/">Learn more</a>',
+        _learn_more("group-chat", "set-listen-mode-for-groups"),
     ]
 
     buttons = [
@@ -1305,7 +1328,7 @@ async def _page_followup(ctx: CommandContext, action: str | None = None) -> None
             f"⚠️ Steer is Claude Code only — <b>{current_engine}</b> runs "
             "always queue follow-ups.",
         ]
-    lines += ["", f'📖 <a href="{_DOCS_BASE}steer-follow-ups/">Learn more</a>']
+    lines += ["", _learn_more("steer-follow-ups")]
 
     buttons = [
         [
@@ -1540,7 +1563,7 @@ async def _page_reasoning(ctx: CommandContext, action: str | None = None) -> Non
         f"Engine: <b>{current_engine}</b>",
         f"Current: <b>{current_label}</b>",
         "",
-        f'📖 <a href="{_DOCS_BASE}model-reasoning/">Learn more</a>',
+        _learn_more("model-reasoning", "set-reasoning-level"),
     ]
 
     # Build level buttons dynamically based on engine
@@ -1688,7 +1711,7 @@ async def _page_ask_questions(ctx: CommandContext, action: str | None = None) ->
         "",
         f"Current: <b>{current_label}</b>",
         "",
-        f'📖 <a href="{_DOCS_BASE}inline-settings/">Learn more</a>',
+        _learn_more("interactive-approval", "answering-questions"),
     ]
 
     buttons = [
@@ -1815,7 +1838,7 @@ async def _page_diff_preview(ctx: CommandContext, action: str | None = None) -> 
         "",
         f"Current: <b>{current_label}</b>",
         "",
-        f'📖 <a href="{_DOCS_BASE}interactive-approval/">Learn more</a>',
+        _learn_more("interactive-approval", "diff-previews"),
     ]
 
     buttons = [
@@ -1978,7 +2001,7 @@ async def _page_cost_usage(ctx: CommandContext, action: str | None = None) -> No
     lines.append("  Set limits in untether.toml [cost_budget] section.")
     lines.append("")
 
-    lines.append(f'📖 <a href="{_DOCS_BASE}cost-budgets/">Learn more</a>')
+    lines.append(_learn_more("cost-budgets"))
 
     # Determine budget defaults from global config
     budget_default_enabled = budget_cfg.enabled if budget_cfg is not None else False
@@ -2113,7 +2136,7 @@ async def _page_resume_line(ctx: CommandContext, action: str | None = None) -> N
         "Reply to continue in Telegram, or copy-paste into your",
         "terminal to pick up the session in CLI.",
         "",
-        f'📖 <a href="{_DOCS_BASE}conversation-modes/">Learn more</a>',
+        _learn_more("conversation-modes", "resume-lines-in-chat-mode"),
     ]
 
     buttons = [
@@ -2155,7 +2178,7 @@ async def _page_about(ctx: CommandContext, action: str | None = None) -> None:
     lines.append("")
     lines.append(
         f'🔗 <a href="{_REPO_URL}">GitHub</a>'
-        f' · <a href="{_REPO_URL}/issues/new?template=bug_report.yml">Report a bug</a>'
+        f' · <a href="{_BUG_REPORT_URL}">Report a bug</a>'
         f' · <a href="{_REPO_URL}/issues/new?template=feature_request.yml">Feature request</a>'
     )
 
@@ -2202,8 +2225,9 @@ def _truncate_field(value: str | None, limit: int = 24) -> str:
 async def _page_triggers(ctx: CommandContext, action: str | None = None) -> None:
     """Triggers control + per-chat visibility page.
 
-    Lives on its own ``/config`` page distinct from ``/config → 📡 Trigger``
-    (which is the listen-mode all/mentions chat-routing setting). Pause/resume
+    Lives on its own ``/config`` page distinct from ``/config → 📡 Listen``
+    (the all/mentions chat-routing setting, renamed from Trigger in #297).
+    Reached from the ``⏰ Triggers`` home button (#296). Pause/resume
     is the master kill-switch (#294). Below the controls, when triggers are
     configured for the current chat, the page lists each cron and webhook
     with its schedule/path, project, engine, and last-fired timestamp (#271
@@ -2219,7 +2243,9 @@ async def _page_triggers(ctx: CommandContext, action: str | None = None) -> None
     if mgr is None:
         await _respond(
             ctx,
-            "<b>⏰ Triggers</b>\n\nUnavailable (transport has no trigger support).",
+            "<b>⏰ Triggers</b>\n\nUnavailable: set <code>[triggers] enabled = true</code>"
+            " in <code>untether.toml</code> and restart to use crons and webhooks.\n\n"
+            + _learn_more("webhooks-and-cron"),
             [[{"text": "← Back", "callback_data": "config:home"}]],
         )
         return
@@ -2251,7 +2277,7 @@ async def _page_triggers(ctx: CommandContext, action: str | None = None) -> None
             "No crons or webhooks configured.",
             "",
             "Add <code>[[triggers.crons]]</code> or <code>[[triggers.webhooks]]</code> "
-            "entries to <code>untether.toml</code> — see the trigger docs.",
+            "entries to <code>untether.toml</code>.",
         ]
     else:
         if is_paused:
@@ -2319,6 +2345,8 @@ async def _page_triggers(ctx: CommandContext, action: str | None = None) -> None
                     lines.append(
                         f"…and {overflow} more (see <code>untether.toml</code>)"
                     )
+
+    lines += ["", _learn_more("webhooks-and-cron")]
 
     buttons: list[list[dict[str, str]]] = []
     if has_any:

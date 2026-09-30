@@ -937,3 +937,17 @@ Tier 7 **Q2** (`/config`) and **Q8** (`/planmode`), Tier 2 **C1** / **C3** with 
 | **R15-8n** (C5 precondition) | with **off** and diff preview on: `create /tmp/c5.txt containing hello` | record whether a Write approval with a diff preview appears. If yes, rewrite C5 to this recipe and drop its "pending R15-8" note; if no, leave the note and file a playbook issue |
 
 Clean-up: restore the chat's previous mode (`/planmode clear` or what `show` printed before a); `rm -f /tmp/r15-8-probe /tmp/c1-probe /tmp/c5.txt`. Offline evidence: `tests/test_planmode_command.py`, `tests/test_config_command.py::TestPlanMode` / `TestPermissionModeHomeHints`.
+
+### #296 — `/config` help links and the `⏰ Triggers` home button
+
+Tier 7 **Q2** (`/config`) + Tier 4 **O3** (Listen via `/config` → 📡 Listen). Claude chat `5284581592`, Codex chat `4929463515`. Every dev restart must come from a shell **outside** any dev-bot session (#547). Logs: `journalctl --user -u untether-dev -o cat --since "30 minutes ago" | grep -E "config\.triggers\.(paused|resumed)|callback\.parse_failed|handle\.worker_failed"` — the first two only when R15-12-2 ran; never `callback.parse_failed` / `handle.worker_failed`.
+
+| ID | Scenario | What to do | Pass criteria |
+|---|---|---|---|
+| **R15-12-1** | Help links resolve | (a) Offline: `uv run python -m tests.test_config_help_links > /tmp/r15-12-urls.txt` (every page × engine incl. Triggers, Gemini, home footer, About), then `while read u; do printf '%s %s\n' "$(curl -s -o /dev/null -w '%{http_code}' -L --max-time 15 "$u")" "$u"; done < /tmp/r15-12-urls.txt`, and for each `#anchor` URL `curl -sL "${u%%#*}" \| grep -c "id=\"${u##*#}\""`. (b) Telegram presence: `/config` in the Claude chat, open each sub-page and confirm a `📖` line (Engine & model shows `Engines · Models`); Approval policy in the Codex chat | (a) every help URL **200**, every anchor count ≥ 1; `steer-follow-ups/` is **expected 404** until v0.35.5 stable syncs from master; allowlisted GitHub URLs 200. (b) every opened page shows its 📖 line. *Offline run 2026-10-01 (rc15 lane): 19 URLs, 18 × 200 + all 9 anchors = 1, `steer-follow-ups/` 404 as expected* |
+| **R15-12-2** | Triggers home button | Back up: `cp ~/.untether-dev/untether.toml /tmp/r15-12-dev.toml.bak`. Set `[triggers] enabled = true` with one cron (`id="r15-probe"`, `schedule="0 4 1 1 *"`, `chat_id=-5284581592`, prompt `"noop"`), restart dev, `/config` in the Claude chat | Last row `⏰ Triggers` / `⏸ Pause triggers`; status line `⏰ Triggers: active`. Tapping `⏰ Triggers` edits in place to the page listing `r15-probe` with `📖 Learn more`. Pause → toast `⏸ Triggers paused` + `config.triggers.paused`; Resume → `config.triggers.resumed` |
+| **R15-12-3** | Enabled, zero triggers (global count) | Remove the cron (keep `enabled = true`), restart dev, `/config` | Home shows `⏰ Triggers` alone; the page says "No crons or webhooks configured." with a 📖 link |
+| **R15-12-cleanup** | Unconditional restore | `cp /tmp/r15-12-dev.toml.bak ~/.untether-dev/untether.toml && systemctl --user restart untether-dev` (outside-session rule); `grep -A1 '^\[triggers\]' ~/.untether-dev/untether.toml` | `enabled = false`; `/ping` in the Claude chat shows no `⏰ triggers:` line |
+| **R15-12-4** | Emoji | `/config` in Claude + Codex chats | `📡` only on Listen; every Triggers label uses ⏰ |
+
+R15-12-5 (🔧 More) is not applicable: Decision 1 deferred the More page to v0.35.6.

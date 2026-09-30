@@ -2955,7 +2955,7 @@ class TestCostUsageToasts:
 class TestDocsLinks:
     """Each sub-page should include a docs link."""
 
-    _DOCS_BASE = "littlebearapps.com/tools/untether/how-to/"
+    _DOCS_BASE = "littlebearapps.com/help/untether/"
 
     @pytest.mark.anyio
     async def test_planmode_has_docs_link(self, tmp_path):
@@ -3068,6 +3068,168 @@ class TestDocsLinks:
         assert "Report a bug" in text
         assert "Settings guide" not in text
         assert "Troubleshooting" not in text
+        # #296 D3: help-centre index + the About page's bug template.
+        assert 'href="https://littlebearapps.com/help/untether/"' in text
+        assert "issues/new?template=bug_report.yml" in text
+
+    @pytest.mark.anyio
+    async def test_loop_has_docs_link(self, tmp_path):
+        ctx = _make_ctx(
+            args_text="loop",
+            text="config:loop",
+            config_path=tmp_path / "prefs.json",
+            default_engine="claude",
+        )
+        await ConfigCommand().handle(ctx)
+        assert (
+            "littlebearapps.com/help/untether/schedule-tasks/#loop-mode"
+            in _last_edit_msg(ctx).text
+        )
+
+    @pytest.mark.anyio
+    @pytest.mark.parametrize("with_manager", [True, False])
+    async def test_triggers_has_docs_link(self, tmp_path, with_manager):
+        from untether.triggers.manager import TriggerManager
+
+        ctx = _make_ctx(args_text="tg", text="config:tg")
+        ctx.trigger_manager = TriggerManager() if with_manager else None
+        await ConfigCommand().handle(ctx)
+        assert (
+            "littlebearapps.com/help/untether/webhooks-and-cron/"
+            in _last_edit_msg(ctx).text
+        )
+
+    @pytest.mark.anyio
+    async def test_resume_line_links_tutorial(self, tmp_path):
+        ctx = _make_ctx(
+            args_text="rl",
+            text="config:rl",
+            config_path=tmp_path / "prefs.json",
+            default_engine="claude",
+        )
+        await ConfigCommand().handle(ctx)
+        assert (
+            "help/untether/conversation-modes/#resume-lines-in-chat-mode"
+            in _last_edit_msg(ctx).text
+        )
+
+    @pytest.mark.anyio
+    async def test_codex_approval_links_interactive_approval(self, tmp_path):
+        ctx = _make_ctx(
+            args_text="pm", text="config:pm", config_path=tmp_path / "prefs.json"
+        )
+        await ConfigCommand().handle(ctx)
+        assert (
+            "help/untether/interactive-approval/#codex-cli--approval-policy"
+            in _last_edit_msg(ctx).text
+        )
+
+    @pytest.mark.anyio
+    async def test_ask_mode_links_answering_questions(self, tmp_path):
+        ctx = _make_ctx(
+            args_text="aq",
+            text="config:aq",
+            config_path=tmp_path / "prefs.json",
+            default_engine="claude",
+        )
+        await ConfigCommand().handle(ctx)
+        assert (
+            "help/untether/interactive-approval/#answering-questions"
+            in _last_edit_msg(ctx).text
+        )
+
+    @pytest.mark.anyio
+    async def test_engine_page_has_models_link(self, tmp_path):
+        ctx = _make_ctx(
+            args_text="ag", text="config:ag", config_path=tmp_path / "prefs.json"
+        )
+        await ConfigCommand().handle(ctx)
+        text = _last_edit_msg(ctx).text
+        assert "help/untether/switch-engines/" in text
+        assert "help/untether/model-reasoning/" in text
+        assert ">Engines</a> · <a" in text
+
+
+# ---------------------------------------------------------------------------
+# #296: ⏰ Triggers home row
+# ---------------------------------------------------------------------------
+
+
+def _trigger_manager(*, crons: int = 0):
+    from untether.triggers.manager import TriggerManager
+    from untether.triggers.settings import parse_trigger_config
+
+    if crons == 0:
+        return TriggerManager()
+    return TriggerManager(
+        parse_trigger_config(
+            {
+                "enabled": True,
+                "crons": [
+                    {"id": f"c{i}", "schedule": "0 9 * * *", "prompt": "x"}
+                    for i in range(crons)
+                ],
+            }
+        )
+    )
+
+
+class TestHomeTriggersRow:
+    @staticmethod
+    async def _home(tmp_path, mgr, engine: str = "claude"):
+        ctx = _make_ctx(config_path=tmp_path / "prefs.json", default_engine=engine)
+        ctx.trigger_manager = mgr
+        await ConfigCommand().handle(ctx)
+        return _last_send_msg(ctx)
+
+    @staticmethod
+    def _last_row(msg) -> list[dict[str, str]]:
+        return msg.extra["reply_markup"]["inline_keyboard"][-1]
+
+    @pytest.mark.anyio
+    async def test_no_row_without_manager(self, tmp_path):
+        msg = await self._home(tmp_path, None)
+        assert not any(d.startswith("config:tg") for d in _buttons_data(msg))
+
+    @pytest.mark.anyio
+    async def test_nav_and_pause_when_configured(self, tmp_path):
+        row = self._last_row(await self._home(tmp_path, _trigger_manager(crons=1)))
+        assert [b["callback_data"] for b in row] == ["config:tg", "config:tg:pause"]
+        assert row[0]["text"].startswith("⏰ Triggers")
+        assert row[1]["text"].startswith("⏸")
+
+    @pytest.mark.anyio
+    async def test_nav_and_resume_when_paused(self, tmp_path):
+        mgr = _trigger_manager(crons=1)
+        mgr.pause()
+        row = self._last_row(await self._home(tmp_path, mgr))
+        assert [b["callback_data"] for b in row] == ["config:tg", "config:tg:resume"]
+        assert row[1]["text"] == "▶️ Resume triggers"
+
+    @pytest.mark.anyio
+    async def test_nav_only_when_enabled_but_empty(self, tmp_path):
+        row = self._last_row(await self._home(tmp_path, _trigger_manager()))
+        assert [b["callback_data"] for b in row] == ["config:tg"]
+
+    @pytest.mark.anyio
+    @pytest.mark.parametrize("engine", ["codex", "opencode"])
+    async def test_row_present_for_codex_and_opencode(self, tmp_path, engine):
+        msg = await self._home(tmp_path, _trigger_manager(crons=1), engine=engine)
+        assert [b["callback_data"] for b in self._last_row(msg)] == [
+            "config:tg",
+            "config:tg:pause",
+        ]
+
+    @pytest.mark.anyio
+    async def test_listen_keeps_satellite_emoji(self, tmp_path):
+        msg = await self._home(tmp_path, _trigger_manager(crons=1))
+        labels = {
+            b["text"]: b["callback_data"]
+            for row in msg.extra["reply_markup"]["inline_keyboard"]
+            for b in row
+        }
+        assert labels["📡 Listen"] == "config:tr"
+        assert not any("📡" in label and "Trigger" in label for label in labels)
 
 
 # ---------------------------------------------------------------------------
@@ -3514,6 +3676,17 @@ class TestBudgetToasts:
 
 
 class TestTriggersPage:
+    @pytest.mark.anyio
+    async def test_title_uses_alarm_clock(self, tmp_path):
+        ctx = _make_ctx(args_text="tg", text="config:tg")
+        ctx.trigger_manager = _trigger_manager(crons=1)
+        await ConfigCommand().handle(ctx)
+        msg = _last_edit_msg(ctx)
+        assert msg.text.startswith("<b>⏰ Triggers")
+        assert not any(
+            "📡" in label and "Trigger" in label for label in _buttons_labels(msg)
+        )
+
     @pytest.mark.anyio
     async def test_no_trigger_manager_shows_unavailable(self, tmp_path):
         cmd = ConfigCommand()

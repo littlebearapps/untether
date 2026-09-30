@@ -34,6 +34,7 @@ Follow-up: queue  · wait for the run
 [📡 Listen]        [🔁 Loop mode]
 [🧠 Reasoning]     [⚙️ Engine & model]
 [↪️ Follow-up]     [ℹ️ About]
+[⏰ Triggers]      [⏸ Pause triggers]   ← only when [triggers] is enabled
 
 📖 Help guides · 🐛 Report a bug
 ```
@@ -52,6 +53,7 @@ Tap any button to open that setting's page. Each sub-page shows:
 - Buttons to change the value
 - A **Clear override** button to revert to the global/engine default
 - A **← Back** button to return to the home page
+- A **📖 Learn more** link to the matching page of the help centre (`littlebearapps.com/help/untether/…`)
 
 ## Toggle behaviour
 
@@ -110,7 +112,7 @@ Approval policy appears instead of Permission mode when the engine is Codex CLI.
 
 ### Triggers page {#triggers-page}
 
-When `[triggers]` is enabled and at least one cron or webhook is configured, the home page gains a one-button toggle row at the bottom and a dedicated `📡 Triggers` button that opens the Triggers page (`config:tg`) ([#271](https://github.com/littlebearapps/untether/issues/271) Tier 2 + [#294](https://github.com/littlebearapps/untether/issues/294)).
+When `[triggers]` is enabled, the home page gains a bottom row with a `⏰ Triggers` button that opens the Triggers page (`config:tg`), even when nothing is configured yet (the page then explains how to add one). When at least one cron or webhook is configured, the same row also carries the one-tap **⏸ Pause triggers** / **▶️ Resume triggers** toggle ([#296](https://github.com/littlebearapps/untether/issues/296)) ([#271](https://github.com/littlebearapps/untether/issues/271) Tier 2 + [#294](https://github.com/littlebearapps/untether/issues/294)).
 
 The Triggers page shows:
 
@@ -119,7 +121,7 @@ The Triggers page shows:
 * **Per-chat cron list** — each line shows the cron `id`, human-readable schedule via `describe_cron(schedule, timezone)`, project, engine, and last-fired relative time.
 * **Per-chat webhook list** — each line shows the webhook `id`, path, auth scheme, project, engine, and last-fired.
 
-Lists are scoped to the current chat (`crons_for_chat()` / `webhooks_for_chat()` with the bridge `default_chat_id` fallback), capped at 10 entries with a `…and N more (see untether.toml)` overflow marker. The pause/resume controls remain visible even when the chat has no triggers configured.
+Lists are scoped to the current chat (`crons_for_chat()` / `webhooks_for_chat()` with the bridge `default_chat_id` fallback), capped at 10 entries with a `…and N more (see untether.toml)` overflow marker. The pause/resume controls remain visible even when the chat has no triggers configured. `📡` is Listen only; Triggers always use `⏰`, matching `/ping` and the run footer.
 
 See [Schedule tasks](schedule-tasks.md#pausing-all-triggers) for the pause flow end-to-end.
 

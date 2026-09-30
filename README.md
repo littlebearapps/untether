@@ -103,7 +103,7 @@ The wizard offers three **workflow modes** — pick the one that fits:
 - 💬 **Forum topics** — map Telegram topics to projects and branches
 - 📤 **Session export** — `/export` for markdown or JSON transcripts
 - 🗂️ **File browser** — `/browse` to navigate project files with inline buttons
-- ⚙️ **Inline settings** — `/config` opens an in-place settings menu; toggle plan mode, ask mode, approval policy (Codex), verbose, engine, model, reasoning, and listen mode with buttons; dedicated `📡 Triggers` page lists per-chat crons/webhooks with last-fired times and a master pause/resume toggle
+- ⚙️ **Inline settings** — `/config` opens an in-place settings menu; toggle plan mode, ask mode, approval policy (Codex), verbose, engine, model, reasoning, and listen mode with buttons; dedicated `⏰ Triggers` page lists per-chat crons/webhooks with last-fired times and a master pause/resume toggle
 - 🔄 **Hot-reload configuration** — edit `untether.toml` and changes apply in ~1 second; covers triggers, voice transcription, allowed-user lists, watchdog timing, progress verbosity, file-transfer/outbox config, and per-engine overrides. Only `bot_token`, `chat_id`, `session_mode`, `topics`, and `message_overflow` require a restart. Extend the engine-subprocess env allowlist via `[security] env_extra_allow` / `env_extra_prefix_allow` to thread credential-manager tokens (1Password, Doppler, Vault, …) without forking
 - 🧩 **Plugin system** — extend with custom engines, transports, and commands
 - 🔌 **Plugin-compatible** — Claude Code plugins detect Untether sessions via `UNTETHER_SESSION` env var, preventing hooks from interfering with Telegram output; works with [PitchDocs](https://github.com/littlebearapps/lba-plugins) and other Claude Code plugins
@@ -189,7 +189,7 @@ Claude effort levels: `low`, `medium`, `high`, `xhigh`, `max` (`xhigh` requires 
 | `/topic` | Create or bind forum topics |
 | `/restart` | Gracefully restart Untether (drains active runs first) |
 | `/verbose` | Toggle verbose progress mode (show tool details) |
-| `/config` | Interactive settings menu (plan mode, ask mode, verbose, engine, model, reasoning, listen, approval mode, cost & usage); `📡 Triggers` page for cron/webhook list + master pause/resume |
+| `/config` | Interactive settings menu (plan mode, ask mode, verbose, engine, model, reasoning, listen, approval mode, cost & usage); `⏰ Triggers` page for cron/webhook list + master pause/resume |
 | `/ctx` | Show or update project/branch context |
 | `/reasoning` | Set reasoning level override |
 | `/listen` | Set group chat listen mode (`all` / `mentions` / `clear`); `/trigger` still works as a deprecated alias |

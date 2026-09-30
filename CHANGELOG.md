@@ -99,6 +99,7 @@
 - **fix(telegram):** `/planmode` and `/config` now describe each Claude permission mode accurately: off (acceptEdits) says file edits run and other tools ask instead of "run freely", on is a plan checkpoint rather than per-action approval, auto no longer replies as "plan mode", and both say a change applies from your next message [#747](https://github.com/littlebearapps/untether/issues/747)
   - both surfaces render from one table (`telegram/commands/_permission_mode_text.py`) tied to `is_claude_prompting_mode()` by a test; the CLI name is shown in brackets (`off (acceptEdits)`, `on (plan)`); a hand-stored `default`/`manual`/`dontAsk`/`bypassPermissions` shows its own name instead of `off`; no override reads **engine default**
   - docs: the plan-mode guide, tutorial, FAQ, glossary, settings guide and runner reference no longer say Plan mode prompts for every tool; `dangerously_skip_permissions` is documented; the Tier 2 C1 recipe now uses `/planmode off`
+- **fix(config):** `/config` "📖 Learn more" links now open the help centre (`littlebearapps.com/help/untether/…`). Every link went to a dead `/tools/untether/how-to/` path and 404'd. Resume line, Ask mode and Codex/Gemini approval now link to the right pages; Engine & model (Engines · Models), Loop mode and Triggers gain links; the home "Help guides" link opens the help-centre index and "Report a bug" the bug template [#296](https://github.com/littlebearapps/untether/issues/296)
 
 ### breaking
 
@@ -111,6 +112,7 @@
 
 ### changes
 
+- **feat(config):** a `⏰ Triggers` button on the `/config` home page opens the Triggers page whenever `[triggers]` is enabled (even with none configured), next to the pause/resume toggle; Triggers now use ⏰ everywhere so 📡 means Listen only [#296](https://github.com/littlebearapps/untether/issues/296)
 - **config(watchdog):** new `[watchdog] rearm_plan_mode` (default `true`, read per spawn) — kill switch for the #383 plan-mode re-arm; `false` never sends `set_permission_mode` (an approval then lasts the live session, the pre-rc15 behaviour). Turn-scoped approval clearing is not switchable. [#383](https://github.com/littlebearapps/untether/issues/383)
 - `/export` picks the chat's most recently *active* session rather than the most recently started one (a resumed older session is now "latest"), and trims the history least-recently-active first [#417](https://github.com/littlebearapps/untether/issues/417)
 - **fix(deps):** bound `httpx` to `<1`. httpx 1.x drops `AsyncClient`, which the Telegram client uses. With no upper bound, a stable httpx 1.0 would break every fresh install and upgrade at startup, and its `1.0.devN` pre-releases already crash-looped sl on two uv rollouts (#745). The locked version is unchanged at 0.28.1. [#782](https://github.com/littlebearapps/untether/issues/782)
