@@ -3221,6 +3221,13 @@ class TestHomeTriggersRow:
         ]
 
     @pytest.mark.anyio
+    async def test_status_line_uses_alarm_emoji(self, tmp_path):
+        text = (await self._home(tmp_path, _trigger_manager(crons=1))).text
+        assert "⏰ Triggers: <b>active</b>" in text
+        assert "Triggers (cron/webhook)" not in text
+        assert not any("📡" in line and "Trigger" in line for line in text.splitlines())
+
+    @pytest.mark.anyio
     async def test_listen_keeps_satellite_emoji(self, tmp_path):
         msg = await self._home(tmp_path, _trigger_manager(crons=1))
         labels = {

@@ -76,7 +76,7 @@ The wizard offers three **workflow modes** — pick the one that fits:
 | **Workspace** | Forum topics — each topic bound to a project/branch with independent sessions. |
 | **Handoff** | Reply-to-continue — resume lines shown for copying to terminal. |
 
-[Choose a mode →](https://untether.littlebearapps.com/how-to/choose-a-mode/) · [Conversation modes tutorial →](https://untether.littlebearapps.com/tutorials/conversation-modes/)
+[Choose a mode →](https://littlebearapps.com/help/untether/choose-a-mode/) · [Conversation modes tutorial →](https://littlebearapps.com/help/untether/conversation-modes/)
 
 **Tip:** Already have a bot token? Pass it directly: `untether --bot-token YOUR_TOKEN`
 
@@ -108,7 +108,7 @@ The wizard offers three **workflow modes** — pick the one that fits:
 - 🧩 **Plugin system** — extend with custom engines, transports, and commands
 - 🔌 **Plugin-compatible** — Claude Code plugins detect Untether sessions via `UNTETHER_SESSION` env var, preventing hooks from interfering with Telegram output; works with [PitchDocs](https://github.com/littlebearapps/lba-plugins) and other Claude Code plugins
 - 📊 **Session statistics** — `/stats` shows per-engine run counts, action totals, and duration across today, this week, and all time
-- 💬 **Three workflow modes** — **assistant** (ongoing chat with auto-resume), **workspace** (forum topics bound to projects/branches), or **handoff** (reply-to-continue with terminal resume lines); [choose a mode](https://untether.littlebearapps.com/how-to/choose-a-mode/) to match your workflow
+- 💬 **Three workflow modes** — **assistant** (ongoing chat with auto-resume), **workspace** (forum topics bound to projects/branches), or **handoff** (reply-to-continue with terminal resume lines); [choose a mode](https://littlebearapps.com/help/untether/choose-a-mode/) to match your workflow
 
 ---
 

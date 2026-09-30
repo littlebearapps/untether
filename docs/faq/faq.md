@@ -32,7 +32,7 @@ untether
 
 The first run launches a setup wizard that creates a Telegram bot via [BotFather](https://t.me/BotFather), picks one of three workflow modes (assistant, workspace, or handoff), and writes `~/.untether/untether.toml`. After the wizard finishes, send a message to your bot in Telegram and the agent runs on your machine.
 
-Already have a bot token? Skip the BotFather step with `untether --bot-token YOUR_TOKEN`. Full walkthrough: [Install and onboard](https://untether.littlebearapps.com/tutorials/install/).
+Already have a bot token? Skip the BotFather step with `untether --bot-token YOUR_TOKEN`. Full walkthrough: [Install and onboard](https://littlebearapps.com/help/untether/install/).
 
 ## Which AI coding agents does Untether support?
 
@@ -86,7 +86,7 @@ Per-chat permission mode (`/planmode on/plan-auto/auto/off`, or `/config → Per
 
 The **plan-auto** mode was called `auto` before v0.35.5. It was renamed because Claude Code introduced its own `auto` mode, and the two names collided. If you set `permission_mode = "auto"` in `untether.toml` and want the old behaviour, change it to `"plan-auto"`. Untether logs one warning at startup (and again if a config reload changes the list) naming every engine setting and cron that uses `"auto"`. Per-chat settings you made through the buttons are migrated for you.
 
-For non-Claude engines, approval is enforced per-engine pre-run — Codex runs inside its sandbox (`/config` → Approval policy: **safe** = read-only), Gemini uses `--approval-mode` — rather than via mid-run buttons. Full guide: [Interactive approval](https://untether.littlebearapps.com/how-to/interactive-approval/).
+For non-Claude engines, approval is enforced per-engine pre-run — Codex runs inside its sandbox (`/config` → Approval policy: **safe** = read-only), Gemini uses `--approval-mode` — rather than via mid-run buttons. Full guide: [Interactive approval](https://littlebearapps.com/help/untether/interactive-approval/).
 
 ## What happens if my agent crashes or my phone loses signal mid-run?
 
@@ -99,7 +99,7 @@ Everything important — Telegram update offsets, active progress message refere
 
 ## Can I change Claude's instructions while it's still working?
 
-Yes, with Claude Code. By default a message you send while a run is working is queued: it runs as the next turn once the current one finishes. Send `/steer <text>` instead and the message goes straight into the running turn. Claude reads it the next time a tool finishes and folds it into the answer it's already writing. You get a `↪️ Steered into the current run.` reply, and the progress message shows when Claude has picked it up. To make steer the default for a chat, send `/steer` on its own or use `/config` → Follow-up. `/queue` switches back, and `/queue <text>` queues a single message. Steering needs a permission mode (`/planmode`) so the session stays live. Files, forwards and other engines always queue, and Untether tells you when a steer couldn't be delivered. Full guide: [Steer follow-ups](https://untether.littlebearapps.com/how-to/steer-follow-ups/).
+Yes, with Claude Code. By default a message you send while a run is working is queued: it runs as the next turn once the current one finishes. Send `/steer <text>` instead and the message goes straight into the running turn. Claude reads it the next time a tool finishes and folds it into the answer it's already writing. You get a `↪️ Steered into the current run.` reply, and the progress message shows when Claude has picked it up. To make steer the default for a chat, send `/steer` on its own or use `/config` → Follow-up. `/queue` switches back, and `/queue <text>` queues a single message. Steering needs a permission mode (`/planmode`) so the session stays live. Files, forwards and other engines always queue, and Untether tells you when a steer couldn't be delivered. Full guide: [Steer follow-ups](https://littlebearapps.com/help/untether/steer-follow-ups/).
 
 ## Why does Claude say its safeguards stopped a response?
 
@@ -109,7 +109,7 @@ The first time it happens in a session, the footer also carries a pointer to Ant
 
 ## How can I tell when Claude's context is filling up?
 
-Look at the end of the status line, the first line of every progress message and reply: `done · claude · 1m 36s · step 10 · 62% ctx` means the conversation fills 62% of Claude's context window. The value updates as Claude works and is shown on follow-up turns too. It appears once Untether has learned the model's window size, which after a restart can be the first reply's final message. It reads a little lower than `/context` in the terminal while Claude is in the middle of tool calls, because Untether only sees the usage of Claude's last response. After Claude compacts the conversation the value disappears until its next response. Codex and the other engines don't show it yet. To hide it, set `show_context_usage = false` under `[progress]` in `untether.toml`; the change applies to the next message without a restart. See [Verbose progress](https://untether.littlebearapps.com/how-to/verbose-progress/#read-the-status-line).
+Look at the end of the status line, the first line of every progress message and reply: `done · claude · 1m 36s · step 10 · 62% ctx` means the conversation fills 62% of Claude's context window. The value updates as Claude works and is shown on follow-up turns too. It appears once Untether has learned the model's window size, which after a restart can be the first reply's final message. It reads a little lower than `/context` in the terminal while Claude is in the middle of tool calls, because Untether only sees the usage of Claude's last response. After Claude compacts the conversation the value disappears until its next response. Codex and the other engines don't show it yet. To hide it, set `show_context_usage = false` under `[progress]` in `untether.toml`; the change applies to the next message without a restart. See [Verbose progress](https://littlebearapps.com/help/untether/verbose-progress/#read-the-status-line).
 
 ## How do I keep agents from spending too much money?
 
@@ -129,7 +129,7 @@ If you set no budget at all, Untether still flags a single run that costs more t
 
 `/usage` shows your Claude subscription quota; in Codex and OpenCode chats it shows the token totals of the chat's last session. `/usage debug` shows OAuth token expiry, schema-mismatch counters, and cache freshness — useful when the subscription footer goes silent. `/stats` reports per-engine totals across today, this week, and all time.
 
-Cost tracking is most accurate for Claude (full USD reporting via API metadata) and OpenCode. For Claude, the figure on each reply is what that reply cost — Claude reports a running total for the whole session, so Untether records the difference since the previous reply (resumed sessions are no longer counted twice). Codex reports tokens only — as a running total for the whole thread, so Untether records each run's difference (resumed runs aren't counted twice). Pi, Gemini, and Amp report tokens-only. Subscription users (Claude Pro/Max, ChatGPT, Gemini, Amp) see a `5h: N% / 7d: N%` indicator instead of dollars. See the [cost-budgets guide](https://untether.littlebearapps.com/how-to/cost-budgets/) for tuning.
+Cost tracking is most accurate for Claude (full USD reporting via API metadata) and OpenCode. For Claude, the figure on each reply is what that reply cost — Claude reports a running total for the whole session, so Untether records the difference since the previous reply (resumed sessions are no longer counted twice). Codex reports tokens only — as a running total for the whole thread, so Untether records each run's difference (resumed runs aren't counted twice). Pi, Gemini, and Amp report tokens-only. Subscription users (Claude Pro/Max, ChatGPT, Gemini, Amp) see a `5h: N% / 7d: N%` indicator instead of dollars. See the [cost-budgets guide](https://littlebearapps.com/help/untether/cost-budgets/) for tuning.
 
 ## Does /loop work via Untether?
 
@@ -137,7 +137,7 @@ Partly, by default. Claude Code's `/loop` and `ScheduleWakeup` are session-scope
 
 To enable end-to-end /loop support, turn on **Loop mode** in `/config → 🔁 Loop mode`. When on, Untether observes Claude's schedule registrations and re-fires each iteration when due, spawning a fresh `claude --resume` subprocess per fire.
 
-Be aware: autonomous loops consume API credits or your subscription quota. Set a budget in `/config → 💰 Cost & usage` *before* turning Loop mode on — the same daily cost cap applies to loop fires automatically. See the [Schedule tasks how-to](https://untether.littlebearapps.com/how-to/schedule-tasks/#loop-mode) for details.
+Be aware: autonomous loops consume API credits or your subscription quota. Set a budget in `/config → 💰 Cost & usage` *before* turning Loop mode on — the same daily cost cap applies to loop fires automatically. See the [Schedule tasks how-to](https://littlebearapps.com/help/untether/schedule-tasks/#loop-mode) for details.
 
 ## Can I send voice notes instead of typing?
 
@@ -153,7 +153,7 @@ voice_transcription_language = "en"       # optional ISO-639-1 hint
 voice_transcription_prompt = "Trello, Untether, Claude Code"  # optional vocabulary bias
 ```
 
-Groq's Whisper Large v3 Turbo is fast and cheap; any OpenAI-compatible Whisper endpoint works (including a self-hosted one). If you only ever speak one language, set `voice_transcription_language` (e.g. `"en"`) — without the hint, Whisper-family models occasionally guess the wrong language on very short voice notes. Untether already biases the decoder toward the terms every user speaks — Claude (as a bare name and as Claude Code), Codex, OpenCode, the agent context files (`CLAUDE.md`, `AGENTS.md`), plus Untether's own vocabulary. If transcription keeps mangling *your* project or tool names ("trollo" instead of Trello), set `voice_transcription_prompt` to a short comma-separated list of those names; your value replaces the built-in list, so include the engine names you care about too. Keep your list under about 500 characters. Whisper's prompt window is ~224 tokens, and with OpenAI Whisper anything before the last 224 tokens is dropped. Keep it to genuinely high-frequency nouns (≤1000 characters, and effect varies by model): an overstuffed prompt can make the model hallucinate those terms on short or silent clips. Set it to `""` to switch the bias off entirely. The API key is `SecretStr`-masked in `repr()` / `str()` / structlog so it never lands in journal or crash output. For safety, `voice_transcription_base_url` is SSRF-checked — a URL that resolves to a private/reserved address (e.g. a self-hosted Whisper on `localhost`, `10.x` or `192.168.x`) is rejected unless you explicitly allow its range with `voice_transcription_url_allowlist = ["10.0.0.0/8"]`. If a voice note is refused, Untether's reply names the blocked host and the exact allowlist entry to add, and the same warning appears in the log at startup. Full setup: [Voice notes](https://untether.littlebearapps.com/how-to/voice-notes/).
+Groq's Whisper Large v3 Turbo is fast and cheap; any OpenAI-compatible Whisper endpoint works (including a self-hosted one). If you only ever speak one language, set `voice_transcription_language` (e.g. `"en"`) — without the hint, Whisper-family models occasionally guess the wrong language on very short voice notes. Untether already biases the decoder toward the terms every user speaks — Claude (as a bare name and as Claude Code), Codex, OpenCode, the agent context files (`CLAUDE.md`, `AGENTS.md`), plus Untether's own vocabulary. If transcription keeps mangling *your* project or tool names ("trollo" instead of Trello), set `voice_transcription_prompt` to a short comma-separated list of those names; your value replaces the built-in list, so include the engine names you care about too. Keep your list under about 500 characters. Whisper's prompt window is ~224 tokens, and with OpenAI Whisper anything before the last 224 tokens is dropped. Keep it to genuinely high-frequency nouns (≤1000 characters, and effect varies by model): an overstuffed prompt can make the model hallucinate those terms on short or silent clips. Set it to `""` to switch the bias off entirely. The API key is `SecretStr`-masked in `repr()` / `str()` / structlog so it never lands in journal or crash output. For safety, `voice_transcription_base_url` is SSRF-checked — a URL that resolves to a private/reserved address (e.g. a self-hosted Whisper on `localhost`, `10.x` or `192.168.x`) is rejected unless you explicitly allow its range with `voice_transcription_url_allowlist = ["10.0.0.0/8"]`. If a voice note is refused, Untether's reply names the blocked host and the exact allowlist entry to add, and the same warning appears in the log at startup. Full setup: [Voice notes](https://littlebearapps.com/help/untether/voice-notes/).
 
 ## Can agents send files back to me automatically?
 
@@ -171,7 +171,7 @@ outbox_cleanup = true
 outbox_notify_skipped = true
 ```
 
-The deny-globs and per-file size cap are enforced before any send, so a misbehaving agent can't exfiltrate arbitrary paths or DOS your Telegram chat with huge attachments. Sub-directories are handled two ways: by default they're archived to `.untether-outbox/.skipped/` and listed as skipped, or set `outbox_deliver_directories = "zip"` (v0.35.4) to have each one bundled into a single `<name>.zip` document and delivered — recursive deny-globs, symlink pruning, and size caps still apply. All engines support it. Full setup: [File transfer](https://untether.littlebearapps.com/how-to/file-transfer/).
+The deny-globs and per-file size cap are enforced before any send, so a misbehaving agent can't exfiltrate arbitrary paths or DOS your Telegram chat with huge attachments. Sub-directories are handled two ways: by default they're archived to `.untether-outbox/.skipped/` and listed as skipped, or set `outbox_deliver_directories = "zip"` (v0.35.4) to have each one bundled into a single `<name>.zip` document and delivered — recursive deny-globs, symlink pruning, and size caps still apply. All engines support it. Full setup: [File transfer](https://littlebearapps.com/help/untether/file-transfer/).
 
 ## Do I need to restart Untether after editing `untether.toml`?
 
@@ -215,12 +215,12 @@ rm -rf ~/.untether/
 
 That removes the CLI, all state files (chat preferences, session resumes, trigger history), and your `untether.toml`. If you set up a systemd user unit, also `systemctl --user disable --now untether` and remove the unit file.
 
-The Telegram bot itself lives on Telegram's side — to delete it entirely, talk to [@BotFather](https://t.me/BotFather), pick `/deletebot`, and select your bot. That step is optional; an inactive bot causes no harm beyond squatting the username. Full uninstall walkthrough: [Uninstall Untether](https://untether.littlebearapps.com/how-to/uninstall/).
+The Telegram bot itself lives on Telegram's side — to delete it entirely, talk to [@BotFather](https://t.me/BotFather), pick `/deletebot`, and select your bot. That step is optional; an inactive bot causes no harm beyond squatting the username. Full uninstall walkthrough: [Uninstall Untether](https://littlebearapps.com/help/untether/uninstall/).
 
 ## Where can I get help or report a bug?
 
 - **Documentation** — [`docs/`](https://github.com/littlebearapps/untether/tree/master/docs) covers tutorials, how-to guides, engine references, and architecture.
-- **Help centre** — <https://untether.littlebearapps.com>
+- **Help centre** — <https://littlebearapps.com/help/untether/>
 - **Bug reports and feature requests** — [GitHub Issues](https://github.com/littlebearapps/untether/issues) with the `bug` or `enhancement` label.
 - **Security issues** — see [SECURITY.md](https://github.com/littlebearapps/untether/blob/master/SECURITY.md) for the responsible-disclosure path.
 

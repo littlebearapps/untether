@@ -146,6 +146,7 @@
 
 ### docs
 
+- README and FAQ help links pointed at `untether.littlebearapps.com`, which has no DNS record; they now open the help centre (`littlebearapps.com/help/untether/<page>/`), and the `/config` home status line reads `⏰ Triggers: active` [#296](https://github.com/littlebearapps/untether/issues/296)
 - **docs:** sweep the user-facing guides for the `auto` → `plan-auto` rename. `docs/how-to/plan-mode.md` gains the four-mode table (including what Claude Code's classifier actually allows and blocks) plus a renamed-in-v0.35.5 note; the per-cron override section now recommends `auto` for unattended crons on the reasoning that a classifier judging each action beats waving through a plan gate and leaving the rest unchecked, and carries a warning that the value changed meaning. The same warning lands in `docs/how-to/schedule-tasks.md` and `docs/how-to/webhooks-and-cron.md`, whose valid-value lists were also stale (they predated `manual`/`dontAsk`/`plan-auto`). README feature bullet and command table, `docs/reference/glossary.md`, `docs/reference/commands-and-directives.md`, `docs/reference/triggers/triggers.md`, `docs/tutorials/interactive-control.md`, `docs/how-to/inline-settings.md` (button layout is now 2+2+1) and FAQ Q6 all updated to agree [#741](https://github.com/littlebearapps/untether/issues/741)
 
 

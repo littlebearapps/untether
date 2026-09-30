@@ -390,6 +390,19 @@ def test_no_satellite_triggers_in_docs() -> None:
             assert "📡 Trigger" not in line, f"{path}:{n}: {line}"
 
 
+def test_readme_and_faq_help_links_resolve() -> None:
+    """The dead ``untether.littlebearapps.com`` subdomain is gone (#296 D4)."""
+    for rel in ("README.md", "docs/faq/faq.md"):
+        text = (_REPO_ROOT / rel).read_text(encoding="utf-8")
+        assert "untether.littlebearapps.com" not in text, rel
+        urls = re.findall(r"https://littlebearapps\.com/help/untether/[^)\s>]*", text)
+        assert urls, rel
+        for url in urls:
+            if url == _HELP_BASE:
+                continue
+            assert _resolve(url) is not None, (rel, url)
+
+
 def _all_urls(rendered: list[Rendered]) -> list[str]:
     return sorted({h for r in rendered for h in r.hrefs})
 

@@ -426,7 +426,7 @@ async def _page_home(ctx: CommandContext) -> None:
         )
         if triggers_has_any:
             state = "⏸ paused" if triggers_paused else "active"
-            triggers_indicator = f"Triggers (cron/webhook): <b>{state}</b>"
+            triggers_indicator = f"⏰ Triggers: <b>{state}</b>"
     if triggers_indicator is not None:
         lines.append(triggers_indicator)
     if show_reasoning:
