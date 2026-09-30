@@ -333,3 +333,125 @@ async def test_812_async_rewake_delivers_hook_rewake_turn() -> None:
     started = [e for e in logs if e["event"] == "claude.turn.started"]
     assert [e["reason"] for e in started] == ["hook_rewake"]
     assert any(e["event"] == "claude.hook.rewake_signal" for e in logs)
+
+
+# ── #816: a /continue run releases its session registries ──────────────────
+
+_CONTINUE = ResumeToken(engine=ENGINE, value="", is_continue=True)
+
+
+def _watchdog_settings(monkeypatch: pytest.MonkeyPatch, **overrides: Any) -> None:
+    from types import SimpleNamespace
+
+    from untether.settings import WatchdogSettings
+
+    values = {
+        "post_result_limbo_grace": 0.3,
+        "post_result_idle_timeout": 30,
+        **overrides,
+    }
+    watchdog = WatchdogSettings.model_construct(
+        **{**WatchdogSettings().model_dump(), **values}
+    )
+    monkeypatch.setattr(
+        claude_mod,
+        "load_settings_if_exists",
+        lambda *a, **k: (SimpleNamespace(watchdog=watchdog), Path("x")),
+    )
+
+
+def _fast_runner() -> ClaudeRunner:
+    runner = _runner()
+    # Slots dataclass: timing knobs must be set on the instance.
+    runner._live_poll_s = 0.05
+    runner._live_close_grace_s = 0.8
+    runner._live_close_sigint_grace_s = 0.8
+    return runner
+
+
+async def _assert_session_released(sid: str) -> None:
+    assert not claude_mod.is_session_alive(sid)
+    assert sid not in claude_mod._SESSION_STDIN
+    assert sid not in claude_mod._LIVE_SESSIONS
+    assert sid not in claude_mod._SESSION_BG_STATE
+    assert sid not in claude_mod._ACTIVE_RUNNERS
+    assert await claude_mod.wait_for_session_handoff(sid, 0.5) == "free"
+
+
+@pytest.fixture
+def _fresh_registries():
+    claude_mod._cleanup_session_registries(SID)
+    yield
+    claude_mod._cleanup_session_registries(SID)
+
+
+@pytest.mark.usefixtures("_fresh_registries")
+async def test_816_continue_run_idle_close_releases_session(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _watchdog_settings(monkeypatch)
+    os.environ["FAKE_CLAUDE_SCENARIO"] = "followup"
+    runner = _fast_runner()
+    with capture_logs() as logs, anyio.fail_after(15):
+        events = [evt async for evt in runner.run("hello", _CONTINUE)]
+    assert isinstance(events[-1], CompletedEvent)
+    assert events[-1].resume is not None and events[-1].resume.value == SID
+    assert runner.current_stream.engine_state.live_close_reason == "idle_no_tasks"
+    await _assert_session_released(SID)
+    cleanups = [e for e in logs if e["event"] == "claude_runner.session_cleanup"]
+    assert [e["session_id"] for e in cleanups] == [SID]
+
+
+@pytest.mark.usefixtures("_fresh_registries")
+async def test_816_continue_run_without_live_sessions_releases_session(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _watchdog_settings(monkeypatch, live_sessions=False)
+    os.environ["FAKE_CLAUDE_SCENARIO"] = "followup"
+    runner = _fast_runner()
+    with anyio.fail_after(15):
+        events = [evt async for evt in runner.run("hello", _CONTINUE)]
+    assert not any(isinstance(e, TurnEvent) for e in events)
+    assert isinstance(events[-1], CompletedEvent)
+    await _assert_session_released(SID)
+
+
+@pytest.mark.usefixtures("_fresh_registries")
+async def test_816_cancelled_continue_run_releases_session(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """/cancel of a /continue run mid-session (the bridge cancels the run's
+    scope): the finally must still resolve the real session id."""
+    _watchdog_settings(monkeypatch, post_result_limbo_grace=60)
+    os.environ["FAKE_CLAUDE_SCENARIO"] = "followup"
+    runner = _fast_runner()
+    seen_alive: list[bool] = []
+    with anyio.fail_after(15):
+        with anyio.CancelScope() as scope:
+            async for evt in runner.run("hello", _CONTINUE):
+                if isinstance(evt, CompletedEvent):
+                    seen_alive.append(claude_mod.is_session_alive(SID))
+                    scope.cancel()
+    assert seen_alive == [True]
+    await _assert_session_released(SID)
+
+
+async def test_816_cleanup_skips_session_owned_by_another_run() -> None:
+    """Hardening: a late cleanup from an old run must not deregister a
+    newer process that now owns the same session id."""
+    sid = "owned-elsewhere"
+    old_state = object()
+    new_state = object()
+    claude_mod._SESSION_BG_STATE[sid] = new_state  # type: ignore[assignment]
+    claude_mod._SESSION_STDIN[sid] = object()  # type: ignore[assignment]
+    try:
+        with capture_logs() as logs:
+            claude_mod._cleanup_session_registries(sid, owner_state=old_state)  # type: ignore[arg-type]
+        assert claude_mod.is_session_alive(sid)
+        assert claude_mod._SESSION_BG_STATE[sid] is new_state
+        assert any(e["event"] == "claude_runner.session_cleanup_skipped" for e in logs)
+        claude_mod._cleanup_session_registries(sid, owner_state=new_state)  # type: ignore[arg-type]
+        assert not claude_mod.is_session_alive(sid)
+        assert sid not in claude_mod._SESSION_BG_STATE
+    finally:
+        claude_mod._cleanup_session_registries(sid)

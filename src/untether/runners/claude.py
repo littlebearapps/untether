@@ -8407,8 +8407,17 @@ class ClaudeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
             # Clean up global registries on ANY exit (cancel, error, normal).
             # process_error_events/stream_end_events handle normal paths but
             # cancellation skips both, leaving stale outline_guard/cooldown state.
-            _sid = resume.value if resume else None
-            if _sid is None:
+            # #816: a /continue token is ``ResumeToken(value="",
+            # is_continue=True)`` — truthy but carrying no session id. The
+            # real id only arrives with the CLI's init, so resolve it from
+            # found_session; keying on "" skipped the cleanup entirely and
+            # left the session looking alive to every later resume.
+            _sid = (
+                resume.value
+                if resume is not None and not resume.is_continue and resume.value
+                else None
+            )
+            if not _sid:
                 try:
                     if stream.found_session is not None:
                         _sid = stream.found_session.value
@@ -8416,7 +8425,7 @@ class ClaudeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
                     pass
             if _sid:
                 try:
-                    _cleanup_session_registries(_sid)
+                    _cleanup_session_registries(_sid, owner_state=state)
                 except Exception as e:  # noqa: BLE001
                     logger.warning(
                         "session.registry.cleanup_failed",
@@ -8648,12 +8657,27 @@ def mark_outline_pending(session_id: str) -> None:
     logger.info("outline_pending.set", session_id=session_id)
 
 
-def _cleanup_session_registries(session_id: str) -> None:
+def _cleanup_session_registries(
+    session_id: str, *, owner_state: ClaudeStreamState | None = None
+) -> None:
     """Clean up all global registries for a session.
 
     Called from run_impl finally (covers cancel), process_error_events,
     and stream_end_events. All operations are idempotent.
+
+    ``owner_state`` (#816 hardening): the finishing run's stream state. When
+    given and the session is registered to a DIFFERENT run's state — a newer
+    process now owns the same session id — the cleanup is skipped, so a late
+    finally can't deregister (or strip pending approvals from) a live owner.
     """
+    owner = _SESSION_BG_STATE.get(session_id)
+    if owner_state is not None and owner is not None and owner is not owner_state:
+        logger.info(
+            "claude_runner.session_cleanup_skipped",
+            session_id=session_id,
+            reason="owned_by_other_run",
+        )
+        return
     cleaned: list[str] = []
     if _ACTIVE_RUNNERS.pop(session_id, None) is not None:
         cleaned.append("active_runners")
