@@ -339,6 +339,28 @@ system subtypes share the struct, so a type clash must never drop the line). Dis
 [untether-events.md](untether-events.md) §4.1 and the runner spec's "Safeguard stops".
 Source: `docs/findings/2026-09-29-claude-rc14-cli-surface.md` §B.
 
+### Context usage and compaction (#819)
+
+The context-window numbers ride on frames already listed above (CLI 2.1.285; zero-token
+probes in `tests/test_claude_cli_schema_drift.py`, research in
+`docs/findings/2026-09-30-claude-sdk-control-permissions-context.md` Q4/Q5):
+
+```json
+{"type":"assistant","message":{"model":"claude-haiku-4-5","usage":{"input_tokens":1234,"cache_creation_input_tokens":100,"cache_read_input_tokens":185000,"output_tokens":5},"content":[…]},"parent_tool_use_id":null,"session_id":"…"}
+{"type":"result","subtype":"success",…,"modelUsage":{"claude-haiku-4-5":{"inputTokens":…,"contextWindow":200000,"maxOutputTokens":64000,…}}}
+{"type":"system","subtype":"compact_boundary","compact_metadata":{"trigger":"manual","pre_tokens":6336,"post_tokens":277,"cumulative_dropped_tokens":6059,"duration_ms":47},"logical_parent_uuid":"…","session_id":"…"}
+```
+
+- `modelUsage` is keyed by the model id the CLI used; `contextWindow` is the only place the
+  window appears. Decoded as `StreamResultMessage.modelUsage` (`Any`).
+- Assistant `message.usage` decodes as `StreamAssistantMessageBody.usage` (`Any`).
+- Compaction also emits `system/status {"status":"compacting"}` (re-sent every 30 s),
+  then `status:null` with `compact_result` (`success` / `failed`) and optional
+  `compact_error`, a fresh mid-command `system/init`, the boundary above and a summary
+  `user` frame (`isCompactSummary`). All these keys decode as `Any` on
+  `StreamSystemMessage` / `StreamUserMessage`. rc15 (C2) uses only the boundary: it clears
+  `% ctx` until the next main-thread response. Compaction rows are the next #819 step.
+
 ## Message object (`message` field)
 
 Fields:

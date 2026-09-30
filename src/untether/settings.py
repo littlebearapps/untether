@@ -723,6 +723,9 @@ class ProgressSettings(BaseModel):
     # #785 part 2: fold short wake-turn acks (no tools, no approval, short
     # answer) into that status message instead of a new pushed message.
     consolidate_wake_turns: bool = True
+    # #819: Claude's context-window use as ``N% ctx`` at the end of the
+    # progress / final / turn header line. Display-only kill switch.
+    show_context_usage: bool = True
 
 
 _ENV_NAME_RE = re.compile(r"^[A-Z_][A-Z0-9_]*$")

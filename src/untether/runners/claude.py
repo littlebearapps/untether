@@ -39,6 +39,7 @@ from ..markdown import _short_model_name
 from ..model import (
     TURN_COMPLETE_MARKER,
     Action,
+    ActionEvent,
     ActionKind,
     CompletedEvent,
     EngineId,
@@ -1794,6 +1795,17 @@ class ClaudeStreamState:
     safeguard_session_count: int = 0
     session_model: str | None = None
 
+    # #819 context-window use. ``ctx_used`` is the input side of the latest
+    # main-thread assistant ``usage`` (None until one arrives, and again
+    # after a compaction — D5) and ``ctx_model`` that frame's model;
+    # ``ctx_init_model`` is the last ``system/init`` model (the ``[1m]``
+    # rule — ``session_model`` is overwritten by message models).
+    # ``ctx_emitted`` is the last ``(pct, window)`` sent, for dedupe.
+    ctx_used: int | None = None
+    ctx_model: str | None = None
+    ctx_init_model: str | None = None
+    ctx_emitted: tuple[int | None, int | None] | None = None
+
     # #812: hooks seen via ``--include-hook-events``. ``pending_hooks`` is
     # hook_id -> PendingHook (insertion-ordered, capped at
     # ``_PENDING_HOOKS_MAX``); SessionStart / Setup are never recorded (the
@@ -3507,6 +3519,227 @@ class _SystemSubtypeHandler(Protocol):
     ) -> list[UntetherEvent]: ...
 
 
+# ── #819: context-window use (``N% ctx`` in the status line) ─────────────
+
+# Model id -> ``contextWindow`` learned from ``result.modelUsage``. Shared
+# across runs and chats: the window is a property of the model, not a run.
+_CONTEXT_WINDOWS: dict[str, int] = {}
+_CONTEXT_WINDOWS_MAX = 64
+_CONTEXT_ONE_M_SUFFIX = "[1m]"
+_CONTEXT_ONE_M_WINDOW = 1_000_000
+# (model, init model) pairs already logged as a window miss (DEBUG, once).
+_CONTEXT_WINDOW_MISSES: set[tuple[str | None, str | None]] = set()
+# (session, model) pairs already warned for a value over the window.
+_CONTEXT_OVER_WINDOW_WARNED: set[tuple[str | None, str | None]] = set()
+_CONTEXT_WARN_MAX = 256
+_CONTEXT_ACTION_ID = "claude.context"
+
+
+def _usage_context_tokens(usage: Any) -> int | None:
+    """Input side of an API ``usage``: ``input_tokens`` +
+    ``cache_creation_input_tokens`` + ``cache_read_input_tokens`` — the usage
+    part of the CLI's ``/context`` total (D8). Non-negative ints only (bools
+    excluded); None when ``usage`` is not a dict or holds none of them."""
+    if not isinstance(usage, dict):
+        return None
+    total = 0
+    seen = False
+    for key in (
+        "input_tokens",
+        "cache_creation_input_tokens",
+        "cache_read_input_tokens",
+    ):
+        value = usage.get(key)
+        if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
+            total += value
+            seen = True
+    return total if seen else None
+
+
+def _context_window_for(model: str | None, session_model: str | None) -> int | None:
+    """The context window for *model* (the frame's) in a session started on
+    *session_model* (``system/init``), or None when not yet learned (D3).
+
+    1. Either id ends with ``[1m]`` and the other is absent, equal or its
+       stripped base → 1 000 000. This wins over a cache hit on the stripped
+       id, which may hold the base window learned from a non-``[1m]``
+       session.
+    2. Exact cache hit on *model*, then on *session_model*.
+
+    Dated ids are never fuzzy-matched to a base id: a miss is logged instead
+    (``claude.context.window_miss``) so a capture shows the real keys.
+    """
+    for one, other in ((session_model, model), (model, session_model)):
+        if one and one.lower().endswith(_CONTEXT_ONE_M_SUFFIX):
+            base = one[: -len(_CONTEXT_ONE_M_SUFFIX)]
+            if other is None or other in (one, base):
+                return _CONTEXT_ONE_M_WINDOW
+    for key in (model, session_model):
+        if key and (window := _CONTEXT_WINDOWS.get(key)) is not None:
+            return window
+    miss = (model, session_model)
+    if miss not in _CONTEXT_WINDOW_MISSES and len(_CONTEXT_WINDOW_MISSES) < (
+        _CONTEXT_WARN_MAX
+    ):
+        _CONTEXT_WINDOW_MISSES.add(miss)
+        logger.debug(
+            "claude.context.window_miss",
+            model=model,
+            session_model=session_model,
+            known=sorted(_CONTEXT_WINDOWS),
+        )
+    return None
+
+
+def _context_pct(used: int, window: int) -> int:
+    """``Math.round(used / window * 100)`` with JS half-up semantics in
+    integer maths (Python's ``round`` is banker's), floored at 0. Not
+    clamped — the caller decides what a value over 100 means."""
+    if window <= 0:
+        return 0
+    return max(0, (used * 200 + window) // (2 * window))
+
+
+def _learn_context_windows(model_usage: Any) -> None:
+    """Record every ``modelUsage.<model>.contextWindow`` (positive int)."""
+    if not isinstance(model_usage, dict):
+        return
+    for model, entry in model_usage.items():
+        if not isinstance(model, str) or not model or not isinstance(entry, dict):
+            continue
+        window = entry.get("contextWindow")
+        if not isinstance(window, int) or isinstance(window, bool) or window <= 0:
+            continue
+        if _CONTEXT_WINDOWS.get(model) == window:
+            continue
+        if model not in _CONTEXT_WINDOWS and len(_CONTEXT_WINDOWS) >= (
+            _CONTEXT_WINDOWS_MAX
+        ):
+            continue
+        _CONTEXT_WINDOWS[model] = window
+        logger.info("claude.context.window_learned", model=model, context_window=window)
+
+
+def _context_value(
+    state: ClaudeStreamState, factory: EventFactory
+) -> tuple[int | None, int | None]:
+    """``(pct, window)`` for the run's current context value; ``pct`` is
+    None while the numerator or the window is unknown. A raw value over 100
+    is displayed as 100 after one ``claude.context.over_window`` WARN per
+    (session, model)."""
+    used = state.ctx_used
+    if used is None:
+        return None, None
+    window = _context_window_for(state.ctx_model, state.ctx_init_model)
+    if window is None:
+        return None, None
+    pct = _context_pct(used, window)
+    if pct > 100:
+        session_id = factory.resume.value if factory.resume else None
+        key = (session_id, state.ctx_model)
+        if key not in _CONTEXT_OVER_WINDOW_WARNED and len(
+            _CONTEXT_OVER_WINDOW_WARNED
+        ) < (_CONTEXT_WARN_MAX):
+            _CONTEXT_OVER_WINDOW_WARNED.add(key)
+            logger.warning(
+                "claude.context.over_window",
+                session_id=session_id,
+                model=state.ctx_model,
+                used=used,
+                context_window=window,
+                pct=pct,
+            )
+        pct = 100
+    return pct, window
+
+
+def _emit_context(
+    state: ClaudeStreamState, factory: EventFactory, *, force: bool = False
+) -> list[UntetherEvent]:
+    """The ``telemetry`` ActionEvent carrying the header's ``% ctx`` — only
+    when the value changed (or, with *force*, whenever one is known: a new
+    live turn's tracker starts empty).
+
+    Never emitted between live turns (after a result, before the next turn
+    opens): the value is kept and the next turn open re-emits it."""
+    pct, window = _context_value(state, factory)
+    if force:
+        if pct is None:
+            return []
+    else:
+        key = (pct, window)
+        if key == state.ctx_emitted or (state.ctx_emitted is None and pct is None):
+            return []
+        if state.live_mode and state.completed_turns > 0 and not state.turn_open:
+            return []
+    state.ctx_emitted = (pct, window)
+    return [
+        factory.action_updated(
+            action_id=_CONTEXT_ACTION_ID,
+            kind="telemetry",
+            title="context",
+            detail={
+                "context_pct": pct,
+                "context_used": state.ctx_used,
+                "context_window": window,
+                "model": state.ctx_model,
+            },
+        )
+    ]
+
+
+def _context_usage_payload(
+    state: ClaudeStreamState, factory: EventFactory
+) -> dict[str, Any] | None:
+    """``usage["context"]`` at a result (log field, not rendered)."""
+    pct, window = _context_value(state, factory)
+    if pct is None:
+        return None
+    return {
+        "pct": pct,
+        "used": state.ctx_used,
+        "window": window,
+        "model": state.ctx_model,
+    }
+
+
+def _note_assistant_context(
+    event: claude_schema.StreamAssistantMessage,
+    *,
+    state: ClaudeStreamState,
+    factory: EventFactory,
+) -> list[UntetherEvent]:
+    """#819: a main-thread response's usage is the new context value.
+    Subagent frames (``parent_tool_use_id``) and ``<synthetic>`` frames
+    don't count — the CLI's ``/context`` skips them too."""
+    if event.parent_tool_use_id is not None:
+        return []
+    message = event.message
+    if not message.model or message.model == "<synthetic>":
+        return []
+    used = _usage_context_tokens(message.usage)
+    if used is None:
+        return []
+    state.ctx_used = used
+    state.ctx_model = message.model
+    return _emit_context(state, factory)
+
+
+def _translate_compact_boundary(
+    event: claude_schema.StreamSystemMessage,
+    *,
+    state: ClaudeStreamState,
+    factory: EventFactory,
+) -> list[UntetherEvent]:
+    """``system/compact_boundary``: the context was compacted. #819 D5 —
+    drop ``% ctx`` until the next main-thread response (``post_tokens``
+    excludes the system prompt and tools, so it would under-report).
+    # #819 C3 seam: the 🗜️ row refinement, ``turn_compactions`` and the
+    # ``claude.compaction`` log land here."""
+    state.ctx_used = None
+    return _emit_context(state, factory)
+
+
 # System subtypes with their own translation (#792, #814). Add a subtype by
 # writing a handler with this signature and registering it here; anything
 # not listed falls through to the ``claude.system_event.non_init`` debug
@@ -3519,6 +3752,8 @@ _SYSTEM_SUBTYPE_HANDLERS: dict[str, _SystemSubtypeHandler] = {
     "model_fallback": _translate_model_fallback,
     # #383: permission-mode edges (#819 extends it for compaction).
     "status": _translate_status,
+    # #819: compaction boundary (clears ``% ctx``).
+    "compact_boundary": _translate_compact_boundary,
     # #812: hook lifecycle frames — tracked, never surfaced.
     "hook_started": _translate_hook_event,
     "hook_progress": _translate_hook_event,
@@ -5392,6 +5627,17 @@ def _open_followup_turn(
     )
 
 
+def _open_turn_events(
+    state: ClaudeStreamState, factory: EventFactory
+) -> list[UntetherEvent]:
+    """Open turn N+1 and hand the new turn's tracker the session's current
+    ``% ctx`` (#819) — the bridge's turn tracker starts empty."""
+    return [
+        _open_followup_turn(state, factory),
+        *_emit_context(state, factory, force=True),
+    ]
+
+
 _STEER_SNIPPET_CHARS = 80
 
 
@@ -5548,7 +5794,7 @@ def translate_claude_event(
                     )
             out: list[UntetherEvent] = []
             if subtype == "init" and not state.turn_open:
-                out.append(_open_followup_turn(state, factory))
+                out.extend(_open_turn_events(state, factory))
             # Keep the base side effects (task map, MCP catalog capture) but
             # never re-emit a StartedEvent inside a live session.
             out.extend(
@@ -5562,13 +5808,16 @@ def translate_claude_event(
         case claude_schema.StreamResultMessage():
             out = []
             if not state.turn_open:
-                out.append(_open_followup_turn(state, factory))
+                out.extend(_open_turn_events(state, factory))
             base = _translate_claude_event_base(
                 event, title=title, state=state, factory=factory
             )
             completed = next(
                 (evt for evt in base if isinstance(evt, CompletedEvent)), None
             )
+            # #819: result-time ActionEvents (the ``% ctx`` telemetry) belong
+            # to this turn — forward them before it closes.
+            out.extend(evt for evt in base if isinstance(evt, ActionEvent))
             state.turn_open = False
             state.completed_turns += 1
             # #383: re-arm plan mode at every live turn close.
@@ -5653,7 +5902,7 @@ def translate_claude_event(
                 )
                 return []
             if not state.turn_open and not _is_tool_result_only(event):
-                out.append(_open_followup_turn(state, factory))
+                out.extend(_open_turn_events(state, factory))
             out.extend(
                 evt
                 for evt in _translate_claude_event_base(
@@ -5743,6 +5992,7 @@ def _translate_claude_event_base(
             model = event.model
             if isinstance(model, str) and model:
                 state.session_model = model
+                state.ctx_init_model = model  # #819
             token = ResumeToken(engine=ENGINE, value=session_id)
             event_title = str(model) if isinstance(model, str) and model else title
             return [factory.started(token, title=event_title, meta=meta or None)]
@@ -5833,6 +6083,8 @@ def _translate_claude_event_base(
                         continue
             # #814: a refused main-thread response → the 🛡️ row.
             out.extend(_note_assistant_refusal(event, state=state, factory=factory))
+            # #819: the response's usage is the header's context value.
+            out.extend(_note_assistant_context(event, state=state, factory=factory))
             return out
         case claude_schema.StreamUserMessage(message=message):
             if not isinstance(message.content, list):
@@ -5971,6 +6223,13 @@ def _translate_claude_event_base(
                 # #806: an interrupted turn — the bridge renders it as
                 # cancelled rather than as an answer / error.
                 usage["terminal_reason"] = event.terminal_reason
+            # #819: learn the context window(s) this result reports, so the
+            # first turn on an unseen model still gets its ``% ctx`` in the
+            # final; ``usage["context"]`` is for the ``runner.completed`` log.
+            _learn_context_windows(event.modelUsage)
+            context_events = _emit_context(state, factory)
+            if (context_usage := _context_usage_payload(state, factory)) is not None:
+                usage["context"] = context_usage
 
             # #572: record the stream-idle classification so the bridge's
             # bounded auto-retry gate can read it via engine_state duck-typing.
@@ -5988,7 +6247,7 @@ def _translate_claude_event_base(
             # consumer, which may cancel/tear down the generator).
             _capture_orphan_descendants(state, source="result")
 
-            events_out: list[UntetherEvent] = []
+            events_out: list[UntetherEvent] = [*context_events]
             # #333 UX signal #1: append "✓ turn complete" to the meta
             # footer so the user immediately sees the turn is done and
             # the session is now waiting for the next prompt. A

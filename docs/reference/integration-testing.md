@@ -855,3 +855,15 @@ Chats: **Codex** `4929463515`, **OpenCode** `5200822877`, **Claude** `5284581592
 | R15-16c | **No history after restart** | `systemctl --user restart untether-dev`, then `/usage` in the Codex chat before any prompt | `…not available for the codex engine, and this chat has no completed codex run since Untether last started…` |
 | R15-16d | **OpenCode session totals** | OpenCode chat: U1 prompt, then reply to it with `now rename hello.txt to greetings.txt`, then `/usage`, then `/export` | `/usage` shows `2 runs`, a `Session total:` equal to the sum of the two runs' footers (within rounding), and `Last run cost: $…` if the model is priced. Logs: two `usage.token_delta engine=opencode source=per_run`. `/export` header shows cost, or tokens when the model is free |
 | R15-16e | **Claude `/usage` unchanged** | Claude chat: `/usage` and `/usage debug` | Same subscription view as rc14 (C7); no `📊 claude · last session` text |
+
+### #819 — Claude context-window use (`% ctx`)
+
+Chats: **Claude** `5284581592`, **Codex** `4929463515` (Bot API ids with a leading `-`). Claude-only (the Codex half is [#832](https://github.com/littlebearapps/untether/issues/832)). This lane ships #819 C1–C2 only; R15-19c (manual `/compact` rows) and R15-19e (auto-compaction rows) join once C3/C4 land. Log sweep: `journalctl --user -u untether-dev -o cat --since "60 minutes ago" | grep -E "claude\.context\.(window_learned|over_window|window_miss)|runner\.completed|jsonl\.msgspec\.invalid"`.
+
+| # | Scenario | What to do | Pass criteria |
+|---|---|---|---|
+| R15-19a | **Header `% ctx` ([#819](https://github.com/littlebearapps/untether/issues/819))** | Claude chat, U2 prompt | Progress header gains `· NN% ctx` once the first answer frame arrives (or at the final on the first run after a restart for an unseen model); final `done · claude · … · step N · NN% ctx`; the `🏷` footer line is byte-identical to a pre-rc15 final (no ctx segment). Log once: `claude.context.window_learned model=<id> context_window=<n>`; `runner.completed … context_pct=NN` |
+| R15-19b | **Turn header** | Reply to R15-19a's answer within 60 s with a follow-up | Follow-up final header carries `% ctx` ≥ R15-19a's; `claude.live_session.injected` |
+| R15-19d | **`/compact` outside the live window (unchanged behaviour)** | Wait > 60 s for idle close (`claude.live_session.stdin_closed reason=idle…`), then send `/compact` | rc15 does **not** change this path (bare-`/compact` handling is an rc16 follow-up): the run is resumed with the preamble-prefixed text, Claude answers in prose, no 🗜️ row, no `runner.empty_result`. Records the baseline |
+| R15-19f | **Toggle** | Set `[progress] show_context_usage = false` in `~/.untether-dev/untether.toml` (hot reload), run U1 | No `% ctx` in progress or final. Revert, run U1 again: the segment is back without a restart |
+| R15-19g | **Codex regression** | Codex chat U1 + U4 | Header has no `% ctx`; no new WARN/ERROR |

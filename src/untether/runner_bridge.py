@@ -717,6 +717,7 @@ def _resolve_presenter(
                 max_actions=default_presenter._formatter.max_actions,
                 command_width=default_presenter._formatter.command_width,
                 verbosity=override,
+                show_context_usage=default_presenter._formatter.show_context_usage,
             )
             return TelegramPresenter(
                 formatter=formatter,
@@ -1241,6 +1242,9 @@ def _record_export_event(
         if not session_id and isinstance(evt, StartedEvent) and evt.resume:
             session_id = evt.resume.value
         if not session_id:
+            return
+        if isinstance(evt, ActionEvent) and evt.action.kind == "telemetry":
+            # #819: per-frame status-line values are not session history.
             return
         event_dict: dict[str, Any] = {"type": evt.type}
         if isinstance(evt, StartedEvent):
@@ -4511,6 +4515,9 @@ class FollowupTurnRouter:
         if (
             isinstance(evt, ActionEvent)
             and ctx.edits is None
+            # #819: a status-line value never forces the turn's progress
+            # message (keeps the lazy progress and #785 folding intact).
+            and evt.action.kind != "telemetry"
             and (self._progress_for is None or self._progress_for(evt))
         ):
             await self._ensure_progress(ctx)
@@ -5084,6 +5091,10 @@ async def handle_message(
                 val = run_usage.get(key)
                 if val is not None:
                     usage_log[key] = val
+        # #819: the context-window use at the result.
+        ctx_usage = (completed.usage or {}).get("context")
+        if isinstance(ctx_usage, dict) and isinstance(ctx_usage.get("pct"), int):
+            usage_log["context_pct"] = ctx_usage["pct"]
         logger.info(
             "runner.completed",
             ok=completed.ok,

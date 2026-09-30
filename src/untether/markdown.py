@@ -49,13 +49,25 @@ def format_elapsed(elapsed_s: float) -> str:
 
 
 def format_header(
-    elapsed_s: float, item: int | None, *, label: str, engine: str
+    elapsed_s: float,
+    item: int | None,
+    *,
+    label: str,
+    engine: str,
+    context_pct: int | None = None,
 ) -> str:
+    """``label · engine · elapsed[ · step N][ · N% ctx]``.
+
+    #819: ``context_pct`` (Claude's context-window use) is appended last, with
+    no emoji, and omitted when unknown.
+    """
     elapsed = format_elapsed(elapsed_s)
     parts = [label, engine]
     parts.append(elapsed)
     if item is not None:
         parts.append(f"step {item}")
+    if context_pct is not None:
+        parts.append(f"{context_pct}% ctx")
     return HEADER_SEP.join(parts)
 
 
@@ -380,7 +392,7 @@ def render_event_cli(event: UntetherEvent) -> list[str]:
             return [str(engine)]
         case ActionEvent() as action_event:
             action = action_event.action
-            if action.kind == "turn":
+            if action.kind in ("turn", "telemetry"):
                 return []
             return [
                 format_action_line(
@@ -472,10 +484,14 @@ class MarkdownFormatter:
         max_actions: int = 5,
         command_width: int | None = MAX_PROGRESS_CMD_LEN,
         verbosity: Literal["compact", "verbose"] = "compact",
+        show_context_usage: bool = True,
     ) -> None:
         self.max_actions = max(0, int(max_actions))
         self.command_width = command_width
         self.verbosity = verbosity
+        # #819: ``[progress] show_context_usage`` — read at every render, set
+        # per run by ``refresh_from`` (hot reload).
+        self.show_context_usage = show_context_usage
 
     def refresh_from(self, progress: Any) -> None:
         """Update mutable formatting knobs from a ``ProgressSettings`` snapshot (#269).
@@ -493,6 +509,12 @@ class MarkdownFormatter:
         verbosity = getattr(progress, "verbosity", None)
         if verbosity in ("compact", "verbose"):
             self.verbosity = verbosity
+        show_context_usage = getattr(progress, "show_context_usage", None)
+        if isinstance(show_context_usage, bool):
+            self.show_context_usage = show_context_usage
+
+    def _context_pct(self, state: ProgressState) -> int | None:
+        return state.context_pct if self.show_context_usage else None
 
     def render_progress_parts(
         self,
@@ -508,6 +530,7 @@ class MarkdownFormatter:
             step,
             label=label,
             engine=state.engine,
+            context_pct=self._context_pct(state),
         )
         body = self._assemble_body(self._format_actions(state, now=now))
         if state.background:
@@ -531,6 +554,7 @@ class MarkdownFormatter:
             step,
             label=status,
             engine=state.engine,
+            context_pct=self._context_pct(state),
         )
         answer = (answer or "").strip()
         body = answer if answer else None

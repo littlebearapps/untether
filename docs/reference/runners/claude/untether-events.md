@@ -305,6 +305,19 @@ Untether `completed.usage` should mirror the Claude Code `result.usage` object
 without transformation. Optionally include `modelUsage` inside `usage` or
 `detail` if downstream consumers want it (currently unused by renderers).
 
+### 6.1 Context-window use (#819)
+
+| Claude frame | Untether event |
+|---|---|
+| main-thread `assistant` with int `message.usage` input fields | `ActionEvent(kind="telemetry", id="claude.context", phase="updated", detail={context_pct, context_used, context_window, model})` — only when the integer % changes and the model's window is known |
+| `result.modelUsage.<model>.contextWindow` | learned into the per-process window cache; a first-known value is emitted as the same telemetry event **before** the supplementary `StartedEvent{complete}` / `CompletedEvent`; `usage["context"] = {pct, used, window, model}` (log field) |
+| `system/compact_boundary` | telemetry with `context_pct: None` (segment hidden until the next response) |
+| live `TurnEvent(started)` | followed by the current value (the turn's tracker starts empty) |
+
+Subagent (`parent_tool_use_id`) and `<synthetic>` frames never change the value.
+`ProgressTracker` keeps telemetry out of its actions (no step, no running tool, never
+exported). Full rules: runner spec → "Context usage".
+
 ---
 
 ## 7. Implementation checklist (v0.3.0)
