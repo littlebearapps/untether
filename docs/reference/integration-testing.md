@@ -470,7 +470,7 @@ Integration tests are run by Claude Code via Telegram MCP tools (see "Automated 
 | Cost tracking (`cost_tracker.py`) | B1-B3, U8 |
 | Progress/formatting (`markdown.py`, `telegram/render.py`) | U3, T6, T7, S4, S8, RC12-8, RC12-9 |
 | Commands (`commands/*.py`) | Tier 7 (all), specific command test |
-| File transfer (`file_transfer.py`) | T2, T3, T5 |
+| File transfer (`file_transfer.py`) | T2, T3, T5, R15-3 |
 | Voice (`voice.py`) | T1, RC12-10 |
 | Topics (`topics.py`, `topic_state.py`) | O1, O5, O6, O8 |
 | Directives (`directives.py`) | T9, T10 |
@@ -594,3 +594,37 @@ When detected, note the engine, chat ID, message IDs, and exact behaviour. Creat
 - **4096-char limit** applies after entity parsing, not before. Splitting must account for entity boundaries.
 - **Voice messages (T1)** require Opus/OGG format, max 10MB by default. Transcription depends on configured API endpoint being accessible.
 - **429 rate limits** block ALL Telegram sends for the full `retry_after` duration, not just the rate-limited chat. Monitor logs for 429s during high-volume testing.
+
+---
+
+## rc15 scenarios (0.35.5rc15)
+
+Dev bot only (`@untether_dev_bot`). Log checks: `journalctl --user -u untether-dev -o cat --since "30 minutes ago" | grep -E "<pattern>"`. Each subsection below comes from one rc15 plan and keeps that plan's scenario IDs.
+
+### #390 — Symlinked upload/download targets
+
+Claude chat (`5284581592`, project `claude-test` → `test-projects/test-claude`). The dev config has `[transports.telegram.files] enabled = true`, `auto_put_mode = "prompt"`, `uploads_dir = "incoming"` and the default deny globs. Setup, after the dev restart:
+
+```bash
+cd ~/untether/test-projects/test-claude
+mkdir -p r15/.git/hooks r15/real/.ssh r15/benign
+printf 'R15_SENTINEL=1\n' > r15/.env
+ln -s .env        r15/cfg.txt        # file symlink → deny target
+ln -s .git/hooks  r15/hooks-link     # dir symlink → .git
+ln -s real/.ssh   r15/keys           # dir symlink → **/.ssh/**
+ln -s benign      r15/link           # benign
+printf 'r15 ok\n' > /tmp/r15-ok.txt
+```
+
+| # | Action | Expected reply (prefix) | Expected log / check |
+|---|---|---|---|
+| R15-3a | `send_file /tmp/r15-ok.txt`, caption `/file put r15/cfg.txt --force` | `path denied by rule: .env (resolves to r15/.env)` | `file_transfer.path_denied direction=put rule=.env via_symlink=True requested=r15/cfg.txt resolved=r15/.env`; `cat r15/.env` still prints `R15_SENTINEL=1` |
+| R15-3b | caption `/file put r15/hooks-link/pre-commit` | `path denied by rule: .git/** (resolves to r15/.git/hooks/pre-commit)` | `path_denied … rule=.git/**`; `test ! -e r15/.git/hooks/pre-commit` |
+| R15-3c | caption `/file put r15/keys/` (dir form, one document) | `path denied by rule: **/.ssh/** (resolves to r15/real/.ssh/r15-ok.txt)` — the dir-level check passes, the per-file check denies | `path_denied … rule=**/.ssh/**` |
+| R15-3d | caption `/file put r15/link/ok.txt` | ``saved `r15/benign/ok.txt` in `claude-test` (…)`` | `file_transfer.saved path=r15/benign/ok.txt` |
+| R15-3e | Repeat R15-3d (no `--force`) | ``saved `r15/benign/ok_1.txt` …`` (dedup through a symlink, no crash) | `file.deduplicate` + `file_transfer.saved path=r15/benign/ok_1.txt`; no `Traceback` / `handle.worker_failed`; `systemctl --user show untether-dev -p NRestarts` unchanged |
+| R15-3f | `/file get r15/cfg.txt` | `path denied by rule: .env (resolves to r15/.env)`; no document | `path_denied direction=get` |
+| R15-3g | `/file get r15/hooks-link` | `path denied by rule: .git/** (resolves to r15/.git/hooks)`; no zip | `path_denied direction=get rule=.git/**` |
+| R15-3h | `/file get r15/link/ok.txt` | Document `ok.txt` delivered, content `r15 ok` | `file_transfer.sent filename=ok.txt` |
+
+Regression: T2, T3 (use `CLAUDE.md` in test-claude) and T5 as written, plus Q13 `/file` → usage. Global negative grep: `journalctl --user -u untether-dev -o cat --since "30 minutes ago" | grep -E "Traceback|ValueError|RuntimeError|handle.worker_failed"` must be empty. Not live-testable (unit-only, say so in the attestation notes): the symlinked `run_root` crash (F5) and the symlink loop (F6). Cleanup: `rm -rf ~/untether/test-projects/test-claude/r15 /tmp/r15-ok.txt` and any `incoming/r15-ok*.txt`.

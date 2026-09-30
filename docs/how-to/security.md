@@ -131,8 +131,10 @@ Add more patterns as needed:
     ]
     ```
 
+Deny globs are checked against both the path you type and the path it resolves to after following symlinks inside the project, so a symlink can't be used to reach a denied file (for example `cfg.txt → .env`, or `docs/x → .git/hooks`). Links that leave the project root are always refused ([#390](https://github.com/littlebearapps/untether/issues/390)).
+
 !!! tip "Defence in depth"
-    Deny globs protect against accidental file exfiltration via `/file get`. They do not prevent the coding agent itself from reading files — the agent runs with full filesystem access in the project directory.
+    Deny globs protect against accidental file exfiltration via `/file get` and against uploads (`/file put`, auto-saved uploads and media groups) landing in sensitive places such as `.git/hooks`. They do not prevent the coding agent itself from reading files — the agent runs with full filesystem access in the project directory.
 
 ## Secure webhook endpoints
 

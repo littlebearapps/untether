@@ -61,6 +61,9 @@ If the target file already exists, Untether auto-appends a numeric suffix (`_1`,
 !!! untether "Untether"
     📄 saved `docs/spec.pdf` (42 KB)
 
+!!! note "Path safety"
+    Deny globs are checked against the path you give **and** the path it resolves to after following symlinks inside the project, so an in-root symlink can't route an upload into `.git/hooks` or onto `.env` ([#390](https://github.com/littlebearapps/untether/issues/390)). Paths that leave the project root are refused. If you upload through a symlinked folder, the confirmation shows the real path the file landed at (e.g. `inbox/a.txt` → `data/inbox/a.txt`).
+
 <img src="../assets/screenshots/file-put.jpg" alt="Photos uploaded and auto-saved with confirmation" width="360" loading="lazy" />
 
 ## Fetch a file (`/file get`)
@@ -72,6 +75,9 @@ Send:
 ```
 
 Directories are zipped automatically.
+
+!!! note "Path safety"
+    The same double check applies to downloads: `/file get cfg.txt` is refused when `cfg.txt` is a symlink to `.env`, and a symlinked directory is zipped with every member checked against its real path. The file (or archive) keeps the name you asked for ([#390](https://github.com/littlebearapps/untether/issues/390)).
 
 !!! untether "Untether"
     📎 `src/main.py` (1.2 KB)

@@ -185,6 +185,13 @@ class PathAccess:
     """The deny glob that matched when ``reason == "denied"``."""
     via_symlink: bool
     """True when the resolved relative path differs from the requested one."""
+    resolved: Path | None = None
+    """Resolved root-relative path whenever resolution stayed inside the root.
+
+    Unlike ``rel`` it is also set when the *resolved* path was denied, so
+    callers can say where a request led (``resolves to .git/hooks/x``)
+    without resolving twice. Relative, so safe to log.
+    """
 
     @property
     def ok(self) -> bool:
@@ -253,6 +260,7 @@ def check_path_access(
         *,
         rule: str | None = None,
         via_symlink: bool = False,
+        resolved: Path | None = None,
     ) -> PathAccess:
         return PathAccess(
             root=root_r,
@@ -261,6 +269,7 @@ def check_path_access(
             reason=reason,
             rule=rule,
             via_symlink=via_symlink,
+            resolved=resolved,
         )
 
     try:
@@ -289,9 +298,9 @@ def check_path_access(
     via_symlink = rel != lex_rel
     rule = deny_reason(rel, deny_globs)
     if rule is not None:
-        return _deny("denied", root_r, rule=rule, via_symlink=via_symlink)
+        return _deny("denied", root_r, rule=rule, via_symlink=via_symlink, resolved=rel)
     if deny_hidden and _is_hidden(rel, hidden_allow):
-        return _deny("hidden", root_r, via_symlink=via_symlink)
+        return _deny("hidden", root_r, via_symlink=via_symlink, resolved=rel)
     return PathAccess(
         root=root_r,
         target=target,
@@ -299,6 +308,7 @@ def check_path_access(
         reason=None,
         rule=None,
         via_symlink=via_symlink,
+        resolved=rel,
     )
 
 
@@ -370,8 +380,17 @@ def zip_directory(
     deny_globs: Sequence[str],
     *,
     max_bytes: int | None = None,
+    arc_prefix: Path | None = None,
 ) -> bytes:
+    """Zip ``root / rel_path``, skipping symlinks and deny-globbed members.
+
+    Deny checks run on the real ``rel_path / member``. Member names use
+    ``arc_prefix`` when given (``/file get`` passes the *requested* path so a
+    download through an in-root symlink keeps its names, #390), else
+    ``rel_path``.
+    """
     target = root / rel_path
+    prefix = rel_path if arc_prefix is None else arc_prefix
     buffer = io.BytesIO()
     with zipfile.ZipFile(buffer, "w", compression=zipfile.ZIP_DEFLATED) as archive:
         for dirpath, _, filenames in os.walk(target, followlinks=False):
@@ -382,10 +401,11 @@ def zip_directory(
                     continue
                 if not item.is_file():
                     continue
-                rel_item = rel_path / item.relative_to(target)
+                member = item.relative_to(target)
+                rel_item = rel_path / member
                 if deny_reason(rel_item, deny_globs) is not None:
                     continue
-                archive.write(item, arcname=rel_item.as_posix())
+                archive.write(item, arcname=(prefix / member).as_posix())
                 if max_bytes is not None and buffer.tell() > max_bytes:
                     logger.debug(
                         "file.zip_too_large",

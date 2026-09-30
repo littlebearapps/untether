@@ -379,3 +379,20 @@ class TestExecuteNotifyMessage:
         result = execute_notify_message(wh, {"name": "World"})
         assert not result.startswith("#--")
         assert result == "Hello World"
+
+
+@pytest.mark.anyio
+async def test_file_write_symlink_to_env_rejected(tmp_path: Path) -> None:
+    """W1 (#390): webhook deny checks run on the resolved path — no symlink gap."""
+    env = tmp_path / ".env"
+    env.write_text("SECRET", encoding="utf-8")
+    link = tmp_path / "cfg"
+    try:
+        link.symlink_to(env)
+    except (OSError, NotImplementedError):
+        pytest.skip("symlinks not supported")
+    webhook = _make_webhook(file_path=str(link))
+    ok, msg = await execute_file_write(webhook, {}, b"overwrite")
+    assert ok is False
+    assert "deny glob" in msg
+    assert env.read_text(encoding="utf-8") == "SECRET"
