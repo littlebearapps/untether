@@ -301,7 +301,13 @@ class TelegramTransportSettings(BaseModel):
         resolve to a private IP are caught later (async, with DNS) at the
         chokepoint in ``transcribe_voice``."""
         # Lazy import to avoid any import-time cycle through the triggers pkg.
-        from .triggers.ssrf import SSRFError, parse_networks, validate_url
+        from .triggers.ssrf import (
+            SSRFBlockedError,
+            SSRFError,
+            parse_networks,
+            suggest_allowlist,
+            validate_url,
+        )
 
         try:
             networks = parse_networks(self.voice_transcription_url_allowlist)
@@ -315,9 +321,26 @@ class TelegramTransportSettings(BaseModel):
             try:
                 validate_url(self.voice_transcription_base_url, allowlist=networks)
             except SSRFError as exc:
+                # #679: name the key that opts the address in (or say it
+                # can't be opted in safely). Stays DNS-free — this runs on
+                # every config load and reload.
+                guidance = ""
+                if isinstance(exc, SSRFBlockedError):
+                    suggested = suggest_allowlist(exc.addresses)
+                    if suggested:
+                        entries = ", ".join(f'"{e}"' for e in suggested)
+                        guidance = (
+                            f"; to allow it, add {entries} to [transports.telegram] "
+                            "voice_transcription_url_allowlist"
+                        )
+                    else:
+                        guidance = (
+                            "; this address range can't be allowlisted safely — "
+                            "use a different host"
+                        )
                 raise ValueError(
                     "[transports.telegram] voice_transcription_base_url is not "
-                    f"permitted: {exc}"
+                    f"permitted: {exc}{guidance}"
                 ) from exc
         return self
 

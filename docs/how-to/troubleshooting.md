@@ -362,7 +362,9 @@ To change:
     voice_transcription_url_allowlist = ["127.0.0.0/8"]   # or your private range
     ```
 
-Run `untether doctor` to validate voice configuration.
+    Since v0.35.5 ([#679](https://github.com/littlebearapps/untether/issues/679)) the voice note reply names the blocked host and the exact entry to add (for example ``voice transcription endpoint `localhost` is blocked by the SSRF guard …``), and the log shows `voice.base_url.ssrf_blocked` with `host`, `blocked_addresses` and `suggested_allowlist`. The same problem is logged at startup and after a hot-reload as `voice.base_url.not_permitted` (WARNING); `voice.base_url.permitted` confirms a fix. A reply saying the endpoint "could not be resolved" means a DNS failure, not the SSRF guard: check the hostname in `voice_transcription_base_url`.
+
+Run `untether doctor` to check the voice API key. It doesn't check the transcription endpoint yet; use the startup log line above for that.
 
 ## File transfer blocked
 

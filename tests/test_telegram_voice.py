@@ -446,18 +446,82 @@ def test_resolve_transcription_prompt_unset_uses_shipped_default() -> None:
     )
 
     assert resolve_transcription_prompt(None) == DEFAULT_VOICE_TRANSCRIPTION_PROMPT
-    # Engine names are the words carrying a spoken instruction's referent.
-    for term in ("Untether", "Codex", "OpenCode", "Claude Code"):
-        assert term in DEFAULT_VOICE_TRANSCRIPTION_PROMPT
-    # #789: the agent context files every user dictates about ("update
-    # CLAUDE.md") — "CLAUDE.md" was transcribed as "Claw.md" without them.
-    for term in ("CLAUDE.md", "AGENTS.md"):
-        assert term in DEFAULT_VOICE_TRANSCRIPTION_PROMPT
     # Product-generic only — no deployment-specific nouns in a PyPI wheel.
     for term in ("lba-1", "nsd", "channelo", "Trello"):
         assert term not in DEFAULT_VOICE_TRANSCRIPTION_PROMPT
-    # Well inside the ~224-token Whisper prompt window.
-    assert len(DEFAULT_VOICE_TRANSCRIPTION_PROMPT) <= 1000
+
+
+def _default_prompt_terms() -> list[str]:
+    from untether.telegram.voice import DEFAULT_VOICE_TRANSCRIPTION_PROMPT
+
+    # Exact elements: a substring check can't tell "Claude" from "Claude Code".
+    return DEFAULT_VOICE_TRANSCRIPTION_PROMPT.split(", ")
+
+
+def test_default_voice_prompt_includes_bare_claude() -> None:
+    """#789 regression guard: rc14 had "Claude" only inside "Claude Code" and
+    "CLAUDE.md" (tokenised C|LAU|DE), so nsd still heard "Clawde". V1 order
+    (Claude first) per the rc15 plan; the recorded-clip A/B (R15-11) is owed."""
+    terms = _default_prompt_terms()
+    assert "Claude" in terms
+    assert terms[0] == "Claude"
+
+
+def test_default_voice_prompt_keeps_referent_terms() -> None:
+    """Engine names and the agent context files carry a spoken instruction's
+    referent ("run it on Codex", "update CLAUDE.md")."""
+    assert {
+        "Claude Code",
+        "CLAUDE.md",
+        "AGENTS.md",
+        "Codex",
+        "OpenCode",
+        "Untether",
+    } <= set(_default_prompt_terms())
+
+
+def test_default_voice_prompt_drops_deprecated_and_out_of_scope_engines() -> None:
+    from untether.telegram.voice import DEFAULT_VOICE_TRANSCRIPTION_PROMPT
+
+    terms = _default_prompt_terms()
+    for term in ("Gemini", "Amp", "Pi"):
+        assert term not in terms
+    # Substring check too, except "Pi" (it's inside "PyPI").
+    for term in ("Gemini", "Amp"):
+        assert term not in DEFAULT_VOICE_TRANSCRIPTION_PROMPT
+
+
+def test_default_voice_prompt_excludes_non_canonical_filename() -> None:
+    """Mixed-case "Claude.md" would bias towards a filename no repo uses."""
+    from untether.telegram.voice import DEFAULT_VOICE_TRANSCRIPTION_PROMPT
+
+    assert "Claude.md" not in _default_prompt_terms()
+    assert "Claude.md" not in DEFAULT_VOICE_TRANSCRIPTION_PROMPT
+
+
+def test_default_voice_prompt_well_inside_whisper_window() -> None:
+    """≤300 chars ≈ ≤130 Whisper tokens at ~2.3 chars/token, against the
+    224-token prompt window (Whisper keeps only the last 224)."""
+    from untether.telegram.voice import DEFAULT_VOICE_TRANSCRIPTION_PROMPT
+
+    terms = _default_prompt_terms()
+    assert len(DEFAULT_VOICE_TRANSCRIPTION_PROMPT) <= 300
+    assert len(terms) == len(set(terms))
+    for term in terms:
+        assert term
+        assert term == term.strip()
+    assert not DEFAULT_VOICE_TRANSCRIPTION_PROMPT.rstrip().endswith(",")
+
+
+def test_default_voice_prompt_documented_verbatim() -> None:
+    """#789 D4: the transport reference quotes the default verbatim, so a
+    constant change without a docs change fails here (the FAQ drifted once)."""
+    from pathlib import Path
+
+    from untether.telegram.voice import DEFAULT_VOICE_TRANSCRIPTION_PROMPT
+
+    doc = Path(__file__).parents[1] / "docs/reference/transports/telegram.md"
+    assert DEFAULT_VOICE_TRANSCRIPTION_PROMPT in doc.read_text(encoding="utf-8")
 
 
 def test_resolve_transcription_prompt_empty_string_opts_out() -> None:
@@ -577,7 +641,10 @@ async def test_transcribe_voice_blocks_private_base_url() -> None:
     )
 
     assert result is None
-    assert replies[-1] == "voice transcription endpoint is not permitted."
+    # #679: the reply now names the host and the allowlist entry to add.
+    assert "`127.0.0.1`" in replies[-1]
+    assert "voice_transcription_url_allowlist" in replies[-1]
+    assert '"127.0.0.0/8"' in replies[-1]
     assert transcriber.calls == []
 
 
@@ -768,3 +835,427 @@ async def test_594_transcribe_error_log_default_endpoint_marker() -> None:
     rec = next(r for r in logs if r["event"] == "openai.transcribe.error")
     assert rec["endpoint"] == "openai-default"
     assert rec["cause"] is None
+
+
+# ---------------------------------------------------------------------------
+# #679: actionable SSRF refusal + startup/reload endpoint check
+# ---------------------------------------------------------------------------
+
+
+def _gai(*ips: str) -> list[tuple]:
+    import socket
+
+    out: list[tuple] = []
+    for ip in ips:
+        family = socket.AF_INET6 if ":" in ip else socket.AF_INET
+        sockaddr = (ip, 8000, 0, 0) if family == socket.AF_INET6 else (ip, 8000)
+        out.append((family, socket.SOCK_STREAM, socket.IPPROTO_TCP, "", sockaddr))
+    return out
+
+
+async def _run_voice(
+    *,
+    base_url: str,
+    allowlist: tuple[str, ...] = (),
+    transcriber: _Transcriber | None = None,
+) -> tuple[str | None, list[str], _Transcriber]:
+    from untether.triggers.ssrf import parse_networks
+
+    replies: list[str] = []
+
+    async def reply(**kwargs) -> None:
+        replies.append(kwargs["text"])
+
+    transcriber = transcriber or _Transcriber(result="should-not-run")
+    result = await transcribe_voice(
+        bot=_Bot(file_info=File(file_path="voice.ogg"), audio=b"ok"),
+        msg=_voice_message(file_size=2),
+        enabled=True,
+        model="whisper-1",
+        reply=reply,
+        transcriber=transcriber,
+        base_url=base_url,
+        url_allowlist=parse_networks(list(allowlist)),
+    )
+    return result, replies, transcriber
+
+
+@pytest.mark.anyio
+async def test_679_localhost_reply_names_host_key_and_suggestion() -> None:
+    from unittest.mock import patch
+
+    with patch("socket.getaddrinfo", return_value=_gai("127.0.0.1", "::1")):
+        result, replies, transcriber = await _run_voice(
+            base_url="http://localhost:8000/v1"
+        )
+    assert result is None
+    assert transcriber.calls == []
+    assert len(replies) == 1
+    text = replies[0]
+    assert "`localhost`" in text
+    assert 'voice_transcription_url_allowlist = ["127.0.0.0/8"]' in text
+    assert "hot-reloads" in text
+    assert "8000" not in text
+    assert "/v1" not in text
+
+
+@pytest.mark.anyio
+async def test_679_blocked_log_fields() -> None:
+    from unittest.mock import patch
+
+    from structlog.testing import capture_logs
+
+    with (
+        capture_logs() as logs,
+        patch("socket.getaddrinfo", return_value=_gai("127.0.0.1", "::1")),
+    ):
+        await _run_voice(base_url="http://localhost:8000/v1")
+    events = [e for e in logs if e["event"] == "voice.base_url.ssrf_blocked"]
+    assert len(events) == 1
+    ev = events[0]
+    assert ev["log_level"] == "error"
+    assert ev["host"] == "localhost"
+    assert ev["port"] == 8000
+    assert ev["reason"] == "blocked_address"
+    assert ev["blocked_addresses"] == ["127.0.0.1", "::1"]
+    assert ev["allowlist_key"] == "voice_transcription_url_allowlist"
+    assert ev["suggested_allowlist"] == ["127.0.0.0/8"]
+    assert ev["error_type"] == "SSRFBlockedError"
+    assert "127.0.0.0/8" in ev["hint"]
+
+
+def _assert_no_secret(logs: list[dict], replies: list[str]) -> None:
+    for text in replies:
+        assert "s3cret" not in text
+    for entry in logs:
+        for value in entry.values():
+            assert "s3cret" not in str(value)
+
+
+@pytest.mark.anyio
+async def test_679_userinfo_never_echoed_blocked_path() -> None:
+    from unittest.mock import patch
+
+    from structlog.testing import capture_logs
+
+    with (
+        capture_logs() as logs,
+        patch("socket.getaddrinfo", return_value=_gai("127.0.0.1")),
+    ):
+        _, replies, _ = await _run_voice(
+            base_url="http://user:s3cret@localhost:8000/v1"
+        )
+    assert replies
+    assert any(e["event"] == "voice.base_url.ssrf_blocked" for e in logs)
+    _assert_no_secret(logs, replies)
+
+
+@pytest.mark.anyio
+async def test_679_userinfo_never_echoed_permitted_path() -> None:
+    from unittest.mock import patch
+
+    from structlog.testing import capture_logs
+
+    with (
+        capture_logs() as logs,
+        patch("socket.getaddrinfo", return_value=_gai("127.0.0.1")),
+    ):
+        result, replies, transcriber = await _run_voice(
+            base_url="http://user:s3cret@localhost:8000/v1",
+            allowlist=("127.0.0.0/8",),
+            transcriber=_Transcriber(result="hello"),
+        )
+    assert result == "hello"
+    assert transcriber.calls
+    assert any(e["event"] == "ssrf.validated" for e in logs)
+    _assert_no_secret(logs, replies)
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("allowlist", [(), ("127.0.0.0/8",)])
+async def test_679_userinfo_never_echoed_startup_check(
+    allowlist: tuple[str, ...],
+) -> None:
+    from unittest.mock import patch
+
+    from structlog.testing import capture_logs
+
+    from untether.telegram.voice import check_voice_endpoint
+
+    with (
+        capture_logs() as logs,
+        patch("socket.getaddrinfo", return_value=_gai("127.0.0.1")),
+    ):
+        verdict = await check_voice_endpoint(
+            enabled=True,
+            base_url="http://user:s3cret@localhost:8000/v1",
+            allowlist_entries=allowlist,
+            phase="startup",
+        )
+    assert verdict is not None
+    assert verdict.status == ("permitted" if allowlist else "blocked")
+    _assert_no_secret(logs, [])
+
+
+@pytest.mark.anyio
+async def test_679_metadata_host_no_allowlist_suggestion() -> None:
+    from unittest.mock import patch
+
+    from structlog.testing import capture_logs
+
+    with (
+        capture_logs() as logs,
+        patch("socket.getaddrinfo", return_value=_gai("169.254.169.254")),
+    ):
+        _, replies, _ = await _run_voice(base_url="http://meta.internal/latest")
+    assert "reserved address" in replies[0]
+    assert "voice_transcription_url_allowlist =" not in replies[0]
+    ev = next(e for e in logs if e["event"] == "voice.base_url.ssrf_blocked")
+    assert ev["suggested_allowlist"] == []
+
+
+@pytest.mark.anyio
+async def test_679_dns_failure_reply_and_log() -> None:
+    import socket
+    from unittest.mock import patch
+
+    from structlog.testing import capture_logs
+
+    with (
+        capture_logs() as logs,
+        patch("socket.getaddrinfo", side_effect=socket.gaierror("nope")),
+    ):
+        _, replies, _ = await _run_voice(base_url="http://whisper.invalid:8000/v1")
+    assert "could not be resolved" in replies[0]
+    assert "voice_transcription_url_allowlist" not in replies[0]
+    ev = next(e for e in logs if e["event"] == "voice.base_url.ssrf_blocked")
+    assert ev["reason"] == "dns_failed"
+
+
+@pytest.mark.anyio
+async def test_679_tailnet_private_suggests_exact_ip() -> None:
+    from unittest.mock import patch
+
+    with patch("socket.getaddrinfo", return_value=_gai("100.101.102.103")):
+        _, replies, _ = await _run_voice(base_url="http://whisper.tailnet.ts.net/v1")
+    assert '["100.101.102.103"]' in replies[0]
+    assert "`whisper.tailnet.ts.net`" in replies[0]
+
+
+def test_679_hostile_hostname_not_rendered() -> None:
+    from untether.telegram.voice import (
+        VoiceEndpointVerdict,
+        format_voice_endpoint_refusal,
+    )
+
+    for host in ("evil`host", "a*b", None):
+        text = format_voice_endpoint_refusal(
+            VoiceEndpointVerdict(
+                status="blocked",
+                host=host,
+                port=80,
+                addresses=("127.0.0.1",),
+                suggested=("127.0.0.0/8",),
+            )
+        )
+        assert "the configured host" in text
+        if host:
+            assert host not in text
+
+
+def test_679_invalid_verdict_keeps_generic_reply() -> None:
+    from untether.telegram.voice import (
+        VoiceEndpointVerdict,
+        format_voice_endpoint_refusal,
+    )
+
+    text = format_voice_endpoint_refusal(
+        VoiceEndpointVerdict(status="invalid", host=None, port=None)
+    )
+    assert text == "voice transcription endpoint is not permitted."
+
+
+@pytest.mark.anyio
+async def test_679_allowlisted_localhost_transcribes() -> None:
+    from unittest.mock import patch
+
+    with patch("socket.getaddrinfo", return_value=_gai("127.0.0.1", "::1")):
+        result, replies, transcriber = await _run_voice(
+            base_url="http://localhost:8000/v1",
+            allowlist=("127.0.0.0/8",),
+            transcriber=_Transcriber(result="transcribed"),
+        )
+    assert result == "transcribed"
+    assert replies == []
+    assert transcriber.calls
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    ("enabled", "base_url"),
+    [(False, "http://localhost:8000/v1"), (True, None)],
+)
+async def test_679_check_skips_when_disabled_or_unset(
+    enabled: bool, base_url: str | None
+) -> None:
+    from unittest.mock import patch
+
+    from structlog.testing import capture_logs
+
+    from untether.telegram.voice import check_voice_endpoint
+
+    with (
+        capture_logs() as logs,
+        patch("socket.getaddrinfo", side_effect=AssertionError("no DNS")),
+    ):
+        verdict = await check_voice_endpoint(
+            enabled=enabled,
+            base_url=base_url,
+            allowlist_entries=(),
+            phase="startup",
+        )
+    assert verdict is None
+    assert not [e for e in logs if e["event"].startswith("voice.base_url.")]
+
+
+@pytest.mark.anyio
+async def test_679_check_warns_for_localhost_startup() -> None:
+    from unittest.mock import patch
+
+    from structlog.testing import capture_logs
+
+    from untether.telegram.voice import check_voice_endpoint
+
+    with (
+        capture_logs() as logs,
+        patch("socket.getaddrinfo", return_value=_gai("127.0.0.1", "::1")),
+    ):
+        verdict = await check_voice_endpoint(
+            enabled=True,
+            base_url="http://localhost:8000/v1",
+            allowlist_entries=(),
+            phase="startup",
+        )
+    assert verdict is not None and verdict.status == "blocked"
+    warns = [e for e in logs if e["event"] == "voice.base_url.not_permitted"]
+    assert len(warns) == 1
+    ev = warns[0]
+    assert ev["log_level"] == "warning"
+    assert ev["phase"] == "startup"
+    assert ev["host"] == "localhost"
+    assert ev["port"] == 8000
+    assert ev["allowlist_key"] == "voice_transcription_url_allowlist"
+    assert ev["suggested_allowlist"] == ["127.0.0.0/8"]
+
+
+@pytest.mark.anyio
+async def test_679_check_permitted_logs_info() -> None:
+    from unittest.mock import patch
+
+    from structlog.testing import capture_logs
+
+    from untether.telegram.voice import check_voice_endpoint
+
+    with (
+        capture_logs() as logs,
+        patch("socket.getaddrinfo", return_value=_gai("93.184.216.34")),
+    ):
+        verdict = await check_voice_endpoint(
+            enabled=True,
+            base_url="https://api.groq.com/openai/v1",
+            allowlist_entries=(),
+            phase="reload",
+        )
+    assert verdict is not None and verdict.status == "permitted"
+    permitted = [e for e in logs if e["event"] == "voice.base_url.permitted"]
+    assert len(permitted) == 1
+    assert permitted[0]["log_level"] == "info"
+    assert permitted[0]["phase"] == "reload"
+    assert permitted[0]["host"] == "api.groq.com"
+    assert not [e for e in logs if e["log_level"] == "warning"]
+
+
+@pytest.mark.anyio
+async def test_679_check_allowlisted_localhost_permitted() -> None:
+    from unittest.mock import patch
+
+    from structlog.testing import capture_logs
+
+    from untether.telegram.voice import check_voice_endpoint
+
+    with (
+        capture_logs() as logs,
+        patch("socket.getaddrinfo", return_value=_gai("127.0.0.1", "::1")),
+    ):
+        verdict = await check_voice_endpoint(
+            enabled=True,
+            base_url="http://localhost:8000/v1",
+            allowlist_entries=("127.0.0.0/8",),
+            phase="reload",
+        )
+    assert verdict is not None and verdict.status == "permitted"
+    assert [e for e in logs if e["event"] == "voice.base_url.permitted"]
+    assert not [e for e in logs if e["event"] == "voice.base_url.not_permitted"]
+
+
+@pytest.mark.anyio
+async def test_679_check_dns_failure_logs_check_failed() -> None:
+    import socket
+    from unittest.mock import patch
+
+    from structlog.testing import capture_logs
+
+    from untether.telegram.voice import check_voice_endpoint
+
+    with (
+        capture_logs() as logs,
+        patch("socket.getaddrinfo", side_effect=socket.gaierror("nope")),
+    ):
+        verdict = await check_voice_endpoint(
+            enabled=True,
+            base_url="http://whisper.invalid/v1",
+            allowlist_entries=(),
+            phase="startup",
+        )
+    assert verdict is not None and verdict.status == "unresolvable"
+    ev = next(e for e in logs if e["event"] == "voice.base_url.check_failed")
+    assert ev["reason"] == "dns_failed"
+    assert ev["log_level"] == "warning"
+
+
+@pytest.mark.anyio
+async def test_679_check_never_raises(monkeypatch: pytest.MonkeyPatch) -> None:
+    from structlog.testing import capture_logs
+
+    import untether.telegram.voice as voice_mod
+
+    async def _boom(*args, **kwargs):
+        raise RuntimeError("classifier exploded")
+
+    monkeypatch.setattr(voice_mod, "classify_voice_endpoint", _boom)
+    with capture_logs() as logs:
+        verdict = await voice_mod.check_voice_endpoint(
+            enabled=True,
+            base_url="http://localhost:8000/v1",
+            allowlist_entries=(),
+            phase="startup",
+        )
+    assert verdict is None
+    ev = next(e for e in logs if e["event"] == "voice.base_url.check_failed")
+    assert ev["reason"] == "error"
+    assert ev["error_type"] == "RuntimeError"
+
+
+def test_679_voice_endpoint_keys_changed() -> None:
+    from untether.telegram.voice import voice_endpoint_keys_changed
+
+    for key in (
+        "voice_transcription",
+        "voice_transcription_base_url",
+        "voice_transcription_url_allowlist",
+    ):
+        assert voice_endpoint_keys_changed([key])
+    assert not voice_endpoint_keys_changed(
+        ["show_resume_line", "voice_transcription_model", "voice_transcription_prompt"]
+    )
+    assert not voice_endpoint_keys_changed([])

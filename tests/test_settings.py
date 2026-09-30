@@ -450,6 +450,60 @@ def test_voice_url_allowlist_invalid_entry_rejected(tmp_path: Path) -> None:
         validate_settings_data(data, config_path=config_path)
 
 
+def _voice_url_data(base_url: str) -> dict:
+    return {
+        "transport": "telegram",
+        "transports": {
+            "telegram": {
+                "bot_token": "tok",
+                "chat_id": 123,
+                "allow_any_user": True,
+                "voice_transcription_base_url": base_url,
+            }
+        },
+    }
+
+
+def test_679_ip_literal_loopback_error_names_allowlist_key(tmp_path: Path) -> None:
+    """#679: the load-time rejection names the key that opts the address in."""
+    with pytest.raises(ConfigError) as info:
+        validate_settings_data(
+            _voice_url_data("http://127.0.0.1:8000/v1"),
+            config_path=tmp_path / "untether.toml",
+        )
+    msg = str(info.value)
+    assert "voice_transcription_url_allowlist" in msg
+    assert '"127.0.0.0/8"' in msg
+
+
+def test_679_metadata_ip_error_does_not_suggest_allowlist(tmp_path: Path) -> None:
+    """#679: a link-local / cloud-metadata literal is never suggested."""
+    with pytest.raises(ConfigError) as info:
+        validate_settings_data(
+            _voice_url_data("http://169.254.169.254/latest"),
+            config_path=tmp_path / "untether.toml",
+        )
+    msg = str(info.value)
+    assert "can't be allowlisted" in msg
+    assert '"169.254' not in msg
+
+
+def test_679_settings_validator_is_dns_free(tmp_path: Path) -> None:
+    """#679 / #506: a `localhost` base_url loads without any DNS lookup — the
+    validator runs on every load and reload, so it must stay DNS-free."""
+    from unittest.mock import patch
+
+    with patch("socket.getaddrinfo", side_effect=AssertionError("DNS in validator")):
+        settings = validate_settings_data(
+            _voice_url_data("http://localhost:8000/v1"),
+            config_path=tmp_path / "untether.toml",
+        )
+    assert (
+        settings.transports.telegram.voice_transcription_base_url
+        == "http://localhost:8000/v1"
+    )
+
+
 # ───────────────────────────────────────────────────────────────────────────
 # #409 — env allowlist user-extensible config (SecuritySettings extras)
 # ───────────────────────────────────────────────────────────────────────────

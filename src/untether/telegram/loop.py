@@ -75,7 +75,12 @@ from .types import (
     TelegramIncomingMessage,
     TelegramIncomingUpdate,
 )
-from .voice import resolve_transcription_prompt, transcribe_voice
+from .voice import (
+    check_voice_endpoint,
+    resolve_transcription_prompt,
+    transcribe_voice,
+    voice_endpoint_keys_changed,
+)
 
 logger = get_logger(__name__)
 
@@ -1865,6 +1870,22 @@ async def run_main_loop(
                                 transport="telegram",
                                 keys=hot_keys,
                             )
+                            # #679: re-check the voice endpoint when a key
+                            # that affects its SSRF verdict changed (log-only,
+                            # background; the helper never raises and is a
+                            # silent no-op when voice was just disabled).
+                            if voice_endpoint_keys_changed(hot_keys):
+                                tg.start_soon(
+                                    partial(
+                                        check_voice_endpoint,
+                                        enabled=cfg.voice_transcription,
+                                        base_url=cfg.voice_transcription_base_url,
+                                        allowlist_entries=tuple(
+                                            cfg.voice_transcription_url_allowlist
+                                        ),
+                                        phase="reload",
+                                    )
+                                )
                         state.transport_snapshot = new_snapshot
                 if (
                     state.transport_id is not None
@@ -1934,6 +1955,22 @@ async def run_main_loop(
                     )
 
                 tg.start_soon(run_config_watch)
+
+            # #679: warn at startup when the configured voice endpoint would be
+            # refused by the SSRF guard (e.g. `localhost` or a tailnet host
+            # without an allowlist entry) instead of only on the first voice
+            # note. Deliberately OUTSIDE the watch_config block so it runs with
+            # watch_config = false too; background so DNS never delays startup.
+            if cfg.voice_transcription and cfg.voice_transcription_base_url:
+                tg.start_soon(
+                    partial(
+                        check_voice_endpoint,
+                        enabled=cfg.voice_transcription,
+                        base_url=cfg.voice_transcription_base_url,
+                        allowlist_entries=tuple(cfg.voice_transcription_url_allowlist),
+                        phase="startup",
+                    )
+                )
 
             # Graceful drain-then-exit task
             async def _drain_and_exit() -> None:

@@ -294,7 +294,7 @@ Run these in addition to the standard tiers and B-LIVE for rc12. Unless noted, u
 | RC12-7 | **Queued note under a live session ([#781](https://github.com/littlebearapps/untether/issues/781))** | Start a 60 s background task, end the turn; immediately send a follow-up. | The follow-up shows `⏳ Queued — sent as soon as Claude's current turn ends (background tasks keep running).` (no `/cancel to drop it`) and is answered within seconds in the same session. With `live_sessions = false` the old `⏳ Queued behind the previous run's N background task(s) …` wording returns. |
 | RC12-8 | **`<br>` rendering ([#786](https://github.com/littlebearapps/untether/issues/786))** | `Reply with exactly: first line<br>second line, then a two-row markdown table with a <br> inside one cell, then the literal text <br> inside backticks` | The first `<br>` renders as a line break; the table cell shows a space, not `<br>`; the backticked `<br>` stays literal code; no other HTML tag is interpreted. |
 | RC12-9 | **Filenames not auto-linked ([#788](https://github.com/littlebearapps/untether/issues/788))** | `Mention CLAUDE.md, scripts/healthcheck.sh:12, src/untether/runner.py and https://example.com/notes.md in plain text, no code formatting` | The three filenames render as inline code, not links (no `claude.md` domain link); the `https://` URL stays a clickable link. |
-| RC12-10 | **Voice vocabulary ([#789](https://github.com/littlebearapps/untether/issues/789))** | `send_voice` a clip saying *"open CLAUDE dot MD and AGENTS dot MD and summarise them"* with no `voice_transcription_prompt` set in the dev config. | Transcript contains `CLAUDE.md` and `AGENTS.md` (not "Claw.md"); both render as inline code in the echoed transcript. Effect is model-dependent, so a near-miss is a soft fail: note it and don't block the release. |
+| RC12-10 | **Voice vocabulary ([#789](https://github.com/littlebearapps/untether/issues/789))** — *superseded by R15-11 (its "no prompt set" precondition wasn't true on the dev bot)* | `send_voice` a clip saying *"open CLAUDE dot MD and AGENTS dot MD and summarise them"* with no `voice_transcription_prompt` set in the dev config. | Transcript contains `CLAUDE.md` and `AGENTS.md` (not "Claw.md"); both render as inline code in the echoed transcript. Effect is model-dependent, so a near-miss is a soft fail: note it and don't block the release. |
 
 **Required for rc12:** Tier 7 + Tier 1 (all 4 supported engines, because #510 changed the base `run_impl` spawn order) + B-LIVE-1…7 + RC12-1…9, RC12-10 if a voice clip is available.
 
@@ -473,6 +473,8 @@ Integration tests are run by Claude Code via Telegram MCP tools (see "Automated 
 | `/browse` + shared path checks (`commands/browse.py`, `telegram/files.py`) | Q5, U10, T2, T3, R15-2 |
 | File transfer (`file_transfer.py`) | T2, T3, T5, R15-3 |
 | Voice (`voice.py`) | T1, RC12-10 |
+| File transfer (`file_transfer.py`) | T2, T3, T5 |
+| Voice (`voice.py`) | T1, R15-11 (vocabulary), R15-10 (endpoint) |
 | Topics (`topics.py`, `topic_state.py`) | O1, O5, O6, O8 |
 | Directives (`directives.py`) | T9, T10 |
 | Shutdown (`shutdown.py`) | S3, B4 |
@@ -740,3 +742,47 @@ Codex chat `4929463515` (Bot API `-4929463515`), project `codex-test` → `/home
 | R15-1-4 | **Legitimate passthrough still works** | Set `[engines.claude] extra_args = ["--strict-mcp-config"]` and `[engines.codex] extra_args = ["-c", "notify=[]", "-s", "workspace-write"]`; save; run U1 in both chats. Then `/config` → Codex Approval policy → Safe and send `print the first line of README.md`; set it back. Restore | `config.reload.applied`, `bad_config=[]`; both U1 pass; `runner.start` argv contains the passed flags. Safe variant: the run completes (no `cannot be used multiple times`), argv has `-s workspace-write` before `exec` and `--sandbox read-only` after it |
 | R15-1-5 *(optional, startup path)* | **Default engine with a blocked flag refuses to start** | From the terminal: set R15-1-2's `--yolo` config, `systemctl --user restart untether-dev`, wait 10 s, `systemctl --user status untether-dev`; then restore and restart | Service not active / restarting; journal shows ``Invalid `codex.extra_args` in …; flag '--yolo' …``. After restore: startup message arrives, `/ping` answers |
 | R15-1-cleanup | **Always** | `cp /tmp/r15-1-dev.toml.bak ~/.untether-dev/untether.toml`; if R15-1-5 ran, restart dev from the terminal | `diff /tmp/r15-1-dev.toml.bak ~/.untether-dev/untether.toml` empty; `/ping` in the Claude chat answers; the startup message has no `misconfigured:` / `failed to load:` note |
+
+### #679 — voice SSRF guidance
+
+Chat: Claude `5284581592` (any engine works: transcription happens before the runner). Clip: the
+T1 pre-recorded OGG via `send_voice`.
+
+**Safety.** Never restart `untether-dev` while `voice_transcription_base_url` is an IP literal
+without an allowlist: config load fails and the dev bot won't start. Don't run a fake Whisper
+server that logs headers — with an allowlist in place, the API key goes to whatever listens on
+`:8000`. Always restore the backup at the end.
+
+**Setup:** `cp ~/.untether-dev/untether.toml /tmp/untether-dev.toml.r15-10.bak`.
+
+**Key-leak preflight (mandatory before R15-10c and again right before R15-10d):**
+`ss -ltn | grep -E '[:.]8000\b' && { echo "ABORT: something listens on :8000"; exit 1; }`. Abort
+R15-10c–d if anything is listening. For steps c–d also set
+`voice_transcription_api_key = "r15-dummy"` (the backup restores the real key in R15-10g).
+
+**Log grep:** `journalctl --user -u untether-dev -o cat --since "15 minutes ago" | grep -E "voice\.base_url\.|config\.reload\.(failed|transport_config_hot_reloaded)|openai\.transcribe\.error"`
+
+| Step | Action | Expected Telegram | Expected log |
+|---|---|---|---|
+| R15-10a | **Localhost warns on reload ([#679](https://github.com/littlebearapps/untether/issues/679))** — edit the dev TOML: `voice_transcription_base_url = "http://localhost:8000/v1"`, no allowlist key | The "Hot-reloaded" notice (#548) | `config.reload.transport_config_hot_reloaded keys=['voice_transcription_base_url']`, then `voice.base_url.not_permitted phase=reload host=localhost … allowlist_key=voice_transcription_url_allowlist suggested_allowlist=['127.0.0.0/8']` [warning] |
+| R15-10b | `send_voice` the T1 clip | A reply naming `` `localhost` `` with a toml block `voice_transcription_url_allowlist = ["127.0.0.0/8"]`; no URL path or port; **no run starts** | `voice.base_url.ssrf_blocked host=localhost port=8000 reason=blocked_address blocked_addresses=… suggested_allowlist=['127.0.0.0/8']` [error] |
+| R15-10c | Run the preflight; add `voice_transcription_url_allowlist = ["127.0.0.0/8"]` and the dummy key | Hot-reload notice | `voice.base_url.permitted phase=reload host=localhost` [info] |
+| R15-10d | Re-run the preflight, then `send_voice` again (nothing listens on `:8000`) | After the SDK retries (about 10–30 s): `couldn't reach the transcription service — transient network issue…`, which proves the guard passed | `openai.transcribe.error … error_type=APIConnectionError endpoint=http://localhost:8000/v1`; no `ssrf_blocked` |
+| R15-10e | Remove the allowlist line and the dummy key (keep `localhost`), then `systemctl --user restart untether-dev` | The startup message arrives normally; `/ping` answers | `voice.base_url.not_permitted phase=startup host=localhost`. The bot is **not** blocked from starting. |
+| R15-10f | Set `voice_transcription_base_url = "http://127.0.0.1:8000/v1"` (hot-reload only; **do not restart**) | No hot-reload notice (reload rejected); `/ping` still works | `config.reload.failed error=… voice_transcription_base_url is not permitted: Blocked: 127.0.0.1 …; to allow it, add "127.0.0.0/8" to [transports.telegram] voice_transcription_url_allowlist` |
+| R15-10g | Restore: `cp /tmp/untether-dev.toml.r15-10.bak ~/.untether-dev/untether.toml`, then `send_voice` | A normal `🎙 <transcript>` echo and a normal run (T1 regression) | `voice.base_url.permitted phase=reload host=api.groq.com`; no `not_permitted` |
+
+Then run Tier 7 (`/ping`, `/config`) to confirm nothing else regressed.
+
+### #789 — default voice prompt vocabulary
+
+Needs recorded clips (Nathan records them once as Telegram voice notes to Saved Messages): C2a–h
+(bare "Claude" in varied positions), C3 (*"Yes, continue."*) and C5a–c ("cloud" controls). Clips live
+only in `~/.untether-dev/test-clips/789/` and are deleted when the run ends. Never send client-chat
+audio (C1) to the bot or Groq; score it offline with local Whisper, counts only. The plan's
+pre-registered A/B criteria (offline, Groq + local Whisper, V0/V1/V2/no prompt) decide
+ship / tie / no-improvement before this live row runs.
+
+| # | Scenario | Steps | Pass criteria |
+|---|---|---|---|
+| R15-11 | **Voice vocabulary: bare "Claude" ([#789](https://github.com/littlebearapps/untether/issues/789))** | Back up the dev TOML (`cp -p ~/.untether-dev/untether.toml ~/.untether-dev/untether.toml.bak-789-$(date +%Y%m%dT%H%M%S)`) and set a restore trap. Comment out `voice_transcription_prompt` with `sed -i 's/^voice_transcription_prompt/# &/'` (never echo the value), and prove via `load_settings()` + `resolve_transcription_prompt()` that it resolves to the shipped default (print booleans only). Restart `untether-dev`. With `/planmode on`, `send_voice` C2a–h, C3 and C5a–c in the Claude chat, sending `/cancel` after each `🎙` echo. Then set a throwaway override (one hot-reload line, `keys=['voice_transcription_prompt']`, send C2c) and `""` (one hot-reload line, send C3). Restore the TOML from the backup even if the run aborts, re-run the loader check (expect `resolved_to_default=False`) and restart. | Every bare "Claude" is echoed as `Claude`, and `CLAUDE.md`/`AGENTS.md` appear as inline code. "cloud" is never turned into `Claude`. The short clip has no inserted terms. No `voice.transcribe.error`/`timeout`/`unexpected` or `config.read.toml_error`. `journalctl --user -u untether-dev --since "60 minutes ago" \| grep -c "AGENTS.md, Codex, OpenCode"` prints `0` (the prompt is never logged). Restored TOML `sha256sum` matches the backup. |

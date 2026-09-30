@@ -61,7 +61,7 @@ requests on their own base URL without relying on `OPENAI_BASE_URL`. If your ser
 requires a specific model name, set `voice_transcription_model` (for example,
 `whisper-1`).
 
-Since v0.35.4 the base URL is SSRF-validated ([#381](https://github.com/littlebearapps/untether/issues/381)): a loopback or private-network host (such as `http://localhost:8000/v1`) is refused unless you allowlist it with `voice_transcription_url_allowlist` (a list of CIDR/IP strings, e.g. `["127.0.0.0/8"]`). The default public path (`base_url` unset) skips validation.
+Since v0.35.4 the base URL is SSRF-validated ([#381](https://github.com/littlebearapps/untether/issues/381)): a loopback or private-network host (such as `http://localhost:8000/v1`) is refused unless you allowlist it with `voice_transcription_url_allowlist` (a list of CIDR/IP strings, e.g. `["127.0.0.0/8"]`). The default public path (`base_url` unset) skips validation. A refused voice note gets a reply naming the blocked host and the exact allowlist entry to add, and the same verdict is logged at startup and after a voice-related hot-reload (`voice.base_url.not_permitted`, [#679](https://github.com/littlebearapps/untether/issues/679)).
 
 If your voice notes are always in one language, set `voice_transcription_language`
 to an ISO-639-1 code (for example, `en`). This is passed as the Whisper `language`
@@ -76,18 +76,25 @@ to genuinely high-frequency nouns — provider prompt windows are token-capped
 (~224 tokens for Whisper), the effect is model-dependent, and an overstuffed
 prompt can induce hallucinated terms on short or silent clips.
 
+The default list is short and its order doesn't matter much. Only if your
+override is longer than Whisper's ~224-token prompt window (roughly 500
+characters of a comma-separated list): OpenAI Whisper keeps only the **last**
+224 tokens, so put your most important terms at the end. Other providers may
+truncate or reject an over-long prompt, so keep it under that size.
+
 Since v0.35.5 the key is **not** inert when unset
 ([#703](https://github.com/littlebearapps/untether/issues/703)): Untether ships a
 product-generic default covering the terms every user speaks —
 
 ```
-Untether, Telegram, Claude Code, Codex, OpenCode, Gemini, Amp, Pi, MCP, CLI, repo, changelog, PyPI, CLAUDE.md, AGENTS.md
+Claude, Claude Code, CLAUDE.md, AGENTS.md, Codex, OpenCode, Untether, Telegram, MCP, CLI, repo, changelog, PyPI
 ```
 
 Deployment-specific nouns (your project names, hostnames, third-party tools) are
 deliberately **not** in the default — add them yourself. Setting the key
 **replaces** the default rather than extending it, so include the engine names
-you care about in your own value. Set it to an empty string (`""`) to disable the
+you care about in your own value (the default no longer lists Gemini, Amp or Pi,
+[#789](https://github.com/littlebearapps/untether/issues/789)). Set it to an empty string (`""`) to disable the
 bias entirely and omit the parameter, the same way `[preamble] text = ""` works.
 
 ### Trigger mode (mentions-only)
