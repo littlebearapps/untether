@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import subprocess
 import sys
+from collections.abc import Collection
 from pathlib import Path
 
 import anyio
@@ -19,6 +20,7 @@ from ..settings import (
 )
 from ..transport_runtime import TransportRuntime
 from ..transports import SetupResult, TransportBackend
+from ..triggers.run_once_state import load_fired_state, resolve_state_path
 from .bridge import (
     TelegramBridgeConfig,
     TelegramPresenter,
@@ -111,6 +113,7 @@ def _build_startup_message(
     topics: TelegramTopicsSettings,
     session_mode: str = "stateless",
     trigger_config: dict | None = None,
+    spent_cron_ids: Collection[str] = (),
 ) -> str:
     project_aliases = sorted(set(runtime.project_aliases()), key=str.lower)
 
@@ -162,8 +165,20 @@ def _build_startup_message(
     # triggers — only shown when enabled
     if trigger_config and trigger_config.get("enabled"):
         n_wh = len(trigger_config.get("webhooks", []))
-        n_cr = len(trigger_config.get("crons", []))
-        details.append(f"_triggers:_ `enabled ({n_wh} webhooks, {n_cr} crons)`")
+        # #809: count only crons that will actually be scheduled — a fired
+        # run_once cron stays in the TOML but TriggerManager drops it (same
+        # filter as manager.py). Spent one-shots get their own suffix.
+        crons = trigger_config.get("crons", [])
+        spent = set(spent_cron_ids)
+        active = [
+            c for c in crons if not (isinstance(c, dict) and c.get("id") in spent)
+        ]
+        n_cr = len(active)
+        n_spent = len(crons) - n_cr
+        spent_note = f", {n_spent} spent one-shot" if n_spent else ""
+        details.append(
+            f"_triggers:_ `enabled ({n_wh} webhooks, {n_cr} crons{spent_note})`"
+        )
 
     _DOCS_URL = (
         "https://github.com/littlebearapps/untether?tab=readme-ov-file#-help-guides"
@@ -224,12 +239,17 @@ class TelegramBackend(TransportBackend):
         except (OSError, ValueError, KeyError) as exc:
             logger.debug("triggers.config.read_skipped", error=str(exc))
 
+        # #809: fired run_once crons (run_once_fired.json, sibling of the
+        # toml) are not scheduled, so the startup count must skip them.
+        spent_cron_ids = set(load_fired_state(resolve_state_path(config_path)))
+
         startup_msg = _build_startup_message(
             runtime,
             chat_id=chat_id,
             topics=settings.topics,
             session_mode=settings.session_mode,
             trigger_config=trigger_config,
+            spent_cron_ids=spent_cron_ids,
         )
         progress_cfg = _load_progress_settings()
         bot = TelegramClient(token, group_chat_rps=progress_cfg.group_chat_rps)

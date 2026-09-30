@@ -202,6 +202,101 @@ def test_startup_message_shows_triggers_when_enabled() -> None:
     assert "1 webhooks" in message
 
 
+def _startup_crons_message(
+    crons: list[dict[str, Any]], spent: set[str] | None = None
+) -> str:
+    runtime = _build_healthy_runtime()
+    kwargs: dict[str, Any] = {}
+    if spent is not None:
+        kwargs["spent_cron_ids"] = spent
+    return telegram_backend._build_startup_message(
+        runtime,
+        chat_id=123,
+        topics=TelegramTopicsSettings(),
+        trigger_config={"enabled": True, "webhooks": [], "crons": crons},
+        **kwargs,
+    )
+
+
+def test_startup_message_excludes_spent_run_once(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#809: a fired run_once cron is not counted as scheduled.
+
+    Driven through ``build_and_run`` so the ``run_once_fired.json`` read
+    (sibling of the toml) is exercised, not just the formatter.
+    """
+    config_path = tmp_path / "untether.toml"
+    config_path.write_text(
+        'transport = "telegram"\n\n'
+        "[transports.telegram]\n"
+        'bot_token = "token"\n'
+        "chat_id = 321\n\n"
+        "[triggers]\n"
+        "enabled = true\n\n"
+        "[[triggers.crons]]\n"
+        'id = "daily"\n'
+        'schedule = "0 9 * * *"\n'
+        'prompt = "hi"\n\n'
+        "[[triggers.crons]]\n"
+        'id = "once"\n'
+        'schedule = "0 10 * * *"\n'
+        'prompt = "hi"\n'
+        "run_once = true\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "run_once_fired.json").write_text(
+        '{"fired": {"once": "2026-09-29T10:00:00+10:00"}}', encoding="utf-8"
+    )
+
+    captured: dict[str, Any] = {}
+
+    async def fake_run_main_loop(cfg, **kwargs) -> None:
+        captured["cfg"] = cfg
+
+    class _FakeClient:
+        def __init__(self, token: str, **kwargs: Any) -> None:
+            self.token = token
+
+        async def close(self) -> None:
+            return None
+
+    monkeypatch.setattr(telegram_backend, "run_main_loop", fake_run_main_loop)
+    monkeypatch.setattr(telegram_backend, "TelegramClient", _FakeClient)
+
+    telegram_backend.TelegramBackend().build_and_run(
+        transport_config=TelegramTransportSettings(
+            bot_token="token", chat_id=321, allowed_user_ids=[7]
+        ),
+        config_path=config_path,
+        runtime=_build_healthy_runtime(),
+        final_notify=False,
+        default_engine_override=None,
+    )
+
+    startup = captured["cfg"].startup_msg
+    assert "_triggers:_ `enabled (0 webhooks, 1 crons, 1 spent one-shot)`" in startup
+
+
+def test_startup_message_no_spent_suffix_when_none() -> None:
+    """#809: with nothing fired the suffix is omitted entirely."""
+    crons = [{"id": "a"}, {"id": "b", "run_once": True}]
+    for spent in (None, set(), {"not-configured"}):
+        message = _startup_crons_message(crons, spent)
+        assert "_triggers:_ `enabled (0 webhooks, 2 crons)`" in message
+        assert "spent" not in message
+
+
+def test_startup_message_all_crons_spent() -> None:
+    """#809: every cron spent → 0 scheduled, the rest reported as spent."""
+    crons = [
+        {"id": "a", "run_once": True},
+        {"id": "b", "run_once": True},
+    ]
+    message = _startup_crons_message(crons, {"a", "b"})
+    assert "_triggers:_ `enabled (0 webhooks, 0 crons, 2 spent one-shot)`" in message
+
+
 def test_startup_message_project_count(tmp_path: Path) -> None:
     runner = ScriptRunner([Return(answer="ok")], engine="claude")
     router = AutoRouter(
