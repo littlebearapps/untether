@@ -1456,6 +1456,13 @@ class ProgressEdits:
         # between turns. Kept apart from ``_peak_idle`` so that metric keeps
         # meaning "longest stall"; a live-idle hold is silent by design.
         self._peak_live_idle: float = 0.0
+        # #811: live-session turn boundaries, fed by run_runner_with_cancel.
+        # The run-level ``_last_event_at`` freezes during follow-up / wake
+        # turns (their events go to the turn router), so the live-idle gap is
+        # measured from the later of the last run event and the last turn's
+        # completion, and never accrues while a turn is open.
+        self._live_idle_baseline: float | None = None
+        self._turn_active: bool = False
         self._live_idle_logged: bool = False
         self._prev_diag: Any = None
         # #650/#593: clock() timestamp of the last stall tick that observed
@@ -1757,7 +1764,11 @@ class ProgressEdits:
             # stall in ``session.summary peak_idle_seconds``.
             live_idle = self._is_live_session_idle()
             if live_idle:
-                self._peak_live_idle = max(self._peak_live_idle, elapsed)
+                # #811: only a gap with no turn open is live-idle time.
+                if not self._turn_active:
+                    self._peak_live_idle = max(
+                        self._peak_live_idle, self._live_idle_gap()
+                    )
             else:
                 self._peak_idle = max(self._peak_idle, elapsed)
                 self._live_idle_logged = False
@@ -1872,7 +1883,7 @@ class ProgressEdits:
                     logger.info(
                         "progress_edits.stall_live_idle_suppressed",
                         channel_id=self.channel_id,
-                        seconds_since_last_event=round(elapsed, 1),
+                        seconds_since_last_event=round(self._live_idle_gap(), 1),
                         threshold_reason=threshold_reason,
                         run_level=self.run_level,
                         pid=self.pid,
@@ -2567,6 +2578,25 @@ class ProgressEdits:
         if engine_state is None:
             return False
         return getattr(engine_state, "result_received_at", None) is not None
+
+    def note_turn_boundary(self, phase: str) -> None:
+        """#811: a live-session follow-up / wake turn opened or closed.
+
+        Metric-only: feeds ``peak_live_idle_seconds``. Stall suppression is
+        unchanged — run-level edits keep standing down during turns."""
+        if phase == "started":
+            self._turn_active = True
+        elif phase == "completed":
+            self._turn_active = False
+            self._live_idle_baseline = self.clock()
+
+    def _live_idle_gap(self) -> float:
+        """#811: seconds since the later of the last run event and the last
+        live-session turn's completion."""
+        since = self._last_event_at
+        if self._live_idle_baseline is not None:
+            since = max(since, self._live_idle_baseline)
+        return self.clock() - since
 
     def _is_live_session_idle(self) -> bool:
         """#776: a live Claude session sitting between turns (the runner's
@@ -3603,6 +3633,8 @@ async def run_runner_with_cancel(
                         # #776: follow-up turns of a live session get their
                         # own messages; the run's progress/final stay put.
                         if isinstance(evt, TurnEvent):
+                            # #811: the run-level monitor's live-idle clock.
+                            edits.note_turn_boundary(evt.phase)
                             if turn_router is not None:
                                 await turn_router.on_turn(evt)
                             continue

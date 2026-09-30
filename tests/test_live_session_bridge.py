@@ -160,6 +160,154 @@ async def test_live_turn_active_is_not_post_result_idle() -> None:
     assert edits._is_post_result_idle() is False
 
 
+# ── #811: peak_live_idle_seconds measures gaps between turns ───────────────
+
+
+def _live_run_level_edits(
+    transport: FakeTransport, clock: _FakeClock, *, turn_open: bool = False
+):
+    edits = _make_edits(transport, _KeyboardPresenter(), clock=clock)
+    edits.run_level = True
+    edits._stall_check_interval = 0.01
+    edits._STALL_THRESHOLD_SECONDS = 0.05
+    edits._STALL_THRESHOLD_TOOL = 0.05
+    edits._STALL_THRESHOLD_SUBAGENT = 0.05
+    edits._STALL_THRESHOLD_APPROVAL = 10.0
+    edits._stall_repeat_seconds = 0.0
+    edits._STALL_MAX_WARNINGS = 2
+    edits.cancel_event = anyio.Event()
+    edits.stream = _make_stream(
+        last_event_type="system",
+        engine_state=_make_engine_state(
+            result_received_at=None,
+            live_mode=True,
+            completed_turns=1,
+            turn_open=turn_open,
+        ),
+    )
+    return edits
+
+
+async def _drive_live_timeline(edits, clock: _FakeClock, steps: list) -> None:
+    """Run the stall monitor over ``steps``: a float sets the fake clock and
+    yields for a few monitor ticks; a str is a turn boundary phase."""
+    async with anyio.create_task_group() as tg:
+
+        async def drive() -> None:
+            for step in steps:
+                if isinstance(step, str):
+                    edits.note_turn_boundary(step)
+                else:
+                    clock.set(step)
+                await anyio.sleep(0.03)
+            edits.signal_send.close()
+
+        tg.start_soon(edits.run)
+        tg.start_soon(drive)
+
+
+async def test_811_peak_live_idle_excludes_followup_turn_time() -> None:
+    """60 s idle, a 900 s follow-up turn, 60 s idle → peak ≈ 60, not ≥ 900."""
+    transport = FakeTransport()
+    clock = _FakeClock(start=100.0)
+    edits = _live_run_level_edits(transport, clock)
+
+    await _drive_live_timeline(
+        edits,
+        clock,
+        [160.0, "started", 600.0, 1060.0, "completed", 1120.0],
+    )
+
+    assert 59.0 <= edits._peak_live_idle <= 61.0
+    assert edits._peak_idle == 0.0
+    assert edits._turn_active is False
+    assert edits._live_idle_baseline == 1060.0
+
+
+async def test_811_peak_live_idle_is_max_gap_across_turns() -> None:
+    """Idle gaps of 45 / 61 / 30 s between turns → the peak is 61."""
+    transport = FakeTransport()
+    clock = _FakeClock(start=0.0)
+    edits = _live_run_level_edits(transport, clock)
+
+    await _drive_live_timeline(
+        edits,
+        clock,
+        [
+            45.0,
+            "started",
+            345.0,
+            "completed",
+            406.0,
+            "started",
+            1006.0,
+            "completed",
+            1036.0,
+        ],
+    )
+
+    assert 60.0 <= edits._peak_live_idle <= 61.5
+
+
+async def test_811_stall_suppression_unchanged_during_turn() -> None:
+    """Regression: run-level edits still stand down while a turn is open —
+    no stall warning, no auto-cancel — and a turn accrues no live-idle."""
+    from structlog.testing import capture_logs
+
+    transport = FakeTransport()
+    clock = _FakeClock(start=100.0)
+    edits = _live_run_level_edits(transport, clock, turn_open=True)
+    edits.note_turn_boundary("started")
+
+    with capture_logs() as logs:
+        await _drive_live_timeline(
+            edits, clock, [100.0 + step * 700.0 for step in range(1, 10)]
+        )
+
+    assert edits._is_live_session_idle() is True
+    assert edits.cancel_event is not None and not edits.cancel_event.is_set()
+    assert [c for c in transport.send_calls if "min" in c["message"].text] == []
+    assert [e for e in logs if e.get("event") == "progress_edits.stall_detected"] == []
+    assert edits._total_stall_warn_count == 0
+    assert edits._peak_live_idle == 0.0
+    assert edits._peak_idle == 0.0
+
+
+async def test_811_run_runner_with_cancel_feeds_turn_boundaries() -> None:
+    """The bridge feeds each TurnEvent phase to the run-level edits."""
+    from untether.model import ResumeToken as _RT
+    from untether.runner_bridge import run_runner_with_cancel
+    from untether.runners.mock import Emit as _Emit
+    from untether.runners.mock import Return as _Return
+    from untether.runners.mock import ScriptRunner as _ScriptRunner
+
+    token = _RT(engine="claude", value="sess-811")
+    clock = _FakeClock(start=50.0)
+    edits = _make_edits(FakeTransport(), _KeyboardPresenter(), clock=clock)
+    runner = _ScriptRunner(
+        [
+            _Emit(TurnEvent(engine="claude", phase="started", turn=2)),
+            _Emit(TurnEvent(engine="claude", phase="completed", turn=2)),
+            _Emit(TurnEvent(engine="claude", phase="started", turn=3)),
+            _Return(answer="ok"),
+        ],
+        engine="claude",
+        resume_value=token.value,
+    )
+    with anyio.fail_after(5):
+        await run_runner_with_cancel(
+            runner,
+            prompt="go",
+            resume_token=None,
+            edits=edits,
+            running_task=None,
+            on_thread_known=None,
+        )
+
+    assert edits._live_idle_baseline == 50.0
+    assert edits._turn_active is True  # turn 3 never closed
+
+
 # ── FollowupTurnRouter (phase 04) ───────────────────────────────────────────
 
 from untether import runner_bridge as rb  # noqa: E402
