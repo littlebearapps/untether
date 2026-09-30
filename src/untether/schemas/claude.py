@@ -205,6 +205,21 @@ class StreamResultMessage(
     usage: dict[str, Any] | None = None
     result: str | None = None
     structured_output: Any = None
+    # #806: why the turn ended. ``aborted_streaming`` / ``aborted_tools``
+    # mean the turn was interrupted (see CLAUDE_ABORTED_TERMINAL_REASONS);
+    # the subtype is then usually ``success``, sometimes
+    # ``error_during_execution`` — classify on this field, never on subtype.
+    terminal_reason: str | None = None
+    # What started the turn (user / task notification / …); read by #812.
+    origin: dict[str, Any] | None = None
+    stop_reason: Any = None
+
+
+# #806: result ``terminal_reason`` values that mean the turn was cancelled
+# (an interrupt), not that it failed.
+CLAUDE_ABORTED_TERMINAL_REASONS: frozenset[str] = frozenset(
+    {"aborted_streaming", "aborted_tools"}
+)
 
 
 class StreamEventMessage(

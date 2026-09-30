@@ -561,3 +561,73 @@ def test_decode_api_retry_tolerates_drift() -> None:
     assert isinstance(decoded, claude_schema.StreamSystemMessage)
     assert decoded.attempt == 3
     assert isinstance(decoded.error, dict)
+
+
+# ---------------------------------------------------------------------------
+# #806 — result terminal_reason / origin / stop_reason
+# ---------------------------------------------------------------------------
+
+
+def _result_line(**extra: object) -> bytes:
+    return json.dumps(
+        {
+            "type": "result",
+            "subtype": "success",
+            "is_error": False,
+            "duration_ms": 1200,
+            "duration_api_ms": 900,
+            "num_turns": 2,
+            "session_id": "sess-806",
+            "result": "partial",
+            **extra,
+        }
+    ).encode()
+
+
+def test_decode_result_terminal_reason_and_origin() -> None:
+    decoded = claude_schema.decode_stream_json_line(
+        _result_line(
+            terminal_reason="aborted_tools",
+            origin={"kind": "task-notification"},
+            stop_reason=None,
+        )
+    )
+    assert isinstance(decoded, claude_schema.StreamResultMessage)
+    assert decoded.terminal_reason == "aborted_tools"
+    assert decoded.origin == {"kind": "task-notification"}
+    assert decoded.stop_reason is None
+    # All optional: an older CLI's result still decodes.
+    bare = claude_schema.decode_stream_json_line(_result_line())
+    assert isinstance(bare, claude_schema.StreamResultMessage)
+    assert (bare.terminal_reason, bare.origin, bare.stop_reason) == (None, None, None)
+
+
+@pytest.mark.parametrize(
+    ("terminal_reason", "subtype", "expected"),
+    [
+        ("aborted_streaming", "success", "aborted_streaming"),
+        ("aborted_tools", "error_during_execution", "aborted_tools"),
+        ("completed", "success", None),
+        (None, "success", None),
+    ],
+)
+def test_translate_result_marks_aborted_terminal_reason_in_usage(
+    terminal_reason: str | None, subtype: str, expected: str | None
+) -> None:
+    """#806: only an interrupted turn carries ``usage["terminal_reason"]`` —
+    classified on terminal_reason, never on the subtype."""
+    from untether.model import CompletedEvent
+    from untether.runners.claude import ClaudeStreamState, translate_claude_event
+
+    extra: dict[str, object] = {"subtype": subtype, "is_error": subtype != "success"}
+    if terminal_reason is not None:
+        extra["terminal_reason"] = terminal_reason
+    state = ClaudeStreamState()
+    events = translate_claude_event(
+        claude_schema.decode_stream_json_line(_result_line(**extra)),
+        title="claude",
+        state=state,
+        factory=state.factory,
+    )
+    completed = next(e for e in events if isinstance(e, CompletedEvent))
+    assert (completed.usage or {}).get("terminal_reason") == expected

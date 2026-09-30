@@ -337,6 +337,82 @@ async def test_router_interrupted_turn_delivers_error_on_aclose() -> None:
     assert rec.closed == [2]
 
 
+class _CancelRecorder(_Recorder):
+    def __init__(self) -> None:
+        super().__init__()
+        self.cancelled: list[int] = []
+
+    async def deliver_cancelled(self, ctx: rb._TurnCtx) -> None:
+        ctx.delivery["sent"] = True
+        self.cancelled.append(ctx.turn)
+
+
+def _cancel_router(rec: _CancelRecorder):
+    return rb.FollowupTurnRouter(
+        new_tracker=lambda: ProgressTracker(engine="claude"),
+        create_progress=rec.create,
+        close_progress=rec.close,
+        deliver=rec.deliver,
+        default_reply_to=USER_REF,
+        followup_notify=False,
+        anchor_for={}.get,
+        deliver_cancelled=rec.deliver_cancelled,
+    )
+
+
+async def test_806_router_cancelled_turn_renders_cancelled_on_aclose() -> None:
+    """#806: /cancel of an in-flight follow-up turn renders as cancelled —
+    no "the session ended before this turn finished" error final."""
+    from structlog.testing import capture_logs
+
+    rec = _CancelRecorder()
+    router = _cancel_router(rec)
+    await router.on_turn(_turn("started", reason="followup"))
+    await router.on_event(_action())
+    with capture_logs() as logs:
+        await router.aclose("cancel")
+    assert rec.cancelled == [2]
+    assert rec.delivered == []
+    assert rec.closed == [2]
+    assert router.active is False
+    events = [e for e in logs if e["event"].startswith("live_turn.")]
+    assert [(e["event"], e["turn"], e["reason"]) for e in events] == [
+        ("live_turn.cancelled", 2, "cancel")
+    ]
+
+
+async def test_806_router_new_reason_renders_cancelled() -> None:
+    """/new cancels through the same ``cancel_requested`` event as /cancel,
+    so the bridge's close reason for it is "cancel" too — and renders the
+    in-flight turn as cancelled."""
+    from untether.telegram.commands.topics import _cancel_chat_tasks
+
+    task = rb.RunningTask()
+    assert _cancel_chat_tasks(1, {USER_REF: task}) == 1
+    assert task.cancel_requested.is_set()
+
+    rec = _CancelRecorder()
+    router = _cancel_router(rec)
+    await router.on_turn(_turn("started", reason="task_finished"))
+    await router.aclose("cancel")
+    assert rec.cancelled == [2]
+    assert rec.delivered == []
+
+
+@pytest.mark.parametrize("reason", [None, "abs_cap", "error", "idle_no_tasks"])
+async def test_806_abs_cap_mid_turn_still_renders_error(reason: str | None) -> None:
+    """Genuine process loss (abs_cap, a crash, a close the lifecycle made
+    itself) keeps the error final."""
+    rec = _CancelRecorder()
+    router = _cancel_router(rec)
+    await router.on_turn(_turn("started", reason="followup"))
+    await router.on_event(_action())
+    await router.aclose(reason)
+    assert rec.cancelled == []
+    assert [(d[0], d[1]) for d in rec.delivered] == [(2, False)]
+    assert rec.closed == [2]
+
+
 async def test_router_followup_turn_anchors_to_its_message() -> None:
     rec = _Recorder()
     anchor = MessageRef(channel_id=1, message_id=55)
@@ -594,6 +670,81 @@ async def test_interrupted_turn_final_has_no_turn_complete_marker() -> None:
     )
     assert TURN_COMPLETE_MARKER not in final
     assert all(TURN_COMPLETE_MARKER not in t for t in progress)
+
+
+async def test_806_cancelled_turn_without_progress_replies_cancelled() -> None:
+    """#806: /cancel of a follow-up turn that never grew a progress message
+    (no tool yet, under the lazy-progress delay) replies ``cancelled`` to the
+    turn's message — not the error final."""
+    from untether.runners.mock import Wait
+
+    first = CompletedEvent(engine="claude", resume=_TOKEN, ok=True, answer="FIRST")
+    never = anyio.Event()
+    transport = FakeTransport()
+    runner = ScriptRunner(
+        [
+            Emit(StartedEvent(engine="claude", resume=_TOKEN)),
+            Emit(first),
+            Emit(_turn("started", reason="followup")),
+            Wait(never),  # the turn is still running when /cancel lands
+        ],
+        engine="claude",
+        resume_value=_TOKEN.value,
+    )
+    cfg = ExecBridgeConfig(
+        transport=transport, presenter=MarkdownPresenter(), final_notify=True
+    )
+    running: dict[MessageRef, rb.RunningTask] = {}
+
+    async def cancel_when_turn_open() -> None:
+        with anyio.fail_after(5):
+            while not any("FIRST" in c["message"].text for c in transport.send_calls):
+                await anyio.sleep(0.01)
+            await anyio.sleep(0.05)
+        (_, task), *_ = rb.unique_running_tasks(running)
+        task.cancel_requested.set()
+
+    with anyio.fail_after(10):
+        async with anyio.create_task_group() as tg:
+            tg.start_soon(cancel_when_turn_open)
+            await handle_message(
+                cfg,
+                runner=runner,
+                incoming=IncomingMessage(channel_id=1, message_id=10, text="go"),
+                resume_token=None,
+                running_tasks=running,
+            )
+
+    texts = [c["message"].text for c in (*transport.send_calls, *transport.edit_calls)]
+    assert not any("session ended before this turn finished" in t for t in texts)
+    cancelled = [c for c in transport.send_calls if "cancelled" in c["message"].text]
+    assert len(cancelled) == 1
+    assert cancelled[0]["options"].reply_to.message_id == 10
+    # The run's own (already delivered) final is left alone.
+    assert any("FIRST" in t for t in texts)
+
+
+async def test_806_aborted_terminal_reason_turn_renders_cancelled() -> None:
+    """#806: a turn the CLI reports as interrupted (``terminal_reason``
+    ``aborted_*`` → ``usage["terminal_reason"]``) renders as cancelled, not
+    as its partial answer."""
+    transport, _run_progress = await _run_with_turn(
+        Emit(_turn("started", reason="followup")),
+        Emit(_action()),
+        Emit(
+            _turn(
+                "completed",
+                reason="followup",
+                ok=True,
+                answer="PARTIAL-ANSWER",
+                usage={"terminal_reason": "aborted_tools"},
+            )
+        ),
+    )
+    texts = [c["message"].text for c in (*transport.send_calls, *transport.edit_calls)]
+    assert not any("PARTIAL-ANSWER" in t for t in texts)
+    assert any("cancelled" in t for t in texts)
+    assert not any(TURN_COMPLETE_MARKER in t and "cancelled" in t for t in texts)
 
 
 # ── #795 wake-turn reply anchor ──────────────────────────────────────────────

@@ -542,6 +542,25 @@ def scenario_followup(first: dict) -> None:
     serve_followups()
 
 
+def scenario_followup_blocks(first: dict) -> None:
+    """#806: the run answers; a follow-up's turn starts a (foreground) tool
+    and is still running it when the user cancels — no result ever comes."""
+    init()
+    text("FIRST")
+    result("FIRST")
+    obj = next_user(None)
+    if not isinstance(obj, dict):
+        shutdown()
+    cmd = obj.get("uuid")
+    lifecycle(cmd, "queued")
+    lifecycle(cmd, "started")
+    init()
+    tool_use("Bash", "toolu_block", {"command": "sleep 60"})
+    while next_user(None) is not None:  # the tool runs until killed / EOF
+        pass
+    shutdown()
+
+
 def _notify(task_id: str, tool_id: str) -> None:
     emit(
         {
@@ -859,6 +878,7 @@ _SCENARIOS = {
     "scheduled_wakeup": scenario_scheduled_wakeup,
     "followup": scenario_followup,
     "followup_launches_bg": scenario_followup_launches_bg,
+    "followup_blocks": scenario_followup_blocks,
     "multi_agent_acks": scenario_multi_agent_acks,
     "quiet_batch_report": scenario_quiet_batch_report,
     "acks_only_batch": scenario_acks_only_batch,

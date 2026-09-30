@@ -4203,6 +4203,10 @@ def _translate_claude_event_base(
                 # remedy to name.
                 _maybe_latch_action_required(event.result)
             usage = _usage_payload(event)
+            if event.terminal_reason in claude_schema.CLAUDE_ABORTED_TERMINAL_REASONS:
+                # #806: an interrupted turn — the bridge renders it as
+                # cancelled rather than as an answer / error.
+                usage["terminal_reason"] = event.terminal_reason
 
             # #572: record the stream-idle classification so the bridge's
             # bounded auto-retry gate can read it via engine_state duck-typing.

@@ -189,3 +189,49 @@ async def test_steer_after_cancel_falls_back_to_queue(
         [fallback_notice("closing", "claude")],
         [fallback_notice("no_live", "claude")],
     )
+
+
+@pytest.mark.parametrize("command", ["cancel", "new"])
+async def test_806_cancel_inflight_followup_is_cancelled_not_error(
+    monkeypatch: pytest.MonkeyPatch, command: str
+) -> None:
+    """#806: /cancel (or /new) of a live follow-up turn that is mid-tool
+    renders ``cancelled`` — not ``error · the session ended before this turn
+    finished``. Real handle_message + ClaudeRunner + the fake live CLI."""
+    from structlog.testing import capture_logs
+
+    from untether.telegram.commands.topics import _cancel_chat_tasks
+
+    _watchdog(monkeypatch)
+    running: dict[MessageRef, RunningTask] = {}
+
+    async def step(_steer: Any, out: dict[str, Any], tasks: Any) -> None:
+        with anyio.fail_after(5):
+            while not await claude_mod.inject_when_idle(
+                SID, "run the sleep", command_uuid="u-806", poll_s=0.02
+            ):
+                await anyio.sleep(0.02)
+        with anyio.fail_after(5):
+            while True:
+                live = claude_mod.get_live_session(SID)
+                if live is not None and live.state.turn_open:
+                    break
+                await anyio.sleep(0.02)
+        await anyio.sleep(0.2)  # the tool call lands in the turn
+        if command == "new":
+            assert _cancel_chat_tasks(123, tasks) >= 1
+        else:
+            (_, task), *_ = unique_running_tasks(tasks)
+            task.cancel_requested.set()
+
+    with capture_logs() as logs:
+        transport, _out = await _run("followup_blocks", step, running_tasks=running)
+
+    texts = _all_texts(transport)
+    assert not any("session ended before this turn finished" in t for t in texts)
+    # The run's own answer, then the follow-up turn's cancelled render.
+    assert any("FIRST" in t for t in texts)
+    assert any("cancelled" in t for t in texts)
+    cancelled = [e for e in logs if e.get("event") == "live_turn.cancelled"]
+    assert [(e["turn"], e["reason"]) for e in cancelled] == [(2, "cancel")]
+    assert not [e for e in logs if e.get("event") == "live_turn.interrupted"]

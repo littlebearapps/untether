@@ -3960,6 +3960,11 @@ _TURN_PUSH_REASONS = frozenset({"task_finished", "scheduled_wakeup", "unknown"})
 # A wake turn gets a progress message only if it outlives this, uses a tool
 # or raises an approval (#776 D-10) — short turns send just their final.
 _TURN_LAZY_PROGRESS_S = 5.0
+# #806: run-close reasons meaning the user cancelled an in-flight turn. /new
+# sets the same ``cancel_requested`` event as /cancel, so both arrive here
+# as "cancel" (``_bg_close_reason``); closes the lifecycle initiates itself
+# (abs_cap, error, idle_no_tasks, …) keep the error final.
+_TURN_CANCEL_REASONS = frozenset({"cancel"})
 
 
 def _live_closing_notice(reason: str, tasks: list[str]) -> str:
@@ -4054,6 +4059,7 @@ class FollowupTurnRouter:
         anchor_for: Callable[[str | None], tuple[MessageRef, MessageRef | None] | None]
         | None = pop_followup_anchor,
         progress_for: Callable[[ActionEvent], bool] | None = None,
+        deliver_cancelled: Callable[[_TurnCtx], Awaitable[None]] | None = None,
     ) -> None:
         self._new_tracker = new_tracker
         self._create_progress = create_progress
@@ -4066,6 +4072,8 @@ class FollowupTurnRouter:
         # #785 part 2: which actions force a turn's progress message into
         # existence (None = every action, the rc11 behaviour).
         self._progress_for = progress_for
+        # #806: renders a turn the user cancelled (None = the error final).
+        self._deliver_cancelled = deliver_cancelled
         self._tg: Any = None
         self.current: _TurnCtx | None = None
         self.turns_delivered = 0
@@ -4240,14 +4248,42 @@ class FollowupTurnRouter:
         except Exception:  # noqa: BLE001
             logger.debug("live_turn.close_failed", turn=ctx.turn, exc_info=True)
 
-    async def aclose(self) -> None:
+    async def aclose(self, reason: str | None = None) -> None:
         """Run end: a turn still open lost its process (closed / killed
-        mid-turn) — tell the user rather than leave it silent or orphaned."""
+        mid-turn) — tell the user rather than leave it silent or orphaned.
+
+        ``reason`` is why the run ended (the bridge's close reason). A turn
+        the user cancelled (/cancel or /new) renders like a cancelled first
+        turn (#806); anything else — crash, abs_cap, close grace — keeps the
+        error final."""
         ctx = self.current
         if ctx is None:
             return
+        if (
+            not ctx.delivery["sent"]
+            and reason in _TURN_CANCEL_REASONS
+            and self._deliver_cancelled is not None
+        ):
+            logger.info(
+                "live_turn.cancelled",
+                turn=ctx.turn,
+                reason=reason,
+                turn_reason=ctx.reason,
+            )
+            if ctx.lazy_scope is not None:
+                ctx.lazy_scope.cancel()
+            async with ctx.progress_lock:
+                try:
+                    await self._deliver_cancelled(ctx)
+                except Exception:  # noqa: BLE001
+                    logger.debug("live_turn.cancel_delivery_failed", exc_info=True)
         if not ctx.delivery["sent"]:
-            logger.info("live_turn.interrupted", turn=ctx.turn, reason=ctx.reason)
+            logger.info(
+                "live_turn.interrupted",
+                turn=ctx.turn,
+                reason=ctx.reason,
+                close_reason=reason,
+            )
             try:
                 await self._deliver(
                     CompletedEvent(
@@ -5294,7 +5330,56 @@ async def handle_message(
         if ctx.progress_ref is not None and running_tasks is not None:
             running_tasks.pop(ctx.progress_ref, None)
 
+    async def _deliver_turn_cancelled(ctx: _TurnCtx) -> None:
+        """#806: a follow-up / wake turn the user cancelled renders exactly
+        like a cancelled first turn (``cancelled · claude · Ns``), not as an
+        error. One send — it runs under the run-end shielded timeout."""
+        if ctx.delivery["sent"]:
+            return
+        state = ctx.tracker.snapshot(
+            resume_formatter=runner.format_resume,
+            context_line=context_line,
+            meta_formatter=format_meta_line,
+        )
+        rendered = effective_presenter.render_progress(
+            state,
+            elapsed_s=clock() - ctx.started_at,
+            label="`cancelled`",
+        )
+        if ctx.edits is not None:
+            # Stop progress repaints so a queued render can't overwrite it.
+            ctx.edits._finalizing = True
+        await send_result_message(
+            cfg,
+            channel_id=incoming.channel_id,
+            reply_to=ctx.reply_to,
+            progress_ref=ctx.progress_ref,
+            message=rendered,
+            notify=False,
+            edit_ref=ctx.progress_ref,
+            replace_ref=ctx.progress_ref,
+            delete_tag="cancel",
+            thread_id=incoming.thread_id,
+        )
+        ctx.delivery["sent"] = True
+        _release_progress(ctx.progress_ref, reason="cancelled")
+
     async def _deliver_turn(completed: CompletedEvent, ctx: _TurnCtx) -> None:
+        from .schemas.claude import CLAUDE_ABORTED_TERMINAL_REASONS
+
+        terminal_reason = (completed.usage or {}).get("terminal_reason")
+        if terminal_reason in CLAUDE_ABORTED_TERMINAL_REASONS:
+            # #806: the CLI reported the turn as interrupted.
+            logger.info(
+                "live_turn.cancelled",
+                turn=ctx.turn,
+                reason=terminal_reason,
+                turn_reason=ctx.reason,
+            )
+            await _deliver_turn_cancelled(ctx)
+            await _deliver_outbox_now(ctx.reply_to.message_id)
+            await _bg_after_turn()
+            return
         await _deliver_final(completed, RunOutcome(resume=completed.resume), turn=ctx)
         await _deliver_outbox_now(ctx.reply_to.message_id)
         # #777: a later turn may have launched (more) background work.
@@ -5346,6 +5431,7 @@ async def handle_message(
         # #785 part 2: a thinking note alone doesn't open a progress message
         # for a wake turn that may fold into the status message.
         progress_for=lambda evt: evt.action.kind != "note" or not _consolidating(),
+        deliver_cancelled=_deliver_turn_cancelled,
     )
 
     def _bg_session_idle() -> bool:
@@ -5513,7 +5599,7 @@ async def handle_message(
             # #776: an unfinished follow-up turn (session closed mid-turn)
             # still gets a final so its progress message isn't orphaned.
             with anyio.move_on_after(60, shield=True):
-                await turn_router.aclose()
+                await turn_router.aclose(_bg_close_reason())
                 await _resolve_unrun_followups()
                 # #777: never leave a status message saying "running".
                 try:
