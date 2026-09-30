@@ -10048,3 +10048,181 @@ def test_684_control_callbacks_in() -> None:
     assert control_callbacks_in(msg) == frozenset(
         {"claude_control:approve:r", "claude_control:deny:r", "aq:opt:0"}
     )
+
+
+# ── #819: compaction is an expected wait ───────────────────────────────────
+
+
+def test_819_compaction_probe() -> None:
+    transport = FakeTransport()
+    edits = _make_edits(transport, _KeyboardPresenter())
+    edits.stream = _make_stream(
+        engine_state=_make_engine_state(awaiting_compaction=lambda: True)
+    )
+    assert edits._is_compacting() is True
+    assert edits._is_api_retry_waiting() is False
+    edits.stream = _make_stream(engine_state=_make_engine_state())
+    assert edits._is_compacting() is False  # engine without the probe
+    edits.stream = _make_stream(engine_state=None)
+    assert edits._is_compacting() is False
+
+
+def test_819_compaction_probe_survives_exception() -> None:
+    def _boom() -> bool:
+        raise RuntimeError("engine state exploded")
+
+    transport = FakeTransport()
+    edits = _make_edits(transport, _KeyboardPresenter())
+    edits.stream = _make_stream(
+        engine_state=_make_engine_state(awaiting_compaction=_boom)
+    )
+    assert edits._is_compacting() is False
+
+
+def test_819_real_claude_state_drives_the_probe() -> None:
+    from untether.runners.claude import ClaudeStreamState, translate_claude_event
+    from untether.schemas import claude as claude_schema
+
+    state = ClaudeStreamState()
+    edits = _make_edits(FakeTransport(), _KeyboardPresenter())
+    edits.stream = _make_stream(engine_state=state)
+    assert edits._is_compacting() is False
+    for raw in (
+        b'{"type":"system","subtype":"status","status":"compacting","session_id":"s"}',
+    ):
+        translate_claude_event(
+            claude_schema.decode_stream_json_line(raw),
+            title="claude",
+            state=state,
+            factory=state.factory,
+        )
+    assert edits._is_compacting() is True
+    translate_claude_event(
+        claude_schema.decode_stream_json_line(
+            b'{"type":"system","subtype":"status","status":null,'
+            b'"compact_result":"success","session_id":"s"}'
+        ),
+        title="claude",
+        state=state,
+        factory=state.factory,
+    )
+    assert edits._is_compacting() is False
+
+
+async def _run_stall_window(edits: ProgressEdits, clock: _FakeClock) -> list[dict]:
+    with structlog.testing.capture_logs() as logs:
+        async with anyio.create_task_group() as tg:
+
+            async def drive() -> None:
+                clock.set(110.0)
+                await anyio.sleep(0.25)
+                edits.signal_send.close()
+
+            tg.start_soon(edits.run)
+            tg.start_soon(drive)
+    return logs
+
+
+def _stall_edits(**engine_fields: Any) -> tuple[ProgressEdits, _FakeClock]:
+    transport = FakeTransport()
+    clock = _FakeClock(start=100.0)
+    edits = _make_edits(transport, _KeyboardPresenter(), clock=clock)
+    edits._stall_check_interval = 0.01
+    edits._STALL_THRESHOLD_SECONDS = 0.05
+    edits._STALL_THRESHOLD_TOOL = 0.05
+    edits._STALL_THRESHOLD_APPROVAL = 0.05
+    edits._STALL_THRESHOLD_APPROVAL_FIRST = 0.05
+    edits._stall_repeat_seconds = 0.02
+    edits.stream = _make_stream(
+        last_event_type="user", engine_state=_make_engine_state(**engine_fields)
+    )
+    return edits, clock
+
+
+@pytest.mark.anyio
+async def test_819_stall_threshold_reason_compacting() -> None:
+    edits, clock = _stall_edits(awaiting_compaction=lambda: True)
+    logs = await _run_stall_window(edits, clock)
+    selected = [
+        e for e in logs if e["event"] == "progress_edits.stall_threshold_selected"
+    ]
+    assert selected and selected[0]["reason"] == "compacting"
+
+
+@pytest.mark.anyio
+async def test_819_compacting_is_expected_wait_no_auto_cancel() -> None:
+    edits, clock = _stall_edits(awaiting_compaction=lambda: True)
+    logs = await _run_stall_window(edits, clock)
+    events = [entry.get("event") for entry in logs]
+    assert "progress_edits.stall_detected" not in events
+    assert "progress_edits.stall_auto_cancel" not in events
+    pending = [e for e in logs if e.get("event") == "subprocess.approval_pending"]
+    assert pending and pending[0]["reason"] == "compacting"
+    assert edits._total_stall_warn_count == 0
+
+
+@pytest.mark.anyio
+async def test_819_compaction_latch_lapsed_stall_warns_again() -> None:
+    """Negative: once the latch lapses (no heartbeat for 120 s) a wedged
+    compaction is an ordinary stall again."""
+    edits, clock = _stall_edits(awaiting_compaction=lambda: False)
+    logs = await _run_stall_window(edits, clock)
+    selected = [
+        e for e in logs if e["event"] == "progress_edits.stall_threshold_selected"
+    ]
+    assert selected and all(e["reason"] != "compacting" for e in selected)
+    assert "progress_edits.stall_detected" in [e.get("event") for e in logs]
+
+
+class TestStuckAfterToolResultCompaction:
+    def test_819_stuck_after_tool_result_suppressed_while_compacting(self) -> None:
+        from types import SimpleNamespace
+
+        edits, clock = TestStuckAfterToolResultDetector._prepare(
+            last_tool_result_at=600.0, frozen_ring_count=3
+        )
+        clock.set(1000.0)
+        assert edits._detect_stuck_after_tool_result(cpu_active=True) is True
+        edits.stream.engine_state = SimpleNamespace(awaiting_compaction=lambda: True)
+        with structlog.testing.capture_logs() as logs:
+            assert edits._detect_stuck_after_tool_result(cpu_active=True) is False
+        suppressed = [
+            e
+            for e in logs
+            if e["event"] == "progress_edits.stuck_after_tool_result.suppressed"
+        ]
+        assert suppressed and suppressed[0]["reason"] == "compacting"
+
+
+def test_819_export_records_one_compaction_start_and_finish(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from untether.model import Action, ActionEvent, ResumeToken
+    from untether.runner_bridge import _record_export_event
+    from untether.telegram.commands import export as export_mod
+
+    recorded: list[dict[str, Any]] = []
+    monkeypatch.setattr(
+        export_mod,
+        "record_session_event",
+        lambda session_id, event, **_: recorded.append(event),
+    )
+    resume = ResumeToken(engine="claude", value="s-export")
+
+    def _row(phase: str, title: str) -> ActionEvent:
+        return ActionEvent(
+            engine="claude",
+            action=Action(id="claude.compaction.3", kind="note", title=title),
+            phase=phase,  # type: ignore[arg-type]
+        )
+
+    for evt in (
+        _row("started", "🗜️ Compacting context…"),
+        _row("updated", "🗜️ Compacting context…"),
+        _row("updated", "🗜️ Compacting context…"),
+        _row("completed", "🗜️ Context compacted"),
+        _row("completed", "🗜️ Context compacted · 6.3k → 277 tokens (manual)"),
+    ):
+        _record_export_event(evt, resume)
+    phases = [e["phase"] for e in recorded]
+    assert phases == ["started", "completed", "completed"]

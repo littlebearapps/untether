@@ -546,10 +546,10 @@ def test_compact_boundary_clears_context_pct() -> None:
     assert _pcts(_translate(state, _assistant(_usage(40_000)))) == [20]
 
 
-def test_compact_boundary_before_any_value_emits_nothing() -> None:
+def test_compact_boundary_before_any_value_emits_no_telemetry() -> None:
     state = _state()
     boundary = {"type": "system", "subtype": "compact_boundary", "session_id": SID}
-    assert _translate(state, boundary) == []
+    assert _ctx(_translate(state, boundary)) == []
 
 
 def test_init_one_m_model_gives_window_before_first_result() -> None:

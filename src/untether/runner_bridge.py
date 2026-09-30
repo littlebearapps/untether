@@ -1299,6 +1299,14 @@ def _record_export_event(
         if isinstance(evt, ActionEvent) and evt.action.kind == "telemetry":
             # #819: per-frame status-line values are not session history.
             return
+        if (
+            isinstance(evt, ActionEvent)
+            and evt.phase == "updated"
+            and str(evt.action.id).startswith("claude.compaction.")
+        ):
+            # #819: the 30 s compacting heartbeats — the export keeps one
+            # start and one finish per compaction.
+            return
         event_dict: dict[str, Any] = {"type": evt.type}
         if isinstance(evt, StartedEvent):
             event_dict["engine"] = evt.engine
@@ -2042,6 +2050,15 @@ class ProgressEdits:
                 # as a rate-limit window.
                 threshold = self._STALL_THRESHOLD_APPROVAL
                 threshold_reason = "api_retry_waiting"
+            elif self._is_compacting():
+                # #819: the CLI is compacting the context (``system/status:
+                # compacting``, re-sent every 30 s). Bounded by the engine's
+                # latch, so a wedged compaction falls back to the branches
+                # below once its heartbeats stop. Sits before
+                # ``running_tool``: the open 🗜️ row counts as a running
+                # action.
+                threshold = self._STALL_THRESHOLD_APPROVAL
+                threshold_reason = "compacting"
             elif mcp_server is not None:
                 threshold = self._STALL_THRESHOLD_MCP_TOOL
                 threshold_reason = "running_mcp_tool"
@@ -2185,6 +2202,7 @@ class ProgressEdits:
                 "pending_approval",
                 "rate_limit_waiting",
                 "api_retry_waiting",
+                "compacting",
             )
             _expected_wait = (
                 (_post_result_idle and not _post_result_limbo)
@@ -2235,6 +2253,7 @@ class ProgressEdits:
                 "pending_approval",
                 "rate_limit_waiting",
                 "api_retry_waiting",
+                "compacting",
             ):
                 if (
                     self._last_approval_pending_emit_at == 0.0
@@ -3118,6 +3137,21 @@ class ProgressEdits:
                 return False
         return False
 
+    def _is_compacting(self) -> bool:
+        """#819: True while the engine is compacting its context (Claude's
+        ``system/status: compacting``, latched for a bounded window after
+        each heartbeat). Duck-typed like :meth:`_is_api_retry_waiting`;
+        engines without the probe → False."""
+        es = getattr(self.stream, "engine_state", None) if self.stream else None
+        probe = getattr(es, "awaiting_compaction", None)
+        if callable(probe):
+            try:
+                return bool(probe())
+            except Exception as exc:  # noqa: BLE001 - monitor loop must not die
+                logger.debug("progress_edits.compaction_probe_failed", error=str(exc))
+                return False
+        return False
+
     def _has_running_tool(self) -> bool:
         """Check if any action is still running (e.g. Bash command, TaskOutput)."""
         for action_state in reversed(list(self.tracker._actions.values())):
@@ -3193,6 +3227,16 @@ class ProgressEdits:
         if cpu_active is not True:
             return False
         if self._has_pending_approval():
+            return False
+        if self._is_compacting():
+            # #819: auto-compaction lands exactly after a tool_result and
+            # runs silently between heartbeats — the pattern this detector
+            # hunts, but not a wedge.
+            logger.info(
+                "progress_edits.stuck_after_tool_result.suppressed",
+                reason="compacting",
+                tr_elapsed=tr_elapsed,
+            )
             return False
         # #346: skip the detector when the session has legitimate background
         # work armed (Monitor, Bash run_in_background, ScheduleWakeup, etc.).
