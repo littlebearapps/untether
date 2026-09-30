@@ -630,6 +630,8 @@ def test_209_snapshot_matches_the_deny_list() -> None:
     for flag, cls in CLAUDE_FLAGS_CLASSIFIED_2_1_285.items():
         refused = bool(find_blocked_claude_args([flag]))
         assert refused is (cls in {"blocked", "managed"}), (flag, cls)
+
+
 # ── #383: permission-mode edges and the plan re-arm ──────────────────────────
 
 
