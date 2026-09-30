@@ -4093,6 +4093,35 @@ def _reset_compaction_segment(state: ClaudeStreamState) -> None:
     _close_compaction_row(state)
 
 
+def _compaction_usage(
+    state: ClaudeStreamState, event: claude_schema.StreamResultMessage
+) -> dict[str, Any] | None:
+    """``usage["compaction"]`` for a result whose segment compacted (None
+    otherwise). ``manual_success`` is the narrow #819 §4.5 exemption from
+    the #596/#631 empty-result recovery: every compaction recorded in the
+    segment was a ``manual`` one whose ``compact_result`` was ``success``
+    (so it reached a boundary), and the result itself is not an error. An
+    auto compaction — a #596 poisoned session can auto-compact on resume and
+    *then* return the upstream 0-turn result — or a failed one never
+    qualifies."""
+    records = state.turn_compactions
+    if not records:
+        return None
+    last = records[-1]
+    manual_success = not event.is_error and all(
+        rec.get("trigger") == "manual" and rec.get("result") == "success"
+        for rec in records
+    )
+    return {
+        "count": len(records),
+        "trigger": last.get("trigger"),
+        "pre_tokens": last.get("pre_tokens"),
+        "post_tokens": last.get("post_tokens"),
+        "result": last.get("result"),
+        "manual_success": manual_success,
+    }
+
+
 def _translate_compaction_status(
     event: claude_schema.StreamSystemMessage,
     *,
@@ -6161,6 +6190,8 @@ def _should_absorb_resume_result(
         and event.num_turns == 0
         and event.duration_api_ms == 0
         and not event.is_error
+        # #819: a compaction's 0-turn result is never the stopped-task replay.
+        and not state.turn_compactions
     )
 
 
@@ -6196,10 +6227,15 @@ def _has_pending_wakeup(state: ClaudeStreamState) -> bool:
 
 
 def _completed_keeps_session_live(evt: CompletedEvent) -> bool:
-    """A live session only survives a successful, non-empty first result."""
+    """A live session only survives a successful, non-empty first result —
+    or a successful manual ``/compact`` (#819: its result is 0-turn and
+    empty by design)."""
     if not evt.ok:
         return False
     usage = evt.usage or {}
+    compaction = usage.get("compaction")
+    if isinstance(compaction, dict) and compaction.get("manual_success") is True:
+        return True
     return not (
         not (evt.answer or "").strip()
         and (usage.get("num_turns", 1) or 0) == 0
@@ -6969,7 +7005,11 @@ def _translate_claude_event_base(
             context_events = _emit_context(state, factory)
             if (context_usage := _context_usage_payload(state, factory)) is not None:
                 usage["context"] = context_usage
-            # #819: the segment's compaction record ends with its result.
+            # #819: the segment's compaction record rides on usage (like
+            # ``usage["safeguard"]``, so live turns get it too), then ends
+            # with its result.
+            if (compaction := _compaction_usage(state, event)) is not None:
+                usage["compaction"] = compaction
             _reset_compaction_segment(state)
 
             # #572: record the stream-idle classification so the bridge's

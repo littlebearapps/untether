@@ -10226,3 +10226,215 @@ def test_819_export_records_one_compaction_start_and_finish(
         _record_export_event(evt, resume)
     phases = [e["phase"] for e in recorded]
     assert phases == ["started", "completed", "completed"]
+
+
+# ── #819: the manual-/compact 0-turn result (narrow exemption) ─────────────
+
+
+def _compaction(
+    trigger: str | None = "manual",
+    result: str | None = "success",
+    *,
+    manual_success: bool = True,
+) -> dict[str, Any]:
+    return {
+        "count": 1,
+        "trigger": trigger,
+        "pre_tokens": 182_000,
+        "post_tokens": 41_000,
+        "result": result,
+        "manual_success": manual_success,
+    }
+
+
+async def _run_single(
+    usage: dict[str, Any],
+    *,
+    resume_value: str = "sess-819",
+    answer: str = "",
+) -> tuple[FakeTransport, Any, list[dict[str, Any]]]:
+    from structlog.testing import capture_logs
+
+    transport = FakeTransport()
+    runner = ScriptRunner(
+        [Return(answer=answer, usage=usage)],
+        engine=CODEX_ENGINE,
+        resume_value=resume_value,
+    )
+    cfg = ExecBridgeConfig(
+        transport=transport, presenter=MarkdownPresenter(), final_notify=False
+    )
+    with capture_logs() as logs:
+        await handle_message(
+            cfg,
+            runner=runner,
+            incoming=IncomingMessage(channel_id=123, message_id=10, text="/compact"),
+            resume_token=ResumeToken(engine=CODEX_ENGINE, value=resume_value),
+        )
+    return transport, runner, logs
+
+
+@pytest.mark.anyio
+async def test_819_manual_compaction_zero_turn_result_is_not_empty_result_anomaly(
+    quarantine_store,
+) -> None:
+    usage = {"num_turns": 0, "duration_api_ms": 0, "compaction": _compaction()}
+    transport, runner, logs = await _run_single(usage)
+    events = [r.get("event") for r in logs]
+    assert "runner.empty_result" not in events
+    assert "session.quarantined" not in events
+    assert "session.auto_resend_fresh" not in events
+    assert len(runner.calls) == 1
+    assert quarantine_store.is_quarantined(CODEX_ENGINE, "sess-819") is False
+    final_text = transport.edit_calls[-1]["message"].text
+    assert final_text.startswith("done")
+    assert "🗜️ Context compacted · 182k → 41k tokens (manual)" in final_text
+    completed = [r for r in logs if r.get("event") == "runner.completed"]
+    assert completed and completed[0]["compactions"] == 1
+    assert completed[0]["compaction_trigger"] == "manual"
+
+
+@pytest.mark.anyio
+async def test_819_auto_compaction_then_zero_turn_result_stays_anomalous(
+    quarantine_store,
+) -> None:
+    """The #596 poisoned session that auto-compacts on resume and then
+    returns the 0-turn result must still reach #631 quarantine + fresh."""
+    import dataclasses
+
+    from structlog.testing import capture_logs
+
+    class _AutoCompactThenAnswer(_EmptyThenAnswerRunner):
+        async def run(self, prompt, resume):
+            async for evt in super().run(prompt, resume):
+                if isinstance(evt, CompletedEvent) and len(self.calls) == 1:
+                    evt = dataclasses.replace(
+                        evt,
+                        usage={
+                            **(evt.usage or {}),
+                            "compaction": _compaction(
+                                "auto", "success", manual_success=False
+                            ),
+                        },
+                    )
+                yield evt
+
+    transport = FakeTransport()
+    runner = _AutoCompactThenAnswer(resume_value="sess-poisoned-819")
+    cfg = ExecBridgeConfig(
+        transport=transport, presenter=MarkdownPresenter(), final_notify=False
+    )
+    cleared: list[str] = []
+
+    async def on_resume_failed(tok: ResumeToken) -> None:
+        cleared.append(tok.value)
+
+    with capture_logs() as logs:
+        await handle_message(
+            cfg,
+            runner=runner,
+            incoming=IncomingMessage(channel_id=123, message_id=10, text="go on"),
+            resume_token=ResumeToken(engine=CODEX_ENGINE, value="sess-poisoned-819"),
+            on_resume_failed=on_resume_failed,
+        )
+    events = [r.get("event") for r in logs]
+    assert "runner.empty_result" in events
+    assert "session.auto_resend_fresh" in events
+    assert quarantine_store.is_quarantined(CODEX_ENGINE, "sess-poisoned-819")
+    assert len(runner.calls) == 2 and runner.calls[1][1] is None
+    assert "Here is the real result." in transport.edit_calls[-1]["message"].text
+
+
+@pytest.mark.anyio
+async def test_819_failed_manual_compaction_zero_turn_stays_anomalous(
+    monkeypatch,
+) -> None:
+    _disable_empty_resend(monkeypatch)
+    usage = {
+        "num_turns": 0,
+        "duration_api_ms": 0,
+        "compaction": _compaction(None, "failed", manual_success=False),
+    }
+    transport, _, logs = await _run_single(usage)
+    assert any(r.get("event") == "runner.empty_result" for r in logs)
+    final_text = transport.edit_calls[-1]["message"].text
+    assert "Context compacted" not in final_text
+    assert "empty result" in final_text
+
+
+@pytest.mark.anyio
+async def test_819_manual_compaction_with_error_result_not_exempt() -> None:
+    from structlog.testing import capture_logs
+
+    from untether.runners.mock import ErrorReturn
+
+    transport = FakeTransport()
+    runner = ScriptRunner(
+        [
+            ErrorReturn(
+                error="boom",
+                usage={
+                    "num_turns": 0,
+                    "duration_api_ms": 0,
+                    "compaction": _compaction(manual_success=False),
+                },
+            )
+        ],
+        engine=CODEX_ENGINE,
+        resume_value="sess-819e",
+    )
+    cfg = ExecBridgeConfig(
+        transport=transport, presenter=MarkdownPresenter(), final_notify=False
+    )
+    with capture_logs():
+        await handle_message(
+            cfg,
+            runner=runner,
+            incoming=IncomingMessage(channel_id=123, message_id=10, text="/compact"),
+            resume_token=ResumeToken(engine=CODEX_ENGINE, value="sess-819e"),
+        )
+    final_text = transport.edit_calls[-1]["message"].text
+    assert final_text.startswith("error")
+    assert "Context compacted" not in final_text
+
+
+@pytest.mark.anyio
+async def test_819_anomaly_computed_before_compaction_body(monkeypatch) -> None:
+    """The compaction body is synthesised only after the anomaly decision —
+    and only for ``manual_success``: a spy on the exemption predicate sees
+    the raw (empty) run."""
+    from untether import runner_bridge
+
+    seen: list[Any] = []
+    real = runner_bridge._compaction_manual_success
+
+    def _spy(usage):
+        seen.append(dict(usage or {}))
+        return real(usage)
+
+    monkeypatch.setattr(runner_bridge, "_compaction_manual_success", _spy)
+    usage = {"num_turns": 0, "duration_api_ms": 0, "compaction": _compaction()}
+    transport, _, logs = await _run_single(usage)
+    assert seen and seen[0]["compaction"]["manual_success"] is True
+    assert not any(r.get("event") == "runner.empty_result" for r in logs)
+    assert "Context compacted" in transport.edit_calls[-1]["message"].text
+
+
+@pytest.mark.anyio
+async def test_819_genuine_zero_turn_result_still_anomalous(monkeypatch) -> None:
+    _disable_empty_resend(monkeypatch)
+    transport, _, logs = await _run_single({"num_turns": 0, "duration_api_ms": 0})
+    assert any(r.get("event") == "runner.empty_result" for r in logs)
+    assert "Context compacted" not in transport.edit_calls[-1]["message"].text
+
+
+def test_819_compaction_empty_body_shapes() -> None:
+    from untether.runner_bridge import _compaction_empty_body
+
+    assert _compaction_empty_body(_compaction()) == (
+        "🗜️ Context compacted · 182k → 41k tokens (manual)"
+    )
+    assert _compaction_empty_body({"pre_tokens": 6336, "trigger": "manual"}) == (
+        "🗜️ Context compacted · 6.3k tokens before (manual)"
+    )
+    assert _compaction_empty_body({"pre_tokens": True}) == "🗜️ Context compacted"

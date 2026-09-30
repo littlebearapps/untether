@@ -606,3 +606,127 @@ def test_plain_zero_turn_empty_result_not_kept_live() -> None:
         usage={"num_turns": 0, "duration_api_ms": 0},
     )
     assert _completed_keeps_session_live(evt) is False
+
+
+# ── C4: usage["compaction"] and the manual-only exemption ──────────────────
+
+
+def _manual_compact(state: ClaudeStreamState) -> list[Any]:
+    events: list[Any] = []
+    for frame in (
+        _compacting(),
+        _status_done("success"),
+        _init(),
+        _boundary(),
+        _summary_user(),
+        _replay_user(),
+        _result(""),
+    ):
+        events.extend(_feed(state, frame))
+    return events
+
+
+def test_usage_compaction_on_completed_event() -> None:
+    state = _first_run_state()
+    completed = _manual_compact(state)[-1]
+    assert isinstance(completed, CompletedEvent)
+    assert completed.usage["compaction"] == {
+        "count": 1,
+        "trigger": "manual",
+        "pre_tokens": 6336,
+        "post_tokens": 277,
+        "result": "success",
+        "manual_success": True,
+    }
+    assert _completed_keeps_session_live(completed) is True
+
+
+def test_usage_compaction_on_live_turn_event() -> None:
+    state = _live_state()
+    events = _manual_compact(state)
+    turn_done = [e for e in events if isinstance(e, TurnEvent)][-1]
+    assert turn_done.phase == "completed"
+    assert turn_done.usage["compaction"]["manual_success"] is True
+    # The record ends with the segment: the next turn starts clean.
+    assert state.turn_compactions == []
+
+
+def test_auto_compaction_is_not_manual_success() -> None:
+    state = _first_run_state()
+    for frame in (_compacting(), _status_done("success"), _boundary(trigger="auto")):
+        _feed(state, frame)
+    completed = _feed(state, _result(""))[-1]
+    assert completed.usage["compaction"]["trigger"] == "auto"
+    assert completed.usage["compaction"]["manual_success"] is False
+    assert _completed_keeps_session_live(completed) is False
+
+
+def test_failed_compaction_is_not_manual_success() -> None:
+    state = _first_run_state()
+    _feed(state, _compacting())
+    _feed(state, _status_done("failed", compact_error="nope"))
+    completed = _feed(state, _result(""))[-1]
+    assert completed.usage["compaction"]["result"] == "failed"
+    assert completed.usage["compaction"]["manual_success"] is False
+
+
+def test_manual_boundary_without_success_status_is_not_manual_success() -> None:
+    """Condition 3: a boundary with no preceding ``compact_result: success``."""
+    state = _first_run_state()
+    _feed(state, _boundary())
+    completed = _feed(state, _result(""))[-1]
+    assert completed.usage["compaction"]["result"] is None
+    assert completed.usage["compaction"]["manual_success"] is False
+
+
+def test_error_result_is_not_manual_success() -> None:
+    state = _first_run_state()
+    for frame in (_compacting(), _status_done("success"), _boundary()):
+        _feed(state, frame)
+    completed = _feed(state, _result("boom", is_error=True))[-1]
+    assert completed.ok is False
+    assert completed.usage["compaction"]["manual_success"] is False
+
+
+def test_auto_then_manual_in_one_segment_is_not_manual_success() -> None:
+    state = _first_run_state()
+    for trigger in ("auto", "manual"):
+        for frame in (_compacting(), _status_done("success"), _boundary(trigger)):
+            _feed(state, frame)
+    completed = _feed(state, _result(""))[-1]
+    assert completed.usage["compaction"]["count"] == 2
+    assert completed.usage["compaction"]["trigger"] == "manual"
+    assert completed.usage["compaction"]["manual_success"] is False
+
+
+def test_no_compaction_no_usage_key() -> None:
+    state = _first_run_state()
+    _feed(state, _assistant("hi"))
+    completed = _feed(state, _result("hi", turns=1, api_ms=5))[-1]
+    assert "compaction" not in (completed.usage or {})
+
+
+def test_resume_guard_never_absorbs_compaction_result() -> None:
+    """A resumed run whose stopped-task replay looks like the 0-turn result
+    is absorbed — unless the segment compacted."""
+    state = ClaudeStreamState()
+    state.resumed = True
+    state.live_mode = True
+    _feed(state, _init())
+    _feed(
+        state,
+        {
+            "type": "system",
+            "subtype": "task_notification",
+            "task_id": "t1",
+            "status": "stopped",
+        },
+    )
+    assert state.stopped_notification_pre_output
+    for frame in (_compacting(), _status_done("success"), _boundary()):
+        _feed(state, frame)
+    with capture_logs() as logs:
+        events = _feed(state, _result(""))
+    assert not any(e["event"] == "claude.resume_guard.absorbed" for e in logs)
+    completed = [e for e in events if isinstance(e, CompletedEvent)]
+    assert completed and completed[0].usage["compaction"]["manual_success"] is True

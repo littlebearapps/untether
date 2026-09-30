@@ -17,6 +17,7 @@ from .background_status import (
     FOLDABLE_REASONS,
     BackgroundStatusManager,
     count_substantive_actions,
+    format_tokens,
     is_collection_action,
     live_shown,
     register_live_count_source,
@@ -1506,6 +1507,39 @@ def _safeguard_empty_body(safeguard: Mapping[str, Any]) -> str:
         "it wasn't retried, so there is no answer. Rephrasing the request, "
         "or switching model with /model, may help."
     )
+
+
+def _compaction_usage(usage: Mapping[str, Any] | None) -> dict[str, Any] | None:
+    """#819: the runner's ``usage["compaction"]`` (Claude), or None."""
+    raw = (usage or {}).get("compaction")
+    return raw if isinstance(raw, dict) else None
+
+
+def _compaction_manual_success(usage: Mapping[str, Any] | None) -> bool:
+    """#819 §4.5: the narrow exemption from the #596/#631 empty-result
+    recovery — only a successful *manual* compaction (the runner checks
+    manual trigger + ``success`` + not an error). Auto or failed
+    compactions keep the anomaly path, so a poisoned session that
+    auto-compacts on resume still reaches quarantine."""
+    compaction = _compaction_usage(usage)
+    return compaction is not None and compaction.get("manual_success") is True
+
+
+def _compaction_empty_body(compaction: Mapping[str, Any]) -> str:
+    """The body of a successful ``/compact`` — its result is 0-turn and
+    empty by design, which would otherwise render as an ``error`` final."""
+    body = "\N{COMPRESSION}\N{VARIATION SELECTOR-16} Context compacted"
+    pre = compaction.get("pre_tokens")
+    post = compaction.get("post_tokens")
+    if isinstance(pre, int) and not isinstance(pre, bool):
+        if isinstance(post, int) and not isinstance(post, bool):
+            body += f" · {format_tokens(pre)} → {format_tokens(post)} tokens"
+        else:
+            body += f" · {format_tokens(pre)} tokens before"
+    trigger = compaction.get("trigger")
+    if isinstance(trigger, str) and trigger:
+        body += f" ({trigger})"
+    return body
 
 
 def _format_error(error: BaseException) -> str:
@@ -5286,6 +5320,10 @@ async def handle_message(
         ctx_usage = (completed.usage or {}).get("context")
         if isinstance(ctx_usage, dict) and isinstance(ctx_usage.get("pct"), int):
             usage_log["context_pct"] = ctx_usage["pct"]
+        # #819: compactions in this run / turn.
+        if (compaction := _compaction_usage(completed.usage)) is not None:
+            usage_log["compactions"] = compaction.get("count")
+            usage_log["compaction_trigger"] = compaction.get("trigger")
         logger.info(
             "runner.completed",
             ok=completed.ok,
@@ -5427,6 +5465,11 @@ async def handle_message(
         # Missing usage keys default to 1 (non-anomalous) — only an engine
         # that EXPLICITLY reported zero turns and zero API time qualifies;
         # engines without usage reporting never trip this.
+        # #819: a successful manual /compact is 0-turn / 0-ms / empty by
+        # design — exempt it (narrowly, see _compaction_manual_success). The
+        # anomaly is decided on the raw answer; the compaction body is only
+        # filled in after it.
+        compaction_ok = _compaction_manual_success(completed.usage)
         empty_result_anomaly = False
         if (
             turn is None
@@ -5436,6 +5479,7 @@ async def handle_message(
             and completed.usage
             and (completed.usage.get("num_turns", 1) or 0) == 0
             and (completed.usage.get("duration_api_ms", 1) or 0) == 0
+            and not compaction_ok
         ):
             empty_result_anomaly = True
             # #631 (W5-diag): derive WHY the anomaly branch will or will not
@@ -5530,6 +5574,16 @@ async def handle_message(
                     "consider itself complete. Resend your message, or "
                     "start fresh with /new."
                 )
+
+        if (
+            compaction_ok
+            and run_ok is True
+            and not run_outcome.cancelled
+            and not final_answer.strip()
+        ):
+            final_answer = _compaction_empty_body(
+                _compaction_usage(completed.usage) or {}
+            )
 
         # #632 (W2): a run that completed with real work proves the session
         # is healthy — clear any forced-teardown quarantine marker for the
