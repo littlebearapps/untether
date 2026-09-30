@@ -2,13 +2,24 @@ from __future__ import annotations
 
 import io
 import ipaddress
-from collections.abc import Awaitable, Callable, Sequence
-from typing import Protocol
+import re
+from collections.abc import Awaitable, Callable, Iterable, Sequence
+from dataclasses import dataclass
+from typing import Literal, Protocol
+from urllib.parse import urlparse
 
 from openai import APIConnectionError, AsyncOpenAI, OpenAIError
 
 from ..logging import get_logger
-from ..triggers.ssrf import SSRFError, validate_url_with_dns
+from ..triggers.ssrf import (
+    SSRFBlockedError,
+    SSRFError,
+    SSRFResolutionError,
+    parse_networks,
+    strip_url_userinfo,
+    suggest_allowlist,
+    validate_url_with_dns,
+)
 from ..utils.error_display import user_safe_error
 from .client import BotClient
 from .types import TelegramIncomingMessage
@@ -17,8 +28,14 @@ logger = get_logger(__name__)
 
 __all__ = [
     "DEFAULT_VOICE_TRANSCRIPTION_PROMPT",
+    "VOICE_ENDPOINT_KEYS",
+    "VoiceEndpointVerdict",
+    "check_voice_endpoint",
+    "classify_voice_endpoint",
+    "format_voice_endpoint_refusal",
     "resolve_transcription_prompt",
     "transcribe_voice",
+    "voice_endpoint_keys_changed",
 ]
 
 # #703: #691 shipped `voice_transcription_prompt` correctly but NO host set it,
@@ -73,6 +90,222 @@ VOICE_TRANSCRIPTION_CONNECTION_HINT = (
 # The OpenAI SDK retries connection errors twice by default; widen the window
 # so a brief blip self-heals before it ever reaches the user.
 _VOICE_MAX_RETRIES = 4
+
+# #679: config key that opts a private/loopback voice endpoint in.
+VOICE_ALLOWLIST_KEY = "voice_transcription_url_allowlist"
+
+# #679: transport keys whose change can alter the endpoint verdict — a reload
+# touching any of them re-runs the endpoint check; unrelated reloads don't.
+VOICE_ENDPOINT_KEYS: frozenset[str] = frozenset(
+    {
+        "voice_transcription",
+        "voice_transcription_base_url",
+        VOICE_ALLOWLIST_KEY,
+    }
+)
+
+# Only a plain hostname / IP literal is echoed into Telegram (inline code).
+# Anything else (backticks, markdown, spaces) → "the configured host".
+_SAFE_HOST_RE = re.compile(r"^[A-Za-z0-9._:\-\[\]]+$")
+
+
+@dataclass(frozen=True, slots=True)
+class VoiceEndpointVerdict:
+    """#679: the SSRF verdict for a voice ``base_url``.
+
+    Carries only the parsed host and port — never userinfo or the path — so
+    anything built from it (reply text, log fields) cannot leak credentials.
+    """
+
+    status: Literal["permitted", "blocked", "unresolvable", "invalid"]
+    host: str | None
+    port: int | None
+    addresses: tuple[str, ...] = ()
+    suggested: tuple[str, ...] = ()
+    error: str | None = None
+    error_type: str | None = None
+
+
+def voice_endpoint_keys_changed(keys: Iterable[str]) -> bool:
+    """#679: True when a hot-reload touched a key that affects the verdict."""
+    return any(k in VOICE_ENDPOINT_KEYS for k in keys)
+
+
+def _host_and_port(base_url: str) -> tuple[str | None, int | None]:
+    try:
+        parsed = urlparse(base_url)
+        host = parsed.hostname
+        port = parsed.port or (443 if parsed.scheme == "https" else 80)
+    except ValueError:
+        return None, None
+    return host, port
+
+
+async def classify_voice_endpoint(
+    base_url: str,
+    allowlist: Sequence[ipaddress.IPv4Network | ipaddress.IPv6Network] = (),
+) -> VoiceEndpointVerdict:
+    """#679: run the SSRF guard on *base_url* and map the outcome to a verdict.
+
+    Both the per-voice-note chokepoint and the startup/reload check call this,
+    so the two can never disagree. Validates a userinfo-stripped copy: the
+    verdict depends only on the scheme and host, and the ``ssrf.*`` logs then
+    never see credentials.
+    """
+    url = strip_url_userinfo(base_url)
+    host, port = _host_and_port(url)
+    try:
+        await validate_url_with_dns(url, allowlist=allowlist)
+    except SSRFBlockedError as exc:
+        return VoiceEndpointVerdict(
+            status="blocked",
+            host=host or exc.hostname,
+            port=port,
+            addresses=exc.addresses,
+            suggested=suggest_allowlist(exc.addresses),
+            error=str(exc),
+            error_type=exc.__class__.__name__,
+        )
+    except SSRFResolutionError as exc:
+        return VoiceEndpointVerdict(
+            status="unresolvable",
+            host=host or exc.hostname,
+            port=port,
+            error=str(exc),
+            error_type=exc.__class__.__name__,
+        )
+    except SSRFError as exc:
+        return VoiceEndpointVerdict(
+            status="invalid",
+            host=host,
+            port=port,
+            error=str(exc),
+            error_type=exc.__class__.__name__,
+        )
+    return VoiceEndpointVerdict(status="permitted", host=host, port=port)
+
+
+def _display_host(host: str | None) -> str:
+    if host and _SAFE_HOST_RE.match(host):
+        return f"`{host}`"
+    return "the configured host"
+
+
+def _allowlist_toml(suggested: Sequence[str]) -> str:
+    inner = ", ".join(f'"{entry}"' for entry in suggested)
+    return f"{VOICE_ALLOWLIST_KEY} = [{inner}]"
+
+
+def _endpoint_hint(verdict: VoiceEndpointVerdict) -> str:
+    """One-line operator fix, shared by the runtime and startup logs."""
+    if verdict.status == "blocked" and verdict.suggested:
+        return (
+            f"add {_allowlist_toml(verdict.suggested)} to [transports.telegram] "
+            "(hot-reloads, no restart needed)"
+        )
+    if verdict.status == "blocked":
+        return (
+            "the host resolves to a reserved address that can't be allowlisted "
+            "safely; point voice_transcription_base_url at a different host"
+        )
+    if verdict.status == "unresolvable":
+        return "DNS lookup failed; check voice_transcription_base_url"
+    return "check voice_transcription_base_url"
+
+
+def format_voice_endpoint_refusal(verdict: VoiceEndpointVerdict) -> str:
+    """#679: the actionable Telegram reply for a refused voice endpoint.
+
+    Names the host (only if it is a plain hostname/IP) and, for a
+    loopback/private address, the exact allowlist entry that opts it in. Never
+    echoes the full URL, userinfo, path or port (#200 posture).
+    """
+    host = _display_host(verdict.host)
+    if verdict.status == "blocked" and verdict.suggested:
+        return (
+            f"voice transcription endpoint {host} is blocked by the SSRF guard "
+            "(it resolves to a loopback/private address).\n"
+            "to allow it, add this to `[transports.telegram]` in untether.toml "
+            "(hot-reloads, no restart needed):\n"
+            "```toml\n"
+            f"{_allowlist_toml(verdict.suggested)}\n"
+            "```\n"
+            "if you already have entries, add the new value to that list."
+        )
+    if verdict.status == "blocked":
+        return (
+            f"voice transcription endpoint {host} resolves to a reserved address "
+            "(link-local / cloud metadata) and is blocked by the SSRF guard. "
+            "point `voice_transcription_base_url` at a different host."
+        )
+    if verdict.status == "unresolvable":
+        return (
+            f"voice transcription endpoint {host} could not be resolved "
+            "(DNS lookup failed). check `voice_transcription_base_url`."
+        )
+    return "voice transcription endpoint is not permitted."
+
+
+_VERDICT_REASON = {
+    "blocked": "blocked_address",
+    "unresolvable": "dns_failed",
+    "invalid": "invalid",
+}
+
+
+async def check_voice_endpoint(
+    *,
+    enabled: bool,
+    base_url: str | None,
+    allowlist_entries: Sequence[str],
+    phase: Literal["startup", "reload"],
+) -> VoiceEndpointVerdict | None:
+    """#679: log whether the configured voice endpoint would be refused.
+
+    Runs at startup and after a hot-reload that touched a voice endpoint key,
+    so a blocked ``localhost``/tailnet endpoint shows up in the journal before
+    the first voice note. Log-only (never a Telegram message) and it NEVER
+    raises — it runs as a background task in the main task group.
+
+    Note: the DNS lookup runs in a worker thread that is not abandon-on-cancel,
+    so shutdown may wait up to the resolver timeout if DNS hangs.
+    """
+    if not enabled or base_url is None:
+        return None
+    try:
+        verdict = await classify_voice_endpoint(
+            base_url, allowlist=parse_networks(allowlist_entries)
+        )
+        if verdict.status == "permitted":
+            logger.info("voice.base_url.permitted", phase=phase, host=verdict.host)
+        elif verdict.status == "blocked":
+            logger.warning(
+                "voice.base_url.not_permitted",
+                phase=phase,
+                host=verdict.host,
+                port=verdict.port,
+                blocked_addresses=list(verdict.addresses),
+                allowlist_key=VOICE_ALLOWLIST_KEY,
+                suggested_allowlist=list(verdict.suggested),
+                hint=_endpoint_hint(verdict),
+            )
+        else:
+            logger.warning(
+                "voice.base_url.check_failed",
+                phase=phase,
+                host=verdict.host,
+                reason=_VERDICT_REASON[verdict.status],
+                hint=_endpoint_hint(verdict),
+            )
+        return verdict
+    except Exception as exc:  # noqa: BLE001 — advisory check, never break the loop
+        logger.warning(
+            "voice.base_url.check_failed",
+            phase=phase,
+            reason="error",
+            error_type=exc.__class__.__name__,
+        )
+        return None
 
 
 class VoiceTranscriber(Protocol):
@@ -184,16 +417,24 @@ async def transcribe_voice(
     # the authoritative chokepoint — every transcription path (incl. values that
     # arrived via hot-reload) passes through here. base_url=None means the SDK
     # uses public api.openai.com, which needs no validation.
+    # #679: the verdict carries the host/addresses so the reply and log can
+    # name the host and the allowlist entry that opts it in.
     if base_url is not None:
-        try:
-            await validate_url_with_dns(base_url, allowlist=url_allowlist)
-        except SSRFError as exc:
+        verdict = await classify_voice_endpoint(base_url, allowlist=url_allowlist)
+        if verdict.status != "permitted":
             logger.error(
                 "voice.base_url.ssrf_blocked",
-                error=str(exc),
-                error_type=exc.__class__.__name__,
+                error=verdict.error,
+                error_type=verdict.error_type,
+                host=verdict.host,
+                port=verdict.port,
+                reason=_VERDICT_REASON[verdict.status],
+                blocked_addresses=list(verdict.addresses),
+                allowlist_key=VOICE_ALLOWLIST_KEY,
+                suggested_allowlist=list(verdict.suggested),
+                hint=_endpoint_hint(verdict),
             )
-            await reply(text="voice transcription endpoint is not permitted.")
+            await reply(text=format_voice_endpoint_refusal(verdict))
             return None
     if transcriber is None:
         transcriber = OpenAIVoiceTranscriber(base_url=base_url, api_key=api_key)

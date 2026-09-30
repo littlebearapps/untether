@@ -61,7 +61,7 @@ requests on their own base URL without relying on `OPENAI_BASE_URL`. If your ser
 requires a specific model name, set `voice_transcription_model` (for example,
 `whisper-1`).
 
-Since v0.35.4 the base URL is SSRF-validated ([#381](https://github.com/littlebearapps/untether/issues/381)): a loopback or private-network host (such as `http://localhost:8000/v1`) is refused unless you allowlist it with `voice_transcription_url_allowlist` (a list of CIDR/IP strings, e.g. `["127.0.0.0/8"]`). The default public path (`base_url` unset) skips validation.
+Since v0.35.4 the base URL is SSRF-validated ([#381](https://github.com/littlebearapps/untether/issues/381)): a loopback or private-network host (such as `http://localhost:8000/v1`) is refused unless you allowlist it with `voice_transcription_url_allowlist` (a list of CIDR/IP strings, e.g. `["127.0.0.0/8"]`). The default public path (`base_url` unset) skips validation. A refused voice note gets a reply naming the blocked host and the exact allowlist entry to add, and the same verdict is logged at startup and after a voice-related hot-reload (`voice.base_url.not_permitted`, [#679](https://github.com/littlebearapps/untether/issues/679)).
 
 If your voice notes are always in one language, set `voice_transcription_language`
 to an ISO-639-1 code (for example, `en`). This is passed as the Whisper `language`

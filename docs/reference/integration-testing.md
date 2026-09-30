@@ -471,7 +471,7 @@ Integration tests are run by Claude Code via Telegram MCP tools (see "Automated 
 | Progress/formatting (`markdown.py`, `telegram/render.py`) | U3, T6, T7, S4, S8, RC12-8, RC12-9 |
 | Commands (`commands/*.py`) | Tier 7 (all), specific command test |
 | File transfer (`file_transfer.py`) | T2, T3, T5 |
-| Voice (`voice.py`) | T1, RC12-10 |
+| Voice (`voice.py`) | T1, RC12-10, R15-10 (endpoint) |
 | Topics (`topics.py`, `topic_state.py`) | O1, O5, O6, O8 |
 | Directives (`directives.py`) | T9, T10 |
 | Shutdown (`shutdown.py`) | S3, B4 |
@@ -667,3 +667,34 @@ practical to provoke live without a malformed request, so the `test_746_*_stays_
   group), use `message_id: 1` for `B2` instead. That message never existed, and it produces the
   same "message to edit not found" (Track D §1: "not found" also covers ids you can't see).
 - Record the three ids in the attestation `--notes`.
+
+### #679 — voice SSRF guidance
+
+Chat: Claude `5284581592` (any engine works: transcription happens before the runner). Clip: the
+T1 pre-recorded OGG via `send_voice`.
+
+**Safety.** Never restart `untether-dev` while `voice_transcription_base_url` is an IP literal
+without an allowlist: config load fails and the dev bot won't start. Don't run a fake Whisper
+server that logs headers — with an allowlist in place, the API key goes to whatever listens on
+`:8000`. Always restore the backup at the end.
+
+**Setup:** `cp ~/.untether-dev/untether.toml /tmp/untether-dev.toml.r15-10.bak`.
+
+**Key-leak preflight (mandatory before R15-10c and again right before R15-10d):**
+`ss -ltn | grep -E '[:.]8000\b' && { echo "ABORT: something listens on :8000"; exit 1; }`. Abort
+R15-10c–d if anything is listening. For steps c–d also set
+`voice_transcription_api_key = "r15-dummy"` (the backup restores the real key in R15-10g).
+
+**Log grep:** `journalctl --user -u untether-dev -o cat --since "15 minutes ago" | grep -E "voice\.base_url\.|config\.reload\.(failed|transport_config_hot_reloaded)|openai\.transcribe\.error"`
+
+| Step | Action | Expected Telegram | Expected log |
+|---|---|---|---|
+| R15-10a | **Localhost warns on reload ([#679](https://github.com/littlebearapps/untether/issues/679))** — edit the dev TOML: `voice_transcription_base_url = "http://localhost:8000/v1"`, no allowlist key | The "Hot-reloaded" notice (#548) | `config.reload.transport_config_hot_reloaded keys=['voice_transcription_base_url']`, then `voice.base_url.not_permitted phase=reload host=localhost … allowlist_key=voice_transcription_url_allowlist suggested_allowlist=['127.0.0.0/8']` [warning] |
+| R15-10b | `send_voice` the T1 clip | A reply naming `` `localhost` `` with a toml block `voice_transcription_url_allowlist = ["127.0.0.0/8"]`; no URL path or port; **no run starts** | `voice.base_url.ssrf_blocked host=localhost port=8000 reason=blocked_address blocked_addresses=… suggested_allowlist=['127.0.0.0/8']` [error] |
+| R15-10c | Run the preflight; add `voice_transcription_url_allowlist = ["127.0.0.0/8"]` and the dummy key | Hot-reload notice | `voice.base_url.permitted phase=reload host=localhost` [info] |
+| R15-10d | Re-run the preflight, then `send_voice` again (nothing listens on `:8000`) | After the SDK retries (about 10–30 s): `couldn't reach the transcription service — transient network issue…`, which proves the guard passed | `openai.transcribe.error … error_type=APIConnectionError endpoint=http://localhost:8000/v1`; no `ssrf_blocked` |
+| R15-10e | Remove the allowlist line and the dummy key (keep `localhost`), then `systemctl --user restart untether-dev` | The startup message arrives normally; `/ping` answers | `voice.base_url.not_permitted phase=startup host=localhost`. The bot is **not** blocked from starting. |
+| R15-10f | Set `voice_transcription_base_url = "http://127.0.0.1:8000/v1"` (hot-reload only; **do not restart**) | No hot-reload notice (reload rejected); `/ping` still works | `config.reload.failed error=… voice_transcription_base_url is not permitted: Blocked: 127.0.0.1 …; to allow it, add "127.0.0.0/8" to [transports.telegram] voice_transcription_url_allowlist` |
+| R15-10g | Restore: `cp /tmp/untether-dev.toml.r15-10.bak ~/.untether-dev/untether.toml`, then `send_voice` | A normal `🎙 <transcript>` echo and a normal run (T1 regression) | `voice.base_url.permitted phase=reload host=api.groq.com`; no `not_permitted` |
+
+Then run Tier 7 (`/ping`, `/config`) to confirm nothing else regressed.
