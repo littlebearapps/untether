@@ -1,4 +1,8 @@
-from collections.abc import Callable
+import hashlib
+import inspect
+import os
+from collections.abc import Callable, Iterator
+from pathlib import Path
 
 import pytest
 
@@ -84,3 +88,138 @@ def _clear_cancel_dedup() -> None:
     _RECENT_CANCELS.clear()
     yield
     _RECENT_CANCELS.clear()
+
+
+# ---------------------------------------------------------------------------
+# #808: host isolation — config file and live network
+# ---------------------------------------------------------------------------
+
+# Every module that binds ``HOME_CONFIG_PATH`` by name. The constant is frozen
+# at import (``config.py``), so patching ``HOME`` does nothing; each binding
+# has to be swapped. ``test_test_isolation.py`` re-greps ``src/`` and fails
+# when a new binding appears that this tuple doesn't cover.
+HOME_CONFIG_PATH_MODULES: tuple[str, ...] = (
+    "untether.config",
+    "untether.settings",
+    "untether.api",
+    "untether.cli",
+    "untether.cli.config",
+    "untether.telegram.onboarding",
+)
+
+_LOOPBACK_HOSTS = frozenset({"127.0.0.1", "::1", "localhost"})
+_NETWORK_DISABLED = "network disabled in unit tests (#808)"
+
+
+def _real_host_config_path() -> Path:
+    # Deliberately not ``HOME_CONFIG_PATH``: by the time teardown runs that
+    # constant is patched, and it was frozen at import anyway.
+    return Path(os.path.expanduser("~/.untether/untether.toml"))
+
+
+def _config_fingerprint(path: Path) -> tuple[str, int] | None:
+    if not path.is_file():
+        return None
+    return hashlib.sha256(path.read_bytes()).hexdigest(), path.stat().st_mtime_ns
+
+
+@pytest.fixture(autouse=True, scope="session")
+def _host_config_untouched() -> Iterator[None]:
+    """#808: the real ``~/.untether/untether.toml`` is the staging config on
+    lba-1. Fingerprint it before the session and fail the run if any test
+    read-migrated or rewrote it. (A deliberate hand edit of the staging
+    config mid-run would trip this too — rerun if so.)"""
+    path = _real_host_config_path()
+    before = _config_fingerprint(path)
+    yield
+    after = _config_fingerprint(path)
+    assert after == before, (
+        f"#808: the unit suite modified the host config {path} "
+        f"(before={before}, after={after})"
+    )
+
+
+@pytest.fixture(autouse=True)
+def _isolated_config(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """#808: point every path-less config loader at a per-test tmp path.
+
+    ``load_settings_if_exists()`` (called from the bridge and the Claude
+    runner on every run) resolves ``UNTETHER_CONFIG_PATH`` then
+    ``HOME_CONFIG_PATH``, and ``migrate_config_file`` *writes*. Without this,
+    a test run reads — and can rewrite — the host's staging config.
+
+    The bindings are patched rather than the env var being set, because the
+    env var is checked first: setting it here would override the tests that
+    patch ``HOME_CONFIG_PATH`` themselves. Those tests' own patches, and any
+    test that ``setenv``s ``UNTETHER_CONFIG_PATH``, still win (D-11).
+
+    The tmp file is never created, so path-less loaders see "no config" and
+    fall back to defaults.
+    """
+    import importlib
+
+    config_path = tmp_path / ".untether" / "untether.toml"
+    monkeypatch.delenv("UNTETHER_CONFIG_PATH", raising=False)
+    for name in HOME_CONFIG_PATH_MODULES:
+        module = importlib.import_module(name)
+        monkeypatch.setattr(module, "HOME_CONFIG_PATH", config_path)
+
+    # The usage command reads OAuth credentials from ~/.claude; the path is
+    # also bound as a default argument, so swap those defaults too.
+    from untether.telegram.commands import usage
+
+    real_creds = usage._DEFAULT_CREDENTIALS_PATH
+    fake_creds = tmp_path / ".claude" / ".credentials.json"
+    monkeypatch.setattr(usage, "_DEFAULT_CREDENTIALS_PATH", fake_creds)
+    for obj in vars(usage).values():
+        defaults = getattr(obj, "__defaults__", None)
+        if inspect.isfunction(obj) and defaults and real_creds in defaults:
+            monkeypatch.setattr(
+                obj,
+                "__defaults__",
+                tuple(fake_creds if d == real_creds else d for d in defaults),
+            )
+    return config_path
+
+
+@pytest.fixture(autouse=True)
+def _no_live_network(
+    request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch
+) -> Iterator[None]:
+    """#808: block every non-loopback httpx request.
+
+    Every Claude final runs ``_maybe_append_usage_footer``, which fetched
+    ``https://api.anthropic.com/api/oauth/usage`` with the host's real OAuth
+    token (and could 429 the live bots). Patching the real transports means
+    ``httpx.MockTransport`` and loopback servers (trigger webhook tests) keep
+    working; anything else raises ``httpx.ConnectError``, which the usage
+    path already swallows. Opt out with ``@pytest.mark.allow_network``.
+
+    The usage cache is module-level, so it is reset per test as well — a
+    stale entry from one test must not answer the next test's fetch.
+    """
+    import httpx
+
+    from untether.utils import usage_cache
+
+    usage_cache.reset_cache()
+    if request.node.get_closest_marker("allow_network") is None:
+        real_sync = httpx.HTTPTransport.handle_request
+        real_async = httpx.AsyncHTTPTransport.handle_async_request
+
+        def _guarded_sync(self: httpx.HTTPTransport, req: httpx.Request):
+            if req.url.host not in _LOOPBACK_HOSTS:
+                raise httpx.ConnectError(_NETWORK_DISABLED, request=req)
+            return real_sync(self, req)
+
+        async def _guarded_async(self: httpx.AsyncHTTPTransport, req: httpx.Request):
+            if req.url.host not in _LOOPBACK_HOSTS:
+                raise httpx.ConnectError(_NETWORK_DISABLED, request=req)
+            return await real_async(self, req)
+
+        monkeypatch.setattr(httpx.HTTPTransport, "handle_request", _guarded_sync)
+        monkeypatch.setattr(
+            httpx.AsyncHTTPTransport, "handle_async_request", _guarded_async
+        )
+    yield
+    usage_cache.reset_cache()

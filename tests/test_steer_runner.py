@@ -21,7 +21,6 @@ from tests.test_live_session_runner import (  # noqa: F401 — fixtures
     SID,
     _clean_env,
     _collect,
-    _default_settings,
     _turns,
 )
 from untether.model import ActionEvent, CompletedEvent

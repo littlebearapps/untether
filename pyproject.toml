@@ -108,6 +108,7 @@ addopts = ["--cov=untether", "--cov-branch", "--cov-report=term-missing", "--cov
 testpaths = ["tests"]
 markers = [
     "cancel_enforcement: opts a test out of the autouse #593 cancel-enforcement neutraliser",
+    "allow_network: opts a test out of the autouse #808 non-loopback network block",
 ]
 
 [tool.mutmut]

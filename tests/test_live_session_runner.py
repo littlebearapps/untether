@@ -42,12 +42,6 @@ class _LiveRunner(ClaudeRunner):
         return base
 
 
-@pytest.fixture(autouse=True)
-def _default_settings(monkeypatch: pytest.MonkeyPatch) -> None:
-    # Deterministic defaults: never read the host's untether.toml.
-    monkeypatch.setattr(claude_mod, "load_settings_if_exists", lambda *a, **k: None)
-
-
 def _runner() -> ClaudeRunner:
     return _LiveRunner(claude_cmd=str(FAKE_CLI), permission_mode="bypassPermissions")
 

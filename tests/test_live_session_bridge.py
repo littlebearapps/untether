@@ -478,13 +478,6 @@ from untether.runners.mock import Emit, Return, ScriptRunner  # noqa: E402
 _TOKEN = ResumeToken(engine="claude", value="sess-798")
 
 
-def _no_usage_fetch(monkeypatch: pytest.MonkeyPatch) -> None:
-    async def _raise() -> dict:
-        raise RuntimeError("no usage API in tests")
-
-    monkeypatch.setattr("untether.utils.usage_cache.fetch_claude_usage_cached", _raise)
-
-
 async def _run_with_turn(
     *turn_steps: Emit, end_mid_turn: bool = False
 ) -> tuple[FakeTransport, MessageRef]:
@@ -554,14 +547,11 @@ def _turn_texts(
     "reason",
     ["followup", "task_finished", "scheduled_wakeup", "monitor_event", "unknown"],
 )
-async def test_turn_final_carries_turn_complete_marker(
-    reason: str, monkeypatch: pytest.MonkeyPatch
-) -> None:
+async def test_turn_final_carries_turn_complete_marker(reason: str) -> None:
     """#798: every successful live turn final shows the #333 marker, whatever
     started the turn; the turn's in-flight progress never does (the run's
     marker is stripped from the turn tracker and the final adds its own to
     the snapshot only)."""
-    _no_usage_fetch(monkeypatch)
     transport, run_progress = await _run_with_turn(
         Emit(_turn("started", reason=reason)),
         Emit(_action()),
@@ -573,10 +563,7 @@ async def test_turn_final_carries_turn_complete_marker(
     assert all(TURN_COMPLETE_MARKER not in t for t in progress)
 
 
-async def test_failed_turn_final_has_no_turn_complete_marker(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    _no_usage_fetch(monkeypatch)
+async def test_failed_turn_final_has_no_turn_complete_marker() -> None:
     transport, run_progress = await _run_with_turn(
         Emit(_turn("started", reason="followup")),
         Emit(_action()),
@@ -595,11 +582,8 @@ async def test_failed_turn_final_has_no_turn_complete_marker(
     assert all(TURN_COMPLETE_MARKER not in t for t in progress)
 
 
-async def test_interrupted_turn_final_has_no_turn_complete_marker(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+async def test_interrupted_turn_final_has_no_turn_complete_marker() -> None:
     """A turn the session ended under (router.aclose) is not "complete"."""
-    _no_usage_fetch(monkeypatch)
     transport, run_progress = await _run_with_turn(
         Emit(_turn("started", reason="task_finished", detail={"tasks": ["b1"]})),
         Emit(_action()),
