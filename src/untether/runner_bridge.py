@@ -46,6 +46,7 @@ from .runner import (
     reset_run_stream_handle,
     set_run_stream_handle,
 )
+from .session_costs import TokenScope, token_counts
 from .session_quarantine import QuarantineStore, get_quarantine_store
 from .transport import (
     ChannelId,
@@ -882,16 +883,83 @@ def _apply_cost_delta(
     }
 
 
-def _format_run_cost(usage: dict[str, Any] | None) -> str | None:
-    """Format run cost/usage from CompletedEvent into a footer line."""
+# #419: engines whose CompletedEvent token usage needs the session ledger.
+# Codex's turn.completed.usage is the thread's running total (every earlier
+# ``exec resume`` run included), so runs report the delta.
+_TOKEN_LEDGER_SCOPES: dict[str, TokenScope] = {
+    "codex": "thread_cumulative",
+    # #417: OpenCode reports per run; the ledger keeps a session total.
+    "opencode": "per_run",
+}
+
+
+def _apply_token_delta(
+    engine: str,
+    session_id: str | None,
+    usage: dict[str, Any] | None,
+    *,
+    resumed: bool,
+) -> dict[str, Any] | None:
+    """Return ``usage`` with its token fields rewritten to this run's share
+    (#419). Passthrough (the same object, no ``token_delta_source``) when the
+    engine is not in ``_TOKEN_LEDGER_SCOPES``, there is no session id, or the
+    usage carries no token counts."""
+    scope = _TOKEN_LEDGER_SCOPES.get(engine)
+    if scope is None or not usage or not session_id:
+        return usage
+    counts = token_counts(usage)
+    if counts is None:
+        return usage
+    from .session_costs import get_session_cost_ledger
+
+    try:
+        result = get_session_cost_ledger().record_tokens(
+            engine, session_id, counts, scope=scope, resumed=resumed
+        )
+    except Exception:  # noqa: BLE001 — accounting must never break delivery
+        logger.warning("usage.token_delta_failed", exc_info=True)
+        return usage
+    logger.info(
+        "usage.token_delta",
+        engine=engine,
+        session_id=session_id,
+        source=result.source,
+        input_delta=result.delta.get("input_tokens", 0),
+        output_delta=result.delta.get("output_tokens", 0),
+        reasoning_delta=result.delta.get("reasoning_output_tokens", 0),
+        cumulative_input=result.cumulative.get("input_tokens", 0),
+        cumulative_output=result.cumulative.get("output_tokens", 0),
+        runs=result.runs,
+    )
+    if scope == "per_run":
+        # The per-run figures are already this run's; add the session total.
+        return {**usage, "session_total_usage": result.cumulative}
+    # The flat fields now mean *this run*, like total_cost_usd after #778.
+    return {
+        **usage,
+        **result.delta,
+        "thread_total_usage": result.cumulative,
+        "token_delta_source": result.source,
+    }
+
+
+def _format_run_cost(
+    usage: dict[str, Any] | None, *, thread_cumulative: bool = False
+) -> str | None:
+    """Format run cost/usage from CompletedEvent into a footer line.
+
+    Token counts come from either usage shape via ``token_counts()``
+    (#417): nested ``usage["usage"]`` (Claude, OpenCode) or flat (Codex).
+    ``thread_cumulative`` marks an engine whose raw usage is a running thread
+    total (#419): when the ledger did not turn it into a per-run delta
+    (``token_delta_source`` missing, or ``baseline_unknown``) the figure is
+    labelled `` · thread total``.
+    """
     if not usage:
         return None
     cost = usage.get("total_cost_usd")
-    token_usage = usage.get("usage")
-    has_tokens = isinstance(token_usage, dict) and (
-        token_usage.get("input_tokens", 0) or token_usage.get("output_tokens", 0)
-    )
-    if cost is None and not has_tokens:
+    counts = token_counts(usage)
+    if cost is None and counts is None:
         return None
     parts: list[str] = []
     if cost is not None:
@@ -911,19 +979,24 @@ def _format_run_cost(usage: dict[str, Any] | None) -> str | None:
             parts.append(f"{mins}m {remaining}s")
         else:
             parts.append(f"{secs:.1f}s")
-    if has_tokens:
-        input_tokens = token_usage.get("input_tokens", 0)
-        output_tokens = token_usage.get("output_tokens", 0)
-        if input_tokens or output_tokens:
+    if counts is not None:
+        input_tokens = counts.get("input_tokens", 0)
+        output_tokens = counts.get("output_tokens", 0)
 
-            def _fmt_tokens(n: int) -> str:
-                if n >= 1_000_000:
-                    return f"{n / 1_000_000:.1f}M"
-                if n >= 1_000:
-                    return f"{n / 1_000:.1f}k"
-                return str(n)
+        def _fmt_tokens(n: int) -> str:
+            if n >= 1_000_000:
+                return f"{n / 1_000_000:.1f}M"
+            if n >= 1_000:
+                return f"{n / 1_000:.1f}k"
+            return str(n)
 
-            parts.append(f"{_fmt_tokens(input_tokens)}/{_fmt_tokens(output_tokens)}")
+        token_part = f"{_fmt_tokens(input_tokens)}/{_fmt_tokens(output_tokens)}"
+        if thread_cumulative and usage.get("token_delta_source") in (
+            None,
+            "baseline_unknown",
+        ):
+            token_part += " · thread total"
+        parts.append(token_part)
     return " · ".join(parts) or None
 
 
@@ -4985,12 +5058,30 @@ async def handle_message(
             completed.usage,
             resumed=turn is not None or resume_token is not None,
         )
+        cost_usage = run_usage
+        # #419: Codex token usage is a running thread total — same delta
+        # treatment, same exactly-once point (#806).
+        run_usage = _apply_token_delta(
+            runner.engine,
+            resume_value,
+            run_usage,
+            resumed=turn is not None or resume_token is not None,
+        )
         usage_log: dict[str, object] = {}
-        if run_usage and run_usage is not completed.usage:
-            usage_log["turn_cost_usd"] = run_usage.get("total_cost_usd")
+        if (
+            cost_usage
+            and cost_usage is not completed.usage
+            and "total_cost_usd" in cost_usage
+        ):
+            usage_log["turn_cost_usd"] = cost_usage.get("total_cost_usd")
         if completed.usage:
             for key in ("num_turns", "total_cost_usd", "duration_api_ms"):
                 val = completed.usage.get(key)
+                if val is not None:
+                    usage_log[key] = val
+        if run_usage:
+            for key in ("input_tokens", "output_tokens", "token_delta_source"):
+                val = run_usage.get(key)
                 if val is not None:
                     usage_log[key] = val
         logger.info(
@@ -5341,16 +5432,29 @@ async def handle_message(
             _show_cost = _footer_run_opts.show_api_cost
         _cost_alert_text, _cost_alert_obj = acct.cost_alert_text, acct.cost_alert
         if _show_cost and run_ok is not False:
-            cost_line = _format_run_cost(run_usage)
+            cost_line = _format_run_cost(
+                run_usage,
+                thread_cumulative=(
+                    _TOKEN_LEDGER_SCOPES.get(runner.engine) == "thread_cumulative"
+                ),
+            )
             if cost_line:
                 budget_suffix = (
                     _format_budget_suffix(_cost_alert_obj)
                     if _cost_alert_obj is not None
                     else ""
                 )
+                # #417 D9: 💰 implies money — a token-only footer uses 🔢.
+                _cost_val = run_usage.get("total_cost_usd") if run_usage else None
+                _prefix = (
+                    "\U0001f4b0"
+                    if isinstance(_cost_val, (int, float))
+                    and not isinstance(_cost_val, bool)
+                    else "\U0001f522"
+                )
                 # #770: footer lines go on the LAST chunk of a split final.
                 final_rendered = _insert_footer_line(
-                    final_rendered, f"\n\U0001f4b0{cost_line}{budget_suffix}"
+                    final_rendered, f"\n{_prefix}{cost_line}{budget_suffix}"
                 )
         elif _cost_alert_text:
             # Budget exceeded but cost display is off — show standalone alert

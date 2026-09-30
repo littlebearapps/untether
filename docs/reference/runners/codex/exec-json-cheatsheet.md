@@ -36,13 +36,37 @@ Example:
 Fields:
 - `type`
 - `usage.input_tokens`
-- `usage.cached_input_tokens`
+- `usage.cached_input_tokens` — a **subset** of `input_tokens`
+- `usage.cache_write_input_tokens` — added upstream in #33454 (defaults to `0`)
 - `usage.output_tokens`
+- `usage.reasoning_output_tokens` — a **subset** of `output_tokens` (never add it on top)
 
-Example:
+`usage` is the **thread's running total**, not this turn's: Codex emits
+`usage_from_last_total()`, and `exec resume` seeds the total from the rollout, so
+a resumed run reports *every earlier run on the thread + this run*. A turn with
+no model call reports all zeros; a failed turn reports no usage (its tokens land
+in the next run's total). Verified on 0.157.1 (#419 step-0 capture,
+`tests/fixtures/codex_0157_resume_usage.jsonl`): three runs on one thread
+reported input `10656 → 21328 → 32017`.
+
+Example (0.157.1):
 ```json
-{"type":"turn.completed","usage":{"input_tokens":24763,"cached_input_tokens":24448,"output_tokens":122}}
+{"type":"turn.completed","usage":{"input_tokens":24763,"cached_input_tokens":24448,"cache_write_input_tokens":0,"output_tokens":122,"reasoning_output_tokens":64}}
 ```
+
+**Per-run token attribution in Untether (#419).** The runner forwards the raw
+thread total; the bridge records it in `session_costs.json` (key
+`codex:<thread_id>`) and reports `usage(run N) − usage(run N−1)` for that
+thread (per field, with a per-field-max baseline so a lower total never
+re-counts). The first run of a fresh thread is `source=new_session`; a resumed
+thread Untether has never seen (e.g. `/continue` of a thread started in a
+terminal) records the raw total once as `source=baseline_unknown`. Tokens spent
+on the thread *outside* Untether between two Untether runs (a terminal
+`codex resume <id>`, or a rollback window) are inside the next total, so they
+land in the next run's delta as `source=ledger` — exact in aggregate, not per
+run. `thread.started` is re-emitted with the same `thread_id` on both
+`exec resume <id>` and `exec resume --last` (verified on 0.157.1), so reply
+resumes and `/continue` both reach the ledger.
 
 ### `turn.failed`
 
@@ -166,15 +190,29 @@ Example (completed, failure):
 {"type":"item.completed","item":{"id":"item_6","type":"mcp_tool_call","server":"docs","tool":"search","arguments":{"q":"exec --json"},"result":null,"error":{"message":"tool timeout"},"status":"failed"}}
 ```
 
-### `web_search` (only `item.completed`)
+### `web_search` (`item.started` and `item.completed`)
 
 Fields:
-- `item.query`
+- `item.id` — see the duplicate-id note below
+- `item.query` — `""` on `item.started`; the real query (or `""`) on `item.completed`
+- `item.action` — tagged by `type`: `search` (`query?`, `queries?`) | `open_page`
+  (`url?`) | `find_in_page` (`url?`, `pattern?`) | `other`. `item.started`
+  always carries `{"type":"other"}`.
+- `item.results` (completed only, optional) — array of opaque result objects
 
-Example:
+**Duplicate `id` key on the wire:** upstream serialises `ThreadItem { id,
+#[serde(flatten)] details }` plus the item's own `id`, so each line carries
+`"id":"item_N"` *and then* the raw id (`"id":"exec-…"`). Untether's decoder
+(msgspec) keeps the **last** key — the raw id shared by started and completed —
+so the two phases pair. Pinned by `test_web_search_duplicate_id_keeps_last`.
+
+Example (0.157.1 wire, trimmed):
 ```json
-{"type":"item.completed","item":{"id":"item_7","type":"web_search","query":"codex exec --json schema"}}
+{"type":"item.started","item":{"id":"item_2","type":"web_search","id":"exec-8c5b…","query":"","action":{"type":"other"}}}
+{"type":"item.completed","item":{"id":"item_2","type":"web_search","id":"exec-8c5b…","query":"codex-cli latest version npm GitHub","action":{"type":"search","query":"codex-cli latest version npm GitHub"},"results":[{"type":"text_result","title":"@openai/codex - npm","url":"https://www.npmjs.com/package/%40openai/codex"}]}}
 ```
+
+Legacy (≤ 0.125) lines carry only `id` + `query` and still decode.
 
 ### `todo_list` (`item.started`, `item.updated`, and `item.completed`)
 
@@ -312,7 +350,8 @@ machine-only metadata.
   truncate it, and rely on `command_execution.status` + `exit_code` instead.
 - `mcp_tool_call.result.content` can be large and tool-specific; consider showing
   only high-level status unless you know the tool’s schema.
-- `usage` fields (`turn.completed.usage.*`) are typically telemetry-only.
+- `usage` fields (`turn.completed.usage.*`) are the thread's running total —
+  subtract the previous run's total for per-run figures (Untether does, #419).
 
 ### Success and failure signals
 
@@ -341,8 +380,9 @@ If you want a compact UI, the following is usually enough:
 - `reasoning` items only appear when reasoning summaries are enabled.
 - `todo_list` items only appear when the plan tool is active; they are the
   primary source of `item.updated`.
-- `file_change` and `web_search` items are emitted only as `item.completed`
-  in the current `codex exec --json` stream.
+- `file_change` items are emitted only as `item.completed` in the current
+  `codex exec --json` stream; `web_search` is emitted on `item.started`
+  (empty query, `action.type = "other"`) and `item.completed` since 0.157.x.
 
 ## See also
 

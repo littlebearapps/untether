@@ -344,6 +344,60 @@ def _format_change_summary(changes: list[Any]) -> str:
     return ", ".join(str(path) for path in paths)
 
 
+_WEB_SEARCH_MAX_QUERIES = 3
+
+
+def _str_field(obj: object, key: str) -> str:
+    """``obj[key]`` when ``obj`` is a dict and the value is a non-empty str."""
+    if not isinstance(obj, dict):
+        return ""
+    value = obj.get(key)
+    return value if isinstance(value, str) else ""
+
+
+def _web_search_title(query: str | None, action: object) -> tuple[str, str]:
+    """Return ``(title, action_type)`` for a Codex ``web_search`` item (#419).
+
+    Never raises: ``action`` is whatever JSON arrived (the schema leaves it
+    untyped). A non-dict action is treated as absent; non-str
+    ``type``/``query``/``url``/``pattern`` values are ignored; ``queries``
+    contributes only its str elements.
+    """
+    query = query if isinstance(query, str) else ""
+    action_type = _str_field(action, "type")
+    if action_type == "search":
+        title = _str_field(action, "query") or query
+        if not title and isinstance(action, dict):
+            raw = action.get("queries")
+            queries = (
+                [q for q in raw if isinstance(q, str) and q]
+                if isinstance(raw, list)
+                else []
+            )
+            if queries:
+                title = " · ".join(queries[:_WEB_SEARCH_MAX_QUERIES])
+                extra = len(queries) - _WEB_SEARCH_MAX_QUERIES
+                if extra > 0:
+                    title += f" (+{extra} more)"
+        return (title or "web search", "search" if title else "other")
+    if action_type == "open_page":
+        return (_str_field(action, "url") or query or "page", "open_page")
+    if action_type == "find_in_page":
+        pattern = _str_field(action, "pattern")
+        url = _str_field(action, "url")
+        if pattern and url:
+            title = f'"{pattern}" in {url}'
+        elif pattern:
+            title = f'"{pattern}"'
+        else:
+            title = url or query or "page"
+        return (title, "find_in_page")
+    # "other", absent or an unknown future type.
+    if query:
+        return (query, "search")
+    return ("web search", "other")
+
+
 @dataclass(frozen=True, slots=True)
 class _TodoSummary:
     done: int
@@ -526,15 +580,24 @@ def _translate_item_event(
                         ok=ok,
                     ),
                 ]
-        case codex_schema.WebSearchItem(id=action_id, query=query):
-            detail = {"query": query}
+        case codex_schema.WebSearchItem(
+            id=action_id, query=query, action=ws_action, results=results
+        ):
+            title, action_type = _web_search_title(query, ws_action)
+            detail = {"query": query or "", "action_type": action_type}
+            url = _str_field(ws_action, "url")
+            if url:
+                detail["url"] = url
+            if isinstance(results, list):
+                # Only the count — raw results (page content) are never copied.
+                detail["result_count"] = len(results)
             if phase in {"started", "updated"}:
                 return [
                     factory.action(
                         phase=phase,
                         action_id=action_id,
                         kind="web_search",
-                        title=query,
+                        title=title,
                         detail=detail,
                     )
                 ]
@@ -543,7 +606,7 @@ def _translate_item_event(
                     factory.action_completed(
                         action_id=action_id,
                         kind="web_search",
-                        title=query,
+                        title=title,
                         detail=detail,
                         ok=True,
                     )

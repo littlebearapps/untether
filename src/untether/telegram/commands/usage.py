@@ -7,6 +7,7 @@ do not use Anthropic OAuth credentials.
 from __future__ import annotations
 
 import contextlib
+import html
 import json
 import subprocess
 import sys
@@ -297,11 +298,121 @@ def _format_debug_section() -> str:
     return "\n".join(lines)
 
 
+# #417: how each token field renders on /usage. Codex's cached/cache-write
+# input and reasoning output are SUBSETS (parentheses, Codex's own display
+# vocabulary); OpenCode's cache read/write are SEPARATE from input_tokens
+# (``+``). Keyed on the field name, not the engine id.
+_INPUT_SUBSET_FIELDS: tuple[tuple[str, str], ...] = (
+    ("cached_input_tokens", "cached"),
+    ("cache_write_input_tokens", "cache write"),
+)
+_INPUT_ADDITIVE_FIELDS: tuple[tuple[str, str], ...] = (
+    ("cache_read_tokens", "cache read"),
+    ("cache_write_tokens", "cache write"),
+)
+_OUTPUT_SUBSET_FIELDS: tuple[str, ...] = (
+    "reasoning_output_tokens",
+    "reasoning_tokens",
+)
+_SESSION_ID_SHOWN = 8
+
+
+def _format_token_breakdown(counts: dict[str, int]) -> str:
+    """``168k in (142k cached) · 1.6k out (reasoning 900)`` /
+    ``22k in + 21k cache read · 118 out`` (#417)."""
+    from ...background_status import format_tokens
+
+    in_part = f"{format_tokens(counts.get('input_tokens', 0))} in"
+    subsets = [
+        f"{format_tokens(counts[k])} {label}"
+        for k, label in _INPUT_SUBSET_FIELDS
+        if counts.get(k)
+    ]
+    if subsets:
+        in_part += f" ({', '.join(subsets)})"
+    for k, label in _INPUT_ADDITIVE_FIELDS:
+        if counts.get(k):
+            in_part += f" + {format_tokens(counts[k])} {label}"
+    out_part = f"{format_tokens(counts.get('output_tokens', 0))} out"
+    reasoning = next((counts[k] for k in _OUTPUT_SUBSET_FIELDS if counts.get(k)), 0)
+    if reasoning:
+        out_part += f" (reasoning {format_tokens(reasoning)})"
+    return f"{in_part} · {out_part}"
+
+
+def _session_token_reply(channel_id: object, engine: str) -> CommandResult:
+    """``/usage`` for an engine without subscription-quota data (#417): the
+    token totals of the chat's last session of ``engine``."""
+    from ...runner_bridge import _TOKEN_LEDGER_SCOPES
+    from ...session_costs import get_session_cost_ledger, token_counts
+    from .export import latest_session_for_chat
+
+    esc_engine = html.escape(engine)
+    sess = (
+        latest_session_for_chat(channel_id, engine=engine)  # type: ignore[arg-type]
+        if isinstance(channel_id, (int, str))
+        else None
+    )
+    if sess is None:
+        return CommandResult(
+            text=(
+                f"Subscription quota tracking is not available for the"
+                f" <b>{esc_engine}</b> engine, and this chat has no completed"
+                f" {esc_engine} run since Untether last started. Send a prompt,"
+                " then try /usage again — or use /export for a transcript."
+            ),
+            notify=True,
+            parse_mode="HTML",
+        )
+
+    sid = sess.session_id
+    shown_sid = sid if len(sid) <= _SESSION_ID_SHOWN else sid[:_SESSION_ID_SHOWN] + "…"
+    lines = [f"📊 <b>{esc_engine}</b> · last session in this chat"]
+    ledger = get_session_cost_ledger().session_tokens(engine, sid)
+    session_line = f"Session <code>{html.escape(shown_sid)}</code>"
+    if ledger is not None and ledger.runs > 0:
+        runs = ledger.runs
+        lines.append(f"{session_line} · {runs} run{'s' if runs != 1 else ''}")
+        lines.append(
+            f"<b>Session total:</b> {html.escape(_format_token_breakdown(ledger.totals))}"
+        )
+        last = html.escape(_format_token_breakdown(ledger.last_run))
+        if ledger.last_source == "baseline_unknown" and runs == 1:
+            last += " (includes earlier runs outside Untether)"
+        lines.append(f"<b>Last run:</b> {last}")
+    else:
+        lines.append(session_line)
+        counts = token_counts(sess.usage)
+        if counts is not None:
+            label = (
+                "Session total"
+                if _TOKEN_LEDGER_SCOPES.get(engine) == "thread_cumulative"
+                else "Last run"
+            )
+            lines.append(
+                f"<b>{label}:</b> {html.escape(_format_token_breakdown(counts))}"
+            )
+        else:
+            lines.append("No token counts were reported for this session.")
+    cost = sess.usage.get("total_cost_usd") if sess.usage else None
+    if isinstance(cost, (int, float)) and not isinstance(cost, bool):
+        lines.append(f"<b>Last run cost:</b> ${cost:.4f}")
+    source = "its exec mode" if engine == "codex" else "its CLI"
+    lines.append(
+        f"Quota and plan limits are not available for {esc_engine} — {source}"
+        " doesn't report them. Transcript: /export"
+    )
+    return CommandResult(text="\n".join(lines), notify=True, parse_mode="HTML")
+
+
 class UsageCommand:
-    """Command backend for Claude Code usage reporting."""
+    """Command backend for usage reporting: Claude Code subscription quota,
+    or the last session's token totals for other engines (#417)."""
 
     id = "usage"
-    description = "Show Claude Code subscription usage"
+    description = (
+        "Show usage (Claude: subscription quota; other engines: session tokens)"
+    )
 
     async def handle(self, ctx: CommandContext) -> CommandResult | None:
         from ..engine_overrides import SUBSCRIPTION_USAGE_SUPPORTED_ENGINES
@@ -313,14 +424,11 @@ class UsageCommand:
 
         current_engine = await resolve_effective_engine(ctx)
         if current_engine not in SUBSCRIPTION_USAGE_SUPPORTED_ENGINES:
-            return CommandResult(
-                text=(
-                    f"Usage tracking is not available for the"
-                    f" <b>{current_engine}</b> engine."
-                ),
-                notify=True,
-                parse_mode="HTML",
-            )
+            # #417: token totals for the chat's last session instead of a
+            # flat "not available" (``/usage debug`` too — the debug block
+            # is Claude-OAuth specific).
+            channel_id = getattr(ctx.message, "channel_id", None)
+            return _session_token_reply(channel_id, current_engine)
 
         try:
             data = await fetch_claude_usage()

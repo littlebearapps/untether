@@ -113,7 +113,7 @@ not required at any tier.
 | U5 | **Model override** | Via `/config` → Model → set a different model, then send a prompt | Footer shows overridden model name | #77 (AMP model flag), build_args correctness |
 | U6 | **Cancel mid-run** | Send a long prompt, then `/cancel` before it finishes | Run stops, completion message appears, no orphan process | Graceful cancellation, process cleanup |
 | U7 | **Error handling** | Send a prompt that will fail (e.g. `read /nonexistent/file/path`) | Error renders in Telegram, no crash, session ends cleanly | Stderr sanitisation (#85), error formatting |
-| U8 | **/usage** | `/usage` after a completed run | Shows cost or subscription info (engine-dependent) | #89 (429 handling), cost tracking |
+| U8 | **/usage** | `/usage` after a completed run | Claude: subscription info; Codex/OpenCode: last-session token totals (`📊 <engine> · last session in this chat`, #417) | #89 (429 handling), cost tracking |
 | U9 | **/export** | `/export` after a completed run | Markdown export downloads, contains prompt and response | #63 (missing usage in export) |
 | U10 | **/browse** | `/browse` | File browser appears with inline keyboard, can navigate directories | Browse command, path traversal safety |
 
@@ -834,3 +834,24 @@ Tier 2 (Claude interactive). Claude `ut-dev` chat `5284581592` (Bot API `-528458
 | **R15-4h** plan-auto (Decision 6 default) | `/planmode plan-auto`. Send `Plan: start a Monitor on "for i in 1 2 3; do sleep 10; echo tick $i; done" and after each tick append the tick to /tmp/r15-383/ticks.txt.` Then after the ticks, send `summarise ticks.txt` | No approval buttons at any point; ticks are appended without a plan per tick; the follow-up plans (a plan appears in the progress/final) and is auto-approved | No `rearm_sent reason=idle` for the tick turns; one `rearm_sent reason=followup` before the follow-up; one `control_request.auto_approve_exit_plan_mode` for the follow-up |
 
 R15-4d (an approved background agent isn't disrupted) is owed with the #383 C4 deferral, which lands after #829. After the run, `journalctl --user -u untether-dev --since "1 hour ago" -p warning | grep -E "permission_mode|plan_rearm"` must be empty.
+### #419 — Codex usage fields, per-thread token deltas, web-search titles
+
+Engine chat: **Codex** `4929463515` (Bot API `-4929463515`). The footer needs #417 as well, so run R15-15a–c and R15-16a–e back to back in one Codex session. Log check: `journalctl --user -u untether-dev -o cat --since "30 minutes ago" | grep -E "usage.token_delta|usage.token_delta_failed|jsonl.msgspec.invalid|runner.completed"`.
+
+| # | Scenario | What to do | Pass criteria |
+|---|---|---|---|
+| R15-15a | **Codex web-search titles ([#419](https://github.com/littlebearapps/untether/issues/419))** | Codex chat: `Use web search to find the latest release version of the openai/codex CLI and answer in one line.` (default `web_search` mode is `cached`, which still sends the tool) | While running, the progress shows a `web search` row (never a blank `searched: `); the same row completes as `searched: <query>` (or `opened: <url>` for a page open). Final answer renders. `grep -c jsonl.msgspec.invalid` = 0 since the restart. If Codex chose not to search, re-prompt once with `You must call the web search tool.`; if still no search, record **not exercised** |
+| R15-15b | **Codex resumed run counts only its own tokens ([#419](https://github.com/littlebearapps/untether/issues/419))** | Codex chat: U1 prompt (`create a file called hello.txt with "hello world"`), then reply to its resume line: `now rename hello.txt to greetings.txt` | Logs: `usage.token_delta engine=codex source=new_session` for run 1, then `source=ledger` for run 2 with `input_delta` = run-2 `cumulative_input` − run-1 `cumulative_input` (compute from the two lines), `runs=2`. `runner.completed` for run 2 carries `input_tokens` equal to that delta. No `usage.token_delta_failed` |
+| R15-15c | **Ledger survives restart** | After R15-15b: `systemctl --user restart untether-dev`, then reply to run 2's resume line: `say done` | `usage.token_delta … source=ledger runs=3` (not `baseline_unknown`) |
+
+### #417 — `/usage` for non-Claude engines + Codex token footer
+
+Chats: **Codex** `4929463515`, **OpenCode** `5200822877`, **Claude** `5284581592` (Bot API ids with a leading `-`). Run straight after R15-15a–c (same Codex session). Dev config has `[footer] show_api_cost = true`; if a chat has a per-chat footer override, clear it via `/config` first. Also scan `grep -E "usage.token_delta_failed|export_event.record_failed|usage.fetch_failed"` → 0 lines from the Codex/OpenCode chats.
+
+| # | Scenario | What to do | Pass criteria |
+|---|---|---|---|
+| R15-16a | **Codex token footer, per run ([#417](https://github.com/littlebearapps/untether/issues/417))** | Read the two finals from R15-15b | Run 1's final has a token-only footer `🔢<in>/<out>` (e.g. `🔢14.2k/310`; no `💰`, D9). Run 2's input figure matches `input_delta` of run 2's `usage.token_delta` line (compact-formatted) and is **smaller** than that line's `cumulative_input`. No token footer at all would have appeared on rc14. If R15-15c ran, run 3's footer has no `· thread total` suffix (`source=ledger`) |
+| R15-16b | **Codex `/usage` = last session tokens** | In the Codex chat send `/usage`, then `/export` | `/usage` reply starts `📊 codex · last session in this chat`, shows `Session total:` / `Last run:` / `N runs` and the `/export` pointer; it never says `Usage tracking is not available`. `/export`'s header `N in / M out tokens` equals the last `usage.token_delta` line's `cumulative_input` / `cumulative_output` — the same thread total `/usage` summarises (the issue's "agree" criterion) |
+| R15-16c | **No history after restart** | `systemctl --user restart untether-dev`, then `/usage` in the Codex chat before any prompt | `…not available for the codex engine, and this chat has no completed codex run since Untether last started…` |
+| R15-16d | **OpenCode session totals** | OpenCode chat: U1 prompt, then reply to it with `now rename hello.txt to greetings.txt`, then `/usage`, then `/export` | `/usage` shows `2 runs`, a `Session total:` equal to the sum of the two runs' footers (within rounding), and `Last run cost: $…` if the model is priced. Logs: two `usage.token_delta engine=opencode source=per_run`. `/export` header shows cost, or tokens when the model is free |
+| R15-16e | **Claude `/usage` unchanged** | Claude chat: `/usage` and `/usage debug` | Same subscription view as rc14 (C7); no `📊 claude · last session` text |

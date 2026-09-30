@@ -1562,6 +1562,334 @@ async def test_cost_footer_shown_on_success_run(monkeypatch) -> None:
 
 
 # ===========================================================================
+# #419: Codex thread-cumulative token usage → per-run delta
+# ===========================================================================
+
+
+async def _run_codex_usage(
+    usage: dict, *, session_id: str, resume: bool, transport: "FakeTransport"
+) -> None:
+    runner = ScriptRunner(
+        [Return(answer="done", usage=usage)],
+        engine=CODEX_ENGINE,
+        resume_value=session_id,
+    )
+    cfg = ExecBridgeConfig(
+        transport=transport, presenter=MarkdownPresenter(), final_notify=True
+    )
+    await handle_message(
+        cfg,
+        runner=runner,
+        incoming=IncomingMessage(channel_id=123, message_id=10, text="go"),
+        resume_token=(
+            ResumeToken(engine=CODEX_ENGINE, value=session_id) if resume else None
+        ),
+    )
+
+
+@pytest.mark.anyio
+async def test_codex_resumed_run_accounts_token_delta() -> None:
+    from untether.session_costs import get_session_cost_ledger
+
+    sid = f"codex-419-{uuid.uuid4().hex[:8]}"
+    transport = FakeTransport()
+    with structlog.testing.capture_logs() as logs:
+        await _run_codex_usage(
+            {"input_tokens": 100, "cached_input_tokens": 0, "output_tokens": 10},
+            session_id=sid,
+            resume=False,
+            transport=transport,
+        )
+        await _run_codex_usage(
+            {"input_tokens": 250, "cached_input_tokens": 0, "output_tokens": 30},
+            session_id=sid,
+            resume=True,
+            transport=transport,
+        )
+    deltas = [e for e in logs if e["event"] == "usage.token_delta"]
+    assert [e["source"] for e in deltas] == ["new_session", "ledger"]
+    assert deltas[1]["input_delta"] == 150
+    assert deltas[1]["cumulative_input"] == 250
+    completed = [e for e in logs if e["event"] == "runner.completed"]
+    assert completed[-1]["input_tokens"] == 150
+    assert completed[-1]["token_delta_source"] == "ledger"
+    assert "turn_cost_usd" not in completed[-1]
+    tokens = get_session_cost_ledger().session_tokens(CODEX_ENGINE, sid)
+    assert tokens is not None
+    assert (tokens.totals["input_tokens"], tokens.totals["output_tokens"]) == (
+        250,
+        30,
+    )
+    assert tokens.runs == 2
+
+
+@pytest.mark.anyio
+async def test_codex_usage_accounted_once_per_run() -> None:
+    from untether.session_costs import get_session_cost_ledger
+
+    sid = f"codex-419-{uuid.uuid4().hex[:8]}"
+    await _run_codex_usage(
+        {"input_tokens": 100, "cached_input_tokens": 0, "output_tokens": 10},
+        session_id=sid,
+        resume=False,
+        transport=FakeTransport(),
+    )
+    tokens = get_session_cost_ledger().session_tokens(CODEX_ENGINE, sid)
+    assert tokens is not None and tokens.runs == 1
+
+
+# ===========================================================================
+# #417: token footer for flat (Codex) usage, 🔢 prefix, thread-total label
+# ===========================================================================
+
+
+class TestFormatRunCostTokenShapes:
+    def test_format_run_cost_flat_codex_tokens(self):
+        usage = {"input_tokens": 12300, "cached_input_tokens": 0, "output_tokens": 400}
+        assert _format_run_cost(usage) == "12.3k/400"
+
+    @pytest.mark.parametrize(
+        ("usage", "expected"),
+        [
+            (
+                {
+                    "total_cost_usd": 0.15,
+                    "num_turns": 3,
+                    "usage": {"input_tokens": 72500, "output_tokens": 120},
+                },
+                "$0.15 · 3 tn · 72.5k/120",
+            ),
+            (
+                {"usage": {"input_tokens": 5000, "output_tokens": 300}},
+                "5.0k/300",
+            ),
+        ],
+    )
+    def test_format_run_cost_nested_shape_unchanged(self, usage, expected):
+        assert _format_run_cost(usage) == expected
+
+    @pytest.mark.parametrize(
+        ("source", "thread_cumulative", "suffix"),
+        [
+            ("baseline_unknown", True, True),
+            (None, True, True),
+            ("ledger", True, False),
+            ("new_session", True, False),
+            (None, False, False),
+        ],
+    )
+    def test_format_run_cost_thread_total_suffix(
+        self, source, thread_cumulative, suffix
+    ):
+        usage = {"input_tokens": 1000, "output_tokens": 10}
+        if source is not None:
+            usage["token_delta_source"] = source
+        out = _format_run_cost(usage, thread_cumulative=thread_cumulative)
+        assert out is not None
+        assert out.endswith("· thread total") is suffix
+
+    def test_format_run_cost_zero_tokens_is_none(self):
+        assert (
+            _format_run_cost(
+                {"input_tokens": 0, "cached_input_tokens": 0, "output_tokens": 0}
+            )
+            is None
+        )
+
+
+async def _run_footer(
+    runner: ScriptRunner,
+    *,
+    resume_token: ResumeToken | None = None,
+) -> str:
+    transport = FakeTransport()
+    cfg = ExecBridgeConfig(
+        transport=transport, presenter=MarkdownPresenter(), final_notify=True
+    )
+    await handle_message(
+        cfg,
+        runner=runner,
+        incoming=IncomingMessage(channel_id=123, message_id=10, text="go"),
+        resume_token=resume_token,
+    )
+    return transport.send_calls[-1]["message"].text
+
+
+@pytest.mark.anyio
+async def test_codex_footer_shows_per_run_delta_on_resume(monkeypatch) -> None:
+    """#417 + #419 end to end: the footer shows this run's tokens, not the
+    thread's running total, and never the money emoji."""
+    _force_show_api_cost(monkeypatch)
+    sid = f"codex-417-{uuid.uuid4().hex[:8]}"
+    first = await _run_footer(
+        ScriptRunner(
+            [
+                Return(
+                    answer="one",
+                    usage={
+                        "input_tokens": 100000,
+                        "cached_input_tokens": 0,
+                        "output_tokens": 1000,
+                    },
+                )
+            ],
+            engine=CODEX_ENGINE,
+            resume_value=sid,
+        )
+    )
+    assert "\U0001f522100.0k/1.0k" in first
+    second = await _run_footer(
+        ScriptRunner(
+            [
+                Return(
+                    answer="two",
+                    usage={
+                        "input_tokens": 112300,
+                        "cached_input_tokens": 0,
+                        "output_tokens": 1400,
+                    },
+                )
+            ],
+            engine=CODEX_ENGINE,
+            resume_value=sid,
+        ),
+        resume_token=ResumeToken(engine=CODEX_ENGINE, value=sid),
+    )
+    assert "\U0001f52212.3k/400" in second
+    assert "112.3k" not in second
+    assert "thread total" not in second
+    assert "\U0001f4b0" not in first
+    assert "\U0001f4b0" not in second
+
+
+@pytest.mark.anyio
+async def test_codex_continue_without_thread_started_labels_thread_total(
+    monkeypatch,
+) -> None:
+    from untether.session_costs import get_session_cost_ledger
+
+    _force_show_api_cost(monkeypatch)
+    usage = {"input_tokens": 50000, "cached_input_tokens": 0, "output_tokens": 500}
+    runner = ScriptRunner(
+        [
+            Emit(
+                CompletedEvent(
+                    engine=CODEX_ENGINE,
+                    resume=ResumeToken(engine=CODEX_ENGINE, value=""),
+                    ok=True,
+                    answer="continued",
+                    usage=usage,
+                )
+            )
+        ],
+        engine=CODEX_ENGINE,
+    )
+    final = await _run_footer(
+        runner,
+        resume_token=ResumeToken(engine=CODEX_ENGINE, value="", is_continue=True),
+    )
+    assert "50.0k/500 · thread total" in final
+    assert get_session_cost_ledger().session_tokens(CODEX_ENGINE, "") is None
+
+
+@pytest.mark.anyio
+async def test_footer_prefix_money_only_with_cost(monkeypatch) -> None:
+    _force_show_api_cost(monkeypatch)
+    with_cost = await _run_footer(
+        ScriptRunner(
+            [
+                Return(
+                    answer="a",
+                    usage={
+                        "total_cost_usd": 0.05,
+                        "usage": {"input_tokens": 900, "output_tokens": 9},
+                    },
+                )
+            ],
+            engine="opencode",
+        )
+    )
+    assert "\U0001f4b0$0.05" in with_cost
+    token_only = await _run_footer(
+        ScriptRunner(
+            [
+                Return(
+                    answer="b",
+                    usage={"usage": {"input_tokens": 900, "output_tokens": 9}},
+                )
+            ],
+            engine="opencode",
+        )
+    )
+    assert "\U0001f522900/9" in token_only
+    assert "\U0001f4b0" not in token_only
+
+
+@pytest.mark.anyio
+async def test_codex_footer_hidden_when_show_api_cost_false(monkeypatch) -> None:
+    from untether.settings import FooterSettings
+
+    monkeypatch.setattr(
+        "untether.runner_bridge._load_footer_settings",
+        lambda: FooterSettings(show_api_cost=False),
+    )
+    final = await _run_footer(
+        ScriptRunner(
+            [
+                Return(
+                    answer="quiet",
+                    usage={
+                        "input_tokens": 1000,
+                        "cached_input_tokens": 0,
+                        "output_tokens": 10,
+                    },
+                )
+            ],
+            engine=CODEX_ENGINE,
+        )
+    )
+    assert "\U0001f522" not in final
+    assert "1.0k/10" not in final
+
+
+@pytest.mark.anyio
+async def test_opencode_runs_accumulate_session_total(monkeypatch) -> None:
+    from untether.session_costs import get_session_cost_ledger
+
+    _force_show_api_cost(monkeypatch)
+    sid = f"oc-417-{uuid.uuid4().hex[:8]}"
+    finals = []
+    for i, (inp, out) in enumerate([(5000, 300), (2000, 100)]):
+        finals.append(
+            await _run_footer(
+                ScriptRunner(
+                    [
+                        Return(
+                            answer=f"run {i}",
+                            usage={
+                                "usage": {"input_tokens": inp, "output_tokens": out}
+                            },
+                        )
+                    ],
+                    engine="opencode",
+                    resume_value=sid,
+                ),
+                resume_token=(ResumeToken(engine="opencode", value=sid) if i else None),
+            )
+        )
+    assert "\U0001f5225.0k/300" in finals[0]
+    assert "\U0001f5222.0k/100" in finals[1]
+    tokens = get_session_cost_ledger().session_tokens("opencode", sid)
+    assert tokens is not None
+    assert (tokens.totals["input_tokens"], tokens.totals["output_tokens"]) == (
+        7000,
+        400,
+    )
+    assert tokens.runs == 2
+    assert tokens.last_source == "per_run"
+
+
+# ===========================================================================
 # Post-outline flow guidance
 # ===========================================================================
 

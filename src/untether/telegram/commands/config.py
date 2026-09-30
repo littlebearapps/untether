@@ -1875,7 +1875,8 @@ async def _page_cost_usage(ctx: CommandContext, action: str | None = None) -> No
                 "<b>💰 Cost & usage</b>\n\n"
                 f"Not available for <b>{current_engine}</b>.\n"
                 "API cost works with Claude Code and OpenCode.\n"
-                "Subscription usage works with Claude Code."
+                "Subscription usage works with Claude Code.\n"
+                "Send /usage for this chat's last-session token totals."
             ),
             [[{"text": "← Back", "callback_data": "config:home"}]],
         )
