@@ -123,8 +123,6 @@ Either way, **Approve Plan / Let's discuss / Deny buttons** appear in Telegram s
 
 *(Earlier versions also enforced a 30–120s escalating cooldown here — a workaround for a Claude Code v2.1.72-2.1.74 retry loop that was fixed upstream and retired in v0.35.4.)*
 
-<img src="../assets/screenshots/cooldown-auto-deny.jpg" alt="Auto-denied ExitPlanMode (no outline yet) with Approve Plan / Deny buttons" width="360" loading="lazy" />
-
 <div markdown>
 
 !!! untether "Untether"

@@ -274,3 +274,6 @@ def test_docs_have_no_stale_mode_claims(rel: str) -> None:
         assert not ("every tool call" in line and _ON_MARKERS.search(line)), where
         assert "approve actions" not in line, where
         assert "agent decides" not in line, where
+        # (d) #783: the tutorial's "What just happened" bullet called off
+        # "fully autonomous" (pre-#749).
+        assert "fully autonomous" not in line, where

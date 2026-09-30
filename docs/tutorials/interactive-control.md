@@ -227,7 +227,7 @@ To check your current mode at any time:
 
 Key concepts:
 
-- **Permission modes** control the level of oversight: plan (full control), auto (hands-off with plans), off (fully autonomous)
+- **Permission modes** control the level of oversight: `on` (plan mode: Claude plans without editing files, and you approve the plan before changes start), `plan-auto` (plan mode, but the plan is approved for you: no plan buttons), `auto` (Claude Code's auto mode: a classifier approves routine actions and blocks risky ones; no plan phase) and `off` (`acceptEdits`: no plan phase; file edits and common filesystem commands run, and other tools ask you first)
 - **Approval buttons** appear inline in Telegram when Claude Code needs permission — Approve, Deny, or Pause & Outline Plan; after an outline is written, you also get **Let's discuss** to talk about the plan
 - **Diff previews** show you exactly what will change before you approve
 - **"Pause & Outline Plan"** forces Claude Code to write a visible plan before executing
