@@ -3889,6 +3889,7 @@ async def run_runner_with_cancel(
         # #695: both events carry the model so a single grep over either
         # answers "which model ran this session?".
         **_model_log_fields(edits.tracker.meta),
+        **_hook_summary_fields(edits.stream),
     )
     if event_count == 0 and not outcome.cancelled:
         logger.warning(
@@ -3899,6 +3900,16 @@ async def run_runner_with_cancel(
         )
 
     return outcome
+
+
+def _hook_summary_fields(stream: Any) -> dict[str, Any]:
+    """#812: ``hooks_started`` for engines that track hook lifecycle frames
+    (Claude with ``--include-hook-events``); absent for the rest."""
+    engine_state = getattr(stream, "engine_state", None)
+    started = getattr(engine_state, "hooks_started", None)
+    if isinstance(started, int) and not isinstance(started, bool):
+        return {"hooks_started": started}
+    return {}
 
 
 def sync_resume_token(
@@ -4049,11 +4060,16 @@ _TURN_HEADERS: dict[str, str] = {
     "task_finished": "\N{BELL} Background task finished",
     "scheduled_wakeup": "\N{ALARM CLOCK} Scheduled wake-up",
     "monitor_event": "\N{SATELLITE ANTENNA} Monitor",
+    # #812: an asyncRewake hook's findings (e.g. security-guidance's commit
+    # review). Always pushed, never folded (D-4 — see FOLDABLE_REASONS).
+    "hook_rewake": "\N{HOOK} Hook feedback",
     "unknown": "\N{BELL} Claude continued",
 }
 # Reasons whose final is pushed (the user is waiting for it); Monitor ticks
 # can be many per minute, so they arrive silently (#776 D-6).
-_TURN_PUSH_REASONS = frozenset({"task_finished", "scheduled_wakeup", "unknown"})
+_TURN_PUSH_REASONS = frozenset(
+    {"task_finished", "scheduled_wakeup", "hook_rewake", "unknown"}
+)
 # A wake turn gets a progress message only if it outlives this, uses a tool
 # or raises an approval (#776 D-10) — short turns send just their final.
 _TURN_LAZY_PROGRESS_S = 5.0
@@ -4064,9 +4080,34 @@ _TURN_LAZY_PROGRESS_S = 5.0
 _TURN_CANCEL_REASONS = frozenset({"cancel"})
 
 
-def _live_closing_notice(reason: str, tasks: list[str]) -> str:
+def _live_closing_hooks_notice(hooks: list[str]) -> str:
+    """#812: an automatic close cut a background hook short — its feedback
+    (e.g. an asyncRewake security review) never reached the session."""
+    n = len(hooks)
+    names = ", ".join(h[:40] for h in hooks[:3])
+    if n > 3:
+        names += f" (+{n - 3} more)"
+    if n == 1:
+        return (
+            f"\N{HOURGLASS WITH FLOWING SAND} Closing session — a background hook "
+            f"({names}) was still running; its feedback wasn't delivered."
+        )
+    return (
+        f"\N{HOURGLASS WITH FLOWING SAND} Closing session — {n} background hooks "
+        f"({names}) were still running; their feedback wasn't delivered."
+    )
+
+
+def _live_closing_notice(
+    reason: str, tasks: list[str], hooks: list[str] | None = None
+) -> str:
     """User-facing text for a live session closing over running background
-    tasks (#776)."""
+    tasks (#776) or background hooks (#812, automatic closes only)."""
+    if hooks:
+        hook_text = _live_closing_hooks_notice(hooks)
+        if not tasks:
+            return hook_text
+        return f"{hook_text}\n{_live_closing_notice(reason, tasks)}"
     n = len(tasks)
     names = ", ".join(t[:60] for t in tasks[:3])
     if n > 3:
@@ -4100,6 +4141,11 @@ def _turn_header(evt: TurnEvent) -> str | None:
         return None
     base = _TURN_HEADERS.get(evt.reason, _TURN_HEADERS["unknown"])
     tasks = [t for t in (evt.detail or {}).get("tasks", []) if isinstance(t, str)]
+    if evt.reason == "hook_rewake":
+        hook_event = (evt.detail or {}).get("hook_event")
+        if isinstance(hook_event, str) and hook_event:
+            return f"{base} — {hook_event[:60]}"
+        return base
     if evt.reason == "monitor_event" and len(tasks) == 1:
         return f"{base} — {tasks[0][:80]}"
     if evt.reason == "task_finished" and tasks:
@@ -5347,9 +5393,10 @@ async def handle_message(
         if kind != "closing":
             return
         tasks = [t for t in payload.get("tasks", []) if isinstance(t, str)]
-        if not tasks:
+        hooks = [h for h in payload.get("hooks", []) if isinstance(h, str)]
+        if not tasks and not hooks:
             return
-        text = _live_closing_notice(str(payload.get("reason")), tasks)
+        text = _live_closing_notice(str(payload.get("reason")), tasks, hooks)
         try:
             await cfg.transport.send(
                 channel_id=incoming.channel_id,

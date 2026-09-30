@@ -223,3 +223,17 @@ def _no_live_network(
         )
     yield
     usage_cache.reset_cache()
+
+
+@pytest.fixture(autouse=True)
+def _no_cli_help_probe(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
+    """#812: ``_build_args`` asks ``claude --help`` (once per binary) whether
+    ``--include-hook-events`` exists. Unit tests must never spawn the host's
+    real CLI for that, so the probe reports "unknown" (→ flag omitted, the
+    pre-rc14 argv) unless a test stubs ``_probe_cli_help`` itself."""
+    from untether.runners import claude as claude_runner
+
+    monkeypatch.setattr(claude_runner, "_probe_cli_help", lambda path: None)
+    claude_runner._HOOK_EVENTS_SUPPORT.clear()
+    yield
+    claude_runner._HOOK_EVENTS_SUPPORT.clear()

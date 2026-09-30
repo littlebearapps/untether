@@ -222,6 +222,20 @@ class StreamSystemMessage(
     trigger: Any = None
     direction: Any = None
     scope: Any = None
+    # #812 ``--include-hook-events`` (CLI 2.1.284): ``hook_started`` /
+    # ``hook_progress`` / ``hook_response`` carry ``hook_id`` (pairs started
+    # with response), ``hook_name`` (e.g. ``Stop`` / ``SessionStart:startup``)
+    # and ``hook_event``; ``hook_response`` adds ``outcome``
+    # (success / error / cancelled) and an optional ``exit_code`` (2 =
+    # blocking error, the asyncRewake wake signal). ``stdout`` / ``stderr``
+    # / ``output`` are deliberately NOT declared, so msgspec skips them and
+    # hook output is never held in memory. All typed Any (hook_id included —
+    # the runner normalises on read) for the same drift reason as above.
+    hook_id: Any = None
+    hook_name: Any = None
+    hook_event: Any = None
+    outcome: Any = None
+    exit_code: Any = None
 
 
 class StreamResultMessage(

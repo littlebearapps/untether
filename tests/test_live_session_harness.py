@@ -358,3 +358,38 @@ async def test_777_status_message_opens_after_answer_and_finalises(
     assert "✅ bg a1 ·" in final
     # The wake turn's report still arrives as its own message.
     assert any("REPORT: all good" in c["message"].text for c in sends)
+
+
+# ── #812: hooks ─────────────────────────────────────────────────────────────
+
+
+async def test_812_hook_flood_no_progress_rows(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """40 PreToolUse/PostToolUse started/response pairs around one tool call:
+    the hook frames produce no UntetherEvents, so no progress row, no edit
+    and no message mentions them — only the real tool and the answer."""
+    _watchdog(monkeypatch)
+    transport = await _drive("hook_flood")
+    everything = [t for _, t, _ in transport.log]
+    assert any("FLOOD DONE" in t for t in everything)
+    for text in everything:
+        assert "PreToolUse" not in text
+        assert "PostToolUse" not in text
+        assert "hook" not in text.lower()
+    # initial progress (edited into the final) — nothing else was sent.
+    assert len(transport.send_calls) == 1
+
+
+async def test_812_async_rewake_arrives_as_pushed_hook_feedback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """End to end: the Stop hook outlives the 0.4 s idle grace; the live
+    session holds, the rewake turn runs and is delivered as its own pushed
+    ``🪝 Hook feedback — Stop`` message quoting the finding."""
+    _watchdog(monkeypatch)
+    transport = await _drive("async_rewake_idle", wake_s=1.5)
+    wake = next(c for c in transport.send_calls if "HOOK: finding" in c["message"].text)
+    assert "\N{HOOK} Hook feedback — Stop" in wake["message"].text
+    assert wake["options"].notify is True
+    assert wake["options"].reply_to.message_id == 10

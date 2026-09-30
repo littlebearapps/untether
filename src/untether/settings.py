@@ -622,6 +622,16 @@ class WatchdogSettings(BaseModel):
     # #776: absolute lifetime cap for one live Claude process, from spawn
     # (backstop against e.g. an endless Monitor). Range 10 min - 24 h.
     live_session_max_s: float = Field(default=14400.0, ge=600, le=86400)
+    # #812: keep a live Claude session's stdin open while a hook the CLI
+    # runs in the background (``async`` / ``asyncRewake``) is still pending,
+    # so an ``asyncRewake`` hook's findings arrive as their own wake turn
+    # instead of being dropped when stdin closes. Passes
+    # ``--include-hook-events`` (when the installed CLI lists it) to see the
+    # hooks. Kill switch: false = no flag, no hold (pre-rc14 behaviour).
+    hold_for_async_hooks: bool = True
+    # #812: bound on the hold per hook, from its ``hook_started``. Default =
+    # the CLI's enforced 600 s asyncRewake timeout + its 30 s exit wait.
+    async_hook_max_hold: float = Field(default=630.0, ge=0, le=3600)
 
     # #481: grace window for fresh Bash/BashOutput tool calls. When the most
     # recent action is Bash/BashOutput/KillShell and its age is less than

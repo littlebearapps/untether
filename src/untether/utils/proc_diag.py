@@ -313,6 +313,34 @@ def describe_process(pid: int, *, max_args: int = 5, max_len: int = 80) -> str |
     return " ".join(out)
 
 
+_HOOK_PATH_MARKER = "/hooks/"
+
+
+def hook_script_label(pid: int) -> str | None:
+    """#812: is ``pid`` running a Claude Code hook script? Returns a short,
+    safe label (the script's basename) or None.
+
+    Matches ``/hooks/`` anywhere in the *raw* argv — not in
+    ``describe_process`` output, which shows only the executable's basename
+    (``/x/.claude/hooks/stop.sh`` → ``stop.sh``) and cuts tokens at 80 chars
+    (plugin hook paths under ``~/.claude/plugins/cache/…`` lose their
+    ``/hooks/`` segment), so it can't be matched reliably. Only the matched
+    token's basename is returned, and it goes through the #800
+    secret-token check first.
+    """
+    argv = read_cmdline_argv(pid)
+    if not argv:
+        return None
+    for token in _argv_tokens(argv):
+        if _HOOK_PATH_MARKER not in token:
+            continue
+        name = os.path.basename(token.strip("\"';&|()")) or "hook"
+        if _is_secret_token(name):
+            return _REDACTED
+        return name if len(name) <= 60 else name[:59] + "…"
+    return None
+
+
 def _find_children(pid: int) -> list[int]:
     """Find child PIDs via /proc/pid/task/*/children."""
     children: list[int] = []

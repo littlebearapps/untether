@@ -978,7 +978,154 @@ def scenario_steer_post_last_tool(first: dict) -> None:
     serve_followups()
 
 
+# ── #812 hooks (``--include-hook-events`` frames, CLI 2.1.284 shapes) ──────
+# How long the CLI keeps running after stdin EOF while an asyncRewake hook
+# is still pending (the real CLI: up to 30 s, ``Rxo``). A rewake that fires
+# in that window is dropped — no turn, no hook_response (§A1 P5-B).
+REWAKE_WAIT_S = float(os.environ.get("FAKE_CLAUDE_REWAKE_WAIT_S", "0.2"))
+
+
+def hook_started(hook_id: str, event: str, name: str | None = None) -> None:
+    emit(
+        {
+            "type": "system",
+            "subtype": "hook_started",
+            "hook_id": hook_id,
+            "hook_name": name or event,
+            "hook_event": event,
+            "uuid": f"u-{hook_id}-s",
+        }
+    )
+
+
+def hook_response(
+    hook_id: str,
+    event: str,
+    *,
+    outcome: str = "success",
+    exit_code: int | None = 0,
+    stderr: str = "",
+    name: str | None = None,
+) -> None:
+    payload = {
+        "type": "system",
+        "subtype": "hook_response",
+        "hook_id": hook_id,
+        "hook_name": name or event,
+        "hook_event": event,
+        "output": stderr,
+        "stdout": "",
+        "stderr": stderr,
+        "outcome": outcome,
+        "uuid": f"u-{hook_id}-r",
+    }
+    if exit_code is not None:
+        payload["exit_code"] = exit_code
+    emit(payload)
+
+
+def _eof_with_pending_rewake() -> None:
+    # P5-B: the CLI waits for the pending asyncRewake hook, then exits
+    # without running (or even reporting) it.
+    time.sleep(REWAKE_WAIT_S)
+    shutdown()
+
+
+def _stop_turn(answer: str, *hooks: tuple[str, str]) -> None:
+    """A turn whose Stop hook(s) start before the result (as async hooks do:
+    started at the turn's end, their response lands after the result)."""
+    init()
+    hook_started("h-ups-1", "UserPromptSubmit")
+    hook_response("h-ups-1", "UserPromptSubmit")
+    text(answer)
+    for hook_id, event in hooks:
+        hook_started(hook_id, event)
+    result(answer)
+
+
+def scenario_async_rewake_idle(first: dict) -> None:
+    _stop_turn("DONE", ("h-stop", "Stop"))
+    got = wait_idle_or_eof(WAKE_S)
+    if got is None:
+        _eof_with_pending_rewake()
+    # stdin still open: the rewake exits 2 and the CLI wakes itself (P5-A).
+    hook_response(
+        "h-stop", "Stop", outcome="error", exit_code=2, stderr="finding: key leak\n"
+    )
+    hook_started("h-ups-2", "UserPromptSubmit")
+    hook_response("h-ups-2", "UserPromptSubmit")
+    init()
+    text("HOOK: finding: key leak")
+    global _cost
+    _cost = round(_cost + 0.01, 6)
+    emit(
+        {
+            "type": "result",
+            "subtype": "success",
+            "is_error": False,
+            "duration_ms": 1000,
+            "duration_api_ms": 900,
+            "num_turns": 1,
+            "result": "HOOK: finding: key leak",
+            "total_cost_usd": _cost,
+            "usage": {"input_tokens": 10, "output_tokens": 5},
+            "origin": {"kind": "task-notification", "producer": "session-task"},
+        }
+    )
+    serve_followups()
+
+
+def scenario_async_hook_success(first: dict) -> None:
+    _stop_turn("DONE", ("h-stop", "Stop"))
+    got = wait_idle_or_eof(WAKE_S)
+    if got is None:
+        _eof_with_pending_rewake()
+    hook_response("h-stop", "Stop", outcome="success", exit_code=0)
+    serve_followups()
+
+
+def scenario_async_hook_no_response(first: dict) -> None:
+    # A hook that never reports back (exercises the hold bound).
+    _stop_turn("DONE", ("h-stop", "Stop"))
+    while next_user(None) is not None:
+        pass
+    _eof_with_pending_rewake()
+
+
+def scenario_plain_async_cancelled_on_eof(first: dict) -> None:
+    # A plain `async` hook: the CLI kills it at stdin close and reports it
+    # cancelled (§A1 P3), then exits.
+    _stop_turn("DONE", ("h-async", "PostToolUse"))
+    while next_user(None) is not None:
+        pass
+    hook_response("h-async", "PostToolUse", outcome="cancelled", exit_code=1)
+    shutdown()
+
+
+def scenario_hook_flood(first: dict) -> None:
+    # Every configured hook on every tool call emits a started/response
+    # pair; none of it may reach progress rows.
+    init()
+    for i in range(40):
+        tool_id = f"toolu_f{i}"
+        hook_started(f"h-pre-{i}", "PreToolUse")
+        hook_response(f"h-pre-{i}", "PreToolUse")
+        if i == 0:
+            tool_use("Bash", tool_id, {"command": "echo hi"})
+            tool_result(tool_id, "hi")
+        hook_started(f"h-post-{i}", "PostToolUse")
+        hook_response(f"h-post-{i}", "PostToolUse")
+    text("FLOOD DONE")
+    result("FLOOD DONE", turns=2)
+    serve_followups()
+
+
 _SCENARIOS = {
+    "async_rewake_idle": scenario_async_rewake_idle,
+    "async_hook_success": scenario_async_hook_success,
+    "async_hook_no_response": scenario_async_hook_no_response,
+    "plain_async_cancelled_on_eof": scenario_plain_async_cancelled_on_eof,
+    "hook_flood": scenario_hook_flood,
     "steer_mid_tool": scenario_steer_mid_tool,
     "steer_post_last_tool": scenario_steer_post_last_tool,
     "error_first": scenario_error_first,

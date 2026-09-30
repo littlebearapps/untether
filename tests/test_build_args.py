@@ -900,3 +900,124 @@ class TestClaudeAllowedToolsByMode:
 
         implicit = build_runner({"permission_mode": "default"}, Path("untether.toml"))
         assert implicit.allowed_tools_explicit is False
+
+
+# ---------------------------------------------------------------------------
+# #812 — `--include-hook-events`
+#
+# Passed only in control-channel mode, behind `[watchdog] hold_for_async_hooks`,
+# when a cached `claude --help` probe lists the flag, and never twice. Not a
+# reserved flag (D-2): a config that already passes it keeps working.
+# ---------------------------------------------------------------------------
+
+_HELP_WITH_FLAG = (
+    "Usage: claude [options]\n"
+    "  --include-hook-events  Include all hook lifecycle events in the output "
+    "stream (only works with --output-format=stream-json)\n"
+)
+
+
+class TestClaudeIncludeHookEvents:
+    @pytest.fixture
+    def cli(self, tmp_path, monkeypatch: pytest.MonkeyPatch):
+        from untether.runners import claude as claude_mod
+
+        binary = tmp_path / "claude"
+        binary.write_text("#!/bin/sh\nexit 0\n")
+        binary.chmod(0o755)
+        calls: list[str] = []
+        help_text = {"value": _HELP_WITH_FLAG}
+
+        def _probe(path: str) -> str | None:
+            calls.append(path)
+            return help_text["value"]
+
+        monkeypatch.setattr(claude_mod, "_probe_cli_help", _probe)
+        return {"path": str(binary), "calls": calls, "help": help_text}
+
+    def _args(self, cli: dict[str, Any], mode: str | None = "plan", **kw: Any):
+        from untether.runners.claude import ClaudeRunner, ClaudeStreamState
+
+        runner = ClaudeRunner(claude_cmd=cli["path"], permission_mode=mode, **kw)
+        return runner.build_args("hello", None, state=ClaudeStreamState())
+
+    def test_812_include_hook_events_in_control_channel(self, cli) -> None:
+        args = self._args(cli)
+        assert args.count("--include-hook-events") == 1
+        # One probe, cached per (path, mtime): a second build doesn't re-run it.
+        self._args(cli)
+        assert len(cli["calls"]) == 1
+
+    def test_812_include_hook_events_dedup_extra_args(self, cli) -> None:
+        args = self._args(cli, extra_args=["--include-hook-events"])
+        assert args.count("--include-hook-events") == 1
+
+    def test_812_flag_is_not_reserved(self) -> None:
+        from pathlib import Path
+
+        from untether.runners.claude import build_runner
+
+        runner = build_runner(
+            {"extra_args": ["--include-hook-events"]}, Path("/tmp/untether.toml")
+        )
+        assert runner.extra_args == ["--include-hook-events"]
+
+    def test_812_kill_switch_off_omits_flag(
+        self, cli, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from pathlib import Path
+        from types import SimpleNamespace
+
+        from untether.runners import claude as claude_mod
+        from untether.settings import WatchdogSettings
+
+        watchdog = WatchdogSettings(hold_for_async_hooks=False)
+        monkeypatch.setattr(
+            claude_mod,
+            "load_settings_if_exists",
+            lambda *a, **k: (SimpleNamespace(watchdog=watchdog), Path("x")),
+        )
+        assert "--include-hook-events" not in self._args(cli)
+
+    def test_812_cli_lacks_flag_omits_it(self, cli) -> None:
+        cli["help"]["value"] = "Usage: claude [options]\n  --verbose\n"
+        assert "--include-hook-events" not in self._args(cli)
+
+    def test_812_probe_failure_is_treated_as_unsupported(self, cli) -> None:
+        cli["help"]["value"] = None
+        assert "--include-hook-events" not in self._args(cli)
+
+    def test_812_unresolvable_cli_omits_flag(self) -> None:
+        from untether.runners.claude import cli_supports_hook_events
+
+        assert cli_supports_hook_events("definitely-not-a-claude-binary-812") is False
+
+    def test_812_cli_upgrade_reprobes(self, cli) -> None:
+        import os
+
+        self._args(cli)
+        st = os.stat(cli["path"])
+        os.utime(cli["path"], (st.st_atime, st.st_mtime + 10))
+        self._args(cli)
+        assert len(cli["calls"]) == 2
+
+    def test_812_not_passed_in_plain_p_mode(self, cli) -> None:
+        args = self._args(cli, mode=None)
+        assert "-p" in args
+        assert "--include-hook-events" not in args
+        assert cli["calls"] == []  # no probe when it can't matter
+
+    def test_812_settings_defaults(self) -> None:
+        import pydantic
+
+        from untether.settings import WatchdogSettings
+
+        wd = WatchdogSettings()
+        assert wd.hold_for_async_hooks is True
+        assert wd.async_hook_max_hold == 630.0
+        WatchdogSettings(async_hook_max_hold=0)
+        WatchdogSettings(async_hook_max_hold=3600)
+        with pytest.raises(pydantic.ValidationError):
+            WatchdogSettings(async_hook_max_hold=3601)
+        with pytest.raises(pydantic.ValidationError):
+            WatchdogSettings(async_hook_max_hold=-1)

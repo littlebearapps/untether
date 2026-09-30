@@ -32,6 +32,8 @@ type TurnReason = Literal[
     "scheduled_wakeup",
     "monitor_event",
     "followup",
+    # #812: an asyncRewake hook exited 2 and woke the idle session.
+    "hook_rewake",
     "unknown",
 ]
 

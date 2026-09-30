@@ -148,6 +148,81 @@ def _load_env_extras() -> tuple[tuple[str, ...], tuple[str, ...]]:
         return ((), ())
 
 
+# #812: ``--include-hook-events`` (listed in ``claude --help`` on 2.1.284,
+# findings §A2). Not in ``_RESERVED_FLAGS`` (D-2): a config that already
+# passes it must keep working, so ``_build_args`` dedupes instead.
+_HOOK_EVENTS_FLAG = "--include-hook-events"
+_CLI_HELP_TIMEOUT_S = 15.0
+# (resolved cmd path, mtime) -> does ``--help`` list the flag. Unknown (probe
+# failed) is cached as False until the binary changes.
+_HOOK_EVENTS_SUPPORT: dict[tuple[str, float], bool] = {}
+
+
+def _probe_cli_help(path: str) -> str | None:
+    """Run ``<claude> --help`` (zero-token, no session). None on failure.
+    Tests stub this (see ``tests/conftest.py``)."""
+    try:
+        proc = subprocess_module.run(  # fixed argv, no shell
+            [path, "--help"],
+            capture_output=True,
+            text=True,
+            timeout=_CLI_HELP_TIMEOUT_S,
+            stdin=subprocess_module.DEVNULL,
+            check=False,
+        )
+    except (OSError, subprocess_module.SubprocessError):
+        return None
+    return (proc.stdout or "") + (proc.stderr or "")
+
+
+def cli_supports_hook_events(cmd: str) -> bool:
+    """#812: does the installed Claude CLI accept ``--include-hook-events``?
+
+    One ``--help`` probe per (binary path, mtime) — a CLI upgrade re-probes.
+    Unknown (unresolvable command, probe failure) → False: the flag is never
+    passed to a CLI that might reject it.
+    """
+    path = shutil.which(cmd) or (cmd if os.path.isabs(cmd) else None)
+    if path is None:
+        return False
+    try:
+        real = os.path.realpath(path)
+        key = (real, os.stat(real).st_mtime)
+    except OSError:
+        return False
+    cached = _HOOK_EVENTS_SUPPORT.get(key)
+    if cached is not None:
+        return cached
+    text = _probe_cli_help(real)
+    supported = text is not None and _HOOK_EVENTS_FLAG in text
+    _HOOK_EVENTS_SUPPORT[key] = supported
+    logger.info(
+        "claude.hook_events.probe",
+        cli_path=real,
+        supported=supported,
+        probe_ok=text is not None,
+    )
+    return supported
+
+
+def _load_hook_hold_settings() -> tuple[bool, float]:
+    """#812: ``[watchdog] hold_for_async_hooks`` / ``async_hook_max_hold``.
+
+    Best-effort: a config error falls back to the defaults (hold on, 630 s).
+    """
+    try:
+        result = load_settings_if_exists()
+        if result is not None:
+            settings, _ = result
+            return (
+                bool(getattr(settings.watchdog, "hold_for_async_hooks", True)),
+                float(getattr(settings.watchdog, "async_hook_max_hold", 630.0)),
+            )
+    except Exception:  # noqa: BLE001 — config errors must never block a run
+        logger.debug("claude.hook_hold.settings_load_failed", exc_info=True)
+    return (True, 630.0)
+
+
 def _load_quarantine_on_forced_teardown() -> bool:
     """#632 (W2): read ``[auto_continue].quarantine_on_forced_teardown``.
 
@@ -338,6 +413,10 @@ class LiveSession:
     # transcript is complete, so a close that overruns its grace must not
     # quarantine it.
     closed_idle_clean: bool = False
+    # #812: background hooks still pending when stdin was closed (the
+    # stream's view); the close grace stretches to cover the CLI's own
+    # 30 s asyncRewake wait when this — or a hook child process — is seen.
+    close_hooks: list[PendingHook] = field(default_factory=list)
     # #775: the steer window. Set (under ``lock``) when /cancel or /new
     # interrupts an active turn — the process is about to be killed, so a
     # steer must fall back to the queue path instead of being written into a
@@ -439,6 +518,7 @@ async def close_live_session(
         live.close_reason = reason
         live.state.live_close_reason = reason
         live.closed_idle_clean = _is_clean_idle(live)
+        live.close_hooks = _hooks_at_close(live)
     tasks = live_task_descriptions(live.state)
     logger.info(
         "claude.live_session.stdin_closed",
@@ -448,10 +528,22 @@ async def close_live_session(
         turn=live.state.turn,
         age_s=round(time.monotonic() - live.spawned_at, 1),
     )
-    if notice:
-        await _notify_live_listeners(
-            live, "closing", {"reason": reason, "tasks": tasks}
+    hooks = [h.label for h in live.close_hooks]
+    if hooks:
+        _log_async_hook_killed(
+            live,
+            hook_names=[h.name or h.label for h in live.close_hooks],
+            hook_events=[h.event for h in live.close_hooks],
+            source="stream",
         )
+    # #812: an automatic close over a background hook tells the user its
+    # feedback was lost (a user-initiated close already has its own notice).
+    hook_notice = bool(hooks) and reason not in _USER_CLOSE_REASONS
+    if notice or hook_notice:
+        payload: dict[str, Any] = {"reason": reason, "tasks": tasks}
+        if hook_notice:
+            payload["hooks"] = hooks
+        await _notify_live_listeners(live, "closing", payload)
     lock = _stdin_lock(live.stdin)
     with contextlib.suppress(Exception):
         if lock is None:
@@ -460,6 +552,68 @@ async def close_live_session(
             async with lock:
                 await live.stdin.aclose()
     return True
+
+
+# #812: closes the user (or an operator restart) asked for — a hook they
+# cut short is expected, so it logs at INFO and gets no extra notice.
+_USER_CLOSE_REASONS = frozenset({"cancel", "new", "drain", "options_changed"})
+
+
+def _hooks_at_close(live: LiveSession) -> list[PendingHook]:
+    """#812: background hooks a close is about to cut short. Mid-turn, the
+    open turn's own (synchronous) hooks don't count — only earlier turns'."""
+    state = live.state
+    return [
+        hook
+        for hook in _hooks_outstanding(state)
+        if live.idle or hook.turn < state.turn
+    ]
+
+
+def _log_async_hook_killed(
+    live: LiveSession,
+    *,
+    hook_names: list[str],
+    hook_events: list[str | None],
+    source: str,
+) -> None:
+    reason = live.close_reason
+    log = logger.info if reason in _USER_CLOSE_REASONS else logger.warning
+    log(
+        "claude.live_session.async_hook_killed",
+        session_id=live.session_id,
+        close_reason=reason,
+        hook_names=hook_names,
+        hook_events=hook_events,
+        source=source,
+    )
+
+
+_HOOK_SCAN_MAX_PIDS = 64
+
+
+def _scan_hook_children(child_pids: Iterable[int]) -> list[str]:
+    """#812: labels of hook scripts running under the CLI at close — the
+    fallback signal when the stream can't say (no ``--include-hook-events``).
+    Scans raw argv via ``hook_script_label`` (``describe_process`` output
+    loses the ``/hooks/`` segment). Best-effort; never raises."""
+    from ..utils.proc_diag import find_descendants, hook_script_label
+
+    labels: list[str] = []
+    try:
+        pids: list[int] = []
+        for child in child_pids:
+            pids.append(child)
+            pids.extend(find_descendants(child))
+            if len(pids) >= _HOOK_SCAN_MAX_PIDS:
+                break
+        for pid in pids[:_HOOK_SCAN_MAX_PIDS]:
+            label = hook_script_label(pid)
+            if label is not None and label not in labels:
+                labels.append(label)
+    except Exception:  # noqa: BLE001 — diagnostics must never break teardown
+        logger.debug("claude.live_session.hook_scan_failed", exc_info=True)
+    return labels
 
 
 def _is_clean_idle(live: LiveSession) -> bool:
@@ -992,6 +1146,26 @@ class SafeguardTurn:
 
 
 @dataclass(slots=True)
+class PendingHook:
+    """#812: a hook whose ``hook_started`` hasn't been paired with its
+    ``hook_response`` yet (``--include-hook-events``). After the turn's
+    result that is the only runtime sign of a hook still running in the
+    background — the frames carry no async marker (findings §A2)."""
+
+    hook_id: str
+    name: str | None
+    event: str | None
+    started_at: float
+    # The turn the hook belongs to: the open turn, or — when it started
+    # while idle (the next turn's UserPromptSubmit) — the upcoming one.
+    turn: int
+
+    @property
+    def label(self) -> str:
+        return self.event or self.name or "hook"
+
+
+@dataclass(slots=True)
 class ClaudeStreamState:
     factory: EventFactory = field(default_factory=lambda: EventFactory(ENGINE))
     pending_actions: dict[str, Action] = field(default_factory=dict)
@@ -1344,6 +1518,29 @@ class ClaudeStreamState:
     safeguard: SafeguardTurn = field(default_factory=SafeguardTurn)
     safeguard_session_count: int = 0
     session_model: str | None = None
+
+    # #812: hooks seen via ``--include-hook-events``. ``pending_hooks`` is
+    # hook_id -> PendingHook (insertion-ordered, capped at
+    # ``_PENDING_HOOKS_MAX``); SessionStart / Setup are never recorded (the
+    # CLI settles those in-band). Entries past ``async_hook_max_hold_s``
+    # move to ``expired_hooks`` so a later close can still name them.
+    pending_hooks: dict[str, PendingHook] = field(default_factory=dict)
+    expired_hooks: dict[str, PendingHook] = field(default_factory=dict)
+    # (hook name, hook event, monotonic ts) of an async hook that exited 2
+    # (the asyncRewake wake signal) while idle; the next turn opening within
+    # ``_HOOK_REWAKE_HINT_TTL_S`` is its rewake. Cleared on every turn open.
+    hook_rewake_hint: tuple[str | None, str | None, float] | None = None
+    # The hint the open turn saw (stale at open, or an earlier turn's async
+    # hook exiting 2 mid-turn) — the result's ``origin`` confirms it.
+    turn_hook_hint: tuple[str | None, str | None, float] | None = None
+    hooks_started: int = 0
+    # Mirrored from ``[watchdog] hold_for_async_hooks`` /
+    # ``async_hook_max_hold`` by ``run_impl`` (read per spawn, so a config
+    # edit applies to the next run).
+    hold_for_async_hooks: bool = True
+    async_hook_max_hold_s: float = 630.0
+    # ``claude.hook.pending_hold`` fires once per hold; reset when it ends.
+    hook_hold_logged: bool = False
 
     # #572: set when the run's StreamResultMessage was a Stream-idle-timeout
     # failure — "type_a" (mid-generation stall, retryable) or "type_b"
@@ -2473,6 +2670,185 @@ def _translate_model_fallback(
     ]
 
 
+# #812 hook lifecycle (``--include-hook-events``).
+_PENDING_HOOKS_MAX = 256
+# SessionStart / Setup hook events are always emitted and settled in-band by
+# the CLI itself (findings §A1 P2) — they never hold a session.
+_HOOK_NEVER_HOLD_EVENTS = frozenset({"SessionStart", "Setup"})
+# A rewake turn opens right after its hook's ``hook_response`` (P5-A: same
+# millisecond); a hint older than this is not taken as the turn's cause.
+_HOOK_REWAKE_HINT_TTL_S = 10.0
+# The asyncRewake wake signal: exit code 2 (``outcome: "error"``).
+_HOOK_REWAKE_EXIT_CODE = 2
+
+
+def _hook_event_name(event: claude_schema.StreamSystemMessage) -> str | None:
+    hook_event = _str_or_none(event.hook_event)
+    if hook_event:
+        return hook_event
+    # ``hook_name`` is ``Stop`` or ``SessionStart:startup`` style.
+    name = _str_or_none(event.hook_name)
+    return name.split(":", 1)[0] if name else None
+
+
+def _hook_never_holds(event_name: str | None) -> bool:
+    return event_name in _HOOK_NEVER_HOLD_EVENTS
+
+
+def _apply_hook_event(
+    state: ClaudeStreamState, event: claude_schema.StreamSystemMessage
+) -> None:
+    """#812: track ``hook_started`` / ``hook_response`` pairs by ``hook_id``.
+
+    Produces no UntetherEvents — hook traffic (every configured hook on every
+    tool call) must never reach progress rows or the bridge's stall timers.
+    """
+    subtype = event.subtype
+    hook_id = _str_or_none(event.hook_id)
+    name = _str_or_none(event.hook_name)
+    hook_event = _hook_event_name(event)
+    session_id = event.session_id
+    if subtype == "hook_started":
+        state.hooks_started += 1
+        if hook_id is None or _hook_never_holds(hook_event):
+            return
+        if hook_id not in state.pending_hooks and (
+            len(state.pending_hooks) >= _PENDING_HOOKS_MAX
+        ):
+            oldest_id = next(iter(state.pending_hooks))
+            oldest = state.pending_hooks.pop(oldest_id)
+            logger.debug(
+                "claude.hook.pending_evicted",
+                session_id=session_id,
+                hook_id=oldest_id,
+                hook_event=oldest.event,
+                cap=_PENDING_HOOKS_MAX,
+            )
+        state.pending_hooks[hook_id] = PendingHook(
+            hook_id=hook_id,
+            name=name,
+            event=hook_event,
+            started_at=time.monotonic(),
+            # Started while idle → the upcoming turn's hook (e.g. its
+            # UserPromptSubmit, emitted before ``system/init``).
+            turn=state.turn if state.turn_open else state.turn + 1,
+        )
+        return
+    if subtype != "hook_response":
+        return  # hook_progress: output polling, nothing to track.
+    pending = state.pending_hooks.pop(hook_id, None) if hook_id else None
+    expired = state.expired_hooks.pop(hook_id, None) if hook_id else None
+    known = pending or expired
+    outcome = _str_or_none(event.outcome)
+    exit_code = event.exit_code
+    is_rewake_signal = (
+        outcome == "error"
+        and isinstance(exit_code, int)
+        and not isinstance(exit_code, bool)
+        and exit_code == _HOOK_REWAKE_EXIT_CODE
+        and not _hook_never_holds(hook_event)
+    )
+    if is_rewake_signal:
+        hint = (name, hook_event, time.monotonic())
+        if not state.turn_open:
+            state.hook_rewake_hint = hint
+        elif known is not None and known.turn < state.turn:
+            # An earlier turn's async hook exited 2 after this turn opened
+            # (the turn's own cause, confirmed by ``origin`` at its result).
+            state.turn_hook_hint = hint
+        logger.info(
+            "claude.hook.rewake_signal",
+            session_id=session_id,
+            hook_name=name,
+            hook_event=hook_event,
+            turn_open=state.turn_open,
+            held_s=(
+                round(time.monotonic() - known.started_at, 1)
+                if known is not None
+                else None
+            ),
+        )
+    elif outcome == "cancelled":
+        logger.info(
+            "claude.hook.cancelled",
+            session_id=session_id,
+            hook_name=name,
+            hook_event=hook_event,
+            exit_code=exit_code,
+        )
+    else:
+        logger.debug(
+            "claude.hook.response",
+            session_id=session_id,
+            hook_name=name,
+            hook_event=hook_event,
+            outcome=outcome,
+            exit_code=exit_code,
+        )
+
+
+def _translate_hook_event(
+    event: claude_schema.StreamSystemMessage,
+    *,
+    state: ClaudeStreamState,
+    factory: EventFactory,
+) -> list[UntetherEvent]:
+    _apply_hook_event(state, event)
+    return []
+
+
+def has_pending_async_hooks(state: ClaudeStreamState) -> bool:
+    """#812: True while a hook is still running in the background — a
+    ``hook_started`` with no ``hook_response`` yet, younger than
+    ``async_hook_max_hold_s``. The live-session lifecycle holds stdin open on
+    it (closing stdin makes the CLI drop an asyncRewake hook's findings,
+    §A1 P5-B).
+
+    Deliberately separate from :func:`has_live_background_work` (D-1): hooks
+    aren't background tasks, so they must not show in footers or the #777
+    panel, nor change the #592 cap, the #346 gate or ``_is_clean_idle``.
+    Expired entries move to ``expired_hooks`` with ``claude.hook.hold_expired``.
+    """
+    if not state.hold_for_async_hooks or not state.pending_hooks:
+        return False
+    now = time.monotonic()
+    max_hold = state.async_hook_max_hold_s
+    holding = False
+    for hook_id, hook in list(state.pending_hooks.items()):
+        if _hook_never_holds(hook.event):
+            continue
+        held = now - hook.started_at
+        if held >= max_hold:
+            state.pending_hooks.pop(hook_id, None)
+            if len(state.expired_hooks) >= _PENDING_HOOKS_MAX:
+                state.expired_hooks.pop(next(iter(state.expired_hooks)))
+            state.expired_hooks[hook_id] = hook
+            logger.warning(
+                "claude.hook.hold_expired",
+                session_id=(
+                    state.factory.resume.value
+                    if state.factory.resume is not None
+                    else None
+                ),
+                hook_name=hook.name,
+                hook_event=hook.event,
+                held_s=round(held, 1),
+                max_hold_s=max_hold,
+            )
+            continue
+        holding = True
+    return holding
+
+
+def _hooks_outstanding(state: ClaudeStreamState) -> list[PendingHook]:
+    """#812: hooks still unpaired at a close — pending or past their hold."""
+    return [
+        hook
+        for hook in (*state.pending_hooks.values(), *state.expired_hooks.values())
+        if not _hook_never_holds(hook.event)
+    ]
+
+
 class _SystemSubtypeHandler(Protocol):
     def __call__(
         self,
@@ -2493,6 +2869,10 @@ _SYSTEM_SUBTYPE_HANDLERS: dict[str, _SystemSubtypeHandler] = {
     "model_refusal_fallback": _translate_model_refusal_fallback,
     "model_refusal_no_fallback": _translate_model_refusal_no_fallback,
     "model_fallback": _translate_model_fallback,
+    # #812: hook lifecycle frames — tracked, never surfaced.
+    "hook_started": _translate_hook_event,
+    "hook_progress": _translate_hook_event,
+    "hook_response": _translate_hook_event,
 }
 
 
@@ -2505,6 +2885,9 @@ def _translate_system_subtype(
     """Dispatch a system frame to its registered handler; None when the
     subtype has none."""
     handler = _SYSTEM_SUBTYPE_HANDLERS.get(event.subtype)
+    if handler is None and event.subtype.startswith("hook_"):
+        # #812: any future hook lifecycle subtype stays silent too.
+        handler = _translate_hook_event
     if handler is None:
         return None
     return handler(event, state=state, factory=factory)
@@ -4059,6 +4442,15 @@ def _completed_keeps_session_live(evt: CompletedEvent) -> bool:
     )
 
 
+def _result_origin_kind(event: claude_schema.StreamResultMessage) -> str | None:
+    """The result's ``origin.kind`` (``task-notification`` for a CLI-started
+    turn, #812 §A3), read defensively — ``origin`` is typed Any."""
+    origin = event.origin
+    if isinstance(origin, dict):
+        return _str_or_none(origin.get("kind"))
+    return None
+
+
 def _open_followup_turn(
     state: ClaudeStreamState, factory: EventFactory
 ) -> UntetherEvent:
@@ -4087,6 +4479,23 @@ def _open_followup_turn(
         ):
             detail["announced_turns"] = announced_turns
         _mark_announced(state, ids)
+    elif (hint := state.hook_rewake_hint) is not None and time.monotonic() - hint[
+        2
+    ] <= _HOOK_REWAKE_HINT_TTL_S:
+        # #812: an asyncRewake hook exited 2 while idle; the CLI enqueued
+        # its findings as a task-notification turn (§A3) — no
+        # command_lifecycle, so this sits before scheduled_wakeup.
+        reason = "hook_rewake"
+        detail["hook"] = hint[0]
+        detail["hook_event"] = hint[1]
+        logger.info(
+            "claude.turn.hook_rewake",
+            session_id=factory.resume.value if factory.resume else None,
+            turn=state.turn + 1,
+            hook_name=hint[0],
+            hook_event=hint[1],
+            attributed="open",
+        )
     elif command_uuid is not None:
         reason = "scheduled_wakeup"
     elif monitors := [
@@ -4111,6 +4520,10 @@ def _open_followup_turn(
     state.turn_ended_tasks = []
     state.turn_detail = detail
     state.unattributed_turn_completed_at = None
+    # #812: a stale hint (a slow turn start) is kept for the result's
+    # ``origin`` check; either way the idle-time hint is spent.
+    state.turn_hook_hint = None if reason == "hook_rewake" else state.hook_rewake_hint
+    state.hook_rewake_hint = None
     # Per-turn scalars (see their field docs) start fresh for the new turn.
     state.safeguard = SafeguardTurn()
     state.last_assistant_text = None
@@ -4325,6 +4738,28 @@ def translate_claude_event(
                     turn=state.turn,
                     task_ids=[tid for tid, _ in state.turn_ended_tasks],
                 )
+            elif (
+                state.turn_reason == "unknown"
+                and (hook_hint := state.turn_hook_hint) is not None
+                and _result_origin_kind(event) == "task-notification"
+            ):
+                # #812: the turn opened without a fresh hint (slow start, or
+                # the hook's exit-2 response landed after the turn opened);
+                # the CLI's task-notification origin confirms it was the
+                # rewake.
+                state.turn_reason = "hook_rewake"
+                detail["hook"] = hook_hint[0]
+                detail["hook_event"] = hook_hint[1]
+                detail["retro_attributed"] = True
+                logger.info(
+                    "claude.turn.hook_rewake",
+                    session_id=event.session_id,
+                    turn=state.turn,
+                    hook_name=hook_hint[0],
+                    hook_event=hook_hint[1],
+                    attributed="result",
+                )
+            state.turn_hook_hint = None
             state.turn_ended_tasks = []
             state.unattributed_turn_completed_at = (
                 time.monotonic() if state.turn_reason == "unknown" else None
@@ -5610,6 +6045,17 @@ class ClaudeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
         # resume / model / effort / allowed-tools / permission so the final
         # prompt position (after `--`) is never displaced (#407).
         args.extend(self.extra_args)
+        # #812: hook lifecycle frames let the live session hold stdin open
+        # for a background (async / asyncRewake) hook. Control-channel mode
+        # only (live sessions need it), behind the kill switch, only when the
+        # CLI lists the flag, and never twice (a config may already pass it).
+        if (
+            effective_mode is not None
+            and _HOOK_EVENTS_FLAG not in self.extra_args
+            and _load_hook_hold_settings()[0]
+            and cli_supports_hook_events(self.claude_cmd)
+        ):
+            args.append(_HOOK_EVENTS_FLAG)
 
         if resume is not None:
             if resume.is_continue:
@@ -6200,6 +6646,9 @@ class ClaudeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
     # #791: after the close grace, SIGINT (the CLI's Ctrl-C path) gets this
     # long before the SIGTERM escalation.
     _live_close_sigint_grace_s: float = 5.0
+    # #812: the close grace when a background hook is evident at close — the
+    # CLI's 30 s asyncRewake exit wait (``Rxo``, §A1) + 5 s.
+    _live_close_grace_hooks_s: float = 35.0
 
     async def _live_session_lifecycle(
         self,
@@ -6252,9 +6701,29 @@ class ClaudeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
                     )
                     return
                 now = time.monotonic()
-                live_work = has_live_background_work(state) or _has_pending_wakeup(
-                    state
+                # #812: a hook still running in the background holds stdin
+                # open too (sibling predicate, D-1) — closing it would make
+                # the CLI drop an asyncRewake hook's findings.
+                hooks_pending = live.idle and has_pending_async_hooks(state)
+                live_work = (
+                    has_live_background_work(state)
+                    or _has_pending_wakeup(state)
+                    or hooks_pending
                 )
+                if hooks_pending and not state.hook_hold_logged:
+                    state.hook_hold_logged = True
+                    run_logger.info(
+                        "claude.hook.pending_hold",
+                        session_id=sid,
+                        hook_names=[
+                            h.label
+                            for h in state.pending_hooks.values()
+                            if not _hook_never_holds(h.event)
+                        ],
+                        max_hold_s=state.async_hook_max_hold_s,
+                    )
+                elif not hooks_pending:
+                    state.hook_hold_logged = False
                 if abs_cap_s > 0 and now - live.spawned_at >= abs_cap_s:
                     await close_live_session(sid, "abs_cap", notice=live_work)
                     continue
@@ -6320,7 +6789,35 @@ class ClaudeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
         if proc is not None and isinstance(getattr(proc, "pid", None), int):
             with contextlib.suppress(Exception):
                 grace_start_diag = collect_proc_diag(proc.pid)
-        with anyio.move_on_after(self._live_close_grace_s):
+        # #812 fallback (flag off, CLI too old, or hold bound hit): with a
+        # background hook still evident, give the CLI its own 30 s
+        # asyncRewake exit wait (+5 s) before signalling it. This only lets
+        # plain hooks finish their teardown — a rewake that fires after
+        # stdin closed is dropped by the CLI regardless (§A1 P5-B).
+        hooks_evident = bool(live.close_hooks)
+        if not hooks_evident and grace_start_diag is not None:
+            proc_hooks = _scan_hook_children(grace_start_diag.child_pids)
+            if proc_hooks:
+                hooks_evident = True
+                _log_async_hook_killed(
+                    live, hook_names=proc_hooks, hook_events=[], source="proc"
+                )
+                if live.close_reason not in _USER_CLOSE_REASONS:
+                    await _notify_live_listeners(
+                        live,
+                        "closing",
+                        {
+                            "reason": live.close_reason,
+                            "tasks": [],
+                            "hooks": proc_hooks,
+                        },
+                    )
+        grace_s = (
+            self._live_close_grace_hooks_s
+            if hooks_evident
+            else self._live_close_grace_s
+        )
+        with anyio.move_on_after(grace_s):
             await reader_done.wait()
         if reader_done.is_set() or proc is None or proc.returncode is not None:
             return "exited_after_close"
@@ -6338,7 +6835,7 @@ class ClaudeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
             session_id=sid,
             pid=proc.pid,
             close_reason=live.close_reason,
-            grace_s=self._live_close_grace_s,
+            grace_s=grace_s,
             live_tasks=live_tasks,
             idle_clean=idle_clean,
             **_close_grace_diag(proc.pid, grace_start_diag),
@@ -7347,6 +7844,13 @@ class ClaudeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
 
         tag = self.tag()
         run_logger = self.get_logger()
+        if self._effective_permission_mode() is not None:
+            # #812: warm the cached `--help` probe off the event loop so the
+            # (synchronous) build_args below only reads the cache.
+            with contextlib.suppress(Exception):
+                await anyio.to_thread.run_sync(
+                    cli_supports_hook_events, self.claude_cmd
+                )
         cmd = [self.command(), *self.build_args(prompt, resume, state=state)]
         payload = self.stdin_payload(prompt, resume, state=state)
         env = self.env(state=state)
@@ -7529,6 +8033,13 @@ class ClaudeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
                         )
                         live_session_max_s = float(
                             settings_obj.watchdog.live_session_max_s
+                        )
+                        # #812: read per spawn like live_sessions.
+                        state.hold_for_async_hooks = bool(
+                            getattr(settings_obj.watchdog, "hold_for_async_hooks", True)
+                        )
+                        state.async_hook_max_hold_s = float(
+                            getattr(settings_obj.watchdog, "async_hook_max_hold", 630.0)
                         )
                 except Exception:  # noqa: BLE001 — settings errors must not block a run
                     run_logger.debug(

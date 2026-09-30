@@ -756,3 +756,66 @@ def test_read_wchan_missing_pid_returns_none() -> None:
     from untether.utils.proc_diag import read_wchan
 
     assert read_wchan(2**22 + 12345) is None
+
+
+# ── #812: hook_script_label ─────────────────────────────────────────────────
+
+
+@pytest.mark.parametrize(
+    ("argv", "expected"),
+    [
+        # sh -c with a long plugin path — describe_process truncates the
+        # token at 80 chars, before its /hooks/ segment.
+        (
+            [
+                "/bin/sh",
+                "-c",
+                "python3 /home/u/.claude/plugins/cache/claude-plugins-official/"
+                "security-guidance/1.0.0/hooks/security_reminder_hook.py",
+            ],
+            "security_reminder_hook.py",
+        ),
+        # A hook run directly — describe_process shows only its basename.
+        (["/home/u/proj/.claude/hooks/stop.sh"], "stop.sh"),
+        (["bash", "-c", "sleep 90; /x/.claude/hooks/review.sh"], "review.sh"),
+        # Secret-looking script names never leak.
+        (["/x/.claude/hooks/push-token-check.sh"], "<redacted>"),
+        (["node", "/srv/mcp/server.js", "--port", "1"], None),
+    ],
+)
+def test_812_hook_script_label(argv: list[str], expected: str | None) -> None:
+    from unittest import mock
+
+    from untether.utils import proc_diag
+
+    with mock.patch.object(proc_diag, "read_cmdline_argv", return_value=argv):
+        assert proc_diag.hook_script_label(1) == expected
+
+
+def test_812_describe_process_loses_the_hooks_segment() -> None:
+    """Why ``hook_script_label`` reads raw argv: the #800-redacted
+    ``describe_process`` line can't be matched on ``/hooks/``."""
+    from unittest import mock
+
+    from untether.utils import proc_diag
+
+    for argv in (
+        ["/home/u/proj/.claude/hooks/stop.sh"],
+        [
+            "/bin/sh",
+            "-c",
+            "python3 /home/u/.claude/plugins/cache/claude-plugins-official/"
+            "security-guidance/1.0.0/hooks/security_reminder_hook.py",
+        ],
+    ):
+        with mock.patch.object(proc_diag, "read_cmdline_argv", return_value=argv):
+            assert "/hooks/" not in (proc_diag.describe_process(1) or "")
+
+
+def test_812_hook_script_label_unreadable_pid() -> None:
+    from unittest import mock
+
+    from untether.utils import proc_diag
+
+    with mock.patch.object(proc_diag, "read_cmdline_argv", return_value=None):
+        assert proc_diag.hook_script_label(1) is None

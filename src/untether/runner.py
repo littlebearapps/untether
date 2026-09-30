@@ -159,6 +159,26 @@ _RESULT_EVENT_TYPE = "result"
 # the parser saw. recent_events still records them for diagnostics.
 _CONTROL_CHANNEL_EVENT_TYPES = frozenset({"control_request", "control_response"})
 
+# #812: Claude's ``--include-hook-events`` lifecycle frames
+# (``{"type":"system","subtype":"hook_started|hook_progress|hook_response"}``)
+# can land after the turn's ``result`` (an async hook finishing while the
+# session idles). Like control traffic they must not overwrite
+# ``last_event_type`` — a trailing ``system`` would break the #470
+# post-result check and the auto-continue predicate — but unlike it they are
+# genuine liveness (a hook doing work), so they still count towards
+# ``last_stdout_at`` / ``event_count``. Ring label: ``hook:<subtype>``.
+_HOOK_FRAME_SUBTYPE_PREFIX = "hook_"
+
+
+def _hook_frame_subtype(raw: dict[str, Any], etype: str) -> str | None:
+    if etype != "system":
+        return None
+    subtype = raw.get("subtype")
+    if isinstance(subtype, str) and subtype.startswith(_HOOK_FRAME_SUBTYPE_PREFIX):
+        return subtype
+    return None
+
+
 # #526 rc20 follow-up: shared with runner_bridge.py for paced
 # ``subprocess.approval_pending`` INFO emission. The user-side stall
 # detector (bridge) and the watchdog-side liveness detector (here)
@@ -1068,14 +1088,19 @@ class JsonlSubprocessRunner(BaseRunner):
             # #502: skip control-channel events when updating last_event_type
             # so session.summary reflects the last stream event, not stdin/stdout
             # permission-flow traffic. recent_events still records them.
-            if etype not in _CONTROL_CHANNEL_EVENT_TYPES:
+            # #812: hook lifecycle frames are skipped the same way.
+            hook_subtype = _hook_frame_subtype(raw_dict, etype)
+            if etype not in _CONTROL_CHANNEL_EVENT_TYPES and hook_subtype is None:
                 stream.last_event_type = etype
                 stream.last_event_tool = etool
             # #716: latch the terminal frame separately from the running
             # ``last_event_type``. Set-only — never cleared.
             if etype == _RESULT_EVENT_TYPE:
                 stream.saw_result = True
-            label = f"tool:{etool}" if etool else etype
+            if hook_subtype is not None:
+                label = f"hook:{hook_subtype}"
+            else:
+                label = f"tool:{etool}" if etool else etype
             stream.recent_events.append((now, label))
             # Stuck-after-tool_result tracking (#322). The latch persists across
             # intervening "other" events (attachments, system hooks) and is

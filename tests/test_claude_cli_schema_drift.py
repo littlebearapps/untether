@@ -20,6 +20,7 @@ import pytest
 
 from untether.background_status import COLLECTION_TOOLS
 from untether.runners.claude import _SAFEGUARD_NOTICE_MODEL_RE, _SAFEGUARD_NOTICE_RE
+from untether.runners.claude import _probe_cli_help as _real_probe_cli_help
 from untether.schemas.claude import (
     CLAUDE_ABORTED_TERMINAL_REASONS,
     CLAUDE_OVERAGE_STATUSES,
@@ -285,3 +286,61 @@ def test_taskoutput_in_removed_tools(cli_blob: mmap.mmap) -> None:
     removed = {v.decode() for v in re.findall(rb'"([^"]+)"', m.group(1))}
     assert {"TaskOutput", "BashOutput", "AgentOutput"} <= removed
     assert "Read" in COLLECTION_TOOLS
+
+
+def test_hook_event_flag_and_subtypes_present(cli_blob: mmap.mmap) -> None:
+    """#812: ``--include-hook-events`` is still an option, the three hook
+    lifecycle frames still carry the keys the runner pairs on, the
+    ``outcome`` enum is unchanged, and a CLI-started turn's result origin is
+    still ``task-notification`` (rewake retro-attribution)."""
+    if cli_blob.find(b'.option("--include-hook-events"') < 0:
+        pytest.fail(
+            "--include-hook-events is no longer a CLI option — the #812 hold "
+            "can't see background hooks; the --help probe will stop passing "
+            f"it (last green on CLI {PROBED_CLI_VERSION})"
+        )
+    started = re.search(
+        rb'subtype:"hook_started",hook_id:\w{1,4},hook_name:\w{1,4},'
+        rb"hook_event:\w{1,4}",
+        cli_blob,
+    )
+    progress = cli_blob.find(b'subtype:"hook_progress",hook_id:')
+    # The emitter's object literal nests ``{exit_code:…}``, so take a
+    # bounded window rather than matching braces.
+    response = re.search(rb'subtype:"hook_response",hook_id:[^;]{0,300}', cli_blob)
+    if started is None or progress < 0 or response is None:
+        pytest.fail(
+            "the hook_started / hook_progress / hook_response emitters moved "
+            "— re-derive _apply_hook_event's pairing (last green on CLI "
+            f"{PROBED_CLI_VERSION})"
+        )
+    body = response.group(0)
+    for key in (b"hook_name:", b"hook_event:", b"exit_code:", b"outcome:"):
+        assert key in body, f"hook_response lost {key!r}"
+    outcome = _require(
+        _zod_enum(cli_blob, rb'outcome:\w{1,4}\((\[[^\]]*"cancelled"[^\]]*\])\)'),
+        "hook_response.outcome",
+    )
+    assert set(outcome) == {"success", "error", "cancelled"}, (
+        f"hook_response.outcome is now {outcome} — review the rewake / "
+        "cancelled branches in _apply_hook_event"
+    )
+    if re.search(rb'kind:\w{1,4}\("task-notification"\)', cli_blob) is None:
+        pytest.fail(
+            "result origin kind 'task-notification' moved — hook_rewake "
+            f"retro-attribution is dead code (last green on CLI {PROBED_CLI_VERSION})"
+        )
+
+
+def test_help_probe_detects_hook_events_flag(monkeypatch: pytest.MonkeyPatch) -> None:
+    """#812: the real ``claude --help`` probe (zero-token — no session) sees
+    the flag, so ``_build_args`` passes it. conftest stubs the probe for every
+    other test; this one restores the real one (bound at import)."""
+    from untether.runners import claude as claude_mod
+
+    monkeypatch.setattr(claude_mod, "_probe_cli_help", _real_probe_cli_help)
+    claude_mod._HOOK_EVENTS_SUPPORT.clear()
+    assert claude_mod.cli_supports_hook_events("claude") is True, (
+        "`claude --help` no longer lists --include-hook-events "
+        f"(last green on CLI {PROBED_CLI_VERSION})"
+    )

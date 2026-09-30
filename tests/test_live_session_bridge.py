@@ -1005,3 +1005,96 @@ async def test_785_thinking_note_alone_opens_no_progress_when_filtered() -> None
     assert router.current.tracker.action_count == 1  # still tracked
     await router.on_event(_action())
     assert rec.created == [2]
+
+
+# ── #812: hook feedback turns ──────────────────────────────────────────────
+
+
+async def test_812_hook_rewake_header_pushes_never_folds() -> None:
+    """An asyncRewake hook's findings (security reviews) are always their own
+    pushed message with a 🪝 header — never folded into a panel line (D-4)."""
+    from untether.background_status import FOLDABLE_REASONS, wake_fold_decision
+
+    assert "hook_rewake" not in FOLDABLE_REASONS
+    assert "hook_rewake" in rb._TURN_PUSH_REASONS
+    # Even a short, tool-free, ok answer — the exact shape that folds for
+    # task_finished — does not fold.
+    decision = wake_fold_decision(
+        reason="hook_rewake",
+        ok=True,
+        answer="ok",
+        substantive_actions=0,
+        already_announced=False,
+        live_tasks_remaining=0,
+        batch_announced=True,
+    )
+    assert decision != "fold"
+
+    rec = _Recorder()
+    router = _router(rec)
+    detail = {"hook": "Stop", "hook_event": "Stop"}
+    await router.on_turn(_turn("started", reason="hook_rewake", detail=detail))
+    await router.on_turn(
+        _turn(
+            "completed", reason="hook_rewake", ok=True, answer="finding", detail=detail
+        )
+    )
+    _turn_no, ok, answer, header, notify, _reply = rec.delivered[0]
+    assert (ok, answer) == (True, "finding")
+    assert header == "\N{HOOK} Hook feedback — Stop"
+    assert notify is True
+
+
+async def test_812_retro_attributed_hook_rewake_gets_its_header() -> None:
+    rec = _Recorder()
+    router = _router(rec)
+    await router.on_turn(_turn("started", reason="unknown"))
+    await router.on_turn(
+        _turn(
+            "completed",
+            reason="hook_rewake",
+            ok=True,
+            answer="finding",
+            detail={"hook": "Stop", "hook_event": "Stop", "retro_attributed": True},
+        )
+    )
+    _turn_no, _ok, _answer, header, notify, _reply = rec.delivered[0]
+    assert header == "\N{HOOK} Hook feedback — Stop"
+    assert notify is True
+
+
+def test_812_hook_rewake_header_without_event() -> None:
+    assert rb._turn_header(_turn("started", reason="hook_rewake")) == (
+        "\N{HOOK} Hook feedback"
+    )
+
+
+@pytest.mark.parametrize(
+    ("hooks", "tasks", "expected"),
+    [
+        (
+            ["Stop"],
+            [],
+            "\N{HOURGLASS WITH FLOWING SAND} Closing session — a background hook "
+            "(Stop) was still running; its feedback wasn't delivered.",
+        ),
+        (
+            ["Stop", "PostToolUse"],
+            [],
+            "\N{HOURGLASS WITH FLOWING SAND} Closing session — 2 background hooks "
+            "(Stop, PostToolUse) were still running; their feedback wasn't "
+            "delivered.",
+        ),
+    ],
+)
+def test_812_closing_notice_hooks_variant(
+    hooks: list[str], tasks: list[str], expected: str
+) -> None:
+    assert rb._live_closing_notice("idle_no_tasks", tasks, hooks) == expected
+
+
+def test_812_closing_notice_hooks_and_tasks_both_named() -> None:
+    text = rb._live_closing_notice("max_hold", ["a"], ["Stop"])
+    first, second = text.split("\n")
+    assert "background hook (Stop)" in first
+    assert second == rb._live_closing_notice("max_hold", ["a"])

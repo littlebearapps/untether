@@ -309,3 +309,27 @@ async def test_subagent_owned_notification_never_labels_a_turn() -> None:
         events = await _collect("agent_wake_unknown_first", until=3)
         for turn in _turns(events):
             assert "Inspect nested agents" not in _labels(turn), (mode, turn)
+
+
+async def test_812_async_rewake_delivers_hook_rewake_turn() -> None:
+    """An asyncRewake Stop hook exits 2 while the session idles with stdin
+    open (P5-A): the CLI's self-started turn arrives as a ``hook_rewake``
+    segment carrying the hook's event — no hook frame becomes an event."""
+    with capture_logs() as logs:
+        events = await _collect("async_rewake_idle", until=2)
+    completed = [e for e in events if isinstance(e, CompletedEvent)]
+    assert len(completed) == 1 and completed[0].answer == "DONE"
+    turns = _turns(events)
+    assert [t.phase for t in turns] == ["started", "completed"]
+    assert turns[0].reason == "hook_rewake"
+    assert turns[0].detail == {"hook": "Stop", "hook_event": "Stop"}
+    assert turns[1].reason == "hook_rewake"
+    assert turns[1].answer == "HOOK: finding: key leak"
+    # Only the two answers' actions/turns — hook frames surface nothing.
+    assert not any(
+        getattr(getattr(e, "action", None), "title", "").startswith("hook")
+        for e in events
+    )
+    started = [e for e in logs if e["event"] == "claude.turn.started"]
+    assert [e["reason"] for e in started] == ["hook_rewake"]
+    assert any(e["event"] == "claude.hook.rewake_signal" for e in logs)

@@ -1361,3 +1361,127 @@ async def test_589_manage_subprocess_balances_the_counter() -> None:
         "counter leaked on the error path — a leak permanently inflates "
         "live_runs and would block all future spawns (#589)"
     )
+
+
+# ---------------------------------------------------------------------------
+# #812: hook lifecycle frames in the engine-agnostic line handler
+# ---------------------------------------------------------------------------
+
+
+def _claude_line_handler(sid: str = "sess-812"):
+    import json as _json
+
+    from untether.runner import JsonlStreamState
+    from untether.runners.claude import ClaudeRunner
+
+    runner = ClaudeRunner(claude_cmd="claude", permission_mode="plan")
+    state = runner.new_state("hi", None)
+    state.live_mode = True
+    stream = JsonlStreamState(expected_session=None)
+    stream.engine_state = state
+    stream.followup_turns = True
+    log = runner.get_logger()
+
+    def feed(obj: dict) -> list:
+        obj.setdefault("session_id", sid)
+        return runner._handle_jsonl_line(
+            raw_line=_json.dumps(obj).encode(),
+            stream=stream,
+            state=state,
+            resume=None,
+            logger=log,
+            pid=1,
+        )
+
+    return feed, stream, state
+
+
+def _hook(subtype: str, hook_id: str, event: str = "Stop", **extra) -> dict:
+    return {
+        "type": "system",
+        "subtype": subtype,
+        "hook_id": hook_id,
+        "hook_name": event,
+        "hook_event": event,
+        **extra,
+    }
+
+
+def test_812_hook_frames_keep_last_event_type() -> None:
+    """#470 / auto-continue guard: an async hook's response landing after the
+    turn's ``result`` must not flip ``last_event_type`` to ``system`` — but a
+    running hook is still liveness (D-5)."""
+    feed, stream, state = _claude_line_handler()
+    feed({"type": "system", "subtype": "init", "model": "m"})
+    feed(_hook("hook_started", "h1"))
+    feed(
+        {
+            "type": "result",
+            "subtype": "success",
+            "is_error": False,
+            "duration_ms": 1,
+            "duration_api_ms": 1,
+            "num_turns": 1,
+            "result": "ok",
+        }
+    )
+    assert stream.last_event_type == "result"
+    count, seen_at = stream.event_count, stream.last_stdout_at
+    out = feed(_hook("hook_progress", "h1", stdout="x"))
+    out += feed(_hook("hook_response", "h1", outcome="success", exit_code=0))
+    assert out == []
+    assert stream.last_event_type == "result"
+    assert stream.last_event_tool is None
+    assert stream.saw_result is True
+    assert stream.event_count == count + 2
+    assert stream.last_stdout_at >= seen_at
+    labels = [label for _, label in stream.recent_events]
+    assert labels[-2:] == ["hook:hook_progress", "hook:hook_response"]
+    assert state.pending_hooks == {}
+
+
+def test_812_non_hook_system_frames_still_update_last_event_type() -> None:
+    feed, stream, _ = _claude_line_handler()
+    feed({"type": "system", "subtype": "init", "model": "m"})
+    assert stream.last_event_type == "system"
+    assert stream.recent_events[-1][1] == "system"
+
+
+def test_812_hook_flood_keeps_approval_registry_probe() -> None:
+    """#697: a PreToolUse/PostToolUse flood pushes ``control_request`` out of
+    the 10-entry ring; the engine's own request registry stays authoritative."""
+    from untether.runner import _approval_pending
+    from untether.runners import claude as claude_mod
+
+    sid = "sess-812-flood"
+    feed, stream, _ = _claude_line_handler(sid)
+    feed({"type": "system", "subtype": "init", "model": "m"})
+    feed(
+        {
+            "type": "control_request",
+            "request_id": "req_812",
+            "request": {
+                "subtype": "can_use_tool",
+                "tool_name": "Bash",
+                "input": {"command": "ls"},
+            },
+        }
+    )
+    claude_mod._REQUEST_TO_SESSION["req_812"] = sid
+    try:
+        for i in range(40):
+            feed(_hook("hook_started", f"pre{i}", "PreToolUse"))
+            feed(_hook("hook_response", f"pre{i}", "PreToolUse", outcome="success"))
+        labels = [label for _, label in stream.recent_events]
+        assert "control_request" not in labels  # scrolled out of the ring
+        assert all(label.startswith("hook:") for label in labels)
+        assert _approval_pending(stream) is True
+    finally:
+        for registry in (
+            claude_mod._REQUEST_TO_SESSION,
+            claude_mod._REQUEST_TO_INPUT,
+            claude_mod._REQUEST_TO_TOOL_NAME,
+        ):
+            registry.pop("req_812", None)
+    # Without the registry entry the ring alone can no longer tell.
+    assert _approval_pending(stream) is False
