@@ -61,12 +61,18 @@ def register_progress(
     save_active_progress(path, entries)
 
 
-def unregister_progress(path: Path, session_key: str) -> None:
-    """Remove a completed progress message."""
+def unregister_progress(path: Path, session_key: str) -> bool:
+    """Remove a completed progress message.
+
+    Returns True when an entry was removed; a missing key is a no-op
+    (False), so callers can release the same message more than once (#810).
+    """
     entries = load_active_progress(path)
-    if session_key in entries:
-        del entries[session_key]
-        save_active_progress(path, entries)
+    if session_key not in entries:
+        return False
+    del entries[session_key]
+    save_active_progress(path, entries)
+    return True
 
 
 def clear_all_progress(path: Path) -> None:

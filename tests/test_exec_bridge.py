@@ -9127,3 +9127,215 @@ async def test_510_thread_pid_never_binds_previous_spawn() -> None:
     assert seen_stream is not runner.stale_stream
     assert edits.pid == 1001
     assert edits.stream is runner.stream
+
+
+# ---------------------------------------------------------------------------
+# #810 — every exit path releases the run's progress-persistence entry
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def progress_store(tmp_path, monkeypatch):
+    """Point the bridge's progress persistence at an isolated
+    ``active_progress.json`` for the duration of a test."""
+    import untether.runner_bridge as rb
+
+    path = tmp_path / "active_progress.json"
+    monkeypatch.setattr(rb, "_PROGRESS_PERSISTENCE_PATH", path)
+    return path
+
+
+def _810_released(logs: list[dict]) -> list[dict]:
+    return [r for r in logs if r.get("event") == "progress_persistence.released"]
+
+
+@pytest.mark.anyio
+async def test_810_cancelled_run_unregisters_progress(progress_store) -> None:
+    """A /cancel renders `cancelled` AND drops the persistence entry, so a
+    later restart doesn't relabel it "interrupted by restart" (nsd msg 10332)."""
+    from untether.telegram.progress_persistence import load_active_progress
+
+    transport = FakeTransport()
+    hold = anyio.Event()
+    runner = ScriptRunner([Wait(hold)], engine=CODEX_ENGINE, resume_value="sid-810")
+    cfg = ExecBridgeConfig(
+        transport=transport, presenter=MarkdownPresenter(), final_notify=True
+    )
+    running_tasks: dict = {}
+    registered: dict = {}
+
+    async def run_handle_message() -> None:
+        await handle_message(
+            cfg,
+            runner=runner,
+            incoming=IncomingMessage(channel_id=123, message_id=10, text="go"),
+            resume_token=None,
+            running_tasks=running_tasks,
+        )
+
+    with structlog.testing.capture_logs() as logs:
+        async with anyio.create_task_group() as tg:
+            tg.start_soon(run_handle_message)
+            for _ in range(100):
+                if running_tasks:
+                    break
+                await anyio.lowlevel.checkpoint()
+            running_task = running_tasks[next(iter(running_tasks))]
+            with anyio.fail_after(1):
+                await running_task.resume_ready.wait()
+            registered.update(load_active_progress(progress_store))
+            running_task.cancel_requested.set()
+
+    progress_id = transport.send_calls[0]["ref"].message_id
+    assert f"123:{progress_id}" in registered  # registered while running
+    assert "cancelled" in transport.edit_calls[-1]["message"].text.lower()
+    assert load_active_progress(progress_store) == {}
+    released = _810_released(logs)
+    assert [(r["reason"], r["message_id"]) for r in released] == [
+        ("cancelled", progress_id)
+    ]
+
+
+@pytest.mark.anyio
+async def test_810_error_run_unregisters_progress(progress_store) -> None:
+    from untether.telegram.progress_persistence import load_active_progress
+
+    transport = FakeTransport()
+    runner = ScriptRunner(
+        [Raise(RuntimeError("boom"))], engine=CODEX_ENGINE, resume_value="sid-810"
+    )
+    cfg = ExecBridgeConfig(
+        transport=transport, presenter=MarkdownPresenter(), final_notify=True
+    )
+
+    with structlog.testing.capture_logs() as logs:
+        await handle_message(
+            cfg,
+            runner=runner,
+            incoming=IncomingMessage(channel_id=123, message_id=10, text="go"),
+            resume_token=None,
+        )
+
+    progress_id = transport.send_calls[0]["ref"].message_id
+    assert "error" in transport.edit_calls[-1]["message"].text.lower()
+    assert load_active_progress(progress_store) == {}
+    assert [(r["reason"], r["message_id"]) for r in _810_released(logs)] == [
+        ("error", progress_id)
+    ]
+
+
+class _810ToolResultThenAnswerRunner(MockRunner):
+    """First run() exits after a tool_result without a result frame (the
+    auto-continue cohort, #34142/#30333); the resumed run() answers."""
+
+    def __init__(self) -> None:
+        super().__init__(events=[], engine=CLAUDE_ENGINE, resume_value="sid-810")
+        self.calls: list[tuple[str, ResumeToken | None]] = []
+
+    async def run(self, prompt, resume):
+        from untether.runner import JsonlStreamState, publish_run_stream
+        from untether.runners.mock import _resume_token
+
+        self.calls.append((prompt, resume))
+        stream = JsonlStreamState(expected_session=None)
+        first = len(self.calls) == 1
+        stream.last_event_type = "user" if first else "result"
+        stream.saw_result = not first
+        stream.proc_returncode = 0
+        publish_run_stream(stream, None)
+        token = _resume_token(
+            self.engine, resume.value if resume else self._resume_value
+        )
+        async with self.lock_for(token):
+            yield StartedEvent(engine=self.engine, resume=token, title=self.title)
+            if first:
+                yield CompletedEvent(
+                    engine=self.engine,
+                    resume=token,
+                    ok=False,
+                    answer="",
+                    error="stream ended without a result",
+                )
+            else:
+                yield CompletedEvent(
+                    engine=self.engine, resume=token, ok=True, answer="continued ok"
+                )
+
+
+@pytest.mark.anyio
+async def test_810_auto_continue_releases_original_progress(
+    progress_store, quarantine_store
+) -> None:
+    """The auto-continue re-entry opens a fresh progress message; the
+    original must not stay registered (accepted residual: it keeps its last
+    render — it just isn't relabelled at restart any more)."""
+    from untether.telegram.progress_persistence import load_active_progress
+
+    transport = FakeTransport()
+    runner = _810ToolResultThenAnswerRunner()
+    cfg = ExecBridgeConfig(
+        transport=transport, presenter=MarkdownPresenter(), final_notify=False
+    )
+
+    with structlog.testing.capture_logs() as logs, anyio.fail_after(10):
+        await handle_message(
+            cfg,
+            runner=runner,
+            incoming=IncomingMessage(channel_id=123, message_id=10, text="go"),
+            resume_token=None,
+        )
+
+    assert len(runner.calls) == 2
+    assert any(r.get("event") == "session.auto_continue" for r in logs)
+    progress_ids = [
+        c["ref"].message_id
+        for c in transport.send_calls
+        if "starting" in c["message"].text.lower()
+    ]
+    assert len(progress_ids) == 2
+    original, resumed = progress_ids
+    assert load_active_progress(progress_store) == {}
+    reasons = {r["message_id"]: r["reason"] for r in _810_released(logs)}
+    assert reasons == {original: "auto_continue", resumed: "final"}
+
+
+@pytest.mark.anyio
+async def test_810_final_path_still_unregisters_once(progress_store) -> None:
+    """The success path releases exactly once, from _deliver_final after the
+    send — the function-wide finally is a silent no-op behind it."""
+    from untether.telegram.progress_persistence import load_active_progress
+
+    transport = FakeTransport()
+    cfg = ExecBridgeConfig(
+        transport=transport, presenter=MarkdownPresenter(), final_notify=False
+    )
+    order: list[str] = []
+    original_edit = transport.edit
+
+    async def _recording_edit(*, ref, message, wait=True):
+        if "done" in message.text:
+            # The final render lands while the entry is still registered
+            # (#149 ordering: release strictly after the send).
+            order.append(
+                "final_sent_registered"
+                if load_active_progress(progress_store)
+                else "final_sent_released"
+            )
+        return await original_edit(ref=ref, message=message, wait=wait)
+
+    transport.edit = _recording_edit  # type: ignore[method-assign]
+
+    with structlog.testing.capture_logs() as logs:
+        await handle_message(
+            cfg,
+            runner=_return_runner(answer="done", resume_value="sid-810"),
+            incoming=IncomingMessage(channel_id=123, message_id=10, text="go"),
+            resume_token=None,
+        )
+
+    progress_id = transport.send_calls[0]["ref"].message_id
+    assert order == ["final_sent_registered"]
+    assert load_active_progress(progress_store) == {}
+    assert [(r["reason"], r["message_id"]) for r in _810_released(logs)] == [
+        ("final", progress_id)
+    ]

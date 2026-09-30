@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from untether.telegram.progress_persistence import (
     clear_all_progress,
     load_active_progress,
@@ -77,3 +79,93 @@ def test_clear_all(tmp_path: Path) -> None:
 def test_clear_nonexistent_is_noop(tmp_path: Path) -> None:
     path = tmp_path / "active_progress.json"
     clear_all_progress(path)  # should not raise
+
+
+@pytest.mark.anyio
+async def test_810_orphan_cleanup_skips_cancelled_run(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#810: a run cancelled before a restart must not be relabelled
+    "interrupted by restart" by the next startup's orphan cleanup, while a
+    genuinely unfinished progress message still is."""
+    from types import SimpleNamespace
+
+    import anyio
+
+    import untether.runner_bridge as rb
+    from untether.markdown import MarkdownPresenter
+    from untether.runner_bridge import ExecBridgeConfig, IncomingMessage
+    from untether.runners.mock import ScriptRunner, Wait
+    from untether.telegram.loop import _cleanup_orphan_progress
+    from untether.transport import MessageRef
+
+    config_path = tmp_path / "untether.toml"
+    progress_path = resolve_progress_path(config_path)
+    monkeypatch.setattr(rb, "_PROGRESS_PERSISTENCE_PATH", progress_path)
+
+    class _Transport:
+        def __init__(self) -> None:
+            self._next = 100
+            self.edits: list[tuple[int, str]] = []
+
+        async def send(self, *, channel_id, message, options=None):
+            self._next += 1
+            return MessageRef(channel_id=channel_id, message_id=self._next)
+
+        async def edit(self, *, ref, message, wait=True):
+            self.edits.append((ref.message_id, message.text))
+            return ref
+
+        async def delete(self, *, ref):
+            return True
+
+        async def close(self) -> None:
+            return None
+
+    transport = _Transport()
+    cfg = ExecBridgeConfig(
+        transport=transport, presenter=MarkdownPresenter(), final_notify=True
+    )
+    running_tasks: dict = {}
+    runner = ScriptRunner([Wait(anyio.Event())], engine="codex", resume_value="s")
+
+    async def _run() -> None:
+        await rb.handle_message(
+            cfg,
+            runner=runner,
+            incoming=IncomingMessage(channel_id=123, message_id=10, text="go"),
+            resume_token=None,
+            running_tasks=running_tasks,
+        )
+
+    async with anyio.create_task_group() as tg:
+        tg.start_soon(_run)
+        for _ in range(100):
+            if running_tasks:
+                break
+            await anyio.lowlevel.checkpoint()
+        task = running_tasks[next(iter(running_tasks))]
+        with anyio.fail_after(1):
+            await task.resume_ready.wait()
+        task.cancel_requested.set()
+
+    cancelled_id = 101
+    assert "cancelled" in transport.edits[-1][1].lower()
+    # A second, still-running progress message from the "prior instance".
+    register_progress(progress_path, "123:555", chat_id=123, message_id=555)
+
+    # Simulated restart: the startup orphan cleanup runs against the file.
+    edited: list[int] = []
+
+    class _Bot:
+        async def edit_message_text(self, *, chat_id, message_id, text):
+            edited.append(message_id)
+
+    startup_cfg = SimpleNamespace(
+        runtime=SimpleNamespace(config_path=config_path), bot=_Bot()
+    )
+    await _cleanup_orphan_progress(startup_cfg)  # type: ignore[arg-type]
+
+    assert cancelled_id not in edited
+    assert edited == [555]
+    assert load_active_progress(progress_path) == {}

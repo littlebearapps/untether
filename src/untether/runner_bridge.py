@@ -4689,6 +4689,30 @@ async def handle_message(
     # "↻ retrying" notice IS delivered).
     empty_resume = {"pending": False}
 
+    def _release_progress(ref: MessageRef | None, *, reason: str) -> None:
+        """#810: drop *ref*'s progress-persistence entry.
+
+        Every way out of this run — final, wake-ack fold, error, cancel and
+        the recovery re-entries — releases here, so a later restart's orphan
+        cleanup never relabels a correctly rendered message as "interrupted
+        by restart". Call it only AFTER the final / cancel render has been
+        sent: releasing earlier reopens the #149 orphan window (see the note
+        at the end of ``ProgressEdits.delete_ephemeral``). Idempotent — an
+        already-released or never-registered key is a silent no-op.
+        """
+        if ref is None or _PROGRESS_PERSISTENCE_PATH is None:
+            return
+        from .telegram.progress_persistence import unregister_progress
+
+        session_key = f"{incoming.channel_id}:{ref.message_id}"
+        if unregister_progress(_PROGRESS_PERSISTENCE_PATH, session_key):
+            logger.debug(
+                "progress_persistence.released",
+                reason=reason,
+                channel_id=incoming.channel_id,
+                message_id=ref.message_id,
+            )
+
     async def _deliver_final(
         completed: CompletedEvent,
         run_outcome: RunOutcome,
@@ -5084,13 +5108,7 @@ async def handle_message(
             if t_progress_ref is not None:
                 with contextlib.suppress(Exception):
                     await cfg.transport.delete(ref=t_progress_ref)
-                if _PROGRESS_PERSISTENCE_PATH is not None:
-                    from .telegram.progress_persistence import unregister_progress
-
-                    unregister_progress(
-                        _PROGRESS_PERSISTENCE_PATH,
-                        f"{incoming.channel_id}:{t_progress_ref.message_id}",
-                    )
+                _release_progress(t_progress_ref, reason="folded")
             return
         if turn is not None:
             _promote_quiet_breakout(turn)
@@ -5125,11 +5143,7 @@ async def handle_message(
         # Unregister progress persistence after the final message is sent.
         # Must happen AFTER send_result_message() so a crash between
         # delete_ephemeral() and here still has an orphan cleanup pointer.
-        if t_progress_ref is not None and _PROGRESS_PERSISTENCE_PATH is not None:
-            from .telegram.progress_persistence import unregister_progress
-
-            session_key = f"{incoming.channel_id}:{t_progress_ref.message_id}"
-            unregister_progress(_PROGRESS_PERSISTENCE_PATH, session_key)
+        _release_progress(t_progress_ref, reason="final")
 
     running_task: RunningTask | None = None
     if running_tasks is not None and progress_ref is not None:
@@ -5519,512 +5533,536 @@ async def handle_message(
             await edits.delete_ephemeral()
             edits_scope.cancel()
 
-    elapsed = clock() - started_at
+    # #810 (D-9): one release for every way out of the run below — final,
+    # error, cancel, and the auto-resend / auto-continue / stream-idle retry
+    # re-entries (which never finalise the original progress message; they
+    # only stop a restart from relabelling it). The finally runs after each
+    # branch's final / cancel send, preserving the #149 ordering. An
+    # exception escaping here may mean that send never landed, so the entry
+    # is kept for the restart cleanup to relabel.
+    release_reason: str | None = "final"
+    try:
+        elapsed = clock() - started_at
 
-    if error is not None and final_delivery["sent"]:
-        # #591: the answer was already delivered before the teardown error —
-        # don't overwrite the delivered final message with an error render.
-        logger.warning(
-            "handle.error_after_final_delivery",
-            error=str(error),
-            error_type=error.__class__.__name__,
-            elapsed_s=round(elapsed, 2),
-        )
-        return
-
-    if error is not None:
-        sync_resume_token(progress_tracker, outcome.resume)
-        err_body = _format_error(error)
-        hint = _get_error_hint(err_body)
-        if hint:
-            err_body = f"\N{ELECTRIC LIGHT BULB} {hint}\n\n```\n{err_body}\n```"
-        else:
-            err_body = f"```\n{err_body}\n```"
-        state = progress_tracker.snapshot(
-            resume_formatter=runner.format_resume,
-            context_line=context_line,
-            meta_formatter=format_meta_line,
-        )
-        final_rendered = effective_presenter.render_final(
-            state,
-            elapsed_s=elapsed,
-            status="error",
-            answer=err_body,
-        )
-
-        # Append usage footer for Claude Code engine runs (even on error)
-        if runner.engine == "claude":
-            footer_cfg = _load_footer_settings()
-            from .runners.run_options import get_run_options
-
-            _err_run_opts = get_run_options()
-            _show_sub = footer_cfg.show_subscription_usage
-            if _err_run_opts and _err_run_opts.show_subscription_usage is not None:
-                _show_sub = _err_run_opts.show_subscription_usage
-            final_rendered = await _maybe_append_usage_footer(
-                final_rendered, always_show=_show_sub
-            )
-
-        logger.debug(
-            "handle.error.rendered",
-            error=err_body,
-            rendered=final_rendered.text,
-        )
-        await send_result_message(
-            cfg,
-            channel_id=incoming.channel_id,
-            reply_to=user_ref,
-            progress_ref=progress_ref,
-            message=final_rendered,
-            notify=False,
-            edit_ref=progress_ref,
-            replace_ref=progress_ref,
-            delete_tag="error",
-            thread_id=incoming.thread_id,
-        )
-        return
-
-    if outcome.cancelled and final_delivery["sent"]:
-        # #591: the run completed and its answer was delivered before the
-        # user's /cancel landed (the channelo msg-5815 shape — a cancel of
-        # an already-done run). The cancel only tears the subprocess down;
-        # the delivered answer must not be replaced by a "cancelled" render.
-        logger.info(
-            "handle.cancelled_after_delivery",
-            resume=outcome.resume.value if outcome.resume else None,
-            elapsed_s=elapsed,
-        )
-        return
-
-    if outcome.cancelled:
-        resume = sync_resume_token(progress_tracker, outcome.resume)
-        logger.info(
-            "handle.cancelled",
-            resume=resume.value if resume else None,
-            elapsed_s=elapsed,
-        )
-        state = progress_tracker.snapshot(
-            resume_formatter=runner.format_resume,
-            context_line=context_line,
-            meta_formatter=format_meta_line,
-        )
-        final_rendered = effective_presenter.render_progress(
-            state,
-            elapsed_s=elapsed,
-            label="`cancelled`",
-        )
-        await send_result_message(
-            cfg,
-            channel_id=incoming.channel_id,
-            reply_to=user_ref,
-            progress_ref=progress_ref,
-            message=final_rendered,
-            notify=False,
-            edit_ref=progress_ref,
-            replace_ref=progress_ref,
-            delete_tag="cancel",
-            thread_id=incoming.thread_id,
-        )
-        return
-
-    if outcome.completed is None:
-        raise RuntimeError("runner finished without a completed event")
-
-    completed = outcome.completed
-    run_ok = completed.ok
-
-    # --- Auto-resend: #596 empty-result no-op resume / #631 (W1) quarantine-and-fresh ---
-    # _deliver_final already delivered the "↻ retrying automatically…" notice
-    # (early, ~5s in). Now that the run generator has fully returned (the
-    # empty run's subprocess is done), resend the ORIGINAL prompt once.
-    # #631: the resumed session may be POISONED — an upstream dangling turn
-    # left over from a forced teardown will keep returning empty 0-turn
-    # resumes if resumed again. When empty_resume_fresh is on (default),
-    # clear the stored token, quarantine the poisoned session id so it is
-    # never resumed again, and re-run the ORIGINAL prompt as a FRESH session
-    # (resume=None). When the flag is off, preserve the exact #596
-    # same-session resend behaviour. Single-shot via _empty_resent_count;
-    # mutually exclusive with auto-continue (that fires only when there was
-    # no result at all).
-    if empty_resume["pending"] and _empty_resent_count < 1:
-        _er_settings = _load_auto_continue_settings()
-        # Fall back to the original resume_token so a completion that omits a
-        # resume value never silently starts a FRESH session by accident.
-        _poison = completed.resume or outcome.resume or resume_token
-        if _er_settings.empty_resume_fresh and _poison is not None:
-            # #631 W1: clear the stored session token and quarantine the
-            # poisoned session id, then retry as a FRESH session.
-            if on_resume_failed is not None:
-                try:
-                    await on_resume_failed(_poison)
-                except Exception:  # noqa: BLE001
-                    logger.debug("session.clear_failed", exc_info=True)
-            if _qstore is not None:
-                try:
-                    _qstore.quarantine(
-                        runner.engine,
-                        _poison.value,
-                        reason="empty_zero_turn_resume",
-                    )
-                except Exception:  # noqa: BLE001 — a store failure must
-                    # never crash message handling; the other quarantine
-                    # call sites in this function already tolerate this.
-                    logger.debug("session.quarantine_failed", exc_info=True)
+        if error is not None and final_delivery["sent"]:
+            release_reason = "error_after_final"
+            # #591: the answer was already delivered before the teardown error —
+            # don't overwrite the delivered final message with an error render.
             logger.warning(
-                "session.auto_resend_fresh",
-                old_session_id=_poison.value,
-                engine=runner.engine,
-                attempt=_empty_resent_count + 1,
+                "handle.error_after_final_delivery",
+                error=str(error),
+                error_type=error.__class__.__name__,
+                elapsed_s=round(elapsed, 2),
             )
-            _er_resume = None
-        else:
-            # Legacy same-session path (flag off): preserve #596 behaviour
-            # byte-for-byte.
-            _er_resume = _poison
-            logger.warning(
-                "session.auto_resend_empty",
-                session_id=_er_resume.value if _er_resume else None,
-                engine=runner.engine,
-                attempt=_empty_resent_count + 1,
+            return
+
+        if error is not None:
+            release_reason = "error"
+            sync_resume_token(progress_tracker, outcome.resume)
+            err_body = _format_error(error)
+            hint = _get_error_hint(err_body)
+            if hint:
+                err_body = f"\N{ELECTRIC LIGHT BULB} {hint}\n\n```\n{err_body}\n```"
+            else:
+                err_body = f"```\n{err_body}\n```"
+            state = progress_tracker.snapshot(
+                resume_formatter=runner.format_resume,
+                context_line=context_line,
+                meta_formatter=format_meta_line,
             )
-        await handle_message(
-            cfg,
-            runner=runner,
-            incoming=IncomingMessage(
+            final_rendered = effective_presenter.render_final(
+                state,
+                elapsed_s=elapsed,
+                status="error",
+                answer=err_body,
+            )
+
+            # Append usage footer for Claude Code engine runs (even on error)
+            if runner.engine == "claude":
+                footer_cfg = _load_footer_settings()
+                from .runners.run_options import get_run_options
+
+                _err_run_opts = get_run_options()
+                _show_sub = footer_cfg.show_subscription_usage
+                if _err_run_opts and _err_run_opts.show_subscription_usage is not None:
+                    _show_sub = _err_run_opts.show_subscription_usage
+                final_rendered = await _maybe_append_usage_footer(
+                    final_rendered, always_show=_show_sub
+                )
+
+            logger.debug(
+                "handle.error.rendered",
+                error=err_body,
+                rendered=final_rendered.text,
+            )
+            await send_result_message(
+                cfg,
                 channel_id=incoming.channel_id,
-                message_id=incoming.message_id,
-                text=incoming.text,
-                reply_to=incoming.reply_to,
+                reply_to=user_ref,
+                progress_ref=progress_ref,
+                message=final_rendered,
+                notify=False,
+                edit_ref=progress_ref,
+                replace_ref=progress_ref,
+                delete_tag="error",
                 thread_id=incoming.thread_id,
-            ),
-            resume_token=_er_resume,
-            context=context,
-            context_line=context_line,
-            strip_resume_line=strip_resume_line,
-            running_tasks=running_tasks,
-            on_thread_known=on_thread_known,
-            on_resume_failed=on_resume_failed,
-            clock=clock,
-            # #631 (T6): thread the resolved store through so an
-            # injected/singleton store survives this recursive re-entry.
-            quarantine_store=_qstore,
-            # Carry ALL recovery counters so an alternating empty-resume ↔
-            # auto-continue ↔ stream-idle-retry chain can't reset another
-            # guard and loop.
-            _auto_continued_count=_auto_continued_count,
-            _empty_resent_count=_empty_resent_count + 1,
-            _stream_idle_retried_count=_stream_idle_retried_count,
-        )
-        return
-    # --- End auto-resend ---
+            )
+            return
 
-    # --- Auto-continue: mitigate Claude Code bug #34142/#30333 ---
-    # When Claude Code's turn state machine incorrectly ends a session
-    # after receiving tool results (last JSONL event is "user" type),
-    # auto-resume so the user doesn't have to manually continue.
-    ac_settings = _load_auto_continue_settings()
-    _ac_resume = completed.resume or outcome.resume
-    _ac_last_event = edits.stream.last_event_type if edits.stream else None
-    _ac_proc_rc = edits.stream.proc_returncode if edits.stream else None
-    _ac_saw_result = bool(getattr(edits.stream, "saw_result", False))
-    # #591: a run whose answer was already delivered can never need the
-    # auto-continue salvage.
-    # #716: this delivery check used to be described as "belt-and-braces"
-    # against a predicate that "already excludes last_event_type ==
-    # 'result'". That had it backwards — the predicate read a *running*
-    # value that says nothing about whether the run reached its result, so
-    # on the 106 nsd runs that ended `last_event_type=user` while healthy,
-    # `final_delivery["sent"]` was the ONLY thing holding the line. The
-    # predicate now discriminates on its own via `saw_result`; this stays
-    # as a genuine second gate, not a redundant one.
-    if (
-        ac_settings.enabled
-        and not final_delivery["sent"]
-        and _should_auto_continue(
-            last_event_type=_ac_last_event,
-            engine=runner.engine,
-            cancelled=outcome.cancelled,
-            resume_value=_ac_resume.value if _ac_resume else None,
-            auto_continued_count=_auto_continued_count,
-            max_retries=ac_settings.max_retries,
-            proc_returncode=_ac_proc_rc,
-            saw_result=_ac_saw_result,
-        )
-    ):
-        # #568: emit the fields a future narrowing decision would need.
-        # The two upstream defects this mitigates are indistinguishable at
-        # this point, so rather than guess we record the cohort markers and
-        # let fleet data decide. `background_observed` in particular is the
-        # candidate discriminator for the NOT_PLANNED claude-code#30333 path
-        # (which is scoped to background subagents) — measure how many
-        # successful salvages have it False before ever gating on it.
-        # #640: `proc_returncode` was previously absent, which is why the
-        # broken signal-death guard needed log-line correlation to detect.
-        _ac_es = getattr(edits.stream, "engine_state", None) if edits.stream else None
-        logger.warning(
-            "session.auto_continue",
-            session_id=_ac_resume.value if _ac_resume else None,
-            engine=runner.engine,
-            last_event_type=_ac_last_event,
-            attempt=_auto_continued_count + 1,
-            max_retries=ac_settings.max_retries,
-            proc_returncode=_ac_proc_rc,
-            background_observed=bool(
-                getattr(edits.stream, "background_observed", False)
-                or getattr(_ac_es, "background_observed", False)
-            ),
-            event_count=getattr(edits.stream, "event_count", None),
-        )
+        if outcome.cancelled and final_delivery["sent"]:
+            release_reason = "cancelled_after_delivery"
+            # #591: the run completed and its answer was delivered before the
+            # user's /cancel landed (the channelo msg-5815 shape — a cancel of
+            # an already-done run). The cancel only tears the subprocess down;
+            # the delivered answer must not be replaced by a "cancelled" render.
+            logger.info(
+                "handle.cancelled_after_delivery",
+                resume=outcome.resume.value if outcome.resume else None,
+                elapsed_s=elapsed,
+            )
+            return
 
-        # #551 Tier 0: deliver outbox files from subprocess 1 BEFORE
-        # subprocess 2 spawns. Without this, any files the agent wrote
-        # to ``.untether-outbox/`` during the stuck-after-tool-results
-        # window are orphaned (subprocess 2 starts fresh and the
-        # original outbox is never scanned). ~3.6% silent loss observed
-        # on lba-1 before this fix. Failure to deliver must NOT block
-        # auto-continue itself \u2014 the recovery is more important than
-        # any single batch of files.
-        if cfg.send_file is not None and cfg.outbox_config is not None:
-            from .telegram.outbox_delivery import deliver_outbox_files
+        if outcome.cancelled:
+            release_reason = "cancelled"
+            resume = sync_resume_token(progress_tracker, outcome.resume)
+            logger.info(
+                "handle.cancelled",
+                resume=resume.value if resume else None,
+                elapsed_s=elapsed,
+            )
+            state = progress_tracker.snapshot(
+                resume_formatter=runner.format_resume,
+                context_line=context_line,
+                meta_formatter=format_meta_line,
+            )
+            final_rendered = effective_presenter.render_progress(
+                state,
+                elapsed_s=elapsed,
+                label="`cancelled`",
+            )
+            await send_result_message(
+                cfg,
+                channel_id=incoming.channel_id,
+                reply_to=user_ref,
+                progress_ref=progress_ref,
+                message=final_rendered,
+                notify=False,
+                edit_ref=progress_ref,
+                replace_ref=progress_ref,
+                delete_tag="cancel",
+                thread_id=incoming.thread_id,
+            )
+            return
+
+        if outcome.completed is None:
+            raise RuntimeError("runner finished without a completed event")
+
+        completed = outcome.completed
+        run_ok = completed.ok
+
+        # --- Auto-resend: #596 empty-result no-op resume / #631 (W1) quarantine-and-fresh ---
+        # _deliver_final already delivered the "↻ retrying automatically…" notice
+        # (early, ~5s in). Now that the run generator has fully returned (the
+        # empty run's subprocess is done), resend the ORIGINAL prompt once.
+        # #631: the resumed session may be POISONED — an upstream dangling turn
+        # left over from a forced teardown will keep returning empty 0-turn
+        # resumes if resumed again. When empty_resume_fresh is on (default),
+        # clear the stored token, quarantine the poisoned session id so it is
+        # never resumed again, and re-run the ORIGINAL prompt as a FRESH session
+        # (resume=None). When the flag is off, preserve the exact #596
+        # same-session resend behaviour. Single-shot via _empty_resent_count;
+        # mutually exclusive with auto-continue (that fires only when there was
+        # no result at all).
+        if empty_resume["pending"] and _empty_resent_count < 1:
+            release_reason = "auto_resend"
+            _er_settings = _load_auto_continue_settings()
+            # Fall back to the original resume_token so a completion that omits a
+            # resume value never silently starts a FRESH session by accident.
+            _poison = completed.resume or outcome.resume or resume_token
+            if _er_settings.empty_resume_fresh and _poison is not None:
+                # #631 W1: clear the stored session token and quarantine the
+                # poisoned session id, then retry as a FRESH session.
+                if on_resume_failed is not None:
+                    try:
+                        await on_resume_failed(_poison)
+                    except Exception:  # noqa: BLE001
+                        logger.debug("session.clear_failed", exc_info=True)
+                if _qstore is not None:
+                    try:
+                        _qstore.quarantine(
+                            runner.engine,
+                            _poison.value,
+                            reason="empty_zero_turn_resume",
+                        )
+                    except Exception:  # noqa: BLE001 — a store failure must
+                        # never crash message handling; the other quarantine
+                        # call sites in this function already tolerate this.
+                        logger.debug("session.quarantine_failed", exc_info=True)
+                logger.warning(
+                    "session.auto_resend_fresh",
+                    old_session_id=_poison.value,
+                    engine=runner.engine,
+                    attempt=_empty_resent_count + 1,
+                )
+                _er_resume = None
+            else:
+                # Legacy same-session path (flag off): preserve #596 behaviour
+                # byte-for-byte.
+                _er_resume = _poison
+                logger.warning(
+                    "session.auto_resend_empty",
+                    session_id=_er_resume.value if _er_resume else None,
+                    engine=runner.engine,
+                    attempt=_empty_resent_count + 1,
+                )
+            await handle_message(
+                cfg,
+                runner=runner,
+                incoming=IncomingMessage(
+                    channel_id=incoming.channel_id,
+                    message_id=incoming.message_id,
+                    text=incoming.text,
+                    reply_to=incoming.reply_to,
+                    thread_id=incoming.thread_id,
+                ),
+                resume_token=_er_resume,
+                context=context,
+                context_line=context_line,
+                strip_resume_line=strip_resume_line,
+                running_tasks=running_tasks,
+                on_thread_known=on_thread_known,
+                on_resume_failed=on_resume_failed,
+                clock=clock,
+                # #631 (T6): thread the resolved store through so an
+                # injected/singleton store survives this recursive re-entry.
+                quarantine_store=_qstore,
+                # Carry ALL recovery counters so an alternating empty-resume ↔
+                # auto-continue ↔ stream-idle-retry chain can't reset another
+                # guard and loop.
+                _auto_continued_count=_auto_continued_count,
+                _empty_resent_count=_empty_resent_count + 1,
+                _stream_idle_retried_count=_stream_idle_retried_count,
+            )
+            return
+        # --- End auto-resend ---
+
+        # --- Auto-continue: mitigate Claude Code bug #34142/#30333 ---
+        # When Claude Code's turn state machine incorrectly ends a session
+        # after receiving tool results (last JSONL event is "user" type),
+        # auto-resume so the user doesn't have to manually continue.
+        ac_settings = _load_auto_continue_settings()
+        _ac_resume = completed.resume or outcome.resume
+        _ac_last_event = edits.stream.last_event_type if edits.stream else None
+        _ac_proc_rc = edits.stream.proc_returncode if edits.stream else None
+        _ac_saw_result = bool(getattr(edits.stream, "saw_result", False))
+        # #591: a run whose answer was already delivered can never need the
+        # auto-continue salvage.
+        # #716: this delivery check used to be described as "belt-and-braces"
+        # against a predicate that "already excludes last_event_type ==
+        # 'result'". That had it backwards — the predicate read a *running*
+        # value that says nothing about whether the run reached its result, so
+        # on the 106 nsd runs that ended `last_event_type=user` while healthy,
+        # `final_delivery["sent"]` was the ONLY thing holding the line. The
+        # predicate now discriminates on its own via `saw_result`; this stays
+        # as a genuine second gate, not a redundant one.
+        if (
+            ac_settings.enabled
+            and not final_delivery["sent"]
+            and _should_auto_continue(
+                last_event_type=_ac_last_event,
+                engine=runner.engine,
+                cancelled=outcome.cancelled,
+                resume_value=_ac_resume.value if _ac_resume else None,
+                auto_continued_count=_auto_continued_count,
+                max_retries=ac_settings.max_retries,
+                proc_returncode=_ac_proc_rc,
+                saw_result=_ac_saw_result,
+            )
+        ):
+            release_reason = "auto_continue"
+            # #568: emit the fields a future narrowing decision would need.
+            # The two upstream defects this mitigates are indistinguishable at
+            # this point, so rather than guess we record the cohort markers and
+            # let fleet data decide. `background_observed` in particular is the
+            # candidate discriminator for the NOT_PLANNED claude-code#30333 path
+            # (which is scoped to background subagents) — measure how many
+            # successful salvages have it False before ever gating on it.
+            # #640: `proc_returncode` was previously absent, which is why the
+            # broken signal-death guard needed log-line correlation to detect.
+            _ac_es = (
+                getattr(edits.stream, "engine_state", None) if edits.stream else None
+            )
+            logger.warning(
+                "session.auto_continue",
+                session_id=_ac_resume.value if _ac_resume else None,
+                engine=runner.engine,
+                last_event_type=_ac_last_event,
+                attempt=_auto_continued_count + 1,
+                max_retries=ac_settings.max_retries,
+                proc_returncode=_ac_proc_rc,
+                background_observed=bool(
+                    getattr(edits.stream, "background_observed", False)
+                    or getattr(_ac_es, "background_observed", False)
+                ),
+                event_count=getattr(edits.stream, "event_count", None),
+            )
+
+            # #551 Tier 0: deliver outbox files from subprocess 1 BEFORE
+            # subprocess 2 spawns. Without this, any files the agent wrote
+            # to ``.untether-outbox/`` during the stuck-after-tool-results
+            # window are orphaned (subprocess 2 starts fresh and the
+            # original outbox is never scanned). ~3.6% silent loss observed
+            # on lba-1 before this fix. Failure to deliver must NOT block
+            # auto-continue itself \u2014 the recovery is more important than
+            # any single batch of files.
+            if cfg.send_file is not None and cfg.outbox_config is not None:
+                from .telegram.outbox_delivery import deliver_outbox_files
+                from .utils.paths import get_run_base_dir
+
+                _run_root = get_run_base_dir()
+                if _run_root is not None:
+                    _oc = cfg.outbox_config
+                    try:
+                        result = await deliver_outbox_files(
+                            send_file=cfg.send_file,
+                            channel_id=incoming.channel_id,
+                            thread_id=incoming.thread_id,
+                            reply_to_msg_id=user_ref.message_id,
+                            run_root=_run_root,
+                            outbox_dir=_oc.outbox_dir,
+                            deny_globs=_oc.deny_globs,
+                            max_download_bytes=_oc.max_download_bytes,
+                            max_files=_oc.outbox_max_files,
+                            cleanup=True,  # subprocess 2 starts fresh
+                            deliver_directories=getattr(
+                                _oc, "outbox_deliver_directories", "off"
+                            ),
+                        )
+                        logger.info(
+                            "outbox.delivered_pre_auto_continue",
+                            sent=len(result.sent),
+                            skipped=len(result.skipped),
+                            cleaned=result.cleaned,
+                        )
+                        # #524 rc20 follow-up: surface skipped items from the
+                        # pre-auto-continue scan too. Without this, agents that
+                        # write a directory (e.g. ``guides/``) and then hit the
+                        # stuck-after-tool-results recovery never tell the user
+                        # the deliverable existed — the directory is left in
+                        # place for subprocess 2 to re-find, but the user sees
+                        # nothing in chat about the first attempt.
+                        await _surface_outbox_skipped(
+                            cfg,
+                            incoming,
+                            user_ref,
+                            result.skipped,
+                            _oc,
+                        )
+                    except Exception:  # noqa: BLE001
+                        logger.warning(
+                            "outbox.auto_continue_delivery_failed", exc_info=True
+                        )
+
+            # #551 Tier 1: reworded notice signals recovery, not failure.
+            # The \ud83d\udd01 prefix distinguishes auto-resume from a fresh start
+            # and discourages users from /cancel-ing the salvage.
+            notice = _format_auto_continue_notice(_auto_continued_count)
+            notice_msg = RenderedMessage(text=notice, extra={})
+            await cfg.transport.send(
+                channel_id=incoming.channel_id,
+                message=notice_msg,
+                options=SendOptions(
+                    reply_to=user_ref,
+                    notify=True,
+                    thread_id=incoming.thread_id,
+                ),
+            )
+            await handle_message(
+                cfg,
+                runner=runner,
+                incoming=IncomingMessage(
+                    channel_id=incoming.channel_id,
+                    message_id=incoming.message_id,
+                    text="continue",
+                    reply_to=incoming.reply_to,
+                    thread_id=incoming.thread_id,
+                ),
+                resume_token=_ac_resume,
+                context=context,
+                context_line=context_line,
+                strip_resume_line=strip_resume_line,
+                running_tasks=running_tasks,
+                on_thread_known=on_thread_known,
+                on_resume_failed=on_resume_failed,
+                clock=clock,
+                # #631 (T6): thread the resolved store through so an
+                # injected/singleton store survives this recursive re-entry.
+                quarantine_store=_qstore,
+                _auto_continued_count=_auto_continued_count + 1,
+                # Carry the other recovery guards so they can't be reset by an
+                # interleaved auto-continue (see #596 auto-resend / #572 retry).
+                _empty_resent_count=_empty_resent_count,
+                _stream_idle_retried_count=_stream_idle_retried_count,
+            )
+            return
+        # --- End auto-continue ---
+
+        # --- #572: bounded auto-retry for Type-A stream-idle timeouts ---
+        # A Type-A failure is a mid-generation SSE stall after real output began
+        # (#438: num_turns >= 1, duration_api_ms > 0) — transient upstream flake.
+        # When [watchdog] stream_idle_auto_retry is on (default OFF), auto-resume
+        # the session instead of surfacing a terminal error with only a "raise
+        # the timeout" hint. Type-B (cold-start zero-byte stall) NEVER retries —
+        # retrying hammers a down API. Error finals ride the post-return path
+        # (the #591 early delivery is ok=True-only), so returning here fully
+        # suppresses the terminal error message. The retry re-enters
+        # handle_message as a normal resumed run — quarantine divert, session-
+        # owner serialisation, RAM guard and per-run budget checks all apply to
+        # it exactly as to a user-initiated run.
+        _si_ws = _load_watchdog_settings()
+        _si_es = getattr(edits.stream, "engine_state", None) if edits.stream else None
+        _si_class = getattr(_si_es, "stream_idle_class", None)
+        _si_resume = completed.resume or outcome.resume
+        _si_rc = edits.stream.proc_returncode if edits.stream else None
+        _si_max = getattr(_si_ws, "stream_idle_max_retries", 1) if _si_ws else 1
+        if (
+            _si_ws is not None
+            and getattr(_si_ws, "stream_idle_auto_retry", False)
+            and _si_class == "type_a"
+            and run_ok is False
+            and not outcome.cancelled
+            and not final_delivery["sent"]
+            and _si_resume is not None
+            and _stream_idle_retried_count < _si_max
+            and not _is_signal_death(_si_rc)
+            and not _stream_idle_retry_budget_blocked(completed.usage)
+        ):
+            release_reason = "stream_idle_retry"
+            logger.warning(
+                "claude.stream_idle.auto_retry",
+                session_id=_si_resume.value,
+                engine=runner.engine,
+                attempt=_stream_idle_retried_count + 1,
+                max_retries=_si_max,
+                proc_returncode=_si_rc,
+                num_turns=(completed.usage or {}).get("num_turns"),
+                duration_api_ms=(completed.usage or {}).get("duration_api_ms"),
+                total_cost_usd=(completed.usage or {}).get("total_cost_usd"),
+            )
+            notice_msg = RenderedMessage(
+                text=_format_stream_idle_retry_notice(_stream_idle_retried_count),
+                extra={},
+            )
+            await cfg.transport.send(
+                channel_id=incoming.channel_id,
+                message=notice_msg,
+                options=SendOptions(
+                    reply_to=user_ref,
+                    notify=True,
+                    thread_id=incoming.thread_id,
+                ),
+            )
+            await handle_message(
+                cfg,
+                runner=runner,
+                incoming=IncomingMessage(
+                    channel_id=incoming.channel_id,
+                    message_id=incoming.message_id,
+                    text="continue",
+                    reply_to=incoming.reply_to,
+                    thread_id=incoming.thread_id,
+                ),
+                resume_token=_si_resume,
+                context=context,
+                context_line=context_line,
+                strip_resume_line=strip_resume_line,
+                running_tasks=running_tasks,
+                on_thread_known=on_thread_known,
+                on_resume_failed=on_resume_failed,
+                clock=clock,
+                quarantine_store=_qstore,
+                # Carry the other recovery counters so an alternating chain
+                # can't reset another guard and loop.
+                _auto_continued_count=_auto_continued_count,
+                _empty_resent_count=_empty_resent_count,
+                _stream_idle_retried_count=_stream_idle_retried_count + 1,
+            )
+            return
+        # --- End #572 stream-idle auto-retry ---
+
+        # #591: deliver the final answer unless the early path already did.
+        if not final_delivery["sent"]:
+            await _deliver_final(completed, outcome)
+
+        # Deliver outbox files (agent-initiated file delivery).
+        # #524 rc20 follow-up: surface skipped items even when run_ok is False.
+        # Delivery of *sent* files still requires a successful run (failures
+        # may leave the outbox in a partially-written state), but the user
+        # should always learn what the agent intended to send.
+        if (
+            cfg.send_file is not None
+            and cfg.outbox_config is not None
+            and not outbox_early["delivered"]
+        ):
+            from .telegram.outbox_delivery import (
+                OutboxResult,
+                deliver_outbox_files,
+                scan_outbox,
+            )
             from .utils.paths import get_run_base_dir
 
             _run_root = get_run_base_dir()
             if _run_root is not None:
                 _oc = cfg.outbox_config
-                try:
-                    result = await deliver_outbox_files(
-                        send_file=cfg.send_file,
-                        channel_id=incoming.channel_id,
-                        thread_id=incoming.thread_id,
-                        reply_to_msg_id=user_ref.message_id,
-                        run_root=_run_root,
-                        outbox_dir=_oc.outbox_dir,
-                        deny_globs=_oc.deny_globs,
-                        max_download_bytes=_oc.max_download_bytes,
-                        max_files=_oc.outbox_max_files,
-                        cleanup=True,  # subprocess 2 starts fresh
-                        deliver_directories=getattr(
-                            _oc, "outbox_deliver_directories", "off"
-                        ),
-                    )
-                    logger.info(
-                        "outbox.delivered_pre_auto_continue",
-                        sent=len(result.sent),
-                        skipped=len(result.skipped),
-                        cleaned=result.cleaned,
-                    )
-                    # #524 rc20 follow-up: surface skipped items from the
-                    # pre-auto-continue scan too. Without this, agents that
-                    # write a directory (e.g. ``guides/``) and then hit the
-                    # stuck-after-tool-results recovery never tell the user
-                    # the deliverable existed — the directory is left in
-                    # place for subprocess 2 to re-find, but the user sees
-                    # nothing in chat about the first attempt.
+                _outbox_result: OutboxResult | None = None
+                if run_ok is not False:
+                    try:
+                        _outbox_result = await deliver_outbox_files(
+                            send_file=cfg.send_file,
+                            channel_id=incoming.channel_id,
+                            thread_id=incoming.thread_id,
+                            reply_to_msg_id=user_ref.message_id,
+                            run_root=_run_root,
+                            outbox_dir=_oc.outbox_dir,
+                            deny_globs=_oc.deny_globs,
+                            max_download_bytes=_oc.max_download_bytes,
+                            max_files=_oc.outbox_max_files,
+                            cleanup=_oc.outbox_cleanup,
+                            deliver_directories=getattr(
+                                _oc, "outbox_deliver_directories", "off"
+                            ),
+                        )
+                    except Exception:  # noqa: BLE001
+                        logger.warning("outbox.delivery_failed", exc_info=True)
+                        _outbox_result = None
+                else:
+                    # Failed run: skip file delivery but still scan so the user
+                    # gets the 📎 Outbox skipped notice for any directory or
+                    # blocked entry the agent left behind.
+                    try:
+                        _, _failed_skipped = scan_outbox(
+                            _run_root,
+                            outbox_dir=_oc.outbox_dir,
+                            deny_globs=_oc.deny_globs,
+                            max_download_bytes=_oc.max_download_bytes,
+                            max_files=_oc.outbox_max_files,
+                        )
+                    except Exception:  # noqa: BLE001
+                        logger.debug("outbox.failed_run_scan_error", exc_info=True)
+                        _failed_skipped = []
+                    _outbox_result = OutboxResult(skipped=_failed_skipped)
+
+                if _outbox_result is not None:
                     await _surface_outbox_skipped(
                         cfg,
                         incoming,
                         user_ref,
-                        result.skipped,
+                        _outbox_result.skipped,
                         _oc,
                     )
-                except Exception:  # noqa: BLE001
-                    logger.warning(
-                        "outbox.auto_continue_delivery_failed", exc_info=True
-                    )
-
-        # #551 Tier 1: reworded notice signals recovery, not failure.
-        # The \ud83d\udd01 prefix distinguishes auto-resume from a fresh start
-        # and discourages users from /cancel-ing the salvage.
-        notice = _format_auto_continue_notice(_auto_continued_count)
-        notice_msg = RenderedMessage(text=notice, extra={})
-        await cfg.transport.send(
-            channel_id=incoming.channel_id,
-            message=notice_msg,
-            options=SendOptions(
-                reply_to=user_ref,
-                notify=True,
-                thread_id=incoming.thread_id,
-            ),
-        )
-        await handle_message(
-            cfg,
-            runner=runner,
-            incoming=IncomingMessage(
-                channel_id=incoming.channel_id,
-                message_id=incoming.message_id,
-                text="continue",
-                reply_to=incoming.reply_to,
-                thread_id=incoming.thread_id,
-            ),
-            resume_token=_ac_resume,
-            context=context,
-            context_line=context_line,
-            strip_resume_line=strip_resume_line,
-            running_tasks=running_tasks,
-            on_thread_known=on_thread_known,
-            on_resume_failed=on_resume_failed,
-            clock=clock,
-            # #631 (T6): thread the resolved store through so an
-            # injected/singleton store survives this recursive re-entry.
-            quarantine_store=_qstore,
-            _auto_continued_count=_auto_continued_count + 1,
-            # Carry the other recovery guards so they can't be reset by an
-            # interleaved auto-continue (see #596 auto-resend / #572 retry).
-            _empty_resent_count=_empty_resent_count,
-            _stream_idle_retried_count=_stream_idle_retried_count,
-        )
-        return
-    # --- End auto-continue ---
-
-    # --- #572: bounded auto-retry for Type-A stream-idle timeouts ---
-    # A Type-A failure is a mid-generation SSE stall after real output began
-    # (#438: num_turns >= 1, duration_api_ms > 0) — transient upstream flake.
-    # When [watchdog] stream_idle_auto_retry is on (default OFF), auto-resume
-    # the session instead of surfacing a terminal error with only a "raise
-    # the timeout" hint. Type-B (cold-start zero-byte stall) NEVER retries —
-    # retrying hammers a down API. Error finals ride the post-return path
-    # (the #591 early delivery is ok=True-only), so returning here fully
-    # suppresses the terminal error message. The retry re-enters
-    # handle_message as a normal resumed run — quarantine divert, session-
-    # owner serialisation, RAM guard and per-run budget checks all apply to
-    # it exactly as to a user-initiated run.
-    _si_ws = _load_watchdog_settings()
-    _si_es = getattr(edits.stream, "engine_state", None) if edits.stream else None
-    _si_class = getattr(_si_es, "stream_idle_class", None)
-    _si_resume = completed.resume or outcome.resume
-    _si_rc = edits.stream.proc_returncode if edits.stream else None
-    _si_max = getattr(_si_ws, "stream_idle_max_retries", 1) if _si_ws else 1
-    if (
-        _si_ws is not None
-        and getattr(_si_ws, "stream_idle_auto_retry", False)
-        and _si_class == "type_a"
-        and run_ok is False
-        and not outcome.cancelled
-        and not final_delivery["sent"]
-        and _si_resume is not None
-        and _stream_idle_retried_count < _si_max
-        and not _is_signal_death(_si_rc)
-        and not _stream_idle_retry_budget_blocked(completed.usage)
-    ):
-        logger.warning(
-            "claude.stream_idle.auto_retry",
-            session_id=_si_resume.value,
-            engine=runner.engine,
-            attempt=_stream_idle_retried_count + 1,
-            max_retries=_si_max,
-            proc_returncode=_si_rc,
-            num_turns=(completed.usage or {}).get("num_turns"),
-            duration_api_ms=(completed.usage or {}).get("duration_api_ms"),
-            total_cost_usd=(completed.usage or {}).get("total_cost_usd"),
-        )
-        notice_msg = RenderedMessage(
-            text=_format_stream_idle_retry_notice(_stream_idle_retried_count),
-            extra={},
-        )
-        await cfg.transport.send(
-            channel_id=incoming.channel_id,
-            message=notice_msg,
-            options=SendOptions(
-                reply_to=user_ref,
-                notify=True,
-                thread_id=incoming.thread_id,
-            ),
-        )
-        await handle_message(
-            cfg,
-            runner=runner,
-            incoming=IncomingMessage(
-                channel_id=incoming.channel_id,
-                message_id=incoming.message_id,
-                text="continue",
-                reply_to=incoming.reply_to,
-                thread_id=incoming.thread_id,
-            ),
-            resume_token=_si_resume,
-            context=context,
-            context_line=context_line,
-            strip_resume_line=strip_resume_line,
-            running_tasks=running_tasks,
-            on_thread_known=on_thread_known,
-            on_resume_failed=on_resume_failed,
-            clock=clock,
-            quarantine_store=_qstore,
-            # Carry the other recovery counters so an alternating chain
-            # can't reset another guard and loop.
-            _auto_continued_count=_auto_continued_count,
-            _empty_resent_count=_empty_resent_count,
-            _stream_idle_retried_count=_stream_idle_retried_count + 1,
-        )
-        return
-    # --- End #572 stream-idle auto-retry ---
-
-    # #591: deliver the final answer unless the early path already did.
-    if not final_delivery["sent"]:
-        await _deliver_final(completed, outcome)
-
-    # Deliver outbox files (agent-initiated file delivery).
-    # #524 rc20 follow-up: surface skipped items even when run_ok is False.
-    # Delivery of *sent* files still requires a successful run (failures
-    # may leave the outbox in a partially-written state), but the user
-    # should always learn what the agent intended to send.
-    if (
-        cfg.send_file is not None
-        and cfg.outbox_config is not None
-        and not outbox_early["delivered"]
-    ):
-        from .telegram.outbox_delivery import (
-            OutboxResult,
-            deliver_outbox_files,
-            scan_outbox,
-        )
-        from .utils.paths import get_run_base_dir
-
-        _run_root = get_run_base_dir()
-        if _run_root is not None:
-            _oc = cfg.outbox_config
-            _outbox_result: OutboxResult | None = None
-            if run_ok is not False:
-                try:
-                    _outbox_result = await deliver_outbox_files(
-                        send_file=cfg.send_file,
-                        channel_id=incoming.channel_id,
-                        thread_id=incoming.thread_id,
-                        reply_to_msg_id=user_ref.message_id,
-                        run_root=_run_root,
-                        outbox_dir=_oc.outbox_dir,
-                        deny_globs=_oc.deny_globs,
-                        max_download_bytes=_oc.max_download_bytes,
-                        max_files=_oc.outbox_max_files,
-                        cleanup=_oc.outbox_cleanup,
-                        deliver_directories=getattr(
-                            _oc, "outbox_deliver_directories", "off"
-                        ),
-                    )
-                except Exception:  # noqa: BLE001
-                    logger.warning("outbox.delivery_failed", exc_info=True)
-                    _outbox_result = None
-            else:
-                # Failed run: skip file delivery but still scan so the user
-                # gets the 📎 Outbox skipped notice for any directory or
-                # blocked entry the agent left behind.
-                try:
-                    _, _failed_skipped = scan_outbox(
-                        _run_root,
-                        outbox_dir=_oc.outbox_dir,
-                        deny_globs=_oc.deny_globs,
-                        max_download_bytes=_oc.max_download_bytes,
-                        max_files=_oc.outbox_max_files,
-                    )
-                except Exception:  # noqa: BLE001
-                    logger.debug("outbox.failed_run_scan_error", exc_info=True)
-                    _failed_skipped = []
-                _outbox_result = OutboxResult(skipped=_failed_skipped)
-
-            if _outbox_result is not None:
-                await _surface_outbox_skipped(
-                    cfg,
-                    incoming,
-                    user_ref,
-                    _outbox_result.skipped,
-                    _oc,
-                )
+    except BaseException:
+        release_reason = None
+        raise
+    finally:
+        if release_reason is not None:
+            _release_progress(progress_ref, reason=release_reason)
