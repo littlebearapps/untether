@@ -163,7 +163,7 @@ def _probe_cli_help(path: str) -> str | None:
     """Run ``<claude> --help`` (zero-token, no session). None on failure.
     Tests stub this (see ``tests/conftest.py``)."""
     try:
-        proc = subprocess_module.run(  # fixed argv, no shell
+        proc = subprocess_module.run(  # nosec B603 — fixed argv, no shell
             [path, "--help"],
             capture_output=True,
             text=True,
