@@ -594,3 +594,18 @@ When detected, note the engine, chat ID, message IDs, and exact behaviour. Creat
 - **4096-char limit** applies after entity parsing, not before. Splitting must account for entity boundaries.
 - **Voice messages (T1)** require Opus/OGG format, max 10MB by default. Transcription depends on configured API endpoint being accessible.
 - **429 rate limits** block ALL Telegram sends for the full `retry_after` duration, not just the rate-limited chat. Monitor logs for 429s during high-volume testing.
+
+## rc15 scenarios (0.35.5rc15)
+
+### #829 — background hold counts quiet time; honest close notices
+
+Setup: `[watchdog] post_result_bg_max_hold = 60` in `~/.untether-dev/untether.toml`. The key is read **per spawn**, so start **every row with `/new`**; restore `1800` afterwards and send `/new` again. Chat: `ut-dev: Claude Code` (`-5284581592`). Log greps: `journalctl --user -u untether-dev`. Runs in the Claude-interactive block (after R15-6, before R15-19). Background: [`docs/findings/2026-09-30-claude-bg-agent-activity-and-eof.md`](../findings/2026-09-30-claude-bg-agent-activity-and-eof.md) — P0 selected **B2** (agents ignore EOF; SIGINT → rc 0, resumable), kept **A.2** (owned-foreground task marks its agent active) and the **output-file** Bash fallback.
+
+| ID | Steps | Expected Telegram | Log signatures |
+|---|---|---|---|
+| R15-21a | `/new`; background Agent that reads and summarises 30 files one at a time (≈3–5 min); reply "STARTED" | panel advances past 60 s; **no** closing notice at 60 s; `🔔 Background task finished` wake turn at the end | ≥1 `claude.live_session.hold_rearmed source=task_progress`; **no** `stdin_closed reason=max_hold` before `claude.task.ended` |
+| R15-21b | `/new`; background Bash `python3 -c "import time; time.sleep(600)"` (silent, idle); reply "STARTED" | at ≈60 s: `⏳ Closing session — 1 background task still running with no progress for 1 min: … Stopping it.` then `↩️ Reply to continue in the same session.` (silent) | `stdin_closed reason=max_hold` at 60–90 s; `lifecycle_exited reason=exited_after_close` (or `reader_done`/`cancelled` right after `stdin_closed`); `claude.live_session.closed quarantined=False`; **no** `session.quarantined` — the negative guard for the Bash fallback |
+| R15-21c | right after 21b: "what did you just start?" | answer remembers the sleep task | `handle.incoming resume=<same sid>`; `claude.resume_guard.absorbed` (F11 stopped-task replay); no `session.resume_diverted_fresh` |
+| R15-21d *(opportunistic)* | `/new`; background Agent told to run a foreground `python3 -c "import time; time.sleep(150)"` between files | no close during the sleep (A.2 kept) | `hold_rearmed source=agent_tool`; if it later closes: `exited_after_sigint stopped_clean=True`, no `session.quarantined` (B2) |
+| R15-21e | `bg_hold_rearm_on_progress = false`; `/new`; repeat 21a | closing notice at ≈60 s despite progress: `… still running at the background hold limit: … Stopping it.`; then the `closed` line | `stdin_closed reason=max_hold`; no `hold_rearmed`; the agent ignores EOF, so `close_grace_expired` then `exited_after_sigint stopped_clean=True` |
+| R15-21f | `/new`; background Bash printing `tick N` every 2 s for 3 min | no close while ticking; wake turn at the end | `hold_rearmed source=bash_output` |

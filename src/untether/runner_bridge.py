@@ -4120,26 +4120,40 @@ def _live_closing_hooks_notice(hooks: list[str], count: int | None = None) -> st
     )
 
 
+def _format_hold_span(seconds: float) -> str:
+    """#829: "30 min" / "1 min" / "45 s" for the closing notice."""
+    if seconds < 60:
+        return f"{max(1, round(seconds))} s"
+    return f"{round(seconds / 60)} min"
+
+
 def _live_closing_notice(
     reason: str,
     tasks: list[str],
     hooks: list[str] | None = None,
     hook_count: int | None = None,
+    *,
+    max_hold_s: float | None = None,
+    rearm_on_progress: bool = True,
 ) -> str:
     """User-facing text for a live session closing over running background
-    tasks (#776) or background hooks (#812, automatic closes only)."""
+    tasks (#776) or background hooks (#812, automatic closes only).
+
+    #829: it never promises "reply to continue" — whether the next message
+    continues the same session is only known once the process has exited
+    (the ``"closed"`` follow-up, ``_live_closed_notice``)."""
     if hooks:
         hook_text = _live_closing_hooks_notice(hooks, hook_count)
         if not tasks:
             return hook_text
-        return f"{hook_text}\n{_live_closing_notice(reason, tasks)}"
+        return f"{hook_text}\n{_live_closing_notice(reason, tasks, max_hold_s=max_hold_s, rearm_on_progress=rearm_on_progress)}"
     n = len(tasks)
     names = ", ".join(t[:60] for t in tasks[:3])
     if n > 3:
         names += f" (+{n - 3} more)"
     noun = f"{n} background task{'s' if n != 1 else ''}"
     if reason == "cancel":
-        return f"\N{BLACK SQUARE FOR STOP} Stopped {noun}: {names}. Reply to continue."
+        return f"\N{BLACK SQUARE FOR STOP} Stopped {noun}: {names}."
     if reason == "options_changed":
         return (
             f"\N{GEAR}\N{VARIATION SELECTOR-16} Settings changed — stopping {noun}: "
@@ -4148,16 +4162,35 @@ def _live_closing_notice(
     if reason == "drain":
         return (
             f"\N{HOURGLASS WITH FLOWING SAND} Untether is restarting — stopping "
-            f"{noun}: {names}. Reply to continue."
+            f"{noun}: {names}."
         )
-    it = "it" if n == 1 else "they"
-    why = {
-        "max_hold": "the background hold limit",
-        "abs_cap": "the session time limit",
-    }.get(reason, "the session limit")
+    it = "it" if n == 1 else "them"
+    if reason == "max_hold" and rearm_on_progress and max_hold_s:
+        why = f"with no progress for {_format_hold_span(max_hold_s)}"
+    else:
+        limit = {
+            "max_hold": "the background hold limit",
+            "abs_cap": "the session time limit",
+        }.get(reason, "the session limit")
+        why = f"at {limit}"
     return (
         f"\N{HOURGLASS WITH FLOWING SAND} Closing session — {noun} still running "
-        f"at {why}: {names}. Stopping {it}; reply to continue."
+        f"{why}: {names}. Stopping {it}."
+    )
+
+
+def _live_closed_notice(quarantined: bool) -> str:
+    """#829: the silent follow-up once a close that stopped tasks has ended —
+    whether the next message continues the same session."""
+    if quarantined:
+        return (
+            "\N{WARNING SIGN}\N{VARIATION SELECTOR-16} The session didn't stop "
+            "cleanly, so your next message starts a fresh session (Claude won't "
+            "remember this run). Partial work may be left in the working tree."
+        )
+    return (
+        "\N{LEFTWARDS ARROW WITH HOOK}\N{VARIATION SELECTOR-16} Reply to continue "
+        "in the same session."
     )
 
 
@@ -5459,7 +5492,31 @@ async def handle_message(
             return
         await _surface_outbox_skipped(cfg, incoming, user_ref, result.skipped, oc)
 
+    # #829: whether this run's closing notice named tasks — only then does
+    # the "closed" outcome get its own line.
+    closing_named_tasks: dict[str, str] = {}
+
     async def _on_live_notice(kind: str, payload: dict[str, Any]) -> None:
+        if kind == "closed":
+            reason = closing_named_tasks.pop("reason", None)
+            if reason is None:
+                return
+            quarantined = payload.get("quarantined") is True
+            if reason == "options_changed" and not quarantined:
+                return  # the queued message already resumes the session
+            try:
+                await cfg.transport.send(
+                    channel_id=incoming.channel_id,
+                    message=RenderedMessage(text=_live_closed_notice(quarantined)),
+                    options=SendOptions(
+                        reply_to=turn_router.last_reply_to,
+                        notify=False,
+                        thread_id=incoming.thread_id,
+                    ),
+                )
+            except Exception:  # noqa: BLE001
+                logger.warning("live_session.notice_failed", exc_info=True)
+            return
         if kind != "closing":
             return
         tasks = [t for t in payload.get("tasks", []) if isinstance(t, str)]
@@ -5474,9 +5531,21 @@ async def handle_message(
             hooks = []  # #812: nothing was still running
         if not tasks and not hooks:
             return
+        raw_hold = payload.get("max_hold_s")
         text = _live_closing_notice(
-            str(payload.get("reason")), tasks, hooks, hook_count
+            str(payload.get("reason")),
+            tasks,
+            hooks,
+            hook_count,
+            max_hold_s=(
+                float(raw_hold)
+                if isinstance(raw_hold, int | float) and not isinstance(raw_hold, bool)
+                else None
+            ),
+            rearm_on_progress=payload.get("rearm_on_progress") is not False,
         )
+        if tasks:
+            closing_named_tasks["reason"] = str(payload.get("reason"))
         try:
             await cfg.transport.send(
                 channel_id=incoming.channel_id,

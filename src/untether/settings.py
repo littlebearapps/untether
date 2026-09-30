@@ -600,18 +600,25 @@ class WatchdogSettings(BaseModel):
     # RSS/TCP) is released promptly. 0 disables the shortcut. Range 0-600s.
     post_result_limbo_grace: float = Field(default=60.0, ge=0, le=600)
 
-    # #647/#646: liveness-aware extension of the post-result ceiling. Upstream
-    # runs Agent/Task subagents in the background by default (Claude Code
-    # ≥2.1.198) and their completion is never signalled on stream-json, so a
-    # fixed `post_result_idle_timeout` SIGTERMs live subagent work mid-flight —
-    # which quarantines the session (#632) and diverts the user's next message
-    # to a fresh contextless session. When the ceiling expires while background
-    # handles are still live and the process tree is not demonstrably idle
-    # (/proc CPU evidence), the SIGTERM is deferred and re-checked each poll.
-    # Bounded: background handles age out at 900 s from registration, and the
-    # total post-result hold never exceeds this cap. 0 disables the extension
-    # (pre-rc10 fixed-cap behaviour). Range 0-2h.
+    # The background hold, in seconds. It has two meanings:
+    # - Live sessions (#776, the default; #829): how long a live Claude
+    #   session stays open with background work still running and **no
+    #   background activity** — no turn, no agent `task_progress` frame, no
+    #   subagent tool starting or ending, no output from a background Bash —
+    #   before Untether closes it with a notice (`max_hold`). With
+    #   `bg_hold_rearm_on_progress = false` it counts from the last turn only
+    #   (the rc14 behaviour). `live_session_max_s` still caps the process.
+    # - `live_sessions = false` (legacy, #647/#646): the liveness-aware
+    #   extension of the post-result ceiling — when `post_result_idle_timeout`
+    #   expires while background handles are live and the process tree is not
+    #   demonstrably idle (/proc CPU evidence), the SIGTERM is deferred, and
+    #   the total post-result hold never exceeds this cap. 0 disables it.
+    # Read per spawn. Range 0-2h.
     post_result_bg_max_hold: float = Field(default=1800.0, ge=0, le=7200)
+    # #829: re-arm the live-session background hold on background activity
+    # (see `post_result_bg_max_hold`). False = the hold counts from the last
+    # turn only (rc14). Read per spawn, so a change applies to the next run.
+    bg_hold_rearm_on_progress: bool = True
 
     # #776: live-session model for Claude (control-channel mode). The process
     # stays live after its reply: background-task / scheduled-wakeup /

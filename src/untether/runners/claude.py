@@ -414,6 +414,20 @@ class LiveSession:
     # transcript is complete, so a close that overruns its grace must not
     # quarantine it.
     closed_idle_clean: bool = False
+    # #829: the parent's turn was closed when stdin was closed (idle, no
+    # injected line pending) — ``closed_idle_clean`` minus the "nothing
+    # live" part. A close that stopped live tasks from such a turn, asked
+    # for by Untether and exiting rc 0 on SIGINT, stopped cleanly (B2).
+    closed_turn_idle: bool = False
+    # #829: the tasks named when stdin was closed, and whether the
+    # lifecycle has emitted its ``"closed"`` notice (once).
+    close_tasks: list[str] = field(default_factory=list)
+    closed_notified: bool = False
+    # #829: when the current idle period began (the turn ended), and the
+    # rate limit of ``claude.live_session.hold_rearmed`` (first re-arm of an
+    # idle period, then at most every ``_hold_rearm_log_every_s``).
+    idle_period_started: float | None = None
+    rearm_logged_at: float | None = None
     # #812: background hooks still unpaired when stdin was closed (the
     # stream's view — *candidates*: frames carry no pid, so which of them is
     # still running can't be told); empty when no hook was running. The
@@ -507,10 +521,14 @@ async def close_live_session(
 ) -> bool:
     """Gracefully close a live session's stdin (#776).
 
-    The CLI then stops any live background task (recording the stop in the
-    transcript, F3) and exits rc=0 — no SIGTERM, no quarantine. Idempotent;
-    returns False when there is nothing (left) to close. With ``notice``
-    listeners get a ``"closing"`` event naming the tasks being stopped.
+    The CLI then stops any live background Bash (recording the stop in the
+    transcript, F3) and exits rc=0 — no SIGTERM, no quarantine. Background
+    *agents* ignore EOF and run to completion (#829 P0 G6), so a close over
+    one runs into the grace and the SIGINT path (``_await_live_exit_or_force``).
+    Idempotent; returns False when there is nothing (left) to close. With
+    ``notice`` listeners get a ``"closing"`` event naming the tasks being
+    stopped; the lifecycle later sends one ``"closed"`` event with the
+    outcome (#829).
     """
     live = _LIVE_SESSIONS.get(session_id)
     if live is None:
@@ -537,6 +555,7 @@ async def close_live_session(
         live.close_reason = reason
         live.state.live_close_reason = reason
         live.closed_idle_clean = _is_clean_idle(live)
+        live.closed_turn_idle = live.idle and not live.state.awaiting_injected
         candidates = _hooks_at_close(live)
         # Never claim more hooks than live hook processes (and never more than
         # the candidates); the candidate count only when unreadable.
@@ -545,6 +564,7 @@ async def close_live_session(
         live.close_hook_count = count
         live.close_hook_procs = None if shells is None else len(shells)
     tasks = live_task_descriptions(live.state)
+    live.close_tasks = list(tasks)
     logger.info(
         "claude.live_session.stdin_closed",
         session_id=session_id,
@@ -552,6 +572,8 @@ async def close_live_session(
         live_tasks=len(tasks),
         turn=live.state.turn,
         age_s=round(time.monotonic() - live.spawned_at, 1),
+        # #829: how long the background work had been quiet at the close.
+        last_progress_age_s=_last_progress_age_s(live.state),
     )
     hooks = _hook_event_labels(live.close_hooks)
     if hooks:
@@ -569,6 +591,11 @@ async def close_live_session(
     hook_notice = bool(hooks) and reason not in _USER_CLOSE_REASONS
     if notice or hook_notice:
         payload: dict[str, Any] = {"reason": reason, "tasks": tasks}
+        if reason == "max_hold":
+            # #829: the notice says how long nothing progressed (or, with the
+            # re-arm switched off, that the hold limit was reached).
+            payload["max_hold_s"] = live.state.bg_max_hold_s
+            payload["rearm_on_progress"] = live.state.bg_hold_rearm_on_progress
         if hook_notice:
             payload["hooks"] = hooks
             payload["hook_count"] = live.close_hook_count
@@ -586,6 +613,12 @@ async def close_live_session(
 # #812: closes the user (or an operator restart) asked for — a hook they
 # cut short is expected, so it logs at INFO and gets no extra notice.
 _USER_CLOSE_REASONS = frozenset({"cancel", "new", "drain", "options_changed"})
+# #829 B2: Untether-initiated closes that may stop cleanly on SIGINT (rc 0,
+# transcript complete, resumable — P0 G7-G9). ``abs_cap`` closes mid-turn and
+# ``error`` follows a failed run: both keep the forced-teardown quarantine.
+_STOPPED_CLEAN_REASONS = frozenset(
+    {"max_hold", "cancel", "new", "drain", "options_changed"}
+)
 
 
 async def _cli_children(pid: int | None) -> CliScan | None:
@@ -744,6 +777,13 @@ def _is_clean_idle(live: LiveSession) -> bool:
         and not _live_native_tasks(state)
         and not has_live_background_work(state)
     )
+
+
+def _may_stop_clean(live: LiveSession) -> bool:
+    """#829 B2: an Untether-initiated close (``_STOPPED_CLEAN_REASONS``) of a
+    session whose turn was closed when stdin was closed. If the CLI then
+    exits rc 0 on SIGINT it stopped cleanly — no quarantine."""
+    return live.close_reason in _STOPPED_CLEAN_REASONS and live.closed_turn_idle
 
 
 def _close_grace_diag(pid: int, start: Any) -> dict[str, Any]:
@@ -1202,6 +1242,13 @@ class ClaudeTask:
     # ``parent_tool_use_id``) — the status panel only lists such a task on
     # its own once that agent is gone. None = unknown.
     owner_tool_use_id: str | None = None
+    # #829: when this task last showed activity (monotonic) and what showed
+    # it — its start / revival, a ``task_progress`` frame (one per subagent
+    # tool call, P0 G1), or a subagent-owned foreground tool starting or
+    # ending (``agent_tool``). The live session's background hold counts
+    # from the newest of these (``latest_background_progress``).
+    last_progress_at: float = field(default_factory=time.monotonic)
+    last_progress_source: str = "task_started"
 
     @property
     def is_live_background(self) -> bool:
@@ -1683,6 +1730,18 @@ class ClaudeStreamState:
     async_hook_max_hold_s: float = 630.0
     # ``claude.hook.pending_hold`` fires once per hold; reset when it ends.
     hook_hold_logged: bool = False
+    # #829: mirrored from ``[watchdog] bg_hold_rearm_on_progress`` /
+    # ``post_result_bg_max_hold`` by ``run_impl`` (per spawn). With the switch
+    # on, a live session's background hold measures the time since the last
+    # background activity (``latest_background_progress``), not since the
+    # last turn.
+    bg_hold_rearm_on_progress: bool = True
+    bg_max_hold_s: float = 1800.0
+    # #829: background Bash output files, tool_use_id -> path, from the Bash
+    # tool_result ("Output is being written to: …/tasks/<id>.output"). The
+    # file grows while the command prints (P0 G4) — the only activity signal
+    # a ``local_bash`` task has.
+    bg_output_files: dict[str, str] = field(default_factory=dict)
 
     # #572: set when the run's StreamResultMessage was a Stream-idle-timeout
     # failure — "type_a" (mid-generation stall, retryable) or "type_b"
@@ -3657,6 +3716,178 @@ def has_live_background_work(state: ClaudeStreamState) -> bool:
     return watchers + bg_tasks > 0
 
 
+# ── #829: background activity (what re-arms the live session's hold) ──────
+
+
+@dataclass(frozen=True, slots=True)
+class BackgroundActivity:
+    """The newest background activity a live session has seen (#829).
+
+    ``at`` is ``time.monotonic()``; ``source`` is ``task_started`` (a start or
+    revival), ``task_progress`` (an agent's per-tool-call frame),
+    ``agent_tool`` (a subagent-owned foreground tool started, ended, or is
+    still running) or ``bash_output`` (a background Bash's output file was
+    written)."""
+
+    at: float
+    source: str
+    task_id: str
+
+
+def _stamp_progress(task: ClaudeTask, source: str) -> None:
+    task.last_progress_at = time.monotonic()
+    task.last_progress_source = source
+
+
+def _task_by_tool_use_id(
+    state: ClaudeStreamState, tool_use_id: str
+) -> ClaudeTask | None:
+    for task in state.tasks.values():
+        if task.tool_use_id == tool_use_id:
+            return task
+    return None
+
+
+def _is_owned_foreground(task: ClaudeTask) -> bool:
+    """A subagent's own foreground tool (``owned_by_subagent``, not
+    backgrounded): the CLI registers one that runs longer than ~3 s and ends
+    it with a ``task_notification`` (P0 G3). It never holds the session."""
+    return task.owned_by_subagent and not task.is_backgrounded
+
+
+def _stamp_owner(state: ClaudeStreamState, task: ClaudeTask) -> None:
+    """#829 A.2: a subagent's foreground tool starting or ending means its
+    owning agent is working — the agent emits no ``task_progress`` while one
+    long tool runs (P0 G2)."""
+    if not _is_owned_foreground(task) or not task.owner_tool_use_id:
+        return
+    owner = _task_by_tool_use_id(state, task.owner_tool_use_id)
+    if owner is not None and owner.ended_at is None:
+        _stamp_progress(owner, "agent_tool")
+
+
+def latest_background_activity(
+    state: ClaudeStreamState, task_ids: Iterable[str] | None = None
+) -> BackgroundActivity | None:
+    """The newest activity among the tasks holding the live session open
+    (``ClaudeTask.holds_session``), optionally restricted to ``task_ids``.
+
+    A holding agent with a live subagent-owned foreground tool counts as
+    active *now* (``agent_tool``): it is working through one long call.
+    Only native task-map evidence — a background Bash's output file is
+    checked separately (``_bash_output_activity``), off-thread, and only when
+    the hold would expire. None when no (matching) task holds the session.
+    """
+    wanted = None if task_ids is None else set(task_ids)
+    busy_owners = {
+        task.owner_tool_use_id
+        for task in state.tasks.values()
+        if _is_owned_foreground(task)
+        and task.owner_tool_use_id
+        and task.ended_at is None
+        and task.status in _TASK_LIVE_STATUSES
+    }
+    now = time.monotonic()
+    best: BackgroundActivity | None = None
+    for task in _live_native_tasks(state):
+        if wanted is not None and task.task_id not in wanted:
+            continue
+        if task.tool_use_id is not None and task.tool_use_id in busy_owners:
+            candidate = BackgroundActivity(now, "agent_tool", task.task_id)
+        else:
+            candidate = BackgroundActivity(
+                task.last_progress_at, task.last_progress_source, task.task_id
+            )
+        if best is None or candidate.at > best.at:
+            best = candidate
+    return best
+
+
+def latest_background_progress(
+    state: ClaudeStreamState, task_ids: Iterable[str] | None = None
+) -> float | None:
+    """#829: monotonic time of the newest background activity among the
+    tasks holding the live session (see ``latest_background_activity``);
+    None when none holds it.
+
+    Stable API: #383's plan-mode re-arm deferral bounds itself on "the
+    exit-turn agents idle for ``post_result_bg_max_hold``" by passing those
+    agents' ``task_ids`` — ``time.monotonic() - latest_background_progress(
+    state, task_ids) >= max_hold`` (None: none of them holds the session any
+    more), with ``live_session_max_s`` as the ceiling.
+    """
+    activity = latest_background_activity(state, task_ids)
+    return None if activity is None else activity.at
+
+
+def _last_progress_age_s(state: ClaudeStreamState) -> float | None:
+    at = latest_background_progress(state)
+    return None if at is None else round(time.monotonic() - at, 1)
+
+
+_BG_OUTPUT_FILE_RE = re.compile(r"Output is being written to: (\S+?\.output)\b")
+
+
+def _note_bg_output_file(
+    state: ClaudeStreamState, tool_use_id: str, content: Any
+) -> None:
+    """#829: remember a background Bash's output file from its tool_result."""
+    if isinstance(content, list):
+        content = " ".join(
+            str(block.get("text", ""))
+            for block in content
+            if isinstance(block, dict) and block.get("type") == "text"
+        )
+    if not isinstance(content, str) or "Output is being written to:" not in content:
+        return
+    match = _BG_OUTPUT_FILE_RE.search(content)
+    if match is not None:
+        state.bg_output_files[tool_use_id] = match.group(1)
+
+
+def _output_file_mtimes(paths: list[str]) -> dict[str, float]:
+    """Wall-clock mtimes of the files that exist (runs in a worker thread)."""
+    out: dict[str, float] = {}
+    for path in paths:
+        with contextlib.suppress(OSError):
+            out[path] = os.stat(path).st_mtime
+    return out
+
+
+async def _bash_output_activity(state: ClaudeStreamState) -> BackgroundActivity | None:
+    """#829 fallback: ``local_bash`` emits no ``task_progress`` (P0 G4), but
+    its output file grows while the command prints. The newest write among
+    the holding, non-Monitor background Bash tasks, as monotonic time; None
+    when there is none (a silent command never re-arms the hold)."""
+    candidates: list[tuple[ClaudeTask, str]] = []
+    for task in _live_native_tasks(state):
+        if task.task_type != "local_bash" or _is_native_monitor(state, task):
+            continue
+        path = state.bg_output_files.get(task.tool_use_id or "")
+        if path:
+            candidates.append((task, path))
+    if not candidates:
+        return None
+    try:
+        mtimes = await anyio.to_thread.run_sync(
+            _output_file_mtimes, [path for _, path in candidates]
+        )
+    except Exception:  # noqa: BLE001 — a stat failure must not break the hold
+        logger.debug("claude.live_session.output_stat_failed", exc_info=True)
+        return None
+    wall_now = time.time()
+    mono_now = time.monotonic()
+    best: BackgroundActivity | None = None
+    for task, path in candidates:
+        mtime = mtimes.get(path)
+        if mtime is None:
+            continue
+        at = mono_now - max(0.0, wall_now - mtime)
+        if best is None or at > best.at:
+            best = BackgroundActivity(at, "bash_output", task.task_id)
+    return best
+
+
 def background_task_summary(state: ClaudeStreamState) -> str | None:
     """Return a compact "⏳ 2 watchers · 1 bg task" summary or None if empty.
 
@@ -3753,6 +3984,8 @@ def _end_task(
         return
     task.status = status
     task.ended_at = time.monotonic()
+    # #829 A.2: a subagent's long foreground tool finishing = its agent works.
+    _stamp_owner(state, task)
     log = logger.info if task.is_backgrounded else logger.debug
     log(
         "claude.task.ended",
@@ -3776,6 +4009,7 @@ def _revive_task(
     task.status = status
     task.ended_at = None
     task.started_at = time.monotonic()
+    _stamp_progress(task, "task_started")  # #829: a resumed agent is working
     task.revived_count += 1
     # #795: the turn that resumed it is the one its next wake turn answers.
     task.origin_turn = state.turn
@@ -3939,6 +4173,9 @@ def _apply_task_event(
         _stamp_task_origin(state, task)
         if task.owned_by_subagent and task.tool_use_id:
             task.owner_tool_use_id = state.tool_parents.get(task.tool_use_id)
+        _stamp_progress(task, "task_started")
+        # #829 A.2: the owning agent entered a long foreground tool.
+        _stamp_owner(state, task)
         return
     task = state.tasks.get(task_id)
     if task is None:
@@ -3954,6 +4191,10 @@ def _apply_task_event(
         # task_started (and a snapshot listing the id).
         if event.usage is not None:
             task.last_usage = dict(event.usage)
+        if task.ended_at is None:
+            # #829 D1: frames are per tool call with usage rising (P0 G1), so
+            # any frame is activity. Never a straggler for an ended id.
+            _stamp_progress(task, "task_progress")
         if event.last_tool_name is not None:
             task.last_tool_name = event.last_tool_name
         if event.description:
@@ -5204,6 +5445,8 @@ def _translate_claude_event_base(
                     continue
                 saw_tool_result = True
                 tool_use_id = content.tool_use_id
+                # #829: a background Bash's output file (hold fallback).
+                _note_bg_output_file(state, tool_use_id, content.content)
                 if tool_use_id in state.live_wakeups:
                     _note_pending_wakeup(state, tool_use_id, content.content)
                 # #347/#374 clear a background-task entry only on a *terminal*
@@ -6858,6 +7101,9 @@ class ClaudeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
     # #812: the close grace when a background hook is evident at close — the
     # CLI's 30 s asyncRewake exit wait (``Rxo``, §A1) + 5 s.
     _live_close_grace_hooks_s: float = 35.0
+    # #829: ``claude.live_session.hold_rearmed`` logs the first re-arm of an
+    # idle period, then at most once per this many seconds.
+    _hold_rearm_log_every_s: float = 300.0
 
     async def _live_session_lifecycle(
         self,
@@ -6878,7 +7124,10 @@ class ClaudeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
         - nothing live (no native bg task, no pending ScheduleWakeup) for
           ``idle_grace_s`` → graceful close (``idle_no_tasks``);
         - work still live ``max_hold_s`` after the last turn ended → notice +
-          graceful close (``max_hold``; re-armed by every turn);
+          graceful close (``max_hold``; re-armed by every turn and — #829,
+          ``state.bg_hold_rearm_on_progress`` — by background activity:
+          ``latest_background_progress`` while idle, and a background Bash's
+          output file when the hold would expire);
         - ``abs_cap_s`` from spawn → notice + close (``abs_cap``).
         Closing stdin makes the CLI stop its tasks and exit rc=0 (F3/F4). Only
         if it doesn't exit within ``_live_close_grace_s`` does
@@ -6887,6 +7136,10 @@ class ClaudeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
         (#791).
         """
         exit_reason = "reader_done"
+        # #829: the session this lifecycle watches — kept so the ``"closed"``
+        # notice can be sent from ``finally`` on every exit path, including a
+        # CLI that exits within one poll of the close.
+        tracked: LiveSession | None = None
         try:
             while not reader_done.is_set():
                 await anyio.sleep(self._live_poll_s)
@@ -6900,6 +7153,7 @@ class ClaudeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
                 live = _LIVE_SESSIONS.get(sid) if sid else None
                 if live is None:
                     continue
+                tracked = live
                 if live.closing:
                     exit_reason = await self._await_live_exit_or_force(
                         live=live,
@@ -6979,7 +7233,11 @@ class ClaudeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
                 if not live.idle:
                     live.idle_since = None
                     live.hold_started = None
+                    live.idle_period_started = None
                     continue
+                if live.idle_period_started is None:
+                    live.idle_period_started = now
+                    live.rearm_logged_at = None
                 if _awaiting_injected(state):
                     # A follow-up was written; its turn hasn't opened yet.
                     live.idle_since = now
@@ -6998,11 +7256,27 @@ class ClaudeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
                     live.idle_since = now
                 live.had_live_work = live_work
                 if live_work:
+                    rearm = state.bg_hold_rearm_on_progress
+                    if rearm and live.hold_started is not None:
+                        # #829: the hold measures quiet time, not time since
+                        # the turn — any newer background activity moves it.
+                        activity = latest_background_activity(state)
+                        if activity is not None and activity.at > live.hold_started:
+                            live.hold_started = activity.at
+                            self._log_hold_rearm(live, activity, run_logger, now)
                     if (
                         max_hold_s > 0
                         and live.hold_started is not None
                         and now - live.hold_started >= max_hold_s
                     ):
+                        if rearm:
+                            # #829 fallback, only at would-expire: a
+                            # background Bash that is still printing.
+                            output = await _bash_output_activity(state)
+                            if output is not None and output.at > live.hold_started:
+                                live.hold_started = output.at
+                                self._log_hold_rearm(live, output, run_logger, now)
+                                continue
                         await close_live_session(
                             sid, "max_hold", notice=True, only_if_idle=True
                         )
@@ -7022,6 +7296,73 @@ class ClaudeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
                 ),
                 reason=exit_reason,
             )
+            # The run's task group is cancelled as soon as the CLI's stdout
+            # ends, so "cancelled" is also the normal exit after a close —
+            # report it once the process is gone (never while it may still
+            # be running, e.g. a /cancel that gave up waiting).
+            if (
+                tracked is not None
+                and tracked.closing
+                and not tracked.closed_notified
+                and (
+                    exit_reason != "cancelled"
+                    or reader_done.is_set()
+                    or getattr(proc, "returncode", None) is not None
+                )
+            ):
+                await self._notify_live_closed(tracked, run_logger)
+
+    def _log_hold_rearm(
+        self,
+        live: LiveSession,
+        activity: BackgroundActivity,
+        run_logger: Any,
+        now: float,
+    ) -> None:
+        """#829: ``claude.live_session.hold_rearmed`` — the first re-arm of
+        an idle period, then at most every ``_hold_rearm_log_every_s``
+        (counted from the previous line)."""
+        last = live.rearm_logged_at
+        if last is not None and now - last < self._hold_rearm_log_every_s:
+            return
+        live.rearm_logged_at = now
+        run_logger.info(
+            "claude.live_session.hold_rearmed",
+            session_id=live.session_id,
+            source=activity.source,
+            task_id=activity.task_id,
+            since_turn_s=(
+                round(now - live.idle_period_started, 1)
+                if live.idle_period_started is not None
+                else None
+            ),
+            activity_age_s=round(max(0.0, now - activity.at), 1),
+        )
+
+    async def _notify_live_closed(self, live: LiveSession, run_logger: Any) -> None:
+        """#829: tell listeners how a close ended — once, after the process
+        is gone. ``quarantined`` is read from the store, so it is right on
+        every path (clean exit, SIGINT, SIGTERM, error)."""
+        live.closed_notified = True
+        quarantined = False
+        with contextlib.suppress(Exception):
+            quarantined = get_quarantine_store().is_quarantined(
+                self.engine, live.session_id
+            )
+        payload = {
+            "reason": live.close_reason,
+            "quarantined": quarantined,
+            "tasks": list(live.close_tasks),
+        }
+        run_logger.info(
+            "claude.live_session.closed",
+            session_id=live.session_id,
+            close_reason=live.close_reason,
+            quarantined=quarantined,
+            tasks=len(live.close_tasks),
+        )
+        with anyio.CancelScope(shield=True), anyio.move_on_after(5):
+            await _notify_live_listeners(live, "closed", payload)
 
     async def _await_live_exit_or_force(
         self,
@@ -7096,6 +7437,13 @@ class ClaudeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
         # Quarantining it would cost the user their context on the next
         # message; #631 empty-resume recovery stays the backstop.
         idle_clean = live.closed_idle_clean and _is_clean_idle(live)
+        # #829 B2: an Untether-initiated close of a session whose turn was
+        # closed (so ``idle_clean`` failed only because tasks were live — a
+        # background agent ignores EOF, P0 G6) may still stop cleanly on
+        # SIGINT: rc 0, a complete transcript, resumable (P0 G7-G9). Its
+        # quarantine is decided after the SIGINT wait instead of before it.
+        # ``abs_cap`` (mid-turn) and ``error`` never qualify.
+        may_stop_clean = not idle_clean and _may_stop_clean(live)
         # #791 (a): record what the CLI was doing before any signal changes it.
         run_logger.warning(
             "claude.live_session.close_grace_expired",
@@ -7105,34 +7453,55 @@ class ClaudeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
             grace_s=grace_s,
             live_tasks=live_tasks,
             idle_clean=idle_clean,
+            last_progress_age_s=_last_progress_age_s(live.state),
             **_close_grace_diag(proc.pid, grace_start_diag),
         )
-        quarantined = False
-        if (
-            not idle_clean
-            and stream is not None
-            and stream.did_emit_completed
-            and _load_quarantine_on_forced_teardown()
-        ):
+
+        def quarantine() -> bool:
+            if (
+                idle_clean
+                or stream is None
+                or not stream.did_emit_completed
+                or not _load_quarantine_on_forced_teardown()
+            ):
+                return False
             try:
                 get_quarantine_store().quarantine(
                     self.engine, sid, reason="forced_teardown_after_result"
                 )
-                quarantined = True
             except Exception:  # noqa: BLE001 — never break teardown
                 run_logger.debug("session.quarantine_record_failed", exc_info=True)
+                return False
+            return True
+
+        quarantined = False if may_stop_clean else quarantine()
         # #791 (c): SIGINT first — the CLI's own Ctrl-C shutdown path (the
         # whole process group, as a terminal Ctrl-C would) — then SIGTERM.
-        signal_pid_group(proc.pid, signal.SIGINT)
-        with anyio.move_on_after(self._live_close_sigint_grace_s):
-            await reader_done.wait()
-        if reader_done.is_set() or proc.returncode is not None:
+        #
+        # #829: shielded (bounded by the SIGINT grace + 1 s) — the CLI's exit
+        # ends the reader, which cancels this task group; a deferred B2
+        # quarantine decision must not be lost to that cancellation.
+        stopped_clean = False
+        with anyio.CancelScope(shield=True):
+            signal_pid_group(proc.pid, signal.SIGINT)
+            with anyio.move_on_after(self._live_close_sigint_grace_s):
+                await reader_done.wait()
+            exited = reader_done.is_set() or proc.returncode is not None
+            if may_stop_clean:
+                if exited:
+                    stopped_clean = await self._await_returncode(proc) == 0
+                if not stopped_clean:
+                    # rc != 0, or deaf to SIGINT too (the SIGTERM path below
+                    # keeps today's quarantine).
+                    quarantined = quarantine()
+        if exited:
             run_logger.info(
                 "claude.live_session.exited_after_sigint",
                 session_id=sid,
                 pid=proc.pid,
                 close_reason=live.close_reason,
                 quarantined=quarantined,
+                stopped_clean=stopped_clean,
             )
             return "sigint"
         run_logger.warning(
@@ -7155,6 +7524,14 @@ class ClaudeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
         if proc.returncode is None:
             signal_pid_group(proc.pid, signal.SIGKILL)
         return "sigkill"
+
+    async def _await_returncode(self, proc: Any, timeout_s: float = 1.0) -> int | None:
+        """#829: the exit code once the process has been reaped (stdout EOF
+        can precede the reap by a moment); None if still unknown."""
+        if proc.returncode is None and hasattr(proc, "wait"):
+            with anyio.move_on_after(timeout_s), contextlib.suppress(Exception):
+                await proc.wait()
+        return proc.returncode
 
     async def _post_result_idle_watchdog(
         self,
@@ -8310,6 +8687,14 @@ class ClaudeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
                         state.async_hook_max_hold_s = float(
                             getattr(settings_obj.watchdog, "async_hook_max_hold", 630.0)
                         )
+                        # #829: read per spawn like its siblings (D2).
+                        state.bg_hold_rearm_on_progress = bool(
+                            getattr(
+                                settings_obj.watchdog,
+                                "bg_hold_rearm_on_progress",
+                                True,
+                            )
+                        )
                 except Exception:  # noqa: BLE001 — settings errors must not block a run
                     run_logger.debug(
                         "post_result_idle.settings_load_failed", exc_info=True
@@ -8322,6 +8707,7 @@ class ClaudeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
                     stream.followup_turns = True
                     state.spawn_run_options = get_run_options()
                 state.live_session_max_s = live_session_max_s
+                state.bg_max_hold_s = post_result_bg_max_hold_s
 
                 async with anyio.create_task_group() as tg:
                     tg.start_soon(
