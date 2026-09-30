@@ -107,6 +107,10 @@ Anthropic runs real-time safeguards on Claude's responses. When one flags a requ
 
 The first time it happens in a session, the footer also carries a pointer to Anthropic's guidance. For cyber-security work that's the [real-time cyber safeguards article](https://support.claude.com/en/articles/14604842-real-time-cyber-safeguards-on-claude), which covers the Cyber Verification Program; otherwise it's Claude Code's [automatic model fallback](https://code.claude.com/docs/en/model-config#automatic-model-fallback) docs, which explain which model it switches to and the `switchModelsOnFlag` setting. If a request keeps getting stopped, rephrase it or pick a different model with `/model`. Untether doesn't bypass or retry around safeguards itself; it only makes the stop visible.
 
+## How can I tell when Claude's context is filling up?
+
+Look at the end of the status line, the first line of every progress message and reply: `done · claude · 1m 36s · step 10 · 62% ctx` means the conversation fills 62% of Claude's context window. The value updates as Claude works and is shown on follow-up turns too. It appears once Untether has learned the model's window size, which after a restart can be the first reply's final message. It reads a little lower than `/context` in the terminal while Claude is in the middle of tool calls, because Untether only sees the usage of Claude's last response. After Claude compacts the conversation the value disappears until its next response. Codex and the other engines don't show it yet. To hide it, set `show_context_usage = false` under `[progress]` in `untether.toml`; the change applies to the next message without a restart. See [Verbose progress](https://untether.littlebearapps.com/how-to/verbose-progress/#read-the-status-line).
+
 ## How do I keep agents from spending too much money?
 
 Untether ships per-run and per-day cost budgets. In `untether.toml`:

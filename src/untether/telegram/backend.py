@@ -257,6 +257,7 @@ class TelegramBackend(TransportBackend):
         formatter = MarkdownFormatter(
             max_actions=progress_cfg.max_actions,
             verbosity=progress_cfg.verbosity,
+            show_context_usage=progress_cfg.show_context_usage,
         )
         presenter = TelegramPresenter(
             formatter=formatter,

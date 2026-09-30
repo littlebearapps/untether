@@ -121,6 +121,12 @@ class StreamAssistantMessageBody(msgspec.Struct, forbid_unknown_fields=False):
     # verbatim by the CLI's headless emitter.
     stop_reason: str | None = None
     stop_details: dict[str, Any] | None = None
+    # #819: the API usage of this response. ``input_tokens`` +
+    # ``cache_creation_input_tokens`` + ``cache_read_input_tokens`` of the
+    # latest main-thread frame is the usage part of the CLI's ``/context``
+    # total. Any: the runner reads ints only, so a shape change can never
+    # drop the line.
+    usage: Any = None
 
 
 class StreamUserMessage(
@@ -130,6 +136,12 @@ class StreamUserMessage(
     uuid: str | None = None
     parent_tool_use_id: str | None = None
     session_id: str | None = None
+    # #819: ``isCompactSummary`` marks the compaction summary the CLI writes
+    # after ``compact_boundary``; ``isReplay`` a replayed local-command echo
+    # (``/compact``'s "Compacted" stdout). Wire presence unconfirmed on
+    # 2.1.285, so Any + optional.
+    isReplay: Any = None
+    isCompactSummary: Any = None
 
 
 class StreamAssistantMessage(
@@ -236,6 +248,17 @@ class StreamSystemMessage(
     hook_event: Any = None
     outcome: Any = None
     exit_code: Any = None
+    # #819 compaction (CLI 2.1.285): ``status`` frames carry
+    # ``status: "compacting"`` (re-sent every 30 s) and then ``status: null``
+    # with ``compact_result`` (success / failed) and an optional
+    # ``compact_error``; ``compact_boundary`` carries ``compact_metadata``
+    # ``{trigger: manual|auto, pre_tokens, post_tokens?,
+    # cumulative_dropped_tokens?, duration_ms?, …}`` and an optional
+    # ``logical_parent_uuid``. All Any for the drift reason above.
+    compact_metadata: Any = None
+    compact_result: Any = None
+    compact_error: Any = None
+    logical_parent_uuid: Any = None
 
 
 class StreamResultMessage(
@@ -261,6 +284,11 @@ class StreamResultMessage(
     # readers check ``isinstance(origin, dict)`` first.
     origin: Any = None
     stop_reason: Any = None
+    # #819: per-model usage for the session, keyed by the model id the CLI
+    # used; each entry carries ``contextWindow`` (the context-% denominator)
+    # and ``maxOutputTokens``. Field name as on the wire. Any: readers check
+    # ``isinstance(..., dict)`` and int fields.
+    modelUsage: Any = None
 
 
 # #806: result ``terminal_reason`` values that mean the turn was cancelled

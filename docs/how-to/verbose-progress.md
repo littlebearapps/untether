@@ -43,6 +43,16 @@ Verbose mode adds context lines underneath each action, so you can see exactly w
 
 <img src="../assets/screenshots/verbose-progress.jpg" alt="Compact vs verbose progress for the same tool action" width="360" loading="lazy" />
 
+## Read the status line
+
+The first line of every progress message and final answer is the status line:
+
+```
+done · claude · 1m 36s · step 10 · 62% ctx
+```
+
+It shows the state (`working`, `done`, `error`, `cancelled`), the engine, the elapsed time, the number of steps so far and, for Claude, how full the context window is (`62% ctx`). The context value appears once Claude's context window is known — at the latest by the final of the first run on a model after a restart — and disappears after a compaction until Claude's next response. It reads a little lower than `/context` in the terminal while Claude is working through tool calls. Turn it off with `[progress] show_context_usage = false`.
+
 ## Set global default in config
 
 To make verbose the default for all chats:

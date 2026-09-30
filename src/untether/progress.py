@@ -37,6 +37,9 @@ class ProgressState:
     meta_line: str | None = None
     # #777: pre-result background-task block (markdown), set by the bridge.
     background: str | None = None
+    # #819: context-window use in percent (Claude), from ``telemetry``
+    # ActionEvents. None when unknown or just after a compaction.
+    context_pct: int | None = None
 
 
 class ProgressTracker:
@@ -57,6 +60,8 @@ class ProgressTracker:
         self.action_count = 0
         self._actions: dict[str, ActionState] = {}
         self._seq = 0
+        # #819: latest context-window use (percent), header-only.
+        self.context_pct: int | None = None
 
     def note_event(self, event: UntetherEvent) -> bool:
         match event:
@@ -74,6 +79,11 @@ class ProgressTracker:
             case ActionEvent(action=action, phase=phase, ok=ok):
                 if action.kind == "turn":
                     return False
+                if action.kind == "telemetry":
+                    # #819: a value for the header, not a step — never
+                    # stored as an action (no step bump, no running-tool,
+                    # keyboard or fold bookkeeping).
+                    return self._note_telemetry(action.detail)
                 action_id = str(action.id or "")
                 if not action_id:
                     return False
@@ -108,6 +118,23 @@ class ProgressTracker:
                 return True
             case _:
                 return False
+
+    def _note_telemetry(self, detail: dict[str, Any]) -> bool:
+        """#819: apply a ``telemetry`` ActionEvent. True only when the shown
+        value changed (a re-render is owed)."""
+        if "context_pct" not in detail:
+            return False
+        value = detail["context_pct"]
+        if value is not None and (
+            not isinstance(value, int)
+            or isinstance(value, bool)
+            or not 0 <= value <= 100
+        ):
+            return False
+        if value == self.context_pct:
+            return False
+        self.context_pct = value
+        return True
 
     def action_detail(self, action_id: str) -> dict[str, Any] | None:
         """The tracked action's current ``detail``, or None when unknown."""
@@ -184,4 +211,5 @@ class ProgressTracker:
             resume_line=resume_line,
             context_line=context_line,
             meta_line=meta_line,
+            context_pct=self.context_pct,
         )

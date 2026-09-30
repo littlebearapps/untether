@@ -716,3 +716,115 @@ def test_set_permission_mode_refusal_codes(cli_blob: mmap.mmap) -> None:
     guarded = {m.decode() for m in re.findall(rb'if\(\w==="(\w+)"', body)}
     if guarded != {"bypassPermissions", "auto"}:
         pytest.fail(f"guarded target modes {sorted(guarded)} — {hint}")
+
+
+# ── #819: context-window use and compaction ──────────────────────────────────
+
+
+def test_compaction_frames_present(cli_blob: mmap.mmap) -> None:
+    """The compaction frames #819's rows and ``% ctx`` reset are built on:
+    ``system/status`` (``compacting`` → null + ``compact_result``) and
+    ``system/compact_boundary`` + ``compact_metadata``."""
+    for literal in (
+        b'subtype:"compact_boundary"',
+        b"compact_metadata",
+        b"pre_tokens:",
+        b"post_tokens",
+        b"cumulative_dropped_tokens:",
+        b'type:"sdk_status",status:"compacting"',
+        b"compact_result",
+        b"compact_error:",
+        b"logical_parent_uuid",
+        b"isCompactSummary",
+    ):
+        if cli_blob.find(literal) == -1:
+            pytest.fail(
+                f"{literal.decode()} is gone from the installed CLI — the #819 "
+                "compaction handling reads it; re-derive (last green on CLI "
+                f"{PROBED_CLI_VERSION})"
+            )
+    status = _schema_window(cli_blob, "status")
+    result = _require(
+        _zod_enum(status, rb"compact_result:\w{1,4}\(\[([^\]]*)\]\)"),
+        "system/status compact_result",
+    )
+    assert set(result) == {"success", "failed"}, (
+        f"system/status compact_result is now {result} — review the #819 row "
+        "outcomes (success / failed / skipped)"
+    )
+    assert b"permissionMode:" in status, "system/status lost permissionMode (#383)"
+    boundary = _schema_window(cli_blob, "compact_boundary")
+    trigger = _require(
+        _zod_enum(boundary, rb"trigger:\w{1,4}\(\[([^\]]*)\]\)"),
+        "compact_metadata.trigger",
+    )
+    assert set(trigger) == {"manual", "auto"}, (
+        f"compact_metadata.trigger is now {trigger} — the #819 manual-only "
+        "0-turn exemption keys off 'manual'"
+    )
+    for key in ("pre_tokens:", "post_tokens:", "duration_ms:"):
+        assert key.encode() in boundary, (
+            f"compact_metadata lost {key!r} (last green on CLI {PROBED_CLI_VERSION})"
+        )
+
+
+def test_context_window_literals_present(cli_blob: mmap.mmap) -> None:
+    """#819's ``% ctx`` denominator is ``result.modelUsage[<model>]
+    .contextWindow``; its numerator is the assistant ``usage`` input side —
+    the same parts the CLI's own ``/context`` reads."""
+    for literal in (
+        b"contextWindow",
+        b"rawMaxTokens",
+        b"autoCompactThreshold",
+        b"% context used",
+        b"cache_creation_input_tokens",
+        b"cache_read_input_tokens",
+    ):
+        if cli_blob.find(literal) == -1:
+            pytest.fail(
+                f"{literal.decode()} is gone from the installed CLI — re-check "
+                f"the #819 context maths (last green on CLI {PROBED_CLI_VERSION})"
+            )
+    if not re.search(
+        rb"costUSD:\w{1,4}\(\),contextWindow:\w{1,4}\(\)\.int\(\)", cli_blob
+    ):
+        pytest.fail(
+            "result.modelUsage no longer declares an int contextWindow — the "
+            f"#819 window cache would never learn (last green on CLI "
+            f"{PROBED_CLI_VERSION})"
+        )
+
+
+def test_get_context_usage_present(cli_blob: mmap.mmap) -> None:
+    """Pins the contract of the #833 follow-up (exact ``/context`` parity via
+    the ``get_context_usage`` control request)."""
+    for literal in (
+        b"get_context_usage",
+        b"'summary' answers from the last response",
+    ):
+        if cli_blob.find(literal) == -1:
+            pytest.fail(
+                f"{literal.decode()} is gone from the installed CLI — revisit "
+                f"#833 (last green on CLI {PROBED_CLI_VERSION})"
+            )
+
+
+def test_compact_heartbeat_interval_present(cli_blob: mmap.mmap) -> None:
+    """The CLI re-sends ``status: "compacting"`` on a 30 s interval while a
+    compaction runs — the #819 liveness latch is sized from it (four missed
+    heartbeats)."""
+    m = re.search(
+        rb"(\w{1,4})=(\d+);function \w{1,4}\(\w\)\{let \w=setInterval\("
+        rb"\w{1,4},\1,\w\);return\(\)=>clearInterval\(\w\)\}"
+        rb'function \w{1,4}\(\w\)\{[^}]{0,80}type:"sdk_status",status:"compacting"',
+        cli_blob,
+    )
+    if m is None:
+        pytest.skip(
+            "the compacting heartbeat's minified shape moved — re-derive the "
+            f"probe (last green on CLI {PROBED_CLI_VERSION})"
+        )
+    assert int(m.group(2)) == 30000, (
+        f"compacting heartbeat is now {m.group(2)} ms — resize the #819 "
+        "compaction latch"
+    )

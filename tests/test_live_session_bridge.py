@@ -1470,3 +1470,65 @@ async def test_815_tool_using_turn_elapsed_unchanged() -> None:
     )
     assert "· 5s" in final
     assert final.count(TURN_COMPLETE_MARKER) == 1
+
+
+# ── #819: context-window use in turn headers ───────────────────────────────
+
+
+def _telemetry(pct: int | None) -> ActionEvent:
+    return ActionEvent(
+        engine="claude",
+        action=Action(
+            id="claude.context",
+            kind="telemetry",
+            title="context",
+            detail={"context_pct": pct},
+        ),
+        phase="updated",
+    )
+
+
+async def test_819_telemetry_does_not_force_turn_progress() -> None:
+    """A status-line value never opens a wake turn's progress message (the
+    lazy progress and #785 folding stay intact) but is still noted."""
+    from untether.background_status import count_substantive_actions
+
+    rec = _Recorder()
+    router = _router(rec)
+    await router.on_turn(_turn("started", detail={"tasks": ["build"]}))
+    await router.on_event(_telemetry(30))
+    assert rec.created == []
+    assert router.current is not None
+    tracker = router.current.tracker
+    assert tracker.context_pct == 30
+    assert tracker.action_count == 0
+    assert count_substantive_actions(a.action for a in tracker.snapshot().actions) == 0
+    await router.on_event(_action())
+    assert rec.created == [2]
+
+
+async def test_819_turn_final_header_shows_context_pct() -> None:
+    transport, run_progress = await _run_with_turn(
+        Emit(_turn("started", reason="followup")),
+        Emit(_telemetry(30)),
+        Emit(_action()),
+        Emit(_telemetry(34)),
+        Emit(_turn("completed", reason="followup", ok=True, answer="TURN-2-ANSWER")),
+    )
+    final, progress = _turn_texts(transport, run_progress, "TURN-2-ANSWER")
+    header = final.splitlines()[0]
+    assert header.endswith("· 34% ctx")
+    assert "ctx" not in final.split("\n", 1)[1].replace("TURN-2-ANSWER", "")
+    assert any("% ctx" in t.splitlines()[0] for t in progress)
+
+
+def test_819_export_skips_telemetry_keeps_other_actions(monkeypatch) -> None:
+    recorded: list[dict] = []
+    monkeypatch.setattr(
+        "untether.telegram.commands.export.record_session_event",
+        lambda session_id, event, channel_id=0: recorded.append(event),
+    )
+    rb._record_export_event(_telemetry(40), _TOKEN)
+    assert recorded == []
+    rb._record_export_event(_action(), _TOKEN)
+    assert [e["action"]["kind"] for e in recorded] == ["command"]
