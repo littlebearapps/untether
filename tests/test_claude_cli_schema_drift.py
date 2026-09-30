@@ -394,3 +394,17 @@ def test_hook_started_precedes_a_detached_hook_spawn(cli_blob: mmap.mmap) -> Non
             rb'`Hook "\$\{\w+\.command\}" requires bash but Git Bash',
             window,
         ), "hook spawn detached flag no longer keyed on the Windows/Git Bash check"
+
+
+# ── #383: permission-mode edges and the plan re-arm ──────────────────────────
+
+
+def test_permission_mode_status_frame_present(cli_blob: mmap.mmap) -> None:
+    """#383 tracks the CLI's effective mode from the `system/status` frame the
+    CLI emits on every mode change (plan exit, set_permission_mode)."""
+    if cli_blob.find(b'subtype:"status",status:null,permissionMode:') == -1:
+        pytest.fail(
+            "the system/status permissionMode frame literal is gone from the "
+            "installed CLI — #383's effective-mode tracking falls back to the "
+            f"approval stamps (last green on CLI {PROBED_CLI_VERSION})"
+        )

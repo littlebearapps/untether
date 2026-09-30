@@ -363,6 +363,9 @@ class ControlErrorResponse(
 ):
     request_id: str
     error: str
+    # e.g. "invalid_mode" / "bypass_not_launched" on a refused
+    # set_permission_mode (CLI 2.1.285; #383).
+    error_code: str | None = None
 
 
 type ControlResponse = ControlSuccessResponse | ControlErrorResponse

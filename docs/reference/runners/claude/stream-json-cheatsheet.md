@@ -257,6 +257,16 @@ One line per input command (user line or scheduled wake-up):
 
 In control-channel mode the process does not exit after `result`: background-task completions, Monitor lines, ScheduleWakeup firings and user lines written while idle each produce another `system/init` → … → `result`. `total_cost_usd` is cumulative per session (including across `--resume`); `num_turns` is per result.
 
+### `system` / `status` — permission-mode edges (#383)
+
+Emitted on **every** change of the CLI's permission mode — an approved `ExitPlanMode` (mode becomes `prePlanMode ?? "default"`, so a session started in plan lands in `default`; emitted *before* the tool_result) and a successful `set_permission_mode`. A no-op change emits nothing. (The same subtype also carries `status:"compacting"` during compaction.)
+
+```json
+{"type":"system","subtype":"status","status":null,"permissionMode":"default","uuid":"…","session_id":"…"}
+```
+
+`system/init.permissionMode` reports the mode each turn starts in (live follow-up turns included on 2.1.285). Untether tracks the effective mode from both (`claude.permission_mode.changed`); neither produces an Untether event.
+
 ### Hook lifecycle (`system` subtypes, `--include-hook-events`) — #812
 
 Emitted only when Untether passes `--include-hook-events` (control-channel mode, CLI lists the

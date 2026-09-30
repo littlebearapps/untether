@@ -1327,6 +1327,20 @@ class ClaudeStreamState:
     # #383: the run's configured mode maps to CLI `plan` (`plan` or
     # `plan-auto`). Armed in `new_state()`; drives the approval caption.
     configured_plan_mode: bool = False
+    # #383 the CLI's effective permission mode, tracked from the native
+    # signals: every `system/init.permissionMode`, `system/status` frames
+    # carrying a `permissionMode` (emitted on every mode change) and the ack
+    # of our own `set_permission_mode`. None until the first init.
+    effective_permission_mode: str | None = None
+    # The CLI reported `plan` at least once in this process (guards the
+    # re-arm against fighting the CLI's own precedence, e.g.
+    # --dangerously-skip-permissions overriding plan).
+    plan_mode_observed: bool = False
+    # When (monotonic) / in which turn a plan chat left plan mode; cleared
+    # when plan is observed again. Also stamped by the approval paths, for
+    # CLIs that emit no status frames.
+    plan_exited_at: float | None = None
+    plan_exit_turn: int | None = None
     # Whether this run is a resume (for error diagnostics)
     resumed: bool = False
     # Track max text block length seen (for cooldown bypass — survives overwrites)
@@ -3056,6 +3070,188 @@ def _hooks_outstanding(state: ClaudeStreamState) -> list[PendingHook]:
     ]
 
 
+# ── #383: plan approvals are turn-scoped, and the approval says so ─────────
+
+_PLAN_APPROVE_BUTTON = "✅ Approve Plan"
+_PLAN_CAPTION_CARRY_OUT = (
+    "Approving lets Claude carry out this plan without further prompts."
+)
+_PLAN_CAPTION_RESUMES = " Plan mode resumes when this reply ends."
+_PLAN_CAPTION_PROMPTING = (
+    "Approving ends planning; Claude still asks before each action."
+)
+_PLAN_APPROVED_FEEDBACK = "✅ Plan approved — Claude will carry it out now"
+_PLAN_APPROVED_FEEDBACK_RESUMES = " · plan mode resumes when it's done"
+
+
+def _plan_mode_resumes(state: ClaudeStreamState) -> bool:
+    """True when the chat is a plan chat AND plan mode really comes back once
+    the approved reply ends: live sessions off (every message respawns with
+    ``--permission-mode plan``). The approval UI only claims it when true."""
+    if not state.configured_plan_mode:
+        return False
+    return not state.live_mode
+
+
+def _plan_approve_caption(state: ClaudeStreamState) -> str | None:
+    """#383: the line under an ExitPlanMode approval saying what approving
+    does. Plan / plan-auto chats get the carry-out sentence (plus the
+    "resumes" clause only when :func:`_plan_mode_resumes`); a prompting-mode
+    chat (Claude entered plan mode itself) gets its own wording; other
+    autonomous modes get none."""
+    if state.configured_plan_mode:
+        caption = _PLAN_CAPTION_CARRY_OUT
+        if _plan_mode_resumes(state):
+            caption += _PLAN_CAPTION_RESUMES
+        return caption
+    if state.prompting_mode:
+        return _PLAN_CAPTION_PROMPTING
+    return None
+
+
+def plan_approved_feedback(session_id: str | None) -> str:
+    """#383: the feedback edit shown after a plan is approved in Telegram."""
+    text = _PLAN_APPROVED_FEEDBACK
+    state = _SESSION_BG_STATE.get(session_id) if session_id else None
+    if state is not None and _plan_mode_resumes(state):
+        text += _PLAN_APPROVED_FEEDBACK_RESUMES
+    return text
+
+
+def _scope_plan_approvals_to_turn(
+    session_id: str | None, *, turn: int, reason: str
+) -> None:
+    """#383: a live-session turn boundary ends the reply a plan approval was
+    given in. ``_PLAN_EXIT_APPROVED`` is cleared outright; an unconsumed
+    post-outline approval (``_DISCUSS_APPROVED``) survives exactly one
+    boundary (``_DISCUSS_CARRY``) so "outline → Approve Plan → go ahead"
+    needs one tap, and is cleared at the second."""
+    if session_id is None:
+        return
+    cleared: list[str] = []
+    if session_id in _PLAN_EXIT_APPROVED:
+        _PLAN_EXIT_APPROVED.discard(session_id)
+        cleared.append("plan_exit_approved")
+    if session_id in _DISCUSS_CARRY:
+        _DISCUSS_CARRY.discard(session_id)
+        if session_id in _DISCUSS_APPROVED:
+            _DISCUSS_APPROVED.discard(session_id)
+            cleared.append("discuss_approved")
+    elif session_id in _DISCUSS_APPROVED:
+        _DISCUSS_CARRY.add(session_id)
+        logger.info(
+            "claude.plan_approval.carried",
+            session_id=session_id,
+            turn=turn,
+            turn_reason=reason,
+        )
+    if cleared:
+        logger.info(
+            "claude.plan_approval.cleared",
+            session_id=session_id,
+            turn=turn,
+            turn_reason=reason,
+            reason="turn_boundary",
+            cleared=cleared,
+        )
+
+
+_PLAN_REARM_ID_PREFIX = "ut_plan_rearm_"
+
+
+def _stamp_plan_exit(state: ClaudeStreamState) -> None:
+    """#383 fallback for CLIs without status frames: an approval path just
+    let a plan chat leave plan mode."""
+    if state.configured_plan_mode and state.plan_exited_at is None:
+        state.plan_exited_at = time.monotonic()
+        state.plan_exit_turn = state.turn
+
+
+def _note_permission_mode(
+    state: ClaudeStreamState, mode: str, *, source: str, session_id: str | None
+) -> None:
+    """#383: record the CLI's effective permission mode from a native signal
+    (``source`` ∈ ``init`` | ``status`` | ``ack``)."""
+    previous = state.effective_permission_mode
+    if mode != previous:
+        state.effective_permission_mode = mode
+        logger.info(
+            "claude.permission_mode.changed",
+            session_id=session_id,
+            source=source,
+            turn=state.turn,
+            **{"from": previous, "to": mode},
+        )
+    if mode == "plan":
+        state.plan_mode_observed = True
+        state.plan_exited_at = None
+        state.plan_exit_turn = None
+        # Back in plan mode: nothing the old approval covered is running
+        # unplanned any more. `_DISCUSS_APPROVED` is a pre-exit approval
+        # and follows only the one-boundary carry.
+        if session_id is not None and session_id in _PLAN_EXIT_APPROVED:
+            _PLAN_EXIT_APPROVED.discard(session_id)
+            logger.info(
+                "claude.plan_approval.cleared",
+                session_id=session_id,
+                turn=state.turn,
+                reason="plan_rearmed",
+                cleared=["plan_exit_approved"],
+            )
+    elif state.configured_plan_mode:
+        _stamp_plan_exit(state)
+
+
+def _translate_status(
+    event: claude_schema.StreamSystemMessage,
+    *,
+    state: ClaudeStreamState,
+    factory: EventFactory,
+) -> list[UntetherEvent]:
+    """``system/status`` frames. #383: a string ``permissionMode`` is the
+    CLI's mode-change edge (``status`` is null). Produces no events.
+    # #819: compacting status lands here (``status: "compacting"``)."""
+    mode = event.permissionMode
+    if isinstance(mode, str):
+        _note_permission_mode(
+            state,
+            mode,
+            source="status",
+            session_id=event.session_id
+            or (factory.resume.value if factory.resume else None),
+        )
+    return []
+
+
+def _handle_plan_rearm_ack(
+    state: ClaudeStreamState,
+    response: claude_schema.ControlResponse,
+    *,
+    session_id: str | None,
+) -> None:
+    """#383: the CLI's answer to our ``set_permission_mode`` request."""
+    match response:
+        case claude_schema.ControlSuccessResponse(request_id=request_id):
+            body = response.response or {}
+            mode = body.get("mode") if isinstance(body, dict) else None
+            logger.info(
+                "claude.permission_mode.rearm_ack",
+                session_id=session_id,
+                request_id=request_id,
+                mode=mode,
+            )
+            if isinstance(mode, str):
+                _note_permission_mode(state, mode, source="ack", session_id=session_id)
+        case claude_schema.ControlErrorResponse(request_id=request_id):
+            logger.warning(
+                "claude.permission_mode.rearm_failed",
+                session_id=session_id,
+                request_id=request_id,
+                error=response.error,
+                error_code=response.error_code,
+            )
+
+
 class _SystemSubtypeHandler(Protocol):
     def __call__(
         self,
@@ -3076,6 +3272,8 @@ _SYSTEM_SUBTYPE_HANDLERS: dict[str, _SystemSubtypeHandler] = {
     "model_refusal_fallback": _translate_model_refusal_fallback,
     "model_refusal_no_fallback": _translate_model_refusal_no_fallback,
     "model_fallback": _translate_model_fallback,
+    # #383: permission-mode edges (#819 extends it for compaction).
+    "status": _translate_status,
     # #812: hook lifecycle frames — tracked, never surfaced.
     "hook_started": _translate_hook_event,
     "hook_progress": _translate_hook_event,
@@ -4388,92 +4586,6 @@ def _drop_exitplanmode_plan(
     )
 
 
-# ── #383: plan approvals are turn-scoped, and the approval says so ─────────
-
-_PLAN_APPROVE_BUTTON = "✅ Approve Plan"
-_PLAN_CAPTION_CARRY_OUT = (
-    "Approving lets Claude carry out this plan without further prompts."
-)
-_PLAN_CAPTION_RESUMES = " Plan mode resumes when this reply ends."
-_PLAN_CAPTION_PROMPTING = (
-    "Approving ends planning; Claude still asks before each action."
-)
-_PLAN_APPROVED_FEEDBACK = "✅ Plan approved — Claude will carry it out now"
-_PLAN_APPROVED_FEEDBACK_RESUMES = " · plan mode resumes when it's done"
-
-
-def _plan_mode_resumes(state: ClaudeStreamState) -> bool:
-    """True when the chat is a plan chat AND plan mode really comes back once
-    the approved reply ends: live sessions off (every message respawns with
-    ``--permission-mode plan``). The approval UI only claims it when true."""
-    if not state.configured_plan_mode:
-        return False
-    return not state.live_mode
-
-
-def _plan_approve_caption(state: ClaudeStreamState) -> str | None:
-    """#383: the line under an ExitPlanMode approval saying what approving
-    does. Plan / plan-auto chats get the carry-out sentence (plus the
-    "resumes" clause only when :func:`_plan_mode_resumes`); a prompting-mode
-    chat (Claude entered plan mode itself) gets its own wording; other
-    autonomous modes get none."""
-    if state.configured_plan_mode:
-        caption = _PLAN_CAPTION_CARRY_OUT
-        if _plan_mode_resumes(state):
-            caption += _PLAN_CAPTION_RESUMES
-        return caption
-    if state.prompting_mode:
-        return _PLAN_CAPTION_PROMPTING
-    return None
-
-
-def plan_approved_feedback(session_id: str | None) -> str:
-    """#383: the feedback edit shown after a plan is approved in Telegram."""
-    text = _PLAN_APPROVED_FEEDBACK
-    state = _SESSION_BG_STATE.get(session_id) if session_id else None
-    if state is not None and _plan_mode_resumes(state):
-        text += _PLAN_APPROVED_FEEDBACK_RESUMES
-    return text
-
-
-def _scope_plan_approvals_to_turn(
-    session_id: str | None, *, turn: int, reason: str
-) -> None:
-    """#383: a live-session turn boundary ends the reply a plan approval was
-    given in. ``_PLAN_EXIT_APPROVED`` is cleared outright; an unconsumed
-    post-outline approval (``_DISCUSS_APPROVED``) survives exactly one
-    boundary (``_DISCUSS_CARRY``) so "outline → Approve Plan → go ahead"
-    needs one tap, and is cleared at the second."""
-    if session_id is None:
-        return
-    cleared: list[str] = []
-    if session_id in _PLAN_EXIT_APPROVED:
-        _PLAN_EXIT_APPROVED.discard(session_id)
-        cleared.append("plan_exit_approved")
-    if session_id in _DISCUSS_CARRY:
-        _DISCUSS_CARRY.discard(session_id)
-        if session_id in _DISCUSS_APPROVED:
-            _DISCUSS_APPROVED.discard(session_id)
-            cleared.append("discuss_approved")
-    elif session_id in _DISCUSS_APPROVED:
-        _DISCUSS_CARRY.add(session_id)
-        logger.info(
-            "claude.plan_approval.carried",
-            session_id=session_id,
-            turn=turn,
-            turn_reason=reason,
-        )
-    if cleared:
-        logger.info(
-            "claude.plan_approval.cleared",
-            session_id=session_id,
-            turn=turn,
-            turn_reason=reason,
-            reason="turn_boundary",
-            cleared=cleared,
-        )
-
-
 def _maybe_audit_env(state: ClaudeStreamState, session_id: str) -> None:
     """One-shot ``/proc/<pid>/environ`` audit on first system.init (#361).
 
@@ -5173,6 +5285,12 @@ def _translate_claude_event_base(
             _maybe_audit_env(state, session_id)
             # #365 capture MCP catalog snapshot + log init-time staleness.
             _capture_mcp_catalog(state, session_id, event.mcp_servers)
+            # #383: every init (live turns included) reports the mode the
+            # turn starts in.
+            if isinstance(event.permissionMode, str):
+                _note_permission_mode(
+                    state, event.permissionMode, source="init", session_id=session_id
+                )
             meta: dict[str, Any] = {}
             for key in (
                 "cwd",
@@ -5623,6 +5741,7 @@ def _translate_claude_event_base(
                     auto_session = factory.resume.value if factory.resume else None
                     if auto_session is not None:
                         _PLAN_EXIT_APPROVED.add(auto_session)
+                    _stamp_plan_exit(state)  # #383
                     _approve_exitplanmode_plan(
                         state, request_id, session_id=auto_session, source="plan_auto"
                     )
@@ -5640,8 +5759,9 @@ def _translate_claude_event_base(
                         _DISCUSS_CARRY.discard(session_id)
                         _OUTLINE_PENDING.discard(session_id)
                         # #283: bypass diff_preview gate for subsequent tools
-                        # in this session (#309).
+                        # in this reply (#309).
                         _PLAN_EXIT_APPROVED.add(session_id)
+                        _stamp_plan_exit(state)  # #383
                         logger.info(
                             "control_request.discuss_approved",
                             request_id=request_id,
@@ -6115,6 +6235,16 @@ def _translate_claude_event_base(
             ]
         case claude_schema.StreamRateLimitMessage(rate_limit_info=info):
             return _translate_rate_limit_event(info, state=state, factory=factory)
+        case claude_schema.StreamControlResponse(response=resp) if (
+            resp.request_id.startswith(_PLAN_REARM_ID_PREFIX)
+        ):
+            # #383: the answer to our own set_permission_mode re-arm.
+            _handle_plan_rearm_ack(
+                state,
+                resp,
+                session_id=factory.resume.value if factory.resume else None,
+            )
+            return []
         case _:
             logger.debug(
                 "claude.event.unrecognised",
@@ -6240,6 +6370,8 @@ class ClaudeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
                 tool_name == "ExitPlanMode" or tool_name in _DIFF_PREVIEW_TOOLS
             ):
                 _PLAN_EXIT_APPROVED.add(session_id_for_plan)
+            if tool_name == "ExitPlanMode" and plan_state is not None:
+                _stamp_plan_exit(plan_state)  # #383
         else:
             inner = {"behavior": "deny", "message": deny_message or "User denied"}
             # Clean up stored input on denial too

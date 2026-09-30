@@ -343,3 +343,158 @@ def test_cleanup_discards_the_carry() -> None:
     _cleanup_session_registries(SID)
     assert SID not in _DISCUSS_APPROVED
     assert SID not in _DISCUSS_CARRY
+
+
+# ── C2: effective-mode tracking ────────────────────────────────────────────
+
+
+def _status(state: ClaudeStreamState, mode: str | None, **extra: Any) -> list[Any]:
+    payload: dict[str, Any] = {"type": "system", "subtype": "status", **extra}
+    if "status" not in extra:
+        payload["status"] = None
+    if mode is not None:
+        payload["permissionMode"] = mode
+    return _feed(state, payload)
+
+
+def _init(state: ClaudeStreamState, mode: str) -> list[Any]:
+    return _feed(
+        state,
+        {
+            "type": "system",
+            "subtype": "init",
+            "model": "claude",
+            "permissionMode": mode,
+        },
+    )
+
+
+def _ack(state: ClaudeStreamState, request_id: str, mode: str | None = "plan") -> Any:
+    response: dict[str, Any] = {"subtype": "success", "request_id": request_id}
+    if mode is not None:
+        response["response"] = {"mode": mode}
+    return _feed(state, {"type": "control_response", "response": response})
+
+
+def test_status_frame_tracks_effective_mode() -> None:
+    state, _ = _live_session()
+    state.live_mode = False  # first turn; StartedEvent path
+    _init(state, "plan")
+    assert state.effective_permission_mode == "plan"
+    assert state.plan_mode_observed
+    with capture_logs() as logs:
+        assert _status(state, "default") == []
+    assert state.effective_permission_mode == "default"
+    assert state.plan_exited_at is not None
+    assert state.plan_exit_turn == state.turn
+    changed = [e for e in logs if e["event"] == "claude.permission_mode.changed"]
+    assert len(changed) == 1
+    assert changed[0]["from"] == "plan"
+    assert changed[0]["to"] == "default"
+    assert changed[0]["source"] == "status"
+
+
+def test_status_without_permission_mode_is_ignored() -> None:
+    """The shared handler's other shape (#819 compaction) changes nothing."""
+    state, _ = _live_session()
+    _init(state, "plan")
+    assert _status(state, None, status="compacting") == []
+    assert state.effective_permission_mode == "plan"
+    assert state.plan_exited_at is None
+
+
+def test_live_turn_init_reports_mode() -> None:
+    state, _ = _live_session()
+    _init(state, "plan")
+    _status(state, "default")
+    _result(state)
+    _init(state, "plan")  # a live follow-up turn's init
+    assert state.effective_permission_mode == "plan"
+    assert state.plan_exited_at is None
+
+
+async def test_fallback_without_status_frames() -> None:
+    """An approval alone (no status frame) stamps the plan exit."""
+    state, _ = _live_session()
+    _control(state, "req-epm", "ExitPlanMode")
+    await _tap("approve", "req-epm")
+    assert state.plan_exited_at is not None
+    assert state.plan_exit_turn == 1
+
+
+async def test_bash_approval_does_not_stamp_plan_exit() -> None:
+    state, _ = _live_session()
+    state.prompting_mode = True
+    _control(state, "req-bash", "Bash")
+    await _tap("approve", "req-bash")
+    assert state.plan_exited_at is None
+
+
+def test_plan_auto_stamp_and_discuss_path_stamp_plan_exit() -> None:
+    state, _ = _live_session()
+    state.auto_approve_exit_plan_mode = True
+    assert _control(state, "req-pa", "ExitPlanMode") == []
+    assert state.plan_exited_at is not None
+    other, _ = _live_session("sess-discuss")
+    _DISCUSS_APPROVED.add("sess-discuss")
+    assert _control(other, "req-da", "ExitPlanMode") == []
+    assert other.plan_exited_at is not None
+
+
+@pytest.mark.parametrize("via", ["status", "ack"])
+def test_plan_observed_clears_plan_exit_approved(via: str) -> None:
+    state, _ = _live_session()
+    _init(state, "plan")
+    _status(state, "default")
+    _PLAN_EXIT_APPROVED.add(SID)
+    _DISCUSS_APPROVED.add(SID)
+    with capture_logs() as logs:
+        if via == "status":
+            _status(state, "plan")
+        else:
+            _ack(state, "ut_plan_rearm_sess-383_1")
+    assert SID not in _PLAN_EXIT_APPROVED
+    assert SID in _DISCUSS_APPROVED  # pre-exit approval: carry rule only
+    assert state.plan_exited_at is None
+    assert state.plan_exit_turn is None
+    cleared = [e for e in logs if e["event"] == "claude.plan_approval.cleared"]
+    assert cleared and cleared[0]["reason"] == "plan_rearmed"
+
+
+def test_foreign_ack_ignored() -> None:
+    """A #365 catalog-refresh ack is not ours: no state change."""
+    state, _ = _live_session()
+    _init(state, "plan")
+    _status(state, "default")
+    assert _ack(state, "ut_catalog_refresh_sess-383_1") == []
+    assert state.effective_permission_mode == "default"
+    assert state.plan_exited_at is not None
+
+
+def test_non_plan_chat_never_stamps_exit() -> None:
+    state, _ = _live_session()
+    state.configured_plan_mode = False
+    _init(state, "acceptEdits")
+    _status(state, "plan")
+    _status(state, "acceptEdits")
+    assert state.plan_exited_at is None
+
+
+def test_error_ack_logs_rearm_failed() -> None:
+    state, _ = _live_session()
+    with capture_logs() as logs:
+        _feed(
+            state,
+            {
+                "type": "control_response",
+                "response": {
+                    "subtype": "error",
+                    "request_id": "ut_plan_rearm_sess-383_1",
+                    "error": "Cannot set permission mode",
+                    "error_code": "invalid_mode",
+                },
+            },
+        )
+    failed = [e for e in logs if e["event"] == "claude.permission_mode.rearm_failed"]
+    assert failed and failed[0]["error_code"] == "invalid_mode"
+    assert failed[0]["log_level"] == "warning"
