@@ -21,13 +21,17 @@ from untether.telegram.loop import (
     _ANSWERED_ECHO_MAX,
     ForwardCoalescer,
     ForwardKey,
+    _apply_command_barrier,
+    _classify_message,
     _drain_backlog,
+    _dropped_prompt_notice,
     _format_answered_echo,
     _forward_key,
     _init_quarantine_store,
     _PendingPrompt,
     _resolve_engine_run_options,
 )
+from untether.telegram.steer import split_followup_command
 from untether.telegram.types import TelegramIncomingMessage
 
 # ---------------------------------------------------------------------------
@@ -406,7 +410,7 @@ class TestForwardCoalescer:
         assert len(dispatched) == 1
 
     @pytest.mark.anyio
-    async def test_cancel_prevents_dispatch(self) -> None:
+    async def test_drop_prevents_dispatch(self) -> None:
         dispatched: list[_PendingPrompt] = []
 
         async def dispatch(p: _PendingPrompt) -> None:
@@ -423,13 +427,13 @@ class TestForwardCoalescer:
             p = _pending()
             coalescer.schedule(p)
             key = _forward_key(p.msg)
-            coalescer.cancel(key)
+            assert coalescer.drop(key, reason="test") is p
             await anyio.sleep(0.3)
 
         assert len(dispatched) == 0
 
     @pytest.mark.anyio
-    async def test_cancel_nonexistent_key_is_noop(self) -> None:
+    async def test_drop_nonexistent_key_is_noop(self) -> None:
         dispatched: list[_PendingPrompt] = []
 
         async def dispatch(p: _PendingPrompt) -> None:
@@ -443,7 +447,7 @@ class TestForwardCoalescer:
                 dispatch=dispatch,
                 pending=pending,
             )
-            coalescer.cancel((999, 0, 0))  # no-op
+            assert coalescer.drop((999, 0, 0), reason="test") is None
             await anyio.sleep(0.05)
 
         assert len(dispatched) == 0
@@ -851,6 +855,230 @@ class TestForwardCoalescerMerge:
         )
 
         assert [p.text for p in dispatched] == ["one", "two"]
+
+
+# ---------------------------------------------------------------------------
+# #807 — commands are a barrier for the coalesce window
+# ---------------------------------------------------------------------------
+
+# Engine ids plus reserved command ids, as `get_reserved_commands` builds them.
+_DIRECTIVES = {"codex", "claude"}
+_RESERVED = {*_DIRECTIVES, "cancel", "continue", "new", "file"}
+
+
+async def _run_with_commands(
+    steps: list[_PendingPrompt | str],
+    *,
+    debounce_s: float = 0.1,
+    gap_s: float = 0.02,
+) -> tuple[list[str], list[tuple[_PendingPrompt, str]]]:
+    """Like ``_run_schedules``, but a ``str`` step is a message routed the
+    way ``route_message`` routes it: the #775 steer split, then the #807
+    barrier, then either a command (started via ``start_soon``, as the loop
+    does) or a prompt scheduled on the coalescer.
+
+    Returns the order things ran in (``prompt:<text>`` / ``command:<id>``)
+    and every barrier drop.
+    """
+    order: list[str] = []
+    drops: list[tuple[_PendingPrompt, str]] = []
+
+    async def dispatch(p: _PendingPrompt) -> None:
+        order.append(f"prompt:{p.text}")
+
+    async def handle_command(command_id: str) -> None:
+        order.append(f"command:{command_id}")
+
+    pending: dict[ForwardKey, _PendingPrompt] = {}
+    async with anyio.create_task_group() as tg:
+        coalescer = ForwardCoalescer(
+            task_group=tg,
+            debounce_s=debounce_s,
+            dispatch=dispatch,
+            pending=pending,
+        )
+        next_id = 100
+        for idx, step in enumerate(steps):
+            if idx:
+                await anyio.sleep(gap_s)
+            if isinstance(step, _PendingPrompt):
+                coalescer.schedule(step)
+                continue
+            next_id += 1
+            msg = _msg(message_id=next_id, text=step)
+            classification = _classify_message(msg, files_enabled=False)
+            command_id = classification.command_id
+            text = classification.text
+            override: str | None = None
+            split = split_followup_command(command_id, classification.args_text)
+            if split is not None:
+                override, text = split
+                command_id = None
+            dropped = _apply_command_barrier(
+                coalescer,
+                _forward_key(msg),
+                command_id=command_id,
+                is_cancel=classification.is_cancel,
+                reserved_commands=_RESERVED,
+            )
+            if dropped is not None:
+                drops.append(dropped)
+            if command_id is not None and command_id not in _DIRECTIVES:
+                tg.start_soon(handle_command, command_id)
+                continue
+            prompt = _pending(msg=msg, text=text)
+            prompt.followup_override = override
+            coalescer.schedule(prompt)
+        await anyio.sleep(min(debounce_s * 3, 0.5))
+        tg.cancel_scope.cancel()
+    return order, drops
+
+
+class TestForwardCoalescerBarrier:
+    @pytest.mark.anyio
+    async def test_807_new_drops_pending_with_notice(self) -> None:
+        with capture_logs() as logs:
+            order, drops = await _run_with_commands(
+                [_pending(msg=_msg(message_id=1), text="A"), "/new"]
+            )
+
+        assert order == ["command:new"]
+        ((dropped, command),) = drops
+        assert dropped.text == "A"
+        assert command == "new"
+        assert _dropped_prompt_notice(dropped, command=command) == (
+            "🗑️ Dropped 1 message sent just before /new — "
+            "send it again if you still need it."
+        )
+        (event,) = [e for e in logs if e["event"] == "forward.prompt.dropped"]
+        assert event["log_level"] == "info"
+        assert event["reason"] == "new"
+        assert event["merged_count"] == 1
+        assert event["message_id"] == 1
+        assert not [e for e in logs if e["event"] == "forward.prompt.flushed"]
+
+    @pytest.mark.anyio
+    async def test_807_cancel_drops_pending_with_notice(self) -> None:
+        """Two merged prompts are dropped together, and the notice says so."""
+        with capture_logs() as logs:
+            order, drops = await _run_with_commands(
+                [
+                    _pending(msg=_msg(message_id=1), text="A1"),
+                    _pending(msg=_msg(message_id=2), text="A2"),
+                    "/cancel",
+                ]
+            )
+
+        assert order == ["command:cancel"]
+        ((dropped, command),) = drops
+        assert command == "cancel"
+        assert dropped.text == "A1\n\nA2"
+        assert _dropped_prompt_notice(dropped, command=command) == (
+            "🗑️ Dropped 2 messages sent just before /cancel — "
+            "send them again if you still need them."
+        )
+        (event,) = [e for e in logs if e["event"] == "forward.prompt.dropped"]
+        assert event["reason"] == "cancel"
+        assert event["merged_count"] == 2
+
+    @pytest.mark.anyio
+    async def test_807_continue_never_silently_drops(self) -> None:
+        """`/continue` used to call a bare ``cancel()``: the prompt vanished
+        with only a debug log. It now drops with a notice."""
+        assert not hasattr(ForwardCoalescer, "cancel")
+        with capture_logs() as logs:
+            order, drops = await _run_with_commands(
+                [_pending(msg=_msg(message_id=1), text="A"), "/continue"]
+            )
+
+        assert order == ["command:continue"]
+        ((dropped, command),) = drops
+        assert command == "continue"
+        assert "just before /continue" in _dropped_prompt_notice(
+            dropped, command=command
+        )
+        (event,) = [e for e in logs if e["event"] == "forward.prompt.dropped"]
+        assert event["reason"] == "continue"
+
+    @pytest.mark.anyio
+    async def test_807_plain_command_flushes_first(self) -> None:
+        with capture_logs() as logs:
+            order, drops = await _run_with_commands(
+                [_pending(msg=_msg(message_id=1), text="A"), "/ping"],
+                # A window far longer than the test: A can only have run
+                # because the command flushed it.
+                debounce_s=30.0,
+            )
+
+        assert order == ["prompt:A", "command:ping"]
+        assert drops == []
+        (event,) = [e for e in logs if e["event"] == "forward.prompt.flushed"]
+        assert event["reason"] == "command"
+        assert event["message_id"] == 1
+        assert not [e for e in logs if e["event"] == "forward.prompt.dropped"]
+
+    @pytest.mark.anyio
+    async def test_807_a_new_b_runs_b_only_in_new_session(self) -> None:
+        order, drops = await _run_with_commands(
+            [
+                _pending(msg=_msg(message_id=1), text="A"),
+                "/new",
+                _pending(msg=_msg(message_id=3), text="B"),
+            ]
+        )
+
+        # A is gone; B runs on its own (not merged behind A), after /new.
+        assert order == ["command:new", "prompt:B"]
+        assert [d.text for d, _ in drops] == ["A"]
+
+    @pytest.mark.anyio
+    async def test_807_steer_text_is_not_a_barrier(self) -> None:
+        """`/steer <text>` is split to a prompt before the barrier, so it
+        coalesces like one (kept apart from A by the #775 merge rule)."""
+        with capture_logs() as logs:
+            order, drops = await _run_with_commands(
+                [
+                    _pending(msg=_msg(message_id=1), text="A"),
+                    "/steer also check the logs",
+                ]
+            )
+
+        assert order == ["prompt:A", "prompt:also check the logs"]
+        assert drops == []
+        flushed = [e for e in logs if e["event"] == "forward.prompt.flushed"]
+        assert [e["reason"] for e in flushed] == ["followup_mode"]
+
+    @pytest.mark.anyio
+    async def test_807_no_pending_no_notice(self) -> None:
+        with capture_logs() as logs:
+            order, drops = await _run_with_commands(["/new", "/cancel", "/ping"])
+
+        assert order == ["command:new", "command:cancel", "command:ping"]
+        assert drops == []
+        assert not [
+            e
+            for e in logs
+            if e["event"] in {"forward.prompt.dropped", "forward.prompt.flushed"}
+        ]
+
+    @pytest.mark.anyio
+    async def test_807_directive_is_not_a_barrier(self) -> None:
+        """`/codex <text>` is a prompt: the #794 merge rule flushes A with
+        reason ``directive``, not ``command``."""
+        with capture_logs() as logs:
+            order, _ = await _run_with_commands(
+                [_pending(msg=_msg(message_id=1), text="A"), "/codex list files"]
+            )
+
+        assert order == ["prompt:A", "prompt:/codex list files"]
+        flushed = [e for e in logs if e["event"] == "forward.prompt.flushed"]
+        assert [e["reason"] for e in flushed] == ["directive"]
+
+    def test_807_notice_counts_attached_forwards(self) -> None:
+        pending = _pending(text="summarise", forwards=[(10, "a"), (11, "b")])
+        assert _dropped_prompt_notice(pending, command="new").startswith(
+            "🗑️ Dropped 3 messages sent just before /new"
+        )
 
 
 # ---------------------------------------------------------------------------

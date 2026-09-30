@@ -16,7 +16,7 @@ from ..config_watch import ConfigReload
 from ..config_watch import watch_config as watch_config_changes
 from ..context import RunContext
 from ..directives import DirectiveError
-from ..ids import RESERVED_CHAT_COMMANDS
+from ..ids import RESERVED_CHAT_COMMANDS, RESERVED_COMMAND_IDS
 from ..logging import get_logger
 from ..model import EngineId, ResumeToken
 from ..progress import ProgressTracker
@@ -852,6 +852,59 @@ def _merge_block_reason(existing: _PendingPrompt, new: _PendingPrompt) -> str | 
     return None
 
 
+# #807: session-control commands drop a pending coalesced prompt (with a
+# notice) instead of flushing it — flushing would only start the prompt for
+# the command to kill it, or run it in the session the user is leaving.
+_SESSION_CONTROL_COMMANDS = frozenset({"cancel", "new", "continue"})
+
+
+def _is_prompt_directive(command_id: str, reserved_commands: set[str]) -> bool:
+    """True for ``/<engine>`` and ``/<project>`` — prompt directives, not
+    commands. They run as prompts and meet the #794 merge rules instead of
+    the #807 command barrier."""
+    return command_id in reserved_commands and command_id not in RESERVED_COMMAND_IDS
+
+
+def _apply_command_barrier(
+    coalescer: ForwardCoalescer,
+    key: ForwardKey,
+    *,
+    command_id: str | None,
+    is_cancel: bool,
+    reserved_commands: set[str],
+) -> tuple[_PendingPrompt, str] | None:
+    """Make a command a barrier for the coalesce window (#807).
+
+    ``/cancel``, ``/new`` and ``/continue`` drop the pending prompt and
+    return it with the command name, so the caller can tell the user. Any
+    other command flushes it first, keeping the order the user typed. Prompt
+    directives (``/<engine>``, ``/<project>``) and ``/steer <text>`` (already
+    split to ``command_id=None``) are prompts and are left alone.
+    """
+    command = "cancel" if is_cancel else command_id
+    if command is None:
+        return None
+    if command in _SESSION_CONTROL_COMMANDS:
+        dropped = coalescer.drop(key, reason=command)
+        return (dropped, command) if dropped is not None else None
+    if not _is_prompt_directive(command, reserved_commands):
+        coalescer.flush(key, reason="command")
+    return None
+
+
+def _dropped_prompt_notice(pending: _PendingPrompt, *, command: str) -> str:
+    count = len(pending.merged_message_ids) + 1 + len(pending.forwards)
+    if count == 1:
+        return (
+            f"🗑️ Dropped 1 message sent just before /{command} — "
+            "send it again if you still need it."
+        )
+    return (
+        f"🗑️ Dropped {count} messages sent just before /{command} — "
+        "send them again if you still need them."
+    )
+
+
 def _format_forwarded_prompt(forwarded: list[str], prompt: str) -> str:
     if not forwarded:
         return prompt
@@ -878,20 +931,41 @@ class ForwardCoalescer:
         self._dispatch = dispatch
         self._pending = pending
 
-    def cancel(self, key: ForwardKey) -> None:
+    def flush(self, key: ForwardKey, *, reason: str) -> bool:
+        """Dispatch the prompt pending for ``key`` now (#807).
+
+        Returns whether anything was pending. Used as a barrier ahead of a
+        command so the prompt typed before it keeps its place in line.
+        """
+        pending = self._pending.get(key)
+        if pending is None:
+            return False
+        self._flush(key, pending, reason=reason)
+        return True
+
+    def drop(self, key: ForwardKey, *, reason: str) -> _PendingPrompt | None:
+        """Discard the prompt pending for ``key`` without dispatching it (#807).
+
+        Returns the dropped prompt so the caller can tell the user — a
+        pending prompt must never vanish silently (#794).
+        """
         pending = self._pending.pop(key, None)
         if pending is None:
-            return
+            return None
         if pending.cancel_scope is not None:
             pending.cancel_scope.cancel()
-        logger.debug(
-            "forward.prompt.cancelled",
+        logger.info(
+            "forward.prompt.dropped",
             chat_id=pending.msg.chat_id,
             thread_id=pending.msg.thread_id,
             sender_id=pending.msg.sender_id,
             message_id=pending.msg.message_id,
+            merged_message_ids=pending.merged_message_ids,
+            merged_count=len(pending.merged_message_ids) + 1,
             forward_count=len(pending.forwards),
+            reason=reason,
         )
+        return pending
 
     def schedule(self, pending: _PendingPrompt) -> None:
         if pending.msg.sender_id is None:
@@ -2697,12 +2771,6 @@ async def run_main_loop(
                 chat_project = ctx.chat_project
                 ambient_context = ctx.ambient_context
 
-                if classification.is_cancel:
-                    tg.start_soon(
-                        handle_cancel, cfg, msg, state.running_tasks, scheduler
-                    )
-                    return
-
                 command_id = classification.command_id
                 args_text = classification.args_text
                 # #775: `/steer <text>` / `/queue <text>` — the text runs as a
@@ -2713,8 +2781,35 @@ async def run_main_loop(
                     followup_override, text = followup_split
                     command_id = None
                     args_text = ""
+
+                # #807: a command is a barrier for the coalesce window. Session
+                # control drops the pending prompt (visibly); any other command
+                # sends it first so it keeps the order the user typed.
+                barrier_drop = _apply_command_barrier(
+                    forward_coalescer,
+                    forward_key,
+                    command_id=command_id,
+                    is_cancel=classification.is_cancel,
+                    reserved_commands=state.reserved_commands,
+                )
+                if barrier_drop is not None:
+                    dropped, barrier_command = barrier_drop
+                    tg.start_soon(
+                        partial(
+                            make_reply(cfg, dropped.msg),
+                            text=_dropped_prompt_notice(
+                                dropped, command=barrier_command
+                            ),
+                        )
+                    )
+
+                if classification.is_cancel:
+                    tg.start_soon(
+                        handle_cancel, cfg, msg, state.running_tasks, scheduler
+                    )
+                    return
+
                 if command_id == "continue":
-                    forward_coalescer.cancel(forward_key)
                     prompt_text = args_text.strip() if args_text else ""
                     resolved = cfg.runtime.resolve_message(
                         text=prompt_text,

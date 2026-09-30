@@ -4,6 +4,7 @@ from typing import Any, cast
 
 import anyio
 import pytest
+from structlog.testing import capture_logs
 
 import untether.telegram.loop as telegram_loop
 import untether.telegram.topics as telegram_topics
@@ -2692,8 +2693,12 @@ async def test_run_main_loop_merges_rapid_prompts_in_order() -> None:
 @pytest.mark.anyio
 async def test_run_main_loop_command_between_prompts_not_merged() -> None:
     """A slash command inside the window runs as a command; its text never
-    joins the prompt, and neither surrounding prompt is lost."""
-    runner = ScriptRunner([Return(answer="ok")], engine=CODEX_ENGINE)
+    joins a prompt, and neither surrounding prompt is lost. Since #807 the
+    command is a barrier: the prompt before it is sent first rather than
+    merged with the one after it, keeping the order the user typed."""
+    runner = ScriptRunner(
+        [Return(answer="one"), Return(answer="two")], engine=CODEX_ENGINE
+    )
     runtime = TransportRuntime(router=_make_router(runner), projects=_empty_projects())
     cfg = _coalesce_cfg(runtime)
 
@@ -2705,10 +2710,10 @@ async def test_run_main_loop_command_between_prompts_not_merged() -> None:
 
     await run_main_loop(cfg, poller)
 
-    assert len(runner.calls) == 1
-    prompt_text, _ = runner.calls[0]
-    assert prompt_text.endswith("first\n\nsecond")
-    assert "/file get x" not in prompt_text
+    assert len(runner.calls) == 2
+    assert runner.calls[0][0].endswith("first")
+    assert runner.calls[1][0].endswith("second")
+    assert not any("/file get x" in prompt for prompt, _ in runner.calls)
     transport = cast(FakeTransport, cfg.exec_cfg.transport)
     assert any(
         "file transfer disabled" in call["message"].text
@@ -2765,6 +2770,58 @@ async def test_run_main_loop_directive_prompt_not_merged_into_previous() -> None
     assert len(codex_runner.calls) == 1
     assert codex_runner.calls[0][0].endswith("list the files")
     assert "hello claude" not in codex_runner.calls[0][0]
+
+
+@pytest.mark.anyio
+async def test_807_command_barrier_real_window(tmp_path: Path) -> None:
+    """#807, through the real loop and a real coalesce window: `A, /new, B`
+    sent inside one window runs only B, in a fresh session, and A's drop is
+    announced in reply to A rather than vanishing."""
+    state_path = tmp_path / "untether.toml"
+    store = ChatSessionStore(resolve_sessions_path(state_path))
+    await store.set_session_resume(
+        123, None, ResumeToken(engine=CODEX_ENGINE, value="resume-old")
+    )
+    runner = ScriptRunner([Return(answer="ok")], engine=CODEX_ENGINE)
+    runtime = TransportRuntime(
+        router=_make_router(runner),
+        projects=_empty_projects(),
+        config_path=state_path,
+    )
+    cfg = replace(_coalesce_cfg(runtime), session_mode="chat")
+    transport = cast(FakeTransport, cfg.exec_cfg.transport)
+
+    async def poller(_cfg: TelegramBridgeConfig):
+        assert _cfg.forward_coalesce_s > 0
+        yield _user_msg(1, "alpha prompt")
+        await anyio.sleep(_cfg.forward_coalesce_s / 4)
+        yield _user_msg(2, "/new")
+        await anyio.sleep(_cfg.forward_coalesce_s / 4)
+        yield _user_msg(3, "bravo prompt")
+        await anyio.sleep(_cfg.forward_coalesce_s * 4)
+
+    with capture_logs() as logs, anyio.fail_after(30):
+        await run_main_loop(cfg, poller)
+
+    assert len(runner.calls) == 1
+    prompt_text, resume = runner.calls[0]
+    assert prompt_text.endswith("bravo prompt")
+    assert "alpha prompt" not in prompt_text
+    assert resume is None
+    notices = [
+        call
+        for call in transport.send_calls
+        if call["message"].text.startswith("🗑️ Dropped")
+    ]
+    assert len(notices) == 1
+    assert notices[0]["message"].text == (
+        "🗑️ Dropped 1 message sent just before /new — "
+        "send it again if you still need it."
+    )
+    assert notices[0]["options"].reply_to.message_id == 1
+    (dropped,) = [e for e in logs if e["event"] == "forward.prompt.dropped"]
+    assert dropped["reason"] == "new"
+    assert dropped["merged_count"] == 1
 
 
 @pytest.mark.anyio
