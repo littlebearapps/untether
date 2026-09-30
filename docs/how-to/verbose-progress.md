@@ -53,6 +53,15 @@ done · claude · 1m 36s · step 10 · 62% ctx
 
 It shows the state (`working`, `done`, `error`, `cancelled`), the engine, the elapsed time, the number of steps so far and, for Claude, how full the context window is (`62% ctx`). The context value appears once Claude's context window is known — at the latest by the final of the first run on a model after a restart — and disappears after a compaction until Claude's next response. It reads a little lower than `/context` in the terminal while Claude is working through tool calls. Turn it off with `[progress] show_context_usage = false`.
 
+When Claude compacts its context, the progress message shows one row for it (a single step):
+
+```
+▸ 🗜️ Compacting context…
+✓ 🗜️ Context compacted · 182k → 41k tokens (auto)
+```
+
+`(auto)` is Claude compacting on its own as the window fills. `(manual)` is a `/compact` you sent as a follow-up while the session was still live, and that reply's body is the same `🗜️ Context compacted …` line. A failed compaction shows `🗜️ Compaction failed · <reason>`. Compaction counts as activity, not as a stall.
+
 ## Set global default in config
 
 To make verbose the default for all chats:
