@@ -73,16 +73,16 @@ If you want stricter sandboxing, run Untether inside a container or on a VM. The
 
 ## How do I approve tool calls from my phone?
 
-When Claude Code wants to run a tool that needs approval — write a file, run a shell command in plan mode, etc. — Untether posts the request to your Telegram chat with inline buttons: ✅ Approve / ❌ Deny / 📋 Pause & Outline Plan. Tap a button and the agent continues immediately.
+When Claude Code wants to run a tool that needs approval — write a file, run a shell command in Accept edits mode, etc. — Untether posts the request to your Telegram chat with inline buttons: ✅ Approve / ❌ Deny / 📋 Pause & Outline Plan. Tap a button and the agent continues immediately.
 
 If you click "Pause & Outline Plan", Claude writes a plain-language summary of what it's about to do, and you get a second round of buttons: ✅ Approve Plan / ❌ Deny / 💬 Let's discuss. Approving here also auto-approves the next plan-exit so you don't get prompted twice for the same plan. An approval covers that reply only: your next message, and any background wake-up in plan mode, starts in plan mode again — once any background agents that reply started have finished their work (until then, replies say `⚠️ Not re-planned`).
 
 Per-chat permission mode (`/planmode on/plan-auto/auto/off`, or `/config → Permission mode`) controls when the buttons appear:
 
-- **on** — every plan transition prompts for approval.
+- **on** — Claude plans without editing files, and you approve the plan before changes start.
 - **plan-auto** — plan mode, with the plan transition approved for you, so no buttons appear.
 - **auto** — Claude Code's own auto mode: a classifier approves routine work and blocks risky actions such as sending sensitive data to external endpoints. Questions the agent asks you still come through as buttons. Auto mode needs a model that supports it: on one that doesn't (such as Haiku), Claude Code quietly runs in its ordinary ask-first mode instead, so Untether shows a `⚠️ Asked for auto mode — Claude Code is running default` line in the run and sends the remaining permission requests to Telegram for approval instead of approving them. Shell commands and file edits stay pre-approved by the default tool allowlist in that case, so pick a model that supports auto mode for anything you wouldn't let run unchecked.
-- **off** — no plan phase; file edits run freely, and other actions (most shell commands, web fetches, MCP tools) ask for approval unless your Claude Code settings allow them.
+- **off** — no plan phase; file edits and common filesystem commands run without asking, and other actions (most shell commands, web fetches, MCP tools) ask for approval unless your Claude Code settings allow them.
 
 The **plan-auto** mode was called `auto` before v0.35.5. It was renamed because Claude Code introduced its own `auto` mode, and the two names collided. If you set `permission_mode = "auto"` in `untether.toml` and want the old behaviour, change it to `"plan-auto"`. Untether logs one warning at startup (and again if a config reload changes the list) naming every engine setting and cron that uses `"auto"`. Per-chat settings you made through the buttons are migrated for you.
 

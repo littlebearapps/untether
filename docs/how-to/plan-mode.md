@@ -1,23 +1,23 @@
 # Plan mode
 
-When you're away from the terminal, you need confidence that your agent won't go off-script. Plan mode controls how Claude Code handles permission requests through Untether — require manual approval from your phone, auto-approve transitions, or let Claude Code run freely.
+When you're away from the terminal, you need confidence that your agent won't go off-script. Plan mode controls how Claude Code handles permission requests through Untether: approve Claude's plan from your phone, have plans approved for you, hand decisions to Claude Code's classifier, or skip the plan phase and approve individual tools.
 
 ## Permission modes
 
 | Mode | `/planmode` command | CLI flag | Behaviour |
 |------|-------------------|----------|-----------|
-| **Plan** | `/planmode on` | `--permission-mode plan` | All tool calls and plan transitions require Telegram approval |
+| **Plan** | `/planmode on` | `--permission-mode plan` | Claude plans without editing files; you approve the plan (ExitPlanMode buttons) before changes start. Reads and searches don't raise buttons |
 | **Plan-auto** | `/planmode plan-auto` | `--permission-mode plan` | Tools are auto-approved; ExitPlanMode is also auto-approved (no buttons) |
 | **Auto** | `/planmode auto` | `--permission-mode auto` | Claude Code's own auto mode — a classifier approves routine work and blocks risky actions. No plan phase |
-| **Accept edits** | `/planmode off` | `--permission-mode acceptEdits` | No plan phase; file edits run freely, other actions ask for approval |
+| **Accept edits** | `/planmode off` | `--permission-mode acceptEdits` | No plan phase; reads, file edits and common filesystem commands run without asking; other tools show Approve / Deny |
 
-**Plan** is the most interactive mode. You see every file edit, shell command, and plan transition as inline buttons.
+**Plan** puts one checkpoint before any change: Claude drafts a plan without editing files, and you approve it (or tap Pause & Outline Plan) before changes start.
 
 **Plan-auto** keeps the plan phase but approves the plan-to-execution transition for you, so you don't tap a button for every ExitPlanMode.
 
 **Auto** hands the decision to Claude Code's own classifier rather than to Untether. Routine work — local edits, installing declared dependencies, read-only requests — runs without prompting, while risky actions are blocked: sending sensitive data to external endpoints, production deploys, force pushes, `rm -rf` on unresolvable targets. There's no plan phase at all. Questions the agent asks you still arrive as option buttons, and if the classifier blocks the same action repeatedly, Claude Code falls back to prompting you in Telegram.
 
-**Accept edits** has no plan phase. Reads, file edits inside the project and common filesystem commands run without buttons; anything else (most shell commands, web fetches, MCP tools) shows Approve / Deny buttons unless your Claude Code `permissions.allow` rules already allow it. Before v0.35.5, Untether pre-approved `Bash`, `Read`, `Edit` and `Write` and approved everything else silently, so this mode never prompted ([#749](https://github.com/littlebearapps/untether/issues/749)). To keep the old hands-off behaviour, use **Plan-auto** or **Auto**, or add allow rules to your Claude Code settings.
+**Accept edits** has no plan phase. Reads, file edits inside the project and common filesystem commands run without buttons; anything else (most shell commands, web fetches, MCP tools) shows Approve / Deny buttons unless your Claude Code `permissions.allow` rules already allow it. Before v0.35.5, Untether pre-approved `Bash`, `Read`, `Edit` and `Write` and approved everything else silently, so this mode never prompted ([#749](https://github.com/littlebearapps/untether/issues/749)). To keep the old hands-off behaviour, use **Plan-auto** or **Auto**, or add allow rules to your Claude Code settings. Of the four modes, this is the one that asks most often. Your own Claude Code `permissions.allow` rules still apply, so anything they allow runs without a button.
 
 !!! note "Renamed in v0.35.5"
     **Plan-auto** was called **auto** before v0.35.5. Claude Code introduced its own `auto` mode, and the two names collided — Untether's version shadowed it, so the real one was unreachable. Per-chat settings you made through `/planmode` or `/config` are migrated for you the first time v0.35.5 starts. If you set `permission_mode = "auto"` in `untether.toml` and want the old behaviour, change it to `"plan-auto"`; Untether logs a warning at startup (and on a config reload that changes the list) naming every place it sees the ambiguous value.
@@ -29,16 +29,21 @@ When you're away from the terminal, you need confidence that your agent won't go
 Toggle per chat:
 
 ```
-/planmode on         # enable plan mode
+/planmode on         # plan mode: approve the plan before changes
 /planmode plan-auto  # plan mode with auto-approved transitions
 /planmode auto       # Claude Code's own classifier-gated auto mode
-/planmode off        # disable plan mode
+/planmode off        # no plan phase (acceptEdits); other tools ask
 /planmode            # toggle: if currently on/plan-auto, turn off; otherwise turn on
-/planmode show       # show current mode
+/planmode show       # show current mode (with the CLI name, e.g. off (acceptEdits))
 /planmode clear      # remove override, use engine config default
 ```
 
-Mode is stored per chat and persists across sessions. New runs in the chat use the configured mode.
+Mode is stored per chat and persists across sessions. New runs in the chat use the configured mode. The change applies from your next message; until then the current run and any background wake-ups keep the old mode.
+
+A mode that `/planmode` can't set (`default`/`manual`, `dontAsk`, `bypassPermissions`, set in `untether.toml` or by hand) is shown under its own name, never as `off`. With no override, `/planmode show` and `/config` say **engine default**: the chat uses `[engines.claude] permission_mode` from `untether.toml`, or Claude Code's own settings with no approval buttons if that's unset.
+
+!!! warning "`dangerously_skip_permissions` overrides every mode"
+    If `[engines.claude] dangerously_skip_permissions = true` is set in `untether.toml`, Untether passes `--dangerously-skip-permissions` and every mode runs with no permission checks, whatever `/planmode` or `/config` shows.
 
 ## "Pause & Outline Plan"
 

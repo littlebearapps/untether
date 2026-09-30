@@ -88,7 +88,7 @@ The wizard offers three **workflow modes** — pick the one that fits:
 
 - 📡 **Progress streaming** — watch your agent work in real time; see tool calls, file changes, and elapsed time as they happen
 - 🔐 **Interactive permissions** — approve plan transitions, tool calls and clarifying questions with inline buttons; how much asks first depends on the permission mode, and "Pause & Outline Plan" holds the session open while you review the plan outline before approving
-- 📋 **Permission modes** — toggle per chat with `/planmode`; choose full manual approval, auto-approved plan transitions, Claude Code's own classifier-gated auto mode, or no plan phase
+- 📋 **Permission modes** — toggle per chat with `/planmode`; choose plan approval, auto-approved plans, Claude Code's own classifier-gated auto mode, or no plan phase (edits run, other tools ask)
 - 🔔 **Background work stays visible (Claude)** — when Claude hands work to a background task, subagent, `Monitor` or `ScheduleWakeup`, the session stays open: each result arrives as its own message, and your follow-ups land in the same session
 - 📁 **Projects and worktrees** — register repos with `untether init`, target with `/myproject @feat/thing`, run branches in isolated worktrees in parallel
 - 💰 **Cost and usage tracking** — run agents remotely with confidence; per-run and daily budgets, `/usage` breakdowns, and optional auto-cancel keep spending visible. A per-run outlier alert fires even with no budget configured, so an expensive run can't pass unnoticed

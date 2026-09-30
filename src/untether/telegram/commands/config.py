@@ -7,6 +7,16 @@ from ...ids import DEPRECATED_ENGINES
 from ...logging import get_logger
 from ...runners.run_options import CLAUDE_PLAN_AUTO_MODE
 from ...transport import RenderedMessage
+from ._permission_mode_text import (
+    APPLY_TIMING_TEXT,
+    BUTTON_MODES,
+    CLAUDE_MODE_TEXT,
+    NO_OVERRIDE_HINT,
+    NO_OVERRIDE_LABEL,
+    NO_OVERRIDE_TEXT,
+    cli_name_suffix,
+    mode_display,
+)
 
 logger = get_logger(__name__)
 
@@ -110,11 +120,10 @@ async def _resolve_effective_engine(
 
 _HOME_HINTS: dict[str, dict[str, str]] = {
     "pm": {
-        "on": "approve actions",
-        "off": "run freely",
-        "plan-auto": "auto-approve plans",
-        "auto": "classifier-gated",
-        "default": "agent decides",
+        # #747: Claude hints come from the shared permission-mode table
+        # (on/off/plan-auto/auto/manual/dontAsk/bypassPermissions).
+        **{text.ui_name: text.hint for text in CLAUDE_MODE_TEXT.values()},
+        NO_OVERRIDE_LABEL: NO_OVERRIDE_HINT,
         "full auto": "Codex's own sandbox",
         "safe": "read-only sandbox",
         "full access": "all tools approved",
@@ -222,16 +231,8 @@ async def _page_home(ctx: CommandContext) -> None:
         engine_override = await prefs.get_engine_override(chat_id, current_engine)
         pm = engine_override.permission_mode if engine_override else None
         if current_engine == "claude":
-            if pm == "plan":
-                pm_label = "on"
-            elif pm == CLAUDE_PLAN_AUTO_MODE:
-                pm_label = "plan-auto"
-            elif pm == "auto":
-                pm_label = "auto"
-            elif pm is not None:
-                pm_label = "off"
-            else:
-                pm_label = "default"
+            # #747: only acceptEdits is "off"; hand-stored modes show their name.
+            pm_label = NO_OVERRIDE_LABEL if pm is None else mode_display(pm)[0]
         elif current_engine == "codex":
             pm_label = "safe" if pm == "safe" else "full auto"
         elif current_engine == "gemini":
@@ -715,29 +716,23 @@ async def _page_planmode(ctx: CommandContext, action: str | None = None) -> None
     pm = override.permission_mode if override else None
 
     if engine == "claude":
-        if pm == "plan":
-            current_label = "on"
-        elif pm == CLAUDE_PLAN_AUTO_MODE:
-            current_label = "plan-auto"
-        elif pm == "auto":
-            current_label = "auto"
-        elif pm is not None:
-            current_label = "off"
-        else:
-            current_label = "default"
+        current_label = NO_OVERRIDE_LABEL if pm is None else mode_display(pm)[0]
 
+        # #747: bullets come from the shared table, in button order.
+        bullets = [
+            f"• <b>{CLAUDE_MODE_TEXT[stored].ui_name}</b>{cli_name_suffix(stored)}"
+            f" — {CLAUDE_MODE_TEXT[stored].summary}"
+            for stored in BUTTON_MODES
+        ]
         lines = [
             "<b>📋 Permission mode</b>",
             "",
             "How much Claude checks with you before acting.",
             "",
-            "• <b>off</b> — run freely, no approval needed",
-            "• <b>on</b> — plan mode; approve the plan before edits",
-            "• <b>plan-auto</b> — plan mode, plan approved automatically",
-            "• <b>auto</b> — Claude Code's own auto mode: a classifier"
-            " approves routine work and blocks risky actions",
+            *bullets,
             "",
-            "ℹ️ <i>Default: uses Claude Code's own permission mode</i>",
+            f"ℹ️ <i>Clear override → {NO_OVERRIDE_LABEL}: {NO_OVERRIDE_TEXT}</i>",
+            f"ℹ️ <i>Changes apply from your next message. {APPLY_TIMING_TEXT}</i>",
             "",
             f"Current: <b>{current_label}</b>",
             "",
@@ -2397,9 +2392,9 @@ class ConfigCommand:
             return None  # Sub-page navigation only
         _TOAST_LABELS: dict[str, dict[str, str]] = {
             "pm": {
-                "on": "Plan mode: on",
-                "off": "Plan mode: off",
-                "pa": "Plan mode: plan-auto",
+                "on": "Permission mode: on (plan)",
+                "off": "Permission mode: off (acceptEdits)",
+                "pa": "Permission mode: plan-auto",
                 "auto": "Permission mode: auto",
                 "clr": "Permission mode: cleared",
                 "fa": "Approval policy: full auto",

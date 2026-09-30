@@ -16,7 +16,7 @@ The home page shows current values for all settings, with buttons arranged in pa
 🐕 Untether settings
 
 Agent controls (Claude Code)
-Plan mode: on  · approve actions
+Permission mode: on  · approve the plan first
 Ask mode: on  · interactive questions
 Diff preview: off  · buttons only
 
@@ -28,7 +28,7 @@ Model: default
 Listen: all
 Follow-up: queue  · wait for the run
 
-[📋 Plan mode]     [❓ Ask mode]
+[📋 Permission mode]  [❓ Ask mode]
 [📝 Diff preview]  [🔍 Verbose]
 [💰 Cost & usage]  [↩️ Resume line]
 [📡 Listen]        [🔁 Loop mode]
@@ -41,7 +41,7 @@ Follow-up: queue  · wait for the run
 <!-- TODO: capture screenshot: config-menu-v035 — /config home page with 2-column toggle layout -->
 
 !!! note "Engine-specific controls"
-    The home page adapts to the current engine. **Claude Code** shows Plan mode, Ask mode, and Diff preview under "Agent controls". **Codex CLI** shows **Approval policy** (full auto / safe = read-only sandbox). **Gemini CLI** shows **Approval mode** (read-only / edit files / full access). Engines without interactive controls (OpenCode, Pi, Amp) skip the agent controls section entirely.
+    The home page adapts to the current engine. **Claude Code** shows Permission mode, Ask mode, and Diff preview under "Agent controls". **Codex CLI** shows **Approval policy** (full auto / safe = read-only sandbox). **Gemini CLI** shows **Approval mode** (read-only / edit files / full access). Engines without interactive controls (OpenCode, Pi, Amp) skip the agent controls section entirely.
 
 ## Navigate sub-pages
 
@@ -59,7 +59,7 @@ Most settings use a **two-button selection** pattern: `[On] [Off] [Clear]` with 
 
 When you tap a setting button:
 
-1. **Confirmation toast** — a brief popup appears confirming the change (e.g. "Plan mode: off", "Verbose: on"). This uses the same toast mechanism as Claude Code approval buttons.
+1. **Confirmation toast** — a brief popup appears confirming the change (e.g. "Permission mode: off (acceptEdits)", "Verbose: on"). This uses the same toast mechanism as Claude Code approval buttons.
 2. **Auto-return** — the menu automatically navigates back to the home page, showing the updated value across all settings. No need to tap "Back" manually.
 
 ### Multi-state settings
@@ -77,7 +77,7 @@ The active option is marked with a ✓ prefix. Tap a different option to switch.
 
 Settings are engine-specific and only appear when relevant:
 
-- **Plan mode** — Claude Code only. Codex and Gemini have their own pre-run policies instead.
+- **Permission mode** — Claude Code only. Codex and Gemini have their own pre-run policies instead.
 - **Approval policy** — Codex CLI only. Toggle between "full auto" (default, Codex's own sandbox setting) and "safe" (read-only sandbox via `--sandbox read-only`; tests, builds and cache/`/tmp` writes fail too). This is a pre-run policy — not interactive mid-run approval.
 - **Approval mode** — Gemini CLI only. Toggle between "read-only" (default, write tools blocked), "edit files" (file reads/writes OK, shell commands blocked via `--approval-mode auto_edit`), and "full access" (all tools approved via `--approval-mode yolo`). This is a pre-run policy.
 - **Ask mode** and **Diff preview** — Claude Code only. Hidden for other engines.
@@ -106,7 +106,7 @@ When you switch engines via the Engine & model page, the home page automatically
 | Budget enabled | off, on | Yes (chat prefs) |
 | Budget auto-cancel | off, on | Yes (chat prefs) |
 
-Approval policy appears instead of Plan mode when the engine is Codex CLI. Approval mode appears instead of Plan mode when the engine is Gemini CLI.
+Approval policy appears instead of Permission mode when the engine is Codex CLI. Approval mode appears instead of Permission mode when the engine is Gemini CLI.
 
 ### Triggers page {#triggers-page}
 
