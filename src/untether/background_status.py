@@ -271,6 +271,35 @@ FOLD_MAX_CHARS = 300
 FOLDABLE_REASONS = frozenset(
     {"task_finished", "unknown", "scheduled_wakeup", "monitor_event"}
 )
+# #813: read-only tools a wake turn uses to *collect* a finished task's
+# result. Since CLI 2.1.277 (TaskOutput removed) the model reads the task's
+# ``output_file`` with ``Read``; ``TaskOutput`` stays for older CLIs. A short
+# ack whose only tools are these is still an ack — it folds.
+COLLECTION_TOOLS = frozenset({"Read", "Glob", "Grep", "TaskOutput"})
+# More collection calls than this is an investigation, not an ack.
+COLLECTION_FOLD_MAX = 3
+_NON_COLLECTION_KINDS = frozenset({"file_change", "command", "note"})
+
+
+def is_collection_action(action: Any) -> bool:
+    """#813: a read-only result-collection tool call (``Read`` of a task's
+    output file, ``Glob``/``Grep``, legacy ``TaskOutput``). Writes, shell
+    commands, approvals and questions never qualify."""
+    if getattr(action, "kind", None) in _NON_COLLECTION_KINDS:
+        return False
+    detail = getattr(action, "detail", None)
+    name = detail.get("name") if isinstance(detail, dict) else None
+    return isinstance(name, str) and name in COLLECTION_TOOLS
+
+
+def count_substantive_actions(actions: Iterable[Any]) -> int:
+    """#785/#813: the actions that make a wake turn more than an ack —
+    every non-note action except up to ``COLLECTION_FOLD_MAX`` read-only
+    collection calls (beyond that, all of them count)."""
+    tools = [a for a in actions if getattr(a, "kind", None) != "note"]
+    collection = sum(1 for a in tools if is_collection_action(a))
+    other = len(tools) - collection
+    return other + (collection if collection > COLLECTION_FOLD_MAX else 0)
 
 
 def wake_fold_decision(
@@ -285,8 +314,9 @@ def wake_fold_decision(
 ) -> str:
     """``"fold"`` or why the turn breaks out as its own (pushed) message.
 
-    Decided on content first — tools / approvals / questions (any non-note
-    action), a substantive answer, an error — because the CLI often opens the
+    Decided on content first — tools / approvals / questions (see
+    ``count_substantive_actions``: a few read-only result-collection calls
+    don't count, #813), a substantive answer, an error — because the CLI often opens the
     compiled-report turn as ``unknown`` before the last task's end event
     lands, so "is this the last task?" can't be known when the turn opens.
     At completion, though, a task_finished / unknown turn that left no
@@ -367,7 +397,10 @@ class BackgroundStatusPanel:
         # per task row, or unattributed (a turn no task event named).
         self.acks: dict[str, list[str]] = {}
         self.notes: list[str] = []
-        self._last_note: str | None = None
+        # #813: unattributed acks by the wake turn that produced them, so a
+        # task whose end the runner paired with that turn claims exactly
+        # that note — never merely the latest one.
+        self._note_turns: dict[int, str] = {}
         self.folds = 0
         # Wake turns delivered as their own pushed message while this was the
         # run's status message (see ``wake_fold_decision``'s batch rule).
@@ -459,24 +492,35 @@ class BackgroundStatusPanel:
     def _ack_lines(self, task: Any) -> list[str]:
         return [f"   ↳ {ack}" for ack in self.acks.get(self._tid(task), [])]
 
-    def _claim_last_note(self, target: str) -> bool:
-        """Move the latest unattributed ack onto ``target``'s row: the CLI
-        answered one finish twice — first in a turn no task event named, then
-        in the task's own turn."""
-        note, self._last_note = self._last_note, None
-        if note is None or note not in self.notes or target not in self.tasks:
+    def _claim_turn_notes(self, target: str, turns: Iterable[int]) -> bool:
+        """#813: move the unattributed acks of ``turns`` onto ``target``'s
+        row — the CLI answered one finish twice, first in a turn no task
+        event named (the runner paired the task's end with it), then in the
+        task's own turn. With no turn key nothing is claimed: the note stays
+        unattributed, which is never misfiled and never lost."""
+        if target not in self.tasks:
             return False
-        self.notes.remove(note)
-        bucket = self.acks.setdefault(target, [])
-        if note not in bucket:
-            bucket.append(note)
-        return True
+        claimed = False
+        for turn in turns:
+            note = self._note_turns.pop(turn, None)
+            if note is None:
+                continue
+            if note in self.notes and note not in self._note_turns.values():
+                self.notes.remove(note)
+            bucket = self.acks.setdefault(target, [])
+            if note not in bucket:
+                bucket.append(note)
+            claimed = True
+        return claimed
 
-    async def attribute_last_note(self, task_ids: Iterable[str]) -> None:
+    async def attribute_turn_notes(
+        self, task_ids: Iterable[str], announced_turns: Iterable[int]
+    ) -> None:
         """A task's own (already-announced) turn broke out as a message:
-        still file the earlier unattributed ack under that task's row."""
+        still file the ack of the turn its end was paired with under that
+        task's row."""
         target = next((tid for tid in task_ids if tid in self.tasks), None)
-        if target is not None and self._claim_last_note(target):
+        if target is not None and self._claim_turn_notes(target, announced_turns):
             await self._edit(self.render())
 
     async def fold(
@@ -485,30 +529,35 @@ class BackgroundStatusPanel:
         *,
         task_ids: Iterable[str] = (),
         already_announced: bool = False,
+        turn: int | None = None,
+        announced_turns: Iterable[int] = (),
     ) -> bool:
         """#785 part 2: record a short wake-turn answer on this message
         instead of a new pushed one. False (nothing changed) when it can't be
         shown in full — the caller then delivers the turn normally."""
         if self.ref is None:
             return False
-        saved = ({k: list(v) for k, v in self.acks.items()}, list(self.notes))
-        saved_last = self._last_note
+        saved = (
+            {k: list(v) for k, v in self.acks.items()},
+            list(self.notes),
+            dict(self._note_turns),
+        )
         ack = _one_line(text)
         target = next((tid for tid in task_ids if tid in self.tasks), None)
         if target is not None and already_announced:
-            self._claim_last_note(target)
-        self._last_note = None
+            self._claim_turn_notes(target, announced_turns)
         if ack:
             if target is not None:
                 bucket = self.acks.setdefault(target, [])
                 if ack not in bucket:
                     bucket.append(ack)
-            elif ack not in self.notes:
-                self.notes.append(ack)
-                self._last_note = ack
+            else:
+                if ack not in self.notes:
+                    self.notes.append(ack)
+                if turn is not None:
+                    self._note_turns[turn] = ack
         if len(self.render()) >= STATUS_MAX_CHARS:  # would be truncated
-            self.acks, self.notes = saved
-            self._last_note = saved_last
+            self.acks, self.notes, self._note_turns = saved
             return False
         self.folds += 1
         if not self.finalised and not self.live():
@@ -824,10 +873,14 @@ class BackgroundStatusManager:
         if (panel := self.fold_target) is not None:
             panel.breakouts += 1
 
-    async def attribute_last_note(self, task_ids: Iterable[str]) -> None:
+    async def attribute_turn_notes(
+        self, task_ids: Iterable[str], announced_turns: Iterable[int]
+    ) -> None:
         async with self._lock:
             if (panel := self.fold_target) is not None:
-                await panel.attribute_last_note([str(t) for t in task_ids])
+                await panel.attribute_turn_notes(
+                    [str(t) for t in task_ids], list(announced_turns)
+                )
 
     async def fold(
         self,
@@ -835,6 +888,8 @@ class BackgroundStatusManager:
         *,
         task_ids: Iterable[str] = (),
         already_announced: bool = False,
+        turn: int | None = None,
+        announced_turns: Iterable[int] = (),
     ) -> bool:
         async with self._lock:
             panel = self.fold_target
@@ -854,7 +909,11 @@ class BackgroundStatusManager:
                 if tid not in panel.tasks and tid in by_id:
                     panel.tasks[tid] = by_id[tid]
             return await panel.fold(
-                text, task_ids=ids, already_announced=already_announced
+                text,
+                task_ids=ids,
+                already_announced=already_announced,
+                turn=turn,
+                announced_turns=list(announced_turns),
             )
 
     async def aclose(self, reason: str | None) -> None:

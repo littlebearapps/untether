@@ -721,11 +721,14 @@ async def test_fold_without_a_task_is_a_note_then_filed_by_the_restatement() -> 
     clock = _Clock()
     a1, a2 = _agent("a1", "sweep one"), _agent("a2", "sweep two")
     panel = await _open_panel(transport, clock, a1, a2)
-    assert await panel.fold("Sweep one is back.")
+    assert await panel.fold("Sweep one is back.", turn=2)
     assert transport.edit_calls[-1]["message"].text.endswith("💬 Sweep one is back.")
     a1.status, a1.ended_at = "completed", clock.t + 1
     assert await panel.fold(
-        "Sweep one finished.", task_ids=["a1"], already_announced=True
+        "Sweep one finished.",
+        task_ids=["a1"],
+        already_announced=True,
+        announced_turns=[2],
     )
     lines = transport.edit_calls[-1]["message"].text.splitlines()
     row = lines.index(next(ln for ln in lines if ln.startswith("✅ sweep one ·")))
@@ -925,3 +928,140 @@ async def test_run_end_sends_an_owed_quiet_notice(reason: str, sent: int) -> Non
     await _folded_then_done(manager, store, clock)
     await manager.aclose(reason)
     assert len([c for c in transport.send_calls if c["options"].notify]) == sent
+
+
+# ── #813: read-only acks fold; unattributed acks stay under their own task ──
+
+from untether.background_status import (  # noqa: E402
+    COLLECTION_FOLD_MAX,
+    count_substantive_actions,
+    is_collection_action,
+)
+from untether.model import Action  # noqa: E402
+from untether.runners.claude import _tool_kind_and_title  # noqa: E402
+
+_TOOL_INPUTS: dict[str, dict[str, Any]] = {
+    "Read": {"file_path": "/tmp/task.output"},
+    "Glob": {"pattern": "*.md"},
+    "Grep": {"pattern": "TODO"},
+    "TaskOutput": {"task_id": "a1"},
+    "Write": {"file_path": "/tmp/x.md", "content": "x"},
+    "Edit": {"file_path": "/tmp/x.md"},
+    "Bash": {"command": "ls"},
+}
+
+
+def _tool(name: str, n: int = 0) -> Action:
+    raw = _TOOL_INPUTS.get(name, {})
+    kind, title = _tool_kind_and_title(name, raw)
+    return Action(
+        id=f"toolu_{name}_{n}",
+        kind=kind,
+        title=title,
+        detail={"name": name, "input": raw},
+    )
+
+
+def _note() -> Action:
+    return Action(id="note_1", kind="note", title="thinking", detail={})
+
+
+def _approval() -> Action:
+    return Action(
+        id="ctrl_1",
+        kind="warning",
+        title="Permission required",
+        detail={"request_id": "req_1", "inline_keyboard": {"buttons": []}},
+    )
+
+
+@pytest.mark.parametrize("name", ["Read", "Glob", "Grep", "TaskOutput"])
+def test_813_readonly_collection_ack_folds(name: str) -> None:
+    actions = [_note(), _tool(name)]
+    assert is_collection_action(actions[1])
+    assert count_substantive_actions(actions) == 0
+    assert _decide(substantive_actions=count_substantive_actions(actions)) == "fold"
+
+
+@pytest.mark.parametrize(
+    "names",
+    [["Write"], ["Edit"], ["Bash"], ["Read", "Bash"], ["Read", "approval"]],
+    ids=["write", "edit", "bash", "read+bash", "read+approval"],
+)
+def test_813_write_or_bash_breaks_out(names: list[str]) -> None:
+    actions = [_approval() if n == "approval" else _tool(n) for n in names]
+    assert count_substantive_actions(actions) >= 1
+    assert _decide(substantive_actions=count_substantive_actions(actions)) == "tools"
+
+
+def test_813_collection_cap_breaks_out() -> None:
+    at_cap = [_tool("Read", i) for i in range(COLLECTION_FOLD_MAX)]
+    assert count_substantive_actions(at_cap) == 0
+    over = [_tool("Read", i) for i in range(COLLECTION_FOLD_MAX + 1)]
+    assert count_substantive_actions(over) == COLLECTION_FOLD_MAX + 1
+    assert _decide(substantive_actions=count_substantive_actions(over)) == "tools"
+    # The name alone never makes a collection call: a write kind doesn't.
+    spoof = Action(id="x", kind="file_change", title="x", detail={"name": "Read"})
+    assert not is_collection_action(spoof)
+
+
+async def test_813_unattributed_ack_claimed_by_its_own_turn_not_latest() -> None:
+    """The QA misfile: two unnamed acks (turns 4 and 5), then a3's own turn
+    restates its finish. a3's end was paired with turn 4 — so turn 4's ack
+    moves under a3, while turn 5's (the latest) stays put until a4 claims it."""
+    transport = FakeTransport()
+    clock = _Clock()
+    a3 = _agent("a3", "agent three")
+    a4 = _agent("a4", "agent four")
+    a5 = _agent("a5", "agent five")
+    panel = await _open_panel(transport, clock, a3, a4, a5)
+    assert await panel.fold("Agent three is in.", turn=4)
+    assert await panel.fold("Agent four is in.", turn=5)
+    a3.status, a3.ended_at = "completed", clock.t + 1
+    a4.status, a4.ended_at = "completed", clock.t + 2
+    assert await panel.fold(
+        "Agent three filed.",
+        task_ids=["a3"],
+        already_announced=True,
+        turn=6,
+        announced_turns=[4],
+    )
+    lines = transport.edit_calls[-1]["message"].text.splitlines()
+    row = lines.index(next(ln for ln in lines if ln.startswith("✅ agent three ·")))
+    assert lines[row + 1 : row + 3] == [
+        "   ↳ Agent three is in.",
+        "   ↳ Agent three filed.",
+    ]
+    assert "💬 Agent four is in." in lines
+    # a4's own turn broke out (tools, say): its paired ack is still filed.
+    await panel.attribute_turn_notes(["a4"], [5])
+    lines = transport.edit_calls[-1]["message"].text.splitlines()
+    row = lines.index(next(ln for ln in lines if ln.startswith("✅ agent four ·")))
+    assert lines[row + 1] == "   ↳ Agent four is in."
+    assert not any(ln.startswith("💬") for ln in lines)
+
+
+async def test_813_no_turn_key_leaves_note_unattributed() -> None:
+    transport = FakeTransport()
+    clock = _Clock()
+    a1, a2 = _agent("a1", "sweep one"), _agent("a2", "sweep two")
+    panel = await _open_panel(transport, clock, a1, a2)
+    assert await panel.fold("One of them is back.", turn=3)
+    a1.status, a1.ended_at = "completed", clock.t + 1
+    # Nothing paired a1's end with a turn: the latest note is NOT claimed.
+    assert await panel.fold(
+        "Sweep one finished.", task_ids=["a1"], already_announced=True, turn=4
+    )
+    edits = len(transport.edit_calls)
+    await panel.attribute_turn_notes(["a1"], [])
+    assert len(transport.edit_calls) == edits  # nothing changed, no edit
+    lines = transport.edit_calls[-1]["message"].text.splitlines()
+    assert "💬 One of them is back." in lines
+    assert "   ↳ One of them is back." not in lines
+    # A refused fold rolls its turn key back too — nothing is lost or left.
+    assert not await panel.fold("z " * 2000, turn=9)
+    assert await panel.fold("Sweep two finished.", task_ids=["a2"], turn=10)
+    await panel.attribute_turn_notes(["a2"], [9])
+    assert "💬 One of them is back." in (
+        transport.edit_calls[-1]["message"].text.splitlines()
+    )

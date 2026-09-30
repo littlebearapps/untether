@@ -16,6 +16,8 @@ import anyio
 from .background_status import (
     FOLDABLE_REASONS,
     BackgroundStatusManager,
+    count_substantive_actions,
+    is_collection_action,
     live_shown,
     register_live_count_source,
     render_background_block,
@@ -5461,8 +5463,12 @@ async def handle_message(
         followup_notify=cfg.final_notify,
         clock=clock,
         # #785 part 2: a thinking note alone doesn't open a progress message
-        # for a wake turn that may fold into the status message.
-        progress_for=lambda evt: evt.action.kind != "note" or not _consolidating(),
+        # for a wake turn that may fold into the status message — nor does a
+        # read-only result-collection call (#813).
+        progress_for=lambda evt: (
+            not _consolidating()
+            or (evt.action.kind != "note" and not is_collection_action(evt.action))
+        ),
         deliver_cancelled=_deliver_turn_cancelled,
     )
 
@@ -5512,8 +5518,9 @@ async def handle_message(
         return bool(getattr(settings, "consolidate_wake_turns", True))
 
     def _substantive_actions(tracker: ProgressTracker) -> int:
-        # Tools, approvals and questions — not thinking / rate-limit notes.
-        return sum(1 for a in tracker.snapshot().actions if a.action.kind != "note")
+        # Tools, approvals and questions — not thinking / rate-limit notes,
+        # nor a few read-only result-collection calls (#813).
+        return count_substantive_actions(a.action for a in tracker.snapshot().actions)
 
     async def _fold_wake_turn(ctx: _TurnCtx, completed: CompletedEvent) -> bool:
         target = bg_status.fold_target
@@ -5531,15 +5538,24 @@ async def handle_message(
             batch_announced=target.breakouts > 0,
         )
         task_ids = [t for t in detail.get("task_ids", []) if isinstance(t, str)]
-        if decision == "last_task" and already:
-            # The finish this turn restates was folded silently (the report
-            # turn raced the task's end): the earlier ack belongs on the
-            # task's row. (Its push comes from _promote_quiet_breakout.)
-            await bg_status.attribute_last_note(task_ids)
+        # #813: the wake turn(s) the runner paired this task's end with.
+        announced_turns = [
+            t
+            for t in detail.get("announced_turns", [])
+            if isinstance(t, int) and not isinstance(t, bool)
+        ]
+        if decision != "fold" and already:
+            # The finish this turn restates was folded silently as an
+            # unattributed ack (the ack turn raced the task's end): that ack
+            # belongs on the task's row, whatever this turn's own outcome.
+            # (A breakout's push comes from _promote_quiet_breakout.)
+            await bg_status.attribute_turn_notes(task_ids, announced_turns)
         folded = decision == "fold" and await bg_status.fold(
             completed.answer or "",
             task_ids=task_ids,
             already_announced=already,
+            turn=ctx.turn,
+            announced_turns=announced_turns,
         )
         if decision == "fold" and not folded and target.breakouts > 0:
             # An ack the status message couldn't take, after the batch has

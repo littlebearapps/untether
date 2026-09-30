@@ -11,6 +11,7 @@ import os
 from pathlib import Path
 
 import pytest
+from structlog.testing import capture_logs
 
 from tests.test_live_session_harness import _drive, _progress, _watchdog
 from untether.session_quarantine import QuarantineStore, set_quarantine_store
@@ -206,6 +207,50 @@ async def test_orphaned_subagent_task_is_listed_while_it_holds_the_session(
     assert len(report) == 1 and report[0]["options"].notify is True
     pushed = [c for c in transport.send_calls if c["options"].notify]
     assert pushed == report
+
+
+async def test_813_five_agent_interleaved_readonly_acks_fold(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#813 (nsd's first live batch, 5 tasks / 9 wake turns): every ack
+    collects its task's result with one ``Read`` — they all fold, the report
+    is the batch's only push, and every ``↳`` line sits under the task it
+    describes (a3's restatement arrives while the latest unattributed ack is
+    a4's, which "latest note" used to misfile under a3)."""
+    _progress(monkeypatch, show_background_tasks=True, consolidate_wake_turns=True)
+    with capture_logs() as logs:
+        transport = await _drive("five_agent_interleaved", wake_s=0.6)
+
+    acks = {
+        "a1": ["a1 is back; four still running.", "a1 findings filed."],
+        "a2": ["a2 is back."],
+        "a3": ["a3 is back.", "a3 findings filed."],
+        "a4": ["a4 is back.", "a4 findings filed."],
+        "a5": ["a5 finished (again)."],
+    }
+    for task_acks in acks.values():
+        for ack in task_acks:
+            assert _sent(transport, ack) == [], ack
+
+    report = _sent(transport, "REPORT: all five agents finished")
+    assert len(report) == 1 and report[0]["options"].notify is True
+    pushed = [c for c in transport.send_calls if c["options"].notify]
+    assert pushed == report
+
+    lines = _status_text(transport).splitlines()
+    assert lines[0] == "✅ all 5 background tasks done"
+    for task_id, task_acks in acks.items():
+        row = lines.index(
+            next(ln for ln in lines if ln.startswith(f"✅ bg {task_id} ·"))
+        )
+        assert lines[row + 1 : row + 1 + len(task_acks)] == [
+            f"   ↳ {ack}" for ack in task_acks
+        ], (task_id, lines)
+    assert not any(ln.startswith("💬") for ln in lines)
+
+    decisions = [e for e in logs if e["event"] == "live_turn.fold_decision"]
+    assert len(decisions) == 9
+    assert not [e for e in decisions if e["decision"] == "tools"]
 
 
 async def test_noop_turns_after_the_report_fold_silently(

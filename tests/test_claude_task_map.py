@@ -682,3 +682,37 @@ def test_777_subagent_task_is_linked_to_its_agent() -> None:
         },
     )
     assert state.tasks["s1"].owner_tool_use_id == "toolu_a"
+
+
+def test_813_task_end_paired_records_announced_turn() -> None:
+    """#813: two agents; an ``unknown`` ack turn completes, then one agent's
+    end is paired with it — the task's own notification turn names THAT turn
+    in ``announced_turns`` so the bridge files the ack under the right task."""
+    state = ClaudeStreamState()
+    state.live_mode = True
+    _feed(state, _started_agent("a1", "toolu_a"))
+    _feed(state, _started_agent("a2", "toolu_b"))
+    _feed(state, _result("two agents started"))
+    # Wake turn 2 opens unnamed and completes before a1's end lands.
+    _feed(state, _init())
+    assert state.turn_reason == "unknown"
+    _feed(state, _result("One of them is back."))
+    ack_turn = state.turn
+    with capture_logs() as logs:
+        _feed(state, _updated("a1", "completed"))
+    assert any(e["event"] == "claude.turn.task_end_paired" for e in logs)
+    assert state.task_announced_turn["a1"] == ack_turn
+    _feed(state, _notification("a1", "toolu_a", "completed"))
+    events = _feed(state, _init())
+    started = [e for e in events if getattr(e, "phase", None) == "started"]
+    assert started[0].reason == "task_finished"
+    assert started[0].detail["already_announced"] is True
+    assert started[0].detail["announced_turns"] == [ack_turn]
+    # A finish nothing paired carries no turn key.
+    _feed(state, _result("a1 filed."))
+    _feed(state, _updated("a2", "completed"))
+    _feed(state, _notification("a2", "toolu_b", "completed"))
+    events = _feed(state, _init())
+    started = [e for e in events if getattr(e, "phase", None) == "started"]
+    assert started[0].reason == "task_finished"
+    assert "announced_turns" not in started[0].detail

@@ -1090,6 +1090,10 @@ class ClaudeStreamState:
     # #785: tasks whose finish a wake turn already delivered; a later turn
     # opened only by their notification is the same finish, not news.
     announced_task_ids: set[str] = field(default_factory=set)
+    # #813: task id -> the ``unknown`` wake turn its end was paired with, so
+    # the bridge files that turn's folded ack under the task (not merely the
+    # latest unattributed ack).
+    task_announced_turn: dict[str, int] = field(default_factory=dict)
     # #785: when the last wake turn completed still ``unknown``; a task
     # ending within ``_WAKE_PAIR_WINDOW_S`` after it is paired with it.
     unattributed_turn_completed_at: float | None = None
@@ -2687,6 +2691,7 @@ def _note_task_end(state: ClaudeStreamState, task: ClaudeTask) -> None:
         return
     state.unattributed_turn_completed_at = None
     state.announced_task_ids.add(task.task_id)
+    state.task_announced_turn[task.task_id] = state.turn
     logger.info(
         "claude.turn.task_end_paired",
         turn=state.turn,
@@ -3628,6 +3633,15 @@ def _open_followup_turn(
             # #785: the second wake turn for one finish (the first opened as
             # ``unknown`` and was attributed to it) — the bridge won't push.
             detail["already_announced"] = True
+        # #813: the wake turn(s) these finishes were paired with.
+        if announced_turns := sorted(
+            {
+                state.task_announced_turn[t]
+                for t in ids
+                if t in state.task_announced_turn
+            }
+        ):
+            detail["announced_turns"] = announced_turns
         _mark_announced(state, ids)
     elif command_uuid is not None:
         reason = "scheduled_wakeup"

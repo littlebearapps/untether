@@ -581,7 +581,8 @@ def scenario_multi_agent_acks(first: dict) -> None:
     the task's end lands (the end arrives mid-turn), then the task's own
     notification turn restating it. The first finish is a short ack while the
     other agent still runs; the second finish's first turn is the compiled
-    report (long). ``FAKE_CLAUDE_ACK_TOOL=1`` makes the first ack use a tool."""
+    report (long). ``FAKE_CLAUDE_ACK_TOOL=1`` makes the first ack run a shell
+    command (a read-only ``Read`` would still fold, #813)."""
     init()
     tool_use("Agent", "toolu_a1", {"description": "sweep one", "prompt": "go"})
     start_bg("a1", "toolu_a1", task_type="local_agent")
@@ -599,8 +600,8 @@ def scenario_multi_agent_acks(first: dict) -> None:
             shutdown()
         init()
         if task_id == "a1" and os.environ.get("FAKE_CLAUDE_ACK_TOOL") == "1":
-            tool_use("Read", "toolu_rd", {"file_path": "/tmp/out.md"})
-            tool_result("toolu_rd", "notes")
+            tool_use("Bash", "toolu_sh", {"command": "ls /tmp/out"})
+            tool_result("toolu_sh", "notes")
         text(first_answer)
         _end_quietly(task_id)
         result(first_answer)
@@ -608,6 +609,80 @@ def scenario_multi_agent_acks(first: dict) -> None:
         init()
         text(f"{task_id} finished (again).")
         result(f"{task_id} finished (again).")
+    serve_followups()
+
+
+def _read_ack(turn: int, task_id: str, answer: str) -> None:
+    """#813: a wake turn that collects a finished task's result with one
+    ``Read`` of its output file (CLI >= 2.1.277) and then acks it."""
+    tool_id = f"toolu_read_{turn}"
+    tool_use("Read", tool_id, {"file_path": f"/tmp/tasks/{task_id}.output"})
+    tool_result(tool_id, f"{task_id} output")
+    text(answer)
+
+
+def scenario_five_agent_interleaved(first: dict) -> None:
+    """#813 (the nsd 5-task / 9-turn batch): five background agents; every
+    wake turn collects a result with one ``Read`` and acks it. Ends are
+    interleaved the way the CLI delivers them — a1 lands just after its
+    unnamed ack (paired) then restates it; a2 ends inside its ack
+    (retro-attributed); a3 and a4 each end just after their own unnamed ack
+    (both paired) and are only restated afterwards, so a3's restatement
+    arrives while the *latest* unattributed ack is a4's; a5 ends inside the
+    report turn, then restates it."""
+    init()
+    for n in range(1, 6):
+        tool_use("Agent", f"toolu_a{n}", {"description": f"agent {n}", "prompt": "go"})
+        start_bg(f"a{n}", f"toolu_a{n}", task_type="local_agent")
+        tool_result(f"toolu_a{n}", "Async agent launched successfully.")
+    text("Five agents running in the background; I'll report back.")
+    result("Five agents running in the background; I'll report back.", turns=6)
+
+    def wake() -> None:
+        if wait_idle_or_eof(WAKE_S) is None:
+            shutdown()
+        init()
+
+    # T2 unnamed ack; a1 ends just after it (paired with T2).
+    wake()
+    _read_ack(2, "a1", "a1 is back; four still running.")
+    result("a1 is back; four still running.")
+    _end_quietly("a1")
+    # T3: a1's own notification turn restates it.
+    _notify("a1", "toolu_a1")
+    init()
+    _read_ack(3, "a1", "a1 findings filed.")
+    result("a1 findings filed.")
+    # T4: a2 ends inside its ack turn (retro-attributed).
+    wake()
+    _read_ack(4, "a2", "a2 is back.")
+    _end_quietly("a2")
+    result("a2 is back.")
+    # T5 / T6: unnamed acks, each followed by its task's end (paired).
+    wake()
+    _read_ack(5, "a3", "a3 is back.")
+    result("a3 is back.")
+    _end_quietly("a3")
+    wake()
+    _read_ack(6, "a4", "a4 is back.")
+    result("a4 is back.")
+    _end_quietly("a4")
+    # T7 / T8: the restatements, a3's first (latest unattributed ack = a4's).
+    for turn, task_id in ((7, "a3"), (8, "a4")):
+        _notify(task_id, f"toolu_{task_id}")
+        init()
+        _read_ack(turn, task_id, f"{task_id} findings filed.")
+        result(f"{task_id} findings filed.")
+    # T9: the report; a5 ends inside it. T10: a5's restatement.
+    wake()
+    report = "REPORT: " + "all five agents finished; findings compiled. " * 12
+    _read_ack(9, "a5", report)
+    _end_quietly("a5")
+    result(report)
+    _notify("a5", "toolu_a5")
+    init()
+    _read_ack(10, "a5", "a5 finished (again).")
+    result("a5 finished (again).")
     serve_followups()
 
 
@@ -880,6 +955,7 @@ _SCENARIOS = {
     "followup_launches_bg": scenario_followup_launches_bg,
     "followup_blocks": scenario_followup_blocks,
     "multi_agent_acks": scenario_multi_agent_acks,
+    "five_agent_interleaved": scenario_five_agent_interleaved,
     "quiet_batch_report": scenario_quiet_batch_report,
     "acks_only_batch": scenario_acks_only_batch,
     "report_then_noop": scenario_report_then_noop,
