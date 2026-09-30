@@ -347,15 +347,23 @@ class BaseRunner(SessionLockMixin):
     async def run_locked(
         self, prompt: str, resume: ResumeToken | None
     ) -> AsyncIterator[UntetherEvent]:
-        if resume is not None:
+        # A /continue token carries no session id (``value == ""``), so locking
+        # it up front would key every /continue of this engine on one shared
+        # ``"<engine>:"`` lock. Treat it like a new run instead: lock the real
+        # session id once the StartedEvent names it (#817).
+        if resume is not None and not resume.is_continue:
             async for evt in self.run_with_resume_lock(prompt, resume, self.run_impl):
                 yield evt
             return
+        if resume is not None and resume.engine != self.engine:
+            raise RuntimeError(
+                f"resume token is for engine {resume.engine!r}, not {self.engine!r}"
+            )
 
         lock: anyio.Semaphore | None = None
         acquired = False
         try:
-            async for evt in self.run_impl(prompt, None):
+            async for evt in self.run_impl(prompt, resume):
                 if lock is None and isinstance(evt, StartedEvent):
                     lock = self.lock_for(evt.resume)
                     await lock.acquire()
