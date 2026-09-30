@@ -5858,7 +5858,9 @@ async def handle_message(
     # only stop a restart from relabelling it). The finally runs after each
     # branch's final / cancel send, preserving the #149 ordering. An
     # exception escaping here may mean that send never landed, so the entry
-    # is kept for the restart cleanup to relabel.
+    # is kept for the restart cleanup to relabel. The re-entries also release
+    # right after their notice lands and before recursing: an exception from
+    # the nested run must not keep THIS (already-noticed) entry alive.
     release_reason: str | None = "final"
     try:
         elapsed = clock() - started_at
@@ -6034,6 +6036,10 @@ async def handle_message(
                     engine=runner.engine,
                     attempt=_empty_resent_count + 1,
                 )
+            # #810: the "↻ retrying" notice is already delivered — release
+            # now, so a nested run that raises (drain cancel included) can't
+            # leave this message for a restart to relabel.
+            _release_progress(progress_ref, reason=release_reason)
             await handle_message(
                 cfg,
                 runner=runner,
@@ -6196,6 +6202,9 @@ async def handle_message(
                     thread_id=incoming.thread_id,
                 ),
             )
+            # #810: release only after the notice send (#149), and before
+            # the nested run — its failure must not relabel this message.
+            _release_progress(progress_ref, reason=release_reason)
             await handle_message(
                 cfg,
                 runner=runner,
@@ -6281,6 +6290,9 @@ async def handle_message(
                     thread_id=incoming.thread_id,
                 ),
             )
+            # #810: release only after the notice send (#149), and before
+            # the nested run — its failure must not relabel this message.
+            _release_progress(progress_ref, reason=release_reason)
             await handle_message(
                 cfg,
                 runner=runner,

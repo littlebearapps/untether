@@ -9299,6 +9299,69 @@ async def test_810_auto_continue_releases_original_progress(
     assert reasons == {original: "auto_continue", resumed: "final"}
 
 
+class _810NestedRunCancelledRunner(_810ToolResultThenAnswerRunner):
+    """As above, but the auto-continue re-run is torn down by a cancel of
+    the enclosing scope (the drain-cancel shape) instead of answering."""
+
+    def __init__(self, scope: anyio.CancelScope) -> None:
+        super().__init__()
+        self.scope = scope
+
+    async def run(self, prompt, resume):
+        if self.calls:
+            self.calls.append((prompt, resume))
+            self.scope.cancel()
+            await anyio.sleep_forever()
+        async for evt in super().run(prompt, resume):
+            yield evt
+
+
+@pytest.mark.anyio
+async def test_810_nested_recovery_raising_still_releases_original(
+    progress_store, quarantine_store
+) -> None:
+    """Review follow-up: the recovery re-entry releases the ORIGINAL entry
+    right after its notice lands, before recursing — a nested run that
+    raises (drain cancel) used to skip the outer finally's release, so a
+    restart relabelled the already-noticed original message."""
+    from untether.telegram.progress_persistence import load_active_progress
+
+    transport = FakeTransport()
+    scope = anyio.CancelScope()
+    runner = _810NestedRunCancelledRunner(scope)
+    cfg = ExecBridgeConfig(
+        transport=transport, presenter=MarkdownPresenter(), final_notify=False
+    )
+    at_notice: list[bool] = []
+    original_send = transport.send
+
+    async def _recording_send(*, channel_id, message, options=None):
+        if message.text.startswith("\U0001f501"):
+            # #149: the notice lands while the original is still registered.
+            at_notice.append(bool(load_active_progress(progress_store)))
+        return await original_send(
+            channel_id=channel_id, message=message, options=options
+        )
+
+    transport.send = _recording_send  # type: ignore[method-assign]
+
+    with structlog.testing.capture_logs() as logs, anyio.fail_after(10), scope:
+        await handle_message(
+            cfg,
+            runner=runner,
+            incoming=IncomingMessage(channel_id=123, message_id=10, text="go"),
+            resume_token=None,
+        )
+
+    assert scope.cancelled_caught
+    assert len(runner.calls) == 2
+    assert at_notice == [True]
+    original = transport.send_calls[0]["ref"].message_id
+    assert f"123:{original}" not in load_active_progress(progress_store)
+    reasons = {r["message_id"]: r["reason"] for r in _810_released(logs)}
+    assert reasons.get(original) == "auto_continue"
+
+
 @pytest.mark.anyio
 async def test_810_final_path_still_unregisters_once(progress_store) -> None:
     """The success path releases exactly once, from _deliver_final after the
