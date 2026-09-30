@@ -419,11 +419,11 @@ class LiveSession:
     # close grace stretches to cover the CLI's own 30 s asyncRewake wait
     # when this — or a live hook process — is seen.
     close_hooks: list[PendingHook] = field(default_factory=list)
-    # How many hooks the close cut short: the live hook shells at close,
+    # How many hooks the close cut short: the live hook processes at close,
     # capped by the candidates (the candidate count when the process table
     # couldn't be read). Never more than were running.
     close_hook_count: int = 0
-    # Raw live hook-shell count at close (None: not scanned / unreadable).
+    # Raw live hook-process count at close (None: not scanned / unreadable).
     close_hook_procs: int | None = None
     # #775: the steer window. Set (under ``lock``) when /cancel or /new
     # interrupts an active turn — the process is about to be killed, so a
@@ -517,11 +517,11 @@ async def close_live_session(
     shells: list[int] | None = None
     if not live.closing and _hooks_outstanding(live.state):
         # #812: which hooks are still running is known only as a count of
-        # live hook shells. None left while idle → every unpaired hook has
+        # live hook processes. None left while idle → every unpaired hook has
         # finished (a plain ``async`` hook's response is withheld until the
         # next turn): release them so this close doesn't report them cut
         # short.
-        shells = await _hook_shells(live.pid)
+        shells = await _hook_processes(live.state, live.pid)
         if live.idle and shells is not None and not shells:
             release_settled_async_hooks(live.state)
     async with live.lock:
@@ -537,7 +537,7 @@ async def close_live_session(
         live.state.live_close_reason = reason
         live.closed_idle_clean = _is_clean_idle(live)
         candidates = _hooks_at_close(live)
-        # Never claim more hooks than live hook shells (and never more than
+        # Never claim more hooks than live hook processes (and never more than
         # the candidates); the candidate count only when unreadable.
         count = len(candidates) if shells is None else min(len(shells), len(candidates))
         live.close_hooks = candidates if count else []
@@ -587,20 +587,53 @@ async def close_live_session(
 _USER_CLOSE_REASONS = frozenset({"cancel", "new", "drain", "options_changed"})
 
 
-async def _hook_shells(pid: int | None) -> list[int] | None:
-    """#812: the CLI's live hook shells (``<shell> -c`` children; every
-    command hook runs as one). None when unknown (no pid, unreadable table,
-    other platforms): the caller must not assume no hook is running, so the
-    hold stays bounded by ``async_hook_max_hold_s``."""
+async def _cli_children(pid: int | None) -> dict[int, list[str]] | None:
     if not isinstance(pid, int):
         return None
-    from ..utils.proc_diag import hook_shell_children
+    from ..utils.proc_diag import cli_children
 
     try:
-        return await anyio.to_thread.run_sync(hook_shell_children, pid)
+        return await anyio.to_thread.run_sync(cli_children, pid)
     except Exception:  # noqa: BLE001 — a scan failure must not break a close
         logger.debug("claude.hook.proc_scan_failed", exc_info=True)
         return None
+
+
+async def _hook_processes(
+    state: ClaudeStreamState, pid: int | None
+) -> list[int] | None:
+    """#812: the CLI children that may be a running command hook — any
+    direct child except the session's baseline (MCP servers), Bash-tool
+    shells and late service-looking children (see
+    ``proc_diag.hook_evidence_children``). A shell that execs a single hook
+    command (bash/zsh — macOS) leaves no ``<shell> -c`` behind, so the
+    wrapper alone isn't enough. None when unknown (no pid, unreadable
+    table): the caller must not assume no hook is running, so the hold
+    stays bounded by ``async_hook_max_hold_s``."""
+    children = await _cli_children(pid)
+    if children is None:
+        return None
+    from ..utils.proc_diag import hook_evidence_children
+
+    return hook_evidence_children(children, state.cli_baseline_children)
+
+
+async def capture_cli_baseline(state: ClaudeStreamState, pid: int | None) -> None:
+    """#812: record the CLI's children right after ``system/init`` — its
+    long-lived MCP servers (started before init) — so they are never taken
+    for a running hook. Once per process; a failed scan leaves None (then
+    nothing is exempt: the hold errs long, bounded)."""
+    if state.cli_baseline_children is not None:
+        return
+    children = await _cli_children(pid)
+    if children is None:
+        return
+    state.cli_baseline_children = frozenset(children)
+    logger.debug(
+        "claude.hook.cli_baseline",
+        pid=pid,
+        children=len(children),
+    )
 
 
 def _hooks_at_close(live: LiveSession) -> list[PendingHook]:
@@ -1603,9 +1636,12 @@ class ClaudeStreamState:
     # Monotonic time the live-session lifecycle first found no hook process
     # under the CLI while hooks were pending (None once one is seen again).
     hook_procs_gone_since: float | None = None
-    # Live hook shells at the lifecycle's last scan (None: unreadable / not
-    # scanned). Labels a hold expiry — never more hooks than this.
+    # Live hook processes at the lifecycle's last scan (None: unreadable /
+    # not scanned). Labels a hold expiry — never more hooks than this.
     live_hook_processes: int | None = None
+    # CLI children present right after ``system/init`` (MCP servers): never
+    # hook evidence (None: not captured — nothing exempt).
+    cli_baseline_children: frozenset[int] | None = None
     # (hook name, hook event, monotonic ts) of an async hook that exited 2
     # (the asyncRewake wake signal) while idle; the next turn opening within
     # ``_HOOK_REWAKE_HINT_TTL_S`` is its rewake. Cleared on every turn open.
@@ -2951,8 +2987,8 @@ def release_settled_async_hooks(
     finished — to ``deferred_hooks`` (still paired when the response lands;
     never "killed" at a close). Returns the pending hooks released.
 
-    Only ever called on "no hook process at all": while any hook shell is
-    alive, nothing is released, because a shell can't be tied to a hook."""
+    Only ever called on "no hook process at all": while any hook process
+    is alive, nothing is released, because a shell can't be tied to a hook."""
     now = time.monotonic() if now is None else now
     released: list[PendingHook] = []
     for hook_id, hook in list(state.pending_hooks.items()):
@@ -6497,6 +6533,10 @@ class ClaudeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
                             stdin=session_stdin,
                             pid=pid,
                         )
+                        # #812: MCP servers are up by system/init. Always
+                        # captured: the close-grace check uses it even with
+                        # the hold switched off.
+                        await capture_cli_baseline(state, pid)
                     logger.info(
                         "session_stdin.registered",
                         session_id=registered_session_id,
@@ -6846,7 +6886,7 @@ class ClaudeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
                 # #812: a hook still running in the background holds stdin
                 # open too (sibling predicate, D-1) — closing it would make
                 # the CLI drop an asyncRewake hook's findings. All or
-                # nothing: while ANY hook shell lives every unpaired hook
+                # nothing: while ANY hook process lives every unpaired hook
                 # holds (a shell can't be tied to a hook); once none has
                 # been alive for the settle, they have all finished (plain
                 # ``async``: response withheld by the CLI until the next
@@ -6857,10 +6897,11 @@ class ClaudeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
                     and state.async_hook_max_hold_s > 0
                     and state.pending_hooks
                 ):
-                    shells = await _hook_shells(
+                    shells = await _hook_processes(
+                        state,
                         getattr(proc, "pid", None)
                         if getattr(proc, "returncode", None) is None
-                        else None
+                        else None,
                     )
                     state.live_hook_processes = None if shells is None else len(shells)
                     if shells is None or shells:
@@ -6999,10 +7040,10 @@ class ClaudeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
                         },
                     )
         if not hooks_evident and proc is not None and proc.returncode is None:
-            # Process evidence: a live hook shell (whatever its command —
+            # Process evidence: a live hook process (whatever its command —
             # the ``/hooks/`` path heuristic above misses inline commands)
             # still gets the CLI's asyncRewake exit wait.
-            shells = await _hook_shells(getattr(proc, "pid", None))
+            shells = await _hook_processes(live.state, getattr(proc, "pid", None))
             if shells:
                 hooks_evident = True
                 run_logger.info(

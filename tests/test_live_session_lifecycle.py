@@ -620,6 +620,69 @@ async def test_812_hold_expiry_counts_live_hook_processes_not_candidates(
     assert not quarantine.is_quarantined("claude", SID)
 
 
+async def test_812_execd_hook_command_is_held_until_its_rewake(
+    monkeypatch: pytest.MonkeyPatch, quarantine: QuarantineStore
+) -> None:
+    """macOS regression (033ca86): ``/bin/sh`` is bash there, and bash execs
+    ``sh -c '<single command>'`` — the security-guidance asyncRewake Stop
+    hook (``bash …/sg-python.sh …``) runs with no ``<shell> -c`` left. Only
+    counting shells, the hold saw no hook process, released at ~1 s and the
+    session idled out: rewake lost. Any non-baseline CLI child counts now."""
+    from structlog.testing import capture_logs
+
+    _settings(monkeypatch)
+    started = anyio.current_time()
+    with capture_logs() as logs:
+        runner, events = await _run("async_hook_exec_rewake", wake_s=3.0, timeout=20)
+    elapsed = anyio.current_time() - started
+    state = _engine_state(runner)
+    for released in _events(logs, "claude.hook.hold_released"):
+        assert "h-stop-rewake" not in released["hook_ids"]
+    rewake = [
+        e
+        for e in events
+        if isinstance(e, TurnEvent)
+        and e.phase == "started"
+        and e.reason == "hook_rewake"
+    ]
+    assert len(rewake) == 1
+    finals = [e for e in events if isinstance(e, TurnEvent) and e.phase == "completed"]
+    assert [f.answer for f in finals] == ["HOOK: finding: key leak"]
+    assert elapsed >= 3.0
+    assert _events(logs, "claude.live_session.async_hook_killed") == []
+    assert _events(logs, "claude.live_session.close_grace_expired") == []
+    assert state.pending_hooks == {} and state.deferred_hooks == {}
+    assert runner.current_stream.proc_returncode == 0
+
+
+async def test_812_mcp_like_children_never_hold(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A long-lived child present at ``system/init`` (an MCP server, the
+    session baseline) and an MCP-looking child started later (a reconnect)
+    are not hook evidence: the finished plain async hooks are released on
+    the normal settle and the session idles out, far inside the bound."""
+    from structlog.testing import capture_logs
+
+    _settings(monkeypatch, async_hook_max_hold=8.0)
+    started = anyio.current_time()
+    with capture_logs() as logs:
+        runner, _ = await _run("async_hook_with_services", timeout=20)
+    elapsed = anyio.current_time() - started
+    state = _engine_state(runner)
+    assert state.cli_baseline_children  # the pre-init service was recorded
+    released = _events(logs, "claude.hook.hold_released")
+    assert len(released) == 1 and released[0]["reason"] == "no_hook_process"
+    assert sorted(released[0]["hook_ids"]) == ["h-stop-plain", "h-ups"]
+    closed = _events(logs, "claude.live_session.stdin_closed")
+    assert len(closed) == 1 and closed[0]["reason"] == "idle_no_tasks"
+    assert elapsed < 5.0
+    assert _events(logs, "claude.hook.hold_expired") == []
+    assert _events(logs, "claude.live_session.async_hook_killed") == []
+    assert _events(logs, "claude.live_session.hook_process_at_close") == []
+    assert _events(logs, "claude.live_session.close_grace_expired") == []
+
+
 async def test_812_close_with_no_hook_process_names_nothing(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -642,10 +705,10 @@ async def test_812_close_with_no_hook_process_names_nothing(
         async def aclose(self) -> None:
             pass
 
-    async def no_shells(pid: Any) -> list[int]:
+    async def no_shells(state: Any, pid: Any) -> list[int]:
         return []
 
-    monkeypatch.setattr(claude_mod, "_hook_shells", no_shells)
+    monkeypatch.setattr(claude_mod, "_hook_processes", no_shells)
     sid = "sess-812-no-proc"
     claude_mod._LIVE_SESSIONS[sid] = LiveSession(
         session_id=sid, state=state, stdin=_Pipe(), pid=4242

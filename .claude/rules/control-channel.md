@@ -148,17 +148,23 @@ hook's rewake once stdin has closed (`docs/findings/2026-09-29-claude-rc14-cli-s
   unpaired `hook_started` → every unpaired hook expires together, ONE
   `claude.hook.hold_expired` WARN per hold (`live_hook_processes`,
   `pending_hooks`, `hook_events`, `held_s`, `max_hold_s`); the hold then ends
-  even if a hook shell lives.
+  even if a hook process lives.
 - The CLI withholds a plain `async` hook's `hook_response` until the next turn
-  or stdin close. Each idle tick counts live `<shell> -c` children
-  (`proc_diag.hook_shell_children()`). **All-or-nothing — never bind a shell
-  to a hook** (frames carry no pid; a turn's hooks start in the same ms; the
-  per-hook binding in 271bb96 released a live `asyncRewake` hook and lost its
-  rewake): any hook shell alive → every unpaired hook holds; none for 1 s →
+  or stdin close. Each idle tick counts **hook processes**
+  (`proc_diag.cli_children()` → `hook_evidence_children()`): any direct CLI
+  child except the baseline captured at `system/init`
+  (`capture_cli_baseline()`, MCP servers), Bash-tool shells and late
+  MCP/LSP-looking argv; a `<shell> -c` child or a `/hooks/` token always
+  counts. Never rely on `sh -c` alone: bash (macOS `/bin/sh`) and zsh exec a
+  single hook command (security-guidance's `bash …/sg-python.sh …`).
+  **All-or-nothing — never bind a process to a hook** (frames carry no pid;
+  a turn's hooks start in the same ms; the per-hook binding in 271bb96
+  released a live `asyncRewake` hook and lost its rewake): any hook process
+  alive → every unpaired hook holds; none for 1 s →
   `release_settled_async_hooks()` releases them all
   (`claude.hook.hold_released reason=no_hook_process`). Unreadable process
   table → keep the bounded hold. `close_live_session` re-checks.
-- Labels never claim more hooks than live hook shells: N = live shells
+- Labels never claim more hooks than live hook processes: N = live ones
   (capped by the unpaired candidates; the candidate count only when the table
   is unreadable), events = the distinct candidate events. N = 0 at a close →
   no `async_hook_killed`, no notice.
@@ -166,7 +172,7 @@ hook's rewake once stdin has closed (`docs/findings/2026-09-29-claude-rc14-cli-s
   pushed, never folded); a turn already open is confirmed at its result by
   `origin.kind == "task-notification"`.
 - A close with a hook still evident (unpaired hooks with a live shell, a
-  `/hooks/` argv child, or any live hook shell — process evidence) uses
+  `/hooks/` argv child, or any live hook process — process evidence) uses
   `_live_close_grace_hooks_s` (35 s = the CLI's 30 s rewake wait + 5 s)
   instead of 15 s, logs `claude.live_session.async_hook_killed` (`hook_count`,
   `live_hook_processes`, `hook_events`, candidate `hook_names`/`hook_ids` +

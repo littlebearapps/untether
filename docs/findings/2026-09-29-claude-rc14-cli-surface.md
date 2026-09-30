@@ -128,16 +128,22 @@ hook-message, interrupt, TaskOutput/TaskStop and origin sections, not the whole 
   processes exit within a second, but their `hook_response` (`outcome:"success"`) lands only when
   stdin closes (30.01 s), or at the next turn. The `asyncRewake` Stop hook (security-guidance) and
   the sync hooks report at once (the rewake 0.28 s after the result, while idle). So an unpaired
-  `hook_started` after the result isn't proof of a running hook. Untether's hold (#812) reads the
-  CLI's live `<shell> -c` children (every command hook runs as `/bin/sh -c <command>`; Bash-tool
-  shells, which end `&& pwd -P >| …-cwd`, are skipped) and is **all-or-nothing**: while any hook
-  shell lives, every unpaired hook holds; once none has been alive for 1 s they are all released
-  (`claude.hook.hold_released reason=no_hook_process`). A per-hook binding (shell spawn time →
-  nearest `hook_started`) was tried and reverted: live on 2.1.285 the four hooks of one turn
-  started within the same ms, the one live shell was tied to the sync Stop hook, and the running
-  `asyncRewake` hook was released and its rewake lost. Labels instead count live hook shells:
-  expiry and close messages never claim more hooks than are running, and name the distinct
-  events they could be (`a background hook (Stop or UserPromptSubmit)`).
+  `hook_started` after the result isn't proof of a running hook. Untether's hold (#812) counts
+  **hook processes**: any direct child of the CLI except the session baseline (children present
+  right after `system/init` — MCP servers), Bash-tool shells (which end `&& pwd -P >| …-cwd`) and
+  later children whose argv looks like an MCP/LSP server. A `<shell> -c` child or a `/hooks/`
+  argv token always counts. The `-c` wrapper alone isn't enough: every command hook is spawned as
+  `/bin/sh -c <command>`, but bash (macOS `/bin/sh`) and zsh exec a single command, so the
+  security-guidance hook (`bash "${CLAUDE_PLUGIN_ROOT}/hooks/sg-python.sh" …`) runs on the Mac as
+  `bash …/sg-python.sh` with no shell wrapper (Linux dash keeps `sh -c`). The hold is
+  **all-or-nothing**: while any hook process lives, every unpaired hook holds; once none has been
+  alive for 1 s they are all released (`claude.hook.hold_released reason=no_hook_process`). A
+  per-hook binding (shell spawn time → nearest `hook_started`) was tried and reverted: live on
+  2.1.285 the four hooks of one turn started within the same ms, the one live shell was tied to
+  the sync Stop hook, and the running `asyncRewake` hook was released and its rewake lost. Labels
+  instead count live hook processes: expiry and close messages never claim more hooks than are
+  running, and name the distinct events they could be (`a background hook (Stop or
+  UserPromptSubmit)`).
 
 ### A2. `--include-hook-events`
 

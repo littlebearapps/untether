@@ -1263,6 +1263,93 @@ def scenario_async_hook_live_mix_running(first: dict) -> None:
     _eof_with_pending_rewake()
 
 
+# The model's part of a turn — real Stop hooks start a model call after
+# ``system/init``, well after Untether records its baseline there.
+MODEL_S = 0.5
+
+
+def spawn_execd_hook(hook_id: str, seconds: float) -> subprocess.Popen:
+    """A hook whose shell execs its single command — bash (macOS
+    ``/bin/sh``) and zsh do this for ``sh -c '<one command>'``, e.g. the
+    security-guidance plugin's ``bash …/sg-python.sh …`` asyncRewake hook.
+    ``exec`` makes dash do the same: the live process is the command, a
+    direct child of the CLI, with no ``<shell> -c`` left."""
+    proc = subprocess.Popen(
+        f"exec sleep {seconds}",
+        shell=True,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    _hook_procs[hook_id] = proc
+    return proc
+
+
+def spawn_service(name: str, *argv: str) -> None:
+    """A long-lived non-hook child of the CLI (an MCP server)."""
+    _hook_procs[name] = subprocess.Popen(
+        [sys.executable, "-c", "import time; time.sleep(600)", *argv],
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+
+
+def scenario_async_hook_exec_rewake(first: dict) -> None:
+    """The macOS shape of #812's target: plain async UserPromptSubmit + Stop
+    hooks (response withheld) and an asyncRewake Stop hook whose shell
+    exec'd its command. Rewakes ``WAKE_S`` after spawn if stdin is open."""
+    fast = 0.01
+    spawn_hook("h-ups", fast)
+    hook_started("h-ups", "UserPromptSubmit")
+    _withheld.append(("h-ups", "UserPromptSubmit"))
+    init()
+    time.sleep(MODEL_S)  # the model's turn: Stop hooks come after it
+    text("DONE")
+    spawn_hook("h-stop-plain", fast)
+    hook_started("h-stop-plain", "Stop")
+    _withheld.append(("h-stop-plain", "Stop"))
+    proc = spawn_execd_hook("h-stop-rewake", WAKE_S)
+    hook_started("h-stop-rewake", "Stop")
+    result("DONE")
+    while proc.poll() is None:
+        got = next_user(0.05)
+        if got is None:
+            _eof_with_pending_rewake()
+        if isinstance(got, dict):
+            _deferred.append(got)
+    wait_hook("h-stop-rewake")
+    hook_response(
+        "h-stop-rewake",
+        "Stop",
+        outcome="error",
+        exit_code=2,
+        stderr="finding: key leak\n",
+    )
+    _rewake_turn("HOOK: finding: key leak")
+    serve_followups()
+
+
+def scenario_async_hook_with_services(first: dict) -> None:
+    """MCP servers up before ``system/init`` (the baseline) and one started
+    later (a reconnect) must never read as a running hook: the plain async
+    hooks are released once their own processes are gone."""
+    spawn_service("svc-baseline", "trello-server")
+    spawn_hook("h-ups", 0.01)
+    hook_started("h-ups", "UserPromptSubmit")
+    _withheld.append(("h-ups", "UserPromptSubmit"))
+    init()
+    text("DONE")
+    spawn_hook("h-stop-plain", 0.01)
+    hook_started("h-stop-plain", "Stop")
+    _withheld.append(("h-stop-plain", "Stop"))
+    result("DONE")
+    spawn_service("svc-late", "npm", "exec", "firecrawl-mcp")
+    while next_user(None) is not None:
+        pass
+    shutdown()
+
+
 def scenario_async_hook_no_response(first: dict) -> None:
     # A hook that never reports back (exercises the hold bound).
     _stop_turn("DONE", ("h-stop", "Stop"), hook_s=600)
@@ -1305,6 +1392,8 @@ _SCENARIOS = {
     "async_hook_post_result_response": scenario_async_hook_post_result_response,
     "async_hook_live_mix_rewake": scenario_async_hook_live_mix_rewake,
     "async_hook_live_mix_running": scenario_async_hook_live_mix_running,
+    "async_hook_exec_rewake": scenario_async_hook_exec_rewake,
+    "async_hook_with_services": scenario_async_hook_with_services,
     "async_hook_no_response": scenario_async_hook_no_response,
     "plain_async_cancelled_on_eof": scenario_plain_async_cancelled_on_eof,
     "hook_flood": scenario_hook_flood,

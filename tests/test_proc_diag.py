@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import sys
+from typing import Any
 
 import pytest
 
@@ -821,19 +822,49 @@ def test_812_hook_script_label_unreadable_pid() -> None:
         assert proc_diag.hook_script_label(1) is None
 
 
-# ── #812: hook_shell_children ────────────────────────────────────────────────
+# ── #812: CLI children as hook-process evidence ────────────────────────────
 
 
 @pytest.mark.skipif(not sys.platform.startswith("linux"), reason="/proc backend")
-def test_812_hook_shell_children_finds_sh_c_children_only() -> None:
-    """Claude Code runs every command hook as ``/bin/sh -c <command>``; a
-    direct non-shell child (an MCP server) and a Bash-tool shell (the
-    ``… && pwd -P >| <tmp>/claude-<id>-cwd`` wrapper) are not one."""
+def test_812_cli_children_lists_live_children_with_argv() -> None:
+    """Live direct children with their argv; an exited-but-unreaped child
+    (zombie) is left out."""
     import subprocess
+    import time
 
-    from untether.utils.proc_diag import hook_shell_children
+    from untether.utils.proc_diag import cli_children
+
+    live = subprocess.Popen(["sleep", "5"])
+    dead = subprocess.Popen(["true"])
+    try:
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            found = cli_children(os.getpid())
+            assert found is not None
+            if dead.pid not in found:
+                break
+            time.sleep(0.05)
+        assert found[live.pid] == ["sleep", "5"]
+        assert dead.pid not in found  # zombie until wait()
+    finally:
+        live.kill()
+        live.wait()
+        dead.wait()
+    assert live.pid not in (cli_children(os.getpid()) or {})
+
+
+@pytest.mark.skipif(not sys.platform.startswith("linux"), reason="/proc backend")
+def test_812_execd_hook_is_evidence_but_a_tool_shell_is_not() -> None:
+    """``sh -c 'exec <cmd>'`` — what bash/zsh do for a single hook command —
+    leaves the bare command as the CLI's child: still evidence. A Bash-tool
+    shell (the ``… && pwd -P >| <tmp>/claude-<id>-cwd`` wrapper) is not."""
+    import subprocess
+    import time
+
+    from untether.utils.proc_diag import cli_children, hook_evidence_children
 
     hook = subprocess.Popen("sleep 5; true", shell=True)
+    execd = subprocess.Popen("exec sleep 5", shell=True)
     tool = subprocess.Popen(
         [
             "/bin/sh",
@@ -841,16 +872,63 @@ def test_812_hook_shell_children_finds_sh_c_children_only() -> None:
             "eval 'sleep 5' < /dev/null && pwd -P >| /tmp/claude-ab12-cwd",
         ]
     )
-    other = subprocess.Popen(["sleep", "5"])
     try:
-        found = hook_shell_children(os.getpid())
-        assert found is not None
-        assert set(found) & {hook.pid, tool.pid, other.pid} == {hook.pid}
+        time.sleep(0.2)  # let the exec land
+        children = cli_children(os.getpid())
+        assert children is not None
+        assert children[execd.pid] == ["sleep", "5"]
+        found = hook_evidence_children(children, frozenset())
+        assert set(found) & {hook.pid, execd.pid, tool.pid} == {hook.pid, execd.pid}
     finally:
-        for proc in (hook, tool, other):
+        for proc in (hook, execd, tool):
             proc.kill()
             proc.wait()
-    assert hook.pid not in (hook_shell_children(os.getpid()) or [])
+
+
+def test_812_hook_evidence_baseline_and_services() -> None:
+    from untether.utils.proc_diag import hook_evidence_children
+
+    children = {
+        10: ["node", "/x/trello-server.js"],  # baseline MCP server
+        11: ["/bin/sh", "-c", "moshi-hook claude-hook"],  # a shell: always
+        12: ["bash", "/p/hooks/sg-python.sh", "/p/hooks/review.py"],  # hook
+        13: ["npm", "exec", "firecrawl-mcp"],  # late MCP (reconnect)
+        14: ["/usr/bin/typescript-language-server", "--stdio"],  # late LSP
+        15: ["sleep", "120"],  # an exec'd inline hook command
+        16: [],  # argv unreadable: unknown counts
+        17: ["/bin/zsh", "-c", "eval 'ls' && pwd -P >| /tmp/claude-1f-cwd"],
+        18: ["python3", "/home/alsparks/review.py"],  # "lsp" inside a word
+    }
+    baseline = frozenset({10, 11, 12})
+    assert sorted(hook_evidence_children(children, baseline)) == [
+        11,
+        12,
+        15,
+        16,
+        18,
+    ]
+    # No baseline captured: nothing is exempt for being early.
+    assert 10 in hook_evidence_children(children, None)
+
+
+@pytest.mark.parametrize(
+    ("argv", "expected"),
+    [
+        (["npm", "exec", "firecrawl-mcp"], True),
+        (["node", "/usr/lib/node_modules/mcp-server-trello/dist/index.js"], True),
+        (["npx", "-y", "@modelcontextprotocol/server-github"], True),
+        (["uvx", "mcp"], True),
+        (["pyright-langserver", "--stdio"], True),
+        (["rust-analyzer-lsp"], True),
+        (["python3", "/home/u/.claude/hooks/mcp_guard.py"], False),
+        (["python3", "/home/alsparks/x.py"], False),
+        (["sleep", "120"], False),
+    ],
+)
+def test_812_looks_like_service(argv: list[str], expected: bool) -> None:
+    from untether.utils.proc_diag import looks_like_service
+
+    assert looks_like_service(argv) is expected
 
 
 @pytest.mark.parametrize(
@@ -870,40 +948,55 @@ def test_812_is_shell_c(argv: list[str], expected: bool) -> None:
     assert _is_shell_c(argv) is expected
 
 
-def test_812_hook_shell_children_unknown_pid_is_none_off_darwin(
+def test_812_cli_children_unknown_pid_is_none_off_darwin(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Unreadable table → None: the caller must not assume no hook runs."""
     from untether.utils import proc_diag
 
     monkeypatch.setattr(proc_diag.sys, "platform", "linux")
-    assert proc_diag.hook_shell_children(2**22 + 12345) is None
+    assert proc_diag.cli_children(2**22 + 12345) is None
 
 
-def test_812_hook_shell_children_darwin_ps(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_812_cli_children_darwin_ps(monkeypatch: pytest.MonkeyPatch) -> None:
+    """macOS: one ``ps`` listing (pid, ppid, stat, command) — direct
+    children only, zombies skipped — then the same classification: bash's
+    exec'd hook command counts, the baseline MCP server doesn't."""
     import subprocess
 
     from untether.utils import proc_diag
 
     ps_out = (
-        "  100     1 /Users/u/.local/bin/claude --output-format stream-json\n"
-        "  200   100 /bin/sh -c '/Users/u/.local/bin/moshi-hook' claude-hook\n"
-        "  201   100 npm exec firecrawl-mcp\n"
-        "  202   100 /bin/zsh -c eval 'ls' && pwd -P >| /tmp/claude-1f-cwd\n"
-        "  300   999 /bin/sh -c unrelated\n"
+        "  100     1 Ss   /Users/u/.local/bin/claude --output-format stream-json\n"
+        "  200   100 S    /bin/sh -c '/Users/u/.local/bin/moshi-hook' claude-hook\n"
+        "  201   100 S    npm exec firecrawl-mcp\n"
+        "  202   100 S    /bin/zsh -c eval 'ls' && pwd -P >| /tmp/claude-1f-cwd\n"
+        "  203   100 S+   bash /p/hooks/sg-python.sh /p/hooks/review.py\n"
+        "  204   100 Z    <defunct>\n"
+        "  205   100 S    node /x/trello-server.js\n"
+        "  300   999 S    /bin/sh -c unrelated\n"
         "garbage\n"
     )
+    calls: list[list[str]] = []
+
+    def fake_run(argv: list[str], **kwargs: Any) -> Any:
+        calls.append(argv)
+        return subprocess.CompletedProcess(argv, 0, stdout=ps_out, stderr="")
+
     monkeypatch.setattr(proc_diag.sys, "platform", "darwin")
     monkeypatch.setattr(proc_diag.os.path, "isdir", lambda p: False)
-    monkeypatch.setattr(
-        proc_diag.subprocess,
-        "run",
-        lambda *a, **k: subprocess.CompletedProcess(a, 0, stdout=ps_out, stderr=""),
-    )
-    assert proc_diag.hook_shell_children(100) == [200]
+    monkeypatch.setattr(proc_diag.subprocess, "run", fake_run)
+    children = proc_diag.cli_children(100)
+    assert calls[0] == ["/bin/ps", "-axo", "pid=,ppid=,stat=,command="]
+    assert children is not None
+    assert sorted(children) == [200, 201, 202, 203, 205]
+    assert children[203] == ["bash", "/p/hooks/sg-python.sh", "/p/hooks/review.py"]
+    assert sorted(
+        proc_diag.hook_evidence_children(children, frozenset({201, 205}))
+    ) == [200, 203]
     monkeypatch.setattr(
         proc_diag.subprocess,
         "run",
         lambda *a, **k: subprocess.CompletedProcess(a, 1, stdout="", stderr="x"),
     )
-    assert proc_diag.hook_shell_children(100) is None
+    assert proc_diag.cli_children(100) is None

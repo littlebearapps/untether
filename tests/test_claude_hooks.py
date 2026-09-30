@@ -11,6 +11,7 @@ import time
 from typing import Any
 
 import msgspec
+import pytest
 from structlog.testing import capture_logs
 
 from untether.events import EventFactory
@@ -527,3 +528,36 @@ def test_session_summary_hook_fields() -> None:
     # Other engines (no hook tracking) add nothing.
     assert _hook_summary_fields(SimpleNamespace(engine_state=object())) == {}
     assert _hook_summary_fields(None) == {}
+
+
+@pytest.mark.anyio
+async def test_capture_cli_baseline_once_and_unreadable_leaves_none(
+    monkeypatch: Any,
+) -> None:
+    """#812: the baseline (MCP servers up by system/init) is recorded once
+    per process; an unreadable table leaves None, so nothing is exempt and
+    the hold errs long (bounded)."""
+    scans: list[int | None] = []
+    tables: list[dict[int, list[str]] | None] = [
+        None,
+        {10: ["node", "srv.js"], 11: ["npm", "exec", "x-mcp"]},
+        {99: ["sleep", "1"]},
+    ]
+
+    async def fake_children(pid: int | None) -> dict[int, list[str]] | None:
+        scans.append(pid)
+        return tables[len(scans) - 1]
+
+    monkeypatch.setattr(claude_mod, "_cli_children", fake_children)
+    state, _ = _state()
+    await claude_mod.capture_cli_baseline(state, 4242)
+    assert state.cli_baseline_children is None
+    await claude_mod.capture_cli_baseline(state, 4242)
+    assert state.cli_baseline_children == frozenset({10, 11})
+    await claude_mod.capture_cli_baseline(state, 4242)  # already captured
+    assert state.cli_baseline_children == frozenset({10, 11})
+    assert scans == [4242, 4242]
+    # The baseline feeds the evidence filter.
+    scans.clear()
+    tables[:] = [{10: ["node", "srv.js"], 12: ["sleep", "120"]}]
+    assert await claude_mod._hook_processes(state, 4242) == [12]

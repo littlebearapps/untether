@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import contextlib
 import os
+import re
 import subprocess
 import sys
 from dataclasses import dataclass, field
@@ -368,28 +369,24 @@ def _is_tool_shell(command: str) -> bool:
     return _TOOL_SHELL_MARKER in command
 
 
-def hook_shell_children(pid: int) -> list[int] | None:
-    """#812: direct children of ``pid`` running ``<shell> -c …`` — the shape
-    every Claude Code command hook runs as. Bash-tool shells are left out.
-    Returns None when the process table can't be read (then the caller
-    can't tell, and must not assume no hook is running). Blocking (``ps``
-    on macOS): call from a thread.
-
-    Only a count is meaningful: hook frames carry no pid, and hooks started
-    in the same millisecond can't be told apart, so a shell is never bound
-    to a particular hook."""
+def cli_children(pid: int) -> dict[int, list[str]] | None:
+    """#812: live (non-zombie) direct children of ``pid`` → argv (``[]`` when
+    unreadable; on macOS the ``ps`` command line split on whitespace).
+    Returns None when the process table can't be read. Blocking (``ps`` on
+    macOS): call from a thread."""
     if os.path.isdir(f"/proc/{pid}"):
-        found: list[int] = []
+        found: dict[int, list[str]] = {}
         for child in _find_children(pid):
-            argv = read_cmdline_argv(child)
-            if argv and _is_shell_c(argv) and not _is_tool_shell(" ".join(argv[1:])):
-                found.append(child)
+            state = _read_stat(child)[0]
+            if state is None or state.startswith("Z"):
+                continue  # gone, or exited and not reaped yet
+            found[child] = read_cmdline_argv(child) or []
         return found
     if sys.platform != "darwin":
         return None
     try:
         out = subprocess.run(  # nosec B603 — fixed argv, no shell
-            ["/bin/ps", "-axo", "pid=,ppid=,command="],
+            ["/bin/ps", "-axo", "pid=,ppid=,stat=,command="],
             capture_output=True,
             text=True,
             timeout=2.0,
@@ -400,23 +397,70 @@ def hook_shell_children(pid: int) -> list[int] | None:
         return None
     if out.returncode != 0 or not out.stdout:
         return None
-    found = []
+    found = {}
     for line in out.stdout.splitlines():
-        fields = line.split(None, 2)
-        if len(fields) != 3:
+        fields = line.split(None, 3)
+        if len(fields) < 3:
             continue
         try:
             row_pid, row_ppid = int(fields[0]), int(fields[1])
         except ValueError:
             continue
-        # ``command=`` joins argv with spaces; the shell and ``-c`` are the
-        # leading tokens.
-        if (
-            row_ppid == pid
-            and _is_shell_c(fields[2].split()[:3])
-            and not _is_tool_shell(fields[2])
-        ):
-            found.append(row_pid)
+        if row_ppid != pid or fields[2].startswith("Z"):
+            continue
+        found[row_pid] = fields[3].split() if len(fields) == 4 else []
+    return found
+
+
+# #812: long-lived CLI children that appear after the session baseline and
+# are not hooks — an MCP server (re)started on reconnect, a language server.
+# A token-boundary match so a path like ``/home/alsparks`` doesn't count; a
+# ``/hooks/`` token always wins (plugin and user hook scripts live there).
+_SERVICE_TOKEN = re.compile(
+    r"(?<![a-z0-9])(?:mcp|lsp)(?![a-z0-9])|modelcontextprotocol"
+    r"|language-?server|langserver"
+)
+
+
+def looks_like_service(argv: list[str]) -> bool:
+    lowered = [t.lower() for t in argv]
+    if any(_HOOK_PATH_MARKER in t for t in lowered):
+        return False
+    return any(_SERVICE_TOKEN.search(t) for t in lowered)
+
+
+def hook_evidence_children(
+    children: dict[int, list[str]], baseline: frozenset[int] | None
+) -> list[int]:
+    """#812: the CLI children that may be a running command hook.
+
+    Hooks run as ``/bin/sh -c <command>``, but a shell that execs a single
+    command (bash — macOS ``/bin/sh`` — and zsh do; Linux dash doesn't)
+    leaves only the command itself (``bash …/sg-python.sh …``). So any
+    direct child counts, except:
+
+    - a Bash-tool shell (``… && pwd -P >| <tmp>/claude-<id>-cwd``);
+    - a non-shell child already present at the session baseline (MCP
+      servers, spawned before ``system/init``) — a ``<shell> -c`` child or
+      one with a ``/hooks/`` argv token always counts, baseline or not;
+    - a later non-shell child that looks like a service (MCP / LSP argv).
+
+    Unknown argv counts. ``baseline`` None (never captured) exempts nothing.
+    Wrong guesses err towards holding (bounded by ``async_hook_max_hold``)."""
+    found: list[int] = []
+    for child, argv in children.items():
+        if argv and _is_shell_c(argv):
+            if not _is_tool_shell(" ".join(argv[1:])):
+                found.append(child)
+            continue
+        if any(_HOOK_PATH_MARKER in t for t in argv):
+            found.append(child)  # a hook script, whenever it started
+            continue
+        if baseline is not None and child in baseline:
+            continue
+        if argv and looks_like_service(argv):
+            continue
+        found.append(child)
     return found
 
 
