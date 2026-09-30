@@ -964,6 +964,97 @@ async def test_806_aborted_turn_still_accounts_its_cost(
     ]
 
 
+async def test_806_aborted_turn_is_accounted_once_when_its_render_is_interrupted(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#806 review: an aborted turn is accounted before its ``cancelled``
+    render. When /cancel interrupts that render, ``aclose`` retries it and —
+    if the retry fails too — delivers a synthetic final through
+    ``_deliver_final``, which used to account the turn a second time
+    (``runner.completed`` and /stats double-recorded)."""
+    from structlog.testing import capture_logs
+
+    from untether import cost_tracker, session_stats
+
+    monkeypatch.setattr(cost_tracker, "_daily_cost", ("", 0.0))
+    stats_runs: list[dict] = []
+    monkeypatch.setattr(session_stats, "record_run", lambda **kw: stats_runs.append(kw))
+    running: dict[MessageRef, rb.RunningTask] = {}
+    cancelled_renders = {"n": 0}
+
+    class _Transport(FakeTransport):
+        async def _maybe_fail(self, message) -> None:
+            if "cancelled" not in message.text:
+                return
+            cancelled_renders["n"] += 1
+            if cancelled_renders["n"] == 1:
+                # /cancel lands while the cancelled render is in flight.
+                (_, task), *_ = rb.unique_running_tasks(running)
+                task.cancel_requested.set()
+                await anyio.sleep(5)
+            raise RuntimeError("telegram down")
+
+        async def send(self, *, channel_id, message, options=None):
+            await self._maybe_fail(message)
+            return await super().send(
+                channel_id=channel_id, message=message, options=options
+            )
+
+        async def edit(self, *, ref, message, wait=True):
+            await self._maybe_fail(message)
+            return await super().edit(ref=ref, message=message, wait=wait)
+
+    first = CompletedEvent(
+        engine="claude",
+        resume=_TOKEN,
+        ok=True,
+        answer="FIRST",
+        usage={"total_cost_usd": 1.0, "num_turns": 1},
+    )
+    transport = _Transport()
+    runner = ScriptRunner(
+        [
+            Emit(StartedEvent(engine="claude", resume=_TOKEN)),
+            Emit(first),
+            Emit(_turn("started", reason="followup")),
+            Emit(_action()),
+            Emit(
+                _turn(
+                    "completed",
+                    reason="followup",
+                    ok=True,
+                    answer="PARTIAL-ANSWER",
+                    resume=_TOKEN,
+                    usage={
+                        "terminal_reason": "aborted_tools",
+                        "total_cost_usd": 1.5,
+                        "num_turns": 2,
+                    },
+                )
+            ),
+        ],
+        engine="claude",
+        resume_value=_TOKEN.value,
+    )
+    cfg = ExecBridgeConfig(
+        transport=transport, presenter=MarkdownPresenter(), final_notify=True
+    )
+    with capture_logs() as logs, anyio.fail_after(20):
+        await handle_message(
+            cfg,
+            runner=runner,
+            incoming=IncomingMessage(channel_id=1, message_id=10, text="go"),
+            resume_token=None,
+            running_tasks=running,
+        )
+
+    assert cancelled_renders["n"] == 2  # interrupted, then retried by aclose
+    completed_logs = [e for e in logs if e["event"] == "runner.completed"]
+    assert len(completed_logs) == 2  # the run's result + the aborted turn
+    assert len(stats_runs) == 2
+    assert cost_tracker.get_daily_cost() == pytest.approx(1.5)
+
+
 # ── #795 wake-turn reply anchor ──────────────────────────────────────────────
 
 FOLLOWUP_REF = MessageRef(channel_id=1, message_id=20)

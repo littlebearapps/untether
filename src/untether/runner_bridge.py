@@ -4200,6 +4200,11 @@ class _TurnCtx:
     edits_scope: anyio.CancelScope | None = None
     lazy_scope: anyio.CancelScope | None = None
     delivery: dict[str, bool] = field(default_factory=lambda: {"sent": False})
+    # #806: what ``_account_completion`` settled for this turn. A turn's
+    # spend is accounted once: an aborted turn accounts before its
+    # ``cancelled`` render, and if that render is interrupted ``aclose``'s
+    # synthetic final must not account it again (/stats, runner.completed).
+    accounting: _CompletionAccounting | None = None
     # Serialises progress creation: the lazy timer and the first action can
     # both ask for it (review finding, #776).
     progress_lock: anyio.Lock = field(default_factory=anyio.Lock)
@@ -4933,6 +4938,9 @@ async def handle_message(
         ``runner.completed`` log and /stats. Shared by ``_deliver_final`` and
         the aborted-turn path, which renders ``cancelled`` instead of a final
         but still spent money."""
+        if turn is not None and turn.accounting is not None:
+            logger.debug("live_turn.already_accounted", turn=turn.turn)
+            return turn.accounting
         t_tracker = turn.tracker if turn is not None else progress_tracker
         resume_value = final_resume.value if final_resume is not None else None
         # #778: Claude's total_cost_usd is cumulative per session (across
@@ -4977,13 +4985,16 @@ async def handle_message(
         )
         # Records the daily total (record_run_cost) as well as checking it.
         alert_text, alert = _check_cost_budget(run_usage)
-        return _CompletionAccounting(
+        acct = _CompletionAccounting(
             resume_value=resume_value,
             run_usage=run_usage,
             cost_alert_text=alert_text,
             cost_alert=alert,
             outlier_text=_check_run_cost_outlier(run_usage),
         )
+        if turn is not None:
+            turn.accounting = acct
+        return acct
 
     async def _deliver_final(
         completed: CompletedEvent,
