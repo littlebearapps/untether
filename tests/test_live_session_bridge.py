@@ -1138,28 +1138,56 @@ def test_812_hook_rewake_header_without_event() -> None:
     )
 
 
+_HG = "\N{HOURGLASS WITH FLOWING SAND} Closing session — "
+
+
 @pytest.mark.parametrize(
-    ("hooks", "tasks", "expected"),
+    ("hooks", "count", "expected"),
     [
         (
             ["Stop"],
-            [],
-            "\N{HOURGLASS WITH FLOWING SAND} Closing session — a background hook "
-            "(Stop) was still running; its feedback wasn't delivered.",
+            None,
+            f"{_HG}a background hook (Stop) was still running; its feedback "
+            "wasn't delivered.",
         ),
         (
             ["Stop", "PostToolUse"],
-            [],
-            "\N{HOURGLASS WITH FLOWING SAND} Closing session — 2 background hooks "
-            "(Stop, PostToolUse) were still running; their feedback wasn't "
-            "delivered.",
+            None,
+            f"{_HG}2 background hooks (Stop, PostToolUse) were still running; "
+            "their feedback wasn't delivered.",
+        ),
+        # #812: one live hook process among candidates of two events — one
+        # hook that could be either, never "2 hooks".
+        (
+            ["Stop", "UserPromptSubmit"],
+            1,
+            f"{_HG}a background hook (Stop or UserPromptSubmit) was still "
+            "running; its feedback wasn't delivered.",
+        ),
+        (
+            ["Stop"],
+            1,
+            f"{_HG}a background hook (Stop) was still running; its feedback "
+            "wasn't delivered.",
+        ),
+        (
+            ["PostToolUse", "Stop", "UserPromptSubmit"],
+            1,
+            f"{_HG}a background hook (PostToolUse, Stop or UserPromptSubmit) "
+            "was still running; its feedback wasn't delivered.",
+        ),
+        (
+            ["Stop"],
+            2,
+            f"{_HG}2 background hooks (Stop) were still running; their "
+            "feedback wasn't delivered.",
         ),
     ],
 )
 def test_812_closing_notice_hooks_variant(
-    hooks: list[str], tasks: list[str], expected: str
+    hooks: list[str], count: int | None, expected: str
 ) -> None:
-    assert rb._live_closing_notice("idle_no_tasks", tasks, hooks) == expected
+    assert rb._live_closing_notice("idle_no_tasks", [], hooks, count) == expected
 
 
 def test_812_closing_notice_hooks_and_tasks_both_named() -> None:

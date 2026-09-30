@@ -4093,18 +4093,27 @@ _TURN_LAZY_PROGRESS_S = 5.0
 _TURN_CANCEL_REASONS = frozenset({"cancel"})
 
 
-def _live_closing_hooks_notice(hooks: list[str]) -> str:
+def _live_closing_hooks_notice(hooks: list[str], count: int | None = None) -> str:
     """#812: an automatic close cut a background hook short — its feedback
-    (e.g. an asyncRewake security review) never reached the session."""
-    n = len(hooks)
-    names = ", ".join(h[:40] for h in hooks[:3])
-    if n > 3:
-        names += f" (+{n - 3} more)"
+    (e.g. an asyncRewake security review) never reached the session.
+
+    ``count`` is how many were still running (the live hook processes);
+    ``hooks`` the distinct events they could be. Hook frames carry no pid,
+    so one running hook among Stop and UserPromptSubmit candidates reads
+    "a background hook (Stop or UserPromptSubmit)" — never "2 hooks".
+    Without ``count`` each entry is one hook (script labels)."""
+    n = len(hooks) if count is None else count
+    shown = [h[:40] for h in hooks[:3]]
+    more = f" (+{len(hooks) - 3} more)" if len(hooks) > 3 else ""
     if n == 1:
+        names = (
+            shown[0] if len(shown) == 1 else f"{', '.join(shown[:-1])} or {shown[-1]}"
+        ) + more
         return (
             f"\N{HOURGLASS WITH FLOWING SAND} Closing session — a background hook "
             f"({names}) was still running; its feedback wasn't delivered."
         )
+    names = ", ".join(shown) + more
     return (
         f"\N{HOURGLASS WITH FLOWING SAND} Closing session — {n} background hooks "
         f"({names}) were still running; their feedback wasn't delivered."
@@ -4112,12 +4121,15 @@ def _live_closing_hooks_notice(hooks: list[str]) -> str:
 
 
 def _live_closing_notice(
-    reason: str, tasks: list[str], hooks: list[str] | None = None
+    reason: str,
+    tasks: list[str],
+    hooks: list[str] | None = None,
+    hook_count: int | None = None,
 ) -> str:
     """User-facing text for a live session closing over running background
     tasks (#776) or background hooks (#812, automatic closes only)."""
     if hooks:
-        hook_text = _live_closing_hooks_notice(hooks)
+        hook_text = _live_closing_hooks_notice(hooks, hook_count)
         if not tasks:
             return hook_text
         return f"{hook_text}\n{_live_closing_notice(reason, tasks)}"
@@ -5441,9 +5453,19 @@ async def handle_message(
             return
         tasks = [t for t in payload.get("tasks", []) if isinstance(t, str)]
         hooks = [h for h in payload.get("hooks", []) if isinstance(h, str)]
+        raw_count = payload.get("hook_count")
+        hook_count = (
+            raw_count
+            if isinstance(raw_count, int) and not isinstance(raw_count, bool)
+            else None
+        )
+        if hooks and hook_count is not None and hook_count <= 0:
+            hooks = []  # #812: nothing was still running
         if not tasks and not hooks:
             return
-        text = _live_closing_notice(str(payload.get("reason")), tasks, hooks)
+        text = _live_closing_notice(
+            str(payload.get("reason")), tasks, hooks, hook_count
+        )
         try:
             await cfg.transport.send(
                 channel_id=incoming.channel_id,

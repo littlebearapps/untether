@@ -128,15 +128,16 @@ hook-message, interrupt, TaskOutput/TaskStop and origin sections, not the whole 
   processes exit within a second, but their `hook_response` (`outcome:"success"`) lands only when
   stdin closes (30.01 s), or at the next turn. The `asyncRewake` Stop hook (security-guidance) and
   the sync hooks report at once (the rewake 0.28 s after the result, while idle). So an unpaired
-  `hook_started` after the result isn't proof of a running hook. Untether's hold (#812) releases
-  per hook: each live `<shell> -c` child of the CLI (every command hook runs as
-  `/bin/sh -c <command>`, spawned right after its `hook_started`; Bash-tool shells, which end
-  `&& pwd -P >| …-cwd`, are skipped) keeps one hook — the latest-started one whose frame landed
-  near the shell's spawn time, else the latest-started — and a hook no live shell can be is
-  released after 1 s (`claude.hook.hold_released reason=hook_process_exited`, or
-  `no_hook_process` when no hook shell is left). Only hooks still running expire and get named at
-  a close. Same-event hooks started in the same millisecond can't be told apart, so the label may
-  be the sibling's; the count and the hold's length are still right.
+  `hook_started` after the result isn't proof of a running hook. Untether's hold (#812) reads the
+  CLI's live `<shell> -c` children (every command hook runs as `/bin/sh -c <command>`; Bash-tool
+  shells, which end `&& pwd -P >| …-cwd`, are skipped) and is **all-or-nothing**: while any hook
+  shell lives, every unpaired hook holds; once none has been alive for 1 s they are all released
+  (`claude.hook.hold_released reason=no_hook_process`). A per-hook binding (shell spawn time →
+  nearest `hook_started`) was tried and reverted: live on 2.1.285 the four hooks of one turn
+  started within the same ms, the one live shell was tied to the sync Stop hook, and the running
+  `asyncRewake` hook was released and its rewake lost. Labels instead count live hook shells:
+  expiry and close messages never claim more hooks than are running, and name the distinct
+  events they could be (`a background hook (Stop or UserPromptSubmit)`).
 
 ### A2. `--include-hook-events`
 

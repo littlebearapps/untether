@@ -12,7 +12,6 @@ import contextlib
 import os
 import subprocess
 import sys
-import time
 from dataclasses import dataclass, field
 
 
@@ -369,36 +368,22 @@ def _is_tool_shell(command: str) -> bool:
     return _TOOL_SHELL_MARKER in command
 
 
-def _spawn_monotonic(pid: int) -> float | None:
-    """When ``pid`` was spawned, on the ``time.monotonic()`` scale (Linux;
-    ~10 ms resolution). None when unknown."""
-    ticks = pid_starttime(pid)
-    if ticks is None:
-        return None
-    try:
-        hz = os.sysconf("SC_CLK_TCK")
-        boot_now = time.clock_gettime(time.CLOCK_BOOTTIME)
-    except (AttributeError, OSError, ValueError):
-        return None
-    if hz <= 0:
-        return None
-    # /proc/<pid>/stat starttime counts from boot (CLOCK_BOOTTIME).
-    return time.monotonic() - (boot_now - ticks / hz)
-
-
-def hook_shell_processes(pid: int) -> dict[int, float | None] | None:
+def hook_shell_children(pid: int) -> list[int] | None:
     """#812: direct children of ``pid`` running ``<shell> -c …`` — the shape
-    every Claude Code command hook runs as — mapped to their spawn time on
-    the ``time.monotonic()`` scale (None where the platform can't tell:
-    macOS). Bash-tool shells are left out. Returns None when the process
-    table can't be read (then the caller can't tell, and must not assume
-    no hook is running). Blocking (``ps`` on macOS): call from a thread."""
+    every Claude Code command hook runs as. Bash-tool shells are left out.
+    Returns None when the process table can't be read (then the caller
+    can't tell, and must not assume no hook is running). Blocking (``ps``
+    on macOS): call from a thread.
+
+    Only a count is meaningful: hook frames carry no pid, and hooks started
+    in the same millisecond can't be told apart, so a shell is never bound
+    to a particular hook."""
     if os.path.isdir(f"/proc/{pid}"):
-        found: dict[int, float | None] = {}
+        found: list[int] = []
         for child in _find_children(pid):
             argv = read_cmdline_argv(child)
             if argv and _is_shell_c(argv) and not _is_tool_shell(" ".join(argv[1:])):
-                found[child] = _spawn_monotonic(child)
+                found.append(child)
         return found
     if sys.platform != "darwin":
         return None
@@ -415,7 +400,7 @@ def hook_shell_processes(pid: int) -> dict[int, float | None] | None:
         return None
     if out.returncode != 0 or not out.stdout:
         return None
-    found = {}
+    found = []
     for line in out.stdout.splitlines():
         fields = line.split(None, 2)
         if len(fields) != 3:
@@ -431,7 +416,7 @@ def hook_shell_processes(pid: int) -> dict[int, float | None] | None:
             and _is_shell_c(fields[2].split()[:3])
             and not _is_tool_shell(fields[2])
         ):
-            found[row_pid] = None
+            found.append(row_pid)
     return found
 
 

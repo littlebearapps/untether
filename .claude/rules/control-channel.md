@@ -144,24 +144,36 @@ hook's rewake once stdin has closed (`docs/findings/2026-09-29-claude-rc14-cli-s
 - `has_pending_async_hooks()` is a **sibling predicate** OR'd into
   `_live_session_lifecycle`, never part of `has_live_background_work()` — hooks
   must not reach footers, the #777 panel, the #592 cap or `_is_clean_idle`.
-- Per-hook bound `[watchdog] async_hook_max_hold` (630 s, 0–3600) from each
-  `hook_started` → `claude.hook.hold_expired` WARN.
+- Bound `[watchdog] async_hook_max_hold` (630 s, 0–3600) from the **newest**
+  unpaired `hook_started` → every unpaired hook expires together, ONE
+  `claude.hook.hold_expired` WARN per hold (`live_hook_processes`,
+  `pending_hooks`, `hook_events`, `held_s`, `max_hold_s`); the hold then ends
+  even if a hook shell lives.
 - The CLI withholds a plain `async` hook's `hook_response` until the next turn
-  or stdin close. Each idle tick `release_finished_async_hooks()` maps live
-  `<shell> -c` children (`proc_diag.hook_shell_processes()`) to hooks and
-  releases a hook no live shell accounts for after 1 s
-  (`claude.hook.hold_released reason=hook_process_exited|no_hook_process`).
-  Unreadable process table → keep the bounded hold. `close_live_session`
-  re-checks with `immediate`.
+  or stdin close. Each idle tick counts live `<shell> -c` children
+  (`proc_diag.hook_shell_children()`). **All-or-nothing — never bind a shell
+  to a hook** (frames carry no pid; a turn's hooks start in the same ms; the
+  per-hook binding in 271bb96 released a live `asyncRewake` hook and lost its
+  rewake): any hook shell alive → every unpaired hook holds; none for 1 s →
+  `release_settled_async_hooks()` releases them all
+  (`claude.hook.hold_released reason=no_hook_process`). Unreadable process
+  table → keep the bounded hold. `close_live_session` re-checks.
+- Labels never claim more hooks than live hook shells: N = live shells
+  (capped by the unpaired candidates; the candidate count only when the table
+  is unreadable), events = the distinct candidate events. N = 0 at a close →
+  no `async_hook_killed`, no notice.
 - Idle exit-2 `hook_response` → next turn `reason="hook_rewake"` (always
   pushed, never folded); a turn already open is confirmed at its result by
   `origin.kind == "task-notification"`.
-- A close with a hook still evident uses `_live_close_grace_hooks_s` (35 s = the
-  CLI's 30 s rewake wait + 5 s) instead of 15 s, logs
-  `claude.live_session.async_hook_killed` (INFO for `cancel`/`new`/`drain`/
-  `options_changed`, WARN otherwise) and, on automatic closes only, sends
-  `⏳ Closing session — a background hook (<event>) was still running; its
-  feedback wasn't delivered.`
+- A close with a hook still evident (unpaired hooks with a live shell, a
+  `/hooks/` argv child, or any live hook shell — process evidence) uses
+  `_live_close_grace_hooks_s` (35 s = the CLI's 30 s rewake wait + 5 s)
+  instead of 15 s, logs `claude.live_session.async_hook_killed` (`hook_count`,
+  `live_hook_processes`, `hook_events`, candidate `hook_names`/`hook_ids` +
+  `note`; INFO for `cancel`/`new`/`drain`/`options_changed`, WARN otherwise)
+  and, on automatic closes only, sends `⏳ Closing session — a background hook
+  (Stop or UserPromptSubmit) was still running; its feedback wasn't
+  delivered.` (`N background hooks (…)` when N ≥ 2).
 - Timing knobs are slots-dataclass fields: set them on the instance in tests.
 
 ## Parent-initiated control_requests (Untether → Claude)

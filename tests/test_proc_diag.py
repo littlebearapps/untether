@@ -821,21 +821,18 @@ def test_812_hook_script_label_unreadable_pid() -> None:
         assert proc_diag.hook_script_label(1) is None
 
 
-# ── #812: hook_shell_processes ───────────────────────────────────────────────
+# ── #812: hook_shell_children ────────────────────────────────────────────────
 
 
 @pytest.mark.skipif(not sys.platform.startswith("linux"), reason="/proc backend")
-def test_812_hook_shell_processes_finds_sh_c_children_only() -> None:
+def test_812_hook_shell_children_finds_sh_c_children_only() -> None:
     """Claude Code runs every command hook as ``/bin/sh -c <command>``; a
     direct non-shell child (an MCP server) and a Bash-tool shell (the
-    ``… && pwd -P >| <tmp>/claude-<id>-cwd`` wrapper) are not one. Spawn
-    times come back on the monotonic scale."""
+    ``… && pwd -P >| <tmp>/claude-<id>-cwd`` wrapper) are not one."""
     import subprocess
-    import time
 
-    from untether.utils.proc_diag import hook_shell_processes
+    from untether.utils.proc_diag import hook_shell_children
 
-    before = time.monotonic()
     hook = subprocess.Popen("sleep 5; true", shell=True)
     tool = subprocess.Popen(
         [
@@ -846,17 +843,14 @@ def test_812_hook_shell_processes_finds_sh_c_children_only() -> None:
     )
     other = subprocess.Popen(["sleep", "5"])
     try:
-        found = hook_shell_processes(os.getpid())
+        found = hook_shell_children(os.getpid())
         assert found is not None
         assert set(found) & {hook.pid, tool.pid, other.pid} == {hook.pid}
-        spawned = found[hook.pid]
-        assert spawned is not None
-        assert before - 0.5 <= spawned <= time.monotonic() + 0.05
     finally:
         for proc in (hook, tool, other):
             proc.kill()
             proc.wait()
-    assert hook.pid not in (hook_shell_processes(os.getpid()) or {})
+    assert hook.pid not in (hook_shell_children(os.getpid()) or [])
 
 
 @pytest.mark.parametrize(
@@ -876,17 +870,17 @@ def test_812_is_shell_c(argv: list[str], expected: bool) -> None:
     assert _is_shell_c(argv) is expected
 
 
-def test_812_hook_shell_processes_unknown_pid_is_none_off_darwin(
+def test_812_hook_shell_children_unknown_pid_is_none_off_darwin(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Unreadable table → None: the caller must not assume no hook runs."""
     from untether.utils import proc_diag
 
     monkeypatch.setattr(proc_diag.sys, "platform", "linux")
-    assert proc_diag.hook_shell_processes(2**22 + 12345) is None
+    assert proc_diag.hook_shell_children(2**22 + 12345) is None
 
 
-def test_812_hook_shell_processes_darwin_ps(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_812_hook_shell_children_darwin_ps(monkeypatch: pytest.MonkeyPatch) -> None:
     import subprocess
 
     from untether.utils import proc_diag
@@ -906,10 +900,10 @@ def test_812_hook_shell_processes_darwin_ps(monkeypatch: pytest.MonkeyPatch) -> 
         "run",
         lambda *a, **k: subprocess.CompletedProcess(a, 0, stdout=ps_out, stderr=""),
     )
-    assert proc_diag.hook_shell_processes(100) == {200: None}
+    assert proc_diag.hook_shell_children(100) == [200]
     monkeypatch.setattr(
         proc_diag.subprocess,
         "run",
         lambda *a, **k: subprocess.CompletedProcess(a, 1, stdout="", stderr="x"),
     )
-    assert proc_diag.hook_shell_processes(100) is None
+    assert proc_diag.hook_shell_children(100) is None

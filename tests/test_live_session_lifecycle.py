@@ -7,6 +7,7 @@ lifecycle timers shrunk to fractions of a second.
 from __future__ import annotations
 
 import os
+import time
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -36,7 +37,7 @@ _ENV = (
     "FAKE_CLAUDE_WAKE_S",
     "FAKE_CLAUDE_IGNORE_SIGINT",
     "FAKE_CLAUDE_REWAKE_WAIT_S",
-    "FAKE_CLAUDE_TURN_S",
+    "FAKE_CLAUDE_SYNC_HOOK_S",
 )
 
 
@@ -477,17 +478,16 @@ async def test_812_plain_async_hooks_do_not_hold_past_their_process(
     assert sorted(holds[0]["hook_names"]) == ["Stop", "Stop", "UserPromptSubmit"]
     released = _events(logs, "claude.hook.hold_released")
     assert len(released) == 1
-    # Per hook: the plain ones go once their own process is gone, whether
-    # or not the rewake hook's shell is still up at that scan.
-    assert released[0]["reason"] in ("hook_process_exited", "no_hook_process")
+    # All or nothing: released only once no hook process is left.
+    assert released[0]["reason"] == "no_hook_process"
     assert sorted(released[0]["hook_ids"]) == ["h-stop-b", "h-ups-b"]
     closed = _events(logs, "claude.live_session.stdin_closed")
     assert len(closed) == 1 and closed[0]["reason"] == "idle_no_tasks"
     assert logs.index(holds[0]) < logs.index(released[0]) < logs.index(closed[0])
     assert state.live_close_reason == "idle_no_tasks"
-    # The rewake hook held (1 s), then the plain 0.3 s idle grace — well
-    # short of the 5 s bound.
-    assert 1.0 <= elapsed < 4.5
+    # The rewake hook held (1 s), no hook process for the 1 s settle, then
+    # the plain 0.3 s idle grace — well short of the 5 s bound.
+    assert 2.0 <= elapsed < 4.5
     assert _events(logs, "claude.hook.hold_expired") == []
     assert _events(logs, "claude.live_session.async_hook_killed") == []
     assert _events(logs, "claude.live_session.close_grace_expired") == []
@@ -499,83 +499,169 @@ async def test_812_plain_async_hooks_do_not_hold_past_their_process(
     assert not any(isinstance(e, TurnEvent) for e in events)
 
 
-async def test_812_only_the_running_hook_is_held_expired_and_named(
+async def test_812_live_hook_shell_holds_every_unpaired_hook_until_rewake(
     monkeypatch: pytest.MonkeyPatch, quarantine: QuarantineStore
 ) -> None:
-    """Live regression (CLI 2.1.285, @untether_dev_bot): plain ``async``
-    moshi-hook on UserPromptSubmit + Stop (exits at once, response withheld
-    while idle) next to a project ``asyncRewake`` Stop hook still running.
-    The release was all-or-nothing on "no hook shell left", so the one live
-    shell kept every unpaired hook pending: the finished ones were held,
-    WARN'd as hold_expired and named in async_hook_killed and the user's
-    closing notice ("3 background hooks … were still running"). Now each
-    finished hook is released on its own; only the running one expires and
-    is named."""
+    """Live regression (CLI 2.1.285, @untether_dev_bot, 271bb96): plain
+    ``async`` UserPromptSubmit + Stop hooks (exit at once, response
+    withheld), a sync Stop hook with no visible ``<shell> -c`` answering
+    1.5 s after the result, and an ``asyncRewake`` Stop hook whose inline
+    command (no ``/hooks/``) is still running — all started in the same few
+    ms. The per-hook PID binding tied the one live shell to the sync hook,
+    released the rewake hook after 1 s, and once the sync hook answered the
+    session idled out and the rewake was lost. All or nothing: while any
+    hook shell lives nothing is released, so the rewake turn arrives."""
     from structlog.testing import capture_logs
 
-    _settings(monkeypatch, async_hook_max_hold=3.0)
-    notices, subscribe = _hook_notices()
+    _settings(monkeypatch)
+    started = anyio.current_time()
     with capture_logs() as logs:
-        runner, _ = await _run("async_hook_mixed_live", on_event=subscribe)
+        runner, events = await _run(
+            "async_hook_live_mix_rewake", wake_s=3.0, timeout=20
+        )
+    elapsed = anyio.current_time() - started
     state = _engine_state(runner)
     holds = _events(logs, "claude.hook.pending_hold")
-    assert len(holds) == 1
-    assert sorted(holds[0]["hook_names"]) == ["Stop", "Stop", "UserPromptSubmit"]
-    released = _events(logs, "claude.hook.hold_released")
-    assert len(released) == 1
-    assert released[0]["reason"] == "hook_process_exited"
-    assert sorted(released[0]["hook_ids"]) == ["h-stop-plain", "h-ups"]
-    assert released[0]["still_running"] == ["Stop"]
-    expired = _events(logs, "claude.hook.hold_expired")
-    assert [e["hook_id"] for e in expired] == ["h-stop-rewake"]
+    assert holds and sorted(holds[0]["hook_names"]) == [
+        "Stop",
+        "Stop",
+        "Stop",
+        "UserPromptSubmit",
+    ]
+    # Nothing released while the rewake hook's shell was alive.
+    for released in _events(logs, "claude.hook.hold_released"):
+        assert "h-stop-rewake" not in released["hook_ids"]
+    rewake = [
+        e
+        for e in events
+        if isinstance(e, TurnEvent)
+        and e.phase == "started"
+        and e.reason == "hook_rewake"
+    ]
+    assert len(rewake) == 1
+    finals = [e for e in events if isinstance(e, TurnEvent) and e.phase == "completed"]
+    assert [f.answer for f in finals] == ["HOOK: finding: key leak"]
     closed = _events(logs, "claude.live_session.stdin_closed")
     assert len(closed) == 1 and closed[0]["reason"] == "idle_no_tasks"
-    killed = _events(logs, "claude.live_session.async_hook_killed")
-    assert len(killed) == 1
-    assert killed[0]["hook_ids"] == ["h-stop-rewake"]
-    assert killed[0]["hook_events"] == ["Stop"]
-    assert (
-        logs.index(holds[0])
-        < logs.index(released[0])
-        < logs.index(expired[0])
-        < logs.index(closed[0])
-        < logs.index(killed[0])
-    )
-    assert [p["hooks"] for kind, p in notices if kind == "closing"] == [["Stop"]]
-    # The plain hooks' withheld responses landed at teardown and paired off;
-    # the rewake hook was killed without one.
+    assert logs.index(holds[0]) < logs.index(closed[0])
+    # Held past the 0.3 s idle grace until the rewake (3 s after spawn).
+    assert elapsed >= 3.0
+    assert _events(logs, "claude.hook.hold_expired") == []
+    assert _events(logs, "claude.live_session.async_hook_killed") == []
+    assert _events(logs, "claude.live_session.close_grace_expired") == []
     assert state.pending_hooks == {} and state.deferred_hooks == {}
-    assert set(state.expired_hooks) == {"h-stop-rewake"}
+    assert state.expired_hooks == {}
     assert runner.current_stream.proc_returncode == 0
     assert not quarantine.is_quarantined("claude", SID)
 
 
-async def test_812_an_older_running_hook_keeps_its_own_hold(
-    monkeypatch: pytest.MonkeyPatch,
+async def test_812_hold_expiry_counts_live_hook_processes_not_candidates(
+    monkeypatch: pytest.MonkeyPatch, quarantine: QuarantineStore
 ) -> None:
-    """The hook still running is the OLDER one (a long UserPromptSubmit
-    hook; the fast plain Stop hook started a turn later). Its shell's spawn
-    time ties it to its own ``hook_started``, so the Stop hook is released
-    and the UserPromptSubmit hook is the one that expires and is named."""
+    """The same mix, but the rewake hook outlives the bound. The expiry is
+    one WARN for the hold (1 live hook process among 3 unpaired
+    candidates), the close gets the hooks grace from the live shell, and
+    the user hears about ONE hook that could be either event — not "3
+    background hooks" (8cf35e5's labelling defect)."""
     from structlog.testing import capture_logs
 
-    _settings(monkeypatch, async_hook_max_hold=3.0)
-    monkeypatch.setattr(claude_mod, "_HOOK_BIND_WINDOW_S", 0.3, raising=False)
-    os.environ["FAKE_CLAUDE_TURN_S"] = "0.8"
+    from untether.runner_bridge import _live_closing_notice
+
+    _settings(monkeypatch, async_hook_max_hold=2.5)
+    # The CLI outwaits the plain grace but not the hooks grace... then some:
+    # force the grace to expire so the log shows which one applied.
+    os.environ["FAKE_CLAUDE_REWAKE_WAIT_S"] = "6"
     notices, subscribe = _hook_notices()
     with capture_logs() as logs:
-        runner, _ = await _run("async_hook_old_hook_live", on_event=subscribe)
-    released = _events(logs, "claude.hook.hold_released")
-    assert [r["hook_ids"] for r in released] == [["h-stop-plain"]]
-    assert released[0]["still_running"] == ["UserPromptSubmit"]
+        runner, _ = await _run(
+            "async_hook_live_mix_running", on_event=subscribe, timeout=25
+        )
+    state = _engine_state(runner)
+    assert _events(logs, "claude.hook.hold_released") == []
     expired = _events(logs, "claude.hook.hold_expired")
-    assert [e["hook_id"] for e in expired] == ["h-ups"]
+    assert len(expired) == 1
+    assert expired[0]["log_level"] == "warning"
+    assert expired[0]["live_hook_processes"] == 1
+    assert expired[0]["pending_hooks"] == 3
+    assert expired[0]["hook_events"] == ["Stop", "UserPromptSubmit"]
+    assert expired[0]["held_s"] >= expired[0]["max_hold_s"] == 2.5
+    closed = _events(logs, "claude.live_session.stdin_closed")
+    assert len(closed) == 1 and closed[0]["reason"] == "idle_no_tasks"
     killed = _events(logs, "claude.live_session.async_hook_killed")
-    assert len(killed) == 1 and killed[0]["hook_ids"] == ["h-ups"]
-    assert [p["hooks"] for kind, p in notices if kind == "closing"] == [
-        ["UserPromptSubmit"]
-    ]
-    assert _engine_state(runner).live_close_reason == "idle_no_tasks"
+    assert len(killed) == 1
+    assert killed[0]["log_level"] == "warning"
+    assert killed[0]["hook_count"] == 1
+    assert killed[0]["live_hook_processes"] == 1
+    assert killed[0]["hook_events"] == ["Stop", "UserPromptSubmit"]
+    assert sorted(killed[0]["hook_ids"]) == ["h-stop-plain", "h-stop-rewake", "h-ups"]
+    assert "candidates" in killed[0]["note"]
+    grace = _events(logs, "claude.live_session.close_grace_expired")
+    assert len(grace) == 1
+    assert grace[0]["grace_s"] == runner._live_close_grace_hooks_s == 1.6
+    assert (
+        logs.index(expired[0])
+        < logs.index(closed[0])
+        < logs.index(killed[0])
+        < logs.index(grace[0])
+    )
+    payloads = [p for kind, p in notices if kind == "closing"]
+    assert len(payloads) == 1
+    assert payloads[0]["hooks"] == ["Stop", "UserPromptSubmit"]
+    assert payloads[0]["hook_count"] == 1
+    assert _live_closing_notice(
+        payloads[0]["reason"], [], payloads[0]["hooks"], payloads[0]["hook_count"]
+    ) == (
+        "\N{HOURGLASS WITH FLOWING SAND} Closing session — a background hook "
+        "(Stop or UserPromptSubmit) was still running; its feedback wasn't "
+        "delivered."
+    )
+    assert state.pending_hooks == {}
+    # A clean idle close overrunning its grace is not quarantined (#791).
+    assert not quarantine.is_quarantined("claude", SID)
+
+
+async def test_812_close_with_no_hook_process_names_nothing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """N = 0 at close: unpaired candidates but no live hook process (and an
+    idle scan too slow to have released them) → no async_hook_killed, no
+    hooks notice."""
+    from structlog.testing import capture_logs
+
+    state = ClaudeStreamState()
+    state.completed_turns = 1
+    state.turn_open = False
+    # Too young to release, so they stay candidates at the close.
+    now = time.monotonic()
+    for hook_id, event in (("h-ups", "UserPromptSubmit"), ("h-stop", "Stop")):
+        state.pending_hooks[hook_id] = claude_mod.PendingHook(
+            hook_id=hook_id, name=event, event=event, started_at=now, turn=1
+        )
+
+    class _Pipe:
+        async def aclose(self) -> None:
+            pass
+
+    async def no_shells(pid: Any) -> list[int]:
+        return []
+
+    monkeypatch.setattr(claude_mod, "_hook_shells", no_shells)
+    sid = "sess-812-no-proc"
+    claude_mod._LIVE_SESSIONS[sid] = LiveSession(
+        session_id=sid, state=state, stdin=_Pipe(), pid=4242
+    )
+    notices: list[dict] = []
+    add_live_session_listener(sid, lambda kind, p: notices.append(p))
+    try:
+        with capture_logs() as logs:
+            assert await close_live_session(sid, "idle_no_tasks") is True
+        live = claude_mod._LIVE_SESSIONS[sid]
+        assert live.close_hooks == [] and live.close_hook_count == 0
+        assert live.close_hook_procs == 0
+    finally:
+        claude_mod._LIVE_SESSIONS.pop(sid, None)
+    assert _events(logs, "claude.live_session.async_hook_killed") == []
+    assert notices == []
 
 
 async def test_812_cancel_does_not_report_finished_plain_async_hooks_killed(
@@ -641,8 +727,10 @@ async def test_812_hook_hold_expiry_logs_async_hook_killed(
     killed = _events(logs, "claude.live_session.async_hook_killed")
     assert len(hold) == 1 and len(expired) == 1 and len(killed) == 1
     assert expired[0]["log_level"] == "warning"
-    assert expired[0]["hook_event"] == "Stop"
+    assert expired[0]["hook_events"] == ["Stop"]
+    assert expired[0]["live_hook_processes"] == 1
     assert killed[0]["log_level"] == "warning"
+    assert killed[0]["hook_count"] == 1
     assert killed[0]["source"] == "stream"
     assert killed[0]["close_reason"] == "idle_no_tasks"
     assert killed[0]["hook_events"] == ["Stop"]
@@ -650,6 +738,7 @@ async def test_812_hook_hold_expiry_logs_async_hook_killed(
     # The user hears about it even on a routine idle close.
     assert notices and notices[0][0] == "closing"
     assert notices[0][1]["hooks"] == ["Stop"]
+    assert notices[0][1]["hook_count"] == 1
     assert notices[0][1]["reason"] == "idle_no_tasks"
     # The CLI's own asyncRewake wait fits inside the stretched grace, so it
     # exits by itself: no signal, no quarantine.

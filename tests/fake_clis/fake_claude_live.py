@@ -1109,10 +1109,18 @@ def scenario_async_rewake_idle(first: dict) -> None:
     hook_response(
         "h-stop", "Stop", outcome="error", exit_code=2, stderr="finding: key leak\n"
     )
+    _rewake_turn("HOOK: finding: key leak")
+    serve_followups()
+
+
+def _rewake_turn(answer: str) -> None:
+    """The turn the CLI starts itself after an asyncRewake hook exits 2
+    (P5-A); withheld plain-async responses flush as it opens."""
     hook_started("h-ups-2", "UserPromptSubmit")
     hook_response("h-ups-2", "UserPromptSubmit")
+    flush_withheld()
     init()
-    text("HOOK: finding: key leak")
+    text(answer)
     global _cost
     _cost = round(_cost + 0.01, 6)
     emit(
@@ -1123,13 +1131,12 @@ def scenario_async_rewake_idle(first: dict) -> None:
             "duration_ms": 1000,
             "duration_api_ms": 900,
             "num_turns": 1,
-            "result": "HOOK: finding: key leak",
+            "result": answer,
             "total_cost_usd": _cost,
             "usage": {"input_tokens": 10, "output_tokens": 5},
             "origin": {"kind": "task-notification", "producer": "session-task"},
         }
     )
-    serve_followups()
 
 
 def scenario_async_hook_success(first: dict) -> None:
@@ -1179,51 +1186,81 @@ def scenario_async_hook_post_result_response(first: dict) -> None:
     serve_followups()
 
 
-# Seconds between a turn's UserPromptSubmit hooks and its Stop hooks.
-TURN_S = float(os.environ.get("FAKE_CLAUDE_TURN_S", "0"))
+# How long the live mix's synchronous Stop hook runs after the result.
+SYNC_HOOK_S = float(os.environ.get("FAKE_CLAUDE_SYNC_HOOK_S", "1.5"))
 
 
-def _mixed_hooks_turn(*, ups_s: float, stop_rewake: bool) -> None:
-    """Live regression (CLI 2.1.285, @untether_dev_bot): the user-global
-    plain ``async: true`` hook (``moshi-hook``) on UserPromptSubmit + Stop —
-    its process exits at once and the CLI withholds its response while idle
-    — next to a sync Stop hook and (``stop_rewake``) a project
-    ``asyncRewake`` Stop hook still running (``sleep 120``). ``ups_s`` is
-    how long the UserPromptSubmit hook's process lives (a long one is the
-    still-running hook instead)."""
+def spawn_exec_hook(hook_id: str, seconds: float) -> subprocess.Popen:
+    """A hook whose shell exec'd its command (bash — macOS ``/bin/sh`` —
+    does that for a single simple command): no ``<shell> -c`` process is
+    left to see."""
+    proc = subprocess.Popen(
+        ["sleep", str(seconds)],
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    _hook_procs[hook_id] = proc
+    return proc
+
+
+def _live_mix_turn(rewake_s: float) -> None:
+    """Live regression (CLI 2.1.285, @untether_dev_bot, 06:24): the
+    user-global plain ``async: true`` hook (moshi-hook) on UserPromptSubmit +
+    Stop — its process exits at once and the CLI withholds its response
+    while idle — a user-global sync Stop hook (no ``<shell> -c`` visible,
+    responds ``SYNC_HOOK_S`` after the result), and a project
+    ``asyncRewake`` Stop hook whose inline command (no ``/hooks/`` path)
+    runs ``rewake_s``. All four ``hook_started`` land within a few ms."""
     fast = 0.01
-    spawn_hook("h-ups", ups_s)
-    hook_started("h-ups", "UserPromptSubmit")
-    if ups_s == fast:
-        _withheld.append(("h-ups", "UserPromptSubmit"))
+    spawn_hook("h-ups", fast)
+    hook_started("h-ups", "UserPromptSubmit")  # plain async, withheld
+    _withheld.append(("h-ups", "UserPromptSubmit"))
     init()
-    time.sleep(TURN_S)
     text("DONE")
     spawn_hook("h-stop-plain", fast)
-    hook_started("h-stop-plain", "Stop")  # plain async, response withheld
+    hook_started("h-stop-plain", "Stop")  # plain async, withheld
     _withheld.append(("h-stop-plain", "Stop"))
-    if stop_rewake:
-        spawn_hook("h-stop-rewake", 600)
-        hook_started("h-stop-rewake", "Stop")  # asyncRewake, still running
-    hook_started("h-stop-sync", "Stop")
-    hook_response("h-stop-sync", "Stop")
+    spawn_hook("h-stop-rewake", rewake_s)
+    hook_started("h-stop-rewake", "Stop")  # asyncRewake, still running
+    spawn_exec_hook("h-stop-sync", SYNC_HOOK_S)
+    hook_started("h-stop-sync", "Stop")  # sync
     result("DONE")
+    wait_hook("h-stop-sync")
+    hook_response("h-stop-sync", "Stop")
+
+
+def scenario_async_hook_live_mix_rewake(first: dict) -> None:
+    # The rewake fires (exit 2) ``WAKE_S`` after spawn — while idle, if
+    # stdin is still open; after EOF the CLI drops it (P5-B).
+    _live_mix_turn(WAKE_S)
+    proc = _hook_procs["h-stop-rewake"]
+    while proc.poll() is None:
+        got = next_user(0.05)
+        if got is None:
+            _eof_with_pending_rewake()
+        if isinstance(got, dict):
+            _deferred.append(got)
+    wait_hook("h-stop-rewake")
+    hook_response(
+        "h-stop-rewake",
+        "Stop",
+        outcome="error",
+        exit_code=2,
+        stderr="finding: key leak\n",
+    )
+    _rewake_turn("HOOK: finding: key leak")
+    serve_followups()
+
+
+def scenario_async_hook_live_mix_running(first: dict) -> None:
+    # The rewake hook outlives the hold bound (``sleep 120`` vs 45 s live).
+    _live_mix_turn(600)
     while next_user(None) is not None:
         pass
-    # EOF: the withheld plain responses flush; a hook still running is
-    # killed with no response (§A1 P3/P5-B).
+    # EOF: the withheld plain responses flush; the running hook is killed
+    # with no response (§A1 P3/P5-B).
     _eof_with_pending_rewake()
-
-
-def scenario_async_hook_mixed_live(first: dict) -> None:
-    # Fast plain UPS + fast plain Stop; the asyncRewake Stop hook runs on.
-    _mixed_hooks_turn(ups_s=0.01, stop_rewake=True)
-
-
-def scenario_async_hook_old_hook_live(first: dict) -> None:
-    # The OLDER hook is the running one: a long UserPromptSubmit hook started
-    # ``TURN_S`` before the fast plain Stop hook.
-    _mixed_hooks_turn(ups_s=600, stop_rewake=False)
 
 
 def scenario_async_hook_no_response(first: dict) -> None:
@@ -1266,8 +1303,8 @@ _SCENARIOS = {
     "async_rewake_idle": scenario_async_rewake_idle,
     "async_hook_success": scenario_async_hook_success,
     "async_hook_post_result_response": scenario_async_hook_post_result_response,
-    "async_hook_mixed_live": scenario_async_hook_mixed_live,
-    "async_hook_old_hook_live": scenario_async_hook_old_hook_live,
+    "async_hook_live_mix_rewake": scenario_async_hook_live_mix_rewake,
+    "async_hook_live_mix_running": scenario_async_hook_live_mix_running,
     "async_hook_no_response": scenario_async_hook_no_response,
     "plain_async_cancelled_on_eof": scenario_plain_async_cancelled_on_eof,
     "hook_flood": scenario_hook_flood,
