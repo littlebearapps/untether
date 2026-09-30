@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import json
 import time
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -730,3 +731,145 @@ def test_resume_guard_never_absorbs_compaction_result() -> None:
     assert not any(e["event"] == "claude.resume_guard.absorbed" for e in logs)
     completed = [e for e in events if isinstance(e, CompletedEvent)]
     assert completed and completed[0].usage["compaction"]["manual_success"] is True
+
+
+# ── C5: real CLI 2.1.285 transcripts (Haiku, captured 2026-10-01) ──────────
+#
+# claude_compaction_2.1.285.jsonl — ten "Read big.txt …" passes (the CLI's
+#   Read dedupe kept the context at ~51k, below the 67k auto threshold of
+#   ``--autocompact 100k``), then ``/compact`` and "Reply OK.". Observed
+#   (Z10 confirmed): status compacting → status null + success → fresh init
+#   → compact_boundary{manual, 51305 → 2228} → summary user (isSynthetic,
+#   isReplay false, string content, no isCompactSummary) → replayed
+#   "Compacted" stdout (isReplay true) → result{num_turns 0,
+#   duration_api_ms 0, result ""}. No heartbeat (22 s < 30 s).
+# claude_autocompact_2.1.285.jsonl — distinct files; auto compaction DID
+#   fire in ``-p`` stream-json mode on the third turn, between the
+#   tool_result and the next request: status compacting → status null +
+#   success → compact_boundary{auto, 79267 → 15092} (no ``session_id`` on
+#   the frame, no fresh init) → summary user (list content) → assistant.
+# claude_compact_empty_2.1.285.jsonl — ``/compact`` on a fresh session: init
+#   → ``<synthetic>`` assistant "Error: No messages to compact" → result
+#   {num_turns 0, duration_api_ms 0, result "", modelUsage {}}. No
+#   compaction frames at all.
+# ``message.model`` equals the ``modelUsage`` key on the real API
+#   (``claude-haiku-4-5-20251001`` for both), so no normalisation is needed.
+
+FIXTURES = Path(__file__).parent / "fixtures"
+
+
+def _replay(name: str, *, live: bool) -> tuple[ClaudeStreamState, list[Any]]:
+    state = ClaudeStreamState()
+    state.live_mode = live
+    events: list[Any] = []
+    for line in (FIXTURES / name).read_text().splitlines():
+        event = claude_schema.decode_stream_json_line(line.encode())
+        events.extend(
+            translate_claude_event(
+                event, title="claude", state=state, factory=state.factory
+            )
+        )
+    return state, events
+
+
+def _turn_segments(events: list[Any]) -> list[list[Any]]:
+    """The events between each TurnEvent(started) and its completion."""
+    segments: list[list[Any]] = []
+    current: list[Any] | None = None
+    for evt in events:
+        if isinstance(evt, TurnEvent) and evt.phase == "started":
+            current = []
+        elif isinstance(evt, TurnEvent) and evt.phase == "completed":
+            if current is not None:
+                segments.append([*current, evt])
+            current = None
+        elif current is not None:
+            current.append(evt)
+    return segments
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "claude_compaction_2.1.285.jsonl",
+        "claude_autocompact_2.1.285.jsonl",
+        "claude_compact_empty_2.1.285.jsonl",
+    ],
+)
+def test_fixture_lines_all_decode(name: str) -> None:
+    for line in (FIXTURES / name).read_text().splitlines():
+        claude_schema.decode_stream_json_line(line.encode())
+
+
+def test_fixture_manual_compact_replay() -> None:
+    state, events = _replay("claude_compaction_2.1.285.jsonl", live=True)
+    segments = _turn_segments(events)
+    compact = [s for s in segments if _rows(s)]
+    assert len(compact) == 1
+    seg = compact[0]
+    rows = _rows(seg)
+    assert rows[0].phase == "started" and rows[0].action.title == COMPACTING
+    assert rows[-1].action.title == ("🗜️ Context compacted · 51k → 2.2k tokens (manual)")
+    assert len({r.action.id for r in rows}) == 1
+    end = seg[-1]
+    assert end.answer == ""
+    assert end.usage["compaction"]["manual_success"] is True
+    assert end.usage["compaction"]["pre_tokens"] == 51305
+    # D5: the compaction turn ends with no % ctx; the next turn's response
+    # brings it back, lower.
+    assert [e.action.detail["context_pct"] for e in _telemetry(seg)] == [26, None]
+    after = segments[segments.index(seg) + 1]
+    assert [e.action.detail["context_pct"] for e in _telemetry(after)] == [11]
+
+
+def test_fixture_message_model_matches_model_usage_key() -> None:
+    """The window learned from ``result.modelUsage`` is keyed exactly like
+    ``message.model`` on the real API, so ``% ctx`` resolves."""
+    state, events = _replay("claude_compaction_2.1.285.jsonl", live=True)
+    assert claude_mod._CONTEXT_WINDOWS == {"claude-haiku-4-5-20251001": 200_000}
+    assert state.ctx_model == "claude-haiku-4-5-20251001"
+    # The first turn of an unseen model gets its % ctx at the result (D3);
+    # every later response resolves against the learned window.
+    pcts = [e.action.detail["context_pct"] for e in _telemetry(events)]
+    assert pcts[0] == 22 and None not in pcts[: pcts.index(None)]
+
+
+def test_fixture_autocompact_replay() -> None:
+    state, events = _replay("claude_autocompact_2.1.285.jsonl", live=True)
+    segments = _turn_segments(events)
+    compact = [s for s in segments if _rows(s)]
+    assert len(compact) == 1
+    seg = compact[0]
+    rows = _rows(seg)
+    assert rows[-1].action.title == ("🗜️ Context compacted · 79k → 15k tokens (auto)")
+    pcts = [e.action.detail["context_pct"] for e in _telemetry(seg)]
+    assert pcts[-2:] == [None, 21]  # dropped at the boundary, back lower
+    end = seg[-1]
+    assert end.answer == "901"
+    assert end.usage["compaction"]["trigger"] == "auto"
+    assert end.usage["compaction"]["manual_success"] is False
+    # Auto compaction sends no fresh init: one turn, no extra turn opened.
+    assert sum(1 for e in seg if isinstance(e, TurnEvent)) == 1
+
+
+def test_fixture_autocompact_first_run_single_resume() -> None:
+    """Replayed as a first run (no live session): one StartedEvent resume
+    throughout, rows inside the run."""
+    _, events = _replay("claude_autocompact_2.1.285.jsonl", live=False)
+    assert len({e.resume.value for e in events if isinstance(e, StartedEvent)}) == 1
+    assert _rows(events)
+
+
+def test_fixture_empty_session_compact() -> None:
+    """``/compact`` on a fresh session records no boundary, so it is never
+    exempt: no rows, no ``usage["compaction"]`` — and the CLI's synthetic
+    text is the answer, so the bridge renders it rather than the #596 path
+    or the compaction body."""
+    state, events = _replay("claude_compact_empty_2.1.285.jsonl", live=False)
+    assert _rows(events) == []
+    completed = [e for e in events if isinstance(e, CompletedEvent)]
+    assert len(completed) == 1
+    assert "compaction" not in (completed[0].usage or {})
+    assert completed[0].usage["num_turns"] == 0
+    assert completed[0].answer == "Error: No messages to compact"
+    assert _completed_keeps_session_live(completed[0]) is True

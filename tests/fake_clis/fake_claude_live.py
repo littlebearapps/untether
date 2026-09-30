@@ -171,39 +171,52 @@ def init() -> None:
     )
 
 
-def text(msg: str) -> None:
-    emit(
-        {
-            "type": "assistant",
-            "message": {
-                "id": f"msg_{time.monotonic_ns()}",
-                "role": "assistant",
-                "model": "claude-haiku-fake",
-                "content": [{"type": "text", "text": msg}],
-            },
-        }
-    )
+FAKE_MODEL = "claude-haiku-fake"
 
 
-def tool_use(name: str, tool_id: str, raw_input: dict) -> None:
-    emit(
-        {
-            "type": "assistant",
-            "message": {
-                "id": f"msg_{tool_id}",
-                "role": "assistant",
-                "model": "claude-haiku-fake",
-                "content": [
-                    {
-                        "type": "tool_use",
-                        "id": tool_id,
-                        "name": name,
-                        "input": raw_input,
-                    }
-                ],
-            },
-        }
-    )
+def _usage(used: int | None) -> dict | None:
+    """#819: an assistant ``usage`` whose input side totals ``used``."""
+    if used is None:
+        return None
+    return {
+        "input_tokens": 10,
+        "cache_creation_input_tokens": 0,
+        "cache_read_input_tokens": used - 10,
+        "output_tokens": 5,
+    }
+
+
+def text(msg: str, *, usage: int | None = None, model: str = FAKE_MODEL) -> None:
+    message = {
+        "id": f"msg_{time.monotonic_ns()}",
+        "role": "assistant",
+        "model": model,
+        "content": [{"type": "text", "text": msg}],
+    }
+    if usage is not None:
+        message["usage"] = _usage(usage)
+    emit({"type": "assistant", "message": message})
+
+
+def tool_use(
+    name: str, tool_id: str, raw_input: dict, *, usage: int | None = None
+) -> None:
+    message = {
+        "id": f"msg_{tool_id}",
+        "role": "assistant",
+        "model": FAKE_MODEL,
+        "content": [
+            {
+                "type": "tool_use",
+                "id": tool_id,
+                "name": name,
+                "input": raw_input,
+            }
+        ],
+    }
+    if usage is not None:
+        message["usage"] = _usage(usage)
+    emit({"type": "assistant", "message": message})
 
 
 def tool_result(tool_id: str, content: str) -> None:
@@ -221,23 +234,127 @@ def tool_result(tool_id: str, content: str) -> None:
 
 
 def result(
-    answer: str, *, turns: int = 1, delta: float = 0.01, api_ms: int = 900
+    answer: str,
+    *,
+    turns: int = 1,
+    delta: float = 0.01,
+    api_ms: int = 900,
+    model_usage: dict | None = None,
 ) -> None:
     global _cost
     _cost = round(_cost + delta, 6)
+    payload = {
+        "type": "result",
+        "subtype": "success",
+        "is_error": False,
+        "duration_ms": 1000,
+        "duration_api_ms": api_ms,
+        "num_turns": turns,
+        "result": answer,
+        "total_cost_usd": _cost,
+        "usage": {"input_tokens": 10, "output_tokens": 5},
+    }
+    if model_usage is not None:
+        payload["modelUsage"] = model_usage
+    emit(payload)
+
+
+# #819: ``result.modelUsage`` naming the fake model's window.
+MODEL_USAGE = {FAKE_MODEL: {"contextWindow": 200_000, "maxOutputTokens": 64_000}}
+
+
+def compaction(
+    trigger: str,
+    pre: int,
+    post: int | None,
+    *,
+    heartbeats: int = 0,
+    failed: bool = False,
+    init_between: bool = False,
+) -> None:
+    """#819: the compaction frames as captured on CLI 2.1.285
+    (``tests/fixtures/claude_compaction_2.1.285.jsonl`` / ``…autocompact…``):
+    ``status: compacting`` (re-sent every 30 s — ``heartbeats``), ``status:
+    null`` + ``compact_result``, a fresh ``init`` (manual ``/compact`` only),
+    then ``compact_boundary`` and the synthetic summary ``user`` frame. A
+    failed compaction stops after its ``status: null``."""
+    emit({"type": "system", "subtype": "status", "status": "compacting"})
+    for _ in range(heartbeats):
+        time.sleep(0.05)
+        emit({"type": "system", "subtype": "status", "status": "compacting"})
+    if failed:
+        emit(
+            {
+                "type": "system",
+                "subtype": "status",
+                "status": None,
+                "compact_result": "failed",
+                "compact_error": "Conversation too long to compact",
+            }
+        )
+        return
     emit(
         {
-            "type": "result",
-            "subtype": "success",
-            "is_error": False,
-            "duration_ms": 1000,
-            "duration_api_ms": api_ms,
-            "num_turns": turns,
-            "result": answer,
-            "total_cost_usd": _cost,
-            "usage": {"input_tokens": 10, "output_tokens": 5},
+            "type": "system",
+            "subtype": "status",
+            "status": None,
+            "compact_result": "success",
         }
     )
+    if init_between:
+        init()
+    meta = {
+        "trigger": trigger,
+        "pre_tokens": pre,
+        "cumulative_dropped_tokens": pre - (post or 0),
+        "duration_ms": 50,
+    }
+    if post is not None:
+        meta["post_tokens"] = post
+    emit(
+        {
+            "type": "system",
+            "subtype": "compact_boundary",
+            "compact_metadata": meta,
+            "logical_parent_uuid": "lp-fake",
+        }
+    )
+    emit(
+        {
+            "type": "user",
+            "isSynthetic": True,
+            "message": {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "text",
+                        "text": "This session is being continued from a "
+                        "previous conversation that ran out of context.",
+                    }
+                ],
+            },
+        }
+    )
+
+
+def compact_command_turn(cmd: str | None) -> None:
+    """#819: a manual ``/compact`` written into the live session — Z10: no
+    API turn, a replayed "Compacted" stdout and a 0-turn, 0-ms, empty
+    result."""
+    lifecycle(cmd, "queued")
+    lifecycle(cmd, "started")
+    compaction("manual", 60_000, 2_000, init_between=True)
+    emit(
+        {
+            "type": "user",
+            "isReplay": True,
+            "message": {
+                "role": "user",
+                "content": "<local-command-stdout>Compacted </local-command-stdout>",
+            },
+        }
+    )
+    result("", turns=0, api_ms=0, delta=0.0, model_usage=MODEL_USAGE)
 
 
 def snapshot() -> None:
@@ -651,6 +768,57 @@ def scenario_followup(first: dict) -> None:
     if RESULT_DELAY_S > 0:
         time.sleep(RESULT_DELAY_S)
     result("FIRST")
+    serve_followups()
+
+
+def scenario_compact_followup(first: dict) -> None:
+    """#819: the run answers with a known context size; a ``/compact``
+    follow-up compacts in the same process (its own turn), and the next
+    follow-up answers with a much lower context."""
+    init()
+    text("FIRST", usage=60_000)
+    result("FIRST", model_usage=MODEL_USAGE)
+    while True:
+        obj = next_user(None)
+        if obj is None or obj == "timeout":
+            break
+        cmd = obj.get("uuid")
+        if user_text(obj).strip() == "/compact":
+            compact_command_turn(cmd)
+            continue
+        lifecycle(cmd, "queued")
+        lifecycle(cmd, "started")
+        init()
+        text(f"ECHO: {user_text(obj)}", usage=20_000)
+        result(f"ECHO: {user_text(obj)}", model_usage=MODEL_USAGE)
+    shutdown()
+
+
+def scenario_auto_compact_mid_turn(first: dict) -> None:
+    """#819 (the shape captured in ``claude_autocompact_2.1.285.jsonl``): a
+    tool loop fills the context, the CLI auto-compacts between the
+    ``tool_result`` and the next request — no fresh ``init`` — and the turn
+    carries on with a lower context."""
+    init()
+    tool_use("Read", "toolu_big", {"file_path": "big.txt"}, usage=150_000)
+    tool_result("toolu_big", "lots of text")
+    compaction("auto", 170_000, 30_000, heartbeats=2)
+    text("done reading", usage=40_000)
+    result("done reading", turns=2, model_usage=MODEL_USAGE)
+    serve_followups()
+
+
+def scenario_context_usage_growth(first: dict) -> None:
+    """#819: three main-thread responses with rising usage in one turn."""
+    init()
+    tool_use("Read", "toolu_a", {"file_path": "a.txt"}, usage=20_000)
+    time.sleep(WAKE_S)
+    tool_result("toolu_a", "a")
+    tool_use("Read", "toolu_b", {"file_path": "b.txt"}, usage=60_000)
+    time.sleep(WAKE_S)
+    tool_result("toolu_b", "b")
+    text("GROWN", usage=124_000)
+    result("GROWN", turns=3, model_usage=MODEL_USAGE)
     serve_followups()
 
 
@@ -2138,6 +2306,9 @@ _SCENARIOS = {
     "monitor_ticks": scenario_monitor_ticks,
     "scheduled_wakeup": scenario_scheduled_wakeup,
     "followup": scenario_followup,
+    "compact_followup": scenario_compact_followup,
+    "auto_compact_mid_turn": scenario_auto_compact_mid_turn,
+    "context_usage_growth": scenario_context_usage_growth,
     "followup_launches_bg": scenario_followup_launches_bg,
     "followup_blocks": scenario_followup_blocks,
     "multi_agent_acks": scenario_multi_agent_acks,

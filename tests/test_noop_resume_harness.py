@@ -546,3 +546,76 @@ async def test_harness_trailing_user_frame_after_result_sets_saw_result(
     summaries = [r for r in logs if r.get("event") == "session.summary"]
     assert summaries, "expected a session.summary line"
     assert summaries[-1]["saw_result"] is True
+
+
+# ── #819: compaction vs the empty-result recovery ──────────────────────────
+
+
+@pytest.mark.anyio
+async def test_manual_compact_result_does_not_trigger_fresh_resend(
+    monkeypatch, quarantine_store
+) -> None:
+    """A successful manual /compact's 0-turn, 0-ms, empty result is not the
+    #596 anomaly: no quarantine, no fresh resend, one spawn, a ``done``
+    final with the compaction body."""
+    monkeypatch.setenv("FAKE_CLAUDE_SCENARIO", "manual_compact_result")
+    transport = FakeTransport()
+    cfg = ExecBridgeConfig(
+        transport=transport, presenter=MarkdownPresenter(), final_notify=False
+    )
+    sid = "S-compact-819"
+    with capture_logs() as logs:
+        await _run_bounded(
+            handle_message(
+                cfg,
+                runner=_harness_runner(),
+                incoming=IncomingMessage(channel_id=123, message_id=10, text="x"),
+                resume_token=ResumeToken(engine=CLAUDE_ENGINE, value=sid),
+            )
+        )
+    events = [r.get("event") for r in logs]
+    assert "runner.empty_result" not in events
+    assert "session.auto_resend_fresh" not in events
+    assert sum(1 for e in events if e == "subprocess.spawn") == 1
+    assert quarantine_store.is_quarantined(CLAUDE_ENGINE, sid) is False
+    final_text = transport.edit_calls[-1]["message"].text
+    assert final_text.startswith("done")
+    assert "🗜️ Context compacted · 180k → 20k tokens (manual)" in final_text
+
+
+@pytest.mark.anyio
+async def test_resumed_auto_compact_then_empty_result_still_quarantines(
+    monkeypatch, quarantine_store
+) -> None:
+    """The #596/#631 guard the narrow exemption protects: a resume that
+    auto-compacts and then returns the empty 0-turn result is quarantined
+    and re-run fresh."""
+    monkeypatch.setenv("FAKE_CLAUDE_SCENARIO", "resume_autocompact_noop")
+    transport = FakeTransport()
+    cfg = ExecBridgeConfig(
+        transport=transport, presenter=MarkdownPresenter(), final_notify=False
+    )
+    sid = "S-poisoned-819"
+    cleared: list[str] = []
+
+    async def on_resume_failed(tok: ResumeToken) -> None:
+        cleared.append(tok.value)
+
+    with capture_logs() as logs:
+        await _run_bounded(
+            handle_message(
+                cfg,
+                runner=_harness_runner(),
+                incoming=IncomingMessage(channel_id=123, message_id=10, text="go"),
+                resume_token=ResumeToken(engine=CLAUDE_ENGINE, value=sid),
+                on_resume_failed=on_resume_failed,
+            )
+        )
+    events = [r.get("event") for r in logs]
+    assert "runner.empty_result" in events
+    assert events.count("session.auto_resend_fresh") == 1
+    assert quarantine_store.is_quarantined(CLAUDE_ENGINE, sid) is True
+    assert sid in cleared
+    assert "fresh answer" in transport.edit_calls[-1]["message"].text
+    compaction = [r for r in logs if r.get("event") == "claude.compaction"]
+    assert compaction and compaction[0]["trigger"] == "auto"
