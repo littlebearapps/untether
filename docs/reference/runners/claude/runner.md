@@ -395,7 +395,33 @@ Background subagent events (tagged `parent_tool_use_id`) arriving while the pare
 
 Kill switch: `[watchdog] hold_for_async_hooks = false` passes no flag and holds nothing (pre-rc14 behaviour).
 
-**Lifecycle** (`_live_session_lifecycle`, per run). While idle: nothing live for `post_result_limbo_grace` (60 s) → close stdin; background work still live `post_result_bg_max_hold` (1800 s, re-armed each turn) after the last turn → notice + close; `live_session_max_s` (4 h) from spawn → notice + close; a pending approval/ask or an injected line not yet started pauses the timers. Closing stdin makes the CLI stop its tasks and exit rc=0 (graceful — nothing quarantined); only if it hasn't exited 15 s later (35 s when a background hook is evident, #812) does Untether log a process snapshot (`claude.live_session.close_grace_expired`: state, wchan, CPU across the grace, FDs, TCP, children with redacted cmdlines) and escalate — SIGINT (the CLI's Ctrl-C path), then SIGTERM/SIGKILL 5 s later. The session is quarantined (`forced_teardown_after_result`) only when the close was not clean: a close of an idle turn with no live background work leaves a complete transcript, so it is not quarantined even if the CLI needed a signal ([#791](https://github.com/littlebearapps/untether/issues/791)); #631 empty-resume recovery remains the backstop. `/cancel`, `/new` and drain/restart close idle live sessions the same way with a notice naming the stopped tasks; a turn in progress is still killed by `/cancel`.
+**Lifecycle** (`_live_session_lifecycle`, per run). While idle: nothing live for `post_result_limbo_grace` (60 s) → close stdin; background work still live but **quiet** for `post_result_bg_max_hold` (1800 s) → notice + close; `live_session_max_s` (4 h) from spawn → notice + close; a pending approval/ask or an injected line not yet started pauses the timers.
+
+**Background hold = quiet time** ([#829](https://github.com/littlebearapps/untether/issues/829)). The hold counts from the newest background activity, not from the last turn. Activity is read from the native task map (`latest_background_progress`) and comes from:
+
+- a turn, or a task starting or being revived (#801);
+- any `task_progress` frame for a live background agent. The CLI emits one per subagent tool call, with usage rising every time; a frame for an ended task id never counts;
+- a subagent-owned foreground tool (`owned_by_subagent`, not backgrounded) starting or ending. While one is live its agent counts as active, because the CLI sends no `task_progress` during a long foreground tool. The owned task registers about 3 s into the tool and ends with a `task_notification`;
+- a background Bash's output file being written. The file is named in the Bash tool_result (`Output is being written to: …/tasks/<id>.output`). It's checked only when the hold would expire, off-thread, from its mtime. `local_bash` has no progress frames, and Monitors never count.
+
+A silent command (`sleep 600`) and an agent that has stopped reporting still close after the hold. Re-arms log `claude.live_session.hold_rearmed source=task_progress|agent_tool|bash_output|task_started` (the first of each idle period, then at most every 5 min); `stdin_closed` and `close_grace_expired` carry `last_progress_age_s`. Kill switch `[watchdog] bg_hold_rearm_on_progress = false` (read per spawn) restores the turn-based hold. Evidence: [`docs/findings/2026-09-30-claude-bg-agent-activity-and-eof.md`](../../../findings/2026-09-30-claude-bg-agent-activity-and-eof.md).
+
+**Close and quarantine.** Closing stdin makes the CLI stop background **Bash** and exit rc=0 (graceful, nothing quarantined). Background **agents ignore EOF**: the CLI lets them run to completion, even running their wake turns with stdin closed. So a close over a live agent waits the grace: 15 s, or 35 s when a background hook is evident (#812). Untether then logs a process snapshot (`claude.live_session.close_grace_expired`: state, wchan, CPU across the grace, FDs, TCP, children with redacted cmdlines) and escalates: SIGINT (the CLI's Ctrl-C path), then SIGTERM/SIGKILL 5 s later.
+
+The session is quarantined (`forced_teardown_after_result`) only when the close was not clean:
+
+- a close of an idle turn with no live background work leaves a complete transcript, so it isn't quarantined even if the CLI needed a signal ([#791](https://github.com/littlebearapps/untether/issues/791));
+- **#829 B2:** an Untether-initiated close (`max_hold`, `cancel`, `new`, `drain`, `options_changed`) of a session whose turn was closed isn't quarantined when the CLI exits **rc 0 on the SIGINT**. Probed 6/6 resumable, no dangling `tool_use`. It logs `claude.live_session.exited_after_sigint stopped_clean=True`, and the decision is taken after the SIGINT wait;
+- `abs_cap` (it can close mid-turn), the `error` close, a non-zero exit and a CLI that also ignores SIGINT (the SIGTERM path) keep the quarantine.
+
+#631 empty-resume recovery remains the backstop. `/cancel`, `/new` and drain/restart close idle live sessions the same way with a notice naming the stopped tasks; a turn in progress is still killed by `/cancel`.
+
+**Notices.** The `closing` notice never promises "reply to continue". Examples: `⏳ Closing session — 2 background tasks still running with no progress for 30 min: A, B. Stopping them.`, `⏹ Stopped 1 background task: A.`, `⏳ Untether is restarting — stopping …`. Once the process has gone, the lifecycle emits one `closed` event (`{"reason", "quarantined", "tasks"}`, logged as `claude.live_session.closed`). If the closing notice named tasks, the bridge follows it with one silent line:
+
+- not quarantined: `↩️ Reply to continue in the same session.`
+- quarantined: `⚠️ The session didn't stop cleanly, so your next message starts a fresh session (Claude won't remember this run). Partial work may be left in the working tree.`
+
+After `options_changed` only the warning is sent, because the queued message already resumes.
 
 **Resume guard.** On `--resume` of a session whose previous process ended with background work still live, the CLI replays `task_notification{stopped}` and answers it with a 0-turn result before running the real turn. That result is absorbed (`claude.resume_guard.absorbed`), not delivered — no empty-resume quarantine or resend.
 

@@ -244,7 +244,27 @@ def serve_followups() -> None:
     shutdown()
 
 
+def _wait_for_sigint() -> None:
+    """#829: a real background agent ignores stdin EOF (probe G6); the CLI
+    exits ``FAKE_CLAUDE_SIGINT_RC`` (default 0, probe G7) on the SIGINT
+    Untether sends after the close grace."""
+    rc = int(os.environ.get("FAKE_CLAUDE_SIGINT_RC", "0"))
+
+    def _on_sigint(*_: object) -> None:
+        sys.stdout.flush()
+        os._exit(rc)
+
+    signal.signal(signal.SIGINT, _on_sigint)
+    _maybe_ignore_sigint()
+    time.sleep(60)
+    os._exit(0)
+
+
 def shutdown() -> None:
+    # #829: FAKE_CLAUDE_EOF_MODE=until_sigint models live background agents,
+    # which keep working after EOF — only a SIGINT ends the process.
+    if os.environ.get("FAKE_CLAUDE_EOF_MODE") == "until_sigint":
+        _wait_for_sigint()
     # Stdin closed: stop live background work, as the real CLI does (F3).
     flush_withheld()  # #812: plain async hooks report at teardown
     kill_hooks()
@@ -1455,7 +1475,198 @@ def scenario_hook_flood(first: dict) -> None:
     serve_followups()
 
 
+# ── #829: background activity and the live-session hold ───────────────────
+
+PROGRESS_S = float(os.environ.get("FAKE_CLAUDE_PROGRESS_S", "0.1"))
+PROGRESS_FOR_S = float(os.environ.get("FAKE_CLAUDE_PROGRESS_FOR_S", "1.0"))
+TOOL_S = float(os.environ.get("FAKE_CLAUDE_TOOL_S", "1.0"))
+
+
+def _mark_progress() -> None:
+    """Write the wall-clock time of the latest activity where the test can
+    time the close from (``FAKE_CLAUDE_MARKER_FILE``)."""
+    path = os.environ.get("FAKE_CLAUDE_MARKER_FILE")
+    if path:
+        with open(path, "w") as fh:
+            fh.write(repr(time.time()))
+
+
+def _launch_agent() -> None:
+    init()
+    tool_use("Agent", "toolu_ag", {"description": "build", "prompt": "go"})
+    start_bg("a1", "toolu_ag", task_type="local_agent")
+    tool_result("toolu_ag", "Async agent launched successfully.")
+    result("agent started", turns=2)
+
+
+def _task_progress(task_id: str, n: int, tool_use_id: str = "toolu_ag") -> None:
+    emit(
+        {
+            "type": "system",
+            "subtype": "task_progress",
+            "task_id": task_id,
+            "tool_use_id": tool_use_id,
+            "description": f"Running step {n}",
+            "subagent_type": "general-purpose",
+            "usage": {"total_tokens": 1000 + 100 * n, "tool_uses": n, "duration_ms": n},
+            "last_tool_name": "Read",
+        }
+    )
+
+
+def _wait_or_shutdown(seconds: float) -> None:
+    if wait_idle_or_eof(seconds) is None:
+        shutdown()
+
+
+def _silent_until_eof() -> None:
+    while True:
+        _wait_or_shutdown(3600)
+
+
+def scenario_bg_agent_progressing(first: dict) -> None:
+    """#829: a background agent emitting ``task_progress`` (rising usage,
+    one frame per tool call, P0 G1) every ``FAKE_CLAUDE_PROGRESS_S`` for
+    ``FAKE_CLAUDE_PROGRESS_FOR_S``; then it finishes and wakes the parent
+    (``FAKE_CLAUDE_PROGRESS_THEN=finish``, default) or goes silent."""
+    _launch_agent()
+    deadline = time.monotonic() + PROGRESS_FOR_S
+    n = 0
+    while time.monotonic() < deadline:
+        n += 1
+        _task_progress("a1", n)
+        _mark_progress()
+        _wait_or_shutdown(PROGRESS_S)
+    if os.environ.get("FAKE_CLAUDE_PROGRESS_THEN", "finish") != "finish":
+        _silent_until_eof()
+    end_bg("a1")
+    init()
+    text("GOT: AGENT-DONE")
+    result("GOT: AGENT-DONE")
+    serve_followups()
+
+
+def scenario_bg_agent_silent(first: dict) -> None:
+    """#829: a background agent that never reports progress."""
+    _launch_agent()
+    _silent_until_eof()
+
+
+def scenario_bg_agent_long_tool(first: dict) -> None:
+    """#829 A.2: the agent enters one long foreground tool — the CLI sends
+    no ``task_progress`` meanwhile (P0 G2), only the subagent-owned
+    foreground task's start and ``task_notification`` (P0 G3)."""
+    _launch_agent()
+    emit(
+        {
+            "type": "assistant",
+            "parent_tool_use_id": "toolu_ag",
+            "message": {
+                "id": "msg_sub_long",
+                "role": "assistant",
+                "model": "claude-haiku-fake",
+                "content": [
+                    {
+                        "type": "tool_use",
+                        "id": "toolu_sub_long",
+                        "name": "Bash",
+                        "input": {"command": "make test"},
+                    }
+                ],
+            },
+        }
+    )
+    _task_progress("a1", 1)
+    emit(
+        {
+            "type": "system",
+            "subtype": "task_started",
+            "task_id": "bfg1",
+            "tool_use_id": "toolu_sub_long",
+            "description": "make test",
+            "owned_by_subagent": True,
+            "is_backgrounded": False,
+            "task_type": "local_bash",
+        }
+    )
+    _wait_or_shutdown(TOOL_S)
+    emit(
+        {
+            "type": "system",
+            "subtype": "task_notification",
+            "task_id": "bfg1",
+            "tool_use_id": "toolu_sub_long",
+            "status": "completed",
+            "output_file": "",
+            "summary": "make test",
+        }
+    )
+    _mark_progress()
+    _silent_until_eof()
+
+
+def scenario_nonholding_progress(first: dict) -> None:
+    """#829 negative: only a subagent-owned *foreground* task (no known
+    owner) shows progress while a silent background Bash holds the session
+    — that progress must not re-arm the hold."""
+    init()
+    tool_use("Bash", "toolu_bg", {"command": "sleep 600", "run_in_background": True})
+    start_bg("b1", "toolu_bg")
+    tool_result("toolu_bg", "Command running in background with ID: b1.")
+    result("waiting", turns=2)
+    emit(
+        {
+            "type": "system",
+            "subtype": "task_started",
+            "task_id": "bfg9",
+            "tool_use_id": "toolu_unknown",
+            "description": "fg",
+            "owned_by_subagent": True,
+            "is_backgrounded": False,
+            "task_type": "local_bash",
+        }
+    )
+    n = 0
+    while True:
+        n += 1
+        _task_progress("bfg9", n, tool_use_id="toolu_unknown")
+        _wait_or_shutdown(PROGRESS_S)
+
+
+def scenario_bg_bash_printing(first: dict) -> None:
+    """#829 fallback: a background Bash whose output file (named in its
+    tool_result, P0 G4) grows every ``FAKE_CLAUDE_PROGRESS_S`` for
+    ``FAKE_CLAUDE_PROGRESS_FOR_S`` — or never (``FAKE_CLAUDE_PROGRESS_FOR_S=0``,
+    a silent ``sleep``)."""
+    path = os.environ["FAKE_CLAUDE_OUTPUT_FILE"]
+    with open(path, "w"):
+        pass
+    init()
+    tool_use("Bash", "toolu_bg", {"command": "ticker", "run_in_background": True})
+    start_bg("b1", "toolu_bg")
+    tool_result(
+        "toolu_bg",
+        "Command running in background with ID: b1. Output is being written to: "
+        f"{path}. You will be notified when it completes.",
+    )
+    result("waiting", turns=2)
+    deadline = time.monotonic() + PROGRESS_FOR_S
+    n = 0
+    while time.monotonic() < deadline:
+        n += 1
+        with open(path, "a") as fh:
+            fh.write(f"tick {n}\n")
+        _mark_progress()
+        _wait_or_shutdown(PROGRESS_S)
+    _silent_until_eof()
+
+
 _SCENARIOS = {
+    "bg_agent_progressing": scenario_bg_agent_progressing,
+    "bg_agent_silent": scenario_bg_agent_silent,
+    "bg_agent_long_tool": scenario_bg_agent_long_tool,
+    "nonholding_progress": scenario_nonholding_progress,
+    "bg_bash_printing": scenario_bg_bash_printing,
     "async_rewake_idle": scenario_async_rewake_idle,
     "async_hook_success": scenario_async_hook_success,
     "async_hook_post_result_response": scenario_async_hook_post_result_response,

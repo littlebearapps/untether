@@ -599,20 +599,27 @@ def test_turn_headers(reason: str, detail: dict, expected: str | None) -> None:
 @pytest.mark.parametrize(
     ("reason", "tasks", "expected"),
     [
+        # #829: no closing text promises "reply to continue" any more — the
+        # "closed" follow-up says whether the session continues.
         (
             "cancel",
             ["a"],
-            "\N{BLACK SQUARE FOR STOP} Stopped 1 background task: a. Reply to continue.",
+            "\N{BLACK SQUARE FOR STOP} Stopped 1 background task: a.",
         ),
         (
             "drain",
             ["a", "b"],
-            "\N{HOURGLASS WITH FLOWING SAND} Untether is restarting — stopping 2 background tasks: a, b. Reply to continue.",
+            "\N{HOURGLASS WITH FLOWING SAND} Untether is restarting — stopping 2 background tasks: a, b.",
         ),
         (
             "max_hold",
             ["a"],
-            "\N{HOURGLASS WITH FLOWING SAND} Closing session — 1 background task still running at the background hold limit: a. Stopping it; reply to continue.",
+            "\N{HOURGLASS WITH FLOWING SAND} Closing session — 1 background task still running at the background hold limit: a. Stopping it.",
+        ),
+        (
+            "abs_cap",
+            ["a", "b"],
+            "\N{HOURGLASS WITH FLOWING SAND} Closing session — 2 background tasks still running at the session time limit: a, b. Stopping them.",
         ),
     ],
 )
@@ -620,6 +627,55 @@ def test_live_closing_notice_wording(
     reason: str, tasks: list[str], expected: str
 ) -> None:
     assert rb._live_closing_notice(reason, tasks) == expected
+
+
+@pytest.mark.parametrize(
+    ("tasks", "max_hold_s", "rearm", "expected"),
+    [
+        (
+            ["A", "B"],
+            1800.0,
+            True,
+            "\N{HOURGLASS WITH FLOWING SAND} Closing session — 2 background tasks still running with no progress for 30 min: A, B. Stopping them.",
+        ),
+        (
+            ["A"],
+            60.0,
+            True,
+            "\N{HOURGLASS WITH FLOWING SAND} Closing session — 1 background task still running with no progress for 1 min: A. Stopping it.",
+        ),
+        (
+            ["A"],
+            45.0,
+            True,
+            "\N{HOURGLASS WITH FLOWING SAND} Closing session — 1 background task still running with no progress for 45 s: A. Stopping it.",
+        ),
+        (
+            ["A"],
+            1800.0,
+            False,  # kill switch: the hold counted from the turn, not activity
+            "\N{HOURGLASS WITH FLOWING SAND} Closing session — 1 background task still running at the background hold limit: A. Stopping it.",
+        ),
+    ],
+)
+def test_829_max_hold_notice_names_the_quiet_time(
+    tasks: list[str], max_hold_s: float, rearm: bool, expected: str
+) -> None:
+    text = rb._live_closing_notice(
+        "max_hold", tasks, max_hold_s=max_hold_s, rearm_on_progress=rearm
+    )
+    assert text == expected
+    assert "reply to continue" not in text.lower()
+
+
+def test_829_closed_notice_wording() -> None:
+    assert rb._live_closed_notice(False) == (
+        "\N{LEFTWARDS ARROW WITH HOOK}\N{VARIATION SELECTOR-16} Reply to "
+        "continue in the same session."
+    )
+    warning = rb._live_closed_notice(True)
+    assert warning.startswith("\N{WARNING SIGN}")
+    assert "fresh session" in warning and "Partial work" in warning
 
 
 async def test_router_tracks_last_reply_anchor_for_notices() -> None:

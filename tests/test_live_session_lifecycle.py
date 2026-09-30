@@ -38,6 +38,15 @@ _ENV = (
     "FAKE_CLAUDE_IGNORE_SIGINT",
     "FAKE_CLAUDE_REWAKE_WAIT_S",
     "FAKE_CLAUDE_SYNC_HOOK_S",
+    # #829
+    "FAKE_CLAUDE_PROGRESS_S",
+    "FAKE_CLAUDE_PROGRESS_FOR_S",
+    "FAKE_CLAUDE_PROGRESS_THEN",
+    "FAKE_CLAUDE_TOOL_S",
+    "FAKE_CLAUDE_MARKER_FILE",
+    "FAKE_CLAUDE_OUTPUT_FILE",
+    "FAKE_CLAUDE_EOF_MODE",
+    "FAKE_CLAUDE_SIGINT_RC",
 )
 
 
@@ -53,6 +62,8 @@ _TIMINGS = {
     "_live_close_grace_hooks_s": 1.6,
     "_subcountdown_sigterm_grace_s": 1.0,
     "_subcountdown_sigterm_grace_poll_s": 0.1,
+    # #829: log every hold re-arm so tests can count them.
+    "_hold_rearm_log_every_s": 0.0,
 }
 
 
@@ -972,3 +983,384 @@ async def test_812_user_close_over_pending_hook_logs_info_without_hook_notice() 
     assert killed and killed[0]["log_level"] == "info"
     assert killed[0]["close_reason"] == "cancel"
     assert notices == []  # notice=False and a user close: nothing extra
+
+
+# ── #829: activity-based background hold, honest close ────────────────────
+
+
+class _CloseClock:
+    """Wall-clock times of the run's first result and of each live-session
+    notice, keyed by kind (``closing`` / ``closed``)."""
+
+    def __init__(self) -> None:
+        self.result_at: float | None = None
+        self.notices: list[tuple[str, dict, float]] = []
+
+    async def on_event(self, evt: Any) -> None:
+        if isinstance(evt, CompletedEvent) and self.result_at is None:
+            self.result_at = time.time()
+            add_live_session_listener(
+                SID, lambda kind, p: self.notices.append((kind, p, time.time()))
+            )
+
+    def first(self, kind: str) -> tuple[dict, float]:
+        payload, at = next((p, t) for k, p, t in self.notices if k == kind)
+        return payload, at
+
+    def kinds(self) -> list[str]:
+        return [k for k, _, _ in self.notices]
+
+
+def _progress_env(**values: Any) -> None:
+    for key, value in values.items():
+        os.environ[f"FAKE_CLAUDE_{key.upper()}"] = str(value)
+
+
+async def test_829_progress_keeps_the_session_open(
+    monkeypatch: pytest.MonkeyPatch, quarantine: QuarantineStore
+) -> None:
+    """F on rc14: an agent reporting progress every 0.1 s for 2 s outlives a
+    0.5 s hold; its wake turn is delivered and nothing closes at max_hold."""
+    from structlog.testing import capture_logs
+
+    _settings(monkeypatch, post_result_bg_max_hold=0.5)
+    _progress_env(progress_s=0.1, progress_for_s=2.0)
+    with capture_logs() as logs:
+        runner, events = await _run("bg_agent_progressing")
+    finals = [e for e in events if isinstance(e, TurnEvent) and e.phase == "completed"]
+    assert [f.answer for f in finals] == ["GOT: AGENT-DONE"]
+    assert _engine_state(runner).live_close_reason == "idle_no_tasks"
+    rearmed = _events(logs, "claude.live_session.hold_rearmed")
+    assert rearmed and {e["source"] for e in rearmed} == {"task_progress"}
+    assert all(e["task_id"] == "a1" for e in rearmed)
+    closes = _events(logs, "claude.live_session.stdin_closed")
+    assert [c["reason"] for c in closes] == ["idle_no_tasks"]
+    assert not quarantine.is_quarantined("claude", SID)
+
+
+async def test_829_silent_agent_still_closes_at_max_hold(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _settings(monkeypatch, post_result_bg_max_hold=0.5)
+    clock = _CloseClock()
+    runner, _ = await _run("bg_agent_silent", on_event=clock.on_event)
+    assert _engine_state(runner).live_close_reason == "max_hold"
+    payload, closed_at = clock.first("closing")
+    assert payload["tasks"] == ["bg a1"]
+    assert payload["max_hold_s"] == 0.5 and payload["rearm_on_progress"] is True
+    assert clock.result_at is not None
+    assert 0.5 <= closed_at - clock.result_at < 1.5
+
+
+async def test_829_close_is_timed_from_the_last_progress(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """F on rc14: progress for 1 s, then silence — the 0.5 s hold counts from
+    the last frame, not from the result."""
+    from structlog.testing import capture_logs
+
+    marker = tmp_path / "last_progress"
+    _settings(monkeypatch, post_result_bg_max_hold=0.5)
+    _progress_env(
+        progress_s=0.1, progress_for_s=1.0, progress_then="silent", marker_file=marker
+    )
+    clock = _CloseClock()
+    with capture_logs() as logs:
+        runner, _ = await _run("bg_agent_progressing", on_event=clock.on_event)
+    assert _engine_state(runner).live_close_reason == "max_hold"
+    _, closed_at = clock.first("closing")
+    last_progress = float(marker.read_text())
+    assert 0.5 <= closed_at - last_progress < 1.2
+    assert clock.result_at is not None and closed_at - clock.result_at >= 1.3
+    closes = _events(logs, "claude.live_session.stdin_closed")
+    assert closes[0]["reason"] == "max_hold"
+    assert closes[0]["last_progress_age_s"] >= 0.5
+
+
+async def test_829_kill_switch_restores_turn_based_hold(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from structlog.testing import capture_logs
+
+    _settings(monkeypatch, post_result_bg_max_hold=0.5, bg_hold_rearm_on_progress=False)
+    _progress_env(progress_s=0.1, progress_for_s=3.0)
+    clock = _CloseClock()
+    with capture_logs() as logs:
+        runner, events = await _run("bg_agent_progressing", on_event=clock.on_event)
+    state = _engine_state(runner)
+    assert state.bg_hold_rearm_on_progress is False
+    assert state.live_close_reason == "max_hold"
+    payload, closed_at = clock.first("closing")
+    assert payload["rearm_on_progress"] is False
+    assert clock.result_at is not None and 0.5 <= closed_at - clock.result_at < 1.2
+    assert _events(logs, "claude.live_session.hold_rearmed") == []
+    assert not any(isinstance(e, TurnEvent) for e in events)
+
+
+async def test_829_absolute_cap_wins_over_progress(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _settings(monkeypatch, post_result_bg_max_hold=0.5, live_session_max_s=1.0)
+    _progress_env(progress_s=0.1, progress_for_s=4.0)
+    runner, _ = await _run("bg_agent_progressing")
+    assert _engine_state(runner).live_close_reason == "abs_cap"
+
+
+async def test_829_agent_in_a_long_foreground_tool_is_not_closed(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """F on rc14 (A.2): no ``task_progress`` while the agent runs one 2 s
+    tool, but its subagent-owned foreground task is live — the session holds,
+    and closes a hold after the tool ends."""
+    from structlog.testing import capture_logs
+
+    marker = tmp_path / "tool_end"
+    _settings(monkeypatch, post_result_bg_max_hold=0.5)
+    _progress_env(tool_s=2.0, marker_file=marker)
+    clock = _CloseClock()
+    with capture_logs() as logs:
+        runner, _ = await _run("bg_agent_long_tool", on_event=clock.on_event)
+    state = _engine_state(runner)
+    assert state.live_close_reason == "max_hold"
+    assert state.tasks["a1"].owner_tool_use_id is None
+    assert state.tasks["bfg1"].owner_tool_use_id == "toolu_ag"
+    _, closed_at = clock.first("closing")
+    tool_end = float(marker.read_text())
+    assert clock.result_at is not None and closed_at - clock.result_at >= 2.0
+    assert 0.4 <= closed_at - tool_end < 1.2
+    sources = {e["source"] for e in _events(logs, "claude.live_session.hold_rearmed")}
+    assert "agent_tool" in sources
+
+
+async def test_829_non_holding_progress_does_not_rearm(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from structlog.testing import capture_logs
+
+    _settings(monkeypatch, post_result_bg_max_hold=0.5)
+    _progress_env(progress_s=0.1)
+    clock = _CloseClock()
+    with capture_logs() as logs:
+        runner, _ = await _run("nonholding_progress", on_event=clock.on_event)
+    assert _engine_state(runner).live_close_reason == "max_hold"
+    _, closed_at = clock.first("closing")
+    assert clock.result_at is not None and 0.5 <= closed_at - clock.result_at < 1.2
+    assert _events(logs, "claude.live_session.hold_rearmed") == []
+
+
+async def test_829_printing_background_bash_rearms_once_per_window(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """F on rc14: ``local_bash`` has no progress frames, but its output file
+    grows — checked only when the hold would expire, one re-arm per window."""
+    from structlog.testing import capture_logs
+
+    marker = tmp_path / "last_write"
+    _settings(monkeypatch, post_result_bg_max_hold=0.5)
+    _progress_env(
+        progress_s=0.1,
+        progress_for_s=2.0,
+        marker_file=marker,
+        output_file=tmp_path / "b1.output",
+    )
+    clock = _CloseClock()
+    with capture_logs() as logs:
+        runner, _ = await _run("bg_bash_printing", on_event=clock.on_event)
+    state = _engine_state(runner)
+    assert state.live_close_reason == "max_hold"
+    assert state.bg_output_files == {"toolu_bg": str(tmp_path / "b1.output")}
+    _, closed_at = clock.first("closing")
+    assert clock.result_at is not None and closed_at - clock.result_at >= 2.0
+    assert 0.4 <= closed_at - float(marker.read_text()) < 1.3
+    rearmed = _events(logs, "claude.live_session.hold_rearmed")
+    assert rearmed and {e["source"] for e in rearmed} == {"bash_output"}
+    # At most one re-arm per 0.5 s window: ~4 while it prints, plus the one
+    # that lands on the last write before the close.
+    assert 2 <= len(rearmed) <= 6
+    # Re-armed to a write newer than the previous re-arm: never older than
+    # one hold (+ a poll), or the check ran on a stale mtime.
+    assert all(e["activity_age_s"] < 0.7 for e in rearmed), rearmed
+
+
+async def test_829_silent_background_bash_still_closes(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The fallback's negative guard (R15-21b): a silent command never
+    re-arms the hold."""
+    from structlog.testing import capture_logs
+
+    _settings(monkeypatch, post_result_bg_max_hold=0.5)
+    _progress_env(progress_for_s=0, output_file=tmp_path / "b1.output")
+    clock = _CloseClock()
+    with capture_logs() as logs:
+        runner, _ = await _run("bg_bash_printing", on_event=clock.on_event)
+    assert _engine_state(runner).live_close_reason == "max_hold"
+    _, closed_at = clock.first("closing")
+    assert clock.result_at is not None and 0.5 <= closed_at - clock.result_at < 1.2
+    assert _events(logs, "claude.live_session.hold_rearmed") == []
+
+
+# B2 (P0 G6-G9): background agents ignore stdin EOF, so a close over one
+# runs into the grace and SIGINT — which the CLI answers with rc 0 and a
+# resumable transcript.
+
+
+async def test_829_b2_max_hold_close_stopped_by_sigint_is_not_quarantined(
+    monkeypatch: pytest.MonkeyPatch, quarantine: QuarantineStore
+) -> None:
+    from structlog.testing import capture_logs
+
+    _settings(monkeypatch, post_result_bg_max_hold=0.5)
+    _progress_env(eof_mode="until_sigint")
+    clock = _CloseClock()
+    with capture_logs() as logs:
+        runner, _ = await _run("bg_agent_silent", on_event=clock.on_event)
+    assert _engine_state(runner).live_close_reason == "max_hold"
+    assert runner.current_stream.sigterm_sent is False
+    assert runner.current_stream.proc_returncode == 0
+    assert not quarantine.is_quarantined("claude", SID)
+    assert _events(logs, "session.quarantined") == []
+    assert len(_events(logs, "claude.live_session.close_grace_expired")) == 1
+    sigint = _events(logs, "claude.live_session.exited_after_sigint")
+    assert len(sigint) == 1
+    assert sigint[0]["stopped_clean"] is True and sigint[0]["quarantined"] is False
+    assert clock.kinds() == ["closing", "closed"]
+    closed, _ = clock.first("closed")
+    assert closed == {"reason": "max_hold", "quarantined": False, "tasks": ["bg a1"]}
+
+
+async def test_829_b2_cancel_close_stopped_by_sigint_is_not_quarantined(
+    monkeypatch: pytest.MonkeyPatch, quarantine: QuarantineStore
+) -> None:
+    """/cancel of an idle session over a running agent keeps the plain grace
+    (it must fit /cancel's 20 s wait) and still stops cleanly."""
+    from structlog.testing import capture_logs
+
+    _settings(monkeypatch)
+    _progress_env(eof_mode="until_sigint")
+    notices: list[tuple[str, dict]] = []
+
+    async def cancel(evt: Any) -> None:
+        if isinstance(evt, CompletedEvent):
+            add_live_session_listener(SID, lambda kind, p: notices.append((kind, p)))
+            await close_live_session(SID, "cancel", notice=True)
+
+    with capture_logs() as logs:
+        runner, _ = await _run("bg_agent_silent", on_event=cancel)
+    assert _engine_state(runner).live_close_reason == "cancel"
+    assert not quarantine.is_quarantined("claude", SID)
+    expired = _events(logs, "claude.live_session.close_grace_expired")
+    assert (
+        len(expired) == 1 and expired[0]["grace_s"] == _TIMINGS["_live_close_grace_s"]
+    )
+    sigint = _events(logs, "claude.live_session.exited_after_sigint")
+    assert sigint and sigint[0]["stopped_clean"] is True
+    assert [k for k, _ in notices] == ["closing", "closed"]
+    assert notices[1][1]["quarantined"] is False
+
+
+async def test_829_b2_nonzero_exit_on_sigint_still_quarantines(
+    monkeypatch: pytest.MonkeyPatch, quarantine: QuarantineStore
+) -> None:
+    from structlog.testing import capture_logs
+
+    _settings(monkeypatch, post_result_bg_max_hold=0.5)
+    _progress_env(eof_mode="until_sigint", sigint_rc=1)
+    clock = _CloseClock()
+    with capture_logs() as logs:
+        runner, _ = await _run("bg_agent_silent", on_event=clock.on_event)
+    assert quarantine.is_quarantined("claude", SID)
+    sigint = _events(logs, "claude.live_session.exited_after_sigint")
+    assert sigint[0]["stopped_clean"] is False and sigint[0]["quarantined"] is True
+    closed, _ = clock.first("closed")
+    assert closed["quarantined"] is True
+
+
+async def test_829_b2_abs_cap_close_still_quarantines(
+    monkeypatch: pytest.MonkeyPatch, quarantine: QuarantineStore
+) -> None:
+    from structlog.testing import capture_logs
+
+    _settings(monkeypatch, live_session_max_s=0.5)
+    _progress_env(eof_mode="until_sigint")
+    with capture_logs() as logs:
+        runner, _ = await _run("bg_agent_silent")
+    assert _engine_state(runner).live_close_reason == "abs_cap"
+    assert quarantine.is_quarantined("claude", SID)
+    sigint = _events(logs, "claude.live_session.exited_after_sigint")
+    assert sigint[0]["stopped_clean"] is False and sigint[0]["quarantined"] is True
+
+
+@pytest.mark.parametrize(
+    ("reason", "turn_idle", "expected"),
+    [
+        ("max_hold", True, True),
+        ("cancel", True, True),
+        ("new", True, True),
+        ("drain", True, True),
+        ("options_changed", True, True),
+        ("max_hold", False, False),  # a turn (or injected line) was open
+        ("abs_cap", True, False),  # closes mid-turn too — never exempt
+        ("error", True, False),  # follows a failed run
+        ("idle_no_tasks", True, False),  # nothing live: #791's idle_clean covers it
+    ],
+)
+def test_829_b2_eligibility(reason: str, turn_idle: bool, expected: bool) -> None:
+    live = LiveSession(session_id="s", state=ClaudeStreamState(), stdin=None)
+    live.close_reason = reason
+    live.closed_turn_idle = turn_idle
+    assert claude_mod._may_stop_clean(live) is expected
+
+
+async def test_829_b2_sigint_deaf_cli_keeps_quarantine_on_sigterm(
+    monkeypatch: pytest.MonkeyPatch, quarantine: QuarantineStore
+) -> None:
+    from structlog.testing import capture_logs
+
+    _settings(monkeypatch, post_result_bg_max_hold=0.5)
+    _progress_env(eof_mode="until_sigint", ignore_sigint=1)
+    with capture_logs() as logs:
+        runner, _ = await _run("bg_agent_silent")
+    assert runner.current_stream.sigterm_sent is True
+    assert quarantine.is_quarantined("claude", SID)
+    teardown = _events(logs, "claude.live_session.forced_teardown")
+    assert teardown and teardown[0]["quarantined"] is True
+
+
+async def test_829_closed_notice_once_when_cli_exits_on_eof(
+    monkeypatch: pytest.MonkeyPatch, quarantine: QuarantineStore
+) -> None:
+    """A background Bash stops on EOF (F3) and the CLI exits within a poll —
+    the early-return path still sends exactly one ``closed``."""
+    _settings(monkeypatch, post_result_bg_max_hold=0.5)
+    clock = _CloseClock()
+    await _run("bg_bash_wake", wake_s=30, on_event=clock.on_event)
+    assert clock.kinds() == ["closing", "closed"]
+    closed, _ = clock.first("closed")
+    assert closed == {"reason": "max_hold", "quarantined": False, "tasks": ["bg b1"]}
+
+
+async def test_829_idle_close_without_notice_still_reports_closed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``closed`` follows every Untether close; the bridge only speaks when
+    the closing notice named tasks."""
+    _settings(monkeypatch)
+    clock = _CloseClock()
+    await _run("followup", on_event=clock.on_event)
+    assert clock.kinds() == ["closed"]
+    closed, _ = clock.first("closed")
+    assert closed["reason"] == "idle_no_tasks" and closed["tasks"] == []
+
+
+def test_829_settings_defaults_and_round_trip() -> None:
+    import pydantic
+
+    wd = WatchdogSettings()
+    assert wd.bg_hold_rearm_on_progress is True
+    assert wd.post_result_bg_max_hold == 1800.0  # name, default and range kept
+    off = WatchdogSettings.model_validate({"bg_hold_rearm_on_progress": False})
+    assert off.bg_hold_rearm_on_progress is False
+    assert WatchdogSettings.model_validate(off.model_dump()) == off
+    with pytest.raises(pydantic.ValidationError):
+        WatchdogSettings(post_result_bg_max_hold=7201)

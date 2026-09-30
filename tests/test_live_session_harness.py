@@ -36,6 +36,8 @@ _ENV = (
     "FAKE_CLAUDE_WAKE_S",
     "FAKE_CLAUDE_TASK_END",
     "FAKE_CLAUDE_ACK_TOOL",
+    "FAKE_CLAUDE_EOF_MODE",
+    "FAKE_CLAUDE_SIGINT_RC",
 )
 
 
@@ -108,6 +110,7 @@ async def _drive(
     wake_s: float = 0.3,
     running_tasks: dict[MessageRef, RunningTask] | None = None,
     timeout: float = 25.0,
+    timings: dict[str, float] | None = None,
 ) -> _OrderedTransport:
     os.environ["FAKE_CLAUDE_SCENARIO"] = scenario
     os.environ["FAKE_CLAUDE_WAKE_S"] = str(wake_s)
@@ -116,6 +119,9 @@ async def _drive(
         transport=transport, presenter=MarkdownPresenter(), final_notify=False
     )
     runner = _LiveRunner(claude_cmd=str(FAKE_CLI), permission_mode="bypassPermissions")
+    # Slots dataclass: timing knobs must be set on the instance.
+    for name, value in (timings or {}).items():
+        setattr(runner, name, value)
     with anyio.fail_after(timeout):
         await handle_message(
             cfg,
@@ -250,6 +256,59 @@ async def test_max_hold_sends_closing_notice(monkeypatch: pytest.MonkeyPatch) ->
     assert len(notices) == 1
     assert "1 background task still running" in notices[0]
     assert "bg b1" in notices[0] and "Stopping it" in notices[0]
+    # #829: the hold counts quiet time; the outcome follows once it exited.
+    assert "with no progress for" in notices[0]
+    assert "reply to continue" not in notices[0].lower()
+    closed = [
+        c for c in transport.send_calls if "Reply to continue" in c["message"].text
+    ]
+    assert len(closed) == 1
+    assert closed[0]["message"].text.endswith("Reply to continue in the same session.")
+    assert closed[0]["options"].notify is False
+    texts = _texts(transport)
+    assert texts.index(notices[0]) < texts.index(closed[0]["message"].text)
+
+
+_FAST_CLOSE = {
+    "_live_poll_s": 0.05,
+    "_live_close_grace_s": 0.5,
+    "_live_close_sigint_grace_s": 0.8,
+}
+
+
+async def test_829_agent_close_stopped_by_sigint_offers_same_session(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """B2 end to end: an agent ignores EOF, SIGINT stops it with rc 0 — not
+    quarantined, so the user is told the same session continues."""
+    _watchdog(monkeypatch, post_result_bg_max_hold=0.5)
+    os.environ["FAKE_CLAUDE_EOF_MODE"] = "until_sigint"
+    transport = await _drive("bg_agent_silent", timings=_FAST_CLOSE)
+    texts = _texts(transport)
+    assert any("Closing session" in t and "Stopping it" in t for t in texts)
+    assert any(t.endswith("Reply to continue in the same session.") for t in texts)
+    assert not any("fresh session" in t for t in texts)
+
+
+async def test_829_unclean_close_warns_of_a_fresh_session(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _watchdog(monkeypatch, post_result_bg_max_hold=0.5)
+    os.environ["FAKE_CLAUDE_EOF_MODE"] = "until_sigint"
+    os.environ["FAKE_CLAUDE_SIGINT_RC"] = "1"
+    transport = await _drive("bg_agent_silent", timings=_FAST_CLOSE)
+    warning = [c for c in transport.send_calls if "fresh session" in c["message"].text]
+    assert len(warning) == 1 and warning[0]["options"].notify is False
+    assert not any("Reply to continue" in t for t in _texts(transport))
+
+
+async def test_829_idle_close_without_tasks_sends_no_closed_line(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _watchdog(monkeypatch)
+    transport = await _drive("followup", timings={"_live_poll_s": 0.05})
+    assert not any("Reply to continue" in t for t in _texts(transport))
+    assert not any("fresh session" in t for t in _texts(transport))
 
 
 class _PerSpawnEnvRunner(_LiveRunner):

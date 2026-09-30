@@ -16,8 +16,11 @@ from structlog.testing import capture_logs
 from untether.runners.claude import (
     BG_BASH_MAX_KEEP_S,
     ClaudeStreamState,
+    _bash_output_activity,
     background_task_summary,
     has_live_background_work,
+    latest_background_activity,
+    latest_background_progress,
     translate_claude_event,
 )
 from untether.schemas import claude as claude_schema
@@ -716,3 +719,173 @@ def test_813_task_end_paired_records_announced_turn() -> None:
     started = [e for e in events if getattr(e, "phase", None) == "started"]
     assert started[0].reason == "task_finished"
     assert "announced_turns" not in started[0].detail
+
+
+# ── #829: background activity (the live-session hold's clock) ──────────────
+
+
+def _progress(task_id: str, n: int = 1) -> dict:
+    return {
+        "type": "system",
+        "subtype": "task_progress",
+        "task_id": task_id,
+        "tool_use_id": "toolu_a",
+        "description": f"Running step {n}",
+        "usage": {"total_tokens": 1000 + n, "tool_uses": n, "duration_ms": n},
+        "last_tool_name": "Read",
+    }
+
+
+def _owned_foreground(task_id: str, tool_use_id: str) -> dict:
+    return {
+        "type": "system",
+        "subtype": "task_started",
+        "task_id": task_id,
+        "tool_use_id": tool_use_id,
+        "description": "make test",
+        "owned_by_subagent": True,
+        "is_backgrounded": False,
+        "task_type": "local_bash",
+    }
+
+
+def _agent_with_sub_tool(state: ClaudeStreamState) -> None:
+    _feed(state, _started_agent("a1", "toolu_a"))
+    sub_tool = _tool_use("Bash", "toolu_long", {"command": "make test"})
+    sub_tool["parent_tool_use_id"] = "toolu_a"
+    _feed(state, sub_tool)
+
+
+def test_829_start_and_progress_stamp_activity() -> None:
+    state = ClaudeStreamState()
+    before = time.monotonic()
+    _feed(state, _started_agent("a1", "toolu_a"))
+    task = state.tasks["a1"]
+    assert task.last_progress_at >= before
+    assert task.last_progress_source == "task_started"
+    task.last_progress_at = 0.0
+    _feed(state, _progress("a1"))
+    assert task.last_progress_at >= before
+    assert task.last_progress_source == "task_progress"
+
+
+def test_829_revival_stamps_activity() -> None:
+    state = ClaudeStreamState()
+    _feed(state, _started_agent("a1", "toolu_a"))
+    _feed(state, _notification("a1", "toolu_a", "completed"))
+    state.tasks["a1"].last_progress_at = 0.0
+    _feed(state, _started_agent("a1", "toolu_a"))
+    assert state.tasks["a1"].revived_count == 1
+    assert state.tasks["a1"].last_progress_at > 0.0
+
+
+def test_829_progress_for_an_ended_task_is_not_activity() -> None:
+    """A straggler frame for an ended id: no stamp, no re-arm, no revival."""
+    state = ClaudeStreamState()
+    _feed(state, _started_agent("a1", "toolu_a"))
+    _feed(state, _notification("a1", "toolu_a", "completed"))
+    state.tasks["a1"].last_progress_at = 0.0
+    _feed(state, _progress("a1"))
+    assert state.tasks["a1"].last_progress_at == 0.0
+    assert state.tasks["a1"].ended_at is not None
+    assert latest_background_progress(state) is None
+
+
+def test_829_owned_foreground_tool_start_and_end_stamp_the_owner() -> None:
+    state = ClaudeStreamState()
+    _agent_with_sub_tool(state)
+    agent = state.tasks["a1"]
+    agent.last_progress_at = 0.0
+    _feed(state, _owned_foreground("bfg1", "toolu_long"))
+    assert state.tasks["bfg1"].owner_tool_use_id == "toolu_a"
+    assert agent.last_progress_at > 0.0
+    assert agent.last_progress_source == "agent_tool"
+    agent.last_progress_at = 0.0
+    _feed(state, _notification("bfg1", "toolu_long", "completed"))
+    assert agent.last_progress_at > 0.0
+
+
+def test_829_agent_in_a_live_foreground_tool_counts_as_active_now() -> None:
+    state = ClaudeStreamState()
+    _agent_with_sub_tool(state)
+    _feed(state, _owned_foreground("bfg1", "toolu_long"))
+    state.tasks["a1"].last_progress_at = 0.0
+    before = time.monotonic()
+    activity = latest_background_activity(state)
+    assert activity is not None
+    assert activity.source == "agent_tool" and activity.task_id == "a1"
+    assert activity.at >= before
+    _feed(state, _notification("bfg1", "toolu_long", "completed"))
+    state.tasks["a1"].last_progress_at = 5.0
+    assert latest_background_progress(state) == 5.0  # the tool is over
+
+
+def test_829_latest_progress_ignores_tasks_that_do_not_hold() -> None:
+    state = ClaudeStreamState()
+    _feed(state, _owned_foreground("f1", "toolu_x"))  # never holds
+    assert latest_background_progress(state) is None
+    _feed(state, _started_bash("b1", "toolu_b"))
+    _feed(state, _started_agent("a1", "toolu_a"))
+    state.tasks["b1"].last_progress_at = 10.0
+    state.tasks["a1"].last_progress_at = 20.0
+    state.tasks["f1"].last_progress_at = 99.0
+    assert latest_background_progress(state) == 20.0
+    # #383 C4's use: restricted to the exit-turn tasks.
+    assert latest_background_progress(state, ["b1"]) == 10.0
+    assert latest_background_progress(state, ["gone"]) is None
+    _feed(state, _notification("a1", "toolu_a", "completed"))
+    assert latest_background_progress(state) == 10.0
+
+
+def test_829_bash_output_file_is_noted_from_the_tool_result() -> None:
+    state = ClaudeStreamState()
+    _feed(state, _started_bash("b1", "toolu_b"))
+    _feed(
+        state,
+        {
+            "type": "user",
+            "message": {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": "toolu_b",
+                        "content": (
+                            "Command running in background with ID: b1. Output is "
+                            "being written to: /tmp/claude-1000/-x/s1/tasks/b1.output. "
+                            "You will be notified when it completes."
+                        ),
+                    }
+                ],
+            },
+        },
+    )
+    assert state.bg_output_files == {
+        "toolu_b": "/tmp/claude-1000/-x/s1/tasks/b1.output"
+    }
+
+
+@pytest.mark.anyio
+async def test_829_bash_output_activity_reads_mtime_and_skips_monitors(
+    tmp_path,
+) -> None:
+    import os
+
+    state = ClaudeStreamState()
+    _feed(state, _started_bash("b1", "toolu_b"))
+    _feed(state, _tool_use("Monitor", "toolu_m", {"command": "tail -f x"}))
+    _feed(state, _started_bash("m1", "toolu_m", desc="monitor"))
+    out_b = tmp_path / "b1.output"
+    out_m = tmp_path / "m1.output"
+    for path in (out_b, out_m):
+        path.write_text("tick\n")
+    state.bg_output_files = {"toolu_b": str(out_b), "toolu_m": str(out_m)}
+    old = time.time() - 100
+    os.utime(out_b, (old, old))
+    activity = await _bash_output_activity(state)
+    assert activity is not None and activity.task_id == "b1"
+    assert activity.source == "bash_output"
+    assert 95 <= time.monotonic() - activity.at <= 105
+    # A Monitor's growing output never counts; a missing file is no activity.
+    out_b.unlink()
+    assert await _bash_output_activity(state) is None
