@@ -47,6 +47,9 @@ _ENV = (
     "FAKE_CLAUDE_OUTPUT_FILE",
     "FAKE_CLAUDE_EOF_MODE",
     "FAKE_CLAUDE_SIGINT_RC",
+    # #684
+    "FAKE_CLAUDE_STDIN_LOG",
+    "FAKE_CLAUDE_UNANSWERED_RESULT_S",
 )
 
 
@@ -109,11 +112,16 @@ def _settings(monkeypatch: pytest.MonkeyPatch, **overrides: Any) -> None:
 
 
 async def _run(
-    scenario: str, *, on_event: Any = None, wake_s: float = 0.3, timeout: float = 20
+    scenario: str,
+    *,
+    on_event: Any = None,
+    wake_s: float = 0.3,
+    timeout: float = 20,
+    permission_mode: str = "bypassPermissions",
 ) -> tuple[ClaudeRunner, list[Any]]:
     os.environ["FAKE_CLAUDE_SCENARIO"] = scenario
     os.environ["FAKE_CLAUDE_WAKE_S"] = str(wake_s)
-    runner = _LiveRunner(claude_cmd=str(FAKE_CLI), permission_mode="bypassPermissions")
+    runner = _LiveRunner(claude_cmd=str(FAKE_CLI), permission_mode=permission_mode)
     for name, value in _TIMINGS.items():
         setattr(runner, name, value)
     events: list[Any] = []
@@ -1364,3 +1372,56 @@ def test_829_settings_defaults_and_round_trip() -> None:
     assert WatchdogSettings.model_validate(off.model_dump()) == off
     with pytest.raises(pydantic.ValidationError):
         WatchdogSettings(post_result_bg_max_hold=7201)
+
+
+# ---------------------------------------------------------------------------
+# #684: a withdrawn request no longer holds the live session
+# ---------------------------------------------------------------------------
+
+
+async def test_684_cancelled_request_does_not_hold_live_session(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, quarantine: QuarantineStore
+) -> None:
+    """The CLI withdraws a pending Bash approval (``control_cancel_request``):
+    after the result the session idle-closes within the grace instead of
+    holding until the 4 h cap, and Untether writes no answer for it."""
+    from structlog.testing import capture_logs
+
+    _settings(monkeypatch)
+    stdin_log = tmp_path / "stdin.log"
+    os.environ["FAKE_CLAUDE_STDIN_LOG"] = str(stdin_log)
+    with capture_logs() as logs:
+        # permission_mode=default (#749): the Bash request reaches Telegram.
+        runner, events = await _run("control_cancel", permission_mode="default")
+    assert isinstance(events[-1], CompletedEvent)
+    assert _engine_state(runner).live_close_reason == "idle_no_tasks"
+    lines = stdin_log.read_text().split()
+    assert "cancel_sent:req-cancel-1" in lines
+    assert "control_response" not in lines
+    (info,) = _events(logs, "control_request.cancelled_by_cli")
+    assert info["request_id"] == "req-cancel-1" and info["kind"] == "tool"
+    assert "req-cancel-1" not in claude_mod._REQUEST_TO_SESSION
+    assert not quarantine.is_quarantined("claude", SID)
+
+
+async def test_684_unanswered_request_still_holds(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """D4: detection never releases the hold — a request nobody answered
+    still pauses the idle close (here until a shrunk absolute cap)."""
+    _settings(monkeypatch, live_session_max_s=1.5)
+    os.environ["FAKE_CLAUDE_UNANSWERED_RESULT_S"] = "0.05"
+    seen: dict[str, Any] = {}
+
+    async def probe(evt: Any) -> None:
+        if isinstance(evt, CompletedEvent):
+            await anyio.sleep(0.8)  # well past the 0.3 s idle grace
+            state = claude_mod._SESSION_BG_STATE.get(SID)
+            seen["awaiting"] = state.awaiting_user_approval() if state else None
+            seen["accepting"] = is_session_accepting(SID)
+
+    runner, _ = await _run(
+        "control_unanswered", on_event=probe, permission_mode="default"
+    )
+    assert seen == {"awaiting": True, "accepting": True}
+    assert _engine_state(runner).live_close_reason == "abs_cap"

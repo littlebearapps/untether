@@ -130,6 +130,14 @@ Claude Code emits a system init event early in the stream:
   finish.` under the turn header (the whole header for a follow-up).
 - Optional: emit a `note` action summarizing tools/MCP servers (debug-only).
 
+The top-level `control_cancel_request` line (#684) — the CLI withdrawing a
+pending permission request — writes no reply and retires the request: one
+`action.completed` (kind `warning`, `⏹️ Permission request withdrawn — Claude
+Code no longer needs an answer`) for the request's action, which drops its
+keyboard; nothing for an unknown or already-answered id. The base runner keeps
+it out of `last_event_type` (control traffic) and treats it as resolving an
+approval wait in the ring-buffer fallback.
+
 The top-level `rate_limit_event` line (#790) is a quota snapshot, not a
 throttle notice: `allowed` emits nothing; `allowed_warning` emits at most one
 `note` per window (`⚠️ 5h limit N% used — resets HH:MM`); only `rejected` not

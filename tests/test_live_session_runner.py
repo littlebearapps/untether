@@ -901,3 +901,49 @@ async def test_383_agent_before_approval_not_deferred(tmp_path: Path) -> None:
     assert _answers(events) == ["PLANNED", "MODE: plan", "MODE: plan"]
     assert not _rearm_logs(logs, "rearm_deferred")
     assert [e["reason"] for e in _rearm_logs(logs)] == ["idle"]
+
+
+# ---------------------------------------------------------------------------
+# #684: a withdrawn request in a follow-up turn
+# ---------------------------------------------------------------------------
+
+
+async def test_684_cancel_in_followup_turn_records_channel() -> None:
+    """A follow-up turn is translated by the run's reader tasks, which inherit
+    the run's chat (``get_run_channel_id`` ContextVar, set by the executor
+    around ``handle_message``) — so a withdrawn request's record is scoped to
+    the right chat and a late tap there reads "No longer needed"."""
+    from untether.runners.claude import ControlRequestStatus, classify_control_request
+    from untether.utils.paths import reset_run_channel_id, set_run_channel_id
+
+    cmd = str(uuid.uuid4())
+
+    async def inject(evt: Any, runner: ClaudeRunner) -> None:
+        if isinstance(evt, CompletedEvent):
+            assert await write_user_message(SID, "do it", command_uuid=cmd)
+
+    runner = _LiveRunner(claude_cmd=str(FAKE_CLI), permission_mode="default")
+    token = set_run_channel_id(68_400)
+    try:
+        with capture_logs() as logs:
+            events = await _collect(
+                "control_cancel_followup", until=2, on_event=inject, runner=runner
+            )
+    finally:
+        reset_run_channel_id(token)
+
+    start, end = [t for t in _turns(events) if t.phase in ("started", "completed")]
+    assert end.answer == "Stopped."
+    withdrawn = [
+        e
+        for e in events[events.index(start) : events.index(end)]
+        if getattr(e, "phase", None) == "completed"
+        and "withdrawn" in getattr(getattr(e, "action", None), "title", "")
+    ]
+    assert len(withdrawn) == 1
+    record = claude_mod._HANDLED_REQUESTS["req-cancel-1"]
+    assert record is not None
+    assert (record.outcome, record.channel_id) == ("cancelled", 68_400)
+    lookup = classify_control_request("req-cancel-1", channel_id=68_400)
+    assert lookup.status is ControlRequestStatus.CANCELLED
+    assert any(e["event"] == "control_request.cancelled_by_cli" for e in logs)

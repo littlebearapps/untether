@@ -463,9 +463,9 @@ Integration tests are run by Claude Code via Telegram MCP tools (see "Automated 
 | Per-run stream binding (`runner.py` `RunStreamHandle` / `publish_run_stream`, `runner_bridge.py` stall monitor) | RC12-1, S1, S2, U1-U4 (all engines), B-LIVE-1 |
 | Claude stream schema / rate-limit / API-retry handling (`schemas/claude.py`, `runners/claude.py`) | `uv run pytest tests/test_claude_cli_schema_drift.py`, RC12-2, RC12-3, S1 |
 | Runner bridge / auto-continue / no-op resume recovery (`runner_bridge.py`, `runners/claude.py`) | B-RESUME, U1-U4 (Claude), U6, U7 |
-| Live sessions / follow-up injection / scheduler (`runners/claude.py`, `runner_bridge.py`, `live_followup.py`, `scheduler.py`) | B-LIVE-1…7, RC12-4…7, C1-C6, S7, U1-U4 (Claude) |
+| Live sessions / follow-up injection / scheduler (`runners/claude.py`, `runner_bridge.py`, `live_followup.py`, `scheduler.py`) | B-LIVE-1…7, RC12-4…7, C1-C6, S7, U1-U4 (Claude), R15-6 |
 | Telegram transport (`telegram/*.py`) | T1-T10, S7, S8, R15-9-1 (benign edit/delete 400s at startup) |
-| Control channel (`claude_control.py`) | C1-C6, T8, S9, R15-5 |
+| Control channel (`claude_control.py`) | C1-C6, T8, S9, R15-5, R15-6 |
 | Config/settings (`settings.py`) | O1-O9, S5, upgrade path, R15-13a…d (settings parse cache) |
 | Cost tracking (`cost_tracker.py`) | B1-B3, U8 |
 | Progress/formatting (`markdown.py`, `telegram/render.py`) | U3, T6, T7, S4, S8, RC12-8, RC12-9 |
@@ -881,3 +881,20 @@ Chats: **Claude** `5284581592`, **Codex** `4929463515` (Bot API ids with a leadi
 | R15-19d | **`/compact` outside the live window (unchanged behaviour)** | Wait > 60 s for idle close (`claude.live_session.stdin_closed reason=idle…`), then send `/compact` | rc15 does **not** change this path (bare-`/compact` handling is an rc16 follow-up): the run is resumed with the preamble-prefixed text, Claude answers in prose, no 🗜️ row, no `runner.empty_result`. Records the baseline |
 | R15-19f | **Toggle** | Set `[progress] show_context_usage = false` in `~/.untether-dev/untether.toml` (hot reload), run U1 | No `% ctx` in progress or final. Revert, run U1 again: the segment is back without a restart |
 | R15-19g | **Codex regression** | Codex chat U1 + U4 | Header has no `% ctx`; no new WARN/ERROR |
+
+### #684 — withdrawn and unanswerable control requests
+
+Tier 2 **C1–C6**, **B-LIVE-1…7**, Tier 6 **S9**, Tier 1 **U1** on Codex and OpenCode (smoke for the engine-agnostic `runner.py` frozenset edit). Claude `ut-dev` chat `5284581592` (Bot API `-5284581592`). Setup: `~/.untether-dev/untether.toml` `[watchdog] tool_timeout = 60` (the minimum; applies to new runs), `/planmode on`. **Restore 600 afterwards.** Logs: `journalctl --user -u untether-dev -o cat --since "30 minutes ago" | grep -E "control_request\.|claude_control\.|approval_pending|live_session\.stdin_closed|session.summary"`.
+
+| ID | Telegram action | Expected in Telegram | Expected in logs |
+|---|---|---|---|
+| **R15-6a** Healthy long wait (negative) | `run ls -la /tmp with Bash`; don't tap for 150 s; then Approve | The keyboard stays; after Approve the tool runs | `subprocess.approval_pending` INFO; **no** `control_request.unanswerable`; `session.summary … unanswerable_control_requests=0` |
+| **R15-6b** Live wake turn (negative) | B-LIVE-7 shape (20 s background task, then ExitPlanMode in the wake turn); wait 150 s before tapping | The keyboard is on the wake turn's message; Approve → file written | No `unanswerable` |
+| **R15-6c** Ask by text (negative) | A C4 prompt that raises AskUserQuestion; tap **Other**; wait 150 s; type an answer | The answer is routed | No `unanswerable`; `ask_user_question.answering` |
+| **R15-6d** Outline hold (negative) | C3: tap **📋 Pause & Outline Plan**, let the outline arrive, wait 150 s | Buttons on the outline message | No `unanswerable` (the `has_outline_messages` surface) |
+| **R15-6e** Stale `da:` (positive, opportunistic) | If C3 produces an outline-guard deny (`control_request.outline_guard_deny`) followed by an outline-ready hold-open, answer the real request | Normal approval flow | `control_request.da_superseded`, then the session idle-closes normally after the reply (`stdin_closed reason=idle_no_tasks`, not held). Record "not exercised" if the guard path doesn't occur |
+| **R15-6f** Native cancel (opportunistic) | Grep the whole session for `control_request.cancelled_by_cli` | If present: the progress row reads `⏹️ Permission request withdrawn…`, the keyboard is gone, a tap toasts `No longer needed` | Untether never sends `interrupt`, so a live cancel is expected to be **not exercised**; unit + fake-CLI tests are the gate |
+| **R15-6g** Kill switch | Set `[watchdog] detect_unanswerable_control_requests = false`; repeat (e) or a unit-level check | — | No `unanswerable` lines |
+| **R15-6h** `initialize` re-send probe (zero-token, done offline 2026-10-01) | — | — | Fake-API harness on CLI 2.1.285: a mid-session `initialize` re-send while a `can_use_tool` is pending emits **no** second `system/init`; the envelope lists the pending id in `pending_permission_requests` (plus `pending_user_dialog_requests`), `session_state:"requires_action"`; one `system/background_tasks_changed` follows. Recorded in `docs/findings/2026-09-30-claude-sdk-control-permissions-context.md` (rc16 D2 input) |
+
+Pass = R15-6a–d show no false positive, (e)/(f) positive or recorded "not exercised", `uv run pytest tests/test_claude_cli_schema_drift.py` passes against the installed CLI, and C1–C6, B-LIVE-1…7, S9 and U1 (Codex/OpenCode) are unchanged. Post-rollout (7 days, all 5 hosts): `journalctl --user -u untether -o cat --since "7 days ago" | grep -E "control_request\.(unanswerable|cancelled_by_cli|da_superseded)"` — expect `unanswerable` ≈ 0 and triage every hit; `claude.live_session.stdin_closed reason=abs_cap` should not rise.

@@ -1483,3 +1483,38 @@ def test_812_hook_flood_keeps_approval_registry_probe() -> None:
             registry.pop("req_812", None)
     # Without the registry entry the ring alone can no longer tell.
     assert _approval_pending(stream) is False
+
+
+# ---------------------------------------------------------------------------
+# #684: control_cancel_request is control-channel traffic
+# ---------------------------------------------------------------------------
+
+
+def test_684_cancel_frame_is_control_traffic() -> None:
+    feed, stream, _state = _claude_line_handler("sess-684")
+    feed({"type": "system", "subtype": "init", "model": "m"})
+    feed(
+        {
+            "type": "assistant",
+            "message": {
+                "id": "m1",
+                "role": "assistant",
+                "model": "m",
+                "content": [{"type": "text", "text": "hi"}],
+            },
+        }
+    )
+    assert stream.last_event_type == "assistant"
+    feed({"type": "control_cancel_request", "request_id": "r-x"})
+    assert stream.last_event_type == "assistant"
+    assert stream.recent_events[-1][1] == "control_cancel_request"
+
+
+def test_684_ring_cancel_resolves_approval() -> None:
+    from untether.runner import JsonlStreamState, _approval_pending
+
+    stream = JsonlStreamState(expected_session=None)
+    stream.recent_events.append((1.0, "assistant"))
+    stream.recent_events.append((2.0, "control_request"))
+    stream.recent_events.append((3.0, "control_cancel_request"))
+    assert _approval_pending(stream) is False

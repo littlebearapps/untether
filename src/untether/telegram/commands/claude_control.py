@@ -172,7 +172,8 @@ def _not_found_result(
 def _unsent_result(
     result: ControlSendResult, request_id: str, action: str
 ) -> CommandResult:
-    """Result for a tap whose response was not written (#685)."""
+    """Result for a tap whose response was not written (#685) — or was
+    written after the CLI withdrew the request, so it was ignored (#684)."""
     if result.status is ControlRequestStatus.NOT_FOUND:
         return _not_found_result(request_id, action, result.reason)
     if result.status is not ControlRequestStatus.PENDING:
@@ -318,7 +319,7 @@ class ClaudeControlCommand:
                 rejects_plan=False,
                 claim_owner=ctx.callback_query_id,
             )
-            if not sent.sent:
+            if not sent.sent or sent.status is ControlRequestStatus.CANCELLED:
                 return _unsent_result(sent, request_id, action)
             session_id = sent.session_id
 
@@ -434,7 +435,7 @@ class ClaudeControlCommand:
             deny_message=deny_message,
             claim_owner=ctx.callback_query_id,
         )
-        if not sent.sent:
+        if not sent.sent or sent.status is ControlRequestStatus.CANCELLED:
             # #685: never log claude_control.sent (or say "Approved") for a
             # tap that wrote nothing.
             return _unsent_result(sent, request_id, action)
@@ -556,7 +557,7 @@ class ClaudeControlCommand:
             rejects_plan=False,  # #793: wants to talk, not a rejection
             claim_owner=ctx.callback_query_id,
         )
-        if not sent.sent:
+        if not sent.sent or sent.status is ControlRequestStatus.CANCELLED:
             return _unsent_result(sent, request_id, "chat")
         session_id = sent.session_id
 

@@ -828,3 +828,47 @@ def test_compact_heartbeat_interval_present(cli_blob: mmap.mmap) -> None:
         f"compacting heartbeat is now {m.group(2)} ms — resize the #819 "
         "compaction latch"
     )
+
+
+# ---------------------------------------------------------------------------
+# #684: the CLI withdrawing a pending control request
+# ---------------------------------------------------------------------------
+
+
+def test_684_control_cancel_request_frame_present(cli_blob: mmap.mmap) -> None:
+    """#684 retires a request on the CLI's ``control_cancel_request`` frame
+    (findings 2026-09-30 Q1 §3, probe Z4). If the frame is gone, withdrawn
+    requests would hold a live session until the 4 h cap again."""
+    for literal in (
+        b'type:"control_cancel_request",request_id:',
+        b"enqueueCancelRequest(",
+    ):
+        if cli_blob.find(literal) == -1:
+            pytest.fail(
+                f"{literal.decode()} is gone from the installed CLI — re-check "
+                "how the CLI withdraws a pending permission request before "
+                f"trusting #684 (last green on CLI {PROBED_CLI_VERSION})"
+            )
+
+
+def test_684_pending_permission_requests_present(cli_blob: mmap.mmap) -> None:
+    """The ``initialize`` re-send cross-check deferred to rc16 (#684 D2,
+    #837) reads ``pending_permission_requests`` off the success envelope."""
+    if cli_blob.find(b"pending_permission_requests") == -1:
+        pytest.fail(
+            "pending_permission_requests is gone from the installed CLI — "
+            "re-check findings Q1 §7 before building the rc16 cross-check "
+            f"(last green on CLI {PROBED_CLI_VERSION})"
+        )
+
+
+def test_684_stdin_close_rejection_text_present(cli_blob: mmap.mmap) -> None:
+    """Closing stdin with a request pending rejects it with this text and
+    sends no cancel frame (findings Q1 §6, probe Z5) — so registries are
+    cleaned at process end, not by a cancel."""
+    if cli_blob.find(b"Tool permission stream closed before response received") == -1:
+        pytest.fail(
+            "the stdin-close permission rejection text is gone from the "
+            "installed CLI — re-check Q1 §6 (last green on CLI "
+            f"{PROBED_CLI_VERSION})"
+        )

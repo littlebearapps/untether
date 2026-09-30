@@ -588,3 +588,26 @@ planning executes**. Model compliance with the plan reminder is currently the on
 also bounds what the #383 re-arm can enforce: after a flip, a write is routed to Untether, not
 denied by the CLI. Needs its own issue (route or deny `decision_reason_type:"mode"` requests in
 plan mode; check first how the plan-file write is classified).
+
+## Addendum (2026-10-01, rc15 implementation): #684 R15-6h — `initialize` re-send
+
+Zero token cost. CLI 2.1.285 on lba-1, fake Messages API on 127.0.0.1 (first call returns a Bash
+`tool_use`, later calls a text reply), argv `-p --input-format stream-json --output-format
+stream-json --verbose --permission-prompt-tool stdio --permission-mode default --model haiku
+--tools Bash --setting-sources local --strict-mcp-config --no-session-persistence`. The host
+sends `initialize` (`hooks: null`) and a user line, waits for the `can_use_tool`, then re-sends
+`initialize` (request id `ut_init2`) with the request still pending and reads stdout for 3 s.
+Script: lane-c3 scratch (not committed).
+
+| Observation | Result |
+|---|---|
+| Second `system/init` after the re-send (§4.5 risk 4 of plan 06) | **None** — `system/init` count stayed 1 |
+| Envelope keys | `subtype`, `request_id`, `response`, `pending_permission_requests`, **`pending_user_dialog_requests`** (new, not in Z6b's notes) |
+| `pending_permission_requests` | exactly the pending `can_use_tool` (its `request_id`) |
+| `response.session_state` / `current_permission_mode` | `requires_action` / `default` |
+| Other frames after the re-send | one `system/background_tasks_changed` snapshot (the #776 task map reconciles snapshots) |
+| Stdin close afterwards | as Z5: error tool_result, one more model call, rc 0 |
+
+So the rc16 cross-check (#684 D2 → #837) needs no guard against a re-emitted `system/init`, but
+must tolerate the extra `background_tasks_changed` snapshot and the response still resets the
+runner watchdog's idle clock (risk 3).

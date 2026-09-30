@@ -1206,3 +1206,11 @@ def test_589_concurrency_guard_bounds() -> None:
         WatchdogSettings(max_concurrent_engine_runs=-1)
     with pytest.raises(ValidationError):
         WatchdogSettings(prespawn_ram_per_run_reserve_mb=-1)
+
+
+def test_684_watchdog_detect_unanswerable_default_true_and_toggle() -> None:
+    from untether.settings import WatchdogSettings
+
+    assert WatchdogSettings().detect_unanswerable_control_requests is True
+    off = WatchdogSettings(detect_unanswerable_control_requests=False)
+    assert off.detect_unanswerable_control_requests is False

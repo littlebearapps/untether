@@ -54,6 +54,7 @@ per the contract above.
 | Signature | Level | Since | Why |
 |---|---|---|---|
 | `claude.live_session.close_grace_expired` | WARN | 0.35.5rc12 ([#791](https://github.com/littlebearapps/untether/issues/791)) | A live session didn't exit within 15 s of stdin EOF and had to be signalled (SIGINT, then SIGTERM). Carries a proc snapshot (state, wchan, CPU, children). A clean idle close is no longer quarantined, so this line is the only trace of a slow-exiting CLI; recurring hits point at an upstream exit-path hang worth filing. |
+| `control_request.unanswerable` | WARN | 0.35.5rc15 ([#684](https://github.com/littlebearapps/untether/issues/684)) | A Claude control request has been pending past `tool_timeout` with no answerable surface (`reasons`: `no_keyboard`, `no_session_writer`). Detect-only, once per request. Every hit is a UX or registry bug (swallowed keyboard, stale `da:` entry, a background agent's request with no turn to render it). Carries `kind`, `live_idle`, `holds_live_session`. Kill switch `[watchdog] detect_unanswerable_control_requests`. |
 
 ## msgspec dedup signature (#639)
 
