@@ -395,7 +395,9 @@ the cause.
 
 ## Error handling
 
-- Non-429 errors are logged and dropped (no retry).
+- Non-429 errors are logged at ERROR (`telegram.http_error`) and dropped (no retry).
+- Benign `editMessage*` / `deleteMessage` rejections ("message is not modified", "message to edit not found", "message to delete not found", "message can't be edited", "message can't be deleted") are classified by their `description` (case-insensitive substring; Telegram's `error_code` is 400 for all of them and documented as unstable) and logged at INFO as `telegram.benign_rejection` with a `reason_class` (`not_modified`, `target_gone`, `not_editable`, `not_deletable`), instead of ERROR. A missing, zero or negative `message_id`, `MESSAGE_ID_INVALID`, a benign-looking string on any other method, and every non-400 status stay at ERROR. When 5 rejections of one `(method, reason_class)` arrive within 60 s, one WARNING `telegram.benign_rejection.burst` (with `distinct_messages`, `message_ids`, `chat_ids`) is logged per window, so a wrong-id bug or a stuck edit loop still surfaces ([#746](https://github.com/littlebearapps/untether/issues/746)).
+- The recorded failure reason (`transport.edit.failed error=`, `startup.orphan_cleanup.edit_failed reason=`) is Telegram's `description` when the response carries one, else `http <status>: <body>`.
 - On `RetryAfter`, the op is retried unless a newer op superseded the same key.
 
 ## Replace progress messages

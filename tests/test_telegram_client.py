@@ -230,3 +230,102 @@ async def test_telegram_download_file_429_defaults_retry_after_on_bad_body() -> 
     assert payload == b"ok"
     assert sleeps == [5.0]
     assert len(calls) == 2
+
+
+# ---------------------------------------------------------------------------
+# #746 — benign edit/delete 400s
+# ---------------------------------------------------------------------------
+
+_EDIT_GONE = "Bad Request: message to edit not found"
+_NOT_MODIFIED = (
+    "Bad Request: message is not modified: specified new message content and "
+    "reply markup are exactly the same as a current content and reply markup "
+    "of the message"
+)
+
+
+def _handler_400(description: str):
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            400,
+            json={"ok": False, "error_code": 400, "description": description},
+            request=request,
+        )
+
+    return handler
+
+
+@pytest.mark.anyio
+async def test_746_no_token_in_logs_on_benign_400(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    token = "123:abcDEF_ghij"
+    setup_logging(debug=True)
+    client = httpx.AsyncClient(transport=httpx.MockTransport(_handler_400(_EDIT_GONE)))
+    try:
+        api = HttpBotClient(token, http_client=client)
+        for _ in range(5):  # the 5th also emits the burst WARNING
+            await api.edit_message_text(chat_id=123, message_id=916, text="x")
+    finally:
+        await client.aclose()
+
+    out = capsys.readouterr().out
+    assert token not in out
+    assert "abcDEF_ghij" not in out
+    assert "telegram.benign_rejection" in out
+    assert "telegram.benign_rejection.burst" in out
+
+
+def _transport_over(description: str):
+    from untether.telegram.bridge import TelegramTransport
+
+    http = httpx.AsyncClient(transport=httpx.MockTransport(_handler_400(description)))
+    tg = TelegramClient(
+        "123:abcDEF_ghij",
+        http_client=http,
+        private_chat_rps=0.0,
+        group_chat_rps=0.0,
+    )
+    return TelegramTransport(tg), tg, http
+
+
+@pytest.mark.anyio
+async def test_746_transport_edit_not_modified_no_error_end_to_end() -> None:
+    from structlog.testing import capture_logs
+
+    from untether.transport import MessageRef, RenderedMessage
+
+    transport, tg, http = _transport_over(_NOT_MODIFIED)
+    ref = MessageRef(channel_id=123, message_id=916)
+    try:
+        with capture_logs() as logs:
+            result = await transport.edit(ref=ref, message=RenderedMessage(text="same"))
+    finally:
+        await tg.close()
+        await http.aclose()
+
+    assert result == ref
+    assert any(r.get("event") == "transport.edit.noop" for r in logs)
+    assert not [r for r in logs if r.get("log_level") == "error"]
+
+
+@pytest.mark.anyio
+async def test_746_transport_edit_target_gone_warns_with_description() -> None:
+    from structlog.testing import capture_logs
+
+    from untether.transport import MessageRef, RenderedMessage
+
+    transport, tg, http = _transport_over(_EDIT_GONE)
+    ref = MessageRef(channel_id=123, message_id=916)
+    try:
+        with capture_logs() as logs:
+            result = await transport.edit(ref=ref, message=RenderedMessage(text="x"))
+    finally:
+        await tg.close()
+        await http.aclose()
+
+    assert result is None
+    rec = next(r for r in logs if r.get("event") == "transport.edit.failed")
+    assert rec["log_level"] == "warning"
+    assert rec["error"] == _EDIT_GONE
+    assert not [r for r in logs if r.get("log_level") == "error"]

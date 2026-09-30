@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import re
+import time
+from collections import deque
+from collections.abc import Callable
 from typing import Any, Protocol, TypeVar
 
 import httpx
@@ -17,6 +20,66 @@ _BOT_TOKEN_RE = re.compile(r"/bot[^/]+/")
 def _safe_url(url: object) -> str:
     """Sanitise a Telegram Bot API URL for logging (strip bot token)."""
     return _BOT_TOKEN_RE.sub("/bot***/", str(url))
+
+
+# #746: known-benign editMessage*/deleteMessage rejections. Telegram's
+# error_code is "subject to change" (Bot API docs) and all of these are HTTP
+# 400, so match the description — case-insensitively, as a substring
+# (aiogram-2 style). Strings from tdlib/telegram-bot-api Client.cpp @ e3e9dd8;
+# see docs/findings/2026-09-30-telegram-benign-400s-and-stt-prompt.md (Track D).
+# A reworded string falls back to ERROR ``telegram.http_error`` (loud, safe).
+_BENIGN_REJECTIONS: tuple[tuple[str, str], ...] = (
+    ("message is not modified", "not_modified"),
+    ("message to edit not found", "target_gone"),
+    ("message to delete not found", "target_gone"),
+    ("message can't be edited", "not_editable"),
+    ("message can't be deleted", "not_deletable"),  # also "... for everyone"
+)
+# MESSAGE_ID_INVALID is deliberately absent: it is the signature of a wrong id
+# (an Untether bug), not a vanished message. It stays ERROR.
+
+# #746: a flood of benign rejections is still worth a WARNING (a wrong-id or
+# routing bug, or a stuck render loop, would otherwise leave only INFO lines).
+_BENIGN_BURST_THRESHOLD = 5  # rejections of one (method, reason_class) ...
+_BENIGN_BURST_WINDOW_S = 60.0  # ... within this many seconds
+
+
+def classify_benign_rejection(
+    method: str, description: object, message_id: object
+) -> str | None:
+    """#746: the benign reason class for a rejected edit/delete, else ``None``.
+
+    ``message_id`` is the id Untether *sent* (the request payload). A missing,
+    non-int or non-positive id is an Untether bug, never a benign race
+    (Telegram's "not found" also fires for ``message_id <= 0``), so it never
+    classifies. ``bool`` is excluded explicitly.
+    """
+    if not isinstance(description, str) or not description:
+        return None
+    if not (method.startswith("editMessage") or method == "deleteMessage"):
+        return None
+    if isinstance(message_id, bool) or not isinstance(message_id, int):
+        return None
+    if message_id <= 0:
+        return None
+    text = description.lower()
+    for needle, reason_class in _BENIGN_REJECTIONS:
+        if needle in text:
+            return reason_class
+    return None
+
+
+def _error_description(resp: httpx.Response) -> str | None:
+    """The Bot API ``description`` of an error response, if it parses."""
+    try:
+        payload = resp.json()
+    except Exception:  # noqa: BLE001
+        return None
+    if isinstance(payload, dict):
+        description = payload.get("description")
+        if isinstance(description, str):
+            return description
+    return None
 
 
 T = TypeVar("T")
@@ -143,6 +206,7 @@ class HttpBotClient:
         *,
         timeout_s: float = 30,
         http_client: httpx.AsyncClient | None = None,
+        clock: Callable[[], float] = time.monotonic,
     ) -> None:
         if not token:
             raise ValueError("Telegram token is empty")
@@ -157,6 +221,11 @@ class HttpBotClient:
         # a separate, uncorrelated ``telegram.api_error`` line. Bounded
         # insertion-ordered dict; entries are popped on read.
         self._last_api_errors: dict[tuple[str, Any, Any], str] = {}
+        # #746: sliding window of benign rejections per (method, reason_class)
+        # and the time of the last burst WARNING per key.
+        self._clock = clock
+        self._benign_hits: dict[tuple[str, str], deque[tuple[float, Any, Any]]] = {}
+        self._benign_burst_warned_at: dict[tuple[str, str], float] = {}
 
     async def close(self) -> None:
         if self._owns_http_client:
@@ -182,6 +251,39 @@ class HttpBotClient:
     ) -> str | None:
         """#598: fetch-and-clear the recorded failure reason for a request."""
         return self._last_api_errors.pop((method, chat_id, message_id), None)
+
+    def _note_benign_rejection(
+        self, method: str, reason_class: str, chat_id: Any, message_id: Any
+    ) -> None:
+        """#746: one WARNING when 5 benign rejections of one kind land in 60 s.
+
+        Keyed on ``(method, reason_class)`` — not the message — so it catches
+        one message hammered (a stuck loop), many wrong ids (a routing bug)
+        and many chats at once. Latched: at most one WARNING per key per
+        window. Memory is bounded (a few keys, each trimmed to the window).
+        """
+        key = (method, reason_class)
+        now = self._clock()
+        hits = self._benign_hits.setdefault(key, deque())
+        hits.append((now, chat_id, message_id))
+        while hits and now - hits[0][0] > _BENIGN_BURST_WINDOW_S:
+            hits.popleft()
+        if len(hits) < _BENIGN_BURST_THRESHOLD:
+            return
+        last = self._benign_burst_warned_at.get(key)
+        if last is not None and now - last < _BENIGN_BURST_WINDOW_S:
+            return
+        self._benign_burst_warned_at[key] = now
+        logger.warning(
+            "telegram.benign_rejection.burst",
+            method=method,
+            reason_class=reason_class,
+            count=len(hits),
+            window_s=_BENIGN_BURST_WINDOW_S,
+            distinct_messages=len({(c, m) for _, c, m in hits}),
+            message_ids=sorted({m for _, _, m in hits})[:5],
+            chat_ids=sorted({c for _, c, _ in hits if c is not None})[:5],
+        )
 
     def _parse_telegram_envelope(
         self,
@@ -291,22 +393,47 @@ class HttpBotClient:
                 )
                 raise TelegramRetryAfter(retry_after) from exc
             body = resp.text
-            logger.error(
-                "telegram.http_error",
-                method=method,
-                status=resp.status_code,
-                url=_safe_url(resp.request.url),
-                error=str(exc),
-                body=body,
-                # Which message a failed edit/delete targeted (diagnostic).
-                message_id=(
-                    request_payload.get("message_id")
-                    if isinstance(request_payload, dict)
-                    else None
-                ),
+            chat_id = message_id = None
+            if isinstance(request_payload, dict):
+                chat_id = request_payload.get("chat_id")
+                message_id = request_payload.get("message_id")
+            description = _error_description(resp)
+            benign = (
+                classify_benign_rejection(method, description, message_id)
+                if resp.status_code == 400
+                else None
             )
+            if benign is not None:
+                # #746: an expected race (message gone / not modified / can't
+                # be edited) — INFO, so restart orphan cleanup and no-op edits
+                # no longer raise ERROR lines. No URL: keeps the token out.
+                logger.info(
+                    "telegram.benign_rejection",
+                    method=method,
+                    status=resp.status_code,
+                    reason_class=benign,
+                    description=description,
+                    chat_id=chat_id,
+                    message_id=message_id,
+                )
+                self._note_benign_rejection(method, benign, chat_id, message_id)
+            else:
+                logger.error(
+                    "telegram.http_error",
+                    method=method,
+                    status=resp.status_code,
+                    url=_safe_url(resp.request.url),
+                    error=str(exc),
+                    body=body,
+                    # Which message a failed edit/delete targeted (diagnostic).
+                    message_id=message_id,
+                )
+            # #746 D4: record the readable Telegram description when there is
+            # one (matches the envelope path), else the raw body.
             self._record_api_error(
-                method, request_payload, f"http {resp.status_code}: {body[:200]}"
+                method,
+                request_payload,
+                description or f"http {resp.status_code}: {body[:200]}",
             )
             return None
 

@@ -4214,6 +4214,26 @@ async def test_598_not_modified_treated_as_noop() -> None:
 
 
 @pytest.mark.anyio
+async def test_746_not_modified_match_is_case_insensitive() -> None:
+    """#746: the bridge uses the shared classifier, so the "not modified"
+    match no longer depends on Telegram's capitalisation."""
+    from structlog.testing import capture_logs
+
+    from untether.telegram.bridge import TelegramTransport
+
+    bot = _FailingEditBot("Bad Request: Message Is Not Modified")
+    transport = TelegramTransport(bot)  # type: ignore[arg-type]
+    ref = MessageRef(channel_id=123, message_id=916)
+
+    with capture_logs() as logs:
+        result = await transport.edit(ref=ref, message=RenderedMessage(text="same"))
+
+    assert result == ref
+    assert any(r.get("event") == "transport.edit.noop" for r in logs)
+    assert not any(r.get("event") == "transport.edit.failed" for r in logs)
+
+
+@pytest.mark.anyio
 async def test_598_edit_failed_tolerates_bot_without_pop() -> None:
     """Bots/doubles without pop_edit_error still log (error=None)."""
     from structlog.testing import capture_logs

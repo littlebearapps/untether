@@ -464,7 +464,7 @@ Integration tests are run by Claude Code via Telegram MCP tools (see "Automated 
 | Claude stream schema / rate-limit / API-retry handling (`schemas/claude.py`, `runners/claude.py`) | `uv run pytest tests/test_claude_cli_schema_drift.py`, RC12-2, RC12-3, S1 |
 | Runner bridge / auto-continue / no-op resume recovery (`runner_bridge.py`, `runners/claude.py`) | B-RESUME, U1-U4 (Claude), U6, U7 |
 | Live sessions / follow-up injection / scheduler (`runners/claude.py`, `runner_bridge.py`, `live_followup.py`, `scheduler.py`) | B-LIVE-1…7, RC12-4…7, C1-C6, S7, U1-U4 (Claude) |
-| Telegram transport (`telegram/*.py`) | T1-T10, S7, S8 |
+| Telegram transport (`telegram/*.py`) | T1-T10, S7, S8, R15-9-1 (benign edit/delete 400s at startup) |
 | Control channel (`claude_control.py`) | C1-C6, T8, S9 |
 | Config/settings (`settings.py`) | O1-O9, S5, upgrade path, R15-13a…d (settings parse cache) |
 | Cost tracking (`cost_tracker.py`) | B1-B3, U8 |
@@ -610,3 +610,60 @@ Log check: `journalctl --user -u untether-dev -o cat --since "30 minutes ago" | 
 | R15-13b | **No re-parse without edits** | Note the restart time, restart `untether-dev`, then run Q2 (`/config`, open two sub-pages), U2 (multi-tool prompt) and U4 (resume) in the Claude chat with no config edits. | `journalctl --user -u untether-dev -o cat --since "<restart time>" \| grep 'config.loaded' \| grep -c 'reason=first_load'` is **1**, and there are 0 `reason=content_changed` or `reason=env_changed` lines. Every startup read (`cli/run.py:30`, `telegram/backend.py:42`), the `/config` renders (`telegram/commands/config.py:293,351,…`) and every run read share one cache entry for the dev config path, so only the earliest read parses. The strict `load_settings()` path logs only at DEBUG (`reason=uncached`) and isn't counted. The count must not grow with tool calls, turns or page renders. Unit test #2 covers the same property deterministically. |
 | R15-13c | **Kill switch** | Never open, `cat` or `systemctl cat` the unit (it holds secrets). Create a drop-in with a heredoc: `mkdir -p ~/.config/systemd/user/untether-dev.service.d && cat > ~/.config/systemd/user/untether-dev.service.d/r15-13c-settings-cache.conf <<'EOF'` / `[Service]` / `Environment=UNTETHER_SETTINGS_CACHE=0` / `EOF`, then `systemctl --user daemon-reload && systemctl --user restart untether-dev`, and run U1. Afterwards: `rm ~/.config/systemd/user/untether-dev.service.d/r15-13c-settings-cache.conf && systemctl --user daemon-reload && systemctl --user restart untether-dev`. | U1 passes. There are no INFO `config.loaded reason=…` lines since the restart (the cached path is off), and the behaviour matches rc14. After removing the drop-in, the next message logs one `reason=first_load`. |
 | R15-13d | **Invalid edit is not masked** | Introduce a TOML syntax error in the dev config (for example a stray `[[`), send `ping` in the Claude chat, then fix it. | The run still completes on defaults. The logs show `config.read.toml_error` plus the helpers' `*_settings.load_failed` warnings (today's behaviour), **not** a silent stale config. After the fix, the next message logs `config.loaded reason=content_changed`. |
+
+### #746 — benign Telegram edit/delete 400s
+
+| # | Test | What to send / do | What to verify |
+|---|---|---|---|
+| R15-9-1 | **Benign orphan 400s are INFO ([#746](https://github.com/littlebearapps/untether/issues/746))** | **Run from a terminal Claude Code session on lba-1 (Telegram MCP + Bash), never from a dev-bot chat**: step 3 stops `untether-dev`, which would kill a session driven through it. Claude chat `5284581592` (Bot API `-5284581592`). (1) Send `/ping`; note **your** message id `U` and the bot's reply id `B1` (`get_history`). (2) Send `/ping` again; note the reply id `B2`, then delete `B2` with the Telegram MCP `delete_message`. (3) `systemctl --user stop untether-dev`. (4) Seed the orphans with the **guarded script below**: it backs the existing `~/.untether-dev/active_progress.json` up to `.bak`, **aborts unless that file is empty or `{}`**, and writes `{"r15:a":{"chat_id":-5284581592,"message_id":B1},"r15:b":{"chat_id":-5284581592,"message_id":B2},"r15:c":{"chat_id":-5284581592,"message_id":U}}`. (5) `systemctl --user start untether-dev`; wait for the startup message. (6) **Always** restore: `mv ~/.untether-dev/active_progress.json.bak ~/.untether-dev/active_progress.json` (even when an earlier step failed). | Telegram: `B1` now reads `⚠️ interrupted by restart`; `B2` stays deleted; `U` is unchanged. Logs: `startup.orphan_cleanup count=3`; `telegram.benign_rejection method=editMessageText … reason_class=target_gone message_id=B2`; `telegram.benign_rejection … reason_class=not_editable message_id=U` (a bot can't edit a user's message); `startup.orphan_cleanup.done count=3 edited=1 failed=2 skipped=0`; **no** `telegram.http_error` and **no** `[error` line between `startup.orphan_cleanup` and `startup.sent`. `active_progress.json` is gone or empty afterwards. |
+
+**Step 4/6 script** (Bash in the terminal session; fill in `B1`, `B2`, `U`):
+```bash
+set -euo pipefail
+F=~/.untether-dev/active_progress.json
+systemctl --user is-active --quiet untether-dev && { echo "ABORT: stop untether-dev first"; exit 1; }
+restore() { if [ -e "$F.bak" ]; then mv -f "$F.bak" "$F"; else rm -f "$F"; fi; }
+if [ -e "$F" ]; then
+  cp -p "$F" "$F.bak"
+  python3 -c 'import json,sys; d=json.load(open(sys.argv[1])) if open(sys.argv[1]).read().strip() else {}; sys.exit(0 if d == {} else 3)' "$F" \
+    || { echo "ABORT: $F holds real orphans; not touching it"; rm -f "$F.bak"; exit 1; }
+fi
+trap restore EXIT          # guarantees step 6 even if step 5 or the checks fail
+python3 - "$F" B1 B2 U <<'EOF'
+import json, sys
+f, b1, b2, u = sys.argv[1], *map(int, sys.argv[2:])
+c = -5284581592
+json.dump({"r15:a": {"chat_id": c, "message_id": b1},
+           "r15:b": {"chat_id": c, "message_id": b2},
+           "r15:c": {"chat_id": c, "message_id": u}}, open(f, "w"))
+EOF
+systemctl --user start untether-dev
+sleep 20                   # startup: backlog drain → orphan cleanup → startup message
+journalctl --user -u untether-dev --since "-2 min" -o cat \
+  | grep -E "startup\.orphan_cleanup|telegram\.benign_rejection|telegram\.http_error|startup\.sent"
+```
+The `trap` restores the original (empty) file after cleanup has cleared the seeded one. If the
+pre-check aborts, the `.bak` is removed and the real file is untouched: pick another time, or
+first let a normal dev restart clean those orphans.
+
+**Log checks** (run straight after step 5):
+```bash
+journalctl --user -u untether-dev --since "-3 min" -o cat \
+  | grep -E "startup\.orphan_cleanup|telegram\.benign_rejection|telegram\.http_error|startup\.sent"
+# the /monitor-equivalent grep A must return nothing for this window:
+journalctl --user -u untether-dev --since "-3 min" -o cat | grep -iE "\[(warning|warn|error)"
+```
+Expected: the four INFO lines above, and an **empty** second grep. The second grep also catches
+an unexpected `transport.edit.failed`, which isn't on this path.
+
+**Negative control (optional, no code change).** A genuine 400 still logs ERROR. It isn't
+practical to provoke live without a malformed request, so the `test_746_*_stays_error` unit tests in
+`tests/test_telegram_client_api.py` cover it. Mark it
+"covered by unit tests" in the attestation notes.
+
+**Practical notes.**
+- Use only the dev bot. Never edit `~/.untether/` (staging).
+- If `delete_message` can't delete the bot's message (the user isn't an admin of the basic
+  group), use `message_id: 1` for `B2` instead. That message never existed, and it produces the
+  same "message to edit not found" (Track D §1: "not found" also covers ids you can't see).
+- Record the three ids in the attestation `--notes`.
