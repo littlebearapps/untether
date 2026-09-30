@@ -809,3 +809,95 @@ async def test_383_kill_switch(tmp_path: Path) -> None:
     )
     assert _answers(events) == ["MODE: default"]
     assert "control_request:set_permission_mode" not in _stdin_kinds(log)
+
+
+# ── #383 C4: the approved plan's background agents defer the re-arm ────────
+
+
+def _inject_at(*completions: int) -> Any:
+    """on_event: answer plans; after each listed turn-close count, inject one
+    follow-up via the queue path (the session is idle, so it writes at once)."""
+    seen = {"done": 0}
+
+    async def on_event(evt: Any, runner: ClaudeRunner) -> None:
+        await _answer_plans(evt)
+        if isinstance(evt, CompletedEvent) or (
+            isinstance(evt, TurnEvent) and evt.phase == "completed"
+        ):
+            seen["done"] += 1
+            if seen["done"] in completions:
+                assert await claude_mod.inject_when_idle(
+                    SID, f"msg {seen['done']}", command_uuid=str(uuid.uuid4())
+                )
+
+    return on_event
+
+
+def _starts(events: list[Any]) -> list[TurnEvent]:
+    return [t for t in _turns(events) if t.phase == "started"]
+
+
+async def test_383_agent_wake_deferred_then_rearmed(tmp_path: Path) -> None:
+    """P-3: a running subagent inherits the parent's mode, so the re-arm
+    waits for the agent the approved turn launched. A follow-up meanwhile
+    runs unplanned and says so; the agent's own wake turn and later
+    follow-ups are planned again."""
+    log = _plan_env(tmp_path, FAKE_CLAUDE_WAKE_S="1.5")
+    with capture_logs() as logs:
+        events = await _collect(
+            "plan_approve_agent_wake",
+            until=4,
+            on_event=_inject_at(1, 3),
+            runner=_plan_runner(),
+        )
+    assert _answers(events) == ["MODE: default", "MODE: plan", "MODE: plan"]
+    starts = _starts(events)
+    assert [t.reason for t in starts] == ["followup", "task_finished", "followup"]
+    assert starts[0].detail["plan_deferred"] == {"agents": 1}
+    assert not any("plan_deferred" in t.detail for t in starts[1:])
+    kinds = _stdin_kinds(log)
+    # The approved agent ran to the end unplanned; the re-arm followed its
+    # end and beat the wake turn the CLI started by itself.
+    assert "agent_end:a1:default" in kinds
+    rearm = kinds.index("control_request:set_permission_mode")
+    assert kinds.index("agent_end:a1:default") < rearm
+    assert rearm < kinds.index("turn_start:plan")
+    assert kinds.count("control_request:set_permission_mode") == 1
+    deferred = _rearm_logs(logs, "rearm_deferred")
+    assert deferred and deferred[0]["reason"] == "live_agents"
+    assert deferred[0]["agents"] == 1
+    assert [e["reason"] for e in _rearm_logs(logs)] == ["agents_done"]
+
+
+async def test_383_deferral_does_not_chain(tmp_path: Path) -> None:
+    """The unplanned follow-up launches a second agent; once the approved
+    turn's agent ends, plan mode comes back although the second still runs."""
+    log = _plan_env(tmp_path, FAKE_CLAUDE_WAKE_S="1.5")
+    with capture_logs() as logs:
+        events = await _collect(
+            "plan_approve_agent_chain",
+            until=4,
+            on_event=_inject_at(1),
+            runner=_plan_runner(),
+        )
+    assert _answers(events) == ["MODE: default", "MODE: plan", "MODE: plan"]
+    kinds = _stdin_kinds(log)
+    assert "agent_end:a1:default" in kinds
+    assert "agent_end:a2:plan" in kinds  # a later turn's agent: not deferred for
+    assert [e["reason"] for e in _rearm_logs(logs)] == ["agents_done"]
+
+
+async def test_383_agent_before_approval_not_deferred(tmp_path: Path) -> None:
+    """An agent launched in an earlier, planning turn ran under plan mode
+    anyway: the approved turn's close re-arms at once."""
+    _plan_env(tmp_path, FAKE_CLAUDE_WAKE_S="1.5")
+    with capture_logs() as logs:
+        events = await _collect(
+            "plan_approve_agent_before",
+            until=4,
+            on_event=_inject_at(1, 2),
+            runner=_plan_runner(),
+        )
+    assert _answers(events) == ["PLANNED", "MODE: plan", "MODE: plan"]
+    assert not _rearm_logs(logs, "rearm_deferred")
+    assert [e["reason"] for e in _rearm_logs(logs)] == ["idle"]

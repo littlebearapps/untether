@@ -1285,6 +1285,68 @@ def test_812_hook_rewake_header_without_event() -> None:
     )
 
 
+_NOT_REPLANNED = (
+    "\N{WARNING SIGN}\N{VARIATION SELECTOR-16} Not re-planned: the approved"
+    " plan's background agents are still running. Plan mode resumes when they"
+    " finish."
+)
+
+
+@pytest.mark.parametrize(
+    ("reason", "detail", "expected"),
+    [
+        # A follow-up has no header of its own: the line is the header.
+        ("followup", {"plan_deferred": {"agents": 1}}, _NOT_REPLANNED),
+        (
+            "task_finished",
+            {"tasks": ["lint"], "plan_deferred": {"agents": 2}},
+            "\N{BELL} Background task finished — lint\n" + _NOT_REPLANNED,
+        ),
+        (
+            "monitor_event",
+            {"plan_deferred": {"agents": 1}},
+            "\N{SATELLITE ANTENNA} Monitor\n" + _NOT_REPLANNED,
+        ),
+        # Without the flag, headers are unchanged.
+        ("followup", {}, None),
+        (
+            "task_finished",
+            {"tasks": ["lint"]},
+            "\N{BELL} Background task finished — lint",
+        ),
+    ],
+)
+def test_383_turn_header_shows_not_replanned_line(
+    reason: str, detail: dict, expected: str | None
+) -> None:
+    """#383 C4: a turn that runs unplanned because the approved plan's
+    agents are still working says so under its header."""
+    assert rb._turn_header(_turn("started", reason=reason, detail=detail)) == expected
+
+
+async def test_383_deferred_followup_final_carries_the_line() -> None:
+    rec = _Recorder()
+    anchor = MessageRef(channel_id=1, message_id=55)
+    router = _router(rec, anchors={"cmd-1": (anchor, None)})
+    detail = {"plan_deferred": {"agents": 1}}
+    await router.on_turn(
+        _turn("started", reason="followup", command_uuid="cmd-1", detail=detail)
+    )
+    await router.on_turn(
+        _turn(
+            "completed",
+            reason="followup",
+            command_uuid="cmd-1",
+            ok=True,
+            answer="12:04",
+            detail=detail,
+        )
+    )
+    _turn_no, _ok, _answer, header, _notify, reply = rec.delivered[0]
+    assert header == _NOT_REPLANNED
+    assert reply == 55
+
+
 _HG = "\N{HOURGLASS WITH FLOWING SAND} Closing session — "
 
 

@@ -2423,7 +2423,10 @@ def _exit_plan_request(request_id: str = "req-383") -> claude_schema.StreamJsonM
 
 
 _CARRY_OUT = "Approving lets Claude carry out this plan without further prompts."
-_RESUMES = " Plan mode resumes when this reply ends."
+_RESUMES = (
+    " Plan mode resumes when this reply ends,"
+    " or after the background agents it starts have finished."
+)
 _PROMPTING = "Approving ends planning; Claude still asks before each action."
 
 

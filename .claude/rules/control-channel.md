@@ -76,6 +76,17 @@ verbatim.
   turn-scoped regardless: every `_open_followup_turn` clears
   `_PLAN_EXIT_APPROVED`; an unconsumed `_DISCUSS_APPROVED` survives one
   boundary (`_DISCUSS_CARRY`). A mid-turn steer fold is never a boundary.
+- **Agent deferral (#383 C4).** Background subagents inherit the parent's
+  live mode (probe P-3), so `_claim_plan_rearm` returns None while a live
+  `local_agent` launched in the plan-exit turn (`origin_turn ==
+  plan_exit_turn`) still runs. Key on `origin_turn`, never start time (no
+  chaining). The bound is agent *inactivity* — `latest_background_progress`
+  restricted to those tasks, `post_result_bg_max_hold` — with
+  `live_session_max_s` as the ceiling (plan 21 D7), never a fixed time since
+  the exit. Re-checked at every turn close, on the agent's end frame while
+  idle (post-line drain, reason `agents_done`), by the lifecycle while idle,
+  and before a follow-up / idle steer; turns that run meanwhile carry
+  `TurnEvent.detail["plan_deferred"]`.
 
 ## AskUserQuestion flow
 

@@ -939,12 +939,16 @@ async def inject_when_idle(
                         # #383: the CLI refused the plan re-arm — resume a
                         # fresh plan-mode process instead.
                         return False
-                    await _write_plan_rearm_if_needed(live, reason="followup")
+                    await _write_plan_rearm_if_needed(
+                        live, reason="followup", command_uuid=command_uuid
+                    )
                     ok = await write_user_message(
                         session_id, text, command_uuid=command_uuid
                     )
                     if ok:
                         live.idle_since = time.monotonic()
+                    else:
+                        live.state.unplanned_commands.pop(command_uuid, None)
                     return ok
         await anyio.sleep(poll_s)
 
@@ -1030,12 +1034,15 @@ async def steer_into_session(
         if live.idle:
             # #383: an idle steer runs as the next turn — re-arm first. A
             # mid-turn fold is not a boundary.
-            await _write_plan_rearm_if_needed(live, reason="steer")
+            await _write_plan_rearm_if_needed(
+                live, reason="steer", command_uuid=command_uuid
+            )
         # Record before writing: command_lifecycle can race the send.
         state.steered_commands[command_uuid] = text
         ok = await write_user_message(session_id, text, command_uuid=command_uuid)
         if not ok:
             state.steered_commands.pop(command_uuid, None)
+            state.unplanned_commands.pop(command_uuid, None)
             return "write_failed"
         mid_turn = not live.idle
         if not mid_turn:
@@ -1461,6 +1468,22 @@ class ClaudeStreamState:
     # Set at a live turn close when the session must go back to plan mode;
     # drained before the turn-closing event is yielded.
     plan_rearm_pending: bool = False
+    # What set ``plan_rearm_pending`` (the ``rearm_sent`` reason): ``idle``
+    # (a turn closed) or ``agents_done`` (#383 C4: an approved-plan agent
+    # ended while the session idled).
+    plan_rearm_pending_reason: str = "idle"
+    # #383 C4: the re-arm waits while background agents launched in the
+    # turn that left plan mode still run — they inherit the parent's live
+    # mode (probe P-3), so re-arming would switch the approved plan's workers
+    # back into planning. Agents counted at the last deferred claim (0 = no
+    # deferral), when it began (monotonic), and whether this boundary has
+    # logged ``rearm_deferred`` yet.
+    plan_rearm_deferred: int = 0
+    plan_rearm_deferred_since: float | None = None
+    plan_rearm_deferred_logged: bool = False
+    # Follow-ups / idle steers written while the re-arm was deferred
+    # (command_uuid -> agents): their turn is flagged ``plan_deferred``.
+    unplanned_commands: dict[str, int] = field(default_factory=dict)
     # Request id of the one re-arm on the wire (single flight).
     plan_rearm_inflight: str | None = None
     # The CLI refused a re-arm: the session is closed once idle and the next
@@ -3213,7 +3236,12 @@ _PLAN_APPROVE_BUTTON = "✅ Approve Plan"
 _PLAN_CAPTION_CARRY_OUT = (
     "Approving lets Claude carry out this plan without further prompts."
 )
-_PLAN_CAPTION_RESUMES = " Plan mode resumes when this reply ends."
+# #383 C4: worded to stay true under the agent deferral — plan mode comes
+# back after the background agents the approved reply starts have finished.
+_PLAN_CAPTION_RESUMES = (
+    " Plan mode resumes when this reply ends,"
+    " or after the background agents it starts have finished."
+)
 _PLAN_CAPTION_PROMPTING = (
     "Approving ends planning; Claude still asks before each action."
 )
@@ -3325,6 +3353,8 @@ def _note_permission_mode(
         state.plan_exited_at = None
         state.plan_exit_turn = None
         state.plan_rearm_failed = False
+        state.plan_rearm_deferred = 0
+        state.plan_rearm_deferred_since = None
         # Back in plan mode: nothing the old approval covered is running
         # unplanned any more. `_DISCUSS_APPROVED` is a pre-exit approval
         # and follows only the one-boundary carry.
@@ -3409,19 +3439,28 @@ def _handle_plan_rearm_ack(
 _PLAN_AUTO_REARM_AT_IDLE = False
 
 
+# Re-arm reasons that write a user line right after the re-arm; every other
+# reason is idle-side: ``idle`` (a turn closed) and, #383 C4, ``agents_done``
+# / ``agents_idle`` / ``ceiling`` (the approved plan's agents finished, went
+# quiet, or outlived the cap while the session idled).
+_REARM_USER_LINE_REASONS = frozenset({"followup", "steer"})
+
+
 def _plan_rearm_needed(state: ClaudeStreamState, *, reason: str) -> bool:
     """#383: should this live session be put back into CLI plan mode?
 
-    ``reason``: ``idle`` (a turn just closed), ``followup`` or ``steer``
-    (a user line is about to be written). Never for non-plan chats, never
-    outside a live session, never when the CLI never reported plan (its own
-    precedence won, e.g. --dangerously-skip-permissions), never twice."""
+    ``reason``: ``followup`` or ``steer`` (a user line is about to be
+    written), else idle-side (see ``_REARM_USER_LINE_REASONS``). Never for
+    non-plan chats, never outside a live session, never when the CLI never
+    reported plan (its own precedence won, e.g.
+    --dangerously-skip-permissions), never twice. The agent deferral (C4) is
+    applied by :func:`_claim_plan_rearm`, not here."""
     if not (state.rearm_plan_mode and state.live_mode):
         return False
     if not state.configured_plan_mode:
         return False
     if (
-        reason == "idle"
+        reason not in _REARM_USER_LINE_REASONS
         and state.auto_approve_exit_plan_mode
         and not _PLAN_AUTO_REARM_AT_IDLE
     ):
@@ -3433,13 +3472,101 @@ def _plan_rearm_needed(state: ClaudeStreamState, *, reason: str) -> bool:
     return state.effective_permission_mode != "plan" or state.plan_exited_at is not None
 
 
+def _exit_turn_agents(state: ClaudeStreamState) -> list[ClaudeTask]:
+    """#383 C4: background agents launched in the turn that left plan mode
+    (the approved plan's workers) that still hold the session. Keyed on
+    ``origin_turn``, not start time: agents a later (unplanned) turn
+    launches carry a later turn and never extend the deferral, and a #801
+    revival re-stamps ``origin_turn`` to the reviving turn."""
+    exit_turn = state.plan_exit_turn
+    if exit_turn is None:
+        return []
+    return [
+        task
+        for task in state.tasks.values()
+        if task.task_type == "local_agent"
+        and task.holds_session
+        and task.origin_turn == exit_turn
+    ]
+
+
+def _rearm_deferral(
+    state: ClaudeStreamState, *, now: float | None = None
+) -> tuple[int, str]:
+    """#383 C4 (plan 21 D7): ``(agents, why)`` — agents > 0 while the re-arm
+    must wait (``why="live_agents"``). It ends when the exit-turn agents are
+    gone (``agents_done``), when none of them has shown activity
+    (``latest_background_progress``: a ``task_progress`` frame, a subagent
+    tool starting or ending) for ``post_result_bg_max_hold``
+    (``agents_idle``; 0 = no inactivity bound), or ``live_session_max_s``
+    after the plan exit (``ceiling``)."""
+    agents = _exit_turn_agents(state)
+    if not agents:
+        return 0, "agents_done"
+    now = time.monotonic() if now is None else now
+    exited = state.plan_exited_at
+    if (
+        exited is not None
+        and state.live_session_max_s > 0
+        and now - exited >= state.live_session_max_s
+    ):
+        return 0, "ceiling"
+    if state.bg_max_hold_s > 0:
+        last = latest_background_progress(state, [task.task_id for task in agents])
+        if last is None or now - last >= state.bg_max_hold_s:
+            return 0, "agents_idle"
+    return len(agents), "live_agents"
+
+
 def _claim_plan_rearm(
-    state: ClaudeStreamState, session_id: str, *, reason: str
+    state: ClaudeStreamState,
+    session_id: str,
+    *,
+    reason: str,
+    command_uuid: str | None = None,
 ) -> bytes | None:
     """Claim the (single-flight) re-arm synchronously — before any await, so
-    two writers can't both send — and return the request line, or None."""
+    two writers can't both send — and return the request line, or None.
+
+    #383 C4: None while the approved plan's agents still run
+    (:func:`_rearm_deferral`); a follow-up / idle steer written meanwhile is
+    remembered by ``command_uuid`` so its turn says it wasn't re-planned."""
     if not _plan_rearm_needed(state, reason=reason):
         return None
+    agents, why = _rearm_deferral(state)
+    if agents:
+        state.plan_rearm_pending = False
+        state.plan_rearm_deferred = agents
+        if state.plan_rearm_deferred_since is None:
+            state.plan_rearm_deferred_since = time.monotonic()
+        if command_uuid is not None:
+            state.unplanned_commands[command_uuid] = agents
+        if not state.plan_rearm_deferred_logged:
+            state.plan_rearm_deferred_logged = True
+            logger.info(
+                "claude.permission_mode.rearm_deferred",
+                session_id=session_id,
+                reason=why,
+                trigger=reason,
+                agents=agents,
+                plan_exit_turn=state.plan_exit_turn,
+                turn=state.turn,
+            )
+        return None
+    if state.plan_rearm_deferred:
+        since = state.plan_rearm_deferred_since
+        logger.info(
+            "claude.permission_mode.rearm_deferral_ended",
+            session_id=session_id,
+            reason=why,
+            trigger=reason,
+            plan_exit_turn=state.plan_exit_turn,
+            deferred_s=(
+                round(time.monotonic() - since, 1) if since is not None else None
+            ),
+        )
+        state.plan_rearm_deferred = 0
+        state.plan_rearm_deferred_since = None
     state.plan_rearm_seq += 1
     request_id = f"{_PLAN_REARM_ID_PREFIX}{session_id}_{state.plan_rearm_seq}"
     state.plan_rearm_inflight = request_id
@@ -3484,12 +3611,17 @@ async def _send_plan_rearm(
     return True
 
 
-async def _write_plan_rearm_if_needed(live: LiveSession, *, reason: str) -> bool:
+async def _write_plan_rearm_if_needed(
+    live: LiveSession, *, reason: str, command_uuid: str | None = None
+) -> bool:
     """#383 backstop before a follow-up / idle steer is written: FIFO on
     stdin makes the CLI apply plan before it starts that line's turn (a
     ``plan`` request can't be refused on 2.1.285, so no ack wait). Call it
-    under ``live.lock``, immediately before ``write_user_message``."""
-    payload = _claim_plan_rearm(live.state, live.session_id, reason=reason)
+    under ``live.lock``, immediately before ``write_user_message``. Also the
+    lifecycle's write when a C4 deferral ends while the session idles."""
+    payload = _claim_plan_rearm(
+        live.state, live.session_id, reason=reason, command_uuid=command_uuid
+    )
     if payload is None:
         return False
     return await _send_plan_rearm(
@@ -4391,6 +4523,24 @@ def _end_task(
         duration_s=round(task.ended_at - task.started_at, 1),
     )
     _note_task_end(state, task)
+    _note_plan_deferral_task_end(state, task)
+
+
+def _note_plan_deferral_task_end(state: ClaudeStreamState, task: ClaudeTask) -> None:
+    """#383 C4: an agent the approved (plan-exit) turn launched ended while
+    the session idles — queue a re-check of the deferred re-arm. The
+    post-line drain writes it right after this line, ahead of the wake turn
+    the CLI starts for the finish (same residual window as probe P-6)."""
+    if (
+        state.plan_rearm_deferred
+        and state.live_mode
+        and not state.turn_open
+        and state.plan_rearm_inflight is None
+        and task.task_type == "local_agent"
+        and task.origin_turn == state.plan_exit_turn
+    ):
+        state.plan_rearm_pending = True
+        state.plan_rearm_pending_reason = "agents_done"
 
 
 def _revive_task(
@@ -5283,6 +5433,22 @@ def _result_origin_kind(event: claude_schema.StreamResultMessage) -> str | None:
     return None
 
 
+def _turn_plan_deferred(
+    state: ClaudeStreamState, reason: str, command_uuid: str | None
+) -> int:
+    """#383 C4: agents holding back the re-arm for the turn about to open —
+    a follow-up / idle steer written while the re-arm was deferred, or (plan
+    chats, whose wake turns are re-armed) a wake turn opened during it."""
+    if reason == "followup":
+        if command_uuid is None:
+            return 0
+        return state.unplanned_commands.pop(command_uuid, 0)
+    if not state.plan_rearm_deferred or not _plan_rearm_needed(state, reason="idle"):
+        return 0
+    agents, _ = _rearm_deferral(state)
+    return agents
+
+
 def _open_followup_turn(
     state: ClaudeStreamState, factory: EventFactory
 ) -> UntetherEvent:
@@ -5342,6 +5508,11 @@ def _open_followup_turn(
         state.pending_wakeup_until = None
     if reason == "followup" and command_uuid is not None:
         state.awaiting_injected.pop(command_uuid, None)
+    # #383 C4: this turn runs unplanned because the approved plan's agents
+    # are still working — say so (the bridge adds a line to its header).
+    if agents := _turn_plan_deferred(state, reason, command_uuid):
+        detail["plan_deferred"] = {"agents": agents}
+    state.plan_rearm_deferred_logged = False
     state.turn += 1
     state.turn_open = True
     state.turn_reason = reason
@@ -5409,6 +5580,7 @@ def _absorb_injected(
     """
     state.absorbed_commands.add(command_uuid)
     state.awaiting_injected.pop(command_uuid, None)
+    state.unplanned_commands.pop(command_uuid, None)  # #383 C4: no turn of its own
     steer_text = state.steered_commands.get(command_uuid)
     label = "steer" if steer_text is not None else "follow-up"
     title = f"\N{RIGHTWARDS ARROW WITH HOOK}\N{VARIATION SELECTOR-16} {label} received"
@@ -5495,6 +5667,7 @@ def translate_claude_event(
                 # #383: whatever the outcome — a failed turn can have left
                 # plan mode too.
                 state.plan_rearm_pending = _plan_rearm_needed(state, reason="idle")
+                state.plan_rearm_pending_reason = "idle"
             if state.absorbed_cost_baseline is not None:
                 # #778: the absorbed result carried the previous process's
                 # session total — hand it to the cost ledger as a baseline.
@@ -5573,6 +5746,7 @@ def translate_claude_event(
             state.completed_turns += 1
             # #383: re-arm plan mode at every live turn close.
             state.plan_rearm_pending = _plan_rearm_needed(state, reason="idle")
+            state.plan_rearm_pending_reason = "idle"
             detail = dict(state.turn_detail)
             if state.turn_reason == "unknown" and state.turn_ended_tasks:
                 # #785: the turn opened before any task event named what it
@@ -7414,19 +7588,24 @@ class ClaudeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
     ) -> None:
         """#383: write the pending idle-boundary ``set_permission_mode plan``
         re-arm. No-op unless one is pending; skips a closing session or one
-        without stdin."""
+        without stdin. ``plan_rearm_pending_reason``: ``idle`` (a turn
+        closed) or ``agents_done`` (C4: an approved-plan agent ended while
+        the session idled — written right after that line, ahead of the
+        wake turn the CLI starts for it)."""
         if not state.plan_rearm_pending:
             return
         state.plan_rearm_pending = False
+        reason = state.plan_rearm_pending_reason
+        state.plan_rearm_pending_reason = "idle"
         session_id = state.factory.resume.value if state.factory.resume else None
         live = _LIVE_SESSIONS.get(session_id) if session_id else None
         if session_id is None or live is None or live.closing or stdin is None:
             return
-        payload = _claim_plan_rearm(state, session_id, reason="idle")
+        payload = _claim_plan_rearm(state, session_id, reason=reason)
         if payload is None:
             return
         await _send_plan_rearm(
-            state, stdin, payload, session_id=session_id, reason="idle"
+            state, stdin, payload, session_id=session_id, reason=reason
         )
 
     async def _drain_catalog_refresh(
@@ -7732,6 +7911,8 @@ class ClaudeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
                         sid, "plan_rearm_failed", only_if_idle=True
                     )
                     continue
+                if state.plan_rearm_deferred and state.plan_rearm_inflight is None:
+                    await self._lift_idle_plan_deferral(live, now=now)
                 if _awaiting_injected(state):
                     # A follow-up was written; its turn hasn't opened yet.
                     live.idle_since = now
@@ -7805,6 +7986,24 @@ class ClaudeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
                 )
             ):
                 await self._notify_live_closed(tracked, run_logger)
+
+    async def _lift_idle_plan_deferral(self, live: LiveSession, *, now: float) -> None:
+        """#383 C4: while the session idles, the approved plan's agents can
+        go quiet past the hold or reach the ceiling with no turn close to
+        re-check the deferral — re-arm then, so the next wake turn is
+        planned. (An agent *finishing* is handled on its task frame.)"""
+        state = live.state
+        agents, why = _rearm_deferral(state, now=now)
+        if agents:
+            return
+        if not _plan_rearm_needed(state, reason=why):
+            # plan-auto: wake turns aren't re-armed; its follow-ups still are.
+            state.plan_rearm_deferred = 0
+            state.plan_rearm_deferred_since = None
+            return
+        async with live.lock:
+            if live.idle and live.accepting_input:
+                await _write_plan_rearm_if_needed(live, reason=why)
 
     def _log_hold_rearm(
         self,

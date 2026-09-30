@@ -4194,7 +4194,22 @@ def _live_closed_notice(quarantined: bool) -> str:
     )
 
 
+# #383 C4: the turn runs unplanned because the approved plan's background
+# agents are still working (``TurnEvent.detail["plan_deferred"]``).
+_PLAN_DEFERRED_LINE = (
+    "\N{WARNING SIGN}\N{VARIATION SELECTOR-16} Not re-planned: the approved plan's"
+    " background agents are still running. Plan mode resumes when they finish."
+)
+
+
 def _turn_header(evt: TurnEvent) -> str | None:
+    header = _turn_title(evt)
+    if (evt.detail or {}).get("plan_deferred"):
+        return f"{header}\n{_PLAN_DEFERRED_LINE}" if header else _PLAN_DEFERRED_LINE
+    return header
+
+
+def _turn_title(evt: TurnEvent) -> str | None:
     if evt.reason == "followup":
         return None
     base = _TURN_HEADERS.get(evt.reason, _TURN_HEADERS["unknown"])
