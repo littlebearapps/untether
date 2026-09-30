@@ -1294,6 +1294,69 @@ def _insert_footer_line(msg: RenderedMessage, insertion: str) -> RenderedMessage
     )
 
 
+# #814: Claude safeguard stops. The runner carries a per-turn tally on
+# ``usage["safeguard"]``; the final gets a footer flag and, once per
+# session, a pointer to the guidance (bounded, oldest evicted first).
+SAFEGUARD_CVP_URL = (
+    "https://support.claude.com/en/articles/"
+    "14604842-real-time-cyber-safeguards-on-claude"
+)
+SAFEGUARD_FALLBACK_URL = (
+    "https://code.claude.com/docs/en/model-config#automatic-model-fallback"
+)
+_SAFEGUARD_HINTED: dict[str, None] = {}
+_SAFEGUARD_HINTED_MAX = 512
+
+
+def _safeguard_usage(usage: Mapping[str, Any] | None) -> dict[str, Any] | None:
+    raw = (usage or {}).get("safeguard")
+    if not isinstance(raw, dict):
+        return None
+    stops = raw.get("stops")
+    if not isinstance(stops, int) or isinstance(stops, bool) or stops <= 0:
+        return None
+    return raw
+
+
+def _safeguard_footer(safeguard: Mapping[str, Any], session_key: str | None) -> str:
+    """``🛡️ safeguards stopped N response(s) · <outcome>`` plus, the first
+    time a session sees one, a guidance link: the Cyber Verification
+    Program for category ``cyber``, else the fallback-model docs."""
+    stops = int(safeguard["stops"])
+    noun = "response" if stops == 1 else "responses"
+    line = f"\n\N{SHIELD}\N{VARIATION SELECTOR-16} safeguards stopped {stops} {noun}"
+    label = safeguard.get("outcome_label")
+    if isinstance(label, str) and label:
+        line += f" · {label}"
+    key = session_key or ""
+    if key and key in _SAFEGUARD_HINTED:
+        return line
+    if key:
+        _SAFEGUARD_HINTED[key] = None
+        while len(_SAFEGUARD_HINTED) > _SAFEGUARD_HINTED_MAX:
+            _SAFEGUARD_HINTED.pop(next(iter(_SAFEGUARD_HINTED)))
+    if safeguard.get("category") == "cyber":
+        hint = f"about cyber safeguards: {SAFEGUARD_CVP_URL}"
+    else:
+        hint = f"about fallback models: {SAFEGUARD_FALLBACK_URL}"
+    return f"{line}\n\N{ELECTRIC LIGHT BULB} {hint}"
+
+
+def _safeguard_empty_body(safeguard: Mapping[str, Any]) -> str:
+    """The body for a stopped, not-retried turn with no answer — explains
+    the silence instead of rendering an empty error."""
+    model = safeguard.get("model")
+    if isinstance(model, str) and model:
+        who = f"{model}'s safeguards"
+    else:
+        who = "Anthropic's safeguards"
+    return (
+        f"\N{SHIELD}\N{VARIATION SELECTOR-16} {who} stopped this response and "
+        "it wasn't retried, so there is no answer. Rephrasing the request, "
+        "or switching model with /model, may help."
+    )
+
+
 def _format_error(error: BaseException) -> str:
     cancel_exc = anyio.get_cancelled_exc_class()
     flattened = [
@@ -4813,6 +4876,15 @@ async def handle_message(
         # — and leaked one chat's plan body into another concurrent chat's
         # final answer.
         final_answer = completed.answer
+        # #814: a safeguard stop is never an error; a not-retried stop with
+        # no answer gets an explanation instead of an empty body.
+        safeguard = _safeguard_usage(completed.usage)
+        if (
+            safeguard is not None
+            and safeguard.get("outcome") == "not_retried"
+            and not final_answer.strip()
+        ):
+            final_answer = _safeguard_empty_body(safeguard)
 
         # Auto-clear broken session: if a resumed run failed with 0 turns,
         # clear the saved session so the next message starts fresh.
@@ -5145,6 +5217,15 @@ async def handle_message(
         if _outlier_text and _cost_alert_obj is None:
             final_rendered = _insert_footer_line(final_rendered, f"\n{_outlier_text}")
 
+        if safeguard is not None:
+            final_rendered = _insert_footer_line(
+                final_rendered,
+                _safeguard_footer(
+                    safeguard,
+                    f"{runner.engine}:{resume_value}" if resume_value else None,
+                ),
+            )
+
         # Append usage footer for Claude Code engine runs
         if runner.engine == "claude":
             _show_sub = footer_cfg.show_subscription_usage
@@ -5170,6 +5251,8 @@ async def handle_message(
             turn is not None
             and _cost_alert_obj is None
             and not _outlier_text
+            # #814: a stopped response always gets its own message.
+            and safeguard is None
             and await _fold_wake_turn(turn, completed)
         ):
             delivery["sent"] = True

@@ -26,7 +26,7 @@ from collections.abc import AsyncIterator, Callable, Iterable
 from dataclasses import dataclass, field
 from datetime import UTC
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Literal, Protocol
 
 import anyio
 import msgspec
@@ -35,6 +35,7 @@ from ..backends import EngineBackend, EngineConfig
 from ..config import ConfigError
 from ..events import EventFactory
 from ..logging import get_logger
+from ..markdown import _short_model_name
 from ..model import (
     TURN_COMPLETE_MARKER,
     Action,
@@ -952,6 +953,44 @@ class ClaudeTask:
         return self.is_backgrounded and self.status in _TASK_LIVE_STATUSES
 
 
+# #814: safeguard-stop outcomes, as logged and carried on ``usage``.
+SAFEGUARD_OUTCOME_RETRIED = "retried"
+SAFEGUARD_OUTCOME_SWITCHED = "switched"
+SAFEGUARD_OUTCOME_NOT_RETRIED = "not_retried"
+
+
+@dataclass(slots=True)
+class SafeguardTurn:
+    """#814: safeguard stops seen in one turn (reset when a turn opens).
+
+    A stop can surface twice — as the refused assistant frame
+    (``stop_reason == "refusal"``) and as the CLI's reaction to it (the
+    ``informational`` "continuing once" notice or a ``model_refusal_*``
+    frame) — so the turn's count is ``max(refusals, notices)``, never the
+    sum.
+    """
+
+    refusals: int = 0
+    notices: int = 0
+    # Stops already written to the ``claude.safeguard_stop`` log.
+    logged: int = 0
+    outcome: str | None = None
+    category: str | None = None
+    model: str | None = None
+    fallback_model: str | None = None
+    # The first signal seen this turn (stop_reason / informational /
+    # model_refusal_fallback / model_refusal_no_fallback).
+    source: str | None = None
+    # A main-thread assistant frame arrived after the refusal — the CLI
+    # re-ran the request (used when no notice says so before the result).
+    output_after_refusal: bool = False
+    refused_message_ids: set[str] = field(default_factory=set)
+
+    @property
+    def stops(self) -> int:
+        return max(self.refusals, self.notices)
+
+
 @dataclass(slots=True)
 class ClaudeStreamState:
     factory: EventFactory = field(default_factory=lambda: EventFactory(ENGINE))
@@ -1297,6 +1336,14 @@ class ClaudeStreamState:
     # the attempt counter goes backwards (a new sequence).
     api_retry_action_id: str | None = None
     api_retry_last_attempt: int = 0
+
+    # #814: safeguard stops in the current turn (reset per turn) and in the
+    # whole session; ``session_model`` is the last model the stream named
+    # (system/init or a main-thread assistant frame), used when a
+    # safeguard signal carries none.
+    safeguard: SafeguardTurn = field(default_factory=SafeguardTurn)
+    safeguard_session_count: int = 0
+    session_model: str | None = None
 
     # #572: set when the run's StreamResultMessage was a Stream-idle-timeout
     # failure — "type_a" (mid-generation stall, retryable) or "type_b"
@@ -2064,6 +2111,403 @@ def _translate_api_retry(
             detail=detail,
         ),
     ]
+
+
+def _str_or_none(value: Any) -> str | None:
+    """Normalise an ``Any``-typed schema field (#814): a non-empty string,
+    else None — so a shape drift degrades to "field missing"."""
+    if isinstance(value, str):
+        value = value.strip()
+        return value or None
+    return None
+
+
+# #814: the CLI's same-model refusal-retry notice (CLI 2.1.285, level notice):
+#   "<Model>'s safeguards stopped the response above · continuing once with
+#    that noted"
+_SAFEGUARD_NOTICE_RE = re.compile(r"safeguards stopped", re.IGNORECASE)
+_SAFEGUARD_NOTICE_MODEL_RE = re.compile(
+    r"^(.+?)['’]s safeguards stopped", re.IGNORECASE
+)
+_INFORMATIONAL_MAX_CHARS = 200
+_INFORMATIONAL_ROW_LEVELS = frozenset({"warning", "notice"})
+
+
+def _safeguard_model_label(model: str | None) -> str | None:
+    """Display form of a model named by a safeguard signal: an ID
+    (``claude-opus-5-5``) is shortened like the footer does; a display name
+    (``Opus 5.5``, from the notice text) is kept as-is."""
+    if not model:
+        return None
+    if model.lower().startswith("claude-"):
+        return _short_model_name(model)
+    return model
+
+
+def _safeguard_outcome_label(outcome: str | None, fallback_model: str | None) -> str:
+    """Human wording for a #814 outcome (progress row and footer)."""
+    if outcome == SAFEGUARD_OUTCOME_RETRIED:
+        return "retried once"
+    if outcome == SAFEGUARD_OUTCOME_SWITCHED:
+        target = _safeguard_model_label(fallback_model)
+        return f"switched to {target}" if target else "switched model"
+    if outcome == SAFEGUARD_OUTCOME_NOT_RETRIED:
+        return "not retried"
+    return "outcome pending"
+
+
+def _log_safeguard_stop(
+    state: ClaudeStreamState, factory: EventFactory, *, outcome: str
+) -> None:
+    """Write ``claude.safeguard_stop`` once per newly-resolved stop."""
+    sg = state.safeguard
+    if sg.stops <= sg.logged:
+        return
+    sg.logged = sg.stops
+    logger.info(
+        "claude.safeguard_stop",
+        session_id=factory.resume.value if factory.resume else None,
+        model=sg.model,
+        source=sg.source,
+        category=sg.category,
+        outcome=outcome,
+        fallback_model=sg.fallback_model,
+        turn=state.turn,
+        turn_count=sg.stops,
+        session_count=state.safeguard_session_count,
+    )
+
+
+def _note_safeguard(
+    state: ClaudeStreamState,
+    factory: EventFactory,
+    *,
+    source: str,
+    outcome: str | None,
+    category: str | None = None,
+    model: str | None = None,
+    fallback_model: str | None = None,
+) -> list[UntetherEvent]:
+    """#814: a safeguard stop → one updating ``🛡️`` note per turn, the
+    ``claude.safeguard_stop`` log, and the per-turn tally the result's
+    ``usage["safeguard"]`` carries to the footer.
+
+    ``outcome`` is None for the refused assistant frame itself — the CLI's
+    reaction (notice / fallback frame) resolves it; the result infers it
+    when that reaction never came first (ordering is unverified). Never an
+    error: the row is ``ok=True`` and the run's outcome is untouched.
+    """
+    sg = state.safeguard
+    before = sg.stops
+    if source == "stop_reason":
+        sg.refusals += 1
+    else:
+        sg.notices += 1
+    state.safeguard_session_count += sg.stops - before
+    if sg.source is None:
+        sg.source = source
+    if outcome is not None:
+        sg.outcome = outcome
+    if fallback_model:
+        sg.fallback_model = fallback_model
+    if category:
+        sg.category = category
+    if sg.model is None:
+        # The first model named this turn is the one that was stopped.
+        sg.model = model or state.session_model
+    if sg.outcome is not None:
+        _log_safeguard_stop(state, factory, outcome=sg.outcome)
+    if not state.turn_open:
+        # Arrived after the turn's result (live session): counted and
+        # logged above, but that turn's progress/final is already gone.
+        return []
+    return _safeguard_row(state, factory)
+
+
+def _safeguard_row(
+    state: ClaudeStreamState, factory: EventFactory
+) -> list[UntetherEvent]:
+    sg = state.safeguard
+    label = _safeguard_model_label(sg.model)
+    who = f"{label} safeguards" if label else "Safeguards"
+    title = f"\N{SHIELD}\N{VARIATION SELECTOR-16} {who} stopped a response"
+    if sg.outcome is not None:
+        title += f" · {_safeguard_outcome_label(sg.outcome, sg.fallback_model)}"
+    if sg.stops > 1:
+        title += f" (×{sg.stops})"
+    action_id = f"claude.safeguard.{state.turn}"
+    detail: dict[str, Any] = {"safeguard": True, "stops": sg.stops}
+    if sg.outcome is not None:
+        detail["outcome"] = sg.outcome
+    if sg.category:
+        detail["category"] = sg.category
+    level = "warning" if sg.outcome == SAFEGUARD_OUTCOME_NOT_RETRIED else "info"
+    return [
+        factory.action_started(
+            action_id=action_id, kind="note", title=title, detail=detail
+        ),
+        factory.action_completed(
+            action_id=action_id,
+            kind="note",
+            title=title,
+            ok=True,
+            level=level,
+            detail=detail,
+        ),
+    ]
+
+
+def _note_assistant_refusal(
+    event: claude_schema.StreamAssistantMessage,
+    *,
+    state: ClaudeStreamState,
+    factory: EventFactory,
+) -> list[UntetherEvent]:
+    """#814: main-thread assistant frames — track the model, mark output
+    after a refusal, and note a ``stop_reason == "refusal"`` frame."""
+    if event.parent_tool_use_id is not None:
+        return []
+    message = event.message
+    if message.model and message.model != "<synthetic>":
+        state.session_model = message.model
+    sg = state.safeguard
+    if message.stop_reason != "refusal":
+        if sg.refusals:
+            sg.output_after_refusal = True
+        return []
+    frame_id = message.id or event.uuid
+    if frame_id is not None:
+        if frame_id in sg.refused_message_ids:
+            return []
+        sg.refused_message_ids.add(frame_id)
+    details = message.stop_details if isinstance(message.stop_details, dict) else {}
+    return _note_safeguard(
+        state,
+        factory,
+        source="stop_reason",
+        outcome=None,
+        category=_str_or_none(details.get("category")),
+        model=message.model if message.model != "<synthetic>" else None,
+    )
+
+
+def _finalize_safeguard_turn(
+    state: ClaudeStreamState, factory: EventFactory
+) -> dict[str, Any] | None:
+    """At the turn's result: resolve a still-pending outcome and return the
+    ``usage["safeguard"]`` payload (None when the turn had no stop)."""
+    sg = state.safeguard
+    if sg.stops == 0:
+        return None
+    if sg.outcome is None:
+        # A refused frame with no CLI reaction yet: later output means the
+        # request was re-run; none means it wasn't.
+        sg.outcome = (
+            SAFEGUARD_OUTCOME_RETRIED
+            if sg.output_after_refusal
+            else SAFEGUARD_OUTCOME_NOT_RETRIED
+        )
+    _log_safeguard_stop(state, factory, outcome=sg.outcome)
+    payload: dict[str, Any] = {
+        "stops": sg.stops,
+        "outcome": sg.outcome,
+        "outcome_label": _safeguard_outcome_label(sg.outcome, sg.fallback_model),
+        "category": sg.category,
+        "model": _safeguard_model_label(sg.model),
+    }
+    if sg.fallback_model:
+        payload["fallback_model"] = _safeguard_model_label(sg.fallback_model)
+    return payload
+
+
+def _translate_informational(
+    event: claude_schema.StreamSystemMessage,
+    *,
+    state: ClaudeStreamState,
+    factory: EventFactory,
+) -> list[UntetherEvent]:
+    """#814 ``system/informational``: the safeguard notice → the 🛡️ row;
+    other warning/notice banners → a generic row; info/suggestion → log
+    only (D-15: widen after the 24 h audit shows the level mix)."""
+    content = _str_or_none(event.content)
+    level = _str_or_none(event.level)
+    if content and _SAFEGUARD_NOTICE_RE.search(content):
+        m = _SAFEGUARD_NOTICE_MODEL_RE.match(content)
+        return _note_safeguard(
+            state,
+            factory,
+            source="informational",
+            outcome=SAFEGUARD_OUTCOME_RETRIED,
+            model=m.group(1).strip() if m else None,
+        )
+    first_line = (content or "").splitlines()[0].strip() if content else ""
+    if len(first_line) > _INFORMATIONAL_MAX_CHARS:
+        first_line = first_line[: _INFORMATIONAL_MAX_CHARS - 1] + "…"
+    rendered = level in _INFORMATIONAL_ROW_LEVELS and bool(first_line)
+    (logger.info if rendered else logger.debug)(
+        "claude.informational",
+        session_id=event.session_id,
+        level=level,
+        prevent_continuation=event.prevent_continuation is True,
+        content_len=len(content or ""),
+        rendered=rendered,
+    )
+    if not rendered or not state.turn_open:
+        return []
+    tool_use_id = _str_or_none(event.tool_use_id)
+    if tool_use_id is not None:
+        # "Dedupes progress messages for the same tool use" — one row.
+        action_id = f"claude.informational.{tool_use_id}"
+    else:
+        state.note_seq += 1
+        action_id = f"claude.informational.{state.note_seq}"
+    icon = (
+        "\N{WARNING SIGN}\N{VARIATION SELECTOR-16}"
+        if level == "warning"
+        else "\N{INFORMATION SOURCE}\N{VARIATION SELECTOR-16}"
+    )
+    title = f"{icon} {first_line}"
+    detail: dict[str, Any] = {"level": level}
+    return [
+        factory.action_started(
+            action_id=action_id, kind="note", title=title, detail=detail
+        ),
+        factory.action_completed(
+            action_id=action_id,
+            kind="note",
+            title=title,
+            ok=True,
+            level="warning" if level == "warning" else "info",
+            detail=detail,
+        ),
+    ]
+
+
+def _translate_model_refusal_fallback(
+    event: claude_schema.StreamSystemMessage,
+    *,
+    state: ClaudeStreamState,
+    factory: EventFactory,
+) -> list[UntetherEvent]:
+    """#814 ``system/model_refusal_fallback``: the refused request is re-run
+    on the fallback model."""
+    fallback = _str_or_none(event.fallback_model)
+    if fallback and _str_or_none(event.scope) != "local":
+        # ``scope:"local"`` = a subagent / side question fell back; the
+        # session model is unchanged.
+        state.session_model = fallback
+    return _note_safeguard(
+        state,
+        factory,
+        source="model_refusal_fallback",
+        outcome=SAFEGUARD_OUTCOME_SWITCHED,
+        category=_str_or_none(event.api_refusal_category),
+        model=_str_or_none(event.original_model),
+        fallback_model=fallback,
+    )
+
+
+def _translate_model_refusal_no_fallback(
+    event: claude_schema.StreamSystemMessage,
+    *,
+    state: ClaudeStreamState,
+    factory: EventFactory,
+) -> list[UntetherEvent]:
+    """#814 ``system/model_refusal_no_fallback``: refused and not re-run."""
+    return _note_safeguard(
+        state,
+        factory,
+        source="model_refusal_no_fallback",
+        outcome=SAFEGUARD_OUTCOME_NOT_RETRIED,
+        category=_str_or_none(event.api_refusal_category),
+        model=_str_or_none(event.original_model),
+    )
+
+
+def _translate_model_fallback(
+    event: claude_schema.StreamSystemMessage,
+    *,
+    state: ClaudeStreamState,
+    factory: EventFactory,
+) -> list[UntetherEvent]:
+    """#814 ``system/model_fallback``: the turn switched to the configured
+    fallback model (overloaded / model_not_found / …) — not a safeguard
+    stop, but the user should know which model answered."""
+    original = _str_or_none(event.original_model)
+    fallback = _str_or_none(event.fallback_model)
+    trigger = _str_or_none(event.trigger)
+    logger.info(
+        "claude.model_fallback",
+        session_id=event.session_id,
+        original_model=original,
+        fallback_model=fallback,
+        trigger=trigger,
+    )
+    if fallback:
+        state.session_model = fallback
+    if not state.turn_open:
+        return []
+    src = _safeguard_model_label(original) or "?"
+    dst = _safeguard_model_label(fallback) or "?"
+    title = (
+        f"\N{RIGHTWARDS ARROW WITH HOOK}\N{VARIATION SELECTOR-16} "
+        f"Switched model {src} \N{RIGHTWARDS ARROW} {dst}"
+    )
+    if trigger:
+        title += f" ({trigger.replace('_', ' ')})"
+    state.note_seq += 1
+    action_id = f"claude.model_fallback.{state.note_seq}"
+    detail: dict[str, Any] = {"original_model": original, "fallback_model": fallback}
+    return [
+        factory.action_started(
+            action_id=action_id, kind="note", title=title, detail=detail
+        ),
+        factory.action_completed(
+            action_id=action_id,
+            kind="note",
+            title=title,
+            ok=True,
+            level="info",
+            detail=detail,
+        ),
+    ]
+
+
+class _SystemSubtypeHandler(Protocol):
+    def __call__(
+        self,
+        event: claude_schema.StreamSystemMessage,
+        *,
+        state: ClaudeStreamState,
+        factory: EventFactory,
+    ) -> list[UntetherEvent]: ...
+
+
+# System subtypes with their own translation (#792, #814). Add a subtype by
+# writing a handler with this signature and registering it here; anything
+# not listed falls through to the ``claude.system_event.non_init`` debug
+# log in ``_translate_claude_event_base``.
+_SYSTEM_SUBTYPE_HANDLERS: dict[str, _SystemSubtypeHandler] = {
+    "api_retry": _translate_api_retry,
+    "informational": _translate_informational,
+    "model_refusal_fallback": _translate_model_refusal_fallback,
+    "model_refusal_no_fallback": _translate_model_refusal_no_fallback,
+    "model_fallback": _translate_model_fallback,
+}
+
+
+def _translate_system_subtype(
+    event: claude_schema.StreamSystemMessage,
+    *,
+    state: ClaudeStreamState,
+    factory: EventFactory,
+) -> list[UntetherEvent] | None:
+    """Dispatch a system frame to its registered handler; None when the
+    subtype has none."""
+    handler = _SYSTEM_SUBTYPE_HANDLERS.get(event.subtype)
+    if handler is None:
+        return None
+    return handler(event, state=state, factory=factory)
 
 
 def _normalize_tool_result(content: Any) -> str:
@@ -3668,6 +4112,7 @@ def _open_followup_turn(
     state.turn_detail = detail
     state.unattributed_turn_completed_at = None
     # Per-turn scalars (see their field docs) start fresh for the new turn.
+    state.safeguard = SafeguardTurn()
     state.last_assistant_text = None
     state.last_exitplanmode_plan = None
     state.last_schedule_wakeup_arm_delay = None
@@ -3967,8 +4412,9 @@ def _translate_claude_event_base(
             if subtype.startswith("task_") or subtype == "background_tasks_changed":
                 _apply_task_event(state, event)
                 return []
-            if subtype == "api_retry":
-                return _translate_api_retry(event, state=state, factory=factory)
+            handled = _translate_system_subtype(event, state=state, factory=factory)
+            if handled is not None:
+                return handled
             if subtype != "init":
                 logger.debug(
                     "claude.system_event.non_init",
@@ -4001,6 +4447,8 @@ def _translate_claude_event_base(
             if run_options is not None and run_options.reasoning:
                 meta["effort"] = run_options.reasoning
             model = event.model
+            if isinstance(model, str) and model:
+                state.session_model = model
             token = ResumeToken(engine=ENGINE, value=session_id)
             event_title = str(model) if isinstance(model, str) and model else title
             return [factory.started(token, title=event_title, meta=meta or None)]
@@ -4089,6 +4537,8 @@ def _translate_claude_event_base(
                                 state.outline_text = text
                     case _:
                         continue
+            # #814: a refused main-thread response → the 🛡️ row.
+            out.extend(_note_assistant_refusal(event, state=state, factory=factory))
             return out
         case claude_schema.StreamUserMessage(message=message):
             if not isinstance(message.content, list):
@@ -4217,6 +4667,10 @@ def _translate_claude_event_base(
                 # remedy to name.
                 _maybe_latch_action_required(event.result)
             usage = _usage_payload(event)
+            # #814: rides on usage (not StartedEvent meta) so it reaches both
+            # CompletedEvent and a live turn's TurnEvent — D-12.
+            if (safeguard := _finalize_safeguard_turn(state, factory)) is not None:
+                usage["safeguard"] = safeguard
             if event.terminal_reason in claude_schema.CLAUDE_ABORTED_TERMINAL_REASONS:
                 # #806: an interrupted turn — the bridge renders it as
                 # cancelled rather than as an answer / error.

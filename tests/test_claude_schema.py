@@ -600,6 +600,10 @@ def test_decode_result_terminal_reason_and_origin() -> None:
     bare = claude_schema.decode_stream_json_line(_result_line())
     assert isinstance(bare, claude_schema.StreamResultMessage)
     assert (bare.terminal_reason, bare.origin, bare.stop_reason) == (None, None, None)
+    # ``origin`` is Any-typed: a non-object value must not drop the line.
+    odd = claude_schema.decode_stream_json_line(_result_line(origin="user"))
+    assert isinstance(odd, claude_schema.StreamResultMessage)
+    assert odd.origin == "user"
 
 
 @pytest.mark.parametrize(
@@ -631,3 +635,77 @@ def test_translate_result_marks_aborted_terminal_reason_in_usage(
     )
     completed = next(e for e in events if isinstance(e, CompletedEvent))
     assert (completed.usage or {}).get("terminal_reason") == expected
+
+
+# ---------------------------------------------------------------------------
+# #814 — safeguard stops
+# ---------------------------------------------------------------------------
+
+
+def test_decode_assistant_stop_reason_refusal_and_details() -> None:
+    payload = {
+        "type": "assistant",
+        "parent_tool_use_id": None,
+        "session_id": "sess-814",
+        "uuid": "u-1",
+        "message": {
+            "id": "msg_1",
+            "role": "assistant",
+            "model": "claude-opus-5-5",
+            "content": [{"type": "text", "text": "partial"}],
+            "stop_reason": "refusal",
+            "stop_details": {
+                "type": "refusal",
+                "category": "cyber",
+                "explanation": "flagged",
+            },
+        },
+    }
+    decoded = claude_schema.decode_stream_json_line(json.dumps(payload).encode())
+    assert isinstance(decoded, claude_schema.StreamAssistantMessage)
+    assert decoded.message.id == "msg_1"
+    assert decoded.message.stop_reason == "refusal"
+    assert decoded.message.stop_details == {
+        "type": "refusal",
+        "category": "cyber",
+        "explanation": "flagged",
+    }
+    # Absent on ordinary frames (and older CLIs).
+    del payload["message"]["stop_reason"], payload["message"]["stop_details"]
+    plain = claude_schema.decode_stream_json_line(json.dumps(payload).encode())
+    assert isinstance(plain, claude_schema.StreamAssistantMessage)
+    assert (plain.message.stop_reason, plain.message.stop_details) == (None, None)
+
+
+@pytest.mark.parametrize(
+    "fields",
+    [
+        {"content": "Opus 5.5's safeguards stopped…", "level": "notice"},
+        {"content": {"blocks": []}, "level": 3, "prevent_continuation": "yes"},
+        {"content": None, "level": None},
+        {
+            "subtype": "model_refusal_fallback",
+            "original_model": {"id": "x"},
+            "fallback_model": ["y"],
+            "api_refusal_category": 7,
+            "api_refusal_explanation": None,
+            "trigger": "refusal",
+            "direction": "retry",
+            "scope": "local",
+            "content": "switched",
+        },
+    ],
+)
+def test_decode_system_informational_any_typed_fields(fields: dict) -> None:
+    """Any-typed: an unexpected type decodes instead of dropping the line."""
+    payload = {
+        "type": "system",
+        "subtype": "informational",
+        "session_id": "sess-814",
+        "uuid": "u-2",
+        **fields,
+    }
+    decoded = claude_schema.decode_stream_json_line(json.dumps(payload).encode())
+    assert isinstance(decoded, claude_schema.StreamSystemMessage)
+    for key, value in fields.items():
+        assert getattr(decoded, key) == value

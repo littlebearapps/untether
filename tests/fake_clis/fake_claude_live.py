@@ -883,6 +883,46 @@ def scenario_error_first(first: dict) -> None:
     serve_followups()
 
 
+def scenario_safeguard_refusal_retry(first: dict) -> None:
+    # #814: the nsd transcript shape — the model's first response is
+    # stopped by Anthropic's safeguards (assistant ``stop_reason:"refusal"``
+    # with ``stop_details``), the CLI prints its informational notice and
+    # re-runs once on the same model, and the turn completes normally.
+    init()
+    emit(
+        {
+            "type": "assistant",
+            "message": {
+                "id": "msg_refused",
+                "role": "assistant",
+                "model": "claude-opus-5-5",
+                "content": [{"type": "text", "text": "Looking at the exploit"}],
+                "stop_reason": "refusal",
+                "stop_details": {
+                    "type": "refusal",
+                    "category": "cyber",
+                    "explanation": "flagged",
+                },
+            },
+        }
+    )
+    emit(
+        {
+            "type": "system",
+            "subtype": "informational",
+            "content": (
+                "Opus 5.5's safeguards stopped the response above \u00b7 "
+                "continuing once with that noted"
+            ),
+            "level": "notice",
+            "uuid": "info-1",
+        }
+    )
+    text("Here is the defensive summary.")
+    result("Here is the defensive summary.", turns=2)
+    serve_followups()
+
+
 def _collect_steers() -> tuple[list[dict], bool]:
     """Wait for steered user lines (#775): the first within STEER_WAIT_S,
     then any more until a short quiet gap. Returns (steers, eof)."""
@@ -942,6 +982,7 @@ _SCENARIOS = {
     "steer_mid_tool": scenario_steer_mid_tool,
     "steer_post_last_tool": scenario_steer_post_last_tool,
     "error_first": scenario_error_first,
+    "safeguard_refusal_retry": scenario_safeguard_refusal_retry,
     "ignore_eof": scenario_ignore_eof,
     "ignore_eof_with_task": scenario_ignore_eof_with_task,
     "bg_bash_wake": scenario_bg_bash_wake,

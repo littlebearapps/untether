@@ -18,14 +18,17 @@ from collections.abc import Iterator
 
 import pytest
 
+from untether.background_status import COLLECTION_TOOLS
+from untether.runners.claude import _SAFEGUARD_NOTICE_MODEL_RE, _SAFEGUARD_NOTICE_RE
 from untether.schemas.claude import (
+    CLAUDE_ABORTED_TERMINAL_REASONS,
     CLAUDE_OVERAGE_STATUSES,
     CLAUDE_RATE_LIMIT_STATUSES,
     CLAUDE_RATE_LIMIT_TYPES,
 )
 
 # Last CLI these constants were re-derived against.
-PROBED_CLI_VERSION = "2.1.283"
+PROBED_CLI_VERSION = "2.1.285"
 
 pytestmark = pytest.mark.skipif(
     shutil.which("claude") is None, reason="claude CLI not installed"
@@ -155,3 +158,130 @@ def test_api_retry_subtype_and_counter_keys_present(cli_blob: mmap.mmap) -> None
         f"system/api_retry schema lost keys {missing} "
         f"(last green on CLI {PROBED_CLI_VERSION})"
     )
+
+
+# ---------------------------------------------------------------------------
+# #814 — safeguard stops (findings 2026-09-29 §B)
+# ---------------------------------------------------------------------------
+
+
+def _schema_window(blob: mmap.mmap, subtype: str, size: int = 4000) -> bytes:
+    """The zod object following ``subtype:<fn>("<subtype>")``, with its
+    ``.describe("…")`` strings stripped, up to its ``session_id`` key."""
+    m = re.search(rb'subtype:\w{1,4}\("' + subtype.encode() + rb'"\)', blob)
+    if m is None:
+        pytest.fail(
+            f'installed CLI no longer declares system subtype "{subtype}" '
+            f"(last green on CLI {PROBED_CLI_VERSION})"
+        )
+    window = re.sub(
+        rb'\.describe\((?:"(?:[^"\\]|\\.)*"|\'(?:[^\'\\]|\\.)*\')\)',
+        b"",
+        blob[m.end() : m.end() + size],
+    )
+    return window.split(b"session_id:", 1)[0]
+
+
+def test_informational_notice_present(cli_blob: mmap.mmap) -> None:
+    """``system/informational`` keeps ``content`` + the ``level`` enum the
+    runner branches on, and the safeguard notice text still matches the
+    runner's patterns."""
+    window = _schema_window(cli_blob, "informational")
+    assert b"content:" in window
+    level = _require(
+        _zod_enum(window, rb"level:\w{1,4}\(\[([^\]]*)\]\)"), "informational.level"
+    )
+    assert set(level) == {"info", "notice", "suggestion", "warning"}, (
+        f"informational.level is now {level} — review the row/log-only split "
+        "in _translate_informational (D-15)"
+    )
+    m = re.search(
+        rb"`\$\{\w{1,4}\(\w{1,4}\)\}('s safeguards stopped the response above"
+        rb"[^`]{0,80})`",
+        cli_blob,
+    )
+    if m is None:
+        pytest.fail(
+            "the safeguard notice text moved — _SAFEGUARD_NOTICE_RE no longer "
+            f"sees it (last green on CLI {PROBED_CLI_VERSION})"
+        )
+    notice = "Opus 5.5" + m.group(1).decode("utf-8", "replace")
+    assert "continuing once" in notice
+    assert _SAFEGUARD_NOTICE_RE.search(notice)
+    model = _SAFEGUARD_NOTICE_MODEL_RE.match(notice)
+    assert model is not None and model.group(1) == "Opus 5.5"
+
+
+def test_refusal_stop_details_present(cli_blob: mmap.mmap) -> None:
+    """The CLI still reads ``stop_reason === "refusal"`` and
+    ``stop_details.category`` off the API message it passes through."""
+    assert re.search(rb'\.stop_reason==="refusal"', cli_blob), (
+        'no `stop_reason==="refusal"` check left in the installed CLI '
+        f"(last green on CLI {PROBED_CLI_VERSION})"
+    )
+    assert re.search(rb"stop_details\??\.category", cli_blob), (
+        "stop_details.category no longer read by the installed CLI"
+    )
+
+
+@pytest.mark.parametrize(
+    ("subtype", "keys"),
+    [
+        (
+            "model_refusal_fallback",
+            ("original_model", "fallback_model", "api_refusal_category", "content"),
+        ),
+        (
+            "model_refusal_no_fallback",
+            ("original_model", "api_refusal_category", "content"),
+        ),
+        ("model_fallback", ("original_model", "fallback_model", "trigger")),
+    ],
+)
+def test_model_refusal_subtypes_present(
+    cli_blob: mmap.mmap, subtype: str, keys: tuple[str, ...]
+) -> None:
+    """The undocumented refusal/fallback subtypes keep the keys the #814
+    handlers read."""
+    window = _schema_window(cli_blob, subtype)
+    missing = [k for k in keys if f"{k}:".encode() not in window]
+    assert not missing, (
+        f"system/{subtype} schema lost keys {missing} "
+        f"(last green on CLI {PROBED_CLI_VERSION})"
+    )
+
+
+def test_terminal_reason_aborted_values_present(cli_blob: mmap.mmap) -> None:
+    """#806 (phase 03): the CLI's own "was this turn aborted?" predicate
+    names exactly CLAUDE_ABORTED_TERMINAL_REASONS."""
+    m = re.search(
+        rb'function \w{1,4}\((\w)\)\{return ((?:\1==="aborted_[a-z_]+"(?:\|\|)?)+)\}',
+        cli_blob,
+    )
+    if m is None:
+        pytest.fail(
+            "the CLI's aborted-terminal predicate moved — re-derive the probe "
+            f"(last green on CLI {PROBED_CLI_VERSION})"
+        )
+    declared = {v.decode() for v in re.findall(rb'"([^"]+)"', m.group(2))}
+    assert declared == set(CLAUDE_ABORTED_TERMINAL_REASONS), (
+        f"installed CLI treats {sorted(declared)} as aborted; "
+        f"CLAUDE_ABORTED_TERMINAL_REASONS holds "
+        f"{sorted(CLAUDE_ABORTED_TERMINAL_REASONS)}"
+    )
+
+
+def test_taskoutput_in_removed_tools(cli_blob: mmap.mmap) -> None:
+    """#813 (phase 06): ``TaskOutput`` is still in the CLI's removed-tools
+    list, so a wake turn collects a task's output with ``Read`` — which
+    COLLECTION_TOOLS must keep treating as read-only."""
+    m = re.search(rb'\[((?:"[A-Za-z]+",)*"TaskOutput"(?:,"[A-Za-z]+")*)\]', cli_blob)
+    if m is None:
+        pytest.fail(
+            "TaskOutput is no longer in a removed-tools list in the installed "
+            f"CLI (last green on CLI {PROBED_CLI_VERSION}) — if it came back, "
+            "re-check COLLECTION_TOOLS"
+        )
+    removed = {v.decode() for v in re.findall(rb'"([^"]+)"', m.group(1))}
+    assert {"TaskOutput", "BashOutput", "AgentOutput"} <= removed
+    assert "Read" in COLLECTION_TOOLS
