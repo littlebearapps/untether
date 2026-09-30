@@ -140,7 +140,7 @@ def _host_config_untouched() -> Iterator[None]:
 
 
 @pytest.fixture(autouse=True)
-def _isolated_config(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+def _isolated_config(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[Path]:
     """#808: point every path-less config loader at a per-test tmp path.
 
     ``load_settings_if_exists()`` (called from the bridge and the Claude
@@ -155,8 +155,13 @@ def _isolated_config(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
 
     The tmp file is never created, so path-less loaders see "no config" and
     fall back to defaults.
+
+    #506: the process-wide settings parse cache is cleared before and after
+    every test, so no test can be served another test's parsed config.
     """
     import importlib
+
+    from untether.settings import clear_settings_cache
 
     config_path = tmp_path / ".untether" / "untether.toml"
     monkeypatch.delenv("UNTETHER_CONFIG_PATH", raising=False)
@@ -179,7 +184,9 @@ def _isolated_config(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
                 "__defaults__",
                 tuple(fake_creds if d == real_creds else d for d in defaults),
             )
-    return config_path
+    clear_settings_cache()
+    yield config_path
+    clear_settings_cache()
 
 
 @pytest.fixture(autouse=True)

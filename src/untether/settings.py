@@ -1,8 +1,13 @@
 from __future__ import annotations
 
+import functools
 import os
 import re
+import tomllib
+from collections import OrderedDict
 from collections.abc import Iterable
+from contextvars import ContextVar
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Annotated, Any, ClassVar, Literal
 
@@ -18,7 +23,7 @@ from pydantic import (
 )
 from pydantic.types import StrictInt
 from pydantic_settings import BaseSettings, SettingsConfigDict
-from pydantic_settings.sources import TomlConfigSettingsSource
+from pydantic_settings.sources import InitSettingsSource, TomlConfigSettingsSource
 
 from .config import (
     HOME_CONFIG_PATH,
@@ -738,6 +743,9 @@ class SecuritySettings(BaseModel):
 
 
 class UntetherSettings(BaseSettings):
+    # #506: the parse cache in ``load_settings_if_exists`` keys on the file's
+    # bytes + ``_env_fingerprint()``. If an ``env_file`` / ``secrets_dir`` is
+    # ever added here, that key must grow to cover it.
     model_config = SettingsConfigDict(
         extra="allow",
         env_prefix="UNTETHER__",
@@ -945,6 +953,7 @@ class UntetherSettings(BaseSettings):
 
 
 def load_settings(path: str | Path | None = None) -> tuple[UntetherSettings, Path]:
+    """Strict loader (startup, config watcher, onboarding). Never cached (#506 D3)."""
     cfg_path = _resolve_config_path(path)
     _ensure_config_file(cfg_path)
     migrate_config_file(cfg_path)
@@ -954,15 +963,168 @@ def load_settings(path: str | Path | None = None) -> tuple[UntetherSettings, Pat
 def load_settings_if_exists(
     path: str | Path | None = None,
 ) -> tuple[UntetherSettings, Path] | None:
+    """Load settings if the config file exists, else ``None``.
+
+    #506: the result is cached per path, keyed on the file's exact bytes plus
+    the ``UNTETHER__*`` environment, so an unchanged file is parsed once
+    instead of on every read, while an edit still applies on the very next
+    read (#269 per-run hot-reload, including mid-live-session turns).
+
+    A cache hit returns a **shared, read-only** ``UntetherSettings`` instance:
+    do not mutate it — ``model_copy()`` it if you need a private copy.
+    Set ``UNTETHER_SETTINGS_CACHE=0`` to disable the cache.
+    """
     cfg_path = _resolve_config_path(path)
     if cfg_path.exists():
         if not cfg_path.is_file():
             raise ConfigError(
                 f"Config path {cfg_path} exists but is not a file."
             ) from None
+        if _settings_cache_enabled():
+            return _load_settings_cached(cfg_path), cfg_path
         migrate_config_file(cfg_path)
         return _load_settings_from_path(cfg_path), cfg_path
+    _SETTINGS_CACHE.pop(str(cfg_path), None)
     return None
+
+
+# ---------------------------------------------------------------------------
+# #506: content-keyed settings parse cache
+# ---------------------------------------------------------------------------
+#
+# One Claude message used to parse untether.toml at least 15 times (plus ~one
+# per tool call), each parse blocking the event loop for ~10-47 ms. The key is
+# the exact file bytes, not ``(mtime_ns, size)`` like ``config_watch`` uses:
+# on kernels < 6.13 timestamps are coarse, so two same-size writes inside one
+# tick share a stat signature and a stat-keyed cache would serve stale config.
+
+_SETTINGS_CACHE_MAX = 4
+_SETTINGS_CACHE_ENV = "UNTETHER_SETTINGS_CACHE"
+_SETTINGS_CACHE_OFF = frozenset({"0", "false", "off", "no"})
+_ENV_PREFIX = "UNTETHER__"
+
+
+@dataclass(slots=True, frozen=True)
+class _CachedSettings:
+    raw: bytes
+    env: tuple[tuple[str, str], ...]
+    settings: UntetherSettings
+
+
+_SETTINGS_CACHE: OrderedDict[str, _CachedSettings] = OrderedDict()
+
+# The TOML data for the in-memory source, set only around one instantiation.
+_TOML_DATA: ContextVar[dict[str, Any] | None] = ContextVar(
+    "untether_settings_toml_data", default=None
+)
+
+
+class _InMemoryTomlSettings(UntetherSettings):
+    """``UntetherSettings`` fed from already-parsed TOML (``_TOML_DATA``)
+    instead of re-reading the file, so the cached object is derived from
+    exactly the bytes stored as its key. Same source precedence as
+    ``UntetherSettings`` (init > env > dotenv > toml > secrets)."""
+
+    # Keep validation errors titled like the uncached path's.
+    model_config = SettingsConfigDict(
+        **UntetherSettings.model_config, title="UntetherSettings"
+    )
+
+    @classmethod
+    def settings_customise_sources(
+        cls,
+        settings_cls,
+        init_settings,
+        env_settings,
+        dotenv_settings,
+        file_secret_settings,
+    ):
+        return (
+            init_settings,
+            env_settings,
+            dotenv_settings,
+            InitSettingsSource(settings_cls, init_kwargs=_TOML_DATA.get() or {}),
+            file_secret_settings,
+        )
+
+
+def _settings_cache_enabled() -> bool:
+    value = os.environ.get(_SETTINGS_CACHE_ENV, "1").strip().lower()
+    return value not in _SETTINGS_CACHE_OFF
+
+
+def _env_fingerprint() -> tuple[tuple[str, str], ...]:
+    """The ``UNTETHER__*`` env vars pydantic-settings reads (case-insensitively)."""
+    return tuple(
+        sorted(
+            (key.upper(), value)
+            for key, value in os.environ.items()
+            if key.upper().startswith(_ENV_PREFIX)
+        )
+    )
+
+
+def _parse_settings_bytes(raw: bytes, cfg_path: Path) -> UntetherSettings:
+    """Parse and validate ``raw`` (the config file's bytes) in memory."""
+    try:
+        data = tomllib.loads(raw.decode("utf-8"))
+    except UnicodeDecodeError as exc:
+        logger.error("config.read.decode_error", path=str(cfg_path), error=str(exc))
+        raise ConfigError(f"Failed to read config file {cfg_path}: {exc}") from None
+    except tomllib.TOMLDecodeError as exc:
+        logger.error("config.read.toml_error", path=str(cfg_path), error=str(exc))
+        raise ConfigError(f"Malformed TOML in {cfg_path}: {exc}") from None
+    token = _TOML_DATA.set(data)
+    try:
+        return _InMemoryTomlSettings()
+    except ValidationError as exc:
+        raise ConfigError(f"Invalid config in {cfg_path}: {exc}") from exc
+    except Exception as exc:  # pragma: no cover - safety net
+        raise ConfigError(f"Failed to load config {cfg_path}: {exc}") from exc
+    finally:
+        _TOML_DATA.reset(token)
+
+
+def _load_settings_cached(cfg_path: Path) -> UntetherSettings:
+    key = str(cfg_path)
+    env_now = _env_fingerprint()
+    entry = _SETTINGS_CACHE.get(key)
+    try:
+        raw_now = cfg_path.read_bytes()
+    except OSError:
+        # Let the uncached path produce today's errors/logs unchanged.
+        migrate_config_file(cfg_path)
+        return _load_settings_from_path(cfg_path)
+    if entry is not None and entry.raw == raw_now and entry.env == env_now:
+        _SETTINGS_CACHE.move_to_end(key)
+        return entry.settings
+
+    # Miss: migrate (may rewrite the file), then parse the post-migration
+    # bytes captured here — never a re-read — so no write racing the parse can
+    # leave settings cached under the wrong key. Errors are not cached (D7).
+    migrate_config_file(cfg_path)
+    raw = cfg_path.read_bytes()
+    settings = _parse_settings_bytes(raw, cfg_path)
+    if entry is None:
+        reason = "first_load"
+    elif entry.raw != raw:
+        reason = "content_changed"
+    else:
+        reason = "env_changed"
+    _SETTINGS_CACHE[key] = _CachedSettings(raw=raw, env=env_now, settings=settings)
+    _SETTINGS_CACHE.move_to_end(key)
+    while len(_SETTINGS_CACHE) > _SETTINGS_CACHE_MAX:
+        _SETTINGS_CACHE.popitem(last=False)
+    # INFO again (#498 demoted it while it fired on every read): it now fires
+    # once per real parse, and is the live verification signal for #506.
+    logger.info("config.loaded", path=key, reason=reason)
+    return settings
+
+
+def clear_settings_cache() -> None:
+    """Drop every cached settings entry and bound class (tests, #808)."""
+    _SETTINGS_CACHE.clear()
+    _bound_settings_class.cache_clear()
 
 
 def validate_settings_data(
@@ -1001,20 +1163,30 @@ def _ensure_config_file(cfg_path: Path) -> None:
         raise ConfigError(f"Missing config file {cfg_path}.") from None
 
 
-def _load_settings_from_path(cfg_path: Path) -> UntetherSettings:
+@functools.lru_cache(maxsize=8)
+def _bound_settings_class(cfg_path: Path) -> type[UntetherSettings]:
+    """``UntetherSettings`` bound to ``cfg_path`` as its ``toml_file``.
+
+    #506: built once per path instead of per call (~5 ms each). Safe to reuse
+    because the class binds only the path; file and env are read at
+    instantiation."""
     cfg = dict(UntetherSettings.model_config)
     cfg["toml_file"] = cfg_path
-    Bound = type(
+    return type(
         "UntetherSettingsBound",
         (UntetherSettings,),
         {"model_config": SettingsConfigDict(**cfg)},
     )
+
+
+def _load_settings_from_path(cfg_path: Path) -> UntetherSettings:
+    Bound = _bound_settings_class(cfg_path)
     try:
         settings = Bound()
-        # #498 — fires per-helper load (footer/watchdog/progress/auto_continue/
-        # preamble/budget) by design (#269 hot-reload); too noisy at INFO.
-        # See v0.35.4 issue for caching settings within handle_message.
-        logger.debug("config.loaded", path=str(cfg_path))
+        # #506: the cached ``load_settings_if_exists`` path logs INFO
+        # ``config.loaded`` once per real parse; this uncached path
+        # (``load_settings()``, kill switch) stays at DEBUG (#498).
+        logger.debug("config.loaded", path=str(cfg_path), reason="uncached")
         return settings
     except ValidationError as exc:
         raise ConfigError(f"Invalid config in {cfg_path}: {exc}") from exc

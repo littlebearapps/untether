@@ -169,3 +169,232 @@ async def test_810_orphan_cleanup_skips_cancelled_run(
     assert cancelled_id not in edited
     assert edited == [555]
     assert load_active_progress(progress_path) == {}
+
+
+# ---------------------------------------------------------------------------
+# #746 — orphan cleanup checks the edit result
+# ---------------------------------------------------------------------------
+
+
+def _orphan_cfg(config_path: Path, bot: object) -> object:
+    from types import SimpleNamespace
+
+    return SimpleNamespace(runtime=SimpleNamespace(config_path=config_path), bot=bot)
+
+
+def _events(logs: list[dict], name: str) -> list[dict]:
+    return [r for r in logs if r.get("event") == name]
+
+
+@pytest.mark.anyio
+async def test_746_orphan_cleanup_logs_edited_only_on_success(tmp_path: Path) -> None:
+    from structlog.testing import capture_logs
+
+    from untether.telegram.loop import _cleanup_orphan_progress
+
+    config_path = tmp_path / "untether.toml"
+    progress_path = resolve_progress_path(config_path)
+    for mid in (555, 556, 557):
+        register_progress(progress_path, f"123:{mid}", chat_id=123, message_id=mid)
+
+    class _Bot:
+        def __init__(self) -> None:
+            self.pops: list[tuple[object, object]] = []
+
+        async def edit_message_text(self, *, chat_id, message_id, text):
+            return object() if message_id == 555 else None
+
+        def pop_edit_error(self, chat_id, message_id):
+            self.pops.append((chat_id, message_id))
+            return (
+                "Bad Request: message to edit not found" if message_id == 556 else None
+            )
+
+    bot = _Bot()
+    with capture_logs() as logs:
+        await _cleanup_orphan_progress(_orphan_cfg(config_path, bot))  # type: ignore[arg-type]
+
+    assert [
+        r["message_id"] for r in _events(logs, "startup.orphan_cleanup.edited")
+    ] == [555]
+    failed = {
+        r["message_id"]: r for r in _events(logs, "startup.orphan_cleanup.edit_failed")
+    }
+    assert set(failed) == {556, 557}
+    assert failed[556]["reason"] == "Bad Request: message to edit not found"
+    assert failed[557]["reason"] is None
+    assert bot.pops == [(123, 556), (123, 557)]
+    assert all(type(c) is int and type(m) is int for c, m in bot.pops)
+    done = _events(logs, "startup.orphan_cleanup.done")
+    assert len(done) == 1
+    assert done[0]["log_level"] == "info"
+    assert (
+        done[0]["count"],
+        done[0]["edited"],
+        done[0]["failed"],
+        done[0]["skipped"],
+    ) == (
+        3,
+        1,
+        2,
+        0,
+    )
+    assert load_active_progress(progress_path) == {}
+
+
+@pytest.mark.anyio
+async def test_746_orphan_cleanup_all_fail_still_clears_state(tmp_path: Path) -> None:
+    from structlog.testing import capture_logs
+
+    from untether.telegram.loop import _cleanup_orphan_progress
+
+    config_path = tmp_path / "untether.toml"
+    progress_path = resolve_progress_path(config_path)
+    for mid in (10, 11):
+        register_progress(progress_path, f"1:{mid}", chat_id=1, message_id=mid)
+
+    class _Bot:
+        async def edit_message_text(self, *, chat_id, message_id, text):
+            return None
+
+        def pop_edit_error(self, chat_id, message_id):
+            return None
+
+    with capture_logs() as logs:
+        await _cleanup_orphan_progress(_orphan_cfg(config_path, _Bot()))  # type: ignore[arg-type]
+
+    done = _events(logs, "startup.orphan_cleanup.done")[0]
+    assert (done["edited"], done["failed"]) == (0, 2)
+    assert not _events(logs, "startup.orphan_cleanup.edited")
+    assert load_active_progress(progress_path) == {}
+
+
+@pytest.mark.anyio
+async def test_746_orphan_cleanup_bot_without_pop(tmp_path: Path) -> None:
+    from structlog.testing import capture_logs
+
+    from untether.telegram.loop import _cleanup_orphan_progress
+
+    config_path = tmp_path / "untether.toml"
+    progress_path = resolve_progress_path(config_path)
+    register_progress(progress_path, "1:10", chat_id=1, message_id=10)
+
+    class _Bot:
+        async def edit_message_text(self, *, chat_id, message_id, text):
+            return None
+
+    with capture_logs() as logs:
+        await _cleanup_orphan_progress(_orphan_cfg(config_path, _Bot()))  # type: ignore[arg-type]
+
+    failed = _events(logs, "startup.orphan_cleanup.edit_failed")
+    assert len(failed) == 1 and failed[0]["reason"] is None
+
+
+@pytest.mark.anyio
+async def test_746_orphan_cleanup_corrupt_and_missing_entries(tmp_path: Path) -> None:
+    import json
+
+    from structlog.testing import capture_logs
+
+    from untether.telegram.loop import _cleanup_orphan_progress
+
+    config_path = tmp_path / "untether.toml"
+    progress_path = resolve_progress_path(config_path)
+    progress_path.parent.mkdir(parents=True, exist_ok=True)
+    progress_path.write_text(
+        json.dumps(
+            {
+                "bad": {"chat_id": "abc", "message_id": 5},
+                "missing": {"chat_id": 1},
+                "good": {"chat_id": 1, "message_id": 7},
+            }
+        )
+    )
+    edited: list[int] = []
+
+    class _Bot:
+        async def edit_message_text(self, *, chat_id, message_id, text):
+            edited.append(message_id)
+            return object()
+
+    with capture_logs() as logs:
+        await _cleanup_orphan_progress(_orphan_cfg(config_path, _Bot()))  # type: ignore[arg-type]
+
+    assert edited == [7]
+    failed = _events(logs, "startup.orphan_cleanup.edit_failed")
+    assert len(failed) == 1 and failed[0]["chat_id"] == "abc"
+    assert failed[0].get("exc_info") is True
+    done = _events(logs, "startup.orphan_cleanup.done")[0]
+    assert (done["edited"], done["failed"], done["skipped"]) == (1, 1, 1)
+    assert load_active_progress(progress_path) == {}
+
+
+@pytest.mark.anyio
+async def test_746_orphan_cleanup_http_400_end_to_end(tmp_path: Path) -> None:
+    """The #746 regression: a restart that finds deleted/uneditable orphans
+    logs no ERROR line, through the real TelegramClient outbox."""
+    import json
+
+    import httpx
+    from structlog.testing import capture_logs
+
+    from untether.telegram.client import TelegramClient
+    from untether.telegram.loop import _cleanup_orphan_progress
+
+    config_path = tmp_path / "untether.toml"
+    progress_path = resolve_progress_path(config_path)
+    for mid in (555, 556, 557):
+        register_progress(progress_path, f"123:{mid}", chat_id=123, message_id=mid)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        mid = body["message_id"]
+        if mid == 555:
+            return httpx.Response(
+                200,
+                json={
+                    "ok": True,
+                    "result": {
+                        "message_id": 555,
+                        "chat": {"id": 123, "type": "private"},
+                    },
+                },
+                request=request,
+            )
+        desc = (
+            "Bad Request: message to edit not found"
+            if mid == 556
+            else "Bad Request: message can't be edited"
+        )
+        return httpx.Response(
+            400,
+            json={"ok": False, "error_code": 400, "description": desc},
+            request=request,
+        )
+
+    http = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    tg = TelegramClient(
+        "123:abcDEF_ghij", http_client=http, private_chat_rps=0.0, group_chat_rps=0.0
+    )
+    try:
+        with capture_logs() as logs:
+            await _cleanup_orphan_progress(_orphan_cfg(config_path, tg))  # type: ignore[arg-type]
+    finally:
+        await tg.close()
+        await http.aclose()
+
+    assert not [r for r in logs if r.get("log_level") == "error"]
+    benign = _events(logs, "telegram.benign_rejection")
+    assert sorted(r["reason_class"] for r in benign) == ["not_editable", "target_gone"]
+    done = _events(logs, "startup.orphan_cleanup.done")[0]
+    assert (done["count"], done["edited"], done["failed"]) == (3, 1, 2)
+    assert not _events(logs, "telegram.benign_rejection.burst")
+    reasons = {
+        r["message_id"]: r["reason"]
+        for r in _events(logs, "startup.orphan_cleanup.edit_failed")
+    }
+    assert reasons == {
+        556: "Bad Request: message to edit not found",
+        557: "Bad Request: message can't be edited",
+    }
+    assert load_active_progress(progress_path) == {}

@@ -21,6 +21,7 @@ from ..settings import (
 from ..transport import MessageRef, RenderedMessage, SendOptions, Transport
 from ..transport_runtime import TransportRuntime
 from .client import BotClient
+from .client_api import classify_benign_rejection
 from .outbox import SUPERSEDED
 from .render import MAX_BODY_CHARS, prepare_telegram, prepare_telegram_multi
 from .types import TelegramCallbackQuery, TelegramIncomingMessage
@@ -405,10 +406,14 @@ class TelegramTransport:
                 pop = getattr(self._bot, "pop_edit_error", None)
                 if callable(pop):
                     reason = pop(chat_id, message_id)
-                if reason is not None and "message is not modified" in reason:
+                if (
+                    classify_benign_rejection("editMessageText", reason, message_id)
+                    == "not_modified"
+                ):
                     # #598/#364 family: Telegram rejects edits whose text AND
                     # markup match the current message — the edit's intent is
                     # already satisfied, so this is a no-op, not a failure.
+                    # #746: the one shared classifier (case-insensitive).
                     logger.info(
                         "transport.edit.noop",
                         chat_id=chat_id,

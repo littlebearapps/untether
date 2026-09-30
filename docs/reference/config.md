@@ -37,6 +37,17 @@ Fields listed as **restart-required** trigger a warning in the Telegram chat
 when edited. Everything else hot-reloads silently with a matching
 `config.reload.transport_config_hot_reloaded` INFO event.
 
+Separately from the watcher, the per-run settings (`[footer]`, `[progress]`,
+`[watchdog]`, `[preamble]`, `[cost_budget]`, `[auto_continue]`, `[security]`, …)
+are re-read on every use, even with `watch_config = false`, so an edit applies on
+the next run or the next turn of a live session
+([#269](https://github.com/littlebearapps/untether/issues/269)). Since 0.35.5 the
+file is only re-parsed when its contents (or the `UNTETHER__*` env vars) change,
+and each real parse logs one INFO `config.loaded reason=first_load|content_changed|env_changed`
+line ([#506](https://github.com/littlebearapps/untether/issues/506)). Set
+`UNTETHER_SETTINGS_CACHE=0` to turn the cache off (see
+[environment variables](env-vars.md)).
+
 The authoritative list lives on each settings model as `RESTART_REQUIRED_FIELDS`
 (see `src/untether/settings.py`) so code, docs, and UI can't drift. Editing
 `untether.toml` to update one of these while the service runs logs the warning

@@ -552,7 +552,16 @@ async def _drain_backlog(cfg: TelegramBridgeConfig, offset: int | None) -> int |
 
 
 async def _cleanup_orphan_progress(cfg: TelegramBridgeConfig) -> None:
-    """Edit orphan progress messages from a prior instance to show interrupted."""
+    """Edit orphan progress messages from a prior instance to show interrupted.
+
+    #746: failures are expected — the orphan may have been deleted, or the id
+    may not be editable. The HTTP layer already logs each one once at the
+    right level (INFO ``telegram.benign_rejection`` for a vanished message,
+    ERROR for anything genuine), so a per-orphan failure is DEBUG here with
+    the popped reason. ``startup.orphan_cleanup.edited`` is logged only when
+    the edit actually succeeded, and one INFO ``startup.orphan_cleanup.done``
+    summarises the pass.
+    """
     config_path = cfg.runtime.config_path
     if config_path is None:
         return
@@ -567,29 +576,51 @@ async def _cleanup_orphan_progress(cfg: TelegramBridgeConfig) -> None:
     if not entries:
         return
     logger.info("startup.orphan_cleanup", count=len(entries))
+    edited = failed = skipped = 0
+    pop = getattr(cfg.bot, "pop_edit_error", None)
     for entry in entries.values():
         chat_id = entry.get("chat_id")
         message_id = entry.get("message_id")
         if chat_id is None or message_id is None:
+            skipped += 1
             continue
         try:
-            await cfg.bot.edit_message_text(
-                chat_id=int(chat_id),
-                message_id=int(message_id),
+            cid, mid = int(chat_id), int(message_id)
+            result = await cfg.bot.edit_message_text(
+                chat_id=cid,
+                message_id=mid,
                 text="\u26a0\ufe0f interrupted by restart",
             )
-            logger.debug(
-                "startup.orphan_cleanup.edited",
-                chat_id=chat_id,
-                message_id=message_id,
-            )
-        except Exception:  # noqa: BLE001
+        except Exception:  # noqa: BLE001 — corrupt entry (int()) or an unexpected raise
+            failed += 1
             logger.debug(
                 "startup.orphan_cleanup.edit_failed",
                 chat_id=chat_id,
                 message_id=message_id,
                 exc_info=True,
             )
+            continue
+        if result is None:
+            failed += 1
+            # The #598 reason is keyed on the ints that were sent.
+            reason = pop(cid, mid) if callable(pop) else None
+            logger.debug(
+                "startup.orphan_cleanup.edit_failed",
+                chat_id=cid,
+                message_id=mid,
+                reason=reason,
+            )
+            continue
+        # A Message, or SUPERSEDED (the winning op set the final state).
+        edited += 1
+        logger.debug("startup.orphan_cleanup.edited", chat_id=cid, message_id=mid)
+    logger.info(
+        "startup.orphan_cleanup.done",
+        count=len(entries),
+        edited=edited,
+        failed=failed,
+        skipped=skipped,
+    )
     clear_all_progress(progress_path)
 
 
