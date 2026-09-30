@@ -15,6 +15,25 @@ applies_to: "tests/**"
 - **Never `monkeypatch.setattr(module.logger, "warning", …)`** on a structlog lazy proxy. Undoing it pins a bound method with the default processors, silently hiding every later warning from `structlog.testing.capture_logs()` in full-suite runs only. Use `capture_logs()` to assert on logs.
 - **`ClaudeRunner` is a slots dataclass**: overriding timing knobs (`_live_close_grace_s`, `_live_poll_s`, …) as subclass class attributes is inert — field defaults shadow them. Set them on the instance.
 
+### Host isolation (#808)
+
+`tests/conftest.py` isolates every test from the host automatically — **never
+rely on the host config or the live network**:
+
+- `_isolated_config` (autouse) patches `HOME_CONFIG_PATH` at every module
+  binding (`HOME_CONFIG_PATH_MODULES`) to a per-test tmp path, deletes
+  `UNTETHER_CONFIG_PATH`, and points `/usage`'s OAuth credentials path at tmp.
+  A test that needs a config writes its own, or passes a path explicitly.
+- `_no_live_network` (autouse) refuses non-loopback requests at
+  `httpx.HTTPTransport` / `AsyncHTTPTransport` (`MockTransport` and loopback
+  still work) and resets the usage cache. Opt out per test with
+  `@pytest.mark.allow_network` (registered in `pyproject.toml`).
+- `_host_config_untouched` (session) fails the run if the real
+  `~/.untether/untether.toml` changes (sha256 + mtime).
+- A new `HOME_CONFIG_PATH` import in `src/` must be added to
+  `HOME_CONFIG_PATH_MODULES`; `tests/test_test_isolation.py` scans `src/` and
+  fails otherwise.
+
 ## Patterns
 
 ### Stub subprocess runners

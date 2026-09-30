@@ -320,6 +320,31 @@ Claude chat (`5284581592`) unless noted. Background prompts should use `python3 
 
 ---
 
+## rc14 scenarios (0.35.5rc14)
+
+Claude chat (`5284581592`) unless noted. As for rc13, use `python3 -c "import time; time.sleep(N)"` rather than a bare `sleep N` for anything a subagent runs. Log checks: `journalctl --user -u untether-dev -o cat --since "30 minutes ago" | grep -E "<pattern>"`.
+
+| # | Scenario | What to do | Pass criteria |
+|---|---|---|---|
+| RC14-1 | **Cancel a follow-up turn ([#806](https://github.com/littlebearapps/untether/issues/806))** | Reply to a short prompt, then within 60 s send a follow-up that runs a 60 s foreground Python sleep; `/cancel` while it runs | The follow-up's final reads `cancelled · claude · Ns` (not `error · the session ended before this turn finished`); `live_turn.cancelled turn=2 reason=cancel`; the turn's cost still appears in `cost.turn_delta` / `runner.completed` |
+| RC14-2 | **Command barrier ([#807](https://github.com/littlebearapps/untether/issues/807))** | Send each pair back to back (inside `forward_coalesce_s`): `A` + `/new`; `A` + `/cancel`; `A` + `/continue`; `A` + `/ping` | The first three each get a `🗑️ Dropped 1 message sent just before /<cmd> — send it again if you still need it.` reply on `A` and `forward.prompt.dropped reason=<cmd>`; with `/ping`, `A` runs (`forward.prompt.flushed reason=command`) and `/ping` answers too |
+| RC14-3 | **Cancelled message survives restart ([#810](https://github.com/littlebearapps/untether/issues/810))** | Start a 60 s foreground run, `/cancel` it, then `systemctl --user restart untether-dev` | The message still reads `cancelled` after the restart (no `⚠️ interrupted by restart`); `progress_persistence.released reason=cancelled` (DEBUG) and no orphan relabel for that message id at startup |
+| RC14-4 | **Spent one-shot cron ([#809](https://github.com/littlebearapps/untether/issues/809))** | Add a `run_once = true` cron to the dev config that has already fired (listed in `run_once_fired.json`), restart dev | The startup message's triggers line counts only scheduled crons and appends `, 1 spent one-shot` |
+| RC14-5 | **`peak_live_idle_seconds` ([#811](https://github.com/littlebearapps/untether/issues/811))** | Reply to a short prompt, then send a follow-up running a 60 s foreground Python sleep; let the session idle-close | `session.summary followup_turns=1 peak_live_idle_seconds` ≈ 60 (the idle gap before the close), not the follow-up's run time added on top |
+| RC14-6 | **Async-hook hold + rewake ([#812](https://github.com/littlebearapps/untether/issues/812))** | In the dev project's `.claude/settings.json` add a `Stop` command hook with `"asyncRewake": true` that sleeps, prints findings to stderr and `exit 2`. Two variants: `sleep 90` and a sleep longer than the bound. Send a short prompt and wait | 90 s variant: `claude.hook.pending_hold` after the reply, then `claude.turn.hook_rewake` and a new **pushed** `🪝 Hook feedback — Stop` message with the findings; no `close_grace_expired`. Bound variant: `claude.hook.hold_expired`, then at the close `claude.live_session.async_hook_killed` and the notice `⏳ Closing session — a background hook (Stop) was still running; its feedback wasn't delivered.` A plain `async: true` hook that exits quickly must not hold: `claude.hook.hold_released reason=no_hook_process` within a few seconds |
+| RC14-7 | **Read-only acks fold ([#813](https://github.com/littlebearapps/untether/issues/813))** | The RC13-2 shape with 3 background agents, asking for one short sentence per finish (Claude will usually `Read` each output file) | No `live_turn.fold_decision decision=tools` on acks whose only tools are `Read`/`Glob`/`Grep`; each `↳` line sits under the task it describes; only the final summary is pushed |
+| RC14-8 | **Safeguard stop ([#814](https://github.com/littlebearapps/untether/issues/814))** | **Opportunistic only — never provoke a refusal.** Grep the session's logs for `claude.safeguard_stop` | If one occurred: a `🛡️ … safeguards stopped a response · <outcome>` progress row, a `🛡️ safeguards stopped N response(s)` footer, one `💡` hint link per session, and the run is not marked as an error. If none occurred, record **not exercised**, not fail |
+
+Practical notes for RC14-6:
+
+- **Make the hook one-shot with a marker file.** A `Stop` hook that exits 2 fires again at the end of every turn, including the rewake turn it caused, so it loops. Have the script exit 0 at once if a marker exists and create the marker before its sleep, e.g. `[ -e /tmp/rc14-hook-fired ] && exit 0; touch /tmp/rc14-hook-fired; sleep 90; echo "rc14 findings" >&2; exit 2`. Delete the marker between runs.
+- **Shorten the bound for the second variant.** Set `[watchdog] async_hook_max_hold = 60` in `~/.untether-dev/untether.toml` (hot-reloaded for new runs) and use `sleep 120`, so the bound variant takes about two minutes instead of eleven. Put the default (630) back afterwards.
+- Hook events need `--include-hook-events`: check `claude.hook_events.probe supported=true` once after the dev restart. `[watchdog] hold_for_async_hooks = false` is the kill switch (no flag, no hold).
+
+**Required for rc14:** minor-release tiers because #812 touches the engine-agnostic `runner.py`: Tier 7 + Tier 1 (all 4 supported engines) + Tier 2 (C1–C6) + B-LIVE-1…7 + `uv run pytest tests/test_claude_cli_schema_drift.py` against the installed CLI + RC14-1…8.
+
+---
+
 ## Upgrade Path Testing
 
 Run before **minor and major** releases to verify backward compatibility.

@@ -150,8 +150,23 @@ Behavior:
   with a directive (`/codex …`, `/project …`, `@branch …`), or the chat's
   context changed in between — sends the pending prompt straight away as its own
   run (`forward.prompt.flushed` with a `reason`). Nothing is dropped.
-- Slash commands are never merged into a prompt; they run as soon as they
-  arrive. Replies to a message whose run is still going bypass the window.
+- Slash commands are never merged into a prompt, and a command is a
+  **barrier** for the window ([#807](https://github.com/littlebearapps/untether/issues/807)):
+  - `/cancel`, `/new` and `/continue` **drop** the pending prompt and reply to
+    it with `🗑️ Dropped N message(s) sent just before /<cmd> — send it again
+    if you still need it.` (`forward.prompt.dropped` with `reason` and
+    `merged_count`). Sending it first would only start a run for the command
+    to kill, or run it in the session being left. Before 0.35.5rc14
+    `/continue` dropped it silently and `/cancel` / `/new` let it run after
+    them.
+  - Every other command **flushes** the pending prompt first
+    (`forward.prompt.flushed reason=command`). Ordering is best-effort: the
+    prompt is dispatched before the command is handled, but its run starts
+    asynchronously, so a `/model` or `/planmode` sent right behind it can
+    still apply to it.
+  - Prompt directives (`/<engine>`, `/<project>`) and `/steer <text>` are
+    prompts, not commands: they follow the merge/flush rules above.
+- Replies to a message whose run is still going bypass the window.
 
 Configuration (under `[transports.telegram]`):
 

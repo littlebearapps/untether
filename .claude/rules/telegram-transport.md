@@ -79,6 +79,21 @@ Agents write files to `.untether-outbox/` during a run. On completion, `outbox_d
 
 `render_markdown()` rewrites markdown-it `text` tokens only — never code spans or code blocks. A bare `<br>` / `<br/>` / `<br />` becomes a line break (a space in a table row); every other tag stays escaped text (#786, keeps #713's posture). Bare filenames ending `.md` / `.sh` / `.py` become inline code so neither linkify nor Telegram clients auto-link them as domains (#788); explicit link text and real URLs are left alone. A GFM pipe table (a `|` line followed by a `|---|` delimiter row) keeps one row per line: row breaks become hardbreaks, the delimiter row is dropped and the header row is bolded; `split_markdown_body()` repeats the header when a table is split across chunks (#797).
 
+## Forward-coalesce command barrier (#807)
+
+A slash command sent while a prompt is pending in the `ForwardCoalescer` window
+(`telegram/loop.py`, `_apply_command_barrier`) is a barrier:
+
+- `/cancel`, `/new`, `/continue` → `ForwardCoalescer.drop(key, reason=<cmd>)`
+  (INFO `forward.prompt.dropped`) and a reply to the dropped prompt:
+  `🗑️ Dropped N message(s) sent just before /<cmd> — …`. Never drop silently (#794).
+- any other command → `ForwardCoalescer.flush(key, reason="command")` first.
+  **Best-effort ordering only:** the prompt is dispatched via `start_soon` and
+  awaits prefs/context, so a `/model` or `/planmode` right behind it can still
+  apply to it. Don't document or test it as a strict guarantee.
+- `/<engine>` / `/<project>` directives and `/steer <text>` are prompts — they
+  skip the barrier and meet the #794 merge/flush rules.
+
 ## Plan outline rendering
 
 Plan outlines render as formatted Telegram text via `render_markdown()` + `split_markdown_body()`. Approval buttons (✅/❌/📋) appear on the last outline message. Outline and notification messages are cleaned up on approve/deny via `_OUTLINE_REGISTRY`.

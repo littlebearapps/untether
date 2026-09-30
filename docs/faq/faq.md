@@ -101,6 +101,12 @@ Everything important — Telegram update offsets, active progress message refere
 
 Yes, with Claude Code. By default a message you send while a run is working is queued: it runs as the next turn once the current one finishes. Send `/steer <text>` instead and the message goes straight into the running turn. Claude reads it the next time a tool finishes and folds it into the answer it's already writing. You get a `↪️ Steered into the current run.` reply, and the progress message shows when Claude has picked it up. To make steer the default for a chat, send `/steer` on its own or use `/config` → Follow-up. `/queue` switches back, and `/queue <text>` queues a single message. Steering needs a permission mode (`/planmode`) so the session stays live. Files, forwards and other engines always queue, and Untether tells you when a steer couldn't be delivered. Full guide: [Steer follow-ups](https://untether.littlebearapps.com/how-to/steer-follow-ups/).
 
+## Why does Claude say its safeguards stopped a response?
+
+Anthropic runs real-time safeguards on Claude's responses. When one flags a request (most often in security-related work), the response is stopped and Claude Code reacts in one of three ways: it retries once on the same model, it switches to a fallback model, or it ends the turn without an answer. Untether shows which one happened. The progress message gets a `🛡️ <model> safeguards stopped a response` line with the outcome (`retried once`, `switched to <model>`, or `not retried`), and the final reply gets a matching `🛡️ safeguards stopped …` footer line. A safeguard stop is never reported as an error, and if the turn ended with no answer Untether says so rather than sending an empty message.
+
+The first time it happens in a session, the footer also carries a pointer to Anthropic's guidance. For cyber-security work that's the [real-time cyber safeguards article](https://support.claude.com/en/articles/14604842-real-time-cyber-safeguards-on-claude), which covers the Cyber Verification Program; otherwise it's Claude Code's [automatic model fallback](https://code.claude.com/docs/en/model-config#automatic-model-fallback) docs, which explain which model it switches to and the `switchModelsOnFlag` setting. If a request keeps getting stopped, rephrase it or pick a different model with `/model`. Untether doesn't bypass or retry around safeguards itself; it only makes the stop visible.
+
 ## How do I keep agents from spending too much money?
 
 Untether ships per-run and per-day cost budgets. In `untether.toml`:
