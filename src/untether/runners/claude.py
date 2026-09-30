@@ -1326,6 +1326,11 @@ class ClaudeStreamState:
     turn_command_uuid: str | None = None
     # Hints collected while idle, consumed when the next turn opens.
     pending_command_uuid: str | None = None
+    # #815: when the CLI announced the next turn (``command_lifecycle
+    # {started}``). The turn only opens on its first frame — for a tool-free
+    # turn that is the final assistant message, seconds later — so the
+    # TurnEvent carries the lead time for the bridge's elapsed header.
+    pending_turn_since: float | None = None
     turn_notifications: list[str] = field(default_factory=list)
     # #785: task ids behind ``turn_notifications`` (a notification for a task
     # the map doesn't know contributes a label but no id).
@@ -4670,6 +4675,12 @@ def _open_followup_turn(
     state.turn_reason = reason
     state.turn_command_uuid = command_uuid if reason == "followup" else None
     state.pending_command_uuid = None
+    started_ago_s = (
+        max(0.0, time.monotonic() - state.pending_turn_since)
+        if state.pending_turn_since is not None
+        else None
+    )
+    state.pending_turn_since = None
     state.turn_notifications = []
     state.turn_notification_ids = []
     state.turn_ended_tasks = []
@@ -4699,6 +4710,7 @@ def _open_followup_turn(
         reason=reason,  # type: ignore[arg-type]
         command_uuid=state.turn_command_uuid,
         detail=detail,
+        started_ago_s=started_ago_s,
     )
 
 
@@ -4823,6 +4835,8 @@ def translate_claude_event(
         case claude_schema.StreamCommandLifecycleMessage(state=cmd_state):
             if cmd_state == "started" and not state.turn_open:
                 state.pending_command_uuid = event.command_uuid
+                if state.pending_turn_since is None:
+                    state.pending_turn_since = time.monotonic()
             return []
         case claude_schema.StreamSystemMessage(subtype=subtype):
             if subtype == "task_notification" and not state.turn_open:

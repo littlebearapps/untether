@@ -30,6 +30,7 @@ _ENV = (
     "FAKE_CLAUDE_WAKE_S",
     "FAKE_CLAUDE_SESSION_ID",
     "FAKE_CLAUDE_TASK_END",
+    "FAKE_CLAUDE_FOLLOWUP_DELAY_S",
 )
 
 
@@ -152,6 +153,26 @@ async def test_followup_turn_attributed_by_command_uuid() -> None:
     start, end = _turns(events)
     assert start.reason == "followup" and start.command_uuid == cmd
     assert end.answer == "ECHO: second" and end.command_uuid == cmd
+
+
+async def test_815_followup_turn_carries_its_lead_time() -> None:
+    """The real CLI announces a follow-up (``command_lifecycle{started}``)
+    and sends no ``init``: a tool-free turn's first frame is its answer, so
+    the turn opens late. The TurnEvent must say how long it had been running
+    (the bridge times the header from it) — not ~0."""
+    os.environ["FAKE_CLAUDE_FOLLOWUP_DELAY_S"] = "0.6"
+    cmd = str(uuid.uuid4())
+
+    async def inject(evt: Any, runner: ClaudeRunner) -> None:
+        if isinstance(evt, CompletedEvent):
+            assert await write_user_message(SID, "second", command_uuid=cmd)
+
+    events = await _collect("followup", until=2, on_event=inject)
+    start, end = _turns(events)
+    assert start.reason == "followup" and start.command_uuid == cmd
+    assert start.started_ago_s is not None and start.started_ago_s >= 0.5
+    assert end.started_ago_s is None
+    assert end.answer == "ECHO: second"
 
 
 async def test_stdin_not_closed_at_first_result() -> None:

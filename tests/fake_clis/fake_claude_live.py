@@ -32,6 +32,11 @@ WAKE_S = float(os.environ.get("FAKE_CLAUDE_WAKE_S", "0.3"))
 # #510: hold the first turn's result so a concurrent spawn lands in between.
 RESULT_DELAY_S = float(os.environ.get("FAKE_CLAUDE_RESULT_DELAY_S", "0"))
 
+# #815: a follow-up's think time before its first frame. When set, the
+# follow-up turn skips ``init`` (as CLI 2.1.28x does), so the turn's first
+# frame is its answer — the tool-free shape whose header read ``0s``.
+FOLLOWUP_DELAY_S = float(os.environ.get("FAKE_CLAUDE_FOLLOWUP_DELAY_S", "0"))
+
 # #775: how long the steer scenarios wait for a steered user line.
 STEER_WAIT_S = float(os.environ.get("FAKE_CLAUDE_STEER_WAIT_S", "5"))
 
@@ -230,7 +235,10 @@ def serve_followups() -> None:
         lifecycle(cmd, "queued")
         lifecycle(cmd, "started")
         flush_withheld()  # #812: withheld async-hook responses land now
-        init()
+        if FOLLOWUP_DELAY_S > 0:
+            time.sleep(FOLLOWUP_DELAY_S)
+        else:
+            init()
         text(f"ECHO: {user_text(obj)}")
         result(f"ECHO: {user_text(obj)}")
     shutdown()

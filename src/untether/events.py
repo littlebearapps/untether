@@ -191,6 +191,7 @@ class EventFactory:
         reason: TurnReason = "unknown",
         command_uuid: str | None = None,
         detail: dict[str, Any] | None = None,
+        started_ago_s: float | None = None,
     ) -> TurnEvent:
         return TurnEvent(
             engine=self.engine,
@@ -200,6 +201,7 @@ class EventFactory:
             resume=self._resume,
             command_uuid=command_uuid,
             detail=detail or {},
+            started_ago_s=started_ago_s,
         )
 
     def turn_completed(

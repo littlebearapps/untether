@@ -1167,3 +1167,69 @@ def test_812_closing_notice_hooks_and_tasks_both_named() -> None:
     first, second = text.split("\n")
     assert "background hook (Stop)" in first
     assert second == rb._live_closing_notice("max_hold", ["a"])
+
+
+# ── #815: a turn's final header times it from when the CLI started it ─────
+
+
+async def _timed_turn_final(*turn_steps: Emit, answer: str) -> str:
+    """Run a live session whose first result lands at t=100 on a fake clock,
+    then ``turn_steps`` (which move the clock via ``Emit(at=…)``); return the
+    turn's final text."""
+    clock = _FakeClock(start=100.0)
+    first = CompletedEvent(engine="claude", resume=_TOKEN, ok=True, answer="FIRST")
+    transport = FakeTransport()
+    runner = ScriptRunner(
+        [
+            Emit(StartedEvent(engine="claude", resume=_TOKEN), at=100.0),
+            Emit(first, at=100.0),
+            *turn_steps,
+        ],
+        engine="claude",
+        resume_value=_TOKEN.value,
+        advance=clock.set,
+    )
+    cfg = ExecBridgeConfig(
+        transport=transport, presenter=MarkdownPresenter(), final_notify=True
+    )
+    await handle_message(
+        cfg,
+        runner=runner,
+        incoming=IncomingMessage(channel_id=1, message_id=10, text="go"),
+        resume_token=None,
+        clock=clock,
+    )
+    calls = [*transport.send_calls, *transport.edit_calls]
+    finals = [c["message"].text for c in calls if answer in c["message"].text]
+    assert len(finals) == 1
+    return finals[0]
+
+
+async def test_815_tool_free_followup_turn_header_shows_its_real_elapsed() -> None:
+    """The CLI announced the follow-up 7 s before its first frame (the
+    answer itself, for a tool-free turn): the header must say 7s, not 0s."""
+    final = await _timed_turn_final(
+        Emit(_turn("started", reason="followup", started_ago_s=7.0), at=200.0),
+        Emit(
+            _turn("completed", reason="followup", ok=True, answer="TOOL-FREE"),
+            at=200.0,
+        ),
+        answer="TOOL-FREE",
+    )
+    assert "· 7s" in final
+    assert "· 0s" not in final
+    assert final.count(TURN_COMPLETE_MARKER) == 1
+
+
+async def test_815_tool_using_turn_elapsed_unchanged() -> None:
+    final = await _timed_turn_final(
+        Emit(_turn("started", reason="followup"), at=200.0),
+        Emit(_action(), at=201.0),
+        Emit(
+            _turn("completed", reason="followup", ok=True, answer="WITH-TOOL"),
+            at=205.0,
+        ),
+        answer="WITH-TOOL",
+    )
+    assert "· 5s" in final
+    assert final.count(TURN_COMPLETE_MARKER) == 1

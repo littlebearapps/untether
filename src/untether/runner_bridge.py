@@ -4284,7 +4284,9 @@ class FollowupTurnRouter:
             reason=evt.reason,
             tracker=self._new_tracker(),
             reply_to=anchor or self._default_reply_to,
-            started_at=self._clock(),
+            # #815: time the turn from when the CLI started it, not from its
+            # first frame — a tool-free turn's first frame is its answer.
+            started_at=self._clock() - max(0.0, evt.started_ago_s or 0.0),
             notify=notify,
             header=_turn_header(evt),
             command_uuid=evt.command_uuid,
