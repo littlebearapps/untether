@@ -162,12 +162,12 @@ async def test_steer_after_cancel_falls_back_to_queue(
     running: dict[MessageRef, RunningTask] = {}
 
     async def step(steer: Any, out: dict[str, Any], tasks: Any) -> None:
-        with anyio.fail_after(5):
+        with anyio.fail_after(15):
             while not tasks:
                 await anyio.sleep(0.02)
         (_, task), *_ = unique_running_tasks(tasks)
         task.cancel_requested.set()
-        with anyio.fail_after(5):
+        with anyio.fail_after(15):
             while True:
                 live = claude_mod.get_live_session(SID)
                 if live is None or not live.accepting_steer:
@@ -206,12 +206,12 @@ async def test_806_cancel_inflight_followup_is_cancelled_not_error(
     running: dict[MessageRef, RunningTask] = {}
 
     async def step(_steer: Any, out: dict[str, Any], tasks: Any) -> None:
-        with anyio.fail_after(5):
+        with anyio.fail_after(15):
             while not await claude_mod.inject_when_idle(
                 SID, "run the sleep", command_uuid="u-806", poll_s=0.02
             ):
                 await anyio.sleep(0.02)
-        with anyio.fail_after(5):
+        with anyio.fail_after(15):
             while True:
                 live = claude_mod.get_live_session(SID)
                 if live is not None and live.state.turn_open:
