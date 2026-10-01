@@ -1367,6 +1367,31 @@ def _flatten_exception_group(error: BaseException) -> list[BaseException]:
     return [error]
 
 
+async def _close_runner_events(events: object) -> None:
+    """Close a runner's event generator in the calling task.
+
+    No new cancel scope around the close: while the generator is suspended
+    at a ``yield`` inside its own task group (Claude's ``run_impl``), that
+    group's scope is still this task's current scope, so a scope opened here
+    would exit after it and anyio raises "Attempted to exit a cancel scope
+    that isn't the current tasks's current cancel scope" (rc15 integration
+    finding). Teardown under a pending cancel is the same path every
+    ``/cancel`` already takes. The task group reports the close as a group
+    of ``GeneratorExit``/cancellation, which is a clean close here.
+    """
+    aclose = getattr(events, "aclose", None)
+    if aclose is None:
+        return
+    cancel_exc = anyio.get_cancelled_exc_class()
+    try:
+        await aclose()
+    except BaseExceptionGroup as eg:
+        leaves = _flatten_exception_group(eg)
+        if not all(isinstance(e, (GeneratorExit, cancel_exc)) for e in leaves):
+            raise
+        logger.debug("runner.events_closed", leaves=len(leaves))
+
+
 _RESUME_LINE_MARKER = "\n\n\u21a9\ufe0f "  # ↩️ with variation selector
 
 
@@ -4073,22 +4098,18 @@ async def run_runner_with_cancel(
                         await edits.on_event(evt)
                 finally:
                     # #614: close the runner generator in THIS task. When the
-                    # async-for is abandoned mid-body (e.g. /cancel lands
-                    # while on_completed is awaiting), the generator is left
-                    # suspended at a yield and would be finalized later by
-                    # the event loop's async-generator hook in a DIFFERENT
+                    # async-for is abandoned mid-body (e.g. a cancel lands
+                    # while a Telegram send is stalled), the generator is
+                    # left suspended at a yield and would be finalized later
+                    # by the event loop's async-generator hook in a DIFFERENT
                     # task — and run_impl's anyio task group then raises
                     # "Attempted to exit cancel scope in a different task
-                    # than it was entered in" as an unretrieved task
-                    # exception. Shielded so the pending bridge-level
-                    # cancellation can't interrupt generator teardown
-                    # (subprocess kill, registry cleanup); bounded so a
-                    # wedged teardown can't hang the bridge.
-                    aclose = getattr(events, "aclose", None)
-                    if aclose is not None:
-                        with anyio.move_on_after(30, shield=True):
-                            await aclose()
-                    runner_finished.set()
+                    # than it was entered in". The base runner's wrappers
+                    # close run_impl with ``aclosing`` so this reaches it.
+                    try:
+                        await _close_runner_events(events)
+                    finally:
+                        runner_finished.set()
                     tg.cancel_scope.cancel()
 
             async def wait_cancel(task: RunningTask) -> None:

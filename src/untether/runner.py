@@ -89,13 +89,20 @@ class SessionLockMixin:
             raise RuntimeError(
                 f"resume token is for engine {resume_token.engine!r}, not {self.engine!r}"
             )
+        # ``aclosing``: closing this wrapper must close the inner generator in
+        # the same task. A bare ``async for`` leaves it suspended at its yield
+        # (inside run_impl's task group) for the event loop to finalise in
+        # another task, which raises "Attempted to exit cancel scope in a
+        # different task" (rc15 integration finding; #614 closed only the
+        # outermost generator).
         if resume_token is None:
-            async for evt in run_fn(prompt, resume_token):
-                yield evt
+            async with contextlib.aclosing(run_fn(prompt, resume_token)) as events:
+                async for evt in events:
+                    yield evt
             return
         lock = self.lock_for(resume_token)
-        async with lock:
-            async for evt in run_fn(prompt, resume_token):
+        async with lock, contextlib.aclosing(run_fn(prompt, resume_token)) as events:
+            async for evt in events:
                 yield evt
 
 
@@ -387,8 +394,11 @@ class BaseRunner(SessionLockMixin):
         # ``"<engine>:"`` lock. Treat it like a new run instead: lock the real
         # session id once the StartedEvent names it (#817).
         if resume is not None and not resume.is_continue:
-            async for evt in self.run_with_resume_lock(prompt, resume, self.run_impl):
-                yield evt
+            async with contextlib.aclosing(
+                self.run_with_resume_lock(prompt, resume, self.run_impl)
+            ) as events:
+                async for evt in events:
+                    yield evt
             return
         if resume is not None and resume.engine != self.engine:
             raise RuntimeError(
@@ -398,17 +408,19 @@ class BaseRunner(SessionLockMixin):
         lock: anyio.Semaphore | None = None
         acquired = False
         try:
-            async for evt in self.run_impl(prompt, resume):
-                if lock is None and isinstance(evt, StartedEvent):
-                    lock = self.lock_for(evt.resume)
-                    await lock.acquire()
-                    acquired = True
-                    _lock_logger.debug(
-                        "session_lock.acquired",
-                        session_id=evt.resume.value,
-                        engine=str(self.engine),
-                    )
-                yield evt
+            # ``aclosing``: see ``run_with_resume_lock``.
+            async with contextlib.aclosing(self.run_impl(prompt, resume)) as events:
+                async for evt in events:
+                    if lock is None and isinstance(evt, StartedEvent):
+                        lock = self.lock_for(evt.resume)
+                        await lock.acquire()
+                        acquired = True
+                        _lock_logger.debug(
+                            "session_lock.acquired",
+                            session_id=evt.resume.value,
+                            engine=str(self.engine),
+                        )
+                    yield evt
         finally:
             if acquired and lock is not None:
                 lock.release()

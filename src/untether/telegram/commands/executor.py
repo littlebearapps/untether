@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import contextlib
 from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
 from dataclasses import dataclass
 from functools import partial
@@ -89,8 +90,11 @@ class _PreludeRunner:
     ) -> AsyncIterator[UntetherEvent]:
         for event in self.prelude_events:
             yield event
-        async for event in self.runner.run(prompt, resume):
-            yield event
+        # ``aclosing`` so closing this wrapper also closes the runner's
+        # generator in the same task (see ``BaseRunner.run_with_resume_lock``).
+        async with contextlib.aclosing(self.runner.run(prompt, resume)) as events:
+            async for event in events:
+                yield event
 
 
 def _reasoning_note(engine: str, message: str) -> ActionEvent:
@@ -125,7 +129,8 @@ def _resolve_reasoning_override(
         logger.info(
             "run.reasoning.unsupported_level_ignored",
             engine=engine,
-            level=level,
+            # Not ``level=``: structlog's add_log_level overwrites that key.
+            reasoning_level=level,
             allowed=list(allowed_reasoning_levels(engine)),
         )
         message = (
