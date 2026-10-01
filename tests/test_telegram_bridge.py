@@ -1904,7 +1904,7 @@ async def test_run_engine_drops_stale_minimal_before_runner() -> None:
     ]
     assert len(ignored) == 1
     assert ignored[0]["engine"] == CODEX_ENGINE
-    assert ignored[0]["level"] == "minimal"
+    assert ignored[0]["reasoning_level"] == "minimal"
 
 
 def test_resolve_reasoning_override_unsupported_level_is_dropped() -> None:
@@ -1926,7 +1926,7 @@ def test_resolve_reasoning_override_unsupported_level_is_dropped() -> None:
     ]
     assert len(events) == 1
     assert events[0]["engine"] == "codex"
-    assert events[0]["level"] == "minimal"
+    assert events[0]["reasoning_level"] == "minimal"
 
 
 def test_resolve_reasoning_override_presanitised_input_same_note() -> None:

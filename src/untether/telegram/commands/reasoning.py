@@ -197,7 +197,7 @@ async def _handle_reasoning_command(
             "reasoning.set",
             chat_id=msg.chat_id,
             engine=engine,
-            level=normalized_level,
+            reasoning_level=normalized_level,
             scope=scope,
             command="reasoning",
         )

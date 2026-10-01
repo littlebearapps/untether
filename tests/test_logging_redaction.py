@@ -202,3 +202,26 @@ class TestRedactGenericSecrets:
         assert out["children"][0]["cmd"] == "npm exec firecrawl-mcp"
         assert "eyJhbGci" not in out["children"][1]["cmd"]
         assert out["child_count"] == 2
+
+
+def test_no_log_call_passes_a_level_field() -> None:
+    """structlog's ``add_log_level`` writes the log level into ``level``, so a
+    ``level=`` field on a log call is silently overwritten (rc15 integration
+    finding: ``run.reasoning.unsupported_level_ignored`` lost its value)."""
+    import ast
+    from pathlib import Path
+
+    src = Path(__file__).resolve().parents[1] / "src" / "untether"
+    methods = {"debug", "info", "warning", "warn", "error", "exception", "critical"}
+    offenders = [
+        f"{path.relative_to(src)}:{node.lineno}"
+        for path in src.rglob("*.py")
+        for node in ast.walk(ast.parse(path.read_text(encoding="utf-8")))
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr in methods
+        and isinstance(node.func.value, ast.Name)
+        and "log" in node.func.value.id.lower()
+        and any(kw.arg == "level" for kw in node.keywords)
+    ]
+    assert offenders == []

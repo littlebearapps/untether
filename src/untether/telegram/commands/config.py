@@ -1470,7 +1470,7 @@ async def _page_reasoning(ctx: CommandContext, action: str | None = None) -> Non
                 "config.reasoning.unsupported_level",
                 chat_id=chat_id,
                 engine=current_engine,
-                level=level,
+                reasoning_level=level,
                 allowed=sorted(allowed),
             )
             await _page_home(ctx)
@@ -1495,7 +1495,7 @@ async def _page_reasoning(ctx: CommandContext, action: str | None = None) -> Non
             "config.reasoning.set",
             chat_id=chat_id,
             engine=current_engine,
-            level=level,
+            reasoning_level=level,
         )
         await _page_home(ctx)
         return
