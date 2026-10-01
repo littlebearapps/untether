@@ -98,10 +98,12 @@ def _path_access_error(
     """Map a refused :func:`check_path_access` result to the reply text."""
     if check.reason in {"denied", "hidden"}:
         _log_path_denied(direction, requested, check)
-        rule = check.rule if check.rule is not None else "hidden path"
+        # Code spans: replies are rendered as Markdown, so a glob such as
+        # ``**/.ssh/**`` would otherwise lose its ``**`` pairs to bold.
+        rule = f"`{check.rule}`" if check.rule is not None else "hidden path"
         text = f"path denied by rule: {rule}"
         if check.via_symlink and check.resolved is not None:
-            text = f"{text} (resolves to {check.resolved.as_posix()})"
+            text = f"{text} (resolves to `{check.resolved.as_posix()}`)"
         return text
     if check.reason == "unresolvable":
         return f"{kind} path could not be resolved (symlink loop?)."
@@ -321,7 +323,7 @@ async def _save_document_payload(
                     name=name,
                     rel_path=None,
                     size=None,
-                    error=f"path denied by rule: {deny_rule}",
+                    error=f"path denied by rule: `{deny_rule}`",
                 )
             name = target.name
     payload = await cfg.bot.download_file(file_path)

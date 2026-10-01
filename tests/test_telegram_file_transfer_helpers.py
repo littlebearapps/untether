@@ -144,7 +144,7 @@ async def test_save_document_payload_denied_path(tmp_path: Path) -> None:
         force=False,
     )
 
-    assert result.error == "path denied by rule: .git/**"
+    assert result.error == "path denied by rule: `.git/**`"
 
 
 @pytest.mark.anyio
@@ -296,7 +296,7 @@ def test_resolve_file_put_paths_denied_rule(tmp_path: Path) -> None:
 
     assert base_dir is None
     assert rel_path is None
-    assert error == "path denied by rule: .env"
+    assert error == "path denied by rule: `.env`"
 
 
 def test_resolve_file_put_paths_target_is_file(tmp_path: Path) -> None:
@@ -1281,8 +1281,8 @@ async def test_save_document_payload_denies_symlink_into_git(tmp_path: Path) -> 
     )
 
     assert result.error is not None
-    assert result.error.startswith("path denied by rule: .git/**")
-    assert "resolves to .git/hooks/pre-commit" in result.error
+    assert result.error.startswith("path denied by rule: `.git/**`")
+    assert "resolves to `.git/hooks/pre-commit`" in result.error
     assert not (tmp_path / ".git" / "hooks" / "pre-commit").exists()
 
 
@@ -1305,7 +1305,7 @@ async def test_save_document_payload_uploads_dir_symlinked_to_git_hooks(
     )
 
     assert result.error is not None
-    assert result.error.startswith("path denied by rule: .git/**")
+    assert result.error.startswith("path denied by rule: `.git/**`")
     assert not (tmp_path / ".git" / "hooks" / "pre-commit").exists()
 
 
@@ -1327,7 +1327,7 @@ async def test_save_document_payload_force_via_symlink_to_env_denied(
         force=True,
     )
 
-    assert result.error == "path denied by rule: .env (resolves to .env)"
+    assert result.error == "path denied by rule: `.env` (resolves to `.env`)"
     assert (tmp_path / ".env").read_text(encoding="utf-8") == "SECRET"
 
 
@@ -1421,7 +1421,7 @@ def test_resolve_file_put_paths_symlinked_dir_into_git_denied(
     assert result == (
         None,
         None,
-        "path denied by rule: .git/** (resolves to .git/hooks)",
+        "path denied by rule: `.git/**` (resolves to `.git/hooks`)",
     )
 
 
@@ -1594,3 +1594,28 @@ async def test_path_denied_log_info_without_symlink(tmp_path: Path) -> None:
     assert denied[0]["direction"] == "get"
     assert denied[0]["via_symlink"] is False
     assert denied[0]["log_level"] == "info"
+
+
+def test_path_denied_reply_keeps_glob_stars_when_rendered() -> None:
+    # Replies go through Markdown; a bare ``**/.ssh/**`` used to render as a
+    # bold ``/.ssh/`` (rc15 integration finding, R15-3c).
+    from untether.markdown import MarkdownParts
+    from untether.telegram.files import PathAccess
+    from untether.telegram.render import prepare_telegram
+
+    check = PathAccess(
+        root=Path("/repo"),
+        target=None,
+        rel=None,
+        reason="denied",
+        rule="**/.ssh/**",
+        via_symlink=True,
+        resolved=Path("r15/real/.ssh/key.txt"),
+    )
+    text = transfer._path_access_error(
+        "put", Path("r15/keys/key.txt"), check, kind="upload"
+    )
+    rendered, _entities = prepare_telegram(MarkdownParts(header=text))
+    assert rendered == (
+        "path denied by rule: **/.ssh/** (resolves to r15/real/.ssh/key.txt)"
+    )

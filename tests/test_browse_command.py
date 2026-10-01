@@ -625,7 +625,7 @@ class TestDirectArgs:
         (tmp_path / ".env").write_text("x")
         _, result = await _handle("notes.txt", tmp_path, globs=("**/*.txt",))
         assert result is not None
-        assert result.text == "Path denied by rule: **/*.txt"
+        assert result.text == "Path denied by rule: `**/*.txt`"
         _, result = await _handle(".env", tmp_path, globs=("**/*.txt",))
         assert result is not None
         assert result.text == "Hidden paths can't be browsed."
@@ -641,7 +641,7 @@ class TestDirectArgs:
         with patch(ROOT_PATCH, return_value=tmp_path):
             result = await BrowseCommand().handle(ctx)  # type: ignore[arg-type]
         assert result is not None
-        assert result.text == "Path denied by rule: .env"
+        assert result.text == "Path denied by rule: `.env`"
 
 
 # ---------------------------------------------------------------------------
@@ -719,7 +719,7 @@ class TestListingAndCallbacks:
         pid = _register_path(CHAT, str(tmp_path.resolve() / ".env"))
         ctx, result = await _handle(f"f:{pid}", tmp_path)
         assert result is not None
-        assert result.text == "Path denied by rule: .env"
+        assert result.text == "Path denied by rule: `.env`"
         ctx.executor.send.assert_not_called()
 
     @pytest.mark.anyio
