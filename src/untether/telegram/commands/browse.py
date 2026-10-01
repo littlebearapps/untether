@@ -411,9 +411,7 @@ class BrowseCommand:
             chat_id=chat_id,
         )
         if check.reason == "denied":
-            return CommandResult(
-                text=f"Path denied by rule: `{check.rule}`", notify=True
-            )
+            return CommandResult(text=f"Path denied by rule: {check.rule}", notify=True)
         if check.reason == "hidden":
             return CommandResult(text="Hidden paths can't be browsed.", notify=True)
         return CommandResult(
