@@ -1,5 +1,6 @@
 ---
-applies_to: "tests/**"
+paths:
+  - "tests/**"
 ---
 
 # Testing Conventions
@@ -78,50 +79,15 @@ assert all(isinstance(e, ActionEvent) for e in events[1:-1])
 
 ## Integration testing (MANDATORY before releases)
 
-Unit tests cover code paths but NOT live Telegram interaction. Before every version bump, run integration tests against `@untether_dev_bot`. See `docs/reference/integration-testing.md` for the full playbook and `.claude/rules/release-discipline.md` for tier requirements per release type.
+Unit tests don't cover live Telegram interaction. Before every version bump, drive `@untether_dev_bot` via the Telegram
+MCP tools (`send_message`, `get_history`, `list_inline_buttons`, `press_inline_button`, `reply_to_message`, `send_voice`,
+`send_file`) plus Bash (`journalctl`, `kill -TERM`). Chat IDs, tiers and the full pattern:
+`docs/reference/integration-testing.md`; tier requirements per release type: `.claude/rules/release-discipline.md`.
+The Gemini/AMP chats are deprecated and in no required tier. After a run, check dev logs and file issues for Untether
+bugs (watch for phantom responses, cross-session contamination, wrong engine, disproportionate cost); note upstream
+engine quirks separately.
 
-## Integration testing via Telegram MCP
+## Test catalog
 
-Integration tests are automated via Telegram MCP tools by Claude Code during the release process. See `docs/reference/integration-testing.md` for the full playbook.
-
-### Test chats
-
-| Chat | Chat ID | Bot API chat_id |
-|------|---------|-----------------|
-| Claude Code | `5284581592` | `-5284581592` |
-| Codex CLI | `4929463515` | `-4929463515` |
-| OpenCode | `5200822877` | `-5200822877` |
-| Pi | `5156256333` | `-5156256333` |
-| Gemini CLI ⚠️ deprecated | `5207762142` | `-5207762142` |
-| AMP CLI ⚠️ deprecated | `5230875989` | `-5230875989` |
-
-The two deprecated chats are **not** part of any required tier — both engines are
-non-functional upstream and cannot pass U1. Use them for opt-in spot checks only.
-
-### Pattern
-
-1. `send_message` — send test prompt or command to engine chat
-2. Wait for bot response (sleep or poll)
-3. `get_history`/`get_messages` — read back response, verify content
-4. `list_inline_buttons` → `press_inline_button` for interactive tests
-5. `reply_to_message` for resume/session continuation tests
-
-### Log inspection and issue creation
-
-After integration tests, use Bash tool to check dev bot logs for warnings/errors and create GitHub issues for any Untether bugs found. Distinguish Untether bugs from upstream engine API errors.
-
-### Detecting unexpected engine behaviour
-
-Watch for phantom responses (substantive output from empty input), session cross-contamination, wrong engine running, or disproportionate cost. Note the engine, chat ID, message IDs, and exact behaviour. Create a GitHub issue if the root cause is in Untether; note as an engine quirk if upstream.
-
-### Additional MCP tools
-
-- `send_voice` — OGG/Opus voice files for voice message tests
-- `send_file` — file upload/media group tests
-- Bash tool — `kill -TERM` for SIGTERM tests, `journalctl` for log inspection
-
-All integration test tiers are fully automatable by Claude Code.
-
-## Key test files
-
-The full coverage matrix lives in [`docs/reference/integration-testing.md`](../../docs/reference/integration-testing.md) (per-tier playbook) and the README `## Tests` section in [`CLAUDE.md`](../../CLAUDE.md) (per-file coverage list, kept in sync with the test suite). When adding a new test file, update that list — not this rule.
+Per-file coverage lives in `docs/reference/test-catalog.md`. **When adding or substantially changing a test file,
+update its entry there** — not this rule, and not `CLAUDE.md`.

@@ -1,0 +1,197 @@
+# Feature & file catalog (developer reference)
+
+Moved out of `CLAUDE.md` (2026-10-01) so it no longer loads into every Claude Code
+session. Read this when you need the detail on a feature, a file's purpose, or the
+per-engine reference docs. **Add new feature bullets here, not to `CLAUDE.md`.**
+
+## Features (vs upstream takopi)
+
+- **Interactive permission control** — bidirectional Telegram buttons for tool approval, plan mode, and clarifying questions
+- **Pause & Outline Plan** — third button on plan approval; the outline (chat text, or the ExitPlanMode `plan` input on plan-file CLIs, #659) is posted with Approve/Deny/Let's discuss buttons (hold-open keeps session alive while user reads); the v2.1.72-74-era progressive cooldown was retired in #570 (upstream retry loop fixed, verified on CLI 2.1.215)
+- **Agent context preamble** — configurable prompt preamble tells agents they're on Telegram and requests structured end-of-task summaries; `[preamble]` config section
+- **`/planmode`** — toggle permission mode per chat (on/plan-auto/auto/off). `auto` is Claude Code's own classifier-gated auto mode; `plan-auto` is Untether's plan-gate sugar, renamed from `auto` in 0.35.5rc8 because it shadowed the CLI's mode (#741). Full mode table in `docs/reference/runners/claude/runner.md` → "Permission modes"
+- **Permission modes that prompt, actually prompt** (#749, 0.35.5rc9) — `default`, `manual` and `acceptEdits` previously behaved like `bypassPermissions`: `--allowedTools Bash,Read,Edit,Write` pre-approved them at the CLI's stage 5, and the control handler blanket-approved whatever still reached stage 6. Both halves are now mode-aware — the allowlist is not sent, and every tool routes to a Telegram approval. Autonomous modes (`plan`, `plan-auto`, `auto`, `dontAsk`, `bypassPermissions`) are deliberately unchanged: gating them would raise a button per `Glob`/`Grep` in plan mode for no safety gain. `is_claude_prompting_mode()` in `runners/run_options.py` is the single classification point. #751 (0.35.5rc15, security): the first `system/init.permissionMode` is compared with the requested mode — a mismatch (e.g. `auto` on Haiku, which the CLI silently runs as `default`) shows a `⚠️ Asked for … mode` row, logs `claude.permission_mode.mismatch` and re-arms `prompting_mode` when the CLI actually runs a prompting mode (never disarms); `permission_audit.py` logs `claude.permission_mode.auto_semantics_changed` / `trigger.unattended_approval_risk` / `trigger.cron.permission_mode_invalid` at startup and on each reload that changes them, and `telegram/loop.py` logs `trigger.unattended_approval_risk phase=dispatch` when a cron/webhook reaches Claude in a tap-waiting mode
+- **`/listen`** — set listen mode (`all` / `mentions`) per chat or topic; controls when the bot responds in groups; renamed from `/trigger` in v0.35.3 (#297) to disambiguate from webhook/cron triggers — `/trigger` still works as a deprecated alias for one release cycle
+- **Ask mode** — interactive AskUserQuestion with option buttons, sequential multi-question flows, and `/config` toggle; Claude-only
+- **Early callback answering** — clears button spinners immediately instead of waiting for processing, and a late tap is answered truthfully (`Already answered` / `No longer needed` / `This request has expired`, #685)
+- **Approval push notifications** — separate notify message when approval buttons appear
+- **Ephemeral message cleanup** — approval-related messages auto-delete when run finishes
+- **Bold formatting** — command responses use HTML bold for key values
+- **`/usage`** — Claude: subscription usage (5h/weekly quota); other engines: the chat's last-session token totals — session total, last run, run count (#417)
+- **`/export`** — exports session transcript as markdown or JSON
+- **`/browse`** — navigate project files via inline keyboard buttons
+- **Cost tracking and budget** — per-run and daily cost limits with configurable alerts
+- **Subscription usage footer** — configurable `[footer]` to show 5h/weekly subscription usage instead of/alongside API costs
+- **Graceful restart** — `/restart` command drains active runs before restarting; SIGTERM also triggers graceful drain
+- **Compact startup message** — version number, conditional diagnostics (only shows mode/topics/triggers/engines when they carry signal), project count instead of full list
+- **Workflow mode indicator** — startup message shows `mode: assistant`, `mode: workspace`, or `mode: handoff`; derived from `session_mode` + `topics.enabled`
+- **Model/mode footer** — final messages show model name + permission mode (e.g. `🏷 sonnet · plan`) from `StartedEvent.meta`; all engines populate model info
+- **`/verbose`** — toggle verbose progress mode per chat; shows tool details (file paths, commands, patterns) in progress messages
+- **`/config`** — inline settings menu with navigable sub-pages; toggle plan mode, ask mode, verbose, engine, trigger via buttons
+- **`[progress]` config** — global verbosity and max_actions settings in `untether.toml`; `show_context_usage` toggles the `% ctx` header segment (#819)
+- **Pi context compaction** — `AutoCompactionStart`/`AutoCompactionEnd` events rendered as progress actions
+- **Stall diagnostics & liveness watchdog** — `/proc` process diagnostics (CPU, RSS, TCP, FDs), progressive stall warnings with Telegram notifications, liveness watchdog for alive-but-silent subprocesses, stall auto-cancel (dead process, no-PID zombie, absolute cap) with CPU-active suppression (sleeping-process aware — shows tool name when main process waiting on child), tool-active repeat suppression (first warning fires, repeats suppressed while child CPU-active), MCP tool-aware threshold (15 min for network-bound MCP calls vs 10 min for local tools) with contextual "MCP tool running: {server}" messaging, `session.summary` structured log; `rate_limit_event` models the CLI's real quota snapshot (#790) — only `status=rejected` (not covered by overage) latches a throttle, until `resetsAt`; `allowed` heartbeats and bare events no longer fake a 60s wait (retires the #657 guess); `system/api_retry` back-offs render as `🔁 API error … retrying in Ns` and count as an expected wait (#792); live-idle holds never raise stall warnings and are reported as `peak_live_idle_seconds`, not `peak_idle_seconds` (#787), counting only idle gaps between turns (#811); `[watchdog]` config section with configurable `tool_timeout`, `mcp_tool_timeout`, `rearm_plan_mode` (#383), and `stream_idle_auto_retry`/`stream_idle_max_retries` (#572 — bounded auto-resume of Type-A mid-generation API stalls, default off; Type-B never retries), `live_sessions`, `hold_for_async_hooks`/`async_hook_max_hold` (#812), `detect_unanswerable_control_requests` (#684); detect-only `control_request.unanswerable` WARN for a control request pending past `tool_timeout` with no answerable surface (no `claude_control:`/`aq:` button, no text-reply route, or no stdin writer), and the CLI's `control_cancel_request` retires the request (keyboard stripped, a late tap says "No longer needed", it no longer pauses the live session) — #684
+- **Auto-continue** — detects Claude Code sessions that exit after receiving tool results without processing them (upstream bugs #34142, #30333) and auto-resumes; suppressed on signal deaths (rc=143/SIGTERM, rc=137/SIGKILL) to prevent death spirals under memory pressure; configurable via `[auto_continue]` with `enabled` (default true) and `max_retries` (default 1)
+- **Live sessions** (#776, 0.35.5rc11) — a Claude process stays live after its reply while background work runs. The runner keeps reading past `result`, tracks background work from the CLI's own `system/task_*` events (native task map; #374/#646/#662), and emits each later turn (background task finished / Monitor tick / ScheduleWakeup / injected follow-up) as a `TurnEvent` segment that the bridge delivers as its own Telegram message (`🔔 Background task finished — …`, `📡 Monitor — …`, `⏰ Scheduled wake-up`, `🪝 Hook feedback — …`; `TurnReason` = `task_finished`/`monitor_event`/`scheduled_wakeup`/`followup`/`hook_rewake`/`unknown`; approvals work inside wake turns). Follow-ups to a live session are written into its stdin (queue semantics, attributed via `command_lifecycle.command_uuid`) instead of `--resume` (#647). The lifecycle closes stdin gracefully when idle (60 s), after the background hold (1800 s with no background activity — a turn, an agent's `task_progress` frame, a subagent's foreground tool starting/ending/running, or a background Bash's output file growing; #829, `latest_background_progress`, kill switch `[watchdog] bg_hold_rearm_on_progress`) or at the 4 h cap; `/cancel`, `/new` and drain close idle sessions the same way with a notice; `/cancel` of an in-flight follow-up or wake turn renders it `cancelled`, not as an error (#806). A resume guard absorbs the CLI's 0-turn "stopped task" result on resume. Each run binds its **own** stream/PID via a per-run `RunStreamHandle` ContextVar — the bridge never reads the shared `runner.current_stream`/`last_pid` (#510, cross-chat stall/summary reads). An idle close that overruns its grace logs `claude.live_session.close_grace_expired` with a proc snapshot, sends SIGINT then SIGTERM, and is not quarantined when it was a clean idle close (#791) — nor when an Untether-initiated close of a closed turn exits rc 0 on the SIGINT (#829 B2, `stopped_clean=True`; background agents ignore EOF, so closes over them reach SIGINT). Closing notices never promise "reply to continue"; after the exit one silent `closed` line says `↩️ Reply to continue in the same session.` or warns of a fresh session (#829). Wake turns are attributed only to top-level background tasks, retro-attributed when a task ends during an `unknown` turn, and a second turn for the same finish arrives silently (#785). A resumed background agent (same `task_id`, fresh `task_started`) is revived rather than left terminal, and a subagent's own background task that outlives its agent (`ClaudeTask.holds_session`) still holds the session open, so idle close never kills promised work (#801). Every turn final — follow-up, queued→injected, wake — carries `✓ turn complete` (#798), and a wake turn replies to the prompt whose turn launched its task (#795). Plan approvals are turn-scoped (#383): every turn open clears the #283 diff-preview skip, and an unconsumed post-outline approval carries one boundary (`_DISCUSS_CARRY`); in `plan` / `plan-auto` chats the runner tracks the CLI's effective mode (`system/init`, `system/status`, acks) and re-arms plan mode with `set_permission_mode` (`ut_plan_rearm_…`) before yielding each turn close and before a follow-up / idle steer (`plan-auto`: follow-ups only), kill switch `[watchdog] rearm_plan_mode`; the re-arm is deferred while background agents launched in the plan-exit turn still work (they inherit the parent's mode, probe P-3) — until they end, go quiet for `post_result_bg_max_hold` (`latest_background_progress`) or hit `live_session_max_s` — and turns meanwhile carry `⚠️ Not re-planned …` (`TurnEvent.detail["plan_deferred"]`). Kill switch `[watchdog] live_sessions = false`. Claude control-channel mode only; see `docs/reference/runners/claude/runner.md` → "Live sessions"
+- **Background-task status** (#777, 0.35.5rc13) — renders the live-session task map (`src/untether/background_status.py`, never re-parses events): a `⏳ background (N)` block in the progress message (`🤖 <desc> · <elapsed> · <tokens> tok · <tools> tools · <step>` / `🐚 <desc> · <elapsed>`) and, after the answer, one silent status message edited in place (≥30 s throttle, earlier on a completion) with `✅`/`❌`/`⏹️` rows, finalised when the set empties or the session closes (reason shown). Lists what holds the session (`live_shown()` — incl. a subagent's orphaned bg task once its agent ended). `/ping` shows `⏳ background: N tasks running`. `[progress] show_background_tasks` (default true), `background_tasks_max_rows` (default 5, `+N more`), hot-reloaded
+- **Wake-ack consolidation** (#785 part 2) — short, tool-free wake turns (`task_finished`/`unknown`/`scheduled_wakeup`/`monitor_event`, ≤300 chars) fold into the status message as `↳ <ack>` lines instead of a new pushed message; a turn with tools, approvals, substantive text or the last task's report breaks out, and the first breakout of a batch always pushes; a batch where everything folded still pushes one `✅ all N background tasks done`. Up to 3 read-only collection calls (`Read`/`Glob`/`Grep`, `COLLECTION_TOOLS`) don't break a fold, and an unattributed ack is filed only under the task paired with its turn (#813). `[progress] consolidate_wake_turns = true`; off = rc12 per-turn delivery
+- **Async-hook hold** (#812, 0.35.5rc14) — a live session stays open while a background command hook (`async`/`asyncRewake`, e.g. security-guidance's commit review) is still running, because the CLI drops an `asyncRewake` rewake once stdin closes. `--include-hook-events` is passed when a cached `claude --help` probe lists it (`claude.hook_events.probe`; not a reserved flag, deduped against `extra_args`); `system/hook_*` frames pair by `hook_id` (no UntetherEvents, not `last_event_type`). `has_pending_async_hooks()` is a sibling hold, never a background task (no footer/panel rows). Plain `async` hooks: the CLI withholds their `hook_response` until the next turn or stdin close, so Untether holds every unpaired hook while any hook process lives and releases them all once none has for 1 s (`claude.hook.hold_released reason=no_hook_process`; all-or-nothing — a per-hook PID binding lost a live rewake). A hook process is any CLI child except Bash-tool shells, children older than the oldest unpaired hook's `hook_started` by > 5 s (the CLI emits the frame, then spawns), and children in the CLI's own process group that are in the `system/init` baseline (pid + start time — MCP servers) or have MCP/LSP-looking argv (`proc_diag.hook_evidence_children()`); the CLI spawns hooks `detached`, so a hook is never exempt by baseline or name — not just `sh -c`, because bash/zsh (macOS) exec a single hook command. Children fall back to a /proc ppid scan without `task/*/children`; a forking wrapper is resolved to the CLI. A rewake arrives as a pushed `🪝 Hook feedback — <event>` turn (`hook_rewake`, never folded). Bound `[watchdog] async_hook_max_hold` (630 s, 0–3600) from the newest unpaired hook → one `claude.hook.hold_expired` per hold, then `claude.live_session.async_hook_killed` and `⏳ Closing session — a background hook (Stop or UserPromptSubmit) was still running; its feedback wasn't delivered.` — counts are live hook processes, never unpaired candidates. Hook close grace 35 s (also on a live hook process alone); `session.summary hooks_started`. Kill switch `[watchdog] hold_for_async_hooks = false`
+- **Safeguard stops** (#814, 0.35.5rc14) — when Anthropic's safeguards stop a Claude response (assistant `stop_reason: "refusal"`, the `system/informational` "continuing once" notice, `model_refusal_fallback`/`_no_fallback`), a per-turn `🛡️ <model> safeguards stopped a response · retried once|switched to <model>|not retried` row, a `🛡️ safeguards stopped N response(s)` footer line (via `usage["safeguard"]`, so live turns get it too) with a one-time-per-session hint link (cyber safeguards article for category `cyber`, else the model-fallback docs), and `claude.safeguard_stop`. Never an error; a not-retried stop with no answer gets an explanatory body; stopped wake turns never fold. `system/model_fallback` renders a `↪️ Switched model` row (`claude.model_fallback`); other warning/notice `informational` banners get a generic row, info/suggestion log only
+- **Context usage** (#819, 0.35.5rc15) — the progress, final and live-turn header line ends with Claude's context-window use (`done · claude · 1m 36s · step 10 · 62% ctx`; no emoji, no footer segment). Numerator = input side of the latest main-thread assistant `usage` (subagent/`<synthetic>` frames skipped); denominator = `result.modelUsage.<model>.contextWindow`, learned per model into a per-process cache (`claude.context.window_learned`; `[1m]` → 1M; dated ids never fuzzy-matched → `claude.context.window_miss`); omitted until known and after a `compact_boundary` until the next response. Carried as an `ActionEvent` of kind `telemetry` (`claude.context`, deduped on integer %) that `ProgressTracker` keeps out of its actions (no step, not exported, never forces a wake turn's progress); re-emitted after each live `TurnEvent(started)`. `usage["context"]` → `runner.completed context_pct=`. `[progress] show_context_usage` (default true, per-run hot reload). Claude only (Codex = #832)
+- **Steer follow-ups** (#775, 0.35.5rc13) — per-chat/topic `followup_mode` (`queue` default | `steer`), resolved topic → chat → `[transports.telegram] followup_mode` → `queue` (hot-reload; kept out of `EngineOverrides`). In steer mode a plain-text/voice message to a live Claude session is written straight into stdin (`steer_into_session`, under `LiveSession.lock` with a steer-window race guard closed on `/cancel`/close): mid-tool it folds into the running turn (`↪️ steer received` progress row, `↪️ Steered into the current run.` ack), after the last tool it runs as its own follow-up turn replying to the steer message; an idle live session gets no ack. `/steer <text>` / `/queue <text>` override once; bare `/steer` / `/queue` set the default; `/config` → `↪️ Follow-up` page. Files, media groups, forwards, commands and a pending AskUserQuestion always win/queue; non-Claude engines and no-live-run fall back with a notice. Helper `telegram/steer.py`; prefs `telegram/followup_mode.py`
+- **Per-session cost deltas** (#778) — Claude's `total_cost_usd` is cumulative per session (also across `--resume`); `session_costs.json` records the last total per session so cost footer, budget, `cost.run_outlier` and daily totals use the per-run/per-turn delta; Codex token usage is thread-cumulative too, so `session_costs.json` also records per-thread token totals and runs report the delta (#419)
+- **Empty-resume recovery (quarantine-and-fresh)** (#631, #632) — a resume that returns 0 turns/$0 (upstream dangling-tool_use defect) quarantines the session in `session_quarantine.json` and auto-resends the message once on a fresh session; sessions SIGTERM'd after a result (`forced_teardown_after_result`) are quarantined proactively so the next message diverts to a fresh session before any empty result is seen; `[auto_continue]` flags `empty_resume_fresh` and `quarantine_on_forced_teardown` (both default true); structured events `runner.empty_result` → `session.quarantined` → `session.auto_resend_fresh`/`session.resume_diverted_fresh`; Claude runner only
+- **MCP catalog observability + proactive refresh** (#365) — `catalog_staleness.detected` structlog WARNING once per `(session, server, status)` tuple when Claude's `system.init` reports a non-`connected` MCP status (`detect_catalog_staleness`, default **on**); opt-in fire-and-forget `mcp_status` control_request after each `tool_result` to nudge Claude Code's catalog (`notify_catalog_refresh`, default **off**). Request IDs use the `ut_catalog_refresh_<session_id>_<seq>` namespace; drained via `ClaudeRunner._drain_catalog_refresh`. Logs `catalog.refresh_sent` INFO / `catalog.refresh_failed` WARN/ERROR. Claude runner only
+- **File upload deduplication** — auto-appends `_1`, `_2`, … when target file exists, instead of requiring `--force`; media groups without captions auto-save to `incoming/`
+- **Agent-initiated file delivery (outbox)** — agents write files to `.untether-outbox/` during a run; Untether sends them as Telegram documents on completion with `📎` captions; deny-glob security, size limits, file count cap, auto-cleanup; `[transports.telegram.files]` config
+- **Progress persistence** — active progress messages persisted to `active_progress.json`; on restart, orphan messages edited to "⚠️ interrupted by restart" with keyboard removed; every exit path (cancel, error, recovery re-run) releases its entry, so a cancelled or failed message is never relabelled (#810)
+- **Resume line formatting** — visual separation with blank line and ↩️ prefix in final message footer
+- **`/continue`** — cross-environment resume; pick up the most recent CLI session from Telegram using each engine's native continue flag (`--continue`, `resume --last`, `--resume latest`); supported for Claude, Codex, OpenCode, Pi (Gemini deprecated; not AMP); a `/continue` run releases its session registries when it ends, so a later resume of that session no longer waits 30 s and diverts to a fresh session (#816)
+- **Timezone-aware cron triggers** — per-cron `timezone` or global `default_timezone` with IANA names (e.g. `Australia/Melbourne`); DST-aware via `zoneinfo`; invalid names rejected at config parse time
+- **Hot-reload trigger configuration** — editing `untether.toml` applies cron/webhook changes immediately without restart; `TriggerManager` holds mutable state that the cron scheduler and webhook server reference at runtime; `handle_reload()` re-parses `[triggers]` on config file change
+- **Hot-reload Telegram bridge settings** — `voice_transcription` (incl. the #638 `voice_transcription_language` ISO-639-1 hint and the #691/#703 `voice_transcription_prompt` vocabulary bias, which ships a product-generic default), file transfer, `allowed_user_ids`, timing, and `show_resume_line` settings reload without restart; `TelegramBridgeConfig` unfrozen (slots kept) with `update_from()` wired into `handle_reload()`; restart-only keys (`bot_token`, `chat_id`, `session_mode`, `topics`, `message_overflow`) still warn; a refused voice `base_url` is re-checked at startup and on a voice-key reload (`voice.base_url.not_permitted`, log-only, #679)
+- **`/at` command** — one-shot delayed runs: `/at 30m <prompt>` schedules a prompt to run in 60s–24h; `/cancel` drops pending delays before firing; lost on restart (documented) with a per-chat cap of 20 pending delays; `telegram/at_scheduler.py` holds task-group + run_job refs
+- **`run_once` cron flag** — `[[triggers.crons]]` entries can set `run_once = true` to fire once then auto-disable; cron stays in TOML and re-activates on config reload or restart; the startup message counts only scheduled crons and shows spent one-shots separately (#809)
+- **Trigger visibility (Tier 1)** — `/ping` shows per-chat trigger summary (`⏰ triggers: 1 cron (id, 9:00 AM daily (Melbourne))`); run footer shows `⏰ cron:<id>` / `⚡ webhook:<id>` for trigger-initiated runs; new `describe_cron()` utility renders common patterns in plain English
+- **Graceful restart improvements (Tier 1)** — persists Telegram `update_id` to `last_update_id.json` so restarts don't drop/duplicate messages; `Type=notify` systemd integration via stdlib `sd_notify` (`READY=1` + `STOPPING=1`); `RestartSec=2`
+- **`diff_preview` plan bypass (#283)** — after user approves a plan outline via "Pause & Outline Plan", the `_discuss_approved` flag short-circuits diff preview for subsequent Edit/Write tools so no second approval is needed
+- **User-extensible env allowlist (#409)** — `[security] env_extra_allow` and `env_extra_prefix_allow` (in `untether.toml`) extend the engine-subprocess env allowlist with per-deployment names so users can thread credential-manager tokens (1Password, Doppler, Vault, Infisical, …) without forking `utils/env_policy.py`. Names are validated against `[A-Z_][A-Z0-9_]*`. Honoured by the Claude and Pi runners and by the `env_audit` probe. `BWS_ACCESS_TOKEN` was promoted into the built-in defaults at the same time. One `env_policy.user_extension` INFO log per process
+- **Master trigger pause toggle (#294)** — `TriggerManager.pause()` / `resume()` / `is_paused` gate cron firing and webhook dispatch globally; webhook server returns `503 triggers paused` (with `Retry-After: 60`); `/health` endpoint reflects paused state. Wired into `/config` two ways: home-page button row (only when triggers configured) and a dedicated `📡 Triggers` page (`config:tg`) showing counts + Pause/Resume button. `/ping` switches to `⏸ triggers paused: … (suspended)` while paused. Pause is in-memory only — restart auto-resumes (safe default)
+
+See `.claude/skills/claude-stream-json/` and `.claude/rules/control-channel.md` for implementation details.
+
+## Key files
+
+| File | Purpose |
+|------|---------|
+| `runners/claude.py` | Claude Code runner, interactive features |
+| `runners/gemini.py` | Gemini CLI runner (⚠️ deprecated) |
+| `runners/amp.py` | AMP CLI runner (Sourcegraph) (⚠️ deprecated) |
+| `runner_bridge.py` | Connects runners to Telegram presenter, injects agent preamble, auto-continue with signal death suppression, empty-resume quarantine-and-fresh recovery |
+| `session_costs.py` | Per-session cumulative cost and token ledger (`session_costs.json`) for per-run/per-turn cost deltas (#778) and Codex per-thread token deltas (#419); `token_counts()` normalises nested/flat usage |
+| `live_followup.py` | Follow-up injection into a live Claude session (scheduler `inject_job` hook, #776) |
+| `session_quarantine.py` | Persistent QuarantineStore (`session_quarantine.json`): poisoned-session markers, forced-teardown quarantine, resume divert (#631/#632) |
+| `cost_tracker.py` | Per-run/daily cost tracking and budget alerts |
+| `permission_audit.py` | #751 config-time Claude permission audit (startup + reload, from `build_runtime_spec`): `auto`-semantics, unattended tap-waiting crons, invalid resolved cron modes; fingerprint dedupe |
+| `commands/claude_control.py` | Approve/Deny/Discuss callback handler |
+| `commands/dispatch.py` | Callback dispatch and command routing |
+| `markdown.py` | Progress/final message formatting, meta_line footer |
+| `commands/planmode.py` | `/planmode` toggle command |
+| `commands/usage.py` | `/usage` command |
+| `commands/export.py` | `/export` command |
+| `commands/browse.py` | `/browse` file browser |
+| `commands/restart.py` | `/restart` graceful restart command |
+| `commands/verbose.py` | `/verbose` toggle command |
+| `commands/config.py` | `/config` inline settings menu |
+| `commands/ask_question.py` | AskUserQuestion option button handler |
+| `commands/topics.py` | `/new`, `/ctx`, `/topic` commands; `_cancel_chat_tasks()` helper |
+| `commands/listen.py` | `/listen` command (listen-mode toggle); `/trigger` deprecated alias (#297) |
+| `listen_mode.py` | `resolve_listen_mode()` and `should_trigger_run()` for response gating |
+| `utils/proc_diag.py` | `/proc` process diagnostics for stall analysis (CPU, RSS, TCP, FDs, children) |
+| `shutdown.py` | Graceful shutdown state and drain logic |
+| `telegram/bridge.py` | Telegram message rendering |
+| `telegram/loop.py` | Telegram update loop, signal handlers, drain-then-exit |
+| `telegram/files.py` | File upload helpers, deduplication, deny globs, atomic writes |
+| `telegram/outbox_delivery.py` | Agent-initiated file delivery: scan, send, cleanup outbox files |
+| `commands.py` | Command result types |
+| `scripts/validate_release.py` | Release validation (changelog format, issue links, version match) |
+| `scripts/healthcheck.sh` | Post-deploy health check (systemd, version, logs, Bot API) |
+| `triggers/manager.py` | TriggerManager: mutable cron/webhook holder for hot-reload; atomic config swap on TOML change; `crons_for_chat`, `webhooks_for_chat`, `remove_cron` helpers |
+| `triggers/describe.py` | `describe_cron(schedule, timezone)` utility for human-friendly cron rendering |
+| `telegram/at_scheduler.py` | `/at` command state: pending one-shot delays with cancel scopes, install/uninstall, cancel per chat |
+| `telegram/commands/at.py` | `/at` command backend — parses Ns/Nm/Nh, schedules delayed run |
+| `telegram/offset_persistence.py` | Persist Telegram `update_id` across restarts; `DebouncedOffsetWriter` |
+| `sdnotify.py` | Stdlib `sd_notify` client for `READY=1`/`STOPPING=1` systemd signals |
+| `triggers/server.py` | Webhook HTTP server (aiohttp); multipart parsing from cached body, fire-and-forget dispatch |
+| `triggers/dispatcher.py` | Routes webhooks/crons to `run_job()` or non-agent action handlers |
+| `triggers/cron.py` | Cron expression parser, timezone-aware scheduler loop |
+| `triggers/actions.py` | Non-agent webhook actions: file_write (multipart short-circuit), http_forward, notify_only |
+| `triggers/fetch.py` | Cron data-fetch: HTTP GET/POST, file read, response parsing, prompt building |
+| `triggers/rate_limit.py` | Token-bucket rate limiter (per-webhook + global) |
+| `triggers/ssrf.py` | SSRF protection for outbound HTTP requests (IP blocking, DNS validation, URL scheme check) |
+| `triggers/auth.py` | Bearer token and HMAC-SHA256/SHA1 webhook auth verification |
+| `triggers/settings.py` | CronConfig/WebhookConfig/CronFetchConfig/TriggersSettings models, timezone validation |
+| `cliff.toml` | git-cliff config for changelog drafting |
+
+## Reference docs
+
+Detailed protocol specs and event cheatsheets for each integration:
+
+| Doc | Path | Covers |
+|-----|------|--------|
+| Claude runner spec | `docs/reference/runners/claude/runner.md` | CLI invocation, stream-json protocol, control channel, permission modes |
+| Claude stream-json | `docs/reference/runners/claude/stream-json-cheatsheet.md` | JSONL event shapes (`system`, `assistant`, `user`, `result`) with examples |
+| Claude event mapping | `docs/reference/runners/claude/untether-events.md` | Claude JSONL → Untether event translation rules |
+| Codex exec-json | `docs/reference/runners/codex/exec-json-cheatsheet.md` | Thread/item/turn JSONL event shapes with examples |
+| Codex event mapping | `docs/reference/runners/codex/untether-events.md` | Codex JSONL → Untether event translation rules |
+| OpenCode runner spec | `docs/reference/runners/opencode/runner.md` | CLI invocation, step-based event model, session IDs |
+| OpenCode stream-json | `docs/reference/runners/opencode/stream-json-cheatsheet.md` | JSONL event shapes (`StepStart`, `ToolUse`, `Text`, `StepFinish`) |
+| OpenCode event mapping | `docs/reference/runners/opencode/untether-events.md` | OpenCode JSONL → Untether event translation rules |
+| Pi runner spec | `docs/reference/runners/pi/runner.md` | CLI invocation, file-based sessions, provider/model selection |
+| Pi stream-json | `docs/reference/runners/pi/stream-json-cheatsheet.md` | JSONL event shapes (`SessionHeader`, `AgentStart`, `ToolExecution`) |
+| Pi event mapping | `docs/reference/runners/pi/untether-events.md` | Pi JSONL → Untether event translation rules |
+| Gemini runner spec | `docs/reference/runners/gemini/runner.md` | CLI invocation, stream-json, model selection |
+| Gemini stream-json | `docs/reference/runners/gemini/stream-json-cheatsheet.md` | JSONL event shapes (`init`, `message`, `tool_use`, `tool_result`, `result`, `error`) |
+| Gemini event mapping | `docs/reference/runners/gemini/untether-events.md` | Gemini JSONL → Untether event translation rules |
+| AMP runner spec | `docs/reference/runners/amp/runner.md` | CLI invocation, stream-json, mode/model selection |
+| AMP stream-json | `docs/reference/runners/amp/stream-json-cheatsheet.md` | JSONL event shapes (`system`, `assistant`, `user`, `result`) |
+| AMP event mapping | `docs/reference/runners/amp/untether-events.md` | AMP JSONL → Untether event translation rules |
+| Telegram transport | `docs/reference/transports/telegram.md` | Bot API client, outbox/rate-limiting, voice transcription, forum topics |
+| Workflow modes | `docs/reference/modes.md` | Assistant, workspace, handoff — settings, commands, mode-agnostic features |
+
+## Documentation screenshots
+
+48 screenshots in `docs/assets/screenshots/` with a tracking checklist in `CAPTURES.md`. README uses a composite hero collage (`hero-collage.jpg`) built with ImageMagick for mobile responsiveness. Doc files use HTML `<img>` tags with `width="360"` and `loading="lazy"` (works in both GitHub and MkDocs). 14 screenshots are still missing and commented out with `<!-- TODO: capture screenshot -->` markers.
+
+## Deprecated engines (Gemini CLI, AMP)
+
+Both are **deprecated** and targeted for **removal in 0.36.0**. They still load and
+run; they are not supported.
+
+- **`gemini`** — Google ended Gemini CLI support for individual and free accounts on
+  **2026-06-18**, directing users to Antigravity CLI. On those accounts it fails with
+  `IneligibleTierError: This client is no longer supported` and exits **1**. Under
+  Untether the subprocess **hangs instead of exiting**, so the run stalls to the
+  watchdog auto-cancel (~10 min) rather than erroring — known defect, not being fixed.
+  Enterprise / Google Cloud licences may still work, unverified.
+- **`amp`** — integration unmaintained. AMP remotely refuses out-of-date clients
+  (`426 This version of Amp is no longer supported`) and exits **1**, so it fails fast.
+  `amp threads list` is local and does NOT hit the version gate, so `/threads` can keep
+  working while `amp -x` is refused. Decision is about our integration, not AMP itself.
+  The AMP-only `/threads` command is deprecated alongside it.
+
+**Working rule:** when a cross-engine sweep breaks either runner, `xfail`/`skip` the
+test — do NOT fix the runner. Security fixes still apply. Both are excluded from every
+integration-test tier. Full rule in `.claude/rules/runner-development.md` → "Deprecated
+engines — sweep exemption".
+
+Antigravity CLI (#558) is a **new engine**, not a `gemini` rename — it must not reuse
+the `gemini` engine id.
+
+## CI Pipeline
+
+GitHub Actions CI runs on push to master/dev and on PRs:
+
+| Job | What it checks |
+|-----|---------------|
+| format | `ruff format --check --diff` |
+| ruff | `ruff check` with GitHub annotations |
+| ty | Type checking (Astral's ty, informational — `continue-on-error`) |
+| pytest | Tests on Python 3.12, 3.13, 3.14 with 80% coverage threshold |
+| build | `uv build` + `twine check` + `check-wheel-contents` validation |
+| lockfile | `uv lock --check` ensures lockfile is in sync |
+| install-test | Clean wheel install + smoke-test imports (catches undeclared deps) |
+| testpypi-publish | Publishes to TestPyPI on dev push (OIDC, `skip-existing: true`) |
+| auto-tag-on-master | On master push: detects stable version bump in `pyproject.toml`, creates and pushes `vX.Y.Z` tag (skips pre-releases) |
+| release-validation | PR-only: validates changelog format, issue links, date when version changes |
+| pip-audit | Dependency vulnerability scanning (PyPA advisory DB) |
+| bandit | Python SAST (security static analysis) |
+| codeql | CodeQL code scanning (Python + Actions), blocks PRs on new alerts |
+| docs | Zensical docs build |
+| prerelease-deps | Weekly (Monday): tests with `--upgrade --prerelease=allow` (informational) |
+
+All third-party actions are pinned to commit SHAs (supply chain protection). Top-level `permissions: {}` restricts to least-privilege.
+
+Dependabot auto-merge (`dependabot-auto-merge.yml`) auto-squash-merges dependency updates after CI passes. GitHub Actions deps (CI-only, never shipped) are auto-merged for all version bumps including major. Python deps (shipped in wheel) are auto-merged for patch/minor only; major bumps get flagged for manual review.
+
+Release pipeline (`release.yml`) uses PyPI trusted publishing with OIDC. The `pypi` GitHub Environment publishes automatically once `auto-tag-on-master.yml` creates a `vX.Y.Z` tag — the PR review on master IS the release approval, so no second reviewer prompt is needed. (Earlier versions had a manual `pypi` environment reviewer gate; that gate was removed in favour of the single-gate flow described under "Release guard".) The `testpypi` environment deploys automatically on dev push. `scripts/validate_release.py` enforces changelog/version consistency. `CODEOWNERS` (`* @littlebearapps/core`) requires team review on all PRs.

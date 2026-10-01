@@ -35,8 +35,8 @@ re-litigates them. Key points for `/qa`:
 - **Redaction.** Scrub tokens/keys/env/chat-content/fleet identifiers from any
   log/response evidence before it lands in a finding (see
   `.claude/commands/debug/step-evidence.md`).
-- **Untether-mode.** `AskUserQuestion`/`ExitPlanMode` return empty — the `--run`
-  confirmation is stated in text and STOPS for a reply. Keep the report brief.
+- **Untether-mode.** Don't gate on `AskUserQuestion` (buttons only with ask
+  mode on) — the `--run` confirmation is stated in text and STOPS for a reply. Keep the report brief.
 
 ## The live-bot guardrails (non-negotiable)
 

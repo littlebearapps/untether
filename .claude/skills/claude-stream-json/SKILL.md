@@ -28,6 +28,7 @@ Untether spawns Claude Code CLI as a subprocess and consumes its JSONL output. T
 | `docs/reference/runners/claude/runner.md` | Full runner specification |
 | `docs/reference/runners/claude/stream-json-cheatsheet.md` | JSONL event shapes with examples |
 | `docs/reference/runners/claude/untether-events.md` | Claude JSONL to Untether event mapping |
+| `.claude/skills/claude-stream-json/control-channel-internals.md` | Control-channel mechanism detail: registries, claims, live-session stdin writers, async-hook hold, plan re-arm, parent-initiated requests |
 
 ## CLI invocation
 

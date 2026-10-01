@@ -1,5 +1,6 @@
 ---
-applies_to: "src/untether/telegram/**"
+paths:
+  - "src/untether/telegram/**"
 ---
 
 # Telegram Transport Rules

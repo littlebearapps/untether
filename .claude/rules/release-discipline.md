@@ -1,3 +1,14 @@
+---
+paths:
+  - "CHANGELOG.md"
+  - "pyproject.toml"
+  - "uv.lock"
+  - "scripts/validate_release.py"
+  - "scripts/fleet-*.sh"
+  - "scripts/run-integration-tests.sh"
+  - ".github/workflows/**"
+---
+
 # Release & Issue Tracking Discipline
 
 ## When fixing bugs

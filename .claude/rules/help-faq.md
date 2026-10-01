@@ -1,3 +1,9 @@
+---
+paths:
+  - "docs/faq/**"
+  - "CHANGELOG.md"
+---
+
 # Help-Centre FAQ Rules (`docs/faq/faq.md`)
 
 `docs/faq/faq.md` is the user-facing FAQ for Untether. It backs the

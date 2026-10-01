@@ -29,7 +29,7 @@ merge-ready and surface gaps; you **author nothing**.
 3. **Docs completion (folded-in).** CHANGELOG entry is issue-linked (`[#N]`) with
    correct subsections; **rc versions correctly skip** the changelog. FAQ
    (`docs/faq/faq.md`) touched when a user-visible surface changed (per
-   `.claude/rules/help-faq.md`). `CLAUDE.md` `## Tests` + `docs/reference/*`
+   `.claude/rules/help-faq.md`). `docs/reference/test-catalog.md` + `docs/reference/*`
    reconciled when a runner/schema/telegram surface changed.
 4. **Batch-cohesion.** No independent high-risk state machines (session
    lifecycle/resume · signal-death · watchdog/stall · hot-reload · rate-limit/

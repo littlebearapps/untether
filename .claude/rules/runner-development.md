@@ -1,5 +1,9 @@
 ---
-applies_to: "src/untether/runners/**,src/untether/runner.py"
+paths:
+  - "src/untether/runners/**"
+  - "src/untether/runner.py"
+  - "src/untether/runner_bridge.py"
+  - "src/untether/schemas/**"
 ---
 
 # Runner Development Rules
@@ -23,9 +27,10 @@ Runner instances are **shared across chats**, so `runner.current_stream` / `runn
 
 When Claude Code exits with `last_event_type=user` (tool results sent but never processed), `runner_bridge.py` auto-resumes the session. Suppressed on signal deaths (rc=143/137) to prevent death spirals. Configure via `[auto_continue]` in `untether.toml` (`enabled`, `max_retries`).
 
-Live sessions (#776, Claude only): a run's process stays live after its result while background work or a follow-up keeps it busy; `_live_session_lifecycle` closes stdin (graceful — the CLI stops its tasks and exits rc=0) when idle, and a resumed run's replayed stopped-task 0-turn result is absorbed by the resume guard rather than treated as an empty resume. The quarantine paths below now mostly apply to `live_sessions = false` and to forced teardown after a close grace. A close that overruns its 15 s grace logs `claude.live_session.close_grace_expired` (proc snapshot) and escalates SIGINT → SIGTERM 5 s later; a clean idle close (turn closed, no live background work) is **not** quarantined even then (#791). Nor is an Untether-initiated close of a closed turn whose CLI exits rc 0 on the SIGINT (#829 B2, `stopped_clean=True`) — background agents ignore EOF, so such closes always reach SIGINT; `abs_cap`/`error` closes keep the quarantine.
-
-Empty-resume recovery (#631/#632, Claude only): a resume returning 0 turns/$0 quarantines the session (`session_quarantine.py`, persisted to `session_quarantine.json`) and auto-resends once on a fresh session; forced teardown after a result quarantines proactively (except a clean idle live-session close, #791, and a #829 B2 `stopped_clean` close) and the next message diverts fresh. Flags: `empty_resume_fresh`, `quarantine_on_forced_teardown` (both default true). Never retry the same poisoned session.
+Live sessions (#776) and empty-resume recovery (#631/#632, Claude only): idle live sessions close gracefully via
+`_live_session_lifecycle`; a 0-turn/$0 resume quarantines the session (`session_quarantine.py`) and auto-resends once on a
+fresh session. **Never retry the same poisoned session.** Clean idle closes (#791) and `stopped_clean` closes (#829 B2) are
+not quarantined. Detail: `docs/reference/runners/claude/runner.md` → "Live sessions".
 
 ## Event creation
 

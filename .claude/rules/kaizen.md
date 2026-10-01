@@ -1,7 +1,13 @@
+---
+paths:
+  - "docs/kaizen/**"
+  - ".claude/commands/kaizen*.md"
+---
+
 # Kaizen — capture rule (thin slice)
 
-The always-on slice for Untether's continuous-improvement loop. Loads whenever
-`/kaizen` or `/kaizen-review` runs (and when a Stop-hook nudges `/kaizen`). The
+The capture slice for Untether's continuous-improvement loop. `/kaizen` and
+`/kaizen-review` load it explicitly (and when a Stop-hook nudges `/kaizen`). The
 full rubric lives in `docs/kaizen/README.md`; this rule is the boundary + shape.
 
 ## When `/kaizen` fires (session end)

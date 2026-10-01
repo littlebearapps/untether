@@ -1,68 +1,45 @@
+---
+paths:
+  - "CLAUDE.md"
+  - "AGENTS.md"
+  - "llms.txt"
+  - ".claude/**"
+  - "docs/reference/feature-catalog.md"
+  - "docs/reference/test-catalog.md"
+---
+
 # AI Context File Quality Standards
 
-When generating or updating AI context files (CLAUDE.md, AGENTS.md, GEMINI.md, .cursorrules, copilot-instructions.md, .windsurfrules, .clinerules), follow these standards.
+Applies when editing `CLAUDE.md`, `AGENTS.md`, `llms.txt`, `.claude/rules/*`, `.claude/skills/*`, commands or agents.
 
-## Cross-File Consistency
+## Context budget (the reason this rule exists)
 
-All context files for a project must agree on:
+Everything in `CLAUDE.md` and every rule without `paths:` loads into **every** session. Claude Code warns above ~150k
+chars of instruction files in total, and adherence drops as files grow. In 2026-10 `CLAUDE.md` had grown to 91k chars
+(487 lines) because feature and test lists were appended every rc.
 
-- Language and framework version
-- Key commands (test, build, lint, deploy)
-- Directory structure and key file paths
-- Naming conventions and coding standards
-- Critical rules and constraints
+- **`CLAUDE.md` ≤ ~200 lines / ~15k chars.** Only what an agent can't discover and needs in *every* session: the
+  one-liner, architecture, commands, the critical never/always rules (dev vs staging, release guard), and pointers.
+- **Feature detail → `docs/reference/feature-catalog.md`. Test-file detail → `docs/reference/test-catalog.md`.**
+  Never re-grow a feature list or per-test-file list in `CLAUDE.md`.
+- **Every `.claude/rules/*.md` needs `paths:` frontmatter** (a YAML list of globs). Rules without it load
+  unconditionally. `applies_to:` is NOT a Claude Code key and is silently ignored. A rule that a workflow command
+  loads explicitly ("Load `.claude/rules/x.md`") still needs `paths:`.
+- **Rules state invariants (never/always + why), not mechanism walkthroughs.** Mechanism detail goes in
+  `docs/reference/**` or a skill's supporting file (e.g. `.claude/skills/claude-stream-json/control-channel-internals.md`),
+  which loads only when read.
+- Don't restate one fact in several always-loaded places. Pick one home and point to it.
+- `<!-- block comments -->` in `CLAUDE.md` are stripped before injection; use them for maintainer-only notes.
+- `@path` imports don't save context: imported files load at launch too.
 
-When updating one context file, check if the same information appears in others and update them too.
+## Cross-file consistency
 
-## Path Verification
+`CLAUDE.md`, `AGENTS.md` and the rules must agree on Python version, key commands (test/lint/build), paths, naming and
+critical constraints. When you change one, grep the others for the same fact.
 
-Every file path mentioned in a context file must exist on disk. Before writing a context file, verify referenced paths:
+## Accuracy
 
-```bash
-test -f "path/to/file" || echo "WARN: path does not exist"
-```
-
-Never reference deleted files, renamed modules, or moved directories without checking first.
-
-## Version Accuracy
-
-Context files must reference the correct:
-
-- Language runtime version (from `.nvmrc`, `engines`, `requires-python`, `go.mod`)
-- Framework version (from `package.json`, `pyproject.toml`)
-- Test runner (jest vs vitest vs pytest vs go test)
-- Linter/formatter (eslint vs biome, ruff vs flake8)
-
-## Command Accuracy
-
-Every command listed in a context file (test, build, lint, deploy) must be runnable. Verify against `package.json` scripts, `Makefile` targets, or `pyproject.toml` scripts before writing.
-
-## Sync Points
-
-When these project changes occur, update the corresponding context files:
-
-| Change | Files to Update |
-|--------|----------------|
-| New command or skill | AGENTS.md, CLAUDE.md, llms.txt |
-| New dependency | All context files referencing tech stack |
-| File rename or move | All context files referencing file paths |
-| Test runner change | All context files listing test commands |
-| New rule or convention | All context files listing coding standards |
-| Architecture change | AGENTS.md, CLAUDE.md (architecture section) |
-| New agent | AGENTS.md |
-
-## Tool Compatibility
-
-Not all context files work in all tools:
-
-| File | Works In | Does NOT Work In |
-|------|----------|-----------------|
-| `AGENTS.md` | Claude Code, OpenCode, Codex CLI, Gemini CLI | — |
-| `CLAUDE.md` | Claude Code, OpenCode (fallback) | Cursor, Copilot |
-| `.cursorrules` | Cursor | Claude Code, OpenCode |
-| `.github/copilot-instructions.md` | GitHub Copilot | Claude Code, Cursor |
-| `.windsurfrules` | Windsurf | Claude Code, Cursor |
-| `.clinerules` | Cline | Claude Code, Cursor |
-| `GEMINI.md` | Gemini CLI | Claude Code, Cursor |
-| `.claude/rules/*.md` | Claude Code only | OpenCode, Codex CLI, Cursor |
-| Claude Code hooks | Claude Code only | OpenCode, Codex CLI, all others |
+- Every path you mention must exist: `test -e path || echo "WARN: $path missing"`.
+- Every command you list must run (check `pyproject.toml`, `scripts/`, `.github/workflows/`).
+- Versions (Python, ruff, pytest, engine CLIs) come from `pyproject.toml` / lockfiles, never memory.
+- `AGENTS.md` is read by Codex/OpenCode/Gemini/Pi; `CLAUDE.md` and `.claude/rules/*` are Claude Code only.

@@ -156,7 +156,7 @@ Not full loops — helpers the loops lean on.
 
 - **Trigger:** documentation drifted with **no code change** to deliver alongside it.
 - **Driver:** `.claude/commands/docs.md`. The default path is `/pr-dev` (docs are folded in as a completion criterion); `/docs` is the escape hatch.
-- **Output:** minimal edits to CHANGELOG / `docs/faq/faq.md` / `CLAUDE.md ## Tests` / `docs/reference/*`.
+- **Output:** minimal edits to CHANGELOG / `docs/faq/faq.md` / `docs/reference/test-catalog.md` / `docs/reference/*`.
 - **Authority:** docs only. No code, no PR (a code branch routes to `/pr-dev`), no master/tag/release. FAQ is gate-protected.
 
 ### `/research` + `docs/findings/` — current-truth convention  ·  Status: **available**

@@ -1,6 +1,13 @@
+---
+paths:
+  - ".claude/commands/**"
+  - ".claude/agents/**"
+  - "docs/LOOPS.md"
+---
+
 # Workflow Commands — routing + cross-cutting rules
 
-The thin always-on slice for Untether's agentic loop commands (`/debug`, `/fix`,
+The thin shared slice for Untether's agentic loop commands (`/debug`, `/fix`,
 `/plan`, `/implement`, `/qa`, `/pr-dev`, `/pr-main`, `/kaizen`, `/kaizen-review`,
 `/handover`). Every one of those command files cites this rule in its header. It
 does two jobs: **route** work to the right command, and load the **cross-cutting
@@ -31,9 +38,10 @@ pushing on. Record the redirect in the run summary.
 
 ## Cross-cutting rules (every workflow command obeys these)
 
-1. **Untether-mode aware.** When run via Telegram, `AskUserQuestion` /
-   `ExitPlanMode` return empty — never block on them. State assumptions in text
-   and STOP for a reply. Final summaries stay brief (≈500–1500 chars, 3–7
+1. **Untether-mode aware.** When run via Telegram, `ExitPlanMode` works
+   (Approve/Deny buttons; an approved result is approved) and `AskUserQuestion`
+   shows buttons only when ask mode is on — so don't use it for simple
+   confirmations: state assumptions in text and STOP for a reply. Final summaries stay brief (≈500–1500 chars, 3–7
    bullets); never re-paste a full plan body (see
    `feedback_telegram_summary_brevity`).
 

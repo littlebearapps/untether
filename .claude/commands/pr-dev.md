@@ -77,7 +77,8 @@ manifest:
   install/update paths), edit the FAQ in this branch. The file is gate-protected
   (Edit/Write allowed; `rm`/`mv`/`>` blocked).
 - **Context-doc reconciliation** — if a runner/schema/telegram surface changed,
-  update `CLAUDE.md`'s `## Tests` list + the relevant `docs/reference/*` per
+  update `docs/reference/test-catalog.md` (and `feature-catalog.md` for a new
+  feature) + the relevant `docs/reference/*` per
   `.claude/rules/runner-development.md` / `testing-conventions.md`.
 
 ### D-4. Classify docs-only vs code (mirror CI's predicate)

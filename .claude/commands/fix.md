@@ -30,8 +30,8 @@ cross-cutting rules. In particular for `/fix`:
 - **Redaction.** Scrub tokens/keys/env/chat-content/fleet identifiers from any
   evidence before it lands in a PR or issue (see
   `.claude/commands/debug/step-evidence.md`).
-- **Untether-mode.** `AskUserQuestion`/`ExitPlanMode` return empty under
-  Telegram — state assumptions in text and STOP for a reply. Keep the run report
+- **Untether-mode.** Don't gate on `AskUserQuestion` under Telegram (buttons
+  only with ask mode on) — state assumptions in text and STOP for a reply. Keep the run report
   brief (≈500–1500 chars).
 
 ## Boundary vs `/debug`

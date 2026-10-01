@@ -75,6 +75,7 @@ uv run pytest tests/test_*.py -x # specific file
 ## Before committing
 
 ```sh
+uv run ruff format --check src/ tests/
 uv run ruff check src/
 uv run pytest
 uv lock --check
