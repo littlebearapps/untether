@@ -2695,6 +2695,37 @@ class TestCostUsage:
         assert "config:cu:su_on" in buttons
 
     @pytest.mark.anyio
+    async def test_cost_usage_page_uses_footer_defaults(self, tmp_path, monkeypatch):
+        """Unset per-chat toggles show the ``[footer]`` values, matching the
+        home page (rc15 integration finding: the page said ``Subscription
+        usage: off`` while home said ``sub on`` and finals showed ⚡)."""
+        from types import SimpleNamespace
+
+        import untether.settings as settings_mod
+        from untether.settings import FooterSettings
+
+        footer = FooterSettings(show_api_cost=False, show_subscription_usage=True)
+        monkeypatch.setattr(
+            settings_mod,
+            "load_settings_if_exists",
+            lambda *a, **k: (SimpleNamespace(footer=footer, cost_budget=None), None),
+        )
+        cmd = ConfigCommand()
+        ctx = _make_ctx(
+            args_text="cu",
+            text="config:cu",
+            config_path=tmp_path / "prefs.json",
+            default_engine="claude",
+        )
+        await cmd.handle(ctx)
+        msg = _last_edit_msg(ctx)
+        assert "<b>API cost</b>: off" in msg.text
+        assert "<b>Subscription usage</b>: on" in msg.text
+        buttons = _buttons_data(msg)
+        assert "config:cu:ac_on" in buttons
+        assert "config:cu:su_off" in buttons
+
+    @pytest.mark.anyio
     async def test_cost_usage_page_renders_for_opencode(self, tmp_path):
         """OpenCode sees API cost but not subscription usage."""
         state_path = tmp_path / "prefs.json"

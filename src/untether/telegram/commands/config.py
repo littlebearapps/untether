@@ -1942,6 +1942,17 @@ async def _page_cost_usage(ctx: CommandContext, action: str | None = None) -> No
     override = await prefs.get_engine_override(chat_id, current_engine)
     ac = override.show_api_cost if override else None
     su = override.show_subscription_usage if override else None
+    # Unset per-chat values fall back to ``[footer]``, as on the home page.
+    from ...settings import FooterSettings
+    from ...settings import load_settings_if_exists as _load_footer_cfg
+
+    try:
+        _footer_result = _load_footer_cfg()
+        footer_cfg = _footer_result[0].footer if _footer_result else FooterSettings()
+    except (OSError, ValueError, KeyError):
+        footer_cfg = FooterSettings()
+    ac_default = footer_cfg.show_api_cost
+    su_default = footer_cfg.show_subscription_usage
 
     lines = [
         "<b>💰 Cost & usage</b>",
@@ -1949,13 +1960,13 @@ async def _page_cost_usage(ctx: CommandContext, action: str | None = None) -> No
     ]
 
     if has_api_cost:
-        ac_label = "on" if ac is True else ("off" if ac is False else "on")
+        ac_label = "on" if (ac if ac is not None else ac_default) else "off"
         lines.append(f"<b>API cost</b>: {ac_label}")
         lines.append("  Show cost, tokens, and time after each task.")
         lines.append("")
 
     if has_sub_usage:
-        su_label = "on" if su is True else "off"
+        su_label = "on" if (su if su is not None else su_default) else "off"
         lines.append(f"<b>Subscription usage</b>: {su_label}")
         lines.append("  Show how much of your 5h/weekly quota is used.")
         lines.append("")
@@ -2014,7 +2025,7 @@ async def _page_cost_usage(ctx: CommandContext, action: str | None = None) -> No
             _toggle_row(
                 "Cost",
                 current=ac,
-                default=True,
+                default=ac_default,
                 on_data="config:cu:ac_on",
                 off_data="config:cu:ac_off",
                 clr_data="config:cu:ac_clr",
@@ -2027,7 +2038,7 @@ async def _page_cost_usage(ctx: CommandContext, action: str | None = None) -> No
             _toggle_row(
                 "Sub",
                 current=su,
-                default=False,
+                default=su_default,
                 on_data="config:cu:su_on",
                 off_data="config:cu:su_off",
                 clr_data="config:cu:su_clr",
