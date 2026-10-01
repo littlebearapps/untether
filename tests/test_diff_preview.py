@@ -122,3 +122,30 @@ class TestDiffPreviewGating:
 
         opts = EngineRunOptions(diff_preview=False)
         assert opts.diff_preview is False
+
+
+class TestDiffPreviewRendering:
+    """rc15 integration finding: the preview is rendered as Markdown, where a
+    bare ``+ x`` line became a ``- x`` list item, so an added line read as
+    removed on the approval message."""
+
+    def _render(self, preview: str) -> str:
+        from untether.telegram.render import render_markdown
+
+        text, _entities = render_markdown(f"⚠️ Permission Request [Edit]\n{preview}")
+        return text
+
+    def test_edit_added_lines_keep_plus_after_rendering(self) -> None:
+        preview = _format_diff_preview(
+            "Edit",
+            {"file_path": "/tmp/a.txt", "old_string": "hello", "new_string": "bye"},
+        )
+        rendered = self._render(preview)
+        assert "- hello\n+ bye" in rendered
+
+    def test_write_content_stays_literal(self) -> None:
+        preview = _format_diff_preview(
+            "Write", {"file_path": "/tmp/a.md", "content": "**bold** `x`\n```py"}
+        )
+        rendered = self._render(preview)
+        assert "+ **bold** `x`\n+ ```py" in rendered

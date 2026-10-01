@@ -5530,6 +5530,16 @@ def _format_diff_preview(tool_name: str, tool_input: dict[str, Any]) -> str:
             return text[: max_len - 1] + "…"
         return text
 
+    def _fenced(lines: list[str]) -> str:
+        # The approval text is rendered as Markdown: bare ``+ x`` lines
+        # became ``- x`` list items (an added line shown as removed) and the
+        # lines ran together. A fenced block keeps them verbatim; the fence
+        # outruns any backtick run in the content so it can't close early.
+        body = "\n".join(lines)
+        longest = max((len(m) for m in re.findall(r"`+", body)), default=0)
+        fence = "`" * max(3, longest + 1)
+        return f"{fence}diff\n{body}\n{fence}"
+
     if tool_name == "Edit":
         file_path = tool_input.get("file_path", "")
         old_string = tool_input.get("old_string", "")
@@ -5551,7 +5561,7 @@ def _format_diff_preview(tool_name: str, tool_input: dict[str, Any]) -> str:
         lines.extend(f"+ {_truncate(line, max_line_len)}" for line in new_lines[:half])
         if len(new_lines) > half:
             lines.append(f"  …({len(new_lines) - half} more added)")
-        return "\n".join(lines)
+        return _fenced(lines)
 
     if tool_name == "Write":
         file_path = tool_input.get("file_path", "")
@@ -5569,7 +5579,7 @@ def _format_diff_preview(tool_name: str, tool_input: dict[str, Any]) -> str:
             lines.append(f"+ {_truncate(line, max_line_len)}")
         if line_count > max_preview_lines:
             lines.append(f"  …({line_count - max_preview_lines} more lines)")
-        return "\n".join(lines)
+        return _fenced(lines)
 
     if tool_name == "Bash":
         command = tool_input.get("command", "")
