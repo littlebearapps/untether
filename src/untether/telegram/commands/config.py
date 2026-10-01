@@ -2296,8 +2296,9 @@ async def _page_triggers(ctx: CommandContext, action: str | None = None) -> None
                 "Status: <b>⏸ paused</b>",
                 "",
                 "Crons and webhooks are temporarily suspended.",
-                f"<code>{cron_count}</code> cron · "
-                f"<code>{webhook_count}</code> webhook",
+                f"<code>{cron_count}</code> cron{'s' if cron_count != 1 else ''} · "
+                f"<code>{webhook_count}</code> "
+                f"webhook{'s' if webhook_count != 1 else ''}",
                 "",
                 "Pause is in-memory only — triggers auto-resume on restart.",
             ]
@@ -2305,8 +2306,9 @@ async def _page_triggers(ctx: CommandContext, action: str | None = None) -> None
             lines += [
                 "Status: <b>active</b>",
                 "",
-                f"<code>{cron_count}</code> cron · "
-                f"<code>{webhook_count}</code> webhook",
+                f"<code>{cron_count}</code> cron{'s' if cron_count != 1 else ''} · "
+                f"<code>{webhook_count}</code> "
+                f"webhook{'s' if webhook_count != 1 else ''}",
             ]
 
         # #271 Tier 2: per-chat trigger list. Only render when we can scope
