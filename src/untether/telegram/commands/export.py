@@ -127,6 +127,16 @@ def _format_export_markdown(
                 token_parts.append(f"{output_tokens} out")
             parts.append(" / ".join(token_parts) + " tokens")
         if parts:
+            # The transcript spans every run of the session but the recorded
+            # usage is the latest run's (rc15 integration finding), except
+            # for engines that report a running thread total (Codex).
+            from ...runner_bridge import _TOKEN_LEDGER_SCOPES
+
+            engine = _session_engine(events)
+            thread_total = _TOKEN_LEDGER_SCOPES.get(engine or "") == (
+                "thread_cumulative"
+            )
+            parts.append("thread total" if thread_total else "last run")
             lines.append(f"**Usage:** {' · '.join(parts)}\n")
 
     lines.append("---\n")

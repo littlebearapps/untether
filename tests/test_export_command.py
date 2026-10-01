@@ -361,3 +361,14 @@ def test_trim_evicts_least_recently_active(clock: _Clock) -> None:
     assert len(_SESSION_HISTORY) == 20
     assert (CHAT_A, "s0") in _SESSION_HISTORY
     assert (CHAT_A, "s1") not in _SESSION_HISTORY
+
+
+def test_export_usage_header_names_its_scope() -> None:
+    """rc15 integration finding: the header showed the last run's cost under a
+    transcript of every run; it now says which figure it is."""
+    opencode = [{"type": "started", "engine": "opencode", "title": "t"}]
+    md = _format_export_markdown("s", opencode, {"total_cost_usd": 0.03})
+    assert "**Usage:** $0.0300 · last run" in md
+    codex = [{"type": "started", "engine": "codex", "title": "t"}]
+    md = _format_export_markdown("s", codex, {"input_tokens": 9, "output_tokens": 2})
+    assert "9 in / 2 out tokens · thread total" in md
