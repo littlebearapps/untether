@@ -2308,7 +2308,14 @@ async def run_main_loop(
                         on_thread_known, topic_key, chat_session_key
                     ),
                     on_resume_failed=wrap_on_resume_failed(topic_key, chat_session_key),
-                    engine_override=engine_override,
+                    # Run the engine the options and the approval audit were
+                    # resolved for: a raw ``None`` made resolve_runner fall
+                    # back to the global default, so a cron on a Claude
+                    # project with no ``engine`` ran on Codex in full auto
+                    # (rc15 integration finding).
+                    engine_override=(
+                        engine_for_overrides if resume_token is None else None
+                    ),
                     thread_id=thread_id,
                     show_resume_line=show_resume_line,
                     progress_ref=progress_ref,

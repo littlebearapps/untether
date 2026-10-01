@@ -188,3 +188,71 @@ async def test_751_run_job_wires_the_dispatch_check(tmp_path, monkeypatch) -> No
     (event,) = _risk(logs)
     assert (event["trigger"], event["source"]) == ("cron:wired", "cron")
     assert len(runner.calls) == 1
+
+
+@pytest.mark.anyio
+async def test_cron_on_project_runs_the_project_default_engine(tmp_path) -> None:
+    """rc15 integration finding: a cron with ``project`` set and no ``engine``
+    ran on the global default engine (Codex, full auto) while its run options
+    and approval audit were resolved for the project's engine (Claude)."""
+    from pathlib import Path
+
+    from tests.telegram_fakes import FakeBot, FakeTransport
+    from untether.config import ProjectConfig, ProjectsConfig
+    from untether.markdown import MarkdownPresenter
+    from untether.router import AutoRouter, RunnerEntry
+    from untether.runner_bridge import ExecBridgeConfig
+    from untether.runners.mock import Return, ScriptRunner
+    from untether.telegram import at_scheduler
+    from untether.telegram.bridge import TelegramBridgeConfig
+    from untether.transport_runtime import TransportRuntime
+
+    codex = ScriptRunner([Return(answer="codex")], engine="codex")
+    claude = ScriptRunner([Return(answer="claude")], engine="claude")
+    runtime = TransportRuntime(
+        router=AutoRouter(
+            entries=[
+                RunnerEntry(engine="codex", runner=codex),
+                RunnerEntry(engine="claude", runner=claude),
+            ],
+            default_engine="codex",
+        ),
+        projects=ProjectsConfig(
+            projects={
+                "proj": ProjectConfig(
+                    alias="proj",
+                    path=tmp_path,
+                    worktrees_dir=Path(".worktrees"),
+                    default_engine="claude",
+                )
+            },
+            default_project=None,
+        ),
+        config_path=tmp_path / "untether.toml",
+    )
+    cfg = TelegramBridgeConfig(
+        bot=FakeBot(),
+        runtime=runtime,
+        chat_id=123,
+        startup_msg="",
+        exec_cfg=ExecBridgeConfig(
+            transport=FakeTransport(),
+            presenter=MarkdownPresenter(),
+            final_notify=True,
+        ),
+        forward_coalesce_s=0.0,
+        media_group_debounce_s=0.0,
+    )
+
+    async def poller(_cfg):
+        run_job = at_scheduler._RUN_JOB
+        assert run_job is not None
+        await run_job(
+            123, 1, "hi", None, RunContext(project="proj", trigger_source="cron:p")
+        )
+        return
+        yield  # pragma: no cover — makes this an async generator
+
+    await loop_mod.run_main_loop(cfg, poller)
+    assert len(claude.calls) == 1
+    assert codex.calls == []
