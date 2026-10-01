@@ -40,6 +40,35 @@ _BENIGN_REJECTIONS: tuple[tuple[str, str], ...] = (
 
 # #746: a flood of benign rejections is still worth a WARNING (a wrong-id or
 # routing bug, or a stuck render loop, would otherwise leave only INFO lines).
+# Message calls (send/edit/delete/answer) get a short timeout: one dead
+# pooled connection (e.g. a stalled IPv6 flow to api.telegram.org) otherwise
+# blocks the chat's outbox for the full bulk timeout (rc15 integration
+# finding: 120 s freezes, lost and duplicated finals). Uploads, downloads and
+# getUpdates keep their own, longer timeouts.
+_MESSAGE_TIMEOUT_S = 30.0
+_CONNECT_TIMEOUT_S = 10.0
+# Never sent: safe to repeat for any method.
+_UNSENT_ERRORS: tuple[type[httpx.HTTPError], ...] = (
+    httpx.ConnectError,
+    httpx.ConnectTimeout,
+    httpx.PoolTimeout,
+)
+# May have reached Telegram: repeat only where a duplicate is harmless.
+_IDEMPOTENT_METHODS = frozenset(
+    {
+        "editMessageText",
+        "editMessageReplyMarkup",
+        "deleteMessage",
+        "answerCallbackQuery",
+    }
+)
+_IDEMPOTENT_RETRY_ERRORS: tuple[type[httpx.HTTPError], ...] = (
+    httpx.ReadTimeout,
+    httpx.WriteTimeout,
+    httpx.RemoteProtocolError,
+    httpx.ReadError,
+)
+
 _BENIGN_BURST_THRESHOLD = 5  # rejections of one (method, reason_class) ...
 _BENIGN_BURST_WINDOW_S = 60.0  # ... within this many seconds
 
@@ -212,7 +241,13 @@ class HttpBotClient:
             raise ValueError("Telegram token is empty")
         self._base = f"https://api.telegram.org/bot{token}"
         self._file_base = f"https://api.telegram.org/file/bot{token}"
-        self._http_client = http_client or httpx.AsyncClient(timeout=timeout_s)
+        self._bulk_timeout_s = timeout_s
+        self._http_client = http_client or httpx.AsyncClient(
+            timeout=httpx.Timeout(
+                min(timeout_s, _MESSAGE_TIMEOUT_S),
+                connect=min(timeout_s, _CONNECT_TIMEOUT_S),
+            )
+        )
         self._owns_http_client = http_client is None
         # #598: last failure reason per (method, chat_id, message_id). The
         # queued call chain returns bare ``None`` on failure, so upper
@@ -330,6 +365,33 @@ class HttpBotClient:
         logger.debug("telegram.response", method=method, payload=payload)
         return payload.get("result")
 
+    async def _post_once(
+        self,
+        method: str,
+        *,
+        json: dict[str, Any] | None,
+        data: dict[str, Any] | None,
+        files: dict[str, Any] | None,
+        **timeout_kwargs: Any,
+    ) -> httpx.Response:
+        if json is not None:
+            return await self._http_client.post(
+                f"{self._base}/{method}", json=json, **timeout_kwargs
+            )
+        return await self._http_client.post(
+            f"{self._base}/{method}", data=data, files=files, **timeout_kwargs
+        )
+
+    @staticmethod
+    def _should_retry(method: str, exc: httpx.HTTPError) -> bool:
+        if method == "getUpdates":
+            return False  # the poll loop retries on its own
+        if isinstance(exc, _UNSENT_ERRORS):
+            return True
+        return method in _IDEMPOTENT_METHODS and isinstance(
+            exc, _IDEMPOTENT_RETRY_ERRORS
+        )
+
     async def _request(
         self,
         method: str,
@@ -345,13 +407,22 @@ class HttpBotClient:
         if request_timeout is not None:
             timeout_kwargs["timeout"] = request_timeout
         try:
-            if json is not None:
-                resp = await self._http_client.post(
-                    f"{self._base}/{method}", json=json, **timeout_kwargs
+            try:
+                resp = await self._post_once(
+                    method, json=json, data=data, files=files, **timeout_kwargs
                 )
-            else:
-                resp = await self._http_client.post(
-                    f"{self._base}/{method}", data=data, files=files, **timeout_kwargs
+            except httpx.HTTPError as first:
+                if not self._should_retry(method, first):
+                    raise
+                # httpx drops the failed connection, so this goes out on a
+                # fresh one.
+                logger.warning(
+                    "telegram.network_retry",
+                    method=method,
+                    error_type=first.__class__.__name__,
+                )
+                resp = await self._post_once(
+                    method, json=json, data=data, files=files, **timeout_kwargs
                 )
         except httpx.HTTPError as exc:
             exc_url = getattr(exc.request, "url", None)
@@ -496,7 +567,9 @@ class HttpBotClient:
         data: dict[str, Any],
         files: dict[str, Any],
     ) -> Any | None:
-        return await self._request(method, data=data, files=files)
+        return await self._request(
+            method, data=data, files=files, request_timeout=self._bulk_timeout_s
+        )
 
     async def get_updates(
         self,
@@ -542,7 +615,7 @@ class HttpBotClient:
             return None
         url = f"{self._file_base}/{file_path}"
         try:
-            resp = await self._http_client.get(url)
+            resp = await self._http_client.get(url, timeout=self._bulk_timeout_s)
         except httpx.HTTPError as exc:
             request_url = getattr(exc.request, "url", None)
             logger.error(

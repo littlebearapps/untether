@@ -700,3 +700,69 @@ async def test_746_benign_burst_keys_are_independent() -> None:
     assert len(bursts) == 1
     assert bursts[0]["distinct_messages"] == 5
     assert bursts[0]["message_ids"] == [1000, 1001, 1002, 1003, 1004]
+
+
+# --- rc15 integration finding: dead connections and per-call timeouts --------
+
+
+def _flaky_client(error: Exception, *, fail_times: int = 1):
+    calls: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(request.url.path.rsplit("/", 1)[-1])
+        if len(calls) <= fail_times:
+            raise error
+        return httpx.Response(200, json={"ok": True, "result": True})
+
+    http = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    return HttpBotClient("token", http_client=http), calls
+
+
+@pytest.mark.anyio
+async def test_edit_retries_once_after_read_timeout() -> None:
+    client, calls = _flaky_client(httpx.ReadTimeout("dead flow"))
+    result = await client._request(
+        "editMessageText", json={"chat_id": 1, "message_id": 2, "text": "x"}
+    )
+    assert result is True
+    assert calls == ["editMessageText", "editMessageText"]
+
+
+@pytest.mark.anyio
+async def test_send_is_not_repeated_after_read_timeout() -> None:
+    # It may have reached Telegram: a repeat could duplicate the message.
+    client, calls = _flaky_client(httpx.ReadTimeout("dead flow"))
+    result = await client._request("sendMessage", json={"chat_id": 1, "text": "x"})
+    assert result is None
+    assert calls == ["sendMessage"]
+
+
+@pytest.mark.anyio
+async def test_send_retries_when_the_request_never_left() -> None:
+    client, calls = _flaky_client(httpx.ConnectError("refused"))
+    result = await client._request("sendMessage", json={"chat_id": 1, "text": "x"})
+    assert result is True
+    assert calls == ["sendMessage", "sendMessage"]
+
+
+@pytest.mark.anyio
+async def test_retry_happens_only_once() -> None:
+    client, calls = _flaky_client(httpx.ConnectError("refused"), fail_times=5)
+    result = await client._request("sendMessage", json={"chat_id": 1, "text": "x"})
+    assert result is None
+    assert len(calls) == 2
+
+
+@pytest.mark.anyio
+async def test_get_updates_is_never_retried_here() -> None:
+    client, calls = _flaky_client(httpx.ConnectError("refused"))
+    assert await client._request("getUpdates", json={"timeout": 1}) is None
+    assert calls == ["getUpdates"]
+
+
+def test_owned_client_uses_short_message_timeouts() -> None:
+    client = HttpBotClient("token", timeout_s=120)
+    timeout = client._http_client.timeout
+    assert timeout.read == 30.0
+    assert timeout.connect == 10.0
+    assert client._bulk_timeout_s == 120

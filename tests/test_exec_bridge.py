@@ -8631,6 +8631,61 @@ async def test_650_process_dead_after_delivery_reaps_silently() -> None:
 
 
 @pytest.mark.anyio
+async def test_650_reap_waits_out_the_dead_grace() -> None:
+    """rc15 integration finding: the reap fired ~26 s after an idle close while
+    the bridge was still delivering a follow-up turn's final over a stalled
+    Telegram connection, and the turn read "the session ended before this turn
+    finished". A process seen alive recently is not reaped inside the grace."""
+    from unittest.mock import patch
+
+    from untether.runner import JsonlStreamState
+    from untether.utils.proc_diag import ProcessDiag
+
+    transport = FakeTransport()
+    presenter = _KeyboardPresenter()
+    clock = _FakeClock(start=100.0)
+    edits = _make_edits(transport, presenter, clock=clock)
+    edits._stall_check_interval = 0.01
+    edits._STALL_THRESHOLD_SECONDS = 0.05
+    edits.pid = 99999
+    stream = JsonlStreamState(expected_session=None)
+    stream.did_emit_completed = True
+    stream.last_event_type = "result"
+    edits.stream = stream
+    cancel_event = anyio.Event()
+    edits.cancel_event = cancel_event
+
+    alive = ProcessDiag(pid=99999, alive=True)
+    dead = ProcessDiag(pid=99999, alive=False)
+    diags = iter([alive])
+
+    def diag(_pid: int) -> ProcessDiag:
+        return next(diags, dead)
+
+    with (
+        patch("untether.utils.proc_diag.collect_proc_diag", side_effect=diag),
+        structlog.testing.capture_logs() as logs,
+    ):
+        async with anyio.create_task_group() as tg:
+
+            async def drive() -> None:
+                await anyio.sleep(0.05)  # first poll sees it alive at t=100
+                clock.set(130.0)  # dead for 30 s: still inside the grace
+                await anyio.sleep(0.1)
+                assert not cancel_event.is_set()
+                clock.set(100.0 + edits._REAP_DEAD_GRACE_S + 1)
+                await anyio.sleep(0.1)
+                if not cancel_event.is_set():
+                    edits.signal_send.close()
+
+            tg.start_soon(edits.run)
+            tg.start_soon(drive)
+
+    assert cancel_event.is_set(), "reaped once the grace has passed"
+    assert any(r.get("event") == "progress_edits.reaped_after_delivery" for r in logs)
+
+
+@pytest.mark.anyio
 async def test_650_process_dead_without_delivery_still_alarms() -> None:
     """Regression guard for the gate's direction: a dead process on a run
     that never emitted CompletedEvent is a genuine crash — the alarm stays."""

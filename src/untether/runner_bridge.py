@@ -2148,6 +2148,19 @@ class ProgressEdits:
                 and diag.alive is False
                 and bool(getattr(self.stream, "did_emit_completed", False))
             ):
+                # The bridge may still be delivering a follow-up turn's final
+                # (a slow Telegram call holds the event loop off the stream).
+                # Reaping then cancels that delivery and the turn reads "the
+                # session ended before this turn finished" (rc15 integration
+                # finding). A bounded delivery ends well inside this grace,
+                # after which the stream ends on its own.
+                dead_for = (
+                    self.clock() - self._last_alive_at
+                    if self._last_alive_at is not None
+                    else None
+                )
+                if dead_for is not None and dead_for < self._REAP_DEAD_GRACE_S:
+                    continue
                 logger.info(
                     "progress_edits.reaped_after_delivery",
                     channel_id=self.channel_id,
@@ -3715,6 +3728,10 @@ class ProgressEdits:
     # deliberations.
     _STALL_THRESHOLD_APPROVAL_FIRST: float = 600.0
     _STALL_THRESHOLD_APPROVAL: float = 1800.0  # refire threshold after first
+    # How long a dead, already-answered run's process must stay dead before
+    # the #650 silent reap: longer than a bounded Telegram delivery
+    # (twice the client's 30 s message timeout) still holding the stream.
+    _REAP_DEAD_GRACE_S: float = 90.0
     _STALL_MAX_WARNINGS: int = 10  # absolute cap
     _STALL_MAX_WARNINGS_NO_PID: int = 3  # aggressive cap when pid=None + no events
     _TCP_ACTIVE_THRESHOLD: int = 20  # TCP connections above this suggest active work
