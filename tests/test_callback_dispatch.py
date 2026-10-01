@@ -739,7 +739,7 @@ async def test_command_context_carries_file_deny_globs(monkeypatch) -> None:
 
 
 @pytest.fixture
-def _control_registries():
+def control_registries():
     from untether.runners import claude as claude_mod
 
     def _wipe() -> None:
@@ -794,11 +794,11 @@ async def _dispatch_control(cfg, data: str, callback_query_id: str) -> None:
 
 @pytest.mark.anyio
 async def test_685_claude_control_early_toast_uses_registry(
-    monkeypatch, _control_registries
+    monkeypatch, control_registries
 ) -> None:
     from untether.telegram.commands.claude_control import ClaudeControlCommand
 
-    claude_mod = _control_registries
+    claude_mod = control_registries
     claude_mod.mark_request_handled("req-done", action="approve", channel_id=123)
     transport = FakeTransport()
     cfg = make_cfg(transport)
@@ -818,13 +818,13 @@ async def test_685_claude_control_early_toast_uses_registry(
 
 @pytest.mark.anyio
 async def test_685_dispatch_reserves_claim_before_early_answer(
-    monkeypatch, _control_registries
+    monkeypatch, control_registries
 ) -> None:
     """Two taps started together: the first toasts Approved, the second
     Already answered — decided before either early answer is awaited."""
     from untether.telegram.commands.claude_control import ClaudeControlCommand
 
-    claude_mod = _control_registries
+    claude_mod = control_registries
     stdin = _register_request(claude_mod, "req-both")
     transport = FakeTransport()
     cfg = make_cfg(transport)
@@ -847,7 +847,7 @@ async def test_685_dispatch_reserves_claim_before_early_answer(
         tg.start_soon(_dispatch_control, cfg, "claude_control:approve:req-both", "cb-1")
         tg.start_soon(_dispatch_control, cfg, "claude_control:approve:req-both", "cb-2")
         for _ in range(50):
-            await anyio.sleep(0)
+            await anyio.lowlevel.checkpoint()
             if len(toasts) == 2:
                 break
         gate.set()
@@ -859,12 +859,12 @@ async def test_685_dispatch_reserves_claim_before_early_answer(
 
 @pytest.mark.anyio
 async def test_685_claim_released_when_handle_raises(
-    monkeypatch, _control_registries
+    monkeypatch, control_registries
 ) -> None:
     from untether.runners.claude import ControlRequestStatus
     from untether.telegram.commands.claude_control import ClaudeControlCommand
 
-    claude_mod = _control_registries
+    claude_mod = control_registries
     _register_request(claude_mod, "req-boom")
     cfg = make_cfg(FakeTransport())
 

@@ -17,6 +17,7 @@ import pytest
 from structlog.testing import capture_logs
 
 from untether.commands import CommandContext
+from untether.live_followup import inject_live_followup
 from untether.model import ActionEvent, ResumeToken, TurnEvent
 from untether.runners import claude as claude_mod
 from untether.runners.claude import (
@@ -44,7 +45,6 @@ from untether.runners.claude import (
     steer_into_session,
     translate_claude_event,
 )
-from untether.live_followup import inject_live_followup
 from untether.runners.run_options import EngineRunOptions, apply_run_options
 from untether.scheduler import ThreadJob
 from untether.schemas import claude as claude_schema

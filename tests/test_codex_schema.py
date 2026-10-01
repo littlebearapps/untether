@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import itertools
 import json
 from pathlib import Path
 
@@ -236,7 +237,7 @@ def test_resume_capture_usage_is_thread_cumulative() -> None:
             threads.append(event.thread_id)
     assert len(usages) == 3
     assert len(threads) == 3 and len(set(threads)) == 1
-    for prev, cur in zip(usages, usages[1:], strict=False):
+    for prev, cur in itertools.pairwise(usages):
         for name in codex_schema.CODEX_USAGE_FIELDS:
             assert getattr(cur, name) >= getattr(prev, name)
     assert usages[1].input_tokens > usages[0].input_tokens

@@ -2794,7 +2794,7 @@ async def test_685_concurrent_taps_single_write_no_keyerror() -> None:
         tg.start_soon(_tap)
         tg.start_soon(_tap)
         for _ in range(50):
-            await anyio.sleep(0)
+            await anyio.lowlevel.checkpoint()
             if writes:
                 break
         release.set()
