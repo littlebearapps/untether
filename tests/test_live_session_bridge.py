@@ -1532,3 +1532,49 @@ def test_819_export_skips_telemetry_keeps_other_actions(monkeypatch) -> None:
     assert recorded == []
     rb._record_export_event(_action(), _TOKEN)
     assert [e["action"]["kind"] for e in recorded] == ["command"]
+
+
+async def test_router_refreshes_progress_settings_at_each_turn_start() -> None:
+    """rc15 integration finding (R15-19f): a hot-reloaded ``[progress]``
+    toggle reached only the next spawned run; follow-up turns of a live
+    session kept the old value. The router now fires a hook per turn start."""
+    rec = _CancelRecorder()
+    starts: list[int] = []
+    router = rb.FollowupTurnRouter(
+        new_tracker=lambda: ProgressTracker(engine="claude"),
+        create_progress=rec.create,
+        close_progress=rec.close,
+        deliver=rec.deliver,
+        default_reply_to=USER_REF,
+        followup_notify=False,
+        anchor_for={}.get,
+        on_turn_started=lambda: starts.append(1),
+    )
+    await router.on_turn(_turn("started", turn=2, reason="followup"))
+    await router.on_turn(_turn("completed", turn=2, reason="followup"))
+    await router.on_turn(_turn("started", turn=3, reason="followup"))
+    assert len(starts) == 2
+
+
+def test_refresh_progress_settings_reaches_a_verbose_override(monkeypatch) -> None:
+    from types import SimpleNamespace
+
+    from untether.markdown import MarkdownFormatter
+    from untether.telegram.bridge import TelegramPresenter
+
+    default = TelegramPresenter(formatter=MarkdownFormatter(show_context_usage=True))
+    override = TelegramPresenter(
+        formatter=MarkdownFormatter(verbosity="verbose", show_context_usage=True)
+    )
+    monkeypatch.setattr(
+        rb,
+        "_load_progress_settings",
+        lambda: SimpleNamespace(
+            max_actions=3, verbosity="compact", show_context_usage=False
+        ),
+    )
+    rb._refresh_progress_settings(default, override)
+    assert default._formatter.show_context_usage is False
+    assert override._formatter.show_context_usage is False
+    assert override._formatter.max_actions == 3
+    assert override._formatter.verbosity == "verbose"  # the override's own

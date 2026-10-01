@@ -782,6 +782,35 @@ def _resolve_presenter(
     return default_presenter
 
 
+def _refresh_progress_settings(
+    presenter: Presenter, override: Presenter | None = None
+) -> Any:
+    """Push the current ``[progress]`` settings into ``presenter`` (#269).
+
+    ``override`` is a per-chat ``/verbose`` presenter built at run start: it
+    takes the refreshed values too, except the verbosity it overrides.
+    Returns the settings snapshot.
+    """
+    from .telegram.bridge import TelegramPresenter
+
+    progress_cfg = _load_progress_settings()
+    refresh = getattr(presenter, "refresh_progress_settings", None)
+    if callable(refresh):
+        try:
+            refresh(progress_cfg)
+        except Exception:  # noqa: BLE001
+            logger.debug("progress_settings.refresh_failed", exc_info=True)
+    if (
+        override is not None
+        and override is not presenter
+        and isinstance(override, TelegramPresenter)
+        and isinstance(presenter, TelegramPresenter)
+    ):
+        override._formatter.max_actions = presenter._formatter.max_actions
+        override._formatter.show_context_usage = presenter._formatter.show_context_usage
+    return progress_cfg
+
+
 # #410: schema-mismatch surfacing — promoted from one-shot per-process to
 # per-call counter so the issue-watcher actually creates an issue when API-
 # shape drift starts happening (one-shot logs only fire once per restart, so
@@ -4603,8 +4632,13 @@ class FollowupTurnRouter:
         | None = pop_followup_anchor,
         progress_for: Callable[[ActionEvent], bool] | None = None,
         deliver_cancelled: Callable[[_TurnCtx], Awaitable[None]] | None = None,
+        on_turn_started: Callable[[], None] | None = None,
     ) -> None:
         self._new_tracker = new_tracker
+        # Re-reads ``[progress]`` so a hot-reloaded toggle reaches turns of
+        # a live session, not only the next spawned run (rc15 integration
+        # finding: ``show_context_usage = false`` was ignored by follow-ups).
+        self._on_turn_started = on_turn_started
         self._create_progress = create_progress
         self._close_progress = close_progress
         self._deliver = deliver
@@ -4716,6 +4750,11 @@ class FollowupTurnRouter:
         if evt.phase == "started":
             if self.current is not None:
                 await self._finish(self.current)
+            if self._on_turn_started is not None:
+                try:
+                    self._on_turn_started()
+                except Exception:  # noqa: BLE001
+                    logger.debug("live_turn.on_started_failed", exc_info=True)
             ctx = self._open(evt)
             logger.info(
                 "live_turn.started",
@@ -5137,13 +5176,7 @@ async def handle_message(
     # apply on the next run. Per-chat /verbose overrides downstream of
     # _resolve_presenter() construct a fresh formatter from these refreshed
     # values, so the override picks up the new defaults too.
-    progress_cfg = _load_progress_settings()
-    refresh = getattr(cfg.presenter, "refresh_progress_settings", None)
-    if callable(refresh):
-        try:
-            refresh(progress_cfg)
-        except Exception:  # noqa: BLE001
-            logger.debug("progress_settings.refresh_failed", exc_info=True)
+    progress_cfg = _refresh_progress_settings(cfg.presenter)
 
     # Resolve effective presenter: check for per-chat verbose override
     effective_presenter = _resolve_presenter(cfg.presenter, incoming.channel_id)
@@ -6157,6 +6190,9 @@ async def handle_message(
             or (evt.action.kind != "note" and not is_collection_action(evt.action))
         ),
         deliver_cancelled=_deliver_turn_cancelled,
+        on_turn_started=lambda: _refresh_progress_settings(
+            cfg.presenter, effective_presenter
+        ),
     )
 
     edits.control_surface_probe = build_control_surface_probe(edits, turn_router)
