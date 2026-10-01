@@ -74,11 +74,13 @@ Data is stored in `stats.json` in the Untether config directory (`~/.untether/` 
 
 ## Background-task telemetry
 
-v0.35.2 adds per-session tracking for Claude Code's long-running primitives. Counts and outstanding deadlines are recorded for: `Monitor`, `Bash` (`run_in_background`), `Agent` (`run_in_background`), `ScheduleWakeup`, and `RemoteTrigger`. These feed into `/health` and the stall detector so background work isn't mistaken for a wedged session. ([#347](https://github.com/littlebearapps/untether/issues/347))
+v0.35.2 adds per-session tracking for Claude Code's long-running primitives. Counts and outstanding deadlines are recorded for: `Monitor`, `Bash` (`run_in_background`), `Agent` (`run_in_background`), `ScheduleWakeup`, and `RemoteTrigger`. These feed into `/health` and the stall detector so background work isn't mistaken for a wedged session. ([#347](https://github.com/littlebearapps/untether/issues/347)) Since v0.35.5 Claude Code's own task events drive this, and running background tasks are shown live in the progress and status messages — see [Verbose progress → Background tasks](verbose-progress.md#background-tasks-claude).
 
 ## Cost footer accuracy
 
 Run and session cost footers were tightened in v0.35.2. Claude usage queries use a 60 s TTL cache (stale-while-error), Gemini pulls from `stats.total_cost_usd`, and AMP now reports `total_cost_usd`. Zero-turn sessions render `$0.00` instead of a blank. ([#316](https://github.com/littlebearapps/untether/issues/316))
+
+Since v0.35.5 a resumed session's figures are per run. Claude reports a running cost total for the whole session and Codex a running token total for the whole thread, so Untether records the difference from the previous run; footers, budgets and `/stats` no longer count a session's earlier runs again ([#778](https://github.com/littlebearapps/untether/issues/778), [#419](https://github.com/littlebearapps/untether/issues/419)). A turn Claude runs by itself after a background task counts as its own small run. In Codex and OpenCode chats, `/usage` shows the token totals of the chat's last session — see [Cost budgets → Other engines](cost-budgets.md#other-engines).
 
 ## Related
 

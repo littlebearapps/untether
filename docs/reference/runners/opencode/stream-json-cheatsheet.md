@@ -106,6 +106,7 @@ Fields:
 - `sessionID`: Session identifier
 - `error.name`: Error type
 - `error.data.message`: Human-readable error (when available)
+- `message` (optional): Alternative top-level message; Untether prefers it over `error` when present
 
 Example:
 ```json
@@ -117,10 +118,12 @@ Example:
 | OpenCode Event | Untether Event | Condition |
 |----------------|--------------|-----------|
 | `step_start` | `StartedEvent` | First occurrence |
-| `tool_use` | `ActionEvent(phase="completed")` | `status == "completed"` |
+| `tool_use` | `ActionEvent(phase="completed")` | `status == "completed"` (`ok=False` if `metadata.exit` is non-zero) |
+| `tool_use` | `ActionEvent(phase="completed", ok=False)` | `status == "error"` |
+| `tool_use` | `ActionEvent(phase="started")` | any other status |
 | `text` | (accumulate text) | - |
-| `step_finish` | `CompletedEvent` | `reason == "stop"` |
-| `step_finish` | (ignored) | `reason == "tool-calls"` |
+| `step_finish` | `CompletedEvent` (with accumulated cost/tokens) | `reason == "stop"` |
+| `step_finish` | (cost/tokens accumulated only) | `reason == "tool-calls"` or absent |
 | `error` | `CompletedEvent(ok=False)` | - |
 
 If `step_finish` omits `reason`, Untether treats a clean process exit as successful completion and emits `CompletedEvent(ok=True)` with accumulated usage.

@@ -86,6 +86,9 @@ Note: Outside topics (private chats or main group chats), `/ctx` binds the chat 
 
 Use `/new` inside the topic to cancel any running task and clear stored sessions for that thread.
 
+!!! warning "Known issue in v0.35.5"
+    `/new` currently also cancels runs that are working in *other* topics of the same group ([#826](https://github.com/littlebearapps/untether/issues/826)). The stored sessions of other topics are not cleared. Until it's fixed, use `/cancel` (reply to the progress message) to stop a single topic's run.
+
 ## Set a default engine per topic
 
 Use `/agent set` inside the topic:
@@ -93,6 +96,12 @@ Use `/agent set` inside the topic:
 ```
 /agent set claude
 ```
+
+## Set the follow-up mode per topic
+
+For Claude Code, send `/steer` (no text) inside a topic to have messages sent there while Claude is working steered into the run, or `/queue` to go back to waiting for the turn to end. It applies to that topic only. See [Steer follow-ups](steer-follow-ups.md).
+
+Notices about a run — such as `🔄 Restarting — waiting for your run to finish…` during a restart — are posted in the topic that owns the run ([#665](https://github.com/littlebearapps/untether/issues/665)).
 
 ## State files
 

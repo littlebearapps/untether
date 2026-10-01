@@ -43,7 +43,7 @@ Onboarding walks you through bot setup and asks how you want to work. [Full inst
 
     Forum topics bound to projects and branches.
 
-    Best for: teams, organized multi-repo workflows.
+    Best for: teams, organised multi-repo workflows.
 
     [Set up topics →](how-to/topics.md)
 
@@ -67,12 +67,14 @@ Step-by-step guides for new users:
 
 1. [Install & onboard](tutorials/install.md) — set up Untether and your bot
 2. [First run](tutorials/first-run.md) — send a task, watch it stream, continue the conversation
-3. [Projects & branches](tutorials/projects-and-branches.md) — target repos from anywhere, run on feature branches
-4. [Multi-engine](tutorials/multi-engine.md) — use different engines for different tasks
+3. [Interactive control](tutorials/interactive-control.md) — approve or deny Claude Code's actions, review plans, answer questions
+4. [Projects & branches](tutorials/projects-and-branches.md) — target repos from anywhere, run on feature branches
+5. [Multi-engine](tutorials/multi-engine.md) — use different engines for different tasks
 
 ## How-to guides
 
 - [Chat sessions](how-to/chat-sessions.md), [Topics](how-to/topics.md), [Projects](how-to/projects.md), [Worktrees](how-to/worktrees.md)
+- [Plan mode](how-to/plan-mode.md), [Interactive approval](how-to/interactive-approval.md), [Steer follow-ups](how-to/steer-follow-ups.md), [Cost budgets](how-to/cost-budgets.md)
 - [Voice notes](how-to/voice-notes.md), [File transfer](how-to/file-transfer.md), [Export sessions](how-to/export-sessions.md)
 - [Webhooks & cron](how-to/webhooks-and-cron.md), [Group chat](how-to/group-chat.md), [Schedule tasks](how-to/schedule-tasks.md)
 - [Write a plugin](how-to/write-a-plugin.md), [Add a runner](how-to/add-a-runner.md), [Dev setup](how-to/dev-setup.md)
@@ -83,4 +85,4 @@ Exact options, defaults, and contracts:
 
 - [Commands & directives](reference/commands-and-directives.md)
 - [Configuration](reference/config.md)
-- [Specification](reference/specification.md) — normative behavior
+- [Specification](reference/specification.md) — normative behaviour

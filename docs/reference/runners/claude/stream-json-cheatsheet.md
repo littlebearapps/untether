@@ -19,7 +19,7 @@ Fields:
 - `session_id`
 - `tools`: array of tool names
 - `mcp_servers`: array of `{name, status}`
-- `cwd`, `model`, `permissionMode`, `apiKeySource` (optional)
+- `cwd`, `model`, `permissionMode`, `apiKeySource`, `output_style` (optional)
 
 Example:
 ```json
@@ -77,7 +77,8 @@ Fields (success path):
 - `total_cost_usd`, `is_error`, `duration_ms`, `duration_api_ms`, `num_turns`
 - `result`: final answer string
 - `usage`: usage object
-- `modelUsage`: optional per-model usage
+- `modelUsage`: optional per-model usage, keyed by model id; each entry carries `contextWindow`
+  (decoded since 0.35.5rc15 for the `% ctx` denominator, [#819](https://github.com/littlebearapps/untether/issues/819))
 
 Example (success):
 ```json
@@ -85,7 +86,9 @@ Example (success):
 ```
 
 Fields (error path):
-- Same as success, but `is_error`: `true`, `subtype`: `"error"`
+- Same as success, but `is_error`: `true` and an error `subtype` (e.g.
+  `error_during_execution`, which can carry an `errors` array). Untether keys success on
+  `is_error`; `subtype` is informational
 - `result` may be empty or contain an error description
 
 Example (error):
@@ -104,11 +107,12 @@ Turn-ending fields (decoded since 0.35.5rc14, all optional):
   Typed `Any`: readers check it is an object first.
 - `stop_reason`: passed through, typed `Any`.
 
-Optional fields (may appear in upstream Claude Code CLI output but are **not** captured
-by Untether's `StreamResultMessage` schema):
-- `error`: error description string
+Optional fields that may appear in upstream Claude Code CLI output but are **not** captured
+by Untether's `StreamResultMessage` schema:
+- `error` / `errors`: error description(s)
 - `permission_denials`: array of `{tool_name, tool_use_id, tool_input}`
-- `structured_output`: arbitrary structured output (captured by schema but unused)
+
+`structured_output` (arbitrary structured output) is captured by the schema but unused.
 
 ### `rate_limit_event`
 
@@ -218,6 +222,13 @@ tail on long-running actions from its own clock (#481), so the upstream heartbea
 redundant for progress rendering — the schema entry exists so the line decodes instead of
 being dropped with a `jsonl.msgspec.invalid` warning ([#637](https://github.com/littlebearapps/untether/issues/637)).
 
+### `stream_event`
+
+Partial-message deltas (`{"type":"stream_event","uuid","session_id","event":{…},"parent_tool_use_id"}`)
+appear only with `--include-partial-messages`, which Untether doesn't pass. The schema
+decodes them (`StreamEventMessage`), and `translate_claude_event` ignores them
+(DEBUG `claude.event.unrecognised`).
+
 ### Background-task lifecycle (`system` subtypes, CLI ≥ 2.1.28x) — #776
 
 Verified on 2.1.283 (see `docs/findings/2026-09-27-claude-live-session-probes.md`).
@@ -276,6 +287,33 @@ Untether's plan re-arm (host → CLI, handled inline by the CLI's stdin reader, 
 ```
 
 A real change is followed by the `system/status` frame above; `plan` while already `plan` is acked with no status frame. Refusal codes (2.1.285): `invalid_mode`, `bypass_*` (target `bypassPermissions`) and `auto_mode_*` (target `auto`) — `plan` is never refused.
+
+### `control_request` / `control_response` (permission prompts)
+
+In control-channel mode (`--permission-prompt-tool stdio`) the CLI asks the host before
+running a tool the earlier permission stages didn't decide:
+
+```json
+{"type":"control_request","request_id":"<id>","request":{"subtype":"can_use_tool","tool_name":"Edit","input":{"file_path":"…","old_string":"…","new_string":"…"},"permission_suggestions":[…]}}
+```
+
+Other request subtypes Untether decodes: `initialize`, `set_permission_mode`,
+`hook_callback`, `mcp_message`, `rewind_files`, `interrupt` (`ControlRequest` in
+`schemas/claude.py`). Untether answers on stdin:
+
+```json
+{"type":"control_response","response":{"subtype":"success","request_id":"<id>","response":{"behavior":"allow","updatedInput":{…}}}}
+{"type":"control_response","response":{"subtype":"success","request_id":"<id>","response":{"behavior":"deny","message":"User denied"}}}
+```
+
+`updatedInput` echoes the request's `input` (AskUserQuestion adds `answers`). Which requests
+become Telegram buttons depends on the permission mode
+([#749](https://github.com/littlebearapps/untether/issues/749)); see the
+[runner spec](runner.md), "Permission modes". The CLI ignores a second answer to the same
+request, so Untether tracks answered requests itself
+([#685](https://github.com/littlebearapps/untether/issues/685)). `control_response` lines
+from the CLI are decoded too; only the acks of Untether's own `set_permission_mode`
+(`ut_plan_rearm_…`, above) are acted on.
 
 ### `control_cancel_request` (CLI → host) — #684
 
@@ -421,10 +459,21 @@ Fields:
 {"type":"text","text":"Hello"}
 ```
 
+### Thinking
+```json
+{"type":"thinking","thinking":"…","signature":"…"}
+```
+Untether emits each non-empty thinking block as a completed `note` action
+(`claude.thinking.<n>`).
+
 ### Tool use
 ```json
 {"type":"tool_use","id":"toolu_1","name":"Bash","input":{"command":"ls -la"}}
 ```
+
+`server_tool_use` (Anthropic server-side tools such as `web_search`) has the same shape and
+is translated like `tool_use`; `advisor_tool_result` has the `tool_result` shape and is
+translated like it ([#489](https://github.com/littlebearapps/untether/issues/489)).
 
 #### `ScheduleWakeup` (session-scoped scheduling)
 

@@ -2,7 +2,19 @@
 
 When an engine fails, Untether scans the error message and shows an actionable recovery hint above the raw error. The raw error is wrapped in a code block for visual separation.
 
-This page lists all recognised error patterns grouped by category. Hints are matched by substring (case-insensitive) — first match wins.
+This page lists all recognised error patterns grouped by category, in the order they are checked. Hints are matched by substring (case-insensitive) — first match wins, so the order is part of the behaviour.
+
+## Engine end-of-life and CLI flag drift
+
+These are checked first. The end-of-life patterns must outrank the generic `invalid_request_error` pattern, which AMP's `426` payload would otherwise match with a misleading hint ([#721](https://github.com/littlebearapps/untether/issues/721)); the Codex retired-setting pattern must outrank the generic `no longer supported` fallback, which would otherwise blame the client version ([#830](https://github.com/littlebearapps/untether/issues/830)).
+
+| Pattern | Hint | Engines |
+|---------|------|---------|
+| `ineligibletiererror` / `gemini code assist for individuals` | Gemini CLI is end-of-life for individual and free Google accounts (18 June 2026). The `gemini` engine is deprecated in Untether — switch engines via /config, or migrate to Antigravity CLI (antigravity.google). | Gemini (deprecated) |
+| `this version of amp is no longer supported` | AMP is refusing this client version. Run `amp update` to upgrade. The `amp` engine is deprecated in Untether and may stop working again without notice. | AMP (deprecated) |
+| `is no longer supported; remove this setting` | A setting in your Codex config (`~/.codex/config.toml`, a `--profile` file, or `[engines.codex] extra_args`) is no longer supported by the installed Codex CLI — remove the key the error names. | Codex |
+| `' for '--` / `a value is required for '--` / `error: unexpected argument '-` | The engine CLI rejected a command-line flag — this Untether version may not match the installed CLI. Update Untether, and report it if the problem persists. | Codex (clap argv errors) |
+| `no longer supported` | The engine CLI reports that this client version or account tier is no longer supported by its provider. Update the CLI, or switch engines via /config. | All |
 
 ## Authentication
 
@@ -136,9 +148,9 @@ These are checked before the generic `invalid_request_error` pattern, because th
 
 | Pattern | Hint | Engines |
 |---------|------|---------|
-| `require paid credits` | AMP execute mode requires paid credits. Add credits at ampcode.com/pay. | AMP |
-| `amp login` | Run `amp login` to authenticate with Sourcegraph. | AMP |
-| `gemini result status:` | Gemini returned an unexpected result. Try a fresh session with `/new`. | Gemini |
+| `require paid credits` | AMP execute mode requires paid credits. Add credits at ampcode.com/pay. | AMP (deprecated) |
+| `amp login` | Run `amp login` to authenticate with Sourcegraph. | AMP (deprecated) |
+| `gemini result status:` | Gemini returned an unexpected result. Try a fresh session with `/new`. | Gemini (deprecated) |
 
 ## Account errors
 

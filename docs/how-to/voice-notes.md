@@ -48,12 +48,31 @@ requires a specific model name, set `voice_transcription_model` (for example,
     Since v0.35.5 ([#679](https://github.com/littlebearapps/untether/issues/679)), a refused voice note gets a reply that names the blocked host and the exact entry to add, for example `voice_transcription_url_allowlist = ["127.0.0.0/8"]` for `localhost`. For a private or tailnet host (Tailscale uses `100.64.0.0/10`), the reply suggests that single IP rather than the whole range. The same check runs at startup and after a hot-reload of a voice endpoint key, so a blocked endpoint shows up in the log as `voice.base_url.not_permitted` before anyone sends a voice note. Link-local and cloud-metadata addresses (`169.254.x`) are never suggested.
 
 !!! tip "Hot-reload"
-    Voice transcription settings (`voice_transcription`, model, base URL, API key) can be toggled by editing `untether.toml` — changes take effect immediately without restarting (requires `watch_config = true`).
+    Voice transcription settings (`voice_transcription`, model, base URL, API key, prompt) can be toggled by editing `untether.toml` — changes take effect immediately without restarting (requires `watch_config = true`).
 
-## Behavior
+## Improve recognition of names
+
+Speech-to-text tends to mangle tool and project names ("Clawed Code", "trollo") while getting the rest of the sentence right. Untether sends the transcription API a short vocabulary hint so those words come out right ([#703](https://github.com/littlebearapps/untether/issues/703), [#789](https://github.com/littlebearapps/untether/issues/789)). The built-in hint is:
+
+```
+Claude, Claude Code, CLAUDE.md, AGENTS.md, Codex, OpenCode, Untether, Telegram, MCP, CLI, repo, changelog, PyPI
+```
+
+Set your own with `voice_transcription_prompt`. It **replaces** the built-in hint rather than adding to it, so include any of those words you still want:
+
+```toml
+[transports.telegram]
+voice_transcription_prompt = "Claude Code, CLAUDE.md, Codex, Trello, happy-gadgets, Cloudflare"
+```
+
+- Leave the key out to use the built-in hint; set it to `""` to send no hint at all.
+- Keep it to a comma-separated list of names, well under Whisper's ~224-token prompt window (Whisper keeps only the last ~224 tokens). The value is limited to 1,000 characters.
+- The prompt is never written to the logs, so private project names are safe to include.
+
+## Behaviour
 
 When you send a voice note, Untether transcribes it and runs the result as a normal text message.
-If transcription fails, you’ll get an error message and the run is skipped.
+If transcription fails, you’ll get an error message and the run is skipped. In a chat set to [steer](steer-follow-ups.md), a voice note sent while Claude is working is steered into the run like a typed message.
 
 !!! user "You"
     🎤 *(voice note — 0:12)*

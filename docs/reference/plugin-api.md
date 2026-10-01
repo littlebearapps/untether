@@ -17,7 +17,7 @@ subject to change. The API version is tracked by `TAKOPI_PLUGIN_API_VERSION`.
 - Plugins should pin to a compatible Untether range, e.g.:
 
 ```toml
-dependencies = ["untether>=0.14,<0.15"]
+dependencies = ["untether>=0.35,<0.36"]
 ```
 
 ---
@@ -69,7 +69,7 @@ dependencies = ["untether>=0.14,<0.15"]
 |--------|---------|
 | `EngineId` | Engine id type alias |
 | `ResumeToken` | Resume token (engine + value) |
-| `StartedEvent` / `ActionEvent` / `CompletedEvent` | Core event types |
+| `StartedEvent` / `ActionEvent` / `CompletedEvent` | Core event types (`TurnEvent`, emitted only by live Claude sessions, is internal: `untether.model`) |
 | `Action` | Action metadata for `ActionEvent` |
 | `ActionState` / `ProgressState` / `ProgressTracker` | Progress tracking helpers for presenters |
 | `RunContext` | Project/branch context |
@@ -82,7 +82,7 @@ dependencies = ["untether>=0.14,<0.15"]
 | Symbol | Purpose |
 |--------|---------|
 | `ExecBridgeConfig` | Transport + presenter config |
-| `IncomingMessage` | Normalized incoming message |
+| `IncomingMessage` | Normalised incoming message |
 | `RunningTask` / `RunningTasks` | Per-message run coordination |
 | `handle_message()` | Core message handler used by transports |
 
@@ -101,7 +101,7 @@ dependencies = ["untether>=0.14,<0.15"]
 | `set_run_base_dir` | Set working directory context for path relativization |
 | `reset_run_base_dir` | Reset working directory context |
 | `ThreadJob` | Job dataclass for ThreadScheduler |
-| `ThreadScheduler` | Per-thread message serialization |
+| `ThreadScheduler` | Per-thread message serialisation |
 | `get_command` | Get command backend by ID |
 | `list_command_ids` | Get available command plugin IDs |
 | `list_backends` | Discover available engine backends |
@@ -124,6 +124,10 @@ Action events are optional. The minimal valid run is:
 ```
 StartedEvent -> CompletedEvent
 ```
+
+The one exception to "`CompletedEvent` is last" is a runner that keeps its engine process live after the first result (Claude Code's live sessions): it may follow `CompletedEvent` with `TurnEvent(started) -> ActionEvent* -> TurnEvent(completed)` segments. Plugin runners don't need to emit them. See the [Specification](specification.md) §4.3.4 and §5.4.
+
+`BaseRunner` takes the per-session lock for you (on the resume token, or on the token from the first `StartedEvent` for new and `/continue` runs) and closes `run_impl` with `contextlib.aclosing`. Runners are shared across chats, so don't keep per-run state on the runner instance.
 
 ### Resume tokens
 
@@ -160,15 +164,20 @@ class TransportBackend(Protocol):
     id: str
     description: str
 
-    def check_setup(...) -> SetupResult: ...
-    def interactive_setup(self, *, force: bool) -> bool: ...
+    def check_setup(
+        self,
+        engine_backend: EngineBackend,
+        *,
+        transport_override: str | None = None,
+    ) -> SetupResult: ...
+    async def interactive_setup(self, *, force: bool) -> bool: ...
     def lock_token(
-        self, *, transport_config: dict[str, object], config_path: Path
+        self, *, transport_config: object, _config_path: Path
     ) -> str | None: ...
     def build_and_run(
         self,
         *,
-        transport_config: dict[str, object],
+        transport_config: object,
         config_path: Path,
         runtime: TransportRuntime,
         final_notify: bool,
@@ -179,7 +188,7 @@ class TransportBackend(Protocol):
 Transport backends are responsible for:
 
 - Validating config and onboarding users (`check_setup`, `interactive_setup`)
-- Providing a lock token so Untether can prevent parallel runs
+- Providing a lock token (e.g. the bot token) whose fingerprint is stamped into the config lock file. The lock itself is per config file, so two instances can't share one config
 - Starting the transport loop in `build_and_run`
 
 ---
@@ -203,6 +212,28 @@ Command handlers receive a `CommandContext` with:
 - `runtime` (engine/project resolution)
 - `executor` (send messages or run engines)
 
+The full field list:
+
+| Field | Type | Notes |
+|-------|------|-------|
+| `command` | `str` | Command id, without the slash |
+| `text` | `str` | Full message text |
+| `args_text` | `str` | Text after the command |
+| `args` | `tuple[str, ...]` | Parsed arguments |
+| `message` | `MessageRef` | The command message |
+| `reply_to` | `MessageRef \| None` | The message being replied to |
+| `reply_text` | `str \| None` | Text of the replied-to message |
+| `config_path` | `Path \| None` | Active `untether.toml` |
+| `plugin_config` | `dict[str, Any]` | `[plugins.<id>]` table |
+| `runtime` | `TransportRuntime` | Engine/project resolution |
+| `executor` | `CommandExecutor` | Send messages or run engines |
+| `trigger_manager` | `TriggerManager \| None` | Live trigger config; `None` for transports without triggers |
+| `default_chat_id` | `int \| None` | Chat that unscoped triggers fall back to |
+| `file_deny_globs` | `tuple[str, ...] \| None` | Live `[transports.telegram.files] deny_globs` ([#389](https://github.com/littlebearapps/untether/issues/389)); `None` means the defaults |
+| `callback_query_id` | `str \| None` | Callback query id of a button tap ([#685](https://github.com/littlebearapps/untether/issues/685)); `None` for text commands |
+
+The last four are optional (default `None`), so transports that don't set them keep working.
+
 Use `ctx.executor.run_one(...)` or `ctx.executor.run_many(...)` to reuse Untether's
 engine pipeline. Use `mode="capture"` to collect results and build a custom reply.
 
@@ -211,6 +242,7 @@ engine pipeline. Use `mode="capture"` to collect results and build a custom repl
 - `channel_id` (`int | str`, chat/channel id)
 - `message_id` (`int | str`, message id)
 - `thread_id` (`int | str | None`; set when the transport supports threads, like Telegram topics)
+- `sender_id` (`int | None`; the sending user, when known)
 - `raw` (transport-specific payload, may be `None`)
 
 Example: key per-thread state by `(ctx.message.channel_id, ctx.message.thread_id)`.
@@ -221,7 +253,7 @@ Example: key per-thread state by `(ctx.message.channel_id, ctx.message.thread_id
 
 `TransportRuntime` keeps transports away from internal router/project types. Key helpers:
 
-- `resolve_message(text, reply_text)` → `ResolvedMessage` (prompt, resume token, context)
+- `resolve_message(text=..., reply_text=..., ambient_context=None, chat_id=None)` → `ResolvedMessage` (prompt, resume token, engine override, context, `context_source`)
 - `resolve_engine(engine_override, context)` → `EngineId`
 - `resolve_runner(resume_token, engine_override)` → `ResolvedRunner` (runner + availability info)
 - `resolve_run_cwd(context)` → `Path | None` (raises `ConfigError` for project/worktree issues)
@@ -275,6 +307,8 @@ async def on_message(...):
     )
 ```
 
+`handle_message()` also takes optional `on_resume_failed`, `progress_ref` (reuse an existing progress message) and `quarantine_store` keyword arguments.
+
 `handle_message()` implements:
 
 - Progress updates and throttling
@@ -282,4 +316,4 @@ async def on_message(...):
 - Cancellation propagation
 - Final rendering
 
-This keeps transport backends thin and consistent with core behavior.
+This keeps transport backends thin and consistent with core behaviour.

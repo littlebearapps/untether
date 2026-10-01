@@ -16,21 +16,41 @@ Add to your `untether.toml`:
 === "untether config"
 
     ```sh
-    untether config set opencode.model "claude-sonnet"
+    untether config set opencode.model "anthropic/claude-sonnet-5-5"
     ```
 
 === "toml"
 
     ```toml
     [opencode]
-    model = "claude-sonnet"  # optional
+    model = "anthropic/claude-sonnet-5-5"  # optional; passed as --model
     ```
+
+Model IDs **must** use OpenCode's `provider/model` format (e.g. `openai/gpt-5.5`,
+`anthropic/claude-sonnet-5-5`); a bare model name fails. The same applies to a
+`/config` or `/model` override. When `[opencode] model` is unset, Untether reads
+the top-level `"model"` from `~/.config/opencode/opencode.json` and passes that
+instead (it also labels the `🏷` footer).
+
+`[opencode]` has no `extra_args` or permission-mode setting: OpenCode runs
+non-interactively, and approvals, plan mode, AskUserQuestion, live sessions and
+steer are Claude Code-only.
 
 ## Usage
 
 ```bash
 untether opencode
 ```
+
+## Invocation
+
+```text
+opencode run --format json [--session <ses_id> | --continue] [--model <provider/model>] -- <prompt>
+```
+
+The prompt goes after `--`, so a prompt starting with `-` is never read as a flag.
+`--continue` is used for `/continue`; a reply to a message with a resume line uses
+`--session`.
 
 ## Resume Format
 
@@ -49,8 +69,10 @@ OpenCode outputs JSON events with the following types:
 | `step_start` | Beginning of a processing step |
 | `tool_use` | Tool invocation with input/output |
 | `text` | Text output from the model |
-| `step_finish` | End of a step (reason: "stop" or "tool-calls" when present) |
+| `step_finish` | End of a step (reason: "stop" or "tool-calls" when present; carries cost and tokens) |
 | `error` | Error event |
+
+Any other `type` is reported as an `opencode emitted unsupported event: <type>` warning rather than dropped silently.
 
 See [stream-json-cheatsheet.md](./stream-json-cheatsheet.md) for detailed event format documentation.
 

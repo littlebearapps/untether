@@ -1,6 +1,17 @@
 # Gemini `--output-format stream-json` event cheatsheet
 
-`gemini -p --output-format stream-json` writes **one JSON object per line** (JSONL) with a
+!!! warning "Deprecated"
+
+    The `gemini` engine is **deprecated in v0.35.5**: it still loads but is
+    unsupported, and removal is targeted for **0.36.0**
+    ([#720](https://github.com/littlebearapps/untether/issues/720)). Google ended
+    Gemini CLI support for individual and free accounts on **18 June 2026**
+    (`IneligibleTierError`); under Untether the subprocess hangs until the
+    watchdog cancels the run. Enterprise / Google Cloud licences are unverified.
+    Antigravity CLI is tracked as a separate engine
+    ([#558](https://github.com/littlebearapps/untether/issues/558)), not a rename.
+
+`gemini --output-format stream-json --prompt=<prompt>` writes **one JSON object per line** (JSONL) with a
 required `type` field.
 
 ## Event types

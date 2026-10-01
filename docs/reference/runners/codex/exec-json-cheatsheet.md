@@ -108,6 +108,8 @@ Every item line includes:
 
 Fields:
 - `item.text`
+- `item.phase` (optional) — `commentary` for interim progress text, `final_answer`
+  for the answer; absent on older versions
 
 Example:
 ```json
@@ -130,7 +132,7 @@ Fields:
 - `item.command`
 - `item.aggregated_output`
 - `item.exit_code` (null or omitted until completion)
-- `item.status` (`in_progress`, `completed`, `failed`)
+- `item.status` (`in_progress`, `completed`, `failed`, `declined`)
 
 Example (started):
 ```json
@@ -214,6 +216,18 @@ Example (0.157.1 wire, trimmed):
 
 Legacy (≤ 0.125) lines carry only `id` + `query` and still decode.
 
+### `collab_tool_call` (sub-agent coordination)
+
+Fields (all optional except `item.id`):
+- `item.tool`
+- `item.sender_thread_id`
+- `item.receiver_thread_ids[]`
+- `item.prompt`
+- `item.agents_states` (map of thread id → `{status, message?}`)
+- `item.status` (`in_progress`, `completed`, `failed`)
+
+Untether decodes it but does not render it.
+
 ### `todo_list` (`item.started`, `item.updated`, and `item.completed`)
 
 Fields:
@@ -244,6 +258,12 @@ Example:
 ```json
 {"type":"item.completed","item":{"id":"item_9","type":"error","message":"command output truncated"}}
 ```
+
+### Unknown item types
+
+An `item.*` line with an `item.type` not listed here decodes as an
+`unknown_item` (id, type and remaining fields kept) rather than failing the
+line; Untether does not render it.
 
 ## MCP content block shapes (`mcp_tool_call.result.content`)
 

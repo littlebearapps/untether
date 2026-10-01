@@ -65,6 +65,7 @@ nav = [
     { "Configuration" = "reference/config.md" },
     { "Workflow modes" = "reference/modes.md" },
     { "Environment variables" = "reference/env-vars.md" },
+    { "Error reference" = "reference/errors.md" },
     { "Changelog" = "reference/changelog.md" },
     { "Specification" = "reference/specification.md" },
     { "Plugin API" = "reference/plugin-api.md" },

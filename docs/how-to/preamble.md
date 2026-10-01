@@ -1,6 +1,6 @@
 # Agent preamble
 
-Untether injects a context preamble at the start of every agent prompt, telling the engine it's running via Telegram and requesting structured end-of-task summaries. This works across all engines (Claude Code, Codex, OpenCode, Pi, Gemini CLI, Amp).
+Untether injects a context preamble at the start of every agent prompt, telling the engine it's running via Telegram and requesting structured end-of-task summaries. This works across all engines (Claude Code, Codex, OpenCode, Pi, and the deprecated Gemini CLI and Amp).
 
 ## What the default preamble does
 
@@ -8,7 +8,9 @@ The built-in preamble tells the agent:
 
 1. **Context** — it's running via Untether on Telegram, and the user is on a mobile device
 2. **Visibility constraints** — only final assistant text is visible; tool calls, thinking blocks, and terminal output are invisible to the user
-3. **Summary format** — every response that completes work should end with a structured summary including "Completed", "Next Steps", and "Decisions Needed" sections
+3. **Summary format** — every response that completes work should end with a short structured summary (about 500–1,500 characters) including "Completed", "Next Steps", and "Decisions Needed" sections, plus how to send files back through `.untether-outbox/`
+4. **Config changes** — Untether hot-reloads `untether.toml`, so the agent must not restart the Untether service after editing it (a restart from inside the session drops its own final answer)
+5. **Plan mode** — the `ExitPlanMode` plan should be a 3–5 bullet summary, and the reply after approval a brief summary rather than a re-paste of the plan
 
 This means agents naturally produce mobile-friendly summaries instead of expecting the user to read terminal output or file diffs.
 

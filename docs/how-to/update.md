@@ -27,7 +27,7 @@ systemctl --user restart untether
 ```
 
 !!! note "Agent CLIs are separate"
-    Untether wraps agent CLIs (Claude Code, Codex, OpenCode, Pi, Gemini CLI, Amp) as subprocesses. Updating Untether does not update the agent CLIs. Update them separately:
+    Untether wraps agent CLIs (Claude Code, Codex, OpenCode, Pi, and the deprecated Gemini CLI and Amp) as subprocesses. Updating Untether does not update the agent CLIs. Update them separately:
 
     ```sh
     npm update -g @anthropic-ai/claude-code
@@ -40,7 +40,7 @@ systemctl --user restart untether
 
 ## Upgrading to v0.35.5
 
-v0.35.5 is in release-candidate testing; see the unreleased section of the [changelog](https://github.com/littlebearapps/untether/blob/dev/CHANGELOG.md). Behaviour changes that may affect operators:
+See the [v0.35.5 changelog entry](https://github.com/littlebearapps/untether/blob/master/CHANGELOG.md#v0355) for the full list. Behaviour changes that may affect operators:
 
 - **`auto` permission mode renamed `plan-auto` (breaking).** `/planmode auto` now selects Claude Code's own classifier-gated auto mode. Per-chat settings migrate automatically; if `untether.toml` sets `permission_mode = "auto"` and you want the old behaviour, change it to `"plan-auto"`. See [Plan mode](plan-mode.md). ([#741](https://github.com/littlebearapps/untether/issues/741))
 - **`/planmode off` (Accept edits) now asks before shell commands.** Prompting modes (`acceptEdits`, `default`, `manual`) previously approved every tool silently. Anything the mode doesn't cover now shows Approve / Deny buttons unless your Claude Code settings allow it. ([#749](https://github.com/littlebearapps/untether/issues/749))
@@ -49,7 +49,15 @@ v0.35.5 is in release-candidate testing; see the unreleased section of the [chan
 - **Claude rate-limit and stall signals are quieter and more accurate.** Routine `rate_limit_event` usage snapshots no longer show a fake `⏳ Rate limited` wait; only a real rejection latches until its reset time, and a `⚠️ 5h limit N% used` heads-up appears at most once per window. API retry back-offs show as `🔁 API error … retrying in Ns`. Live-session idle holds no longer raise stall warnings, and `session.summary` reports them as `peak_live_idle_seconds`, so `peak_idle_seconds` drops on live sessions — adjust any log alerts that key on it. ([#790](https://github.com/littlebearapps/untether/issues/790), [#792](https://github.com/littlebearapps/untether/issues/792), [#787](https://github.com/littlebearapps/untether/issues/787))
 - **`extra_args` refuses approval and sandbox bypass flags (breaking, security).** A `[engines.claude]` or `[engines.codex]` `extra_args` that carries `--dangerously-skip-permissions`, `--allowedTools`, `--yolo`, `--sandbox danger-full-access`, `-C`/`--cd` and similar now fails to load: the default engine won't start, and any other engine is disabled until you remove the flag (the error names it). Use the named keys instead (`allowed_tools`, `permission_mode`). See [Security → Engine CLI flags](security.md#engine-cli-flags-extra_args). ([#209](https://github.com/littlebearapps/untether/issues/209))
 - **Codex safe mode now actually restricts Codex (behaviour change, security).** Before v0.35.5 the Codex **safe** approval policy did not restrict anything — `codex exec` ignored the flag — and on codex-cli 0.149.0+ every safe-mode run failed at startup. Safe now uses Codex's read-only sandbox: file edits, writes, tests, builds, package installs and shell network access are blocked, including cache and `/tmp` writes. If you want Codex to edit files or run tests, switch the chat to **Full auto** in `/config` → Approval policy. ([#830](https://github.com/littlebearapps/untether/issues/830))
+- **A plan approval now covers one reply (Claude).** Approving a plan used to skip per-tool approvals for every later message and background wake-up in the same open session, for up to four hours. It now ends with the reply it was given in, and plan mode switches back on when that reply ends. Set `[watchdog] rearm_plan_mode = false` to go back to an approval lasting until the session closes. See [Plan mode](plan-mode.md#auto-approval-after-plan-approval). ([#383](https://github.com/littlebearapps/untether/issues/383))
+- **File deny globs match at the project root (security).** The default `deny_globs` now also cover a root-level `key.pem`, `id_rsa`, `.npmrc`, `.netrc` or `.ssh/config`, and a project-root `.env.example` now matches `**/.env.*`, so `/file get` and outbox delivery skip it. Deny globs are also checked after following symlinks. See [Security → File transfer deny globs](security.md#file-transfer-deny-globs). ([#831](https://github.com/littlebearapps/untether/issues/831), [#390](https://github.com/littlebearapps/untether/issues/390))
+- **`/browse` needs a project.** It no longer falls back to the process working directory (your home directory under systemd). Bind the chat to a project or set `default_project`. Hidden paths and deny globs are now refused there too. See [Browse files](browse-files.md). ([#389](https://github.com/littlebearapps/untether/issues/389))
+- **Crons and webhooks with a `project` but no `engine` use that project's engine.** They used to run on the global default engine. Set `engine` on the trigger if you relied on the old behaviour. ([#862](https://github.com/littlebearapps/untether/issues/862))
+- **Codex no longer offers the `minimal` reasoning level.** A saved `minimal` is ignored with a one-line note and the run uses Codex's default. ([#416](https://github.com/littlebearapps/untether/issues/416))
+- **Voice transcription has a default vocabulary hint.** Unless you set `voice_transcription_prompt`, Untether now biases transcription towards engine and project names such as Claude, `CLAUDE.md` and Codex. Set it to `""` to send no hint. See [Voice notes](voice-notes.md#improve-recognition-of-names). ([#703](https://github.com/littlebearapps/untether/issues/703), [#789](https://github.com/littlebearapps/untether/issues/789))
 - **Gemini CLI and Amp are deprecated**, targeted for removal in 0.36.0.
+
+New in v0.35.5 and worth a look after upgrading: [steering a running Claude run](steer-follow-ups.md) with `/steer`, the [background-task status message and context-window percentage](verbose-progress.md) in Claude runs, and approval [diff previews](interactive-approval.md#diff-previews) as a proper diff block.
 
 ## Upgrading to v0.35.4
 

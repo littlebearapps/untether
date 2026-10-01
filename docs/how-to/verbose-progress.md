@@ -62,6 +62,16 @@ When Claude compacts its context, the progress message shows one row for it (a s
 
 `(auto)` is Claude compacting on its own as the window fills. `(manual)` is a `/compact` you sent as a follow-up while the session was still live, and that reply's body is the same `🗜️ Context compacted …` line. A failed compaction shows `🗜️ Compaction failed · <reason>`. Compaction counts as activity, not as a stall.
 
+Other rows a Claude run can show, all new in v0.35.5:
+
+| Row | Meaning |
+|---|---|
+| `🔁 API error 529 (overloaded) — retrying in 8s (attempt 2/10)` | Claude Code is backing off before retrying the API; see [Troubleshooting → Rate-limit and API-retry notes](troubleshooting.md#rate-limit-and-api-retry-notes-claude) |
+| `⚠️ 5h limit 85% used — resets 17:30` | Heads-up that your subscription window is nearly used |
+| `↪️ steer received: …` | A message you [steered](steer-follow-ups.md) into the run was read |
+| `🛡️ … safeguards stopped a response · …` | Anthropic's safeguards stopped a response; see [Troubleshooting](troubleshooting.md#safeguards-stopped-a-response) |
+| `↪️ Switched model … → …` | Claude Code switched to its fallback model for this turn |
+
 ## Set global default in config
 
 To make verbose the default for all chats:
@@ -99,7 +109,7 @@ Control how many actions appear in the progress message. Actions beyond this lim
 Set to `0` to hide the action list entirely, or increase it to see more history.
 
 !!! tip "Hot-reload"
-    `[progress]` settings (`verbosity`, `max_actions`, `heartbeat_interval`, `min_render_interval`, `group_chat_rps`, `show_background_tasks`, `background_tasks_max_rows`, `consolidate_wake_turns`) hot-reload — editing them in `untether.toml` applies on the next run without restart ([#269](https://github.com/littlebearapps/untether/issues/269)).
+    `[progress]` settings (`verbosity`, `max_actions`, `heartbeat_interval`, `min_render_interval`, `group_chat_rps`, `show_background_tasks`, `background_tasks_max_rows`, `consolidate_wake_turns`, `show_context_usage`) hot-reload — editing them in `untether.toml` applies on the next run without restart ([#269](https://github.com/littlebearapps/untether/issues/269)). Since v0.35.5 `verbosity`, `max_actions` and `show_context_usage` also reach the next turn of a Claude session that is still open ([#863](https://github.com/littlebearapps/untether/issues/863)).
 
 ## Long-running tool tail (heartbeat)
 
@@ -149,7 +159,7 @@ Claude often answers each background task finishing with a one-liner — "the li
    ↳ Sweep one is back; waiting on sweep two.
 ```
 
-A wake turn still arrives as its own message when it runs a tool, asks for an approval or a question, writes more than ~300 characters, fails, or finishes the last running task (normally Claude's compiled report) — so each batch of background work still gets the push you're waiting for, once. If every reply in a batch folded, a short pushed `✅ all N background tasks done` notice arrives when the last task ends. A short reply to a Monitor tick or a `ScheduleWakeup` that fired with nothing new folds the same way (shown as a 💬 line).
+A wake turn still arrives as its own message when it runs a tool (up to three `Read` / `Glob` / `Grep` calls to collect a result don't count — [#813](https://github.com/littlebearapps/untether/issues/813)), asks for an approval or a question, writes more than ~300 characters, fails, or finishes the last running task (normally Claude's compiled report) — so each batch of background work still gets the push you're waiting for, once. If every reply in a batch folded, a short pushed `✅ all N background tasks done` notice arrives when the last task ends. A short reply to a Monitor tick or a `ScheduleWakeup` that fired with nothing new folds the same way (shown as a 💬 line).
 
 === "toml"
 

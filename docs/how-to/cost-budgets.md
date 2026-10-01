@@ -28,6 +28,8 @@ Running agents remotely means they can rack up costs while you're not watching. 
 | `max_cost_per_day` | (none) | Maximum total cost per day (USD) |
 | `warn_at_pct` | `70` | Show a warning when this percentage of the budget is reached |
 | `auto_cancel` | `false` | Automatically cancel the run when a budget is exceeded |
+| `warn_run_above_usd` | (unset = $20) | Flag any single run that costs more than this, even with `enabled = false`; `0` turns it off |
+| `notify_run_outlier` | `true` | Post the one-line chat notice for an outlier run (the log line is written either way) |
 
 ## Per-chat overrides
 
@@ -53,7 +55,17 @@ After each run completes, Untether checks the reported cost against your budgets
     Claude reports a running total for the whole session, including earlier runs you resumed. Since v0.35.5 Untether subtracts what the session had already cost, so budgets, `/stats` and the footer see only this run's spend. A turn that Claude runs on its own after a background task counts as its own small run ([#778](https://github.com/littlebearapps/untether/issues/778)).
 
 !!! note "Token-only engines"
-    Engines that don't report USD costs (Codex, Pi, and OpenCode on its free tier) show token counts in the footer instead (e.g. `💰 26.0k in / 71 out`). Gemini CLI and AMP surface `total_cost_usd` when their CLI reports one; on the free tier they render tokens only. Budget alerts apply only to the USD-reporting path.
+    Engines that don't report USD costs (Codex, Pi, and OpenCode on its free tier) show token counts in the footer instead, marked `🔢` (e.g. `🔢12.3k/400`, input/output); `💰` means the footer carries a cost ([#417](https://github.com/littlebearapps/untether/issues/417)). Codex reports a running total for the whole thread, so since v0.35.5 Untether shows each run's own share; a figure that is still the whole thread (for example the first `/continue` of a thread started outside Untether) is labelled `· thread total` ([#419](https://github.com/littlebearapps/untether/issues/419)). Gemini CLI and AMP (both deprecated) surface `total_cost_usd` when their CLI reports one. Budget alerts apply only to the USD-reporting path.
+
+### Expensive single runs
+
+Even with no budget configured, a single run that costs more than `warn_run_above_usd` ($20 unless you set it) adds one line to its final message, whatever your footer settings ([#702](https://github.com/littlebearapps/untether/issues/702)):
+
+```
+💸 This run cost $24.30 (over the $20.00 alert)
+```
+
+It also logs `cost.run_outlier` with the run's shape (turns, cost per turn, duration and token counts), so you can tell one long task from a session whose context has grown expensive ([#717](https://github.com/littlebearapps/untether/issues/717)). The line is skipped when a budget alert already covered the run. Separately, if spend is neither shown (`[footer] show_api_cost = false`) nor bounded (no `[cost_budget]`), Untether logs one `config.cost_visibility_gap` warning per start ([#658](https://github.com/littlebearapps/untether/issues/658)).
 
 ### Alert levels
 
@@ -65,7 +77,7 @@ After each run completes, Untether checks the reported cost against your budgets
 When `auto_cancel = true` and a budget is exceeded, Untether cancels the run automatically. Otherwise, you see the alert but the run continues.
 
 !!! untether "Untether"
-    ⚠️ **cost warning** — run cost $1.45 is 73% of $2.00 per-run budget
+    ⚠️ Run cost $1.45 is 73% of per-run budget $2.00
 
 <img src="../assets/screenshots/cost-warning-alert.jpg" alt="Cost warning alert showing budget threshold exceeded" width="360" loading="lazy" />
 
@@ -86,18 +98,17 @@ This shows:
 - **5h window**: usage percentage and time until reset
 - **Weekly**: 7-day usage percentage and time until reset
 - **Per-model breakdown**: Sonnet and Opus usage (if applicable)
-- **Extra credits**: any overage credits used
+- **Extra**: overage credits used, when extra usage is turned on for your account
 
 The `/usage` command reads your Claude Code OAuth credentials to fetch live data from the Anthropic API. If you see "No Claude credentials found", run `claude login` in your terminal.
 
 !!! untether "Untether"
-    **Claude Code usage**
+    📊 Claude Code Usage
 
-    **5h window**: 42% used (2h 6m left)<br>
-    **Weekly**: 28% used (5d 2h left)
-
-    sonnet: 38% · opus: 4%<br>
-    extra credits: $0.00
+    5h window: ████░░░░░░ 42% (resets in 2h 6m)<br>
+    Weekly:    ███░░░░░░░ 28% (resets in 5d 2h)<br>
+    Sonnet:    ████░░░░░░ 38%<br>
+    Opus:      ░░░░░░░░░░ 4%
 
 ### Other engines
 
@@ -122,16 +133,16 @@ Untether can show subscription usage in the footer of completed messages. This i
 
     ```toml
     [footer]
-    show_usage = true
+    show_subscription_usage = true
     ```
 
 When enabled, completed messages show a line like:
 
 ```
-5h: 45% (2h 15m) | 7d: 30% (4d 3h)
+⚡ 5h: 45% | 7d: 30%
 ```
 
-This tells you how much of your 5-hour and 7-day rate limits you've used, and when they reset.
+This tells you how much of your 5-hour and 7-day rate limits you've used. A window's reset time is added once it passes 50%, for example `⚡ 5h: 72% (1h 14m) | 7d: 30%`. See [Subscription usage](subscription-usage.md) for details.
 
 ## Historical statistics
 

@@ -22,7 +22,7 @@ When you're away from the terminal, you need confidence that your agent won't go
 !!! note "Renamed in v0.35.5"
     **Plan-auto** was called **auto** before v0.35.5. Claude Code introduced its own `auto` mode, and the two names collided — Untether's version shadowed it, so the real one was unreachable. Per-chat settings you made through `/planmode` or `/config` are migrated for you the first time v0.35.5 starts. If you set `permission_mode = "auto"` in `untether.toml` and want the old behaviour, change it to `"plan-auto"`; Untether logs a warning at startup (and on a config reload that changes the list) naming every place it sees the ambiguous value.
 
-    Auto mode needs a recent model (Opus 4.6+, Sonnet 4.6+, or Fable 5) and an organisation that hasn't disabled it.
+    Auto mode needs a recent model (Opus 4.6+, Sonnet 4.6+, or Fable 5) and an organisation that hasn't disabled it. On a model without it (such as Haiku), Claude Code quietly starts in its prompting `default` mode instead. Untether shows `⚠️ Asked for auto mode — Claude Code is running default` and sends each permission request to Telegram for approval rather than letting it through unchecked ([#751](https://github.com/littlebearapps/untether/issues/751)).
 
 ## Setting the mode
 
@@ -49,11 +49,11 @@ A mode that `/planmode` can't set (`default`/`manual`, `dontAsk`, `bypassPermiss
 
 When Claude Code tries to exit plan mode (ExitPlanMode), you see three buttons instead of two:
 
-- **Approve Plan** — let Claude Code carry out the plan
-- **Deny** — block and ask Claude Code to explain
-- **Pause & Outline Plan** — require a written plan first
+- **✅ Approve Plan** — let Claude Code carry out the plan
+- **❌ Deny** — block and ask Claude Code to explain
+- **📋 Pause & Outline Plan** — require a written plan first (on its own row)
 
-In a plan chat the request also says what approving does: *Approving lets Claude carry out this plan without further prompts. Plan mode resumes when this reply ends, or after the background agents it starts have finished.* In a chat where Claude Code switched to plan mode on its own (`/planmode off`), it reads *Approving ends planning; Claude still asks before each action.*
+In a plan chat the request also says what approving does: *Approving lets Claude carry out this plan without further prompts. Plan mode resumes when this reply ends, or after the background agents it starts have finished.* In a chat where Claude Code switched to plan mode on its own (`/planmode off`), it reads *Approving ends planning; Claude still asks before each action.* When you approve after an outline (below), the confirmation reads `✅ Plan approved — Claude will carry it out now · plan mode resumes when it's done` (the second half only when plan mode will come back, as in a plan chat).
 
 <div markdown>
 
@@ -62,9 +62,11 @@ In a plan chat the request also says what approving does: *Approving lets Claude
     Approving lets Claude carry out this plan without further prompts. Plan mode resumes when this reply ends, or after the background agents it starts have finished.
 
 <div class="tg-buttons">
-<span class="tg-btn">Approve Plan</span>
-<span class="tg-btn">Deny</span>
-<span class="tg-btn">Pause &amp; Outline Plan</span>
+<span class="tg-btn">✅ Approve Plan</span>
+<span class="tg-btn">❌ Deny</span>
+</div>
+<div class="tg-buttons">
+<span class="tg-btn">📋 Pause &amp; Outline Plan</span>
 </div>
 
 </div>
@@ -99,18 +101,18 @@ For long outlines that span multiple messages, **Approve Plan / Let's discuss / 
     3. **Run** tests to verify no regressions
 
 <div class="tg-buttons">
-<span class="tg-btn">Approve Plan</span>
-<span class="tg-btn">Deny</span>
+<span class="tg-btn">✅ Approve Plan</span>
+<span class="tg-btn">❌ Deny</span>
 </div>
 <div class="tg-buttons">
-<span class="tg-btn">Let's discuss</span>
+<span class="tg-btn">💬 Let's discuss</span>
 </div>
 
 </div>
 
-- Tap **Approve Plan** to let Claude Code proceed with implementation
-- Tap **Deny** to stop Claude Code and provide different direction
-- Tap **Let's discuss** to talk about the plan before deciding — Claude Code will ask what you'd like to change and wait for your reply
+- Tap **✅ Approve Plan** to let Claude Code proceed with implementation
+- Tap **❌ Deny** to stop Claude Code and provide different direction
+- Tap **💬 Let's discuss** to talk about the plan before deciding — Claude Code will ask what you'd like to change and wait for your reply
 
 ## The outline gate
 
@@ -129,11 +131,11 @@ Either way, **Approve Plan / Let's discuss / Deny buttons** appear in Telegram s
     ▸ Plan outlined — approve to proceed
 
 <div class="tg-buttons">
-<span class="tg-btn">Approve Plan</span>
-<span class="tg-btn">Deny</span>
+<span class="tg-btn">✅ Approve Plan</span>
+<span class="tg-btn">❌ Deny</span>
 </div>
 <div class="tg-buttons">
-<span class="tg-btn">Let's discuss</span>
+<span class="tg-btn">💬 Let's discuss</span>
 </div>
 
 </div>
@@ -179,7 +181,7 @@ permission_mode = "auto"        # or "plan-auto"
 For unattended crons, `auto` is usually the better choice: Claude Code's classifier judges each action on its own terms and blocks risky ones, whereas `plan-auto` waves through the plan gate and then lets the rest of the run proceed unchecked. Use `plan-auto` when you specifically want the plan phase — for example so the plan itself gets posted to the chat for you to read later.
 
 !!! warning "`auto` changed meaning in v0.35.5"
-    Before v0.35.5, `permission_mode = "auto"` on a cron meant plan mode with the plan gate auto-approved. It now selects Claude Code's own auto mode. Existing crons keep working but behave differently — set `"plan-auto"` to restore the previous behaviour. Untether logs one warning at startup, and again if a config reload changes the list, naming every engine setting and cron that uses `"auto"`. It also warns at startup about crons set to `default`, `manual`, `acceptEdits` or `plan`, which wait for a tap nobody gives, and logs the same warning when a cron or webhook fires into a chat whose mode will ask for approval.
+    Before v0.35.5, `permission_mode = "auto"` on a cron meant plan mode with the plan gate auto-approved. It now selects Claude Code's own auto mode. Existing crons keep working but behave differently — set `"plan-auto"` to restore the previous behaviour. Untether logs one warning at startup, and again if a config reload changes the list, naming every engine setting and cron that uses `"auto"`. It also logs a warning (`trigger.unattended_approval_risk`) at startup for crons set to `default`, `manual`, `acceptEdits` or `plan`, which wait for a tap nobody gives, and logs the same warning when a cron or webhook fires into a chat whose mode will ask for approval. These are log lines only; the run is not stopped.
 
 Precedence: cron `permission_mode` > per-chat `/planmode` > engine config default. The rest of the chat's interactive traffic continues to honour plan mode. See [Schedule tasks — Autonomous crons](schedule-tasks.md#autonomous-crons) for the full reference.
 

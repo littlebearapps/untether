@@ -31,6 +31,7 @@ If you need exact options and defaults, use **[Reference](../reference/index.md)
 - [Verbose progress](verbose-progress.md) (control progress message detail)
 - [Inline settings menu](inline-settings.md) (`/config` — toggle settings with buttons)
 - [Steer follow-ups](steer-follow-ups.md) (`/steer` — send a message into a running Claude run)
+- [Agent preamble](preamble.md) (the context Untether adds to every prompt)
 
 ## Messaging extras
 
@@ -41,16 +42,17 @@ If you need exact options and defaults, use **[Reference](../reference/index.md)
 ## Automation
 
 - [Webhooks and cron](webhooks-and-cron.md) (start runs from GitHub, CI, or on a schedule)
-- [Schedule tasks](schedule-tasks.md) (native Telegram scheduled messages)
+- [Schedule tasks](schedule-tasks.md) (`/at` delays, Telegram scheduled messages, Loop mode)
 
 ## Cost and usage
 
 - [Cost budgets](cost-budgets.md) (per-run and daily cost limits)
 - [Subscription usage](subscription-usage.md) (monitor Claude Code subscription from Telegram)
+- [Session statistics](session-statistics.md) (`/stats` — runs, actions and time per engine)
 
 ## Multi-user and security
 
-- [Group chat](group-chat.md) (shared groups, access control, trigger modes)
+- [Group chat](group-chat.md) (shared groups, access control, listen modes)
 - [Security hardening](security.md) (access restrictions, token protection, webhook auth)
 
 ## Debugging and operations

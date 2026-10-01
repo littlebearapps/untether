@@ -3,7 +3,7 @@
 There are several ways to run tasks on a schedule: the `/at` command for quick one-shot delays, Telegram's built-in message scheduling, Untether's trigger system (webhooks and cron), and Loop mode for Claude Code's `/loop` and `ScheduleWakeup`.
 
 !!! note "Loop mode is opt-in"
-    By default, Untether does **not** fire Claude Code's session-scoped schedules after a turn ends — the `claude --print` subprocess exits and the cron task dies with it (verified empirically against `claude` v2.1.129/2.1.132 — upstream docs claiming `--resume` restores tasks are incorrect in `--print` mode). Since v0.35.5 a Claude session stays open after its reply while a `ScheduleWakeup` is pending (up to 30 minutes), so short dynamic-loop waits fire natively and arrive as `⏰ Scheduled wake-up` messages. For anything longer, turn on **Loop mode** in `/config → 🔁 Loop mode`. See [Loop mode](#loop-mode) below.
+    By default, Untether does **not** fire Claude Code's session-scoped schedules after a turn ends — the `claude --print` subprocess exits and the cron task dies with it (verified empirically against `claude` v2.1.129/2.1.132 — upstream docs claiming `--resume` restores tasks are incorrect in `--print` mode). Since v0.35.5 a Claude session stays open after its reply while a `ScheduleWakeup` is pending (up to the 30-minute background hold, `[watchdog] post_result_bg_max_hold`), so short dynamic-loop waits fire natively and arrive as `⏰ Scheduled wake-up` messages. For anything longer, turn on **Loop mode** in `/config → 🔁 Loop mode`. See [Loop mode](#loop-mode) below.
 
 ## One-shot delays with /at
 
@@ -119,7 +119,7 @@ Add `run_once = true` to fire a cron exactly once, then auto-disable. Fired stat
 
 ### Autonomous crons in plan-mode chats (Claude) {#autonomous-crons}
 
-By default a cron inherits the chat's permission mode, so if you've set `/planmode plan` on a Claude chat the scheduled run will pause for your approval too. That's rarely what you want for an 8 AM summariser that runs while you're asleep.
+By default a cron inherits the chat's permission mode, so if you've set `/planmode on` on a Claude chat the scheduled run will pause for your approval too. That's rarely what you want for an 8 AM summariser that runs while you're asleep.
 
 Set `permission_mode = "auto"` on the cron to make that run autonomous without flipping the whole chat:
 
@@ -134,12 +134,12 @@ permission_mode = "auto"
 ```
 
 !!! warning "`auto` changed meaning in v0.35.5"
-    Before v0.35.5, `permission_mode = "auto"` meant plan mode with the plan gate auto-approved. It now selects Claude Code's own classifier-gated auto mode, which has no plan phase. Existing crons keep running but behave differently — set `"plan-auto"` to restore the previous behaviour. Untether logs one warning at startup, and again if a config reload changes the list, naming every engine setting and cron that uses `"auto"`. It also warns at startup about crons set to `default`, `manual`, `acceptEdits` or `plan`, which wait for a tap nobody gives, and logs the same warning when a cron or webhook fires into a chat whose mode will ask for approval.
+    Before v0.35.5, `permission_mode = "auto"` meant plan mode with the plan gate auto-approved. It now selects Claude Code's own classifier-gated auto mode, which has no plan phase. Existing crons keep running but behave differently — set `"plan-auto"` to restore the previous behaviour. Untether logs one warning at startup, and again if a config reload changes the list, naming every engine setting and cron that uses `"auto"`. It also logs a warning (`trigger.unattended_approval_risk`) at startup for crons set to `default`, `manual`, `acceptEdits` or `plan`, which wait for a tap nobody gives, and logs the same warning when a cron or webhook fires into a chat whose mode will ask for approval. These are log lines only; the run is not stopped.
 
 !!! warning "Unattended crons and prompting modes"
     Since v0.35.5, `default`, `manual` and `acceptEdits` really do prompt: any tool call the mode doesn't cover waits for an Approve / Deny tap ([#749](https://github.com/littlebearapps/untether/issues/749)). A cron that fires while you're away will sit on that button. For unattended crons use `plan-auto`, `auto`, `dontAsk` or `bypassPermissions`, or pre-approve the tools the job needs.
 
-Precedence (Claude): cron `permission_mode` > per-chat `/planmode` > engine config default. Every autonomous run logs `trigger.cron.permission_mode_override`. Valid values: `default` (alias `manual`), `plan`, `plan-auto`, `auto`, `acceptEdits`, `dontAsk`, `bypassPermissions`. Claude-only for now; other engines silently ignore the field ([#332](https://github.com/littlebearapps/untether/issues/332) tracks full coverage).
+Precedence (Claude): cron `permission_mode` > per-chat `/planmode` > engine config default. Every autonomous run logs `trigger.cron.permission_mode_override`. Valid values: `default` (alias `manual`), `plan`, `plan-auto`, `auto`, `acceptEdits`, `dontAsk`, `bypassPermissions`. For a Codex cron, `"safe"` selects Codex's read-only sandbox for that run; other engines ignore the field ([#332](https://github.com/littlebearapps/untether/issues/332) tracks full coverage).
 
 ## Trigger provenance and history
 

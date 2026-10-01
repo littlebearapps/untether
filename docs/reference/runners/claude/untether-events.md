@@ -54,8 +54,9 @@ Runner must implement its own regex because the resume format is
 **Note:** Claude Code session IDs should be treated as opaque strings.
 
 Resume rules:
-- If a resume token is provided to `run()`, the runner MUST verify that any
-  `session_id` observed in the stream matches it.
+- If a resume token is provided to `run()` (other than a `/continue` token, which
+  names no session), the runner MUST verify that any `session_id` observed in
+  the stream matches it.
 - If the stream yields a different `session_id`, emit a fatal error and end the run.
 
 ---
@@ -69,6 +70,8 @@ Untether requires **serialization per session id**:
 - Once the session id is known, acquire a lock for `claude:<session_id>` and hold
   it until the run completes.
 - For resumed runs, acquire the lock immediately on entry.
+- A `/continue` token carries no session id, so it is handled like a new run:
+  the lock is taken on the id named by its first `started` event (#817).
 
 This matches the Codex runner behavior in `untether/runners/codex.py`.
 
@@ -86,10 +89,15 @@ Claude Code emits a system init event early in the stream:
 
 **Mapping:**
 - Emit a Untether `started` event as soon as `session_id` is known.
-- Populate `meta` from `system.init` fields: `cwd`, `model`, `tools`, `permissionMode`, `output_style`. The `model` and `permissionMode` fields are used by the bridge to render the `🏷` footer line on final messages.
-- The first `system.init` per run produces the `started` event. In a live
-  session (#776) every later turn begins with another `system.init`: it opens a
-  follow-up turn (see 4.5) and never re-emits `started`.
+- Populate `meta` from `system.init` fields: `cwd`, `model`, `tools`, `permissionMode`, `output_style`, `apiKeySource`, `mcp_servers` (whichever are present), plus `effort` when a reasoning override is set. The `model` and `permissionMode` fields are used by the bridge to render the `🏷` footer line on final messages.
+- The first `system.init` per run produces the `started` event. A later
+  `system.init` never re-emits `started`; in a live session (#776) one that
+  arrives while no turn is open opens a follow-up turn (see 4.5). A manual
+  `/compact` also re-emits `init` mid-command.
+- #751: on the first `init` only, a `permissionMode` that differs from the
+  requested mode adds a warning `note` after `started` (`⚠️ Asked for <mode>
+  mode — Claude Code is running <mode>`) and, when the effective mode is a
+  prompting one, re-arms the stage-6 approval gate.
 - Background-task subtypes (`task_started`, `task_progress`, `task_updated`,
   `task_notification`, `background_tasks_changed`) emit no Untether events;
   they maintain the native task map (`ClaudeStreamState.tasks`).
@@ -130,6 +138,16 @@ Claude Code emits a system init event early in the stream:
   finish.` under the turn header (the whole header for a follow-up).
 - Optional: emit a `note` action summarizing tools/MCP servers (debug-only).
 
+A top-level `control_request` (control-channel mode) is answered on stdin.
+Housekeeping subtypes and the tool requests the mode doesn't route to the
+user (#749) are approved silently and emit nothing; a request that needs the
+user emits a started `warning` action (`claude.control.<n>`) whose
+`detail.inline_keyboard` carries the Telegram buttons (Approve / Deny, plan
+buttons for `ExitPlanMode`, option buttons for `AskUserQuestion`) and
+`detail.request_id`. See the runner spec, "Permissions" and "Permission
+modes". A `control_response` from the CLI emits nothing; the ack of
+Untether's own `set_permission_mode` updates the effective mode (see the `system/status` bullet above).
+
 The top-level `control_cancel_request` line (#684) — the CLI withdrawing a
 pending permission request — writes no reply and retires the request: one
 `action.completed` (kind `warning`, `⏹️ Permission request withdrawn — Claude
@@ -160,8 +178,9 @@ For each content block:
 - `title`:
   - if kind=`command`: use `input.command` if present
   - else: tool name or derived label
-- `detail` should include:
-  - `tool_name`, `tool_input`, `message_id`, `parent_tool_use_id` (if provided)
+- `detail` includes `name` (tool name), `input` (tool input),
+  `parent_tool_use_id` (if provided) and, for `file_change`, `changes`.
+- `server_tool_use` blocks (#489) are translated the same way.
 
 #### B) `type = "tool_result"`
 **Mapping:** emit `action` with `phase="completed"`.
@@ -170,8 +189,9 @@ For each content block:
 - `ok`:
   - if `content.is_error` exists and is true -> `ok=False`
   - else `ok=True`
-- `detail` should include:
-  - `tool_use_id`, `content` (raw), `message_id`
+- `detail` is the started action's detail plus `tool_use_id`,
+  `result_preview` (the normalised content), `result_len` and `is_error`.
+- `advisor_tool_result` blocks (#489) are translated the same way.
 
 The runner SHOULD keep a small in-memory map from `tool_use_id -> tool_name`
 (learned from `tool_use`) so the completed action title can match the started
@@ -183,9 +203,10 @@ action title.
 - Store the latest assistant text as a fallback final answer if `result.result`
   is empty or missing.
 
-#### D) `type = "thinking"` or other unknown types
-**Mapping:** optional `note` action (phase completed) with title derived from
-content; otherwise ignore.
+#### D) `type = "thinking"` or other block types
+**Mapping:** a non-empty `thinking` block emits a completed `note` action
+(`claude.thinking.<n>`, title = the thinking text, `detail.signature` when
+present). `image` / `document` blocks (#597) and other types emit nothing.
 
 #### E) Safeguard stops (`message.stop_reason == "refusal"`, #814)
 A main-thread assistant frame (no `parent_tool_use_id`) whose
@@ -212,10 +233,13 @@ The terminal event looks like:
 **Mapping:** emit a single Untether `completed` event:
 
 - `ok = !event.is_error`
-- `answer = event.result` (fallback to last assistant text if empty)
-- `error = event.error` (if present)
+- `answer = event.result` (fallback to last assistant text if empty); on
+  success an approved `ExitPlanMode` plan body is prepended as
+  `📋 Plan (approved)` when the answer is brief (#508/#793)
+- `error` (only when `is_error`): built by `_extract_error` from the result
+  text (or subtype), a diagnostic line and the #438 stream-idle classification
 - `resume = ResumeToken(engine="claude", value=event.session_id)`
-- `usage = event.usage` (pass through)
+- `usage`: see section 6
 - Emit exactly one `completed` event per run. With live sessions off (or in
   legacy `-p` mode) trailing lines are ignored; with live sessions on (#776)
   reading continues and later results close follow-up turns (4.5).
@@ -254,7 +278,8 @@ TurnEvent(phase="started", turn=N, reason=…) → ActionEvent* → TurnEvent(ph
 ```
 
 built with `EventFactory.turn_started` / `turn_completed`. The turn opens on the
-first post-result `system.init`, assistant message, or non-tool-result user
+first post-result `system.init`, `system/status{"status":"compacting"}` (a
+`/compact` follow-up, #819), assistant message, or non-tool-result user
 message; `reason` comes from what preceded it: an injected line's
 `command_lifecycle.command_uuid` (`followup`), a `task_notification`
 (`task_finished`), a fresh (≤ 10 s) idle `hook_response` with exit code 2
@@ -266,7 +291,11 @@ and the result's `origin.kind` is `task-notification`
 (`detail.retro_attributed`). The bridge always pushes a `hook_rewake` final
 (`🪝 Hook feedback — <event>`) and never folds it. Assistant/user
 events tagged `parent_tool_use_id` (a background subagent) never open a turn.
-`command_lifecycle` lines themselves emit nothing.
+`command_lifecycle` lines emit nothing themselves, with one exception (#775):
+a `started` for a line Untether injected (a steer or a follow-up) while a
+turn is still open means the CLI folded it into that turn, and emits a
+`↪️ steer received: …` (or `↪️ follow-up received`) note
+(`detail.absorbed_command_uuid`).
 
 Attribution (#785): a `task_notification` only labels the next turn when the
 task is top-level background work (`is_backgrounded` and not
@@ -287,7 +316,9 @@ an error; its cost delta is still accounted first (#806).
 
 ### 4.4 Error handling / malformed lines
 
-- If a JSONL line is invalid JSON: emit a warning action and continue.
+- If a JSONL line is invalid JSON, or valid JSON that doesn't match the schema:
+  emit nothing and continue. The base runner logs invalid JSON
+  (`jsonl.parse.invalid`); a schema mismatch logs WARN `jsonl.msgspec.invalid`.
 - If the subprocess exits non-zero or the stream ends without a `result` event:
   emit `completed` with `ok=False` and `error` explaining the failure.
 - Emit **exactly one** `completed` event per run.
@@ -299,16 +330,23 @@ an error; its cost delta is still accounted first (#806).
 Claude Code tool names can evolve. The runner SHOULD map based on tool name and input
 shape. Suggested rules:
 
+The implemented mapping is `tool_kind_and_title` in `runners/tool_actions.py`
+(paths from `input.file_path`, else `input.path`):
+
 | Tool name pattern | ActionKind | Title logic |
 | --- | --- | --- |
-| `Bash`, `Shell` | `command` | `input.command` |
-| `Write`, `Edit`, `MultiEdit`, `NotebookEdit` | `file_change` | `input.path` |
-| `Read` | `tool` | `Read <path>` |
-| `WebSearch` | `web_search` | `input.query` |
+| `Bash`, `Shell`, `KillShell` | `command` | `input.command` |
+| `Write`, `Edit`, `MultiEdit`, `NotebookEdit` | `file_change` | the path |
+| `Read` | `tool` | ``read: `<path>` `` |
+| `Glob` / `Grep` | `tool` | ``glob: `<pattern>` `` / `grep: <pattern>` |
+| `WebSearch` / `WebFetch` | `web_search` | `input.query` / `input.url` |
+| `TodoWrite` / `TodoRead` | `note` | `update todos` / `read todos` |
+| `AskUserQuestion` | `note` | `ask user` |
+| `Task`, `Agent` | `subagent` | `input.description`, else `input.prompt` |
 | (default) | `tool` | tool name |
 
-For `file_change`, emit `detail.changes = [{"path": <path>, "kind": "update"}]`.
-If input indicates creation (ex: `create: true`), use `kind: "add"`.
+For `file_change`, emit `detail.changes = [{"path": <path>, "kind": "update"}]`
+(always `update`; creation is not distinguished).
 
 If a tool name is unknown, map to `tool` and include the full input in `detail`.
 
@@ -316,9 +354,13 @@ If a tool name is unknown, map to `tool` and include the full input in `detail`.
 
 ## 6. Usage mapping
 
-Untether `completed.usage` should mirror the Claude Code `result.usage` object
-without transformation. Optionally include `modelUsage` inside `usage` or
-`detail` if downstream consumers want it (currently unused by renderers).
+Untether `completed.usage` (and a live turn's `TurnEvent(completed).usage`) is
+a dict built from the result: `total_cost_usd`, `duration_ms`,
+`duration_api_ms`, `num_turns`, `subtype` (when present) and the raw
+`result.usage` object under `usage`. Extra keys are added when they apply:
+`safeguard` (4.2 E), `terminal_reason` (4.3), `context` and `compaction`
+(6.1). `modelUsage` is not copied; it is read only to learn each model's
+context window.
 
 ### 6.1 Context-window use (#819)
 

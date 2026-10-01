@@ -12,7 +12,7 @@ This project follows the [Contributor Covenant](CODE_OF_CONDUCT.md). By particip
 
 - **Python 3.12+** — `uv python install 3.14`
 - **uv** — `curl -LsSf https://astral.sh/uv/install.sh | sh`
-- At least one agent CLI on PATH for integration testing: `claude`, `codex`, `opencode`, `pi`, `gemini`, or `amp`
+- At least one agent CLI on PATH for integration testing: `claude`, `codex`, `opencode`, or `pi` (`gemini` and `amp` are deprecated and removed in 0.36.0 — when a change breaks their runners, `xfail`/`skip` the test rather than fixing the runner)
 
 ### Development setup
 
@@ -86,14 +86,14 @@ Key test patterns:
 
 - Use **stub subprocess runners** with fake CLI scripts for engine tests
 - Use **`FakeTransport`** protocol doubles instead of real Telegram clients
-- Verify the **3-event contract**: `StartedEvent` → `ActionEvent(s)` → `CompletedEvent`
+- Verify the **3-event contract**: `StartedEvent` → `ActionEvent(s)` → `CompletedEvent` (Claude live sessions may follow it with `TurnEvent` segments, never a second `CompletedEvent`)
 - Use **pytest + anyio** for async tests
 
 ### Linting
 
 ```sh
 uv run ruff check src tests             # lint
-uv run ruff format src tests            # auto-format
+uv run ruff format src tests            # auto-format (CI also checks formatting)
 ```
 
 ## Architecture overview
@@ -124,10 +124,10 @@ See [Architecture](docs/explanation/architecture.md) for the full breakdown.
 ## Submitting changes
 
 1. Fork the repository
-2. Create a feature branch from `master`
+2. Create a feature branch from `dev` (or from `master` if no `dev` branch exists yet)
 3. Make your changes with tests
-4. Verify: `uv run pytest && uv run ruff check src tests`
-5. Push and open a pull request
+4. Verify: `uv run pytest && uv run ruff check src tests && uv run ruff format --check src tests`
+5. Push and open a pull request against `dev` — `master` only receives release merges and always matches the latest PyPI release
 
 ### Pull request guidelines
 

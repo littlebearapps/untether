@@ -31,6 +31,7 @@ Notes:
 
 - File transfer is **disabled by default**.
 - If `allowed_user_ids` is empty, private chats are allowed and group usage requires admin privileges.
+- Setting `deny_globs` **replaces** the built-in list. The defaults also cover `.env.*`, `*.key`, `id_rsa`, `id_ed25519`, `.netrc`, `.npmrc` and `.pypirc`; copy the full list from [Security → File transfer deny globs](security.md#file-transfer-deny-globs) and add to it rather than starting from the short example above.
 
 ## Upload a file (`/file put`)
 
@@ -62,7 +63,7 @@ If the target file already exists, Untether auto-appends a numeric suffix (`_1`,
     📄 saved `docs/spec.pdf` (42 KB)
 
 !!! note "Path safety"
-    Deny globs are checked against the path you give **and** the path it resolves to after following symlinks inside the project, so an in-root symlink can't route an upload into `.git/hooks` or onto `.env` ([#390](https://github.com/littlebearapps/untether/issues/390)). Paths that leave the project root are refused. If you upload through a symlinked folder, the confirmation shows the real path the file landed at (e.g. `inbox/a.txt` → `data/inbox/a.txt`).
+    Deny globs are checked against the path you give **and** the path it resolves to after following symlinks inside the project, so an in-root symlink can't route an upload into `.git/hooks` or onto `.env` ([#390](https://github.com/littlebearapps/untether/issues/390)). A refused path gets a reply naming the rule, such as ``path denied by rule: `**/.ssh/**` ``, with `(resolves to …)` added when a symlink led there. Paths that leave the project root are refused. If you upload through a symlinked folder, the confirmation shows the real path the file landed at (e.g. `inbox/a.txt` → `data/inbox/a.txt`).
 
 <img src="../assets/screenshots/file-put.jpg" alt="Photos uploaded and auto-saved with confirmation" width="360" loading="lazy" />
 
@@ -145,7 +146,7 @@ Files are sent in alphabetical order, one at a time, immediately after the agent
 
 Outbox delivery reuses the same security rules as `/file get`:
 
-- **Deny globs** — files matching `.git/**`, `.env`, `.envrc`, `**/*.pem`, `**/.ssh/**` (and any custom deny globs) are surfaced to the user as a `📎 Outbox skipped` notice rather than silently dropped (#524)
+- **Deny globs** — files matching `deny_globs` (by default `.git/**`, `.env` and `.env.*` files, `.envrc`, keys and certificates, `.ssh/**`, `.netrc`, `.npmrc`, `.pypirc`) are surfaced to the user as a `📎 Outbox skipped` notice rather than silently dropped (#524)
 - **Size limit** — files larger than 50 MB are skipped (and surfaced via the same notice)
 - **Path traversal** — symlinks pointing outside the project root are rejected
 - **File count** — capped at `outbox_max_files` per run (default 10)
@@ -162,8 +163,8 @@ All engines support outbox delivery — any agent that can write files to disk c
 | Codex CLI | Yes | — |
 | OpenCode | Yes | — |
 | Pi | Yes | — |
-| Gemini CLI | Needs config | Set approval mode to "Full access" via `/config` → Approval mode |
-| AMP | Yes | — |
+| Gemini CLI (deprecated) | Needs config | Set approval mode to "Full access" via `/config` → Approval mode |
+| AMP (deprecated) | Yes | — |
 
 !!! tip "Gemini CLI permissions"
     Gemini CLI defaults to read-only approval mode. To enable file creation (and outbox delivery), set the approval mode to "Full access" via `/config` → **Approval mode** in the Gemini chat.

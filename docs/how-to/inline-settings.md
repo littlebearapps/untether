@@ -10,7 +10,7 @@ Send `/config` in any chat:
 /config
 ```
 
-The home page shows current values for all settings, with buttons arranged in pairs (max 2 per row) for comfortable mobile tap targets:
+The home page shows current values grouped under **Agent controls**, **Display** and **Routing**, with buttons arranged in pairs (max 2 per row) for comfortable mobile tap targets:
 
 ```
 🐕 Untether settings
@@ -20,13 +20,18 @@ Permission mode: on  · approve the plan first
 Ask mode: on  · interactive questions
 Diff preview: off  · buttons only
 
-Verbose: off
+Display
 Cost & usage: cost on, sub off
+Verbose: off  · compact progress
 Resume line: on
-Engine: claude (global)
-Model: default
-Listen: all
+
+Routing
+Engine: claude (default)
+Model: default  · from CLI settings
+Listen: all  · respond to everything
 Follow-up: queue  · wait for the run
+⏰ Triggers: active                    ← only when triggers are configured
+Effort: default  · high
 
 [📋 Permission mode]  [❓ Ask mode]
 [📝 Diff preview]  [🔍 Verbose]

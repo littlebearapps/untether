@@ -1,8 +1,10 @@
 # Dev Instance
 
-Untether runs two isolated instances on lba-1: **staging** (PyPI/TestPyPI release) and **dev** (local editable source). They use separate Telegram bots, separate configs, and separate state — zero crosstalk.
+The release pipeline uses two isolated Untether instances on lba-1: **staging** (PyPI/TestPyPI release) and **dev** (local editable source). They use separate Telegram bots, separate configs, and separate state — zero crosstalk.
 
 > **Fleet context:** lba-1 staging is one of **five production-ish hosts** (lba-1, nsd, channelo, sl, mac). Multi-host upgrades use `scripts/fleet-rollout.sh` — see [release-discipline.md → Fleet rollout](../../.claude/rules/release-discipline.md). This page covers the lba-1 staging/dev pair specifically.
+
+> **Other lba-1 instances:** three special-purpose services also run on lba-1 — `untether-demo.service` (screenshot demo bot, `~/.untether-demo/`), `untether-dev-hf.service` (handoff/stateless-mode testing, `~/.untether-dev-hf/`) and `untether-dev-ws.service` (workspace-mode testing, `~/.untether-dev-ws/`). All three run the **same editable `.venv` as dev**, so a source change reaches them too when they restart. The release pipeline and integration tests use only staging and dev.
 
 ## How it works
 
@@ -12,11 +14,11 @@ Untether runs two isolated instances on lba-1: **staging** (PyPI/TestPyPI releas
 | **Binary** | `~/.local/bin/untether` (pipx, PyPI wheel) | `/home/nathan/untether/.venv/bin/untether` (editable) |
 | **Config** | `~/.untether/untether.toml` | `~/.untether-dev/untether.toml` |
 | **State files** | `~/.untether/*.json` | `~/.untether-dev/*.json` |
-| **Lock file** | `~/.untether/untether.toml.lock` | `~/.untether-dev/untether.toml.lock` |
+| **Lock file** | `~/.untether/untether.lock` | `~/.untether-dev/untether.lock` |
 | **Telegram bot** | `@hetz_lba1_bot` | `@untether_dev_bot` |
 | **Source** | PyPI release or TestPyPI rc | Whatever's in `/home/nathan/untether/src/` |
 
-The `UNTETHER_CONFIG_PATH` env var (set in the dev systemd unit) is what directs the dev instance to its own config directory. State and lock files derive their paths from the config file location automatically.
+The `UNTETHER_CONFIG_PATH` env var (set in the dev systemd unit) is what directs the dev instance to its own config directory. State and lock files derive their paths from the config file location automatically (the lock is `config_path.with_suffix(".lock")` — see `src/untether/lockfile.py`).
 
 ## Why no separate repo or branch?
 
@@ -92,6 +94,9 @@ Integration tests        Merge to dev → TestPyPI         PR dev → master, me
    systemctl --user restart untether
    scripts/healthcheck.sh --version X.Y.Zrc1
    ```
+7. To put the rc on **all five hosts**, attest the integration-test run first
+   (`scripts/run-integration-tests.sh X.Y.Zrc1 --manual`), then run
+   `scripts/fleet-rollout.sh X.Y.Zrc1` and the [`/ping` sweep](fleet-ping-verification.md).
 
 ### Fix bugs during staging
 
@@ -136,7 +141,7 @@ This reinstalls the last stable PyPI version.
 
 ## Test project directories
 
-Six test workspaces live under `test-projects/` in the repo (gitignored, not version-controlled):
+Six dev-bot test workspaces live under `test-projects/` in the repo (gitignored, not version-controlled):
 
 | Directory | Engine | Dev config route |
 |-----------|--------|-----------------|
@@ -144,10 +149,13 @@ Six test workspaces live under `test-projects/` in the repo (gitignored, not ver
 | `test-projects/test-codex/` | Codex | `[projects.codex-test]` |
 | `test-projects/test-opencode/` | OpenCode | `[projects.opencode-test]` |
 | `test-projects/test-pi/` | Pi | `[projects.pi-test]` |
-| `test-projects/test-gemini/` | Gemini CLI | `[projects.gemini-test]` |
-| `test-projects/test-amp/` | AMP | `[projects.amp-test]` |
+| `test-projects/test-gemini/` | Gemini CLI (deprecated) | `[projects.gemini-test]` |
+| `test-projects/test-amp/` | AMP (deprecated) | `[projects.amp-test]` |
 
 Each has a `CLAUDE.md` and `.claude/settings.json`. They're throwaway workspaces — agents run here during dev testing so untether source isn't accidentally modified.
+
+!!! warning "Gemini CLI and AMP are deprecated"
+    Both engines still load but are unsupported and are **removed in 0.36.0**. Their routes remain in the dev config, but they are excluded from every integration-test tier — see [integration-testing.md](integration-testing.md).
 
 ### Telegram groups
 
@@ -159,8 +167,8 @@ Each test project has a dedicated Telegram group (all in the `ut-dev` folder):
 | ut-dev: codex | `-4929463515` | Codex |
 | ut-dev: opencode | `-5200822877` | OpenCode |
 | ut-dev: pi | `-5156256333` | Pi |
-| ut-dev: gemini | `-5207762142` | Gemini CLI |
-| ut-dev: amp | `-5230875989` | AMP |
+| ut-dev: gemini | `-5207762142` | Gemini CLI (deprecated) |
+| ut-dev: amp | `-5230875989` | AMP (deprecated) |
 
 Main dev chat (private): `8351408485` (direct messages to `@untether_dev_bot`)
 
@@ -277,3 +285,10 @@ systemctl --user restart untether
 ```
 
 The same settings should be applied to `untether-dev.service`.
+
+!!! note "lba-1's own units"
+    The live lba-1 units (`~/.config/systemd/user/untether.service` and `untether-dev.service`)
+    predate the v0.35.1 example: they still use `Type=simple` and `RestartSec=10`, with
+    `KillMode=mixed`, `TimeoutStopSec=150`, `OOMScoreAdjust=-100` and `OOMPolicy=continue`.
+    Staging also has a `memory-cap.conf` drop-in (`MemoryMax=14G`). The demo, dev-hf and
+    dev-ws units use `KillMode=process` / `control-group` and no OOM overrides.

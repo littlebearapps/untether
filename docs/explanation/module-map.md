@@ -6,7 +6,7 @@ This page is a high-level map of Untether’s internal modules: what they do and
 
 | Module | Responsibility |
 |--------|----------------|
-| `cli.py` | Typer CLI entry point; loads settings, selects engine/transport, runs the transport backend. |
+| `cli/` | Typer CLI package (`run.py`, `doctor.py`, `config.py`, `init.py`, …); loads settings, selects engine/transport, runs the transport backend. |
 | `telegram/backend.py` | Telegram transport backend: validates config, runs onboarding, builds and runs the Telegram bridge. |
 
 ## Orchestration and routing
@@ -19,8 +19,12 @@ This page is a high-level map of Untether’s internal modules: what they do and
 | `transport_runtime.py` | Facade used by transports and commands to resolve messages and runners without importing internal router/project types. |
 | `cost_tracker.py` | Per-run and daily cost tracking with budget alerts and auto-cancel. |
 | `shutdown.py` | Graceful shutdown state and drain logic. |
+| `live_followup.py` | Writes a queued follow-up into a still-running Claude session (live sessions) instead of resuming a new process. |
+| `session_costs.py` | Per-session cost and token ledger, so a resumed session's running totals are recorded per run. |
+| `session_quarantine.py` | Persisted markers for sessions that must not be resumed (empty-resume recovery). |
+| `permission_audit.py` | Startup / reload audit of Claude permission modes and crons that would wait for an approval tap. |
 | `telegram/at_scheduler.py` | One-shot delayed runs from `/at <duration>`; in-memory state, drained on shutdown. |
-| `telegram/loop_scheduler.py` | Loop mode firing for Claude's `/loop` and `ScheduleWakeup`; persists `active_loops.json` so loops survive restart. Mirrors `at_scheduler` API. |
+| `loop_scheduler.py` | Loop mode firing for Claude's `/loop` and `ScheduleWakeup`; persists `active_loops.json` so loops survive restart. Mirrors `at_scheduler` API. |
 
 ## Domain model and events
 
@@ -36,6 +40,7 @@ This page is a high-level map of Untether’s internal modules: what they do and
 |--------|----------------|
 | `progress.py` | Progress tracking: reduces untether events into progress snapshots. |
 | `markdown.py` | Markdown formatting for progress/final messages; includes helpers like elapsed formatting. |
+| `background_status.py` | Live background-task block and status message for Claude live sessions. |
 | `presenter.py` | Presenter protocol: converts `ProgressState` into transport-specific messages. |
 | `transport.py` | Transport protocol: send/edit/delete abstractions and message reference types. |
 
@@ -50,6 +55,9 @@ This page is a high-level map of Untether’s internal modules: what they do and
 | `telegram/commands/*` | In-chat command handlers (`/agent`, `/file`, `/topic`, `/ctx`, `/new`, …). |
 | `telegram/outbox_delivery.py` | Agent-initiated file delivery: scan outbox, send files as Telegram documents, cleanup. |
 | `telegram/progress_persistence.py` | Active progress message persistence for orphan cleanup on restart. |
+| `telegram/steer.py`, `telegram/followup_mode.py` | `/steer` / `/queue` and the per-chat follow-up mode (Claude live sessions). |
+| `telegram/files.py` | File-transfer path rules, including deny-glob matching shared by `/file`, outbox and `/browse`. |
+| `telegram/voice.py` | Voice-note transcription, including the default vocabulary hint. |
 
 ## Plugins
 
@@ -66,7 +74,9 @@ This page is a high-level map of Untether’s internal modules: what they do and
 
 | Module | Responsibility |
 |--------|----------------|
-| `runners/*` | Engine runner implementations (Claude Code, Codex, OpenCode, Pi, Gemini CLI, Amp). |
+| `runners/*` | Engine runner implementations (Claude Code, Codex, OpenCode, Pi, and the deprecated Gemini CLI and Amp). |
+| `runners/run_options.py` | Per-run options (model, reasoning, permission mode) and the Claude permission-mode tables. |
+| `runners/extra_args_guard.py` | Rejects approval- and sandbox-bypass flags in `extra_args`. |
 | `schemas/*` | msgspec schemas / decoders for engine JSONL streams. |
 
 ## Triggers
@@ -85,7 +95,9 @@ This page is a high-level map of Untether’s internal modules: what they do and
 | Module | Responsibility |
 |--------|----------------|
 | `settings.py` | Loads `untether.toml` (TOML + env), validates with pydantic-settings. |
-| `config_store.py` | Raw TOML read/write (merge/update without clobbering extra sections). |
+| `config.py` | Raw TOML read/write (merge/update without clobbering extra sections) and project config types. |
+| `config_watch.py` | Watches `untether.toml` and triggers hot-reload. |
+| `runtime_loader.py` | Builds the runtime (engines, router, projects) from settings at startup and on reload. |
 | `config_migrations.py` | One-time edits to on-disk config (e.g. legacy Telegram key migration). |
 
 ## Utilities

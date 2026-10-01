@@ -121,6 +121,12 @@ Still allowed, and documented: Codex `-s read-only|workspace-write` (the way to 
 
 Treat write access to `untether.toml`, the engines' config directories or the service environment as equivalent to choosing the permission mode.
 
+## Permission-mode safety checks (Claude)
+
+- **Prompting modes prompt.** In `acceptEdits` (`/planmode off`), `default` and `manual`, Untether no longer pre-approves `Bash`, `Read`, `Edit` and `Write` or silently approves other tools: anything Claude Code would ask about becomes an Approve / Deny message ([#749](https://github.com/littlebearapps/untether/issues/749)).
+- **A silent downgrade is caught.** If you ask for `auto` but Claude Code starts in another mode (auto mode isn't available on every model), Untether shows `⚠️ Asked for auto mode — Claude Code is running default`, logs `claude.permission_mode.mismatch`, and sends permission requests to Telegram instead of approving them ([#751](https://github.com/littlebearapps/untether/issues/751)). In that case `Bash`, `Read`, `Edit` and `Write` stay pre-approved, because `auto` keeps the default `allowed_tools`.
+- **Unattended triggers are flagged.** At startup and on a config reload, Untether logs `trigger.unattended_approval_risk` for crons whose mode would wait for an approval tap, and logs it again when such a cron or webhook fires. A cron `permission_mode` that Claude Code would reject is reported as `trigger.cron.permission_mode_invalid`. See [Plan mode → Per-cron override](plan-mode.md#cron-override).
+
 ## File transfer deny globs
 
 File transfer includes a deny list that blocks access to sensitive paths. The defaults are:
@@ -160,6 +166,8 @@ Add more patterns as needed:
     ```
 
 Deny globs are checked against both the path you type and the path it resolves to after following symlinks inside the project, so a symlink can't be used to reach a denied file (for example `cfg.txt → .env`, or `docs/x → .git/hooks`). Links that leave the project root are always refused ([#390](https://github.com/littlebearapps/untether/issues/390)).
+
+The same matcher applies everywhere a path crosses the Telegram boundary: `/file get` and `/file put`, outbox delivery, `/browse` listings and previews (which also hide dot-paths other than `.github` and `.gitignore`, and need a project-bound chat — [#389](https://github.com/littlebearapps/untether/issues/389)), webhook `file_write` actions and cron `file_read` fetches ([#831](https://github.com/littlebearapps/untether/issues/831)).
 
 !!! tip "Defence in depth"
     Deny globs protect against accidental file exfiltration via `/file get` and against uploads (`/file put`, auto-saved uploads and media groups) landing in sensitive places such as `.git/hooks`. They do not prevent the coding agent itself from reading files — the agent runs with full filesystem access in the project directory.

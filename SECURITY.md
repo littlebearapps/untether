@@ -45,6 +45,22 @@ Include:
 - Bot token management — token security is the operator's responsibility
 - Issues requiring physical access to the host machine
 
+## Security improvements in v0.35.5
+
+v0.35.5 closes several approval, sandbox and file-access gaps. Upgrade notes:
+
+- **BREAKING — `extra_args` refuses approval and sandbox bypass flags** ([#209](https://github.com/littlebearapps/untether/issues/209)). Claude's `--dangerously-skip-permissions`, `--allowedTools`, `--permission-prompts` and similar, and Codex's `--yolo`, `--dangerously-bypass-approvals-and-sandbox`, `--sandbox danger-full-access`, `-C`/`--cd` and similar, now fail config load: the default engine won't start and any other engine is disabled until the flag is removed. Errors and logs name the flag, never its value. `[engines.claude] dangerously_skip_permissions = true` now logs a warning, since it overrides every `/planmode` choice. See [Security how-to → Engine CLI flags](docs/how-to/security.md#engine-cli-flags-extra_args) for what `extra_args` blocking can't stop.
+- **Codex safe mode now restricts Codex** ([#830](https://github.com/littlebearapps/untether/issues/830)). Before v0.35.5, `codex exec` ignored the approval flag Untether passed, so a chat set to **safe** ran exactly like full auto (and on codex-cli 0.149.0+ every safe run failed to start). Safe now uses Codex's read-only sandbox: edits, writes and shell network access are blocked.
+- **Claude prompting modes prompt** ([#749](https://github.com/littlebearapps/untether/issues/749)). `default`, `manual` and `acceptEdits` (`/planmode off`) used to approve every tool silently; anything the mode doesn't cover now waits for an Approve / Deny tap. Unattended crons in these modes now wait for a tap and are flagged in the log (`trigger.unattended_approval_risk`).
+- **No silent approvals when Claude Code downgrades `auto`** ([#751](https://github.com/littlebearapps/untether/issues/751)). On a model without auto mode (such as Haiku), Claude Code quietly runs `auto` as `default`; Untether used to approve those permission requests automatically. It now shows `⚠️ Asked for auto mode — Claude Code is running default`, logs `claude.permission_mode.mismatch` and sends the requests to Telegram.
+- **File deny globs match at the project root and at any depth** ([#831](https://github.com/littlebearapps/untether/issues/831)). With the default `deny_globs`, a project-root `key.pem`, `id_rsa`, `.env.local`, `.npmrc`, `.netrc` or `.ssh/config` was not denied, and nothing deeper than one level under `.ssh/` was. Matching is now strictly more denying for `/file get`, `/file put`, outbox delivery, `/browse`, webhook `file_write` and cron `file_read`; the `.git` rule is case-insensitive. A project-root `.env.example` is now denied too.
+- **Deny globs follow symlinks** ([#390](https://github.com/littlebearapps/untether/issues/390)). `/file put` and `/file get` check the path a request resolves to as well as the path requested, so an in-root symlink (e.g. `docs/x` → `.git/hooks`) can no longer route around `.git/**` or `.env`.
+- **`/browse` needs a project root** ([#389](https://github.com/littlebearapps/untether/issues/389), [#210](https://github.com/littlebearapps/untether/issues/210)). It no longer falls back to the process working directory (`$HOME` under systemd), applies the deny globs and hidden-path rules to listings and previews, resolves symlinks before its containment check, and scopes its button ids per chat.
+- **Log redaction widened** ([#800](https://github.com/littlebearapps/untether/issues/800), [#679](https://github.com/littlebearapps/untether/issues/679)). Process titles are scanned in full, and bearer credentials, JWTs and `api_key=` / `token=` / `secret=` / `password=` values are redacted; `ssrf.*` log lines redact URL userinfo.
+- **Dependency advisories** — `anyio` 4.15.1 (CVE-2026-63374, CVE-2026-64847; [#773](https://github.com/littlebearapps/untether/issues/773)) and `aiohttp` 3.14.3 (`PYSEC-2026-3545`/`3546`/`3547`) in the lockfile.
+
+See [CHANGELOG v0.35.5](https://github.com/littlebearapps/untether/blob/master/CHANGELOG.md#v0355) for the full entry list.
+
 ## Security improvements in v0.35.3
 
 v0.35.3 ships a follow-on hardening bundle on top of v0.35.2. Upgrade notes:

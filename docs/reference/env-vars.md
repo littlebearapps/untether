@@ -1,6 +1,6 @@
 # Environment variables
 
-Untether supports a small set of environment variables for logging and runtime behavior.
+Untether supports a small set of environment variables for logging and runtime behaviour.
 
 ## Logging
 
@@ -8,39 +8,71 @@ Untether supports a small set of environment variables for logging and runtime b
 |----------|-------------|
 | `TAKOPI_LOG_LEVEL` | Minimum log level (default `info`; `--debug` forces `debug`). |
 | `TAKOPI_LOG_FORMAT` | `console` (default) or `json`. |
-| `TAKOPI_LOG_COLOR` | Force color on/off (`1/true/yes/on` or `0/false/no/off`). |
+| `TAKOPI_LOG_COLOR` | Force colour on (`1`/`true`/`yes`/`on`) or off (any other value). Unset: colour when stdout is a TTY. |
 | `TAKOPI_LOG_FILE` | Append JSON lines to a file. `--debug` defaults this to `debug.log`. |
-| `TAKOPI_TRACE_PIPELINE` | Log pipeline events at `info` instead of `debug`. |
+| `TAKOPI_TRACE_PIPELINE` | Log pipeline events at `info` instead of `debug` (`1`/`true`/`yes`/`on`). |
 
-## CLI behavior
+## CLI behaviour
 
 | Variable | Description |
 |----------|-------------|
-| `TAKOPI_NO_INTERACTIVE` | Disable interactive prompts (useful for CI / non-TTY). |
+| `TAKOPI_NO_INTERACTIVE` | Any non-empty value disables interactive prompts (useful for CI / non-TTY). |
 | `UNTETHER_CONFIG_PATH` | Override config file location (default `~/.untether/untether.toml`). Useful for running multiple instances or testing with alternate configs. |
 | `UNTETHER_SETTINGS_CACHE` | Set to `0` (or `false`/`off`/`no`) to turn off the settings parse cache ([#506](https://github.com/littlebearapps/untether/issues/506)). By default `untether.toml` is parsed once per edit: every read compares the file's bytes (and the `UNTETHER__*` env vars) with the last parse and re-parses only when they differ, so edits still apply on the next read. Turning the cache off re-parses on every read, as before 0.35.5. Set it in a systemd drop-in (`Environment=UNTETHER_SETTINGS_CACHE=0`) for a per-host rollback. |
+| `NOTIFY_SOCKET` | Set by systemd for `Type=notify` units; Untether sends `READY=1` there once it is up and `STOPPING=1` when it starts draining. Not set by hand. |
+
+## Config overrides { #config-overrides }
+
+Any key on Untether's settings models can be set from the environment as
+`UNTETHER__<SECTION>__<KEY>` (prefix `UNTETHER__`, nested sections joined with `__`,
+case-insensitive). An env value wins over the same key in `untether.toml`; other keys
+in that section still come from the file.
+
+```sh
+UNTETHER__WATCHDOG__LIVE_SESSIONS=false
+UNTETHER__TRANSPORTS__TELEGRAM__FOLLOWUP_MODE=steer
+UNTETHER__PROGRESS__VERBOSITY=verbose
+```
+
+This covers the top-level keys and the `[transports.telegram]`, `[projects.*]`,
+`[plugins]`, `[footer]`, `[preamble]`, `[progress]`, `[watchdog]`, `[cost_budget]`,
+`[auto_continue]`, `[loop]` and `[security]` sections. It does **not** reach the
+engine tables (`[claude]` / `[engines.claude]`, …) or `[triggers]`, which are read
+from the TOML file only. The settings cache re-parses when any `UNTETHER__*` value
+changes ([#506](https://github.com/littlebearapps/untether/issues/506)), but the
+service only sees its own environment, so set these in the unit (or a drop-in) and
+restart.
 
 ## Engine-specific
 
 | Variable | Description |
 |----------|-------------|
-| `PI_CODING_AGENT_DIR` | Override Pi agent session directory base path. |
+| `PI_CODING_AGENT_DIR` | Override Pi agent session directory base path (default `~/.pi/agent`). |
+| `CLAUDE_CONFIG_DIR` | Claude Code's config directory. Untether reads it to recognise plan files under `$CLAUDE_CONFIG_DIR/plans/` (as well as `.claude/plans/`) and to keep a separate rate-limit state per Claude config directory. |
 
 ## Runner environment
 
-These variables are set automatically by Untether in the engine subprocess environment. They are not user-configurable.
+These variables are set (or removed) automatically by Untether in the engine subprocess environment.
 
 | Variable | Set by | Description |
 |----------|--------|-------------|
-| `UNTETHER_SESSION` | Claude runner | Set to `1` for all Claude Code subprocess invocations. Enables Claude Code plugins to detect Untether sessions and adjust behaviour — for example, skipping blocking Stop hooks that would displace user-requested content in Telegram. |
+| `UNTETHER_SESSION` | Claude runner | Always set to `1` for Claude Code subprocesses. Enables Claude Code plugins to detect Untether sessions and adjust behaviour — for example, skipping blocking Stop hooks that would displace user-requested content in Telegram. |
 | `CLAUDE_STREAM_IDLE_TIMEOUT_MS` | Claude runner | Claude Code's stdout idle timeout. Default raised to `300000` (5 min) in v0.35.2 ([#342](https://github.com/littlebearapps/untether/issues/342)) — matches undici's idle-body timeout. The old 60 s default killed long-thinking runs. **As of v0.35.3 ([#438](https://github.com/littlebearapps/untether/issues/438))**, this is preferably set via `[watchdog] claude_stream_idle_timeout_ms` in `untether.toml` (range 30 s – 30 min). Shell-set `CLAUDE_STREAM_IDLE_TIMEOUT_MS` still wins via `setdefault`. Failures with `API Error: Stream idle timeout - partial response received` now classify as Type A (mid-generation — raising helps) or Type B (cold-start zero-byte — raising does NOT help; upstream API outage). |
+| `CLAUDE_ENABLE_STREAM_WATCHDOG` | Claude runner | Defaults to `1` (turns on Claude Code's own stream watchdog — [#322](https://github.com/littlebearapps/untether/issues/322)). A value already in Untether's environment wins. |
+| `MCP_TOOL_TIMEOUT` | Claude runner | Defaults to `120000` (ms). A value already in Untether's environment wins. |
+| `MAX_MCP_OUTPUT_TOKENS` | Claude runner | Defaults to `12000`. A value already in Untether's environment wins. |
+| `ANTHROPIC_API_KEY` | Claude runner | **Removed** from the Claude subprocess environment unless `[claude] use_api_billing = true`, so Claude Code uses its subscription login. |
+| `NO_COLOR`, `CI` | Pi runner | Default to `1` so Pi's output carries no ANSI codes. A value already in Untether's environment wins. |
 
 !!! note "Not a security concern"
     `UNTETHER_SESSION` is a simple signal variable, not a credential or secret. It tells Claude Code plugins that the session is running via Telegram so they can avoid interfering with Untether's single-message output model. Plugins like [PitchDocs](https://github.com/littlebearapps/lba-plugins) check for this variable and skip blocking hooks that would otherwise consume the final response with meta-commentary instead of the user's requested content. See the [PitchDocs interference audit](../audits/pitchdocs-context-guard-interference.md) for the full analysis.
 
 ## Env allowlist (Claude/Pi)
 
-As of v0.35.2, arbitrary process env vars are **not** forwarded to Claude/Pi subprocesses. Only an internal allowlist (things like `PATH`, `HOME`, `LANG`, Anthropic/OpenAI/Pi credentials, `BWS_ACCESS_TOKEN` (added as a default in v0.35.3), and a small set of CLI-specific knobs including `CLAUDE_STREAM_IDLE_TIMEOUT_MS`, `MCP_TOOL_TIMEOUT`, `MAX_MCP_OUTPUT_TOKENS`) is passed through. ([#198](https://github.com/littlebearapps/untether/issues/198))
+As of v0.35.2, arbitrary process env vars are **not** forwarded to Claude/Pi subprocesses ([#198](https://github.com/littlebearapps/untether/issues/198)). Only the built-in allowlist in `src/untether/utils/env_policy.py` (plus your `[security]` extras) is passed through:
+
+- **Exact names:** OS essentials (`PATH`, `HOME`, `USER`, `LOGNAME`, `SHELL`, `TERM`, `LANG`, `LC_ALL`, `LC_CTYPE`, `TMPDIR`, `TMP`, `TEMP`, `TZ`); CLI output (`NO_COLOR`, `CI`, `FORCE_COLOR`, `COLORTERM`, `CLICOLOR`, `CLICOLOR_FORCE`); `XDG_RUNTIME_DIR`, `XDG_CONFIG_HOME`, `XDG_DATA_HOME`, `XDG_CACHE_HOME`, `XDG_STATE_HOME`; language runtimes (`PYTHONPATH`, `PYTHONUNBUFFERED`, `PYTHONDONTWRITEBYTECODE`, `PYTHONIOENCODING`, `NODE_PATH`, `NODE_OPTIONS`, `LD_LIBRARY_PATH`, `DYLD_LIBRARY_PATH`, `DYLD_FALLBACK_LIBRARY_PATH`); git/SSH (`SSH_AUTH_SOCK`, `SSH_AGENT_PID`, `GIT_CONFIG_GLOBAL`, `GIT_SSH_COMMAND`); provider keys (`ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, `ANTHROPIC_BASE_URL`, `OPENAI_API_KEY`, `OPENAI_BASE_URL`, `OPENAI_ORG_ID`, `OPENAI_PROJECT_ID`, `GOOGLE_API_KEY`, `GOOGLE_CLOUD_PROJECT`, `GOOGLE_CLOUD_LOCATION`, `GOOGLE_APPLICATION_CREDENTIALS`, `GEMINI_API_KEY`, `XAI_API_KEY`, `GROQ_API_KEY`, `CEREBRAS_API_KEY`, `DEEPSEEK_API_KEY`, `MISTRAL_API_KEY`, `FIREWORKS_API_KEY`); `GITHUB_TOKEN`, `GITHUB_PERSONAL_ACCESS_TOKEN`, `GH_TOKEN`; `CLOUDFLARE_API_TOKEN`, `CLOUDFLARE_ACCOUNT_ID`; `BWS_ACCESS_TOKEN` (a default since v0.35.3); `UNTETHER_SESSION`; `PROJECT_ROOT`, `DIRENV_DIR`.
+- **Prefixes:** `CLAUDE_`, `CLAUDE_CODE_`, `MCP_`, `MAX_MCP_`, `LC_`, `UV_`, `NPM_`, `PNPM_`, `NODE_`, `PIP_`, `UNTETHER_`.
 
 The Claude runner always execs under `env -i KEY=VAL …`, so the resolved environment is exactly the allowlist ([#361](https://github.com/littlebearapps/untether/issues/361)). When `[security] env_audit = true` (default — see [config reference](config.md#security)), Untether also samples `/proc/<pid>/environ` once at session start and logs `claude.env_audit.leaked_var` for any non-allowlisted name it finds.
 
@@ -62,7 +94,7 @@ If you'd rather the new variable ship as a default for every Untether user, open
 
 <!-- verified codex 0.157.1 / opencode 1.14.33, 2026-09-30 (#454); recheck on either CLI bump -->
 
-Untether does not filter the Codex or OpenCode environment: both CLIs are spawned with Untether's full process environment. `[security] env_extra_allow` has no effect on them (there is no allowlist to extend). Per-runner filtering for these engines is tracked in [#375](https://github.com/littlebearapps/untether/issues/375).
+Untether does not filter the Codex or OpenCode environment: both CLIs are spawned with Untether's full process environment (so are the deprecated Gemini CLI and AMP engines, removed in 0.36.0). `[security] env_extra_allow` has no effect on them (there is no allowlist to extend). Per-runner filtering for these engines is tracked in [#375](https://github.com/littlebearapps/untether/issues/375).
 
 What an **MCP server** sees is decided by the engine, not by Untether, and the two engines differ:
 

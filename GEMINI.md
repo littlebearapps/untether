@@ -42,8 +42,8 @@ Telegram <-> TelegramPresenter <-> RunnerBridge <-> Runner
 ## Key files
 
 - runners/claude.py — Claude Code runner with interactive features
-- runners/gemini.py — Gemini CLI runner
-- runners/amp.py — AMP CLI runner (Sourcegraph)
+- runners/gemini.py — Gemini CLI runner (deprecated; removal in 0.36.0 — xfail/skip on sweeps, don't fix)
+- runners/amp.py — AMP CLI runner (deprecated; removal in 0.36.0 — xfail/skip on sweeps, don't fix)
 - runner_bridge.py — Runner-to-transport bridge
 - cost_tracker.py — Per-run/daily cost tracking
 - telegram/bridge.py — Telegram message rendering

@@ -1,23 +1,13 @@
-> ## ⚠️ Status: deprecated
->
-> The `gemini` engine is **deprecated** and targeted for **removal in 0.36.0**.
->
-> Google ended Gemini CLI support for individual and free accounts on
-> **18 June 2026**, directing users to [Antigravity CLI](https://antigravity.google).
-> On an individual account the CLI fails with
-> `IneligibleTierError: This client is no longer supported` and exits **1**.
-> Under Untether, however, the subprocess **hangs instead of exiting**, so the
-> run stalls until the watchdog auto-cancels it (~10 min) rather than reporting
-> an error. Known defect; not being fixed, as the engine is deprecated.
->
-> Enterprise / Google Cloud licences may still work, but Untether no longer
-> verifies this and does no further work on this runner beyond security fixes.
-> Cross-engine sweeps skip it (see
-> [`runner-development.md`](../../../../.claude/rules/runner-development.md)).
->
-> Antigravity CLI is tracked separately as a new engine in
-> [#558](https://github.com/littlebearapps/untether/issues/558) — it is a
-> distinct tool, not a rename, and will not reuse the `gemini` engine id.
+!!! warning "Deprecated"
+
+    The `gemini` engine is **deprecated in v0.35.5**: it still loads but is
+    unsupported, and removal is targeted for **0.36.0**
+    ([#720](https://github.com/littlebearapps/untether/issues/720)). Google ended
+    Gemini CLI support for individual and free accounts on **18 June 2026**
+    (`IneligibleTierError`); under Untether the subprocess hangs until the
+    watchdog cancels the run. Enterprise / Google Cloud licences are unverified.
+    Antigravity CLI is tracked as a separate engine
+    ([#558](https://github.com/littlebearapps/untether/issues/558)), not a rename.
 
 Below is the implementation spec for the **Gemini CLI** runner shipped in Untether.
 
@@ -57,22 +47,22 @@ Untether appends a **single backticked** resume line at the end of the message:
 Notes:
 
 * The resume token is the **session id** (short alphanumeric string, e.g., `abc123def`), captured from the `init` event's `session_id` field.
-* `--resume latest` is also valid in the CLI but Untether always uses explicit session IDs.
+* Replies use the explicit session id; `/continue` passes `--resume latest`.
 
 ### Non-interactive runs
 
 The runner invokes:
 
 ```text
-gemini -p --output-format stream-json --skip-trust --model <model> --prompt=<prompt>
+gemini [--resume <session_id>|latest] --output-format stream-json [--model <model>] --approval-mode <mode> [--skip-trust] --prompt=<prompt>
 ```
 
 Flags:
 
-* `-p` — non-interactive (print mode)
+* `--prompt=<value>` — non-interactive (headless) mode; `--prompt` is the long form of `-p`, so no separate `-p` is passed
 * `--output-format stream-json` — JSONL output
 * `--model <model>` — optional, from config or `/config` override
-* `--prompt=<value>` — prompt bound directly to flag (prevents injection when prompt starts with `-`)
+* The prompt is bound directly to `--prompt=` (and space-prefixed if it starts with `-`), so it is never read as a flag
 * `--resume <session_id>` — when resuming a session
 * `--approval-mode <mode>` — defaults to `yolo` (full access) when no override is set; configurable via `/config` or `permission_mode` run option
 * `--skip-trust` — passed by **default** as of v0.35.3 ([#471](https://github.com/littlebearapps/untether/issues/471)) so headless runs work outside `~/.gemini/trustedFolders.json`. Gemini CLI rejects runs from any directory not in the trust list — even with `--approval-mode yolo` — and there is no interactive prompt path in headless usage, so projects outside the trust list previously failed silently before any agent output. Set `[gemini] skip_trust = false` in `untether.toml` to opt out (security-conscious operators who want Gemini's project-local extension/MCP trust gate enforced).
@@ -116,7 +106,7 @@ Exposes `BACKEND = EngineBackend(id="gemini", build_runner=build_runner, install
 #### Runner invocation
 
 ```text
-gemini -p --output-format stream-json [--resume <session_id>] [--model <model>] [--approval-mode <mode>] --prompt=<prompt>
+gemini [--resume <session_id>|latest] --output-format stream-json [--model <model>] --approval-mode <mode> [--skip-trust] --prompt=<prompt>
 ```
 
 #### Event translation

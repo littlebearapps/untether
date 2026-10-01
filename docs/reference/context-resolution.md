@@ -68,17 +68,22 @@ Validation rules:
 
 - `projects` is optional.
 - Each project entry must include `path` (string, non-empty).
-- `default_project` must match a configured project alias.
-- Project aliases cannot collide with engine ids or reserved commands (`/cancel`).
-- `default_engine` and per-project `default_engine` must be valid engine ids.
-- `projects.<alias>.chat_id` must be unique and must not match `transports.telegram.chat_id`.
+- `default_engine` must be an available engine id (it defaults to `"codex"`); an unknown value is a startup error.
+- The project rules below don't stop startup: a project that breaks one is **skipped** and logged
+  (`project.skipped.*`), and the rest still load.
+    - Project aliases can't collide (case-insensitively) with engine ids or reserved chat commands
+      (`cancel`, `continue`, `file`, `new`, `agent`, `model`, `reasoning`, `trigger`, `topic`, `ctx`), or with each other.
+    - A per-project `default_engine` must be an available engine id.
+    - `projects.<alias>.chat_id` must be unique and must not match `transports.telegram.chat_id`.
+- `default_project` must match a loaded project alias; otherwise it's ignored and logged
+  (`projects.config.invalid_default_project`).
 - `transport` defaults to `"telegram"` when omitted; override per-run with `--transport`.
 
 ## `untether init`
 
 `untether init <alias>` registers the current repo as a project alias.
 
-Important behavior:
+Important behaviour:
 
 - The stored `path` is the **main checkout** of the repo, even if you run
   `untether init` inside a worktree. Untether resolves the repo root via the git
@@ -121,10 +126,23 @@ Untether defaults the project context to that alias unless a reply `dir:` or exp
 
 In non-topic chats, `/ctx` can bind a chat context. That bound context is treated as
 ambient and takes precedence over the default project mapping until cleared.
+In a forum topic, the context bound with `/topic` (merged with the chat's project) is the
+ambient context instead.
+
+Precedence, highest first:
+
+1. a `dir:` (or `ctx:`) line in the replied-to message
+2. `/<project-alias>` and `@branch` directives
+3. the ambient context (topic binding, else `/ctx` binding)
+4. the chat's project (`projects.<alias>.chat_id`), else `default_project`
+
+An `@branch` on its own keeps the project from the ambient context or default; an ambient
+branch only applies when the resolved project matches the ambient project.
 
 ## Worktree resolution
 
-When `@branch` is present:
+When `@branch` is present and names the branch already checked out in `<project.path>`,
+Untether runs in the main checkout. Otherwise:
 
 ```
 worktrees_root = <project.path> / <worktrees_dir>
@@ -162,6 +180,32 @@ Base branch selection:
 When `@branch` is omitted:
 
 - Untether runs in `<project.path>` (the main checkout).
+
+## Sessions and follow-ups
+
+Context decides *where* a run happens; the conversation scope decides *which session* a
+message continues when it carries no resume line.
+
+- A reply to a message with a resume line continues that session (the resume line wins over
+  any stored session). A reply to a progress message whose run is still going queues behind
+  that run.
+- **Forum topics** (`[transports.telegram.topics] enabled = true`): each topic stores its own
+  session per engine.
+- **`session_mode = "chat"`**: sessions are stored per scope and engine — per chat in a private
+  chat's main thread, per topic in a private chat's topics
+  ([#734](https://github.com/littlebearapps/untether/issues/734)), and per sender in a group
+  without topics. The topic store wins when both apply.
+- **`session_mode = "stateless"`** (default): without topics, each message starts a new session
+  unless it carries or replies to a resume line.
+
+**Follow-up mode** ([#775](https://github.com/littlebearapps/untether/issues/775), Claude Code only)
+decides what a message sent while a run is active does: `queue` waits for the running turn to end,
+`steer` writes it into the running session. It resolves in this order:
+
+1. the topic's setting (`/steer` / `/queue` with no text, or `/config`)
+2. the chat's setting
+3. `[transports.telegram] followup_mode`
+4. `queue`
 
 ## Examples
 

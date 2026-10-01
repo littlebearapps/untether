@@ -5,7 +5,7 @@
 ```mermaid
 flowchart TB
     subgraph CLI["CLI Layer"]
-        cli[cli.py]
+        cli[cli/]
         cli_desc["Entry point, config loading, lock file"]
     end
 
@@ -31,7 +31,7 @@ flowchart TB
 
     subgraph Runner["Runner Layer"]
         runner_proto[Runner Protocol<br/>runner.py]
-        runners[runners/<br/>claude, codex, opencode, pi, gemini, amp]
+        runners[runners/<br/>claude, codex, opencode, pi,<br/>gemini + amp (deprecated)]
         schemas[schemas/<br/>JSONL decoders]
     end
 
@@ -221,12 +221,12 @@ flowchart TD
     B --> C[Build Command]
 
     C --> D{Engine?}
-    D -->|Claude| D1["claude --print --output-format stream-json<br/>[--resume id] prompt"]
+    D -->|Claude| D1["claude --output-format stream-json<br/>--input-format stream-json --verbose<br/>[--resume id] --permission-mode …<br/>(prompt as JSON on stdin)"]
     D -->|Codex| D2["codex exec --json<br/>[resume &lt;token&gt;] -"]
     D -->|Pi| D3["pi --print --mode json<br/>--session &lt;id&gt; &lt;prompt&gt;"]
     D -->|OpenCode| D4["opencode run --format json<br/>[--session id] -- &lt;prompt&gt;"]
-    D -->|Gemini| D5["gemini --output-format stream-json<br/>[--resume id] --prompt=&lt;prompt&gt;"]
-    D -->|Amp| D6["amp --stream-json<br/>-x &lt;prompt&gt;"]
+    D -->|Gemini, deprecated| D5["gemini --output-format stream-json<br/>[--resume id] --prompt=&lt;prompt&gt;"]
+    D -->|Amp, deprecated| D6["amp --stream-json<br/>-x &lt;prompt&gt;"]
 
     D1 --> E[Spawn Subprocess<br/>anyio.open_process]
     D2 --> E
@@ -244,6 +244,40 @@ flowchart TD
 
     F -->|EOF| J[Return]
 ```
+
+## Live sessions (Claude Code)
+
+The flow above ends at the first `result`. Since v0.35.5 a Claude Code run in a permission mode (the control-channel mode, without `-p`) is a **live session**: Untether keeps reading after the answer, so the process stays open while Claude Code has background work in flight ([#776](https://github.com/littlebearapps/untether/issues/776)).
+
+```mermaid
+sequenceDiagram
+    participant User
+    participant Bridge as runner_bridge.py
+    participant Runner as ClaudeRunner
+    participant CLI as claude (live)
+
+    User->>Bridge: prompt
+    Bridge->>Runner: run(prompt)
+    Runner->>CLI: spawn + prompt on stdin
+    CLI-->>Runner: result (turn 1)
+    Runner-->>Bridge: final answer
+    Note over CLI: background task, Monitor or<br/>ScheduleWakeup still running
+    CLI-->>Runner: task_notification → new turn
+    Runner-->>Bridge: TurnEvent (🔔 / 📡 / ⏰)
+    Bridge->>User: wake-turn message
+    User->>Bridge: follow-up
+    Bridge->>Runner: live_followup writes to stdin<br/>(after the current turn ends)
+    CLI-->>Runner: result (follow-up turn)
+    Note over Runner,CLI: idle ~60 s with no background work,<br/>or background hold / 4 h cap reached
+    Runner->>CLI: close stdin (graceful exit)
+```
+
+- **Turns.** Each later turn arrives as a `TurnEvent` segment and is delivered as its own Telegram message. Background work is tracked from Claude Code's own `system/task_*` events; the background status message ([`background_status.py`](module-map.md#rendering-and-progress)) is built from the same task map.
+- **Follow-ups.** `ThreadScheduler` still serialises jobs per thread, but a queued follow-up for a live session is written into the running process (`live_followup.py`) instead of waiting for it to exit and `--resume`-ing. A [steered](../how-to/steer-follow-ups.md) message is written straight away and read at the next tool boundary.
+- **Closing.** The session closes by closing stdin: about a minute after the last turn when nothing is running, after `[watchdog] post_result_bg_max_hold` (30 min) with no background activity, or at `live_session_max_s` (4 h). `/cancel`, `/new`, settings changes and restarts close it too, with a notice. A clean close is not quarantined, so the next message resumes the same session.
+- **Per-run state.** Runner instances are shared across chats, so each run publishes its own stream and PID through a per-run handle rather than shared runner attributes ([#510](https://github.com/littlebearapps/untether/issues/510)).
+
+`[watchdog] live_sessions = false` restores the stop-at-first-answer behaviour. Other engines are not affected. See the [Claude runner reference](../reference/runners/claude/runner.md#live-sessions-776) for the protocol details.
 
 ---
 
@@ -281,7 +315,7 @@ sequenceDiagram
 
 ```mermaid
 flowchart TD
-    cli[cli.py] --> config[config.py]
+    cli[cli/] --> config[config.py]
     cli --> engines[engines.py]
     cli --> transports[transports.py]
     cli --> commands[commands.py]
@@ -416,7 +450,7 @@ flowchart TD
 
 | Layer | Components | Responsibility |
 |-------|------------|----------------|
-| **CLI** | `cli.py` | Entry point, config, lock |
+| **CLI** | `cli/` | Entry point, config, lock |
 | **Plugins** | `plugins.py`, `engines.py`, `transports.py`, `commands.py`, `api.py` | Entrypoint discovery, plugin loading, public API boundary |
 | **Orchestration** | `router.py`, `scheduler.py`, `config.py` | Engine selection, job queuing, project config |
 | **Bridge** | `telegram/bridge.py`, `runner_bridge.py` | Message handling, execution coordination |

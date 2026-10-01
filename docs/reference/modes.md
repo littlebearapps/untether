@@ -1,6 +1,6 @@
 # Workflow modes
 
-Untether supports three workflow modes inherited from [takopi](https://github.com/banteg/takopi). Each mode configures three settings that control session continuation and resume line display.
+Untether supports three workflow modes. Each mode configures three settings that control session continuation and resume line display.
 
 ## Mode comparison
 
@@ -41,7 +41,7 @@ Same auto-resume as assistant, but scoped per Telegram forum topic. Each topic b
 Requires a Telegram supergroup with forum topics enabled and the bot added as admin with "manage topics" permission.
 
 - **Session mode:** `chat` (auto-resume within each topic)
-- **Topics:** enabled — each topic gets its own resume tokens, default engine, trigger mode, and model/reasoning overrides
+- **Topics:** enabled — each topic gets its own resume tokens, default engine, listen mode, follow-up mode, and model/reasoning overrides
 - **Resume lines:** hidden
 - **State file:** `telegram_topics_state.json`
 
@@ -118,16 +118,17 @@ These work identically in all three modes:
 
 - All 6 engine runners (Claude, Codex, OpenCode, Pi; Gemini and AMP deprecated)
 - All commands except `/ctx` and `/topic` (workspace-only)
-- Permission control (approve/deny/discuss, plan mode)
-- AskUserQuestion with option buttons
+- Permission control (approve/deny/discuss, plan mode) — Claude Code only
+- AskUserQuestion with option buttons — Claude Code only
+- Live sessions and steer/queue follow-ups — Claude Code only
 - `/continue` cross-environment resume
 - `/config` inline settings menu
 - `/browse` file browser (in assistant mode it needs `default_project` or a project-bound chat)
 - `/export` session transcript
-- `/usage` cost stats
+- `/usage` subscription usage (Claude Code) or session token totals (other engines)
 - File upload and outbox delivery
 - Voice transcription
 - Cost tracking and budget alerts
 - Stall detection and watchdog
-- Trigger mode (all vs mentions)
+- Listen mode (all vs mentions, `/listen`)
 - Model and reasoning overrides

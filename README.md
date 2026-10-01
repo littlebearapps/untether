@@ -8,7 +8,7 @@
 </p>
 
 <p align="center">
-  Works with <a href="https://docs.anthropic.com/en/docs/claude-code">Claude Code</a> · <a href="https://github.com/openai/codex">Codex</a> · <a href="https://github.com/opencode-ai/opencode">OpenCode</a> · <a href="https://github.com/nicholasgasior/pi">Pi</a>
+  Works with <a href="https://docs.anthropic.com/en/docs/claude-code">Claude Code</a> · <a href="https://github.com/openai/codex">Codex</a> · <a href="https://github.com/opencode-ai/opencode">OpenCode</a> · <a href="https://github.com/mariozechner/pi-coding-agent">Pi</a>
 </p>
 
 <p align="center">
@@ -78,7 +78,7 @@ The wizard offers three **workflow modes** — pick the one that fits:
 
 [Choose a mode →](https://littlebearapps.com/help/untether/choose-a-mode/) · [Conversation modes tutorial →](https://littlebearapps.com/help/untether/conversation-modes/)
 
-**Tip:** Already have a bot token? Pass it directly: `untether --bot-token YOUR_TOKEN`
+**Tip:** Already have a bot token? Answer **yes** when the wizard asks and paste it in — it skips the BotFather walkthrough.
 
 📖 See our [help guides](#-help-guides) for detailed setup, engine configuration, and troubleshooting.
 
@@ -89,10 +89,12 @@ The wizard offers three **workflow modes** — pick the one that fits:
 - 📡 **Progress streaming** — watch your agent work in real time; see tool calls, file changes, and elapsed time as they happen
 - 🔐 **Interactive permissions** — approve plan transitions, tool calls and clarifying questions with inline buttons; how much asks first depends on the permission mode, and "Pause & Outline Plan" holds the session open while you review the plan outline before approving
 - 📋 **Permission modes** — toggle per chat with `/planmode`; choose plan approval, auto-approved plans, Claude Code's own classifier-gated auto mode, or no plan phase (edits run, other tools ask)
-- 🔔 **Background work stays visible (Claude)** — when Claude hands work to a background task, subagent, `Monitor` or `ScheduleWakeup`, the session stays open: each result arrives as its own message, and your follow-ups land in the same session
+- 🔔 **Background work stays visible (Claude, with a permission mode set)** — when Claude hands work to a background task, subagent, `Monitor` or `ScheduleWakeup`, the session stays open: each result arrives as its own message, and your follow-ups land in the same session. A `⏳ background (N)` block and a status message show each task's elapsed time and progress while it runs
+- ↪️ **Steer or queue follow-ups (Claude, with a permission mode set)** — a message sent mid-run waits for the current turn by default; `/steer <text>` (or steer as the chat default) writes it straight into the running session so Claude picks it up at its next step
+- 🗜️ **Context use at a glance (Claude)** — the status line ends with how full Claude's context window is (`done · claude · 1m 36s · step 10 · 62% ctx`), and compaction shows as a `🗜️ Context compacted · 182k → 41k tokens` row instead of looking like a stall
 - 📁 **Projects and worktrees** — register repos with `untether init`, target with `/myproject @feat/thing`, run branches in isolated worktrees in parallel
 - 💰 **Cost and usage tracking** — run agents remotely with confidence; per-run and daily budgets, `/usage` breakdowns, and optional auto-cancel keep spending visible. A per-run outlier alert fires even with no budget configured, so an expensive run can't pass unnoticed
-- 💡 **Actionable error hints** — friendly messages for API outages, rate limits, billing errors, and network failures with resume guidance
+- 💡 **Actionable error hints** — friendly messages for API outages, rate limits, billing errors, and network failures with resume guidance; Claude's API retry back-offs (`🔁 API error 529 … retrying in 8s`) and safeguard stops (`🛡️`) show as their own rows rather than silent hangs
 - 🏷 **Model and mode metadata** — every completed message shows model with version, effort level, and permission mode (e.g. `🏷 opus 5 · medium · plan`) across all engines
 - 🎙️ **Voice notes** — hands full? Dictate tasks instead of typing; Untether transcribes via a configurable Whisper-compatible endpoint, with a vocabulary bias so tool and project names survive transcription
 - 🔄 **Cross-environment resume** — start a session in your terminal, pick it up from Telegram with `/continue`; works with Claude Code, Codex, OpenCode, and Pi ([guide](docs/how-to/cross-environment-resume.md))
@@ -102,8 +104,8 @@ The wizard offers three **workflow modes** — pick the one that fits:
 - 🔁 **Autonomous loops (Claude only)** — opt-in observation of Claude Code's `/loop` and `ScheduleWakeup`; Untether re-fires iterations after the subprocess exits so loops keep running between turns. Off by default; enable per chat via `/config → 🔁 Loop mode`. Cost guarded by `[cost_budget]`, runaway-safety capped by `[loop]` (max iterations, total duration, expiry)
 - 💬 **Forum topics** — map Telegram topics to projects and branches
 - 📤 **Session export** — `/export` for markdown or JSON transcripts
-- 🗂️ **File browser** — `/browse` to navigate project files with inline buttons
-- ⚙️ **Inline settings** — `/config` opens an in-place settings menu; toggle plan mode, ask mode, approval policy (Codex), verbose, engine, model, reasoning, and listen mode with buttons; dedicated `⏰ Triggers` page lists per-chat crons/webhooks with last-fired times and a master pause/resume toggle
+- 🗂️ **File browser** — `/browse` to navigate a project-bound chat's files with inline buttons; file deny-globs (`.env`, keys, `.git`) apply to listings and previews
+- ⚙️ **Inline settings** — `/config` opens an in-place settings menu; toggle permission mode, ask mode, follow-up mode (steer/queue), approval policy (Codex), verbose, engine, model, reasoning, and listen mode with buttons; dedicated `⏰ Triggers` page lists per-chat crons/webhooks with last-fired times and a master pause/resume toggle
 - 🔄 **Hot-reload configuration** — edit `untether.toml` and changes apply in ~1 second; covers triggers, voice transcription, allowed-user lists, watchdog timing, progress verbosity, file-transfer/outbox config, and per-engine overrides. Only `bot_token`, `chat_id`, `session_mode`, `topics`, and `message_overflow` require a restart. Extend the engine-subprocess env allowlist via `[security] env_extra_allow` / `env_extra_prefix_allow` to thread credential-manager tokens (1Password, Doppler, Vault, …) without forking
 - 🧩 **Plugin system** — extend with custom engines, transports, and commands
 - 🔌 **Plugin-compatible** — Claude Code plugins detect Untether sessions via `UNTETHER_SESSION` env var, preventing hooks from interfering with Telegram output; works with [PitchDocs](https://github.com/littlebearapps/lba-plugins) and other Claude Code plugins
@@ -157,7 +159,10 @@ These two engines still load and run, but are no longer supported and are **targ
 | **Subscription usage** | ✅ | — | — | — | — | — |
 | **Reasoning/effort levels** | ✅ | ✅ | — | — | — | — |
 | **Device re-auth (`/auth`)** | — | ✅ | — | — | — | — |
-| **Context compaction** | — | — | — | ✅ | — | — |
+| **Live sessions & background tasks** | ✅ | — | — | — | — | — |
+| **Steer follow-ups** | ✅ | — | — | — | — | — |
+| **Context % in status line** | ✅ | — | — | — | — | — |
+| **Context compaction** | ✅ | — | — | ✅ | — | — |
 | **Cross-env resume (`/continue`)** | ✅ | ✅ | ✅ | ✅⁵ | ✅ | —⁶ |
 
 ¹ Amp model override maps to `--mode` (deep/free/rush/smart).
@@ -179,17 +184,19 @@ Claude effort levels: `low`, `medium`, `high`, `xhigh`, `max` (`xhigh` requires 
 | `/cancel` | Stop the running agent |
 | `/agent` | Show or set the engine for this chat |
 | `/model` | Override the model for an engine |
-| `/planmode` | Toggle permission mode (on/plan-auto/auto/off) |
-| `/usage` | Show API costs for the current session (`/usage debug` shows fetch state, OAuth expiry, schema-mismatch counter) |
+| `/planmode` | Set Claude Code's permission mode (on/plan-auto/auto/off) |
+| `/usage` | Claude: subscription quota (`/usage debug` shows fetch state, OAuth expiry, schema-mismatch counter); Codex and OpenCode: token totals for the chat's last session |
 | `/export` | Export session transcript |
-| `/browse` | Browse project files |
+| `/browse` | Browse project files (needs a project-bound chat or `default_project`) |
 | `/new` | Cancel running tasks and clear stored sessions |
 | `/continue` | Resume the most recent CLI session in this project ([guide](docs/how-to/cross-environment-resume.md)) |
+| `/steer` | Claude: `/steer <text>` writes one message into the running session; bare `/steer` makes steer the default for this chat or topic |
+| `/queue` | `/queue <text>` waits for the current turn to finish; bare `/queue` makes queue the default for this chat or topic |
 | `/file put/get` | Transfer files |
 | `/topic` | Create or bind forum topics |
 | `/restart` | Gracefully restart Untether (drains active runs first) |
 | `/verbose` | Toggle verbose progress mode (show tool details) |
-| `/config` | Interactive settings menu (plan mode, ask mode, verbose, engine, model, reasoning, listen, approval mode, cost & usage); `⏰ Triggers` page for cron/webhook list + master pause/resume |
+| `/config` | Interactive settings menu (permission mode, ask mode, follow-up, verbose, engine, model, reasoning, listen, approval mode, cost & usage); `⏰ Triggers` page for cron/webhook list + master pause/resume |
 | `/ctx` | Show or update project/branch context |
 | `/reasoning` | Set reasoning level override |
 | `/listen` | Set group chat listen mode (`all` / `mentions` / `clear`); `/trigger` still works as a deprecated alias |
@@ -255,6 +262,8 @@ untether                         # start (or restart — Ctrl+C first if already
 
 > **Note:** If you've set up a systemd service on Linux, use `systemctl --user restart untether` instead.
 
+> **Upgrading to v0.35.5?** It includes breaking changes — Untether's `auto` permission mode is renamed `plan-auto`, `/planmode off` now asks before shell commands, `extra_args` refuses approval-bypass flags, and Codex safe mode is now a real read-only sandbox. Read [Upgrading to v0.35.5](https://github.com/littlebearapps/untether/blob/master/docs/how-to/update.md#upgrading-to-v0355) first.
+
 ---
 
 ## 📦 Requirements
@@ -281,6 +290,7 @@ Full documentation is available in the [`docs/`](https://github.com/littlebearap
 
 - [Interactive approval](https://github.com/littlebearapps/untether/blob/master/docs/how-to/interactive-approval.md) — approve and deny tool calls from Telegram
 - [Plan mode](https://github.com/littlebearapps/untether/blob/master/docs/how-to/plan-mode.md) — control plan transitions and the outline gate
+- [Steer follow-ups](https://github.com/littlebearapps/untether/blob/master/docs/how-to/steer-follow-ups.md) — redirect a running Claude run, or queue the next message
 - [Cost budgets](https://github.com/littlebearapps/untether/blob/master/docs/how-to/cost-budgets.md) — per-run and daily budget limits
 - [Inline settings](https://github.com/littlebearapps/untether/blob/master/docs/how-to/inline-settings.md) — `/config` button menu
 - [Voice notes](https://github.com/littlebearapps/untether/blob/master/docs/how-to/voice-notes.md) — dictate tasks from your phone

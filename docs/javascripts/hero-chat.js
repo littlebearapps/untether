@@ -1,4 +1,4 @@
-// Animated hero chat + terminal widget for Takopi docs
+// Animated hero chat + terminal widget for the Untether docs
 (function() {
   const TIME_SCALE = 0.5; // 2x speed
   const RESUME_ID = '019bb498';
@@ -11,9 +11,9 @@
     { time: 4982, cmd: "cat readme.md" },
     { time: 7217, thinking: "Scanning source structure" },
     { time: 7642, cmd: "ls src" },
-    { time: 9024, cmd: "ls src/takopi" },
+    { time: 9024, cmd: "ls src/untether" },
     { time: 10927, thinking: "Exploring Telegram integration" },
-    { time: 11213, cmd: "rg telegram src/takopi" },
+    { time: 11213, cmd: "rg telegram src/untether" },
     { time: 14884, thinking: "Planning deeper codebase inspection" },
     { time: 15210, cmd: "rg scripts pyproject.toml" },
     { time: 16796, cmd: "cat pyproject.toml" },
@@ -24,7 +24,7 @@
   const DONE_TIME = 23000;
   const MAX_VISIBLE = 5;
 
-  const ANSWER = `Takopi is a Telegram bridge for agent CLIs like Codex, Claude Code, OpenCode, and Pi. It lets you run agents from chat, stream progress back, manage multiple repos and branches, and resume sessions from either chat or terminal.`;
+  const ANSWER = `Untether is a Telegram bridge for agent CLIs like Claude Code, Codex, OpenCode, and Pi. It lets you run agents from chat, stream progress back, manage multiple repos and branches, and resume sessions from either chat or terminal.`;
 
   const USER_QUESTION = 'what does this project do?';
 
@@ -142,7 +142,7 @@
     // Type a follow-up message
     await new Promise(r => setTimeout(r, 800));
     const codexInput = output.querySelector('.codex-input');
-    await typeText(codexInput, 'omg takopi you are the best', 50);
+    await typeText(codexInput, 'omg untether you are the best', 50);
   }
 
   function init() {

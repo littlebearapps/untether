@@ -1,8 +1,10 @@
 # Post-rollout `/ping` verification playbook
 
-`scripts/fleet-rollout.sh` confirms each host's **service** is active/running, but a
-running service is not proof the **bot answers**. The last-mile check is a `/ping`
-sweep of all five bots — expecting `🏓 pong` from each.
+`scripts/fleet-rollout.sh` confirms each host's **service** is active/running (and, since
+[#745](https://github.com/littlebearapps/untether/issues/745), that it stays up through a
+`scripts/fleet-postcheck.sh` stability window with no restart loop), but a running service
+is not proof the **bot answers**. The last-mile check is a `/ping` sweep of all five bots —
+expecting `🏓 pong` from each.
 
 A shell script can't do this: the Telegram MCP tools (`send_message`, `get_history`,
 …) live **inside Claude Code**, not in a standalone shell. So this is a documented,
@@ -37,13 +39,23 @@ For each bot in the table:
 
 1. `send_message(chat_id=<chat>, message="/ping")`
 2. Wait ~3–5s, then `get_history(chat_id=<chat>, limit=3)`
-3. **PASS** if the newest bot message is `🏓 pong` (optionally with a version/mode footer).
+3. **PASS** if the newest bot message starts `🏓 pong — up <uptime>` (e.g. `🏓 pong — up 4m 12s`).
+   A freshly restarted host shows a short uptime — a long one means the restart didn't land.
    **FAIL** if there's no reply within ~15s, an error, or a stale/oversized response.
+
+   `/ping` (`src/untether/telegram/commands/ping.py`) carries no version or mode footer — use
+   `scripts/fleet-status.sh` for versions. It may add up to two extra lines, both normal:
+
+   - a triggers line when crons/webhooks target that chat — `⏰ triggers: 1 cron (<id>, <schedule>)`
+     or `⏰ triggers: 2 crons, 1 webhook`; while triggers are paused it reads
+     `⏸ triggers paused: … (suspended)`
+   - `⏳ background: N tasks running` while a live Claude run in that chat holds background work
+     ([#777](https://github.com/littlebearapps/untether/issues/777))
 
 Report a one-line-per-host result, e.g.:
 
 ```
-/ping sweep — 0.35.4rc5
+/ping sweep — 0.35.5rc16
   lba-1     🏓 pong   ✓
   nsd       🏓 pong   ✓
   channelo  🏓 pong   ✓

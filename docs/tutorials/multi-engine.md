@@ -1,6 +1,6 @@
 # Multi-engine workflows
 
-This tutorial shows you how to use different engines for different tasks and set up defaults so you don't have to think about it. Swap between Claude Code, Codex, OpenCode, Pi, Gemini CLI, and Amp with a single prefix — from your phone, laptop, or any device with [Telegram](https://telegram.org).
+This tutorial shows you how to use different engines for different tasks and set up defaults so you don't have to think about it. Swap between Claude Code, Codex, OpenCode and Pi with a single prefix — from your phone, laptop, or any device with [Telegram](https://telegram.org).
 
 **What you'll learn:** Engine directives, persistent defaults, and when to use which engine.
 
@@ -10,12 +10,14 @@ Different engines have different strengths:
 
 | Engine | Good at | Unique features |
 |-------|---------|----------------|
-| **Claude Code** | Complex refactors, architecture, long context | Interactive permissions, plan mode, ask mode, diff preview |
-| **Codex** | Fast edits, shell commands, quick fixes | Reasoning levels, approval policy (safe mode), device re-auth (`/auth`) |
+| **Claude Code** | Complex refactors, architecture, long context | Interactive permissions, plan mode, ask mode, diff preview, live sessions with background tasks, steer follow-ups, context % in the status line |
+| **Codex** | Fast edits, shell commands, quick fixes | Reasoning levels, approval policy (safe = read-only sandbox), device re-auth (`/auth`) |
 | **OpenCode** | 75+ providers via Models.dev, local models | Broadest provider support |
 | **Pi** | Multi-provider auth, conversational | Context compaction |
-| **Gemini CLI** | Google models, plan mode, model routing | 3-tier approval mode (read-only/edit/full), auto Pro/Flash routing, extensions |
-| **AMP** | Sourcegraph integration, thread sharing | Mode selection (deep/rush/smart), rich permissions |
+| **Gemini CLI** ⚠️ | Deprecated — removal in 0.36.0 | 3-tier approval mode (read-only/edit/full), auto Pro/Flash routing, extensions |
+| **AMP** ⚠️ | Deprecated — removal in 0.36.0 | Mode selection (deep/rush/smart), rich permissions |
+
+Gemini CLI and AMP still load and run, but are no longer supported — don't start new work on them. See [Deprecated engines](https://github.com/littlebearapps/untether#deprecated-engines) in the README.
 
 See the [engine compatibility matrix](https://github.com/littlebearapps/untether#engine-compatibility) in the README for a full feature-by-feature breakdown.
 
@@ -71,7 +73,7 @@ Use `/agent set` to change the default for the current scope:
 Response:
 
 !!! untether "Untether"
-    chat default engine set to claude
+    chat default engine **set to** `claude`
 
 Now all new conversations in this chat use Claude Code (unless you explicitly override with `/codex`).
 
@@ -83,7 +85,9 @@ Check the current default:
 Example response:
 
 !!! untether "Untether"
-    engine: claude (chat default)<br>
+    engine: **claude** (chat default)<br>
+    model: **default** (no override)<br>
+    reasoning: **default** (no override)<br>
     defaults: topic: none, chat: claude, project: none, global: codex<br>
     available: codex, claude, opencode, pi, gemini, amp
 
@@ -97,7 +101,7 @@ Clear it:
 Response:
 
 !!! untether "Untether"
-    chat default engine cleared.
+    chat default engine **cleared**.
 
 ## 4. Defaults in topics
 
@@ -236,7 +240,7 @@ That's the end of the tutorials. You now know how to:
 
 **Want to do something specific?**
 
-- [Enable forum topics](../how-to/topics.md) for organized threads
+- [Enable forum topics](../how-to/topics.md) for organised threads
 - [Transfer files](../how-to/file-transfer.md) between Telegram and your repo
 - [Use voice notes](../how-to/voice-notes.md) to dictate tasks
 - [Schedule tasks](../how-to/schedule-tasks.md) to run later
@@ -245,7 +249,7 @@ That's the end of the tutorials. You now know how to:
 
 - [Architecture](../explanation/architecture.md) — how the pieces fit together
 - [Routing and sessions](../explanation/routing-and-sessions.md) — how context resolution works
-- [Specification](../reference/specification.md) — normative behavior contracts
+- [Specification](../reference/specification.md) — normative behaviour contracts
 
 **Need exact syntax?**
 

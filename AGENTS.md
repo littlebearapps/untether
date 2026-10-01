@@ -62,13 +62,14 @@ uv run pytest tests/test_*.py -x # specific file
 | `/cancel` | Stop the running agent |
 | `/agent` | Show or set engine for this chat |
 | `/model` | Override the model for an engine |
-| `/planmode` | Toggle permission mode (on/plan-auto/auto/off) |
-| `/usage` | Show API costs for the current session |
+| `/planmode` | Set Claude Code permission mode (on/plan-auto/auto/off) |
+| `/usage` | Claude subscription quota; token totals for Codex/OpenCode |
 | `/stats` | Per-engine session statistics (today/week/all-time) |
 | `/auth` | Codex device re-authentication |
 | `/export` | Export session transcript |
 | `/browse` | Browse project files |
 | `/config` | Interactive settings menu |
+| `/steer` / `/queue` | Claude: steer a follow-up into the running session, or queue it (bare form sets the chat/topic default) |
 | `/verbose` | Toggle verbose progress mode |
 | `/restart` | Gracefully restart Untether |
 

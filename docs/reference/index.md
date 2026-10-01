@@ -15,6 +15,10 @@ If you’re trying to understand the *why*, use **[Explanation](../explanation/i
   - Telegram transport options (sessions, topics, files, voice transcription)
 - [Workflow modes](modes.md)
   - Assistant, workspace, and handoff — what each mode configures and when to use it
+- [Environment variables](env-vars.md)
+  - Variables Untether reads, and the engine-subprocess environment allowlist
+- [Error reference](errors.md)
+  - Engine error patterns and the recovery hint Untether shows for each
 
 ## Normative behavior
 
@@ -35,7 +39,7 @@ If you’re trying to understand the *why*, use **[Explanation](../explanation/i
 ## Transport reference
 
 - [Telegram transport](transports/telegram.md)
-  Rate limits, outbox behavior, retries, message editing rules.
+  Rate limits, outbox behaviour, retries, message editing rules.
 
 ## Trigger reference
 
@@ -62,6 +66,14 @@ These are “engine adapter” implementation details: JSONL formats, mapping ru
   - [runner.md](runners/pi/runner.md)
   - [stream-json-cheatsheet.md](runners/pi/stream-json-cheatsheet.md)
   - [untether-events.md](runners/pi/untether-events.md)
+- Gemini CLI (deprecated — removal targeted for 0.36.0):
+  - [runner.md](runners/gemini/runner.md)
+  - [stream-json-cheatsheet.md](runners/gemini/stream-json-cheatsheet.md)
+  - [untether-events.md](runners/gemini/untether-events.md)
+- AMP (deprecated — removal targeted for 0.36.0):
+  - [runner.md](runners/amp/runner.md)
+  - [stream-json-cheatsheet.md](runners/amp/stream-json-cheatsheet.md)
+  - [untether-events.md](runners/amp/untether-events.md)
 
 ## Quick lookup
 
@@ -75,3 +87,5 @@ If you’re an LLM agent contributing to Untether, start here:
 - [Agent entrypoint](agents/index.md)
 - [Repo map](agents/repo-map.md)
 - [Invariants](agents/invariants.md) (runner contract, resume handling, “don’t break this” rules)
+- [Feature catalog](feature-catalog.md) and [test catalog](test-catalog.md) (which file owns a feature; what each test file covers)
+- [Dev instance](dev-instance.md) and [integration testing](integration-testing.md) (testing against the dev bot before a release)

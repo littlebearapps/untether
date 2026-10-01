@@ -13,16 +13,16 @@ Buttons appear when Claude Code wants to:
 
 Other tool calls (Read, Glob, Grep, WebSearch, etc.) are auto-approved in plan mode — they don't change anything, so you won't be interrupted for them. In **Accept edits** (`/planmode off`), any action the mode doesn't cover asks for approval, whatever the tool ([#749](https://github.com/littlebearapps/untether/issues/749)).
 
-## The three buttons
+## The approval buttons
 
-When a permission request arrives, you see a message with the tool name and a compact diff preview, plus three buttons:
+When a permission request arrives, you see a message with the tool name and a compact diff preview, plus buttons:
 
 | Button | What it does |
 |--------|-------------|
-| **Approve** | Let Claude Code proceed with the action |
-| **Deny** | Block the action and ask Claude Code to explain what it was about to do |
-| **Pause & Outline Plan** | Stop Claude Code and require a written plan before continuing (only appears for ExitPlanMode) |
-| **Let's discuss** | Talk about the plan before approving or denying (only appears after outline is written) |
+| **✅ Approve** | Let Claude Code proceed with the action (reads **✅ Approve Plan** on an ExitPlanMode request) |
+| **❌ Deny** | Block the action and ask Claude Code to explain what it was about to do |
+| **📋 Pause & Outline Plan** | Stop Claude Code and require a written plan before continuing (only appears for ExitPlanMode) |
+| **💬 Let's discuss** | Talk about the plan before approving or denying (only appears after outline is written) |
 
 Buttons clear immediately when you tap them — no waiting for a spinner.
 
@@ -31,38 +31,45 @@ Buttons clear immediately when you tap them — no waiting for a spinner.
 <div markdown>
 
 !!! untether "Untether"
-    ▸ Permission Request [CanUseTool] - tool: Edit (file_path=src/main.py)<br>
-    📝 src/main.py<br>
-    `- import sys`<br>
-    `+ import sys`<br>
-    `+ from pathlib import Path`
+    ▸ Permission Request [CanUseTool] - tool: Edit (file_path=src/main.py)
+
+    ```diff
+    📝 src/main.py
+    - import sys
+    + import sys
+    + from pathlib import Path
+    ```
 
 <div class="tg-buttons">
-<span class="tg-btn">Approve</span>
-<span class="tg-btn">Deny</span>
-<span class="tg-btn">Pause &amp; Outline Plan</span>
+<span class="tg-btn">✅ Approve</span>
+<span class="tg-btn">❌ Deny</span>
 </div>
 
 </div>
 
 ## Diff previews
 
-For tools that modify files, the approval message includes a compact diff, shown as a monospace block, so you can see what's about to change before deciding:
+For tools that modify files, the approval message includes a compact diff, shown as a `diff` code block, so you can see what's about to change before deciding:
 
 - **Edit**: 📝 file path, removed lines (`- old`) and added lines (`+ new`), up to 4 lines each
-- **Write**: 📝 file path, then the first 8 lines of content to be written
+- **Write**: 📝 file path, then the first 8 lines of content to be written (as `+` lines)
 - **Bash**: `$ command` (up to 200 characters)
+
+Long lines are cut at 60 characters, and a `…(N more added)` line says how much was left out. Before v0.35.5 the preview was rendered as Markdown, so an added `+ x` line could show up as a `- x` bullet; it is now a fenced block that keeps every line as written ([#855](https://github.com/littlebearapps/untether/issues/855)).
 
 This lets you make informed approve/deny decisions without leaving Telegram.
 
 You can toggle diff previews on or off via `/config` → **Diff preview**. When OFF, approval messages show the tool name and buttons only — no inline diffs. Useful on slow connections or when you trust the agent enough to skim by tool name alone.
 
 !!! untether "Untether"
-    ▸ Permission Request [CanUseTool] - tool: Edit (file_path=src/main.py)<br>
-    📝 src/main.py<br>
-    `- import sys`<br>
-    `+ import sys`<br>
-    `+ from pathlib import Path`
+    ▸ Permission Request [CanUseTool] - tool: Edit (file_path=src/main.py)
+
+    ```diff
+    📝 src/main.py
+    - import sys
+    + import sys
+    + from pathlib import Path
+    ```
 
 <img src="../assets/screenshots/approval-diff-preview.jpg" alt="Approval message with compact diff preview showing removed and added lines" width="360" loading="lazy" />
 
@@ -97,6 +104,16 @@ Toggle ask mode on or off via `/config` → Ask mode. When off, questions are au
 </div>
 
 </div>
+
+## Tapping a button twice, or too late
+
+Each request can be answered once. A second tap (yours or someone else's in a group) doesn't send anything to Claude Code; you get a popup instead ([#685](https://github.com/littlebearapps/untether/issues/685), [#684](https://github.com/littlebearapps/untether/issues/684)):
+
+- **Already answered** — plus a silent `ℹ️ Already answered — approved` (or `denied`, …) line saying what the first tap did
+- **No longer needed** — Claude Code withdrew the request, for example because the turn ended; its buttons are removed
+- **This request has expired** — the request timed out, or Untether no longer knows about it (for example after a restart)
+
+An unanswered request is denied automatically after 5 minutes (`⏱️ Timed out: auto-denied after 5 min`). Untether checks for this when another approval request arrives, so a single request on its own waits for you.
 
 ## Push notifications
 
@@ -134,6 +151,9 @@ This is a pre-run policy — Codex doesn't pause mid-run to ask for permission. 
     Safe used to pass `--ask-for-approval untrusted`. `codex exec` never applied that flag, so Safe ran exactly like Full auto, and codex-cli 0.149.0+ rejects it outright, so every Safe run failed at startup ([#830](https://github.com/littlebearapps/untether/issues/830)).
 
 ### Gemini CLI — Approval mode
+
+!!! warning "Deprecated"
+    Gemini CLI is deprecated in Untether and targeted for removal in 0.36.0. See [Switch engines](switch-engines.md).
 
 Toggle via `/config` → **Approval mode**:
 
