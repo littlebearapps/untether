@@ -210,12 +210,16 @@ was sent to the classifier exactly as without the flag — so dropping it for
 **Interaction with `--permission-prompt-tool stdio`.** Untether passes the
 prompt tool alongside *every* mode, and the two compose rather than conflict:
 
-* Modes that prompt (`default`, `manual`, `plan`) raise a `control_request`
-  for each gated tool, which becomes a Telegram approval.
-* Modes that don't prompt for routine work (`acceptEdits`, `auto`) raise no
-  `control_request` for the actions they auto-approve. `diff_preview` is
-  therefore inert in those modes — it has been inert under `acceptEdits`
-  since it shipped, and `auto` behaves the same way.
+* Prompting modes (`default`, `manual`, `acceptEdits`) raise a
+  `control_request` for every tool the mode doesn't cover; each becomes a
+  Telegram approval (with a diff preview for Edit/Write). Autonomous modes
+  (`plan`, `plan-auto`, `auto`, `dontAsk`, `bypassPermissions`) only surface
+  `ExitPlanMode` and `AskUserQuestion`; see the table below
+  ([#749](https://github.com/littlebearapps/untether/issues/749)). `/planmode`
+  and `/config` describe each mode from one table,
+  `telegram/commands/_permission_mode_text.py`, whose wording is tied to
+  `is_claude_prompting_mode()` by a test
+  ([#747](https://github.com/littlebearapps/untether/issues/747)).
 * **`AskUserQuestion` still raises a `can_use_tool` control_request in `auto`
   mode** (probed on 2.1.228 against Untether's exact argv), so ask-mode option
   buttons keep working. This was the load-bearing question for
@@ -284,7 +288,7 @@ contradict the mode.
 |---|---|---|
 | `default` | ✗ | every tool prompts |
 | `manual` | ✗ | every tool prompts |
-| `acceptEdits` | ✗ | in-scope edits auto-run in the CLI; out-of-scope writes prompt |
+| `acceptEdits` | ✗ | reads, in-scope edits and common filesystem commands auto-run in the CLI; every other tool prompts |
 | `plan` | ✓ | reads pre-approved; writes blocked internally by plan mode |
 | `plan-auto` | ✓ | as `plan`, plus `ExitPlanMode` rubber-stamped |
 | `auto` | ✓ | classifier decides at stage 4; stage 6 is the fallback path |

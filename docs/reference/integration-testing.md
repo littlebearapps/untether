@@ -119,15 +119,15 @@ not required at any tier.
 
 ### Tier 2: Claude-Specific Tests (interactive features)
 
-Run in the Claude test chat only. Requires plan mode ON for most tests.
+Run in the Claude test chat only. C1, C2, C5 and C6 need `/planmode off` (Accept edits); C3 needs `/planmode on`. Since #749, plan mode never raises a Bash or Edit button, so C1 cannot pass with plan mode on ([#747](https://github.com/littlebearapps/untether/issues/747)).
 
 | # | Test | What to send | What to verify | Catches |
 |---|------|-------------|----------------|---------|
-| C1 | **Tool approval** | Send a prompt requiring Bash (e.g. `run ls -la`), with plan mode ON | Approve/Deny/Discuss buttons appear, clicking Approve proceeds, tool executes | #104 (buttons not appearing), #103 (progress stuck) |
+| C1 | **Tool approval** | `/planmode off`, then `run touch /tmp/c1-probe` (a path outside the project) | Approve/Deny/Discuss buttons appear, clicking Approve proceeds, tool executes | #104 (buttons not appearing), #103 (progress stuck) |
 | C2 | **Tool denial** | Same as C1, click Deny | Denial message reaches Claude, Claude acknowledges and continues | #66 (deny retry loop) |
 | C3 | **Plan mode outline** | Send a complex prompt, click "Pause & Outline Plan" | Claude writes outline, then Approve/Deny/Let's discuss buttons appear automatically | Cooldown mechanics (#87), post-outline approval |
 | C4 | **Ask question** | Send a prompt that triggers AskUserQuestion (e.g. `should I use TypeScript or JavaScript for this?`) | Question appears with option buttons, user reply routes back to Claude | AskUserQuestion flow |
-| C5 | **Diff preview** | With plan mode ON, send a prompt that edits a file | Diff preview shows in approval message (old/new lines) | Diff preview rendering |
+| C5 | **Diff preview** | With plan mode ON, send a prompt that edits a file (precondition pending R15-8 — see rc15 scenarios) | Diff preview shows in approval message (old/new lines) | Diff preview rendering |
 | C6 | **Rapid approve/deny** | Approve a tool, then quickly deny the next one | No spinner hang, no stale buttons, clean state transitions | Early callback answering, button cleanup |
 | C7 | **Subscription usage** | `/usage` with subscription footer enabled | Shows 5h/weekly format | Subscription footer rendering |
 
@@ -411,7 +411,7 @@ Integration tests are run by Claude Code via Telegram MCP tools (see "Automated 
    Focus on: progress rendering, final message, model footer, resume
 
 6. Run Tier 2 (Claude-specific) — 15 minutes
-   Claude Code runs C1-C7 in Claude test chat with plan mode ON
+   Claude Code runs C1-C7 in Claude test chat (per-test /planmode preconditions above)
    Uses list_inline_buttons/press_inline_button for approval tests
 
 7. Run Tier 3 (Telegram transport) — 15 minutes
@@ -503,8 +503,8 @@ now rename hello.txt to greetings.txt
 # U7 — error handling (all engines)
 read /nonexistent/file/path
 
-# C1 — tool approval (Claude, plan mode ON)
-run ls -la
+# C1 — tool approval (Claude, /planmode off first)
+run touch /tmp/c1-probe
 
 # C4 — ask question (Claude)
 should I use TypeScript or JavaScript for this?
@@ -914,3 +914,40 @@ Setup (dev only; restore afterwards): in `~/.untether-dev/untether.toml` set `[t
 | **R15-7e** Negative control | `/model` back to the default (Opus/Sonnet), `/planmode auto`, send `say hi` | No `⚠️ Asked for` row and no `claude.permission_mode.mismatch`; footer `… · auto` |
 
 Clean-up: remove the `r15-*` crons, set `[triggers] enabled = false`, `/planmode on`, restore `/model`. Offline evidence already recorded: probes P1 / P1b / P2 (findings §Q3a), `tests/test_permission_mode_mismatch.py`, `tests/test_unattended_approval_risk.py`.
+
+### #747 — permission-mode wording in `/planmode` and `/config`
+
+Tier 7 **Q2** (`/config`) and **Q8** (`/planmode`), Tier 2 **C1** / **C3** with the corrected preconditions. Claude `ut-dev` chat `5284581592` only. Restart dev from a shell **outside** any dev-bot session (#547). Before step a, note what `/planmode show` prints so it can be restored. Logs: `journalctl --user -u untether-dev -o cat --since "20 minutes ago" | grep -E "planmode\.(set|cleared)|config\.planmode\.set|startup\.command_menu\.updated|live_session\.options_changed"` — no `ERROR` / `Traceback`, no `callback.parse_failed`.
+
+| ID | Send / tap | Pass criteria |
+|---|---|---|
+| **R15-8a** | `/planmode on` | "permission mode **on** for this chat: plan mode: Claude plans without editing files, and you approve the plan before changes start." / "applies from your next message (`--permission-mode plan`). Until then, the current run and any background wake-ups keep the old mode." |
+| **R15-8b** | `/planmode show` | `permission mode: **on** (plan): plan mode: …` |
+| **R15-8c** | `/planmode off`, then `/planmode show` | reply contains `acceptEdits` and "other tools ask you here first"; no "freely"; show has `(acceptEdits)` |
+| **R15-8d** | `/planmode auto` | no "plan mode"; contains "classifier", "no plan phase" and the fallback clause; `--permission-mode auto` |
+| **R15-8e** | `/planmode plan-auto`, then `/planmode clear`, then `/planmode show` | plan-auto summary; "override cleared: no override for this chat; it uses the engine config (`[engines.claude] permission_mode` …)"; show says **engine default** and the same text |
+| **R15-8f** | `/config` | home line `Permission mode: engine default  · from engine config` (after e) |
+| **R15-8g** | tap 📋 Permission mode | four bullets `off (acceptEdits) — …`, `on (plan) — …`, `plan-auto (plan) — …`, `auto — …`; the "Clear override → engine default" and "Changes apply from your next message…" lines; 📖 line present |
+| **R15-8h** | tap **Off** | toast "Permission mode: off (acceptEdits)"; home shows `· edits run, others ask` |
+| **R15-8i** | tap 📋 → **On** | toast "Permission mode: on (plan)"; home `· approve the plan first` |
+| **R15-8j** | Telegram `/` menu | `planmode — Set Claude Code permission mode: on/plan-auto/auto/off` |
+| **R15-8k** | with **off**: `use Bash to run: touch /tmp/r15-8-probe` | an Approve / Deny message for Bash appears; tap **Deny**; `ls /tmp/r15-8-probe` → absent |
+| **R15-8l** (informational) | with **on**: same prompt | expected: no Bash button, only the ExitPlanMode keyboard (Approve / Deny / 📋 Pause & Outline Plan) → **Deny**. Record whether the file exists (plan-mode Bash writes aren't probed; the text only claims "without editing files") |
+| **R15-8m** | with **on**, `say hi`; when it answers (live-idle), `/planmode off`, then `say hi again` | the follow-up footer shows `acceptEdits`; log `claude.live_session.options_changed` |
+| **R15-8n** (C5 precondition) | with **off** and diff preview on: `create /tmp/c5.txt containing hello` | record whether a Write approval with a diff preview appears. If yes, rewrite C5 to this recipe and drop its "pending R15-8" note; if no, leave the note and file a playbook issue |
+
+Clean-up: restore the chat's previous mode (`/planmode clear` or what `show` printed before a); `rm -f /tmp/r15-8-probe /tmp/c1-probe /tmp/c5.txt`. Offline evidence: `tests/test_planmode_command.py`, `tests/test_config_command.py::TestPlanMode` / `TestPermissionModeHomeHints`.
+
+### #296 — `/config` help links and the `⏰ Triggers` home button
+
+Tier 7 **Q2** (`/config`) + Tier 4 **O3** (Listen via `/config` → 📡 Listen). Claude chat `5284581592`, Codex chat `4929463515`. Every dev restart must come from a shell **outside** any dev-bot session (#547). Logs: `journalctl --user -u untether-dev -o cat --since "30 minutes ago" | grep -E "config\.triggers\.(paused|resumed)|callback\.parse_failed|handle\.worker_failed"` — the first two only when R15-12-2 ran; never `callback.parse_failed` / `handle.worker_failed`.
+
+| ID | Scenario | What to do | Pass criteria |
+|---|---|---|---|
+| **R15-12-1** | Help links resolve | (a) Offline: `uv run python -m tests.test_config_help_links > /tmp/r15-12-urls.txt` (every page × engine incl. Triggers, Gemini, home footer, About), then `while read u; do printf '%s %s\n' "$(curl -s -o /dev/null -w '%{http_code}' -L --max-time 15 "$u")" "$u"; done < /tmp/r15-12-urls.txt`, and for each `#anchor` URL `curl -sL "${u%%#*}" \| grep -c "id=\"${u##*#}\""`. (b) Telegram presence: `/config` in the Claude chat, open each sub-page and confirm a `📖` line (Engine & model shows `Engines · Models`); Approval policy in the Codex chat | (a) every help URL **200**, every anchor count ≥ 1; `steer-follow-ups/` is **expected 404** until v0.35.5 stable syncs from master; allowlisted GitHub URLs 200. (b) every opened page shows its 📖 line. *Offline run 2026-10-01 (rc15 lane): 19 URLs, 18 × 200 + all 9 anchors = 1, `steer-follow-ups/` 404 as expected* |
+| **R15-12-2** | Triggers home button | Back up: `cp ~/.untether-dev/untether.toml /tmp/r15-12-dev.toml.bak`. Set `[triggers] enabled = true` with one cron (`id="r15-probe"`, `schedule="0 4 1 1 *"`, `chat_id=-5284581592`, prompt `"noop"`), restart dev, `/config` in the Claude chat | Last row `⏰ Triggers` / `⏸ Pause triggers`; status line `⏰ Triggers: active`. Tapping `⏰ Triggers` edits in place to the page listing `r15-probe` with `📖 Learn more`. Pause → toast `⏸ Triggers paused` + `config.triggers.paused`; Resume → `config.triggers.resumed` |
+| **R15-12-3** | Enabled, zero triggers (global count) | Remove the cron (keep `enabled = true`), restart dev, `/config` | Home shows `⏰ Triggers` alone; the page says "No crons or webhooks configured." with a 📖 link |
+| **R15-12-cleanup** | Unconditional restore | `cp /tmp/r15-12-dev.toml.bak ~/.untether-dev/untether.toml && systemctl --user restart untether-dev` (outside-session rule); `grep -A1 '^\[triggers\]' ~/.untether-dev/untether.toml` | `enabled = false`; `/ping` in the Claude chat shows no `⏰ triggers:` line |
+| **R15-12-4** | Emoji | `/config` in Claude + Codex chats | `📡` only on Listen; every Triggers label uses ⏰ |
+
+R15-12-5 (🔧 More) is not applicable: Decision 1 deferred the More page to v0.35.6.

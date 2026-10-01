@@ -39,10 +39,10 @@ Quick definitions for terms used throughout the Untether documentation.
 ## Interactive control (Claude Code)
 
 **Permission mode**
-:   The level of oversight applied to Claude Code's actions. **Plan** shows Approve/Deny buttons for every tool call. **Plan-auto** keeps the plan phase but auto-approves the plan transition. **Auto** is Claude Code's own mode, where a classifier approves routine work and blocks risky actions instead of prompting. **Accept edits** (`off`) runs fully autonomously with no buttons. Plan-auto was called `auto` before v0.35.5, before Claude Code shipped a mode of that name.
+:   The level of oversight applied to Claude Code's actions. **Plan** (`on`) has Claude plan without editing files and asks you to approve the plan. **Plan-auto** keeps the plan phase but auto-approves the plan transition. **Auto** is Claude Code's own mode, where a classifier approves routine work and blocks risky actions instead of prompting. **Accept edits** (`off`) runs file edits and common filesystem commands and asks before anything else. Plan-auto was called `auto` before v0.35.5, before Claude Code shipped a mode of that name.
 
 **Approval buttons**
-:   Inline Telegram buttons that appear when Claude Code wants to perform an action in plan mode. You tap **Approve** to allow the action, **Deny** to block it, or **Pause & Outline Plan** to require a written plan first. After an outline is written, you can also tap **Let's discuss** to talk about the plan before deciding.
+:   Inline Telegram buttons that appear when Claude Code needs your permission. You tap **Approve** to allow the action, **Deny** to block it, or **Pause & Outline Plan** to require a written plan first. After an outline is written, you can also tap **Let's discuss** to talk about the plan before deciding.
 
 **Progress message**
 :   The Telegram message that Untether updates in real time as the agent works. It shows the engine, elapsed time, step count, and a list of recent tool calls. When the run finishes, it's replaced by the final answer.

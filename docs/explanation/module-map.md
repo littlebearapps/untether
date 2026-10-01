@@ -78,7 +78,7 @@ This page is a high-level map of Untether’s internal modules: what they do and
 | `triggers/dispatcher.py` | Routes webhook/cron fires to `run_job()` or non-agent action handlers. |
 | `triggers/cron.py` | Cron expression parser, timezone-aware scheduler loop. |
 | `triggers/history.py` | Persistent JSON history of cron/webhook fire times for `/stats` triggered/manual breakdown. |
-| `triggers/describe.py` | Human-friendly cron rendering for `/ping`, `/config → 📡 Triggers`. |
+| `triggers/describe.py` | Human-friendly cron rendering for `/ping`, `/config → ⏰ Triggers`. |
 
 ## Configuration and persistence
 

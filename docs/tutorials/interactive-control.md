@@ -13,12 +13,12 @@ Untether offers four permission modes that control how much oversight you have:
 
 | Mode | Command | What happens |
 |------|---------|-------------|
-| **Plan** | `/planmode on` | Every tool call shows Approve / Deny buttons. Full control. |
+| **Plan** | `/planmode on` | Claude plans without editing files and you approve the plan before changes start. Reads and searches run without buttons. |
 | **Plan-auto** | `/planmode plan-auto` | Tools are auto-approved. Plan transitions are also auto-approved. Hands-off. |
 | **Auto** | `/planmode auto` | Claude Code's own auto mode — a classifier approves routine work and blocks risky actions. No plan phase. |
-| **Accept edits** | `/planmode off` | No plan phase. File edits run freely; other actions (shell commands, web fetches, MCP tools) show Approve / Deny buttons unless your Claude Code settings already allow them. |
+| **Accept edits** | `/planmode off` | No plan phase. File edits and common filesystem commands run without asking; other actions (shell commands, web fetches, MCP tools) show Approve / Deny buttons unless your Claude Code settings already allow them. |
 
-For this tutorial, we'll use **Plan** mode so you can see every interaction.
+For this tutorial, use **Plan** mode so you can see the plan approval flow.
 
 ## 2. Enable plan mode
 
@@ -200,15 +200,17 @@ In plan-auto mode, tool calls (Edit, Write, Bash) are auto-approved — Claude C
 
 `/planmode auto` is different: it hands approval to Claude Code's own classifier, which runs routine work and blocks risky actions. See [Plan mode](../how-to/plan-mode.md).
 
-## 10. Return to default
+## 10. Skip the plan phase
 
-To turn off plan mode entirely:
+To drop the plan phase (Claude Code's `acceptEdits` mode):
 
 ```
 /planmode off
 ```
 
 This sets Claude Code to `acceptEdits` mode: no plan phase, and file edits run without buttons. Since v0.35.5, anything `acceptEdits` doesn't cover (most shell commands, web fetches, MCP tools) shows Approve / Deny buttons, unless your Claude Code `permissions.allow` rules already allow it.
+
+To go back to the engine's default instead, send `/planmode clear`.
 
 To check your current mode at any time:
 
@@ -225,7 +227,7 @@ To check your current mode at any time:
 
 Key concepts:
 
-- **Permission modes** control the level of oversight: plan (full control), auto (hands-off with plans), off (fully autonomous)
+- **Permission modes** control the level of oversight: `on` (plan mode: Claude plans without editing files, and you approve the plan before changes start), `plan-auto` (plan mode, but the plan is approved for you: no plan buttons), `auto` (Claude Code's auto mode: a classifier approves routine actions and blocks risky ones; no plan phase) and `off` (`acceptEdits`: no plan phase; file edits and common filesystem commands run, and other tools ask you first)
 - **Approval buttons** appear inline in Telegram when Claude Code needs permission — Approve, Deny, or Pause & Outline Plan; after an outline is written, you also get **Let's discuss** to talk about the plan
 - **Diff previews** show you exactly what will change before you approve
 - **"Pause & Outline Plan"** forces Claude Code to write a visible plan before executing

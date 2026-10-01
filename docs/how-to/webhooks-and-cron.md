@@ -249,7 +249,7 @@ The server includes a health endpoint at `GET /health` for uptime monitoring. Wh
 Untether ships a master pause toggle ([#294](https://github.com/littlebearapps/untether/issues/294)) that gates **both** crons and webhooks at once — useful when deploying, debugging, or muting overnight without editing config:
 
 * **`/config` home page** shows a one-button toggle row at the bottom whenever triggers are configured.
-* **`/config` → `📡 Triggers`** opens a dedicated page with state, per-chat counts, and a Pause/Resume button. It also lists per-chat crons and webhooks with last-fired times.
+* **`/config` → `⏰ Triggers`** opens a dedicated page with state, per-chat counts, and a Pause/Resume button. It also lists per-chat crons and webhooks with last-fired times.
 * While paused: cron loop skips ticks, webhooks return `503 triggers paused` with `Retry-After: 60`, `/health` returns `paused: true`, and `/ping` shows `⏸ triggers paused: … (suspended)`.
 * `run_once` crons are not consumed during the pause and fire on the next matching tick after resume.
 

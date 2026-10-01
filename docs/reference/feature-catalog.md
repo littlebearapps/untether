@@ -56,7 +56,7 @@ per-engine reference docs. **Add new feature bullets here, not to `CLAUDE.md`.**
 - **Graceful restart improvements (Tier 1)** — persists Telegram `update_id` to `last_update_id.json` so restarts don't drop/duplicate messages; `Type=notify` systemd integration via stdlib `sd_notify` (`READY=1` + `STOPPING=1`); `RestartSec=2`
 - **`diff_preview` plan bypass (#283)** — after user approves a plan outline via "Pause & Outline Plan", the `_discuss_approved` flag short-circuits diff preview for subsequent Edit/Write tools so no second approval is needed
 - **User-extensible env allowlist (#409)** — `[security] env_extra_allow` and `env_extra_prefix_allow` (in `untether.toml`) extend the engine-subprocess env allowlist with per-deployment names so users can thread credential-manager tokens (1Password, Doppler, Vault, Infisical, …) without forking `utils/env_policy.py`. Names are validated against `[A-Z_][A-Z0-9_]*`. Honoured by the Claude and Pi runners and by the `env_audit` probe. `BWS_ACCESS_TOKEN` was promoted into the built-in defaults at the same time. One `env_policy.user_extension` INFO log per process
-- **Master trigger pause toggle (#294)** — `TriggerManager.pause()` / `resume()` / `is_paused` gate cron firing and webhook dispatch globally; webhook server returns `503 triggers paused` (with `Retry-After: 60`); `/health` endpoint reflects paused state. Wired into `/config` two ways: home-page button row (only when triggers configured) and a dedicated `📡 Triggers` page (`config:tg`) showing counts + Pause/Resume button. `/ping` switches to `⏸ triggers paused: … (suspended)` while paused. Pause is in-memory only — restart auto-resumes (safe default)
+- **Master trigger pause toggle (#294)** — `TriggerManager.pause()` / `resume()` / `is_paused` gate cron firing and webhook dispatch globally; webhook server returns `503 triggers paused` (with `Retry-After: 60`); `/health` endpoint reflects paused state. Wired into `/config` two ways: a home-page row `[⏰ Triggers] [⏸ Pause triggers]` (whenever `[triggers]` is enabled; the pause toggle only when any are configured, #296) and the dedicated `⏰ Triggers` page (`config:tg`) showing counts + Pause/Resume button; `📡` means Listen only. `/ping` switches to `⏸ triggers paused: … (suspended)` while paused. Pause is in-memory only — restart auto-resumes (safe default)
 
 See `.claude/skills/claude-stream-json/` and `.claude/rules/control-channel.md` for implementation details.
 
@@ -141,7 +141,7 @@ Detailed protocol specs and event cheatsheets for each integration:
 
 ## Documentation screenshots
 
-48 screenshots in `docs/assets/screenshots/` with a tracking checklist in `CAPTURES.md`. README uses a composite hero collage (`hero-collage.jpg`) built with ImageMagick for mobile responsiveness. Doc files use HTML `<img>` tags with `width="360"` and `loading="lazy"` (works in both GitHub and MkDocs). 14 screenshots are still missing and commented out with `<!-- TODO: capture screenshot -->` markers.
+46 screenshots in `docs/assets/screenshots/` with a tracking checklist in `CAPTURES.md`. README uses a composite hero collage (`hero-collage.jpg`) built with ImageMagick for mobile responsiveness. Doc files use HTML `<img>` tags with `width="360"` and `loading="lazy"` (works in both GitHub and MkDocs). 14 screenshots are still missing and commented out with `<!-- TODO: capture screenshot -->` markers.
 
 ## Deprecated engines (Gemini CLI, AMP)
 
