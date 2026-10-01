@@ -312,7 +312,95 @@ def _scenario_hang_before_result(argv: list[str]) -> int:
     return 0
 
 
+def _emit_compaction(sid: str, trigger: str, *, init_between: bool) -> None:
+    """#819: the compaction frames as captured on CLI 2.1.285 (see
+    ``tests/fixtures/claude_compaction_2.1.285.jsonl`` / ``…autocompact…``)."""
+    emit(
+        {
+            "type": "system",
+            "subtype": "status",
+            "status": "compacting",
+            "session_id": sid,
+        }
+    )
+    emit(
+        {
+            "type": "system",
+            "subtype": "status",
+            "status": None,
+            "compact_result": "success",
+            "session_id": sid,
+        }
+    )
+    if init_between:
+        _emit_init(sid)
+    emit(
+        {
+            "type": "system",
+            "subtype": "compact_boundary",
+            "session_id": sid,
+            "compact_metadata": {
+                "trigger": trigger,
+                "pre_tokens": 180_000,
+                "post_tokens": 20_000,
+            },
+        }
+    )
+    emit(
+        {
+            "type": "user",
+            "session_id": sid,
+            "isSynthetic": True,
+            "message": {
+                "role": "user",
+                "content": "This session is being continued from a previous "
+                "conversation that ran out of context.",
+            },
+        }
+    )
+
+
+def _scenario_resume_autocompact_noop(argv: list[str]) -> int:
+    """#819: the poisoned-session case the manual-only exemption protects —
+    a resume auto-compacts and *then* returns the #596 0-turn empty result.
+    Non-resume invocations (the fresh recovery leg) answer normally."""
+    resume = _resume_arg(argv)
+    if resume is not None:
+        _emit_init(resume)
+        _emit_compaction(resume, "auto", init_between=False)
+        _emit_empty_result(resume)
+        return 0
+    sid = f"S-fresh-{os.getpid()}"
+    _emit_init(sid)
+    _emit_real_result(sid, text="fresh answer", num_turns=2, cost=0.02)
+    return 0
+
+
+def _scenario_manual_compact_result(argv: list[str]) -> int:
+    """#819: a successful manual ``/compact`` (Z10): no API turn, a replayed
+    "Compacted" stdout and a 0-turn, 0-ms, empty result."""
+    resume = _resume_arg(argv)
+    sid = resume or f"S-fresh-{os.getpid()}"
+    _emit_init(sid)
+    _emit_compaction(sid, "manual", init_between=True)
+    emit(
+        {
+            "type": "user",
+            "session_id": sid,
+            "isReplay": True,
+            "message": {
+                "role": "user",
+                "content": "<local-command-stdout>Compacted </local-command-stdout>",
+            },
+        }
+    )
+    _emit_empty_result(sid)
+    return 0
+
+
 _SCENARIOS = {
+    "resume_autocompact_noop": _scenario_resume_autocompact_noop,
+    "manual_compact_result": _scenario_manual_compact_result,
     "dangling_then_empty_resume": _scenario_dangling_then_empty_resume,
     "linger_then_sigterm_after_result": _scenario_linger_then_sigterm_after_result,
     "healthy_resume": _scenario_healthy_resume,

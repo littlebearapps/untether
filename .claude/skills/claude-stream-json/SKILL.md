@@ -129,6 +129,18 @@ updating `🔁 API error 529 (overloaded) — retrying in 8s (attempt 2/10)` not
 latched as an expected wait (bridge threshold reason `api_retry_waiting`), kept
 apart from rate-limit time.
 
+### `system` / `status` + `compact_boundary` (#819)
+
+`status: "compacting"` (re-sent every 30 s) → `status: null` + `compact_result`
+→ (manual `/compact` only: a fresh `init`) → `compact_boundary` with
+`compact_metadata{trigger, pre_tokens, post_tokens}` → a synthetic summary
+`user` frame. One `🗜️` row per compaction; liveness-only in `runner.py`;
+bounded expected wait (`compacting`, `awaiting_compaction()`). A manual
+`/compact`'s 0-turn empty result is exempt from #596/#631 only when
+`usage["compaction"].manual_success`. `status: null` + `permissionMode` is
+#383's mode edge in the same handler. Main-thread `message.usage` over
+`result.modelUsage.<model>.contextWindow` is the header's `% ctx`.
+
 Full shapes and decision tables: `docs/reference/runners/claude/stream-json-cheatsheet.md`.
 
 ## Tool name to ActionKind mapping

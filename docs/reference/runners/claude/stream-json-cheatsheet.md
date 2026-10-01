@@ -368,12 +368,43 @@ probes in `tests/test_claude_cli_schema_drift.py`, research in
 - `modelUsage` is keyed by the model id the CLI used; `contextWindow` is the only place the
   window appears. Decoded as `StreamResultMessage.modelUsage` (`Any`).
 - Assistant `message.usage` decodes as `StreamAssistantMessageBody.usage` (`Any`).
-- Compaction also emits `system/status {"status":"compacting"}` (re-sent every 30 s),
-  then `status:null` with `compact_result` (`success` / `failed`) and optional
-  `compact_error`, a fresh mid-command `system/init`, the boundary above and a summary
-  `user` frame (`isCompactSummary`). All these keys decode as `Any` on
-  `StreamSystemMessage` / `StreamUserMessage`. rc15 (C2) uses only the boundary: it clears
-  `% ctx` until the next main-thread response. Compaction rows are the next #819 step.
+- All these keys decode as `Any` on `StreamSystemMessage` / `StreamUserMessage`.
+
+Compaction frames as captured on CLI 2.1.285 (Haiku, 2026-10-01; redacted transcripts in
+`tests/fixtures/claude_{compaction,autocompact,compact_empty}_2.1.285.jsonl`):
+
+```json
+{"type":"system","subtype":"status","status":"compacting","session_id":"…"}
+{"type":"system","subtype":"status","status":null,"compact_result":"success","session_id":"…"}
+{"type":"system","subtype":"init",…}
+{"type":"system","subtype":"compact_boundary","compact_metadata":{"trigger":"manual","pre_tokens":51305,"post_tokens":2228,"cumulative_dropped_tokens":49077,"duration_ms":21942,"preserved_segment":{…},"preserved_messages":{…}},"logical_parent_uuid":"…","session_id":"…"}
+{"type":"user","isReplay":false,"isSynthetic":true,"message":{"role":"user","content":"This session is being continued from a previous conversation that ran out of context. …"}}
+{"type":"user","isReplay":true,"message":{"role":"user","content":"<local-command-stdout>Compacted </local-command-stdout>"}}
+{"type":"result","subtype":"success","is_error":false,"num_turns":0,"duration_api_ms":0,"result":"",…}
+```
+
+- That is a manual `/compact`. The `init` line and the last two lines appear only for
+  `/compact`.
+- **Auto** compaction fires inside a turn, between a `tool_result` and the next API
+  request. It sends no fresh `init`, and the boundary frame has no `session_id`
+  (`{"trigger":"auto","pre_tokens":79267,"post_tokens":15092,…}`). The summary `user`
+  frame has list content, and the turn carries on.
+- `status: "compacting"` is re-sent every 30 s while compacting (drift probe). A 22 s
+  compaction sent none.
+- A failure ends with `status:null`, `compact_result:"failed"` and an optional
+  `compact_error`, with no boundary. A PreCompact-hook skip ends with a plain
+  `status:null`. `status:null` + `permissionMode` is #383's mode-change edge, not
+  compaction.
+- `post_tokens` excludes the system prompt and tools. After this manual compaction the
+  next response's input side was 21 320 against `post_tokens` 2 228.
+- `isCompactSummary` was not on the wire; the summary frame carries `isSynthetic: true`.
+- `/compact` on a session with no history: `init` → a `<synthetic>` assistant
+  `Error: No messages to compact` → a 0-turn, 0-ms result with `result: ""` and
+  `modelUsage: {}`, and no compaction frames.
+
+**Untether handling**: `% ctx` (C2), the `🗜️` rows, the liveness latch and the manual-only
+0-turn exemption. See [untether-events.md](untether-events.md) §6.1 and the runner spec's
+"Context usage" and "Compaction" sections.
 
 ## Message object (`message` field)
 

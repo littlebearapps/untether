@@ -733,3 +733,111 @@ async def test_684_harness_cancel_strips_keyboard(
     assert any("Stopped." in m.text for m in later)
     # A healthy wait (keyboard on screen), then retired: never unanswerable.
     assert _unanswerable(logs) == []
+
+
+# ── #819: compaction and % ctx end to end ──────────────────────────────────
+
+
+@pytest.fixture
+def _fake_window():
+    claude_mod._CONTEXT_WINDOWS["claude-haiku-fake"] = 200_000
+    yield
+    claude_mod._CONTEXT_WINDOWS.pop("claude-haiku-fake", None)
+
+
+@pytest.mark.usefixtures("_fake_window")
+async def test_819_live_compact_followup_renders_rows_and_final(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A ``/compact`` follow-up into a live session: its own message, a
+    ``done`` final with the compaction body (not an empty ``error``), no
+    #596/#631 recovery, and the session stays live for the next follow-up,
+    answered in the same process with a lower ``% ctx``."""
+    from structlog.testing import capture_logs
+
+    from untether.live_followup import inject_live_followup
+    from untether.model import ResumeToken
+    from untether.scheduler import ThreadJob, ThreadScheduler
+
+    _watchdog(monkeypatch, post_result_limbo_grace=1.0)
+    sid = "fake-live-session"
+
+    async def run_job(job: ThreadJob) -> None:  # pragma: no cover
+        raise AssertionError("follow-up should be injected, not resumed")
+
+    def _job(text: str, msg_id: int) -> ThreadJob:
+        return ThreadJob(
+            chat_id=123,
+            user_msg_id=msg_id,
+            text=text,
+            resume_token=ResumeToken(engine="claude", value=sid),
+            progress_ref=MessageRef(channel_id=123, message_id=msg_id + 70),
+        )
+
+    async def _wait_idle(turns: int) -> None:
+        with anyio.fail_after(20):
+            while True:
+                live = claude_mod.get_live_session(sid)
+                if (
+                    live is not None
+                    and live.idle
+                    and live.state.completed_turns >= turns
+                ):
+                    return
+                await anyio.sleep(0.02)
+
+    holder: dict[str, Any] = {}
+    with capture_logs() as logs:
+        async with anyio.create_task_group() as tg:
+            sched = ThreadScheduler(
+                task_group=tg, run_job=run_job, inject_job=inject_live_followup
+            )
+
+            async def follow_ups() -> None:
+                await _wait_idle(1)
+                await sched.enqueue(_job("/compact", 20))
+                await _wait_idle(2)
+                await sched.enqueue(_job("after", 30))
+
+            async def drive() -> None:
+                holder["transport"] = await _drive("compact_followup")
+
+            tg.start_soon(follow_ups)
+            tg.start_soon(drive)
+
+    transport = holder["transport"]
+    events = [r.get("event") for r in logs]
+    assert "runner.empty_result" not in events
+    assert "session.quarantined" not in events
+    assert "session.auto_resend_fresh" not in events
+    texts = [c["message"].text for c in (*transport.send_calls, *transport.edit_calls)]
+    compact_final = [
+        t for t in texts if "🗜️ Context compacted · 60k → 2k tokens (manual)" in t
+    ]
+    assert compact_final
+    header = compact_final[-1].splitlines()[0]
+    assert header.startswith("done")
+    assert "% ctx" not in header  # D5: dropped after the compaction
+    first_final = [t for t in texts if "FIRST" in t and t.startswith("done")]
+    assert first_final and "30% ctx" in first_final[-1].splitlines()[0]
+    after_final = [t for t in texts if "ECHO: after" in t]
+    assert after_final and "10% ctx" in after_final[-1].splitlines()[0]
+    completed = [r for r in logs if r.get("event") == "runner.completed"]
+    assert any(r.get("compactions") == 1 for r in completed)
+
+
+@pytest.mark.usefixtures("_fake_window")
+async def test_819_context_pct_in_progress_and_final_headers(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _watchdog(monkeypatch)
+    transport = await _drive("context_usage_growth", wake_s=0.7)
+    texts = [c["message"].text for c in (*transport.send_calls, *transport.edit_calls)]
+    final = [t for t in texts if "GROWN" in t]
+    assert final and final[-1].splitlines()[0].endswith("· 62% ctx")
+    progress_headers = [
+        t.splitlines()[0] for t in texts if "GROWN" not in t and "% ctx" in t
+    ]
+    # The value rises while the turn runs (the header updates on every
+    # progress edit), not only at the final.
+    assert any("10% ctx" in h or "30% ctx" in h for h in progress_headers), texts

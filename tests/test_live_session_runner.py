@@ -982,3 +982,93 @@ async def test_751_fake_cli_init_reports_different_mode() -> None:
     mismatch = [e for e in logs if e["event"] == "claude.permission_mode.mismatch"]
     assert len(mismatch) == 1
     assert mismatch[0]["prompting_rearmed"] is True
+
+
+# ── #819: compaction over the fake ─────────────────────────────────────────
+
+
+@pytest.fixture
+def _fake_window():
+    claude_mod._CONTEXT_WINDOWS["claude-haiku-fake"] = 200_000
+    yield
+    claude_mod._CONTEXT_WINDOWS.pop("claude-haiku-fake", None)
+
+
+def _compaction_rows(events: list[Any]) -> list[Any]:
+    from untether.model import ActionEvent
+
+    return [
+        e
+        for e in events
+        if isinstance(e, ActionEvent)
+        and str(e.action.id).startswith("claude.compaction.")
+    ]
+
+
+def _pcts(events: list[Any]) -> list[Any]:
+    from untether.model import ActionEvent
+
+    return [
+        e.action.detail["context_pct"]
+        for e in events
+        if isinstance(e, ActionEvent) and e.action.kind == "telemetry"
+    ]
+
+
+@pytest.mark.usefixtures("_fake_window")
+async def test_819_auto_compact_mid_turn_single_turn() -> None:
+    with capture_logs() as logs:
+        events = await _collect("auto_compact_mid_turn", until=1)
+    completed = [e for e in events if isinstance(e, CompletedEvent)]
+    assert len(completed) == 1 and completed[0].answer == "done reading"
+    assert _turns(events) == []  # compaction never opens a turn of its own
+    rows = _compaction_rows(events)
+    assert [r.phase for r in rows] == [
+        "started",
+        "updated",
+        "updated",
+        "completed",
+        "completed",
+    ]
+    assert rows[-1].action.title == "🗜️ Context compacted · 170k → 30k tokens (auto)"
+    assert _pcts(events) == [75, None, 20]
+    assert completed[0].usage["compaction"]["trigger"] == "auto"
+    assert completed[0].usage["compaction"]["manual_success"] is False
+    assert any(e["event"] == "claude.compaction" for e in logs)
+    # One StartedEvent resume (auto compaction sends no fresh init).
+    assert len({e.resume.value for e in events if isinstance(e, StartedEvent)}) == 1
+
+
+@pytest.mark.usefixtures("_fake_window")
+async def test_819_live_compact_followup_is_its_own_turn() -> None:
+    compact_cmd, next_cmd = str(uuid.uuid4()), str(uuid.uuid4())
+
+    async def inject(evt: Any, runner: ClaudeRunner) -> None:
+        if isinstance(evt, CompletedEvent):
+            assert await write_user_message(SID, "/compact", command_uuid=compact_cmd)
+        if isinstance(evt, TurnEvent) and evt.phase == "completed" and evt.turn == 2:
+            assert await write_user_message(SID, "after", command_uuid=next_cmd)
+
+    with capture_logs() as logs:
+        events = await _collect("compact_followup", until=3, on_event=inject)
+    turns = _turns(events)
+    assert [(t.turn, t.phase) for t in turns] == [
+        (2, "started"),
+        (2, "completed"),
+        (3, "started"),
+        (3, "completed"),
+    ]
+    compact_start, compact_end = turns[0], turns[1]
+    assert compact_start.reason == "followup"
+    assert compact_start.command_uuid == compact_cmd
+    between = events[events.index(compact_start) + 1 : events.index(compact_end)]
+    rows = _compaction_rows(between)
+    assert rows and rows[-1].action.title.endswith("(manual)")
+    assert compact_end.ok is True and compact_end.answer == ""
+    assert compact_end.usage["compaction"]["manual_success"] is True
+    # % ctx: 30 % before, cleared by the boundary, 10 % after.
+    assert _pcts(events) == [30, 30, None, 10]
+    assert turns[3].answer == "ECHO: after"
+    assert not any(
+        e["event"] == "claude.live_session.closed_after_result" for e in logs
+    )

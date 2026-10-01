@@ -402,10 +402,14 @@ def test_status_frame_tracks_effective_mode() -> None:
 
 
 def test_status_without_permission_mode_is_ignored() -> None:
-    """The shared handler's other shape (#819 compaction) changes nothing."""
+    """The shared handler's other shape (#819 compaction) renders its 🗜️ row
+    but changes no permission-mode state."""
     state, _ = _live_session()
     _init(state, "plan")
-    assert _status(state, None, status="compacting") == []
+    events = _status(state, None, status="compacting")
+    assert [e.action.title for e in events if isinstance(e, ActionEvent)] == [
+        "🗜️ Compacting context…"
+    ]
     assert state.effective_permission_mode == "plan"
     assert state.plan_exited_at is None
 

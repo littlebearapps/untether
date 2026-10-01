@@ -34,6 +34,7 @@ import anyio
 import msgspec
 
 from ..backends import EngineBackend, EngineConfig
+from ..background_status import format_tokens
 from ..config import ConfigError
 from ..events import EventFactory
 from ..logging import get_logger
@@ -1936,6 +1937,24 @@ class ClaudeStreamState:
     ctx_init_model: str | None = None
     ctx_emitted: tuple[int | None, int | None] | None = None
 
+    # #819 compaction (``system/status`` + ``system/compact_boundary``).
+    # ``compaction_action_id`` is the open 🗜️ row (None when none is
+    # running); ``compaction_refine_id`` the row a ``compact_result:
+    # success`` closed, which the following boundary re-titles with the
+    # token counts. ``compaction_wait_until`` is the bounded liveness latch
+    # read by :meth:`awaiting_compaction` (refreshed by every ``compacting``
+    # heartbeat). ``last_compact_result`` is the ``compact_result`` the
+    # boundary consumes; ``turn_compactions`` the per-segment record behind
+    # ``usage["compaction"]`` (reset at every result and turn open).
+    # ``compaction_summary_pending``: the next non-tool_result ``user``
+    # frame is the compaction summary, not a fresh prompt.
+    compaction_action_id: str | None = None
+    compaction_refine_id: str | None = None
+    compaction_wait_until: float = 0.0
+    last_compact_result: str | None = None
+    turn_compactions: list[dict[str, Any]] = field(default_factory=list)
+    compaction_summary_pending: bool = False
+
     # #812: hooks seen via ``--include-hook-events``. ``pending_hooks`` is
     # hook_id -> PendingHook (insertion-ordered, capped at
     # ``_PENDING_HOOKS_MAX``); SessionStart / Setup are never recorded (the
@@ -2070,6 +2089,14 @@ class ClaudeStreamState:
         monitor via engine_state duck-typing, like
         :meth:`awaiting_rate_limit_retry` — silence here is expected."""
         return self.api_retry_wait_until > time.monotonic()
+
+    def awaiting_compaction(self) -> bool:
+        """#819: True while the CLI is compacting the context (a
+        ``system/status: compacting`` heartbeat within the last
+        ``_COMPACTION_LATCH_S``). Probed by the bridge's stall monitor like
+        :meth:`awaiting_api_retry`; bounded, so a wedged compaction still
+        warns once the heartbeats stop."""
+        return self.compaction_wait_until > time.monotonic()
 
 
 # #657 → #790: conservative wait window latched when a *confirmed* rejection
@@ -3618,9 +3645,14 @@ def _translate_status(
     state: ClaudeStreamState,
     factory: EventFactory,
 ) -> list[UntetherEvent]:
-    """``system/status`` frames. #383: a string ``permissionMode`` is the
-    CLI's mode-change edge (``status`` is null). Produces no events.
-    # #819: compacting status lands here (``status: "compacting"``)."""
+    """``system/status`` frames — one handler, two shapes.
+
+    #383: a string ``permissionMode`` is the CLI's mode-change edge
+    (``status`` is null); it produces no events. #819: ``status:
+    "compacting"`` and the ``status: null`` + ``compact_result`` that ends
+    it drive the 🗜️ compaction row (:func:`_translate_compaction_status`).
+    A ``status: null`` with neither a result nor an open row is the #383
+    frame only."""
     mode = event.permissionMode
     if isinstance(mode, str):
         _note_permission_mode(
@@ -3630,7 +3662,7 @@ def _translate_status(
             session_id=event.session_id
             or (factory.resume.value if factory.resume else None),
         )
-    return []
+    return _translate_compaction_status(event, state=state, factory=factory)
 
 
 def _handle_plan_rearm_ack(
@@ -4086,19 +4118,254 @@ def _note_assistant_context(
     return _emit_context(state, factory)
 
 
+# #819: how long one ``status: "compacting"`` frame keeps the compaction an
+# expected wait. The CLI re-sends the frame every 30 s while compacting, so
+# 120 s is four missed heartbeats — after that a wedged compaction is a
+# stall again.
+_COMPACTION_LATCH_S = 120.0
+_COMPACTION_ERROR_CHARS = 80
+_COMPACTION_ROW = "\N{COMPRESSION}\N{VARIATION SELECTOR-16}"
+_COMPACTING_TITLE = f"{_COMPACTION_ROW} Compacting context…"
+_COMPACTED_TITLE = f"{_COMPACTION_ROW} Context compacted"
+
+
+def _int_or_none(value: Any) -> int | None:
+    if isinstance(value, int) and not isinstance(value, bool):
+        return value
+    return None
+
+
+def _new_compaction_id(state: ClaudeStreamState) -> str:
+    state.note_seq += 1
+    return f"claude.compaction.{state.note_seq}"
+
+
+def _compacted_title(
+    trigger: str | None, pre_tokens: int | None, post_tokens: int | None
+) -> str:
+    """``🗜️ Context compacted · 182k → 41k tokens (auto)`` — the arrow and
+    the after-size only when ``post_tokens`` is known, the trigger only when
+    it is a string."""
+    title = _COMPACTED_TITLE
+    if pre_tokens is not None and post_tokens is not None:
+        title += f" · {format_tokens(pre_tokens)} → {format_tokens(post_tokens)} tokens"
+    elif pre_tokens is not None:
+        title += f" · {format_tokens(pre_tokens)} tokens before"
+    if trigger:
+        title += f" ({trigger})"
+    return title
+
+
+def _close_compaction_row(state: ClaudeStreamState) -> None:
+    state.compaction_action_id = None
+    state.compaction_wait_until = 0.0
+
+
+def _reset_compaction_segment(state: ClaudeStreamState) -> None:
+    """Per-segment compaction state — at every result and turn open. The
+    summary flag goes too, so a CLI that omits the summary frame can never
+    make the *next* real prompt skip its #544/#333 reset."""
+    state.turn_compactions = []
+    state.last_compact_result = None
+    state.compaction_refine_id = None
+    state.compaction_summary_pending = False
+    _close_compaction_row(state)
+
+
+def _compaction_usage(
+    state: ClaudeStreamState, event: claude_schema.StreamResultMessage
+) -> dict[str, Any] | None:
+    """``usage["compaction"]`` for a result whose segment compacted (None
+    otherwise). ``manual_success`` is the narrow #819 §4.5 exemption from
+    the #596/#631 empty-result recovery: every compaction recorded in the
+    segment was a ``manual`` one whose ``compact_result`` was ``success``
+    (so it reached a boundary), and the result itself is not an error. An
+    auto compaction — a #596 poisoned session can auto-compact on resume and
+    *then* return the upstream 0-turn result — or a failed one never
+    qualifies."""
+    records = state.turn_compactions
+    if not records:
+        return None
+    last = records[-1]
+    manual_success = not event.is_error and all(
+        rec.get("trigger") == "manual" and rec.get("result") == "success"
+        for rec in records
+    )
+    return {
+        "count": len(records),
+        "trigger": last.get("trigger"),
+        "pre_tokens": last.get("pre_tokens"),
+        "post_tokens": last.get("post_tokens"),
+        "result": last.get("result"),
+        "manual_success": manual_success,
+    }
+
+
+def _translate_compaction_status(
+    event: claude_schema.StreamSystemMessage,
+    *,
+    state: ClaudeStreamState,
+    factory: EventFactory,
+) -> list[UntetherEvent]:
+    """#819: the 🗜️ row from ``system/status`` (Claude-Q4 / probe Z10).
+
+    ``compacting`` opens the row (or, as the 30 s heartbeat, updates it and
+    refreshes the liveness latch); ``status: null`` closes it — ``success``
+    (the boundary re-titles it with token counts), ``failed`` (a warning
+    row), or no result at all (a PreCompact hook skipped it). Anything
+    else — ``requesting``, a mode-change ``status: null`` with no row open —
+    produces nothing."""
+    status = event.status
+    session_id = event.session_id or (factory.resume.value if factory.resume else None)
+    if status == "compacting":
+        state.compaction_wait_until = time.monotonic() + _COMPACTION_LATCH_S
+        if state.compaction_action_id is not None:
+            return [
+                factory.action_updated(
+                    action_id=state.compaction_action_id,
+                    kind="note",
+                    title=_COMPACTING_TITLE,
+                )
+            ]
+        state.compaction_action_id = _new_compaction_id(state)
+        logger.info("claude.compaction.started", session_id=session_id)
+        return [
+            factory.action_started(
+                action_id=state.compaction_action_id,
+                kind="note",
+                title=_COMPACTING_TITLE,
+            )
+        ]
+    if status is not None:
+        logger.debug("claude.status.ignored", status=status, session_id=session_id)
+        return []
+    result = event.compact_result if isinstance(event.compact_result, str) else None
+    action_id = state.compaction_action_id
+    if result == "failed":
+        error = event.compact_error if isinstance(event.compact_error, str) else None
+        title = f"{_COMPACTION_ROW} Compaction failed"
+        if error and error.strip():
+            snippet = " ".join(error.split())
+            if len(snippet) > _COMPACTION_ERROR_CHARS:
+                snippet = snippet[: _COMPACTION_ERROR_CHARS - 1] + "…"
+            title += f" · {snippet}"
+        logger.warning("claude.compaction.failed", session_id=session_id, error=error)
+        # A failed compaction never produces a boundary: record it here.
+        state.turn_compactions.append(
+            {
+                "trigger": None,
+                "pre_tokens": None,
+                "post_tokens": None,
+                "result": "failed",
+            }
+        )
+        state.last_compact_result = None
+        _close_compaction_row(state)
+        return [
+            factory.action_completed(
+                action_id=action_id or _new_compaction_id(state),
+                kind="note",
+                title=title,
+                ok=False,
+                level="warning",
+            )
+        ]
+    if result is not None:
+        # ``success`` (or a future value): the boundary that follows
+        # consumes it and refines the row.
+        state.last_compact_result = result
+        _close_compaction_row(state)
+        if action_id is None:
+            return []
+        state.compaction_refine_id = action_id
+        return [
+            factory.action_completed(
+                action_id=action_id,
+                kind="note",
+                title=_COMPACTED_TITLE,
+                ok=True,
+            )
+        ]
+    if action_id is None or isinstance(event.permissionMode, str):
+        # The #383 permission-mode frame (or a stray ``status: null``) — a
+        # mode change while a row is open doesn't end the compaction.
+        return []
+    # A PreCompact hook skipped the compaction: plain ``status: null``.
+    _close_compaction_row(state)
+    logger.info("claude.compaction.skipped", session_id=session_id)
+    return [
+        factory.action_completed(
+            action_id=action_id,
+            kind="note",
+            title=f"{_COMPACTION_ROW} Compaction skipped",
+            ok=True,
+        )
+    ]
+
+
 def _translate_compact_boundary(
     event: claude_schema.StreamSystemMessage,
     *,
     state: ClaudeStreamState,
     factory: EventFactory,
 ) -> list[UntetherEvent]:
-    """``system/compact_boundary``: the context was compacted. #819 D5 —
-    drop ``% ctx`` until the next main-thread response (``post_tokens``
-    excludes the system prompt and tools, so it would under-report).
-    # #819 C3 seam: the 🗜️ row refinement, ``turn_compactions`` and the
-    # ``claude.compaction`` log land here."""
+    """``system/compact_boundary``: the context was compacted.
+
+    Re-titles the row the ``success`` status closed (a fresh row when there
+    was none) with ``pre → post`` tokens and the trigger — the same id, so
+    the row stays one step (D10) — records the compaction for
+    ``usage["compaction"]``, logs ``claude.compaction`` and flags the
+    summary ``user`` frame that follows. #819 D5 — drops ``% ctx`` until
+    the next main-thread response (``post_tokens`` excludes the system
+    prompt and tools, so it would under-report)."""
+    meta = event.compact_metadata if isinstance(event.compact_metadata, dict) else {}
+    trigger = meta.get("trigger") if isinstance(meta.get("trigger"), str) else None
+    pre_tokens = _int_or_none(meta.get("pre_tokens"))
+    post_tokens = _int_or_none(meta.get("post_tokens"))
+    result = state.last_compact_result
+    state.turn_compactions.append(
+        {
+            "trigger": trigger,
+            "pre_tokens": pre_tokens,
+            "post_tokens": post_tokens,
+            "result": result,
+        }
+    )
+    state.last_compact_result = None
+    action_id = (
+        state.compaction_refine_id
+        or state.compaction_action_id
+        or _new_compaction_id(state)
+    )
+    state.compaction_refine_id = None
+    _close_compaction_row(state)
+    state.compaction_summary_pending = True
+    logger.info(
+        "claude.compaction",
+        trigger=trigger,
+        pre_tokens=pre_tokens,
+        post_tokens=post_tokens,
+        cumulative_dropped_tokens=_int_or_none(meta.get("cumulative_dropped_tokens")),
+        duration_ms=_int_or_none(meta.get("duration_ms")),
+        result=result,
+        session_id=event.session_id
+        or (factory.resume.value if factory.resume else None),
+    )
     state.ctx_used = None
-    return _emit_context(state, factory)
+    return [
+        factory.action_completed(
+            action_id=action_id,
+            kind="note",
+            title=_compacted_title(trigger, pre_tokens, post_tokens),
+            ok=True,
+            detail={
+                "trigger": trigger,
+                "pre_tokens": pre_tokens,
+                "post_tokens": post_tokens,
+            },
+        ),
+        *_emit_context(state, factory),
+    ]
 
 
 # System subtypes with their own translation (#792, #814). Add a subtype by
@@ -4111,9 +4378,9 @@ _SYSTEM_SUBTYPE_HANDLERS: dict[str, _SystemSubtypeHandler] = {
     "model_refusal_fallback": _translate_model_refusal_fallback,
     "model_refusal_no_fallback": _translate_model_refusal_no_fallback,
     "model_fallback": _translate_model_fallback,
-    # #383: permission-mode edges (#819 extends it for compaction).
+    # #383: permission-mode edges; #819: the 🗜️ compaction row.
     "status": _translate_status,
-    # #819: compaction boundary (clears ``% ctx``).
+    # #819: compaction boundary (refines the row, clears ``% ctx``).
     "compact_boundary": _translate_compact_boundary,
     # #812: hook lifecycle frames — tracked, never surfaced.
     "hook_started": _translate_hook_event,
@@ -6002,6 +6269,8 @@ def _should_absorb_resume_result(
         and event.num_turns == 0
         and event.duration_api_ms == 0
         and not event.is_error
+        # #819: a compaction's 0-turn result is never the stopped-task replay.
+        and not state.turn_compactions
     )
 
 
@@ -6037,10 +6306,15 @@ def _has_pending_wakeup(state: ClaudeStreamState) -> bool:
 
 
 def _completed_keeps_session_live(evt: CompletedEvent) -> bool:
-    """A live session only survives a successful, non-empty first result."""
+    """A live session only survives a successful, non-empty first result —
+    or a successful manual ``/compact`` (#819: its result is 0-turn and
+    empty by design)."""
     if not evt.ok:
         return False
     usage = evt.usage or {}
+    compaction = usage.get("compaction")
+    if isinstance(compaction, dict) and compaction.get("manual_success") is True:
+        return True
     return not (
         not (evt.answer or "").strip()
         and (usage.get("num_turns", 1) or 0) == 0
@@ -6163,6 +6437,8 @@ def _open_followup_turn(
     state.last_exitplanmode_plan = None
     state.last_schedule_wakeup_arm_delay = None
     state.last_bg_bash_launched_at = None
+    # #819: compaction rows / record / summary flag are per turn.
+    _reset_compaction_segment(state)
     # Not idle any more: the stall / post-result logic keys off this.
     state.result_received_at = None
     # #383: the reply a plan approval was given in has ended.
@@ -6355,7 +6631,14 @@ def translate_claude_event(
                         ),
                     )
             out: list[UntetherEvent] = []
-            if subtype == "init" and not state.turn_open:
+            if not state.turn_open and (
+                subtype == "init"
+                # #819: a ``/compact`` follow-up's first frame is its
+                # compacting status — its rows belong to its own turn, not
+                # to the run's finalised progress message. The mid-command
+                # init that follows then sees the turn already open.
+                or (subtype == "status" and event.status == "compacting")
+            ):
                 out.extend(_open_turn_events(state, factory))
             # Keep the base side effects (task map, MCP catalog capture) but
             # never re-emit a StartedEvent inside a live session.
@@ -6658,6 +6941,14 @@ def _translate_claude_event_base(
             out.extend(_note_assistant_context(event, state=state, factory=factory))
             return out
         case claude_schema.StreamUserMessage(message=message):
+            # #819: the compaction summary the CLI writes after a
+            # ``compact_boundary`` (and ``/compact``'s replayed stdout) is
+            # not a fresh prompt — it must not reset the #544/#333 per-turn
+            # scalars mid-turn.
+            compaction_frame = bool(event.isCompactSummary) or bool(event.isReplay)
+            if state.compaction_summary_pending and not _is_tool_result_only(event):
+                state.compaction_summary_pending = False
+                compaction_frame = True
             if not isinstance(message.content, list):
                 return []
             out: list[UntetherEvent] = []
@@ -6729,7 +7020,7 @@ def _translate_claude_event_base(
             # in flight. The reset must happen here (not in StreamResultMessage)
             # because the watchdog reads the scalar AFTER result_received_at
             # is set, so resetting on result would defeat the shortcut.
-            if saw_non_tool_result and not saw_tool_result:
+            if saw_non_tool_result and not saw_tool_result and not compaction_frame:
                 state.last_schedule_wakeup_arm_delay = None
                 # #333: same reset semantics as the #544 ScheduleWakeup
                 # scalar — a fresh user prompt clears the per-turn
@@ -6801,6 +7092,12 @@ def _translate_claude_event_base(
             context_events = _emit_context(state, factory)
             if (context_usage := _context_usage_payload(state, factory)) is not None:
                 usage["context"] = context_usage
+            # #819: the segment's compaction record rides on usage (like
+            # ``usage["safeguard"]``, so live turns get it too), then ends
+            # with its result.
+            if (compaction := _compaction_usage(state, event)) is not None:
+                usage["compaction"] = compaction
+            _reset_compaction_segment(state)
 
             # #572: record the stream-idle classification so the bridge's
             # bounded auto-retry gate can read it via engine_state duck-typing.

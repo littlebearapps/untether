@@ -183,6 +183,33 @@ def _hook_frame_subtype(raw: dict[str, Any], etype: str) -> str | None:
     return None
 
 
+# #819: Claude's compaction frames get the same treatment as #812's hook
+# frames. An auto-compaction starts right after a ``tool_result`` (last type
+# ``user``); if the CLI dies mid-compaction the auto-continue predicate must
+# still see ``user``, and the #470 post-result check must not see a trailing
+# ``system``. ``system/status`` also carries #383's permission-mode edges,
+# which arrive while a live session idles — same reasoning.
+_LIVENESS_ONLY_SYSTEM_SUBTYPES = frozenset({"status", "compact_boundary"})
+
+
+def _liveness_only_label(raw: dict[str, Any], etype: str) -> str | None:
+    """Ring label for a frame that counts as liveness (``last_stdout_at``,
+    ``event_count``) but must never become ``last_event_type`` — None for
+    every other frame."""
+    hook_subtype = _hook_frame_subtype(raw, etype)
+    if hook_subtype is not None:
+        return f"hook:{hook_subtype}"
+    if etype != "system":
+        return None
+    subtype = raw.get("subtype")
+    if subtype not in _LIVENESS_ONLY_SYSTEM_SUBTYPES:
+        return None
+    if subtype == "status":
+        status = raw.get("status")
+        return f"status:{status}" if isinstance(status, str) else "status:null"
+    return str(subtype)
+
+
 # #526 rc20 follow-up: shared with runner_bridge.py for paced
 # ``subprocess.approval_pending`` INFO emission. The user-side stall
 # detector (bridge) and the watchdog-side liveness detector (here)
@@ -1104,17 +1131,18 @@ class JsonlSubprocessRunner(BaseRunner):
             # #502: skip control-channel events when updating last_event_type
             # so session.summary reflects the last stream event, not stdin/stdout
             # permission-flow traffic. recent_events still records them.
-            # #812: hook lifecycle frames are skipped the same way.
-            hook_subtype = _hook_frame_subtype(raw_dict, etype)
-            if etype not in _CONTROL_CHANNEL_EVENT_TYPES and hook_subtype is None:
+            # #812: hook lifecycle frames are skipped the same way, and so
+            # are #819's compaction / status frames.
+            liveness_label = _liveness_only_label(raw_dict, etype)
+            if etype not in _CONTROL_CHANNEL_EVENT_TYPES and liveness_label is None:
                 stream.last_event_type = etype
                 stream.last_event_tool = etool
             # #716: latch the terminal frame separately from the running
             # ``last_event_type``. Set-only — never cleared.
             if etype == _RESULT_EVENT_TYPE:
                 stream.saw_result = True
-            if hook_subtype is not None:
-                label = f"hook:{hook_subtype}"
+            if liveness_label is not None:
+                label = liveness_label
             else:
                 label = f"tool:{etool}" if etool else etype
             stream.recent_events.append((now, label))

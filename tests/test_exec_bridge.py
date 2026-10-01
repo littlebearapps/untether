@@ -3,6 +3,7 @@ import os
 import sys
 import uuid
 from types import SimpleNamespace
+from typing import Any
 
 import anyio
 import pytest
@@ -10048,3 +10049,393 @@ def test_684_control_callbacks_in() -> None:
     assert control_callbacks_in(msg) == frozenset(
         {"claude_control:approve:r", "claude_control:deny:r", "aq:opt:0"}
     )
+
+
+# ── #819: compaction is an expected wait ───────────────────────────────────
+
+
+def test_819_compaction_probe() -> None:
+    transport = FakeTransport()
+    edits = _make_edits(transport, _KeyboardPresenter())
+    edits.stream = _make_stream(
+        engine_state=_make_engine_state(awaiting_compaction=lambda: True)
+    )
+    assert edits._is_compacting() is True
+    assert edits._is_api_retry_waiting() is False
+    edits.stream = _make_stream(engine_state=_make_engine_state())
+    assert edits._is_compacting() is False  # engine without the probe
+    edits.stream = _make_stream(engine_state=None)
+    assert edits._is_compacting() is False
+
+
+def test_819_compaction_probe_survives_exception() -> None:
+    def _boom() -> bool:
+        raise RuntimeError("engine state exploded")
+
+    transport = FakeTransport()
+    edits = _make_edits(transport, _KeyboardPresenter())
+    edits.stream = _make_stream(
+        engine_state=_make_engine_state(awaiting_compaction=_boom)
+    )
+    assert edits._is_compacting() is False
+
+
+def test_819_real_claude_state_drives_the_probe() -> None:
+    from untether.runners.claude import ClaudeStreamState, translate_claude_event
+    from untether.schemas import claude as claude_schema
+
+    state = ClaudeStreamState()
+    edits = _make_edits(FakeTransport(), _KeyboardPresenter())
+    edits.stream = _make_stream(engine_state=state)
+    assert edits._is_compacting() is False
+    for raw in (
+        b'{"type":"system","subtype":"status","status":"compacting","session_id":"s"}',
+    ):
+        translate_claude_event(
+            claude_schema.decode_stream_json_line(raw),
+            title="claude",
+            state=state,
+            factory=state.factory,
+        )
+    assert edits._is_compacting() is True
+    translate_claude_event(
+        claude_schema.decode_stream_json_line(
+            b'{"type":"system","subtype":"status","status":null,'
+            b'"compact_result":"success","session_id":"s"}'
+        ),
+        title="claude",
+        state=state,
+        factory=state.factory,
+    )
+    assert edits._is_compacting() is False
+
+
+async def _run_stall_window(edits: ProgressEdits, clock: _FakeClock) -> list[dict]:
+    with structlog.testing.capture_logs() as logs:
+        async with anyio.create_task_group() as tg:
+
+            async def drive() -> None:
+                clock.set(110.0)
+                await anyio.sleep(0.25)
+                edits.signal_send.close()
+
+            tg.start_soon(edits.run)
+            tg.start_soon(drive)
+    return logs
+
+
+def _stall_edits(**engine_fields: Any) -> tuple[ProgressEdits, _FakeClock]:
+    transport = FakeTransport()
+    clock = _FakeClock(start=100.0)
+    edits = _make_edits(transport, _KeyboardPresenter(), clock=clock)
+    edits._stall_check_interval = 0.01
+    edits._STALL_THRESHOLD_SECONDS = 0.05
+    edits._STALL_THRESHOLD_TOOL = 0.05
+    edits._STALL_THRESHOLD_APPROVAL = 0.05
+    edits._STALL_THRESHOLD_APPROVAL_FIRST = 0.05
+    edits._stall_repeat_seconds = 0.02
+    edits.stream = _make_stream(
+        last_event_type="user", engine_state=_make_engine_state(**engine_fields)
+    )
+    return edits, clock
+
+
+@pytest.mark.anyio
+async def test_819_stall_threshold_reason_compacting() -> None:
+    edits, clock = _stall_edits(awaiting_compaction=lambda: True)
+    logs = await _run_stall_window(edits, clock)
+    selected = [
+        e for e in logs if e["event"] == "progress_edits.stall_threshold_selected"
+    ]
+    assert selected and selected[0]["reason"] == "compacting"
+
+
+@pytest.mark.anyio
+async def test_819_compacting_is_expected_wait_no_auto_cancel() -> None:
+    edits, clock = _stall_edits(awaiting_compaction=lambda: True)
+    logs = await _run_stall_window(edits, clock)
+    events = [entry.get("event") for entry in logs]
+    assert "progress_edits.stall_detected" not in events
+    assert "progress_edits.stall_auto_cancel" not in events
+    pending = [e for e in logs if e.get("event") == "subprocess.approval_pending"]
+    assert pending and pending[0]["reason"] == "compacting"
+    assert edits._total_stall_warn_count == 0
+
+
+@pytest.mark.anyio
+async def test_819_compaction_latch_lapsed_stall_warns_again() -> None:
+    """Negative: once the latch lapses (no heartbeat for 120 s) a wedged
+    compaction is an ordinary stall again."""
+    edits, clock = _stall_edits(awaiting_compaction=lambda: False)
+    logs = await _run_stall_window(edits, clock)
+    selected = [
+        e for e in logs if e["event"] == "progress_edits.stall_threshold_selected"
+    ]
+    assert selected and all(e["reason"] != "compacting" for e in selected)
+    assert "progress_edits.stall_detected" in [e.get("event") for e in logs]
+
+
+class TestStuckAfterToolResultCompaction:
+    def test_819_stuck_after_tool_result_suppressed_while_compacting(self) -> None:
+        from types import SimpleNamespace
+
+        edits, clock = TestStuckAfterToolResultDetector._prepare(
+            last_tool_result_at=600.0, frozen_ring_count=3
+        )
+        clock.set(1000.0)
+        assert edits._detect_stuck_after_tool_result(cpu_active=True) is True
+        edits.stream.engine_state = SimpleNamespace(awaiting_compaction=lambda: True)
+        with structlog.testing.capture_logs() as logs:
+            assert edits._detect_stuck_after_tool_result(cpu_active=True) is False
+        suppressed = [
+            e
+            for e in logs
+            if e["event"] == "progress_edits.stuck_after_tool_result.suppressed"
+        ]
+        assert suppressed and suppressed[0]["reason"] == "compacting"
+
+
+def test_819_export_records_one_compaction_start_and_finish(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from untether.model import Action, ActionEvent, ResumeToken
+    from untether.runner_bridge import _record_export_event
+    from untether.telegram.commands import export as export_mod
+
+    recorded: list[dict[str, Any]] = []
+    monkeypatch.setattr(
+        export_mod,
+        "record_session_event",
+        lambda session_id, event, **_: recorded.append(event),
+    )
+    resume = ResumeToken(engine="claude", value="s-export")
+
+    def _row(phase: str, title: str) -> ActionEvent:
+        return ActionEvent(
+            engine="claude",
+            action=Action(id="claude.compaction.3", kind="note", title=title),
+            phase=phase,  # type: ignore[arg-type]
+        )
+
+    for evt in (
+        _row("started", "🗜️ Compacting context…"),
+        _row("updated", "🗜️ Compacting context…"),
+        _row("updated", "🗜️ Compacting context…"),
+        _row("completed", "🗜️ Context compacted"),
+        _row("completed", "🗜️ Context compacted · 6.3k → 277 tokens (manual)"),
+    ):
+        _record_export_event(evt, resume)
+    phases = [e["phase"] for e in recorded]
+    assert phases == ["started", "completed", "completed"]
+
+
+# ── #819: the manual-/compact 0-turn result (narrow exemption) ─────────────
+
+
+def _compaction(
+    trigger: str | None = "manual",
+    result: str | None = "success",
+    *,
+    manual_success: bool = True,
+) -> dict[str, Any]:
+    return {
+        "count": 1,
+        "trigger": trigger,
+        "pre_tokens": 182_000,
+        "post_tokens": 41_000,
+        "result": result,
+        "manual_success": manual_success,
+    }
+
+
+async def _run_single(
+    usage: dict[str, Any],
+    *,
+    resume_value: str = "sess-819",
+    answer: str = "",
+) -> tuple[FakeTransport, Any, list[dict[str, Any]]]:
+    from structlog.testing import capture_logs
+
+    transport = FakeTransport()
+    runner = ScriptRunner(
+        [Return(answer=answer, usage=usage)],
+        engine=CODEX_ENGINE,
+        resume_value=resume_value,
+    )
+    cfg = ExecBridgeConfig(
+        transport=transport, presenter=MarkdownPresenter(), final_notify=False
+    )
+    with capture_logs() as logs:
+        await handle_message(
+            cfg,
+            runner=runner,
+            incoming=IncomingMessage(channel_id=123, message_id=10, text="/compact"),
+            resume_token=ResumeToken(engine=CODEX_ENGINE, value=resume_value),
+        )
+    return transport, runner, logs
+
+
+@pytest.mark.anyio
+async def test_819_manual_compaction_zero_turn_result_is_not_empty_result_anomaly(
+    quarantine_store,
+) -> None:
+    usage = {"num_turns": 0, "duration_api_ms": 0, "compaction": _compaction()}
+    transport, runner, logs = await _run_single(usage)
+    events = [r.get("event") for r in logs]
+    assert "runner.empty_result" not in events
+    assert "session.quarantined" not in events
+    assert "session.auto_resend_fresh" not in events
+    assert len(runner.calls) == 1
+    assert quarantine_store.is_quarantined(CODEX_ENGINE, "sess-819") is False
+    final_text = transport.edit_calls[-1]["message"].text
+    assert final_text.startswith("done")
+    assert "🗜️ Context compacted · 182k → 41k tokens (manual)" in final_text
+    completed = [r for r in logs if r.get("event") == "runner.completed"]
+    assert completed and completed[0]["compactions"] == 1
+    assert completed[0]["compaction_trigger"] == "manual"
+
+
+@pytest.mark.anyio
+async def test_819_auto_compaction_then_zero_turn_result_stays_anomalous(
+    quarantine_store,
+) -> None:
+    """The #596 poisoned session that auto-compacts on resume and then
+    returns the 0-turn result must still reach #631 quarantine + fresh."""
+    import dataclasses
+
+    from structlog.testing import capture_logs
+
+    class _AutoCompactThenAnswer(_EmptyThenAnswerRunner):
+        async def run(self, prompt, resume):
+            async for evt in super().run(prompt, resume):
+                if isinstance(evt, CompletedEvent) and len(self.calls) == 1:
+                    evt = dataclasses.replace(
+                        evt,
+                        usage={
+                            **(evt.usage or {}),
+                            "compaction": _compaction(
+                                "auto", "success", manual_success=False
+                            ),
+                        },
+                    )
+                yield evt
+
+    transport = FakeTransport()
+    runner = _AutoCompactThenAnswer(resume_value="sess-poisoned-819")
+    cfg = ExecBridgeConfig(
+        transport=transport, presenter=MarkdownPresenter(), final_notify=False
+    )
+    cleared: list[str] = []
+
+    async def on_resume_failed(tok: ResumeToken) -> None:
+        cleared.append(tok.value)
+
+    with capture_logs() as logs:
+        await handle_message(
+            cfg,
+            runner=runner,
+            incoming=IncomingMessage(channel_id=123, message_id=10, text="go on"),
+            resume_token=ResumeToken(engine=CODEX_ENGINE, value="sess-poisoned-819"),
+            on_resume_failed=on_resume_failed,
+        )
+    events = [r.get("event") for r in logs]
+    assert "runner.empty_result" in events
+    assert "session.auto_resend_fresh" in events
+    assert quarantine_store.is_quarantined(CODEX_ENGINE, "sess-poisoned-819")
+    assert len(runner.calls) == 2 and runner.calls[1][1] is None
+    assert "Here is the real result." in transport.edit_calls[-1]["message"].text
+
+
+@pytest.mark.anyio
+async def test_819_failed_manual_compaction_zero_turn_stays_anomalous(
+    monkeypatch,
+) -> None:
+    _disable_empty_resend(monkeypatch)
+    usage = {
+        "num_turns": 0,
+        "duration_api_ms": 0,
+        "compaction": _compaction(None, "failed", manual_success=False),
+    }
+    transport, _, logs = await _run_single(usage)
+    assert any(r.get("event") == "runner.empty_result" for r in logs)
+    final_text = transport.edit_calls[-1]["message"].text
+    assert "Context compacted" not in final_text
+    assert "empty result" in final_text
+
+
+@pytest.mark.anyio
+async def test_819_manual_compaction_with_error_result_not_exempt() -> None:
+    from structlog.testing import capture_logs
+
+    from untether.runners.mock import ErrorReturn
+
+    transport = FakeTransport()
+    runner = ScriptRunner(
+        [
+            ErrorReturn(
+                error="boom",
+                usage={
+                    "num_turns": 0,
+                    "duration_api_ms": 0,
+                    "compaction": _compaction(manual_success=False),
+                },
+            )
+        ],
+        engine=CODEX_ENGINE,
+        resume_value="sess-819e",
+    )
+    cfg = ExecBridgeConfig(
+        transport=transport, presenter=MarkdownPresenter(), final_notify=False
+    )
+    with capture_logs():
+        await handle_message(
+            cfg,
+            runner=runner,
+            incoming=IncomingMessage(channel_id=123, message_id=10, text="/compact"),
+            resume_token=ResumeToken(engine=CODEX_ENGINE, value="sess-819e"),
+        )
+    final_text = transport.edit_calls[-1]["message"].text
+    assert final_text.startswith("error")
+    assert "Context compacted" not in final_text
+
+
+@pytest.mark.anyio
+async def test_819_anomaly_computed_before_compaction_body(monkeypatch) -> None:
+    """The compaction body is synthesised only after the anomaly decision —
+    and only for ``manual_success``: a spy on the exemption predicate sees
+    the raw (empty) run."""
+    from untether import runner_bridge
+
+    seen: list[Any] = []
+    real = runner_bridge._compaction_manual_success
+
+    def _spy(usage):
+        seen.append(dict(usage or {}))
+        return real(usage)
+
+    monkeypatch.setattr(runner_bridge, "_compaction_manual_success", _spy)
+    usage = {"num_turns": 0, "duration_api_ms": 0, "compaction": _compaction()}
+    transport, _, logs = await _run_single(usage)
+    assert seen and seen[0]["compaction"]["manual_success"] is True
+    assert not any(r.get("event") == "runner.empty_result" for r in logs)
+    assert "Context compacted" in transport.edit_calls[-1]["message"].text
+
+
+@pytest.mark.anyio
+async def test_819_genuine_zero_turn_result_still_anomalous(monkeypatch) -> None:
+    _disable_empty_resend(monkeypatch)
+    transport, _, logs = await _run_single({"num_turns": 0, "duration_api_ms": 0})
+    assert any(r.get("event") == "runner.empty_result" for r in logs)
+    assert "Context compacted" not in transport.edit_calls[-1]["message"].text
+
+
+def test_819_compaction_empty_body_shapes() -> None:
+    from untether.runner_bridge import _compaction_empty_body
+
+    assert _compaction_empty_body(_compaction()) == (
+        "🗜️ Context compacted · 182k → 41k tokens (manual)"
+    )
+    assert _compaction_empty_body({"pre_tokens": 6336, "trigger": "manual"}) == (
+        "🗜️ Context compacted · 6.3k tokens before (manual)"
+    )
+    assert _compaction_empty_body({"pre_tokens": True}) == "🗜️ Context compacted"

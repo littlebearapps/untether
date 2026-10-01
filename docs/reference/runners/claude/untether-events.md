@@ -326,12 +326,17 @@ without transformation. Optionally include `modelUsage` inside `usage` or
 |---|---|
 | main-thread `assistant` with int `message.usage` input fields | `ActionEvent(kind="telemetry", id="claude.context", phase="updated", detail={context_pct, context_used, context_window, model})` — only when the integer % changes and the model's window is known |
 | `result.modelUsage.<model>.contextWindow` | learned into the per-process window cache; a first-known value is emitted as the same telemetry event **before** the supplementary `StartedEvent{complete}` / `CompletedEvent`; `usage["context"] = {pct, used, window, model}` (log field) |
-| `system/compact_boundary` | telemetry with `context_pct: None` (segment hidden until the next response) |
+| `system/status {"status":"compacting"}` | `ActionEvent(kind="note", id="claude.compaction.<n>", phase="started", title="🗜️ Compacting context…")`; a repeat (the 30 s heartbeat) is `phase="updated"` on the same id. Live session with no turn open (a `/compact` follow-up): a `TurnEvent(started)` first |
+| `system/status {"status":null,"compact_result":"success"}` | `phase="completed"`, `🗜️ Context compacted`, `ok=True` |
+| `system/status {"status":null,"compact_result":"failed"}` | `phase="completed"`, `🗜️ Compaction failed · <compact_error>`, `ok=False`, `level="warning"` |
+| `system/status {"status":null}` with a row open / none open | `🗜️ Compaction skipped` / nothing (#383's `permissionMode` frame) |
+| `system/compact_boundary` | the same row re-completed as `🗜️ Context compacted · <pre> → <post> tokens (<trigger>)` (one step), then telemetry with `context_pct: None` (segment hidden until the next response) |
+| `result` after a compaction | `usage["compaction"] = {count, trigger, pre_tokens, post_tokens, result, manual_success}` on the `CompletedEvent` / live `TurnEvent(completed)` |
 | live `TurnEvent(started)` | followed by the current value (the turn's tracker starts empty) |
 
 Subagent (`parent_tool_use_id`) and `<synthetic>` frames never change the value.
 `ProgressTracker` keeps telemetry out of its actions (no step, no running tool, never
-exported). Full rules: runner spec → "Context usage".
+exported). Full rules: runner spec → "Context usage" and "Compaction".
 
 ---
 
