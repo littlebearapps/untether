@@ -47,7 +47,7 @@ Buttons clear immediately when you tap them — no waiting for a spinner.
 
 ## Diff previews
 
-For tools that modify files, the approval message includes a compact diff so you can see what's about to change before deciding:
+For tools that modify files, the approval message includes a compact diff, shown as a monospace block, so you can see what's about to change before deciding:
 
 - **Edit**: 📝 file path, removed lines (`- old`) and added lines (`+ new`), up to 4 lines each
 - **Write**: 📝 file path, then the first 8 lines of content to be written

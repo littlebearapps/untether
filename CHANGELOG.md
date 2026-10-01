@@ -2,6 +2,11 @@
 
 ## v0.35.5 (unreleased)
 
+<!-- Status 2026-10-01: shipped through 0.35.5rc16 — rc15 (22 issues, PR #853; never rolled out on
+     its own) plus the rc15 integration-run fixes #854–#863 (PR #864), on TestPyPI and all 5 hosts.
+     Still to come in v0.35.5: the 30 issues labelled rc17, plus the verification owed on rc16.
+     Single checklist of what's left: #865. Date this section at the dev→master release merge. -->
+
 ### fixes
 
 - **fix(progress):** hot-reloaded `[progress]` settings (`show_context_usage`, `max_actions`, `verbosity`) reach the follow-up turns of a live session, not only the next spawned run ([#863](https://github.com/littlebearapps/untether/issues/863))

@@ -104,7 +104,7 @@ passes its `message_id` to `run_job()` so the engine reply threads under it.
 | `id` | string | (required) | Unique identifier for this webhook. |
 | `path` | string | (required) | URL path the server listens on (e.g. `/hooks/slack-alerts`). |
 | `project` | string\|null | `null` | Project alias. Sets the working directory for the run. |
-| `engine` | string\|null | `null` | Engine override (e.g. `"claude"`, `"codex"`). Uses default engine if unset. |
+| `engine` | string\|null | `null` | Engine override (e.g. `"claude"`, `"codex"`). If unset: the `project`'s `default_engine` when a project is set, otherwise the global `default_engine` (before 0.35.5rc16 a project trigger with no `engine` ran on the global default — [#862](https://github.com/littlebearapps/untether/issues/862)). |
 | `chat_id` | int\|null | `null` | Telegram chat to post in. Falls back to the transport's default `chat_id`. |
 | `auth` | string | `"bearer"` | Auth mode: `"bearer"`, `"hmac-sha256"`, `"hmac-sha1"`, or `"none"`. |
 | `secret` | string\|null | `null` | Auth secret. Required when `auth` is not `"none"`. |
@@ -140,7 +140,7 @@ Webhook IDs must be unique across all configured webhooks.
 | `id` | string | (required) | Unique identifier for this cron. |
 | `schedule` | string | (required) | 5-field cron expression (see [Cron expressions](#cron-expressions)). |
 | `project` | string\|null | `null` | Project alias. Sets the working directory for the run. |
-| `engine` | string\|null | `null` | Engine override. Uses default engine if unset. |
+| `engine` | string\|null | `null` | Engine override. If unset: the `project`'s `default_engine` when a project is set, otherwise the global `default_engine` ([#862](https://github.com/littlebearapps/untether/issues/862)). |
 | `chat_id` | int\|null | `null` | Telegram chat to post in. Falls back to the transport's default `chat_id`. |
 | `prompt` | string\|null | (required if no `prompt_template`) | Static prompt sent to the engine. |
 | `prompt_template` | string\|null | `null` | Template prompt with `{{field}}` substitution (used with fetch data). |
