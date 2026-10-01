@@ -149,3 +149,30 @@ class TestDiffPreviewRendering:
         )
         rendered = self._render(preview)
         assert "+ **bold** `x`\n+ ```py" in rendered
+
+
+def test_elapsed_tail_stays_outside_the_fence() -> None:
+    """rc15 integration finding: after 60 s the #481 elapsed tail was appended
+    after the closing fence, so the code block swallowed the rest of the
+    progress message (footer, resume line)."""
+    from untether.markdown import format_action_line
+    from untether.model import Action
+    from untether.telegram.render import render_markdown
+
+    preview = _format_diff_preview(
+        "Write", {"file_path": "/tmp/c5.txt", "content": "hello\nworld"}
+    )
+    action = Action(
+        id="a1",
+        kind="warning",
+        title=f"Permission Request [Write]\n{preview}",
+        detail={},
+    )
+    line = format_action_line(
+        action, "started", None, command_width=None, elapsed_seconds=112
+    )
+    assert line.splitlines()[0].endswith("· 1m 52s")
+    assert line.endswith("```")
+    rendered, _ = render_markdown(f"{line}  \nfooter line")
+    assert rendered.endswith("footer line")
+    assert "```" not in rendered

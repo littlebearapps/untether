@@ -238,9 +238,14 @@ def format_action_line(
                 # ``▸ Bash · 3m 47s · npm run build`` rather than
                 # ``▸ Bash · 3m 47s · → npm run build``.
                 detail_clean = detail.lstrip("→ ").strip()
-                line += f" · {elapsed_str} · {shorten(detail_clean, 80)}"
+                tail = f" · {elapsed_str} · {shorten(detail_clean, 80)}"
             else:
-                line += f" · {elapsed_str}"
+                tail = f" · {elapsed_str}"
+            # On the first line: a multi-line title (an approval's fenced
+            # diff preview) would otherwise get the tail after its closing
+            # fence, which then never closes (rc15 integration finding).
+            first, sep, rest = line.partition("\n")
+            line = f"{first}{tail}{sep}{rest}"
         return line
     status = action_status(action, completed=True, ok=ok)
     suffix = action_suffix(action)
