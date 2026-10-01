@@ -8,7 +8,7 @@
 </p>
 
 <p align="center">
-  Works with <a href="https://docs.anthropic.com/en/docs/claude-code">Claude Code</a> · <a href="https://github.com/openai/codex">Codex</a> · <a href="https://github.com/opencode-ai/opencode">OpenCode</a> · <a href="https://github.com/mariozechner/pi-coding-agent">Pi</a>
+  Works with <a href="https://docs.anthropic.com/en/docs/claude-code">Claude Code</a> · <a href="https://github.com/openai/codex">Codex</a> · <a href="https://opencode.ai">OpenCode</a> · <a href="https://github.com/mariozechner/pi-coding-agent">Pi</a>
 </p>
 
 <p align="center">
@@ -120,7 +120,7 @@ The wizard offers three **workflow modes** — pick the one that fits:
 |--------|---------|-------------------|
 | [Claude Code](https://docs.anthropic.com/en/docs/claude-code) | `npm i -g @anthropic-ai/claude-code` | Complex refactors, architecture, long context |
 | [Codex](https://github.com/openai/codex) | `npm i -g @openai/codex` | Fast edits, shell commands, quick fixes |
-| [OpenCode](https://github.com/opencode-ai/opencode) | `npm i -g opencode-ai@latest` | 75+ providers via Models.dev, local models |
+| [OpenCode](https://opencode.ai) | `npm i -g opencode-ai@latest` | 75+ providers via Models.dev, local models |
 | [Pi](https://github.com/mariozechner/pi-coding-agent) | `npm i -g @mariozechner/pi-coding-agent` | Multi-provider auth, conversational |
 
 **Note:** Use your existing Claude or ChatGPT subscription — no extra API keys needed (unless you want API billing).

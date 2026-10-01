@@ -1,6 +1,6 @@
 # OpenCode Runner
 
-This runner integrates with the [OpenCode CLI](https://github.com/sst/opencode).
+This runner integrates with the [OpenCode CLI](https://github.com/anomalyco/opencode).
 Shipped in Untether v0.5.0.
 
 ## Installation

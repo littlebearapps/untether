@@ -40,7 +40,7 @@ Untether supports four agent CLIs out of the box:
 
 - **[Claude Code](https://docs.anthropic.com/en/docs/claude-code)** — complex refactors, architecture, long context. Most interactive features (plan mode, ask mode, diff preview, the Pause & Outline plan gate) are Claude-specific.
 - **[Codex](https://github.com/openai/codex)** — fast edits, shell commands, OpenAI subscription via ChatGPT login.
-- **[OpenCode](https://github.com/opencode-ai/opencode)** — 75+ providers via Models.dev, local model support.
+- **[OpenCode](https://opencode.ai)** — 75+ providers via Models.dev, local model support.
 - **[Pi](https://github.com/mariozechner/pi-coding-agent)** — multi-provider auth, conversational style.
 
 Two further engines still load but are **deprecated** and targeted for removal in 0.36.0 — don't start new work on them:
