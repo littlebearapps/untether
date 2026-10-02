@@ -45,6 +45,19 @@ KEY_VALUE_RE = re.compile(
     r"([\"']?\s*([=:])\s*[\"']?)"
     r"([^\s\"',;&}\])]+)"
 )
+# #841: credentials in a URL's userinfo (``scheme://user:pass@host``).
+# Anchored on ``://`` (no scheme backtracking) and greedy to the LAST ``@``
+# before ``/ ? #``, so an unescaped ``@`` inside a password can't leak its
+# tail. Quotes, ``<>`` and backslash are excluded so a JSON blob can't be
+# spanned. Bounded to 512 chars to stay linear (raise the bound if a longer
+# userinfo ever needs masking). The lookahead leaves an already-masked
+# ``***@`` (the #679 / voice ``_log_endpoint`` "credentials configured"
+# marker) untouched — but only when no further ``@`` follows it in the
+# authority, so ``://***@user:pw@host`` is still masked.
+URL_USERINFO_RE = re.compile(
+    r"://(?!\*\*\*@[^\s/?#\"'<>\\@]*(?:[\s/?#\"'<>\\]|\Z))"
+    r"[^\s/?#\"'<>\\]{1,512}@"
+)
 _REDACTED = "[REDACTED]"
 # Values that are clearly not credentials (``secret=None``, ``token=true``).
 _NON_SECRET_VALUES = frozenset({"none", "null", "true", "false", "***"})
@@ -147,7 +160,12 @@ def _redact_key_value(match: re.Match[str]) -> str:
 
 
 def _redact_text(value: str) -> str:
-    redacted = TELEGRAM_TOKEN_RE.sub("bot[REDACTED]", value)
+    redacted = value
+    # #841: URL userinfo first, so a token used as the username becomes one
+    # marker. Cheap prefilter: most log strings carry no URL.
+    if "://" in redacted:
+        redacted = URL_USERINFO_RE.sub("://[REDACTED]@", redacted)
+    redacted = TELEGRAM_TOKEN_RE.sub("bot[REDACTED]", redacted)
     redacted = TELEGRAM_BARE_TOKEN_RE.sub("[REDACTED_TOKEN]", redacted)
     redacted = OPENAI_PROJECT_KEY_RE.sub("[REDACTED_KEY]", redacted)
     redacted = OPENAI_KEY_RE.sub("[REDACTED_KEY]", redacted)

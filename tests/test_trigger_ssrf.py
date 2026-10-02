@@ -525,6 +525,19 @@ class TestStructuredErrors:
         # Unparseable input is returned unchanged, never raises.
         assert redact_url_userinfo("http://[::1") == "http://[::1"
 
+    def test_841_redact_url_userinfo_drop_query(self) -> None:
+        assert redact_url_userinfo(
+            "https://u:p@h/v1?key=abc#frag", drop_query=True
+        ) == ("https://***@h/v1")
+        assert redact_url_userinfo("https://h/v1?key=abc", drop_query=True) == (
+            "https://h/v1"
+        )
+        assert redact_url_userinfo("https://h/v1", drop_query=True) == ("https://h/v1")
+        # the default keeps the query (ssrf.* output unchanged)
+        assert redact_url_userinfo("https://u:p@h/v1?x=1") == ("https://***@h/v1?x=1")
+        # unparseable input is returned unchanged and never raises
+        assert redact_url_userinfo("http://[::1", drop_query=True) == "http://[::1"
+
 
 class TestSuggestAllowlist:
     def test_679_suggest_loopback_v4(self) -> None:

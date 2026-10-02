@@ -837,6 +837,62 @@ async def test_594_transcribe_error_log_default_endpoint_marker() -> None:
     assert rec["cause"] is None
 
 
+class _BoomError(Exception):
+    """An Exception subclass none of the specific handlers catch."""
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    ("error", "event"),
+    [
+        (OpenAIError("nope"), "openai.transcribe.error"),
+        (TimeoutError("slow"), "voice.transcribe.timeout"),
+        (RuntimeError("bad"), "voice.transcribe.error"),
+        (_BoomError("odd"), "voice.transcribe.unexpected"),
+    ],
+)
+async def test_841_endpoint_userinfo_masked_at_all_four_sites(
+    monkeypatch: pytest.MonkeyPatch, error: Exception, event: str
+) -> None:
+    """#841: a base_url with userinfo credentials (and a signed query) must
+    never reach the log verbatim from any of the four failure branches."""
+    from structlog.testing import capture_logs
+
+    import untether.telegram.voice as voice_mod
+
+    async def _permitted(*args, **kwargs):
+        return voice_mod.VoiceEndpointVerdict(
+            status="permitted", host="stt.example.com", port=443
+        )
+
+    monkeypatch.setattr(voice_mod, "classify_voice_endpoint", _permitted)
+
+    async def reply(**kwargs) -> None:
+        pass
+
+    transcriber = _Transcriber(error=error)
+    bot = _Bot(file_info=File(file_path="voice.ogg"), audio=b"ok")
+
+    with capture_logs() as logs:
+        result = await transcribe_voice(
+            bot=bot,
+            msg=_voice_message(file_size=2),
+            enabled=True,
+            model="whisper-1",
+            reply=reply,
+            transcriber=transcriber,
+            base_url="https://r17user:r17pw@stt.example.com/v1?sig=abc",
+        )
+
+    assert result is None
+    rec = next(r for r in logs if r["event"] == event)
+    assert rec["endpoint"] == "https://***@stt.example.com/v1"
+    blob = str(logs)
+    assert "r17pw" not in blob
+    assert "r17user" not in blob
+    assert "sig=abc" not in blob
+
+
 # ---------------------------------------------------------------------------
 # #679: actionable SSRF refusal + startup/reload endpoint check
 # ---------------------------------------------------------------------------

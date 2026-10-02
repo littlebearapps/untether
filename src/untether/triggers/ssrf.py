@@ -90,22 +90,30 @@ class SSRFResolutionError(SSRFError):
         self.hostname = hostname
 
 
-def redact_url_userinfo(url: str) -> str:
+def redact_url_userinfo(url: str, *, drop_query: bool = False) -> str:
     """#679: replace ``user[:pass]@`` in *url*'s netloc with ``***@``.
 
-    Returns the input unchanged when it has no userinfo or can't be parsed —
-    this is a log-hygiene helper and must never raise.
+    With ``drop_query`` (#841) the query string and fragment are dropped too,
+    whether or not the URL carries userinfo (signed URLs / ``?key=`` params).
+
+    Returns the input unchanged when there is nothing to redact or it can't be
+    parsed — this is a log-hygiene helper and must never raise.
     """
     try:
         parsed = urlparse(url)
         netloc = parsed.netloc
     except ValueError:
         return url
-    if "@" not in netloc:
+    has_userinfo = "@" in netloc
+    has_query = drop_query and bool(parsed.query or parsed.fragment)
+    if not has_userinfo and not has_query:
         return url
-    host_part = netloc.rsplit("@", 1)[1]
     try:
-        return parsed._replace(netloc=f"***@{host_part}").geturl()
+        if has_userinfo:
+            parsed = parsed._replace(netloc=f"***@{netloc.rsplit('@', 1)[1]}")
+        if has_query:
+            parsed = parsed._replace(query="", fragment="")
+        return parsed.geturl()
     except ValueError:
         return url
 

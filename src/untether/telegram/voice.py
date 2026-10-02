@@ -16,6 +16,7 @@ from ..triggers.ssrf import (
     SSRFError,
     SSRFResolutionError,
     parse_networks,
+    redact_url_userinfo,
     strip_url_userinfo,
     suggest_allowlist,
     validate_url_with_dns,
@@ -202,6 +203,15 @@ def _display_host(host: str | None) -> str:
 def _allowlist_toml(suggested: Sequence[str]) -> str:
     inner = ", ".join(f'"{entry}"' for entry in suggested)
     return f"{VOICE_ALLOWLIST_KEY} = [{inner}]"
+
+
+def _log_endpoint(base_url: str | None) -> str:
+    """#841: the transcription endpoint as it may appear in a log line —
+    userinfo credentials masked (``***@``), query string and fragment dropped,
+    ``openai-default`` when no base URL is configured."""
+    if not base_url:
+        return "openai-default"
+    return redact_url_userinfo(base_url, drop_query=True)
 
 
 def _endpoint_hint(verdict: VoiceEndpointVerdict) -> str:
@@ -472,7 +482,7 @@ async def transcribe_voice(
             error=str(exc),
             error_type=exc.__class__.__name__,
             cause=repr(exc.__cause__) if exc.__cause__ is not None else None,
-            endpoint=base_url or "openai-default",
+            endpoint=_log_endpoint(base_url),
             file_id=voice.file_id,
             file_size=voice.file_size,
         )
@@ -494,7 +504,7 @@ async def transcribe_voice(
         logger.error(
             "voice.transcribe.timeout",
             error=str(exc),
-            endpoint=base_url or "openai-default",
+            endpoint=_log_endpoint(base_url),
             file_id=voice.file_id,
             file_size=voice.file_size,
         )
@@ -505,7 +515,7 @@ async def transcribe_voice(
             "voice.transcribe.error",
             error=str(exc),
             error_type=exc.__class__.__name__,
-            endpoint=base_url or "openai-default",
+            endpoint=_log_endpoint(base_url),
             file_id=voice.file_id,
             file_size=voice.file_size,
         )
@@ -516,7 +526,7 @@ async def transcribe_voice(
             "voice.transcribe.unexpected",
             error=str(exc),
             error_type=exc.__class__.__name__,
-            endpoint=base_url or "openai-default",
+            endpoint=_log_endpoint(base_url),
             file_id=voice.file_id,
             file_size=voice.file_size,
         )

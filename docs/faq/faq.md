@@ -58,7 +58,7 @@ The two [deprecated engines](#which-ai-coding-agents-does-untether-support) are 
 
 API keys (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, etc.) are only needed if you specifically want API billing instead of a subscription, or for engines that don't offer subscription auth (e.g. some OpenCode providers). Untether itself doesn't make any API calls — it just spawns the agent CLI as a subprocess.
 
-The one exception is voice transcription: Untether ships with optional Whisper-via-Groq support. That's a separate API key (`voice_transcription_api_key`) which is masked in logs as `SecretStr` and only sent to your configured transcription endpoint.
+The one exception is voice transcription: Untether ships with optional Whisper-via-Groq support. That's a separate API key (`voice_transcription_api_key`) which is masked in logs as `SecretStr` and only sent to your configured transcription endpoint — as are credentials embedded in a configured URL (`https://user:pass@host/v1`), which are masked in every log line.
 
 ## Where does my code and data go?
 
