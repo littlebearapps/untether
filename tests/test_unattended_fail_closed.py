@@ -395,3 +395,23 @@ def test_835_received_log_carries_unattended() -> None:
         _feed(state, _can_use_tool("r1", "Write", file_path="/tmp/a"))
     (received,) = [e for e in logs if e["event"] == "control_request.received"]
     assert received["unattended"] == "cron:c1"
+
+
+def test_835_attended_context_strips_trigger_fields() -> None:
+    from untether.context import attended_context
+
+    assert attended_context(None) is None
+    plain = RunContext(project="p", branch="b")
+    assert attended_context(plain) is plain
+    cron = RunContext(
+        project="p",
+        branch="b",
+        trigger_source="cron:c1",
+        permission_mode="auto",
+        model="m",
+        reasoning="high",
+    )
+    assert attended_context(cron) == plain
+    assert unattended_trigger(attended_context(cron)) is None
+    # /at and /loop runs carry a trigger source too; a reply drops it.
+    assert attended_context(RunContext(trigger_source="at:1")) == RunContext()

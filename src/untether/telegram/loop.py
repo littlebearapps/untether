@@ -14,7 +14,7 @@ from ..commands import list_command_ids
 from ..config import ConfigError
 from ..config_watch import ConfigReload
 from ..config_watch import watch_config as watch_config_changes
-from ..context import RunContext, unattended_trigger
+from ..context import RunContext, attended_context, unattended_trigger
 from ..directives import DirectiveError
 from ..ids import RESERVED_CHAT_COMMANDS, RESERVED_COMMAND_IDS
 from ..logging import get_logger
@@ -1654,20 +1654,31 @@ async def send_with_resume(
             notify=False,
         )
         return
+    # #835: a human reply to a running cron/webhook turn (its progress or a
+    # wake-turn message) is the human's turn, not the trigger's — drop the
+    # trigger-only fields so it resolves attended with the chat's options.
+    context = attended_context(running_task.context)
+    if context is not running_task.context:
+        logger.info(
+            "trigger.reply_context_attended",
+            chat_id=chat_id,
+            user_msg_id=user_msg_id,
+            trigger_source=running_task.context.trigger_source,
+        )
     progress_ref = await _send_queued_progress(
         cfg,
         chat_id=chat_id,
         user_msg_id=user_msg_id,
         thread_id=thread_id,
         resume_token=resume,
-        context=running_task.context,
+        context=context,
     )
     await enqueue(
         chat_id,
         user_msg_id,
         text,
         resume,
-        running_task.context,
+        context,
         thread_id,
         session_key,
         progress_ref,

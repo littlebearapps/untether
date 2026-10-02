@@ -40,3 +40,26 @@ def unattended_trigger(context: RunContext | None) -> str | None:
     if source and source.startswith(UNATTENDED_TRIGGER_PREFIXES):
         return source
     return None
+
+
+def attended_context(context: RunContext | None) -> RunContext | None:
+    """*context* with the trigger-only fields cleared (#835).
+
+    For a human message that reuses a trigger run's context — a reply to a
+    running cron/webhook turn's progress or wake-turn message. The human
+    keeps the run's project/branch but not its provenance or its per-trigger
+    ``permission_mode``/``model``/``reasoning``: their turn resolves the
+    chat's own options, so it never inherits "unattended" (approvals
+    auto-denied) and never lands in the cron's live process, whose spawn
+    options no longer match (``options_changed`` → attended resume).
+    """
+    if context is None:
+        return None
+    if (
+        context.trigger_source is None
+        and context.permission_mode is None
+        and context.model is None
+        and context.reasoning is None
+    ):
+        return context
+    return RunContext(project=context.project, branch=context.branch)
