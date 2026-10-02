@@ -128,6 +128,13 @@ gh issue list --repo littlebearapps/untether \
 
 `severity:critical` and `severity:major` should be resolved before tag; `severity:minor` and `severity:trivial` can defer to the next patch if scope-pressured. Enhancements (`enhancement` label) are routed to `next_patch`/`next_minor`/`Future` milestones by the auditor and don't block release.
 
+## Dependabot alerts track `master`
+
+- Dependabot alerts are raised against the **default branch's** `uv.lock` (`master` = latest PyPI), so a fix merged to `dev` leaves the alert open until Nathan's dev→master stable merge. That's expected, not a failure.
+- Verify dev-lock fixes with `uv sync --frozen --all-groups && uv run --no-sync pip-audit --skip-editable` (what CI runs), not the alert list. A dated, commented `--ignore-vuln` with an issue link is the only escape hatch.
+- Shipped CVE fixes also need a `pyproject.toml` floor, not just a lock bump: `pip install -U` / `pipx upgrade` keep an older dependency that still satisfies the published `Requires-Dist`.
+- Dependabot uses the `uv` ecosystem with version updates targeting `dev`. Keep Dependabot *security updates* disabled: they always open PRs against `master`, which breaks the release guard.
+
 ## Changelog format
 
 - Sections: `### fixes`, `### changes`, `### breaking`, `### docs`, `### tests`

@@ -12,13 +12,25 @@ updates:
     labels:
       - "dependencies"
 
-  - package-ecosystem: "pip"
+  # uv ecosystem: Dependabot updates uv.lock alongside pyproject.toml, so its
+  # PRs pass the `lockfile` CI job (the old "pip" ecosystem only rewrote
+  # pyproject.toml). Version updates target dev; security updates stay
+  # disabled because they always target master (release guard).
+  - package-ecosystem: "uv"
     directory: "/"
     target-branch: "dev"
     schedule:
       interval: "weekly"
       day: "monday"
+    cooldown:
+      default-days: 7
     commit-message:
       prefix: "deps"
     labels:
       - "dependencies"
+    groups:
+      docs:
+        patterns:
+          - "zensical"
+          - "mkdocstrings*"
+          - "pymdown-extensions"
