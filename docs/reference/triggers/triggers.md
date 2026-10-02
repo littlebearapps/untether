@@ -223,8 +223,8 @@ denied. Webhooks have no `permission_mode` and always inherit. Per requested mod
 |---|---|
 | `default` / `manual` / `acceptEdits` | every tool the mode would ask about |
 | `plan` | `ExitPlanMode`, and `Edit` / `Write` / `MultiEdit` / `NotebookEdit` / `Bash` (read-only tools run as before) |
-| `plan-auto`, `dontAsk` | nothing new (the plan is still rubber-stamped) |
-| `auto`, `bypassPermissions` | every request that still reaches Untether — `ask` rules, hook `ask` decisions, tools that require user interaction, critical-path `rm`, and auto mode's prompting fallback after repeated classifier blocks |
+| `plan-auto` | nothing new (the plan is still rubber-stamped) |
+| `auto`, `dontAsk`, `bypassPermissions` | every request that still reaches Untether — `ask` rules, hook `ask` decisions, tools that require user interaction, critical-path `rm`, and auto mode's prompting fallback after repeated classifier blocks |
 | any, with diff preview on | an edit that would wait for its diff approval |
 | any | `AskUserQuestion` (with "proceed on reasonable defaults") |
 

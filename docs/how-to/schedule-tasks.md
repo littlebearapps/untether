@@ -141,7 +141,7 @@ permission_mode = "auto"
 
     - `default`, `manual`, `acceptEdits`: any tool the mode would ask about is denied.
     - `plan`: the plan approval is denied (the run ends with the plan as its answer), and so are `Edit`, `Write`, `MultiEdit`, `NotebookEdit` and `Bash`. Use `plan-auto` if the cron should plan and then act.
-    - `auto`, `bypassPermissions`: routine work runs as before. Only requests the CLI still asks the host about are denied — an `ask` rule, a hook that answers `ask`, a tool that needs a person, a critical-path `rm`, and auto mode falling back to asking after repeated classifier blocks.
+    - `auto`, `dontAsk`, `bypassPermissions`: routine work runs as before. Only requests the CLI still asks the host about are denied — an `ask` rule, a hook that answers `ask`, a tool that needs a person, a critical-path `rm`, and auto mode falling back to asking after repeated classifier blocks.
     - With diff preview on in the chat, a file edit that would have shown its diff for approval is denied too.
 
     Questions (`AskUserQuestion`) are denied in every mode, with a note to proceed on reasonable defaults. `/at` runs are not affected: you scheduled them from the chat, so their buttons work as usual. A reply to an unattended run's message continues in an attended session with normal buttons.

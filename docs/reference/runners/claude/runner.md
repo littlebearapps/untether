@@ -257,7 +257,7 @@ with the request (see "Requested vs effective mode" above).
 
 | Point in stage 6 | Unattended behaviour | `reason` |
 |---|---|---|
-| Autonomous auto-approve, mode `auto` / `bypassPermissions` | deny every request (they're all ask-class: `ask` rules, hook `ask`, `requiresUserInteraction` MCP tools, critical-path `rm`, auto's classifier fallback) | `ask_class` |
+| Autonomous auto-approve, mode `auto` / `dontAsk` / `bypassPermissions` | deny every request (they're all ask-class: `ask` rules, hook `ask`, `requiresUserInteraction` MCP tools, critical-path `rm`, auto's classifier fallback; `dontAsk` auto-denies anything that would prompt, so whatever still arrives is ask-class too) | `ask_class` |
 | Autonomous auto-approve, mode `plan` | deny `Edit` / `Write` / `MultiEdit` / `NotebookEdit` / `Bash` (Probe-G regression: plan mode sends them to the host); read-only tools approved as before | `plan_mode` |
 | Diff-preview gate would fire | deny (skipping it would approve an unseen write) | `diff_preview` |
 | Anything left before the outline gate (ExitPlanMode in `plan`, AskUserQuestion, prompting-mode tools, a #751-re-armed downgraded `auto`, other request types) | deny | `would_wait` |

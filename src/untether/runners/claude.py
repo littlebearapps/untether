@@ -3291,7 +3291,9 @@ _UNATTENDED_PLAN_DENIED_TOOLS = frozenset(
 # `ask`, a tool that requires user interaction, a critical-path rm, or (in
 # `auto`) the classifier falling back to prompting after repeated blocks
 # (probe 2026-10-02, CLI 2.1.287: `decision_reason_type: "classifier"`).
-_UNATTENDED_DENY_ALL_MODES = frozenset({"bypassPermissions", "auto"})
+# `dontAsk` auto-denies anything that would prompt, so a request that still
+# reaches stage 6 under it is ask-class too — never approved unattended.
+_UNATTENDED_DENY_ALL_MODES = frozenset({"bypassPermissions", "auto", "dontAsk"})
 
 
 def _unattended_autonomous_deny_reason(

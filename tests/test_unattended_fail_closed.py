@@ -285,14 +285,14 @@ def test_835_attended_plan_write_unchanged() -> None:
     assert "r1" in state.auto_approve_queue
 
 
-@pytest.mark.parametrize("mode", ["bypassPermissions", "auto"])
+@pytest.mark.parametrize("mode", ["bypassPermissions", "auto", "dontAsk"])
 @pytest.mark.parametrize("tool", ["Bash", "Glob", "mcp__x__send"])
 def test_835_bypass_and_auto_cron_ask_class_request_denied(
     mode: str, tool: str
 ) -> None:
-    """Anything reaching stage 6 under `bypassPermissions` / `auto` is an
-    ask-class request (ask rule, hook ask, interaction-required tool, auto's
-    prompting fallback) — denied in an unattended run."""
+    """Anything reaching stage 6 under `bypassPermissions` / `auto` /
+    `dontAsk` is an ask-class request (ask rule, hook ask, interaction-required
+    tool, auto's prompting fallback) — denied in an unattended run."""
     state = _state(mode)
     with capture_logs() as logs:
         _feed(state, _can_use_tool("r1", tool))
@@ -301,7 +301,7 @@ def test_835_bypass_and_auto_cron_ask_class_request_denied(
     assert _deny_logs(logs)[0]["reason"] == "ask_class"
 
 
-@pytest.mark.parametrize("mode", ["bypassPermissions", "auto"])
+@pytest.mark.parametrize("mode", ["bypassPermissions", "auto", "dontAsk"])
 def test_835_attended_bypass_and_auto_unchanged(mode: str) -> None:
     state = _state(mode, trigger=None)
     _feed(state, _can_use_tool("r1", "Bash"))
