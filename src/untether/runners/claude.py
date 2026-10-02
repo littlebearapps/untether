@@ -8184,10 +8184,13 @@ def _translate_claude_event_base(
                     key_params = []
                     for key in ["file_path", "path", "command", "pattern"]:
                         if key in tool_input:
-                            value = str(tool_input[key])
-                            if len(value) > 50:
-                                value = value[:47] + "..."
-                            key_params.append(f"{key}={value}")
+                            # #871/#418: the title is markdown — a raw value
+                            # lost its backticks (`x` → x) and a heredoc's
+                            # newline split the title. A one-line code span
+                            # whose fence outruns any inner backtick.
+                            value = inline_code(str(tool_input[key]), width=50)
+                            if value:
+                                key_params.append(f"{key}={value}")
                     if key_params:
                         details += f" ({', '.join(key_params)})"
                 # CC4: Diff preview for Edit/Write tools (gated on per-chat setting)

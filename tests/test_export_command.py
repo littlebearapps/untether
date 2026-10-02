@@ -168,6 +168,31 @@ class TestFormatExportMarkdown:
         assert "Completed" in md
         assert "Done!" in md
 
+    @staticmethod
+    def _command_md(command: str) -> str:
+        return _format_export_markdown(
+            "s",
+            [
+                {
+                    "type": "action",
+                    "phase": "completed",
+                    "ok": True,
+                    "action": {"id": "1", "kind": "command", "title": command},
+                }
+            ],
+            None,
+        )
+
+    def test_command_with_backticks_is_a_safe_code_span(self):
+        """#871/#418: an inner backtick can't close the code span."""
+        assert "- ✓ `` echo `date` ``" in self._command_md("echo `date`")
+        assert "- ✓ `git status`" in self._command_md("git status")
+
+    def test_multiline_command_is_a_fenced_block(self):
+        """#871/#418: a heredoc is kept verbatim in a fence it can't close."""
+        md = self._command_md("cat <<EOF\nhi `x`\n```\nEOF")
+        assert "  ````\n  cat <<EOF\n  hi `x`\n  ```\n  EOF\n  ````" in md
+
     def test_with_usage(self):
         md = _format_export_markdown(
             "s1",

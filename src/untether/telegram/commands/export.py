@@ -15,6 +15,7 @@ from ...commands import (
     CommandResult,
 )
 from ...logging import get_logger
+from ...markdown import backtick_fence, inline_code
 from ...session_costs import token_counts
 from ...transport import ChannelId
 
@@ -100,6 +101,18 @@ def latest_session_for_chat(
     return best
 
 
+def _command_line(symbol: str, command: str) -> str:
+    """#871/#418: a command as Markdown that its own backticks can't break.
+
+    One line → a code span; a multi-line command (heredoc) → a fenced block
+    inside the list item, so the export keeps it verbatim."""
+    if "\n" not in command.strip():
+        return f"- {symbol} {inline_code(command)}"
+    fence = backtick_fence(command, minimum=3)
+    body = "\n".join(f"  {ln}" if ln else "" for ln in command.strip("\n").splitlines())
+    return f"- {symbol}\n\n  {fence}\n{body}\n  {fence}\n"
+
+
 # #418: headings for a live session's later turns (``TurnEvent.reason``).
 _TURN_REASON_LABELS: dict[str, str] = {
     "followup": "follow-up",
@@ -182,7 +195,7 @@ def _format_export_markdown(
             else:
                 symbol = "↻"
             if kind == "command":
-                lines.append(f"- {symbol} `{title}`")
+                lines.append(_command_line(symbol, title))
             elif kind == "file_change":
                 lines.append(f"- {symbol} 📝 {title}")
             elif kind == "tool":

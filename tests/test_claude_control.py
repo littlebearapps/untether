@@ -2523,6 +2523,30 @@ def test_non_exitplanmode_approval_unchanged() -> None:
     assert _PROMPTING not in action.title
 
 
+@pytest.mark.parametrize(
+    ("command", "expected"),
+    [
+        ("ls", "(command=`ls`)"),
+        ("echo 'x `y` z'", "(command=``echo 'x `y` z'``)"),
+        ("cat <<EOF\nhi\nEOF", "(command=`cat <<EOF hi EOF`)"),
+    ],
+)
+def test_approval_title_command_is_a_safe_code_span(
+    command: str, expected: str
+) -> None:
+    """#871/#418: backticks survive and a heredoc stays on the title line."""
+    state, factory = _make_state_with_session("sess-871-title")
+    state.prompting_mode = True
+    events = translate_claude_event(
+        _can_use_tool_event("req-871-title", "Bash", command=command),
+        title="claude",
+        state=state,
+        factory=factory,
+    )
+    first_line = events[-1].action.title.partition("\n")[0]
+    assert first_line.endswith(expected)
+
+
 @pytest.mark.parametrize("outline_written", [True, False])
 def test_post_outline_title_has_caption(outline_written: bool) -> None:
     session_id = "sess-outline-383"
