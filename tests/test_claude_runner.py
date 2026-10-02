@@ -5055,6 +5055,78 @@ class TestLoopObservation:
         assert pending[0].kind == "wakeup"
         assert pending[0].delay_seconds == 3600.0
 
+    @pytest.fixture
+    def _set_thread(self):
+        """Push a run thread (forum topic) into the run-context contextvar."""
+        from untether.utils.paths import reset_run_thread_id, set_run_thread_id
+
+        token = set_run_thread_id(10)
+        try:
+            yield 10
+        finally:
+            reset_run_thread_id(token)
+
+    @pytest.mark.usefixtures(
+        "_enable_loop", "_set_chat", "_set_thread", "_installed_scheduler"
+    )
+    async def test_826_cron_registration_records_run_thread(self):
+        """#826: a CronCreate inside a run in topic 10 records thread 10, so a
+        /new in another topic leaves it alone and fires land back in topic 10."""
+        from untether import loop_scheduler
+
+        state = ClaudeStreamState()
+        _seed_state_for_loop_observation(state, session_id="sess-cron-t10")
+        translate_claude_event(
+            _decode_event(
+                _make_tool_use_event(
+                    "CronCreate",
+                    "toolu_T10",
+                    {"cron": "*/5 * * * *", "prompt": "poll", "recurring": True},
+                )
+            ),
+            title="claude",
+            state=state,
+            factory=state.factory,
+        )
+        translate_claude_event(
+            _decode_event(
+                _make_tool_use_event(
+                    "ScheduleWakeup",
+                    "toolu_T10W",
+                    {"delaySeconds": 3600, "prompt": "check later"},
+                )
+            ),
+            title="claude",
+            state=state,
+            factory=state.factory,
+        )
+        pending = loop_scheduler.pending_for_chat(7777)
+        assert {(e.kind, e.thread_id) for e in pending} == {
+            ("cron", 10),
+            ("wakeup", 10),
+        }
+
+    @pytest.mark.usefixtures("_enable_loop", "_set_chat", "_installed_scheduler")
+    async def test_826_registration_without_run_thread_is_general(self):
+        """No run thread (General / non-topic chat) → ``thread_id=None``."""
+        from untether import loop_scheduler
+
+        state = ClaudeStreamState()
+        _seed_state_for_loop_observation(state, session_id="sess-cron-gen")
+        translate_claude_event(
+            _decode_event(
+                _make_tool_use_event(
+                    "CronCreate",
+                    "toolu_GEN",
+                    {"cron": "*/5 * * * *", "prompt": "poll", "recurring": True},
+                )
+            ),
+            title="claude",
+            state=state,
+            factory=state.factory,
+        )
+        assert [e.thread_id for e in loop_scheduler.pending_for_chat(7777)] == [None]
+
     @pytest.mark.usefixtures("_enable_loop", "_set_chat", "_installed_scheduler")
     async def test_schedule_wakeup_skipped_when_below_threshold(self):
         """Short waits stay rendered live by the rc8 countdown — no

@@ -1,7 +1,9 @@
 from dataclasses import replace
 from pathlib import Path
 
+import anyio
 import pytest
+from structlog.testing import capture_logs
 
 from tests.telegram_fakes import (
     DEFAULT_ENGINE_ID,
@@ -24,6 +26,7 @@ from untether.telegram.commands.topics import (
     _handle_topic_command,
 )
 from untether.telegram.topic_state import TopicStateStore
+from untether.telegram.topics import thread_filter_for
 from untether.telegram.types import TelegramIncomingMessage
 from untether.transport import MessageRef
 from untether.transport_runtime import TransportRuntime
@@ -36,6 +39,8 @@ def _msg(
     message_id: int = 1,
     thread_id: int | None = None,
     chat_type: str | None = "private",
+    is_forum: bool | None = None,
+    is_topic_message: bool | None = None,
 ) -> TelegramIncomingMessage:
     return TelegramIncomingMessage(
         transport="telegram",
@@ -46,7 +51,9 @@ def _msg(
         reply_to_text=None,
         sender_id=1,
         thread_id=thread_id,
+        is_topic_message=is_topic_message,
         chat_type=chat_type,
+        is_forum=is_forum,
     )
 
 
@@ -341,3 +348,292 @@ async def test_new_command_cancels_running_in_topic(tmp_path: Path) -> None:
     text = transport.send_calls[-1]["message"].text
     assert "cancelled run" in text
     assert "cleared" in text
+
+
+# --- #826: /new is scoped to the forum topic ---
+
+FORUM = -1001234
+
+
+def _forum_msg(thread_id: int | None) -> TelegramIncomingMessage:
+    return _msg(
+        "/new",
+        chat_id=FORUM,
+        thread_id=thread_id,
+        chat_type="supergroup",
+        is_forum=True,
+        is_topic_message=True if thread_id is not None else None,
+    )
+
+
+def _tasks(chat_id: int, *thread_ids: int | None) -> dict[MessageRef, RunningTask]:
+    return {
+        MessageRef(channel_id=chat_id, message_id=100 + i): RunningTask(thread_id=t)
+        for i, t in enumerate(thread_ids)
+    }
+
+
+def _by_thread(tasks: dict[MessageRef, RunningTask]) -> dict[int | None, bool]:
+    return {t.thread_id: t.cancel_requested.is_set() for t in tasks.values()}
+
+
+def test_826_cancel_chat_tasks_forum_topic_only() -> None:
+    running = _tasks(FORUM, 6, 10)
+    msg = _forum_msg(10)
+
+    with capture_logs() as logs:
+        cancelled = _cancel_chat_tasks(
+            FORUM, running, thread_filter=thread_filter_for(msg), thread_id=10
+        )
+
+    assert cancelled == 1
+    assert _by_thread(running) == {6: False, 10: True}
+    scope = [e for e in logs if e.get("event") == "new.cancel_scope"]
+    assert len(scope) == 1
+    assert scope[0]["scoped"] is True
+    assert scope[0]["cancelled"] == 1
+    assert scope[0]["skipped_other_threads"] == 1
+    assert scope[0]["thread_id"] == 10
+
+
+def test_826_cancel_scope_counts_live_run_once() -> None:
+    """#776: a live run registered under several refs is skipped once."""
+    live = RunningTask(thread_id=6)
+    running = {
+        MessageRef(channel_id=FORUM, message_id=1): live,
+        MessageRef(channel_id=FORUM, message_id=2): live,
+    }
+    with capture_logs() as logs:
+        cancelled = _cancel_chat_tasks(
+            FORUM, running, thread_filter=thread_filter_for(_forum_msg(10))
+        )
+    assert cancelled == 0
+    scope = [e for e in logs if e.get("event") == "new.cancel_scope"]
+    assert scope[0]["skipped_other_threads"] == 1
+    assert scope[0]["cancelled"] == 0
+
+
+def test_826_general_new_leaves_topics_alone() -> None:
+    running = _tasks(FORUM, None, 6)
+    cancelled = _cancel_chat_tasks(
+        FORUM, running, thread_filter=thread_filter_for(_forum_msg(None))
+    )
+    assert cancelled == 1
+    assert _by_thread(running) == {None: True, 6: False}
+
+
+def test_826_general_id_1_equals_none() -> None:
+    running = _tasks(FORUM, 1)
+    assert (
+        _cancel_chat_tasks(
+            FORUM, running, thread_filter=thread_filter_for(_forum_msg(None))
+        )
+        == 1
+    )
+    running = _tasks(FORUM, None)
+    assert (
+        _cancel_chat_tasks(
+            FORUM, running, thread_filter=thread_filter_for(_forum_msg(1))
+        )
+        == 1
+    )
+
+
+@pytest.mark.anyio
+async def test_826_topic_new_handler_scoped(tmp_path: Path) -> None:
+    transport = FakeTransport()
+    cfg = replace(
+        make_cfg(transport),
+        topics=TelegramTopicsSettings(enabled=True, scope="all"),
+    )
+    store = TopicStateStore(tmp_path / "topics.json")
+    msg = _forum_msg(10)
+    running = _tasks(FORUM, 10, 6)
+
+    await _handle_new_command(
+        cfg,
+        msg,
+        store=store,
+        resolved_scope="all",
+        scope_chat_ids=frozenset({FORUM}),
+        running_tasks=running,
+    )
+
+    assert _by_thread(running) == {10: True, 6: False}
+    text = transport.send_calls[-1]["message"].text
+    assert "cancelled run and cleared stored sessions for this topic" in text
+
+
+@pytest.mark.anyio
+async def test_826_topic_new_handler_other_topic_only_clears(tmp_path: Path) -> None:
+    """R17-14a shape: /new in topic B while only topic A runs."""
+    transport = FakeTransport()
+    cfg = replace(
+        make_cfg(transport),
+        topics=TelegramTopicsSettings(enabled=True, scope="all"),
+    )
+    store = TopicStateStore(tmp_path / "topics.json")
+    running = _tasks(FORUM, 6)
+
+    await _handle_new_command(
+        cfg,
+        _forum_msg(10),
+        store=store,
+        resolved_scope="all",
+        scope_chat_ids=frozenset({FORUM}),
+        running_tasks=running,
+    )
+
+    assert _by_thread(running) == {6: False}
+    text = transport.send_calls[-1]["message"].text
+    assert "cancelled run" not in text
+    assert "cleared stored sessions for this topic" in text
+
+
+@pytest.mark.anyio
+async def test_826_chat_new_handler_forum_topics_disabled(tmp_path: Path) -> None:
+    transport = FakeTransport()
+    cfg = make_cfg(transport)
+    store = ChatSessionStore(tmp_path / "sessions.json")
+    msg = _forum_msg(6)
+    running = _tasks(FORUM, 6, 10, None)
+
+    with capture_logs() as logs:
+        await _handle_chat_new_command(
+            cfg, msg, store, session_key=(FORUM, 1), running_tasks=running
+        )
+
+    assert _by_thread(running) == {6: True, 10: False, None: False}
+    cancelled_log = [e for e in logs if e.get("event") == "new.cancelled_running"]
+    assert cancelled_log and cancelled_log[0]["thread_id"] == 6
+
+
+def test_826_non_forum_group_stays_chat_wide() -> None:
+    msg = _msg("/new", chat_id=-100555, chat_type="supergroup")
+    assert thread_filter_for(msg) is None
+    running = _tasks(-100555, 55, None)
+    with capture_logs() as logs:
+        cancelled = _cancel_chat_tasks(
+            -100555, running, thread_filter=thread_filter_for(msg)
+        )
+    assert cancelled == 2
+    scope = [e for e in logs if e.get("event") == "new.cancel_scope"]
+    assert scope[0]["scoped"] is False
+
+
+def test_826_basic_group_stays_chat_wide() -> None:
+    msg = _msg("/new", chat_id=-555, chat_type="group")
+    assert thread_filter_for(msg) is None
+
+
+def test_826_private_chat_unchanged() -> None:
+    msg = _msg("/new", chat_type="private")
+    running = _tasks(msg.chat_id, None, None)
+    assert (
+        _cancel_chat_tasks(msg.chat_id, running, thread_filter=thread_filter_for(msg))
+        == 2
+    )
+
+
+def test_826_private_chat_without_chat_type_uses_chat_id() -> None:
+    """``is_private`` falls back to ``chat_id > 0`` when chat_type is absent."""
+    msg = _msg("/new", chat_id=777, thread_id=3, chat_type=None)
+    running = _tasks(777, 3, 4)
+    _cancel_chat_tasks(777, running, thread_filter=thread_filter_for(msg))
+    assert _by_thread(running) == {3: True, 4: False}
+
+
+def test_826_private_topics_scoped() -> None:
+    msg = _msg("/new", thread_id=3, chat_type="private", is_topic_message=True)
+    running = _tasks(msg.chat_id, 3, 4)
+    assert (
+        _cancel_chat_tasks(msg.chat_id, running, thread_filter=thread_filter_for(msg))
+        == 1
+    )
+    assert _by_thread(running) == {3: True, 4: False}
+
+
+@pytest.mark.anyio
+async def test_826_loop_entries_scoped() -> None:
+    from untether import loop_scheduler
+
+    class _Transport:
+        async def send(self, **_):
+            return None
+
+        async def edit(self, **_):
+            return None
+
+        async def delete(self, _ref):
+            return None
+
+    async def _noop(*_args, **_kwargs):
+        return None
+
+    loop_scheduler.uninstall()
+    async with anyio.create_task_group() as tg:
+        loop_scheduler.install(tg, _noop, _Transport(), 1)
+        try:
+            for thread_id in (6, 10):
+                loop_scheduler.register_pending_cron(
+                    session_id=f"sess-{thread_id}",
+                    tool_use_id=f"tu-{thread_id}",
+                    cron_expression="*/5 * * * *",
+                    prompt=f"p{thread_id}",
+                    recurring=True,
+                    chat_id=50,
+                    thread_id=thread_id,
+                )
+            msg = _msg(
+                "/new",
+                chat_id=50,
+                thread_id=10,
+                chat_type="supergroup",
+                is_forum=True,
+            )
+            cancelled = _cancel_chat_tasks(50, {}, thread_filter=thread_filter_for(msg))
+            assert cancelled == 1
+            assert [e.thread_id for e in loop_scheduler.pending_for_chat(50)] == [6]
+        finally:
+            tg.cancel_scope.cancel()
+            loop_scheduler.uninstall()
+
+
+@pytest.mark.anyio
+async def test_826_stateless_new_scoped_to_topic() -> None:
+    """The stateless /new closure (no topic store, no chat store) is scoped too."""
+    from untether.telegram.loop import TelegramCommandContext, _dispatch_builtin_command
+
+    transport = FakeTransport()
+    cfg = make_cfg(transport)
+    msg = _forum_msg(10)
+    running = _tasks(FORUM, 10, 6)
+    replies: list[str] = []
+    started: list = []
+
+    async def _reply(*, text: str, **_kwargs) -> None:
+        replies.append(text)
+
+    class _TG:
+        def start_soon(self, func, *args) -> None:
+            started.append((func, args))
+
+    ctx = TelegramCommandContext(
+        cfg=cfg,
+        msg=msg,
+        args_text="",
+        ambient_context=None,
+        topic_store=None,
+        chat_prefs=None,
+        resolved_scope=None,
+        scope_chat_ids=frozenset(),
+        reply=_reply,
+        task_group=_TG(),  # type: ignore[arg-type]
+        running_tasks=running,
+    )
+    assert _dispatch_builtin_command(ctx=ctx, command_id="new") is True
+    func, args = started[0]
+    await func(*args)
+
+    assert _by_thread(running) == {10: True, 6: False}
+    assert replies == ["cancelled run for this chat."]

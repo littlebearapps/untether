@@ -109,12 +109,23 @@ class ThreadScheduler:
             )
         )
 
-    def queued_for_chat(self, chat_id: ChannelId) -> list[ThreadJob]:
-        """Return queued jobs for a specific chat (sync, for cancel fallback)."""
+    def queued_for_chat(
+        self,
+        chat_id: ChannelId,
+        *,
+        thread_filter: Callable[[ThreadId | None], bool] | None = None,
+    ) -> list[ThreadJob]:
+        """Return queued jobs for a specific chat (sync, for cancel fallback).
+
+        #826: ``thread_filter`` (when given) keeps only jobs whose
+        ``thread_id`` it accepts; ``None`` = the whole chat.
+        """
         return [
             job
             for job in self._queued_by_progress.values()
-            if job.chat_id == chat_id and job.progress_ref is not None
+            if job.chat_id == chat_id
+            and job.progress_ref is not None
+            and (thread_filter is None or thread_filter(job.thread_id))
         ]
 
     async def cancel_queued(

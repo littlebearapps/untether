@@ -8,6 +8,7 @@ from ...progress import ProgressTracker
 from ...runner_bridge import RunningTasks
 from ...scheduler import ThreadJob, ThreadScheduler
 from ...transport import MessageRef
+from ..topics import thread_filter_for, thread_scope_label
 from ..types import TelegramCallbackQuery, TelegramIncomingMessage
 from .reply import make_reply
 
@@ -68,10 +69,13 @@ async def handle_cancel(
         # follow-up turn's message.
         from ...runner_bridge import unique_running_tasks
 
+        # #826: in a forum (or private-chat topic) only the sender's own
+        # thread is in scope — /cancel in topic B must never cancel topic A.
+        tf = thread_filter_for(msg)
         matches = [
             (ref, t)
             for ref, t in unique_running_tasks(running_tasks)
-            if ref.channel_id == chat_id
+            if ref.channel_id == chat_id and (tf is None or tf(t.thread_id))
         ]
         if len(matches) == 1:
             ref, task = matches[0]
@@ -84,7 +88,10 @@ async def handle_cancel(
                 )
                 return
             logger.info(
-                "cancel.requested", chat_id=chat_id, progress_message_id=ref.message_id
+                "cancel.requested",
+                chat_id=chat_id,
+                thread_id=msg.thread_id,
+                progress_message_id=ref.message_id,
             )
             task.cancel_requested.set()
             return
@@ -96,7 +103,7 @@ async def handle_cancel(
             return
         # Check queued jobs
         if scheduler is not None:
-            queued = scheduler.queued_for_chat(chat_id)
+            queued = scheduler.queued_for_chat(chat_id, thread_filter=tf)
             if len(queued) == 1:
                 job = await scheduler.cancel_queued(
                     chat_id, queued[0].progress_ref.message_id
@@ -115,7 +122,7 @@ async def handle_cancel(
         # Check pending /at delays for this chat (#288).
         from .. import at_scheduler
 
-        pending_at = at_scheduler.cancel_pending_for_chat(chat_id)
+        pending_at = at_scheduler.cancel_pending_for_chat(chat_id, thread_filter=tf)
         if pending_at:
             await reply(
                 text=(
@@ -130,7 +137,9 @@ async def handle_cancel(
         # us if the user later resumes the session manually.
         from ... import loop_scheduler
 
-        pending_loops = loop_scheduler.cancel_pending_for_chat(chat_id)
+        pending_loops = loop_scheduler.cancel_pending_for_chat(
+            chat_id, thread_filter=tf
+        )
         if pending_loops:
             await reply(
                 text=(
@@ -139,8 +148,8 @@ async def handle_cancel(
                 )
             )
             return
-        logger.debug("cancel.nothing_running", chat_id=chat_id)
-        await reply(text="nothing running in this chat.")
+        logger.debug("cancel.nothing_running", chat_id=chat_id, thread_id=msg.thread_id)
+        await reply(text=f"nothing running in this {thread_scope_label(msg)}.")
         return
 
     progress_ref = MessageRef(channel_id=chat_id, message_id=reply_id)

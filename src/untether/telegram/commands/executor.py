@@ -31,8 +31,10 @@ from ...transport_runtime import TransportRuntime
 from ...utils.paths import (
     reset_run_base_dir,
     reset_run_channel_id,
+    reset_run_thread_id,
     set_run_base_dir,
     set_run_channel_id,
+    set_run_thread_id,
 )
 from ..bridge import send_plain
 from ..engine_overrides import (
@@ -271,6 +273,8 @@ async def _run_engine(
         )
         run_base_token = set_run_base_dir(cwd)
         run_channel_token = set_run_channel_id(chat_id)
+        # #826: loop registrations record the run's topic.
+        run_thread_token = set_run_thread_id(thread_id)
         try:
             run_fields = {
                 "chat_id": chat_id,
@@ -309,6 +313,7 @@ async def _run_engine(
         finally:
             reset_run_base_dir(run_base_token)
             reset_run_channel_id(run_channel_token)
+            reset_run_thread_id(run_thread_token)
     except Exception as exc:
         logger.exception(
             "handle.worker_failed",

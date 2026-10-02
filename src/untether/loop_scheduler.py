@@ -411,14 +411,32 @@ def cancel_by_upstream_id(upstream_id: str) -> bool:
     return cancel_by_token(token)
 
 
-def cancel_pending_for_chat(chat_id: int) -> int:
-    """Cancel all pending loops for ``chat_id``.  Returns count cancelled."""
+def cancel_pending_for_chat(
+    chat_id: int,
+    *,
+    thread_filter: Callable[[int | None], bool] | None = None,
+) -> int:
+    """Cancel pending loops for ``chat_id``.  Returns count cancelled.
+
+    #826: ``thread_filter`` (when given) limits the cancel to entries whose
+    ``thread_id`` it accepts — a forum topic's ``/new`` / ``/cancel`` leaves
+    other topics' loops alone.  ``None`` = the whole chat.
+    """
     cancelled = 0
     for token in list(_PENDING_BY_CHAT.get(chat_id, ())):
+        if thread_filter is not None:
+            entry = _PENDING_BY_TOKEN.get(token)
+            if entry is None or not thread_filter(entry.thread_id):
+                continue
         if cancel_by_token(token):
             cancelled += 1
     if cancelled:
-        logger.info("loop.cancelled_for_chat", chat_id=chat_id, count=cancelled)
+        logger.info(
+            "loop.cancelled_for_chat",
+            chat_id=chat_id,
+            count=cancelled,
+            scoped=thread_filter is not None,
+        )
     return cancelled
 
 
@@ -580,7 +598,9 @@ async def _spawn_loop_iteration(entry: _LoopEntry) -> None:
         notify_ref = await _TRANSPORT.send(
             channel_id=_as_channel_id(entry.chat_id),
             message=RenderedMessage(text=label),
-            options=SendOptions(notify=False),
+            # #826: the run below goes to entry.thread_id; post the notice
+            # (which the run replies to) in the same topic.
+            options=SendOptions(notify=False, thread_id=entry.thread_id),
         )
     except Exception as exc:  # noqa: BLE001
         logger.error(

@@ -351,6 +351,33 @@ class TestCancellation:
             finally:
                 tg.cancel_scope.cancel()
 
+    async def test_826_cancel_pending_for_chat_thread_filter(self):
+        """#826: a thread filter drops only the matching topic's loops."""
+        async with anyio.create_task_group() as tg:
+            loop_scheduler.install(tg, _noop_run_job, FakeTransport(), 1)
+            try:
+                for thread_id, tu in ((6, "tu-6"), (10, "tu-10"), (None, "tu-g")):
+                    loop_scheduler.register_pending_cron(
+                        session_id=f"sess-{tu}",
+                        tool_use_id=tu,
+                        cron_expression="*/5 * * * *",
+                        prompt=tu,
+                        recurring=True,
+                        chat_id=52,
+                        thread_id=thread_id,
+                    )
+                cancelled = loop_scheduler.cancel_pending_for_chat(
+                    52, thread_filter=lambda t: t == 6
+                )
+                assert cancelled == 1
+                remaining = {e.thread_id for e in loop_scheduler.pending_for_chat(52)}
+                assert remaining == {10, None}
+                # Default (no filter) still drops the whole chat.
+                assert loop_scheduler.cancel_pending_for_chat(52) == 2
+                assert loop_scheduler.pending_for_chat(52) == []
+            finally:
+                tg.cancel_scope.cancel()
+
 
 # ── Inspection ──────────────────────────────────────────────────────────
 
@@ -446,6 +473,30 @@ class TestFirePath:
                 # in the cancelled state.
                 await loop_scheduler._fire(token)
                 assert recorder.calls == []
+            finally:
+                tg.cancel_scope.cancel()
+
+    async def test_826_fire_notice_and_run_go_to_entry_thread(self):
+        """#826: a topic's loop fire posts its notice in that topic and runs
+        there (the run replies to the notice)."""
+        recorder = RunJobRecorder()
+        transport = FakeTransport()
+        async with anyio.create_task_group() as tg:
+            loop_scheduler.install(tg, recorder, transport, 1)
+            try:
+                token = loop_scheduler.register_pending_cron(
+                    session_id="sess-t6",
+                    tool_use_id="tu-t6",
+                    cron_expression="*/5 * * * *",
+                    prompt="p",
+                    recurring=True,
+                    chat_id=86,
+                    thread_id=6,
+                )
+                entry = loop_scheduler._PENDING_BY_TOKEN[token]
+                await loop_scheduler._spawn_loop_iteration(entry)
+                assert transport.sent[0][2].thread_id == 6
+                assert recorder.calls[0][5] == 6
             finally:
                 tg.cancel_scope.cancel()
 

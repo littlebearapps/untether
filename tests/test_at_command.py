@@ -345,6 +345,25 @@ class TestAtScheduler:
             finally:
                 tg.cancel_scope.cancel()
 
+    async def test_826_cancel_pending_for_chat_thread_filter(self):
+        """#826: a thread filter cancels only that topic's /at delays."""
+        async with anyio.create_task_group() as tg:
+            at_scheduler.install(tg, _fake_run_job, FakeTransport(), 1)
+            try:
+                at_scheduler.schedule_delayed_run(333, 6, 60, "topic-6")
+                at_scheduler.schedule_delayed_run(333, 10, 60, "topic-10")
+                at_scheduler.schedule_delayed_run(333, None, 60, "general")
+                cancelled = at_scheduler.cancel_pending_for_chat(
+                    333, thread_filter=lambda t: t == 10
+                )
+                assert cancelled == 1
+                prompts = {p.prompt for p in at_scheduler.pending_for_chat(333)}
+                assert prompts == {"topic-6", "general"}
+                # Default (no filter) still drops the whole chat.
+                assert at_scheduler.cancel_pending_for_chat(333) == 2
+            finally:
+                tg.cancel_scope.cancel()
+
     async def test_uninstall_clears_pending(self):
         async with anyio.create_task_group() as tg:
             at_scheduler.install(tg, _fake_run_job, FakeTransport(), 1)

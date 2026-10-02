@@ -10,6 +10,12 @@ _run_base_dir: ContextVar[Path | None] = ContextVar(
 _run_channel_id: ContextVar[int | None] = ContextVar(
     "untether_run_channel_id", default=None
 )
+# #826: the run's originating thread (forum topic / private-chat topic), set
+# beside the channel so engine-side registrations (e.g. /loop entries) can
+# record which topic they belong to.
+_run_thread_id: ContextVar[int | None] = ContextVar(
+    "untether_run_thread_id", default=None
+)
 
 
 def get_run_base_dir() -> Path | None:
@@ -34,6 +40,18 @@ def set_run_channel_id(channel_id: int | None) -> Token[int | None]:
 
 def reset_run_channel_id(token: Token[int | None]) -> None:
     _run_channel_id.reset(token)
+
+
+def get_run_thread_id() -> int | None:
+    return _run_thread_id.get()
+
+
+def set_run_thread_id(thread_id: int | None) -> Token[int | None]:
+    return _run_thread_id.set(thread_id)
+
+
+def reset_run_thread_id(token: Token[int | None]) -> None:
+    _run_thread_id.reset(token)
 
 
 def relativize_path(value: str, *, base_dir: Path | None = None) -> str:

@@ -838,6 +838,235 @@ async def test_handle_cancel_standalone_other_chat_ignored() -> None:
     assert "nothing running" in transport.send_calls[0]["message"].text
 
 
+# --- #826: /cancel fallback is scoped to the forum topic ---
+
+_FORUM_CHAT = -100826
+
+
+def _forum_cancel_msg(thread_id: int | None) -> TelegramIncomingMessage:
+    return TelegramIncomingMessage(
+        transport="telegram",
+        chat_id=_FORUM_CHAT,
+        message_id=10,
+        text="/cancel",
+        reply_to_message_id=None,
+        reply_to_text=None,
+        sender_id=123,
+        thread_id=thread_id,
+        is_topic_message=True if thread_id is not None else None,
+        chat_type="supergroup",
+        is_forum=True,
+    )
+
+
+@pytest.mark.anyio
+async def test_826_cancel_fallback_does_not_cross_topics() -> None:
+    """/cancel in topic 10 never cancels topic 6's only run."""
+    transport = FakeTransport()
+    cfg = make_cfg(transport)
+    other = RunningTask(thread_id=6)
+    running_tasks = {MessageRef(channel_id=_FORUM_CHAT, message_id=42): other}
+
+    with capture_logs() as logs:
+        await handle_cancel(cfg, _forum_cancel_msg(10), running_tasks)
+
+    assert not other.cancel_requested.is_set()
+    assert transport.send_calls[-1]["message"].text == "nothing running in this topic."
+    assert not [e for e in logs if e.get("event") == "cancel.requested"]
+
+
+@pytest.mark.anyio
+async def test_826_cancel_fallback_single_run_in_own_topic() -> None:
+    """Runs in topics 6 and 10: /cancel in 10 cancels 10 (no ambiguity prompt)."""
+    transport = FakeTransport()
+    cfg = make_cfg(transport)
+    task_6 = RunningTask(thread_id=6)
+    task_10 = RunningTask(thread_id=10)
+    running_tasks = {
+        MessageRef(channel_id=_FORUM_CHAT, message_id=41): task_6,
+        MessageRef(channel_id=_FORUM_CHAT, message_id=42): task_10,
+    }
+
+    with capture_logs() as logs:
+        await handle_cancel(cfg, _forum_cancel_msg(10), running_tasks)
+
+    assert task_10.cancel_requested.is_set()
+    assert not task_6.cancel_requested.is_set()
+    assert transport.send_calls == []
+    requested = [e for e in logs if e.get("event") == "cancel.requested"]
+    assert requested and requested[0]["thread_id"] == 10
+
+
+@pytest.mark.anyio
+async def test_826_cancel_fallback_general_ignores_topics() -> None:
+    """General (no thread) /cancel leaves a topic run alone; a General run
+    registered with thread id 1 is still General's."""
+    transport = FakeTransport()
+    cfg = make_cfg(transport)
+    topic = RunningTask(thread_id=6)
+    general = RunningTask(thread_id=1)
+    running_tasks = {
+        MessageRef(channel_id=_FORUM_CHAT, message_id=41): topic,
+        MessageRef(channel_id=_FORUM_CHAT, message_id=42): general,
+    }
+
+    await handle_cancel(cfg, _forum_cancel_msg(None), running_tasks)
+
+    assert general.cancel_requested.is_set()
+    assert not topic.cancel_requested.is_set()
+
+
+@pytest.mark.anyio
+async def test_826_cancel_fallback_queued_scoped() -> None:
+    """A job queued in topic 6 stays queued after /cancel in topic 10."""
+    transport = FakeTransport()
+    cfg = make_cfg(transport)
+
+    async def _noop_run_job(_) -> None:
+        return None
+
+    scheduler = ThreadScheduler(task_group=_NoopTaskGroup(), run_job=_noop_run_job)
+    progress_ref = MessageRef(channel_id=_FORUM_CHAT, message_id=55)
+    await scheduler.enqueue_resume(
+        chat_id=_FORUM_CHAT,
+        user_msg_id=9,
+        text="queued",
+        resume_token=ResumeToken(engine=CODEX_ENGINE, value="sid"),
+        thread_id=6,
+        progress_ref=progress_ref,
+    )
+
+    await handle_cancel(cfg, _forum_cancel_msg(10), {}, scheduler)
+
+    assert transport.edit_calls == []
+    assert len(scheduler.queued_for_chat(_FORUM_CHAT)) == 1
+    assert transport.send_calls[-1]["message"].text == "nothing running in this topic."
+    # Same topic → the queued job is cancelled.
+    await handle_cancel(cfg, _forum_cancel_msg(6), {}, scheduler)
+    assert scheduler.queued_for_chat(_FORUM_CHAT) == []
+
+
+@pytest.mark.anyio
+async def test_826_cancel_fallback_at_scoped() -> None:
+    """/at delays in topics 6 and 10: /cancel in 10 cancels one, counts 1."""
+    from untether.telegram import at_scheduler
+
+    async def _noop_run_job(*_args: Any, **_kwargs: Any) -> None:
+        return None
+
+    transport = FakeTransport()
+    cfg = make_cfg(transport)
+    at_scheduler.uninstall()
+    async with anyio.create_task_group() as tg:
+        at_scheduler.install(tg, _noop_run_job, transport, 1)
+        try:
+            at_scheduler.schedule_delayed_run(_FORUM_CHAT, 6, 60, "six")
+            at_scheduler.schedule_delayed_run(_FORUM_CHAT, 10, 60, "ten")
+            await handle_cancel(cfg, _forum_cancel_msg(10), {})
+            remaining = [p.prompt for p in at_scheduler.pending_for_chat(_FORUM_CHAT)]
+            assert remaining == ["six"]
+            assert "cancelled 1 pending /at run." in (
+                transport.send_calls[-1]["message"].text
+            )
+        finally:
+            tg.cancel_scope.cancel()
+            at_scheduler.uninstall()
+
+
+@pytest.mark.anyio
+async def test_826_cancel_fallback_private_topic_wording() -> None:
+    """A private chat with topics is scoped too and says "this topic"."""
+    transport = FakeTransport()
+    cfg = make_cfg(transport)
+    other = RunningTask(thread_id=3)
+    msg = TelegramIncomingMessage(
+        transport="telegram",
+        chat_id=123,
+        message_id=10,
+        text="/cancel",
+        reply_to_message_id=None,
+        reply_to_text=None,
+        sender_id=123,
+        thread_id=4,
+        is_topic_message=True,
+        chat_type="private",
+    )
+
+    await handle_cancel(cfg, msg, {MessageRef(channel_id=123, message_id=42): other})
+
+    assert not other.cancel_requested.is_set()
+    assert transport.send_calls[-1]["message"].text == "nothing running in this topic."
+
+
+@pytest.mark.anyio
+async def test_826_cancel_fallback_non_forum_group_chat_wide() -> None:
+    """Non-forum supergroup: thread ids are reply-chain roots — chat-wide."""
+    transport = FakeTransport()
+    cfg = make_cfg(transport)
+    task = RunningTask(thread_id=55)
+    msg = TelegramIncomingMessage(
+        transport="telegram",
+        chat_id=_FORUM_CHAT,
+        message_id=10,
+        text="/cancel",
+        reply_to_message_id=None,
+        reply_to_text=None,
+        sender_id=123,
+        chat_type="supergroup",
+    )
+
+    await handle_cancel(
+        cfg, msg, {MessageRef(channel_id=_FORUM_CHAT, message_id=42): task}
+    )
+
+    assert task.cancel_requested.is_set()
+
+
+class _ThreadRecordingRunner(ScriptRunner):
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self.seen_threads: list[int | None] = []
+
+    async def run(self, prompt, resume):  # type: ignore[override]
+        from untether.utils.paths import get_run_thread_id
+
+        self.seen_threads.append(get_run_thread_id())
+        async for event in super().run(prompt, resume):
+            yield event
+
+
+@pytest.mark.anyio
+async def test_826_run_engine_sets_run_thread_contextvar() -> None:
+    """#826: the run's topic is visible to the engine (loop registration)
+    and reset after the run."""
+    from untether.utils.paths import get_run_thread_id
+
+    runner = _ThreadRecordingRunner(
+        [Return(answer="ok")], engine=CODEX_ENGINE, resume_value="r-826"
+    )
+    exec_cfg = ExecBridgeConfig(
+        transport=_CaptureTransport(),
+        presenter=MarkdownPresenter(),
+        final_notify=True,
+    )
+    runtime = TransportRuntime(router=_make_router(runner), projects=_empty_projects())
+
+    await _run_engine(
+        exec_cfg=exec_cfg,
+        runtime=runtime,
+        running_tasks={},
+        chat_id=123,
+        user_msg_id=1,
+        text="hello",
+        resume_token=None,
+        context=None,
+        thread_id=10,
+    )
+
+    assert runner.seen_threads == [10]
+    assert get_run_thread_id() is None
+
+
 @pytest.mark.anyio
 async def test_handle_file_put_writes_file(tmp_path: Path) -> None:
     payload = b"hello"

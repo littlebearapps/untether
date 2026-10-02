@@ -69,6 +69,7 @@ from .topics import (
     _topics_chat_allowed,
     _topics_chat_project,
     _validate_topics_setup,
+    thread_filter_for,
 )
 from .types import (
     TelegramCallbackQuery,
@@ -520,7 +521,13 @@ def _dispatch_builtin_command(
             async def _stateless_new() -> None:
                 from .commands.topics import _cancel_chat_tasks
 
-                cancelled = _cancel_chat_tasks(msg.chat_id, ctx.running_tasks)
+                # #826: a forum topic's /new only cancels that topic's runs.
+                cancelled = _cancel_chat_tasks(
+                    msg.chat_id,
+                    ctx.running_tasks,
+                    thread_filter=thread_filter_for(msg),
+                    thread_id=msg.thread_id,
+                )
                 label = "cancelled run" if cancelled else "no stored sessions to clear"
                 await reply(text=f"{label} for this chat.")
 

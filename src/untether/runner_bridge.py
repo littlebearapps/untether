@@ -1755,6 +1755,8 @@ class RunningTask:
     # PID (edits.pid) so the drain's self-restart evidence scan can walk the
     # run's process tree.
     edits: ProgressEdits | None = None
+    # #826: the originating message's thread (topic) — scopes /new and /cancel
+    thread_id: ThreadId | None = None
 
 
 RunningTasks = dict[MessageRef, RunningTask]
@@ -6052,7 +6054,9 @@ async def handle_message(
 
     running_task: RunningTask | None = None
     if running_tasks is not None and progress_ref is not None:
-        running_task = RunningTask(context=context, edits=edits)
+        running_task = RunningTask(
+            context=context, edits=edits, thread_id=incoming.thread_id
+        )
         running_tasks[progress_ref] = running_task
 
     # ── #776 live-session follow-up turns ─────────────────────────────────

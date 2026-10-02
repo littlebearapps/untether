@@ -5030,11 +5030,14 @@ def _observe_loop_tool_use(
     :func:`_register_background_handle` so the rc8 ScheduleWakeup
     countdown still works for short waits when Loop mode is OFF.
     """
-    from ..utils.paths import get_run_channel_id
+    from ..utils.paths import get_run_channel_id, get_run_thread_id
 
     chat_id = get_run_channel_id()
     if chat_id is None:
         return  # not in a chat-scoped run (probes, ad-hoc spawns)
+    # #826: record the run's topic so /new and /cancel in another forum topic
+    # leave this loop alone, and fires land back in the originating topic.
+    thread_id = get_run_thread_id()
     if not _loop_enabled_for_chat(chat_id):
         return  # master toggle off → behave as today
     tool_name = str(content.name or "")
@@ -5068,6 +5071,7 @@ def _observe_loop_tool_use(
                 prompt=str(prompt),
                 recurring=recurring,
                 chat_id=int(chat_id),
+                thread_id=thread_id,
                 fallback_first_user_message=state.first_user_message_text,
             )
         except loop_scheduler.LoopSchedulerError as exc:
@@ -5103,6 +5107,7 @@ def _observe_loop_tool_use(
                 delay_seconds=float(delay_seconds_raw),
                 prompt=str(prompt),
                 chat_id=int(chat_id),
+                thread_id=thread_id,
                 fallback_first_user_message=state.first_user_message_text,
             )
         except loop_scheduler.LoopSchedulerError as exc:

@@ -459,6 +459,45 @@ async def test_handle_message_cancelled_renders_cancelled_state() -> None:
 
 
 @pytest.mark.anyio
+async def test_826_running_task_records_incoming_thread() -> None:
+    """#826: the RunningTask carries the originating message's thread so
+    /new and /cancel can scope to a forum topic."""
+    transport = FakeTransport()
+    hold = anyio.Event()
+    runner = ScriptRunner([Wait(hold)], engine=CODEX_ENGINE, resume_value="s-826")
+    cfg = ExecBridgeConfig(
+        transport=transport,
+        presenter=MarkdownPresenter(),
+        final_notify=True,
+    )
+    running_tasks: dict = {}
+
+    async def run_handle_message() -> None:
+        await handle_message(
+            cfg,
+            runner=runner,
+            incoming=IncomingMessage(
+                channel_id=123, message_id=10, text="do something", thread_id=7
+            ),
+            resume_token=None,
+            running_tasks=running_tasks,
+        )
+
+    async with anyio.create_task_group() as tg:
+        tg.start_soon(run_handle_message)
+        for _ in range(100):
+            if running_tasks:
+                break
+            await anyio.lowlevel.checkpoint()
+        assert running_tasks
+        running_task = running_tasks[next(iter(running_tasks))]
+        assert running_task.thread_id == 7
+        with anyio.fail_after(1):
+            await running_task.resume_ready.wait()
+        running_task.cancel_requested.set()
+
+
+@pytest.mark.anyio
 async def test_handle_message_error_preserves_resume_token() -> None:
     transport = FakeTransport()
     session_id = "019b66fc-64c2-7a71-81cd-081c504cfeb2"

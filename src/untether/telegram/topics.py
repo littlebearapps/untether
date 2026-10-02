@@ -1,12 +1,13 @@
 from __future__ import annotations
 
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from typing import TYPE_CHECKING
 
 from ..config import ConfigError
 from ..context import RunContext
 from ..logging import get_logger
 from ..settings import TelegramTopicsSettings
+from ..transport import ThreadId
 from ..transport_runtime import TransportRuntime
 from .client import BotClient
 from .topic_state import TopicStateStore, TopicThreadSnapshot
@@ -18,6 +19,7 @@ if TYPE_CHECKING:
     from .bridge import TelegramBridgeConfig
 
 __all__ = [
+    "GENERAL_TOPIC_ID",
     "_TOPICS_COMMANDS",
     "_maybe_rename_topic",
     "_maybe_update_topic_context",
@@ -29,9 +31,50 @@ __all__ = [
     "_topics_command_error",
     "_topics_scope_label",
     "_validate_topics_setup",
+    "thread_filter_for",
+    "thread_scope_label",
 ]
 
 _TOPICS_COMMANDS = {"ctx", "new", "topic"}
+
+# Clients and MTProto address a forum's General topic as thread id 1, while
+# Bot API messages in General carry no ``message_thread_id``.  #826 treats
+# both as the same scope.
+GENERAL_TOPIC_ID = 1
+
+type ThreadFilter = Callable[[ThreadId | None], bool]
+
+
+def _norm_thread(thread_id: ThreadId | None) -> ThreadId | None:
+    return None if thread_id in (None, GENERAL_TOPIC_ID) else thread_id
+
+
+def thread_filter_for(msg: TelegramIncomingMessage) -> ThreadFilter | None:
+    """#826: which threads a chat-level reset/cancel (``/new``, ``/cancel``) may touch.
+
+    ``None`` = the whole chat (non-forum groups, basic groups: unchanged).
+    Forum supergroups (any ``topics`` setting) and private chats match only
+    the message's own thread; General (``None``) == topic id 1.  Non-forum
+    supergroups are never thread-filtered: their ``message_thread_id`` is a
+    reply-chain root, not a topic.
+    """
+    if msg.is_forum is True or msg.is_private:
+        own = _norm_thread(msg.thread_id)
+        return lambda thread_id: _norm_thread(thread_id) == own
+    return None
+
+
+def thread_scope_label(msg: TelegramIncomingMessage) -> str:
+    """User-facing scope noun for a thread-scoped reply (#826).
+
+    ``"topic"`` when the reset/cancel is limited to a forum topic (General
+    included) or a private-chat topic; ``"chat"`` otherwise.
+    """
+    if thread_filter_for(msg) is not None and (
+        msg.is_forum is True or msg.thread_id is not None
+    ):
+        return "topic"
+    return "chat"
 
 
 def _resolve_topics_scope_raw(
