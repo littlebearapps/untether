@@ -64,7 +64,7 @@ Automated (non-agentic — already live)
 Intentionally NOT built
   /paid-run       — no billable CLI calls of Untether's own
   /dq-spot-check  — no warehouse / no DQ patterns
-  /cost-watch     — cost lives in runtime budget config (cost_tracker.py + [watchdog]), not a command
+  /cost-watch     — cost lives in runtime budget config (cost_tracker.py + [cost_budget]), not a command
   /issue-triage   — covered by A1 + A2
   /context-health — covered by the context hooks + the context-quality rule
 ```

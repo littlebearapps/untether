@@ -54,8 +54,8 @@ Follow the area's rule file:
   callback, ephemeral cleanup).
 - control-channel changes → `control-channel.md` (PTY lifecycle, registry
   cleanup, cooldown).
-- runner edits trigger `.claude/hooks/runner-edit-context.sh`; telegram edits
-  trigger `telegram-edit-context.sh` — these print contract reminders.
+- runner, schema and telegram edits trigger a prompt hook in
+  `.claude/hooks.json` that prints the area's contract reminders.
 
 ### 3. Run targeted tests
 

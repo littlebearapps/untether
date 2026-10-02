@@ -109,9 +109,9 @@ for unit in untether untether-dev untether-demo untether-dev-hf untether-dev-ws;
 done
 ```
 
-**Remote — four hosts (nsd, channelo, sl, mac):**
+**Remote — four hosts (nsd, channelo, sl, mac; `mac` is launchd, no journalctl — see `debug/step-evidence.md` §2b):**
 ```bash
-for host in nsd channelo mac; do
+for host in nsd channelo sl; do
   ssh "$host" "journalctl --user -u untether --since '${HOURS}h ago' --output=cat \
     | grep -E 'level=(error|warning)|\"level\":\\s*\"(error|warning)\"'" \
     > "/tmp/debug-sweep-${host}-$$.log" 2>/dev/null || true
@@ -315,8 +315,8 @@ posting (default: print only, do not post).
 - **Never push to master.** Never merge PRs to master. Never tag. Hooks block
   these — do not attempt workarounds.
 - **Never restart staging to test changes.** Use `untether-dev.service`.
-- **Fleet awareness.** Probe all four hosts (lba-1 local + nsd + channelo + mac
-  via SSH) in sweep mode by default. In targeted mode, probe only the hosts
+- **Fleet awareness.** Probe all five hosts (lba-1 local + nsd + channelo + sl +
+  mac via SSH) in sweep mode by default. In targeted mode, probe only the hosts
   relevant to the issue. If you can't SSH to a host, log it as a partial scope
   and continue — never silently drop a host.
 - **Stay in the dev branch model.** Feature branch → PR to `dev`. Never feature

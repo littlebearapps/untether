@@ -35,11 +35,14 @@ services rarely surface novel bugs.
 
 ## 2b. Fleet — four remote hosts (nsd, channelo, sl, mac)
 
-The fleet runs one `untether.service` per host (the PyPI wheel). SSH from
-lba-1 via the tailnet:
+The fleet runs one `untether` service per host (the PyPI wheel). SSH from
+lba-1 via the tailnet. The Linux VPSs use systemd; `mac` runs under launchd
+(`com.littlebearapps.untether`) and has no journalctl — its output goes to
+macOS Unified Logging (see `contrib/com.littlebearapps.untether-issue-watcher.plist`
+for how the issue watcher reads it).
 
 ```bash
-for host in nsd channelo mac; do
+for host in nsd channelo sl; do
   echo "=== $host ==="
   ssh "$host" "journalctl --user -u untether --since '${HOURS}h ago' --output=cat \
     | grep -E 'level=(error|warning)|\"level\":\\s*\"(error|warning)\"'" 2>/dev/null \
@@ -158,12 +161,11 @@ journalctl --user -u untether-issue-watcher --since "${HOURS}h ago" --output=cat
 ## 2h. Per-host PyPI version
 
 ```bash
-pipx list --short | grep untether                       # local lba-1 staging
-for host in nsd channelo mac; do
-  echo -n "$host: "
-  ssh "$host" "pipx list --short 2>/dev/null | grep untether" 2>/dev/null || echo "(unreachable)"
-done
+scripts/fleet-status.sh        # read-only version + service state for all 5 hosts
 ```
+
+(sl installs via `uv tool`, not pipx, so a `pipx list` loop misses it —
+`fleet-status.sh` uses `untether --version` on every host.)
 
 Version mismatch across hosts during/after a rollout is a fleet-rollout class
 issue.

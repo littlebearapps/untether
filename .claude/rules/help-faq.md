@@ -16,7 +16,7 @@ JSON-LD on every deploy — unlocking AI-citation surface (ChatGPT,
 Perplexity, Google AI Overviews) and SERP rich-snippet eligibility for
 the Untether help articles.
 
-Tracking issue: [#477](https://github.com/littlebearapps/untether/issues/477).
+Tracking issue: [#477](https://github.com/littlebearapps/untether/issues/477) (closed).
 
 ## Hard rules
 
@@ -40,8 +40,9 @@ Tracking issue: [#477](https://github.com/littlebearapps/untether/issues/477).
   questions correctly?
 - Specifically watch for:
   - **Engine support changes** — Q3 ("Which AI coding agents…")
-    enumerates the 6 supported engines. If a new engine lands or one is
-    deprecated, update.
+    enumerates the 4 supported engines plus the 2 deprecated ones (Gemini
+    CLI, Amp). If a new engine lands (e.g. Antigravity, #558) or one is
+    deprecated or removed, update.
   - **Subscription / API key model changes** — Q4 ("Do I need an API
     key?") describes which engines use OAuth vs API key. Any auth-flow
     changes need an FAQ refresh.
@@ -72,7 +73,7 @@ Tracking issue: [#477](https://github.com/littlebearapps/untether/issues/477).
 - Phrase as: ends with `?`, OR starts with How / What / Why / When /
   Where / Can / Do / Does / Is / Are / Should / Will.
 - Aim for ≥7 H2 Q/A pairs (the issue's acceptance criterion). Currently
-  ships with 17. Don't drop below 7 without coordinating with the
+  ships with 19. Don't drop below 7 without coordinating with the
   marketing site.
 
 ### Answer style

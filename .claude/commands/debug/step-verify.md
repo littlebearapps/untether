@@ -82,7 +82,7 @@ scripts/fleet-rollout.sh ${VERSION} --dry-run    # preview
 scripts/fleet-rollout.sh ${VERSION} --only mac   # one host
 ```
 
-The four hosts: lba-1 staging, nsd VPS, channelo VPS, Nathan's Mac.
+The five hosts: lba-1 staging, nsd VPS, channelo VPS, sl VPS, Nathan's Mac.
 
 **Partial failure handling:** if one host fails, the script reports it but
 does NOT roll back successful hosts. Operator decides: rerun the failed

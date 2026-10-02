@@ -62,7 +62,7 @@ scripts/run-integration-tests.sh ${VERSION} --manual \
   --notes "U1-U8 all pass on @untether_dev_bot; tier 6 stress ok"
 ```
 
-This writes `~/.untether-dev/integration-test-pass-${VERSION}.json` with timestamp, tester, tier list, and notes. `scripts/fleet-rollout.sh ${VERSION}` REQUIRES this marker to exist — it refuses to roll the rc/stable to nsd, channelo, or mac without it. The only way around the gate is `--skip-test-gate`, which prints a loud warning and is not recommended for any change that touches production hosts.
+This writes `~/.untether-dev/integration-test-pass-${VERSION}.json` with timestamp, tester, tier list, and notes. `scripts/fleet-rollout.sh ${VERSION}` REQUIRES this marker to exist — it refuses to roll the rc/stable to any host (lba-1, nsd, channelo, sl, mac) without it. The only way around the gate is `--skip-test-gate`, which prints a loud warning and is not recommended for any change that touches production hosts.
 
 **The marker is per-version, not per-host.** One pass on `@untether_dev_bot` is enough to gate the fleet rollout because the dev bot exercises the same code paths every host runs. Re-test if the version number changes (e.g. rc14 → rc15 each get their own marker).
 
@@ -104,7 +104,7 @@ scripts/fleet-rollback.sh 0.35.2 --only mac             # revert one host to kno
 
 **Rc supersede:** if rc14 is already deployed and rc15 is ready, just run `fleet-rollout.sh 0.35.3rc15` — the script detects the supersede and proceeds. `--force-downgrade` is required for older-than-current versions.
 
-**Strategic plan:** [`docs/plans/2026-05-13-fleet-monitoring-and-upgrades.md`](../../docs/plans/2026-05-13-fleet-monitoring-and-upgrades.md) (Phase 4). See also `.claude/rules/dev-workflow.md` for dev/staging separation rules that still apply per-host.
+**Strategic plan:** `docs/plans/2026-05-13-fleet-monitoring-and-upgrades.md` (Phase 4; `docs/plans/` is gitignored — lba-1 checkout only). See also `.claude/rules/dev-workflow.md` for dev/staging separation rules that still apply per-host.
 
 ## Audit-filed issues (release triage)
 
@@ -119,7 +119,7 @@ Before tagging a release, scan both:
 # Open audit findings against the current milestone, ranked by severity
 gh issue list --repo littlebearapps/untether \
   --label auto:monitor-audit --state open \
-  --milestone v0.35.3 --json number,title,labels,milestone
+  --milestone v0.35.5 --json number,title,labels,milestone
 
 # Just the release-blockers
 gh issue list --repo littlebearapps/untether \

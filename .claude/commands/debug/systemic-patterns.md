@@ -37,19 +37,19 @@ For each pattern:
 ### 5. Restart-required config key edited silently
 - **Sig**: `restart_required=true` log line emitted but service was not restarted; user-visible behaviour is stale
 - **Class**: config-hot-reload
-- **Canonical**: `RESTART_REQUIRED_FIELDS` in `TelegramBridgeConfig`; `_notify_restart_required` should broadcast to project chats + admin DMs (#318 follow-up)
+- **Canonical**: `RESTART_REQUIRED_FIELDS` on `TelegramTransportSettings` (`settings.py`); `_notify_restart_required` (`telegram/loop.py`) broadcasts to project chats + admin DMs (#318 follow-up)
 - **Posture**: regression-watch — broadcast must reach the user.
 
 ### 6. Agent self-restart during active run (`feedback_agent_self_restart_pattern`)
 - **Sig**: agent runs `systemctl --user restart untether` inside an active session; 120s graceful drain timeout; outbox message dropped silently
 - **Class**: config-hot-reload (root cause: agent confusion about hot-reload)
-- **Canonical**: tracked by #547 in MEMORY.md
+- **Canonical**: #547 (closed v0.35.3) + MEMORY.md `feedback_agent_self_restart_pattern`
 - **Posture**: by-design behavior on the *kernel/systemd* side — fix is to educate the agent (preamble + this debug-rule), not patch the daemon. If observed: flag, never blame the daemon.
 
 ### 7. Cron + plan-mode stalls (`feedback_cron_plan_mode_stalls`)
 - **Sig**: long `peak_idle` (>10 min) + repeat `stall_warning` on a session that was triggered by a cron (look for `trigger=cron:<id>` in StartedEvent meta)
 - **Class**: stall-liveness-watchdog
-- **Canonical**: warning-UX tracked by #526/#527 in MEMORY.md
+- **Canonical**: warning-UX fixed by #526 (approval-pending stalls, closed v0.35.3; the #527 unified-predicate rewrite was closed not-planned); MEMORY.md `feedback_cron_plan_mode_stalls`
 - **Posture**: **by-design** — cron-fired sessions in default plan mode are correctly waiting for user approval. **Do not escalate as a bug.** UX rendering of these warnings is the only legitimate fix surface.
 
 ### 8. CLI-style Telegram summary brevity drift
@@ -59,7 +59,7 @@ For each pattern:
 - **Posture**: regression-watch — finals should be 500–1500 chars / 3–7 bullets.
 
 ### 9. Stale callback buttons (ephemeral cleanup miss)
-- **Sig**: old buttons still respond after a run completed; `ephemeral_messages` registry not drained in `finally`
+- **Sig**: old buttons still respond after a run completed; `_EPHEMERAL_MSGS` registry (`runner_bridge.py`) not drained in `finally`
 - **Class**: telegram-transport
 - **Canonical**: `register_ephemeral_message` + `ProgressEdits.delete_ephemeral()`
 - **Posture**: regression-watch — every run handler must drain ephemerals in `finally`.
@@ -85,7 +85,7 @@ For each pattern:
 ### 13. Outbox deny-glob false positive
 - **Sig**: `file_transfer.denied` for a legitimate file the user expected to receive
 - **Class**: outbox-delivery
-- **Canonical**: `[transports.telegram.files]` config — `outbox_deny_globs` list
+- **Canonical**: `[transports.telegram.files]` config — `deny_globs` list (shared by `/file` transfers and outbox delivery)
 - **Posture**: bug surface for user-config tuning; check the deny pattern matched, then consider config narrowing.
 
 ### 14. Auto-error-watcher noisy signature
@@ -109,8 +109,8 @@ For each pattern:
 ### 17. `_clear_background_handle` racing watchdog read (#374, #333, #507 redux)
 - **Sig**: background-handle scalar wiped before watchdog reads it; "dead wakeup" symptom
 - **Class**: stall-liveness-watchdog
-- **Canonical**: MEMORY.md `project_channelo_rc15_dead_wakeup_507_redux` — tracked under #374 + #333 for v0.35.4
-- **Posture**: bug — known defect in v0.35.3 line.
+- **Canonical**: MEMORY.md `project_channelo_rc15_dead_wakeup_507_redux`; fixed by #374 (handle cleared on terminal signal) and #573 (lifecycle v2), both closed in v0.35.5
+- **Posture**: regression-watch — was a known defect in the v0.35.3 line.
 
 ### 18. Integration-test attestation gate bypass
 - **Sig**: `fleet-rollout.sh` proceeded without `~/.untether-dev/integration-test-pass-${VERSION}.json` existing; `--skip-test-gate` used silently

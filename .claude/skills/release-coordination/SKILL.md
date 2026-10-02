@@ -41,7 +41,7 @@ Step-by-step release workflow for Untether. Covers the full lifecycle from issue
 fleet rollout  →  7. Tag & publish
 ```
 
-All seven (now-8) phases happen in a single branch (typically `master` for patches, `feature/*` for minors). The CI release pipeline triggers on `v*` tags pushed to `master`.
+Work happens on `feature/*` / `fix/*` branches → PR → `dev` (rc → TestPyPI) → PR `dev`→`master`. The PyPI release pipeline (`release.yml`) triggers on the `v*` tag that `auto-tag-on-master.yml` creates when Nathan merges a stable version to `master`.
 
 **Phase 5.5 (attestation)** is the gate that makes the fleet rollout safe.
 Without it, `scripts/fleet-rollout.sh` refuses to upgrade production hosts.
@@ -381,7 +381,7 @@ git tag vX.Y.Z
 git push origin vX.Y.Z   # triggers release.yml directly
 ```
 
-Both Claude Code and Nathan can do this. The release-guard hook blocks Claude Code from `git tag v*`, so this path is Nathan-only by design.
+This path is **Nathan-only**: Claude Code must never create `v*` tags (CLAUDE.md release guard; the release-guard hook also blocks `git tag v*`).
 
 ## Post-release verification
 
@@ -406,7 +406,7 @@ scripts/healthcheck.sh --dev --version X.Y.Z
 
 ## Rollback procedures
 
-### Failed CI (tag pushed, PyPI publish failed)
+### Failed CI (tag pushed, PyPI publish failed) — Nathan-only
 
 ```bash
 # Delete the tag locally and remotely
@@ -432,7 +432,7 @@ twine yank untether X.Y.Z
 
 **Never re-upload the same version to PyPI** — PyPI rejects duplicate version numbers even after yanking.
 
-### Revert commit on master
+### Revert commit on master — Nathan-only
 
 ```bash
 git revert <commit-sha>
@@ -449,7 +449,7 @@ git push origin master
 | `uv lock --check` fails | `pyproject.toml` changed without running `uv lock` | Run `uv lock` and commit `uv.lock` |
 | Changelog missing issue links | Issue not created before release | Create issue retroactively, amend changelog in next release |
 | PyPI publish fails with 403 | Trusted publisher not configured for this repo | Check PyPI project settings → Publishing → Trusted Publishers |
-| GitHub Release not created | Workflow `release.yml` missing `create_release` step | Check workflow file, ensure `gh release create` runs |
+| GitHub Release not created | The `softprops/action-gh-release` step in `release.yml` failed or was skipped | Check the `release.yml` run log for that step |
 
 ## Untether-specific considerations
 
