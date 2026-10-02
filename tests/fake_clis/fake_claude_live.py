@@ -521,7 +521,18 @@ def scenario_bg_bash_wake(first: dict) -> None:
     if got is None:
         shutdown()
     end_bg("b1")
+    wake_hook_s = float(os.environ.get("FAKE_CLAUDE_WAKE_HOOK_S", "0") or 0)
+    if wake_hook_s:
+        # #872 R17-01a: the task-notification prompt fires a global async
+        # UserPromptSubmit hook, and the wake turn opens a moment later.
+        spawn_hook("h-wake-ups", wake_hook_s)
+        hook_started("h-wake-ups", "UserPromptSubmit")
+        _withheld.append(("h-wake-ups", "UserPromptSubmit"))
+        delay = float(os.environ.get("FAKE_CLAUDE_WAKE_DELAY_S", "0.4"))
+        if wait_idle_or_eof(delay) is None:
+            shutdown()
     init()
+    flush_withheld()
     text("GOT: BG-FINISHED")
     result("GOT: BG-FINISHED")
     serve_followups()

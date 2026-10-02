@@ -54,6 +54,9 @@ _ENV = (
     "FAKE_CLAUDE_BASH_TIMEOUT_MS",
     # #876
     "FAKE_CLAUDE_BG_PATCH",
+    # #872 R17-01a
+    "FAKE_CLAUDE_WAKE_HOOK_S",
+    "FAKE_CLAUDE_WAKE_DELAY_S",
 )
 
 
@@ -1622,11 +1625,61 @@ async def test_872_declared_bash_timeout_holds_past_max_hold(
     assert _engine_state(runner).live_close_reason == "idle_no_tasks"
 
 
+async def test_872_wake_turn_after_declared_wait_gets_a_fresh_hold(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """R17-01a: the declared wait ends (task.ended), the CLI's task
+    notification fires an async UserPromptSubmit hook (live work) and the
+    wake turn opens 0.4 s later. The quiet-time clock dated from before the
+    wait, so the session was closed ``max_hold`` at once, killing the hook.
+    Now the clock restarts when the declared wait ends."""
+    from structlog.testing import capture_logs
+
+    _settings(monkeypatch, post_result_bg_max_hold=0.3)
+    os.environ["FAKE_CLAUDE_BASH_TIMEOUT_MS"] = "3000"
+    os.environ["FAKE_CLAUDE_WAKE_HOOK_S"] = "2"
+    os.environ["FAKE_CLAUDE_WAKE_DELAY_S"] = "0.25"
+    with capture_logs() as logs:
+        runner, events = await _run("bg_bash_wake", wake_s=1.0)
+    finals = [e for e in events if isinstance(e, TurnEvent) and e.phase == "completed"]
+    assert [f.answer for f in finals] == ["GOT: BG-FINISHED"]
+    closes = _events(logs, "claude.live_session.stdin_closed")
+    assert all(c["reason"] != "max_hold" for c in closes)
+    assert _events(logs, "claude.live_session.async_hook_killed") == []
+    rearmed = [
+        e
+        for e in _events(logs, "claude.live_session.hold_rearmed")
+        if e["source"] == "declared_wait_ended"
+    ]
+    assert len(rearmed) == 1
+    assert _engine_state(runner).live_close_reason != "max_hold"
+
+
+async def test_872_fresh_hold_after_declared_wait_is_still_bounded(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The restarted window is one ``max_hold``, not unbounded: a hook that
+    keeps the session busy with no wake turn closes ``max_hold`` a window
+    after the declared wait ended."""
+    _settings(monkeypatch, post_result_bg_max_hold=0.3)
+    os.environ["FAKE_CLAUDE_BASH_TIMEOUT_MS"] = "3000"
+    os.environ["FAKE_CLAUDE_WAKE_HOOK_S"] = "30"
+    os.environ["FAKE_CLAUDE_WAKE_DELAY_S"] = "30"  # the turn never opens
+    clock = _CloseClock()
+    runner, events = await _run("bg_bash_wake", wake_s=1.0, on_event=clock.on_event)
+    assert _engine_state(runner).live_close_reason == "max_hold"
+    _, closed_at = clock.first("closing")
+    assert clock.result_at is not None
+    # task ends ~1.0 s after the result; then a fresh 0.3 s window.
+    assert 1.25 <= closed_at - clock.result_at < 2.5
+
+
 async def test_872_silent_task_closes_once_its_declared_wait_ends(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """CLI enforcement off (the task never ends): the hold closes a grace
-    after the declared deadline — not at the 0.5 s quiet-time limit."""
+    """CLI enforcement off (the task never ends): the hold closes one fresh
+    quiet-time window after the declared deadline + grace (1.0 + 0.2 + 0.5)
+    — not at the 0.5 s quiet-time limit."""
     _settings(monkeypatch, post_result_bg_max_hold=0.5)
     os.environ["FAKE_CLAUDE_BASH_TIMEOUT_MS"] = "1000"
     clock = _CloseClock()
@@ -1634,7 +1687,7 @@ async def test_872_silent_task_closes_once_its_declared_wait_ends(
     assert _engine_state(runner).live_close_reason == "max_hold"
     _, closed_at = clock.first("closing")
     assert clock.result_at is not None
-    assert 1.1 <= closed_at - clock.result_at < 2.0
+    assert 1.6 <= closed_at - clock.result_at < 2.4
 
 
 async def test_872_pending_wakeup_beyond_hold_is_not_closed(

@@ -578,6 +578,11 @@ class LiveSession:
     # #872: ``(source, task_id)`` keys already logged as
     # ``claude.live_session.hold_extended`` this idle period (once each).
     hold_extended_logged: set[str] = field(default_factory=set)
+    # #872: a declared wait held this idle period past the quiet-time limit.
+    # When it ends (task ended / deadline passed) the hold clock restarts, so
+    # the wake turn it was waiting for — and the hooks its prompt fires —
+    # get a fresh ``max_hold`` window instead of the long-expired one.
+    declared_wait_holding: bool = False
     # #812: background hooks still unpaired when stdin was closed (the
     # stream's view — *candidates*: frames carry no pid, so which of them is
     # still running can't be told); empty when no hook was running. The
@@ -9493,6 +9498,7 @@ class ClaudeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
                     live.idle_since = None
                     live.hold_started = None
                     live.idle_period_started = None
+                    live.declared_wait_holding = False
                     continue
                 if live.idle_period_started is None:
                     live.idle_period_started = now
@@ -9526,6 +9532,31 @@ class ClaudeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
                     live.idle_since = now
                 live.had_live_work = live_work
                 if live_work:
+                    if (
+                        live.declared_wait_holding
+                        and declared_wait_until(
+                            state, grace_s=self._declared_wait_grace_s, now=now
+                        )
+                        is None
+                    ):
+                        # #872: the declared wait just ended. The quiet-time
+                        # clock still dates from before it, so the expired
+                        # rule would close at once — over the wake turn's
+                        # prompt and its UserPromptSubmit hook (R17-01a).
+                        # Restart it; ``abs_cap`` above still bounds it.
+                        live.declared_wait_holding = False
+                        live.hold_started = now
+                        run_logger.info(
+                            "claude.live_session.hold_rearmed",
+                            session_id=sid,
+                            source="declared_wait_ended",
+                            task_id=None,
+                            since_turn_s=(
+                                round(now - live.idle_period_started, 1)
+                                if live.idle_period_started is not None
+                                else None
+                            ),
+                        )
                     rearm = state.bg_hold_rearm_on_progress
                     if rearm and live.hold_started is not None:
                         # #829: the hold measures quiet time, not time since
@@ -9549,6 +9580,7 @@ class ClaudeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
                                 state, grace_s=self._declared_wait_grace_s, now=now
                             )
                             if wait is not None:
+                                live.declared_wait_holding = True
                                 self._log_hold_extended(live, wait, run_logger, now)
                                 continue
                         if rearm:
