@@ -816,6 +816,18 @@ Chat: `ut-dev: Claude Code` (`-5284581592`). Logs: `journalctl --user -u untethe
 | R17-02b | with `[watchdog] post_result_bg_max_hold = 60`: `/new`; background Bash `python3 -c "import time; time.sleep(600)"`, reply STARTED (= R15-21b) | R15-21b's closing + `↩️ Reply to continue…` lines | `lifecycle_exited reason=exited_after_close close_reason=max_hold` |
 | R17-02c | `/new`; start a background Agent ("read 20 files one by one, summarise each"), reply STARTED; then `/cancel` | `⏹ Stopped 1 background task: …` | `close_grace_expired` → `exited_after_sigint … stopped_clean=True` → `lifecycle_exited reason=sigint close_reason=cancel` (only with an async hook evident: `reason=cancelled`) |
 
+### #872 — declared waits hold the live session
+
+Setup: `[watchdog] post_result_bg_max_hold = 60` in `~/.untether-dev/untether.toml` (hot-reloads, but it is read **per spawn**, so every row starts with `/new`; restore `1800` and `/new` at the end). Chat: `ut-dev: Claude Code` (`-5284581592`). Logs: `journalctl --user -u untether-dev -o cat --since "15 min ago" | grep -E "hold_extended|stdin_closed|task.ended|lifecycle_exited"`. Regression: B-LIVE-1…7, R15-21a/b/f, C1–C6, U1–U4 (Claude).
+
+| ID | Steps | Expected Telegram | Log signatures |
+|---|---|---|---|
+| R17-01a | `/new`; "Run in the background with `run_in_background: true` and `timeout: 300000`: `sleep 180; echo WATCH-DONE`. Reply STARTED, then tell me what it printed when it finishes." | `STARTED`; **no** `⏳ Closing session` at ≈60 s; ≈180 s: `🔔 Background task finished` turn quoting `WATCH-DONE` | `claude.live_session.hold_extended source=bash_timeout declared_s=300.0`; **no** `stdin_closed reason=max_hold` before `claude.task.ended` |
+| R17-01b | `/new`; same, but **no** `timeout` and `sleep 600` (silent) | at ≈60–90 s: `⏳ Closing session — 1 background task still running with no progress for 1 min: … Stopping it.` then `↩️ Reply to continue in the same session.` | `stdin_closed reason=max_hold`; no `hold_extended` (the R15-21b negative guard, unchanged) |
+| R17-01c | `/new`; `timeout: 90000` with `sleep 600` | no Untether close at 60 s; at ≈90 s the **CLI** stops the task and Claude reports it was stopped at its background time limit (native notice) | `claude.task.ended` (stopped) at ≈90 s **before** any `stdin_closed`; then a wake turn — proves CLI enforcement on 2.1.287 |
+| R17-01d *(opportunistic)* | `/new`; ask for a self-paced `/loop` whose next wake-up is ≈2 min out (e.g. "every 2 min print the time, 2 iterations") | `⏰ Scheduled wake-up` at ≈2 min, no closing notice at 60 s; `/cancel` afterwards | `hold_extended source=scheduled_wakeup`; no `stdin_closed reason=max_hold` before the wake turn |
+| R17-01e | `bg_hold_declared_waits = false`; `/new`; repeat R17-01a | closing notice at ≈60 s | `stdin_closed reason=max_hold`; no `hold_extended` |
+
 ### #416 — Codex reasoning `minimal` retired
 
 Codex chat `4929463515` (Bot API `-4929463515`). **Precondition (read-only):** the chat must not be in `safe` mode — `jq '.chats["-4929463515"].engine_overrides.codex' ~/.untether-dev/telegram_chat_prefs_state.json` → `null`, and `grep -A8 '^\[engines.codex\]' ~/.untether-dev/untether.toml` shows no `permission_mode = "safe"`. If it ever does, record the value, switch to full auto via `/config`, run the rows, then restore it. Logs: `journalctl --user -u untether-dev -o cat --since "15 minutes ago" | grep -E "run.reasoning.unsupported_level_ignored|config.reasoning|model_reasoning_effort=minimal|session.auto_cleared|handle.(runner|worker)_failed"`.

@@ -30,7 +30,7 @@ from untether.schemas.claude import (
 )
 
 # Last CLI these constants were re-derived against.
-PROBED_CLI_VERSION = "2.1.285"
+PROBED_CLI_VERSION = "2.1.287"
 
 pytestmark = pytest.mark.skipif(
     shutil.which("claude") is None, reason="claude CLI not installed"
@@ -385,11 +385,20 @@ def test_hook_started_precedes_a_detached_hook_spawn(cli_blob: mmap.mmap) -> Non
             f"re-derive the probe (last green on CLI {PROBED_CLI_VERSION})"
         )
     for detached, window in command_spawns:
-        assigned = re.search(rb"[,;]" + re.escape(detached) + rb"=!(\w+)[,;]", window)
+        # The flag is declared either inside a longer ``let`` list
+        # (``…,_n=!Qe,`` up to 2.1.286) or as the head of its own ``let``
+        # (``let Jn=!Ze,`` on 2.1.287, where a new hook-cwd early return —
+        # ``startsOutsideProject`` → ``spawnFailed`` — split the list).
+        assigned = re.search(
+            rb"(?:[,;]|let )" + re.escape(detached) + rb"=!([\w$]+)[,;]", window
+        )
         assert assigned is not None, (
             f"hook spawn detached:{detached.decode()} is no longer `!<windows>`"
         )
         windows = re.escape(assigned.group(1))
+        assert re.search(
+            rb"[,;\s]" + windows + rb'=[\w$]+\(\)==="windows"[,;]', window
+        ), "the hook spawn's detached flag is no longer `!(platform === windows)`"
         assert re.search(
             windows + rb"\?\w+\(\):null;if\(" + windows + rb"&&!\w+\)throw Error\("
             rb'`Hook "\$\{\w+\.command\}" requires bash but Git Bash',
@@ -884,3 +893,45 @@ def test_init_frame_carries_permission_mode(cli_blob: mmap.mmap) -> None:
         "system/init no longer declares permissionMode "
         f"(last green on CLI {PROBED_CLI_VERSION})"
     )
+
+
+# --- #872: declared background waits ------------------------------------------
+
+
+def test_872_background_bash_time_limit_present(cli_blob: mmap.mmap) -> None:
+    """#872 rests on the CLI enforcing a background command's ``timeout``
+    itself: 30 min default, 2 h maximum, then "stopped after reaching its
+    background time limit". If the defaults move, the hold's grace and the
+    docs (FAQ, troubleshooting) need re-checking."""
+    limits = re.search(
+        rb"var [\w$]{1,4}=(\d+);function [\w$]{1,4}\(\)\{return "
+        rb"Math\.min\(Math\.max\((\d+),",
+        cli_blob,
+    )
+    if limits is None:
+        pytest.skip(
+            "background Bash time-limit constants not found — re-derive the "
+            f"probe (last green on CLI {PROBED_CLI_VERSION})"
+        )
+    assert (limits.group(1), limits.group(2)) == (b"1800000", b"7200000"), (
+        "the CLI's background-command default / max time limit moved to "
+        f"{limits.group(1).decode()} / {limits.group(2).decode()} ms — review "
+        "#872's declared-wait docs"
+    )
+    if cli_blob.find(b"stopped after reaching its background time limit") < 0:
+        pytest.fail(
+            "the CLI no longer stops background commands at their time limit "
+            "(notice text gone) — a declared wait now ends only at Untether's "
+            f"grace or live_session_max_s (last green on CLI {PROBED_CLI_VERSION})"
+        )
+
+
+def test_872_schedule_wakeup_clamp_present(cli_blob: mmap.mmap) -> None:
+    """ScheduleWakeup stays within [60, 3600] s, so a wake-up the hold waits
+    for is bounded well inside ``live_session_max_s``."""
+    if cli_blob.find(b"outside [60, 3600]") < 0:
+        pytest.fail(
+            "ScheduleWakeup's [60, 3600] s clamp moved — a pending wake-up may "
+            "now hold a live session longer than an hour (#872; last green on "
+            f"CLI {PROBED_CLI_VERSION})"
+        )

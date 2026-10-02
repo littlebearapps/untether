@@ -642,6 +642,7 @@ class WatchdogSettings(BaseModel):
     #   before Untether closes it with a notice (`max_hold`). With
     #   `bg_hold_rearm_on_progress = false` it counts from the last turn only
     #   (the rc14 behaviour). `live_session_max_s` still caps the process.
+    #   A declared wait (#872, `bg_hold_declared_waits`) is never cut short.
     # - `live_sessions = false` (legacy, #647/#646): the liveness-aware
     #   extension of the post-result ceiling — when `post_result_idle_timeout`
     #   expires while background handles are live and the process tree is not
@@ -653,6 +654,12 @@ class WatchdogSettings(BaseModel):
     # (see `post_result_bg_max_hold`). False = the hold counts from the last
     # turn only (rc14). Read per spawn, so a change applies to the next run.
     bg_hold_rearm_on_progress: bool = True
+    # #872: a live session's background hold never closes before a declared
+    # wait ends — a background Bash's `timeout` (with `run_in_background`;
+    # the CLI enforces it, up to 2 h) or a pending ScheduleWakeup (up to 1 h)
+    # — plus a short grace, still capped by `live_session_max_s`. False = the
+    # rc16 quiet-time rule only. Read per spawn.
+    bg_hold_declared_waits: bool = True
 
     # #776: live-session model for Claude (control-channel mode). The process
     # stays live after its reply: background-task / scheduled-wakeup /

@@ -889,3 +889,91 @@ async def test_829_bash_output_activity_reads_mtime_and_skips_monitors(
     # A Monitor's growing output never counts; a missing file is no activity.
     out_b.unlink()
     assert await _bash_output_activity(state) is None
+
+
+# ── #872: declared waits (background Bash timeout, pending wake-up) ─────────
+
+
+def test_872_background_bash_timeout_is_recorded() -> None:
+    state = ClaudeStreamState()
+    _feed(
+        state,
+        _tool_use(
+            "Bash",
+            "toolu_x",
+            {"command": "sleep 7000", "run_in_background": True, "timeout": 7200000},
+        ),
+    )
+    assert state.bg_bash_timeouts == {"toolu_x": 7200.0}
+
+
+@pytest.mark.parametrize(
+    "raw_input",
+    [
+        {"command": "make", "timeout": 600000},  # foreground: not a budget
+        {"command": "x", "run_in_background": True, "timeout": True},
+        {"command": "x", "run_in_background": True, "timeout": "600000"},
+        {"command": "x", "run_in_background": True, "timeout": 0},
+        {"command": "x", "run_in_background": True, "timeout": -5},
+        {"command": "x", "run_in_background": True, "timeout": None},
+        {"command": "x", "run_in_background": True},
+    ],
+)
+def test_872_foreground_or_invalid_timeouts_are_ignored(raw_input: dict) -> None:
+    state = ClaudeStreamState()
+    _feed(state, _tool_use("Bash", "toolu_x", raw_input))
+    assert state.bg_bash_timeouts == {}
+
+
+def test_872_declared_wait_until_bash() -> None:
+    from untether.runners.claude import declared_wait_until
+
+    state = ClaudeStreamState()
+    _feed(state, _started_bash("b1", "toolu_b"))
+    state.bg_bash_timeouts["toolu_b"] = 10.0
+    t0 = state.tasks["b1"].started_at
+    wait = declared_wait_until(state, grace_s=1.0, now=t0 + 2)
+    assert wait is not None
+    assert wait.until == pytest.approx(t0 + 11)
+    assert wait.source == "bash_timeout" and wait.task_id == "b1"
+    assert wait.declared_s == 10.0 and wait.remaining_s == pytest.approx(9.0)
+    assert declared_wait_until(state, grace_s=1.0, now=t0 + 11.5) is None
+    _feed(state, _updated("b1", "completed"))
+    assert declared_wait_until(state, grace_s=1.0, now=t0 + 2) is None
+
+
+def test_872_declared_wait_ignores_monitors_and_includes_subagent_bash() -> None:
+    from untether.runners.claude import declared_wait_until
+
+    state = ClaudeStreamState()
+    _feed(state, _tool_use("Monitor", "toolu_m", {"command": "tail -f x"}))
+    _feed(state, _started_bash("m1", "toolu_m", desc="monitor"))
+    state.bg_bash_timeouts["toolu_m"] = 600.0
+    now = time.monotonic()
+    assert declared_wait_until(state, grace_s=0, now=now) is None
+    # #801: a subagent's own backgrounded Bash holds the session — its
+    # declared budget counts too.
+    _feed(state, _started_subagent_bg("bz1"))
+    state.bg_bash_timeouts["toolu_sub"] = 300.0
+    wait = declared_wait_until(state, grace_s=0, now=now)
+    assert wait is not None and wait.task_id == "bz1"
+
+
+def test_872_declared_wait_until_wakeup() -> None:
+    from untether.runners.claude import declared_wait_until
+
+    state = ClaudeStreamState()
+    now = time.monotonic()
+    state.pending_wakeup_until = now + 90
+    state.pending_wakeup_delay_s = 30.0
+    wait = declared_wait_until(state, grace_s=0, now=now)
+    assert wait is not None and wait.source == "scheduled_wakeup"
+    assert wait.task_id is None and wait.declared_s == 30.0
+    state.pending_wakeup_until = now - 1
+    assert declared_wait_until(state, grace_s=0, now=now) is None
+    # Bash 30 s and wake-up 90 s together: the later one wins.
+    state.pending_wakeup_until = time.monotonic() + 90
+    _feed(state, _started_bash("b1", "toolu_b"))
+    state.bg_bash_timeouts["toolu_b"] = 30.0
+    wait = declared_wait_until(state, grace_s=0)
+    assert wait is not None and wait.source == "scheduled_wakeup"

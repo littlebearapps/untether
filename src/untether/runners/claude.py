@@ -566,6 +566,9 @@ class LiveSession:
     # idle period, then at most every ``_hold_rearm_log_every_s``).
     idle_period_started: float | None = None
     rearm_logged_at: float | None = None
+    # #872: ``(source, task_id)`` keys already logged as
+    # ``claude.live_session.hold_extended`` this idle period (once each).
+    hold_extended_logged: set[str] = field(default_factory=set)
     # #812: background hooks still unpaired when stdin was closed (the
     # stream's view — *candidates*: frames carry no pid, so which of them is
     # still running can't be told); empty when no hook was running. The
@@ -1775,6 +1778,9 @@ class ClaudeStreamState:
     # tool_use handle is cleared by its own confirmation tool_result, so it
     # can't be what holds the session.
     pending_wakeup_until: float | None = None
+    # #872: the delay that wake-up announced ("in 94s"), for the
+    # ``hold_extended`` log — set and cleared with ``pending_wakeup_until``.
+    pending_wakeup_delay_s: float | None = None
     # #776: why the live session's stdin was closed (idle_no_tasks /
     # max_hold / abs_cap / cancel / new / drain); None while still open.
     live_close_reason: str | None = None
@@ -2032,11 +2038,21 @@ class ClaudeStreamState:
     # last turn.
     bg_hold_rearm_on_progress: bool = True
     bg_max_hold_s: float = 1800.0
+    # #872: mirrored from ``[watchdog] bg_hold_declared_waits`` (per spawn).
+    # On, the hold never closes before a declared wait ends
+    # (``declared_wait_until``).
+    bg_hold_declared_waits: bool = True
     # #829: background Bash output files, tool_use_id -> path, from the Bash
     # tool_result ("Output is being written to: …/tasks/<id>.output"). The
     # file grows while the command prints (P0 G4) — the only activity signal
     # a ``local_bash`` task has.
     bg_output_files: dict[str, str] = field(default_factory=dict)
+    # #872: the budget Claude declared for a background Bash — its ``timeout``
+    # with ``run_in_background`` (tool_use_id -> seconds). The CLI stops the
+    # command at that limit (30 min default, 2 h max), so the live session's
+    # hold waits for it. Never cleared by ``_clear_background_handle`` (the
+    # tool_result is only the launch confirmation), like ``bg_output_files``.
+    bg_bash_timeouts: dict[str, float] = field(default_factory=dict)
 
     # #572: set when the run's StreamResultMessage was a Stream-idle-timeout
     # failure — "type_a" (mid-generation stall, retryable) or "type_b"
@@ -4580,6 +4596,17 @@ def _register_background_handle(
         # (see ClaudeStreamState.last_bg_bash_launched_at docstring). Used by
         # the post-result idle watchdog tick log for observability only.
         state.last_bg_bash_launched_at = time.monotonic()
+        # #872: the declared background budget (only with run_in_background —
+        # a foreground ``timeout`` is a different limit, 2-10 min, and a
+        # foreground command the CLI moves to the background gets 30 min from
+        # the move, so it keeps the quiet-time rule).
+        timeout_ms = raw_input.get("timeout")
+        if (
+            isinstance(timeout_ms, (int, float))
+            and not isinstance(timeout_ms, bool)
+            and timeout_ms > 0
+        ):
+            state.bg_bash_timeouts[tool_id] = timeout_ms / 1000.0
     elif tool_name in ("Agent", "Task") and _agent_runs_in_background(raw_input):
         state.background_observed = True
         state.live_bg_agents.add(tool_id)
@@ -5174,6 +5201,71 @@ async def _bash_output_activity(state: ClaudeStreamState) -> BackgroundActivity 
         at = mono_now - max(0.0, wall_now - mtime)
         if best is None or at > best.at:
             best = BackgroundActivity(at, "bash_output", task.task_id)
+    return best
+
+
+@dataclass(frozen=True, slots=True)
+class DeclaredWait:
+    """#872: a wait Claude declared — a background Bash's ``timeout``
+    (``bash_timeout``) or a pending ScheduleWakeup (``scheduled_wakeup``).
+
+    ``until`` is ``time.monotonic()`` (grace included); ``declared_s`` is the
+    budget Claude declared (the Bash ``timeout``, or the wake-up's delay from
+    the announced fire time); ``remaining_s`` is ``until - now``."""
+
+    until: float
+    source: str
+    task_id: str | None
+    declared_s: float
+    remaining_s: float
+
+
+def declared_wait_until(
+    state: ClaudeStreamState, *, grace_s: float, now: float | None = None
+) -> DeclaredWait | None:
+    """#872: the latest declared wait still running, or None.
+
+    - A live, non-Monitor ``local_bash`` task whose tool_use carried a
+      background ``timeout`` (``bg_bash_timeouts``) waits until its start +
+      that timeout + ``grace_s`` — the CLI stops the command at the timeout
+      (counted from when it entered the background) and wakes Claude.
+      Subagent-launched background Bash counts too (#801).
+    - A pending ScheduleWakeup waits until its announced fire time
+      (``pending_wakeup_until``, already graced by ``_WAKEUP_FIRE_GRACE_S``).
+
+    Pure (no I/O)."""
+    if now is None:
+        now = time.monotonic()
+    best: DeclaredWait | None = None
+    for task in _live_native_tasks(state):
+        if task.task_type != "local_bash" or _is_native_monitor(state, task):
+            continue
+        timeout_s = state.bg_bash_timeouts.get(task.tool_use_id or "")
+        if not timeout_s:
+            continue
+        until = task.started_at + timeout_s + grace_s
+        if until > now and (best is None or until > best.until):
+            best = DeclaredWait(
+                until=until,
+                source="bash_timeout",
+                task_id=task.task_id,
+                declared_s=timeout_s,
+                remaining_s=until - now,
+            )
+    if _has_pending_wakeup(state) and state.pending_wakeup_until is not None:
+        until = state.pending_wakeup_until
+        if until > now and (best is None or until > best.until):
+            best = DeclaredWait(
+                until=until,
+                source="scheduled_wakeup",
+                task_id=None,
+                declared_s=(
+                    state.pending_wakeup_delay_s
+                    if state.pending_wakeup_delay_s is not None
+                    else max(0.0, until - _WAKEUP_FIRE_GRACE_S - now)
+                ),
+                remaining_s=until - now,
+            )
     return best
 
 
@@ -6337,6 +6429,7 @@ def _note_pending_wakeup(
     until = fire_at + _WAKEUP_FIRE_GRACE_S
     if state.pending_wakeup_until is None or until > state.pending_wakeup_until:
         state.pending_wakeup_until = until
+        state.pending_wakeup_delay_s = max(0.0, fire_at - now)
 
 
 def _has_pending_wakeup(state: ClaudeStreamState) -> bool:
@@ -6445,6 +6538,7 @@ def _open_followup_turn(
         detail.update(_task_attribution(state, [t.task_id for t in monitors]))
     if reason == "scheduled_wakeup":
         state.pending_wakeup_until = None
+        state.pending_wakeup_delay_s = None
     if reason == "followup" and command_uuid is not None:
         state.awaiting_injected.pop(command_uuid, None)
     # #383 C4: this turn runs unplanned because the approved plan's agents
@@ -8818,6 +8912,10 @@ class ClaudeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
     # #829: ``claude.live_session.hold_rearmed`` logs the first re-arm of an
     # idle period, then at most once per this many seconds.
     _hold_rearm_log_every_s: float = 300.0
+    # #872: after a declared wait's deadline (a background Bash's ``timeout``,
+    # a wake-up's fire time) the hold waits this much longer, so the CLI's own
+    # stop notice / wake turn lands before Untether would close.
+    _declared_wait_grace_s: float = 60.0
 
     async def _live_session_lifecycle(
         self,
@@ -8842,6 +8940,9 @@ class ClaudeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
           ``state.bg_hold_rearm_on_progress`` — by background activity:
           ``latest_background_progress`` while idle, and a background Bash's
           output file when the hold would expire);
+        - #872, ``state.bg_hold_declared_waits``: never before a declared wait
+          ends (``declared_wait_until``: a background Bash's ``timeout``, a
+          pending ScheduleWakeup's fire time, + ``_declared_wait_grace_s``);
         - ``abs_cap_s`` from spawn → notice + close (``abs_cap``).
         Closing stdin makes the CLI stop its tasks and exit rc=0 (F3/F4). Only
         if it doesn't exit within ``_live_close_grace_s`` does
@@ -8955,6 +9056,7 @@ class ClaudeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
                 if live.idle_period_started is None:
                     live.idle_period_started = now
                     live.rearm_logged_at = None
+                    live.hold_extended_logged.clear()
                 if state.plan_rearm_failed:
                     # #383: the CLI refused the plan re-arm; don't let wake
                     # turns keep running unplanned. The next message resumes
@@ -8996,6 +9098,18 @@ class ClaudeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
                         and live.hold_started is not None
                         and now - live.hold_started >= max_hold_s
                     ):
+                        if state.bg_hold_declared_waits:
+                            # #872: a wait Claude declared (a background
+                            # Bash's ``timeout``, a pending wake-up) is not
+                            # cut short for being quiet; ``abs_cap`` above
+                            # still bounds it. ``hold_started`` is untouched,
+                            # so once it lapses the quiet-time rule applies.
+                            wait = declared_wait_until(
+                                state, grace_s=self._declared_wait_grace_s, now=now
+                            )
+                            if wait is not None:
+                                self._log_hold_extended(live, wait, run_logger, now)
+                                continue
                         if rearm:
                             # #829 fallback, only at would-expire: a
                             # background Bash that is still printing.
@@ -9091,6 +9205,33 @@ class ClaudeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
                 else None
             ),
             activity_age_s=round(max(0.0, now - activity.at), 1),
+        )
+
+    def _log_hold_extended(
+        self,
+        live: LiveSession,
+        wait: DeclaredWait,
+        run_logger: Any,
+        now: float,
+    ) -> None:
+        """#872: ``claude.live_session.hold_extended`` — once per idle period
+        per ``(source, task_id)``."""
+        key = f"{wait.source}:{wait.task_id}"
+        if key in live.hold_extended_logged:
+            return
+        live.hold_extended_logged.add(key)
+        run_logger.info(
+            "claude.live_session.hold_extended",
+            session_id=live.session_id,
+            source=wait.source,
+            task_id=wait.task_id,
+            declared_s=round(wait.declared_s, 1),
+            remaining_s=round(wait.remaining_s, 1),
+            since_turn_s=(
+                round(now - live.idle_period_started, 1)
+                if live.idle_period_started is not None
+                else None
+            ),
         )
 
     async def _notify_live_closed(self, live: LiveSession, run_logger: Any) -> None:
@@ -10454,6 +10595,12 @@ class ClaudeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
                                 settings_obj.watchdog,
                                 "bg_hold_rearm_on_progress",
                                 True,
+                            )
+                        )
+                        # #872: read per spawn like its siblings.
+                        state.bg_hold_declared_waits = bool(
+                            getattr(
+                                settings_obj.watchdog, "bg_hold_declared_waits", True
                             )
                         )
                 except Exception:  # noqa: BLE001 — settings errors must not block a run

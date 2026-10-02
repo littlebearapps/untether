@@ -508,7 +508,11 @@ def wait_idle_or_eof(seconds: float) -> dict | None | str:
 
 def scenario_bg_bash_wake(first: dict) -> None:
     init()
-    tool_use("Bash", "toolu_bg", {"command": "sleep 20", "run_in_background": True})
+    bash_input: dict = {"command": "sleep 20", "run_in_background": True}
+    # #872: the budget Claude declares with run_in_background.
+    if os.environ.get("FAKE_CLAUDE_BASH_TIMEOUT_MS"):
+        bash_input["timeout"] = int(os.environ["FAKE_CLAUDE_BASH_TIMEOUT_MS"])
+    tool_use("Bash", "toolu_bg", bash_input)
     start_bg("b1", "toolu_bg")
     tool_result("toolu_bg", "Command running in background with ID: b1.")
     text("waiting")
