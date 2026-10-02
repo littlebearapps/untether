@@ -22,6 +22,9 @@ class EngineRunOptions:
     # means "follow global ``[loop] enabled``"; True/False is an explicit
     # per-chat override set via ``/config → 🔁 Loop mode``.
     loop_enabled: bool | None = None
+    # Native, runner-specific attachments. Telegram populates this only after
+    # resolving the effective engine to Codex; other runners ignore the field.
+    image_paths: tuple[str, ...] = ()
     # #416 — a stored reasoning level the engine no longer allows, dropped by
     # ``drop_unsupported_reasoning`` at resolution time. Only carries the
     # dropped value to the executor's one-line note; runners never read it.

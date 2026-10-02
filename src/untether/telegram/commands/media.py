@@ -39,6 +39,16 @@ async def _handle_media_group(
     ]
     | None = None,
     chat_prefs: ChatPrefsStore | None = None,
+    run_image_prompt: Callable[
+        [
+            TelegramIncomingMessage,
+            Sequence[TelegramIncomingMessage],
+            RunContext | None,
+            TopicStateStore | None,
+        ],
+        Awaitable[bool],
+    ]
+    | None = None,
 ) -> None:
     if not messages:
         return
@@ -84,6 +94,16 @@ async def _handle_media_group(
                 topic_store,
             )
             return
+    if (
+        run_image_prompt is not None
+        and all(
+            item.document is not None and item.document.is_image for item in ordered
+        )
+        and await run_image_prompt(command_msg, ordered, ambient_context, topic_store)
+    ):
+        return
+    if not cfg.files.enabled:
+        return
     if cfg.files.enabled and cfg.files.auto_put:
         caption_text = command_msg.text.strip()
         if cfg.files.auto_put_mode == "prompt" and caption_text:

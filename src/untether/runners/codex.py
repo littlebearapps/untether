@@ -764,6 +764,7 @@ class CodexRunner(ResumeTokenMixin, JsonlSubprocessRunner):
                 "--color=never",
             ]
         )
+        image_paths = run_options.image_paths if run_options is not None else ()
         mode = run_options.permission_mode if run_options is not None else None
         if mode == CODEX_SAFE_PERMISSION_MODE:
             # Must sit before `resume`: `codex exec resume` has no --sandbox.
@@ -771,11 +772,16 @@ class CodexRunner(ResumeTokenMixin, JsonlSubprocessRunner):
         elif mode is not None and mode not in _CODEX_FULL_AUTO_MODES:
             _warn_unknown_permission_mode(mode)
         if resume:
+            args.append("resume")
+            for image_path in image_paths:
+                args.extend(["--image", image_path])
             if resume.is_continue:
-                args.extend(["resume", "--last", "-"])
+                args.extend(["--last", "-"])
             else:
-                args.extend(["resume", resume.value, "-"])
+                args.extend([resume.value, "-"])
         else:
+            for image_path in image_paths:
+                args.extend(["--image", image_path])
             args.append("-")
         if isinstance(state, CodexRunState):
             state.argv = list(args)

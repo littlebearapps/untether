@@ -1,8 +1,8 @@
 from __future__ import annotations
 
 from collections import deque
-from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
-from dataclasses import dataclass, field
+from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
+from dataclasses import dataclass, field, replace
 from functools import partial
 from pathlib import Path
 from typing import TYPE_CHECKING, cast
@@ -51,6 +51,7 @@ from .commands.handlers import (
     parse_slash_command,
     run_engine,
     save_file_put,
+    save_file_put_group,
     set_command_menu,
     should_show_resume_line,
 )
@@ -90,6 +91,9 @@ ForwardKey = tuple[int, int, int]
 MessageKey = tuple[int, int]
 _SEEN_MESSAGES_LIMIT = 2048
 _SEEN_UPDATES_LIMIT = 4096
+DEFAULT_IMAGE_ANALYSIS_PROMPT = (
+    "Analyse the attached image or images and respond to anything relevant in them."
+)
 
 _handle_file_put_default = handle_file_put_default
 
@@ -852,7 +856,9 @@ def _classify_message(
         and msg.media_group_id is None
     )
     is_media_group_document = (
-        files_enabled and msg.document is not None and msg.media_group_id is not None
+        msg.document is not None
+        and msg.media_group_id is not None
+        and (files_enabled or msg.document.is_image)
     )
     return MessageClassification(
         text=text,
@@ -1254,19 +1260,7 @@ class ResumeResolver:
         cfg: TelegramBridgeConfig,
         task_group: TaskGroup,
         running_tasks: Mapping[MessageRef, object],
-        enqueue_resume: Callable[
-            [
-                int,
-                int,
-                str,
-                ResumeToken,
-                RunContext | None,
-                int | None,
-                tuple[int, int | None] | None,
-                MessageRef | None,
-            ],
-            Awaitable[None],
-        ],
+        enqueue_resume: Callable[..., Awaitable[None]],
         topic_store: TopicStateStore | None,
         chat_session_store: ChatSessionStore | None,
     ) -> None:
@@ -1289,6 +1283,7 @@ class ResumeResolver:
         topic_key: tuple[int, int] | None,
         engine_for_session: EngineId,
         prompt_text: str,
+        image_paths: tuple[str, ...] = (),
     ) -> ResumeDecision:
         if resume_token is not None:
             return ResumeDecision(
@@ -1309,6 +1304,7 @@ class ResumeResolver:
                     thread_id,
                     chat_session_key,
                     prompt_text,
+                    image_paths,
                 )
                 return ResumeDecision(resume_token=None, handled_by_running_task=True)
         resume_token = await self.stored_token(
@@ -1360,6 +1356,15 @@ class MediaGroupBuffer:
         run_prompt_from_upload: Callable[
             [TelegramIncomingMessage, str, ResolvedMessage], Awaitable[None]
         ],
+        run_image_prompt: Callable[
+            [
+                TelegramIncomingMessage,
+                Sequence[TelegramIncomingMessage],
+                RunContext | None,
+                TopicStateStore | None,
+            ],
+            Awaitable[bool],
+        ],
         resolve_prompt_message: Callable[
             [TelegramIncomingMessage, str, RunContext | None],
             Awaitable[ResolvedMessage | None],
@@ -1376,6 +1381,7 @@ class MediaGroupBuffer:
         self._reserved_chat_commands = reserved_chat_commands
         self._groups = groups
         self._run_prompt_from_upload = run_prompt_from_upload
+        self._run_image_prompt = run_image_prompt
         self._resolve_prompt_message = resolve_prompt_message
 
     def add(self, msg: TelegramIncomingMessage) -> None:
@@ -1432,6 +1438,7 @@ class MediaGroupBuffer:
                     self._run_prompt_from_upload,
                     self._resolve_prompt_message,
                     chat_prefs=self._chat_prefs,
+                    run_image_prompt=self._run_image_prompt,
                 )
                 logger.debug(
                     "media_group.flush.ok",
@@ -1583,25 +1590,14 @@ async def _send_queued_progress(
 
 async def send_with_resume(
     cfg: TelegramBridgeConfig,
-    enqueue: Callable[
-        [
-            int,
-            int,
-            str,
-            ResumeToken,
-            RunContext | None,
-            int | None,
-            tuple[int, int | None] | None,
-            MessageRef | None,
-        ],
-        Awaitable[None],
-    ],
+    enqueue: Callable[..., Awaitable[None]],
     running_task,
     chat_id: int,
     user_msg_id: int,
     thread_id: int | None,
     session_key: tuple[int, int | None] | None,
     text: str,
+    image_paths: tuple[str, ...] = (),
 ) -> None:
     reply = partial(
         send_plain,
@@ -1625,7 +1621,7 @@ async def send_with_resume(
         resume_token=resume,
         context=running_task.context,
     )
-    await enqueue(
+    args = (
         chat_id,
         user_msg_id,
         text,
@@ -1635,6 +1631,10 @@ async def send_with_resume(
         session_key,
         progress_ref,
     )
+    if image_paths:
+        await enqueue(*args, image_paths)
+    else:
+        await enqueue(*args)
 
 
 async def _notify_drain_start(
@@ -2239,6 +2239,7 @@ async def run_main_loop(
                 | None = None,
                 engine_override: EngineId | None = None,
                 progress_ref: MessageRef | None = None,
+                image_paths: tuple[str, ...] = (),
             ) -> None:
                 topic_key = (
                     (chat_id, thread_id)
@@ -2281,6 +2282,10 @@ async def run_main_loop(
                 run_options = _apply_trigger_permission_override(
                     run_options, context, engine=engine_for_overrides
                 )
+                if image_paths and engine_for_overrides == "codex":
+                    run_options = replace(
+                        run_options or EngineRunOptions(), image_paths=image_paths
+                    )
                 _note_unattended_approval_risk(
                     context,
                     engine_for_overrides,
@@ -2324,17 +2329,16 @@ async def run_main_loop(
 
             async def run_thread_job(job: ThreadJob) -> None:
                 await run_job(
-                    cast(int, job.chat_id),
-                    cast(int, job.user_msg_id),
-                    job.text,
-                    job.resume_token,
-                    job.context,
-                    cast(int | None, job.thread_id),
-                    job.session_key,
-                    None,
-                    scheduler.note_thread_known,
-                    None,
-                    job.progress_ref,
+                    chat_id=cast(int, job.chat_id),
+                    user_msg_id=cast(int, job.user_msg_id),
+                    text=job.text,
+                    resume_token=job.resume_token,
+                    context=job.context,
+                    thread_id=cast(int | None, job.thread_id),
+                    chat_session_key=job.session_key,
+                    on_thread_known=scheduler.note_thread_known,
+                    progress_ref=job.progress_ref,
+                    image_paths=job.image_paths,
                 )
 
             from ..live_followup import inject_live_followup
@@ -2587,6 +2591,7 @@ async def run_main_loop(
                 chat_session_key: tuple[int, int | None] | None,
                 reply_ref: MessageRef | None,
                 reply_id: int | None,
+                image_paths: tuple[str, ...] = (),
                 steerable: bool = False,
                 followup_override: str | None = None,
             ) -> None:
@@ -2621,6 +2626,7 @@ async def run_main_loop(
                     topic_key=topic_key,
                     engine_for_session=engine_resolution.engine,
                     prompt_text=prompt_text,
+                    image_paths=image_paths,
                 )
                 if resume_decision.handled_by_running_task:
                     return
@@ -2637,6 +2643,8 @@ async def run_main_loop(
                         reply_ref,
                         scheduler.note_thread_known,
                         engine_override,
+                        None,
+                        image_paths,
                     )
                     return
                 progress_ref = await _send_queued_progress(
@@ -2656,6 +2664,7 @@ async def run_main_loop(
                     msg.thread_id,
                     chat_session_key,
                     progress_ref,
+                    image_paths,
                 )
 
             async def _try_steer(
@@ -2723,6 +2732,7 @@ async def run_main_loop(
                 msg: TelegramIncomingMessage,
                 prompt_text: str,
                 resolved: ResolvedMessage,
+                image_paths: tuple[str, ...] = (),
             ) -> None:
                 reply_id = msg.reply_to_message_id
                 reply_ref = (
@@ -2746,7 +2756,118 @@ async def run_main_loop(
                     chat_session_key=chat_session_key,
                     reply_ref=reply_ref,
                     reply_id=reply_id,
+                    image_paths=image_paths,
                 )
+
+            async def run_native_image_prompt(
+                msg: TelegramIncomingMessage,
+                messages: Sequence[TelegramIncomingMessage],
+                ambient_context: RunContext | None,
+                topic_store: TopicStateStore | None,
+            ) -> bool:
+                if not messages or any(
+                    item.document is None or not item.document.is_image
+                    for item in messages
+                ):
+                    return False
+                caption = msg.text.strip()
+                prompt_source = caption or DEFAULT_IMAGE_ANALYSIS_PROMPT
+                reply = make_reply(cfg, msg)
+                try:
+                    resolved = cfg.runtime.resolve_message(
+                        text=prompt_source,
+                        reply_text=msg.reply_to_text,
+                        ambient_context=ambient_context,
+                        chat_id=msg.chat_id,
+                    )
+                except DirectiveError as exc:
+                    await reply(text=f"error:\n{exc}")
+                    return True
+                topic_key = resolve_topic_key(msg)
+                engine_resolution = await resolve_engine_defaults(
+                    explicit_engine=resolved.engine_override,
+                    context=resolved.context,
+                    chat_id=msg.chat_id,
+                    topic_key=topic_key,
+                )
+                running_engine: EngineId | None = None
+                if msg.reply_to_message_id is not None:
+                    running_task = state.running_tasks.get(
+                        MessageRef(
+                            channel_id=msg.chat_id,
+                            message_id=msg.reply_to_message_id,
+                        )
+                    )
+                    if running_task is not None:
+                        if running_task.resume is not None:
+                            running_engine = running_task.resume.engine
+                        elif running_task.edits is not None:
+                            running_engine = running_task.edits.tracker.engine
+                effective_engine = running_engine or (
+                    resolved.resume_token.engine
+                    if resolved.resume_token is not None
+                    else engine_resolution.engine
+                )
+                if effective_engine != "codex":
+                    return False
+                if not resolved.prompt.strip():
+                    resolved = replace(
+                        resolved,
+                        prompt=DEFAULT_IMAGE_ANALYSIS_PROMPT,
+                    )
+                chat_project = (
+                    _topics_chat_project(cfg, msg.chat_id)
+                    if cfg.topics.enabled
+                    else None
+                )
+                _, ok = await ensure_topic_context(
+                    resolved=resolved,
+                    ambient_context=ambient_context,
+                    topic_key=topic_key,
+                    chat_project=chat_project,
+                    reply=reply,
+                )
+                if not ok:
+                    return True
+
+                ordered = sorted(messages, key=lambda item: item.message_id)
+                if len(ordered) == 1:
+                    saved = await save_file_put(
+                        cfg,
+                        msg,
+                        "",
+                        resolved.context,
+                        topic_store,
+                    )
+                    if saved is None:
+                        return True
+                    image_paths = (saved.rel_path.as_posix(),)
+                else:
+                    saved_group = await save_file_put_group(
+                        cfg,
+                        msg,
+                        "",
+                        ordered,
+                        resolved.context,
+                        topic_store,
+                    )
+                    if saved_group is None:
+                        return True
+                    if saved_group.failed or len(saved_group.saved) != len(ordered):
+                        await reply(text="failed to upload one or more images.")
+                        return True
+                    image_paths = tuple(
+                        item.rel_path.as_posix()
+                        for item in saved_group.saved
+                        if item.rel_path is not None
+                    )
+                await run_prompt_from_upload(
+                    msg,
+                    resolved.prompt,
+                    resolved,
+                    image_paths,
+                )
+                return True
 
             async def _dispatch_pending_prompt(pending: _PendingPrompt) -> None:
                 msg = pending.msg
@@ -2853,6 +2974,7 @@ async def run_main_loop(
                 reserved_chat_commands=state.reserved_chat_commands,
                 groups=state.media_groups,
                 run_prompt_from_upload=run_prompt_from_upload,
+                run_image_prompt=run_native_image_prompt,
                 resolve_prompt_message=resolve_prompt_message,
             )
 
@@ -2984,6 +3106,27 @@ async def run_main_loop(
                         value="",
                         is_continue=True,
                     )
+                    image_paths: tuple[str, ...] = ()
+                    if (
+                        engine_resolution.engine == "codex"
+                        and msg.document is not None
+                        and msg.document.is_image
+                    ):
+                        saved = await save_file_put(
+                            cfg,
+                            msg,
+                            "",
+                            resolved.context,
+                            state.topic_store,
+                        )
+                        if saved is None:
+                            return
+                        image_paths = (saved.rel_path.as_posix(),)
+                        if not resolved.prompt.strip():
+                            resolved = replace(
+                                resolved,
+                                prompt=DEFAULT_IMAGE_ANALYSIS_PROMPT,
+                            )
                     resolved = ResolvedMessage(
                         prompt=resolved.prompt,
                         resume_token=continue_token,
@@ -2998,6 +3141,7 @@ async def run_main_loop(
                         chat_session_key=chat_session_key,
                         reply_ref=reply_ref,
                         reply_id=reply_id,
+                        image_paths=image_paths,
                     )
                     return
                 if command_id is not None and _dispatch_builtin_command(
@@ -3067,6 +3211,13 @@ async def run_main_loop(
                     if cfg.voice_show_transcription:
                         await reply(text=f"🎙 {text}")
                 if msg.document is not None:
+                    if msg.document.is_image and await run_native_image_prompt(
+                        msg,
+                        (msg,),
+                        ambient_context,
+                        state.topic_store,
+                    ):
+                        return
                     if cfg.files.enabled and cfg.files.auto_put:
                         caption_text = text.strip()
                         if cfg.files.auto_put_mode == "prompt" and caption_text:
