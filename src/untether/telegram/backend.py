@@ -94,6 +94,11 @@ def _build_versions_line(engine_ids: tuple[str, ...]) -> str | None:
     return " · ".join(parts) if len(parts) > 1 else None
 
 
+def _count(n: int, noun: str) -> str:
+    """``1 webhook`` / ``2 webhooks`` (#869, the /health idiom)."""
+    return f"{n} {noun}{'' if n == 1 else 's'}"
+
+
 def _resolve_mode_label(
     session_mode: str,
     topics_enabled: bool,
@@ -175,10 +180,9 @@ def _build_startup_message(
         ]
         n_cr = len(active)
         n_spent = len(crons) - n_cr
-        spent_note = f", {n_spent} spent one-shot" if n_spent else ""
-        details.append(
-            f"_triggers:_ `enabled ({n_wh} webhooks, {n_cr} crons{spent_note})`"
-        )
+        spent_note = f", {_count(n_spent, 'spent one-shot')}" if n_spent else ""
+        counts = f"{_count(n_wh, 'webhook')}, {_count(n_cr, 'cron')}{spent_note}"
+        details.append(f"_triggers:_ `enabled ({counts})`")
 
     _DOCS_URL = (
         "https://github.com/littlebearapps/untether?tab=readme-ov-file#-help-guides"

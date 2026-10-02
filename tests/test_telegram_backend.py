@@ -199,7 +199,9 @@ def test_startup_message_shows_triggers_when_enabled() -> None:
         trigger_config={"enabled": True, "webhooks": [{}], "crons": []},
     )
     assert "_triggers:_" in message
-    assert "1 webhooks" in message
+    # #869: singular for a count of 1
+    assert "(1 webhook, 0 crons)" in message
+    assert "1 webhooks" not in message
 
 
 def _startup_crons_message(
@@ -275,7 +277,7 @@ def test_startup_message_excludes_spent_run_once(
     )
 
     startup = captured["cfg"].startup_msg
-    assert "_triggers:_ `enabled (0 webhooks, 1 crons, 1 spent one-shot)`" in startup
+    assert "_triggers:_ `enabled (0 webhooks, 1 cron, 1 spent one-shot)`" in startup
 
 
 def test_startup_message_no_spent_suffix_when_none() -> None:
@@ -294,7 +296,31 @@ def test_startup_message_all_crons_spent() -> None:
         {"id": "b", "run_once": True},
     ]
     message = _startup_crons_message(crons, {"a", "b"})
-    assert "_triggers:_ `enabled (0 webhooks, 0 crons, 2 spent one-shot)`" in message
+    assert "_triggers:_ `enabled (0 webhooks, 0 crons, 2 spent one-shots)`" in message
+
+
+@pytest.mark.parametrize(
+    ("n_webhooks", "n_crons", "expected"),
+    [
+        (0, 0, "0 webhooks, 0 crons"),
+        (1, 1, "1 webhook, 1 cron"),
+        (2, 13, "2 webhooks, 13 crons"),
+    ],
+)
+def test_869_startup_message_trigger_counts_pluralise(
+    n_webhooks: int, n_crons: int, expected: str
+) -> None:
+    message = telegram_backend._build_startup_message(
+        _build_healthy_runtime(),
+        chat_id=123,
+        topics=TelegramTopicsSettings(),
+        trigger_config={
+            "enabled": True,
+            "webhooks": [{}] * n_webhooks,
+            "crons": [{"id": f"c{i}"} for i in range(n_crons)],
+        },
+    )
+    assert f"_triggers:_ `enabled ({expected})`" in message
 
 
 def test_startup_message_project_count(tmp_path: Path) -> None:

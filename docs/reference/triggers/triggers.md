@@ -739,14 +739,15 @@ mode: handoff
 
 directories: myapp
 
-triggers: enabled (2 webhooks, 1 crons, 1 spent one-shot)
+triggers: enabled (2 webhooks, 1 cron, 1 spent one-shot)
 ```
 
 The cron count includes only crons that will actually be scheduled. A
 `run_once` cron that has already fired stays in the TOML but is counted
 separately as a spent one-shot, and the suffix is omitted when there are none
-([#809](https://github.com/littlebearapps/untether/issues/809)). Counts are not
-pluralised (`1 crons`).
+([#809](https://github.com/littlebearapps/untether/issues/809)). Counts are
+pluralised: `1 webhook`, `1 cron`, `2 spent one-shots`
+([#869](https://github.com/littlebearapps/untether/issues/869)).
 ## Health endpoint
 
 The webhook server exposes a `GET /health` endpoint that returns:
