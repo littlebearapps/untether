@@ -557,9 +557,32 @@ def _normalise_tokens(tokens: list[Token]) -> list[Token]:
     return out
 
 
+def _number_ordered_lists(tokens: list[Token]) -> None:
+    """#886: keep an ordered list's own start number.
+
+    markdown-it renders ``42. x`` as ``<ol start="42">``, but sulguk ignores
+    ``start`` and numbers every list from 1 — so a reply that continues a
+    numbered list (or a continuation chunk of a long answer) restarted at
+    ``1.``. sulguk does honour ``<li value>``, and later items count on from
+    it, so the start is moved onto the list's first item."""
+    for idx, tok in enumerate(tokens):
+        if tok.type != "ordered_list_open":
+            continue
+        start = tok.attrGet("start")
+        if start is None:
+            continue
+        for item in tokens[idx + 1 :]:
+            if item.level < tok.level + 1:
+                break  # an empty list: nothing to number
+            if item.type == "list_item_open" and item.level == tok.level + 1:
+                item.attrSet("value", str(start))
+                break
+
+
 def _render_html(md: str) -> str:
     env: dict[str, Any] = {}
     tokens = _normalise_tokens(_MD_RENDERER.parse(md, env))
+    _number_ordered_lists(tokens)
     return _MD_RENDERER.renderer.render(tokens, _MD_RENDERER.options, env)
 
 

@@ -358,6 +358,11 @@ a few Telegram-specific rewrites:
   delimiter row (`|---|`) is dropped and the header row is bolded. When a long
   reply is split, the header row is repeated in the chunk that continues the
   table ([#797](https://github.com/littlebearapps/untether/issues/797)).
+- **Ordered list numbers** — a list that starts at a number other than 1
+  (`42. …`, or the continuation chunk of a long numbered answer) keeps its
+  numbers: the start is set on the list's first item (`<li value>`), which
+  the HTML-to-entities converter honours, where it ignored `<ol start>` and
+  renumbered from 1 ([#886](https://github.com/littlebearapps/untether/issues/886)).
 - **Bare filenames** — `.md`, `.sh` and `.py` are also country-code TLDs, so a
   bare `CLAUDE.md`, `setup.sh` or `render.py:86` (paths and `:line[:col]`
   suffixes included) is rendered as inline code rather than auto-linked as a

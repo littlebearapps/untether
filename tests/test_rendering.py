@@ -941,3 +941,53 @@ def test_870_code_span_crossing_lines_fallback() -> None:
     text, entities = render_markdown("🐛 one `x\ny` two\n🧪 three")
     assert text == "🐛 one x y two\n🧪 three"
     assert [e["type"] for e in entities] == ["code"]
+
+
+# ── #886: ordered lists keep their own start number ─────────────────────────
+
+
+def _utf16_slice(text: str, offset: int, length: int) -> str:
+    raw = text.encode("utf-16-le")
+    return raw[offset * 2 : (offset + length) * 2].decode("utf-16-le")
+
+
+def test_886_ordered_list_keeps_start_number() -> None:
+    text, _ = render_markdown("42. (first)\n43. second")
+    assert text == "42. (first)\n43. second"
+
+
+def test_886_default_start_unchanged() -> None:
+    assert render_markdown("1. a\n2. b")[0] == "1. a\n2. b"
+    assert render_markdown("0. zero\n1. one")[0] == "0. zero\n1. one"
+
+
+def test_886_nested_lists_number_independently() -> None:
+    text, _ = render_markdown("7. outer\n   3. inner a\n   4. inner b\n8. next")
+    assert text == "7. outer\n\xa03. inner a\n\xa04. inner b\n8. next"
+    text, _ = render_markdown("5. outer\n   - bullet\n6. next")
+    assert text.splitlines()[0] == "5. outer"
+    assert text.splitlines()[-1] == "6. next"
+
+
+def test_886_entity_offsets_follow_the_real_numbers() -> None:
+    text, entities = render_markdown("99. plain\n100. **bold** and `code`")
+    assert text == "99. plain\n100. bold and code"
+    spans = {e["type"]: _utf16_slice(text, e["offset"], e["length"]) for e in entities}
+    assert spans == {"bold": "bold", "code": "code"}
+
+
+def test_886_continuation_chunk_keeps_numbering() -> None:
+    from untether.telegram.render import MarkdownParts, prepare_telegram_multi
+
+    body = "\n".join(f"{n}. item number {n} " + "x" * 40 for n in range(1, 21))
+    payloads = prepare_telegram_multi(
+        MarkdownParts(header="h", body=body), max_body_chars=400
+    )
+    assert len(payloads) > 1
+    numbers = [
+        int(line.split(".", 1)[0])
+        for text, _ in payloads
+        for line in text.splitlines()
+        if re.match(r"^\d+\. item", line)
+    ]
+    assert numbers == list(range(1, 21))
