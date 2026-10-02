@@ -428,7 +428,7 @@ The progress, final and live-turn header lines end with Claude's context-window 
 - **Denominator** — `result.modelUsage.<model>.contextWindow`, learned per model on each `result` and cached per process (`claude.context.window_learned`, INFO, once per model). A model id ending in `[1m]` (the session's `system/init` model, or the frame's) with the other id equal to its base resolves to 1 000 000 before any cache hit. Dated ids are never fuzzy-matched to a base id: a miss logs `claude.context.window_miss` (DEBUG) and shows nothing. So the first turn on a model not seen since the last restart gets its `% ctx` only at the final.
 - **Rounding** — `Math.round` half-up in integer maths, matching `/context`. A value over 100 is shown as 100 after one `claude.context.over_window` WARN per (session, model).
 - **After a compaction** (`system/compact_boundary`) the segment disappears until the next main-thread response (`post_tokens` excludes the system prompt and tools, so it would under-report).
-- **Configured autocompact windows** (`--autocompact` in `extra_args`, settings `autoCompactWindow`, `CLAUDE_CODE_AUTO_COMPACT_WINDOW`) are not read: the header divides by the model window, `/context` by the configured one, so ours reads lower. Exact parity via the `get_context_usage` control request is planned for 0.35.5rc17 ([#833](https://github.com/littlebearapps/untether/issues/833)) and not shipped yet; the value above is the only `% ctx` source today.
+- **Configured autocompact windows** (`--autocompact` in `extra_args`, settings `autoCompactWindow`, `CLAUDE_CODE_AUTO_COMPACT_WINDOW`) are not read: the header divides by the model window, `/context` by the configured one, so ours reads lower. Exact parity via the `get_context_usage` control request is planned for v0.35.6 ([#833](https://github.com/littlebearapps/untether/issues/833)) and not shipped yet; the value above is the only `% ctx` source today.
 
 The value travels as an `ActionEvent` of kind `telemetry` (id `claude.context`, phase `updated`, `detail.context_pct` / `context_used` / `context_window` / `model`), emitted only when the integer percentage changes. `ProgressTracker` stores it apart from the actions (no step, never a running tool, never folded or exported). In a live session the runner re-emits the current value right after each `TurnEvent(started)` (a turn's tracker starts empty), holds changes that arrive between turns until the next turn opens, and forwards result-time telemetry before the `TurnEvent(completed)`. `usage["context"]` (`pct`, `used`, `window`, `model`) rides on the result for the `runner.completed context_pct=` log field only. Display switch: `[progress] show_context_usage` (default `true`, re-read per run). Claude only; the Codex half is [#832](https://github.com/littlebearapps/untether/issues/832).
 
@@ -715,7 +715,7 @@ Strategy:
   * `content` may be a string or an array of content blocks; normalize to a string for summaries
   * `detail` includes a small summary (char count / first line / “(truncated)”)
 
-This mirrors CodexRunner’s “started → completed” item tracking and renders well in existing `UntetherProgressRenderer`.
+This mirrors CodexRunner’s “started → completed” item tracking and renders well in the existing `ProgressTracker` / `MarkdownFormatter` pipeline.
 
 **CompletedEvent**
 

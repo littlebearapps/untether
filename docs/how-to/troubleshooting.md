@@ -141,9 +141,9 @@ minutes.
 Run standalone, `gemini` prints `IneligibleTierError: This client is no longer
 supported for Gemini Code Assist for individuals` and exits 1. Spawned by
 Untether, the subprocess instead **hangs** without exiting, so Untether sees no
-events and no exit — hence the stall rather than an error message. Tracked as
-[#724](https://github.com/littlebearapps/untether/issues/724) and **not being
-fixed**, because the engine is deprecated.
+events and no exit — hence the stall rather than an error message. Filed as
+[#724](https://github.com/littlebearapps/untether/issues/724) and closed as
+**won't fix**, because the engine is deprecated.
 
 Gemini CLI reached **end-of-life for individual and free Google accounts on
 18 June 2026** ([Google's announcement](https://developers.googleblog.com/an-important-update-transitioning-gemini-cli-to-antigravity-cli/)). There is no fix — migrate to

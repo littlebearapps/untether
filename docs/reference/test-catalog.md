@@ -117,7 +117,7 @@ Helpers (not collected): `conftest.py` (shared fixtures plus the #808 isolation 
 - `test_engine_discovery.py` — 3 tests: invalid engine ids filtered, engine CLI commands registered sorted without an engine-id option
 - `test_auto_router.py` — 8 tests: AutoRouter resolves the runner from text before reply, poll order, resume lines in replies (with/without emoji or variation selector, inside a full final)
 - `test_tool_actions.py` — 19 tests: tool-input path extraction and tool → action kind/title mapping (parametrised over bash/edit/read/glob/grep/web tools, Task kind override)
-- `test_exec_render.py` — 19 tests: CLI event rendering and `ProgressRenderer` — relative file-change paths, action clamping/collapsing/dedupe, ctx footer before resume, elapsed formatting, web-search title prefixes (#419)
+- `test_exec_render.py` — 19 tests: CLI event rendering via `ProgressTracker` + `MarkdownFormatter` — relative file-change paths, action clamping/collapsing/dedupe, ctx footer before resume, elapsed formatting, web-search title prefixes (#419)
 - `test_subprocess.py` — 18 tests: subprocess lifecycle — terminate/kill escalation over the descendant tree (#275), transport closed on every exit path (#599), process-group reaping of orphans with PID-reuse identity checks (#590)
 - `test_paths.py` — 5 tests: cwd-relative rewriting of command and file paths, sibling-prefix safety, run base dir
 

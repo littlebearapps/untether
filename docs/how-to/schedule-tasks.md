@@ -139,7 +139,7 @@ permission_mode = "auto"
 !!! warning "Unattended crons and prompting modes"
     Since v0.35.5, `default`, `manual` and `acceptEdits` really do prompt: any tool call the mode doesn't cover waits for an Approve / Deny tap ([#749](https://github.com/littlebearapps/untether/issues/749)). A cron that fires while you're away will sit on that button. For unattended crons use `plan-auto`, `auto`, `dontAsk` or `bypassPermissions`, or pre-approve the tools the job needs.
 
-Precedence (Claude): cron `permission_mode` > per-chat `/planmode` > engine config default. Every autonomous run logs `trigger.cron.permission_mode_override`. Valid values: `default` (alias `manual`), `plan`, `plan-auto`, `auto`, `acceptEdits`, `dontAsk`, `bypassPermissions`. For a Codex cron, `"safe"` selects Codex's read-only sandbox for that run; other engines ignore the field ([#332](https://github.com/littlebearapps/untether/issues/332) tracks full coverage).
+Precedence (Claude): cron `permission_mode` > per-chat `/planmode` > engine config default. Every autonomous run logs `trigger.cron.permission_mode_override`. Valid values: `default` (alias `manual`), `plan`, `plan-auto`, `auto`, `acceptEdits`, `dontAsk`, `bypassPermissions`. For a Codex cron, `"safe"` selects Codex's read-only sandbox for that run; the deprecated Gemini engine passes the value through as `--approval-mode`, and OpenCode, Pi and AMP ignore the field ([#332](https://github.com/littlebearapps/untether/issues/332) tracks full coverage).
 
 ## Trigger provenance and history
 

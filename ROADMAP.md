@@ -4,7 +4,7 @@ This roadmap reflects the project's direction based on recent development and co
 
 ## Near-term
 
-- **Antigravity CLI engine** — new engine backend for Google's [Antigravity CLI](https://antigravity.google) (`agy`), the successor to Gemini CLI. A **distinct engine**, not a Gemini rename: authentication, CLI flags, and session semantics all differ, so it will register under its own `antigravity` engine id. Targeted for v0.36.0 ([#558](https://github.com/littlebearapps/untether/issues/558))
+- **Antigravity CLI engine** — new engine backend for Google's [Antigravity CLI](https://antigravity.google) (`agy`), the successor to Gemini CLI. A **distinct engine**, not a Gemini rename: authentication, CLI flags, and session semantics all differ, so it will register under its own `antigravity` engine id. Targeted for v0.35.6, ahead of the v0.36.0 Gemini/Amp removal ([#558](https://github.com/littlebearapps/untether/issues/558))
 - **Retire the Gemini CLI and Amp engines** — both deprecated in v0.35.5 and scheduled for removal in v0.36.0, alongside the Amp-only `/threads` command. Gemini CLI reached end-of-life for individual and free Google accounts on 18 June 2026; the Amp integration is unmaintained. See [deprecated engines](README.md#deprecated-engines) ([#720](https://github.com/littlebearapps/untether/issues/720), [#458](https://github.com/littlebearapps/untether/issues/458), [#722](https://github.com/littlebearapps/untether/issues/722))
 - **Additional transport backends** — Discord and Slack transports via the plugin system
 - **Improved onboarding diagnostics** — expand `untether doctor` with network, permission, and engine health checks
