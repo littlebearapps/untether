@@ -177,37 +177,53 @@ async def _resolve_engine_run_options(
     )
 
 
-def _apply_trigger_permission_override(
+# Trigger-level fields that win over the resolved chat/topic options for a
+# trigger's own run (#330 permission_mode). Each is copied from RunContext.
+_TRIGGER_OVERRIDE_FIELDS: tuple[str, ...] = ("permission_mode",)
+
+
+def _apply_trigger_overrides(
     run_options: EngineRunOptions | None,
     context: RunContext | None,
     *,
     engine: EngineId | None = None,
+    log: bool = True,
 ) -> EngineRunOptions | None:
-    """#330: apply a trigger-level `permission_mode` on top of resolved run_options.
+    """Apply a trigger's own overrides on top of resolved run_options (#330/#743).
 
-    Dispatchers populate ``RunContext.permission_mode`` from
-    ``CronConfig.permission_mode``; this helper overrides the resolved
-    per-chat/topic ``EngineRunOptions.permission_mode`` when a trigger
-    override is present. Logs once when the override actually changes the
-    effective value so staging debug is greppable.
+    Dispatchers populate ``RunContext`` from the trigger config
+    (``CronConfig.permission_mode``, …); each set field replaces the resolved
+    per-chat/topic value for that run only. This is the single applier for
+    every trigger-level option, used by ``run_job`` and by the live
+    follow-up / steer comparisons so all three see identical options.
+
+    ``log``: emit ``trigger.cron.<field>_override`` when an override changes
+    the effective value. Only ``run_job`` logs; the comparison sites pass
+    ``log=False`` so a follow-up or steer never prints a spurious override.
     """
-    if context is None or context.permission_mode is None:
+    if context is None:
         return run_options
-    previous_mode = run_options.permission_mode if run_options is not None else None
-    if run_options is None:
-        new_options = EngineRunOptions(permission_mode=context.permission_mode)
-    else:
-        from dataclasses import replace
+    fields = {
+        name: value
+        for name in _TRIGGER_OVERRIDE_FIELDS
+        if (value := getattr(context, name, None)) is not None
+    }
+    if not fields:
+        return run_options
+    from dataclasses import replace
 
-        new_options = replace(run_options, permission_mode=context.permission_mode)
-    if previous_mode != context.permission_mode:
-        logger.info(
-            "trigger.cron.permission_mode_override",
-            trigger_source=context.trigger_source,
-            chat_permission_mode=previous_mode,
-            trigger_permission_mode=context.permission_mode,
-            engine=engine,
-        )
+    base = run_options if run_options is not None else EngineRunOptions()
+    new_options = replace(base, **fields)
+    if log:
+        for name, value in fields.items():
+            previous = getattr(run_options, name) if run_options is not None else None
+            if previous != value:
+                logger.info(
+                    f"trigger.cron.{name}_override",
+                    trigger_source=context.trigger_source,
+                    engine=engine,
+                    **{f"chat_{name}": previous, f"trigger_{name}": value},
+                )
     return new_options
 
 
@@ -2273,12 +2289,11 @@ async def run_main_loop(
                     chat_prefs=state.chat_prefs,
                     topic_store=state.topic_store,
                 )
-                # #330: cron-level permission_mode override wins over the
-                # resolved chat/topic preference. Dispatchers populate
-                # RunContext.permission_mode from CronConfig.permission_mode;
-                # here we apply it to the per-run EngineRunOptions so the
-                # runner's _effective_permission_mode() picks it up.
-                run_options = _apply_trigger_permission_override(
+                # #330 / #743: trigger-level overrides win over the resolved
+                # chat/topic preference. Dispatchers populate RunContext from
+                # the trigger config; here they are applied to the per-run
+                # EngineRunOptions so the runner picks them up.
+                run_options = _apply_trigger_overrides(
                     run_options, context, engine=engine_for_overrides
                 )
                 _note_unattended_approval_risk(
@@ -2359,8 +2374,8 @@ async def run_main_loop(
                     chat_prefs=state.chat_prefs,
                     topic_store=state.topic_store,
                 )
-                return _apply_trigger_permission_override(
-                    options, job.context, engine=job.resume_token.engine
+                return _apply_trigger_overrides(
+                    options, job.context, engine=job.resume_token.engine, log=False
                 )
 
             scheduler = ThreadScheduler(
@@ -2698,8 +2713,8 @@ async def run_main_loop(
                         chat_prefs=state.chat_prefs,
                         topic_store=state.topic_store,
                     )
-                    return _apply_trigger_permission_override(
-                        options, resolved.context, engine=target.engine
+                    return _apply_trigger_overrides(
+                        options, resolved.context, engine=target.engine, log=False
                     )
 
                 return await maybe_steer(
