@@ -111,6 +111,53 @@ def _resolve_mode_label(
     return "assistant"
 
 
+def _unattended_startup_line(
+    runtime: TransportRuntime,
+    trigger_config: dict,
+    spent_cron_ids: Collection[str],
+) -> str | None:
+    """#836: the ``unattended approvals`` line, or None.
+
+    Recomputes #751's pure audit (no logging — the WARN stays owned by
+    ``build_runtime_spec``) with the runtime's own engine resolution, so the
+    line reflects what dispatch will do (#862). Never raises: a startup
+    message must not fail on it.
+    """
+    try:
+        from ..context import RunContext
+        from ..permission_audit import (
+            CLAUDE_ENGINE,
+            audit_claude_permission_modes,
+            format_unattended_entries,
+        )
+        from ..triggers.settings import parse_trigger_config
+
+        if CLAUDE_ENGINE not in runtime.engine_ids:
+            return None
+        try:
+            triggers = parse_trigger_config(trigger_config)
+        except (ValueError, TypeError):
+            return None  # reported as triggers.init_failed elsewhere
+        runner = runtime.resolve_runner(
+            resume_token=None, engine_override=CLAUDE_ENGINE
+        ).runner
+        mode = getattr(runner, "permission_mode", None)
+        if getattr(runner, "dangerously_skip_permissions", None) is True:
+            mode = "bypassPermissions"  # overrides the configured mode
+        audit = audit_claude_permission_modes(
+            engine_mode=mode if isinstance(mode, str) else None,
+            triggers=triggers,
+            resolve_engine=lambda engine, project: runtime.resolve_engine(
+                engine_override=engine, context=RunContext(project=project)
+            ),
+            spent_cron_ids=spent_cron_ids,
+        )
+        return format_unattended_entries(audit)
+    except Exception:  # noqa: BLE001
+        logger.debug("startup.unattended_line_failed", exc_info=True)
+        return None
+
+
 def _build_startup_message(
     runtime: TransportRuntime,
     *,
@@ -183,6 +230,11 @@ def _build_startup_message(
         spent_note = f", {_count(n_spent, 'spent one-shot')}" if n_spent else ""
         counts = f"{_count(n_wh, 'webhook')}, {_count(n_cr, 'cron')}{spent_note}"
         details.append(f"_triggers:_ `enabled ({counts})`")
+        # #836: Claude crons whose approvals will be auto-denied (#835).
+        if (
+            line := _unattended_startup_line(runtime, trigger_config, spent)
+        ) is not None:
+            details.append(line)
 
     _DOCS_URL = (
         "https://github.com/littlebearapps/untether?tab=readme-ov-file#-help-guides"

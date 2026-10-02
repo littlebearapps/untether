@@ -917,3 +917,46 @@ def _write_config(tmp_path, *, engine_mode=None, crons=(), extra: str = ""):
     path = tmp_path / "untether.toml"
     path.write_text("\n".join(lines) + "\n" + extra)
     return path
+
+
+def test_836_format_unattended_entries_cap_and_wording() -> None:
+    from untether.permission_audit import (
+        UNATTENDED_LINE_LABEL,
+        UNATTENDED_LINE_LABEL_WAITS,
+        PermissionAudit,
+        format_unattended_entries,
+    )
+
+    # One constant per wording (§13 F2): #835 shipped → "auto-denied".
+    assert UNATTENDED_LINE_LABEL == "unattended approvals (auto-denied)"
+    assert UNATTENDED_LINE_LABEL_WAITS == "unattended approvals (wait for a tap)"
+    assert format_unattended_entries(PermissionAudit()) is None
+    audit = PermissionAudit(
+        unattended=(("cron:a", "default"), ("cron:b", "plan")),
+        inherited=(("cron:c", "plan"), ("cron:d", "plan")),
+    )
+    assert format_unattended_entries(audit) == (
+        "_unattended approvals (auto-denied):_ "
+        "`cron:a (default), cron:b (plan), cron:c (inherits plan)` +1 more"
+    )
+    assert format_unattended_entries(audit, limit=10, label="x") == (
+        "_x:_ `cron:a (default), cron:b (plan), cron:c (inherits plan), "
+        "cron:d (inherits plan)`"
+    )
+
+
+def test_836_audit_inherited_only_for_claude_crons_without_mode() -> None:
+    audit = _audit(
+        engine_mode="plan",
+        triggers=_triggers(
+            {"id": "slip"},
+            {"id": "cx", "engine": "codex"},
+            {"id": "set", "permission_mode": "auto"},
+            {"id": "done", "run_once": True},
+        ),
+        spent={"done"},
+    )
+    assert audit.inherited == (("cron:slip", "plan"),)
+    assert audit.unattended == ()
+    assert _audit(engine_mode="auto", triggers=_triggers({"id": "s"})).inherited == ()
+    assert _audit(engine_mode=None, triggers=_triggers({"id": "s"})).inherited == ()

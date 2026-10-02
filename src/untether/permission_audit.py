@@ -77,10 +77,18 @@ class PermissionAudit:
     unattended: tuple[tuple[str, str], ...] = ()
     # ("cron:<id>", mode)
     invalid: tuple[tuple[str, str], ...] = ()
+    # #836: ("cron:<id>", engine mode) — a Claude cron with no
+    # ``permission_mode`` while the engine default asks for a tap. It takes
+    # the chat's /planmode first (unknowable here), so this is a nudge to set
+    # the mode explicitly; only the startup message shows it (not logged —
+    # the dispatch-time WARN sees the real resolved mode).
+    inherited: tuple[tuple[str, str], ...] = ()
 
     @property
     def empty(self) -> bool:
-        return not (self.auto_entries or self.unattended or self.invalid)
+        return not (
+            self.auto_entries or self.unattended or self.invalid or self.inherited
+        )
 
 
 def make_engine_resolver(
@@ -110,6 +118,8 @@ def audit_claude_permission_modes(
     auto_entries: list[str] = []
     unattended: list[tuple[str, str]] = []
     invalid: list[tuple[str, str]] = []
+    inherited: list[tuple[str, str]] = []
+    engine_waits = engine_mode is not None and claude_tap_waits_for(engine_mode)
     if engine_mode == LEGACY_CLAUDE_PLAN_AUTO_MODE:
         auto_entries.append(ENGINE_CONFIG_ENTRY)
     allowed = VALID_PERMISSION_MODES_BY_ENGINE[CLAUDE_ENGINE]
@@ -118,6 +128,13 @@ def audit_claude_permission_modes(
         for cron in triggers.crons:
             mode = cron.permission_mode
             if mode is None:
+                if (
+                    engine_waits
+                    and engine_mode is not None
+                    and resolve_engine(cron.engine, cron.project) == CLAUDE_ENGINE
+                    and not (cron.run_once and cron.id in spent)
+                ):
+                    inherited.append((f"cron:{cron.id}", engine_mode))
                 continue
             if resolve_engine(cron.engine, cron.project) != CLAUDE_ENGINE:
                 continue
@@ -137,7 +154,34 @@ def audit_claude_permission_modes(
         auto_entries=tuple(auto_entries),
         unattended=tuple(unattended),
         invalid=tuple(invalid),
+        inherited=tuple(inherited),
     )
+
+
+# #836: the startup-message line. One constant per wording so the CHANGELOG,
+# docs and tests can't disagree; the fallback is for a build without #835.
+UNATTENDED_LINE_LABEL = "unattended approvals (auto-denied)"
+UNATTENDED_LINE_LABEL_WAITS = "unattended approvals (wait for a tap)"
+
+
+def format_unattended_entries(
+    audit: PermissionAudit, *, limit: int = 3, label: str = UNATTENDED_LINE_LABEL
+) -> str | None:
+    """#836: ``_<label>:_ `cron:a (default), cron:b (inherits plan)` +N more``.
+
+    Explicit tap-waiting crons first, then crons that inherit a tap-waiting
+    engine default. ``None`` when there is nothing to show. Cron ids are
+    free-form: backticks become ``'`` so the inline code span can't break,
+    and ``+N more`` sits outside it.
+    """
+    items = [f"{trigger} ({mode})" for trigger, mode in audit.unattended]
+    items += [f"{trigger} (inherits {mode})" for trigger, mode in audit.inherited]
+    if not items:
+        return None
+    shown = [item.replace("`", "'") for item in items[:limit]]
+    more = len(items) - len(shown)
+    suffix = f" +{more} more" if more > 0 else ""
+    return f"_{label}:_ `{', '.join(shown)}`{suffix}"
 
 
 # Last finding set logged per kind (process-wide; startup + reloads).

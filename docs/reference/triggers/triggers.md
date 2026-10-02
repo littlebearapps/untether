@@ -232,6 +232,16 @@ flags such crons with WARNING `trigger.unattended_approval_risk`
   to Claude in such a mode, including one inherited from the chat preference or
   engine config — logged once per trigger and mode.
 
+The Telegram startup message adds one line when any Claude cron would have its
+approvals denied ([#836](https://github.com/littlebearapps/untether/issues/836)):
+`_unattended approvals (auto-denied):_` followed by up to three entries, then
+`+N more`. An entry is `cron:<id> (<mode>)` for an explicit asking mode, or
+`cron:<id> (inherits <mode>)` for a cron with no `permission_mode` while
+`[engines.claude] permission_mode` asks (the chat's `/planmode` may still
+override it at fire time — set the cron's mode explicitly to be sure). Spent
+`run_once` crons and webhooks aren't listed; the line is computed once at
+startup and isn't refreshed on reload.
+
 ### `[triggers.crons.fetch]`
 
 === "toml"

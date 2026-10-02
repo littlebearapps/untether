@@ -506,3 +506,212 @@ def test_telegram_files_settings_defaults() -> None:
     assert cfg.auto_put_mode == "upload"
     assert cfg.uploads_dir == "incoming"
     assert cfg.allowed_user_ids == []
+
+
+# ---------------------------------------------------------------------------
+# #836: unattended-approval crons in the startup message
+# ---------------------------------------------------------------------------
+
+
+def _claude_runtime(
+    *,
+    engine_mode: str | None = "plan",
+    projects: dict[str, str] | None = None,
+    default_engine: str = "claude",
+    with_claude: bool = True,
+) -> TransportRuntime:
+    from untether.config import ProjectConfig, ProjectsConfig
+    from untether.runners.claude import ClaudeRunner
+
+    entries = []
+    if with_claude:
+        entries.append(
+            RunnerEntry(
+                engine="claude",
+                runner=ClaudeRunner(claude_cmd="claude", permission_mode=engine_mode),
+            )
+        )
+    entries.append(RunnerEntry(engine="codex", runner=ScriptRunner([], engine="codex")))
+    router = AutoRouter(entries=entries, default_engine=default_engine)
+    project_cfgs = {
+        alias: ProjectConfig(
+            alias=alias,
+            path=Path("/tmp") / alias,
+            worktrees_dir=Path(".wt"),
+            default_engine=engine,
+        )
+        for alias, engine in (projects or {}).items()
+    }
+    return TransportRuntime(
+        router=router,
+        projects=ProjectsConfig(projects=project_cfgs, default_project=None),
+        watch_config=True,
+    )
+
+
+def _msg_836(
+    crons: list[dict[str, Any]],
+    *,
+    runtime: TransportRuntime | None = None,
+    enabled: bool = True,
+    spent: set[str] | None = None,
+) -> str:
+    full = [{"schedule": "0 0 1 1 *", "prompt": "hi", **c} for c in crons]
+    return telegram_backend._build_startup_message(
+        runtime or _claude_runtime(),
+        chat_id=123,
+        topics=TelegramTopicsSettings(),
+        trigger_config={"enabled": enabled, "webhooks": [], "crons": full},
+        spent_cron_ids=spent or set(),
+    )
+
+
+def _line_836(message: str) -> str | None:
+    from untether.permission_audit import UNATTENDED_LINE_LABEL
+
+    for part in message.split("\n\n"):
+        if part.startswith(f"_{UNATTENDED_LINE_LABEL}:_"):
+            return part
+    return None
+
+
+def test_836_startup_lists_unattended_crons() -> None:
+    msg = _msg_836(
+        [
+            {"id": "c2", "permission_mode": "default"},
+            {"id": "c4", "permission_mode": "plan"},
+        ]
+    )
+    assert _line_836(msg) == (
+        "_unattended approvals (auto-denied):_ `cron:c2 (default), cron:c4 (plan)`"
+    )
+    # Below the triggers line.
+    assert msg.index("_triggers:_") < msg.index("_unattended approvals")
+
+
+def test_836_inherited_mode_cron_listed_when_engine_default_asks() -> None:
+    """A Claude cron with no permission_mode falls back to the engine default
+    (`plan`) — the slip the line exists to surface."""
+    msg = _msg_836([{"id": "slip"}, {"id": "ok", "permission_mode": "auto"}])
+    assert _line_836(msg) == (
+        "_unattended approvals (auto-denied):_ `cron:slip (inherits plan)`"
+    )
+    quiet = _msg_836([{"id": "slip"}], runtime=_claude_runtime(engine_mode="auto"))
+    assert _line_836(quiet) is None
+    bypass = _claude_runtime(engine_mode="plan")
+    runner = bypass.resolve_runner(resume_token=None, engine_override="claude").runner
+    runner.dangerously_skip_permissions = True  # type: ignore[attr-defined]
+    assert _line_836(_msg_836([{"id": "slip"}], runtime=bypass)) is None
+
+
+@pytest.mark.parametrize("mode", ["plan-auto", "bypassPermissions", "auto", "dontAsk"])
+def test_836_no_line_when_set_empty(mode: str) -> None:
+    msg = _msg_836([{"id": "c", "permission_mode": mode}])
+    assert _line_836(msg) is None
+    assert "unattended" not in msg
+
+
+def test_836_no_line_when_triggers_disabled() -> None:
+    msg = _msg_836([{"id": "c", "permission_mode": "default"}], enabled=False)
+    assert "unattended" not in msg
+
+
+def test_836_no_line_for_non_claude_crons() -> None:
+    msg = _msg_836(
+        [
+            {"id": "x", "engine": "codex", "permission_mode": "default"},
+            {"id": "y", "project": "cx"},
+        ],
+        runtime=_claude_runtime(projects={"cx": "codex"}),
+    )
+    assert _line_836(msg) is None
+
+
+def test_836_project_default_engine_resolves_to_claude() -> None:
+    """#862: no engine, project default claude, global default codex."""
+    msg = _msg_836(
+        [{"id": "p", "project": "cl", "permission_mode": "acceptEdits"}],
+        runtime=_claude_runtime(projects={"cl": "claude"}, default_engine="codex"),
+    )
+    assert _line_836(msg) == (
+        "_unattended approvals (auto-denied):_ `cron:p (acceptEdits)`"
+    )
+
+
+def test_836_no_line_when_claude_not_configured() -> None:
+    msg = _msg_836(
+        [{"id": "c", "permission_mode": "default"}],
+        runtime=_claude_runtime(with_claude=False, default_engine="codex"),
+    )
+    assert "unattended" not in msg
+
+
+def test_836_spent_run_once_excluded() -> None:
+    msg = _msg_836(
+        [
+            {"id": "gone", "permission_mode": "default", "run_once": True},
+            {"id": "gone2", "run_once": True},
+        ],
+        spent={"gone", "gone2"},
+    )
+    assert _line_836(msg) is None
+
+
+def test_836_more_than_three_shows_plus_n() -> None:
+    msg = _msg_836([{"id": f"c{i}", "permission_mode": "default"} for i in range(5)])
+    line = _line_836(msg)
+    assert line is not None
+    assert line.endswith("` +2 more")
+    assert "cron:c2 (default)`" in line
+    assert "c3" not in line
+
+
+def test_836_no_line_for_auto_crons() -> None:
+    msg = _msg_836([{"id": "a", "permission_mode": "auto"}])
+    assert "unattended" not in msg
+    assert "auto_semantics" not in msg
+
+
+def test_836_bad_trigger_section_skips_line() -> None:
+    msg = telegram_backend._build_startup_message(
+        _claude_runtime(),
+        chat_id=123,
+        topics=TelegramTopicsSettings(),
+        trigger_config={"enabled": True, "crons": [{"id": 1}]},
+    )
+    assert "_triggers:_" in msg
+    assert "unattended" not in msg
+
+
+def test_836_backtick_in_cron_id_sanitised() -> None:
+    msg = _msg_836([{"id": "we`ird*_[id", "permission_mode": "default"}])
+    line = _line_836(msg)
+    assert line == (
+        "_unattended approvals (auto-denied):_ `cron:we'ird*_[id (default)`"
+    )
+    assert line.count("`") == 2
+
+
+def test_836_no_audit_log_from_startup_message() -> None:
+    from structlog.testing import capture_logs
+
+    with capture_logs() as logs:
+        _msg_836([{"id": "c", "permission_mode": "default"}])
+    names = {e["event"] for e in logs}
+    assert "trigger.unattended_approval_risk" not in names
+    assert "startup.unattended_line_failed" not in names
+
+
+def test_836_failure_never_breaks_startup(monkeypatch: pytest.MonkeyPatch) -> None:
+    from structlog.testing import capture_logs
+
+    import untether.permission_audit as audit_mod
+
+    def _boom(*args: object, **kwargs: object) -> object:
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(audit_mod, "audit_claude_permission_modes", _boom)
+    with capture_logs() as logs:
+        msg = _msg_836([{"id": "c", "permission_mode": "default"}])
+    assert "_triggers:_" in msg and "unattended" not in msg
+    assert any(e["event"] == "startup.unattended_line_failed" for e in logs)
