@@ -471,7 +471,7 @@ Commands:
   project chats.
 - `/ctx` shows the bound context and stored session engines inside topics.
   Outside topics, `/ctx set ...` and `/ctx clear` bind the chat context.
-- `/new` inside a topic cancels any running task and clears stored resume tokens for that topic.
+- `/new` inside a topic cancels that topic's running task (and its pending `/loop` entries) and clears stored resume tokens for that topic. Runs in other topics keep going; `/new` in General only cancels General's runs (General = no thread id = topic id 1). The `/cancel` no-reply fallback is scoped the same way. Non-forum groups stay chat-wide ([#826](https://github.com/littlebearapps/untether/issues/826)).
 
 State is stored in `telegram_topics_state.json` alongside the config file.
 Delete it to reset all topic bindings and stored sessions.

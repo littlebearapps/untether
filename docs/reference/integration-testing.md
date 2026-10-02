@@ -479,7 +479,7 @@ Integration tests are run by Claude Code via Telegram MCP tools (see "Automated 
 | `/browse` + shared path checks (`commands/browse.py`, `telegram/files.py`) | Q5, U10, T2, T3, R15-2 |
 | File transfer (`file_transfer.py`) | T2, T3, T5, R15-3 |
 | Voice (`voice.py`) | T1, R15-11 (vocabulary; supersedes RC12-10), R15-10 (endpoint) |
-| Topics (`topics.py`, `topic_state.py`) | O1, O5, O6, O8 |
+| Topics (`topics.py`, `topic_state.py`) | O1, O5, O6, O8, R17-14 (dev-ws forum) |
 | Directives (`directives.py`) | T9, T10 |
 | Shutdown (`shutdown.py`) | S3, B4 |
 | Error hints / reasoning levels (`error_hints.py`, `engine_overrides.py`, `commands/config.py`, `commands/executor.py`) | Tier 7 Q2, Tier 4 O2 (Codex), U7, R15-14a…e |
@@ -904,6 +904,23 @@ Setup: back up (`cp ~/.untether-dev/untether.toml ~/.untether-dev/untether.toml.
 | R17-20i | `/config → ⏰ Triggers` in the Claude chat while `r17-20a` is configured | Row shows `model=haiku · ` and (for `r17-20d`) `effort=low · ` before `last` |
 
 Cleanup: restore the backup (`cp …bak-r17-20 …toml && rm …bak-r17-20`), `/model clear`, restart once if triggers were toggled; check `run_once_fired.json` holds only r17 ids (removing the crons cleans them on the next reload, #317).
+
+### #826 — `/new` and `/cancel` scoped to the forum topic
+
+Venue: the **`untether-dev-ws`** workspace-mode instance (forum supergroup `-1003669503877`, `topics.enabled = true`, `scope = "main"`, `session_mode = "chat"`, default engine Codex; same editable `.venv` as dev). `@untether_dev_bot` has no forum chat. After the code lands: `systemctl --user restart untether-dev-ws` from a terminal (never `untether.service`). Logs: `journalctl --user -u untether-dev-ws -o cat --since "10 minutes ago" | grep -E "new\.cancel_scope|new\.cancelled_running|cancel\.requested|loop\.cancelled_for_chat|session\.summary|runner\.completed"`.
+
+Pre: Telegram MCP `list_topics` on `-1003669503877`; pick two topics **A** and **B** (create `r17-a` / `r17-b` with `create_forum_topic` if needed). The long run, sent in A: `run the shell command "sleep 120" and then reply DONE`. Note A's and B's thread ids.
+
+| ID | Steps | Expected (chat) | Logs |
+|---|---|---|---|
+| R17-14a | while A runs: `/new` in **B** | B: `🧹 cleared stored sessions for this topic.` (no "cancelled run"); A later finishes with `DONE` | `new.cancel_scope scoped=True cancelled=0 skipped_other_threads=1 thread_id=<B>`; no `cancel.requested`, no `session.summary cancelled=True` for A |
+| R17-14b | start A again; `/new` in **General** | General: `🧹 cleared stored sessions for you in this chat.` (or `no stored sessions to clear for this chat.`); A finishes with `DONE` | `new.cancel_scope … thread_id=None scoped=True cancelled=0 skipped_other_threads=1` |
+| R17-14c | start A again; `/cancel` (no reply) in **B** | B: `nothing running in this topic.`; A finishes | no `cancel.requested` |
+| R17-14d | while A runs: `/cancel` (no reply) in **A** | A's run ends cancelled | `cancel.requested thread_id=<A>` |
+| R17-14e | start A again; `/new` in **A** | A: `🧹 cancelled run and cleared stored sessions for this topic.` | `new.cancel_scope scoped=True cancelled=1 skipped_other_threads=0`; `new.cancelled_running thread_id=<A> count=1` |
+| R17-14f *(optional, Claude)* | In A: `/agent set claude`, `/config → 🔁 Loop mode` on, then `/loop 10m print the current time`. Then `/new` in **B**; then `/new` in **A** | Claude confirms the schedule in A; after B's `/new`, `jq '.entries[] \| {chat_id, thread_id}' ~/.untether-dev-ws/active_loops.json` still lists the loop with A's thread id; A's `/new` replies `🧹 … stored sessions for this topic.` and the entry is gone | no `loop.cancelled_for_chat` after B's `/new`; `loop.cancelled_for_chat scoped=True count=1` after A's `/new` |
+
+Regression (non-forum, `@untether_dev_bot`): Tier 7 Q-smoke for `/new` and `/cancel`; in the Codex chat `-4929463515` start `sleep 60`, then `/new` → `🧹 cancelled run and cleared …`, log `new.cancel_scope scoped=False cancelled=1` (`chat_type=group` → chat-wide). Also RC14-2 (the #807 command barrier still replies), T1–T10 sampling, S7, O5, O6. Cleanup on dev-ws: `/agent clear` and Loop mode off in A if R17-14f ran.
 
 ### #416 — Codex reasoning `minimal` retired
 

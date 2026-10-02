@@ -101,7 +101,7 @@ Plan outlines render as formatted Telegram text via `render_markdown()` + `split
 
 ## /new command
 
-`/new` cancels all running tasks for the chat via `_cancel_chat_tasks()` (in `commands/topics.py`) before clearing stored sessions. This prevents process leaks from orphaned Claude/engine subprocesses.
+`/new` cancels the running tasks (and pending `/loop` entries) of the message's thread in forum supergroups and private chats — chat-wide in non-forum groups — via `_cancel_chat_tasks(..., thread_filter=thread_filter_for(msg))` (in `commands/topics.py`; the predicate lives in `telegram/topics.py`, General = no thread = topic id 1) before clearing stored sessions ([#826](https://github.com/littlebearapps/untether/issues/826)). The `/cancel` no-reply fallback uses the same predicate for running tasks, queued jobs, `/at` delays and loops. Scope key = `RunningTask.thread_id` (the originating message's thread), never the echoed `ref.thread_id`. This prevents process leaks from orphaned Claude/engine subprocesses.
 
 ## After changes
 

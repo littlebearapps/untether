@@ -34,7 +34,7 @@ This line is parsed from replies and takes precedence over new directives. For b
 
 | Command | Description |
 |---------|-------------|
-| `/cancel` | Reply to the progress message to stop the current run. Also cancels pending `/at` delays, and drops a prompt still waiting in the forward-coalesce window with a `🗑️ Dropped N message(s) …` reply ([#807](https://github.com/littlebearapps/untether/issues/807)). |
+| `/cancel` | Reply to the progress message to stop the current run. Without a reply it stops the single active run (or queued job), else cancels pending `/at` delays and loops — in a forum topic only that topic's, in General only General's ([#826](https://github.com/littlebearapps/untether/issues/826)). Also drops a prompt still waiting in the forward-coalesce window with a `🗑️ Dropped N message(s) …` reply ([#807](https://github.com/littlebearapps/untether/issues/807)). |
 | `/agent` | Show/set the default engine for the current scope. |
 | `/model` | Show/set the model override for the current scope. |
 | `/reasoning` | Show/set the reasoning override for the current scope. |
@@ -67,7 +67,7 @@ Notes:
 
 - Outside topics, `/ctx` binds the chat context.
 - In topics, `/ctx` binds the topic context.
-- `/new` cancels running tasks and clears sessions but does **not** clear a bound context.
+- `/new` cancels running tasks and clears sessions but does **not** clear a bound context. In a forum supergroup (and a private chat with topics) it only cancels the runs and loops of the topic it was sent in; `/new` in General leaves topic runs alone. Non-forum groups stay chat-wide ([#826](https://github.com/littlebearapps/untether/issues/826)).
 - `/continue` uses the engine's native "continue" flag: `--continue` (Claude, OpenCode, Pi), `resume --last` (Codex), or `--resume latest` (Gemini, deprecated).
 - Long-running tools (Bash, BashOutput, ScheduleWakeup, Monitor, …) surface a heartbeat-driven elapsed-time tail (`▸ Bash · 3m 47s · npm run build`) on the progress message after ~60s, regardless of `/verbose` state ([#481](https://github.com/littlebearapps/untether/issues/481)). Tune via `[progress] heartbeat_interval`.
 - Loop mode (Claude only): there is no `/loop` Telegram command — it's a Claude Code feature. Untether observes Claude's `ScheduleWakeup` and `CronCreate` tool calls and re-fires iterations after the subprocess exits. Off by default; opt in per chat via `/config` → 🔁 **Loop mode**. Cost protection lives in `[cost_budget]`, runaway-safety caps in `[loop]` ([#289](https://github.com/littlebearapps/untether/issues/289)).

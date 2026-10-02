@@ -67,7 +67,7 @@ Autonomous loops consume API credits or your Claude subscription quota. A 24-hou
 
 ### Cancelling a loop
 
-`/cancel` drops all active loops for the current chat and writes a do-not-resume sentinel so the upstream session-scoped cron — if it ever survives — cannot be re-fired by Untether. `/new` does the same (treats `/new` as "wipe this chat's state").
+`/cancel` drops all active loops for the current chat **or forum topic** ([#826](https://github.com/littlebearapps/untether/issues/826)) and writes a do-not-resume sentinel so the upstream session-scoped cron — if it ever survives — cannot be re-fired by Untether. `/new` does the same (treats `/new` as "wipe this chat's — or this topic's — state"). In a forum, a loop belongs to the topic whose run created it, and its iterations are posted back in that topic.
 
 ## Telegram scheduling
 

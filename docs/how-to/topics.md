@@ -84,10 +84,12 @@ Note: Outside topics (private chats or main group chats), `/ctx` binds the chat 
 
 ## Reset a topic session
 
-Use `/new` inside the topic to cancel any running task and clear stored sessions for that thread.
+Use `/new` inside the topic to cancel any running task and clear stored sessions for that thread. Only this topic's run (and its `/loop` schedules) is cancelled — other topics keep running. `/new` or `/cancel` in General likewise only touches General's work ([#826](https://github.com/littlebearapps/untether/issues/826)).
 
-!!! warning "Known issue in v0.35.5"
-    `/new` currently also cancels runs that are working in *other* topics of the same group ([#826](https://github.com/littlebearapps/untether/issues/826)). The stored sessions of other topics are not cleared. Until it's fixed, use `/cancel` (reply to the progress message) to stop a single topic's run.
+`/cancel` without a reply follows the same rule: in a topic it stops that topic's run, or replies "nothing running in this topic." when only other topics are busy.
+
+!!! note "Scheduled runs"
+    Cron and webhook runs have no topic: they run in General, so only `/new` or `/cancel` in General cancels them. An `/at` run belongs to the topic it was scheduled from. Claude Code `/loop` schedules belong to the topic whose run created them, and each loop iteration is posted back in that topic.
 
 ## Set a default engine per topic
 
