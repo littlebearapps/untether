@@ -1925,6 +1925,10 @@ class ClaudeStreamState:
     # result lands; reset on each subsequent result so that a multi-turn
     # bidirectional session re-arms the timer on every turn boundary.
     result_received_at: float | None = None
+    # #821: monotonic time of the previous result — unlike
+    # ``result_received_at`` never cleared at a turn open, so each result can
+    # tell which background agents were active since the one before it.
+    prev_result_at: float | None = None
 
     # #470: cross-layer signals from _post_result_idle_watchdog → bridge.
     # The watchdog stamps ``post_result_closed_at`` (monotonic) and
@@ -6409,6 +6413,46 @@ def _usage_payload(event: claude_schema.StreamResultMessage) -> dict[str, Any]:
     return usage
 
 
+# #821: at most this many task ids ride on ``usage["background"]``.
+_BACKGROUND_USAGE_MAX_IDS = 10
+
+
+def _background_usage(
+    state: ClaudeStreamState, now: float | None = None
+) -> dict[str, Any] | None:
+    """#821: the background agents active since the previous result — their
+    spend is in this result's cost delta (``total_cost_usd`` counts subagent
+    requests, with no per-agent breakdown). Active = a backgrounded
+    ``local_agent`` (top-level or nested) still live, or that ended or showed
+    activity after the previous result (every agent, for the run's first
+    result). None when there are none."""
+    if now is None:
+        now = time.monotonic()
+    prev = state.prev_result_at
+    active = [
+        task
+        for task in state.tasks.values()
+        if task.task_type == "local_agent"
+        and task.is_backgrounded
+        and (
+            task.ended_at is None
+            or prev is None
+            or task.ended_at > prev
+            or task.last_progress_at > prev
+        )
+    ]
+    if not active:
+        return None
+    live = sum(1 for task in active if task.ended_at is None)
+    return {
+        "agents": len(active),
+        "agents_live": live,
+        "agents_ended": len(active) - live,
+        "task_ids": [task.task_id for task in active][:_BACKGROUND_USAGE_MAX_IDS],
+        "since_s": None if prev is None else round(now - prev, 1),
+    }
+
+
 def _capture_orphan_descendants(
     state: ClaudeStreamState, *, source: str, pid: int | None = None
 ) -> None:
@@ -7361,6 +7405,11 @@ def _translate_claude_event_base(
             if (compaction := _compaction_usage(state, event)) is not None:
                 usage["compaction"] = compaction
             _reset_compaction_segment(state)
+            # #821: which background agents' spend this cost delta includes.
+            result_at = time.monotonic()
+            if (background := _background_usage(state, result_at)) is not None:
+                usage["background"] = background
+            state.prev_result_at = result_at
 
             # #572: record the stream-idle classification so the bridge's
             # bounded auto-retry gate can read it via engine_state duck-typing.

@@ -452,6 +452,30 @@ async def test_825_fg_task_moved_to_background_labels_its_wake_turn(
     assert not any(e["event"] == "claude.turn.notification_ignored" for e in logs)
 
 
+# ── #821: each result names the background agents active since the last ──
+
+
+async def test_821_wake_turn_usage_reports_background_agents() -> None:
+    """``multi_agent_acks``: turn 1 launches two agents; each finish produces
+    an ``unknown`` turn (the agent ends mid-turn) and a restatement turn."""
+    events = await _collect("multi_agent_acks", until=5)
+    completed = [e for e in events if isinstance(e, CompletedEvent)]
+    finals = [e for e in events if isinstance(e, TurnEvent) and e.phase == "completed"]
+    usages = [completed[0].usage or {}] + [t.usage or {} for t in finals]
+    shapes = [
+        (
+            (u.get("background") or {}).get("agents_live"),
+            (u.get("background") or {}).get("agents_ended"),
+        )
+        if "background" in u
+        else None
+        for u in usages
+    ]
+    assert shapes == [(2, 0), (1, 1), (1, 0), (0, 1), None]
+    assert completed[0].usage["background"]["since_s"] is None
+    assert finals[0].usage["background"]["since_s"] is not None
+
+
 # ── #816: a /continue run releases its session registries ──────────────────
 
 _CONTINUE = ResumeToken(engine=ENGINE, value="", is_continue=True)

@@ -748,6 +748,15 @@ class TestFormatRunCost:
         assert result is not None
         assert "1.5M/250.0k" in result
 
+    def test_format_run_cost_marks_background_agents(self):
+        """#821: the figure includes background agents' spend — say so."""
+        usage = {"total_cost_usd": 26.94, "num_turns": 3}
+        assert _format_run_cost(usage) == "$26.94 · 3 tn"
+        usage["background"] = {"agents": 2, "agents_live": 1, "agents_ended": 1}
+        assert _format_run_cost(usage) == "$26.94 · incl. 2 bg agents · 3 tn"
+        usage["background"] = {"agents": 1}
+        assert _format_run_cost(usage) == "$26.94 · incl. 1 bg agent · 3 tn"
+
     def test_long_duration(self):
         result = _format_run_cost(
             {

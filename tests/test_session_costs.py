@@ -107,6 +107,45 @@ def test_apply_cost_delta_uses_seeded_baseline() -> None:
     assert out["total_cost_usd"] == pytest.approx(0.0075)
 
 
+def test_apply_cost_delta_logs_background_fields() -> None:
+    """#821: the delta names the background agents whose spend it includes."""
+    from structlog.testing import capture_logs
+
+    background = {
+        "agents": 3,
+        "agents_live": 1,
+        "agents_ended": 2,
+        "task_ids": ["a", "b", "c"],
+    }
+    with capture_logs() as logs:
+        out = rb._apply_cost_delta(
+            "claude",
+            "s-bg",
+            {"total_cost_usd": 1.5, "background": background},
+            resumed=False,
+        )
+    (delta,) = [e for e in logs if e["event"] == "cost.turn_delta"]
+    assert delta["bg_agents"] == 3
+    assert delta["bg_agents_live"] == 1 and delta["bg_agents_ended"] == 2
+    assert delta["bg_task_ids"] == ["a", "b", "c"]
+    assert out["background"] == background  # kept for the footer / outlier
+
+
+def test_apply_cost_delta_logs_zero_bg_agents_for_claude_without_key() -> None:
+    from structlog.testing import capture_logs
+
+    with capture_logs() as logs:
+        rb._apply_cost_delta("claude", "s-nobg", {"total_cost_usd": 0.2}, resumed=False)
+    (delta,) = [e for e in logs if e["event"] == "cost.turn_delta"]
+    assert delta["bg_agents"] == 0
+    assert "bg_task_ids" not in delta
+
+
+def test_apply_cost_delta_non_claude_has_no_bg_fields() -> None:
+    assert rb._background_log_fields("codex", {"background": {"agents": 2}}) == {}
+    assert rb._background_log_fields(None, {"total_cost_usd": 1.0}) == {}
+
+
 # ── end to end through the real bridge ──────────────────────────────────────
 
 

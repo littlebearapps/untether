@@ -258,6 +258,9 @@ The terminal event looks like:
 - `origin.kind == "task-notification"` marks a turn the CLI started itself;
   it confirms a `hook_rewake` turn at its result (4.5).
 - `usage["safeguard"]` is added when the turn had a safeguard stop (4.2 E).
+- `usage["background"]` (#821) names the background agents active since the
+  previous result (`agents`, `agents_live`, `agents_ended`, `task_ids`,
+  `since_s`) — their spend is in this result's cost delta; absent when none.
 - **Resume guard:** on a resumed run, a 0-turn result (`num_turns == 0`,
   `duration_api_ms == 0`) that follows a replayed `task_notification{stopped}`
   before any assistant output is absorbed — no `completed`; the next result is

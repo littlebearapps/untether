@@ -505,3 +505,57 @@ def test_717_zero_turn_run_logs_turns_without_dividing(monkeypatch) -> None:
     fields = next(w[1] for w in warnings if w[0] == "cost.run_outlier")
     assert fields["num_turns"] == 0
     assert "usd_per_turn" not in fields
+
+
+# ---------------------------------------------------------------------------
+# #821: the outlier notice says when background agents' spend is included
+# ---------------------------------------------------------------------------
+
+
+def test_run_outlier_notice_names_background_agents(monkeypatch) -> None:
+    from untether.runner_bridge import _check_run_cost_outlier
+
+    warnings = _capture_outlier(monkeypatch, _outlier_settings())
+    text = _check_run_cost_outlier(
+        {
+            "total_cost_usd": 26.94,
+            "num_turns": 3,
+            "background": {
+                "agents": 10,
+                "agents_live": 4,
+                "agents_ended": 6,
+                "task_ids": ["a1", "a2"],
+            },
+        }
+    )
+    assert text == (
+        "\U0001f4b8 This run cost $26.94 (over the $20.00 alert) \N{EM DASH} "
+        "includes spend by 10 background agents since the previous reply"
+    )
+    (fields,) = [kw for event, kw in warnings if event == "cost.run_outlier"]
+    assert fields["bg_agents"] == 10
+    assert fields["bg_agents_live"] == 4 and fields["bg_agents_ended"] == 6
+    assert fields["bg_task_ids"] == ["a1", "a2"]
+
+
+def test_run_outlier_notice_singular_agent(monkeypatch) -> None:
+    from untether.runner_bridge import _check_run_cost_outlier
+
+    _capture_outlier(monkeypatch, _outlier_settings())
+    text = _check_run_cost_outlier(
+        {"total_cost_usd": 21.0, "background": {"agents": 1}}
+    )
+    assert text is not None
+    assert text.endswith(
+        "includes spend by 1 background agent since the previous reply"
+    )
+
+
+def test_run_outlier_without_background_has_no_clause_or_fields(monkeypatch) -> None:
+    from untether.runner_bridge import _check_run_cost_outlier
+
+    warnings = _capture_outlier(monkeypatch, _outlier_settings())
+    text = _check_run_cost_outlier({"total_cost_usd": 22.06})
+    assert text == "\U0001f4b8 This run cost $22.06 (over the $20.00 alert)"
+    (fields,) = [kw for event, kw in warnings if event == "cost.run_outlier"]
+    assert not any(key.startswith("bg_") for key in fields)

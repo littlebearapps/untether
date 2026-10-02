@@ -959,6 +959,7 @@ def _apply_cost_delta(
         delta_usd=round(result.delta, 6),
         cumulative_usd=round(result.cumulative, 6),
         source=result.source,
+        **_background_log_fields(engine, usage),
     )
     return {
         **usage,
@@ -1047,10 +1048,11 @@ def _format_run_cost(
         return None
     parts: list[str] = []
     if cost is not None:
-        if cost >= 0.01:
-            parts.append(f"${cost:.2f}")
-        else:
-            parts.append(f"${cost:.4f}")
+        cost_part = f"${cost:.2f}" if cost >= 0.01 else f"${cost:.4f}"
+        if agents := _background_agents(usage):
+            # #821: the figure includes background agents' spend.
+            cost_part += f" · incl. {_plural(agents, 'bg agent')}"
+        parts.append(cost_part)
     turns = usage.get("num_turns")
     if turns is not None:
         parts.append(f"{turns} tn")
@@ -1118,6 +1120,48 @@ def _warn_cost_visibility_gap(cost: float, settings: Any, budget_enabled: bool) 
         show_api_cost=footer.show_api_cost,
         show_subscription_usage=footer.show_subscription_usage,
     )
+
+
+def _background_agents(usage: dict[str, Any] | None) -> int:
+    """#821: background agents active since the previous result, as the
+    Claude runner reports on ``usage["background"]`` (0 when absent)."""
+    background = (usage or {}).get("background")
+    if not isinstance(background, dict):
+        return 0
+    agents = background.get("agents")
+    if isinstance(agents, int) and not isinstance(agents, bool) and agents > 0:
+        return agents
+    return 0
+
+
+def _background_log_fields(
+    engine: str | None, usage: dict[str, Any] | None
+) -> dict[str, Any]:
+    """#821: the ``cost.turn_delta`` / ``cost.run_outlier`` fields naming the
+    background agents whose spend a Claude cost delta includes. Claude's
+    ``total_cost_usd`` counts subagent requests with no per-agent split, so
+    this labels the figure rather than dividing it. ``engine=None``: decide
+    from the presence of ``usage["background"]``. Other engines: none."""
+    background = (usage or {}).get("background")
+    if engine is None:
+        if not isinstance(background, dict):
+            return {}
+    elif engine != "claude":
+        return {}
+    fields: dict[str, Any] = {"bg_agents": _background_agents(usage)}
+    if isinstance(background, dict):
+        for key, field_name in (
+            ("agents_live", "bg_agents_live"),
+            ("agents_ended", "bg_agents_ended"),
+            ("task_ids", "bg_task_ids"),
+        ):
+            if key in background:
+                fields[field_name] = background[key]
+    return fields
+
+
+def _plural(n: int, word: str) -> str:
+    return f"{n} {word}" if n == 1 else f"{n} {word}s"
 
 
 def _run_shape_fields(usage: dict[str, Any], cost: float) -> dict[str, Any]:
@@ -1208,10 +1252,20 @@ def _check_run_cost_outlier(usage: dict[str, Any] | None) -> str | None:
             # receives (`_usage_payload` in runners/claude.py); it was
             # simply not forwarded.
             **_run_shape_fields(usage, cost),
+            # #821: background agents whose spend this figure includes.
+            **_background_log_fields(None, usage),
         )
         if not budget_cfg.notify_run_outlier:
             return None
-        return f"\U0001f4b8 This run cost ${cost:.2f} (over the ${threshold:.2f} alert)"
+        notice = (
+            f"\U0001f4b8 This run cost ${cost:.2f} (over the ${threshold:.2f} alert)"
+        )
+        if agents := _background_agents(usage):
+            notice += (
+                f" \N{EM DASH} includes spend by "
+                f"{_plural(agents, 'background agent')} since the previous reply"
+            )
+        return notice
     except Exception as exc:  # noqa: BLE001
         logger.warning(
             "cost.run_outlier_check_failed",

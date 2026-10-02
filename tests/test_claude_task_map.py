@@ -1107,3 +1107,68 @@ def test_promoted_subagent_task_holds_but_never_labels_a_wake_turn() -> None:
     events = _feed(state, _init())
     started = [e for e in events if getattr(e, "phase", None) == "started"]
     assert started[0].reason == "unknown"
+
+
+# ── #821: background agents active since the previous result ────────────────
+
+
+def test_background_usage_counts_agents_active_since_previous_result() -> None:
+    from untether.runners.claude import _background_usage
+
+    state = ClaudeStreamState()
+    _feed(state, _started_agent("a_old", "toolu_old"))
+    _feed(state, _updated("a_old", "completed"))
+    _feed(state, _started_agent("a_live", "toolu_live"))
+    _feed(state, _started_bash("b1", "toolu_b"))
+    now = time.monotonic()
+    state.tasks["a_old"].ended_at = now - 50
+    state.tasks["a_old"].last_progress_at = now - 60
+    state.prev_result_at = now - 10
+    usage = _background_usage(state, now)
+    assert usage == {
+        "agents": 1,
+        "agents_live": 1,
+        "agents_ended": 0,
+        "task_ids": ["a_live"],
+        "since_s": 10.0,
+    }
+
+
+def test_background_usage_counts_agent_that_ended_in_window_and_nested_agents() -> None:
+    from untether.runners.claude import _background_usage
+
+    state = ClaudeStreamState()
+    state.prev_result_at = time.monotonic()
+    _feed(state, _started_agent("a1", "toolu_a"))
+    _feed(state, _updated("a1", "completed"))  # ended after the previous result
+    nested = {
+        **_started_agent("n1", "toolu_n"),
+        "owned_by_subagent": True,
+    }
+    _feed(state, nested)
+    usage = _background_usage(state)
+    assert usage is not None
+    assert usage["agents"] == 2
+    assert usage["agents_live"] == 1 and usage["agents_ended"] == 1
+    assert sorted(usage["task_ids"]) == ["a1", "n1"]
+
+
+def test_background_usage_none_without_agents() -> None:
+    from untether.runners.claude import _background_usage
+
+    state = ClaudeStreamState()
+    _feed(state, _started_bash("b1", "toolu_b"))
+    _feed(state, _tool_use("Monitor", "toolu_m", {"command": "tail -f x"}))
+    _feed(state, _started_bash("m1", "toolu_m", desc="monitor"))
+    assert _background_usage(state) is None
+
+
+def test_background_usage_first_result_has_no_since() -> None:
+    from untether.runners.claude import _background_usage
+
+    state = ClaudeStreamState()
+    _feed(state, _started_agent("a1", "toolu_a"))
+    _feed(state, _updated("a1", "completed"))
+    usage = _background_usage(state)
+    assert usage is not None
+    assert usage["since_s"] is None and usage["agents_ended"] == 1

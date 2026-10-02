@@ -304,7 +304,7 @@ Per-chat override: `/verbose on` and `/verbose off` override the config default 
 | `max_cost_per_day` | float\|null (≥ 0) | `null` | Daily cost limit (USD). |
 | `warn_at_pct` | int (0–100) | `70` | Warning threshold, as a percentage of the limit. |
 | `auto_cancel` | bool | `false` | Auto-cancel runs that exceed the per-run limit. |
-| `warn_run_above_usd` | float\|null (≥ 0) | `null` (→ `20.00`) | Per-run spend alert that fires **without** `enabled = true`. `0` disables it. |
+| `warn_run_above_usd` | float\|null (≥ 0) | `null` (→ `20.00`) | Per-run spend alert that fires **without** `enabled = true`. `0` disables it. For Claude, when background agents were active since the previous reply the alert adds `— includes spend by N background agents since the previous reply` ([#821](https://github.com/littlebearapps/untether/issues/821)). |
 | `notify_run_outlier` | bool | `true` | Show the outlier as a chat line. The `cost.run_outlier` log event fires either way. |
 
 Budget alerts always appear regardless of `[footer]` settings.
