@@ -45,12 +45,14 @@ These three engines are **non-interactive only** — no control channel, no perm
 ### CLI invocation
 
 ```bash
-codex exec --json --skip-git-repo-check --color=never \
-  [--model MODEL] [--session THREAD_ID -] [-]
+codex [--model MODEL] [-c model_reasoning_effort=LEVEL] \
+  exec --json --skip-git-repo-check --color=never \
+  [--sandbox read-only] [resume <thread_id> | resume --last] -
 ```
 
 - Prompt on stdin (trailing `-` means read stdin)
-- Resume: `--session <thread_id> -`
+- Resume: `resume <thread_id> -` (`resume --last -` for `/continue`)
+- `--sandbox` only in `safe` permission mode, and before `resume` (`codex exec resume` has no `--sandbox`); no `--ask-for-approval` — `codex exec` forces approval `never` itself (#830)
 - `--skip-git-repo-check --color=never` for clean output
 
 ### JSONL events

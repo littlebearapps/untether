@@ -218,7 +218,7 @@ Discovery: `importlib.metadata.entry_points(group="untether.engine_backends")`
 | `usage.py` | `/usage` — Claude Code API usage |
 | `model.py` | `/model` override |
 | `reasoning.py` | `/reasoning` override |
-| `trigger.py` | `/trigger` — mentions-only mode |
+| `listen.py` | `/listen` (formerly `/trigger`, still accepted) — all-messages vs mentions-only |
 | `agent.py` | `/agent` — engine selection |
 
 ### CommandResult
@@ -227,7 +227,10 @@ Discovery: `importlib.metadata.entry_points(group="untether.engine_backends")`
 @dataclass
 class CommandResult:
     text: str
+    notify: bool = True
+    reply_to: MessageRef | None = None
     parse_mode: str | None = None  # "HTML" for bold formatting
+    skip_reply: bool = False
 ```
 
 Commands return `CommandResult`; dispatch sends it as a Telegram message.
@@ -235,9 +238,9 @@ Commands return `CommandResult`; dispatch sends it as a Telegram message.
 ### Callback dispatch
 
 Callback data format: `<prefix>:<action>:<id>` (max 64 bytes).
-- `ctrl:approve:<request_id>` — approve control request
-- `ctrl:deny:<request_id>` — deny control request
-- `ctrl:discuss:<request_id>` — pause & outline plan
+- `claude_control:approve:<request_id>` — approve control request
+- `claude_control:deny:<request_id>` — deny control request
+- `claude_control:discuss:<request_id>` — pause & outline plan
 
 ## Running tasks
 

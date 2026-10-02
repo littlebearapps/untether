@@ -57,9 +57,9 @@ Permission requests and plan mode buttons use Telegram inline keyboards:
 {
     "reply_markup": {
         "inline_keyboard": [
-            [{"text": "Approve", "callback_data": "ctrl:approve:<request_id>"}],
-            [{"text": "Deny", "callback_data": "ctrl:deny:<request_id>"}],
-            [{"text": "Pause & Outline Plan", "callback_data": "ctrl:discuss:<request_id>"}],
+            [{"text": "Approve", "callback_data": "claude_control:approve:<request_id>"}],
+            [{"text": "Deny", "callback_data": "claude_control:deny:<request_id>"}],
+            [{"text": "Pause & Outline Plan", "callback_data": "claude_control:discuss:<request_id>"}],
         ]
     }
 }

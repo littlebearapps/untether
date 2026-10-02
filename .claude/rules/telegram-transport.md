@@ -18,7 +18,7 @@ The outbox handles coalescing, priority scheduling, and rate limiting automatica
 ## Callback data
 
 - Max 64 bytes (Telegram enforced)
-- Format: `prefix:action:id` (e.g. `ctrl:approve:req_123`)
+- Format: `prefix:action:id` (e.g. `claude_control:approve:req_123`)
 - Must call `answerCallbackQuery` promptly to clear the button spinner
 
 ## Early callback answering
