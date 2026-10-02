@@ -52,6 +52,8 @@ _ENV = (
     "FAKE_CLAUDE_UNANSWERED_RESULT_S",
     # #872
     "FAKE_CLAUDE_BASH_TIMEOUT_MS",
+    # #876
+    "FAKE_CLAUDE_BG_PATCH",
 )
 
 
@@ -1706,3 +1708,34 @@ def test_872_settings_default_and_round_trip() -> None:
     off = WatchdogSettings.model_validate({"bg_hold_declared_waits": False})
     assert off.bg_hold_declared_waits is False
     assert WatchdogSettings.model_validate(off.model_dump()) == off
+
+
+# ---------------------------------------------------------------------------
+# #876: a task the CLI moved to the background holds the live session
+# ---------------------------------------------------------------------------
+
+
+async def test_876_auto_backgrounded_task_holds_the_live_session(
+    monkeypatch: pytest.MonkeyPatch, quarantine: QuarantineStore
+) -> None:
+    """F on rc16: the moved task stayed ``is_backgrounded=False``, so the
+    session idle-closed after 0.3 s and the CLI killed the copy. Now it is
+    held until the task finishes and its wake turn delivers."""
+    from structlog.testing import capture_logs
+
+    _settings(monkeypatch)  # 0.3 s idle grace, well under the 1.2 s task
+    with capture_logs() as logs:
+        runner, events = await _run("fg_task_backgrounded", wake_s=1.2)
+    finals = [e for e in events if isinstance(e, TurnEvent) and e.phase == "completed"]
+    assert [f.answer for f in finals] == ["COPY DONE"]
+    state = _engine_state(runner)
+    assert state.tasks["f1"].status == "completed"  # finished, not killed
+    assert state.live_close_reason == "idle_no_tasks"
+    closes = _events(logs, "claude.live_session.stdin_closed")
+    ended = next(
+        e
+        for e in logs
+        if e.get("event") == "claude.task.ended" and e.get("task_id") == "f1"
+    )
+    assert len(closes) == 1 and logs.index(ended) < logs.index(closes[0])
+    assert not quarantine.is_quarantined("claude", SID)

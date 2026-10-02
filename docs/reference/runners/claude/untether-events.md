@@ -100,7 +100,11 @@ Claude Code emits a system init event early in the stream:
   prompting one, re-arms the stage-6 approval gate.
 - Background-task subtypes (`task_started`, `task_progress`, `task_updated`,
   `task_notification`, `background_tasks_changed`) emit no Untether events;
-  they maintain the native task map (`ClaudeStreamState.tasks`).
+  they maintain the native task map (`ClaudeStreamState.tasks`). A
+  `task_updated` patch with `is_backgrounded: true` (the CLI moved a running
+  foreground task to the background) marks the task backgrounded, as does a
+  snapshot listing a known parent-owned foreground task, or its notification
+  reaching an idle parent (`claude.task.backgrounded`, #876).
 - `system/api_retry` (#792) emits one `note` action per retry sequence,
   updated in place (`🔁 API error 529 (overloaded) — retrying in 8s (attempt
   2/10)`; level `warning` on the final attempt) and latches an expected wait

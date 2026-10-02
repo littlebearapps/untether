@@ -1024,3 +1024,86 @@ def test_825_late_end_in_followup_turn_is_not_attributed() -> None:
     assert completed[0].reason == "followup"
     assert "tasks" not in completed[0].detail
     assert "late_tasks" not in completed[0].detail
+
+
+# ── #825/#876: foreground → background transitions ──────────────────────────
+
+
+def _started_fg_bash(task_id: str, tool_use_id: str, *, owned: bool = False) -> dict:
+    payload = {
+        **_started_bash(task_id, tool_use_id, desc="copy attempt"),
+        "is_backgrounded": False,
+    }
+    if owned:
+        payload["owned_by_subagent"] = True
+    return payload
+
+
+def _bg_patch(task_id: str, value: bool = True) -> dict:
+    return {
+        "type": "system",
+        "subtype": "task_updated",
+        "task_id": task_id,
+        "patch": {"is_backgrounded": value},
+    }
+
+
+def test_task_updated_is_backgrounded_patch_promotes_foreground_task() -> None:
+    state = ClaudeStreamState()
+    _feed(state, _started_fg_bash("f1", "toolu_f"))
+    assert has_live_background_work(state) is False
+    with capture_logs() as logs:
+        _feed(state, _bg_patch("f1"))
+    task = state.tasks["f1"]
+    assert task.is_backgrounded is True and task.status == "running"
+    assert has_live_background_work(state) is True
+    assert state.background_observed is True
+    (moved,) = [e for e in logs if e["event"] == "claude.task.backgrounded"]
+    assert moved["source"] == "task_updated" and moved["log_level"] == "info"
+
+
+def test_snapshot_listing_promotes_known_parent_foreground_task() -> None:
+    state = ClaudeStreamState()
+    _feed(state, _started_fg_bash("f1", "toolu_f"))
+    with capture_logs() as logs:
+        _feed(state, _snapshot(("f1", "local_bash", "copy attempt")))
+    assert state.tasks["f1"].is_backgrounded is True
+    assert has_live_background_work(state) is True
+    (moved,) = [e for e in logs if e["event"] == "claude.task.backgrounded"]
+    assert moved["source"] == "snapshot"
+
+
+def test_snapshot_never_promotes_subagent_owned_task() -> None:
+    state = ClaudeStreamState()
+    _feed(state, _started_fg_bash("s1", "toolu_s", owned=True))
+    _feed(state, _snapshot(("s1", "local_bash", "copy attempt")))
+    assert state.tasks["s1"].is_backgrounded is False
+    assert has_live_background_work(state) is False
+
+
+def test_is_backgrounded_patch_ignored_for_unknown_task_id() -> None:
+    state = ClaudeStreamState()
+    with capture_logs() as logs:
+        _feed(state, _bg_patch("nope"))
+    assert state.tasks == {}
+    assert not any(e["event"] == "claude.task.backgrounded" for e in logs)
+
+
+def test_promoted_subagent_task_holds_but_never_labels_a_wake_turn() -> None:
+    """#825 review: the patch also promotes a subagent's moved command — it
+    then holds the session (#801) but its finish is not the parent's news."""
+    state = ClaudeStreamState()
+    state.live_mode = True
+    _feed(state, _started_fg_bash("s1", "toolu_s", owned=True))
+    _feed(state, _bg_patch("s1"))
+    assert state.tasks["s1"].holds_session is True
+    assert has_live_background_work(state) is True
+    _feed(state, _result("working"))
+    _feed(state, _updated("s1", "completed"))
+    with capture_logs() as logs:
+        _feed(state, _notification("s1", "toolu_s", "completed"))
+    assert state.turn_notifications == []
+    assert any(e["event"] == "claude.turn.notification_ignored" for e in logs)
+    events = _feed(state, _init())
+    started = [e for e in events if getattr(e, "phase", None) == "started"]
+    assert started[0].reason == "unknown"

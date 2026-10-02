@@ -979,3 +979,29 @@ def test_828_hook_frames_still_carry_no_async_or_agent_marker(
                 "frames natively; switch #828's outlived-turn heuristic to it "
                 f"(last green on CLI {PROBED_CLI_VERSION})"
             )
+
+
+# --- #825 / #876: foreground -> background transitions -------------------------
+
+
+def test_825_task_updated_patch_reports_is_backgrounded(cli_blob: mmap.mmap) -> None:
+    """The ``task_updated`` patch differ emits ``is_backgrounded`` when the CLI
+    moves a running foreground task to the background — #876's primary
+    signal (the snapshot listing and the idle-notification fallback remain)."""
+    differ = re.search(
+        rb'"isBackgrounded"in [\w$]{1,4}\?[\w$]{1,4}\.isBackgrounded:void 0;'
+        rb"if\([\w$]{1,4}!==[\w$]{1,4}&&[\w$]{1,4}!==void 0\)"
+        rb"[\w$]{1,4}\.is_backgrounded=[\w$]{1,4}",
+        cli_blob,
+    )
+    if differ is None:
+        if re.search(rb"[\w$]\.is_backgrounded=[\w$]", cli_blob) is None:
+            pytest.fail(
+                "foreground→background transitions are no longer reported on "
+                "task_updated — #876's snapshot / idle-notification fallback is "
+                f"the only path (last green on CLI {PROBED_CLI_VERSION})"
+            )
+        pytest.skip(
+            "task_updated patch differ moved — re-derive the probe "
+            f"(last green on CLI {PROBED_CLI_VERSION})"
+        )

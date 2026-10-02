@@ -41,6 +41,8 @@ _ENV = (
     "FAKE_CLAUDE_INIT_PERMISSION_MODE",
     # #825
     "FAKE_CLAUDE_EXTRA_TURN",
+    # #876
+    "FAKE_CLAUDE_BG_PATCH",
 )
 
 
@@ -424,6 +426,30 @@ async def test_825_extra_cli_turn_for_late_task_is_already_announced() -> None:
     for repeat in turns[2:]:
         assert repeat.detail["task_ids"] == ["a2"]
         assert repeat.detail.get("already_announced") is True
+
+
+# ── #825/#876: a task the CLI moved to the background ───────────────────
+
+
+@pytest.mark.parametrize(
+    ("bg_patch", "source"), [("1", "task_updated"), ("0", "idle_notification")]
+)
+async def test_825_fg_task_moved_to_background_labels_its_wake_turn(
+    bg_patch: str, source: str
+) -> None:
+    os.environ["FAKE_CLAUDE_BG_PATCH"] = bg_patch
+    with capture_logs() as logs:
+        events = await _collect("fg_task_backgrounded", until=2)
+    turns = _turns(events)
+    assert [(t.phase, t.reason) for t in turns] == [
+        ("started", "task_finished"),
+        ("completed", "task_finished"),
+    ]
+    assert _labels(turns[0]) == ["copy attempt"]
+    assert turns[1].answer == "COPY DONE"
+    (moved,) = [e for e in logs if e["event"] == "claude.task.backgrounded"]
+    assert moved["task_id"] == "f1" and moved["source"] == source
+    assert not any(e["event"] == "claude.turn.notification_ignored" for e in logs)
 
 
 # ── #816: a /continue run releases its session registries ──────────────────

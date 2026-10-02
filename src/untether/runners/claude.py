@@ -5467,6 +5467,30 @@ def _revive_task(
     )
 
 
+def _mark_backgrounded(state: ClaudeStreamState, task: ClaudeTask, source: str) -> None:
+    """#825/#876: the CLI moved a running foreground task to the background
+    (a foreground command past its ``timeout``, a message arriving while it
+    ran, Ctrl+B, an agent's ``autoBackgroundMs``). It now holds the live
+    session (#776) and — when the parent launched it — labels its wake turn.
+    ``source``: ``task_updated`` (``patch.is_backgrounded``), ``snapshot``
+    (listed in ``background_tasks_changed``) or ``idle_notification`` (its
+    notification reached an idle parent, which a foreground tool can't)."""
+    if task.is_backgrounded:
+        return
+    task.is_backgrounded = True
+    if task.holds_session:
+        state.background_observed = True
+        _stamp_progress(task, "task_started")  # #829: it is running now
+    logger.info(
+        "claude.task.backgrounded",
+        task_id=task.task_id,
+        task_type=task.task_type,
+        owned_by_subagent=task.owned_by_subagent,
+        description=(task.description or "")[:80],
+        source=source,
+    )
+
+
 def _mark_announced(state: ClaudeStreamState, task_ids: Iterable[str]) -> None:
     """#785: record finishes a wake turn delivered — except a task that has
     been revived since (#801): its next end is news, not the same finish."""
@@ -5565,6 +5589,15 @@ def _apply_task_event(
                         status=known.status,
                         ended_ago_s=round(now - known.ended_at, 1),
                     )
+            elif (
+                known is not None
+                and not known.is_backgrounded
+                and not known.owned_by_subagent
+                and known.status in _TASK_LIVE_STATUSES
+            ):
+                # #825/#876: the parent's own background list now names a
+                # task it started in the foreground — the CLI moved it.
+                _mark_backgrounded(state, known, "snapshot")
             elif known is None:
                 # The snapshot lands a moment before task_started; register a
                 # background placeholder so the gap can't read as "idle".
@@ -5638,6 +5671,16 @@ def _apply_task_event(
             task.last_step = event.description
         return
     if subtype == "task_updated":
+        backgrounded = (event.patch or {}).get("is_backgrounded")
+        if backgrounded is True:
+            # #825/#876: the CLI's own foreground→background transition.
+            _mark_backgrounded(state, task, "task_updated")
+        elif backgrounded is False and task.is_backgrounded:
+            # The CLI's truth; not seen in practice.
+            task.is_backgrounded = False
+            logger.debug(
+                "claude.task.foregrounded", task_id=task.task_id, source="task_updated"
+            )
         status = (event.patch or {}).get("status")
         if isinstance(status, str) and status not in _TASK_LIVE_STATUSES:
             _end_task(state, task, status, "task_updated")
@@ -6791,6 +6834,16 @@ def translate_claude_event(
         case claude_schema.StreamSystemMessage(subtype=subtype):
             if subtype == "task_notification" and not state.turn_open:
                 task = state.tasks.get(event.task_id or "")
+                if (
+                    task is not None
+                    and not task.is_backgrounded
+                    and not task.owned_by_subagent
+                ):
+                    # #825/#876 fallback: the parent's own foreground tool
+                    # can't outlive its turn unless the CLI backgrounded it.
+                    # (A subagent's foreground task stays ignored — the #785
+                    # nsd wrong-name guard.)
+                    _mark_backgrounded(state, task, "idle_notification")
                 if _notification_labels_turn(event, task):
                     label = event.summary or event.description
                     if task is not None and task.description:

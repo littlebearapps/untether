@@ -936,6 +936,52 @@ def scenario_two_tasks_one_wake_turn(first: dict) -> None:
     serve_followups()
 
 
+def scenario_fg_task_backgrounded(first: dict) -> None:
+    """#825/#876 (nsd, rc16): the parent runs a FOREGROUND Bash; past its
+    timeout the CLI moves it to the background (``task_updated{patch:
+    {is_backgrounded: true}}``) and the turn ends. The task finishes later
+    and wakes the parent. ``FAKE_CLAUDE_BG_PATCH=0`` omits the patch (only
+    the idle notification shows the move)."""
+    init()
+    tool_use("Bash", "toolu_fg", {"command": "cp -r big dest", "timeout": 10000})
+    _live_tasks["f1"] = "toolu_fg"
+    emit(
+        {
+            "type": "system",
+            "subtype": "task_started",
+            "task_id": "f1",
+            "tool_use_id": "toolu_fg",
+            "description": "copy attempt",
+            "is_backgrounded": False,
+            "task_type": "local_bash",
+        }
+    )
+    if os.environ.get("FAKE_CLAUDE_BG_PATCH", "1") != "0":
+        emit(
+            {
+                "type": "system",
+                "subtype": "task_updated",
+                "task_id": "f1",
+                "patch": {"is_backgrounded": True},
+            }
+        )
+    tool_result(
+        "toolu_fg",
+        "Command is still running after 10s. It was moved to the background as "
+        "task f1 and keeps running; you'll receive a notification with the "
+        "result when it completes.",
+    )
+    text("The copy is still running in the background.")
+    result("The copy is still running in the background.", turns=2)
+    if wait_idle_or_eof(WAKE_S) is None:
+        shutdown()
+    end_bg("f1")
+    init()
+    text("COPY DONE")
+    result("COPY DONE")
+    serve_followups()
+
+
 def _read_ack(turn: int, task_id: str, answer: str) -> None:
     """#813: a wake turn that collects a finished task's result with one
     ``Read`` of its output file (CLI >= 2.1.277) and then acks it."""
@@ -2420,6 +2466,7 @@ _SCENARIOS = {
     "followup_blocks": scenario_followup_blocks,
     "multi_agent_acks": scenario_multi_agent_acks,
     "two_tasks_one_wake_turn": scenario_two_tasks_one_wake_turn,
+    "fg_task_backgrounded": scenario_fg_task_backgrounded,
     "five_agent_interleaved": scenario_five_agent_interleaved,
     "quiet_batch_report": scenario_quiet_batch_report,
     "acks_only_batch": scenario_acks_only_batch,
