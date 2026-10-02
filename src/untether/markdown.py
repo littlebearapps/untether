@@ -34,8 +34,10 @@ def assemble_markdown_parts(parts: MarkdownParts) -> str:
     )
 
 
-def format_changed_file_path(path: str, *, base_dir: Path | None = None) -> str:
-    return f"`{relativize_path(path, base_dir=base_dir)}`"
+def format_changed_file_path(
+    path: str, *, base_dir: Path | None = None, width: int | None = None
+) -> str:
+    return inline_code(_shorten_path(relativize_path(path, base_dir=base_dir), width))
 
 
 def format_elapsed(elapsed_s: float) -> str:
@@ -80,6 +82,42 @@ def shorten(text: str, width: int | None) -> str:
     if len(text) <= width:
         return text
     return textwrap.shorten(text, width=width, placeholder="…")
+
+
+_BACKTICK_RUN_RE = re.compile(r"`+")
+
+
+def backtick_fence(text: str, *, minimum: int = 1) -> str:
+    """A backtick fence longer than any backtick run in *text* (#855, #871)."""
+    longest = max((len(m) for m in _BACKTICK_RUN_RE.findall(text)), default=0)
+    return "`" * max(minimum, longest + 1)
+
+
+def inline_code(text: str, width: int | None = None) -> str:
+    """A CommonMark code span that backticks inside *text* can't close (#871).
+
+    Code spans can't hold line breaks (and backslash escapes don't work in
+    them), so lines are joined with spaces, the text is shortened BEFORE
+    fencing (a cut can never land inside the fence), and the fence outruns
+    every inner backtick run. A lead/trail backtick gets one padding space,
+    which CommonMark strips again. Backtick-free text renders as before:
+    ``inline_code("git status") == "`git status`"``.
+    """
+    text = shorten(" ".join(text.splitlines()).strip(), width)
+    if not text:
+        return ""
+    fence = backtick_fence(text)
+    pad = " " if text[0] == "`" or text[-1] == "`" else ""
+    return f"{fence}{pad}{text}{pad}{fence}"
+
+
+def _shorten_path(path: str, width: int | None) -> str:
+    """Keep a path's tail (the file name) when it must be cut."""
+    if width is None or len(path) <= width:
+        return path
+    if width <= 1:
+        return "…"
+    return "…" + path[-(width - 1) :]
 
 
 _EMOJI_PRESENTATION = "\ufe0f"
@@ -134,6 +172,12 @@ def format_file_change_title(action: Action, *, command_width: int | None) -> st
 
     changes = detail.get("changes")
     if isinstance(changes, list) and changes:
+        # #871: shorten each path before fencing, so no later cut lands
+        # inside a code span.
+        shown = min(len(changes), MAX_FILE_CHANGES_INLINE)
+        path_width = (
+            None if command_width is None else max(16, command_width // shown - 12)
+        )
         rendered: list[str] = []
         for raw in changes:
             path: str | None
@@ -147,14 +191,15 @@ def format_file_change_title(action: Action, *, command_width: int | None) -> st
             if not isinstance(path, str) or not path:
                 continue
             verb = kind if isinstance(kind, str) and kind else "update"
-            rendered.append(f"{verb} {format_changed_file_path(path)}")
+            rendered.append(
+                f"{verb} {format_changed_file_path(path, width=path_width)}"
+            )
 
         if rendered:
             if len(rendered) > MAX_FILE_CHANGES_INLINE:
                 remaining = len(rendered) - MAX_FILE_CHANGES_INLINE
                 rendered = rendered[:MAX_FILE_CHANGES_INLINE] + [f"…({remaining} more)"]
-            inline = shorten(", ".join(rendered), command_width)
-            return f"files: {inline}"
+            return f"files: {', '.join(rendered)}"
 
     fallback = title
     relativized = relativize_path(fallback)
@@ -166,7 +211,9 @@ def format_file_change_title(action: Action, *, command_width: int | None) -> st
         and not (fallback.startswith("`") and fallback.endswith("`"))
         and (was_relativized or os.sep in fallback or "/" in fallback)
     ):
-        fallback = f"`{fallback}`"
+        return f"files: {inline_code(_shorten_path(fallback, command_width))}"
+    if fallback.startswith("`") and fallback.endswith("`"):
+        return f"files: {fallback}"  # already a span: never cut inside it
     return f"files: {shorten(fallback, command_width)}"
 
 
@@ -182,8 +229,9 @@ def format_action_title(action: Action, *, command_width: int | None) -> str:
     title = str(action.title or "")
     kind = action.kind
     if kind == "command":
-        title = shorten(title, command_width)
-        return f"`{title}`"
+        # #871: a fence longer than any backtick in the command, so an inner
+        # backtick can't end the span early and swallow the next lines.
+        return inline_code(title, command_width)
     if kind == "tool":
         title = shorten(title, command_width)
         return f"tool: {title}"
@@ -259,13 +307,13 @@ def format_action_line(
         line = f"{status} {format_action_title(action, command_width=command_width)}"
         if elapsed_seconds is not None and elapsed_seconds > 60:
             elapsed_str = format_duration(elapsed_seconds)
-            detail = format_verbose_detail(action)
+            detail = format_verbose_detail(action, width=_TAIL_DETAIL_WIDTH)
             if detail:
                 # Strip the ``→ `` prefix so the tail reads as
                 # ``▸ Bash · 3m 47s · npm run build`` rather than
                 # ``▸ Bash · 3m 47s · → npm run build``.
                 detail_clean = detail.lstrip("→ ").strip()
-                tail = f" · {elapsed_str} · {shorten(detail_clean, 80)}"
+                tail = f" · {elapsed_str} · {_fit_detail(action, detail_clean, _TAIL_DETAIL_WIDTH)}"
             else:
                 tail = f" · {elapsed_str}"
             # On the first line: a multi-line title (an approval's fenced
@@ -290,14 +338,31 @@ def format_action_line(
 
 
 _VERBOSE_DETAIL_WIDTH = 120
+_TAIL_DETAIL_WIDTH = 80
+# Verbose details that carry a code span, built to fit the caller's width so
+# nobody shortens (and cuts) them afterwards (#871).
+_FENCED_DETAIL_NAMES = frozenset({"Edit", "edit", "Grep", "grep", "Glob", "glob"})
 
 
-def format_verbose_detail(action: Action) -> str | None:
+def _fit_detail(action: Action, detail: str, width: int) -> str:
+    """Fit a verbose detail into *width* without ever cutting a code span."""
+    if action.kind == "command":
+        return inline_code(detail, width)
+    name = (action.detail or {}).get("name")
+    if name in _FENCED_DETAIL_NAMES:
+        return detail  # format_verbose_detail(width=...) already sized it
+    return shorten(detail, width)
+
+
+def format_verbose_detail(action: Action, *, width: int | None = None) -> str | None:
     """Extract a compact detail line from action.detail for verbose mode.
 
     Returns a single line like ``"→ src/settings.py (4821 chars)"`` or None
-    if no meaningful detail is available.
+    if no meaningful detail is available. Commands are returned raw (callers
+    fence them); Edit/Grep/Glob details carry a code span sized to *width*
+    (default 120), so callers must not shorten them again (#871).
     """
+    span_width = width if width is not None else _VERBOSE_DETAIL_WIDTH
     detail = action.detail or {}
     name = detail.get("name", "")
     inp = detail.get("input") or detail.get("arguments") or detail.get("args") or {}
@@ -324,12 +389,12 @@ def format_verbose_detail(action: Action) -> str | None:
     if name in ("Edit", "edit"):
         path = inp.get("file_path", "")
         if path:
-            old = shorten(str(inp.get("old_string", "")), 40)
-            return (
-                f"→ {relativize_path(path)} `{old}`→…"
-                if old
-                else f"→ {relativize_path(path)}"
-            )
+            old = inline_code(str(inp.get("old_string", "")), 40)
+            if not old:
+                return f"→ {relativize_path(path)}"
+            # "→ " + path + " " + span + "→…" must fit span_width.
+            budget = max(8, span_width - len(old) - 5)
+            return f"→ {_shorten_path(relativize_path(path), budget)} {old}→…"
         return None
 
     # Write: show file path
@@ -343,7 +408,7 @@ def format_verbose_detail(action: Action) -> str | None:
     if name in ("Grep", "grep", "Glob", "glob"):
         pattern = inp.get("pattern", "")
         if pattern:
-            return f"→ `{shorten(pattern, 60)}`"
+            return f"→ {inline_code(str(pattern), min(60, max(8, span_width - 8)))}"
         return None
 
     # Task/subagent: show description
@@ -642,9 +707,11 @@ class MarkdownFormatter:
             )
             lines.append(line)
             if self.verbosity == "verbose":
-                detail_line = format_verbose_detail(action_state.action)
+                action = action_state.action
+                detail_line = format_verbose_detail(action, width=_VERBOSE_DETAIL_WIDTH)
                 if detail_line:
-                    lines.append(f"  {shorten(detail_line, _VERBOSE_DETAIL_WIDTH)}")
+                    fitted = _fit_detail(action, detail_line, _VERBOSE_DETAIL_WIDTH - 2)
+                    lines.append(f"  {fitted}")
         return lines
 
     @staticmethod

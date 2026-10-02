@@ -363,6 +363,14 @@ a few Telegram-specific rewrites:
   suffixes included) is rendered as inline code rather than auto-linked as a
   domain. Explicit link text and real URLs keep their links
   ([#788](https://github.com/littlebearapps/untether/issues/788)).
+- **Agent text in code spans** — command titles, the long-running tail, verbose
+  detail lines, `read:`/`glob:`/`ls:`/`grep:`/`find:` tool titles, changed-file
+  paths and the Bash approval preview go through `markdown.inline_code`: the
+  span's fence is longer than any backtick run inside the text (the #855
+  diff-preview technique), so a command such as ``echo `date` `` or a heredoc
+  PR body can't close the span early and run the following action lines
+  together. A multi-line command in a Bash approval keeps its lines in a fenced
+  `sh` block ([#871](https://github.com/littlebearapps/untether/issues/871)).
 
 ## File transfer and `/browse`
 

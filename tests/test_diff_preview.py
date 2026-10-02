@@ -58,7 +58,8 @@ class TestFormatDiffPreview:
                 "command": "rm -rf /tmp/test",
             },
         )
-        assert "$ rm -rf /tmp/test" in result
+        # #871 D2: a single-line command is a backtick-safe code span
+        assert result == "$ `rm -rf /tmp/test`"
 
     def test_bash_tool_empty_command(self):
         result = _format_diff_preview("Bash", {"command": ""})
@@ -176,3 +177,33 @@ def test_elapsed_tail_stays_outside_the_fence() -> None:
     rendered, _ = render_markdown(f"{line}  \nfooter line")
     assert rendered.endswith("footer line")
     assert "```" not in rendered
+
+
+class TestBashPreview871:
+    """#871 D2 (amended by ⚑07-D2): the approval's ``$ cmd`` survives Markdown."""
+
+    def test_bash_preview_backtick_command(self):
+        from untether.telegram.render import render_markdown
+
+        result = _format_diff_preview("Bash", {"command": "echo `x`"})
+        text, entities = render_markdown(result)
+        assert text == "$ echo `x`"
+        assert [e["type"] for e in entities] == ["code"]
+        assert entities[0]["length"] == len("echo `x`")
+
+    def test_bash_preview_multiline_heredoc_fenced(self):
+        from untether.telegram.render import render_markdown
+
+        cmd = "cat > /tmp/pr.md <<'EOF'\nMoves `setup-python-env`\nEOF"
+        result = _format_diff_preview("Bash", {"command": cmd})
+        assert result.startswith("$\n```sh\n")
+        text, entities = render_markdown(result)
+        # the lines stay lines (not squashed into one) inside a pre block
+        assert "cat > /tmp/pr.md <<'EOF'\nMoves `setup-python-env`\nEOF" in text
+        assert any(e["type"] == "pre" for e in entities)
+
+    def test_bash_preview_multiline_with_fence_inside(self):
+        cmd = "cat <<'EOF'\n```python\nx\n```\nEOF"
+        result = _format_diff_preview("Bash", {"command": cmd})
+        assert result.startswith("$\n````sh\n")
+        assert result.endswith("\n````")
