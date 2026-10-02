@@ -37,7 +37,7 @@ Telegram <-> TelegramPresenter <-> RunnerBridge <-> Runner
 - Stub subprocess runners with fake CLI scripts
 - FakeTransport protocol doubles (not real Telegram clients)
 - Verify 3-event contract in runner tests
-- Run: uv run pytest, uv run ruff check src/
+- Run: uv run pytest, uv run ruff check src/ tests/
 
 ## Key files
 

@@ -51,7 +51,7 @@ every integration-test tier. Antigravity CLI (#558) is a new engine and must not
 ```bash
 uv run pytest                                  # all tests (80% coverage gate)
 uv run pytest tests/test_claude_control.py -x  # one file
-uv run ruff format src/ tests/ && uv run ruff check src/   # CI checks formatting too
+uv run ruff format src/ tests/ && uv run ruff check src/ tests/   # CI checks formatting too
 uv lock --check                                # lockfile in sync
 python3 scripts/validate_release.py            # changelog/version validation
 systemctl --user restart untether-dev          # pick up local source changes (dev bot)

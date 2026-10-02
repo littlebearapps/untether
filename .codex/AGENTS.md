@@ -2,7 +2,7 @@ After you finish work, commit with a conventional message. Only commit the files
 
 Always run checks before committing:
 ```sh
-uv run ruff check src/
+uv run ruff check src/ tests/
 uv run pytest
 ```
 

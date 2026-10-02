@@ -89,7 +89,7 @@ Run, in order:
 ```bash
 uv run pytest tests/test_<phase-named>.py -x      # the phase's tests, targeted
 uv run pytest                                     # full suite (80% coverage gate)
-uv run ruff check src/
+uv run ruff check src/ tests/
 uv run ruff format --check src/ tests/
 ```
 

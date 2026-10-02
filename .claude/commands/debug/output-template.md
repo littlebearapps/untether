@@ -78,7 +78,7 @@ and the implication for this specific issue>
 **Test results**:
 - Targeted: `uv run pytest tests/test_<area>.py -x` → <pass/fail + count>
 - Full suite: `uv run pytest` → <pass/fail + count>
-- Lint: `uv run ruff check src/` → <clean/diagnostics>
+- Lint: `uv run ruff check src/ tests/` → <clean/diagnostics>
 - Format: `uv run ruff format --check src/ tests/` → <clean/needs-format>
 
 **CHANGELOG**: <quoted entry with issue link>

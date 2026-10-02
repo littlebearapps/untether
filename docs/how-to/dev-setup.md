@@ -46,7 +46,7 @@ The standard workflow:
 vim src/untether/telegram/commands/my_feature.py
 
 # 2. Run checks
-uv run pytest && uv run ruff check src/
+uv run pytest && uv run ruff check src/ tests/
 
 # 3. Restart to pick up changes
 uv run untether                      # Ctrl+C first if already running

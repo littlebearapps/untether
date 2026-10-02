@@ -114,7 +114,7 @@ red flags. Investigate before declaring the fix verified.
 uv run pytest
 
 # Lint + format
-uv run ruff check src/
+uv run ruff check src/ tests/
 uv run ruff format --check src/ tests/
 
 # CHANGELOG validation (if version bumped)

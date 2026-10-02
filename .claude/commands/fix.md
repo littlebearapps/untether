@@ -131,7 +131,7 @@ For each ranked issue (respecting F-3/F-4), follow the debug bundle:
 6. **Verify** — reproduce with a stub-subprocess test (or live dev repro).
 7. **Fix** (`step-fix.md`) — minimal change on `fix/<issue-N>-<slug>` (or a
    cohesive shared branch per F-4); `uv run pytest tests/test_<area>.py -x` →
-   `uv run pytest`; `uv run ruff check src/` + `uv run ruff format src/ tests/`;
+   `uv run pytest`; `uv run ruff check src/ tests/` + `uv run ruff format src/ tests/`;
    CHANGELOG entry (issue-linked; **rc versions skip** per `validate_release.py`).
 8. **Verify** (`step-verify.md`) — confirm the target signature is absent on
    fresh `untether-dev` logs; run the integration tier the change scope requires.
@@ -152,7 +152,7 @@ section:
 
 ## Tests
 - uv run pytest — <N> passed, <M>% coverage
-- uv run ruff check src/ — clean
+- uv run ruff check src/ tests/ — clean
 - integration tiers run: <list, or "pending /qa">
 ```
 

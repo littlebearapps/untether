@@ -19,7 +19,7 @@ Telegram <-> TelegramPresenter <-> RunnerBridge <-> Runner (claude/codex/opencod
 ## Key conventions
 
 - Python 3.12+, anyio for async, msgspec for JSONL, structlog for logging
-- Ruff for linting (`uv run ruff check src/`), pytest with 80% coverage threshold
+- Ruff for linting (`uv run ruff check src/ tests/`), pytest with 80% coverage threshold
 - Australian English in user-facing text (realise, colour, behaviour, licence)
 - Conventional commits: `feat:`, `fix:`, `docs:`, `refactor:`, `test:`
 - Feature branches: `feature/*`, `fix/*`, `docs/*`
@@ -77,7 +77,7 @@ uv run pytest tests/test_*.py -x # specific file
 
 ```sh
 uv run ruff format --check src/ tests/
-uv run ruff check src/
+uv run ruff check src/ tests/
 uv run pytest
 uv lock --check
 ```

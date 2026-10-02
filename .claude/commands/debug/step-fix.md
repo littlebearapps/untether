@@ -72,7 +72,7 @@ patterns. Coverage threshold is 80%.
 
 ```bash
 uv run pytest               # 2372 tests, ~30 sec
-uv run ruff check src/      # lint
+uv run ruff check src/ tests/      # lint
 uv run ruff format src/ tests/   # format — CI checks formatting
 ```
 
@@ -123,7 +123,7 @@ Fixes #<N>
 ## Test plan
 - [x] Targeted: uv run pytest tests/test_<area>.py
 - [x] Full suite: uv run pytest
-- [x] Lint: uv run ruff check src/
+- [x] Lint: uv run ruff check src/ tests/
 - [x] Format: uv run ruff format --check src/ tests/
 - [ ] Integration tests on @untether_dev_bot per release-discipline.md tier
 

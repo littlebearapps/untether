@@ -55,7 +55,7 @@ points:
 
 ```bash
 uv run pytest                          # full suite, 80% coverage gate
-uv run ruff check src/
+uv run ruff check src/ tests/
 uv run ruff format --check src/ tests/
 python3 scripts/validate_release.py    # only if pyproject.toml version changed
 ```
@@ -106,7 +106,7 @@ Stage **explicit paths** (never `git add -A`), commit with a conventional messag
 
 ## Tests
 - uv run pytest — <N> passed, <M>% coverage
-- uv run ruff check src/ — clean
+- uv run ruff check src/ tests/ — clean
 - integration tiers to run: <list> (via /qa)
 
 ## Batching

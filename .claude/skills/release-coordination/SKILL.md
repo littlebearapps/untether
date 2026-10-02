@@ -147,7 +147,7 @@ Run all checks before tagging:
 uv run pytest
 
 # Lint
-uv run ruff check src/
+uv run ruff check src/ tests/
 
 # Format check
 uv run ruff format --check src/ tests/
@@ -173,7 +173,7 @@ print(f'Version {v} matches changelog ✓')
 - [ ] All issues referenced in CHANGELOG.md with `[#N](...)`
 - [ ] `pyproject.toml` version matches changelog heading
 - [ ] Tests pass: `uv run pytest`
-- [ ] Lint clean: `uv run ruff check src/`
+- [ ] Lint clean: `uv run ruff check src/ tests/`
 - [ ] Format clean: `uv run ruff format --check src/ tests/`
 - [ ] Lockfile synced: `uv lock --check`
 - [ ] Release validation: `python3 scripts/validate_release.py`
