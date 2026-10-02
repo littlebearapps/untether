@@ -131,7 +131,7 @@ These two engines still load and run, but are no longer supported and are **targ
 
 | Engine | Status |
 |--------|--------|
-| [Gemini CLI](https://github.com/google-gemini/gemini-cli) | **Deprecated.** Gemini CLI reached end-of-life for individual and free Google accounts on **18 June 2026**; Google directs users to [Antigravity CLI](https://antigravity.google). Enterprise / Google Cloud licences may still work, but Untether no longer verifies this. Antigravity support is tracked separately in [#558](https://github.com/littlebearapps/untether/issues/558). |
+| [Gemini CLI](https://github.com/google-gemini/gemini-cli) | **Deprecated — not supported by Untether.** Google [retired Gemini CLI for individual and free Google accounts on **18 June 2026**](https://developers.googleblog.com/an-important-update-transitioning-gemini-cli-to-antigravity-cli/) and replaced it with [Antigravity CLI](https://antigravity.google). Gemini CLI still works with paid Gemini API keys and Enterprise licences, and the `gemini` engine still loads, so you can keep using it — but Untether no longer tests it or fixes bugs in it. Antigravity support is tracked separately in [#558](https://github.com/littlebearapps/untether/issues/558). |
 | [Amp](https://ampcode.com) | **Deprecated.** Untether's Amp integration is no longer maintained. Amp remotely refuses clients it considers out of date, and Untether does not track that update cadence — so a working setup can stop working without notice. This is a decision about our integration, not about Amp itself. |
 
 ### Engine compatibility

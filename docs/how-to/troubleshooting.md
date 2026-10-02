@@ -146,7 +146,7 @@ events and no exit — hence the stall rather than an error message. Tracked as
 fixed**, because the engine is deprecated.
 
 Gemini CLI reached **end-of-life for individual and free Google accounts on
-18 June 2026**. There is no fix — migrate to
+18 June 2026** ([Google's announcement](https://developers.googleblog.com/an-important-update-transitioning-gemini-cli-to-antigravity-cli/)). There is no fix — migrate to
 [Antigravity CLI](https://antigravity.google) (Untether support is planned as a
 separate engine) or use a supported engine. Enterprise / Google Cloud licences
 may still work, but Untether no longer verifies this.

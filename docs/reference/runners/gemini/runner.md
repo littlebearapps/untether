@@ -2,9 +2,9 @@
 
     The `gemini` engine is **deprecated in v0.35.5**: it still loads but is
     unsupported, and removal is targeted for **0.36.0**
-    ([#720](https://github.com/littlebearapps/untether/issues/720)). Google ended
+    ([#722](https://github.com/littlebearapps/untether/issues/722)). Google ended
     Gemini CLI support for individual and free accounts on **18 June 2026**
-    (`IneligibleTierError`); under Untether the subprocess hangs until the
+    ([announcement](https://developers.googleblog.com/an-important-update-transitioning-gemini-cli-to-antigravity-cli/); `IneligibleTierError`); under Untether the subprocess hangs until the
     watchdog cancels the run. Enterprise / Google Cloud licences are unverified.
     Antigravity CLI is tracked as a separate engine
     ([#558](https://github.com/littlebearapps/untether/issues/558)), not a rename.
