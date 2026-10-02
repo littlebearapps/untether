@@ -1779,6 +1779,17 @@ class ClaudeStreamState:
     # #825: also while a ``task_finished`` turn is open — the CLI folds a
     # second finish into that turn, so it is added to its header.
     turn_ended_tasks: list[tuple[str, str]] = field(default_factory=list)
+    # #825 R17-821: model requests (distinct top-level assistant message ids)
+    # in the open turn, and per task in ``turn_ended_tasks`` the count when it
+    # ended. A task that ended after the turn's last request began was never
+    # seen by the model in this turn — the CLI wakes Claude for it next.
+    turn_model_requests: int = 0
+    turn_last_message_id: str | None = None
+    turn_ended_at_request: dict[str, int] = field(default_factory=dict)
+    # #825: late-ended tasks the model couldn't have seen in the turn they
+    # ended in — ``(task_id, label, at)``; the next non-empty ``unknown``
+    # turn (the CLI's wake for them) is attributed to them at completion.
+    pending_late_tasks: list[tuple[str, str, float]] = field(default_factory=list)
     # #785: tasks whose finish a wake turn already delivered; a later turn
     # opened only by their notification is the same finish, not news.
     announced_task_ids: set[str] = field(default_factory=set)
@@ -5511,6 +5522,9 @@ def background_task_summary(state: ClaudeStreamState) -> str | None:
 # taken to be what that turn answered (nsd evidence: ~8 s between the turn's
 # result and the task's ``background_tasks_changed`` end).
 _WAKE_PAIR_WINDOW_S = 30.0
+# #825: how long a late task the model didn't see stays pending for the
+# wake turn the CLI starts for it (R17-821: 9 s, after an empty turn).
+_LATE_TASK_CARRY_S = 120.0
 
 
 def _is_top_level_background(task: ClaudeTask) -> bool:
@@ -5541,6 +5555,7 @@ def _note_task_end(state: ClaudeStreamState, task: ClaudeTask) -> None:
             and all(task.task_id != tid for tid, _ in state.turn_ended_tasks)
         ):
             state.turn_ended_tasks.append((task.task_id, _task_label(task)))
+            state.turn_ended_at_request[task.task_id] = state.turn_model_requests
         return
     at = state.unattributed_turn_completed_at
     if at is None:
@@ -5558,6 +5573,59 @@ def _note_task_end(state: ClaudeStreamState, task: ClaudeTask) -> None:
         description=_task_label(task)[:80],
         gap_s=round(gap, 1),
     )
+
+
+def _seen_late_tasks(
+    state: ClaudeStreamState,
+    event: claude_schema.StreamResultMessage,
+    detail: dict[str, Any],
+) -> list[tuple[str, str]]:
+    """#825: the tasks that ended during this ``task_finished`` turn (and
+    don't already label it) *and* that the model could have seen in it.
+
+    The CLI hands a finished task's notification to the model at its next
+    request; a task that ended after the turn's last request began (R17-821:
+    124 ms before the result, the body already saying "B is still running")
+    gets a wake turn of its own instead. Those are kept in
+    ``pending_late_tasks`` for that turn rather than named here."""
+    late = [
+        (tid, label)
+        for tid, label in state.turn_ended_tasks
+        if tid not in detail.get("task_ids", [])
+    ]
+    seen: list[tuple[str, str]] = []
+    unseen: list[tuple[str, str]] = []
+    for tid, label in late:
+        ended_at = state.turn_ended_at_request.get(tid)
+        if ended_at is None or state.turn_model_requests > ended_at:
+            seen.append((tid, label))
+        else:
+            unseen.append((tid, label))
+    if unseen:
+        now = time.monotonic()
+        state.pending_late_tasks.extend((tid, label, now) for tid, label in unseen)
+        logger.info(
+            "claude.turn.late_tasks_deferred",
+            session_id=event.session_id,
+            turn=state.turn,
+            task_ids=[tid for tid, _ in unseen],
+            model_requests=state.turn_model_requests,
+        )
+    return seen
+
+
+def _take_pending_late_tasks(state: ClaudeStreamState) -> list[tuple[str, str]]:
+    """#825: the deferred late tasks still waiting for their wake turn
+    (not announced since, not older than ``_LATE_TASK_CARRY_S``); clears
+    the list."""
+    now = time.monotonic()
+    carried = [
+        (tid, label)
+        for tid, label, at in state.pending_late_tasks
+        if tid not in state.announced_task_ids and now - at <= _LATE_TASK_CARRY_S
+    ]
+    state.pending_late_tasks = []
+    return carried
 
 
 def _notification_labels_turn(
@@ -6872,6 +6940,9 @@ def _open_followup_turn(
     state.turn_notifications = []
     state.turn_notification_ids = []
     state.turn_ended_tasks = []
+    state.turn_model_requests = 0
+    state.turn_last_message_id = None
+    state.turn_ended_at_request = {}
     state.turn_detail = detail
     state.unattributed_turn_completed_at = None
     # #812: a stale hint (a slow turn start) is kept for the result's
@@ -7158,11 +7229,7 @@ def translate_claude_event(
                     task_ids=[tid for tid, _ in state.turn_ended_tasks],
                 )
             elif state.turn_reason == "task_finished" and (
-                late := [
-                    (tid, label)
-                    for tid, label in state.turn_ended_tasks
-                    if tid not in detail.get("task_ids", [])
-                ]
+                late := _seen_late_tasks(state, event, detail)
             ):
                 # #825: another task finished while this wake turn ran — the
                 # CLI folded its notification into the turn, so name it too.
@@ -7203,6 +7270,27 @@ def translate_claude_event(
                     hook_name=hook_hint[0],
                     hook_event=hook_hint[1],
                     attributed="result",
+                )
+            elif (
+                state.turn_reason == "unknown"
+                and event.num_turns > 0
+                and (completed is not None and completed.answer.strip())
+                and (carried := _take_pending_late_tasks(state))
+            ):
+                # #825 R17-821: the CLI's wake turn for a task that ended too
+                # late for the previous turn to see — it opened before any
+                # task event named it (the end was already consumed).
+                ids = [tid for tid, _ in carried]
+                detail["tasks"] = [label for _, label in carried]
+                detail["retro_attributed"] = True
+                detail.update(_task_attribution(state, ids))
+                _mark_announced(state, ids)
+                state.turn_reason = "task_finished"
+                logger.info(
+                    "claude.turn.late_tasks_carried",
+                    session_id=event.session_id,
+                    turn=state.turn,
+                    task_ids=ids,
                 )
             state.turn_hook_hint = None
             state.turn_ended_tasks = []
@@ -7246,6 +7334,16 @@ def translate_claude_event(
                 return []
             if not state.turn_open and not _is_tool_result_only(event):
                 out.extend(_open_turn_events(state, factory))
+            if (
+                state.turn_open
+                and isinstance(event, claude_schema.StreamAssistantMessage)
+                and event.parent_tool_use_id is None
+                and (message_id := event.message.id)
+                and message_id != state.turn_last_message_id
+            ):
+                # #825: one more model request in this turn.
+                state.turn_last_message_id = message_id
+                state.turn_model_requests += 1
             out.extend(
                 evt
                 for evt in _translate_claude_event_base(

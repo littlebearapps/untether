@@ -41,6 +41,7 @@ _ENV = (
     "FAKE_CLAUDE_INIT_PERMISSION_MODE",
     # #825
     "FAKE_CLAUDE_EXTRA_TURN",
+    "FAKE_CLAUDE_LATE_UNSEEN",
     # #876
     "FAKE_CLAUDE_BG_PATCH",
 )
@@ -408,6 +409,78 @@ async def test_825_second_task_ending_in_wake_turn_is_named() -> None:
     assert "already_announced" not in done
     (late,) = [e for e in logs if e["event"] == "claude.turn.late_tasks_attributed"]
     assert late["task_ids"] == ["a2"]
+
+
+async def test_825_late_task_the_model_never_saw_labels_its_own_wake_turn() -> None:
+    """R17-821: B ended after the turn's final message began (124 ms before
+    the result, body "B is still running"). It must not be named in A's
+    header; the CLI's later wake turn for B (opened ``unknown``, after an
+    empty turn) gets B's task header instead of "Claude continued"."""
+    os.environ["FAKE_CLAUDE_LATE_UNSEEN"] = "1"
+    with capture_logs() as logs:
+        events = await _collect("two_tasks_one_wake_turn", until=4)
+    turns = _turns(events)
+    assert [(t.phase, t.reason) for t in turns] == [
+        ("started", "task_finished"),
+        ("completed", "task_finished"),
+        ("started", "unknown"),  # the CLI's empty turn
+        ("completed", "unknown"),
+        ("started", "unknown"),
+        ("completed", "task_finished"),
+    ]
+    a_done = turns[1].detail
+    assert a_done["tasks"] == ["bg a1"]
+    assert "late_tasks" not in a_done
+    b_done = turns[5].detail
+    assert turns[5].answer == "B printed its report."
+    assert b_done["tasks"] == ["bg a2"]
+    assert b_done["task_ids"] == ["a2"]
+    assert b_done["retro_attributed"] is True
+    assert "already_announced" not in b_done
+    names = [e["event"] for e in logs]
+    assert "claude.turn.late_tasks_attributed" not in names
+    (deferred,) = [e for e in logs if e["event"] == "claude.turn.late_tasks_deferred"]
+    assert deferred["task_ids"] == ["a2"]
+    (carried,) = [e for e in logs if e["event"] == "claude.turn.late_tasks_carried"]
+    assert carried["task_ids"] == ["a2"]
+
+
+def test_825_seen_late_tasks_split_by_model_request() -> None:
+    """Unit: a late task counts as seen only if a model request began after
+    it ended; unseen ones are deferred, then expire or are dropped once
+    announced."""
+    from untether.runners.claude import (
+        ClaudeStreamState,
+        _seen_late_tasks,
+        _take_pending_late_tasks,
+    )
+    from untether.schemas.claude import StreamResultMessage
+
+    state = ClaudeStreamState()
+    state.turn = 2
+    state.turn_ended_tasks = [("a2", "B"), ("a3", "C"), ("a4", "D")]
+    state.turn_model_requests = 3
+    state.turn_ended_at_request = {"a2": 2, "a3": 3}  # a4: unknown → seen
+    event = StreamResultMessage(
+        subtype="success",
+        duration_ms=1,
+        duration_api_ms=1,
+        is_error=False,
+        num_turns=1,
+        session_id="s",
+    )
+    seen = _seen_late_tasks(state, event, {"task_ids": ["a1"]})
+    assert seen == [("a2", "B"), ("a4", "D")]
+    assert [t[:2] for t in state.pending_late_tasks] == [("a3", "C")]
+    assert _take_pending_late_tasks(state) == [("a3", "C")]
+    assert state.pending_late_tasks == []
+    state.pending_late_tasks = [("a3", "C", 0.0)]  # far older than the carry
+    assert _take_pending_late_tasks(state) == []
+    import time
+
+    state.pending_late_tasks = [("a3", "C", time.monotonic())]
+    state.announced_task_ids.add("a3")
+    assert _take_pending_late_tasks(state) == []
 
 
 async def test_825_extra_cli_turn_for_late_task_is_already_announced() -> None:

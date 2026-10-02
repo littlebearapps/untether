@@ -50,6 +50,18 @@ def _tool_use(name: str, tool_id: str, raw_input: dict) -> dict:
     }
 
 
+def _text(message_id: str, text: str) -> dict:
+    return {
+        "type": "assistant",
+        "message": {
+            "id": message_id,
+            "role": "assistant",
+            "model": "claude-test",
+            "content": [{"type": "text", "text": text}],
+        },
+    }
+
+
 def _snapshot(*tasks: tuple[str, str, str]) -> dict:
     return {
         "type": "system",
@@ -1001,11 +1013,35 @@ def test_825_late_end_in_task_finished_turn_is_collected() -> None:
     _feed(state, _notification("b1", "toolu_b1", "completed"))
     _feed(state, _updated("b2", "completed"))
     assert state.turn_ended_tasks == [("b2", "job B")]
+    # The model's next request (it sees B's notification) — R17-821.
+    _feed(state, _text("msg_after_b2", "both done"))
     events = _feed(state, _result("both done"))
     completed = [e for e in events if getattr(e, "phase", None) == "completed"]
     assert completed[0].detail["tasks"] == ["job A", "job B"]
     assert completed[0].detail["late_tasks"] == ["job B"]
     assert "b2" in state.announced_task_ids
+
+
+def test_825_late_end_after_last_request_is_deferred_not_named() -> None:
+    """R17-821: B ends after the turn's last model request began — the model
+    never saw it, so A's turn keeps its own header and B waits for its own
+    wake turn (not announced)."""
+    state = ClaudeStreamState()
+    _live_two_bash(state)
+    _feed(state, _updated("b1", "completed"))
+    _feed(state, _notification("b1", "toolu_b1", "completed"))
+    _feed(state, _init())
+    _feed(state, _text("msg_final", "A done;"))
+    _feed(state, _updated("b2", "completed"))
+    _feed(state, _text("msg_final", " B is still running"))  # same request
+    events = _feed(state, _result("A done; B is still running"))
+    completed = [e for e in events if getattr(e, "phase", None) == "completed"]
+    assert completed[0].detail["tasks"] == ["job A"]
+    assert "late_tasks" not in completed[0].detail
+    assert "b2" not in state.announced_task_ids
+    assert [t[:2] for t in state.pending_late_tasks] == [("b2", "job B")]
+    # Same message id streamed in more blocks is the same request.
+    assert state.turn_model_requests == 1
 
 
 def test_825_late_end_in_followup_turn_is_not_attributed() -> None:

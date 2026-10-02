@@ -922,6 +922,10 @@ def scenario_two_tasks_one_wake_turn(first: dict) -> None:
     that turn. ``FAKE_CLAUDE_EXTRA_TURN=1``: the second notification lands
     after the turn instead, and the CLI gives it its own (repeat) turn."""
     extra = os.environ.get("FAKE_CLAUDE_EXTRA_TURN") == "1"
+    # R17-821: the second task ends after the turn's final message began
+    # (the model never saw it); the CLI then runs an empty turn and wakes
+    # Claude for it in a turn no task event names.
+    unseen = os.environ.get("FAKE_CLAUDE_LATE_UNSEEN") == "1"
     init()
     for task_id, tool_id in (("a1", "toolu_a1"), ("a2", "toolu_a2")):
         tool_use("Bash", tool_id, {"command": "sleep", "run_in_background": True})
@@ -934,6 +938,17 @@ def scenario_two_tasks_one_wake_turn(first: dict) -> None:
     end_bg("a1")
     init()
     text("Job one is done; checking the other.")
+    if unseen:
+        text("A is done; B is still running.")
+        _end_quietly("a2")
+        result("A is done; B is still running.", turns=2)
+        init()
+        result("", turns=0, delta=0.0)
+        init()
+        text("B printed its report.")
+        result("B printed its report.")
+        serve_followups()
+        return
     _end_quietly("a2")
     if not extra:
         _notify("a2", "toolu_a2")
