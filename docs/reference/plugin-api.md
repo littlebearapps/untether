@@ -58,7 +58,8 @@ dependencies = ["untether>=0.35,<0.36"]
 | `CommandBackend` | Slash command plugin protocol |
 | `CommandContext` | Context passed to a command handler |
 | `CommandExecutor` | Helper to send messages or run engines |
-| `CommandResult` | Simple response payload for a command |
+| `CommandResult` | Simple response payload for a command; optional `attachment` replies with a file ([#418](https://github.com/littlebearapps/untether/issues/418)) |
+| `CommandAttachment` | `CommandAttachment(filename, content, fallback_text=None)`: a file a command replies with. Telegram sends it as a document (outbox-queued, capped at 10 MB) with `CommandResult.text` as the caption; `fallback_text` (or `text`) is sent as a plain message if the upload fails or is too large. Text commands only: callback results ignore it |
 | `RunRequest` | Engine run request used by commands |
 | `RunResult` | Engine run result (captured output) |
 | `RunMode` | `"emit"` (send) or `"capture"` (collect) |

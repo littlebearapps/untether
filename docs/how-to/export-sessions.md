@@ -10,35 +10,40 @@ Send `/export` in the chat where the run happened:
 /export
 ```
 
-Untether replies with a formatted transcript that includes:
+Untether replies with the full transcript attached as a Markdown file (`untether-export-<engine>-<session>-<YYYYmmdd-HHMM>.md`), with a one-line summary as the caption ([#418](https://github.com/littlebearapps/untether/issues/418)). The file includes:
 
 - **Usage** — cost, turns and duration (or token counts when the engine reports no cost), labelled `last run` or, for Codex, `thread total` ([#859](https://github.com/littlebearapps/untether/issues/859))
 - **Engine and model**
 - **Action timeline** — each tool call with status and title
-- **Final answer** — the agent's response text (up to 2,000 characters per run)
+- **Final answer** — the agent's full response text for each run
 
 !!! untether "Untether"
-    ```
-    📄 Session export (14 events, md):
+    📎 `untether-export-claude-1f0c9a2e-…-20261001-0915.md`
 
-    # Session Export: 1f0c9a2e-…
-    Exported: 2026-10-01 09:15 UTC
+    📄 Session export — claude · 14 events · Markdown<br>
+    Session: 1f0c9a2e-…
 
-    **Usage:** $0.4200 · 5 turns · 42.3s · last run
+Opened, the file looks like this:
 
-    ---
+```markdown
+# Session Export: 1f0c9a2e-…
+Exported: 2026-10-01 09:15 UTC
 
-    ## Session Started (claude)
-    Model: claude-opus-5-5
+**Usage:** $0.4200 · 5 turns · 42.3s · last run
 
-    - ✓ 🔧 Read src/main.py
-    - ✓ 📝 src/main.py
-    - ✓ `uv run pytest`
+---
 
-    ## ✓ Completed
+## Session Started (claude)
+Model: claude-opus-5-5
 
-    Fixed the import order in main.py and all tests pass.
-    ```
+- ✓ 🔧 Read src/main.py
+- ✓ 📝 src/main.py
+- ✓ `uv run pytest`
+
+## ✓ Completed
+
+Fixed the import order in main.py and all tests pass.
+```
 
 The usage line is the most recent run's figure; the transcript covers every run of the session. For Codex, which reports a running total for the whole thread, it is the thread total.
 
@@ -50,11 +55,11 @@ For structured data you can process programmatically, add `json`:
 /export json
 ```
 
-The JSON export contains the same information in a machine-readable format, suitable for logging, dashboards, or further analysis.
+You get a `.json` file with the same information in a machine-readable format, suitable for logging, dashboards, or further analysis.
 
 ## What gets exported
 
-Untether keeps the **20 most recently active sessions** in memory, across all chats; the least recently active is dropped first. History is lost on restart. The `/export` command exports the chat's most recently *active* session, so a resumed older session counts as the latest ([#417](https://github.com/littlebearapps/untether/issues/417)). In a forum group this is the most recent session in any topic of the group, not just the current topic.
+Untether keeps the **20 most recently active sessions** in memory, across all chats; the least recently active is dropped first. History is lost on restart. The `/export` command exports the chat's most recently *active* session, so a resumed older session counts as the latest ([#417](https://github.com/littlebearapps/untether/issues/417)). It's the most recent session **in the chat**: in a forum group that means the most recent session in any topic of the group, not just the current topic (topic-scoped export is tracked in [#849](https://github.com/littlebearapps/untether/issues/849)).
 
 Each session records:
 
@@ -65,9 +70,9 @@ Each session records:
 
 ## Long transcripts
 
-The export is sent as a message, and only its first 3,000 characters are included so it fits in Telegram's 4,096-character limit. For runs with many actions or long answers the rest is cut off. The JSON export has the same cut-off.
+The export file is never truncated: long answers and long action timelines are included in full. The file holds everything the transcript shows, including the full answers, so share it with the same care as the chat itself.
 
-Telegram can't give you the rest of a long transcript yet; sending the export as an attached file is tracked in [#418](https://github.com/littlebearapps/untether/issues/418).
+Untether caps an export file at 10 MB (Telegram allows 50 MB, but a large upload would hold up other messages from the bot while it sends). If the file is over that cap, or the upload fails, Untether sends the old inline preview instead: the first 3,000 characters of the transcript, with a note that the file couldn't be attached. A slow upload that times out after reaching Telegram can occasionally deliver both the file and the preview.
 
 ## Related
 

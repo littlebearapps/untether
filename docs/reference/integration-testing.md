@@ -117,7 +117,7 @@ not required at any tier.
 | U6 | **Cancel mid-run** | Send a long prompt, then `/cancel` before it finishes | Run stops, completion message appears, no orphan process | Graceful cancellation, process cleanup |
 | U7 | **Error handling** | Send a prompt that will fail (e.g. `read /nonexistent/file/path`) | Error renders in Telegram, no crash, session ends cleanly | Stderr sanitisation (#85), error formatting |
 | U8 | **/usage** | `/usage` after a completed run | Claude: subscription info; Codex/OpenCode/Pi: last-session token totals (`📊 <engine> · last session in this chat`, #417) | #89 (429 handling), cost tracking |
-| U9 | **/export** | `/export` after a completed run | An inline `📄 Session export (N events, markdown)` preview (first 3000 chars; `/export json` for JSON) with the session header, `**Usage:** … · last run` (`· thread total` for Codex), actions and the answers. It doesn't include the user prompts | #63 (missing usage in export) |
+| U9 | **/export** | `/export` after a completed run | A reply with an attached `untether-export-<engine>-<sid>-<stamp>.md` document captioned `📄 Session export — <engine> · N events · Markdown` / `Session: <id>` (`/export json` attaches a `.json`). The file has the session header, `**Usage:** … · last run` (`· thread total` for Codex), every action and the full, untruncated answers; it doesn't include the user prompts. Log: `command.attachment_sent command=export` | #63 (missing usage in export), #418 (file attachment) |
 | U10 | **/browse** | `/browse` | File browser appears with inline keyboard, can navigate directories | Browse command, path traversal safety |
 
 ### Tier 2: Claude-Specific Tests (interactive features)
@@ -209,7 +209,7 @@ Run quickly to verify all commands respond.
 | Q1 | `/ping` | Pong + uptime | 1s |
 | Q2 | `/config` | Settings menu with buttons | 1s |
 | Q3 | `/usage` | Usage info or "no session" | 1s |
-| Q4 | `/export` | Export or "no session" | 1s |
+| Q4 | `/export` | Export file (📎 `.md` + caption) or "no session" | 1s |
 | Q5 | `/browse` | File browser | 1s |
 | Q6 | `/verbose` | Toggle confirmation | 1s |
 | Q7 | `/cancel` | "Nothing running" or cancels | 1s |

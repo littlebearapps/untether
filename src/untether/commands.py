@@ -89,12 +89,27 @@ class CommandContext:
 
 
 @dataclass(frozen=True, slots=True)
+class CommandAttachment:
+    """#418: a file a command replies with (Telegram: sent as a document).
+
+    ``CommandResult.text`` becomes the caption. ``fallback_text`` is sent as a
+    plain message instead when the upload fails or the file is too large.
+    """
+
+    filename: str
+    content: bytes
+    fallback_text: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
 class CommandResult:
     text: str
     notify: bool = True
     reply_to: MessageRef | None = None
     parse_mode: str | None = None
     skip_reply: bool = False
+    # #418: optional file attachment (text commands only; callbacks ignore it).
+    attachment: CommandAttachment | None = None
 
 
 @runtime_checkable

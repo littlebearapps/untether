@@ -734,6 +734,165 @@ async def test_command_context_carries_file_deny_globs(monkeypatch) -> None:
 
 
 # ---------------------------------------------------------------------------
+# #418 — CommandResult.attachment is delivered as a Telegram document
+# ---------------------------------------------------------------------------
+
+
+class _AttachmentBackend:
+    id = "test_cmd"
+    description = "stub"
+
+    def __init__(self, result: CommandResult) -> None:
+        self.result = result
+
+    async def handle(self, ctx: CommandContext) -> CommandResult | None:
+        return self.result
+
+
+class _FailingDocBot(FakeBot):
+    async def send_document(self, *args, **kwargs):  # type: ignore[override]
+        # records the call, then reports the upload as failed (None)
+        await super().send_document(*args, **kwargs)
+
+
+def _attachment_result(text: str = "📄 summary", **kwargs) -> CommandResult:
+    from untether.commands import CommandAttachment
+
+    return CommandResult(
+        text=text,
+        attachment=CommandAttachment(
+            filename="export.md", content=b"# full transcript", fallback_text="preview"
+        ),
+        **kwargs,
+    )
+
+
+async def _dispatch_attachment(
+    monkeypatch, cfg, result: CommandResult, *, thread_id: int | None = None
+) -> None:
+    from untether.telegram.commands.dispatch import _dispatch_command
+    from untether.telegram.types import TelegramIncomingMessage
+
+    backend = _AttachmentBackend(result)
+    monkeypatch.setattr(dispatch_mod, "get_command", lambda *a, **kw: backend)
+    msg = TelegramIncomingMessage(
+        transport="telegram",
+        chat_id=123,
+        message_id=7,
+        text="/test_cmd",
+        reply_to_message_id=None,
+        reply_to_text=None,
+        sender_id=1,
+        thread_id=thread_id,
+    )
+    await _dispatch_command(
+        cfg, msg, "/test_cmd", "test_cmd", "", {}, AsyncMock(), None, False, None, None
+    )
+
+
+@pytest.mark.anyio
+async def test_418_dispatch_sends_document_via_bot(monkeypatch) -> None:
+    from structlog.testing import capture_logs
+
+    transport = FakeTransport()
+    cfg = make_cfg(transport)
+    with capture_logs() as logs:
+        await _dispatch_attachment(monkeypatch, cfg, _attachment_result())
+    assert len(cfg.bot.document_calls) == 1
+    call = cfg.bot.document_calls[0]
+    assert call["chat_id"] == 123
+    assert call["filename"] == "export.md"
+    assert call["content"] == b"# full transcript"
+    assert call["caption"] == "📄 summary"
+    assert call["reply_to_message_id"] == 7
+    assert call["message_thread_id"] is None
+    assert call["disable_notification"] is False
+    assert transport.send_calls == []
+    sent = [e for e in logs if e["event"] == "command.attachment_sent"]
+    assert len(sent) == 1 and sent[0]["size_bytes"] == len(b"# full transcript")
+
+
+@pytest.mark.anyio
+async def test_418_dispatch_caption_truncated(monkeypatch) -> None:
+    cfg = make_cfg(FakeTransport())
+    await _dispatch_attachment(monkeypatch, cfg, _attachment_result("x" * 2000))
+    caption = cfg.bot.document_calls[0]["caption"]
+    assert len(caption) == 1024
+    assert caption.endswith("…")
+
+
+def test_418_fit_caption_counts_utf16_units() -> None:
+    from untether.runner_bridge import _utf16_len
+    from untether.telegram.commands.dispatch import _fit_caption
+
+    text = "😀" * 1000  # 2 UTF-16 units each
+    cut = _fit_caption(text)
+    assert _utf16_len(cut) <= 1024
+    assert cut.endswith("…")
+    assert _fit_caption("short") == "short"
+
+
+@pytest.mark.anyio
+async def test_418_dispatch_upload_failure_falls_back(monkeypatch) -> None:
+    from structlog.testing import capture_logs
+
+    transport = FakeTransport()
+    cfg = make_cfg(transport)
+    cfg.bot = _FailingDocBot()
+    with capture_logs() as logs:
+        await _dispatch_attachment(monkeypatch, cfg, _attachment_result())
+    assert len(transport.send_calls) == 1
+    assert transport.send_calls[0]["message"].text == "preview"
+    failed = [e for e in logs if e["event"] == "command.attachment_failed"]
+    assert len(failed) == 1 and failed[0]["log_level"] == "warning"
+
+
+@pytest.mark.anyio
+async def test_418_dispatch_too_large_falls_back(monkeypatch) -> None:
+    from structlog.testing import capture_logs
+
+    monkeypatch.setattr(dispatch_mod, "_DOCUMENT_MAX_BYTES", 10)
+    transport = FakeTransport()
+    cfg = make_cfg(transport)
+    with capture_logs() as logs:
+        await _dispatch_attachment(monkeypatch, cfg, _attachment_result())
+    assert cfg.bot.document_calls == []
+    assert [c["message"].text for c in transport.send_calls] == ["preview"]
+    assert [e for e in logs if e["event"] == "command.attachment_too_large"]
+
+
+def test_418_document_cap_is_10_mb() -> None:
+    assert dispatch_mod._DOCUMENT_MAX_BYTES == 10 * 1024 * 1024
+
+
+@pytest.mark.anyio
+async def test_418_dispatch_skip_reply_attachment(monkeypatch) -> None:
+    cfg = make_cfg(FakeTransport())
+    await _dispatch_attachment(
+        monkeypatch, cfg, _attachment_result(skip_reply=True, notify=False)
+    )
+    call = cfg.bot.document_calls[0]
+    assert call["reply_to_message_id"] is None
+    assert call["disable_notification"] is True
+
+
+@pytest.mark.anyio
+async def test_418_dispatch_without_attachment_sends_text(monkeypatch) -> None:
+    transport = FakeTransport()
+    cfg = make_cfg(transport)
+    await _dispatch_attachment(monkeypatch, cfg, CommandResult(text="plain"))
+    assert cfg.bot.document_calls == []
+    assert [c["message"].text for c in transport.send_calls] == ["plain"]
+
+
+@pytest.mark.anyio
+async def test_418_forum_thread_routed(monkeypatch) -> None:
+    cfg = make_cfg(FakeTransport())
+    await _dispatch_attachment(monkeypatch, cfg, _attachment_result(), thread_id=10)
+    assert cfg.bot.document_calls[0]["message_thread_id"] == 10
+
+
+# ---------------------------------------------------------------------------
 # #685 — the claude_control early toast reads (and reserves) the request
 # ---------------------------------------------------------------------------
 

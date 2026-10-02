@@ -6,11 +6,11 @@ from typing import TYPE_CHECKING
 
 import anyio
 
-from ...commands import CommandContext, get_command
+from ...commands import CommandContext, CommandResult, get_command
 from ...config import ConfigError
 from ...logging import get_logger
 from ...model import EngineId, ResumeToken
-from ...runner_bridge import RunningTasks, register_ephemeral_message
+from ...runner_bridge import RunningTasks, _utf16_len, register_ephemeral_message
 from ...runners.run_options import EngineRunOptions
 from ...scheduler import ThreadScheduler
 from ...transport import MessageRef, RenderedMessage, SendOptions
@@ -23,6 +23,79 @@ if TYPE_CHECKING:
     from ..bridge import TelegramBridgeConfig
 
 logger = get_logger(__name__)
+
+# #418: Telegram caps a document caption at 1024 characters (UTF-16 units).
+_CAPTION_MAX = 1024
+# #418: our own bound on a command attachment (Telegram allows 50 MB). The
+# outbox is one serial worker, so a multi-MB upload stalls every chat's
+# progress edits for its whole duration; bigger files fall back to text.
+_DOCUMENT_MAX_BYTES = 10 * 1024 * 1024
+
+
+def _fit_caption(text: str, limit: int = _CAPTION_MAX) -> str:
+    """Cut *text* to at most *limit* UTF-16 units, ending with ``…`` if cut."""
+    if _utf16_len(text) <= limit:
+        return text
+    cut = text[: limit - 1]
+    while cut and _utf16_len(cut) > limit - 1:
+        cut = cut[:-1]
+    return cut + "…"
+
+
+async def _send_command_attachment(
+    cfg: TelegramBridgeConfig,
+    executor: _TelegramCommandExecutor,
+    *,
+    chat_id: int,
+    thread_id: int | None,
+    command_id: str,
+    result: CommandResult,
+    reply_to: MessageRef | None,
+) -> None:
+    """#418: deliver ``result.attachment`` as a document via the outbox-queued
+    ``cfg.bot.send_document``, falling back to a text reply when the file is
+    too large or the upload fails."""
+    attachment = result.attachment
+    assert attachment is not None
+    size = len(attachment.content)
+    fallback = attachment.fallback_text or result.text
+    if size > _DOCUMENT_MAX_BYTES:
+        logger.warning(
+            "command.attachment_too_large",
+            command=command_id,
+            chat_id=chat_id,
+            filename=attachment.filename,
+            size_bytes=size,
+            max_bytes=_DOCUMENT_MAX_BYTES,
+        )
+        await executor.send(fallback, reply_to=reply_to, notify=result.notify)
+        return
+    sent = await cfg.bot.send_document(
+        chat_id=chat_id,
+        filename=attachment.filename,
+        content=attachment.content,
+        reply_to_message_id=reply_to.message_id if reply_to is not None else None,
+        message_thread_id=thread_id,
+        disable_notification=not result.notify,
+        caption=_fit_caption(result.text) if result.text else None,
+    )
+    if sent is None:
+        logger.warning(
+            "command.attachment_failed",
+            command=command_id,
+            chat_id=chat_id,
+            filename=attachment.filename,
+            size_bytes=size,
+        )
+        await executor.send(fallback, reply_to=reply_to, notify=result.notify)
+        return
+    logger.info(
+        "command.attachment_sent",
+        command=command_id,
+        chat_id=chat_id,
+        filename=attachment.filename,
+        size_bytes=size,
+    )
 
 
 def _parse_callback_data(data: str) -> tuple[str, str]:
@@ -207,6 +280,17 @@ async def _dispatch_command(
             reply_to = result.reply_to
         else:
             reply_to = message_ref
+        if result.attachment is not None:
+            await _send_command_attachment(
+                cfg,
+                executor,
+                chat_id=chat_id,
+                thread_id=msg.thread_id,
+                command_id=command_id,
+                result=result,
+                reply_to=reply_to,
+            )
+            return
         msg: RenderedMessage | str = result.text
         if result.parse_mode is not None:
             msg = RenderedMessage(
@@ -378,6 +462,14 @@ async def _dispatch_callback(
             await _answer_callback(user_safe_error(exc, fallback="callback failed"))
             return
         logger.debug("callback.executed", command=command_id, chat_id=chat_id)
+        if result is not None and result.attachment is not None:
+            # #418: attachments are delivered for text commands only.
+            logger.debug(
+                "command.attachment_ignored",
+                command=command_id,
+                chat_id=chat_id,
+                filename=result.attachment.filename,
+            )
         if result is not None:
             cb_msg: RenderedMessage | str = result.text
             if result.parse_mode is not None:
