@@ -187,7 +187,7 @@ The deny-globs and per-file size cap are enforced before any send, so a misbehav
 
 ## Do I need to restart Untether after editing `untether.toml`?
 
-No — almost everything in `untether.toml` hot-reloads automatically within ~1 second of saving the file. Untether watches the config file and re-applies changes in-place: cron and webhook triggers, watchdog timing, progress verbosity, voice-transcription settings, the allowed-user list, message timing, the file-transfer + outbox config, the `show_resume_line` toggle, and every per-engine override.
+No — almost everything in `untether.toml` hot-reloads automatically within a couple of seconds of saving the file. Untether watches the config file and re-applies changes in-place: cron and webhook triggers, watchdog timing, progress verbosity, voice-transcription settings, the allowed-user list, message timing, the file-transfer + outbox config, the `show_resume_line` toggle, and every per-engine override.
 
 The exceptions are a handful of restart-only keys that affect process bring-up: `bot_token`, `chat_id`, `session_mode`, `topics`, and `message_overflow`. If you edit one of those, Untether logs a `restart_required=true` warning, broadcasts a message to the active project chats, and you'll need to `systemctl --user restart untether` (or `/restart` from Telegram) to apply the change.
 

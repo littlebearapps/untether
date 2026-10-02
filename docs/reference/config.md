@@ -37,6 +37,15 @@ changes immediately. A handful of settings require a process restart because
 they're bound to resources (network sockets, bot token, session-mode machinery)
 that can't be swapped live.
 
+Changes are detected by file content, not timestamps
+([#839](https://github.com/littlebearapps/untether/issues/839)): a save that
+doesn't change anything (including `touch`) doesn't reload, while two quick
+same-size edits are both applied. If a reload fails because of something outside
+the file (say, an engine CLI missing from `PATH`), fix it and `touch` the config
+to retry. A symlinked config is followed when the link is re-pointed; if the new
+target lives in a different directory, restart Untether so later in-place edits
+of that file are seen.
+
 Fields listed as **restart-required** trigger a warning in the Telegram chat
 (🔄 prefix) AND a structlog `config.reload.transport_config_changed` record
 when edited. Everything else hot-reloads silently with a matching

@@ -1045,7 +1045,7 @@ def load_settings_if_exists(
 #
 # One Claude message used to parse untether.toml at least 15 times (plus ~one
 # per tool call), each parse blocking the event loop for ~10-47 ms. The key is
-# the exact file bytes, not ``(mtime_ns, size)`` like ``config_watch`` uses:
+# the exact file bytes, not ``(mtime_ns, size)`` (``config_watch`` too, #839):
 # on kernels < 6.13 timestamps are coarse, so two same-size writes inside one
 # tick share a stat signature and a stat-keyed cache would serve stale config.
 
