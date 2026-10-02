@@ -459,3 +459,17 @@ def test_options_changed_notice_wording() -> None:
         "\N{GEAR}\N{VARIATION SELECTOR-16} Settings changed — stopping 1 "
         "background task: x. Your message starts with the new settings."
     )
+
+
+async def test_838_followup_injection_never_checks_guard(cleanup, monkeypatch) -> None:
+    """#838: a live follow-up writes into an existing process — no spawn, so
+    the pre-spawn guard is never consulted (even at the ceiling)."""
+    from untether.runner import JsonlSubprocessRunner
+
+    def _boom(self, resume):
+        raise AssertionError("pre-spawn guard consulted for a live follow-up")
+
+    monkeypatch.setattr(JsonlSubprocessRunner, "_check_prespawn_ram_guard", _boom)
+    _live, pipe = _install("sid-inj", idle=True)
+    assert await inject_live_followup(_job("sid-inj")) is True
+    assert len(pipe.sent) == 1

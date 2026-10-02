@@ -106,6 +106,37 @@ class SessionLockMixin:
                 yield evt
 
 
+# #838: ``CompletedEvent.usage`` key set by the pre-spawn guard on a block
+# (value ``"concurrency"`` / ``"ram"``). The bridge reads it so a blocked
+# resume never auto-clears the chat's saved session.
+PRESPAWN_BLOCKED_KEY = "prespawn_blocked"
+
+
+def prespawn_blocked_reason(usage: dict[str, Any] | None) -> str | None:
+    """The guard-block reason marked on ``usage`` (#838), or None."""
+    if not isinstance(usage, dict):
+        return None
+    reason = usage.get(PRESPAWN_BLOCKED_KEY)
+    return reason if isinstance(reason, str) else None
+
+
+def _idle_claude_live_session_count() -> int:
+    """Idle Claude live sessions (#776) currently holding a process (#838).
+
+    Engine-agnostic: the guard runs for every engine, and a Codex block can
+    be caused by idle Claude sessions. Imported lazily (claude.py imports
+    this module); any failure counts as zero — diagnostics must never block.
+    """
+    try:
+        from .runners.claude import idle_live_session_count
+    except ImportError:  # pragma: no cover — claude runner always ships
+        return 0
+    try:
+        return idle_live_session_count()
+    except Exception:  # noqa: BLE001
+        return 0
+
+
 def _rc_label(rc: int) -> str:
     """Format exit code, adding signal name for negative rc values."""
     if rc < 0:
@@ -1292,22 +1323,39 @@ class JsonlSubprocessRunner(BaseRunner):
         from .utils.subprocess import live_engine_subprocess_count
 
         live_runs = live_engine_subprocess_count()
+        # #838: idle Claude live sessions (#776) stay inside manage_subprocess
+        # and so count toward ``live_runs`` — on purpose (they still hold
+        # their MCP children's RAM). Name them on the logs and the message so
+        # a block while "nothing is running" explains itself, on any engine.
+        idle_live = _idle_claude_live_session_count()
+        ctx: dict[str, Any] = {"idle_live_sessions": idle_live} if idle_live else {}
         if max_runs > 0 and live_runs >= max_runs:
             logger.error(
                 "subprocess.prespawn.concurrency_blocked",
                 engine=self.engine,
                 live_runs=live_runs,
                 max_runs=max_runs,
+                **ctx,
             )
+            idle_clause = ""
+            if idle_live:
+                idle_clause = (
+                    f" (including {idle_live} idle Claude session(s) kept open "
+                    f"for background work — they close on their own)"
+                )
             return CompletedEvent(
                 engine=self.engine,
                 ok=False,
                 answer="",
                 resume=resume,
                 error=(
-                    f"🛑 Too many engine runs in flight ({live_runs}/{max_runs}). "
-                    f"Wait for one to finish, or /cancel an active run."
+                    f"🛑 Too many engine runs in flight ({live_runs}/{max_runs})"
+                    f"{idle_clause}. Wait for one to finish, or /cancel an "
+                    f"active run."
                 ),
+                # #838: marks a guard block so the bridge never treats it as
+                # a broken resume (it would clear the chat's saved session).
+                usage={PRESPAWN_BLOCKED_KEY: "concurrency"},
             )
 
         avail_kb = mem_available_kb()
@@ -1330,6 +1378,7 @@ class JsonlSubprocessRunner(BaseRunner):
                 live_runs=live_runs,
                 per_run_reserve_mb=per_run_reserve,
                 warn_mb=warn_mb,
+                **ctx,
             )
             if live_runs > 0 and effective_block_mb > block_mb:
                 msg = (
@@ -1350,6 +1399,7 @@ class JsonlSubprocessRunner(BaseRunner):
                 answer="",
                 resume=resume,
                 error=msg,
+                usage={PRESPAWN_BLOCKED_KEY: "ram"},
             )
 
         if warn_mb > 0 and avail_mb < warn_mb:
@@ -1359,6 +1409,8 @@ class JsonlSubprocessRunner(BaseRunner):
                 avail_mb=avail_mb,
                 warn_mb=warn_mb,
                 block_mb=block_mb,
+                live_runs=live_runs,
+                **ctx,
             )
         return None
 
@@ -1535,6 +1587,16 @@ class JsonlSubprocessRunner(BaseRunner):
     async def run_impl(
         self, prompt: str, resume: ResumeToken | None
     ) -> AsyncIterator[UntetherEvent]:
+        # #350 / #589 pre-spawn guard — refuse or warn when the host is
+        # near-OOM or the concurrency ceiling is reached. First statement
+        # (#838) so a blocked spawn costs nothing: no run state, no args,
+        # no ``runner.start`` log. A BLOCK yields a CompletedEvent(ok=False)
+        # and returns early without forking.
+        block_result = self._check_prespawn_ram_guard(resume)
+        if block_result is not None:
+            yield block_result
+            return
+
         state = self.new_state(prompt, resume)
         self.start_run(prompt, resume, state=state)
 
@@ -1557,15 +1619,6 @@ class JsonlSubprocessRunner(BaseRunner):
             engine=self.engine,
             prompt_preview=prompt[:100] + "…" if len(prompt) > 100 else prompt,
         )
-
-        # #350 pre-spawn RAM guard — refuse or warn when the host is
-        # near-OOM. Runs BEFORE manage_subprocess so a blocked spawn costs
-        # nothing. A WARN emits a visible note; a BLOCK yields a
-        # CompletedEvent(ok=False) and returns early without forking.
-        block_result = self._check_prespawn_ram_guard(resume)
-        if block_result is not None:
-            yield block_result
-            return
 
         cwd = get_run_base_dir()
 

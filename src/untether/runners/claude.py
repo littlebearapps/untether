@@ -605,6 +605,16 @@ class LiveSession:
 _LIVE_SESSIONS: dict[str, LiveSession] = {}
 
 
+def idle_live_session_count() -> int:
+    """Live sessions idle between turns and not yet closing (#838).
+
+    They still sit inside ``manage_subprocess`` (holding their MCP children),
+    so they count toward the pre-spawn concurrency ceiling; the guard names
+    them so a block while nothing visibly runs explains itself.
+    """
+    return sum(1 for s in _LIVE_SESSIONS.values() if s.idle and not s.closing)
+
+
 def get_live_session(session_id: str) -> LiveSession | None:
     return _LIVE_SESSIONS.get(session_id)
 
@@ -10565,6 +10575,17 @@ class ClaudeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
         2. Legacy mode: -p flag with PTY stdin. Prompt passed as CLI arg.
            Stdin used only for initial payload, then kept open via PTY.
         """
+        # #838: the #350 RAM guard and #589 concurrency ceiling. This override
+        # never calls the base run_impl, so the guard must run here — first,
+        # before start_run registers the session in _ACTIVE_RUNNERS, the #812
+        # probe thread starts or a PTY opens; a block registers nothing.
+        # Live follow-ups / steers inject into an existing process and never
+        # reach run_impl, so they are never checked.
+        block_result = self._check_prespawn_ram_guard(resume)
+        if block_result is not None:
+            yield block_result
+            return
+
         state = self.new_state(prompt, resume)
         self.start_run(prompt, resume, state=state)
 

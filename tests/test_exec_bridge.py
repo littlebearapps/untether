@@ -1384,6 +1384,59 @@ async def test_on_resume_failed_not_called_with_turns() -> None:
 
 
 @pytest.mark.anyio
+async def test_838_prespawn_block_does_not_clear_saved_session() -> None:
+    """#838: a pre-spawn guard block (marked on usage) never ran the engine —
+    the saved session must survive, with a greppable skip log and no cost
+    footer / cost or token delta."""
+    from structlog.testing import capture_logs
+
+    transport = FakeTransport()
+    runner = ScriptRunner(
+        [
+            ErrorReturn(
+                error="🛑 Too many engine runs in flight (1/1).",
+                usage={"prespawn_blocked": "concurrency"},
+            )
+        ],
+        engine=CODEX_ENGINE,
+        resume_value="kept-session",
+    )
+    cfg = ExecBridgeConfig(
+        transport=transport,
+        presenter=MarkdownPresenter(),
+        final_notify=True,
+    )
+    resume = ResumeToken(engine=CODEX_ENGINE, value="kept-session")
+    cleared_tokens: list[ResumeToken] = []
+
+    async def on_resume_failed(token: ResumeToken) -> None:
+        cleared_tokens.append(token)
+
+    with capture_logs() as logs:
+        await handle_message(
+            cfg,
+            runner=runner,
+            incoming=IncomingMessage(channel_id=123, message_id=10, text="hi"),
+            resume_token=resume,
+            on_resume_failed=on_resume_failed,
+        )
+
+    assert cleared_tokens == []
+    skipped = [r for r in logs if r.get("event") == "session.auto_clear_skipped"]
+    assert skipped and skipped[0]["reason"] == "prespawn_blocked"
+    assert skipped[0]["blocked"] == "concurrency"
+    assert not [r for r in logs if r.get("event") == "session.auto_cleared"]
+    assert not [
+        r for r in logs if r.get("event") in {"cost.turn_delta", "usage.token_delta"}
+    ]
+    texts = [c["message"].text for c in transport.send_calls] + [
+        c["message"].text for c in transport.edit_calls
+    ]
+    assert any("Too many engine runs" in t for t in texts)
+    assert not any("💰" in t for t in texts)
+
+
+@pytest.mark.anyio
 async def test_on_resume_failed_not_called_when_not_resumed() -> None:
     """Callback does not fire for new sessions (resume_token=None)."""
     transport = FakeTransport()

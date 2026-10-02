@@ -179,6 +179,230 @@ def test_prespawn_ram_guard_warn_only_does_not_block(
 
 
 # ---------------------------------------------------------------------------
+# #838 — ClaudeRunner.run_impl overrides the base method: the guard must run
+# ---------------------------------------------------------------------------
+
+
+def _838_settings(monkeypatch: pytest.MonkeyPatch, tmp_path, **watchdog_kw) -> None:
+    from untether import settings as settings_module
+    from untether.settings import WatchdogSettings
+
+    class _Fake:
+        watchdog = WatchdogSettings(**watchdog_kw)
+
+    monkeypatch.setattr(
+        settings_module,
+        "load_settings_if_exists",
+        lambda: (_Fake(), tmp_path / "untether.toml"),
+    )
+
+
+class _838Spawned(Exception):
+    """Raised by the patched manage_subprocess: the spawn was reached."""
+
+
+def _838_patch_spawn(monkeypatch: pytest.MonkeyPatch, *, allow: bool) -> dict:
+    seen = {"spawned": 0}
+
+    class _Mgr:
+        async def __aenter__(self) -> object:
+            seen["spawned"] += 1
+            raise _838Spawned()
+
+        async def __aexit__(self, exc_type, exc, tb) -> None:
+            return None
+
+    def fake_manage_subprocess(*args: object, **kwargs: object) -> _Mgr:
+        _ = args, kwargs
+        if not allow:
+            raise AssertionError("manage_subprocess reached despite a guard block")
+        return _Mgr()
+
+    monkeypatch.setattr(claude_runner, "manage_subprocess", fake_manage_subprocess)
+    return seen
+
+
+async def _838_collect(runner: ClaudeRunner, resume: ResumeToken | None = None):
+    events: list = []
+    with contextlib.suppress(_838Spawned):
+        events.extend([evt async for evt in runner.run_impl("hi", resume)])
+    return events
+
+
+@pytest.mark.anyio
+async def test_838_run_impl_blocks_before_spawn_on_low_ram(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+) -> None:
+    from structlog.testing import capture_logs
+
+    from untether.utils import proc_diag
+
+    _838_settings(monkeypatch, tmp_path)
+    monkeypatch.setattr(proc_diag, "mem_available_kb", lambda: 100 * 1024)
+    _838_patch_spawn(monkeypatch, allow=False)
+    runner = ClaudeRunner(claude_cmd="claude", permission_mode="acceptEdits")
+
+    with capture_logs() as logs:
+        events = await _838_collect(runner)
+
+    assert len(events) == 1
+    evt = events[0]
+    assert isinstance(evt, CompletedEvent)
+    assert evt.ok is False
+    assert "Insufficient RAM" in (evt.error or "")
+    assert evt.usage == {"prespawn_blocked": "ram"}
+    blocked = [r for r in logs if r["event"] == "subprocess.prespawn.ram_blocked"]
+    assert blocked and blocked[0]["engine"] == "claude"
+    assert not [r for r in logs if r["event"] == "runner.start"]
+
+
+@pytest.mark.anyio
+async def test_838_concurrency_blocked_for_claude(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+) -> None:
+    from structlog.testing import capture_logs
+
+    from untether.utils import subprocess as sp
+
+    _838_settings(monkeypatch, tmp_path, max_concurrent_engine_runs=1)
+    _838_patch_spawn(monkeypatch, allow=False)
+    runner = ClaudeRunner(claude_cmd="claude", permission_mode="acceptEdits")
+    sp._incr_live_engine_subprocesses(1)
+    try:
+        with capture_logs() as logs:
+            events = await _838_collect(runner)
+    finally:
+        sp._incr_live_engine_subprocesses(-1)
+
+    assert len(events) == 1
+    assert isinstance(events[0], CompletedEvent)
+    assert "Too many engine runs in flight (1/1)" in (events[0].error or "")
+    assert events[0].usage == {"prespawn_blocked": "concurrency"}
+    blocked = [
+        r for r in logs if r["event"] == "subprocess.prespawn.concurrency_blocked"
+    ]
+    assert blocked
+    assert blocked[0]["engine"] == "claude"
+    assert blocked[0]["live_runs"] == 1
+    assert "idle_live_sessions" not in blocked[0]
+
+
+@pytest.mark.anyio
+async def test_838_blocked_resume_registers_nothing(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+) -> None:
+    import pty
+
+    from untether.utils import proc_diag
+
+    _838_settings(monkeypatch, tmp_path)
+    monkeypatch.setattr(proc_diag, "mem_available_kb", lambda: 100 * 1024)
+    _838_patch_spawn(monkeypatch, allow=False)
+
+    def _no_pty() -> tuple[int, int]:
+        raise AssertionError("PTY opened despite a guard block")
+
+    monkeypatch.setattr(pty, "openpty", _no_pty)
+    before_req = dict(claude_runner._REQUEST_TO_SESSION)
+    before_live = dict(claude_runner._LIVE_SESSIONS)
+    # Legacy (PTY) mode: no permission_mode.
+    runner = ClaudeRunner(claude_cmd="claude")
+    token = ResumeToken(engine="claude", value="sess-838")
+
+    events = await _838_collect(runner, token)
+
+    assert len(events) == 1
+    assert isinstance(events[0], CompletedEvent)
+    assert events[0].resume == token
+    assert "sess-838" not in claude_runner._ACTIVE_RUNNERS
+    assert before_req == claude_runner._REQUEST_TO_SESSION
+    assert before_live == claude_runner._LIVE_SESSIONS
+
+
+@pytest.mark.anyio
+async def test_838_warn_tier_still_spawns(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+) -> None:
+    from structlog.testing import capture_logs
+
+    from untether.utils import proc_diag
+
+    _838_settings(monkeypatch, tmp_path)
+    monkeypatch.setattr(proc_diag, "mem_available_kb", lambda: 1500 * 1024)
+    seen = _838_patch_spawn(monkeypatch, allow=True)
+    runner = ClaudeRunner(claude_cmd="claude", permission_mode="acceptEdits")
+
+    with capture_logs() as logs:
+        await _838_collect(runner)
+
+    assert seen["spawned"] == 1
+    warn = [r for r in logs if r["event"] == "subprocess.prespawn.ram_warning"]
+    assert warn and warn[0]["engine"] == "claude"
+
+
+@pytest.mark.anyio
+async def test_838_guard_disabled_spawns(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+) -> None:
+    from structlog.testing import capture_logs
+
+    _838_settings(
+        monkeypatch,
+        tmp_path,
+        prespawn_ram_warn_mb=0,
+        prespawn_ram_block_mb=0,
+        max_concurrent_engine_runs=0,
+    )
+    seen = _838_patch_spawn(monkeypatch, allow=True)
+    runner = ClaudeRunner(claude_cmd="claude", permission_mode="acceptEdits")
+
+    with capture_logs() as logs:
+        await _838_collect(runner)
+
+    assert seen["spawned"] == 1
+    assert not [r for r in logs if str(r["event"]).startswith("subprocess.prespawn")]
+
+
+def test_838_idle_live_sessions_in_log_and_message(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+) -> None:
+    from structlog.testing import capture_logs
+
+    from untether.utils import subprocess as sp
+
+    _838_settings(monkeypatch, tmp_path, max_concurrent_engine_runs=1)
+    state = ClaudeStreamState()
+    state.completed_turns = 1
+    state.turn_open = False
+    session = claude_runner.LiveSession(session_id="idle-838", state=state, stdin=None)
+    assert session.idle
+    monkeypatch.setitem(claude_runner._LIVE_SESSIONS, "idle-838", session)
+    assert claude_runner.idle_live_session_count() == 1
+
+    # Any engine names them: the block below is a Codex spawn.
+    from untether.runners.codex import CodexRunner
+
+    codex = CodexRunner(codex_cmd="codex", extra_args=[])
+    sp._incr_live_engine_subprocesses(1)
+    try:
+        with capture_logs() as logs:
+            result = codex._check_prespawn_ram_guard(resume=None)
+    finally:
+        sp._incr_live_engine_subprocesses(-1)
+
+    assert result is not None
+    assert "1 idle Claude session(s)" in (result.error or "")
+    blocked = [
+        r for r in logs if r["event"] == "subprocess.prespawn.concurrency_blocked"
+    ]
+    assert blocked[0]["engine"] == "codex"
+    assert blocked[0]["idle_live_sessions"] == 1
+
+    session.closing = True
+    assert claude_runner.idle_live_session_count() == 0
+
+
+# ---------------------------------------------------------------------------
 # #478 / #205 — claude runner.start log must NOT carry prompt content at INFO
 # ---------------------------------------------------------------------------
 

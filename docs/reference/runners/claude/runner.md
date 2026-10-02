@@ -481,6 +481,8 @@ Once the CLI emits any task event, the native map is authoritative for Monitor /
 
 In control-channel mode (a permission mode is set) the Claude CLI keeps running after a `result`: a finished background task, each Monitor line and a firing ScheduleWakeup each start a new turn by themselves, and a user line written to stdin while idle runs as another turn. Before 0.35.5rc11 Untether stopped reading at the first `result` and closed stdin, so those turns ran invisibly (or died — closing stdin stops background work), and SIGTERM/quarantine later sent the next follow-up to a fresh session. Probe evidence: [`docs/findings/2026-09-27-claude-live-session-probes.md`](../../../findings/2026-09-27-claude-live-session-probes.md).
 
+A live session idling between turns still holds its process, so it counts toward the pre-spawn guard's `max_concurrent_engine_runs` ceiling and per-run RAM reserve; a follow-up written into it is never checked, because it spawns nothing. A new Claude run checks the guard before anything is registered or spawned ([#838](https://github.com/littlebearapps/untether/issues/838)).
+
 A pending control request pauses the idle-close timers (only the 4 h cap applies); a request the CLI withdraws (`control_cancel_request`) is retired at once and no longer pauses them ([#684](https://github.com/littlebearapps/untether/issues/684)).
 
 **Stream.** The run is still `StartedEvent → ActionEvent* → CompletedEvent` (turn 1, the user's message). The runner keeps reading; every later turn is a `TurnEvent(started) → ActionEvent* → TurnEvent(completed)` segment with a `reason`:

@@ -47,8 +47,9 @@ For Claude subscription diagnostics, use `/usage debug` ([#410](https://github.c
 
 Untether refuses to spawn a new engine subprocess when free RAM is below `[watchdog] prespawn_ram_block_mb` (default 500 MB), and warns at `prespawn_ram_warn_mb` (default 2000 MB). On block the run completes early with `🛑 Insufficient RAM` instead of spawning a doomed subprocess that would leak memory under OOM. Set either threshold to `0` to disable that tier; `0 / 0` disables the guard entirely. See [config: `[watchdog]`](../reference/config.md#watchdog).
 
-!!! warning "Not yet applied to Claude Code runs"
-    In v0.35.5 the RAM guard, and the `max_concurrent_engine_runs` / `prespawn_ram_per_run_reserve_mb` limits that live inside it, only run for Codex, OpenCode and Pi. Claude Code runs start without the check ([#838](https://github.com/littlebearapps/untether/issues/838)).
+The same check holds two concurrency limits ([#589](https://github.com/littlebearapps/untether/issues/589)): `prespawn_ram_per_run_reserve_mb` raises the block bar by that much for each engine run already in flight, and `max_concurrent_engine_runs` (default `0`, unlimited) refuses a spawn outright with `🛑 Too many engine runs in flight (N/M)`. `0 / 0 / 0` turns the whole guard off.
+
+It applies to every engine, Claude Code included (before 0.35.5rc17 Claude runs skipped it, [#838](https://github.com/littlebearapps/untether/issues/838)). Only new processes are checked: a follow-up written into a live Claude session isn't. A Claude session kept open after its reply for background work (or the idle grace) still holds its process and MCP children, so it counts as a run in flight; the block message names those idle sessions, and they close on their own. A block never clears the chat's saved session — the next message after the load drops resumes it (log `session.auto_clear_skipped reason=prespawn_blocked`).
 
 ## Graceful restart
 

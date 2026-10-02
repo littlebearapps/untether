@@ -44,6 +44,7 @@ from .runner import (
     _APPROVAL_PENDING_REFIRE_S,
     Runner,
     RunStreamHandle,
+    prespawn_blocked_reason,
     reset_run_stream_handle,
     set_run_stream_handle,
 )
@@ -5560,7 +5561,24 @@ async def handle_message(
 
         # Auto-clear broken session: if a resumed run failed with 0 turns,
         # clear the saved session so the next message starts fresh.
+        # #838: a pre-spawn guard block (RAM / concurrency) never ran the
+        # engine, so the saved session is fine — keep it.
+        _blocked = prespawn_blocked_reason(completed.usage)
         if (
+            turn is None
+            and run_ok is False
+            and resume_token is not None
+            and on_resume_failed is not None
+            and _blocked is not None
+        ):
+            logger.info(
+                "session.auto_clear_skipped",
+                reason="prespawn_blocked",
+                blocked=_blocked,
+                engine=resume_token.engine,
+                resume=resume_token.value,
+            )
+        elif (
             turn is None
             and run_ok is False
             and resume_token is not None
