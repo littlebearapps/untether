@@ -509,6 +509,14 @@ the press; if we don't, the *user's* Telegram client surfaces
 responses to Claude's PTY, editing feedback messages, etc.) happens
 independently — answering just clears the spinner.
 
+Callbacks are accepted only from allowed senders (`allowed_user_ids`, #377).
+A Claude approval callback (`claude_control:…`) is also bound to the chat whose
+message carries the button: the same callback data sent from another chat (a
+modified client can attach any callback data to any bot message it can see)
+reads as expired and answers nothing
+([#388](https://github.com/littlebearapps/untether/issues/388)). Other callback
+families already act only on the tapping chat.
+
 Backends that want a visible toast ("Approved" / "Denied" / …) set
 `answer_early = True` and provide `early_answer_toast(args_text) -> str | None`.
 Dispatch hits `answerCallbackQuery` via that path **before** calling

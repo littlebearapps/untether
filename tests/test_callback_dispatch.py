@@ -1038,3 +1038,36 @@ async def test_685_claim_released_when_handle_raises(
     assert claude_mod._INFLIGHT_CONTROL_RESPONSES == {}
     lookup = claude_mod.classify_control_request("req-boom")
     assert lookup.status is ControlRequestStatus.PENDING
+
+
+@pytest.mark.anyio
+async def test_388_dispatch_foreign_chat_tap_gets_not_found(
+    monkeypatch, control_registries
+) -> None:
+    """#388: a claude_control callback from chat 123 for a request whose
+    buttons were posted in chat 111 reads as expired and writes nothing."""
+    from structlog.testing import capture_logs
+
+    from untether.telegram.commands.claude_control import ClaudeControlCommand
+
+    claude_mod = control_registries
+    stdin = _register_request(claude_mod, "req-388")
+    claude_mod._REQUEST_TO_CHANNEL["req-388"] = 111
+    transport = FakeTransport()
+    cfg = make_cfg(transport)
+    bot: FakeBot = cfg.bot  # type: ignore[assignment]
+    monkeypatch.setattr(
+        dispatch_mod, "get_command", lambda *a, **kw: ClaudeControlCommand()
+    )
+
+    with capture_logs() as logs:
+        await _dispatch_control(cfg, "claude_control:approve:req-388", "cb-388")
+
+    assert [c["text"] for c in bot.callback_calls] == ["This request has expired"]
+    assert stdin.send.await_count == 0
+    assert "req-388" in claude_mod._REQUEST_TO_SESSION
+    assert "req-388" not in claude_mod._INFLIGHT_CONTROL_RESPONSES
+    nf = [r for r in logs if r.get("event") == "claude_control.not_found"]
+    assert nf and nf[0]["reason"] == "channel_mismatch"
+    assert nf[0]["channel_id"] == 123
+    assert nf[0]["origin_channel_id"] == 111

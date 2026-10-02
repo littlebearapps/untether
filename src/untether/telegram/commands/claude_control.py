@@ -17,6 +17,7 @@ from ...runners.claude import (
     HandledControl,
     claim_control_request,
     classify_control_request,
+    control_request_origin,
     mark_outline_pending,
     mark_request_handled,
     new_control_claim_owner,
@@ -158,24 +159,41 @@ def _already_handled_result(
 
 
 def _not_found_result(
-    request_id: str, action: str, reason: str | None
+    request_id: str,
+    action: str,
+    reason: str | None,
+    *,
+    channel_id: int | None = None,
 ) -> CommandResult:
+    fields: dict[str, object] = {}
+    if reason == "channel_mismatch":
+        # #388 / #715: name both chats so a foreign tap (or a wrong binding)
+        # is diagnosable. The tapping chat itself learns nothing.
+        fields["channel_id"] = channel_id
+        fields["origin_channel_id"] = control_request_origin(request_id)
     logger.warning(
         "claude_control.not_found",
         request_id=request_id,
         action=action,
         reason=reason,
+        **fields,
     )
     return CommandResult(text=_NOT_FOUND_TEXT, notify=True)
 
 
 def _unsent_result(
-    result: ControlSendResult, request_id: str, action: str
+    result: ControlSendResult,
+    request_id: str,
+    action: str,
+    *,
+    channel_id: int | None = None,
 ) -> CommandResult:
     """Result for a tap whose response was not written (#685) — or was
     written after the CLI withdrew the request, so it was ignored (#684)."""
     if result.status is ControlRequestStatus.NOT_FOUND:
-        return _not_found_result(request_id, action, result.reason)
+        return _not_found_result(
+            request_id, action, result.reason, channel_id=channel_id
+        )
     if result.status is not ControlRequestStatus.PENDING:
         return _already_handled_result(result.status, result.prior, request_id, action)
     # Ours to answer, but the session was gone or the write failed.
@@ -207,7 +225,9 @@ def _claim_synthetic(
         request_id, action=action, owner=owner, channel_id=channel_id
     )
     if lookup.status is ControlRequestStatus.NOT_FOUND:
-        return _not_found_result(request_id, action, lookup.reason)
+        return _not_found_result(
+            request_id, action, lookup.reason, channel_id=channel_id
+        )
     if lookup.status is not ControlRequestStatus.PENDING:
         return _already_handled_result(lookup.status, lookup.prior, request_id, action)
     # Resolve before the first await: pop the registration and record the
@@ -320,7 +340,7 @@ class ClaudeControlCommand:
                 claim_owner=ctx.callback_query_id,
             )
             if not sent.sent or sent.status is ControlRequestStatus.CANCELLED:
-                return _unsent_result(sent, request_id, action)
+                return _unsent_result(sent, request_id, action, channel_id=channel_id)
             session_id = sent.session_id
 
             # Arm the outline gate: ExitPlanMode is auto-denied until Claude
@@ -438,7 +458,7 @@ class ClaudeControlCommand:
         if not sent.sent or sent.status is ControlRequestStatus.CANCELLED:
             # #685: never log claude_control.sent (or say "Approved") for a
             # tap that wrote nothing.
-            return _unsent_result(sent, request_id, action)
+            return _unsent_result(sent, request_id, action, channel_id=channel_id)
         session_id = sent.session_id
 
         # Clear outline-pending state on explicit approve/deny
@@ -558,7 +578,9 @@ class ClaudeControlCommand:
             claim_owner=ctx.callback_query_id,
         )
         if not sent.sent or sent.status is ControlRequestStatus.CANCELLED:
-            return _unsent_result(sent, request_id, "chat")
+            return _unsent_result(
+                sent, request_id, "chat", channel_id=ctx.message.channel_id
+            )
         session_id = sent.session_id
 
         if session_id:

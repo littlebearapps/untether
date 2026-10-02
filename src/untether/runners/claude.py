@@ -373,6 +373,15 @@ _TERMINAL_CONTROL_OUTCOMES = frozenset({"cancelled", "expired"})
 # and reads as "answered, details unknown".
 _HANDLED_REQUESTS: OrderedDict[str, HandledControl | None] = OrderedDict()
 
+# #388: request_id -> the chat its buttons were posted in (the run's chat,
+# ``get_run_channel_id()`` at registration). A tap from any other chat on a
+# pending / in-flight request reads ``NOT_FOUND`` (``channel_mismatch``) and
+# writes nothing. Only consulted while the id is still pending or claimed, so
+# an entry left behind by any of the deletion paths is inert. Bounded by
+# liveness pruning, never by evicting a live id (no fail-open under load).
+_REQUEST_TO_CHANNEL: dict[str, int] = {}
+_REQUEST_TO_CHANNEL_MAX = 512
+
 
 @dataclass(slots=True)
 class InflightClaim:
@@ -7735,6 +7744,7 @@ def _translate_claude_event_base(
                                 time.time(),
                             )
                             _REQUEST_TO_SESSION[request_id] = session_id
+                            _bind_request_channel(request_id)  # #388
                             state.control_registered_at[request_id] = time.monotonic()
                             _REQUEST_TO_INPUT[request_id] = getattr(
                                 request, "input", {}
@@ -7784,6 +7794,7 @@ def _translate_claude_event_base(
                         else:
                             button_request_id = f"da:{session_id}"
                             _REQUEST_TO_SESSION[button_request_id] = session_id
+                            _bind_request_channel(button_request_id)  # #388
                             state.control_registered_at[button_request_id] = (
                                 time.monotonic()
                             )
@@ -7905,6 +7916,7 @@ def _translate_claude_event_base(
             if factory.resume:
                 session_id = factory.resume.value
                 _REQUEST_TO_SESSION[request_id] = session_id
+                _bind_request_channel(request_id)  # #388
                 state.control_registered_at[request_id] = time.monotonic()  # #684
                 # Store original tool input and tool name for response handling
                 if isinstance(request, claude_schema.ControlCanUseToolRequest):
@@ -11219,6 +11231,36 @@ def mark_request_handled(
         _HANDLED_REQUESTS.popitem(last=False)
 
 
+def _bind_request_channel(request_id: str) -> None:
+    """Bind a just-registered request to the run's chat (#388).
+
+    Called right after every ``_REQUEST_TO_SESSION[...] =`` registration
+    (pinned by a structural test). No run chat (tests, legacy) → unbound,
+    which keeps the pre-#388 behaviour for that id.
+    """
+    channel = get_run_channel_id()
+    _REQUEST_TO_CHANNEL.pop(request_id, None)
+    if channel is None:
+        return
+    _REQUEST_TO_CHANNEL[request_id] = channel
+    if len(_REQUEST_TO_CHANNEL) > _REQUEST_TO_CHANNEL_MAX:
+        # Liveness pruning: drop entries no longer pending or claimed; a
+        # live binding is never evicted.
+        for rid in [
+            rid
+            for rid in _REQUEST_TO_CHANNEL
+            if rid not in _REQUEST_TO_SESSION and rid not in _INFLIGHT_CONTROL_RESPONSES
+        ]:
+            del _REQUEST_TO_CHANNEL[rid]
+
+
+def control_request_origin(request_id: str) -> int | None:
+    """The chat a pending / claimed request is bound to (#388), or None."""
+    if request_id in _REQUEST_TO_SESSION or request_id in _INFLIGHT_CONTROL_RESPONSES:
+        return _REQUEST_TO_CHANNEL.get(request_id)
+    return None
+
+
 def classify_control_request(
     request_id: str, *, channel_id: int | None = None
 ) -> ControlLookup:
@@ -11228,7 +11270,18 @@ def classify_control_request(
     handled record → ``CANCELLED`` / ``ALREADY_HANDLED``; else ``NOT_FOUND``.
     A handled record from another chat reads ``NOT_FOUND`` (reason
     ``channel_mismatch``) — one chat can't read another's resolution (#715).
+
+    #388: checked first, a pending or in-flight request bound to another chat
+    also reads ``NOT_FOUND`` (``channel_mismatch``) — a forged callback from
+    a different chat can't answer it, and learns nothing (not even "being
+    handled"). ``channel_id=None`` (internal callers) skips the check.
     """
+    if channel_id is not None:
+        origin = control_request_origin(request_id)
+        if origin is not None and origin != channel_id:
+            return ControlLookup(
+                ControlRequestStatus.NOT_FOUND, reason="channel_mismatch"
+            )
     claim = _INFLIGHT_CONTROL_RESPONSES.get(request_id)
     if claim is not None:
         return ControlLookup(
@@ -11241,6 +11294,14 @@ def classify_control_request(
             ),
         )
     if request_id in _REQUEST_TO_SESSION:
+        if channel_id is not None and request_id not in _REQUEST_TO_CHANNEL:
+            # #388: a registration site that forgot _bind_request_channel
+            # (or a run without a chat) would silently reopen the gap.
+            logger.debug(
+                "claude_control.origin_unbound",
+                request_id=request_id,
+                channel_id=channel_id,
+            )
         return ControlLookup(ControlRequestStatus.PENDING)
     if request_id in _HANDLED_REQUESTS:
         record = _HANDLED_REQUESTS[request_id]
@@ -11520,6 +11581,7 @@ def _cleanup_session_registries(
         cleaned.append(f"requests({len(stale)})")
     for k in stale:
         del _REQUEST_TO_SESSION[k]
+        _REQUEST_TO_CHANNEL.pop(k, None)  # #388
         # #685: a claim on a request whose session is gone can never
         # complete — drop it so the id doesn't read "in flight" for ever.
         _INFLIGHT_CONTROL_RESPONSES.pop(k, None)

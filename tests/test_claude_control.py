@@ -3577,3 +3577,272 @@ def test_684_cancel_ignores_stale_record_for_a_reused_id() -> None:
     assert "r-reuse" not in _REQUEST_TO_SESSION
     record = _HANDLED_REQUESTS["r-reuse"]
     assert record is not None and record.outcome == "cancelled"
+
+
+# ===========================================================================
+# #388 — pending approval buttons are bound to the chat they were posted in
+# ===========================================================================
+
+
+def _388_raise_in_chat(chat: int, request_id: str, session_id: str = "sess-388"):
+    """Raise a Phase-2 ExitPlanMode request inside a run whose chat is *chat*."""
+    from untether.utils.paths import reset_run_channel_id, set_run_channel_id
+
+    state, factory = _make_state_with_session(session_id)
+    token = set_run_channel_id(chat)
+    try:
+        events = _raise_exit_plan(state, factory, request_id)
+    finally:
+        reset_run_channel_id(token)
+    return state, factory, events
+
+
+def test_388_pending_request_rejects_other_chat() -> None:
+    from untether.runners.claude import (
+        _REQUEST_TO_CHANNEL,
+        ControlRequestStatus,
+        classify_control_request,
+    )
+
+    _388_raise_in_chat(111, "r-388")
+    assert _REQUEST_TO_SESSION["r-388"] == "sess-388"
+    assert _REQUEST_TO_CHANNEL["r-388"] == 111
+    other = classify_control_request("r-388", channel_id=222)
+    assert other.status is ControlRequestStatus.NOT_FOUND
+    assert other.reason == "channel_mismatch"
+    same = classify_control_request("r-388", channel_id=111)
+    assert same.status is ControlRequestStatus.PENDING
+
+
+def test_388_inflight_from_other_chat_is_not_found() -> None:
+    """Origin check runs before the in-flight branch: no "being handled"
+    oracle for a foreign chat."""
+    from untether.runners.claude import (
+        ControlRequestStatus,
+        claim_control_request,
+        classify_control_request,
+    )
+
+    _388_raise_in_chat(111, "r-388f")
+    owned = claim_control_request(
+        "r-388f", action="approve", owner="cb-own", channel_id=111
+    )
+    assert owned.status is ControlRequestStatus.PENDING
+    foreign = classify_control_request("r-388f", channel_id=222)
+    assert foreign.status is ControlRequestStatus.NOT_FOUND
+    assert foreign.reason == "channel_mismatch"
+    assert (
+        classify_control_request("r-388f", channel_id=111).status
+        is ControlRequestStatus.IN_FLIGHT
+    )
+
+
+@pytest.mark.anyio
+async def test_388_respond_from_other_chat_writes_nothing() -> None:
+    from untether.runners.claude import (
+        ControlRequestStatus,
+        respond_to_control_request,
+    )
+
+    _388_raise_in_chat(111, "r-388w")
+    fake_stdin = _register_live_request("r-388w", "sess-388")
+    foreign = await respond_to_control_request(
+        "r-388w", True, action="approve", channel_id=222
+    )
+    assert foreign.sent is False
+    assert foreign.status is ControlRequestStatus.NOT_FOUND
+    assert fake_stdin.send.await_count == 0
+    assert "r-388w" in _REQUEST_TO_SESSION
+    own = await respond_to_control_request(
+        "r-388w", True, action="approve", channel_id=111
+    )
+    assert own.sent is True
+    assert fake_stdin.send.await_count == 1
+
+
+def test_388_early_toast_from_other_chat_claims_nothing() -> None:
+    from untether.telegram.commands.claude_control import (
+        _EXPIRED_TOAST,
+        ClaudeControlCommand,
+    )
+
+    _388_raise_in_chat(111, "r-388t")
+    toast = ClaudeControlCommand.early_answer_toast(
+        "approve:r-388t", channel_id=222, claim_owner="cb1"
+    )
+    assert toast == _EXPIRED_TOAST
+    assert "r-388t" not in _INFLIGHT_CONTROL_RESPONSES
+
+
+@pytest.mark.anyio
+async def test_388_handle_from_other_chat_logs_both_chats() -> None:
+    from structlog.testing import capture_logs
+
+    from untether.telegram.commands.claude_control import (
+        _NOT_FOUND_TEXT,
+        ClaudeControlCommand,
+    )
+
+    _388_raise_in_chat(111, "r-388h")
+    fake_stdin = _register_live_request("r-388h", "sess-388")
+    with capture_logs() as logs:
+        result = await ClaudeControlCommand().handle(
+            _ctl_ctx("approve", "r-388h", channel_id=222)
+        )
+    assert result is not None and result.text == _NOT_FOUND_TEXT
+    assert fake_stdin.send.await_count == 0
+    nf = _events_named(logs, "claude_control.not_found")
+    assert nf and nf[0]["reason"] == "channel_mismatch"
+    assert nf[0]["channel_id"] == 222
+    assert nf[0]["origin_channel_id"] == 111
+    assert not _events_named(logs, "claude_control.sent")
+
+
+def _388_outline_round(chat: int, *, outline_chars: int, session_id: str):
+    from untether.utils.paths import reset_run_channel_id, set_run_channel_id
+
+    state, factory = _make_state_with_session(session_id)
+    mark_outline_pending(session_id)
+    state.max_text_len_since_cooldown = outline_chars
+    token = set_run_channel_id(chat)
+    try:
+        events = _raise_exit_plan(state, factory, f"r-{session_id}")
+    finally:
+        reset_run_channel_id(token)
+    return state, events
+
+
+@pytest.mark.anyio
+async def test_388_synthetic_da_button_bound() -> None:
+    from untether.runners.claude import _REQUEST_TO_CHANNEL
+    from untether.telegram.commands.claude_control import (
+        _NOT_FOUND_TEXT,
+        ClaudeControlCommand,
+    )
+
+    session_id = "sess-388da"
+    _388_outline_round(111, outline_chars=0, session_id=session_id)
+    da = f"da:{session_id}"
+    assert _REQUEST_TO_SESSION.get(da) == session_id
+    assert _REQUEST_TO_CHANNEL[da] == 111
+    result = await ClaudeControlCommand().handle(
+        _ctl_ctx("approve", da, channel_id=222)
+    )
+    assert result is not None and result.text == _NOT_FOUND_TEXT
+    assert session_id not in _DISCUSS_APPROVED  # verdict not applied
+    assert da in _REQUEST_TO_SESSION
+
+
+def test_388_outline_hold_open_request_bound() -> None:
+    from untether.runners.claude import (
+        _REQUEST_TO_CHANNEL,
+        ControlRequestStatus,
+        classify_control_request,
+    )
+
+    session_id = "sess-388ho"
+    _388_outline_round(111, outline_chars=500, session_id=session_id)
+    rid = f"r-{session_id}"
+    assert _REQUEST_TO_SESSION.get(rid) == session_id
+    assert _REQUEST_TO_CHANNEL[rid] == 111
+    assert (
+        classify_control_request(rid, channel_id=222).status
+        is ControlRequestStatus.NOT_FOUND
+    )
+
+
+@pytest.mark.anyio
+async def test_388_internal_caller_without_channel_unaffected() -> None:
+    from untether.runners.claude import send_claude_control_response
+
+    _388_raise_in_chat(111, "r-388i")
+    fake_stdin = _register_live_request("r-388i", "sess-388")
+    assert await send_claude_control_response("r-388i", True) is True
+    assert fake_stdin.send.await_count == 1
+
+
+def test_388_unknown_origin_keeps_legacy_behaviour() -> None:
+    from structlog.testing import capture_logs
+
+    from untether.runners.claude import (
+        _REQUEST_TO_CHANNEL,
+        ControlRequestStatus,
+        classify_control_request,
+    )
+
+    state, factory = _make_state_with_session("sess-388u")
+    _raise_exit_plan(state, factory, "r-388u")  # no run chat set
+    assert "r-388u" not in _REQUEST_TO_CHANNEL
+    with capture_logs() as logs:
+        lookup = classify_control_request("r-388u", channel_id=222)
+    assert lookup.status is ControlRequestStatus.PENDING
+    assert _events_named(logs, "claude_control.origin_unbound")
+
+
+def test_388_registry_pruned_by_liveness_never_evicts_live() -> None:
+    from untether.runners import claude as claude_mod
+    from untether.runners.claude import _REQUEST_TO_CHANNEL, _bind_request_channel
+    from untether.utils.paths import reset_run_channel_id, set_run_channel_id
+
+    token = set_run_channel_id(111)
+    try:
+        for i in range(600):
+            rid = f"r-live-{i}" if i < 50 else f"r-gone-{i}"
+            if i < 50:
+                _REQUEST_TO_SESSION[rid] = "s"
+            _bind_request_channel(rid)
+    finally:
+        reset_run_channel_id(token)
+    assert len(_REQUEST_TO_CHANNEL) <= claude_mod._REQUEST_TO_CHANNEL_MAX
+    assert all(f"r-live-{i}" in _REQUEST_TO_CHANNEL for i in range(50))
+
+
+def test_388_session_cleanup_drops_bindings() -> None:
+    from untether.runners.claude import _REQUEST_TO_CHANNEL
+
+    _388_raise_in_chat(111, "r-388c", session_id="sess-388c")
+    assert "r-388c" in _REQUEST_TO_CHANNEL
+    _cleanup_session_registries("sess-388c")
+    assert "r-388c" not in _REQUEST_TO_CHANNEL
+
+
+def test_388_every_registration_binds_its_channel() -> None:
+    """Structural: each ``_REQUEST_TO_SESSION[...] = ...`` in claude.py is
+    followed in the same block by ``_bind_request_channel(`` (a site that
+    forgot it would silently reopen #388)."""
+    import ast
+    from pathlib import Path
+
+    import untether.runners.claude as claude_mod
+
+    tree = ast.parse(Path(claude_mod.__file__).read_text(encoding="utf-8"))
+    sites = 0
+    missing: list[int] = []
+    blocks = [
+        block
+        for node in ast.walk(tree)
+        for field in ("body", "orelse", "finalbody")
+        if isinstance(block := getattr(node, field, None), list)
+    ]
+    for body in blocks:
+        for idx, stmt in enumerate(body):
+            if not (
+                isinstance(stmt, ast.Assign)
+                and len(stmt.targets) == 1
+                and isinstance(stmt.targets[0], ast.Subscript)
+                and isinstance(stmt.targets[0].value, ast.Name)
+                and stmt.targets[0].value.id == "_REQUEST_TO_SESSION"
+            ):
+                continue
+            sites += 1
+            follow = body[idx + 1 : idx + 3]
+            if not any(
+                isinstance(s, ast.Expr)
+                and isinstance(s.value, ast.Call)
+                and isinstance(s.value.func, ast.Name)
+                and s.value.func.id == "_bind_request_channel"
+                for s in follow
+            ):
+                missing.append(stmt.lineno)
+    assert sites >= 3, sites
+    assert not missing, f"registrations without _bind_request_channel: {missing}"
