@@ -173,7 +173,7 @@ Detailed protocol specs and event cheatsheets for each integration:
 Both are **deprecated** and targeted for **removal in 0.36.0**. They still load and
 run; they are not supported.
 
-- **`gemini`** — Google ended Gemini CLI support for individual and free accounts on
+- **`gemini`** — Google ended Gemini CLI support for individual accounts (free, Google AI Pro and Ultra) on
   **2026-06-18**, directing users to Antigravity CLI. On those accounts it fails with
   `IneligibleTierError: This client is no longer supported` and exits **1**. Under
   Untether the subprocess **hangs instead of exiting**, so the run stalls to the

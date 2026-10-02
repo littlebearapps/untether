@@ -75,7 +75,7 @@ Pi can authenticate via a provider login or use API billing. You can log in with
 
 !!! warning "Deprecated — don't install for new setups"
 
-    Google ended Gemini CLI support for **individual and free accounts on
+    Google ended Gemini CLI support for **individual accounts (free, Google AI Pro and Ultra) on
     18 June 2026** ([Google's announcement](https://developers.googleblog.com/an-important-update-transitioning-gemini-cli-to-antigravity-cli/)), directing users to [Antigravity CLI](https://antigravity.google).
     On those accounts the CLI fails to authenticate outright
     (`IneligibleTierError`). Worse, under Untether the subprocess hangs rather

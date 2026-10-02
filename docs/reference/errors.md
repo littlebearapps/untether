@@ -10,7 +10,7 @@ These are checked first. The end-of-life patterns must outrank the generic `inva
 
 | Pattern | Hint | Engines |
 |---------|------|---------|
-| `ineligibletiererror` / `gemini code assist for individuals` | Gemini CLI is end-of-life for individual and free Google accounts (18 June 2026). The `gemini` engine is deprecated in Untether — switch engines via /config, or migrate to Antigravity CLI (antigravity.google). | Gemini (deprecated) |
+| `ineligibletiererror` / `gemini code assist for individuals` | Gemini CLI is end-of-life for individual Google accounts (free, Google AI Pro and Ultra) (18 June 2026). The `gemini` engine is deprecated in Untether — switch engines via /config, or migrate to Antigravity CLI (antigravity.google). | Gemini (deprecated) |
 | `this version of amp is no longer supported` | AMP is refusing this client version. Run `amp update` to upgrade. The `amp` engine is deprecated in Untether and may stop working again without notice. | AMP (deprecated) |
 | `is no longer supported; remove this setting` | A setting in your Codex config (`~/.codex/config.toml`, a `--profile` file, or `[engines.codex] extra_args`) is no longer supported by the installed Codex CLI — remove the key the error names. | Codex |
 | `' for '--` / `a value is required for '--` / `error: unexpected argument '-` | The engine CLI rejected a command-line flag — this Untether version may not match the installed CLI. Update Untether, and report it if the problem persists. | Codex (clap argv errors) |

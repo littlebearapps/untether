@@ -98,7 +98,7 @@ Run `untether doctor` to see which engines are detected.
 - **Claude Code:** Run `claude login` to authenticate. On macOS, credentials are stored in Keychain; on Linux, in `~/.claude/.credentials.json`
 - **OpenCode:** Run `opencode` and authenticate with your chosen provider
 - **Pi:** Run `pi` and log in with your provider
-- **Gemini CLI** (⚠️ deprecated): see below — individual and free Google accounts can no longer authenticate at all
+- **Gemini CLI** (⚠️ deprecated): see below — individual Google accounts (free, Google AI Pro and Ultra) can no longer authenticate at all
 - **Amp** (⚠️ deprecated): see below — `amp login` still works, but the client version is refused remotely
 
 ## Why does my Gemini run stall, or my Amp run fail immediately?
@@ -145,7 +145,7 @@ events and no exit — hence the stall rather than an error message. Filed as
 [#724](https://github.com/littlebearapps/untether/issues/724) and closed as
 **won't fix**, because the engine is deprecated.
 
-Gemini CLI reached **end-of-life for individual and free Google accounts on
+Gemini CLI reached **end-of-life for individual Google accounts (free, Google AI Pro and Ultra) on
 18 June 2026** ([Google's announcement](https://developers.googleblog.com/an-important-update-transitioning-gemini-cli-to-antigravity-cli/)). There is no fix — migrate to
 [Antigravity CLI](https://antigravity.google) (Untether support is planned as a
 separate engine) or use a supported engine. Enterprise / Google Cloud licences
