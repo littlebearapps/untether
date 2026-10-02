@@ -179,7 +179,7 @@ async def _resolve_engine_run_options(
 
 # Trigger-level fields that win over the resolved chat/topic options for a
 # trigger's own run (#330 permission_mode). Each is copied from RunContext.
-_TRIGGER_OVERRIDE_FIELDS: tuple[str, ...] = ("permission_mode",)
+_TRIGGER_OVERRIDE_FIELDS: tuple[str, ...] = ("permission_mode", "model", "reasoning")
 
 
 def _apply_trigger_overrides(
@@ -219,7 +219,16 @@ def _apply_trigger_overrides(
     from dataclasses import replace
 
     base = run_options if run_options is not None else EngineRunOptions()
+    if "reasoning" in fields:
+        # #743: the cron's own level replaces the chat's, so a stale chat
+        # level dropped by the resolver (#416) must not be reported as
+        # ignored for this run.
+        derived["ignored_reasoning"] = None
     new_options = replace(base, **fields, **derived)
+    if engine is not None and "reasoning" in fields:
+        # #416 parity with the resolver and the executor, so comparisons see
+        # the same options the run is spawned with.
+        new_options = drop_unsupported_reasoning(engine, new_options)
     if log:
         for name, value in fields.items():
             previous = getattr(run_options, name) if run_options is not None else None

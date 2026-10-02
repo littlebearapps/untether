@@ -525,3 +525,42 @@ async def test_835_busy_steer_keeps_the_turn_unattended(cleanup) -> None:
         "sid-inj", "again", command_uuid="u836", run_options=EngineRunOptions()
     )
     assert out == "options_changed"
+
+
+async def test_743_reply_to_cron_session_with_model_override_closes_options_changed(
+    cleanup,
+) -> None:
+    """#743 D2: a reply to a cron run uses the chat's model, so a live session
+    spawned with the cron's model closes (options_changed) and resumes."""
+    from untether.runners.run_options import EngineRunOptions
+
+    live, pipe = _install("sid-inj", idle=True)
+    live.state.spawn_run_options = EngineRunOptions(
+        model="haiku", permission_mode="plan-auto"
+    )
+    closed: list[bool] = []
+
+    async def aclose() -> None:
+        closed.append(True)
+
+    pipe.aclose = aclose  # type: ignore[method-assign]
+
+    async def chat(job: ThreadJob) -> EngineRunOptions:
+        return EngineRunOptions()
+
+    assert await inject_live_followup(_job("sid-inj"), options_for=chat) is False
+    assert closed == [True]
+    assert live.state.live_close_reason == "options_changed"
+
+
+async def test_743_cron_without_overrides_still_injects(cleanup) -> None:
+    from untether.runners.run_options import EngineRunOptions
+
+    live, pipe = _install("sid-inj", idle=True)
+    live.state.spawn_run_options = EngineRunOptions(model="opus")
+
+    async def chat(job: ThreadJob) -> EngineRunOptions:
+        return EngineRunOptions(model="opus")
+
+    assert await inject_live_followup(_job("sid-inj"), options_for=chat) is True
+    assert len(pipe.sent) == 1

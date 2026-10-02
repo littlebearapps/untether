@@ -163,7 +163,16 @@ Webhook IDs and paths must each be unique across all configured webhooks.
 | `run_once` | bool | `false` | Fire once then auto-disable — after the first dispatch attempt, even if its fetch aborted or the announce send failed. The cron stays in the TOML for history, but its fired state persists to `run_once_fired.json` (sibling of `untether.toml`) so it is filtered out on every subsequent config reload and restart until you remove it from the TOML entirely. Removing the cron from the TOML cleans its fired-state entry on the next reload. |
 | `permission_mode` | string\|null | `null` | Per-cron permission-mode override, validated for **Claude**: one of `default` (alias `manual`), `plan`, `plan-auto`, `auto`, `acceptEdits`, `dontAsk`, `bypassPermissions`. Wins over the chat's `/planmode` and the engine config default for this cron's run only. Set it on every Claude cron that should act unattended — requests that would wait for a tap are denied ([#835](https://github.com/littlebearapps/untether/issues/835)). See [Cron permission modes](#cron-permission-modes). |
 
+| `model` | string\|null | `null` | ([#743](https://github.com/littlebearapps/untether/issues/743)) Model for this cron's run only (passed as the engine's `--model`). Free-form like `/model set`, but it can't start with `-` or contain whitespace/control characters. Set `engine` too so the name matches. |
+| `reasoning` | string\|null | `null` | ([#743](https://github.com/littlebearapps/untether/issues/743)) Effort / reasoning level for this cron's run only. With `engine` set it must be one of that engine's levels (Claude `low`, `medium`, `high`, `xhigh`, `max`; Codex `low`…`xhigh`; an engine without reasoning support is an error); without `engine`, one of `low`…`max`, and a level the resolved engine doesn't allow is ignored with a note in the run. Normalised to lower case. |
+
 Either `prompt` or `prompt_template` is required. Cron IDs must be unique across all configured crons.
+
+**Model / reasoning precedence:** cron `model` / `reasoning` > topic/chat `/model`
+and reasoning > engine config > CLI default. A reply to the cron's run uses the
+chat's settings (a live session spawned with the cron's model closes with
+`options_changed` and resumes). Logged as `trigger.cron.model_override` /
+`trigger.cron.reasoning_override` when the value differs from the chat's.
 
 `schedule` is not validated at config load: an expression without exactly five
 fields never fires, and one with an unparseable field logs

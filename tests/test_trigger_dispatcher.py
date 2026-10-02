@@ -488,3 +488,76 @@ async def test_cron_dispatch_aborts_after_retry_exhaustion(monkeypatch):
 
     assert transport.attempts == 3  # bounded: 1 initial + len(SEND_RETRY_DELAYS)
     assert run_job.calls == []
+
+
+@pytest.mark.anyio
+async def test_743_dispatch_cron_passes_model_and_reasoning():
+    transport = FakeTransport()
+    run_job = RunJobCapture()
+
+    async with anyio.create_task_group() as tg:
+        dispatcher = TriggerDispatcher(
+            run_job=run_job,
+            transport=transport,
+            default_chat_id=100,
+            task_group=tg,
+        )
+        cron = CronConfig(
+            id="cheap",
+            schedule="0 9 * * 1",
+            engine="claude",
+            prompt="weekly report",
+            model="sonnet",
+            reasoning="low",
+        )
+        await dispatcher.dispatch_cron(cron)
+        await anyio.sleep(0.01)
+        tg.cancel_scope.cancel()
+
+    ctx = run_job.calls[0]["context"]
+    assert ctx is not None
+    assert (ctx.model, ctx.reasoning) == ("sonnet", "low")
+
+
+@pytest.mark.anyio
+async def test_743_dispatch_cron_omits_model_and_reasoning_when_unset():
+    transport = FakeTransport()
+    run_job = RunJobCapture()
+
+    async with anyio.create_task_group() as tg:
+        dispatcher = TriggerDispatcher(
+            run_job=run_job,
+            transport=transport,
+            default_chat_id=100,
+            task_group=tg,
+        )
+        await dispatcher.dispatch_cron(
+            CronConfig(id="plain", schedule="* * * * *", prompt="hello")
+        )
+        await anyio.sleep(0.01)
+        tg.cancel_scope.cancel()
+
+    ctx = run_job.calls[0]["context"]
+    assert ctx is not None
+    assert ctx.model is None and ctx.reasoning is None
+
+
+@pytest.mark.anyio
+async def test_743_dispatch_webhook_has_no_model_override():
+    transport = FakeTransport()
+    run_job = RunJobCapture()
+
+    async with anyio.create_task_group() as tg:
+        dispatcher = TriggerDispatcher(
+            run_job=run_job,
+            transport=transport,
+            default_chat_id=100,
+            task_group=tg,
+        )
+        await dispatcher.dispatch_webhook(_make_webhook(), "Test prompt")
+        await anyio.sleep(0.01)
+        tg.cancel_scope.cancel()
+
+    ctx = run_job.calls[0]["context"]
+    assert ctx is not None
+    assert ctx.model is None and ctx.reasoning is None

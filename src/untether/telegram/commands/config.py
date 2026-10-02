@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import html
+
 from ...commands import CommandBackend, CommandContext, CommandResult
 from ...ids import DEPRECATED_ENGINES
 from ...logging import get_logger
@@ -2330,10 +2332,22 @@ async def _page_triggers(ctx: CommandContext, action: str | None = None) -> None
                         cron.schedule, cron.timezone or default_tz
                     )
                     last = _format_trigger_relative(get_last_fired(cron.id))
+                    # #743: free-form, so escaped (only shown when set).
+                    model_seg = (
+                        f"model=<i>{html.escape(_truncate_field(cron.model))}</i> · "
+                        if cron.model
+                        else ""
+                    )
+                    effort_seg = (
+                        f"effort=<i>{html.escape(cron.reasoning)}</i> · "
+                        if cron.reasoning
+                        else ""
+                    )
                     lines.append(
                         f"<code>{cron.id}</code> · {schedule_text} · "
                         f"proj=<i>{_truncate_field(cron.project)}</i> · "
                         f"eng=<i>{_truncate_field(cron.engine)}</i> · "
+                        f"{model_seg}{effort_seg}"
                         f"last <i>{last}</i>"
                     )
                 overflow = len(chat_crons) - _TRIGGER_LIST_CAP

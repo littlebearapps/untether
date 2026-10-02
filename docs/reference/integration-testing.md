@@ -885,6 +885,26 @@ Setup (dev only; back up first: `cp ~/.untether-dev/untether.toml ~/.untether-de
 
 Cleanup: restore the backup, restart once.
 
+### #743 — per-cron `model` and `reasoning`
+
+Claude chat `-5284581592`, Codex chat `-4929463515`. Tiers: Tier 7 Q16, R5 (trigger source in footer), R1 (hot-reload cron add), Tier 4 O2 (reasoning in the footer), B-LIVE-x. Logs: `journalctl --user -u untether-dev -o cat --since "<t0>" | grep -E 'trigger\.cron\.(model|reasoning|permission_mode)_override|triggers?\.(manager\.updated|init_failed)|config\.reload\.triggers_failed|options_changed|runner\.completed'`.
+
+Setup: back up (`cp ~/.untether-dev/untether.toml ~/.untether-dev/untether.toml.bak-r17-20`; never `cat` it); `[triggers] enabled = true` (+ `[triggers.server] port = 9878`) needs one dev restart from a terminal if it was off. Append crons with a heredoc; each reload logs `triggers.manager.updated`. Crons: `chat_id = -5284581592`, `run_once = true`, `schedule = "* * * * *"`. Preflight: `/model set opus` in the Claude chat.
+
+| ID | Steps | Expected |
+|---|---|---|
+| R17-20a | cron `r17-20a`: `engine = "claude"`, `model = "haiku"`, `permission_mode = "plan-auto"`, `prompt = "reply with the single word CRONMODEL"`; wait for the minute | Footer shows a Haiku model + `⏰ cron:r17-20a`; `trigger.cron.model_override trigger_source=cron:r17-20a chat_model=opus trigger_model=haiku engine=claude`; `runner.completed … model=claude-haiku-…` |
+| R17-20b | Right after, send `reply with the single word CHAT` | Footer shows Opus; no `trigger.cron.*_override` for this run; `/model` unchanged |
+| R17-20c | Two crons in the same minute: `r17-20c1` (`model = "haiku"`), `r17-20c2` (no model), both `engine = "claude"`, `permission_mode = "plan-auto"` | c1's footer Haiku, c2's Opus; exactly one `trigger.cron.model_override` (c1) |
+| R17-20d | cron `r17-20d`: `engine = "claude"`, `reasoning = "low"`, `permission_mode = "plan-auto"`, same prompt | Footer shows effort `low`; `trigger.cron.reasoning_override … trigger_reasoning=low` |
+| R17-20e | **Validation:** append cron `r17-20e` with `engine = "codex"`, `reasoning = "max"` | `config.reload.triggers_failed` (WARN) naming `reasoning` and the allowed levels; the previous crons stay active (`/ping` still lists them). Remove the entry → the next reload succeeds |
+| R17-20f | cron `r17-20f`: `model = "haiku"`, `permission_mode = "plan-auto"`, prompt `start a background Bash task with run_in_background: python3 -c "import time; time.sleep(90)", then reply STARTED`. While it runs, **reply** to its final: `what model are you` | `claude.live_session.options_changed`, the `⚙️ Settings changed — stopping 1 background task …` notice, and the reply's footer shows Opus (resumed session) |
+| R17-20g *(gated — needs Nathan's OK)* | cron with `model = "r17-nonexistent"` | An error final names the model problem, not a hang; no retry loop |
+| R17-20h | Codex chat: cron `engine = "codex"`, `chat_id = -4929463515`, `model = <a model from the Codex catalogue>`, `reasoning = "low"` | Footer shows that model + effort `low`; `runner.completed engine=codex model=…` |
+| R17-20i | `/config → ⏰ Triggers` in the Claude chat while `r17-20a` is configured | Row shows `model=haiku · ` and (for `r17-20d`) `effort=low · ` before `last` |
+
+Cleanup: restore the backup (`cp …bak-r17-20 …toml && rm …bak-r17-20`), `/model clear`, restart once if triggers were toggled; check `run_once_fired.json` holds only r17 ids (removing the crons cleans them on the next reload, #317).
+
 ### #416 — Codex reasoning `minimal` retired
 
 Codex chat `4929463515` (Bot API `-4929463515`). **Precondition (read-only):** the chat must not be in `safe` mode — `jq '.chats["-4929463515"].engine_overrides.codex' ~/.untether-dev/telegram_chat_prefs_state.json` → `null`, and `grep -A8 '^\[engines.codex\]' ~/.untether-dev/untether.toml` shows no `permission_mode = "safe"`. If it ever does, record the value, switch to full auto via `/config`, run the rows, then restore it. Logs: `journalctl --user -u untether-dev -o cat --since "15 minutes ago" | grep -E "run.reasoning.unsupported_level_ignored|config.reasoning|model_reasoning_effort=minimal|session.auto_cleared|handle.(runner|worker)_failed"`.

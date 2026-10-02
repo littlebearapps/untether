@@ -3844,6 +3844,35 @@ class TestTriggersPagePerChat:
         assert "last <i>never</i>" in text
 
     @pytest.mark.anyio
+    async def test_743_triggers_page_shows_cron_model_and_effort(self, tmp_path):
+        from untether.triggers.manager import TriggerManager
+        from untether.triggers.settings import parse_trigger_config
+
+        base = {"schedule": "0 9 * * *", "prompt": "hi", "chat_id": 123}
+        cfg = parse_trigger_config(
+            {
+                "enabled": True,
+                "crons": [
+                    {"id": "cheap", **base, "model": "sonnet", "reasoning": "low"},
+                    {"id": "plain", **base},
+                    {"id": "odd", **base, "model": "<b>x</b>"},
+                ],
+            }
+        )
+        cmd = ConfigCommand()
+        ctx = _make_ctx(args_text="tg", text="config:tg", chat_id=123)
+        ctx.trigger_manager = TriggerManager(cfg)
+        await cmd.handle(ctx)
+        text = _last_edit_msg(ctx).text
+        rows = {line.split("</code>")[0]: line for line in text.splitlines()}
+        cheap = rows["<code>cheap"]
+        assert "model=<i>sonnet</i>" in cheap
+        assert "effort=<i>low</i>" in cheap
+        plain = rows["<code>plain"]
+        assert "model=" not in plain and "effort=" not in plain
+        assert "model=<i>&lt;b&gt;x&lt;/b&gt;</i>" in rows["<code>odd"]
+
+    @pytest.mark.anyio
     async def test_lists_webhooks_for_current_chat(self, tmp_path):
         from untether.triggers.manager import TriggerManager
         from untether.triggers.settings import parse_trigger_config

@@ -1005,3 +1005,23 @@ def test_825_task_updated_patch_reports_is_backgrounded(cli_blob: mmap.mmap) -> 
             "task_updated patch differ moved — re-derive the probe "
             f"(last green on CLI {PROBED_CLI_VERSION})"
         )
+
+
+_EFFORT_HELP_RE = re.compile(r"--effort <level>[^(]*\(([^)]*)\)", re.DOTALL)
+
+
+def test_743_effort_choices_match_untether_levels() -> None:
+    """#743: a cron's `reasoning` is validated against Untether's Claude
+    levels, which must match the CLI's `--effort` choices (#416 rule: every
+    allowed level has a /config button). Zero-token: `claude --help` only."""
+    from untether.telegram.engine_overrides import allowed_reasoning_levels
+
+    text = _claude_help()
+    match = _EFFORT_HELP_RE.search(text)
+    if match is None:
+        pytest.skip("`--effort` choices not found in `claude --help`")
+    choices = {c.strip() for c in match.group(1).replace("\n", " ").split(",")}
+    assert choices == set(allowed_reasoning_levels("claude")), (
+        "CLI effort levels changed — update `telegram/engine_overrides.py` and "
+        f"the /config reasoning buttons (#416 rule): CLI {sorted(choices)}"
+    )

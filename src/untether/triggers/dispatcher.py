@@ -62,6 +62,8 @@ class TriggerDispatcher:
             project=cron.project,
             trigger_source=f"cron:{cron.id}",
             permission_mode=cron.permission_mode,
+            model=cron.model,
+            reasoning=cron.reasoning,
         )
         engine_override = cron.engine
         label = f"\N{ALARM CLOCK} Scheduled: cron:{cron.id}"

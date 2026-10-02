@@ -140,6 +140,25 @@ class CronConfig(BaseModel):
     fetch: CronFetchConfig | None = None
     run_once: bool = False
     permission_mode: NonEmptyStr | None = None
+    # #743: this cron's own model / effort (reasoning) for its run only; unset
+    # inherits the chat's /model and reasoning, then engine config.
+    model: NonEmptyStr | None = None
+    reasoning: NonEmptyStr | None = None
+
+    @field_validator("model")
+    @classmethod
+    def _validate_model(cls, v: str | None) -> str | None:
+        # Free-form like /model set (the engine rejects unknown names), but
+        # never something that could read as another argv flag or carry
+        # whitespace / control characters into argv and logs.
+        if v is None:
+            return v
+        if v.startswith("-") or any(ch.isspace() or not ch.isprintable() for ch in v):
+            raise ValueError(
+                f"invalid model {v!r}: must not start with '-' or contain "
+                "whitespace or control characters"
+            )
+        return v
 
     @field_validator("timezone")
     @classmethod
@@ -178,6 +197,40 @@ class CronConfig(BaseModel):
                 f"unknown permission_mode {self.permission_mode!r} for engine "
                 f"{self.engine!r}; allowed values: {sorted(allowed)}"
             )
+        return self
+
+    @model_validator(mode="after")
+    def _validate_reasoning(self) -> CronConfig:
+        """#743: strict when ``engine`` is explicit, else the global table.
+
+        With no ``engine`` the cron resolves later (project default, #862);
+        a level that engine doesn't allow gets the executor's run-time note.
+        """
+        if self.reasoning is None:
+            return self
+        # Import lazily to avoid a circular import at module load.
+        from ..telegram.engine_overrides import (
+            REASONING_LEVELS,
+            allowed_reasoning_levels,
+            supports_reasoning,
+        )
+
+        level = self.reasoning.lower()
+        if self.engine is not None:
+            if not supports_reasoning(self.engine):
+                raise ValueError(
+                    f"reasoning is not supported for engine {self.engine!r}"
+                )
+            allowed = allowed_reasoning_levels(self.engine)
+        else:
+            allowed = REASONING_LEVELS
+        if level not in allowed:
+            where = f"engine {self.engine!r}" if self.engine else "any engine"
+            raise ValueError(
+                f"unknown reasoning {self.reasoning!r} for {where}; "
+                f"allowed values: {list(allowed)}"
+            )
+        self.reasoning = level
         return self
 
 

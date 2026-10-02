@@ -16,6 +16,9 @@ class RunContext:
     # applies it on top of the resolved EngineRunOptions so the cron
     # override wins over the chat's /planmode default.
     permission_mode: str | None = None
+    # #743: per-cron model / reasoning overrides, applied the same way.
+    model: str | None = None
+    reasoning: str | None = None
 
 
 # #751 / #835: trigger sources with nobody present to answer a Telegram

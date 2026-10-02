@@ -245,6 +245,101 @@ class TestCronConfig:
         assert c.permission_mode == "anything"
 
 
+class TestCronModelReasoning:
+    """#743: per-cron model / reasoning overrides."""
+
+    def test_743_model_default_none(self):
+        c = CronConfig(id="x", schedule="* * * * *", prompt="Hi")
+        assert c.model is None
+
+    def test_743_reasoning_default_none(self):
+        c = CronConfig(id="x", schedule="* * * * *", prompt="Hi")
+        assert c.reasoning is None
+
+    @pytest.mark.parametrize(
+        ("raw", "expected"),
+        [
+            ("sonnet", "sonnet"),
+            ("claude-sonnet-5", "claude-sonnet-5"),
+            ("openai/gpt-5", "openai/gpt-5"),
+            ("  haiku  ", "haiku"),
+        ],
+    )
+    def test_743_model_accepted_free_form(self, raw: str, expected: str):
+        c = CronConfig(id="x", schedule="* * * * *", prompt="Hi", model=raw)
+        assert c.model == expected
+
+    @pytest.mark.parametrize(
+        "bad", ["", "   ", "-p", "--model", "son net", "a\tb", "x\x07"]
+    )
+    def test_743_model_rejects_leading_dash_and_whitespace(self, bad: str):
+        with pytest.raises(ValidationError):
+            CronConfig(id="x", schedule="* * * * *", prompt="Hi", model=bad)
+
+    @pytest.mark.parametrize(
+        ("engine", "level"),
+        [("claude", lvl) for lvl in ("low", "medium", "high", "xhigh", "max")]
+        + [("codex", lvl) for lvl in ("low", "medium", "high", "xhigh")],
+    )
+    def test_743_reasoning_valid_for_explicit_engine(self, engine: str, level: str):
+        c = CronConfig(
+            id="x", schedule="* * * * *", prompt="Hi", engine=engine, reasoning=level
+        )
+        assert c.reasoning == level
+
+    def test_743_reasoning_normalised_to_lower_case(self):
+        c = CronConfig(
+            id="x", schedule="* * * * *", prompt="Hi", engine="claude", reasoning="HIGH"
+        )
+        assert c.reasoning == "high"
+
+    @pytest.mark.parametrize(
+        ("engine", "level"),
+        [("codex", "max"), ("claude", "minimal"), ("claude", "ultracode")],
+    )
+    def test_743_reasoning_rejected_for_explicit_engine(self, engine: str, level: str):
+        with pytest.raises(ValidationError, match="allowed values"):
+            CronConfig(
+                id="x",
+                schedule="* * * * *",
+                prompt="Hi",
+                engine=engine,
+                reasoning=level,
+            )
+
+    def test_743_reasoning_rejected_for_engine_without_reasoning(self):
+        with pytest.raises(ValidationError, match="not supported for engine"):
+            CronConfig(
+                id="x",
+                schedule="* * * * *",
+                prompt="Hi",
+                engine="opencode",
+                reasoning="high",
+            )
+
+    def test_743_reasoning_engine_unset_uses_global_table(self):
+        c = CronConfig(id="x", schedule="* * * * *", prompt="Hi", reasoning="high")
+        assert c.reasoning == "high"
+        for bad in ("minimal", "bogus"):
+            with pytest.raises(ValidationError, match="any engine"):
+                CronConfig(id="x", schedule="* * * * *", prompt="Hi", reasoning=bad)
+
+    def test_743_existing_cron_without_fields_parses_unchanged(self):
+        raw = {
+            "id": "nightly",
+            "schedule": "0 6 * * *",
+            "project": "p",
+            "engine": "claude",
+            "chat_id": -100,
+            "prompt": "go",
+            "timezone": "Australia/Melbourne",
+            "run_once": False,
+            "permission_mode": "auto",
+        }
+        c = CronConfig(**raw)
+        assert c.model_dump(exclude_none=True) == raw
+
+
 class TestTriggersSettings:
     def test_disabled_by_default(self):
         s = TriggersSettings()

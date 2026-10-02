@@ -321,6 +321,23 @@ permission_mode = "auto"
 
 Precedence (Claude only): cron `permission_mode` > per-chat `/planmode` > engine config default. Every run that actually changes the resolved value logs `trigger.cron.permission_mode_override` for staging observability. Valid values: `default` (alias `manual`), `plan`, `plan-auto`, `auto`, `acceptEdits`, `dontAsk`, `bypassPermissions`. On a Codex cron, `permission_mode = "safe"` runs that cron in Codex's read-only sandbox; any other value logs `codex.permission_mode.unknown` once and runs full auto ([#830](https://github.com/littlebearapps/untether/issues/830)). Gemini (deprecated) passes it through as `--approval-mode`; OpenCode, Pi and AMP ignore the field — full coverage is tracked in [#332](https://github.com/littlebearapps/untether/issues/332). See [Schedule tasks — Autonomous crons](schedule-tasks.md#autonomous-crons) for the everyday framing.
 
+## Per-cron model and effort
+
+`model` and `reasoning` on a `[[triggers.crons]]` entry pick the model and effort (reasoning) for that scheduled run only, winning over the chat's `/model` and reasoning setting; unset inherits as before ([#743](https://github.com/littlebearapps/untether/issues/743)):
+
+```toml
+[[triggers.crons]]
+id = "nightly-triage"
+schedule = "0 6 * * *"
+engine = "claude"
+model = "sonnet"
+reasoning = "low"
+permission_mode = "auto"
+prompt = "Triage new issues."
+```
+
+Set `engine` alongside `model` so the name matches the engine. `reasoning` is checked against the engine's levels at config load when `engine` is set (Claude `low`…`max`, Codex `low`…`xhigh`; OpenCode/Pi don't take it) — a bad value fails the trigger config the way a bad `permission_mode` does (on reload the previous triggers stay active and `config.reload.triggers_failed` is logged). A reply to the cron's message runs on the chat's model. Logs: `trigger.cron.model_override`, `trigger.cron.reasoning_override`. Webhooks have neither field yet — per-webhook overrides are tracked in [#332](https://github.com/littlebearapps/untether/issues/332). See [Schedule tasks — Pick a model per cron](schedule-tasks.md#pick-a-model-per-cron).
+
 ## Delayed runs with `/at`
 
 For ad-hoc one-shot delays, use the `/at` command directly in Telegram — no TOML edit required:

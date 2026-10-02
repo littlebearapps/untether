@@ -75,7 +75,7 @@ restart.
 | top-level `transport` | changing transport id | — |
 | `progress` | `group_chat_rps` (read once when the Telegram client starts) | everything else (re-read per run) |
 | engine tables, `projects`, `default_engine`, `default_project`, `plugins` | — | rebuilt on reload (a reload that breaks the **default** engine's config fails and the previous runtime keeps running) |
-| `triggers` | turning `enabled` **on** (the cron scheduler and webhook server only start at startup); everything under `[triggers.server]` (`host`, `port`, `rate_limit`, `max_body_bytes` are read when the server binds) | cron add/remove/edit, webhook add/remove/edit, `default_timezone`, `allow_unauthenticated_webhooks`, per-cron `timezone`/`run_once`/`permission_mode`; turning `enabled` **off** clears every cron and webhook route (the server stays bound until restart) |
+| `triggers` | turning `enabled` **on** (the cron scheduler and webhook server only start at startup); everything under `[triggers.server]` (`host`, `port`, `rate_limit`, `max_body_bytes` are read when the server binds) | cron add/remove/edit, webhook add/remove/edit, `default_timezone`, `allow_unauthenticated_webhooks`, per-cron `timezone`/`run_once`/`permission_mode`/`model`/`reasoning`; turning `enabled` **off** clears every cron and webhook route (the server stays bound until restart) |
 
 To restart:
 
@@ -777,4 +777,6 @@ routing details.
 | `fetch` | table\|null | `null` | Pre-fetch step (`type = "http_get"`, `"http_post"` or `"file_read"`) whose result is available to `prompt_template` — see the [Triggers reference](triggers/triggers.md). |
 | `timezone` | string\|null | `null` | IANA timezone (e.g. `"Australia/Melbourne"`). Overrides `default_timezone`. |
 | `permission_mode` | string\|null | `null` | Permission mode for this cron's runs. For `engine = "claude"` it must be one of the `[claude] permission_mode` values. Codex honours `"safe"` (read-only sandbox, [#830](https://github.com/littlebearapps/untether/issues/830)); any other value runs Codex in full auto and logs `codex.permission_mode.unknown`. Gemini (deprecated) passes it through as `--approval-mode`; other engines ignore it. |
+| `model` | string\|null | `null` | ([#743](https://github.com/littlebearapps/untether/issues/743)) Model for this cron's run only; wins over the chat's `/model`. Free-form (no leading `-`, no whitespace). Set `engine` too. |
+| `reasoning` | string\|null | `null` | ([#743](https://github.com/littlebearapps/untether/issues/743)) Effort / reasoning level for this cron's run only; validated against the engine's levels when `engine` is set, else against `low`…`max`. |
 | `run_once` | bool | `false` | Fire once, then stay disabled. The fired state is saved to `run_once_fired.json` beside `untether.toml`, so a reload or restart does not re-activate it; remove the cron from the config (or rename its `id`) to re-arm it. |
