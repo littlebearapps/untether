@@ -208,7 +208,7 @@ jobs:
           - task: pip-audit
             do_sync: true
             command: uv run --no-sync pip-audit --skip-editable --progress-spinner=off
-            sync_args: --all-groups  # audit dev + docs groups too, not just the default group (#TBD-dependabot)
+            sync_args: --all-groups  # audit dev + docs groups too, not just the default group (#875)
           - task: bandit
             do_sync: true
             command: uv run --no-sync bandit -r src/ -c pyproject.toml -q

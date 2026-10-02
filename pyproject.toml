@@ -10,8 +10,8 @@ license = "MIT"
 license-files = ["LICENSE"]
 requires-python = ">=3.12"
 dependencies = [
-  "aiohttp>=3.14.3",  # GHSA-mfx4-hv73-q22v, GHSA-cq5v-8q36-5273, GHSA-mq44-7p77-q5h7 (#TBD-dependabot)
-  "anyio>=4.14.2",  # GHSA-82r6-8w77-94w6, GHSA-5p39-cfhj-2xmp (#TBD-dependabot)
+  "aiohttp>=3.14.3",  # GHSA-mfx4-hv73-q22v, GHSA-cq5v-8q36-5273, GHSA-mq44-7p77-q5h7 (#875)
+  "anyio>=4.14.2",  # GHSA-82r6-8w77-94w6, GHSA-5p39-cfhj-2xmp (#875)
   "httpx>=0.28.1,<1",  # #782: httpx 1.x drops AsyncClient
   "markdown-it-py[linkify]",
   "msgspec>=0.20.0",
@@ -100,7 +100,7 @@ dev = [
 ]
 docs = [
     "mkdocstrings-python>=2.0.1",
-    "pymdown-extensions>=11.0.1",  # docs-only; ReDoS/path-traversal advisories (#TBD-dependabot)
+    "pymdown-extensions>=11.0.1",  # docs-only; ReDoS/path-traversal advisories (#875)
     "zensical>=0.0.15",
 ]
 
