@@ -3625,12 +3625,16 @@ class ProgressEdits:
             # convention in TelegramPresenter.render_progress and
             # _has_pending_approval.
             _current_is_outline = False
+            _kb_tool: str | None = None  # #822
+            _kb_request_id: str | None = None
             for _a in reversed(state.actions):
                 if _a.completed or not _a.action.detail.get("inline_keyboard"):
                     continue
                 _current_is_outline = (
                     _a.action.detail.get("request_type") == "DiscussApproval"
                 )
+                _kb_tool = _a.action.detail.get("tool_name")
+                _kb_request_id = _a.action.detail.get("request_id")
                 break
             if self._outline_sent and has_approval and _current_is_outline:
                 cancel_row = new_kb[-1:]  # keep only the cancel row
@@ -3769,6 +3773,8 @@ class ProgressEdits:
                             channel_id=self.channel_id,
                             message_id=self.progress_ref.message_id,
                             keyboard_rows=len(new_kb),
+                            request_id=_kb_request_id,
+                            tool_name=_kb_tool,
                         )
                     logger.debug(
                         "transport.edit_message",

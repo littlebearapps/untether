@@ -108,6 +108,9 @@ class TelegramPresenter:
                             "render_progress.inline_keyboard_found",
                             action_id=action_state.action.id,
                             buttons=len(kb["buttons"]),
+                            # #822: which request / tool the keyboard is for.
+                            request_id=action_state.action.detail.get("request_id"),
+                            tool_name=action_state.action.detail.get("tool_name"),
                         )
                         break
         return RenderedMessage(

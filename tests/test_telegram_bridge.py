@@ -4687,3 +4687,42 @@ async def test_598_superseded_edit_is_noop_not_failure() -> None:
     assert not any(r.get("event") == "transport.edit.failed" for r in logs)
     rec = next(r for r in logs if r.get("event") == "transport.edit.superseded")
     assert rec["has_reply_markup"] is True
+
+
+def test_822_inline_keyboard_found_logs_tool() -> None:
+    """#822: the keyboard log names the request and tool it is for."""
+    from structlog.testing import capture_logs
+
+    presenter = TelegramPresenter()
+    tracker = ProgressTracker(engine="claude")
+    tracker.note_event(
+        ActionEvent(
+            engine="claude",
+            action=Action(
+                id="claude.control.4",
+                kind="warning",
+                title="Write",
+                detail={
+                    "request_id": "r-822",
+                    "tool_name": "Write",
+                    "inline_keyboard": {
+                        "buttons": [
+                            [
+                                {
+                                    "text": "✅",
+                                    "callback_data": "claude_control:approve:r",
+                                }
+                            ]
+                        ]
+                    },
+                },
+            ),
+            phase="started",
+        )
+    )
+    with capture_logs() as logs:
+        presenter.render_progress(tracker.snapshot(), elapsed_s=0.0)
+    found = [r for r in logs if r["event"] == "render_progress.inline_keyboard_found"]
+    assert found
+    assert found[0]["tool_name"] == "Write"
+    assert found[0]["request_id"] == "r-822"

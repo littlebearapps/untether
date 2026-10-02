@@ -353,6 +353,7 @@ class ClaudeControlCommand:
                 "claude_control.sent",
                 request_id=request_id,
                 action=action,
+                tool_name=sent.tool_name,  # #822
             )
 
             # Send feedback directly and store ref so post-outline approve/deny
@@ -488,6 +489,7 @@ class ClaudeControlCommand:
                         "claude_control.sent",
                         request_id=request_id,
                         approved=approved,
+                        tool_name=sent.tool_name,  # #822
                     )
                     return None
                 except Exception:  # noqa: BLE001
@@ -501,6 +503,7 @@ class ClaudeControlCommand:
             "claude_control.sent",
             request_id=request_id,
             approved=approved,
+            tool_name=sent.tool_name,  # #822
         )
         if approved and tool_name == "ExitPlanMode":
             # #383: a plan approval says so, not "permission request".
@@ -591,6 +594,7 @@ class ClaudeControlCommand:
             "claude_control.sent",
             request_id=request_id,
             action="chat",
+            tool_name=sent.tool_name,  # #822
         )
 
         existing_ref = (

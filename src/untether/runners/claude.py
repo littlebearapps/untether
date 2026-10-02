@@ -7537,6 +7537,19 @@ def _translate_claude_event_base(
                 state.auto_approve_queue.append(request_id)
                 return []
 
+            # #822: one INFO line per tool request reaching Untether, before
+            # any branch decides it, so auto-approved / auto-denied requests
+            # are attributable too (join on request_id with the outcome
+            # lines). Name only — never the tool input.
+            if isinstance(request, claude_schema.ControlCanUseToolRequest):
+                logger.info(
+                    "control_request.received",
+                    request_id=request_id,
+                    tool_name=getattr(request, "tool_name", None),
+                    session_id=factory.resume.value if factory.resume else None,
+                    permission_mode=state.effective_permission_mode,
+                )
+
             # #793: record every ExitPlanMode plan body against its request;
             # the approval paths below (and write_control_response) promote
             # it, every denial path drops it.
@@ -7838,6 +7851,7 @@ def _translate_claude_event_base(
                                     **outline_detail,
                                     "request_id": button_request_id,
                                     "request_type": "DiscussApproval",
+                                    "tool_name": "ExitPlanMode",  # #822
                                     "inline_keyboard": {
                                         "buttons": [
                                             [
@@ -8161,6 +8175,12 @@ def _translate_claude_event_base(
             detail: dict[str, Any] = {
                 "request_id": request_id,
                 "request_type": request_type,
+                # #822: names the tool on the keyboard logs (never the input).
+                "tool_name": (
+                    getattr(request, "tool_name", None)
+                    if isinstance(request, claude_schema.ControlCanUseToolRequest)
+                    else None
+                ),
                 "inline_keyboard": {
                     "buttons": button_rows,
                 },
@@ -8301,12 +8321,21 @@ class ClaudeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
                     reason="telegram_deny" if rejects_plan else "telegram_procedural",
                     session_id=plan_session,
                 )
+        # #822: read once for both branches (both always popped it) so every
+        # write log names the tool and the CLI's effective mode — never the
+        # tool input.
+        tool_name = _REQUEST_TO_TOOL_NAME.pop(request_id, None)
+        write_log: dict[str, Any] = {
+            "tool_name": tool_name,
+            "permission_mode": (
+                plan_state.effective_permission_mode if plan_state else None
+            ),
+        }
         if approved:
             inner: dict[str, Any] = {"behavior": "allow"}
             # Claude Code CLI requires updatedInput for can_use_tool responses
             if request_id in _REQUEST_TO_INPUT:
                 inner["updatedInput"] = _REQUEST_TO_INPUT.pop(request_id)
-            tool_name = _REQUEST_TO_TOOL_NAME.pop(request_id, None)
             # After approving any plan-gated tool, bypass the diff_preview
             # gate for subsequent tools in the same session — the user has
             # already reviewed code, repeating the prompt per-tool is
@@ -8323,7 +8352,6 @@ class ClaudeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
             inner = {"behavior": "deny", "message": deny_message or "User denied"}
             # Clean up stored input on denial too
             _REQUEST_TO_INPUT.pop(request_id, None)
-            _REQUEST_TO_TOOL_NAME.pop(request_id, None)
         response = {
             "type": "control_response",
             "response": {
@@ -8350,6 +8378,7 @@ class ClaudeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
                     approved=approved,
                     session_id=session_id,
                     channel="pipe",
+                    **write_log,
                 )
                 return True
             except (OSError, anyio.ClosedResourceError) as e:
@@ -8361,6 +8390,7 @@ class ClaudeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
                     error=str(e),
                     error_type=e.__class__.__name__,
                     channel="pipe",
+                    **write_log,
                 )
                 return False
             except Exception as e:  # noqa: BLE001
@@ -8372,6 +8402,7 @@ class ClaudeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
                     error=str(e),
                     error_type=e.__class__.__name__,
                     channel="pipe",
+                    **write_log,
                 )
                 return False
         elif self._pty_master_fd is not None:
@@ -8383,6 +8414,7 @@ class ClaudeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
                     approved=approved,
                     session_id=session_id,
                     channel="pty",
+                    **write_log,
                 )
                 return True
             except OSError as e:
@@ -8394,6 +8426,7 @@ class ClaudeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
                     error=str(e),
                     error_type=e.__class__.__name__,
                     channel="pty",
+                    **write_log,
                 )
                 return False
             except Exception as e:  # noqa: BLE001
@@ -8405,6 +8438,7 @@ class ClaudeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
                     error=str(e),
                     error_type=e.__class__.__name__,
                     channel="pty",
+                    **write_log,
                 )
                 return False
         else:
@@ -11184,6 +11218,8 @@ class ControlSendResult:
     session_id: str | None = None
     prior: HandledControl | None = None
     reason: str | None = None
+    # #822: the tool the request was for (logged on claude_control.sent).
+    tool_name: str | None = None
 
 
 def mark_request_handled(
@@ -11419,6 +11455,8 @@ async def respond_to_control_request(
             prior=lookup.prior,
             reason=lookup.reason,
         )
+    # #822: read before write_control_response pops it.
+    tool_name = _REQUEST_TO_TOOL_NAME.get(request_id)
     try:
         session_id = _REQUEST_TO_SESSION[request_id]
         if session_id not in _ACTIVE_RUNNERS:
@@ -11436,6 +11474,7 @@ async def respond_to_control_request(
                 sent=False,
                 session_id=session_id,
                 reason="no_active_session",
+                tool_name=tool_name,
             )
 
         runner, _ = _ACTIVE_RUNNERS[session_id]
@@ -11460,6 +11499,7 @@ async def respond_to_control_request(
                 sent=success,
                 session_id=session_id,
                 prior=_HANDLED_REQUESTS.get(request_id),
+                tool_name=tool_name,
             )
         # A written *or* attempted write marks it handled (a closed pipe
         # means the session is gone either way).
@@ -11469,6 +11509,7 @@ async def respond_to_control_request(
             sent=success,
             session_id=session_id,
             reason=None if success else "write_failed",
+            tool_name=tool_name,
         )
     finally:
         _CANCELLED_DURING_WRITE.discard(request_id)

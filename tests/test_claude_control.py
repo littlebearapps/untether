@@ -3846,3 +3846,188 @@ def test_388_every_registration_binds_its_channel() -> None:
                 missing.append(stmt.lineno)
     assert sites >= 3, sites
     assert not missing, f"registrations without _bind_request_channel: {missing}"
+
+
+# ===========================================================================
+# #822 — approval-path logs name the tool (never the tool input)
+# ===========================================================================
+
+_822_SECRET = "SECRET-822"
+
+
+def _822_no_secret(logs: list[dict[str, Any]]) -> None:
+    for record in logs:
+        assert _822_SECRET not in str(record), record
+        assert "tool_input" not in record
+        assert "input" not in record
+
+
+def test_822_control_request_received_names_tool() -> None:
+    from structlog.testing import capture_logs
+
+    state, factory = _make_state_with_session("sess-822")
+    state.prompting_mode = True
+    state.effective_permission_mode = "default"
+    with capture_logs() as logs:
+        translate_claude_event(
+            _can_use_tool_event("r-822", "Write", file_path=f"/tmp/{_822_SECRET}"),
+            title="claude",
+            state=state,
+            factory=factory,
+        )
+    received = _events_named(logs, "control_request.received")
+    assert len(received) == 1
+    assert received[0]["tool_name"] == "Write"
+    assert received[0]["request_id"] == "r-822"
+    assert received[0]["session_id"] == "sess-822"
+    assert received[0]["permission_mode"] == "default"
+    assert received[0]["log_level"] == "info"
+    _822_no_secret(logs)
+
+
+def test_822_received_on_auto_approve_path() -> None:
+    from structlog.testing import capture_logs
+
+    state, factory = _make_state_with_session("sess-822a")
+    state.effective_permission_mode = "plan"
+    with capture_logs() as logs:
+        events = translate_claude_event(
+            _can_use_tool_event("r-822a", "Glob", pattern=_822_SECRET),
+            title="claude",
+            state=state,
+            factory=factory,
+        )
+    assert events == []
+    assert "r-822a" in state.auto_approve_queue  # behaviour unchanged
+    received = _events_named(logs, "control_request.received")
+    assert received and received[0]["tool_name"] == "Glob"
+    _822_no_secret(logs)
+
+
+def test_822_no_received_for_housekeeping() -> None:
+    from structlog.testing import capture_logs
+
+    state, factory = _make_state_with_session("sess-822h")
+    with capture_logs() as logs:
+        for rid, subtype in (("r-init", "initialize"), ("r-hook", "hook_callback")):
+            translate_claude_event(
+                _decode_event(
+                    {
+                        "type": "control_request",
+                        "request_id": rid,
+                        "request": {
+                            "subtype": subtype,
+                            "callback_id": "cb",
+                            "input": {},
+                        },
+                    }
+                ),
+                title="claude",
+                state=state,
+                factory=factory,
+            )
+    assert not _events_named(logs, "control_request.received")
+
+
+@pytest.mark.parametrize("approved", [True, False])
+@pytest.mark.anyio
+async def test_822_control_response_sent_has_tool_and_mode(approved: bool) -> None:
+    from structlog.testing import capture_logs
+
+    from untether.runners.claude import _SESSION_BG_STATE, respond_to_control_request
+
+    _register_live_request("r-822s", "sess-822s", tool_name="ExitPlanMode")
+    _REQUEST_TO_INPUT["r-822s"] = {"plan": _822_SECRET}
+    state = ClaudeStreamState()
+    state.effective_permission_mode = "plan"
+    _SESSION_BG_STATE["sess-822s"] = state
+    try:
+        with capture_logs() as logs:
+            result = await respond_to_control_request(
+                "r-822s", approved, action="approve" if approved else "deny"
+            )
+    finally:
+        _SESSION_BG_STATE.pop("sess-822s", None)
+        _PLAN_EXIT_APPROVED.discard("sess-822s")
+    assert result.sent is True
+    assert result.tool_name == "ExitPlanMode"
+    sent = _events_named(logs, "control_response.sent")
+    assert sent and sent[0]["tool_name"] == "ExitPlanMode"
+    assert sent[0]["permission_mode"] == "plan"
+    assert sent[0]["channel"] == "pipe"
+    _822_no_secret(logs)
+
+
+@pytest.mark.anyio
+async def test_822_approve_side_effects_unchanged() -> None:
+    from untether.runners.claude import respond_to_control_request
+
+    _register_live_request("r-822e", "sess-822e", tool_name="ExitPlanMode")
+    try:
+        await respond_to_control_request("r-822e", True, action="approve")
+        assert "sess-822e" in _PLAN_EXIT_APPROVED
+        assert "r-822e" not in _REQUEST_TO_TOOL_NAME
+    finally:
+        _PLAN_EXIT_APPROVED.discard("sess-822e")
+
+
+@pytest.mark.parametrize(
+    ("action", "tool"),
+    [
+        ("approve", "Bash"),
+        ("deny", "Bash"),
+        ("discuss", "ExitPlanMode"),
+        ("chat", "ExitPlanMode"),
+    ],
+)
+@pytest.mark.anyio
+async def test_822_claude_control_sent_has_tool_name(action: str, tool: str) -> None:
+    from structlog.testing import capture_logs
+
+    from untether.telegram.commands.claude_control import ClaudeControlCommand
+
+    session_id = f"sess-822c-{action}"
+    _register_live_request(f"r-822c-{action}", session_id, tool_name=tool)
+    if action == "chat":
+        mark_outline_pending(session_id)
+    executor = AsyncMock(send=AsyncMock(return_value=None))
+    try:
+        with capture_logs() as logs:
+            await ClaudeControlCommand().handle(
+                _ctl_ctx(action, f"r-822c-{action}", executor)
+            )
+    finally:
+        _OUTLINE_PENDING.discard(session_id)
+        _PLAN_EXIT_APPROVED.discard(session_id)
+    sent = _events_named(logs, "claude_control.sent")
+    assert sent, logs
+    assert sent[0]["tool_name"] == tool
+
+
+def test_822_keyboard_detail_has_tool_name() -> None:
+    state, factory = _make_state_with_session("sess-822k")
+    state.prompting_mode = True
+    events = translate_claude_event(
+        _can_use_tool_event("r-822k", "Bash", command="ls"),
+        title="claude",
+        state=state,
+        factory=factory,
+    )
+    detail = events[0].action.detail
+    assert detail["tool_name"] == "Bash"
+    assert detail["request_id"] == "r-822k"
+
+    session_id = "sess-822o"
+    state2, factory2 = _make_state_with_session(session_id)
+    mark_outline_pending(session_id)
+    try:
+        events2 = _raise_exit_plan(state2, factory2, "r-822o")
+    finally:
+        _OUTLINE_PENDING.discard(session_id)
+    synth = [
+        e
+        for e in events2
+        if isinstance(e, ActionEvent)
+        and e.action.detail.get("request_type") == "DiscussApproval"
+    ]
+    assert synth and synth[0].action.detail["tool_name"] == "ExitPlanMode"

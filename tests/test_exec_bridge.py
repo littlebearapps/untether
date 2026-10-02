@@ -5042,6 +5042,55 @@ async def test_outline_not_double_deleted() -> None:
 
 
 @pytest.mark.anyio
+async def test_822_keyboard_attach_logs_tool() -> None:
+    """#822: progress_edits.keyboard_attach names the request + tool."""
+    from structlog.testing import capture_logs
+
+    from untether.model import Action, ActionEvent
+
+    transport = FakeTransport()
+    presenter = _KeyboardPresenter()
+    edits = _make_edits(transport, presenter)
+    edits.tracker.note_event(
+        ActionEvent(
+            engine="claude",
+            action=Action(
+                id="claude.control.1",
+                kind="warning",
+                title="Bash",
+                detail={
+                    "request_id": "r-822k",
+                    "request_type": "CanUseTool",
+                    "tool_name": "Bash",
+                    "inline_keyboard": {"buttons": [[{"text": "✅ Approve"}]]},
+                },
+            ),
+            phase="started",
+        )
+    )
+    presenter.set_approval_buttons()
+    edits.event_seq = 1
+    with contextlib.suppress(anyio.WouldBlock):
+        edits.signal_send.send_nowait(None)
+
+    with capture_logs() as logs:
+        async with anyio.create_task_group() as tg:
+
+            async def run_cycle() -> None:
+                await anyio.lowlevel.checkpoint()
+                await anyio.lowlevel.checkpoint()
+                edits.signal_send.close()
+
+            tg.start_soon(edits.run)
+            tg.start_soon(run_cycle)
+
+    attach = [r for r in logs if r.get("event") == "progress_edits.keyboard_attach"]
+    assert attach
+    assert attach[0]["tool_name"] == "Bash"
+    assert attach[0]["request_id"] == "r-822k"
+
+
+@pytest.mark.anyio
 async def test_outline_sent_strips_approval_from_progress() -> None:
     """When outline is sent, progress message should only keep cancel button (#163)."""
     transport = FakeTransport()
