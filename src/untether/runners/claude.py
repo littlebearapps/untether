@@ -556,6 +556,11 @@ class LiveSession:
     # lifecycle has emitted its ``"closed"`` notice (once).
     close_tasks: list[str] = field(default_factory=list)
     closed_notified: bool = False
+    # #820: the last escalation ``_await_live_exit_or_force`` started
+    # (``sigint`` / ``sigterm`` / ``sigkill``), written *before* each signal so
+    # the lifecycle can say how the CLI ended even when the run's teardown
+    # cancels the await that would have returned it.
+    exit_stage: str | None = None
     # #829: when the current idle period began (the turn ended), and the
     # rate limit of ``claude.live_session.hold_rearmed`` (first re-arm of an
     # idle period, then at most every ``_hold_rearm_log_every_s``).
@@ -917,6 +922,32 @@ def _may_stop_clean(live: LiveSession) -> bool:
     session whose turn was closed when stdin was closed. If the CLI then
     exits rc 0 on SIGINT it stopped cleanly — no quarantine."""
     return live.close_reason in _STOPPED_CLEAN_REASONS and live.closed_turn_idle
+
+
+def _lifecycle_exit_reason(
+    *,
+    exit_reason: str,
+    cancelled: bool,
+    process_gone: bool,
+    closing: bool,
+    stage: str | None,
+) -> str:
+    """#820: how a live session ended, for ``lifecycle_exited``.
+
+    The run's reader cancels the task group as soon as the CLI's stdout ends,
+    so the lifecycle is usually cancelled at the await right after its own
+    close — the await's return value is lost. Classify from state that is
+    settled by the time ``finally`` runs instead: whether the process is gone,
+    whether the session was closing, and the escalation stage written before
+    each signal. ``cancelled`` is kept only for a cancellation while the CLI
+    was still running (a ``/cancel`` that gave up waiting, a drain)."""
+    if cancelled and not process_gone:
+        return "cancelled"
+    if cancelled or exit_reason == "reader_done":
+        if closing:
+            return stage or "exited_after_close"
+        return "reader_done"  # the CLI ended without a close
+    return exit_reason  # the await completed: exited_after_close|sigint|sigterm|sigkill
 
 
 def _close_grace_diag(pid: int, start: Any) -> dict[str, Any]:
@@ -8816,9 +8847,12 @@ class ClaudeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
         if it doesn't exit within ``_live_close_grace_s`` does
         ``_await_live_exit_or_force`` log ``close_grace_expired`` and escalate
         (SIGINT, then SIGTERM/SIGKILL); a clean idle close is not quarantined
-        (#791).
+        (#791). ``claude.live_session.lifecycle_exited`` reports how the
+        session actually ended (``_lifecycle_exit_reason``, #820) with the
+        close reason beside it.
         """
         exit_reason = "reader_done"
+        cancelled = False
         # #829: the session this lifecycle watches — kept so the ``"closed"``
         # notice can be sent from ``finally`` on every exit path, including a
         # CLI that exits within one poll of the close.
@@ -8977,9 +9011,19 @@ class ClaudeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
                 if now - live.idle_since >= idle_grace_s:
                     await close_live_session(sid, "idle_no_tasks", only_if_idle=True)
         except (anyio.get_cancelled_exc_class(), KeyboardInterrupt):
-            exit_reason = "cancelled"
+            cancelled = True
             raise
         finally:
+            reason = _lifecycle_exit_reason(
+                exit_reason=exit_reason,
+                cancelled=cancelled,
+                process_gone=(
+                    reader_done.is_set()
+                    or getattr(proc, "returncode", None) is not None
+                ),
+                closing=tracked is not None and tracked.closing,
+                stage=tracked.exit_stage if tracked is not None else None,
+            )
             run_logger.info(
                 "claude.live_session.lifecycle_exited",
                 session_id=(
@@ -8987,21 +9031,20 @@ class ClaudeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
                     if state.factory.resume is not None
                     else None
                 ),
-                reason=exit_reason,
+                reason=reason,
+                close_reason=tracked.close_reason if tracked is not None else None,
             )
             # The run's task group is cancelled as soon as the CLI's stdout
-            # ends, so "cancelled" is also the normal exit after a close —
-            # report it once the process is gone (never while it may still
-            # be running, e.g. a /cancel that gave up waiting).
+            # ends, so a cancellation is also the normal exit after a close
+            # (#820 classifies it from the settled state above). Report the
+            # close once the process is gone — never while it may still be
+            # running (``reason == "cancelled"``: e.g. a /cancel that gave up
+            # waiting).
             if (
                 tracked is not None
                 and tracked.closing
                 and not tracked.closed_notified
-                and (
-                    exit_reason != "cancelled"
-                    or reader_done.is_set()
-                    or getattr(proc, "returncode", None) is not None
-                )
+                and reason != "cancelled"
             ):
                 await self._notify_live_closed(tracked, run_logger)
 
@@ -9193,6 +9236,7 @@ class ClaudeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
         # ends the reader, which cancels this task group; a deferred B2
         # quarantine decision must not be lost to that cancellation.
         stopped_clean = False
+        live.exit_stage = "sigint"  # #820: before the signal, not after
         with anyio.CancelScope(shield=True):
             signal_pid_group(proc.pid, signal.SIGINT)
             with anyio.move_on_after(self._live_close_sigint_grace_s):
@@ -9226,6 +9270,7 @@ class ClaudeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
         )
         if stream is not None:
             stream.sigterm_sent = True
+        live.exit_stage = "sigterm"  # #820
         signal_pid_group(proc.pid, signal.SIGTERM)
         deadline = time.monotonic() + self._subcountdown_sigterm_grace_s
         while time.monotonic() < deadline:
@@ -9233,6 +9278,7 @@ class ClaudeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
             if proc.returncode is not None:
                 return "sigterm"
         if proc.returncode is None:
+            live.exit_stage = "sigkill"  # #820
             signal_pid_group(proc.pid, signal.SIGKILL)
         return "sigkill"
 

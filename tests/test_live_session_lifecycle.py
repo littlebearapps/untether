@@ -1425,3 +1425,166 @@ async def test_684_unanswered_request_still_holds(
     )
     assert seen == {"awaiting": True, "accepting": True}
     assert _engine_state(runner).live_close_reason == "abs_cap"
+
+
+# ---------------------------------------------------------------------------
+# #820: lifecycle_exited says how the live session actually ended
+# ---------------------------------------------------------------------------
+
+
+def _lifecycle_exits(logs: list[dict]) -> list[dict]:
+    return _events(logs, "claude.live_session.lifecycle_exited")
+
+
+async def test_820_clean_idle_close_logs_exited_after_close(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """F on rc16: the CLI exits on EOF while the lifecycle sleeps (the
+    production race, made deterministic by a 0.5 s poll); the run's teardown
+    cancels that sleep, which used to log ``cancelled``."""
+    from structlog.testing import capture_logs
+
+    _settings(monkeypatch)
+    monkeypatch.setitem(_TIMINGS, "_live_poll_s", 0.5)
+    with capture_logs() as logs:
+        runner, _ = await _run("followup")
+    assert _engine_state(runner).live_close_reason == "idle_no_tasks"
+    (exited,) = _lifecycle_exits(logs)
+    assert exited["reason"] == "exited_after_close"
+    assert exited["close_reason"] == "idle_no_tasks"
+
+
+@pytest.mark.parametrize("poll_s", [0.05, 0.5])
+async def test_820_bash_max_hold_close_logs_exited_after_close(
+    monkeypatch: pytest.MonkeyPatch, poll_s: float
+) -> None:
+    """Whichever side wins the race (lifecycle in its grace wait or parked in
+    its poll sleep), a clean max_hold close says so."""
+    from structlog.testing import capture_logs
+
+    _settings(monkeypatch, post_result_bg_max_hold=0.5)
+    monkeypatch.setitem(_TIMINGS, "_live_poll_s", poll_s)
+    with capture_logs() as logs:
+        runner, _ = await _run("bg_bash_wake", wake_s=30)
+    assert _engine_state(runner).live_close_reason == "max_hold"
+    (exited,) = _lifecycle_exits(logs)
+    assert exited["reason"] == "exited_after_close"
+    assert exited["close_reason"] == "max_hold"
+
+
+async def test_820_forced_teardown_logs_sigterm(
+    monkeypatch: pytest.MonkeyPatch, quarantine: QuarantineStore
+) -> None:
+    """F on rc16: a CLI deaf to EOF and SIGINT is SIGTERM'd — the stage
+    marker survives the cancellation of the SIGTERM poll."""
+    from structlog.testing import capture_logs
+
+    _settings(monkeypatch, post_result_bg_max_hold=0.3)
+    os.environ["FAKE_CLAUDE_IGNORE_SIGINT"] = "1"
+    with capture_logs() as logs:
+        runner, _ = await _run("ignore_eof_with_task")
+    assert runner.current_stream.sigterm_sent is True
+    assert quarantine.is_quarantined("claude", SID)  # unchanged (#791)
+    (exited,) = _lifecycle_exits(logs)
+    assert exited["reason"] == "sigterm"
+    assert exited["close_reason"] == "max_hold"
+
+
+async def test_820_sigint_exit_logs_sigint(
+    monkeypatch: pytest.MonkeyPatch, quarantine: QuarantineStore
+) -> None:
+    from structlog.testing import capture_logs
+
+    _settings(monkeypatch, post_result_bg_max_hold=0.5)
+    _progress_env(eof_mode="until_sigint")
+    with capture_logs() as logs:
+        runner, _ = await _run("bg_agent_silent")
+    assert runner.current_stream.sigterm_sent is False
+    (exited,) = _lifecycle_exits(logs)
+    assert exited["reason"] == "sigint"
+    assert exited["close_reason"] == "max_hold"
+
+
+async def test_820_cli_exit_without_close_logs_reader_done(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from structlog.testing import capture_logs
+
+    _settings(monkeypatch)
+    clock = _CloseClock()
+    with capture_logs() as logs:
+        await _run("exit_after_result", on_event=clock.on_event)
+    (exited,) = _lifecycle_exits(logs)
+    assert exited["reason"] == "reader_done"
+    assert exited["close_reason"] is None
+    assert clock.kinds() == []
+
+
+async def test_820_cancel_while_cli_alive_logs_cancelled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A cancellation that lands while the CLI is still running (no close)
+    keeps ``cancelled`` and sends no ``closed`` notice. Driven from an outer
+    task group, never from inside the ``async for``."""
+    from structlog.testing import capture_logs
+
+    _settings(monkeypatch)
+    os.environ["FAKE_CLAUDE_SCENARIO"] = "bg_bash_wake"
+    os.environ["FAKE_CLAUDE_WAKE_S"] = "30"
+    runner = _LiveRunner(claude_cmd=str(FAKE_CLI), permission_mode="bypassPermissions")
+    for name, value in _TIMINGS.items():
+        setattr(runner, name, value)
+    completed = anyio.Event()
+    notices: list[str] = []
+
+    async def drive() -> None:
+        async for evt in runner.run("hello", None):
+            if isinstance(evt, CompletedEvent):
+                add_live_session_listener(SID, lambda kind, _p: notices.append(kind))
+                completed.set()
+
+    with capture_logs() as logs, anyio.fail_after(20):
+        async with anyio.create_task_group() as tg:
+            tg.start_soon(drive)
+            await completed.wait()
+            await anyio.sleep(0.2)  # the lifecycle is polling, CLI alive
+            tg.cancel_scope.cancel()
+    (exited,) = _lifecycle_exits(logs)
+    assert exited["reason"] == "cancelled"
+    assert exited["close_reason"] is None
+    assert "closed" not in notices
+
+
+_STAGES = (None, "sigint", "sigterm")
+_EXIT_REASONS = ("reader_done", "exited_after_close", "sigint")
+
+
+@pytest.mark.parametrize("cancelled", [False, True])
+@pytest.mark.parametrize("process_gone", [False, True])
+@pytest.mark.parametrize("closing", [False, True])
+@pytest.mark.parametrize("stage", _STAGES)
+@pytest.mark.parametrize("exit_reason", _EXIT_REASONS)
+def test_820_exit_reason_table(
+    cancelled: bool,
+    process_gone: bool,
+    closing: bool,
+    stage: str | None,
+    exit_reason: str,
+) -> None:
+    reason = claude_mod._lifecycle_exit_reason(
+        exit_reason=exit_reason,
+        cancelled=cancelled,
+        process_gone=process_gone,
+        closing=closing,
+        stage=stage,
+    )
+    if cancelled and not process_gone:
+        expected = "cancelled"
+    elif cancelled or exit_reason == "reader_done":
+        expected = (stage or "exited_after_close") if closing else "reader_done"
+    else:
+        expected = exit_reason
+    assert reason == expected
+    # The ``closed`` notice gate is unchanged: the old condition was
+    # ``exit_reason != "cancelled" or reader_done or returncode``.
+    assert (reason != "cancelled") == (not cancelled or process_gone)

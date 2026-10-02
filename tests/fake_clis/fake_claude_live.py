@@ -1121,6 +1121,16 @@ def scenario_inherited_fd_after_exit(first: dict) -> None:
     os._exit(0)
 
 
+def scenario_exit_after_result(first: dict) -> None:
+    # #820: the CLI ends on its own right after its result (no close by
+    # Untether, no grandchild holding stdout — unlike the scenario above).
+    init()
+    text("done")
+    result("done")
+    sys.stdout.flush()
+    os._exit(0)
+
+
 def _maybe_ignore_sigint() -> None:
     # #791: FAKE_CLAUDE_IGNORE_SIGINT=1 models a CLI that is also deaf to
     # the Ctrl-C path, so the close escalates on to SIGTERM.
@@ -2327,6 +2337,7 @@ _SCENARIOS = {
     "report_then_noop": scenario_report_then_noop,
     "resume_after_killed_task": scenario_resume_after_killed_task,
     "inherited_fd_after_exit": scenario_inherited_fd_after_exit,
+    "exit_after_result": scenario_exit_after_result,
 }
 
 

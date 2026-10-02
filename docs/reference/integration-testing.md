@@ -800,11 +800,21 @@ Setup: `[watchdog] post_result_bg_max_hold = 60` in `~/.untether-dev/untether.to
 | ID | Steps | Expected Telegram | Log signatures |
 |---|---|---|---|
 | R15-21a | `/new`; background Agent that reads and summarises 30 files one at a time (≈3–5 min); reply "STARTED" | panel advances past 60 s; **no** closing notice at 60 s; `🔔 Background task finished` wake turn at the end | ≥1 `claude.live_session.hold_rearmed source=task_progress`; **no** `stdin_closed reason=max_hold` before `claude.task.ended` |
-| R15-21b | `/new`; background Bash `python3 -c "import time; time.sleep(600)"` (silent, idle); reply "STARTED" | at ≈60 s: `⏳ Closing session — 1 background task still running with no progress for 1 min: … Stopping it.` then `↩️ Reply to continue in the same session.` (silent) | `stdin_closed reason=max_hold` at 60–90 s; `lifecycle_exited reason=exited_after_close` (or `reader_done`/`cancelled` right after `stdin_closed`); `claude.live_session.closed quarantined=False`; **no** `session.quarantined` — the negative guard for the Bash fallback |
+| R15-21b | `/new`; background Bash `python3 -c "import time; time.sleep(600)"` (silent, idle); reply "STARTED" | at ≈60 s: `⏳ Closing session — 1 background task still running with no progress for 1 min: … Stopping it.` then `↩️ Reply to continue in the same session.` (silent) | `stdin_closed reason=max_hold` at 60–90 s; `lifecycle_exited reason=exited_after_close close_reason=max_hold` ([#820](https://github.com/littlebearapps/untether/issues/820)); `claude.live_session.closed quarantined=False`; **no** `session.quarantined` — the negative guard for the Bash fallback |
 | R15-21c | right after 21b: "what did you just start?" | answer remembers the sleep task | `handle.incoming resume=<same sid>`; `claude.resume_guard.absorbed` (F11 stopped-task replay); no `session.resume_diverted_fresh` |
 | R15-21d *(opportunistic)* | `/new`; background Agent told to run a foreground `python3 -c "import time; time.sleep(150)"` between files | no close during the sleep (A.2 kept) | `hold_rearmed source=agent_tool`; if it later closes: `exited_after_sigint stopped_clean=True`, no `session.quarantined` (B2) |
 | R15-21e | `bg_hold_rearm_on_progress = false`; `/new`; repeat 21a | closing notice at ≈60 s despite progress: `… still running at the background hold limit: … Stopping it.`; then the `closed` line | `stdin_closed reason=max_hold`; no `hold_rearmed`; the agent ignores EOF, so `close_grace_expired` then `exited_after_sigint stopped_clean=True` |
 | R15-21f | `/new`; background Bash printing `tick N` every 2 s for 3 min | no close while ticking; wake turn at the end | `hold_rearmed source=bash_output` |
+
+### #820 — `lifecycle_exited` says how the live session ended
+
+Chat: `ut-dev: Claude Code` (`-5284581592`). Logs: `journalctl --user -u untether-dev -o cat --since "15 min ago" | grep -E "stdin_closed|lifecycle_exited|exited_after_sigint|forced_teardown"`. Precondition for R17-02c: **no async hooks configured** in the dev project (an evident hook stretches the close grace to 35 s, `/cancel` gives up after 20 s and the line then correctly logs `cancelled`). Restore the config and `/new` afterwards. Regression: B-LIVE-1, B-LIVE-6, R15-21b.
+
+| ID | Steps | Expected Telegram | Log signatures |
+|---|---|---|---|
+| R17-02a | `/new`; "Reply with OK." then wait ≈90 s | `OK`; nothing else | `stdin_closed reason=idle_no_tasks` → `lifecycle_exited reason=exited_after_close close_reason=idle_no_tasks` |
+| R17-02b | with `[watchdog] post_result_bg_max_hold = 60`: `/new`; background Bash `python3 -c "import time; time.sleep(600)"`, reply STARTED (= R15-21b) | R15-21b's closing + `↩️ Reply to continue…` lines | `lifecycle_exited reason=exited_after_close close_reason=max_hold` |
+| R17-02c | `/new`; start a background Agent ("read 20 files one by one, summarise each"), reply STARTED; then `/cancel` | `⏹ Stopped 1 background task: …` | `close_grace_expired` → `exited_after_sigint … stopped_clean=True` → `lifecycle_exited reason=sigint close_reason=cancel` (only with an async hook evident: `reason=cancelled`) |
 
 ### #416 — Codex reasoning `minimal` retired
 
