@@ -165,7 +165,7 @@ approval wait in the ring-buffer fallback.
 
 The top-level `rate_limit_event` line (#790) is a quota snapshot, not a
 throttle notice: `allowed` emits nothing; `allowed_warning` emits at most one
-`note` per window (`⚠️ 5h limit N% used — resets HH:MM`); only `rejected` not
+`note` per window (`⚠️ 5h limit N% used — resets HH:MM`, rendered without a ✓ prefix, #868); only `rejected` not
 covered by overage emits a `⏳ Rate limited until …` note and latches the wait
 until `resetsAt`. Bare events emit nothing. Decision table:
 [stream-json cheatsheet](stream-json-cheatsheet.md#rate_limit_event).

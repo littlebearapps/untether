@@ -57,8 +57,10 @@ When Claude compacts its context, the progress message shows one row for it (a s
 
 ```
 ▸ 🗜️ Compacting context…
-✓ 🗜️ Context compacted · 182k → 41k tokens (auto)
+🗜️ Context compacted · 182k → 41k tokens (auto)
 ```
+
+Completed status rows that start with their own emoji (🗜️, ⚠️, ⏳, 🛡️, ↪️, ℹ️) show that emoji instead of a ✓, so a warning never reads as a finished step ([#868](https://github.com/littlebearapps/untether/issues/868)).
 
 `(auto)` is Claude compacting on its own as the window fills. `(manual)` is a `/compact` you sent as a follow-up while the session was still live, and that reply's body is the same `🗜️ Context compacted …` line. A failed compaction shows `🗜️ Compaction failed · <reason>`. Compaction counts as activity, not as a stall.
 

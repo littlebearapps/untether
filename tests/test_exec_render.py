@@ -2,6 +2,8 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import cast
 
+import pytest
+
 from tests.factories import (
     action_completed,
     action_started,
@@ -13,10 +15,12 @@ from untether.markdown import (
     MarkdownFormatter,
     action_status,
     assemble_markdown_parts,
+    format_action_line,
     format_elapsed,
     format_file_change_title,
     render_event_cli,
     shorten,
+    starts_with_pictograph,
 )
 from untether.model import Action, ActionEvent, ResumeToken, StartedEvent, UntetherEvent
 from untether.progress import ProgressTracker
@@ -428,3 +432,101 @@ def test_format_action_title_web_search_claude_unchanged() -> None:
     """Regression: Claude's WebSearch has no action_type → ``searched:``."""
     assert _ws_title({}) == "searched: t"
     assert _ws_title({"query": "t"}) == "searched: t"
+
+
+# --- #868: emoji-led notes use their own emoji as the status -----------------
+
+
+@pytest.mark.parametrize(
+    "title",
+    [
+        "⚠️ 7-day limit 79% used — resets Sat 09:00 AEST",
+        "⏳ Rate limited — retrying in 30s",
+        "🛡️ Safeguards stopped a response",
+        "ℹ️ x",
+        "↪️ Switched model a → b",
+        "🗜️ Context compacted",
+    ],
+)
+def test_868_completed_emoji_note_has_no_done_glyph(title: str) -> None:
+    for kind in ("note", "warning"):
+        line = format_action_line(
+            Action(id="n", kind=kind, title=title),  # type: ignore[arg-type]
+            "completed",
+            True,
+            command_width=300,
+        )
+        assert line == title
+
+
+def test_868_completed_plain_note_keeps_done_glyph() -> None:
+    title = "reasoning override is not supported for this engine"
+    line = format_action_line(
+        Action(id="n", kind="note", title=title), "completed", True, command_width=300
+    )
+    assert line == f"✓ {title}"
+
+
+def test_868_failed_emoji_note_keeps_fail_glyph() -> None:
+    line = format_action_line(
+        Action(id="n", kind="note", title="🗜️ Compaction failed"),
+        "completed",
+        False,
+        command_width=300,
+    )
+    assert line == "✗ 🗜️ Compaction failed"
+
+
+def test_868_running_emoji_note_keeps_running_glyph() -> None:
+    line = format_action_line(
+        Action(id="n", kind="note", title="🗜️ Compacting context…"),
+        "started",
+        None,
+        command_width=300,
+    )
+    assert line == "▸ 🗜️ Compacting context…"
+
+
+def test_868_completed_command_starting_with_emoji_keeps_glyph() -> None:
+    line = format_action_line(
+        Action(id="c", kind="command", title="⚠ echo hi"),
+        "completed",
+        True,
+        command_width=300,
+    )
+    assert line.startswith("✓ ")
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "⚠️ warn",
+        "⚠ warn",
+        "⏳ wait",
+        "🔁 retry",
+        "🛡️ guard",
+        "🛡 guard",
+        "ℹ️ info",
+        "↪️ fallback",
+        "↪ fallback",
+        "🗜️ compact",
+        "✅ ok",
+        "🔔 bell",
+        "  ⚠️ leading spaces",
+        # ✓ U+2713 is category So: a note title starting with ✓ drops the
+        # extra glyph rather than doubling it (documented, desirable).
+        "✓ already ticked",
+        # box drawing is So too — plan 06 relies on this for tree lines
+        "├── src",
+    ],
+)
+def test_868_starts_with_pictograph_true(text: str) -> None:
+    assert starts_with_pictograph(text) is True
+
+
+@pytest.mark.parametrize(
+    "text",
+    ["a", "#1", "`code`", "", "   ", "- item", "1. one", "ℹ bare info (no FE0F)"],
+)
+def test_868_starts_with_pictograph_false(text: str) -> None:
+    assert starts_with_pictograph(text) is False

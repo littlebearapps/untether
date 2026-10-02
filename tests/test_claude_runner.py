@@ -2119,6 +2119,32 @@ def test_allowed_warning_notes_once_per_window_without_latch() -> None:
     assert _translate(state, payload) == []
 
 
+def test_868_rate_limit_warning_renders_without_tick() -> None:
+    """#868: the #790 allowed_warning note reads as a warning, not a done step."""
+    import time
+
+    from untether.markdown import MarkdownFormatter, assemble_markdown_parts
+    from untether.progress import ProgressTracker
+    from untether.telegram.render import render_markdown
+
+    state = ClaudeStreamState()
+    payload = _real_rate_limit_event(
+        status="allowed_warning",
+        resetsAt=int(time.time()) + 3600,
+        utilization=0.79,
+        overageDisabledReason=None,
+    )
+    tracker = ProgressTracker(engine="claude")
+    for evt in _translate(state, payload):
+        tracker.note_event(evt)
+    parts = MarkdownFormatter(max_actions=5).render_progress_parts(
+        tracker.snapshot(), elapsed_s=1.0
+    )
+    text, _entities = render_markdown(assemble_markdown_parts(parts))
+    assert any(line.startswith("⚠️ ") for line in text.splitlines())
+    assert "✓ ⚠️" not in text
+
+
 def test_allowed_warning_below_threshold_or_on_overage_is_silent() -> None:
     import time
 

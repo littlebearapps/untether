@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import re
 import textwrap
+import unicodedata
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal
@@ -79,6 +80,32 @@ def shorten(text: str, width: int | None) -> str:
     if len(text) <= width:
         return text
     return textwrap.shorten(text, width=width, placeholder="…")
+
+
+_EMOJI_PRESENTATION = "\ufe0f"
+
+
+def starts_with_pictograph(text: str) -> bool:
+    """True when *text*'s first non-space character is a symbol/pictograph.
+
+    That is: Unicode category ``So`` (warning sign, hooked arrow, check marks
+    and, deliberately, box drawing such as tree lines), the pictograph blocks
+    U+1F000-1FAFF and U+2600-27BF, or any character followed by U+FE0F (emoji
+    presentation). The information source sign U+2139 is category ``Ll``, so
+    only its trailing FE0F marks it; without FE0F it is not a pictograph.
+    #868 uses this to drop the done glyph on emoji-led notes; #870 to spot
+    status lines that must keep their own line.
+    """
+    stripped = text.lstrip()
+    if not stripped:
+        return False
+    first = stripped[0]
+    code = ord(first)
+    if 0x1F000 <= code <= 0x1FAFF or 0x2600 <= code <= 0x27BF:
+        return True
+    if unicodedata.category(first) == "So":
+        return True
+    return stripped[1:2] == _EMOJI_PRESENTATION
 
 
 def action_status(action: Action, *, completed: bool, ok: bool | None = None) -> str:
@@ -249,9 +276,17 @@ def format_action_line(
         return line
     status = action_status(action, completed=True, ok=ok)
     suffix = action_suffix(action)
-    return (
-        f"{status} {format_action_title(action, command_width=command_width)}{suffix}"
-    )
+    title = format_action_title(action, command_width=command_width)
+    # #868: a successful note/warning that leads with its own emoji (⚠️ rate
+    # limit, ⏳, 🛡️, 🗜️, ↪️) uses that emoji as its status — a ✓ in front
+    # would make a warning read as a finished step. ✗ and ▸ are unchanged.
+    if (
+        action.kind in {"note", "warning"}
+        and status == STATUS["done"]
+        and starts_with_pictograph(title)
+    ):
+        return f"{title}{suffix}"
+    return f"{status} {title}{suffix}"
 
 
 _VERBOSE_DETAIL_WIDTH = 120

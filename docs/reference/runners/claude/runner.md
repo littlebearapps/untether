@@ -439,8 +439,8 @@ When Claude Code compacts the conversation, automatically as the context fills o
 | Frame | Row |
 |---|---|
 | `system/status {"status":"compacting"}` | `▸ 🗜️ Compacting context…` (the CLI re-sends it every 30 s while compacting, which updates the same row) |
-| `system/status {"status":null,"compact_result":"success"}` | `✓ 🗜️ Context compacted` |
-| `system/compact_boundary {"compact_metadata":{…}}` | the same row becomes `✓ 🗜️ Context compacted · 182k → 41k tokens (auto)` (no arrow without `post_tokens`) |
+| `system/status {"status":null,"compact_result":"success"}` | `🗜️ Context compacted` (completed emoji-led rows carry no ✓, [#868](https://github.com/littlebearapps/untether/issues/868)) |
+| `system/compact_boundary {"compact_metadata":{…}}` | the same row becomes `🗜️ Context compacted · 182k → 41k tokens (auto)` (no arrow without `post_tokens`) |
 | `system/status {"status":null,"compact_result":"failed","compact_error":…}` | `🗜️ Compaction failed · <error>` (warning, `claude.compaction.failed` WARN) |
 | `system/status {"status":null}` with a row open | `🗜️ Compaction skipped` (a PreCompact hook skipped it) |
 | `system/status {"status":null,"permissionMode":…}` with no row open | nothing (#383's mode-change edge) |
