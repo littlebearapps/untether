@@ -365,6 +365,26 @@ async def test_812_async_rewake_delivers_hook_rewake_turn() -> None:
     assert any(e["event"] == "claude.hook.rewake_signal" for e in logs)
 
 
+async def test_828_bg_subagent_denial_never_labels_the_wake_turn() -> None:
+    """#828: a background agent's sync PreToolUse denial while the parent
+    idles is not an asyncRewake signal — the agent's wake turn stays
+    ``unknown`` at open and is retro-attributed to the agent (#785)."""
+    with capture_logs() as logs:
+        events = await _collect("bg_agent_pretooluse_denial", until=2)
+    turns = _turns(events)
+    assert [(t.phase, t.reason) for t in turns] == [
+        ("started", "unknown"),
+        ("completed", "task_finished"),
+    ]
+    assert _labels(turns[1]) == ["bg a1"]
+    names = [e["event"] for e in logs]
+    assert "claude.turn.hook_rewake" not in names
+    assert "claude.hook.rewake_signal" not in names
+    (blocked,) = [e for e in logs if e["event"] == "claude.hook.blocking_exit"]
+    assert blocked["hook_event"] == "PreToolUse" and blocked["turn_open"] is False
+    assert blocked["started_turn"] == 2
+
+
 # ── #816: a /continue run releases its session registries ──────────────────
 
 _CONTINUE = ResumeToken(engine=ENGINE, value="", is_continue=True)

@@ -935,3 +935,47 @@ def test_872_schedule_wakeup_clamp_present(cli_blob: mmap.mmap) -> None:
             "now hold a live session longer than an hour (#872; last green on "
             f"CLI {PROBED_CLI_VERSION})"
         )
+
+
+# --- #828: hook frames carry no async / subagent marker ------------------------
+
+_HOOK_MARKER_KEYS = (
+    b"agent_id:",
+    b"agent_type:",
+    b"parent_tool_use_id:",
+    b"async:",
+    b"asyncRewake",
+    b"rewake:",
+)
+
+
+def test_828_hook_frames_still_carry_no_async_or_agent_marker(
+    cli_blob: mmap.mmap,
+) -> None:
+    """#828 tells a background subagent's sync hook from an asyncRewake one
+    by *when it started* (it must outlive its turn), because neither frame
+    says which it is. If the CLI starts marking hook frames natively, switch
+    the heuristic to the marker (native first)."""
+    started = re.search(
+        rb'subtype:"hook_started",hook_id:[\w$]{1,4},hook_name:[\w$]{1,4},'
+        rb"hook_event:[\w$]{1,4}[^}]{0,200}\}",
+        cli_blob,
+    )
+    response = re.search(
+        rb'subtype:"hook_response",[^;]{0,600}?outcome:[\w$.]+\}\)', cli_blob
+    )
+    if started is None or response is None:
+        pytest.skip(
+            "hook_started / hook_response emitter literals not found — re-derive "
+            f"the probe (last green on CLI {PROBED_CLI_VERSION})"
+        )
+    for frame, literal in (
+        ("hook_started", started.group(0)),
+        ("hook_response", response.group(0)),
+    ):
+        for key in _HOOK_MARKER_KEYS:
+            assert key not in literal, (
+                f"{frame} now carries {key.decode()!r} — the CLI marks hook "
+                "frames natively; switch #828's outlived-turn heuristic to it "
+                f"(last green on CLI {PROBED_CLI_VERSION})"
+            )

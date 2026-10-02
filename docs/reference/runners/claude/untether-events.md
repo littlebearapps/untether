@@ -109,7 +109,10 @@ Claude Code emits a system init event early in the stream:
   only with `--include-hook-events`, #812) emit no Untether events. They pair
   by `hook_id` into `ClaudeStreamState.pending_hooks`, which drives the
   live-session async-hook hold, and an idle `hook_response{outcome:"error",
-  exit_code:2}` arms the `hook_rewake` attribution for the next turn (4.5).
+  exit_code:2}` from a hook that started in an earlier turn arms the
+  `hook_rewake` attribution for the next turn (4.5); any other exit 2 (a
+  background subagent's sync denial, a `UserPromptSubmit` blocker) logs
+  `claude.hook.blocking_exit` instead (#828).
   The base runner does not let them overwrite `last_event_type`.
 - `system/informational` (#814): the safeguard notice ("…'s safeguards
   stopped the response above · continuing once …") feeds the per-turn
@@ -283,11 +286,13 @@ first post-result `system.init`, `system/status{"status":"compacting"}` (a
 message; `reason` comes from what preceded it: an injected line's
 `command_lifecycle.command_uuid` (`followup`), a `task_notification`
 (`task_finished`), a fresh (≤ 10 s) idle `hook_response` with exit code 2
-from a background hook (`hook_rewake`, #812; `detail.hook` / `hook_event`),
+from a background hook that outlived its turn (`hook_rewake`, #812/#828;
+`detail.hook` / `hook_event`),
 a `command_lifecycle(started)` with an unknown uuid (`scheduled_wakeup`), or a
 live Monitor task (`monitor_event`). A turn that opened `unknown` becomes
 `hook_rewake` at its result when an earlier turn's hook exited 2 during it
-and the result's `origin.kind` is `task-notification`
+(or a stale idle hint ≤ 60 s old was carried in) and the result's `origin.kind`
+is `task-notification`
 (`detail.retro_attributed`). The bridge always pushes a `hook_rewake` final
 (`🪝 Hook feedback — <event>`) and never folds it. Assistant/user
 events tagged `parent_tool_use_id` (a background subagent) never open a turn.

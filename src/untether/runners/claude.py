@@ -2016,9 +2016,11 @@ class ClaudeStreamState:
     # ``system/init`` (MCP servers): never hook evidence (None: not captured
     # — nothing exempt).
     cli_baseline_children: frozenset[tuple[int, int | None]] | None = None
-    # (hook name, hook event, monotonic ts) of an async hook that exited 2
-    # (the asyncRewake wake signal) while idle; the next turn opening within
-    # ``_HOOK_REWAKE_HINT_TTL_S`` is its rewake. Cleared on every turn open.
+    # (hook name, hook event, monotonic ts) of an async hook that outlived
+    # the turn it started in and exited 2 (the asyncRewake wake signal, #828)
+    # while idle; the next turn opening within ``_HOOK_REWAKE_HINT_TTL_S`` is
+    # its rewake. Cleared on every turn open (carried into ``turn_hook_hint``
+    # only within ``_HOOK_REWAKE_CARRY_TTL_S``).
     hook_rewake_hint: tuple[str | None, str | None, float] | None = None
     # The hint the open turn saw (stale at open, or an earlier turn's async
     # hook exiting 2 mid-turn) — the result's ``origin`` confirms it.
@@ -3320,6 +3322,10 @@ _HOOK_NEVER_HOLD_EVENTS = frozenset({"SessionStart", "Setup"})
 # A rewake turn opens right after its hook's ``hook_response`` (P5-A: same
 # millisecond); a hint older than this is not taken as the turn's cause.
 _HOOK_REWAKE_HINT_TTL_S = 10.0
+# #828: a hint the next turn didn't open on (a slow turn start) is carried
+# into that turn for its result's ``origin`` check only this long; an older
+# hint is dropped (P5-A: hint → ``init`` is ~20 ms, so this is generous).
+_HOOK_REWAKE_CARRY_TTL_S = 60.0
 # The asyncRewake wake signal: exit code 2 (``outcome: "error"``).
 _HOOK_REWAKE_EXIT_CODE = 2
 
@@ -3341,6 +3347,12 @@ def _apply_hook_event(
     state: ClaudeStreamState, event: claude_schema.StreamSystemMessage
 ) -> None:
     """#812: track ``hook_started`` / ``hook_response`` pairs by ``hook_id``.
+
+    #828: only a hook that **outlived the turn it started in** can be an
+    asyncRewake signal — a background subagent's sync ``PreToolUse`` denial
+    (or the next turn's ``UserPromptSubmit`` blocker) starts and ends while
+    the parent idles, and the open turn's own sync hooks end inside it. Such
+    exit-2 responses log ``claude.hook.blocking_exit`` instead.
 
     Produces no UntetherEvents — hook traffic (every configured hook on every
     tool call) must never reach progress rows or the bridge's stall timers.
@@ -3385,18 +3397,27 @@ def _apply_hook_event(
     known = pending or expired or deferred
     outcome = _str_or_none(event.outcome)
     exit_code = event.exit_code
-    is_rewake_signal = (
+    exit_2 = (
         outcome == "error"
         and isinstance(exit_code, int)
         and not isinstance(exit_code, bool)
         and exit_code == _HOOK_REWAKE_EXIT_CODE
         and not _hook_never_holds(hook_event)
     )
+    # #828: it outlived its turn — started in a turn that has since closed
+    # (idle: any turn up to the last one; mid-turn: an earlier turn). A hook
+    # started while idle is tagged ``state.turn + 1`` and never qualifies;
+    # an unknown hook id (never seen / evicted) is too weak to count.
+    outlived = known is not None and (
+        known.turn < state.turn if state.turn_open else known.turn <= state.turn
+    )
+    is_rewake_signal = exit_2 and outlived
+    held_s = round(time.monotonic() - known.started_at, 1) if known else None
     if is_rewake_signal:
         hint = (name, hook_event, time.monotonic())
         if not state.turn_open:
             state.hook_rewake_hint = hint
-        elif known is not None and known.turn < state.turn:
+        else:
             # An earlier turn's async hook exited 2 after this turn opened
             # (the turn's own cause, confirmed by ``origin`` at its result).
             state.turn_hook_hint = hint
@@ -3406,11 +3427,20 @@ def _apply_hook_event(
             hook_name=name,
             hook_event=hook_event,
             turn_open=state.turn_open,
-            held_s=(
-                round(time.monotonic() - known.started_at, 1)
-                if known is not None
-                else None
-            ),
+            started_turn=known.turn if known else None,
+            held_s=held_s,
+        )
+    elif exit_2:
+        # #828: a blocking (sync) hook said no — a denial, not a rewake.
+        logger.info(
+            "claude.hook.blocking_exit",
+            session_id=session_id,
+            hook_name=name,
+            hook_event=hook_event,
+            turn_open=state.turn_open,
+            started_turn=known.turn if known else None,
+            held_s=held_s,
+            known=known is not None,
         )
     elif outcome == "cancelled":
         logger.info(
@@ -6563,8 +6593,21 @@ def _open_followup_turn(
     state.turn_detail = detail
     state.unattributed_turn_completed_at = None
     # #812: a stale hint (a slow turn start) is kept for the result's
-    # ``origin`` check; either way the idle-time hint is spent.
-    state.turn_hook_hint = None if reason == "hook_rewake" else state.hook_rewake_hint
+    # ``origin`` check — #828: only within ``_HOOK_REWAKE_CARRY_TTL_S``;
+    # either way the idle-time hint is spent.
+    carried = None if reason == "hook_rewake" else state.hook_rewake_hint
+    if carried is not None:
+        age_s = time.monotonic() - carried[2]
+        if age_s > _HOOK_REWAKE_CARRY_TTL_S:
+            logger.debug(
+                "claude.hook.rewake_hint_expired",
+                session_id=factory.resume.value if factory.resume else None,
+                hook_name=carried[0],
+                hook_event=carried[1],
+                age_s=round(age_s, 1),
+            )
+            carried = None
+    state.turn_hook_hint = carried
     state.hook_rewake_hint = None
     # Per-turn scalars (see their field docs) start fresh for the new turn.
     state.safeguard = SafeguardTurn()

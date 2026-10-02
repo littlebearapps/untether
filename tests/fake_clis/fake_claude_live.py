@@ -1447,6 +1447,58 @@ def _rewake_turn(answer: str) -> None:
     )
 
 
+def _task_notification_result(answer: str) -> None:
+    """A result of a turn the CLI started itself (``origin`` =
+    ``task-notification``), as every background-task wake turn has."""
+    global _cost
+    _cost = round(_cost + 0.01, 6)
+    emit(
+        {
+            "type": "result",
+            "subtype": "success",
+            "is_error": False,
+            "duration_ms": 1000,
+            "duration_api_ms": 900,
+            "num_turns": 1,
+            "result": answer,
+            "total_cost_usd": _cost,
+            "usage": {"input_tokens": 10, "output_tokens": 5},
+            "origin": {"kind": "task-notification", "producer": "session-task"},
+        }
+    )
+
+
+def scenario_bg_agent_pretooluse_denial(first: dict) -> None:
+    """#828 (channelo, rc14): while the parent idles, a background agent's
+    Bash call is denied by a sync ``PreToolUse`` hook (exit 2, started and
+    answered while idle). The agent then finishes and the CLI opens its wake
+    turn well inside the 10 s rewake TTL; the agent's end lands mid-turn."""
+    init()
+    tool_use("Agent", "toolu_ag", {"description": "builder", "prompt": "go"})
+    start_bg("a1", "toolu_ag", task_type="local_agent")
+    tool_result("toolu_ag", "Async agent launched successfully.")
+    text("Builder running in the background.")
+    result("Builder running in the background.", turns=2)
+    if wait_idle_or_eof(WAKE_S) is None:
+        shutdown()
+    hook_started("h-pre", "PreToolUse", name="PreToolUse:Bash")
+    hook_response(
+        "h-pre",
+        "PreToolUse",
+        outcome="error",
+        exit_code=2,
+        stderr="blocked",
+        name="PreToolUse:Bash",
+    )
+    if wait_idle_or_eof(WAKE_S) is None:
+        shutdown()
+    init()
+    text("agent done")
+    _end_quietly("a1")
+    _task_notification_result("agent done")
+    serve_followups()
+
+
 def scenario_async_hook_success(first: dict) -> None:
     _stop_turn("DONE", ("h-stop", "Stop"))
     got = wait_idle_or_eof(WAKE_S)
@@ -2304,6 +2356,7 @@ _SCENARIOS = {
     "plan_approve_queued_wake": scenario_plan_approve_queued_wake,
     "plan_approve_monitor_ticks": scenario_plan_approve_monitor_ticks,
     "async_rewake_idle": scenario_async_rewake_idle,
+    "bg_agent_pretooluse_denial": scenario_bg_agent_pretooluse_denial,
     "async_hook_success": scenario_async_hook_success,
     "async_hook_post_result_response": scenario_async_hook_post_result_response,
     "async_hook_live_mix_rewake": scenario_async_hook_live_mix_rewake,

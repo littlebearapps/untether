@@ -828,6 +828,14 @@ Setup: `[watchdog] post_result_bg_max_hold = 60` in `~/.untether-dev/untether.to
 | R17-01d *(opportunistic)* | `/new`; ask for a self-paced `/loop` whose next wake-up is ≈2 min out (e.g. "every 2 min print the time, 2 iterations") | `⏰ Scheduled wake-up` at ≈2 min, no closing notice at 60 s; `/cancel` afterwards | `hold_extended source=scheduled_wakeup`; no `stdin_closed reason=max_hold` before the wake turn |
 | R17-01e | `bg_hold_declared_waits = false`; `/new`; repeat R17-01a | closing notice at ≈60 s | `stdin_closed reason=max_hold`; no `hold_extended` |
 
+### #828 — a background subagent's sync denial is not a hook rewake
+
+Chat: `ut-dev: Claude Code` (`-5284581592`). Tiers: `uv run pytest` + U1–U4/U6/U7 (Claude), B-LIVE-1/2, RC14-6 (positive control), R17-828.
+
+| ID | Steps | Expected Telegram | Log signatures |
+|---|---|---|---|
+| R17-828 | In the dev project's `.claude/settings.json` add a sync `PreToolUse` hook, matcher `Bash`, command `jq -r .tool_input.command \| grep -q 'R17DENY' && { echo "R17 denied" >&2; exit 2; } \|\| exit 0`. `/new`; send: *"Launch ONE background agent (run_in_background) that first runs `sleep 15`, then the Bash command `echo R17DENY`, then `python3 -c "import time; time.sleep(30)"`, then reports 'agent done'. End your turn immediately."* (the `sleep 15` makes the denial land while the parent idles) | the launch reply; ≈45–60 s later one pushed `🔔 Background task finished — <agent description>` (never `🪝 Hook feedback — PreToolUse`) | `journalctl --user -u untether-dev -o cat --since "10 minutes ago" \| grep -E "claude.hook.(rewake_signal\|blocking_exit)\|claude.turn.(started\|completed\|hook_rewake)"` → ≥1 `claude.hook.blocking_exit hook_event=PreToolUse turn_open=False started_turn=2` (N+1 for the launch turn N); **zero** `claude.hook.rewake_signal` and zero `claude.turn.hook_rewake` for the run. Then re-run RC14-6 (Stop `asyncRewake`, `sleep 90`): `claude.hook.rewake_signal … started_turn=1` → `claude.turn.hook_rewake attributed=open` → pushed `🪝 Hook feedback — Stop`. Remove both hooks afterwards |
+
 ### #416 — Codex reasoning `minimal` retired
 
 Codex chat `4929463515` (Bot API `-4929463515`). **Precondition (read-only):** the chat must not be in `safe` mode — `jq '.chats["-4929463515"].engine_overrides.codex' ~/.untether-dev/telegram_chat_prefs_state.json` → `null`, and `grep -A8 '^\[engines.codex\]' ~/.untether-dev/untether.toml` shows no `permission_mode = "safe"`. If it ever does, record the value, switch to full auto via `/config`, run the rows, then restore it. Logs: `journalctl --user -u untether-dev -o cat --since "15 minutes ago" | grep -E "run.reasoning.unsupported_level_ignored|config.reasoning|model_reasoning_effort=minimal|session.auto_cleared|handle.(runner|worker)_failed"`.

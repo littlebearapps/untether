@@ -373,7 +373,8 @@ def test_stale_hint_is_cleared_and_retro_attributed_at_result() -> None:
     _feed(state, factory, _response("h-stop", "Stop", outcome="error", exit_code=2))
     assert state.hook_rewake_hint is not None
     name, event, _ts = state.hook_rewake_hint
-    state.hook_rewake_hint = (name, event, time.monotonic() - 60.0)  # past TTL
+    # #828: past the 10 s open TTL, inside the 60 s carry TTL.
+    state.hook_rewake_hint = (name, event, time.monotonic() - 30.0)
     events = _feed(state, factory, _init())
     assert [e.reason for e in events if isinstance(e, TurnEvent)] == ["unknown"]
     assert state.hook_rewake_hint is None
@@ -399,7 +400,7 @@ def test_retro_needs_task_notification_origin() -> None:
     _first_turn(state, factory, "h-stop")
     _feed(state, factory, _response("h-stop", "Stop", outcome="error", exit_code=2))
     name, event, _ts = state.hook_rewake_hint  # type: ignore[misc]
-    state.hook_rewake_hint = (name, event, time.monotonic() - 60.0)
+    state.hook_rewake_hint = (name, event, time.monotonic() - 30.0)  # #828
     _feed(state, factory, _init(), _text("x"))
     # A non-dict origin must not break decoding or attribute the turn.
     events = _feed(state, factory, _result("x", origin="task-notification"))
@@ -413,17 +414,25 @@ def test_hint_mid_turn_from_earlier_turn_hook_retro_attributes() -> None:
     state, factory = _state()
     _first_turn(state, factory, "h-stop")
     _feed(state, factory, _init())  # opens turn 2 as unknown
-    # The open turn's own sync Stop hook exiting 2 is NOT a rewake signal...
-    _feed(
-        state,
-        factory,
-        _started("h-own", "Stop"),
-        _response("h-own", "Stop", outcome="error", exit_code=2),
-    )
+    # The open turn's own sync Stop hook exiting 2 is NOT a rewake signal —
+    # #828: it logs ``blocking_exit``, not ``rewake_signal``...
+    with capture_logs() as logs:
+        _feed(
+            state,
+            factory,
+            _started("h-own", "Stop"),
+            _response("h-own", "Stop", outcome="error", exit_code=2),
+        )
     assert state.turn_hook_hint is None
+    assert [e["event"] for e in logs if e["event"].startswith("claude.hook.")] == [
+        "claude.hook.blocking_exit"
+    ]
     # ...but turn 1's async hook is.
-    _feed(state, factory, _response("h-stop", "Stop", outcome="error", exit_code=2))
+    with capture_logs() as logs:
+        _feed(state, factory, _response("h-stop", "Stop", outcome="error", exit_code=2))
     assert state.turn_hook_hint is not None
+    (signal,) = [e for e in logs if e["event"] == "claude.hook.rewake_signal"]
+    assert signal["started_turn"] == 1 and signal["turn_open"] is True
     events = _feed(state, factory, _result("x", origin={"kind": "task-notification"}))
     done = [e for e in events if isinstance(e, TurnEvent) and e.phase == "completed"]
     assert done[0].reason == "hook_rewake"
@@ -655,3 +664,105 @@ def test_hook_started_records_the_shared_clock() -> None:
     hook = state.pending_hooks["h9"]
     assert hook.started_clock is not None
     assert before <= hook.started_clock <= hook_clock()
+
+
+# ── #828: only a hook that outlived its turn is a rewake signal ─────────────
+
+
+def _hook_logs(logs: list[dict], name: str) -> list[dict]:
+    return [e for e in logs if e["event"] == name]
+
+
+def _idle_denial(state: ClaudeStreamState, factory: EventFactory) -> list[dict]:
+    """A background subagent's sync PreToolUse hook denies a Bash call while
+    the parent idles (started and answered while idle)."""
+    with capture_logs() as logs:
+        _feed(
+            state,
+            factory,
+            _started("h-pre", "PreToolUse", name="PreToolUse:Bash"),
+            _response(
+                "h-pre", "PreToolUse", outcome="error", exit_code=2, stderr="blocked"
+            ),
+        )
+    return logs
+
+
+def test_idle_subagent_pretooluse_denial_is_not_a_rewake_signal() -> None:
+    state, factory = _state()
+    _first_turn(state, factory)
+    logs = _idle_denial(state, factory)
+    assert state.hook_rewake_hint is None
+    assert _hook_logs(logs, "claude.hook.rewake_signal") == []
+    (blocked,) = _hook_logs(logs, "claude.hook.blocking_exit")
+    assert blocked["log_level"] == "info"
+    assert blocked["turn_open"] is False and blocked["started_turn"] == 2
+    assert blocked["known"] is True and blocked["hook_event"] == "PreToolUse"
+
+
+def test_denial_then_wake_turn_within_ttl_stays_unknown() -> None:
+    state, factory = _state()
+    _first_turn(state, factory)
+    _idle_denial(state, factory)
+    events = _feed(state, factory, _init())
+    assert [e.reason for e in events if isinstance(e, TurnEvent)] == ["unknown"]
+
+
+def test_denial_then_task_notification_turn_is_never_hook_rewake() -> None:
+    state, factory = _state()
+    _first_turn(state, factory)
+    _idle_denial(state, factory)
+    _feed(state, factory, _init(), _text("agent done"))
+    assert state.turn_hook_hint is None
+    events = _feed(
+        state, factory, _result("agent done", origin={"kind": "task-notification"})
+    )
+    done = [e for e in events if isinstance(e, TurnEvent) and e.phase == "completed"]
+    assert done[0].reason == "unknown"
+
+
+def test_followup_userpromptsubmit_blocker_is_not_a_rewake() -> None:
+    state, factory = _state()
+    _first_turn(state, factory)
+    with capture_logs() as logs:
+        _feed(
+            state,
+            factory,
+            _started("h-ups", "UserPromptSubmit"),
+            _response("h-ups", "UserPromptSubmit", outcome="error", exit_code=2),
+        )
+    assert state.hook_rewake_hint is None
+    assert _hook_logs(logs, "claude.hook.rewake_signal") == []
+    assert len(_hook_logs(logs, "claude.hook.blocking_exit")) == 1
+
+
+def test_unknown_hook_id_exit_2_is_not_a_rewake() -> None:
+    state, factory = _state()
+    _first_turn(state, factory)
+    with capture_logs() as logs:
+        _feed(state, factory, _response("zz", "Stop", outcome="error", exit_code=2))
+    assert state.hook_rewake_hint is None
+    (blocked,) = _hook_logs(logs, "claude.hook.blocking_exit")
+    assert blocked["known"] is False and blocked["started_turn"] is None
+
+
+def test_carry_ttl_drops_an_old_hint() -> None:
+    state, factory = _state()
+    _first_turn(state, factory, "h-stop")
+    _feed(state, factory, _response("h-stop", "Stop", outcome="error", exit_code=2))
+    name, event, _ts = state.hook_rewake_hint  # type: ignore[misc]
+    state.hook_rewake_hint = (name, event, time.monotonic() - 90.0)
+    with capture_logs() as logs:
+        events = _feed(state, factory, _init())
+    assert [e.reason for e in events if isinstance(e, TurnEvent)] == ["unknown"]
+    assert state.turn_hook_hint is None
+    (expired,) = _hook_logs(logs, "claude.hook.rewake_hint_expired")
+    assert expired["age_s"] >= 90.0
+    events = _feed(
+        state,
+        factory,
+        _text("finding"),
+        _result("finding", origin={"kind": "task-notification"}),
+    )
+    done = [e for e in events if isinstance(e, TurnEvent) and e.phase == "completed"]
+    assert done[0].reason == "unknown"
