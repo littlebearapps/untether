@@ -11,7 +11,7 @@ from markdown_it import MarkdownIt
 from markdown_it.token import Token
 from sulguk import transform_html
 
-from ..markdown import MarkdownParts, assemble_markdown_parts
+from ..markdown import MarkdownParts, assemble_markdown_parts, starts_with_pictograph
 
 MAX_BODY_CHARS = 3500
 
@@ -211,6 +211,160 @@ def _format_pipe_tables(inline: Token) -> None:
     inline.children = rewritten
 
 
+# #870: CommonMark renders a single newline inside a paragraph as a space, so
+# a digest written one item per line (emoji headers, indented ``#N`` items,
+# ``Key: value`` lines) collapsed into one run-on paragraph. A softbreak is
+# kept as a line break when the author evidently meant one; hard-wrapped prose
+# (a greedy wrapper's output) still reflows. Revert to ``breaks=True`` on
+# ``_MD_RENDERER`` if this heuristic misbehaves (D4).
+_LINE_BREAK_SHORT = 40  # rule (c): a line shorter than this was ended on purpose
+_INDENT_NBSP_MAX = 8  # cap on the NBSP indent re-added after a kept break
+_WRAP_TOKEN_MAX = 30  # rule (d): longer unbreakable tokens don't set the width
+_NBSP = "\u00a0"
+_LINE_LEAD_RE = re.compile(
+    r"^(?:"
+    r"[•·◦‣∙▪■□●○◆◇▸▹►→←↳↪✓✔✗✘☐☑☒–—>]"  # bullet / arrow / status glyph
+    r"|#\d"  # issue-style item: #123
+    r"|\d{1,3}[.)]\s"  # 1. / 2)
+    r"|\(?[A-Za-z0-9]{1,2}\)\s"  # (a) / b)
+    r"|\*\*[^*\n]{1,40}?(?::\*\*|\*\*:)"  # **Key:** / **Key**:
+    r"|\[[ xX]\]\s"  # [ ] / [x] checkbox
+    r"|[A-Z][\w'()/-]*(?: [\w'()/-]+){0,2}: "  # Key: value (≤3 words)
+    r")"
+)
+_PUNCTUATED_END = frozenset(".!?,;:-–—([/&+=\"'“‘")
+_FUNCTION_WORDS = frozenset(
+    (  # noqa: SIM905 - a word list reads best as one string
+        "a an the of to and or but by in on for with from at is are was as "
+        "that than via per"
+    ).split()
+)
+
+
+def _indent_cols(line: str) -> int:
+    cols = 0
+    for ch in line:
+        if ch == " ":
+            cols += 1
+        elif ch == "\t":
+            cols += 2
+        else:
+            break
+    return cols
+
+
+def _structural_lead(stripped: str) -> bool:
+    return starts_with_pictograph(stripped) or bool(_LINE_LEAD_RE.match(stripped))
+
+
+def _capital_after_open_clause(prev: str, nxt: str) -> bool:
+    """Rule (e): two unpunctuated clauses don't wrap into a capital."""
+    prev = prev.rstrip()
+    if not prev or not nxt or not nxt[0].isupper():
+        return False
+    if prev[-1] in _PUNCTUATED_END:
+        return False
+    last_word = prev.rsplit(None, 1)[-1].lower()
+    return last_word not in _FUNCTION_WORDS
+
+
+def _wrap_width(lines: list[str]) -> int:
+    """Rule (d)'s wrap width: the longest non-final line, ignoring lines that
+    hold an unbreakable token (URL, path) a wrapper couldn't have split."""
+    candidates = [
+        len(line.rstrip())
+        for line in lines[:-1]
+        if max((len(tok) for tok in line.split()), default=0) <= _WRAP_TOKEN_MAX
+    ]
+    if candidates:
+        return max(candidates)
+    return max((len(line.rstrip()) for line in lines), default=0)
+
+
+def _keep_break(prev: str, nxt: str, *, width: int | None) -> bool:
+    """Decide one softbreak (#870). ``width`` is None in the token-text
+    fallback, which has no reliable indentation or widths: rules (b), (c)
+    and (e) only."""
+    nxt_stripped = nxt.strip()
+    if not nxt_stripped:
+        return False
+    if width is not None and _indent_cols(nxt) >= 2:  # (a) indent
+        return True
+    if _structural_lead(nxt_stripped):  # (b) structural lead
+        return True
+    if len(prev.rstrip()) < _LINE_BREAK_SHORT:  # (c) short line
+        return True
+    if width is not None:  # (d) the next word would have fitted
+        first_word = nxt_stripped.split(None, 1)[0]
+        if len(prev.rstrip()) + 1 + len(first_word) <= width:
+            return True
+    return _capital_after_open_clause(prev, nxt_stripped)  # (e)
+
+
+def _keep_line_breaks(inline: Token) -> None:
+    """Keep author line breaks in line-structured paragraphs (#870).
+
+    A ``softbreak`` becomes a ``hardbreak`` when the next line (a) is
+    indented by 2+ columns, (b) starts with a structural lead (pictograph,
+    bullet/arrow/status glyph, ``#N``, ``1.``, ``(a)``, ``**Key:**``,
+    checkbox, ``Key: ``), (c) follows a line under 40 chars, (d) starts with
+    a word that would have fitted on the previous line (a greedy wrapper
+    never breaks early), or (e) starts with a capital after a line ending in
+    neither punctuation nor a function word. Breaks inside link text, and
+    next to pipe-table rows (#797 owns those), are left alone. An indented
+    next line keeps its indent as NBSP (≤ 8), which survives rendering.
+    """
+    children = inline.children
+    if not children or not any(c.type == "softbreak" for c in children):
+        return
+    lines = inline.content.split("\n")
+    breaks = [i for i, c in enumerate(children) if c.type in ("softbreak", "hardbreak")]
+    mapped = len(breaks) == len(lines) - 1
+    roles = _pipe_table_roles(lines) if mapped else [None] * len(lines)
+    width = _wrap_width(lines) if mapped else None
+    if not mapped:
+        # A code span crossing a line hides a newline from the token stream:
+        # fall back to the text of the segments between breaks.
+        segments: list[str] = []
+        current: list[str] = []
+        for child in children:
+            if child.type in ("softbreak", "hardbreak"):
+                segments.append("".join(current))
+                current = []
+            elif child.type in ("text", "code_inline"):
+                current.append(child.content)
+        segments.append("".join(current))
+        lines = segments
+
+    rewritten: list[Token] = []
+    link_depth = 0
+    boundary = 0
+    for child in children:
+        if child.type == "link_open":
+            link_depth += 1
+        elif child.type == "link_close":
+            link_depth = max(0, link_depth - 1)
+        if child.type not in ("softbreak", "hardbreak"):
+            rewritten.append(child)
+            continue
+        idx = boundary
+        boundary += 1
+        if (
+            child.type == "hardbreak"
+            or link_depth > 0
+            or roles[idx] is not None
+            or roles[idx + 1] is not None
+            or not _keep_break(lines[idx], lines[idx + 1], width=width)
+        ):
+            rewritten.append(child)
+            continue
+        rewritten.append(Token("hardbreak", "br", 0))
+        indent = _indent_cols(lines[idx + 1]) if mapped else 0
+        if indent >= 2:
+            rewritten.append(_text_token(_NBSP * min(indent, _INDENT_NBSP_MAX)))
+    inline.children = rewritten
+
+
 def _split_br(content: str, *, table: bool) -> list[Token]:
     """Split a text token's content on bare `<br>` tags (#786).
 
@@ -381,6 +535,7 @@ def _normalise_tokens(tokens: list[Token]) -> list[Token]:
         tok = tokens[idx]
         nxt = tokens[idx + 1] if idx + 1 < len(tokens) else None
         if tok.type == "inline":
+            _keep_line_breaks(tok)
             _format_pipe_tables(tok)
             drop = _rewrite_br(tok)
             _code_format_filenames(tok)

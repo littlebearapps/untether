@@ -363,6 +363,17 @@ a few Telegram-specific rewrites:
   suffixes included) is rendered as inline code rather than auto-linked as a
   domain. Explicit link text and real URLs keep their links
   ([#788](https://github.com/littlebearapps/untether/issues/788)).
+- **Line breaks** — CommonMark turns a single newline inside a paragraph into
+  a space, which collapsed one-item-per-line digests into a single paragraph.
+  A single newline is now kept as a line break when the next line is indented
+  (2+ columns, kept as up to 8 non-breaking spaces), starts with a structural
+  lead (emoji, bullet/arrow/status glyph, `#N`, `1.`, `(a)`, `**Key:**`, a
+  checkbox or `Key: `), follows a line under 40 characters, starts with a word
+  that would have fitted on the previous line (a wrapper never breaks early),
+  or starts with a capital after a line ending in neither punctuation nor a
+  small function word. Hard-wrapped prose still reflows into one paragraph;
+  breaks inside link text and around pipe tables are left alone
+  ([#870](https://github.com/littlebearapps/untether/issues/870)).
 - **Agent text in code spans** — command titles, the long-running tail, verbose
   detail lines, `read:`/`glob:`/`ls:`/`grep:`/`find:` tool titles, changed-file
   paths and the Bash approval preview go through `markdown.inline_code`: the

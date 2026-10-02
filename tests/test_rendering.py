@@ -1,4 +1,5 @@
 import re
+import textwrap
 
 import pytest
 
@@ -580,7 +581,8 @@ def test_render_markdown_pipe_table_without_outer_pipes() -> None:
 def test_render_markdown_pipe_lines_without_delimiter_not_a_table(md: str) -> None:
     text, entities = render_markdown(md)
 
-    assert text == md.replace("\n", " ")
+    # #870: short lines keep their breaks; still never a table (no bold).
+    assert text == md
     assert _bold_spans(text, entities) == []
 
 
@@ -634,3 +636,308 @@ def test_split_markdown_body_table_in_fence_not_given_header() -> None:
     assert len(chunks) > 1
     # Continuations reopen the fence but never gain a repeated table header.
     assert sum(chunk.count("| A | B |") for chunk in chunks) == 1
+
+
+# ---------------------------------------------------------------------------
+# #870 — softbreaks: keep author line structure, reflow wrapped prose
+# ---------------------------------------------------------------------------
+#
+# The digest fixtures below are SYNTHETIC: invented, generic content shaped
+# like the cron-digest finals described in #870 (short label lines without
+# blank lines, ``Key: value`` lines, indented continuation lines, emoji-led
+# status lines, lists next to plain lines, and hard-wrapped prose). No real
+# user or cron output was copied.
+
+_NB = "\u00a0"
+
+_DIGEST_PROSE = (
+    "The import job failed twice overnight because the upstream feed returned "
+    "partial data, so the retry window was extended and the job will run again "
+    "at the next scheduled slot without any manual intervention from the team "
+    "on call this week."
+)
+SYNTH_NIGHTLY_DIGEST = "\n".join(
+    [
+        "🗂️ Nightly maintenance digest",
+        "Run: 2026-01-15 02:00 UTC",
+        "Host: build-01",
+        "✅ Backups: 3 of 3 completed",
+        "⚠️ Disk: /var at 81% (threshold 85%)",
+        "  #101 rotate old log archives",
+        "  #102 prune unused container images",
+        "🐛 Open bugs (4)",
+        "  #2041 login form loses focus on resize",
+        "  #2047 export button stays disabled after a refresh",
+        textwrap.fill(_DIGEST_PROSE, 74),
+        "Next: review the queue depth tomorrow morning",
+    ]
+)
+_STATUS_PROSE = (
+    "The queue backlog grew after the deploy changed the batch size, and the "
+    "workers have not caught up since then; scaling them out should clear the "
+    "backlog within a day without affecting the other services that share the "
+    "cluster."
+)
+SYNTH_SERVICE_STATUS = "\n".join(
+    [
+        "Service status, weekly summary",
+        "Web frontend: healthy (p95 210 ms)",
+        "Queue: degraded",
+        "    backlog 1,240 jobs",
+        "    oldest job 14 min",
+        "Database: healthy",
+        "🔁 Retries: 12 in the last 24h",
+        "→ scale the queue workers from 2 to 4",
+        "1. confirm the batch size change",
+        "2. watch the backlog for an hour",
+        "",
+        textwrap.fill(_STATUS_PROSE, 72),
+    ]
+)
+_CHECKLIST_PROSE = (
+    "Notes: the migration adds a nullable column and backfills it in batches "
+    "of five thousand rows, so it is safe to run during business hours and can "
+    "be paused at any point by stopping the worker that drives the backfill loop."
+)
+SYNTH_RELEASE_CHECKLIST = "\n".join(
+    [
+        "Release checklist for v2.4.0",
+        "[x] changelog updated",
+        "[x] version bumped",
+        "[ ] tag pushed",
+        "(a) staging smoke test passed",
+        "(b) production smoke test pending",
+        "**Owner:** release team",
+        "**Window**: Thursday 10:00 to 12:00",
+        textwrap.fill(_CHECKLIST_PROSE, 76),
+    ]
+)
+
+
+def test_870_softbreak_digest_keeps_lines() -> None:
+    md = "🗂️ Action queue\n🐛 Bugs (47)\n  #3210 a\n  #3239 b\n🧪 Tests (3)\n  #1 one"
+    text, _ = render_markdown(md)
+    assert text.split("\n") == [
+        "🗂️ Action queue",
+        "🐛 Bugs (47)",
+        f"{_NB * 2}#3210 a",
+        f"{_NB * 2}#3239 b",
+        "🧪 Tests (3)",
+        f"{_NB * 2}#1 one",
+    ]
+
+
+def test_870_synthetic_nightly_digest() -> None:
+    text, _ = render_markdown(SYNTH_NIGHTLY_DIGEST)
+    assert text.split("\n") == [
+        "🗂️ Nightly maintenance digest",
+        "Run: 2026-01-15 02:00 UTC",
+        "Host: build-01",
+        "✅ Backups: 3 of 3 completed",
+        "⚠️ Disk: /var at 81% (threshold 85%)",
+        f"{_NB * 2}#101 rotate old log archives",
+        f"{_NB * 2}#102 prune unused container images",
+        "🐛 Open bugs (4)",
+        f"{_NB * 2}#2041 login form loses focus on resize",
+        f"{_NB * 2}#2047 export button stays disabled after a refresh",
+        _DIGEST_PROSE,  # the hard-wrapped paragraph flows, not ragged
+        "Next: review the queue depth tomorrow morning",
+    ]
+
+
+def test_870_synthetic_service_status() -> None:
+    text, _ = render_markdown(SYNTH_SERVICE_STATUS)
+    assert text.split("\n") == [
+        "Service status, weekly summary",
+        "Web frontend: healthy (p95 210 ms)",
+        "Queue: degraded",
+        f"{_NB * 4}backlog 1,240 jobs",
+        f"{_NB * 4}oldest job 14 min",
+        "Database: healthy",
+        "🔁 Retries: 12 in the last 24h",
+        "→ scale the queue workers from 2 to 4",
+        "",  # "1." interrupts the paragraph and starts a real list
+        "1. confirm the batch size change",
+        "2. watch the backlog for an hour",
+        "",
+        _STATUS_PROSE,
+    ]
+
+
+def test_870_synthetic_release_checklist() -> None:
+    text, entities = render_markdown(SYNTH_RELEASE_CHECKLIST)
+    assert text.split("\n") == [
+        "Release checklist for v2.4.0",
+        "[x] changelog updated",
+        "[x] version bumped",
+        "[ ] tag pushed",
+        "(a) staging smoke test passed",
+        "(b) production smoke test pending",
+        "Owner: release team",
+        "Window: Thursday 10:00 to 12:00",
+        _CHECKLIST_PROSE,
+    ]
+    assert _bold_spans(text, entities) == ["Owner:", "Window"]
+
+
+def test_870_softbreak_key_value_block() -> None:
+    text, _ = render_markdown("Status: green\nVersion: rc16\nNext: rc17")
+    assert text == "Status: green\nVersion: rc16\nNext: rc17"
+
+
+def test_870_softbreak_short_lines_keep_breaks() -> None:
+    text, _ = render_markdown("src/a.py\nsrc/b/c.py\ndocs/x.md")
+    assert text == "src/a.py\nsrc/b/c.py\ndocs/x.md"
+    text, _ = render_markdown("Done.\nTests pass.\nPR opened.")
+    assert text == "Done.\nTests pass.\nPR opened."
+
+
+def test_870_softbreak_unmarked_long_items_case_rule() -> None:
+    lines = [
+        "Fixed the import order in main and all tests pass now everywhere",
+        "Updated the changelog with the new release notes for the team today",
+        "Bumped the version to the next release candidate for the next cycle",
+        "Opened a pull request against the dev branch for review by the team",
+    ]
+    text, _ = render_markdown("\n".join(lines))
+    assert text.split("\n") == lines
+
+
+_TCP_PROSE = (
+    "The network stack retransmits lost segments after a timeout expires, and "
+    "the congestion window shrinks so that the sender backs off politely instead "
+    "of flooding an already busy link with even more packets than it can carry, "
+    "which keeps the whole path stable for every other flow that shares it, and "
+    "once acknowledgements start arriving again the window grows slowly back "
+    "towards its previous size until the next loss event or timeout occurs."
+)
+
+
+@pytest.mark.parametrize("width", [60, 72, 80, 100])
+def test_870_softbreak_greedy_wrapped_prose_reflows(width: int) -> None:
+    wrapped = textwrap.fill(_TCP_PROSE, width)
+    assert "\n" in wrapped
+    text, _ = render_markdown(wrapped)
+    assert text == _TCP_PROSE
+
+
+def test_870_wrapped_prose_capital_after_punctuation_reflows() -> None:
+    prose = (
+        "This sentence is long enough to be wrapped by an editor at the margin. "
+        "The next sentence starts with a capital letter after a full stop and "
+        "keeps going for a while longer."
+    )
+    text, _ = render_markdown(textwrap.fill(prose, 60))
+    assert text == prose
+
+
+def test_870_wrapped_prose_with_long_url_reflows() -> None:
+    url = "https://example.com/a/very/long/path/that/no/wrapper/can/split/index.html"
+    prose = (
+        "The network stack retransmits lost segments after a timeout expires and "
+        "the congestion window shrinks so that the sender backs off politely, see "
+        f"{url} for the details of how the algorithm decides when to slow down "
+        "and when to speed up again after the loss."
+    )
+    wrapped = textwrap.fill(prose, 72, break_long_words=False)
+    assert any(len(line) > 72 for line in wrapped.split("\n"))
+    text, _ = render_markdown(wrapped)
+    assert "\n" not in text
+
+
+def test_870_known_false_break_proper_noun_after_open_clause() -> None:
+    # Accepted cost of rule (e) (#870 D1): a wrap that lands between an
+    # unpunctuated clause and a capitalised proper noun keeps its break.
+    prose = (
+        "The pipeline runs on every push to the main branch, which means GitHub "
+        "Actions has to start a fresh runner each time and download the cached "
+        "dependencies before the tests begin."
+    )
+    wrapped = textwrap.fill(prose, 72)
+    assert wrapped.split("\n")[1].startswith("Actions")
+    text, _ = render_markdown(wrapped)
+    assert text.count("\n") == 1
+    assert text.split("\n")[1].startswith("Actions")
+
+
+def test_870_softbreak_indent_nbsp_capped() -> None:
+    text, _ = render_markdown("a\n" + " " * 12 + "deep")
+    assert text == f"a\n{_NB * 8}deep"
+
+
+def test_870_ordered_item_four_space_continuation_reflows() -> None:
+    md = (
+        "1. item with a fairly long first line that goes on and on for a while\n"
+        "    continuation of the same item that is also long enough to matter"
+    )
+    text, _ = render_markdown(md)
+    assert "\n" not in text
+    assert _NB not in text
+
+
+def test_870_softbreak_in_list_item_and_blockquote() -> None:
+    text, _ = render_markdown("- item one\n  short\n  lines")
+    assert text.count("\n") == 2
+    text, entities = render_markdown("> a\n> b")
+    assert text == "a\nb"
+    assert [e["type"] for e in entities] == ["blockquote"]
+
+
+def test_870_softbreak_inside_link_text_stays_space() -> None:
+    text, entities = render_markdown(
+        "See [the docs\nfor details](https://example.com) now."
+    )
+    assert text == "See the docs for details now."
+    assert [e["type"] for e in entities] == ["text_link"]
+
+
+def test_870_softbreak_inside_code_span_untouched() -> None:
+    text, entities = render_markdown("`a\nb` c")
+    assert text == "a b c"
+    assert entities == [{"type": "code", "offset": 0, "length": 3}]
+
+
+def test_870_softbreak_fenced_block_untouched() -> None:
+    body = "x " * 60 + "\n" + "y " * 60
+    text, entities = render_markdown(f"```\n{body}\n```")
+    assert text.rstrip("\n").split("\n")[0] == ("x " * 60)
+    assert {e["type"] for e in entities} == {"code", "pre"}
+
+
+def test_870_pipe_table_after_paragraph_unchanged() -> None:
+    text, _ = render_markdown("Intro\n| A | B |\n|---|---|\n| 1 | 2 |")
+    assert text == "Intro\n| A | B |\n| 1 | 2 |"
+
+
+def test_870_br_then_newline_single_break() -> None:
+    text, _ = render_markdown("line<br>\nnext")
+    assert text == "line\nnext"
+
+
+def test_870_entity_offsets_after_nbsp_indent() -> None:
+    text, entities = render_markdown("🐛 bugs\n  **#1** bold item")
+    assert text == f"🐛 bugs\n{_NB * 2}#1 bold item"
+    bold = [e for e in entities if e["type"] == "bold"]
+    assert len(bold) == 1
+    prefix = text[: text.index("#1")]
+    assert bold[0]["offset"] == len(prefix.encode("utf-16-le")) // 2
+    assert bold[0]["length"] == 2
+
+
+def test_870_prepare_telegram_multiline_header_keeps_lines() -> None:
+    from untether.markdown import MarkdownParts
+    from untether.telegram.render import prepare_telegram
+
+    text, _ = prepare_telegram(MarkdownParts(header="a\nb"))
+    assert text == "a\nb"
+
+
+def test_870_progress_multiline_note_title() -> None:
+    text, _ = render_markdown("Permission Request [Bash]\n$ rm -rf /tmp/x")
+    assert text == "Permission Request [Bash]\n$ rm -rf /tmp/x"
+
+
+def test_870_code_span_crossing_lines_fallback() -> None:
+    text, entities = render_markdown("🐛 one `x\ny` two\n🧪 three")
+    assert text == "🐛 one x y two\n🧪 three"
+    assert [e["type"] for e in entities] == ["code"]
