@@ -1669,3 +1669,72 @@ def test_refresh_progress_settings_reaches_a_verbose_override(monkeypatch) -> No
     assert override._formatter.show_context_usage is False
     assert override._formatter.max_actions == 3
     assert override._formatter.verbosity == "verbose"  # the override's own
+
+
+# ── #418: /export records every turn of a live session ──────────────────────
+
+
+def _turn_action(turn: int) -> ActionEvent:
+    return ActionEvent(
+        engine="claude",
+        action=Action(id=f"toolu_t{turn}", kind="command", title=f"echo turn{turn}"),
+        phase="completed",
+        ok=True,
+    )
+
+
+async def test_418_export_records_every_live_turn() -> None:
+    """Live finding: after one run plus three injected follow-ups (four
+    turns), /export held only the first run's events — the follow-up and
+    wake turns' events went to the turn router before the export recorder."""
+    from untether.telegram.commands import export as export_mod
+
+    export_mod._SESSION_HISTORY.clear()
+    usage = {"total_cost_usd": 0.42, "num_turns": 9}
+    steps: list[Emit] = [Emit(_turn_action(1))]
+    for turn, reason in ((2, "followup"), (3, "followup"), (4, "task_finished")):
+        steps += [
+            Emit(_turn("started", turn=turn, reason=reason)),
+            Emit(_turn_action(turn)),
+            Emit(
+                _turn(
+                    "completed",
+                    turn=turn,
+                    reason=reason,
+                    ok=True,
+                    answer=f"ANSWER-{turn}",
+                    resume=_TOKEN,
+                    **({"usage": usage} if turn == 4 else {}),
+                )
+            ),
+        ]
+    await _run_with_turn(*steps, end_mid_turn=True)
+
+    _ts, events, recorded_usage = export_mod._SESSION_HISTORY[(1, _TOKEN.value)]
+    action_ids = [e["action"]["id"] for e in events if e["type"] == "action"]
+    # Every turn's action, each exactly once (no double recording).
+    assert action_ids == ["toolu_t1", "toolu_t2", "toolu_t3", "toolu_t4"]
+    answers = [e["answer"] for e in events if e["type"] == "completed"]
+    assert answers[:1] == ["FIRST"]
+    assert [a for a in answers if a.startswith("ANSWER-")] == [
+        "ANSWER-2",
+        "ANSWER-3",
+        "ANSWER-4",
+    ]
+    turns = [(e["turn"], e["reason"]) for e in events if e["type"] == "turn"]
+    assert turns == [(2, "followup"), (3, "followup"), (4, "task_finished")]
+    # The latest result's usage (session-cumulative for the live process).
+    assert recorded_usage == usage
+
+    md = export_mod._format_export_markdown(_TOKEN.value, events, recorded_usage)
+    for needle in (
+        "FIRST",
+        "ANSWER-2",
+        "ANSWER-3",
+        "ANSWER-4",
+        "echo turn4",
+        "## Turn 2 (follow-up)",
+        "## Turn 4 (background task finished)",
+    ):
+        assert needle in md
+    export_mod._SESSION_HISTORY.clear()

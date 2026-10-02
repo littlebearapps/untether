@@ -1410,6 +1410,25 @@ def _record_export_event(
             event_dict["error"] = evt.error
             if evt.usage:
                 record_session_usage(session_id, evt.usage, channel_id=channel_id)
+        elif isinstance(evt, TurnEvent):
+            # #418: a live session's later turns (follow-ups, wake turns).
+            # The opening boundary marks the turn; the closing one carries
+            # its answer, so it is recorded as that turn's ``completed``.
+            if evt.phase == "completed":
+                event_dict = {
+                    "type": "completed",
+                    "ok": evt.ok,
+                    "answer": evt.answer,
+                    "error": evt.error,
+                }
+                if evt.usage:
+                    # Session-cumulative for the live process, i.e. this
+                    # run so far — what the export's "last run" line shows.
+                    record_session_usage(session_id, evt.usage, channel_id=channel_id)
+            else:
+                event_dict["phase"] = evt.phase
+            event_dict["turn"] = evt.turn
+            event_dict["reason"] = evt.reason
         record_session_event(session_id, event_dict, channel_id=channel_id)
         if isinstance(evt, ActionEvent):
             logger.debug(
@@ -4184,10 +4203,20 @@ async def run_runner_with_cancel(
                         if isinstance(evt, TurnEvent):
                             # #811: the run-level monitor's live-idle clock.
                             edits.note_turn_boundary(evt.phase)
+                            # #418: every turn of the session is exported,
+                            # not just the run's first.
+                            _record_export_event(
+                                evt,
+                                outcome.resume or evt.resume,
+                                channel_id=channel_id,
+                            )
                             if turn_router is not None:
                                 await turn_router.on_turn(evt)
                             continue
                         if turn_router is not None and turn_router.active:
+                            _record_export_event(
+                                evt, outcome.resume, channel_id=channel_id
+                            )
                             await turn_router.on_event(evt)
                             continue
                         if isinstance(evt, StartedEvent):

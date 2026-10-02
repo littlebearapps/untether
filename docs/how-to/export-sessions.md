@@ -16,6 +16,7 @@ Untether replies with the full transcript attached as a Markdown file (`untether
 - **Engine and model**
 - **Action timeline** — each tool call with status and title
 - **Final answer** — the agent's full response text for each run
+- **Later turns** — in a Claude live session, each follow-up you sent into it and each 🔔 background wake turn, under its own `## Turn N (follow-up)` / `## Turn N (background task finished)` heading with its actions and answer
 
 !!! untether "Untether"
     📎 `untether-export-claude-1f0c9a2e-…-20261001-0915.md`
@@ -45,7 +46,7 @@ Model: claude-opus-5-5
 Fixed the import order in main.py and all tests pass.
 ```
 
-The usage line is the most recent run's figure; the transcript covers every run of the session. For Codex, which reports a running total for the whole thread, it is the thread total.
+The usage line is the most recent run's figure (for a Claude live session, its latest turn's running total for that process); the transcript covers every run and every turn of the session. For Codex, which reports a running total for the whole thread, it is the thread total.
 
 ## Export as JSON
 
@@ -63,7 +64,7 @@ Untether keeps the **20 most recently active sessions** in memory, across all ch
 
 Each session records:
 
-- Start and completion events
+- Start and completion events, plus a boundary for each later turn of a live session (JSON: `{"type": "turn", "phase": "started", "turn": N, "reason": …}`, and that turn's `completed` event carries `turn` and `reason`)
 - Every action (tool call) with its kind, title, and status
 - The final answer text
 - Usage and cost data (when reported by the engine)

@@ -100,6 +100,16 @@ def latest_session_for_chat(
     return best
 
 
+# #418: headings for a live session's later turns (``TurnEvent.reason``).
+_TURN_REASON_LABELS: dict[str, str] = {
+    "followup": "follow-up",
+    "task_finished": "background task finished",
+    "scheduled_wakeup": "scheduled wake-up",
+    "monitor_event": "monitor event",
+    "hook_rewake": "hook wake-up",
+}
+
+
 def _format_export_markdown(
     session_id: str,
     events: list[dict],
@@ -184,6 +194,11 @@ def _format_export_markdown(
                 lines.append(f"- {symbol} ⚠️ {title}")
             else:
                 lines.append(f"- {symbol} {title}")
+        elif evt_type == "turn":
+            # #418: a later turn of a live session (follow-up / wake turn).
+            turn = evt.get("turn")
+            label = _TURN_REASON_LABELS.get(str(evt.get("reason")), "turn")
+            lines.append(f"\n## Turn {turn} ({label})")
         elif evt_type == "completed":
             ok = evt.get("ok", False)
             answer = evt.get("answer", "")
