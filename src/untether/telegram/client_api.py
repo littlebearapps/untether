@@ -98,6 +98,18 @@ def classify_benign_rejection(
     return None
 
 
+def _payload_target(request_payload: Any) -> tuple[Any, Any]:
+    """#823: the ``(chat_id, message_id)`` a request targeted, for error logs.
+
+    Works for both JSON and multipart (``data=``) payloads; anything that
+    isn't a dict (or a method with no chat, e.g. ``getUpdates``) yields
+    ``(None, None)``.
+    """
+    if not isinstance(request_payload, dict):
+        return None, None
+    return request_payload.get("chat_id"), request_payload.get("message_id")
+
+
 def _error_description(resp: httpx.Response) -> str | None:
     """The Bot API ``description`` of an error response, if it parses."""
     try:
@@ -273,10 +285,7 @@ class HttpBotClient:
         description: str,
     ) -> None:
         """#598: remember why a request failed, keyed for later correlation."""
-        chat_id = message_id = None
-        if isinstance(request_payload, dict):
-            chat_id = request_payload.get("chat_id")
-            message_id = request_payload.get("message_id")
+        chat_id, message_id = _payload_target(request_payload)
         self._last_api_errors[(method, chat_id, message_id)] = description
         while len(self._last_api_errors) > 64:
             self._last_api_errors.pop(next(iter(self._last_api_errors)))
@@ -349,11 +358,14 @@ class HttpBotClient:
                     retry_after=retry_after,
                 )
                 raise TelegramRetryAfter(retry_after)
+            chat_id, message_id = _payload_target(request_payload)
             logger.error(
                 "telegram.api_error",
                 method=method,
                 url=_safe_url(resp.request.url),
                 payload=payload,
+                chat_id=chat_id,
+                message_id=message_id,
             )
             self._record_api_error(
                 method,
@@ -416,22 +428,27 @@ class HttpBotClient:
                     raise
                 # httpx drops the failed connection, so this goes out on a
                 # fresh one.
+                retry_chat_id, _ = _payload_target(request_payload)
                 logger.warning(
                     "telegram.network_retry",
                     method=method,
                     error_type=first.__class__.__name__,
+                    chat_id=retry_chat_id,
                 )
                 resp = await self._post_once(
                     method, json=json, data=data, files=files, **timeout_kwargs
                 )
         except httpx.HTTPError as exc:
             exc_url = getattr(exc.request, "url", None)
+            chat_id, message_id = _payload_target(request_payload)
             logger.error(
                 "telegram.network_error",
                 method=method,
                 url=_safe_url(exc_url) if exc_url is not None else None,
                 error=str(exc),
                 error_type=exc.__class__.__name__,
+                chat_id=chat_id,
+                message_id=message_id,
             )
             self._record_api_error(
                 method, request_payload, f"network error: {exc.__class__.__name__}"
@@ -464,10 +481,7 @@ class HttpBotClient:
                 )
                 raise TelegramRetryAfter(retry_after) from exc
             body = resp.text
-            chat_id = message_id = None
-            if isinstance(request_payload, dict):
-                chat_id = request_payload.get("chat_id")
-                message_id = request_payload.get("message_id")
+            chat_id, message_id = _payload_target(request_payload)
             description = _error_description(resp)
             benign = (
                 classify_benign_rejection(method, description, message_id)
@@ -496,7 +510,9 @@ class HttpBotClient:
                     url=_safe_url(resp.request.url),
                     error=str(exc),
                     body=body,
-                    # Which message a failed edit/delete targeted (diagnostic).
+                    # #823: which chat/message a failed request targeted
+                    # (message_ids are per chat, so both are needed).
+                    chat_id=chat_id,
                     message_id=message_id,
                 )
             # #746 D4: record the readable Telegram description when there is
