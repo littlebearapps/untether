@@ -203,7 +203,7 @@ mode, not the stored one (probe P1). If the effective mode is a prompting mode
 requested`): every later stage-6 `can_use_tool` routes to Telegram instead of
 being blanket-approved. `system/init` precedes every control request, so no
 request slips through first. A gate is never disarmed on a CLI report (e.g.
-`default` asked, `bypassPermissions` reported). **Residual ([#835](https://github.com/littlebearapps/untether/issues/835), open, planned for rc17):** the
+`default` asked, `bypassPermissions` reported). **Residual (kept by decision; [#835](https://github.com/littlebearapps/untether/issues/835) part 2, closed by reference):** the
 default `--allowedTools Bash,Read,Edit,Write` still goes out for `auto`, so on
 a downgraded run those four tools stay pre-approved at stage 5. Probe P2
 (zero-token, CLI 2.1.285) showed the allowlist does *not* bypass auto mode's
@@ -237,9 +237,13 @@ prompt tool alongside *every* mode, and the two compose rather than conflict:
   outline gate and `_DISCUSS_APPROVED` machinery apply to `plan` / `plan-auto`
   only.
 * When auto mode's classifier blocks an action 3 times consecutively or 20
-  times in total, Claude Code falls back to prompting; because Untether
-  supplies a prompt tool, that fallback surfaces as a normal Telegram
-  approval rather than a silently dropped action.
+  times in total, Claude Code falls back to prompting: from the third
+  consecutive block on, each blocked action arrives at Untether as a
+  `can_use_tool` with `decision_reason_type: "classifier"` and a
+  `decision_reason` like *"3 consecutive actions were blocked…"* (zero-token
+  probe, CLI 2.1.287, 2026-10-02). In an attended `auto` run Untether's
+  autonomous stage 6 still approves it (open gap, [#882](https://github.com/littlebearapps/untether/issues/882));
+  in an unattended (cron / webhook) run it is denied ([#835](https://github.com/littlebearapps/untether/issues/835)).
 
 **Plan re-arm in live sessions ([#383](https://github.com/littlebearapps/untether/issues/383), 0.35.5rc15).** An approved `ExitPlanMode` moves the CLI to `prePlanMode ?? "default"` — `default` for a session started in plan — and reports it as `system/status{status:null,permissionMode:"default"}`. A live session (#776) used to stay there for every later turn. The runner now tracks the effective mode (`ClaudeStreamState.effective_permission_mode`, from every `system/init.permissionMode`, `system/status` frames with a `permissionMode`, and the ack of its own request; `claude.permission_mode.changed`) and, in a chat whose configured mode maps to CLI `plan` (`plan`, `plan-auto`), sends the parent-initiated `{"type":"control_request","request_id":"ut_plan_rearm_<sid>_<n>","request":{"subtype":"set_permission_mode","mode":"plan"}}` when the session has left plan. Never for prompting modes (`default` / `manual` / `acceptEdits`) or the other autonomous modes (`auto` / `dontAsk` / `bypassPermissions`), never outside a live session, and never unless the CLI reported `plan` at least once in this process (so it can't fight `--dangerously-skip-permissions`, which overrides `plan`). One request in flight at a time. `plan-auto` is re-armed before follow-ups and idle steers only, not at the idle boundary (Decision 6: its rubber stamp would approve a planned wake turn anyway, so planning it costs a plan-model call and an `ExitPlanMode` round trip for no check). Logs `claude.permission_mode.rearm_sent` (`reason` = `idle` / `agents_done` / `followup` / `steer`), `rearm_ack`, `rearm_failed` (WARN; the session is closed once idle and the next message resumes a fresh `--permission-mode plan` process), `rearm_write_failed`. Kill switch `[watchdog] rearm_plan_mode = false`. Plan mode switches a haiku session's model to `claude-sonnet-5-5` while planning, so re-planned follow-ups cost what they did before live sessions. **Known limit (CLI 2.1.285):** plan mode no longer blocks a `Write` internally — it raises `can_use_tool` with `decision_reason_type:"mode"`, which Untether's autonomous-mode stage-6 handler approves; the model's plan-mode instructions are what hold it back (see the findings addendum in `docs/findings/2026-09-30-claude-sdk-control-permissions-context.md`).
 
@@ -248,6 +252,17 @@ organisation that has not set `permissions.disableAutoMode`. On CLI 2.1.285
 an unsupported model does **not** fail the run: the CLI starts in `default`
 and says so only in `system/init.permissionMode`, which Untether compares
 with the request (see "Requested vs effective mode" above).
+
+**Unattended runs ([#835](https://github.com/littlebearapps/untether/issues/835), 0.35.5rc17).** Cron and webhook runs (`RunContext.trigger_source` `cron:` / `webhook:`, the shared `context.unattended_trigger()` predicate that also drives the #751 dispatch WARN) carry `EngineRunOptions.unattended_trigger`, set by the single trigger-override applier `telegram/loop._apply_trigger_overrides` at all three resolution sites (`run_job`, live follow-up and steer comparisons). `new_state` arms `ClaudeStreamState.unattended_trigger` / `unattended_mode` (the configured Untether mode; `bypassPermissions` under `dangerously_skip_permissions`) on the control channel only. Stage 6 then never waits and never approves what an attended run would have asked about:
+
+| Point in stage 6 | Unattended behaviour | `reason` |
+|---|---|---|
+| Autonomous auto-approve, mode `auto` / `bypassPermissions` | deny every request (they're all ask-class: `ask` rules, hook `ask`, `requiresUserInteraction` MCP tools, critical-path `rm`, auto's classifier fallback) | `ask_class` |
+| Autonomous auto-approve, mode `plan` | deny `Edit` / `Write` / `MultiEdit` / `NotebookEdit` / `Bash` (Probe-G regression: plan mode sends them to the host); read-only tools approved as before | `plan_mode` |
+| Diff-preview gate would fire | deny (skipping it would approve an unseen write) | `diff_preview` |
+| Anything left before the outline gate (ExitPlanMode in `plan`, AskUserQuestion, prompting-mode tools, a #751-re-armed downgraded `auto`, other request types) | deny | `would_wait` |
+
+`plan-auto`'s ExitPlanMode stamp, the `ask_questions = false` deny and every attended path are unchanged. A denial goes on `auto_deny_queue` (`{"behavior":"deny","message":…}`, no `interrupt`), is never registered for a tap, logs WARN `permission.unattended_deny` (`tool_name`, `trigger_source`, `session_id`, `request_id`, `permission_mode`, `effective_permission_mode`, `reason`, `turn_denials`) and adds one `🔒 Unattended run — denied <tool>: nobody to approve it` note row per turn. The message tells Claude this is an unattended run and to continue without the action or stop and report (ExitPlanMode: give the complete plan as the final answer; AskUserQuestion: proceed on reasonable defaults). At the result, `usage["unattended"] = {"trigger", "mode", "denied": {tool: n}}` becomes the final's footer `🔒 unattended (cron:<id>) · denied Write ×2, ExitPlanMode — nobody to approve`, with a what-to-change hint once per trigger per process. `control_request.received` carries `unattended=`. **Live sessions:** the marker is part of the options equality, so a human reply into an idle cron process closes it (`options_changed`) and resumes attended; a `/steer` into a *busy* cron turn folds into the unattended process and that turn stays fail-closed. Background wake turns of the cron process stay unattended. Recovery re-runs (auto-continue, #631, #572) stay inside the run's options scope, so they stay unattended. `at:` / `loop:` runs are attended.
 
 #### The six-stage permission pipeline, and where Untether sits ([#749](https://github.com/littlebearapps/untether/issues/749))
 

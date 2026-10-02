@@ -1607,6 +1607,18 @@ class ClaudeStreamState:
     # #751 the first init has been compared with the request (once per
     # process: compaction re-emits `init`, live turns re-emit it too).
     permission_mode_checked: bool = False
+    # #835 the trigger source (`cron:<id>` / `webhook:<id>`) when nobody is
+    # present to answer a Telegram prompt; armed in `new_state()` from
+    # `EngineRunOptions.unattended_trigger` (control channel only). Every
+    # stage-6 request that would wait for a tap is denied instead.
+    unattended_trigger: str | None = None
+    # #835 the Untether permission mode the unattended run asked for
+    # (`plan-auto` kept distinct from `plan`; `bypassPermissions` under
+    # --dangerously-skip-permissions) — drives which approvals are denied.
+    unattended_mode: str | None = None
+    # #835 tools denied in the current turn (reset per turn, one entry per
+    # denial); finalised into `usage["unattended"]` at the result.
+    unattended_denials: list[str] = field(default_factory=list)
     # #383: the run's configured mode maps to CLI `plan` (`plan` or
     # `plan-auto`). Armed in `new_state()`; drives the approval caption.
     configured_plan_mode: bool = False
@@ -3265,6 +3277,147 @@ def _translate_model_fallback(
             detail=detail,
         ),
     ]
+
+
+# #835: tools that change files or run commands. In an unattended `plan` run
+# they are denied at stage 6 — plan mode sends them to the host on current
+# CLIs (`decision_reason_type: "mode"`, the Probe-G regression), and stage 6
+# would otherwise approve them with nobody having seen a plan.
+_UNATTENDED_PLAN_DENIED_TOOLS = frozenset(
+    {"Edit", "Write", "MultiEdit", "NotebookEdit", "Bash"}
+)
+# #835: modes where the CLI resolves permissions itself, so anything that
+# still reaches stage 6 is an ask-class request — an `ask` rule, a hook's
+# `ask`, a tool that requires user interaction, a critical-path rm, or (in
+# `auto`) the classifier falling back to prompting after repeated blocks
+# (probe 2026-10-02, CLI 2.1.287: `decision_reason_type: "classifier"`).
+_UNATTENDED_DENY_ALL_MODES = frozenset({"bypassPermissions", "auto"})
+
+
+def _unattended_autonomous_deny_reason(
+    state: ClaudeStreamState, tool_name: str, *, diff_gate: bool
+) -> str | None:
+    """Why stage 6's autonomous auto-approve must deny in an unattended run.
+
+    ``None`` means "approve as an attended run would" (e.g. Glob in `plan`,
+    anything in `plan-auto`). Never called for attended runs' decisions.
+    """
+    if state.unattended_trigger is None:
+        return None
+    mode = state.unattended_mode
+    if mode in _UNATTENDED_DENY_ALL_MODES:
+        return "ask_class"
+    if mode == "plan" and tool_name in _UNATTENDED_PLAN_DENIED_TOOLS:
+        return "plan_mode"
+    if diff_gate:
+        return "diff_preview"
+    return None
+
+
+def _unattended_deny_message(trigger: str, tool: str, reason: str) -> str:
+    kind = "webhook" if trigger.startswith("webhook:") else "scheduled"
+    head = f"Untether: this is an unattended {kind} run ({trigger}) — "
+    if tool == "ExitPlanMode":
+        return (
+            head + "nobody can approve a plan. Do not call ExitPlanMode again. "
+            "Finish by giving the complete plan as your final answer."
+        )
+    if tool == "AskUserQuestion":
+        return (
+            head + "nobody can answer questions. Proceed with reasonable "
+            "defaults and state your assumptions."
+        )
+    if reason == "diff_preview":
+        what = f"nobody can review this change, so {tool} was denied"
+    elif reason == "plan_mode":
+        what = (
+            f"it runs in plan mode and nobody can approve a plan, so {tool} was denied"
+        )
+    else:
+        what = f"nobody is available to approve {tool}, so it was denied"
+    return (
+        head + what + ". Continue only with actions that don't need approval; "
+        "if the task can't be finished without it, stop and report what you "
+        "would have done and why it needs approval."
+    )
+
+
+def _unattended_deny(
+    state: ClaudeStreamState,
+    factory: EventFactory,
+    request_id: str,
+    request: Any,
+    *,
+    reason: str,
+) -> list[UntetherEvent]:
+    """#835: deny a request an unattended run would otherwise wait on.
+
+    Queued on ``auto_deny_queue`` (written by ``_drain_auto_deny``), never
+    registered for a tap. One ``🔒`` note row per turn; every denial logs
+    ``permission.unattended_deny`` and is counted for the final's footer.
+    """
+    trigger = state.unattended_trigger or "?"
+    if isinstance(request, claude_schema.ControlCanUseToolRequest):
+        tool = getattr(request, "tool_name", "") or "unknown"
+    else:
+        tool = type(request).__name__.replace("Control", "").replace("Request", "")
+    message = _unattended_deny_message(trigger, tool, reason)
+    if tool == "ExitPlanMode":
+        _drop_exitplanmode_plan(
+            state,
+            request_id,
+            rejected=False,
+            reason="unattended",
+            session_id=factory.resume.value if factory.resume else None,
+        )
+    _REQUEST_TO_INPUT.pop(request_id, None)
+    _REQUEST_TO_TOOL_NAME.pop(request_id, None)
+    state.auto_deny_queue.append((request_id, message))
+    state.unattended_denials.append(tool)
+    logger.warning(
+        "permission.unattended_deny",
+        tool_name=tool,
+        trigger_source=trigger,
+        session_id=factory.resume.value if factory.resume else None,
+        request_id=request_id,
+        permission_mode=state.unattended_mode,
+        effective_permission_mode=state.effective_permission_mode,
+        reason=reason,
+        turn_denials=len(state.unattended_denials),
+    )
+    if len(state.unattended_denials) > 1:
+        return []
+    title = f"\N{LOCK} Unattended run — denied {tool}: nobody to approve it"
+    state.note_seq += 1
+    action_id = f"claude.unattended_deny.{state.note_seq}"
+    detail: dict[str, Any] = {"trigger": trigger, "tool_name": tool, "reason": reason}
+    return [
+        factory.action_started(
+            action_id=action_id, kind="note", title=title, detail=detail
+        ),
+        factory.action_completed(
+            action_id=action_id,
+            kind="note",
+            title=title,
+            ok=True,
+            level="warning",
+            detail=detail,
+        ),
+    ]
+
+
+def _unattended_usage_payload(state: ClaudeStreamState) -> dict[str, Any] | None:
+    """#835 ``usage["unattended"]`` for the turn (None without denials)."""
+    if state.unattended_trigger is None or not state.unattended_denials:
+        return None
+    denied: dict[str, int] = {}
+    for tool in state.unattended_denials:
+        denied[tool] = denied.get(tool, 0) + 1
+    return {
+        "trigger": state.unattended_trigger,
+        "mode": state.unattended_mode,
+        "denied": denied,
+    }
 
 
 def _permission_mode_mismatch_rows(
@@ -6728,6 +6881,7 @@ def _open_followup_turn(
     state.hook_rewake_hint = None
     # Per-turn scalars (see their field docs) start fresh for the new turn.
     state.safeguard = SafeguardTurn()
+    state.unattended_denials = []  # #835
     state.last_assistant_text = None
     state.last_exitplanmode_plan = None
     state.last_schedule_wakeup_arm_delay = None
@@ -7412,6 +7566,9 @@ def _translate_claude_event_base(
             # CompletedEvent and a live turn's TurnEvent — D-12.
             if (safeguard := _finalize_safeguard_turn(state, factory)) is not None:
                 usage["safeguard"] = safeguard
+            # #835: the turn's unattended denials, for the final's footer.
+            if (unattended := _unattended_usage_payload(state)) is not None:
+                usage["unattended"] = unattended
             if event.terminal_reason in claude_schema.CLAUDE_ABORTED_TERMINAL_REASONS:
                 # #806: an interrupted turn — the bridge renders it as
                 # cancelled rather than as an answer / error.
@@ -7548,6 +7705,7 @@ def _translate_claude_event_base(
                     tool_name=getattr(request, "tool_name", None),
                     session_id=factory.resume.value if factory.resume else None,
                     permission_mode=state.effective_permission_mode,
+                    unattended=state.unattended_trigger,  # #835
                 )
 
             # #793: record every ExitPlanMode plan body against its request;
@@ -7595,12 +7753,26 @@ def _translate_claude_event_base(
                     plan_approved = (
                         session_id is not None and session_id in _PLAN_EXIT_APPROVED
                     )
-                    if (
+                    diff_gate = bool(
                         run_opts
                         and run_opts.diff_preview is True
                         and tool_name in _DIFF_PREVIEW_TOOLS
                         and not plan_approved
-                    ):
+                    )
+                    # #835: an unattended run never waits for a tap and never
+                    # approves what an attended run would have asked about.
+                    unattended_reason = _unattended_autonomous_deny_reason(
+                        state, tool_name, diff_gate=diff_gate
+                    )
+                    if unattended_reason is not None:
+                        return _unattended_deny(
+                            state,
+                            factory,
+                            request_id,
+                            request,
+                            reason=unattended_reason,
+                        )
+                    if diff_gate:
                         logger.debug(
                             "control_request.diff_preview_gate",
                             request_id=request_id,
@@ -7687,6 +7859,15 @@ def _translate_claude_event_base(
                         _REQUEST_TO_INPUT[request_id] = getattr(request, "input", {})
                         state.auto_approve_queue.append(request_id)
                         return []
+
+            # #835: everything still unresolved here would wait for a Telegram
+            # tap (plan approval, question, prompting-mode tool, …). In an
+            # unattended run nobody can give it — deny now instead of holding
+            # the process (and a concurrency slot) until someone notices.
+            if state.unattended_trigger is not None:
+                return _unattended_deny(
+                    state, factory, request_id, request, reason="would_wait"
+                )
 
             # Gate ExitPlanMode while an outline is pending (Pause & Outline).
             # Both paths (outline written / not written) bypass the normal
@@ -8663,6 +8844,21 @@ class ClaudeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
                 "bypassPermissions"
                 if self.dangerously_skip_permissions is True
                 else normalise_claude_cli_mode(requested_mode)
+            )
+        # #835: an unattended (cron / webhook) run denies anything that would
+        # wait for a tap. Control channel only — the legacy `-p` path has no
+        # stage 6 to gate.
+        run_opts = get_run_options()
+        if (
+            requested_mode is not None
+            and run_opts is not None
+            and run_opts.unattended_trigger is not None
+        ):
+            state.unattended_trigger = run_opts.unattended_trigger
+            state.unattended_mode = (
+                "bypassPermissions"
+                if self.dangerously_skip_permissions is True
+                else requested_mode
             )
         # #383: a plan chat — the approval caption and the plan re-arm key
         # off the configured mode, never the CLI's current one.

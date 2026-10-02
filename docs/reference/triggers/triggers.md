@@ -161,7 +161,7 @@ Webhook IDs and paths must each be unique across all configured webhooks.
 | `timezone` | string\|null | `null` | IANA timezone name (e.g. `"Australia/Melbourne"`). Overrides `default_timezone`. |
 | `fetch` | object\|null | `null` | Pre-fetch step configuration (see [Data-fetch crons](#data-fetch-crons)). |
 | `run_once` | bool | `false` | Fire once then auto-disable — after the first dispatch attempt, even if its fetch aborted or the announce send failed. The cron stays in the TOML for history, but its fired state persists to `run_once_fired.json` (sibling of `untether.toml`) so it is filtered out on every subsequent config reload and restart until you remove it from the TOML entirely. Removing the cron from the TOML cleans its fired-state entry on the next reload. |
-| `permission_mode` | string\|null | `null` | Per-cron permission-mode override, validated for **Claude**: one of `default` (alias `manual`), `plan`, `plan-auto`, `auto`, `acceptEdits`, `dontAsk`, `bypassPermissions`. Wins over the chat's `/planmode` and the engine config default for this cron's run only. See [Cron permission modes](#cron-permission-modes). |
+| `permission_mode` | string\|null | `null` | Per-cron permission-mode override, validated for **Claude**: one of `default` (alias `manual`), `plan`, `plan-auto`, `auto`, `acceptEdits`, `dontAsk`, `bypassPermissions`. Wins over the chat's `/planmode` and the engine config default for this cron's run only. Set it on every Claude cron that should act unattended — requests that would wait for a tap are denied ([#835](https://github.com/littlebearapps/untether/issues/835)). See [Cron permission modes](#cron-permission-modes). |
 
 Either `prompt` or `prompt_template` is required. Cron IDs must be unique across all configured crons.
 
@@ -202,21 +202,35 @@ runs full auto); the deprecated Gemini runner passes it through as
     startup, and again when a reload changes the set of affected entries; set
     `permission_mode = "plan-auto"` to keep the old behaviour.
 
-**Unattended runs.** Nobody is there to tap Approve when a cron fires, so the
-modes that wait for a Telegram tap — `default`, `manual` and `acceptEdits` (tool
-approvals) and `plan` (plan approval) — can leave a scheduled run waiting.
-Untether flags these with WARNING `trigger.unattended_approval_risk`
+**Unattended runs (fail closed).** Nobody is there to tap Approve when a cron or
+webhook fires, so Claude requests that would wait for a Telegram tap are **denied**
+at once ([#835](https://github.com/littlebearapps/untether/issues/835)). Set an
+explicit `permission_mode` on every Claude cron that should act unattended: without
+one the run takes the chat's `/planmode`, then `[engines.claude] permission_mode`
+(`plan` by default), and a `plan` cron's plan approval and file-changing tools are
+denied. Webhooks have no `permission_mode` and always inherit. Per requested mode:
+
+| Mode | Denied in an unattended run |
+|---|---|
+| `default` / `manual` / `acceptEdits` | every tool the mode would ask about |
+| `plan` | `ExitPlanMode`, and `Edit` / `Write` / `MultiEdit` / `NotebookEdit` / `Bash` (read-only tools run as before) |
+| `plan-auto`, `dontAsk` | nothing new (the plan is still rubber-stamped) |
+| `auto`, `bypassPermissions` | every request that still reaches Untether — `ask` rules, hook `ask` decisions, tools that require user interaction, critical-path `rm`, and auto mode's prompting fallback after repeated classifier blocks |
+| any, with diff preview on | an edit that would wait for its diff approval |
+| any | `AskUserQuestion` (with "proceed on reasonable defaults") |
+
+Each denial logs WARNING `permission.unattended_deny` (`tool_name`, `trigger_source`,
+`permission_mode`, `reason` = `would_wait` / `plan_mode` / `ask_class` /
+`diff_preview`, `turn_denials`), shows one `🔒` row per turn and is listed in the
+final's footer. `at:` and `loop:` runs are attended and unchanged. Untether also
+flags such crons with WARNING `trigger.unattended_approval_risk`
 ([#751](https://github.com/littlebearapps/untether/issues/751)):
 
 - `phase=config` at startup and on reload, for crons that set such a mode
   explicitly (spent `run_once` crons are skipped);
-- `phase=dispatch` when a cron or webhook run actually goes to Claude in such a
-  mode, including one inherited from the chat preference or engine config —
-  logged once per trigger and mode.
-
-These are warnings only: the run still starts, and its approval buttons reach the
-chat as normal. For unattended crons use `plan-auto`, `auto`, `dontAsk` or
-`bypassPermissions`.
+- `phase=dispatch` (with `outcome=denied`) when a cron or webhook run actually goes
+  to Claude in such a mode, including one inherited from the chat preference or
+  engine config — logged once per trigger and mode.
 
 ### `[triggers.crons.fetch]`
 

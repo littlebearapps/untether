@@ -19,8 +19,20 @@ def test_no_context_returns_run_options_unchanged():
 
 def test_context_without_permission_mode_returns_run_options_unchanged():
     ro = EngineRunOptions(permission_mode="plan")
-    ctx = RunContext(trigger_source="cron:x")  # no permission_mode
+    ctx = RunContext(trigger_source="at:x")  # no permission_mode, attended
     assert _apply_trigger_overrides(ro, ctx, engine="claude") is ro
+
+
+def test_835_cron_without_permission_mode_only_marks_unattended():
+    """#835: a cron with no permission_mode keeps the chat's mode but is
+    marked unattended (the runner denies anything that would wait)."""
+    ro = EngineRunOptions(permission_mode="plan", model="opus")
+    ctx = RunContext(trigger_source="cron:x")
+    out = _apply_trigger_overrides(ro, ctx, engine="claude")
+    assert out is not None
+    assert out.permission_mode == "plan"
+    assert out.model == "opus"
+    assert out.unattended_trigger == "cron:x"
 
 
 def test_override_beats_chat_pref():

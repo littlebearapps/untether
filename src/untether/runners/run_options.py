@@ -26,6 +26,12 @@ class EngineRunOptions:
     # ``drop_unsupported_reasoning`` at resolution time. Only carries the
     # dropped value to the executor's one-line note; runners never read it.
     ignored_reasoning: str | None = None
+    # #835 — the trigger source (``cron:<id>`` / ``webhook:<id>``) when nobody
+    # is present to answer a Telegram prompt. Claude denies every request
+    # that would wait for a tap; other runners ignore it. Part of the options
+    # equality on purpose: a human reply into a still-live cron process is not
+    # written into it (``options_changed``) but resumes in an attended one.
+    unattended_trigger: str | None = None
 
 
 # Permission modes the Claude Code CLI accepts for ``--permission-mode``.

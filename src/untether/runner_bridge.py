@@ -1579,6 +1579,61 @@ def _safeguard_usage(usage: Mapping[str, Any] | None) -> dict[str, Any] | None:
     return raw
 
 
+# #835: unattended (cron / webhook) runs. The runner carries the turn's
+# denials on ``usage["unattended"]``; the final gets one footer line and, once
+# per trigger per process, what to change (bounded, oldest evicted first).
+_UNATTENDED_HINTED: dict[str, None] = {}
+_UNATTENDED_HINTED_MAX = 256
+_UNATTENDED_ASK_CLASS_MODES = frozenset({"auto", "bypassPermissions"})
+
+
+def _unattended_usage(usage: Mapping[str, Any] | None) -> dict[str, Any] | None:
+    raw = (usage or {}).get("unattended")
+    if not isinstance(raw, dict):
+        return None
+    denied = raw.get("denied")
+    if not isinstance(denied, dict) or not denied:
+        return None
+    return raw
+
+
+def _unattended_footer(unattended: Mapping[str, Any]) -> str:
+    """``🔒 unattended (cron:x) · denied Write (x2), ExitPlanMode — nobody to
+    approve`` plus, the first time a trigger hits it, what to change."""
+    trigger = str(unattended.get("trigger") or "?")
+    parts = []
+    denied: Mapping[str, Any] = unattended["denied"]
+    for tool, count in denied.items():
+        n = count if isinstance(count, int) and not isinstance(count, bool) else 1
+        parts.append(f"{tool} \N{MULTIPLICATION SIGN}{n}" if n > 1 else str(tool))
+    line = (
+        f"\n\N{LOCK} unattended ({trigger}) \N{MIDDLE DOT} denied "
+        f"{', '.join(parts)} \N{EM DASH} nobody to approve"
+    )
+    if trigger in _UNATTENDED_HINTED:
+        return line
+    _UNATTENDED_HINTED[trigger] = None
+    while len(_UNATTENDED_HINTED) > _UNATTENDED_HINTED_MAX:
+        _UNATTENDED_HINTED.pop(next(iter(_UNATTENDED_HINTED)))
+    if unattended.get("mode") in _UNATTENDED_ASK_CLASS_MODES:
+        hint = (
+            "these always ask (an ask rule, a hook, a tool that needs a person, "
+            "or auto mode falling back after repeated blocks) \N{EM DASH} "
+            "change the rule or run it attended"
+        )
+    elif trigger.startswith("webhook:"):
+        hint = (
+            "webhooks use the chat's permission mode \N{EM DASH} set /planmode "
+            "plan-auto or auto in this chat, or pre-approve the tools"
+        )
+    else:
+        hint = (
+            "set permission_mode on the cron (plan-auto, auto or "
+            "bypassPermissions), or pre-approve the tools"
+        )
+    return f"{line}\n\N{ELECTRIC LIGHT BULB} {hint}"
+
+
 def _safeguard_footer(safeguard: Mapping[str, Any], session_key: str | None) -> str:
     """``🛡️ safeguards stopped N response(s) · <outcome>`` plus, the first
     time a session sees one, a guidance link: the Cyber Verification
@@ -5558,6 +5613,7 @@ async def handle_message(
         # #814: a safeguard stop is never an error; a not-retried stop with
         # no answer gets an explanation instead of an empty body.
         safeguard = _safeguard_usage(completed.usage)
+        unattended = _unattended_usage(completed.usage)  # #835
         if (
             safeguard is not None
             and safeguard.get("outcome") == "not_retried"
@@ -5915,6 +5971,11 @@ async def handle_message(
                     safeguard,
                     f"{runner.engine}:{resume_value}" if resume_value else None,
                 ),
+            )
+
+        if unattended is not None:
+            final_rendered = _insert_footer_line(
+                final_rendered, _unattended_footer(unattended)
             )
 
         # Append usage footer for Claude Code engine runs

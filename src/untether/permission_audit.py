@@ -190,9 +190,10 @@ def log_permission_audit(
             reason=reason,
             config_path=path,
             note=(
-                "these crons run in a mode that waits for a Telegram tap; set"
+                "these crons run in a mode that asks for a Telegram tap, so"
+                " those approvals will be auto-denied (#835); set"
                 " permission_mode to plan-auto, auto, dontAsk or"
-                " bypassPermissions for unattended runs"
+                " bypassPermissions, or pre-approve the tools"
             ),
         )
     if _changed("invalid", audit.invalid):

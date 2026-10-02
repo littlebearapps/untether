@@ -637,7 +637,8 @@ Look for `handle.worker_failed`, `handle.runner_failed`, or `config.read.toml_er
 | `file_transfer.path_denied` | INFO | Path refused by a deny glob or hidden-path rule (WARNING when a symlink was involved) |
 | `browse.path_denied` | INFO | `/browse` refused a hidden or deny-globbed path |
 | `claude.permission_mode.mismatch` | WARNING | Claude Code started in a different permission mode from the one requested |
-| `trigger.unattended_approval_risk` | WARNING | A cron or webhook will run in a mode that waits for an approval tap |
+| `trigger.unattended_approval_risk` | WARNING | A cron or webhook will run in a mode that asks for approval — those requests will be denied (`outcome=denied`) |
+| `permission.unattended_deny` | WARNING | An unattended (cron / webhook) Claude run denied a request nobody could approve — set the trigger's `permission_mode` ([#835](https://github.com/littlebearapps/untether/issues/835)) |
 | `cost.run_outlier` | WARNING | A single run cost more than `[cost_budget] warn_run_above_usd` (default $20) |
 | `message.dropped` | DEBUG | Message from unrecognised chat silently dropped |
 | `cost_budget.exceeded` | ERROR | Run or daily cost exceeded budget |

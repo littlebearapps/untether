@@ -119,9 +119,9 @@ Add `run_once = true` to fire a cron exactly once, then auto-disable. Fired stat
 
 ### Autonomous crons in plan-mode chats (Claude) {#autonomous-crons}
 
-By default a cron inherits the chat's permission mode, so if you've set `/planmode on` on a Claude chat the scheduled run will pause for your approval too. That's rarely what you want for an 8 AM summariser that runs while you're asleep.
+By default a cron inherits the chat's permission mode, and if the chat has none, the engine default (`plan` unless you changed `[engines.claude] permission_mode`). Nobody is around to approve anything when a cron fires, so since v0.35.5rc17 an unattended Claude run **denies** anything that would wait for a tap: a plan approval, a question, or a tool the mode would ask about ([#835](https://github.com/littlebearapps/untether/issues/835)). A cron that inherits `plan` therefore ends with a plan instead of doing the work.
 
-Set `permission_mode = "auto"` on the cron to make that run autonomous without flipping the whole chat:
+**Always set an explicit `permission_mode` on a Claude cron that should act unattended.** Set `permission_mode = "auto"` (or `"bypassPermissions"`) to make that run autonomous without flipping the whole chat:
 
 ```toml
 [[triggers.crons]]
@@ -134,10 +134,19 @@ permission_mode = "auto"
 ```
 
 !!! warning "`auto` changed meaning in v0.35.5"
-    Before v0.35.5, `permission_mode = "auto"` meant plan mode with the plan gate auto-approved. It now selects Claude Code's own classifier-gated auto mode, which has no plan phase. Existing crons keep running but behave differently — set `"plan-auto"` to restore the previous behaviour. Untether logs one warning at startup, and again if a config reload changes the list, naming every engine setting and cron that uses `"auto"`. It also logs a warning (`trigger.unattended_approval_risk`) at startup for crons set to `default`, `manual`, `acceptEdits` or `plan`, which wait for a tap nobody gives, and logs the same warning when a cron or webhook fires into a chat whose mode will ask for approval. These are log lines only; the run is not stopped.
+    Before v0.35.5, `permission_mode = "auto"` meant plan mode with the plan gate auto-approved. It now selects Claude Code's own classifier-gated auto mode, which has no plan phase. Existing crons keep running but behave differently — set `"plan-auto"` to restore the previous behaviour. Untether logs one warning at startup, and again if a config reload changes the list, naming every engine setting and cron that uses `"auto"`.
 
-!!! warning "Unattended crons and prompting modes"
-    Since v0.35.5, `default`, `manual` and `acceptEdits` really do prompt: any tool call the mode doesn't cover waits for an Approve / Deny tap ([#749](https://github.com/littlebearapps/untether/issues/749)). A cron that fires while you're away will sit on that button. For unattended crons use `plan-auto`, `auto`, `dontAsk` or `bypassPermissions`, or pre-approve the tools the job needs.
+!!! warning "Unattended runs never wait for a tap"
+    A cron or webhook run has nobody to tap Approve, so Untether denies, at once, anything that would wait for one, and tells Claude to carry on without it or stop and report what it would have done ([#835](https://github.com/littlebearapps/untether/issues/835)). The progress message shows `🔒 Unattended run — denied <tool>: nobody to approve it`, the final lists every denial once (`🔒 unattended (cron:<id>) · denied Write ×2 — nobody to approve`), and each one logs `permission.unattended_deny`. What that means per mode:
+
+    - `default`, `manual`, `acceptEdits`: any tool the mode would ask about is denied.
+    - `plan`: the plan approval is denied (the run ends with the plan as its answer), and so are `Edit`, `Write`, `MultiEdit`, `NotebookEdit` and `Bash`. Use `plan-auto` if the cron should plan and then act.
+    - `auto`, `bypassPermissions`: routine work runs as before. Only requests the CLI still asks the host about are denied — an `ask` rule, a hook that answers `ask`, a tool that needs a person, a critical-path `rm`, and auto mode falling back to asking after repeated classifier blocks.
+    - With diff preview on in the chat, a file edit that would have shown its diff for approval is denied too.
+
+    Questions (`AskUserQuestion`) are denied in every mode, with a note to proceed on reasonable defaults. `/at` runs are not affected: you scheduled them from the chat, so their buttons work as usual. A reply to an unattended run's message continues in an attended session with normal buttons.
+
+    Untether also logs `trigger.unattended_approval_risk` at startup for crons set to `default`, `manual`, `acceptEdits` or `plan`, and when a cron or webhook fires into a chat whose mode would ask (`outcome=denied`). The startup message lists those crons too.
 
 Precedence (Claude): cron `permission_mode` > per-chat `/planmode` > engine config default. Every autonomous run logs `trigger.cron.permission_mode_override`. Valid values: `default` (alias `manual`), `plan`, `plan-auto`, `auto`, `acceptEdits`, `dontAsk`, `bypassPermissions`. For a Codex cron, `"safe"` selects Codex's read-only sandbox for that run; the deprecated Gemini engine passes the value through as `--approval-mode`, and OpenCode, Pi and AMP ignore the field ([#332](https://github.com/littlebearapps/untether/issues/332) tracks full coverage).
 

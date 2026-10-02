@@ -473,3 +473,55 @@ async def test_838_followup_injection_never_checks_guard(cleanup, monkeypatch) -
     _live, pipe = _install("sid-inj", idle=True)
     assert await inject_live_followup(_job("sid-inj")) is True
     assert len(pipe.sent) == 1
+
+
+async def test_835_human_followup_into_unattended_session_resumes_fresh(
+    cleanup,
+) -> None:
+    """#835: a human reply into a still-live cron process is not written into
+    it (its approvals would be denied); the options differ by the unattended
+    marker, so the session closes and the reply resumes attended."""
+    from untether.runners.run_options import EngineRunOptions
+
+    live, pipe = _install("sid-inj", idle=True)
+    live.state.spawn_run_options = EngineRunOptions(
+        permission_mode="default", unattended_trigger="cron:c1"
+    )
+    closed: list[bool] = []
+
+    async def aclose() -> None:
+        closed.append(True)
+
+    pipe.aclose = aclose  # type: ignore[method-assign]
+
+    async def human(job: ThreadJob) -> EngineRunOptions:
+        return EngineRunOptions(permission_mode="default")
+
+    assert await inject_live_followup(_job("sid-inj"), options_for=human) is False
+    assert pipe.sent == []
+    assert closed == [True]
+    assert live.state.live_close_reason == "options_changed"
+
+
+async def test_835_busy_steer_keeps_the_turn_unattended(cleanup) -> None:
+    """#835 (documented): a /steer into a *busy* cron turn is folded into the
+    unattended process — that turn's approvals stay denied (fail closed);
+    only an idle session is isolated (options_changed)."""
+    from untether.runners.claude import steer_into_session
+    from untether.runners.run_options import EngineRunOptions
+
+    live, pipe = _install("sid-inj", idle=False)
+    live.state.spawn_run_options = EngineRunOptions(unattended_trigger="cron:c1")
+    live.state.unattended_trigger = "cron:c1"
+    out = await steer_into_session(
+        "sid-inj", "also do X", command_uuid="u835", run_options=EngineRunOptions()
+    )
+    assert out == "steered"
+    assert len(pipe.sent) == 1
+    assert live.state.unattended_trigger == "cron:c1"
+
+    live.state.turn_open = False  # idle now → isolated
+    out = await steer_into_session(
+        "sid-inj", "again", command_uuid="u836", run_options=EngineRunOptions()
+    )
+    assert out == "options_changed"

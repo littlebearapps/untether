@@ -10605,3 +10605,82 @@ def test_819_compaction_empty_body_shapes() -> None:
         "🗜️ Context compacted · 6.3k tokens before (manual)"
     )
     assert _compaction_empty_body({"pre_tokens": True}) == "🗜️ Context compacted"
+
+
+# ===========================================================================
+# #835: unattended denials footer
+# ===========================================================================
+
+
+async def _run_unattended(usage: dict, transport: "FakeTransport") -> str:
+    runner = ScriptRunner(
+        [Return(answer="Couldn't write it.", usage=usage)],
+        engine="claude",
+        resume_value=f"s-835-{uuid.uuid4().hex[:6]}",
+    )
+    cfg = ExecBridgeConfig(
+        transport=transport, presenter=MarkdownPresenter(), final_notify=True
+    )
+    await handle_message(
+        cfg,
+        runner=runner,
+        incoming=IncomingMessage(channel_id=123, message_id=10, text="go"),
+        resume_token=None,
+    )
+    return transport.send_calls[-1]["message"].text
+
+
+@pytest.mark.anyio
+async def test_835_final_footer_lists_unattended_denials(monkeypatch) -> None:
+    import untether.runner_bridge as rb
+
+    monkeypatch.setattr(rb, "_UNATTENDED_HINTED", {})
+    text = await _run_unattended(
+        {
+            "unattended": {
+                "trigger": "cron:nightly",
+                "mode": "default",
+                "denied": {"Write": 2, "ExitPlanMode": 1},
+            }
+        },
+        FakeTransport(),
+    )
+    assert "\N{LOCK} unattended (cron:nightly)" in text
+    assert "denied Write \N{MULTIPLICATION SIGN}2, ExitPlanMode" in text
+    assert "nobody to approve" in text
+    assert "set permission_mode on the cron" in text
+
+
+@pytest.mark.anyio
+async def test_835_footer_hint_once_per_trigger(monkeypatch) -> None:
+    import untether.runner_bridge as rb
+
+    monkeypatch.setattr(rb, "_UNATTENDED_HINTED", {})
+    usage = {"unattended": {"trigger": "cron:c", "mode": "plan", "denied": {"Bash": 1}}}
+    first = await _run_unattended(usage, FakeTransport())
+    second = await _run_unattended(usage, FakeTransport())
+    assert "\N{ELECTRIC LIGHT BULB}" in first
+    assert "\N{LOCK} unattended (cron:c)" in second
+    assert "\N{ELECTRIC LIGHT BULB}" not in second
+
+
+def test_835_footer_hint_by_mode_and_trigger_kind(monkeypatch) -> None:
+    import untether.runner_bridge as rb
+
+    monkeypatch.setattr(rb, "_UNATTENDED_HINTED", {})
+    ask = rb._unattended_footer(
+        {"trigger": "cron:a", "mode": "auto", "denied": {"Bash": 1}}
+    )
+    assert "always ask" in ask
+    hook = rb._unattended_footer(
+        {"trigger": "webhook:w", "mode": "default", "denied": {"Write": 1}}
+    )
+    assert "webhooks use the chat's permission mode" in hook
+    assert rb._unattended_usage({"unattended": {"denied": {}}}) is None
+    assert rb._unattended_usage(None) is None
+
+
+@pytest.mark.anyio
+async def test_835_no_footer_without_denials() -> None:
+    text = await _run_unattended({}, FakeTransport())
+    assert "unattended" not in text

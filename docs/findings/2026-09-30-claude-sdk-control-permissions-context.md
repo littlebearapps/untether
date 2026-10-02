@@ -627,3 +627,22 @@ dir. Scripts: lane-c5 scratch (not committed).
 | **P1b** `manual` | `--permission-mode manual`, haiku and opus, fresh | `default` both | `normalise_claude_cli_mode("manual") == "default"`; `manual` requested + `default` reported is no mismatch |
 | **P2** allowlist vs classifier | `--permission-mode auto --model opus`, Bash `rm -rf <dir>` with and without `--allowedTools Bash` | target **inside** the cwd: runs in both, no classifier call (auto's in-project fast path). Target **outside** the cwd: in **both** runs the CLI sends the command to the classifier (`claude-sonnet-5`, then the session model, system prompt "You are a security monitor for autonomous AI coding agents", transcript `{"Bash":"rm -rf …"}`); the fake's reply isn't a valid verdict, so both fail closed (`permission_denials` lists the Bash call, tool_result "… auto mode cannot determine the safety of Bash right now") and the target survives | the allowlist does **not** bypass auto mode's classifier → `--allowedTools` stays for `auto` (plan §4.4 fallback); residual documented: on a run the CLI downgrades to `default`, Bash/Read/Edit/Write stay pre-approved at stage 5 (#835) |
 | plan-mode write | `--permission-mode plan --allowedTools Bash,Read,Edit,Write --model haiku --tools Bash,Read,Edit,Write,ExitPlanMode`; step 1 `Write` to the plan file named in the plan-mode reminder (`$HOME/.claude/plans/<slug>.md`), step 2 `Write` to `<cwd>/code.txt`; host denies every `can_use_tool` | plan-file `Write`: **no** `can_use_tool`, the file is created (the CLI allows it internally). `code.txt` `Write`: `can_use_tool` with `decision_reason_type:"mode"`, `display_name:"Write"`, `permission_suggestions: null`, **despite** `Write` being in `--allowedTools` (the mode check runs before the allow rules); denied → not created | confirms the #383 addendum's Probe-G regression and bounds its fix: the plan file never reaches stage 6, so a stage-6 rule on `decision_reason_type == "mode"` in plan chats needs no plan-file exemption |
+
+## Addendum (2026-10-02, rc17 implementation): #835 step-0 — what reaches stage 6 in `auto`
+
+Zero token cost. CLI **2.1.287** on lba-1, fake Messages API on 127.0.0.1 (same harness shape as
+§Q3a), Untether's control-channel argv (no `-p`): `--output-format stream-json --input-format
+stream-json --verbose --model opus --allowedTools Bash,Read,Edit,Write --permission-mode auto
+--permission-prompt-tool stdio --setting-sources local --strict-mcp-config`, `HOME` a temp dir,
+dummy `ANTHROPIC_API_KEY`. The host answers every `can_use_tool` with `deny`. Script: scratch
+(`/tmp/r17-835-probe/probe.py`, not committed).
+
+| Probe | Setup | Observation | Consequence for #835 |
+|---|---|---|---|
+| **A1** routine tools | `--tools Bash,Read,Write,Glob,Grep`; model calls Glob, Grep, Read, then Write inside the cwd | `init.permissionMode = "auto"`; **zero** `can_use_tool`, zero classifier calls; the Write ran | routine work never reaches Untether in `auto` — denying everything that does costs nothing for it |
+| **A2** forced classifier blocks | `--tools Bash`; the model calls `rm -rf /tmp/…/fN` outside the cwd 25 times; every classifier call gets an unusable verdict (fails closed) | calls 1–2: denied by the CLI itself ("Auto mode could not evaluate this action…"), no `can_use_tool`. From the **3rd consecutive block** on, every blocked action arrives as `can_use_tool` with `decision_reason_type: "classifier"` and `decision_reason: "N consecutive actions were blocked. Please review the transcript before continuing. … Latest blocked action: …"` (21 requests for 25 blocks); `requires_user_interaction` null. Result `success`, 25 `permission_denials` | auto mode's prompting fallback **does** surface at stage 6, where Untether's autonomous handler approves it today (attended gap → [#882](https://github.com/littlebearapps/untether/issues/882)). Decision: unattended `auto` denies every stage-6 request (README ⚑11-D5) |
+
+Fleet cross-check (`docs/plans/v0.35.5-rc17/_835-FLEET-AUDIT.md`, 2026-10-02): ~200 unattended
+`auto` / `bypassPermissions` cron runs on 5 hosts produced zero stage-6 requests and zero tap
+waits, so the deny-all policy changes no observed cron outcome.
+

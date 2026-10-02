@@ -256,3 +256,62 @@ async def test_cron_on_project_runs_the_project_default_engine(tmp_path) -> None
     await loop_mod.run_main_loop(cfg, poller)
     assert len(claude.calls) == 1
     assert codex.calls == []
+
+
+# ---------------------------------------------------------------------------
+# #835: enforcement shares the predicate with this warning
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("source", "expected"),
+    [
+        ("cron:c1", "cron:c1"),
+        ("webhook:gh", "webhook:gh"),
+        ("at:tok", None),
+        ("loop:tok", None),
+        (None, None),
+    ],
+)
+def test_835_apply_unattended_trigger_matrix(
+    source: str | None, expected: str | None
+) -> None:
+    from untether.telegram.loop import _apply_trigger_overrides
+
+    ctx = RunContext(trigger_source=source)
+    ro = EngineRunOptions(permission_mode="plan", model="opus", diff_preview=True)
+    out = _apply_trigger_overrides(ro, ctx, engine="claude")
+    assert out is not None
+    assert out.unattended_trigger == expected
+    assert (out.permission_mode, out.model, out.diff_preview) == ("plan", "opus", True)
+    built = _apply_trigger_overrides(None, ctx, engine="claude")
+    if expected is None:
+        assert built is None
+    else:
+        assert built is not None and built.unattended_trigger == expected
+
+
+def test_835_unattended_marker_never_logged_as_override() -> None:
+    from untether.telegram.loop import _apply_trigger_overrides
+
+    with capture_logs() as logs:
+        _apply_trigger_overrides(None, RunContext(trigger_source="cron:q"))
+    assert logs == []
+
+
+def test_835_warning_and_enforcement_share_predicate() -> None:
+    """The dispatch WARN fires for exactly the sources enforcement marks,
+    and now says the outcome is a denial."""
+    from untether.context import unattended_trigger
+
+    for source in ("cron:a", "webhook:b", "at:c", "loop:d"):
+        ctx = RunContext(trigger_source=source, permission_mode="default")
+        loop_mod._UNATTENDED_RISK_WARNED.clear()
+        with capture_logs() as logs:
+            _note_unattended_approval_risk(
+                ctx, "claude", EngineRunOptions(permission_mode="default"), _no_default
+            )
+        warned = _risk(logs)
+        assert bool(warned) == (unattended_trigger(ctx) is not None), source
+        if warned:
+            assert warned[0]["outcome"] == "denied"

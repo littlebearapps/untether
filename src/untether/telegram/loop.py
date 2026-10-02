@@ -14,7 +14,7 @@ from ..commands import list_command_ids
 from ..config import ConfigError
 from ..config_watch import ConfigReload
 from ..config_watch import watch_config as watch_config_changes
-from ..context import RunContext
+from ..context import RunContext, unattended_trigger
 from ..directives import DirectiveError
 from ..ids import RESERVED_CHAT_COMMANDS, RESERVED_COMMAND_IDS
 from ..logging import get_logger
@@ -208,12 +208,18 @@ def _apply_trigger_overrides(
         for name in _TRIGGER_OVERRIDE_FIELDS
         if (value := getattr(context, name, None)) is not None
     }
-    if not fields:
+    # #835: derived, not configured — the shared predicate marks cron and
+    # webhook runs so the runner denies anything that would wait for a tap.
+    # Never logged as an "override".
+    derived: dict[str, object] = {}
+    if (source := unattended_trigger(context)) is not None:
+        derived["unattended_trigger"] = source
+    if not fields and not derived:
         return run_options
     from dataclasses import replace
 
     base = run_options if run_options is not None else EngineRunOptions()
-    new_options = replace(base, **fields)
+    new_options = replace(base, **fields, **derived)
     if log:
         for name, value in fields.items():
             previous = getattr(run_options, name) if run_options is not None else None
@@ -230,9 +236,6 @@ def _apply_trigger_overrides(
 # #751: (trigger_source, mode) pairs already warned about, per process.
 _UNATTENDED_RISK_WARNED: set[tuple[str, str]] = set()
 _UNATTENDED_RISK_WARNED_MAX = 256
-# `at:` is excluded on purpose: a human scheduled it from the chat and is
-# around to tap (Decision 7). `loop:` re-fires follow a human's /loop.
-_UNATTENDED_TRIGGER_PREFIXES = ("cron:", "webhook:")
 
 
 def _note_unattended_approval_risk(
@@ -242,16 +245,16 @@ def _note_unattended_approval_risk(
     engine_default_mode: Callable[[], str | None],
 ) -> None:
     """#751: warn once per (trigger, mode) when a cron or webhook run goes to
-    Claude in a mode that waits for a Telegram tap nobody is there to give.
+    Claude in a mode that asks for a Telegram tap nobody is there to give.
 
     Sees the real resolved mode — the cron's own, else the chat/topic
     preference, else engine config — which the config-time audit can't.
-    Log only: the run's approval buttons already reach the chat with a push.
+    Log only: since #835 those requests are denied at once (``outcome``).
     """
     if context is None or engine != "claude":
         return
-    source = context.trigger_source
-    if not source or not source.startswith(_UNATTENDED_TRIGGER_PREFIXES):
+    source = unattended_trigger(context)
+    if source is None:
         return
     mode = run_options.permission_mode if run_options is not None else None
     if context.permission_mode is not None:
@@ -280,6 +283,8 @@ def _note_unattended_approval_risk(
         mode=mode,
         source=origin,
         waits_for=waits_for,
+        # #835: nothing waits any more — such requests are denied at once.
+        outcome="denied",
     )
 
 
