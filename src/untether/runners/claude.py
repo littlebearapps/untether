@@ -1740,6 +1740,8 @@ class ClaudeStreamState:
     # #785: top-level background tasks that ended while an ``unknown`` turn
     # was open — the CLI starts the wake turn on an agent's result before any
     # task event names it, so the turn is attributed at its completion.
+    # #825: also while a ``task_finished`` turn is open — the CLI folds a
+    # second finish into that turn, so it is added to its header.
     turn_ended_tasks: list[tuple[str, str]] = field(default_factory=list)
     # #785: tasks whose finish a wake turn already delivered; a later turn
     # opened only by their notification is the same finish, not news.
@@ -5337,14 +5339,18 @@ def _note_task_end(state: ClaudeStreamState, task: ClaudeTask) -> None:
     """#785: attribute a top-level background task's end to the wake turn it
     belongs to — the open ``unknown`` turn (retro-attributed at completion)
     or an ``unknown`` turn that completed moments ago (paired: the task's own
-    notification turn that follows is then flagged as already announced)."""
+    notification turn that follows is then flagged as already announced).
+    #825: a task ending while a ``task_finished`` turn is open (one it didn't
+    open) is collected too and added to that turn's header at completion."""
     if not state.live_mode or state.completed_turns == 0:
         return
     if not _is_top_level_background(task) or task.task_id in state.announced_task_ids:
         return
     if state.turn_open:
-        if state.turn_reason == "unknown" and all(
-            task.task_id != tid for tid, _ in state.turn_ended_tasks
+        if (
+            state.turn_reason in ("unknown", "task_finished")
+            and task.task_id not in state.turn_detail.get("task_ids", [])
+            and all(task.task_id != tid for tid, _ in state.turn_ended_tasks)
         ):
             state.turn_ended_tasks.append((task.task_id, _task_label(task)))
         return
@@ -6863,6 +6869,32 @@ def translate_claude_event(
                     session_id=event.session_id,
                     turn=state.turn,
                     task_ids=[tid for tid, _ in state.turn_ended_tasks],
+                )
+            elif state.turn_reason == "task_finished" and (
+                late := [
+                    (tid, label)
+                    for tid, label in state.turn_ended_tasks
+                    if tid not in detail.get("task_ids", [])
+                ]
+            ):
+                # #825: another task finished while this wake turn ran — the
+                # CLI folded its notification into the turn, so name it too.
+                detail["tasks"] = [
+                    *detail.get("tasks", []),
+                    *(label for _, label in late),
+                ]
+                detail["task_ids"] = [
+                    *detail.get("task_ids", []),
+                    *(tid for tid, _ in late),
+                ]
+                detail["late_tasks"] = [label for _, label in late]
+                detail.pop("already_announced", None)  # a new finish is news
+                _mark_announced(state, (tid for tid, _ in late))
+                logger.info(
+                    "claude.turn.late_tasks_attributed",
+                    session_id=event.session_id,
+                    turn=state.turn,
+                    task_ids=[tid for tid, _ in late],
                 )
             elif (
                 state.turn_reason == "unknown"

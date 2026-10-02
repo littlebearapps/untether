@@ -4575,8 +4575,24 @@ def _turn_title(evt: TurnEvent) -> str | None:
     if evt.reason == "task_finished" and tasks:
         if len(tasks) == 1:
             return f"{base} — {tasks[0][:80]}"
-        return f"\N{BELL} {len(tasks)} background tasks finished"
+        # #825: name them (first three, 40 chars each) — a bare count left
+        # the user guessing which finished.
+        names = " · ".join(_short_label(t) for t in tasks[:_TURN_TITLE_MAX_NAMES])
+        more = len(tasks) - _TURN_TITLE_MAX_NAMES
+        suffix = f" (+{more} more)" if more > 0 else ""
+        return f"\N{BELL} {len(tasks)} background tasks finished — {names}{suffix}"
     return base
+
+
+_TURN_TITLE_MAX_NAMES = 3
+_TURN_TITLE_NAME_CHARS = 40
+
+
+def _short_label(label: str) -> str:
+    label = " ".join(label.split())
+    if len(label) <= _TURN_TITLE_NAME_CHARS:
+        return label
+    return label[: _TURN_TITLE_NAME_CHARS - 1].rstrip() + "\N{HORIZONTAL ELLIPSIS}"
 
 
 @dataclass(slots=True)
@@ -4783,6 +4799,23 @@ class FollowupTurnRouter:
                 "live_turn.retro_attributed",
                 turn=ctx.turn,
                 reason=ctx.reason,
+                header=ctx.header,
+            )
+        elif (
+            ctx.reason == "task_finished"
+            and evt.reason == "task_finished"
+            and (evt.detail or {}).get("late_tasks")
+        ):
+            # #825: another task finished during this wake turn — name every
+            # task in the header. Keep ``reply_to`` (the opening task's
+            # anchor); a turn that opened as an already-announced repeat now
+            # carries news, so it pushes.
+            ctx.header = _turn_header(evt)
+            ctx.detail = dict(evt.detail or {})
+            ctx.notify = True
+            logger.info(
+                "live_turn.late_tasks_attributed",
+                turn=ctx.turn,
                 header=ctx.header,
             )
         completed = CompletedEvent(

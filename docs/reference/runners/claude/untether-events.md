@@ -309,7 +309,10 @@ A turn that opened `unknown` (the CLI often starts it on a background agent's
 result before any task event) completes as `task_finished` if a top-level task
 ends during it (`detail.retro_attributed`), or is paired with a task ending
 within 30 s after it. The task's own notification turn that follows carries
-`detail.already_announced` and the bridge delivers it without a push.
+`detail.already_announced` and the bridge delivers it without a push. A
+top-level task that ends while a `task_finished` turn is open is appended to
+that turn's `detail.tasks` / `task_ids` at completion and listed in
+`detail.late_tasks` (#825); the bridge re-heads the final with every name.
 `TurnEvent(completed)` carries the turn's `detail`; a task's own
 notification turn also carries `detail.announced_turns`, the wake turn(s) its
 end was paired with, so the bridge files an unattributed ack under the right

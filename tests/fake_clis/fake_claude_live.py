@@ -905,6 +905,37 @@ def scenario_multi_agent_acks(first: dict) -> None:
     serve_followups()
 
 
+def scenario_two_tasks_one_wake_turn(first: dict) -> None:
+    """#825 (lba-1, rc14): two background tasks; the second ends while the
+    first one's wake turn is open, and the CLI folds its notification into
+    that turn. ``FAKE_CLAUDE_EXTRA_TURN=1``: the second notification lands
+    after the turn instead, and the CLI gives it its own (repeat) turn."""
+    extra = os.environ.get("FAKE_CLAUDE_EXTRA_TURN") == "1"
+    init()
+    for task_id, tool_id in (("a1", "toolu_a1"), ("a2", "toolu_a2")):
+        tool_use("Bash", tool_id, {"command": "sleep", "run_in_background": True})
+        start_bg(task_id, tool_id)
+        tool_result(tool_id, f"Command running in background with ID: {task_id}.")
+    text("Two jobs running.")
+    result("Two jobs running.", turns=3)
+    if wait_idle_or_eof(WAKE_S) is None:
+        shutdown()
+    end_bg("a1")
+    init()
+    text("Job one is done; checking the other.")
+    _end_quietly("a2")
+    if not extra:
+        _notify("a2", "toolu_a2")
+    text("Both jobs finished: B printed its report.")
+    result("Both jobs finished: B printed its report.", turns=2)
+    if extra:
+        _notify("a2", "toolu_a2")
+        init()
+        text("a2 finished (again).")
+        result("a2 finished (again).")
+    serve_followups()
+
+
 def _read_ack(turn: int, task_id: str, answer: str) -> None:
     """#813: a wake turn that collects a finished task's result with one
     ``Read`` of its output file (CLI >= 2.1.277) and then acks it."""
@@ -2388,6 +2419,7 @@ _SCENARIOS = {
     "followup_launches_bg": scenario_followup_launches_bg,
     "followup_blocks": scenario_followup_blocks,
     "multi_agent_acks": scenario_multi_agent_acks,
+    "two_tasks_one_wake_turn": scenario_two_tasks_one_wake_turn,
     "five_agent_interleaved": scenario_five_agent_interleaved,
     "quiet_batch_report": scenario_quiet_batch_report,
     "acks_only_batch": scenario_acks_only_batch,

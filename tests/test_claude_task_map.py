@@ -977,3 +977,50 @@ def test_872_declared_wait_until_wakeup() -> None:
     state.bg_bash_timeouts["toolu_b"] = 30.0
     wait = declared_wait_until(state, grace_s=0)
     assert wait is not None and wait.source == "scheduled_wakeup"
+
+
+# ── #825: late task ends during a wake turn ─────────────────────────────────
+
+
+def _live_two_bash(state: ClaudeStreamState) -> None:
+    state.live_mode = True
+    _feed(state, _started_bash("b1", "toolu_b1", desc="job A"))
+    _feed(state, _started_bash("b2", "toolu_b2", desc="job B"))
+    _feed(state, _result("two jobs running"))
+    assert state.completed_turns == 1
+
+
+def test_825_late_end_in_task_finished_turn_is_collected() -> None:
+    state = ClaudeStreamState()
+    _live_two_bash(state)
+    _feed(state, _updated("b1", "completed"))
+    _feed(state, _notification("b1", "toolu_b1", "completed"))
+    _feed(state, _init())
+    assert state.turn_reason == "task_finished"
+    # The opening task re-reporting its end mid-turn is never "late".
+    _feed(state, _notification("b1", "toolu_b1", "completed"))
+    _feed(state, _updated("b2", "completed"))
+    assert state.turn_ended_tasks == [("b2", "job B")]
+    events = _feed(state, _result("both done"))
+    completed = [e for e in events if getattr(e, "phase", None) == "completed"]
+    assert completed[0].detail["tasks"] == ["job A", "job B"]
+    assert completed[0].detail["late_tasks"] == ["job B"]
+    assert "b2" in state.announced_task_ids
+
+
+def test_825_late_end_in_followup_turn_is_not_attributed() -> None:
+    """A follow-up turn is the user's own reply — a task ending during it
+    leaves its detail alone (negative)."""
+    state = ClaudeStreamState()
+    _live_two_bash(state)
+    state.injected_commands["cmd-1"] = time.monotonic()
+    state.pending_command_uuid = "cmd-1"
+    _feed(state, _init())
+    assert state.turn_reason == "followup"
+    _feed(state, _updated("b2", "completed"))
+    assert state.turn_ended_tasks == []
+    events = _feed(state, _result("answered"))
+    completed = [e for e in events if getattr(e, "phase", None) == "completed"]
+    assert completed[0].reason == "followup"
+    assert "tasks" not in completed[0].detail
+    assert "late_tasks" not in completed[0].detail

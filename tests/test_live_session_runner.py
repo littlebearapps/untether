@@ -39,6 +39,8 @@ _ENV = (
     "FAKE_CLAUDE_STDIN_LOG",
     # #751
     "FAKE_CLAUDE_INIT_PERMISSION_MODE",
+    # #825
+    "FAKE_CLAUDE_EXTRA_TURN",
 )
 
 
@@ -383,6 +385,45 @@ async def test_828_bg_subagent_denial_never_labels_the_wake_turn() -> None:
     (blocked,) = [e for e in logs if e["event"] == "claude.hook.blocking_exit"]
     assert blocked["hook_event"] == "PreToolUse" and blocked["turn_open"] is False
     assert blocked["started_turn"] == 2
+
+
+# ── #825: a task finishing during another task's wake turn is named ──────
+
+
+async def test_825_second_task_ending_in_wake_turn_is_named() -> None:
+    with capture_logs() as logs:
+        events = await _collect("two_tasks_one_wake_turn", until=2)
+    turns = _turns(events)
+    assert [(t.phase, t.reason) for t in turns] == [
+        ("started", "task_finished"),
+        ("completed", "task_finished"),
+    ]
+    assert _labels(turns[0]) == ["bg a1"]
+    done = turns[1].detail
+    assert done["tasks"] == ["bg a1", "bg a2"]
+    assert done["task_ids"] == ["a1", "a2"]
+    assert done["late_tasks"] == ["bg a2"]
+    assert "already_announced" not in done
+    (late,) = [e for e in logs if e["event"] == "claude.turn.late_tasks_attributed"]
+    assert late["task_ids"] == ["a2"]
+
+
+async def test_825_extra_cli_turn_for_late_task_is_already_announced() -> None:
+    """When B's notification lands after A's turn, the CLI opens B's own turn —
+    B was ended (and named) inside A's turn, so that repeat doesn't push."""
+    os.environ["FAKE_CLAUDE_EXTRA_TURN"] = "1"
+    events = await _collect("two_tasks_one_wake_turn", until=3)
+    turns = _turns(events)
+    assert [(t.phase, t.reason) for t in turns] == [
+        ("started", "task_finished"),
+        ("completed", "task_finished"),
+        ("started", "task_finished"),
+        ("completed", "task_finished"),
+    ]
+    assert turns[1].detail["late_tasks"] == ["bg a2"]
+    for repeat in turns[2:]:
+        assert repeat.detail["task_ids"] == ["a2"]
+        assert repeat.detail.get("already_announced") is True
 
 
 # ── #816: a /continue run releases its session registries ──────────────────

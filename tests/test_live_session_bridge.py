@@ -442,6 +442,82 @@ async def test_router_already_announced_turn_is_not_pushed() -> None:
     assert notify is False
 
 
+async def test_825_router_reheads_task_finished_turn_with_late_tasks() -> None:
+    """#825: a wake turn that opened as an already-announced repeat for task
+    A, during which task B finished, is delivered naming both — and pushed,
+    because B's finish is news. Its reply anchor is kept."""
+    rec = _Recorder()
+    router = _router(rec)
+    opened = {"tasks": ["job A"], "task_ids": ["a1"], "already_announced": True}
+    await router.on_turn(_turn("started", detail=opened))
+    assert router.current is not None and router.current.notify is False
+    reply_before = router.current.reply_to
+    await router.on_turn(
+        _turn(
+            "completed",
+            ok=True,
+            answer="both done",
+            detail={
+                "tasks": ["job A", "job B"],
+                "task_ids": ["a1", "a2"],
+                "late_tasks": ["job B"],
+            },
+        )
+    )
+    _turn_no, _ok, _answer, header, notify, reply = rec.delivered[0]
+    assert header == (
+        "\N{BELL} 2 background tasks finished \N{EM DASH} job A \N{MIDDLE DOT} job B"
+    )
+    assert notify is True
+    assert reply == reply_before.message_id
+
+
+async def test_825_router_keeps_header_without_late_tasks() -> None:
+    rec = _Recorder()
+    router = _router(rec)
+    detail = {"tasks": ["job A"], "task_ids": ["a1"]}
+    await router.on_turn(_turn("started", detail=detail))
+    await router.on_turn(
+        _turn(
+            "completed",
+            ok=True,
+            answer="done",
+            detail={"tasks": ["job A", "job B"], "task_ids": ["a1", "a2"]},
+        )
+    )
+    assert rec.delivered[0][3] == "\N{BELL} Background task finished \N{EM DASH} job A"
+
+
+@pytest.mark.parametrize(
+    ("answer", "actions", "expected"),
+    [
+        ("B's report: " + "findings. " * 40, 0, "long_answer"),
+        ("checked B", 1, "tools"),
+        ("B finished (again).", 0, "fold"),  # the accepted #785 trade-off
+    ],
+)
+def test_825_turn_after_late_attribution_is_delivered_when_substantive(
+    answer: str, actions: int, expected: str
+) -> None:
+    """#825 review: B was named in A's turn, so B's own CLI turn arrives
+    ``already_announced``. A substantive B turn still breaks out as its own
+    message; only a short restatement folds into the status message."""
+    from untether.background_status import wake_fold_decision
+
+    assert (
+        wake_fold_decision(
+            reason="task_finished",
+            ok=True,
+            answer=answer,
+            substantive_actions=actions,
+            already_announced=True,
+            live_tasks_remaining=0,
+            batch_announced=True,
+        )
+        == expected
+    )
+
+
 async def test_router_completed_without_detail_keeps_open_header() -> None:
     rec = _Recorder()
     router = _router(rec)
@@ -587,7 +663,22 @@ async def test_router_followup_turn_anchors_to_its_message() -> None:
         (
             "task_finished",
             {"tasks": ["a", "b"]},
-            "\N{BELL} 2 background tasks finished",
+            "\N{BELL} 2 background tasks finished \N{EM DASH} a \N{MIDDLE DOT} b",
+        ),
+        (
+            # #825: first three names, then a count of the rest.
+            "task_finished",
+            {"tasks": ["a", "b", "c", "d", "e"]},
+            "\N{BELL} 5 background tasks finished \N{EM DASH} a \N{MIDDLE DOT} b"
+            " \N{MIDDLE DOT} c (+2 more)",
+        ),
+        (
+            # #825: each name is cut to 40 characters.
+            "task_finished",
+            {"tasks": ["x" * 60, "job B"]},
+            "\N{BELL} 2 background tasks finished \N{EM DASH} "
+            + "x" * 39
+            + "\N{HORIZONTAL ELLIPSIS} \N{MIDDLE DOT} job B",
         ),
         ("followup", {}, None),
     ],
