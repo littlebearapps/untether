@@ -1779,12 +1779,18 @@ class ClaudeStreamState:
     # #825: also while a ``task_finished`` turn is open — the CLI folds a
     # second finish into that turn, so it is added to its header.
     turn_ended_tasks: list[tuple[str, str]] = field(default_factory=list)
-    # #825 R17-821: model requests (distinct top-level assistant message ids)
-    # in the open turn, and per task in ``turn_ended_tasks`` the count when it
+    # #825 R17-821: model requests sent in the open turn (see
+    # ``turn_request_sent``), and per task in ``turn_ended_tasks`` the count when it
     # ended. A task that ended after the turn's last request began was never
     # seen by the model in this turn — the CLI wakes Claude for it next.
     turn_model_requests: int = 0
     turn_last_message_id: str | None = None
+    # #825 re-test: a request is counted when the CLI *sends* it — after a
+    # top-level tool_result — not when its first block streams back (without
+    # partial messages that's the end of a long thinking block, so a task
+    # ending mid-generation looked seen). True until that request's message
+    # id arrives, so the id doesn't count it twice.
+    turn_request_sent: bool = False
     turn_ended_at_request: dict[str, int] = field(default_factory=dict)
     # #825: late-ended tasks the model couldn't have seen in the turn they
     # ended in — ``(task_id, label, at)``; the next non-empty ``unknown``
@@ -6942,6 +6948,7 @@ def _open_followup_turn(
     state.turn_ended_tasks = []
     state.turn_model_requests = 0
     state.turn_last_message_id = None
+    state.turn_request_sent = False
     state.turn_ended_at_request = {}
     state.turn_detail = detail
     state.unattributed_turn_completed_at = None
@@ -7341,8 +7348,23 @@ def translate_claude_event(
                 and (message_id := event.message.id)
                 and message_id != state.turn_last_message_id
             ):
-                # #825: one more model request in this turn.
+                # #825: one more model request in this turn — unless it
+                # was already counted when the CLI sent it (below).
                 state.turn_last_message_id = message_id
+                if state.turn_request_sent:
+                    state.turn_request_sent = False
+                else:
+                    state.turn_model_requests += 1
+            elif (
+                state.turn_open
+                and isinstance(event, claude_schema.StreamUserMessage)
+                and event.parent_tool_use_id is None
+                and not state.turn_request_sent
+                and _is_tool_result_only(event)
+            ):
+                # #825: the CLI sends the next request with this tool result,
+                # and with it any task notification queued so far.
+                state.turn_request_sent = True
                 state.turn_model_requests += 1
             out.extend(
                 evt

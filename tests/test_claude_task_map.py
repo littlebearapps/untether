@@ -1044,6 +1044,62 @@ def test_825_late_end_after_last_request_is_deferred_not_named() -> None:
     assert state.turn_model_requests == 1
 
 
+def _tool_result(tool_id: str) -> dict:
+    return {
+        "type": "user",
+        "message": {
+            "role": "user",
+            "content": [
+                {"type": "tool_result", "tool_use_id": tool_id, "content": "ok"}
+            ],
+        },
+    }
+
+
+def _wake_turn_with_check(state: ClaudeStreamState, *, b_ends: str) -> list:
+    """A's wake turn: the model runs one check (a tool call), the CLI sends
+    the next request with its result, and the final message streams back.
+    ``b_ends`` = when job B ends: ``"before_result"`` or ``"mid_generation"``
+    (after that request was sent, before its first block arrived)."""
+    _live_two_bash(state)
+    _feed(state, _updated("b1", "completed"))
+    _feed(state, _notification("b1", "toolu_b1", "completed"))
+    _feed(state, _init())
+    _feed(state, _tool_use("Bash", "toolu_check", {"command": "ps"}))
+    if b_ends == "before_result":
+        _feed(state, _updated("b2", "completed"))
+    _feed(state, _tool_result("toolu_check"))
+    if b_ends == "mid_generation":
+        _feed(state, _updated("b2", "completed"))
+    _feed(state, _text("msg_final", "A done; B ..."))
+    return _feed(state, _result("A done; B ..."))
+
+
+def test_825_late_end_during_slow_first_block_is_deferred() -> None:
+    """R17RT (live re-test): B ended while the turn's last request was still
+    thinking — after the tool result that sent it, ~19 s before its first
+    block arrived. The model never saw B, so it is deferred, not named."""
+    state = ClaudeStreamState()
+    events = _wake_turn_with_check(state, b_ends="mid_generation")
+    completed = [e for e in events if getattr(e, "phase", None) == "completed"]
+    assert completed[0].detail["tasks"] == ["job A"]
+    assert "late_tasks" not in completed[0].detail
+    assert [t[:2] for t in state.pending_late_tasks] == [("b2", "job B")]
+    # The request sent with the tool result isn't counted again on arrival.
+    assert state.turn_model_requests == 2
+
+
+def test_825_late_end_before_tool_result_is_seen() -> None:
+    """B ended before the tool result that sent the next request: its
+    notification went with that request, so the turn names B."""
+    state = ClaudeStreamState()
+    events = _wake_turn_with_check(state, b_ends="before_result")
+    completed = [e for e in events if getattr(e, "phase", None) == "completed"]
+    assert completed[0].detail["tasks"] == ["job A", "job B"]
+    assert completed[0].detail["late_tasks"] == ["job B"]
+    assert state.pending_late_tasks == []
+
+
 def test_825_late_end_in_followup_turn_is_not_attributed() -> None:
     """A follow-up turn is the user's own reply — a task ending during it
     leaves its detail alone (negative)."""
