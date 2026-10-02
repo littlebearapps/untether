@@ -557,7 +557,7 @@ The session is quarantined (`forced_teardown_after_result`) only when the close 
 - **#829 B2:** an Untether-initiated close (`max_hold`, `cancel`, `new`, `drain`, `options_changed`) of a session whose turn was closed isn't quarantined when the CLI exits **rc 0 on the SIGINT**. Probed 6/6 resumable, no dangling `tool_use`. It logs `claude.live_session.exited_after_sigint stopped_clean=True`, and the decision is taken after the SIGINT wait;
 - `abs_cap` (it can close mid-turn), the `error` close, a non-zero exit and a CLI that also ignores SIGINT (the SIGTERM path) keep the quarantine.
 
-#631 empty-resume recovery remains the backstop. `/cancel`, `/new` and drain/restart close idle live sessions the same way with a notice naming the stopped tasks; a turn in progress is still killed by `/cancel`.
+The #631 empty-resume recovery remains the backstop. `/cancel`, `/new` and drain/restart close idle live sessions the same way with a notice naming the stopped tasks; a turn in progress is still killed by `/cancel`.
 
 **Notices.** The `closing` notice never promises "reply to continue". Examples: `⏳ Closing session — 2 background tasks still running with no progress for 30 min: A, B. Stopping them.`, `⏹ Stopped 1 background task: A.`, `⏳ Untether is restarting — stopping …`. Once the process has gone, the lifecycle emits one `closed` event (`{"reason", "quarantined", "tasks"}`, logged as `claude.live_session.closed`). If the closing notice named tasks, the bridge follows it with one silent line:
 

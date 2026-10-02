@@ -471,14 +471,14 @@ Integration tests are run by Claude Code via Telegram MCP tools (see "Automated 
 | Runner bridge / auto-continue / no-op resume recovery (`runner_bridge.py`, `runners/claude.py`) | B-RESUME, U1-U4 (Claude), U6, U7 |
 | Live sessions / follow-up injection / scheduler (`runners/claude.py`, `runner_bridge.py`, `live_followup.py`, `scheduler.py`) | B-LIVE-1…7, RC12-4…7, C1-C6, S7, U1-U4 (Claude), R15-6 |
 | Telegram transport (`telegram/*.py`) | T1-T10, S7, S8, R15-9-1 (benign edit/delete 400s at startup) |
-| Control channel (`claude_control.py`) | C1-C6, T8, S9, R15-5, R15-6 |
-| Config/settings (`settings.py`) | O1-O9, S5, upgrade path, R15-13a…d (settings parse cache) |
+| Control channel (`claude_control.py`) | C1-C6, T8, S9, R15-5, R15-6, R17-13a/b, R17-16 |
+| Config/settings (`settings.py`) | O1-O9, S5, upgrade path, R15-13a…d (settings parse cache), R17-18a…d (content-keyed watcher) |
 | Cost tracking (`cost_tracker.py`) | B1-B3, U8 |
-| Progress/formatting (`markdown.py`, `telegram/render.py`) | U3, T6, T7, S4, S8, RC12-8, RC12-9 |
+| Progress/formatting (`markdown.py`, `telegram/render.py`) | U3, T6, T7, S4, S8, RC12-8, RC12-9, R17-06a…d, R17-07a…e, R17-08a/b |
 | Commands (`commands/*.py`) | Tier 7 (all), specific command test |
 | `/browse` + shared path checks (`commands/browse.py`, `telegram/files.py`) | Q5, U10, T2, T3, R15-2 |
 | File transfer (`file_transfer.py`) | T2, T3, T5, R15-3 |
-| Voice (`voice.py`) | T1, R15-11 (vocabulary; supersedes RC12-10), R15-10 (endpoint) |
+| Voice (`voice.py`) | T1, R15-11 (vocabulary; supersedes RC12-10), R15-10 (endpoint), R17-19a…c (URL userinfo masked) |
 | Topics (`topics.py`, `topic_state.py`) | O1, O5, O6, O8, R17-14 (dev-ws forum) |
 | Directives (`directives.py`) | T9, T10 |
 | Shutdown (`shutdown.py`) | S3, B4 |
@@ -806,122 +806,6 @@ Setup: `[watchdog] post_result_bg_max_hold = 60` in `~/.untether-dev/untether.to
 | R15-21e | `bg_hold_rearm_on_progress = false`; `/new`; repeat 21a | closing notice at ≈60 s despite progress: `… still running at the background hold limit: … Stopping it.`; then the `closed` line | `stdin_closed reason=max_hold`; no `hold_rearmed`; the agent ignores EOF, so `close_grace_expired` then `exited_after_sigint stopped_clean=True` |
 | R15-21f | `/new`; background Bash printing `tick N` every 2 s for 3 min | no close while ticking; wake turn at the end | `hold_rearmed source=bash_output` |
 
-### #820 — `lifecycle_exited` says how the live session ended
-
-Chat: `ut-dev: Claude Code` (`-5284581592`). Logs: `journalctl --user -u untether-dev -o cat --since "15 min ago" | grep -E "stdin_closed|lifecycle_exited|exited_after_sigint|forced_teardown"`. Precondition for R17-02c: **no async hooks configured** in the dev project (an evident hook stretches the close grace to 35 s, `/cancel` gives up after 20 s and the line then correctly logs `cancelled`). Restore the config and `/new` afterwards. Regression: B-LIVE-1, B-LIVE-6, R15-21b.
-
-| ID | Steps | Expected Telegram | Log signatures |
-|---|---|---|---|
-| R17-02a | `/new`; "Reply with OK." then wait ≈90 s | `OK`; nothing else | `stdin_closed reason=idle_no_tasks` → `lifecycle_exited reason=exited_after_close close_reason=idle_no_tasks` |
-| R17-02b | with `[watchdog] post_result_bg_max_hold = 60`: `/new`; background Bash `python3 -c "import time; time.sleep(600)"`, reply STARTED (= R15-21b) | R15-21b's closing + `↩️ Reply to continue…` lines | `lifecycle_exited reason=exited_after_close close_reason=max_hold` |
-| R17-02c | `/new`; start a background Agent ("read 20 files one by one, summarise each"), reply STARTED; then `/cancel` | `⏹ Stopped 1 background task: …` | `close_grace_expired` → `exited_after_sigint … stopped_clean=True` → `lifecycle_exited reason=sigint close_reason=cancel` (only with an async hook evident: `reason=cancelled`) |
-
-### #872 — declared waits hold the live session
-
-Setup: `[watchdog] post_result_bg_max_hold = 60` in `~/.untether-dev/untether.toml` (hot-reloads, but it is read **per spawn**, so every row starts with `/new`; restore `1800` and `/new` at the end). Chat: `ut-dev: Claude Code` (`-5284581592`). Logs: `journalctl --user -u untether-dev -o cat --since "15 min ago" | grep -E "hold_extended|stdin_closed|task.ended|lifecycle_exited"`. Regression: B-LIVE-1…7, R15-21a/b/f, C1–C6, U1–U4 (Claude).
-
-| ID | Steps | Expected Telegram | Log signatures |
-|---|---|---|---|
-| R17-01a | `/new`; "Run in the background with `run_in_background: true` and `timeout: 300000`: `sleep 180; echo WATCH-DONE`. Reply STARTED, then tell me what it printed when it finishes." | `STARTED`; **no** `⏳ Closing session` at ≈60 s; ≈180 s: `🔔 Background task finished` turn quoting `WATCH-DONE` | `claude.live_session.hold_extended source=bash_timeout declared_s=300.0`; **no** `stdin_closed reason=max_hold` before `claude.task.ended` |
-| R17-01b | `/new`; same, but **no** `timeout` and `sleep 600` (silent) | at ≈60–90 s: `⏳ Closing session — 1 background task still running with no progress for 1 min: … Stopping it.` then `↩️ Reply to continue in the same session.` | `stdin_closed reason=max_hold`; no `hold_extended` (the R15-21b negative guard, unchanged) |
-| R17-01c | `/new`; `timeout: 90000` with `sleep 600` | no Untether close at 60 s; at ≈90 s the **CLI** stops the task and Claude reports it was stopped at its background time limit (native notice) | `claude.task.ended` (stopped) at ≈90 s **before** any `stdin_closed`; then a wake turn — proves CLI enforcement on 2.1.287 |
-| R17-01d *(opportunistic)* | `/new`; ask for a self-paced `/loop` whose next wake-up is ≈2 min out (e.g. "every 2 min print the time, 2 iterations") | `⏰ Scheduled wake-up` at ≈2 min, no closing notice at 60 s; `/cancel` afterwards | `hold_extended source=scheduled_wakeup`; no `stdin_closed reason=max_hold` before the wake turn |
-| R17-01e | `bg_hold_declared_waits = false`; `/new`; repeat R17-01a | closing notice at ≈60 s | `stdin_closed reason=max_hold`; no `hold_extended` |
-
-### #828 — a background subagent's sync denial is not a hook rewake
-
-Chat: `ut-dev: Claude Code` (`-5284581592`). Tiers: `uv run pytest` + U1–U4/U6/U7 (Claude), B-LIVE-1/2, RC14-6 (positive control), R17-828.
-
-| ID | Steps | Expected Telegram | Log signatures |
-|---|---|---|---|
-| R17-828 | In the dev project's `.claude/settings.json` add a sync `PreToolUse` hook, matcher `Bash`, command `jq -r .tool_input.command \| grep -q 'R17DENY' && { echo "R17 denied" >&2; exit 2; } \|\| exit 0`. `/new`; send: *"Launch ONE background agent (run_in_background) that first runs `sleep 15`, then the Bash command `echo R17DENY`, then `python3 -c "import time; time.sleep(30)"`, then reports 'agent done'. End your turn immediately."* (the `sleep 15` makes the denial land while the parent idles) | the launch reply; ≈45–60 s later one pushed `🔔 Background task finished — <agent description>` (never `🪝 Hook feedback — PreToolUse`) | `journalctl --user -u untether-dev -o cat --since "10 minutes ago" \| grep -E "claude.hook.(rewake_signal\|blocking_exit)\|claude.turn.(started\|completed\|hook_rewake)"` → ≥1 `claude.hook.blocking_exit hook_event=PreToolUse turn_open=False started_turn=2` (N+1 for the launch turn N); **zero** `claude.hook.rewake_signal` and zero `claude.turn.hook_rewake` for the run. Then re-run RC14-6 (Stop `asyncRewake`, `sleep 90`): `claude.hook.rewake_signal … started_turn=1` → `claude.turn.hook_rewake attributed=open` → pushed `🪝 Hook feedback — Stop`. Remove both hooks afterwards |
-
-### #825 / #876 — late finishes and auto-backgrounded tasks get their own 🔔 header
-
-Chat: `ut-dev: Claude Code` (`-5284581592`). Logs: `journalctl --user -u untether-dev -o cat --since "15 min ago" | grep -E "late_tasks_attributed|claude.turn.started|live_turn.(started|fold_decision|late_tasks_attributed)|claude.task.backgrounded|notification_ignored|stdin_closed"`. Tiers: `uv run pytest` + U1–U4/U6/U7 (Claude) + B-LIVE-1/2/5 + RC12-6 + RC13-1/2.
-
-| ID | Steps | Expected Telegram | Log signatures |
-|---|---|---|---|
-| R17-825a | `/new`; *"Start two background Bash jobs with run_in_background: `python3 -c "import time; time.sleep(20); print('A')"` described 'job A' and `python3 -c "import time; time.sleep(26); print('B')"` described 'job B'. End your turn now. When job A finishes, run `python3 -c "import time; time.sleep(12)"` in the foreground, then report on whatever has finished."* | either `🔔 2 background tasks finished — job A · job B` (B ended during A's wake turn) or two separate `🔔 Background task finished` messages (the CLI gave B its own turn) — never a single-name header over a body reporting B | first shape: `claude.turn.late_tasks_attributed task_ids=[…]` + `live_turn.late_tasks_attributed`; any later turn for B is `live_turn.started push=False` and its `live_turn.fold_decision` is `fold` only for a short restatement (`tools` / `long_answer` = delivered as its own message). Second shape: `claude.turn.started reason=task_finished` ×2 |
-| R17-825b *(#876)* | `/new`; *"Run this in the FOREGROUND (not run_in_background) with the Bash tool's `timeout: 10000`: `sleep 40; echo FG done`. When it finishes, tell me what it printed."* (the CLI moves a foreground command to the background at its timeout). Optional steer variant: `/steer` first, send the 60 s foreground command, then "what's 2+2?" ~10 s later; `/queue` afterwards | `🔔 Background task finished — <command description>` ≈30 s after the reply (not `🔔 Claude continued`); the session is not idle-closed while it runs | `claude.task.backgrounded source=task_updated` (or `snapshot`); no `claude.turn.notification_ignored … owned_by_subagent=False`; `claude.live_session.stdin_closed` only after `claude.task.ended`. If no `claude.task.backgrounded` appears (the CLI didn't move it), record *not exercised* — the fakes cover the logic |
-
-### #821 — cost lines say when background agents' spend is included
-
-Chat: `ut-dev: Claude Code` (`-5284581592`). Pre-step: set `[cost_budget] warn_run_above_usd = 0.01` in `~/.untether-dev/untether.toml` (hot-reloads; re-read per check) and note the old value. Tiers: `uv run pytest` + U1–U4 (Claude; U8 for the footer) + B-LIVE-1/2; U1 on Codex to confirm no `bg_*` fields and an unchanged footer.
-
-| ID | Steps | Expected Telegram | Log signatures |
-|---|---|---|---|
-| R17-821 | `/new`; *"Launch TWO background agents (run_in_background). Each reads README.md and CHANGELOG.md, runs `python3 -c "import time; time.sleep(25)"`, then replies one sentence. End your turn now."* Then, as a negative control, `/new` and `what's 2+2?`. Restore `warn_run_above_usd` | launch final ends `💸 This run cost $X (over the $0.01 alert) — includes spend by 2 background agents since the previous reply`; each 🔔 wake final likewise (count = agents active in that window); with `show_api_cost` on, the 💰 line shows `· incl. 2 bg agents`. The 2+2 run: `💸 … (over the $0.01 alert)` with **no** background clause | `journalctl --user -u untether-dev -o cat --since "15 minutes ago" \| grep -E "cost.turn_delta\|cost.run_outlier"` → launch `bg_agents=2`; wake turns `bg_agents>=1 bg_agents_ended>=1`; the 2+2 run `bg_agents=0` |
-
-### #835 — unattended cron / webhook runs fail closed
-
-Chat: `ut-dev: Claude Code` (`-5284581592`). Tiers: `uv run pytest`, C1–C6, T8, S9, R15-7a/c (dispatch WARN, now `outcome=denied`). Logs: `journalctl --user -u untether-dev -o cat --since "15 minutes ago" | grep -E "permission.unattended_deny|control_request.received|control_response.auto_denied|approval_pending|unattended_approval_risk|options_changed|runner.completed"`.
-
-Setup (dev only; back up first: `cp ~/.untether-dev/untether.toml ~/.untether-dev/untether.toml.bak-r17-11`; never `cat` the config): set `[triggers] enabled = true` and add `[triggers.server] port = 9878` (127.0.0.1:9876 / 9877 are taken on lba-1 by other processes and staging). Enabling triggers needs **one** `systemctl --user restart untether-dev` from a terminal — hot reload doesn't start the scheduler or the webhook server. Crons use `project = "claude-test"`, `chat_id = -5284581592`, `run_once = true`, `schedule = "* * * * *"` (fires at the next minute boundary; append them with a heredoc and watch for `triggers.manager.updated`). Dev pre-approves Bash/Read, so recipes use **Write outside the project**.
-
-| ID | Setup / steps | Expected (Telegram) | Logs |
-|---|---|---|---|
-| R17-11a | cron `r17-default` (`permission_mode = "default"`, prompt `use the Write tool to create /tmp/r17-835a.txt containing x, then say DONE`) | No approval buttons; progress row `🔒 Unattended run — denied Write: nobody to approve it`; the final explains it couldn't write and ends `🔒 unattended (cron:r17-default) · denied Write — nobody to approve` + `💡 set permission_mode on the cron …`; `/tmp/r17-835a.txt` absent | `control_request.received tool_name=Write unattended=cron:r17-default` → `permission.unattended_deny tool_name=Write reason=would_wait permission_mode=default` → `control_response.auto_denied`; **no** `subprocess.approval_pending`; `runner.completed` within ~2 min |
-| R17-11b | cron `r17-plan` (`permission_mode = "plan"`, prompt `plan how to create /tmp/r17-835b.txt containing y, then do it`) | Final contains the plan; footer `denied ExitPlanMode` (plus `Write` if the model tried anyway); file absent | `permission.unattended_deny tool_name=ExitPlanMode reason=would_wait` (one, not a loop); any `Write`/`Bash` → `reason=plan_mode` |
-| R17-11c | Precondition: Claude chat `/planmode off`, `/config` shows `acceptEdits`. Webhook `r17-wh` (`path = "/hooks/r17"`, `auth = "bearer"`, `secret = "r17-local-only"`, `project = "claude-test"`, `chat_id = -5284581592`, `prompt_template = "use the Write tool to create /tmp/r17-835c.txt containing x, then say DONE"`). Fire: `curl -sS -X POST http://127.0.0.1:9878/hooks/r17 -H "Authorization: Bearer r17-local-only" -H "Content-Type: application/json" -d '{}'` → `202` | Same as R17-11a, with `⚡ webhook:r17-wh` and `🔒 unattended (webhook:r17-wh)`; hint `💡 webhooks use the chat's permission mode …` | `trigger_source=webhook:r17-wh reason=would_wait permission_mode=acceptEdits` |
-| R17-11d | Guard: Claude chat `/planmode off`, send R17-11a's prompt by hand (`/tmp/r17-835d.txt`) | Approve/Deny buttons appear (C1); tap ❌ Deny | **no** `permission.unattended_deny`; `control_request.received … unattended=None` |
-| R17-11e | Cron `r17-live` (`permission_mode = "default"`, prompt `start a background Bash task with run_in_background: python3 -c "import time; time.sleep(90)", then use the Write tool to create /tmp/r17-835e.txt containing x, then say STARTED`). While the background task runs (≤ 90 s), **reply** to its final: `try the write once more` | The cron's Write is denied (`🔒` row); the reply closes the cron process (`⚙️ Settings changed — …`) and resumes the session attended: a Write **button** appears — tap ❌ Deny | `claude.live_session.options_changed`, then `runner.start resume=<r17-live session>`; no `unattended_deny` for the reply's run |
-| R17-11f | cron `r17-pa` (`permission_mode = "plan-auto"`), same prompt as R17-11b with `/tmp/r17-835f.txt` | Regression: plan auto-approved and the Write goes through as attended `plan-auto` does today; no buttons, no `🔒` line | `control_request.auto_approve_exit_plan_mode`; no `unattended_deny`, no `approval_pending` |
-| R17-11g *(optional)* | cron `r17-auto` (`permission_mode = "auto"`, prompt `list the files in this project, then say DONE`) | Normal answer, no `🔒` line (nothing reaches stage 6 in auto for routine work) | no `unattended_deny` |
-
-Cleanup: restore the backup (`cp …bak-r17-11 …toml && rm …bak-r17-11`), restart dev once (triggers back to disabled), `/planmode on`, `rm -f /tmp/r17-835*.txt`. Offline evidence: `tests/test_unattended_fail_closed.py`, the step-0 auto probe in `docs/findings/2026-09-30-claude-sdk-control-permissions-context.md` (addendum 2026-10-02). Post-rollout (7 days, all hosts): `journalctl --user -u untether -o cat --since "7 days ago" | grep -E "permission.unattended_deny|permission_mode.mismatch"` — each hit is a cron to fix in config.
-
-### #836 — unattended-approval crons in the startup message
-
-Chat: the dev bot's startup chat. Tiers: Tier 7 Q16 (`/ping` with a cron), U1 (startup message for Claude/Codex/OpenCode). Logs: `journalctl --user -u untether-dev -o cat --since "5 minutes ago" | grep -E "unattended_approval_risk|startup.unattended_line_failed|auto_semantics_changed"`.
-
-Setup (dev only; back up first: `cp ~/.untether-dev/untether.toml ~/.untether-dev/untether.toml.bak-r17-12`): `[triggers] enabled = true` (+ `[triggers.server] port = 9878`), far-future crons (`schedule = "0 0 1 1 *"`): `r15-default` (`project = "claude-test"`, `permission_mode = "default"`), `r15-plan` (`claude-test`, `plan`), `r15-auto` (`claude-test`, `auto`), `r15-codex` (no project, `auto` — resolves to the Codex global default), `r17-a` (`claude-test`, `acceptEdits`), `r17-slip` (`claude-test`, **no** `permission_mode`; dev's `[engines.claude] permission_mode` is `plan`).
-
-| ID | Steps | Expected |
-|---|---|---|
-| R17-12a | `systemctl --user restart untether-dev` from a terminal (never from inside a bot session) | Startup message: `_triggers:_ \`enabled (0 webhooks, 6 crons)\`` then `_unattended approvals (auto-denied):_ \`cron:r15-default (default), cron:r15-plan (plan), cron:r17-a (acceptEdits)\` +1 more` (the fourth is `cron:r17-slip (inherits plan)`); no `auto` line; `r15-codex` absent. Journal: exactly one `trigger.unattended_approval_risk phase=config reason=startup`; no `startup.unattended_line_failed` |
-| R17-12b | Give `r17-slip` `permission_mode = "plan-auto"` and remove `r15-default`, `r15-plan`, `r17-a`; restart | No `unattended approvals` line; the triggers line still present |
-| R17-12c | Q16 `/ping` in the Claude chat | Unchanged trigger summary |
-
-Cleanup: restore the backup, restart once.
-
-### #743 — per-cron `model` and `reasoning`
-
-Claude chat `-5284581592`, Codex chat `-4929463515`. Tiers: Tier 7 Q16, R5 (trigger source in footer), R1 (hot-reload cron add), Tier 4 O2 (reasoning in the footer), B-LIVE-x. Logs: `journalctl --user -u untether-dev -o cat --since "<t0>" | grep -E 'trigger\.cron\.(model|reasoning|permission_mode)_override|triggers?\.(manager\.updated|init_failed)|config\.reload\.triggers_failed|options_changed|runner\.completed'`.
-
-Setup: back up (`cp ~/.untether-dev/untether.toml ~/.untether-dev/untether.toml.bak-r17-20`; never `cat` it); `[triggers] enabled = true` (+ `[triggers.server] port = 9878`) needs one dev restart from a terminal if it was off. Append crons with a heredoc; each reload logs `triggers.manager.updated`. Crons: `chat_id = -5284581592`, `run_once = true`, `schedule = "* * * * *"`. Preflight: `/model set opus` in the Claude chat.
-
-| ID | Steps | Expected |
-|---|---|---|
-| R17-20a | cron `r17-20a`: `engine = "claude"`, `model = "haiku"`, `permission_mode = "plan-auto"`, `prompt = "reply with the single word CRONMODEL"`; wait for the minute | Footer shows a Haiku model + `⏰ cron:r17-20a`; `trigger.cron.model_override trigger_source=cron:r17-20a chat_model=opus trigger_model=haiku engine=claude`; `runner.completed … model=claude-haiku-…` |
-| R17-20b | Right after, send `reply with the single word CHAT` | Footer shows Opus; no `trigger.cron.*_override` for this run; `/model` unchanged |
-| R17-20c | Two crons in the same minute: `r17-20c1` (`model = "haiku"`), `r17-20c2` (no model), both `engine = "claude"`, `permission_mode = "plan-auto"` | c1's footer Haiku, c2's Opus; exactly one `trigger.cron.model_override` (c1) |
-| R17-20d | cron `r17-20d`: `engine = "claude"`, `reasoning = "low"`, `permission_mode = "plan-auto"`, same prompt | Footer shows effort `low`; `trigger.cron.reasoning_override … trigger_reasoning=low` |
-| R17-20e | **Validation:** append cron `r17-20e` with `engine = "codex"`, `reasoning = "max"` | `config.reload.triggers_failed` (WARN) naming `reasoning` and the allowed levels; the previous crons stay active (`/ping` still lists them). Remove the entry → the next reload succeeds |
-| R17-20f | cron `r17-20f`: `model = "haiku"`, `permission_mode = "plan-auto"`, prompt `start a background Bash task with run_in_background: python3 -c "import time; time.sleep(90)", then reply STARTED`. While it runs, **reply** to its final: `what model are you` | `claude.live_session.options_changed`, the `⚙️ Settings changed — stopping 1 background task …` notice, and the reply's footer shows Opus (resumed session) |
-| R17-20g *(gated — needs Nathan's OK)* | cron with `model = "r17-nonexistent"` | An error final names the model problem, not a hang; no retry loop |
-| R17-20h | Codex chat: cron `engine = "codex"`, `chat_id = -4929463515`, `model = <a model from the Codex catalogue>`, `reasoning = "low"` | Footer shows that model + effort `low`; `runner.completed engine=codex model=…` |
-| R17-20i | `/config → ⏰ Triggers` in the Claude chat while `r17-20a` is configured | Row shows `model=haiku · ` and (for `r17-20d`) `effort=low · ` before `last` |
-
-Cleanup: restore the backup (`cp …bak-r17-20 …toml && rm …bak-r17-20`), `/model clear`, restart once if triggers were toggled; check `run_once_fired.json` holds only r17 ids (removing the crons cleans them on the next reload, #317).
-
-### #826 — `/new` and `/cancel` scoped to the forum topic
-
-Venue: the **`untether-dev-ws`** workspace-mode instance (forum supergroup `-1003669503877`, `topics.enabled = true`, `scope = "main"`, `session_mode = "chat"`, default engine Codex; same editable `.venv` as dev). `@untether_dev_bot` has no forum chat. After the code lands: `systemctl --user restart untether-dev-ws` from a terminal (never `untether.service`). Logs: `journalctl --user -u untether-dev-ws -o cat --since "10 minutes ago" | grep -E "new\.cancel_scope|new\.cancelled_running|cancel\.requested|loop\.cancelled_for_chat|session\.summary|runner\.completed"`.
-
-Pre: Telegram MCP `list_topics` on `-1003669503877`; pick two topics **A** and **B** (create `r17-a` / `r17-b` with `create_forum_topic` if needed). The long run, sent in A: `run the shell command "sleep 120" and then reply DONE`. Note A's and B's thread ids.
-
-| ID | Steps | Expected (chat) | Logs |
-|---|---|---|---|
-| R17-14a | while A runs: `/new` in **B** | B: `🧹 cleared stored sessions for this topic.` (no "cancelled run"); A later finishes with `DONE` | `new.cancel_scope scoped=True cancelled=0 skipped_other_threads=1 thread_id=<B>`; no `cancel.requested`, no `session.summary cancelled=True` for A |
-| R17-14b | start A again; `/new` in **General** | General: `🧹 cleared stored sessions for you in this chat.` (or `no stored sessions to clear for this chat.`); A finishes with `DONE` | `new.cancel_scope … thread_id=None scoped=True cancelled=0 skipped_other_threads=1` |
-| R17-14c | start A again; `/cancel` (no reply) in **B** | B: `nothing running in this topic.`; A finishes | no `cancel.requested` |
-| R17-14d | while A runs: `/cancel` (no reply) in **A** | A's run ends cancelled | `cancel.requested thread_id=<A>` |
-| R17-14e | start A again; `/new` in **A** | A: `🧹 cancelled run and cleared stored sessions for this topic.` | `new.cancel_scope scoped=True cancelled=1 skipped_other_threads=0`; `new.cancelled_running thread_id=<A> count=1` |
-| R17-14f *(optional, Claude)* | In A: `/agent set claude`, `/config → 🔁 Loop mode` on, then `/loop 10m print the current time`. Then `/new` in **B**; then `/new` in **A** | Claude confirms the schedule in A; after B's `/new`, `jq '.entries[] \| {chat_id, thread_id}' ~/.untether-dev-ws/active_loops.json` still lists the loop with A's thread id; A's `/new` replies `🧹 … stored sessions for this topic.` and the entry is gone | no `loop.cancelled_for_chat` after B's `/new`; `loop.cancelled_for_chat scoped=True count=1` after A's `/new` |
-
-Regression (non-forum, `@untether_dev_bot`): Tier 7 Q-smoke for `/new` and `/cancel`; in the Codex chat `-4929463515` start `sleep 60`, then `/new` → `🧹 cancelled run and cleared …`, log `new.cancel_scope scoped=False cancelled=1` (`chat_type=group` → chat-wide). Also RC14-2 (the #807 command barrier still replies), T1–T10 sampling, S7, O5, O6. Cleanup on dev-ws: `/agent clear` and Loop mode off in A if R17-14f ran.
-
 ### #416 — Codex reasoning `minimal` retired
 
 Codex chat `4929463515` (Bot API `-4929463515`). **Precondition (read-only):** the chat must not be in `safe` mode — `jq '.chats["-4929463515"].engine_overrides.codex' ~/.untether-dev/telegram_chat_prefs_state.json` → `null`, and `grep -A8 '^\[engines.codex\]' ~/.untether-dev/untether.toml` shows no `permission_mode = "safe"`. If it ever does, record the value, switch to full auto via `/config`, run the rows, then restore it. Logs: `journalctl --user -u untether-dev -o cat --since "15 minutes ago" | grep -E "run.reasoning.unsupported_level_ignored|config.reasoning|model_reasoning_effort=minimal|session.auto_cleared|handle.(runner|worker)_failed"`.
@@ -1077,3 +961,237 @@ Tier 7 **Q2** (`/config`) + Tier 4 **O3** (Listen via `/config` → 📡 Listen)
 | **R15-12-4** | Emoji | `/config` in Claude + Codex chats | `📡` only on Listen; every Triggers label uses ⏰ |
 
 R15-12-5 (🔧 More) is not applicable: Decision 1 deferred the More page to v0.35.6.
+
+---
+
+## rc17 scenarios (0.35.5rc17)
+
+Dev bot only (`@untether_dev_bot`; R17-14 runs on the `untether-dev-ws` forum instance). Log checks: `journalctl --user -u untether-dev -o cat --since "30 minutes ago" | grep -E "<pattern>"`. Each subsection below comes from one rc17 plan and keeps that plan's scenario IDs. As for rc13/rc14, use `python3 -c "import time; time.sleep(N)"` rather than a bare `sleep N` for anything a subagent runs or anything long in the foreground.
+
+Back up `~/.untether-dev/untether.toml` before any config-editing row and restore it afterwards; never `cat` it (it holds secrets — use `grep -c` / `sed -i`). Drive every row from an lba-1 terminal Claude Code session (Telegram MCP + Bash), never from inside a dev-bot chat, and restart `untether-dev` only from that terminal. Run the zero-token drift suite on lba-1 as part of the rc (`PROBED_CLI_VERSION` is 2.1.287; a skip on lba-1 counts as a fail): `uv run pytest tests/test_claude_cli_schema_drift.py tests/test_codex_cli_schema_drift.py -v -rs`.
+
+No live scenario: [#823](https://github.com/littlebearapps/untether/issues/823) (`chat_id` on `telegram.http_error` / `network_error` / `api_error` — there's no safe way to force a non-benign 4xx/5xx; unit tests are the gate, plus R15-9-1 as a regression and the next `/monitor` soak checking every fleet `telegram.http_error` for `chat_id=`) and [#875](https://github.com/littlebearapps/untether/issues/875) (dependency floors and CI; covered by `pip-audit` in CI and the docs build).
+
+### #820 — `lifecycle_exited` says how the live session ended
+
+Chat: `ut-dev: Claude Code` (`-5284581592`). Logs: `journalctl --user -u untether-dev -o cat --since "15 min ago" | grep -E "stdin_closed|lifecycle_exited|exited_after_sigint|forced_teardown"`. Precondition for R17-02c: **no async hooks configured** in the dev project (an evident hook stretches the close grace to 35 s, `/cancel` gives up after 20 s and the line then correctly logs `cancelled`). Restore the config and `/new` afterwards. Regression: B-LIVE-1, B-LIVE-6, R15-21b.
+
+| ID | Steps | Expected Telegram | Log signatures |
+|---|---|---|---|
+| R17-02a | `/new`; "Reply with OK." then wait ≈90 s | `OK`; nothing else | `stdin_closed reason=idle_no_tasks` → `lifecycle_exited reason=exited_after_close close_reason=idle_no_tasks` |
+| R17-02b | with `[watchdog] post_result_bg_max_hold = 60`: `/new`; background Bash `python3 -c "import time; time.sleep(600)"`, reply STARTED (= R15-21b) | R15-21b's closing + `↩️ Reply to continue…` lines | `lifecycle_exited reason=exited_after_close close_reason=max_hold` |
+| R17-02c | `/new`; start a background Agent ("read 20 files one by one, summarise each"), reply STARTED; then `/cancel` | `⏹ Stopped 1 background task: …` | `close_grace_expired` → `exited_after_sigint … stopped_clean=True` → `lifecycle_exited reason=sigint close_reason=cancel` (only with an async hook evident: `reason=cancelled`) |
+
+### #872 — declared waits hold the live session
+
+Setup: `[watchdog] post_result_bg_max_hold = 60` in `~/.untether-dev/untether.toml` (hot-reloads, but it is read **per spawn**, so every row starts with `/new`; restore `1800` and `/new` at the end). Chat: `ut-dev: Claude Code` (`-5284581592`). Logs: `journalctl --user -u untether-dev -o cat --since "15 min ago" | grep -E "hold_extended|stdin_closed|task.ended|lifecycle_exited"`. Regression: B-LIVE-1…7, R15-21a/b/f, C1–C6, U1–U4 (Claude).
+
+| ID | Steps | Expected Telegram | Log signatures |
+|---|---|---|---|
+| R17-01a | `/new`; "Run in the background with `run_in_background: true` and `timeout: 300000`: `sleep 180; echo WATCH-DONE`. Reply STARTED, then tell me what it printed when it finishes." | `STARTED`; **no** `⏳ Closing session` at ≈60 s; ≈180 s: `🔔 Background task finished` turn quoting `WATCH-DONE` | `claude.live_session.hold_extended source=bash_timeout declared_s=300.0`; **no** `stdin_closed reason=max_hold` before `claude.task.ended` |
+| R17-01b | `/new`; same, but **no** `timeout` and `sleep 600` (silent) | at ≈60–90 s: `⏳ Closing session — 1 background task still running with no progress for 1 min: … Stopping it.` then `↩️ Reply to continue in the same session.` | `stdin_closed reason=max_hold`; no `hold_extended` (the R15-21b negative guard, unchanged) |
+| R17-01c | `/new`; `timeout: 90000` with `sleep 600` | no Untether close at 60 s; at ≈90 s the **CLI** stops the task and Claude reports it was stopped at its background time limit (native notice) | `claude.task.ended` (stopped) at ≈90 s **before** any `stdin_closed`; then a wake turn — proves CLI enforcement on 2.1.287 |
+| R17-01d *(opportunistic)* | `/new`; ask for a self-paced `/loop` whose next wake-up is ≈2 min out (e.g. "every 2 min print the time, 2 iterations") | `⏰ Scheduled wake-up` at ≈2 min, no closing notice at 60 s; `/cancel` afterwards | `hold_extended source=scheduled_wakeup`; no `stdin_closed reason=max_hold` before the wake turn |
+| R17-01e | `bg_hold_declared_waits = false`; `/new`; repeat R17-01a | closing notice at ≈60 s | `stdin_closed reason=max_hold`; no `hold_extended` |
+
+### #828 — a background subagent's sync denial is not a hook rewake
+
+Chat: `ut-dev: Claude Code` (`-5284581592`). Tiers: `uv run pytest` + U1–U4/U6/U7 (Claude), B-LIVE-1/2, RC14-6 (positive control), R17-828.
+
+| ID | Steps | Expected Telegram | Log signatures |
+|---|---|---|---|
+| R17-828 | In the dev project's `.claude/settings.json` add a sync `PreToolUse` hook, matcher `Bash`, command `jq -r .tool_input.command \| grep -q 'R17DENY' && { echo "R17 denied" >&2; exit 2; } \|\| exit 0`. `/new`; send: *"Launch ONE background agent (run_in_background) that first runs `sleep 15`, then the Bash command `echo R17DENY`, then `python3 -c "import time; time.sleep(30)"`, then reports 'agent done'. End your turn immediately."* (the `sleep 15` makes the denial land while the parent idles) | the launch reply; ≈45–60 s later one pushed `🔔 Background task finished — <agent description>` (never `🪝 Hook feedback — PreToolUse`) | `journalctl --user -u untether-dev -o cat --since "10 minutes ago" \| grep -E "claude.hook.(rewake_signal\|blocking_exit)\|claude.turn.(started\|completed\|hook_rewake)"` → ≥1 `claude.hook.blocking_exit hook_event=PreToolUse turn_open=False started_turn=2` (N+1 for the launch turn N); **zero** `claude.hook.rewake_signal` and zero `claude.turn.hook_rewake` for the run. Then re-run RC14-6 (Stop `asyncRewake`, `sleep 90`): `claude.hook.rewake_signal … started_turn=1` → `claude.turn.hook_rewake attributed=open` → pushed `🪝 Hook feedback — Stop`. Remove both hooks afterwards |
+
+### #825 / #876 — late finishes and auto-backgrounded tasks get their own 🔔 header
+
+Chat: `ut-dev: Claude Code` (`-5284581592`). Logs: `journalctl --user -u untether-dev -o cat --since "15 min ago" | grep -E "late_tasks_attributed|claude.turn.started|live_turn.(started|fold_decision|late_tasks_attributed)|claude.task.backgrounded|notification_ignored|stdin_closed"`. Tiers: `uv run pytest` + U1–U4/U6/U7 (Claude) + B-LIVE-1/2/5 + RC12-6 + RC13-1/2.
+
+| ID | Steps | Expected Telegram | Log signatures |
+|---|---|---|---|
+| R17-825a | `/new`; *"Start two background Bash jobs with run_in_background: `python3 -c "import time; time.sleep(20); print('A')"` described 'job A' and `python3 -c "import time; time.sleep(26); print('B')"` described 'job B'. End your turn now. When job A finishes, run `python3 -c "import time; time.sleep(12)"` in the foreground, then report on whatever has finished."* | either `🔔 2 background tasks finished — job A · job B` (B ended during A's wake turn) or two separate `🔔 Background task finished` messages (the CLI gave B its own turn) — never a single-name header over a body reporting B | first shape: `claude.turn.late_tasks_attributed task_ids=[…]` + `live_turn.late_tasks_attributed`; any later turn for B is `live_turn.started push=False` and its `live_turn.fold_decision` is `fold` only for a short restatement (`tools` / `long_answer` = delivered as its own message). Second shape: `claude.turn.started reason=task_finished` ×2 |
+| R17-825b *(#876)* | `/new`; *"Run this in the FOREGROUND (not run_in_background) with the Bash tool's `timeout: 10000`: `sleep 40; echo FG done`. When it finishes, tell me what it printed."* (the CLI moves a foreground command to the background at its timeout). Optional steer variant: `/steer` first, send the 60 s foreground command, then "what's 2+2?" ~10 s later; `/queue` afterwards | `🔔 Background task finished — <command description>` ≈30 s after the reply (not `🔔 Claude continued`); the session is not idle-closed while it runs | `claude.task.backgrounded source=task_updated` (or `snapshot`); no `claude.turn.notification_ignored … owned_by_subagent=False`; `claude.live_session.stdin_closed` only after `claude.task.ended`. If no `claude.task.backgrounded` appears (the CLI didn't move it), record *not exercised* — the fakes cover the logic |
+
+### #821 — cost lines say when background agents' spend is included
+
+Chat: `ut-dev: Claude Code` (`-5284581592`). Pre-step: set `[cost_budget] warn_run_above_usd = 0.01` in `~/.untether-dev/untether.toml` (hot-reloads; re-read per check) and note the old value. Tiers: `uv run pytest` + U1–U4 (Claude; U8 for the footer) + B-LIVE-1/2; U1 on Codex to confirm no `bg_*` fields and an unchanged footer.
+
+| ID | Steps | Expected Telegram | Log signatures |
+|---|---|---|---|
+| R17-821 | `/new`; *"Launch TWO background agents (run_in_background). Each reads README.md and CHANGELOG.md, runs `python3 -c "import time; time.sleep(25)"`, then replies one sentence. End your turn now."* Then, as a negative control, `/new` and `what's 2+2?`. Restore `warn_run_above_usd` | launch final ends `💸 This run cost $X (over the $0.01 alert) — includes spend by 2 background agents since the previous reply`; each 🔔 wake final likewise (count = agents active in that window); with `show_api_cost` on, the 💰 line shows `· incl. 2 bg agents`. The 2+2 run: `💸 … (over the $0.01 alert)` with **no** background clause | `journalctl --user -u untether-dev -o cat --since "15 minutes ago" \| grep -E "cost.turn_delta\|cost.run_outlier"` → launch `bg_agents=2`; wake turns `bg_agents>=1 bg_agents_ended>=1`; the 2+2 run `bg_agents=0` |
+
+### #838 — the pre-spawn guard covers Claude runs
+
+Precondition: `[watchdog] max_concurrent_engine_runs = 1` in `~/.untether-dev/untether.toml` (hot-reloads; no restart). Claude chat `-5284581592` (`session_mode = "chat"`, Bash allowed), Codex chat `-4929463515`. Between R17-10a and R17-10b, and between R17-10c and R17-10d, **wait ≥ 70 s after the previous final and confirm `claude.live_session.stdin_closed` / `claude.live_session.closed` in the journal** — an idle Claude live session still counts toward the ceiling, and a message sent into it is injected rather than spawned, so the guard never runs. Logs: `journalctl --user -u untether-dev -o cat --since "15 minutes ago" | grep -E "prespawn|auto_clear|live_session.(injected|stdin_closed|closed)"`. Tiers: U1–U4, U6, U7 on Claude + Codex + OpenCode; B-LIVE-3.
+
+| ID | Steps | Expected |
+|---|---|---|
+| R17-10a | Claude chat: `run python3 -c "import time; time.sleep(50)" with Bash in the foreground, then reply DONE`. Within 10 s, Codex chat: `say hi` | Codex reply `🛑 Too many engine runs in flight (1/1)…`; `subprocess.prespawn.concurrency_blocked engine=codex live_runs=1` (Claude's process is counted) |
+| R17-10b | Codex chat: `run sleep 50 in the shell, then say DONE`. Within 10 s, Claude chat: `what is 2+2?` | Claude chat gets `🛑 Too many engine runs in flight (1/1)…`; `subprocess.prespawn.concurrency_blocked engine=claude`; **no** `subprocess.spawn … use_control_channel=True` in that second; no `session.auto_cleared`, and `session.auto_clear_skipped reason=prespawn_blocked`; the blocked final has no `💰` footer |
+| R17-10c | After R17-10b's Codex run ends and ≥ 70 s have passed (Claude live session closed), Claude chat: `what was the last number you computed?` | Resumes the R17-10a session: `runner.start resume=<same id as R17-10a>`; the answer references the earlier context |
+| R17-10d | Claude chat: `run python3 -c "import time; time.sleep(40)" in the background with run_in_background and end your turn immediately`; when the turn ends send `quick: 3+3?` | Answered via `claude.live_session.injected` (no guard block although `live_runs=1` and the ceiling is 1) |
+| R17-10e | Restore: delete the `max_concurrent_engine_runs` line | Next spawn unaffected |
+
+### #388 — approval buttons only work in their own chat
+
+Required regression (control channel): C1–C6, T8, S9 in the Claude chat (`-5284581592`), plus B-LIVE-7 (an approval inside a wake turn renders and works in the same chat). R17-13a is **gated**: it needs a standalone Telethon client that can send arbitrary callback data (the pattern in memory `reference_add_bot_to_basic_group.md`, BWS session creds — never print them), run as Nathan's own allowed account from a terminal, never from a dev-bot chat. If it can't run, record R17-13a **not exercised** — the unit tests (`tests/test_claude_control.py`, `tests/test_callback_dispatch.py`) are the gate.
+
+| ID | Steps | Expected | Logs |
+|---|---|---|---|
+| R17-13a *(gated)* | Claude chat: C1 recipe (`/planmode off`, `use the Write tool to create /tmp/r17-388.txt containing x`) → buttons appear. Read the request id from `journalctl --user -u untether-dev -o cat \| grep control_request.registered`. In the **Codex** chat (`-4929463515`) send `/config` (a bot message with buttons). Telethon: `GetBotCallbackAnswerRequest(peer=<codex chat>, msg_id=<that /config message>, data=b"claude_control:approve:<rid>")` | Telethon gets the toast `This request has expired`; the Claude chat's buttons stay live; `/tmp/r17-388.txt` absent | `claude_control.not_found reason=channel_mismatch channel_id=-4929463515 origin_channel_id=-5284581592`; **no** `control_response.sent` / `claude_control.sent` for that rid |
+| R17-13b | Tap ❌ Deny in the Claude chat | Normal denial (C2 behaviour) | `claude_control.sent action=deny` |
+
+### #822 — approval logs name the tool
+
+Claude chat `-5284581592`. Run C1–C6, T8 and S9 per the control-channel row, then check: `journalctl --user -u untether-dev -o cat --since "10 minutes ago" | grep -E "control_request.received|control_response.sent|claude_control.sent|inline_keyboard_found|keyboard_attach|control_response.auto_"`.
+
+| ID | Steps | Expected log |
+|---|---|---|
+| C1 (Write approve) | `/planmode off`, then `use the Write tool to create /tmp/c1-probe containing x`; tap Approve | `control_request.received tool_name=Write permission_mode=acceptEdits` → `inline_keyboard_found … tool_name=Write request_id=…` → `keyboard_attach … tool_name=Write` → `control_response.sent … tool_name=Write permission_mode=acceptEdits` → `claude_control.sent approved=True tool_name=Write` |
+| C2 (WebFetch deny) | the C2 recipe; tap Deny | the same chain with `tool_name=WebFetch approved=False` |
+| C3 (plan) | `/planmode on`, a complex prompt, tap Pause & Outline, then Approve | `claude_control.sent action=discuss tool_name=ExitPlanMode`; later `inline_keyboard_found … tool_name=ExitPlanMode`; `control_response.sent tool_name=ExitPlanMode permission_mode=plan` |
+| R17-16 | In plan mode: `list every .py file under src using Glob` (the auto-approve path) | `control_request.received tool_name=Glob` followed by `control_response.auto_approved request_id=<same>`; no keyboard |
+| Secret check | Over the whole window: `journalctl --user -u untether-dev --since -10min \| grep -E 'control_(request\|response)\.\|claude_control\.sent\|inline_keyboard_found\|keyboard_attach' \| grep -c c1-probe` | `0` (the path is tool input; the DEBUG `telegram.request` payloads legitimately contain it, so don't count those) |
+
+Soak note: add `control_request.received` volume to the next `/monitor` checklist — read-heavy plan sessions roughly double the control-path INFO lines.
+
+### #835 — unattended cron / webhook runs fail closed
+
+Chat: `ut-dev: Claude Code` (`-5284581592`). Tiers: `uv run pytest`, C1–C6, T8, S9, R15-7a/c (dispatch WARN, now `outcome=denied`). Logs: `journalctl --user -u untether-dev -o cat --since "15 minutes ago" | grep -E "permission.unattended_deny|control_request.received|control_response.auto_denied|approval_pending|unattended_approval_risk|options_changed|runner.completed"`.
+
+Setup (dev only; back up first: `cp ~/.untether-dev/untether.toml ~/.untether-dev/untether.toml.bak-r17-11`; never `cat` the config): set `[triggers] enabled = true` and add `[triggers.server] port = 9878` (127.0.0.1:9876 / 9877 are taken on lba-1 by other processes and staging). Enabling triggers needs **one** `systemctl --user restart untether-dev` from a terminal — hot reload doesn't start the scheduler or the webhook server. Crons use `project = "claude-test"`, `chat_id = -5284581592`, `run_once = true`, `schedule = "* * * * *"` (fires at the next minute boundary; append them with a heredoc and watch for `triggers.manager.updated`). Dev pre-approves Bash/Read, so recipes use **Write outside the project**.
+
+| ID | Setup / steps | Expected (Telegram) | Logs |
+|---|---|---|---|
+| R17-11a | cron `r17-default` (`permission_mode = "default"`, prompt `use the Write tool to create /tmp/r17-835a.txt containing x, then say DONE`) | No approval buttons; progress row `🔒 Unattended run — denied Write: nobody to approve it`; the final explains it couldn't write and ends `🔒 unattended (cron:r17-default) · denied Write — nobody to approve` + `💡 set permission_mode on the cron …`; `/tmp/r17-835a.txt` absent | `control_request.received tool_name=Write unattended=cron:r17-default` → `permission.unattended_deny tool_name=Write reason=would_wait permission_mode=default` → `control_response.auto_denied`; **no** `subprocess.approval_pending`; `runner.completed` within ~2 min |
+| R17-11b | cron `r17-plan` (`permission_mode = "plan"`, prompt `plan how to create /tmp/r17-835b.txt containing y, then do it`) | Final contains the plan; footer `denied ExitPlanMode` (plus `Write` if the model tried anyway); file absent | `permission.unattended_deny tool_name=ExitPlanMode reason=would_wait` (one, not a loop); any `Write`/`Bash` → `reason=plan_mode` |
+| R17-11c | Precondition: Claude chat `/planmode off`, `/config` shows `acceptEdits`. Webhook `r17-wh` (`path = "/hooks/r17"`, `auth = "bearer"`, `secret = "r17-local-only"`, `project = "claude-test"`, `chat_id = -5284581592`, `prompt_template = "use the Write tool to create /tmp/r17-835c.txt containing x, then say DONE"`). Fire: `curl -sS -X POST http://127.0.0.1:9878/hooks/r17 -H "Authorization: Bearer r17-local-only" -H "Content-Type: application/json" -d '{}'` → `202` | Same as R17-11a, with `⚡ webhook:r17-wh` and `🔒 unattended (webhook:r17-wh)`; hint `💡 webhooks use the chat's permission mode …` | `trigger_source=webhook:r17-wh reason=would_wait permission_mode=acceptEdits` |
+| R17-11d | Guard: Claude chat `/planmode off`, send R17-11a's prompt by hand (`/tmp/r17-835d.txt`) | Approve/Deny buttons appear (C1); tap ❌ Deny | **no** `permission.unattended_deny`; `control_request.received … unattended=None` |
+| R17-11e | Cron `r17-live` (`permission_mode = "default"`, prompt `start a background Bash task with run_in_background: python3 -c "import time; time.sleep(90)", then use the Write tool to create /tmp/r17-835e.txt containing x, then say STARTED`). While the background task runs (≤ 90 s), **reply** to its final: `try the write once more` | The cron's Write is denied (`🔒` row); the reply closes the cron process (`⚙️ Settings changed — …`) and resumes the session attended: a Write **button** appears — tap ❌ Deny | `claude.live_session.options_changed`, then `runner.start resume=<r17-live session>`; no `unattended_deny` for the reply's run |
+| R17-11f | cron `r17-pa` (`permission_mode = "plan-auto"`), same prompt as R17-11b with `/tmp/r17-835f.txt` | Regression: plan auto-approved and the Write goes through as attended `plan-auto` does today; no buttons, no `🔒` line | `control_request.auto_approve_exit_plan_mode`; no `unattended_deny`, no `approval_pending` |
+| R17-11g *(optional)* | cron `r17-auto` (`permission_mode = "auto"`, prompt `list the files in this project, then say DONE`) | Normal answer, no `🔒` line (nothing reaches stage 6 in auto for routine work) | no `unattended_deny` |
+
+Cleanup: restore the backup (`cp …bak-r17-11 …toml && rm …bak-r17-11`), restart dev once (triggers back to disabled), `/planmode on`, `rm -f /tmp/r17-835*.txt`. Offline evidence: `tests/test_unattended_fail_closed.py`, the step-0 auto probe in `docs/findings/2026-09-30-claude-sdk-control-permissions-context.md` (addendum 2026-10-02). Post-rollout (7 days, all hosts): `journalctl --user -u untether -o cat --since "7 days ago" | grep -E "permission.unattended_deny|permission_mode.mismatch"` — each hit is a cron to fix in config.
+
+### #836 — unattended-approval crons in the startup message
+
+Chat: the dev bot's startup chat. Tiers: Tier 7 Q16 (`/ping` with a cron), U1 (startup message for Claude/Codex/OpenCode). Logs: `journalctl --user -u untether-dev -o cat --since "5 minutes ago" | grep -E "unattended_approval_risk|startup.unattended_line_failed|auto_semantics_changed"`.
+
+Setup (dev only; back up first: `cp ~/.untether-dev/untether.toml ~/.untether-dev/untether.toml.bak-r17-12`): `[triggers] enabled = true` (+ `[triggers.server] port = 9878`), far-future crons (`schedule = "0 0 1 1 *"`): `r15-default` (`project = "claude-test"`, `permission_mode = "default"`), `r15-plan` (`claude-test`, `plan`), `r15-auto` (`claude-test`, `auto`), `r15-codex` (no project, `auto` — resolves to the Codex global default), `r17-a` (`claude-test`, `acceptEdits`), `r17-slip` (`claude-test`, **no** `permission_mode`; dev's `[engines.claude] permission_mode` is `plan`).
+
+| ID | Steps | Expected |
+|---|---|---|
+| R17-12a | `systemctl --user restart untether-dev` from a terminal (never from inside a bot session) | Startup message: `_triggers:_ \`enabled (0 webhooks, 6 crons)\`` then `_unattended approvals (auto-denied):_ \`cron:r15-default (default), cron:r15-plan (plan), cron:r17-a (acceptEdits)\` +1 more` (the fourth is `cron:r17-slip (inherits plan)`); no `auto` line; `r15-codex` absent. Journal: exactly one `trigger.unattended_approval_risk phase=config reason=startup`; no `startup.unattended_line_failed` |
+| R17-12b | Give `r17-slip` `permission_mode = "plan-auto"` and remove `r15-default`, `r15-plan`, `r17-a`; restart | No `unattended approvals` line; the triggers line still present |
+| R17-12c | Q16 `/ping` in the Claude chat | Unchanged trigger summary |
+
+Cleanup: restore the backup, restart once.
+
+### #743 — per-cron `model` and `reasoning`
+
+Claude chat `-5284581592`, Codex chat `-4929463515`. Tiers: Tier 7 Q16, R5 (trigger source in footer), R1 (hot-reload cron add), Tier 4 O2 (reasoning in the footer), B-LIVE-x. Logs: `journalctl --user -u untether-dev -o cat --since "<t0>" | grep -E 'trigger\.cron\.(model|reasoning|permission_mode)_override|triggers?\.(manager\.updated|init_failed)|config\.reload\.triggers_failed|options_changed|runner\.completed'`.
+
+Setup: back up (`cp ~/.untether-dev/untether.toml ~/.untether-dev/untether.toml.bak-r17-20`; never `cat` it); `[triggers] enabled = true` (+ `[triggers.server] port = 9878`) needs one dev restart from a terminal if it was off. Append crons with a heredoc; each reload logs `triggers.manager.updated`. Crons: `chat_id = -5284581592`, `run_once = true`, `schedule = "* * * * *"`. Preflight: `/model set opus` in the Claude chat.
+
+| ID | Steps | Expected |
+|---|---|---|
+| R17-20a | cron `r17-20a`: `engine = "claude"`, `model = "haiku"`, `permission_mode = "plan-auto"`, `prompt = "reply with the single word CRONMODEL"`; wait for the minute | Footer shows a Haiku model + `⏰ cron:r17-20a`; `trigger.cron.model_override trigger_source=cron:r17-20a chat_model=opus trigger_model=haiku engine=claude`; `runner.completed … model=claude-haiku-…` |
+| R17-20b | Right after, send `reply with the single word CHAT` | Footer shows Opus; no `trigger.cron.*_override` for this run; `/model` unchanged |
+| R17-20c | Two crons in the same minute: `r17-20c1` (`model = "haiku"`), `r17-20c2` (no model), both `engine = "claude"`, `permission_mode = "plan-auto"` | c1's footer Haiku, c2's Opus; exactly one `trigger.cron.model_override` (c1) |
+| R17-20d | cron `r17-20d`: `engine = "claude"`, `reasoning = "low"`, `permission_mode = "plan-auto"`, same prompt | Footer shows effort `low`; `trigger.cron.reasoning_override … trigger_reasoning=low` |
+| R17-20e | **Validation:** append cron `r17-20e` with `engine = "codex"`, `reasoning = "max"` | `config.reload.triggers_failed` (WARN) naming `reasoning` and the allowed levels; the previous crons stay active (`/ping` still lists them). Remove the entry → the next reload succeeds |
+| R17-20f | cron `r17-20f`: `model = "haiku"`, `permission_mode = "plan-auto"`, prompt `start a background Bash task with run_in_background: python3 -c "import time; time.sleep(90)", then reply STARTED`. While it runs, **reply** to its final: `what model are you` | `claude.live_session.options_changed`, the `⚙️ Settings changed — stopping 1 background task …` notice, and the reply's footer shows Opus (resumed session) |
+| R17-20g *(gated — needs Nathan's OK)* | cron with `model = "r17-nonexistent"` | An error final names the model problem, not a hang; no retry loop |
+| R17-20h | Codex chat: cron `engine = "codex"`, `chat_id = -4929463515`, `model = <a model from the Codex catalogue>`, `reasoning = "low"` | Footer shows that model + effort `low`; `runner.completed engine=codex model=…` |
+| R17-20i | `/config → ⏰ Triggers` in the Claude chat while `r17-20a` is configured | Row shows `model=haiku · ` and (for `r17-20d`) `effort=low · ` before `last` |
+
+Cleanup: restore the backup (`cp …bak-r17-20 …toml && rm …bak-r17-20`), `/model clear`, restart once if triggers were toggled; check `run_once_fired.json` holds only r17 ids (removing the crons cleans them on the next reload, #317).
+
+### #826 — `/new` and `/cancel` scoped to the forum topic
+
+Venue: the **`untether-dev-ws`** workspace-mode instance (forum supergroup `-1003669503877`, `topics.enabled = true`, `scope = "main"`, `session_mode = "chat"`, default engine Codex; same editable `.venv` as dev). `@untether_dev_bot` has no forum chat. After the code lands: `systemctl --user restart untether-dev-ws` from a terminal (never `untether.service`). Logs: `journalctl --user -u untether-dev-ws -o cat --since "10 minutes ago" | grep -E "new\.cancel_scope|new\.cancelled_running|cancel\.requested|loop\.cancelled_for_chat|session\.summary|runner\.completed"`.
+
+Pre: Telegram MCP `list_topics` on `-1003669503877`; pick two topics **A** and **B** (create `r17-a` / `r17-b` with `create_forum_topic` if needed). The long run, sent in A: `run the shell command "sleep 120" and then reply DONE`. Note A's and B's thread ids.
+
+| ID | Steps | Expected (chat) | Logs |
+|---|---|---|---|
+| R17-14a | while A runs: `/new` in **B** | B: `🧹 cleared stored sessions for this topic.` (no "cancelled run"); A later finishes with `DONE` | `new.cancel_scope scoped=True cancelled=0 skipped_other_threads=1 thread_id=<B>`; no `cancel.requested`, no `session.summary cancelled=True` for A |
+| R17-14b | start A again; `/new` in **General** | General: `🧹 cleared stored sessions for you in this chat.` (or `no stored sessions to clear for this chat.`); A finishes with `DONE` | `new.cancel_scope … thread_id=None scoped=True cancelled=0 skipped_other_threads=1` |
+| R17-14c | start A again; `/cancel` (no reply) in **B** | B: `nothing running in this topic.`; A finishes | no `cancel.requested` |
+| R17-14d | while A runs: `/cancel` (no reply) in **A** | A's run ends cancelled | `cancel.requested thread_id=<A>` |
+| R17-14e | start A again; `/new` in **A** | A: `🧹 cancelled run and cleared stored sessions for this topic.` | `new.cancel_scope scoped=True cancelled=1 skipped_other_threads=0`; `new.cancelled_running thread_id=<A> count=1` |
+| R17-14f *(optional, Claude)* | In A: `/agent set claude`, `/config → 🔁 Loop mode` on, then `/loop 10m print the current time`. Then `/new` in **B**; then `/new` in **A** | Claude confirms the schedule in A; after B's `/new`, `jq '.entries[] \| {chat_id, thread_id}' ~/.untether-dev-ws/active_loops.json` still lists the loop with A's thread id; A's `/new` replies `🧹 … stored sessions for this topic.` and the entry is gone | no `loop.cancelled_for_chat` after B's `/new`; `loop.cancelled_for_chat scoped=True count=1` after A's `/new` |
+
+Regression (non-forum, `@untether_dev_bot`): Tier 7 Q-smoke for `/new` and `/cancel`; in the Codex chat `-4929463515` start `sleep 60`, then `/new` → `🧹 cancelled run and cleared …`, log `new.cancel_scope scoped=False cancelled=1` (`chat_type=group` → chat-wide). Also RC14-2 (the #807 command barrier still replies), T1–T10 sampling, S7, O5, O6. Cleanup on dev-ws: `/agent clear` and Loop mode off in A if R17-14f ran.
+
+### #871 — backticks in commands don't break the action list
+
+Claude chat `-5284581592` unless noted. Regressions: U2, U3, T6, RC12-8, RC12-9.
+
+| ID | Steps | Expected |
+|---|---|---|
+| R17-07a | `/verbose` off. Ask Claude to run four Bash commands one by one, including ``echo "today `date`"``, a heredoc whose body contains backticks, and `sleep 70` | The progress message has one line per action, each command one code span; the `▸ sleep 70 · 1m 0Ns · …` tail has no stray backtick |
+| R17-07b | Repeat R17-07a and `/cancel` during `sleep 70` | The cancelled message keeps one action per line |
+| R17-07c | `/verbose` on; R17-07a steps 1–2 | Detail lines are code spans and don't merge; `/verbose` off afterwards |
+| R17-07d | Codex chat (`-4929463515`): ``run echo "a `b` c" and then ls`` | Two action lines |
+| R17-07e | `/planmode off`, diff preview on: ``run echo "x `y` z" > /tmp/r17-e.txt``; then a multi-line heredoc command | The approval preview shows `$ ` + one code span; the heredoc shows `$` + a fenced `sh` block with its lines intact. Deny both; `rm -f /tmp/r17-e.txt` |
+
+### #868 — emoji-led notes don't get a ✓
+
+Claude chat `-5284581592`. Also re-check R15-19c (its expectation now says no ✓). Logs: `claude.compaction`, `claude.permission_mode.mismatch`.
+
+| ID | Steps | Expected |
+|---|---|---|
+| R17-08a | U1, then `/compact` as a live follow-up | The row reads `🗜️ Context compacted · …` with no leading ✓ (`claude.compaction`) |
+| R17-08b | `/model set haiku` + `/planmode auto`, then any prompt | `⚠️ Asked for auto mode …` with no ✓ (`claude.permission_mode.mismatch`); restore with `/model clear` + `/planmode off` |
+
+### #870 — line-structured replies keep their line breaks
+
+Claude chat `-5284581592` unless noted. Regressions: T11 (tables), RC12-8 (`<br>`), RC12-9 (filenames), U3, C5. Log check: no `can't parse entities` / `transport.send.failed`.
+
+| ID | Steps | Expected |
+|---|---|---|
+| R17-06a | "Reply with exactly the following text and nothing else, preserving every line break and the leading spaces:" + a 10-line digest (emoji headers, two-space-indented `#N` items, two `Key: value` lines, no blank lines) | One line per source line; indented items visibly indented |
+| R17-06b | Ask for ~120 words about TCP, hard-wrapped at 72 columns with single newlines | Reads as one paragraph; 0–2 mid-paragraph breaks is a pass |
+| R17-06c | R17-06a in the Codex chat (`-4929463515`) | Same as R17-06a |
+| R17-06d | `/at 60s Reply with exactly: <the R17-06a digest>` | The scheduled run's final keeps the line structure |
+
+### #869 — startup trigger counts are pluralised
+
+| ID | Steps | Expected |
+|---|---|---|
+| R17-09a | Preflight (read-only): `grep -c '^enabled = true'` under `[triggers]` in `~/.untether-dev/untether.toml`, plus `grep -c '^\[\[triggers.webhooks\]\]'` / `grep -c '^\[\[triggers.crons\]\]'`. Restart `untether-dev` from a terminal (or reuse the restart from R17-12a) | The startup `triggers:` line says `1 webhook` / `1 cron` wherever a count is 1. If no count is exactly 1, record **not exercised** (unit tests are the gate). RC14-4 regression: a spent one-shot still shows `, 1 spent one-shot` |
+
+### #418 — `/export` attaches the transcript as a file
+
+Updated U9 (Tier 1) and Q4 (Tier 7) on Claude (`-5284581592`), Codex (`-4929463515`) and OpenCode (`-5200822877`). Logs: `journalctl --user -u untether-dev --since -5min | grep -E "command.attachment|export"`. No live test for the >10 MB / failed-upload fallback (unit tests cover it); spot-check T3 (`/file get`), which shares `send_document`.
+
+| ID | Steps | Expected |
+|---|---|---|
+| U9-a | A multi-tool prompt (U2), then `/export` | A reply with a 📎 `untether-export-<engine>-<sid>-<stamp>.md` captioned `📄 Session export — <engine> · N events · Markdown` / `Session: <id>`; `command.attachment_sent command=export filename=…md size_bytes=<n>` |
+| U9-b | Download the file (MCP `download_media`) and open it | The full transcript: header, `**Usage:** … · last run` (`thread total` on Codex), every action, and the answer untruncated |
+| U9-c | `/export json` | A `.json` document that `json.load`s and has `events`; `command.attachment_sent … filename=…json` |
+| R17-15 | `write 120 numbered lines of lorem ipsum`, then `/export` | The file contains all 120 lines (the old export cut the answer at 2,000 characters and the message at 3,000) |
+| Q4 | `/export` in a fresh chat with no run | `No session history available to export.` (text, no file); no `command.attachment_*` |
+
+### #839 — hot-reload is keyed on file content
+
+Tiers: O1–O9, S5 (upgrade path). Preflight: `grep -c '^watch_config = true' ~/.untether-dev/untether.toml` must be 1; `cp ~/.untether-dev/untether.toml ~/.untether-dev/untether.toml.bak-r17-18`. Logs: `journalctl --user -u untether-dev -o cat --since "<t0>" | grep -E 'config\.(reload|watch)'`. Regression: R15-13a + R15-13d (settings cache + invalid edit) and R1 (hot-reload cron add).
+
+| ID | Steps | Expected |
+|---|---|---|
+| R17-18a | **Same-stat edit.** (1) `sed -i '/^\[transports\.telegram\]/a forward_coalesce_s = 1.5' ~/.untether-dev/untether.toml`, wait 5 s. (2) With Python, replace `forward_coalesce_s = 1.5` by `forward_coalesce_s = 2.5` in place and restore the original `st_mtime_ns` with `os.utime(p, ns=(st.st_atime_ns, st.st_mtime_ns))` (same size, same mtime; print that the size is unchanged → `True`) | After (1): one `config.reload.transport_config_hot_reloaded keys=['forward_coalesce_s']`. After (2): a **second** `config.reload.applied digest=…` (a different digest), another `transport_config_hot_reloaded keys=['forward_coalesce_s']` and the "Hot-reloaded" notice in the dev chats |
+| R17-18b | **No-op save.** `touch ~/.untether-dev/untether.toml` | No `config.reload.applied` within 5 s (`journalctl --user -u untether-dev --since "-10s" -o cat \| grep -c config.reload.applied` → 0) |
+| R17-18c | **Atomic save still works.** `sed -i 's/forward_coalesce_s = 2.5/forward_coalesce_s = 3.5/'`, then send `ping` in the Claude chat | One reload; the `ping` run completes |
+| R17-18d | **Cleanup.** `cp ~/.untether-dev/untether.toml.bak-r17-18 ~/.untether-dev/untether.toml && rm ~/.untether-dev/untether.toml.bak-r17-18` | One reload; the key is gone |
+
+### #841 — credentials in URLs are masked in logs
+
+Tier: T1 (voice) + the R15-10 shape. **Key-leak preflight:** `cp ~/.untether-dev/untether.toml ~/.untether-dev/untether.toml.bak-r17-19`; never `cat` the file; set `voice_transcription_api_key = "r17-dummy"` so no real key can leave the host in any step. Logs: `openai.transcribe.error`, `endpoint=https://***@`, and no `r17dummypw`. If the 401 surfaces on a different branch (e.g. `voice.transcribe.error`), the leak check still applies.
+
+| ID | Steps | Expected |
+|---|---|---|
+| R17-19a | `sed -i` the dev TOML: `voice_transcription_base_url = "https://r17user:r17dummypw@api.groq.com/openai/v1"` (a public host passes the SSRF guard; the dummy Basic credentials replace the Bearer header, so Groq answers 401). Wait for the "Hot-reloaded" notice, then `send_voice` the T1 clip to the Claude chat | The reply is the sanitised failure text (no URL); the journal has `openai.transcribe.error … endpoint=https://***@api.groq.com/openai/v1` |
+| R17-19b | **Leak check** over the whole window: `journalctl --user -u untether-dev -o cat --since "<t0>" \| grep -c -E 'r17dummypw\|r17user'` | **0**. Expected-present lines: `config.reload.transport_config_hot_reloaded keys=['voice_transcription_base_url', …]`, `voice.base_url.permitted phase=reload host=api.groq.com`, `ssrf.validated url=https://api.groq.com/openai/v1` (stripped) |
+| R17-19c | Restore: `cp ~/.untether-dev/untether.toml.bak-r17-19 ~/.untether-dev/untether.toml && rm ~/.untether-dev/untether.toml.bak-r17-19`, then re-run T1 | T1 transcribes normally |
+
+**Required for rc17:** Tier 7 + Tier 1 (Claude, Codex, OpenCode) + Tier 2 C1–C6 + B-LIVE-1…7 + R17-* (every row above, plus the regressions each subsection names). R17-13a is gated (Telethon; if it can't run, record it *not exercised* — the unit tests are the gate). R17-20g needs Nathan's OK before it runs.
