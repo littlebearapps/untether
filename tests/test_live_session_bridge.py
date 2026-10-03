@@ -1844,3 +1844,79 @@ async def test_890_different_or_unlatched_errors_get_their_own_message() -> None
     assert not any(
         "more background wake-up" in c["message"].text for c in transport.edit_calls
     )
+
+
+def _ok_wake_turn(turn: int, *, reason: str = "monitor_event") -> list[Emit]:
+    return [
+        Emit(_turn("started", turn=turn, reason=reason)),
+        Emit(
+            _turn(
+                "completed",
+                turn=turn,
+                reason=reason,
+                ok=True,
+                answer="Still waiting.",
+                resume=_TOKEN,
+                usage={"num_turns": 1},
+            )
+        ),
+    ]
+
+
+async def test_890_successful_wake_that_folds_starts_afresh(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A wake turn that got through means the limit lifted, even when its
+    short ack folds into the background panel: a later cap is a fresh
+    (pushed) error, not a counter edited into the hours-old one."""
+    from types import SimpleNamespace
+
+    import untether.runner_bridge as bridge_mod
+
+    target = SimpleNamespace(breakouts=0)
+    folded: list[str] = []
+
+    async def fake_fold(self, text: str, **_kw) -> bool:
+        folded.append(text)
+        return True
+
+    monkeypatch.setattr(
+        bridge_mod.BackgroundStatusManager,
+        "fold_target",
+        property(lambda self: target),
+    )
+    monkeypatch.setattr(bridge_mod.BackgroundStatusManager, "fold", fake_fold)
+    transport, _ = await _run_with_turn(
+        *_capped_turn(2), *_ok_wake_turn(3), *_capped_turn(4), end_mid_turn=True
+    )
+    assert folded == ["Still waiting."]
+    assert len(_cap_messages(transport)) == 2
+    assert not any(
+        "more background wake-up" in c["message"].text for c in transport.edit_calls
+    )
+
+
+async def test_890_cancelled_wake_turn_starts_afresh() -> None:
+    """A cancelled turn also ends the run of repeats: the next cap gets its
+    own message."""
+    transport, _ = await _run_with_turn(
+        *_capped_turn(2),
+        Emit(_turn("started", turn=3, reason="task_finished")),
+        Emit(
+            _turn(
+                "completed",
+                turn=3,
+                reason="task_finished",
+                ok=True,
+                answer="PARTIAL",
+                resume=_TOKEN,
+                usage={"terminal_reason": "aborted_tools"},
+            )
+        ),
+        *_capped_turn(4),
+        end_mid_turn=True,
+    )
+    assert len(_cap_messages(transport)) == 2
+    assert not any(
+        "more background wake-up" in c["message"].text for c in transport.edit_calls
+    )

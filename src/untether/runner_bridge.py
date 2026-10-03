@@ -6063,6 +6063,10 @@ async def handle_message(
             status=status,
         )
 
+        if turn is not None and run_ok is True:
+            # #890: a turn got through, so the limit has lifted — the next
+            # cap starts afresh (cleared before the fold below returns early).
+            capped_wake_error.clear()
         # #785 part 2: a short "ack" wake turn is folded into the background
         # status message (an edit — no new message, no push). Accounting
         # above has already run; only the send is replaced.
@@ -6143,9 +6147,6 @@ async def handle_message(
             capped_wake_error.update(
                 head=capped_head, ref=final_ref, rendered=final_rendered, repeats=0
             )
-        elif turn is not None and run_ok is True:
-            # A turn got through: the limit has lifted — start afresh.
-            capped_wake_error.clear()
         if turn is not None and turn.notify and turn.reason in FOLDABLE_REASONS:
             # #785 part 2: this batch of background work has pushed once.
             bg_status.note_breakout()
@@ -6359,6 +6360,8 @@ async def handle_message(
         error. One send — it runs under the run-end shielded timeout."""
         if ctx.delivery["sent"]:
             return
+        # #890: a cancelled turn ends a run of capped repeats too.
+        capped_wake_error.clear()
         state = ctx.tracker.snapshot(
             resume_formatter=runner.format_resume,
             context_line=context_line,
