@@ -4093,3 +4093,106 @@ class TestTriggersPagePerChat:
         assert "c09" in text
         assert "c10" not in text
         assert "…and 3 more" in text
+
+
+# ---------------------------------------------------------------------------
+# #903: every setter preserves the fields it doesn't change (loop_enabled)
+# ---------------------------------------------------------------------------
+
+_903_CLAUDE_ACTIONS = [
+    "pm:on",
+    "pm:off",
+    "pm:pa",
+    "pm:auto",
+    "pm:clr",
+    "rs:hi",
+    "rs:clr",
+    "md:clr",
+    "ag:md_clr",
+    "aq:on",
+    "aq:off",
+    "aq:clr",
+    "dp:on",
+    "dp:off",
+    "dp:clr",
+    "cu:ac_on",
+    "cu:ac_off",
+    "cu:ac_clr",
+    "cu:su_on",
+    "cu:su_clr",
+    "cu:bg_on",
+    "cu:bg_clr",
+    "cu:bc_on",
+    "cu:bc_clr",
+    "rl:on",
+    "rl:off",
+    "rl:clr",
+]
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("args", _903_CLAUDE_ACTIONS)
+async def test_903_setter_keeps_loop_override(tmp_path, args):
+    """#903: changing any other setting must not clear Loop mode."""
+    from untether.telegram.chat_prefs import ChatPrefsStore, resolve_prefs_path
+
+    state_path = tmp_path / "prefs.json"
+    cmd = ConfigCommand()
+    await cmd.handle(
+        _make_ctx(
+            args_text="loop:on",
+            text="config:loop:on",
+            config_path=state_path,
+            default_engine="claude",
+        )
+    )
+    await cmd.handle(
+        _make_ctx(
+            args_text=args,
+            text=f"config:{args}",
+            config_path=state_path,
+            default_engine="claude",
+        )
+    )
+    prefs = ChatPrefsStore(resolve_prefs_path(state_path))
+    override = await prefs.get_engine_override(123, "claude")
+    assert override is not None
+    assert override.loop_enabled is True
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("args", ["pm:fa", "pm:safe", "pm:clr", "rs:hi", "cu:ac_on"])
+async def test_903_codex_setter_keeps_other_fields(tmp_path, args):
+    """#903: a Codex setter keeps a previously set field (show_resume_line)."""
+    from untether.telegram.chat_prefs import ChatPrefsStore, resolve_prefs_path
+
+    state_path = tmp_path / "prefs.json"
+    cmd = ConfigCommand()
+    for step in ("rl:off", args):
+        await cmd.handle(
+            _make_ctx(
+                args_text=step,
+                text=f"config:{step}",
+                config_path=state_path,
+                default_engine="codex",
+            )
+        )
+    prefs = ChatPrefsStore(resolve_prefs_path(state_path))
+    override = await prefs.get_engine_override(123, "codex")
+    assert override is not None
+    assert override.show_resume_line is False
+
+
+def test_903_no_field_by_field_override_rebuilds():
+    """#903: setters must copy the current override, never rebuild it field
+    by field (a forgotten field is silently cleared)."""
+    import re
+
+    src = Path(__file__).resolve().parents[1] / "src" / "untether"
+    offenders = [
+        str(path.relative_to(src))
+        for path in src.rglob("*.py")
+        if path.name != "engine_overrides.py"
+        and re.search(r"\bEngineOverrides\(\s*\n\s*\w+=", path.read_text())
+    ]
+    assert offenders == []

@@ -53,7 +53,7 @@ class PlanModeCommand:
 
     async def handle(self, ctx: CommandContext) -> CommandResult | None:
         from ..chat_prefs import ChatPrefsStore, resolve_prefs_path
-        from ..engine_overrides import EngineOverrides
+        from ..engine_overrides import with_override
         from ._resolve_engine import resolve_effective_engine
 
         config_path = ctx.config_path
@@ -108,20 +108,7 @@ class PlanModeCommand:
         if args in PERMISSION_MODES:
             mode = PERMISSION_MODES[args]
             current = await chat_prefs.get_engine_override(chat_id, engine)
-            updated = EngineOverrides(
-                model=current.model if current else None,
-                reasoning=current.reasoning if current else None,
-                permission_mode=mode,
-                ask_questions=current.ask_questions if current else None,
-                diff_preview=current.diff_preview if current else None,
-                show_api_cost=current.show_api_cost if current else None,
-                show_subscription_usage=current.show_subscription_usage
-                if current
-                else None,
-                show_resume_line=current.show_resume_line if current else None,
-                budget_enabled=current.budget_enabled if current else None,
-                budget_auto_cancel=current.budget_auto_cancel if current else None,
-            )
+            updated = with_override(current, permission_mode=mode)
             await chat_prefs.set_engine_override(chat_id, engine, updated)
             cli_mode = claude_cli_permission_mode(mode)
             logger.info(
@@ -145,20 +132,7 @@ class PlanModeCommand:
 
         if args == "clear":
             current = await chat_prefs.get_engine_override(chat_id, engine)
-            updated = EngineOverrides(
-                model=current.model if current else None,
-                reasoning=current.reasoning if current else None,
-                permission_mode=None,
-                ask_questions=current.ask_questions if current else None,
-                diff_preview=current.diff_preview if current else None,
-                show_api_cost=current.show_api_cost if current else None,
-                show_subscription_usage=current.show_subscription_usage
-                if current
-                else None,
-                show_resume_line=current.show_resume_line if current else None,
-                budget_enabled=current.budget_enabled if current else None,
-                budget_auto_cancel=current.budget_auto_cancel if current else None,
-            )
+            updated = with_override(current, permission_mode=None)
             await chat_prefs.set_engine_override(chat_id, engine, updated)
             logger.info("planmode.cleared", chat_id=chat_id, command="planmode")
             return CommandResult(
