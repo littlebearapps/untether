@@ -1982,6 +1982,11 @@ class ClaudeStreamState:
     # ``result_received_at`` never cleared at a turn open, so each result can
     # tell which background agents were active since the one before it.
     prev_result_at: float | None = None
+    # #889: the previous result's session-cumulative ``total_cost_usd`` /
+    # ``duration_api_ms`` in this process — a live turn's error line shows
+    # its own share, like the #778/#821 footer delta.
+    prev_result_cost_usd: float | None = None
+    prev_result_api_ms: int | None = None
 
     # #470: cross-layer signals from _post_result_idle_watchdog → bridge.
     # The watchdog stamps ``post_result_closed_at`` (monotonic) and
@@ -6122,7 +6127,18 @@ def _extract_error(
     event: claude_schema.StreamResultMessage,
     *,
     resumed: bool = False,
+    live_turn: int | None = None,
+    prev_cost_usd: float | None = None,
+    prev_api_ms: int | None = None,
 ) -> str | None:
+    """The error text: the CLI's message, then a diagnostic line.
+
+    #889: ``live_turn`` marks a later turn of a live session (#776). The
+    CLI's ``total_cost_usd`` / ``duration_api_ms`` are session-cumulative, so
+    such a turn shows its own share (since ``prev_cost_usd`` /
+    ``prev_api_ms``, the previous result in this process) plus a labelled
+    ``session cost:``, and ``live turn N`` instead of the spawn-time
+    ``new`` / ``resumed``. The run's own result keeps the original line."""
     if not event.is_error:
         return None
     # First line: error summary
@@ -6143,13 +6159,25 @@ def _extract_error(
     sid = event.session_id[:8] if event.session_id else None
     if sid:
         parts.append(f"session: {sid}")
-    parts.append("resumed" if resumed else "new")
+    if live_turn is not None:
+        parts.append(f"live turn {live_turn}")
+    else:
+        parts.append("resumed" if resumed else "new")
     parts.append(f"turns: {event.num_turns}")
     cost = event.total_cost_usd
-    if cost is not None:
-        parts.append(f"cost: ${cost:.2f}")
-    if event.duration_api_ms:
-        parts.append(f"api: {event.duration_api_ms}ms")
+    if live_turn is not None:
+        if cost is not None:
+            if prev_cost_usd is not None:
+                parts.append(f"cost: ${max(0.0, cost - prev_cost_usd):.2f}")
+            parts.append(f"session cost: ${cost:.2f}")
+        api_ms = event.duration_api_ms
+        if api_ms and prev_api_ms is not None and api_ms > prev_api_ms:
+            parts.append(f"api: {api_ms - prev_api_ms}ms")
+    else:
+        if cost is not None:
+            parts.append(f"cost: ${cost:.2f}")
+        if event.duration_api_ms:
+            parts.append(f"api: {event.duration_api_ms}ms")
 
     diagnostics = " · ".join(parts)
     if classification is not None:
@@ -7684,7 +7712,26 @@ def _translate_claude_event_base(
                 )
 
             resume = ResumeToken(engine=ENGINE, value=event.session_id)
-            error = None if ok else _extract_error(event, resumed=state.resumed)
+            # #889: a later turn of a live session (the live branch of
+            # translate_claude_event bumps completed_turns after this call).
+            live_turn = (
+                state.turn if state.live_mode and state.completed_turns > 0 else None
+            )
+            error = (
+                None
+                if ok
+                else _extract_error(
+                    event,
+                    resumed=state.resumed,
+                    live_turn=live_turn,
+                    prev_cost_usd=state.prev_result_cost_usd,
+                    prev_api_ms=state.prev_result_api_ms,
+                )
+            )
+            if event.total_cost_usd is not None:
+                state.prev_result_cost_usd = event.total_cost_usd
+            if event.duration_api_ms is not None:
+                state.prev_result_api_ms = event.duration_api_ms
             if not ok:
                 # #692: the subscription-cap reset time lives only in the
                 # raw result-error text — harvest it for this run's stall

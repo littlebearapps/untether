@@ -3169,6 +3169,99 @@ def test_extract_error_with_result_text() -> None:
     assert result.startswith("Context window limit reached")
 
 
+def _live_result(
+    *, cost: float, api_ms: int, is_error: bool = False, text: str = "ok"
+) -> claude_schema.StreamResultMessage:
+    return claude_schema.StreamResultMessage(
+        subtype="success",
+        duration_ms=1100,
+        duration_api_ms=api_ms,
+        is_error=is_error,
+        num_turns=1,
+        session_id="681bd6d5-aaaa-bbbb",
+        result=text,
+        total_cost_usd=cost,
+    )
+
+
+def test_889_live_turn_error_shows_this_turns_cost_not_cumulative(
+    monkeypatch,
+) -> None:
+    """#889: a failed later turn of a live session must not print the CLI's
+    session-cumulative cost / API time or the spawn-time ``new`` flag."""
+    from untether.model import TurnEvent
+
+    # The limit text arms the module-level #692 reset latch — isolate it.
+    monkeypatch.setattr(claude_runner, "_RATE_LIMIT_RESET_LATCH", {})
+    monkeypatch.setattr(claude_runner, "_RATE_LIMIT_ACTION_LATCH", {})
+    state = ClaudeStreamState()
+    state.live_mode = True
+    state.factory.started(ResumeToken(engine="claude", value="681bd6d5-aaaa-bbbb"))
+    # The run's own result (turn 1) — fresh session, cumulative $45.20.
+    first = translate_claude_event(
+        _live_result(cost=45.20, api_ms=5_000_000),
+        title="claude",
+        state=state,
+        factory=state.factory,
+    )
+    assert any(isinstance(e, CompletedEvent) for e in first)
+    # A wake turn hits the session limit: $0.05 more, 2 s more API time.
+    limit = "You've hit your session limit · resets 5:30pm (Australia/Melbourne)"
+    events = translate_claude_event(
+        _live_result(cost=45.25, api_ms=5_002_000, is_error=True, text=limit),
+        title="claude",
+        state=state,
+        factory=state.factory,
+    )
+    done = [e for e in events if isinstance(e, TurnEvent) and e.phase == "completed"]
+    assert len(done) == 1
+    error = done[0].error
+    assert error is not None
+    head, diag = error.split("\n", 1)
+    assert head == limit
+    assert "new" not in diag.split(" · ")
+    assert f"live turn {state.turn}" in diag
+    assert "cost: $0.05" in diag
+    assert "session cost: $45.25" in diag
+    assert "cost: $45.25 ·" not in diag.replace("session cost: $45.25", "")
+    assert "api: 2000ms" in diag
+    assert "5002000" not in diag
+
+
+def test_889_live_turn_error_without_cost_delta_labels_session_cost() -> None:
+    """#889: no earlier cost in this process → the only figure available is
+    the session total, and it is labelled as such."""
+    from untether.runners.claude import _extract_error
+
+    event = _live_result(cost=12.38, api_ms=900, is_error=True, text="boom")
+    result = _extract_error(event, resumed=False, live_turn=3)
+    assert result is not None
+    diag = result.split("\n", 1)[1]
+    assert "live turn 3" in diag
+    assert "session cost: $12.38" in diag
+    assert " cost: $12.38" not in diag.replace("session cost: $12.38", "")
+    assert "api:" not in diag
+    assert "new" not in diag.split(" · ")
+
+
+def test_889_first_turn_error_line_unchanged() -> None:
+    """#889: the run's own (first) result keeps the original diagnostic line
+    even in live mode."""
+    state = ClaudeStreamState()
+    state.live_mode = True
+    state.factory.started(ResumeToken(engine="claude", value="681bd6d5-aaaa-bbbb"))
+    events = translate_claude_event(
+        _live_result(cost=1.5, api_ms=3000, is_error=True, text="boom"),
+        title="claude",
+        state=state,
+        factory=state.factory,
+    )
+    completed = next(e for e in events if isinstance(e, CompletedEvent))
+    assert completed.error == (
+        "boom\nsession: 681bd6d5 · new · turns: 1 · cost: $1.50 · api: 3000ms"
+    )
+
+
 # ===========================================================================
 # #631 (Fix 1) — _usage_payload carries subtype
 # ===========================================================================
