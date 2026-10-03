@@ -93,20 +93,20 @@ The wizard offers three **workflow modes** — pick the one that fits:
 - ↪️ **Steer or queue follow-ups (Claude, with a permission mode set)** — a message sent mid-run waits for the current turn by default; `/steer <text>` (or steer as the chat default) writes it straight into the running session so Claude picks it up at its next step
 - 🗜️ **Context use at a glance (Claude)** — the status line ends with how full Claude's context window is (`done · claude · 1m 36s · step 10 · 62% ctx`), and compaction shows as a `🗜️ Context compacted · 182k → 41k tokens` row instead of looking like a stall
 - 📁 **Projects and worktrees** — register repos with `untether init`, target with `/myproject @feat/thing`, run branches in isolated worktrees in parallel
-- 💰 **Cost and usage tracking** — run agents remotely with confidence; per-run and daily budgets, `/usage` breakdowns, and optional auto-cancel keep spending visible. A per-run outlier alert fires even with no budget configured, so an expensive run can't pass unnoticed
+- 💰 **Cost and usage tracking** — run agents remotely with confidence; per-run and daily budget alerts and `/usage` breakdowns keep spending visible. A per-run outlier alert fires even with no budget configured, so an expensive run can't pass unnoticed
 - 💡 **Actionable error hints** — friendly messages for API outages, rate limits, billing errors, and network failures with resume guidance; Claude's API retry back-offs (`🔁 API error 529 … retrying in 8s`) and safeguard stops (`🛡️`) show as their own rows rather than silent hangs
 - 🏷 **Model and mode metadata** — every completed message shows model with version, effort level, and permission mode (e.g. `🏷 opus 5 · medium · plan`) across all engines
 - 🎙️ **Voice notes** — hands full? Dictate tasks instead of typing; Untether transcribes via a configurable Whisper-compatible endpoint, with a vocabulary bias so tool and project names survive transcription
 - 🔄 **Cross-environment resume** — start a session in your terminal, pick it up from Telegram with `/continue`; works with Claude Code, Codex, OpenCode, and Pi ([guide](docs/how-to/cross-environment-resume.md))
 - 📎 **File transfer** — upload files to your repo with `/file put`, download with `/file get`; agents can also deliver files automatically by writing to `.untether-outbox/` during a run — sent as Telegram documents on completion, with whole directories optionally bundled as a zip (`outbox_deliver_directories = "zip"`)
 - 🛡️ **Graceful recovery** — orphan progress messages cleaned up on restart; stall detection with CPU-aware diagnostics; auto-continue for Claude Code sessions that exit prematurely
-- ⏰ **Scheduled tasks** — cron expressions with timezone support, webhook triggers, one-shot delays (`/at 30m <prompt>`), `run_once` crons, master pause/resume toggle, and hot-reload configuration (no restart required). `/ping` shows per-chat trigger summary; trigger-initiated runs show provenance in the footer (`⏰ cron:<id>` / `⚡ webhook:<id>` / `⏰ at:<token>`); `/stats` reports per-engine triggered-vs-manual breakdown
-- 🔁 **Autonomous loops (Claude only)** — opt-in observation of Claude Code's `/loop` and `ScheduleWakeup`; Untether re-fires iterations after the subprocess exits so loops keep running between turns. Off by default; enable per chat via `/config → 🔁 Loop mode`. Cost guarded by `[cost_budget]`, runaway-safety capped by `[loop]` (max iterations, total duration, expiry)
+- ⏰ **Scheduled tasks** — cron expressions with timezone support, webhook triggers, one-shot delays (`/at 30m <prompt>`), `run_once` crons, master pause/resume toggle, and hot-reload configuration (no restart required). `/ping` shows per-chat trigger summary; trigger-initiated runs show provenance in the footer (`⏰ cron:<id>` / `⚡ webhook:<id>` / `⏰ at:<token>`); `/stats` reports per-engine triggered-vs-manual breakdown. A cron can pick its own `model` and `reasoning`, and unattended runs never hang on an approval nobody can tap: Claude crons and webhooks deny those requests and list them in the final
+- 🔁 **Autonomous loops (Claude only)** — opt-in observation of Claude Code's `/loop` and `ScheduleWakeup`; Untether re-fires iterations after the subprocess exits so loops keep running between turns. Off by default; enable per chat via `/config → 🔁 Loop mode`. Spend alerts via `[cost_budget]`, runaway-safety capped by `[loop]` (max iterations, total duration, expiry)
 - 💬 **Forum topics** — map Telegram topics to projects and branches
-- 📤 **Session export** — `/export` for markdown or JSON transcripts
+- 📤 **Session export** — `/export` sends the full transcript as a Markdown or JSON file
 - 🗂️ **File browser** — `/browse` to navigate a project-bound chat's files with inline buttons; file deny-globs (`.env`, keys, `.git`) apply to listings and previews
 - ⚙️ **Inline settings** — `/config` opens an in-place settings menu; toggle permission mode, ask mode, follow-up mode (steer/queue), approval policy (Codex), verbose, engine, model, reasoning, and listen mode with buttons; dedicated `⏰ Triggers` page lists per-chat crons/webhooks with last-fired times and a master pause/resume toggle
-- 🔄 **Hot-reload configuration** — edit `untether.toml` and changes apply in ~1 second; covers triggers, voice transcription, allowed-user lists, watchdog timing, progress verbosity, file-transfer/outbox config, and per-engine overrides. Only `bot_token`, `chat_id`, `session_mode`, `topics`, and `message_overflow` require a restart. Extend the engine-subprocess env allowlist via `[security] env_extra_allow` / `env_extra_prefix_allow` to thread credential-manager tokens (1Password, Doppler, Vault, …) without forking
+- 🔄 **Hot-reload configuration** — with `watch_config = true`, edit `untether.toml` and changes apply in ~1 second (per-run settings such as `[progress]`, `[footer]` and `[cost_budget]` apply on the next run even without it); covers triggers, voice transcription, allowed-user lists, watchdog timing, progress verbosity, file-transfer/outbox config, and per-engine overrides. Only `bot_token`, `chat_id`, `session_mode`, `topics`, and `message_overflow` require a restart. Extend the engine-subprocess env allowlist via `[security] env_extra_allow` / `env_extra_prefix_allow` to thread credential-manager tokens (1Password, Doppler, Vault, …) without forking
 - 🧩 **Plugin system** — extend with custom engines, transports, and commands
 - 🔌 **Plugin-compatible** — Claude Code plugins detect Untether sessions via `UNTETHER_SESSION` env var, preventing hooks from interfering with Telegram output; works with [PitchDocs](https://github.com/littlebearapps/lba-plugins) and other Claude Code plugins
 - 📊 **Session statistics** — `/stats` shows per-engine run counts, action totals, and duration across today, this week, and all time
@@ -166,7 +166,7 @@ These two engines still load and run, but are no longer supported and are **targ
 | **Cross-env resume (`/continue`)** | ✅ | ✅ | ✅ | ✅⁵ | ✅ | —⁶ |
 
 ¹ Amp model override maps to `--mode` (deep/free/rush/smart).
-² Defaults to full access (`--approval-mode=yolo`, all tools auto-approved); toggle via `/config` to edit files (`auto_edit`, files OK but no shell) or read-only; pre-run policy, not interactive mid-run approval.
+² Defaults to full access (`--approval-mode=yolo`, all tools auto-approved); toggle via `/config` to edit files (`auto_edit`, files OK but no shell); the `/config` "read-only" option still runs with full access; pre-run policy, not interactive mid-run approval.
 ³ Token usage counts only — no USD cost reporting.
 ⁴ Toggle via `/config` between full auto (default; Codex's own sandbox setting) and safe (`--sandbox read-only`: read-only, edits blocked); pre-run policy, not interactive mid-run approval.
 ⁵ Pi requires `provider = "openai-codex"` in engine config for OAuth subscriptions in headless mode.
@@ -186,9 +186,9 @@ Claude effort levels: `low`, `medium`, `high`, `xhigh`, `max` (`xhigh` requires 
 | `/model` | Override the model for an engine |
 | `/planmode` | Set Claude Code's permission mode (on/plan-auto/auto/off) |
 | `/usage` | Claude: subscription quota (`/usage debug` shows fetch state, OAuth expiry, schema-mismatch counter); Codex and OpenCode: token totals for the chat's last session |
-| `/export` | Export session transcript |
+| `/export` | Export the session transcript as a Markdown or JSON file |
 | `/browse` | Browse project files (needs a project-bound chat or `default_project`) |
-| `/new` | Cancel running tasks and clear stored sessions |
+| `/new` | Cancel running tasks and clear stored sessions (in a forum topic, only that topic's) |
 | `/continue` | Resume the most recent CLI session in this project ([guide](docs/how-to/cross-environment-resume.md)) |
 | `/steer` | Claude: `/steer <text>` writes one message into the running session; bare `/steer` makes steer the default for this chat or topic |
 | `/queue` | `/queue <text>` waits for the current turn to finish; bare `/queue` makes queue the default for this chat or topic |
@@ -262,7 +262,7 @@ untether                         # start (or restart — Ctrl+C first if already
 
 > **Note:** If you've set up a systemd service on Linux, use `systemctl --user restart untether` instead.
 
-> **Upgrading to v0.35.5?** It includes breaking changes — Untether's `auto` permission mode is renamed `plan-auto`, `/planmode off` now asks before shell commands, `extra_args` refuses approval-bypass flags, and Codex safe mode is now a real read-only sandbox. Read [Upgrading to v0.35.5](https://github.com/littlebearapps/untether/blob/master/docs/how-to/update.md#upgrading-to-v0355) first.
+> **Upgrading to v0.35.5?** It includes breaking changes — Untether's `auto` permission mode is renamed `plan-auto`, `/planmode off` now asks before shell commands, `extra_args` refuses approval-bypass flags, and Codex safe mode is now a real read-only sandbox. Unattended cron and webhook runs now deny approvals instead of waiting, so give every Claude cron that should act on its own an explicit `permission_mode`. Read [Upgrading to v0.35.5](https://github.com/littlebearapps/untether/blob/master/docs/how-to/update.md#upgrading-to-v0355) first.
 
 ---
 

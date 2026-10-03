@@ -118,10 +118,9 @@ Untether ships per-run and per-day cost budgets. In `untether.toml`:
 ```toml
 [cost_budget]
 enabled = true
-max_cost_per_run = 2.00      # USD; warn or auto-cancel if a single run exceeds this
+max_cost_per_run = 2.00      # USD; alert when a single run reaches this
 max_cost_per_day = 10.00     # USD; ditto across a calendar day
 warn_at_pct = 80             # warn when this % of budget is consumed
-auto_cancel_on_exceed = true # cancel the run when the threshold is hit
 warn_run_above_usd = 20.00   # USD; alert on any single expensive run — works even without a budget
 ```
 
@@ -137,7 +136,7 @@ Partly, by default. Claude Code's `/loop` and `ScheduleWakeup` are session-scope
 
 To enable end-to-end /loop support, turn on **Loop mode** in `/config → 🔁 Loop mode`. When on, Untether observes Claude's schedule registrations and re-fires each iteration when due, spawning a fresh `claude --resume` subprocess per fire.
 
-Be aware: autonomous loops consume API credits or your subscription quota. Set a budget in `/config → 💰 Cost & usage` *before* turning Loop mode on — the same daily cost cap applies to loop fires automatically. See the [Schedule tasks how-to](https://littlebearapps.com/help/untether/schedule-tasks/#loop-mode) for details.
+Be aware: autonomous loops consume API credits or your subscription quota. Set a budget in `/config → 💰 Cost & usage` *before* turning Loop mode on: loop fires count toward the same per-run and daily budgets. Budgets are checked after each run and alert rather than stop the next fire, so the runaway caps in `[loop]` (`max_iterations`, `max_total_duration_hours`, `expiry_days`) are what actually bound a loop. See the [Schedule tasks how-to](https://littlebearapps.com/help/untether/schedule-tasks/#loop-mode) for details.
 
 ## Can I schedule runs or trigger them from a webhook?
 
@@ -191,11 +190,11 @@ The deny-globs and per-file size cap are enforced before any send, so a misbehav
 
 ## Do I need to restart Untether after editing `untether.toml`?
 
-No — almost everything in `untether.toml` hot-reloads automatically within a couple of seconds of saving the file. Untether watches the config file and re-applies changes in-place: cron and webhook triggers, watchdog timing, progress verbosity, voice-transcription settings, the allowed-user list, message timing, the file-transfer + outbox config, the `show_resume_line` toggle, and every per-engine override.
+Usually not. With `watch_config = true` at the top of `untether.toml` (it's off unless you set it), almost everything hot-reloads within a couple of seconds of saving the file. Untether watches the config file and re-applies changes in-place: cron and webhook triggers, voice-transcription settings, the allowed-user list, message timing, the file-transfer + outbox config, the `show_resume_line` toggle, and every per-engine override. Per-run settings such as `[progress]`, `[watchdog]`, `[footer]` and `[cost_budget]` are re-read on every run anyway, so edits to those apply to the next run even without `watch_config`.
 
 The exceptions are a handful of restart-only keys that affect process bring-up: `bot_token`, `chat_id`, `session_mode`, `topics`, and `message_overflow`. If you edit one of those, Untether logs a `restart_required=true` warning, broadcasts a message to the active project chats, and you'll need to `systemctl --user restart untether` (or `/restart` from Telegram) to apply the change.
 
-**For agents:** after editing `untether.toml`, **do NOT run `systemctl restart untether` from inside an active agent session**. Untether already hot-reloaded the change; the restart is unnecessary and the graceful drain will time out (120s) trying to wait for your own session to finish, which silently drops your final answer message to the user. The reload-applied notification that arrives in the chat after your edit is your confirmation it took effect.
+**For agents:** after editing `untether.toml`, **do NOT run `systemctl restart untether` from inside an active agent session**. With `watch_config = true`, Untether has already hot-reloaded the change; the restart is unnecessary and the graceful drain will time out (120s) trying to wait for your own session to finish, which silently drops your final answer message to the user. The reload-applied notification that arrives in the chat after your edit is your confirmation it took effect.
 
 ## How do I update Untether?
 

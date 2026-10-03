@@ -2,11 +2,11 @@
 
 ## v0.35.5 (unreleased)
 
-<!-- Status 2026-10-01: shipped through 0.35.5rc16 — rc15 (22 issues, PR #853; never rolled out on
-     its own) plus the rc15 integration-run fixes #854–#863 (PR #864), on TestPyPI and all 5 hosts.
-     rc17 (0.35.5rc17, 2026-10-02): the entries for #820 #872 #828 #825 #876 #821 #841 #839 #418 #868 #871 #870
-     #869 #838 #388 #826 #835 #836 #743 #822 #823 #875 #886 are below, incl. the rc17 live-run fixes.
-     Still owed: rc17 fleet soak (/monitor), plus the verification owed on rc16.
+<!-- Status 2026-10-03: shipped through 0.35.5rc17, on TestPyPI and all 5 hosts (integration-test
+     attested and fleet-rolled 2026-10-03). rc15 (22 issues, PR #853; never rolled out on its own),
+     the rc15 integration-run fixes #854–#863 (PR #864, 0.35.5rc16) and rc17 (PR #888: #820 #872 #828
+     #825 #876 #821 #841 #839 #418 #868 #871 #870 #869 #838 #388 #826 #835 #836 #743 #822 #823 #875
+     #886, incl. the rc17 live-run fixes) are all below. The rc17 fleet soak filed #889–#895 for rc18.
      Single checklist of what's left: #865. Date this section at the dev→master release merge. -->
 
 ### breaking
