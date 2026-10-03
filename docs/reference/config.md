@@ -46,10 +46,11 @@ to retry. A symlinked config is followed when the link is re-pointed; if the new
 target lives in a different directory, restart Untether so later in-place edits
 of that file are seen.
 
-Fields listed as **restart-required** trigger a warning in the Telegram chat
-(🔄 prefix) AND a structlog `config.reload.transport_config_changed` record
-when edited. Everything else hot-reloads silently with a matching
-`config.reload.transport_config_hot_reloaded` INFO event.
+Editing a field marked 🔄 (**restart-required**) posts a warning to the project
+chats and admin DMs ("⟳ Setting `chat_id` changed — restart required to take
+effect.") and logs `config.reload.transport_config_changed`. Other Telegram
+transport changes apply without a message and log
+`config.reload.transport_config_hot_reloaded`.
 
 Separately from the watcher, the per-run settings (`[footer]`, `[progress]`,
 `[watchdog]`, `[preamble]`, `[cost_budget]`, `[auto_continue]`, `[security]`, …)
@@ -206,14 +207,14 @@ Legacy config note: top-level `bot_token` / `chat_id` are auto-migrated into `[t
 === "untether config"
 
     ```sh
-    untether config set plugins.enabled '["untether-transport-slack", "untether-engine-acme"]'
+    untether config set plugins.enabled '["untether", "untether-transport-slack", "untether-engine-acme"]'
     ```
 
 === "toml"
 
     ```toml
     [plugins]
-    enabled = ["untether-transport-slack", "untether-engine-acme"]
+    enabled = ["untether", "untether-transport-slack", "untether-engine-acme"]
     ```
 
 - `enabled = []` (default) means “load all installed plugins”.
@@ -457,7 +458,7 @@ Controls Untether's observation of Claude Code's session-scoped scheduling tools
 | `redundancy_check_interval` | int (≥ 1) | `30` | Seconds the fire path waits before retrying when the originating subprocess is still alive (race-avoidance gate). |
 | `max_iterations` | int (1–10000) | `20` | Runaway-safety cap on iteration count (NOT a cost cap). |
 | `max_total_duration_hours` | int (1–168) | `4` | Runaway-safety cap on wall-clock duration (NOT a cost cap). |
-| `min_interval_seconds` | int (≥ 60) | `60` | Minimum interval between fires (matches upstream cron floor). |
+| `min_interval_seconds` | int (≥ 60) | `60` | Accepted but not enforced yet; the upstream cron floor (60 s) applies. |
 | `expiry_days` | int (1–30) | `7` | Auto-expire loops this many days after creation (the default matches upstream's 7-day session-task expiry). |
 
 **Cost limits are NOT in `[loop]`** — they live in `[cost_budget]` and apply to loop fires automatically. See [Cost budgets](../how-to/cost-budgets.md) for setup.
@@ -622,14 +623,14 @@ message) rather than dropping its other settings.
 === "untether config"
 
     ```sh
-    untether config set opencode.model "claude-sonnet"
+    untether config set opencode.model "anthropic/claude-sonnet-5-5"
     ```
 
 === "toml"
 
     ```toml
     [opencode]
-    model = "claude-sonnet"
+    model = "anthropic/claude-sonnet-5-5"
     ```
 
 ### `gemini`

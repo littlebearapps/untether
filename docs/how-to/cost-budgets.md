@@ -170,7 +170,7 @@ For historical run data beyond the current session, use the `/stats` command:
 /stats
 ```
 
-This shows per-engine session statistics (runs, actions, duration) across today, this week, and all time. Pass an engine name to filter (e.g. `/stats claude`). Data is persisted in the config directory and auto-pruned after 90 days.
+This shows per-engine session statistics (runs, actions, duration) across today, this week, and all time. Pass an engine name to filter (e.g. `/stats claude`). Data is saved in the config directory; days older than 90 are folded into an all-time total, so "All time" stays complete.
 
 ## Related
 

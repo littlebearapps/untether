@@ -8,7 +8,7 @@ Structured, repeatable integration test process run against `@untether_dev_bot` 
 > returns `426` for out-of-date clients — so they **cannot** pass U1 and are no
 > longer required at any release tier. Their chats and test projects stay in
 > place for opt-in spot checks only. See
-> [`runner-development.md`](../../.claude/rules/runner-development.md) →
+> [`runner-development.md`](https://github.com/littlebearapps/untether/blob/master/.claude/rules/runner-development.md) →
 > "Deprecated engines — sweep exemption".
 
 ## Infrastructure
