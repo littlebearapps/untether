@@ -435,6 +435,70 @@ class TestRunAnywayCallback:
         assert len(runner.calls) == 1
 
 
+async def _no_thread_known(token: Any, done: Any) -> None:
+    return None
+
+
+@pytest.mark.anyio
+class TestCaptureModeRefusal:
+    """A plugin's ``run_one(mode="capture")`` collects the output into a
+    private transport — a refusal must come back as a result the plugin can
+    see, not a notice and a dead Run anyway button inside that capture."""
+
+    def _executor(self, transport: FakeTransport, runner: ScriptRunner):
+        from untether.telegram.commands.executor import _TelegramCommandExecutor
+
+        cfg = make_cfg(transport, runner)
+        return _TelegramCommandExecutor(
+            exec_cfg=cfg.exec_cfg,
+            runtime=cfg.runtime,
+            running_tasks={},
+            scheduler=object(),  # type: ignore[arg-type]
+            on_thread_known=_no_thread_known,
+            engine_overrides_resolver=None,
+            chat_id=123,
+            user_msg_id=7,
+            thread_id=None,
+            show_resume_line=True,
+            stateful_mode=False,
+            default_engine_override=None,
+        )
+
+    async def test_capture_refused_without_notice_or_pending_run(
+        self, cfg_path: Path
+    ) -> None:
+        from untether.commands import RunRequest
+
+        _write_config(cfg_path, _ON)
+        _spend(0.50)
+        transport = FakeTransport()
+        runner = ScriptRunner([Return(answer="ok")], engine="codex", resume_value="r1")
+        executor = self._executor(transport, runner)
+        with capture_logs() as logs:
+            result = await executor.run_one(RunRequest(prompt="hi"), mode="capture")
+        assert runner.calls == []
+        assert result.refused == "daily_budget"
+        assert result.message is not None and result.message.text == BLOCK_TEXT
+        assert budget_gate._PENDING_RUNS == {}
+        assert transport.send_calls == []
+        blocked = [e for e in logs if e["event"] == "cost_budget.run_blocked"]
+        assert len(blocked) == 1
+        assert blocked[0]["scope"] == "per_day"
+        assert blocked[0]["mode"] == "capture"
+
+    async def test_capture_runs_under_budget(self, cfg_path: Path) -> None:
+        from untether.commands import RunRequest
+
+        _write_config(cfg_path, _ON)
+        _spend(0.10)
+        transport = FakeTransport()
+        runner = ScriptRunner([Return(answer="ok")], engine="codex", resume_value="r1")
+        executor = self._executor(transport, runner)
+        result = await executor.run_one(RunRequest(prompt="hi"), mode="capture")
+        assert len(runner.calls) == 1
+        assert result.refused is None
+
+
 # ---------------------------------------------------------------------------
 # Live follow-ups and steers would start a turn without _run_engine
 # ---------------------------------------------------------------------------

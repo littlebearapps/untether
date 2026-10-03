@@ -30,6 +30,10 @@ class RunRequest:
 class RunResult:
     engine: EngineId
     message: RenderedMessage | None
+    # Why the run didn't start, or None when it ran. ``"daily_budget"``: the
+    # daily cost budget's "Stop at limit" refused it (#896); ``message`` then
+    # holds the refusal text.
+    refused: str | None = None
 
 
 class CommandExecutor(Protocol):

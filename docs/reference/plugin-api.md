@@ -61,7 +61,7 @@ dependencies = ["untether>=0.35,<0.36"]
 | `CommandResult` | Simple response payload for a command; optional `attachment` replies with a file ([#418](https://github.com/littlebearapps/untether/issues/418)) |
 | `CommandAttachment` | `CommandAttachment(filename, content, fallback_text=None)`: a file a command replies with. Telegram sends it as a document (outbox-queued, capped at 10 MB) with `CommandResult.text` as the caption; `fallback_text` (or `text`) is sent as a plain message if the upload fails or is too large. Text commands only: callback results ignore it |
 | `RunRequest` | Engine run request used by commands |
-| `RunResult` | Engine run result (captured output) |
+| `RunResult` | Engine run result (captured output). `refused` is `None` when the run started; `"daily_budget"` when the daily cost budget's **Stop at limit** refused it, with the refusal text in `message` ([#896](https://github.com/littlebearapps/untether/issues/896)) |
 | `RunMode` | `"emit"` (send) or `"capture"` (collect) |
 
 ### Core types and helpers
@@ -236,7 +236,7 @@ The full field list:
 The last four are optional (default `None`), so transports that don't set them keep working.
 
 Use `ctx.executor.run_one(...)` or `ctx.executor.run_many(...)` to reuse Untether's
-engine pipeline. Use `mode="capture"` to collect results and build a custom reply.
+engine pipeline. Use `mode="capture"` to collect results and build a custom reply. A captured run refused by the daily budget sends nothing to the chat and offers no **Run anyway** button: check `result.refused` and tell the user yourself.
 
 `ctx.message` and `ctx.reply_to` are `MessageRef` objects with:
 
