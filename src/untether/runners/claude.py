@@ -5053,6 +5053,27 @@ def _loop_enabled_for_chat(chat_id: int | None) -> bool:
         return False
 
 
+def _loop_caps() -> dict[str, int]:
+    """``[loop]`` runaway-safety caps for a new loop entry.
+
+    Falls back to the ``LoopSettings`` defaults when settings can't load.
+    """
+    from ..settings import LoopSettings
+
+    try:
+        settings_result = load_settings_if_exists()
+        loop = (
+            settings_result[0].loop if settings_result is not None else LoopSettings()
+        )
+    except Exception:  # noqa: BLE001
+        loop = LoopSettings()
+    return {
+        "max_iterations": loop.max_iterations,
+        "max_total_duration_hours": loop.max_total_duration_hours,
+        "expiry_days": loop.expiry_days,
+    }
+
+
 def _observe_loop_tool_use(
     state: ClaudeStreamState,
     content: claude_schema.StreamToolUseBlock,
@@ -5108,6 +5129,7 @@ def _observe_loop_tool_use(
                 chat_id=int(chat_id),
                 thread_id=thread_id,
                 fallback_first_user_message=state.first_user_message_text,
+                **_loop_caps(),
             )
         except loop_scheduler.LoopSchedulerError as exc:
             logger.warning(
@@ -5144,6 +5166,7 @@ def _observe_loop_tool_use(
                 chat_id=int(chat_id),
                 thread_id=thread_id,
                 fallback_first_user_message=state.first_user_message_text,
+                **_loop_caps(),
             )
         except loop_scheduler.LoopSchedulerError as exc:
             logger.warning(
