@@ -100,8 +100,50 @@ class SessionStatsStore:
 
     def __post_init__(self) -> None:
         self._load()
-        if self.roll_up():
-            self._save()
+        # Startup must never fail on stats housekeeping (a read-only or full
+        # disk, odd bucket values): keep the in-memory data and carry on.
+        try:
+            if self.roll_up():
+                self._save()
+        except Exception as exc:  # noqa: BLE001
+            self._log_roll_up_failed(exc)
+
+    def _log_roll_up_failed(self, exc: Exception) -> None:
+        logger.warning(
+            "session_stats.roll_up_failed",
+            path=str(self.path),
+            error=str(exc),
+            error_type=type(exc).__name__,
+        )
+
+    def _drop_malformed_buckets(self) -> None:
+        """Skip engine entries and day buckets that aren't dicts, so neither
+        the roll-up nor /stats trips over them (#897)."""
+        engines = self._data.get("engines")
+        if not isinstance(engines, dict):
+            if engines is not None:
+                logger.warning(
+                    "session_stats.malformed_bucket",
+                    path=str(self.path),
+                    skipped=["engines"],
+                )
+            self._data["engines"] = {}
+            return
+        skipped: list[str] = []
+        for engine in list(engines):
+            days = engines[engine]
+            if not isinstance(days, dict):
+                del engines[engine]
+                skipped.append(str(engine))
+                continue
+            for key in list(days):
+                if not isinstance(days[key], dict):
+                    del days[key]
+                    skipped.append(f"{engine}/{key}")
+        if skipped:
+            logger.warning(
+                "session_stats.malformed_bucket", path=str(self.path), skipped=skipped
+            )
 
     def _load(self) -> None:
         if self.path.exists():
@@ -109,6 +151,7 @@ class SessionStatsStore:
                 raw = json.loads(self.path.read_text(encoding="utf-8"))
                 if isinstance(raw, dict) and raw.get("version") == 1:
                     self._data = raw
+                    self._drop_malformed_buckets()
                 else:
                     logger.warning(
                         "session_stats.version_mismatch", path=str(self.path)
@@ -135,7 +178,11 @@ class SessionStatsStore:
     ) -> None:
         today = _today()
         if today != self._rolled_up_on:
-            self.roll_up()  # first run of a new day; saved with the run below
+            # First run of a new day; saved with the run below.
+            try:
+                self.roll_up()
+            except Exception as exc:  # noqa: BLE001
+                self._log_roll_up_failed(exc)
         engines = self._data.setdefault("engines", {})
         engine_days = engines.setdefault(engine, {})
         bucket = DayBucket.from_dict(engine_days.get(today, {}))
@@ -224,9 +271,9 @@ class SessionStatsStore:
             if not isinstance(engine_days, dict):
                 continue
             expired: list[str] = []
-            for key in engine_days:
-                if key == ARCHIVE_KEY:
-                    continue
+            for key, bucket in engine_days.items():
+                if key == ARCHIVE_KEY or not isinstance(bucket, dict):
+                    continue  # malformed buckets are skipped, never folded
                 try:
                     if datetime.strptime(key, "%Y-%m-%d") < cutoff:
                         expired.append(key)
@@ -234,9 +281,16 @@ class SessionStatsStore:
                     continue  # not a day bucket — leave it alone
             if not expired:
                 continue
-            archive = DayBucket.from_dict(engine_days.get(ARCHIVE_KEY, {}))
+            existing = engine_days.get(ARCHIVE_KEY)
+            archive = DayBucket.from_dict(
+                existing if isinstance(existing, dict) else {}
+            )
             for key in expired:
-                archive.merge(DayBucket.from_dict(engine_days.pop(key)))
+                archive.merge(DayBucket.from_dict(engine_days[key]))
+            # Mutate only once every merge has succeeded, so a bad value
+            # leaves this engine's buckets intact.
+            for key in expired:
+                del engine_days[key]
             engine_days[ARCHIVE_KEY] = archive.to_dict()
             folded += len(expired)
         if folded:

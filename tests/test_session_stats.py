@@ -457,3 +457,76 @@ def test_store_aggregate_sums_triggered_and_manual(tmp_path) -> None:
     assert len(stats) == 1
     assert stats[0].triggered_count == 3
     assert stats[0].manual_count == 2
+
+
+# ── #897 hardening: the startup roll-up must never crash init ───────────────
+
+
+def test_897_init_survives_save_oserror(tmp_path, monkeypatch) -> None:
+    """A read-only or full disk while old buckets exist must not crash init;
+    the rolled-up data stays usable in memory."""
+    from structlog.testing import capture_logs
+
+    import untether.session_stats as session_stats
+
+    def _boom(*_a, **_k):
+        raise OSError(30, "Read-only file system")
+
+    monkeypatch.setattr(session_stats, "atomic_write_json", _boom)
+    path = tmp_path / "stats.json"
+    _write_stats(path, _old_and_recent())
+
+    with capture_logs() as logs:
+        store = SessionStatsStore(path)
+
+    failed = [e for e in logs if e.get("event") == "session_stats.roll_up_failed"]
+    assert len(failed) == 1 and failed[0]["log_level"] == "warning"
+    assert _totals(store.aggregate(period="all"))["claude"][0] == 63
+    assert _totals(store.aggregate(period="today")) == {
+        "claude": (32, 96, 32000, 600.0, 5, 27)
+    }
+
+
+def test_897_init_skips_non_dict_buckets(tmp_path) -> None:
+    """A malformed (non-dict) bucket is skipped with a warning instead of
+    crashing the startup roll-up (``from_dict(None)`` used to raise)."""
+    from structlog.testing import capture_logs
+
+    from untether.session_stats import ARCHIVE_KEY
+
+    path = tmp_path / "stats.json"
+    _write_stats(
+        path,
+        {
+            "claude": {
+                "2020-01-01": None,
+                "2020-02-01": _bucket(2, 5.0),
+                _days_ago(0): [1, 2],
+                ARCHIVE_KEY: "garbage",
+            },
+            "codex": None,
+        },
+    )
+
+    with capture_logs() as logs:
+        store = SessionStatsStore(path)
+
+    assert [e for e in logs if e.get("event") == "session_stats.malformed_bucket"]
+    assert not [e for e in logs if e.get("event") == "session_stats.roll_up_failed"]
+    claude = store._data["engines"]["claude"]
+    assert set(claude) == {ARCHIVE_KEY}
+    assert DayBucket.from_dict(claude[ARCHIVE_KEY]).run_count == 2
+    assert _totals(store.aggregate(period="all")) == {"claude": (2, 6, 2000, 5.0, 0, 2)}
+    # Today's malformed bucket no longer breaks recording.
+    store.record_run("claude", actions=1, duration_ms=1)
+    assert _totals(store.aggregate(period="today"))["claude"][0] == 1
+
+
+def test_897_roll_up_skips_non_dict_bucket_injected_after_load(tmp_path) -> None:
+    store = SessionStatsStore(tmp_path / "stats.json")
+    store._data = {
+        "version": 1,
+        "engines": {"claude": {"2020-01-01": None, "2020-02-01": _bucket(1, 1.0)}},
+    }
+    assert store.roll_up() == 1
+    assert store._data["engines"]["claude"]["2020-01-01"] is None
