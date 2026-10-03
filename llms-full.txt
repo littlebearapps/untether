@@ -4127,14 +4127,28 @@ For more control, use Untether's built-in cron system. Cron triggers fire on a s
     id = "daily-review"
     schedule = "0 9 * * 1-5"
     project = "myapp"
+    chat_id = -1001234567890  # the chat to post in — usually myapp's chat
     engine = "claude"
     prompt = "Review open PRs and summarise their status."
     ```
 
 This runs every weekday at 9:00 AM (server time) in the `myapp` project using
-Claude Code. Add `timezone = "Australia/Melbourne"` to evaluate in a specific
-timezone, or set `default_timezone` in `[triggers]` for all crons. See
+Claude Code, and posts in chat `-1001234567890`. Add
+`timezone = "Australia/Melbourne"` to evaluate in a specific timezone, or set
+`default_timezone` in `[triggers]` for all crons. See
 [Webhooks and cron](webhooks-and-cron.md#timezone) for details.
+
+!!! note "`project` doesn't choose the chat"
+    `project` sets the working directory only. Without `chat_id`, the cron
+    posts to the default `chat_id` from `[transports.telegram]`, not the
+    chat bound to `myapp`. Untether logs `trigger.cron.chat_fallback` when
+    that happens and the two chats differ ([#894](https://github.com/littlebearapps/untether/issues/894)).
+
+!!! tip "Turning triggers on needs one restart"
+    Most trigger edits hot-reload, but switching `[triggers] enabled` from
+    `false` to `true` only takes effect after a restart, because the cron
+    scheduler starts at startup. The Telegram reload notice says
+    **Restart required** when this applies.
 
 Common schedules:
 
@@ -5433,7 +5447,7 @@ Action types: `agent_run` (default), `file_write`, `http_forward`, `notify_only`
 Each webhook and cron can specify where the Telegram notification appears:
 
 - Set `chat_id` to post in a specific chat
-- If omitted, uses the default chat from `[transports.telegram]`
+- If omitted, uses the default chat from `[transports.telegram]` — even when `project` is set. A project's bound chat is **not** used, so add `chat_id` to post in the project's chat. Untether logs `trigger.cron.chat_fallback` / `trigger.webhook.chat_fallback` once when a project-only trigger will post to a different chat than the project's ([#894](https://github.com/littlebearapps/untether/issues/894))
 - Set `project` to run in a specific project's working directory
 - Set `engine` to pick the engine. Without it, a trigger with a `project` runs on that project's `default_engine` (since v0.35.5 — it used to fall back to the global default, [#862](https://github.com/littlebearapps/untether/issues/862)), and one without a project uses the global `default_engine`
 
@@ -5499,6 +5513,8 @@ run_once = true
 ```
 
 After the cron fires, the `triggers.cron.run_once_completed` log line confirms the removal, and the startup message counts it separately from scheduled crons ([#809](https://github.com/littlebearapps/untether/issues/809)). Fired state is persisted to `run_once_fired.json` (sibling of `untether.toml`), so the cron is skipped across config reloads and process restarts — the TOML entry is kept for history but won't refire. To re-enable a one-shot, change its `id` or remove both the TOML entry and its record in `run_once_fired.json`.
+
+A one-shot only counts as fired once its run is dispatched. If the `⏰ Scheduled:` message can't be posted (a wrong `chat_id`, or a Telegram or network outage), nothing runs and the cron stays pending: Untether retries it once a minute for up to 15 minutes, then gives up and logs `triggers.cron.run_once_lost` at error level ([#893](https://github.com/littlebearapps/untether/issues/893)). A restart during that window leaves the cron active, so it fires again on its next schedule match.
 
 ## Autonomous crons in plan-mode chats (Claude)
 
@@ -7838,7 +7854,7 @@ This line is parsed from replies and takes precedence over new directives. For b
 | `/config` | Interactive settings menu — permission mode (titled **Permission mode** since [#741](https://github.com/littlebearapps/untether/issues/741)), ask mode, verbose, engine, model, reasoning, listen-mode and follow-up-mode (Claude Code: queue / steer, [#775](https://github.com/littlebearapps/untether/issues/775)) toggles with inline buttons. The `⏰ Triggers` page (`config:tg`) lists per-chat crons (`describe_cron(...)` schedule, project, engine, last-fired) and webhooks (path, auth, project, engine, last-fired), capped at 10 entries with an overflow marker, plus a master pause/resume toggle ([#271](https://github.com/littlebearapps/untether/issues/271), [#294](https://github.com/littlebearapps/untether/issues/294)); the home page links to it with a `⏰ Triggers` button whenever `[triggers]` is enabled ([#296](https://github.com/littlebearapps/untether/issues/296)). Each page's "📖 Learn more" link opens the matching help-centre article. |
 | `/stats` | Per-engine session statistics — runs, actions, duration and last run for one period: `today` (default), `week` or `all` (e.g. `/stats week`). Includes `(N triggered, M manual)` per-engine breakdown when at least one count is nonzero ([#271](https://github.com/littlebearapps/untether/issues/271) Tier 3). Pass an engine name to filter (e.g. `/stats claude`). `/stats auth` shows each engine CLI's auth status instead. |
 | `/auth` | Headless device re-authentication for Codex — runs `codex login --device-auth` and sends the verification URL + device code. `/auth status` checks CLI availability. Codex-only. |
-| `/new` | Cancel any running task and clear stored sessions for the current scope (topic/chat). A prompt still waiting in the forward-coalesce window is dropped with a notice rather than carried into the new session ([#807](https://github.com/littlebearapps/untether/issues/807)). |
+| `/new` | Cancel any running task and clear stored sessions for the current scope (topic/chat). A prompt still waiting in the forward-coalesce window is dropped with a notice rather than carried into the new session ([#807](https://github.com/littlebearapps/untether/issues/807)). When the only thing open was Claude's idle live session after an answer, the reply says `🧹 closed the idle session and cleared …` instead of `cancelled run` ([#895](https://github.com/littlebearapps/untether/issues/895)). |
 | `/continue [prompt]` | Resume the most recent session in the project directory. Picks up CLI-started sessions from Telegram. Optional prompt appended. Not supported for AMP. |
 | `/threads [search <query>]` | List, view, resume or archive AMP threads via inline buttons. AMP-only — **deprecated** together with the AMP engine, removal targeted for 0.36.0 ([#458](https://github.com/littlebearapps/untether/issues/458)). |
 | `/at <duration> <prompt>` | Schedule a one-shot delayed run. Duration: `Ns` (60-9999s), `Nm`, or `Nh` (up to 24h). The chat's project mapping and engine are captured at schedule time and used at fire time (mirrors cron freeze-at-dispatch behaviour). Pending delays are cancelled via `/cancel` and lost on restart. Per-chat cap of 20 pending delays. Trigger-source provenance is stamped as `at:<token>` and rendered in the run footer (`⏰ at:<token>`), and the run counts toward `/stats` as triggered ([#271](https://github.com/littlebearapps/untether/issues/271) follow-up). |
@@ -7964,7 +7980,7 @@ restart.
 | top-level `transport` | changing transport id | — |
 | `progress` | `group_chat_rps` (read once when the Telegram client starts) | everything else (re-read per run) |
 | engine tables, `projects`, `default_engine`, `default_project`, `plugins` | — | rebuilt on reload (a reload that breaks the **default** engine's config fails and the previous runtime keeps running) |
-| `triggers` | turning `enabled` **on** (the cron scheduler and webhook server only start at startup); everything under `[triggers.server]` (`host`, `port`, `rate_limit`, `max_body_bytes` are read when the server binds) | cron add/remove/edit, webhook add/remove/edit, `default_timezone`, `allow_unauthenticated_webhooks`, per-cron `timezone`/`run_once`/`permission_mode`/`model`/`reasoning`; turning `enabled` **off** clears every cron and webhook route (the server stays bound until restart) |
+| `triggers` | turning `enabled` **on** (the cron scheduler and webhook server only start at startup; the reload logs `config.reload.restart_required key=triggers.enabled` and the Telegram reload notice flags it, [#894](https://github.com/littlebearapps/untether/issues/894)); everything under `[triggers.server]` (`host`, `port`, `rate_limit`, `max_body_bytes` are read when the server binds) | cron add/remove/edit, webhook add/remove/edit, `default_timezone`, `allow_unauthenticated_webhooks`, per-cron `timezone`/`run_once`/`permission_mode`/`model`/`reasoning`; turning `enabled` **off** clears every cron and webhook route (the server stays bound until restart) |
 
 To restart:
 
@@ -8201,7 +8217,7 @@ Per-chat override: `/verbose on` and `/verbose off` override the config default 
 | `max_cost_per_run` | float\|null (≥ 0) | `null` | Per-run cost limit (USD). |
 | `max_cost_per_day` | float\|null (≥ 0) | `null` | Daily cost limit (USD). |
 | `warn_at_pct` | int (0–100) | `70` | Warning threshold, as a percentage of the limit. |
-| `auto_cancel` | bool | `false` | Auto-cancel runs that exceed the per-run limit. |
+| `auto_cancel` | bool | `false` | Accepted but not enforced yet: budgets are checked after a run finishes, so they alert rather than cancel ([#896](https://github.com/littlebearapps/untether/issues/896)). |
 | `warn_run_above_usd` | float\|null (≥ 0) | `null` (→ `20.00`) | Per-run spend alert that fires **without** `enabled = true`. `0` disables it. For Claude, when background agents were active since the previous reply the alert adds `— includes spend by N background agents since the previous reply` ([#821](https://github.com/littlebearapps/untether/issues/821)). |
 | `notify_run_outlier` | bool | `true` | Show the outlier as a chat line. The `cost.run_outlier` log event fires either way. |
 
@@ -8643,7 +8659,7 @@ routing details.
 | `path` | string | (required) | URL path (e.g. `/hooks/github`). Must start with `/`, contain only letters, digits, `/`, `_`, `.`, `-`, and not be `/health`. |
 | `project` | string\|null | `null` | Project alias for working directory. |
 | `engine` | string\|null | `null` | Engine override. If unset: the `project`'s `default_engine` when a project is set, otherwise the global `default_engine` ([#862](https://github.com/littlebearapps/untether/issues/862)). |
-| `chat_id` | int\|null | `null` | Telegram chat. Falls back to transport default. |
+| `chat_id` | int\|null | `null` | Telegram chat. Falls back to the transport default `chat_id`, even when `project` is set (the project's bound chat is not used; a warning is logged when they differ). |
 | `auth` | string | `"bearer"` | `"bearer"`, `"hmac-sha256"`, `"hmac-sha1"`, or `"none"`. |
 | `secret` | string\|null | `null` | Auth secret. Required when `auth` is not `"none"`. |
 | `action` | `"agent_run"`\|`"file_write"`\|`"http_forward"`\|`"notify_only"` | `"agent_run"` | What the webhook does. Non-agent actions use `file_path` + `on_conflict`, `forward_url` + `forward_headers` + `forward_method`, or `message_template`, plus `notify_on_success` / `notify_on_failure` — see the [Triggers reference](triggers/triggers.md). |
@@ -8660,7 +8676,7 @@ routing details.
 | `schedule` | string | (required) | 5-field cron expression. |
 | `project` | string\|null | `null` | Project alias for working directory. |
 | `engine` | string\|null | `null` | Engine override. If unset: the `project`'s `default_engine` when a project is set, otherwise the global `default_engine` ([#862](https://github.com/littlebearapps/untether/issues/862)). |
-| `chat_id` | int\|null | `null` | Telegram chat. Falls back to transport default. |
+| `chat_id` | int\|null | `null` | Telegram chat. Falls back to the transport default `chat_id`, even when `project` is set (the project's bound chat is not used; a warning is logged when they differ). |
 | `prompt` | string\|null | (required if no `prompt_template`) | Prompt sent to the engine. |
 | `prompt_template` | string\|null | `null` | Prompt with `{{field}}` substitutions, used with `fetch`. |
 | `fetch` | table\|null | `null` | Pre-fetch step (`type = "http_get"`, `"http_post"` or `"file_read"`) whose result is available to `prompt_template` — see the [Triggers reference](triggers/triggers.md). |
@@ -10616,7 +10632,7 @@ and no run is started ([#758](https://github.com/littlebearapps/untether/issues/
 | `path` | string | (required) | URL path the server listens on (e.g. `/hooks/slack-alerts`). Must start with `/`, contain only letters, digits, `/`, `_`, `.` and `-`, and not be `/health` (reserved). |
 | `project` | string\|null | `null` | Project alias. Sets the working directory for the run. |
 | `engine` | string\|null | `null` | Engine override (e.g. `"claude"`, `"codex"`). If unset: the `project`'s `default_engine` when a project is set, otherwise the global `default_engine` (before 0.35.5rc16 a project trigger with no `engine` ran on the global default — [#862](https://github.com/littlebearapps/untether/issues/862)). |
-| `chat_id` | int\|null | `null` | Telegram chat to post in. Falls back to the transport's default `chat_id`. |
+| `chat_id` | int\|null | `null` | Telegram chat to post in. Falls back to the transport's default `chat_id` — even when `project` is set; a project's bound chat is not used ([Chat routing](#chat-routing)). |
 | `auth` | string | `"bearer"` | Auth mode: `"bearer"`, `"hmac-sha256"`, `"hmac-sha1"`, or `"none"`. |
 | `secret` | string\|null | `null` | Auth secret. Required when `auth` is not `"none"`. |
 | `prompt_template` | string\|null | (required for `agent_run`) | Prompt template with `{{field.path}}` substitutions. |
@@ -10655,12 +10671,12 @@ Webhook IDs and paths must each be unique across all configured webhooks.
 | `schedule` | string | (required) | 5-field cron expression (see [Cron expressions](#cron-expressions)). |
 | `project` | string\|null | `null` | Project alias. Sets the working directory for the run. |
 | `engine` | string\|null | `null` | Engine override. If unset: the `project`'s `default_engine` when a project is set, otherwise the global `default_engine` ([#862](https://github.com/littlebearapps/untether/issues/862)). |
-| `chat_id` | int\|null | `null` | Telegram chat to post in. Falls back to the transport's default `chat_id`. |
+| `chat_id` | int\|null | `null` | Telegram chat to post in. Falls back to the transport's default `chat_id` — even when `project` is set; a project's bound chat is not used ([Chat routing](#chat-routing)). |
 | `prompt` | string\|null | (required if no `prompt_template`) | Static prompt sent to the engine. |
 | `prompt_template` | string\|null | `null` | Template prompt with `{{field}}` substitution (used with fetch data). |
 | `timezone` | string\|null | `null` | IANA timezone name (e.g. `"Australia/Melbourne"`). Overrides `default_timezone`. |
 | `fetch` | object\|null | `null` | Pre-fetch step configuration (see [Data-fetch crons](#data-fetch-crons)). |
-| `run_once` | bool | `false` | Fire once then auto-disable — after the first dispatch attempt, even if its fetch aborted or the announce send failed. The cron stays in the TOML for history, but its fired state persists to `run_once_fired.json` (sibling of `untether.toml`) so it is filtered out on every subsequent config reload and restart until you remove it from the TOML entirely. Removing the cron from the TOML cleans its fired-state entry on the next reload. |
+| `run_once` | bool | `false` | Fire once then auto-disable — after the first dispatch, even if its fetch aborted. If the `⏰ Scheduled:` message can't be posted (after the 5 s + 30 s send retries), nothing runs and the one-shot is **not** consumed: it is retried once a minute for up to 15 minutes (`triggers.cron.run_once_pending` / `run_once_retry`), then given up and consumed with an error-level `triggers.cron.run_once_lost` log line ([#893](https://github.com/littlebearapps/untether/issues/893)). The cron stays in the TOML for history, but its fired state persists to `run_once_fired.json` (sibling of `untether.toml`) so it is filtered out on every subsequent config reload and restart until you remove it from the TOML entirely. Removing the cron from the TOML cleans its fired-state entry on the next reload. |
 | `permission_mode` | string\|null | `null` | Per-cron permission-mode override, validated for **Claude**: one of `default` (alias `manual`), `plan`, `plan-auto`, `auto`, `acceptEdits`, `dontAsk`, `bypassPermissions`. Wins over the chat's `/planmode` and the engine config default for this cron's run only. Set it on every Claude cron that should act unattended — requests that would wait for a tap are denied ([#835](https://github.com/littlebearapps/untether/issues/835)). See [Cron permission modes](#cron-permission-modes). |
 
 | `model` | string\|null | `null` | ([#743](https://github.com/littlebearapps/untether/issues/743)) Model for this cron's run only (passed as the engine's `--model`). Free-form like `/model set`, but it can't start with `-` or contain whitespace/control characters. Set `engine` too so the name matches. |
@@ -11142,6 +11158,15 @@ When a `project` is set, the run executes in the project's working directory
 the Telegram notification and engine reply appear, while `project` determines
 the filesystem context.
 
+!!! warning "`project` does not pick the chat"
+    A trigger with `project` but no `chat_id` posts to the transport default
+    `chat_id`, **not** the chat bound to that project in `[projects.*]`. Set
+    `chat_id` explicitly to post in the project's chat. When the project's
+    chat differs from the default chat, Untether logs
+    `trigger.cron.chat_fallback` (or `trigger.webhook.chat_fallback`) once at
+    startup or on the reload that adds the trigger, naming the trigger, the
+    project and both chat ids ([#894](https://github.com/littlebearapps/untether/issues/894)).
+
 ## Security
 
 - **Localhost binding**: The server binds to `127.0.0.1` by default. Use a
@@ -11417,7 +11442,7 @@ within seconds, and active runs are not interrupted.
 
 | Change | Why |
 |--------|-----|
-| `triggers.enabled` (off to on) | Webhook server and cron scheduler must be started |
+| `triggers.enabled` (off to on) | Webhook server and cron scheduler must be started. The reload logs `config.reload.restart_required key=triggers.enabled` and the Telegram reload notice says **Restart required** ([#894](https://github.com/littlebearapps/untether/issues/894)) |
 | `triggers.server.host` or `port` | aiohttp binds once at startup |
 | `triggers.server.rate_limit` | Rate limiter initialised at startup |
 | `triggers.server.max_body_bytes` | Body limit set when the server app is built |

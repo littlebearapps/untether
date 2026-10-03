@@ -1198,3 +1198,19 @@ Tier: T1 (voice) + the R15-10 shape. **Key-leak preflight:** `cp ~/.untether-dev
 | R17-19c | Restore: `cp ~/.untether-dev/untether.toml.bak-r17-19 ~/.untether-dev/untether.toml && rm ~/.untether-dev/untether.toml.bak-r17-19`, then re-run T1 | T1 transcribes normally |
 
 **Required for rc17:** Tier 7 + Tier 1 (Claude, Codex, OpenCode) + Tier 2 C1–C6 + B-LIVE-1…7 + R17-* (every row above, plus the regressions each subsection names). R17-13a is gated (Telethon; if it can't run, record it *not exercised* — the unit tests are the gate). R17-20g needs Nathan's OK before it runs.
+
+## rc18 scenarios (0.35.5rc18)
+
+Dev bot only (`@untether_dev_bot`, `ut-dev: Claude Code` `-5284581592`), driven from an lba-1 terminal session. Back up `~/.untether-dev/untether.toml` before R18-893/894 and restore it afterwards. Logs: `journalctl --user -u untether-dev -o cat --since "15 min ago" | grep -E "<pattern>"`.
+
+No live scenario: [#889](https://github.com/littlebearapps/untether/issues/889) and [#890](https://github.com/littlebearapps/untether/issues/890) need a real latched usage limit. Unit tests are the gate, plus a passive `/monitor` check on nsd (it hits the 5 h cap most days): one `live_turn.fold_decision decision=error`, then `live_turn.capped_repeat_folded repeats=N`, no `live_turn.capped_repeat_edit_failed`, and error lines reading `live turn N · … · session cost:`.
+
+| ID | Steps | Expected Telegram | Log signatures |
+|---|---|---|---|
+| R18-895a | Short prompt → wait for the final → `/new` within ~20 s | `🧹 closed the idle session and cleared stored sessions for you in this chat.` and no `cancelled ·` card | `new.cancel_scope … idle=1`, `handle.cancelled_after_delivery` |
+| R18-895b | Prompt that runs `sleep 60` in the foreground → `/new` mid-run | `🧹 cancelled run and cleared …` plus a `cancelled ·` card | `new.cancel_scope … idle=0` |
+| R18-894a | With triggers off and the service running, hot-edit `[triggers] enabled = true` plus a `run_once` cron with `project = "claude-test"` and no `chat_id` | `⚠️ Restart required … Restart-only keys touched: triggers.enabled` | `config.reload.restart_required key=triggers.enabled`, `trigger.cron.chat_fallback cron_id=… default_chat_id=123` |
+| R18-893a | Restart `untether-dev` (from the terminal), then let the cron fire to the placeholder default chat | nothing | `triggers.dispatch.send_failed chat_id=123` → `triggers.cron.run_once_pending retry_window_s=900`; no `run_once_completed`; the id is absent from `run_once_fired.json` |
+| R18-893b | Within the window, hot-add `chat_id = -5284581592` to the cron | `⏰ Scheduled: cron:<id>` then the run | `triggers.cron.run_once_retry` → `triggers.dispatch.starting` → `run_once_completed` |
+| R18-891 | Two background Bash commands (`sleep 8`, `sleep 45`); when the first finishes, Claude replies with one short markdown sentence (`**A: 29/40 (Good)** – see \`notes_v2.md\``) | the panel note reads `↳ A: 29/40 (Good) – see notes_v2.md`, with no `**` or backticks | `background_status.folded`, `live_turn.fold_decision decision=fold`, no `background_status.ack_plain_failed` |
+| R18-892 | A background agent `P4` (`sleep 40`); when it finishes, Claude SendMessages the same agent for another leg | the second header reads `🔔 Background task finished — P4: … (continued)`, and the panel's done row shows the sum of both legs | `claude.task.ended` → `claude.task.revived` → `claude.task.ended` (same task) |
