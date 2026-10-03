@@ -233,7 +233,7 @@ Untether-specific hypothesis classes commonly missed (read in full):
 - callback_data > 64 bytes (Telegram silent drop)
 - Restart-required config key edited mid-run, silently warned
 - Signal-death loop with auto-continue (rc=143/137 should suppress retry)
-- Plan-mode cooldown bypass via rapid-fire ExitPlanMode
+- Outline-gate bypass via rapid-fire ExitPlanMode (the gate is text-based since #570 retired the cooldown)
 - MCP catalog staleness (#365 — detect, optionally refresh)
 - Hot-reload race during an active run (TelegramBridgeConfig field copy)
 - Outbox deny-glob false-positive (legitimate file matched a deny pattern)

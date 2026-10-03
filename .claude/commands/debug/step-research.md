@@ -54,9 +54,9 @@ issue tracker before proposing a fix in Untether code:
 | Claude Code | `anthropics/claude-code` | `gh search issues "repo:anthropics/claude-code <error fragment>" --limit 10` |
 | Codex CLI | `openai/codex` | `gh search issues "repo:openai/codex <error fragment>" --limit 10` |
 | OpenCode | `sst/opencode` | `gh search issues "repo:sst/opencode <error fragment>" --limit 10` |
-| Pi | (inflection-ai / pi-cli) | Search Inflection's docs + GitHub — Pi's source is sometimes closed. Fall back to web search. |
-| Gemini CLI | `google-gemini/gemini-cli` | `gh search issues "repo:google-gemini/gemini-cli <error fragment>" --limit 10` |
-| AMP CLI | `sourcegraph/amp` | `gh search issues "repo:sourcegraph/amp <error fragment>" --limit 10` |
+| Pi | `earendil-works/pi` (formerly `badlogic/pi-mono`; npm `@mariozechner/pi-coding-agent`) | `gh search issues "repo:earendil-works/pi <error fragment>" --limit 10` |
+| Gemini CLI (deprecated) | `google-gemini/gemini-cli` | `gh search issues "repo:google-gemini/gemini-cli <error fragment>" --limit 10` |
+| AMP CLI (deprecated) | `sourcegraph/amp` | `gh search issues "repo:sourcegraph/amp <error fragment>" --limit 10` |
 
 Known long-standing upstream issues already tracked in Untether memory:
 - **Claude Code `last_event_type=user` exit** — upstream bugs anthropics/claude-code#34142, #30333 (auto-continue is the Untether mitigation).

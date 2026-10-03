@@ -104,7 +104,7 @@ When Claude calls `AskUserQuestion`:
 2. Question extracted from `input.question` or `input.questions[0].question`
 3. Progress message shows `❓ <question text>` with Approve/Deny buttons
 4. User replies with text → `telegram/loop.py` intercepts via `get_pending_ask_request()`
-5. `answer_ask_question()` sends deny response with user's text as `denial_message`
+5. `answer_ask_question()` sends a deny response with the user's text as its `message` (`deny_message=` on `write_control_response`)
 6. Claude reads the denial message as the answer and continues
 
 ## Diff preview
@@ -149,17 +149,17 @@ After the outline-gate auto-deny, synthetic Approve/Deny/Let's discuss buttons (
 
 Request (from Claude on stdout):
 ```json
-{"type":"control_request","request_id":"req_1","tool_name":"Bash","tool_input":{...}}
+{"type":"control_request","request_id":"req_1","request":{"subtype":"can_use_tool","tool_name":"Bash","input":{...}}}
 ```
 
-Response (to Claude on stdin):
+Response (to Claude on stdin, built by `write_control_response`):
 ```json
-{"type":"control_response","request_id":"req_1","approved":true}
+{"type":"control_response","response":{"subtype":"success","request_id":"req_1","response":{"behavior":"allow","updatedInput":{...}}}}
 ```
 
 Denial with message:
 ```json
-{"type":"control_response","request_id":"req_1","approved":false,"denial_message":"..."}
+{"type":"control_response","response":{"subtype":"success","request_id":"req_1","response":{"behavior":"deny","message":"..."}}}
 ```
 
 ## Stdin writers and live sessions (#776)

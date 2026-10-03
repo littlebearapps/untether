@@ -167,18 +167,21 @@ UntetherSettings (pydantic-settings, TOML source)
 
 ### ChatPrefsStore
 
-Per-chat persistent preferences (engine, model, reasoning, permission_mode):
+Per-chat persistent preferences: `default_engine`, listen mode, context project/branch,
+`followup_mode` (#775) and a per-engine `engine_overrides: dict[str, EngineOverrides]`:
 
 ```python
-class EngineOverrides:
-    engine: str | None
-    model: str | None
-    reasoning: str | None
-    permission_mode: str | None
+class EngineOverrides(msgspec.Struct):  # telegram/engine_overrides.py
+    model: str | None = None
+    reasoning: str | None = None
+    permission_mode: str | None = None
+    ask_questions: bool | None = None
+    diff_preview: bool | None = None
+    # ... footer / budget / loop toggles
 ```
 
-- Stored in `telegram_chat_prefs_state.json`
-- Set via `/agent`, `/model`, `/reasoning`, `/planmode` commands
+- Stored in `telegram_chat_prefs_state.json` (topic-level overrides in the topic state)
+- Set via `/agent`, `/model`, `/reasoning`, `/planmode`, `/config` commands
 - Applied at run time to override global config
 
 ## Engine backend registration
@@ -191,6 +194,8 @@ codex = "untether.runners.codex:BACKEND"
 claude = "untether.runners.claude:BACKEND"
 opencode = "untether.runners.opencode:BACKEND"
 pi = "untether.runners.pi:BACKEND"
+gemini = "untether.runners.gemini:BACKEND"  # deprecated, removed in 0.36.0
+amp = "untether.runners.amp:BACKEND"        # deprecated, removed in 0.36.0
 ```
 
 ### EngineBackend
@@ -215,7 +220,7 @@ Discovery: `importlib.metadata.entry_points(group="untether.engine_backends")`
 | `dispatch.py` | Callback dispatch, early answering, ephemeral registration |
 | `claude_control.py` | Approve/Deny/Discuss handlers, outline-gate wiring |
 | `planmode.py` | `/planmode` toggle |
-| `usage.py` | `/usage` — Claude Code API usage |
+| `usage.py` | `/usage` — Claude subscription quota; token totals for other engines (#417) |
 | `model.py` | `/model` override |
 | `reasoning.py` | `/reasoning` override |
 | `listen.py` | `/listen` (formerly `/trigger`, still accepted) — all-messages vs mentions-only |
@@ -231,6 +236,7 @@ class CommandResult:
     reply_to: MessageRef | None = None
     parse_mode: str | None = None  # "HTML" for bold formatting
     skip_reply: bool = False
+    attachment: CommandAttachment | None = None  # #418: sent as a document
 ```
 
 Commands return `CommandResult`; dispatch sends it as a Telegram message.
@@ -241,6 +247,8 @@ Callback data format: `<prefix>:<action>:<id>` (max 64 bytes).
 - `claude_control:approve:<request_id>` — approve control request
 - `claude_control:deny:<request_id>` — deny control request
 - `claude_control:discuss:<request_id>` — pause & outline plan
+- `claude_control:chat:<request_id>` — let's discuss (holds the request open)
+- synthetic post-outline buttons carry a `da:<session_id>` request id; AskUserQuestion options use `aq:opt:<i>` / `aq:other`
 
 ## Running tasks
 
@@ -254,6 +262,8 @@ class RunningTask:
     cancel_requested: anyio.Event
     done: anyio.Event
     context: RunContext | None
+    edits: ProgressEdits | None      # #690: drain self-restart evidence scan
+    thread_id: ThreadId | None       # #826: scopes /new and /cancel to a topic
 ```
 
 - Keyed by progress message ref

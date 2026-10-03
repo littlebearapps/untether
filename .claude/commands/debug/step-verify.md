@@ -36,13 +36,13 @@ From `docs/reference/integration-testing.md` and
 |---|---|---|
 | **Patch** (bug fix) | Tier 7 (command smoke) + Tier 1 (affected engine + Claude) + relevant Tier 6 (stress) | ~30 min |
 | **Minor** (new feature) | Tier 7 + Tier 1 (all 4 supported engines) + Tier 2 (Claude interactive) + Tier 3 (transport if changed) + Tier 4 (overrides if changed) + Tier 6 + upgrade path | ~75 min |
-| **Major** (breaking) | ALL tiers (1–7), ALL engines, full upgrade path | ~120 min |
+| **Major** (breaking) | ALL tiers (1–7), all supported engines, full upgrade path | ~120 min |
 
 Integration tests are automated via Telegram MCP tools (`send_message`,
 `get_history`, `list_inline_buttons`, `press_inline_button`,
 `reply_to_message`, `send_voice`, `send_file`) + Bash (`journalctl`,
 `kill -TERM`, FD/zombie checks). Chat IDs in
-`testing-conventions.md` §Integration testing via Telegram MCP.
+`docs/reference/integration-testing.md` §Test chats.
 
 Use `@untether_dev_bot`. **NEVER** test on `@hetz_lba1_bot` (staging) until
 dev tests pass.

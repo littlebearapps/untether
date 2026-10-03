@@ -16,7 +16,7 @@ rules** every workflow command must obey.
 This rule sequences and guards. It never re-describes how to code, and never
 re-quotes the 8-step protocol — that lives in the `.claude/commands/debug/`
 bundle. See `docs/LOOPS.md` for the loop registry and
-`docs/plans/agentic-loops-and-commands/README.md` for the full design.
+`docs/plans/agentic-loops-and-commands/README.md` for the full design (`docs/plans/` is gitignored — lba-1 checkout only).
 
 ## Routing — which command for which work shape
 
@@ -59,7 +59,7 @@ pushing on. Record the redirect in the run summary.
    `.claude/rules/dev-workflow.md`.
 
 4. **Reuse, don't duplicate.** Defer to the `.claude/commands/debug/` bundle, the
-   8 rules under `.claude/rules/`, and the superpowers skills (via the Skill
+   rules under `.claude/rules/`, and the superpowers skills (via the Skill
    tool). A command sequences + guards; it never re-describes how to code or
    re-quotes the 8-step protocol.
 

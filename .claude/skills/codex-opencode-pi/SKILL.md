@@ -142,15 +142,17 @@ opencode run --format json [--session SESSION_ID] [--model MODEL] -- <prompt>
 | `task` | `tool` |
 | (other) | `tool` |
 
-### Not yet implemented
+### Usage
 
-Usage accumulation: OpenCode's `step_finish` may include token/cost data but the runner does not currently extract it. `CompletedEvent.usage` is not populated.
+Each `step_finish`'s cost and tokens accumulate into `OpenCodeStreamState`; `_build_usage()` puts them on
+`CompletedEvent.usage` (`total_cost_usd` + `usage{input,output,reasoning,cache_*}_tokens`). The bridge accumulates
+them per session for `/usage` and `/export` (#417).
 
 ### Config keys
 
 ```toml
 [opencode]
-model = "claude-sonnet-4-5-20250929"
+model = "anthropic/claude-sonnet-5-5"   # must be OpenCode's provider/model form; bare names fail
 ```
 
 ---

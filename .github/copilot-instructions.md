@@ -19,7 +19,7 @@ Untether is a Telegram bridge for AI coding agents (Claude Code, Codex, OpenCode
 
 ## Architecture
 
-Runners (`src/untether/runners/`) manage engine subprocesses, emit events via the 3-event contract (StartedEvent → ActionEvent(s) → CompletedEvent). RunnerBridge connects runners to the TelegramPresenter which handles message rendering and inline keyboards.
+Runners (`src/untether/runners/`) manage engine subprocesses, emit events via the 3-event contract (StartedEvent → ActionEvent(s) → CompletedEvent; Claude live sessions may follow it with `TurnEvent` segments, never a second CompletedEvent). RunnerBridge connects runners to the TelegramPresenter which handles message rendering and inline keyboards.
 
 All Telegram writes go through `TelegramOutbox` — never call Bot API directly.
 
@@ -39,4 +39,4 @@ All Telegram writes go through `TelegramOutbox` — never call Bot API directly.
 
 ## Commands
 
-Key Telegram commands: `/cancel`, `/agent`, `/model`, `/planmode`, `/usage`, `/stats` (session statistics), `/auth` (Codex re-auth), `/export`, `/browse`, `/config`, `/verbose`, `/restart`.
+Key Telegram commands: `/cancel`, `/agent`, `/model`, `/planmode`, `/usage`, `/stats` (session statistics), `/auth` (Codex re-auth), `/export`, `/browse`, `/config`, `/steer` / `/queue` (Claude follow-ups), `/verbose`, `/restart`.

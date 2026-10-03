@@ -38,7 +38,7 @@ Tracking issue: [#477](https://github.com/littlebearapps/untether/issues/477) (c
 - Treat the FAQ like a contract with users. Whenever a new feature
   lands in `CHANGELOG.md`, ask: does the existing FAQ still answer
   questions correctly?
-- Specifically watch for:
+- Specifically watch for (Q numbers as of 0.35.5rc17 — they drift as questions are added, so match on the quoted heading):
   - **Engine support changes** — Q3 ("Which AI coding agents…")
     enumerates the 4 supported engines plus the 2 deprecated ones (Gemini
     CLI, Amp). If a new engine lands (e.g. Antigravity, #558) or one is
@@ -53,13 +53,13 @@ Tracking issue: [#477](https://github.com/littlebearapps/untether/issues/477) (c
     documents Plan mode buttons and `/planmode` semantics. Any change
     to ExitPlanMode, ask-mode, or per-engine approval policies needs
     an FAQ pass.
-  - **Cost / budget changes** — Q8 ("How do I keep agents from
+  - **Cost / budget changes** — Q11 ("How do I keep agents from
     spending too much…") shows `[cost_budget]` config. New keys, new
     budget types, or new auto-cancel behaviour need an FAQ refresh.
-  - **Voice transcription changes** — Q9 ("Can I send voice notes…")
+  - **Voice transcription changes** — Q15 ("Can I send voice notes…")
     references `voice_transcription_*` config keys. Renames or new
     keys need an FAQ pass.
-  - **Install / update / uninstall path changes** — Q2/Q10/Q11 cover
+  - **Install / update / uninstall path changes** — Q2/Q18/Q19 cover
     `uv tool` and `pipx` flows. Any change to the wizard, default
     config path, or systemd integration needs an FAQ refresh.
 
@@ -73,7 +73,7 @@ Tracking issue: [#477](https://github.com/littlebearapps/untether/issues/477) (c
 - Phrase as: ends with `?`, OR starts with How / What / Why / When /
   Where / Can / Do / Does / Is / Are / Should / Will.
 - Aim for ≥7 H2 Q/A pairs (the issue's acceptance criterion). Currently
-  ships with 19. Don't drop below 7 without coordinating with the
+  ships with 20. Don't drop below 7 without coordinating with the
   marketing site.
 
 ### Answer style

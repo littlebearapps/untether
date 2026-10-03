@@ -114,4 +114,4 @@ engine id, because its auth, flags, and session semantics differ.
 uv run pytest tests/test_*_runner.py tests/test_claude_control.py -x
 ```
 
-If this change will be released, also run integration tests U1-U4, U6, U7 (all engines) via `@untether_dev_bot`. See `docs/reference/integration-testing.md` — the "Changed area" table maps runner changes to required tests.
+If this change will be released, also run integration tests U1-U4, U6, U7 (all 4 supported engines) via `@untether_dev_bot`. See `docs/reference/integration-testing.md` — the "Changed area" table maps runner changes to required tests.

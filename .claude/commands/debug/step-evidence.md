@@ -129,7 +129,7 @@ ls ~/.untether-dev/integration-test-pass-*.json
 ## 2f. Telegram chat history (dev engine chats)
 
 For chat-side issues, pull last N messages from the relevant dev engine chat
-via the Telegram MCP. Chat IDs from `.claude/rules/testing-conventions.md`:
+via the Telegram MCP. Chat IDs (canonical list: `docs/reference/integration-testing.md` → "Test chats"):
 
 | Engine | Chat ID |
 |---|---|
@@ -137,8 +137,8 @@ via the Telegram MCP. Chat IDs from `.claude/rules/testing-conventions.md`:
 | Codex CLI | `4929463515` |
 | OpenCode | `5200822877` |
 | Pi | `5156256333` |
-| Gemini CLI | `5207762142` |
-| AMP CLI | `5230875989` |
+| Gemini CLI (deprecated) | `5207762142` |
+| AMP CLI (deprecated) | `5230875989` |
 
 ```
 mcp__telegram__get_history(chat_id=<id>, limit=50)

@@ -53,7 +53,7 @@ Follow the area's rule file:
 - telegram-* changes → `telegram-transport.md` (outbox-only writes, 64-byte
   callback, ephemeral cleanup).
 - control-channel changes → `control-channel.md` (PTY lifecycle, registry
-  cleanup, cooldown).
+  cleanup, outline gate, tap claims, plan re-arm).
 - runner, schema and telegram edits trigger a prompt hook in
   `.claude/hooks.json` that prints the area's contract reminders.
 

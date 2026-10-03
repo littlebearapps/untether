@@ -52,13 +52,16 @@ claude --output-format stream-json --input-format stream-json --verbose \
 
 - **No `-p` flag** — prompt sent via stdin as JSON user message
 - `--permission-prompt-tool stdio`: enables bidirectional control channel
-- `--permission-mode plan|tool`: determines what needs approval
+- `--permission-mode <mode>`: the configured mode verbatim (`plan`, `auto`, `default`, `acceptEdits`, …); only Untether's `plan-auto` is translated (to `plan`, #741)
+- `--include-hook-events` when the cached `claude --help` probe lists it (#812)
 
 ### Common flags
 
-- `--resume <session_id>`: resume a previous session
+- `--resume <session_id>` / `--continue` (`/continue`): resume a previous session
 - `--model <name>`: model override (sonnet, opus, haiku)
-- `--allowedTools "<rules>"`: auto-approve specific tools
+- `--effort <level>`: reasoning override
+- `--allowedTools "<rules>"`: pre-approve tools at stage 5 — not sent in prompting modes unless set explicitly (#749)
+- `[engines.claude] extra_args` go after the I/O prelude; approval/sandbox-bypass flags are refused (#209)
 
 ## JSONL event types
 
@@ -168,31 +171,28 @@ When using `--permission-prompt-tool stdio`, Claude Code sends control requests 
 ### Control request (stdout)
 
 ```json
-{"type":"assistant","session_id":"...","message":{"content":[
-  {"type":"tool_use","id":"toolu_ctrl_1","name":"PermissionPromptTool",
-   "input":{"type":"control_request","request_id":"req_1",
-            "tool_name":"Bash","tool_input":{"command":"rm -rf /"}}}
-]}}
+{"type":"control_request","request_id":"<id>","request":{"subtype":"can_use_tool",
+ "tool_name":"Bash","input":{"command":"rm -rf /"},"permission_suggestions":[...]}}
 ```
+
+Other `request.subtype`s (`initialize`, `hook_callback`, `mcp_message`, `rewind_files`, `interrupt`) are
+housekeeping. Decoded by `StreamControlRequest` / `Control*Request` in `schemas/claude.py`. The CLI can withdraw a
+pending request with `control_cancel_request` (#684).
 
 ### Control response (stdin)
 
 ```json
-{"type":"control_response","request_id":"req_1","approved":true}
+{"type":"control_response","response":{"subtype":"success","request_id":"<id>",
+ "response":{"behavior":"allow","updatedInput":{...}}}}
 ```
 
-Or with denial:
+Or with denial (the message is what Claude reads — also how a typed AskUserQuestion answer is delivered):
 ```json
-{"type":"control_response","request_id":"req_1","approved":false,
- "denial_message":"Not allowed — explain your plan first."}
+{"type":"control_response","response":{"subtype":"success","request_id":"<id>",
+ "response":{"behavior":"deny","message":"Not allowed — explain your plan first."}}}
 ```
 
-### ControlInitializeRequest
-
-Sent at session start; auto-approved immediately (no user prompt):
-```json
-{"type":"control_response","request_id":"req_init","approved":true}
-```
+Exact shapes: `docs/reference/runners/claude/stream-json-cheatsheet.md`.
 
 ## PTY for stdin
 
@@ -205,7 +205,7 @@ ClaudeRunner uses `pty.openpty()` instead of `subprocess.PIPE` for stdin:
 ## Session registries (concurrent sessions)
 
 ```python
-_SESSION_STDIN: dict[str, anyio.abc.ByteSendStream]   # session_id -> stdin pipe
+_SESSION_STDIN: dict[str, Any]                        # session_id -> stdin writer (PTY/pipe)
 _REQUEST_TO_SESSION: dict[str, str]                    # request_id -> session_id
 _PLAN_EXIT_APPROVED: set[str]                          # #283 diff-preview skip — cleared at every live turn open (#383)
 _DISCUSS_APPROVED / _DISCUSS_CARRY: set[str]           # post-outline approval; carried ONE boundary (#383)
@@ -217,16 +217,16 @@ _DISCUSS_APPROVED / _DISCUSS_CARRY: set[str]           # post-outline approval; 
 
 ## Auto-approve logic
 
-Non-interactive tools are auto-approved without user prompt:
+Decided per control request in `ClaudeRunner` (mechanism: `control-channel-internals.md`):
 
-```python
-AUTO_APPROVE_TOOLS = {"Grep", "Glob", "Read", "LS", "Bash", "BashOutput",
-                      "TodoWrite", "TodoRead", "WebSearch", "WebFetch", ...}
-```
-
-- `ControlInitializeRequest`: always auto-approved
-- Tool requests where `tool_name in AUTO_APPROVE_TOOLS`: auto-approved silently
-- `ExitPlanMode`: always shown to user as inline buttons
+- Housekeeping request types (`_AUTO_APPROVE_TYPES`: initialize, hook_callback, mcp_message, rewind_files,
+  interrupt) are auto-approved without looking at the payload
+- `can_use_tool` in an autonomous mode (`plan`, `plan-auto`, `auto`, `dontAsk`, `bypassPermissions`): auto-approved
+  unless the tool is in `_TOOLS_REQUIRING_APPROVAL = {"ExitPlanMode", "AskUserQuestion"}` or diff preview routes it
+- `can_use_tool` in a prompting mode (`default`/`manual`/`acceptEdits`, `state.prompting_mode`): every tool goes to
+  Telegram (#749)
+- Unattended cron/webhook runs never wait for a tap: would-wait requests are denied (`_unattended_deny`, #835)
+- `ExitPlanMode`: never auto-approved by the generic path (only `plan-auto`'s rubber stamp or a prior approval)
 
 ## ExitPlanMode handling
 
@@ -273,15 +273,19 @@ Telegram buttons show a spinner until `answerCallbackQuery`. The Claude control 
 ## `write_control_response` helper
 
 ```python
-async def write_control_response(
-    session_id: str,
+async def write_control_response(          # ClaudeRunner method
+    self,
     request_id: str,
     approved: bool,
+    *,
     deny_message: str | None = None,
-) -> None:
+    rejects_plan: bool = True,
+) -> bool:
 ```
 
-Looks up stdin in `_SESSION_STDIN[session_id]`, writes JSON response, handles cleanup.
+Resolves the session via `_REQUEST_TO_SESSION` → `_SESSION_STDIN`, writes the response through `_locked_send`, and
+cleans up. Telegram taps go through `respond_to_control_request()` after `claim_control_request()` (#685), never
+straight to the writer.
 
 ## Config keys (`[claude]` section in untether.toml)
 

@@ -18,7 +18,7 @@ Always include a "Manual testing" checklist section in PRs.
 - Australian English in user-facing text (realise, colour, behaviour, licence)
 - Conventional commits: `feat:`, `fix:`, `docs:`, `refactor:`, `test:`
 - 80% test coverage threshold enforced
-- Runner 3-event contract: StartedEvent -> ActionEvent(s) -> CompletedEvent
+- Runner 3-event contract: StartedEvent -> ActionEvent(s) -> CompletedEvent; Claude live sessions (#776) may add TurnEvent segments after it, never a second CompletedEvent
 - All Telegram writes go through TelegramOutbox (never call Bot API directly)
 - Use EventFactory for event construction, never construct dataclasses directly
-- Key commands: `/cancel`, `/agent`, `/model`, `/planmode`, `/usage`, `/stats`, `/auth`, `/export`, `/browse`, `/config`, `/verbose`, `/restart`
+- Key commands: `/cancel`, `/agent`, `/model`, `/planmode`, `/usage`, `/stats`, `/auth`, `/export`, `/browse`, `/config`, `/steer`, `/queue`, `/verbose`, `/restart`

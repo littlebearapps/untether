@@ -16,7 +16,7 @@ triggers:
 
 # JSONL Subprocess Runner Framework
 
-All Untether engine runners (Claude, Codex, OpenCode, Pi) extend `JsonlSubprocessRunner`, which manages subprocess lifecycle, JSONL parsing, session locking, and error handling.
+All Untether engine runners (Claude, Codex, OpenCode, Pi; deprecated Gemini and AMP) extend `JsonlSubprocessRunner`, which manages subprocess lifecycle, JSONL parsing, session locking, and error handling.
 
 ## Key files
 
@@ -39,7 +39,9 @@ Runner (Protocol)
       CodexRunner
       OpenCodeRunner
       PiRunner
+      GeminiRunner, AmpRunner (deprecated, removed in 0.36.0)
       ClaudeRunner (overrides run_impl for PTY support)
+  (each concrete runner also mixes in ResumeTokenMixin)
 ```
 
 ## Template methods to override
@@ -161,13 +163,15 @@ class JsonlStreamState:
     did_emit_completed: bool                # guard: exactly one CompletedEvent
     ignored_after_completed: bool           # drop lines after CompletedEvent
     jsonl_seq: int                          # line counter for logging
+    followup_turns: bool                    # #776: Claude live sessions read past CompletedEvent
+    # ... plus activity / stall-diagnostic fields (last_event_type, saw_result, proc_returncode, …)
 ```
 
 Key invariants:
 - **Exactly one CompletedEvent per run** — after emitting, all subsequent lines are dropped, unless the runner sets `followup_turns = True` (Claude live sessions, #776), where later turns become `TurnEvent` segments
 - **Per-run stream binding (#510)** — runner instances are shared across chats, so `runner.current_stream` / `runner.last_pid` are diagnostics only ("latest spawn in any chat"). The bridge binds a `RunStreamHandle` via ContextVar in `run_runner_with_cancel`; runners publish into it with `publish_run_stream()`. Bridge code reads the handle, never the runner attributes
 - **Session verification** — if expected_session is set and stream yields a different session_id, raise RuntimeError
-- **Duplicate StartedEvent suppression** — only the first StartedEvent is yielded
+- **Duplicate StartedEvent suppression** — a repeat StartedEvent without `meta` is dropped; one carrying `meta` passes through as a supplementary event (#225, e.g. Pi's late model) and `ProgressTracker.note_event` merges it
 
 ## Error handling
 
@@ -218,6 +222,8 @@ codex = "untether.runners.codex:BACKEND"
 claude = "untether.runners.claude:BACKEND"
 opencode = "untether.runners.opencode:BACKEND"
 pi = "untether.runners.pi:BACKEND"
+gemini = "untether.runners.gemini:BACKEND"  # deprecated
+amp = "untether.runners.amp:BACKEND"        # deprecated
 ```
 
 Discovery: `importlib.metadata.entry_points(group="untether.engine_backends")`
