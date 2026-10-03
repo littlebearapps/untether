@@ -227,6 +227,9 @@ Run quickly to verify all commands respond.
 
 ## rc4 scenarios (v0.35.1rc4)
 
+> Release-specific sections: rc4, rc7, B-LIVE and rc12–rc14 follow here; **rc15 and rc17 are at the end of this
+> file**, after "Known Limitations and Gotchas" (rc16 shipped the rc15 run's fixes and added no section of its own).
+
 Run these in addition to the standard tiers for rc4.
 
 | # | Scenario | Expected |
@@ -458,15 +461,15 @@ Integration tests are run by Claude Code via Telegram MCP tools (see "Automated 
 | Release type | Required tiers | Focus areas | Time |
 |-------------|---------------|-------------|------|
 | **Patch** (bug fix) | Tier 7 + Tier 1 (affected engine + Claude) + relevant Tier 6 | The specific bug area + regression check | ~30 min |
-| **Minor** (new feature) | Tier 7 + Tier 1 (all) + Tier 2 + Tier 3 (relevant) + Tier 4 (relevant) + Tier 6 + upgrade path | New feature + all engine regression + config compat | ~75 min |
-| **Major** (breaking) | All tiers, all engines, full upgrade path | Everything — no shortcuts | ~120 min |
+| **Minor** (new feature) | Tier 7 + Tier 1 (all 4 supported engines) + Tier 2 + Tier 3 (relevant) + Tier 4 (relevant) + Tier 6 + upgrade path | New feature + all engine regression + config compat | ~75 min |
+| **Major** (breaking) | All tiers, all supported engines, full upgrade path | Everything — no shortcuts | ~120 min |
 
 ### What to focus on per change type
 
 | Changed area | Must-run tests |
 |---|---|
-| Runner code (`runners/*.py`) | U1-U4 (all engines), U6, U7 |
-| Per-run stream binding (`runner.py` `RunStreamHandle` / `publish_run_stream`, `runner_bridge.py` stall monitor) | RC12-1, S1, S2, U1-U4 (all engines), B-LIVE-1 |
+| Runner code (`runners/*.py`) | U1-U4 (all supported engines), U6, U7 |
+| Per-run stream binding (`runner.py` `RunStreamHandle` / `publish_run_stream`, `runner_bridge.py` stall monitor) | RC12-1, S1, S2, U1-U4 (all supported engines), B-LIVE-1 |
 | Claude stream schema / rate-limit / API-retry handling (`schemas/claude.py`, `runners/claude.py`) | `uv run pytest tests/test_claude_cli_schema_drift.py`, RC12-2, RC12-3, S1 |
 | Runner bridge / auto-continue / no-op resume recovery (`runner_bridge.py`, `runners/claude.py`) | B-RESUME, U1-U4 (Claude), U6, U7 |
 | Live sessions / follow-up injection / scheduler (`runners/claude.py`, `runner_bridge.py`, `live_followup.py`, `scheduler.py`) | B-LIVE-1…7, RC12-4…7, C1-C6, S7, U1-U4 (Claude), R15-6 |

@@ -67,7 +67,7 @@ systemctl --user status untether untether-dev
 
 ## Staging workflow
 
-After dev testing passes, release candidates go through a staging phase on `@hetz_lba1_bot` before publishing to PyPI. This catches bugs through real-world dogfooding with all chat routes.
+After dev testing passes, release candidates go to TestPyPI and then, once the integration-test attestation is written, to all five hosts in parallel (lba-1 staging, nsd, channelo, sl, mac) before publishing to PyPI. There is no separate dogfood window: the integration tests are the quality gate, and the fleet soak (`/monitor`, issue watcher) catches what they miss.
 
 ```
 Dev (local editable)     Staging (TestPyPI rc)           Release (PyPI)
@@ -75,8 +75,8 @@ Dev (local editable)     Staging (TestPyPI rc)           Release (PyPI)
 
 Fix bugs, test locally   Bump to 0.35.0rc1               Bump to 0.35.0
 Integration tests        Merge to dev → TestPyPI         PR dev → master, merge
-                         staging.sh install 0.35.0rc1     auto-tag-on-master.yml → release.yml → PyPI
-                         Dogfood ~1 week                  staging.sh reset → restart
+                         Attest integration tests         auto-tag-on-master.yml → release.yml → PyPI
+                         fleet-rollout.sh 0.35.0rc1       fleet-rollout.sh 0.35.0 (5 hosts)
                          Issue watcher catches bugs
                          Fix → 0.35.0rc2 if needed
 ```
@@ -112,7 +112,7 @@ Integration tests        Merge to dev → TestPyPI         PR dev → master, me
 3. Run `uv lock`, commit on a feature branch
 4. PR `dev` → `master`. Nathan reviews and squash-merges — **this is the single release gate**
 5. `auto-tag-on-master.yml` detects the stable version and creates `vX.Y.Z`; `release.yml` fires on the tag, runs full CI, publishes to PyPI via OIDC, and creates the GitHub Release. **No manual tag, no PyPI environment approval.**
-6. After PyPI publishes: `scripts/staging.sh reset && systemctl --user restart untether`
+6. After PyPI publishes: attest and run `scripts/fleet-rollout.sh X.Y.Z` (all five hosts), or for lba-1 staging alone `scripts/staging.sh reset && systemctl --user restart untether`
 
 ### Rollback from staging
 

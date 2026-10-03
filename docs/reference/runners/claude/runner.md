@@ -892,7 +892,7 @@ Flow:
 2. Runner registers in `_PENDING_ASK_REQUESTS[request_id] = (channel_id, question_text)` (channel-scoped, so one chat can't answer another's question)
 3. Telegram shows the question (`❓ Question 1 of N: …` for several). When it has `options`, the Approve/Deny row is replaced by up to four option buttons (`aq:opt:<i>`) plus **Other (type reply)** (`aq:other`), driven by an `AskQuestionState` flow; without options the Approve/Deny buttons stay
 4. Option taps advance the flow question by question; when every question is answered, `answer_ask_question_with_options()` approves the request with `updatedInput.answers` set to the collected answers
-5. A typed reply → `telegram/loop.py` intercepts via `get_pending_ask_request(channel_id)`, and `answer_ask_question()` sends `control_response(approved=False, denial_message="The user answered...")` — the answer is in the denial message so Claude Code reads it and continues
+5. A typed reply → `telegram/loop.py` intercepts via `get_pending_ask_request(channel_id)`, and `answer_ask_question()` sends a deny response (`write_control_response(..., approved=False, deny_message="The user answered...")`, wire `{"behavior":"deny","message":…}`) — the answer is in the denial message so Claude Code reads it and continues
 
 The question text is HTML-escaped for Telegram (#713), and late or racing taps on an answered flow toast `Already answered` (#698/#710/#715).
 
