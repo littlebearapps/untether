@@ -75,6 +75,15 @@ def _check(label: str, *, active: bool) -> str:
     return f"✓ {label}" if active else label
 
 
+# #896: the per-chat ``budget_auto_cancel`` toggle (TOML key ``auto_cancel``).
+_STOP_AT_LIMIT = "Stop at limit"
+_STOP_AT_LIMIT_HELP = (
+    "Stops new runs once the daily budget is reached and ends a session after "
+    "the reply that passes the per-run budget. It can't interrupt a reply in "
+    "progress."
+)
+
+
 def _toggle_row(
     label: str,
     *,
@@ -2005,12 +2014,14 @@ async def _page_cost_usage(ctx: CommandContext, action: str | None = None) -> No
             if bc is True
             else ("off" if bc is False else ("on" if global_ac else "off"))
         )
-        lines.append(f"  Auto-cancel: {bc_label}")
+        lines.append(f"  {_STOP_AT_LIMIT}: {bc_label}")
     else:
         bg_label = "on" if bg is True else "off"
         bc_label = "on" if bc is True else "off"
         lines.append(f"  Enabled: {bg_label}")
-        lines.append(f"  Auto-cancel: {bc_label}")
+        lines.append(f"  {_STOP_AT_LIMIT}: {bc_label}")
+    # #896: say exactly what the toggle does — and what it can't.
+    lines.append(f"  {_STOP_AT_LIMIT_HELP}")
     lines.append("  Set limits in untether.toml [cost_budget] section.")
     lines.append("")
 
@@ -2061,7 +2072,7 @@ async def _page_cost_usage(ctx: CommandContext, action: str | None = None) -> No
     )
     buttons.append(
         _toggle_row(
-            "Auto-cancel",
+            _STOP_AT_LIMIT,
             current=bc,
             default=budget_default_ac,
             on_data="config:cu:bc_on",
@@ -2507,9 +2518,9 @@ class ConfigCommand:
                 "bg_on": "Budget: on",
                 "bg_off": "Budget: off",
                 "bg_clr": "Budget: cleared",
-                "bc_on": "Auto-cancel: on",
-                "bc_off": "Auto-cancel: off",
-                "bc_clr": "Auto-cancel: cleared",
+                "bc_on": f"{_STOP_AT_LIMIT}: on",
+                "bc_off": f"{_STOP_AT_LIMIT}: off",
+                "bc_clr": f"{_STOP_AT_LIMIT}: cleared",
             },
             "rl": {
                 "on": "Resume line: on",

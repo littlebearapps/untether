@@ -65,6 +65,7 @@ async def inject_live_followup(
             closed=closed,
         )
         return False
+    wanted: Any = None
     if options_for is not None:
         live = get_live_session(session_id)
         try:
@@ -88,6 +89,24 @@ async def inject_live_followup(
                 closed=closed,
             )
             return False
+    from .budget_gate import BUDGET_STOP_REASON, daily_gate
+
+    if daily_gate(wanted) is not None:
+        # #896: a follow-up written here would start a turn past the daily
+        # budget. End the session once idle; the message then takes the
+        # resume path, where the daily gate refuses it (with Run anyway).
+        from .runners.claude import close_live_session
+
+        closed = await close_live_session(
+            session_id, BUDGET_STOP_REASON, notice=True, only_if_idle=True
+        )
+        logger.info(
+            "claude.live_session.budget_refused",
+            session_id=session_id,
+            chat_id=job.chat_id,
+            closed=closed,
+        )
+        return False
     command_uuid = str(uuid.uuid4())
     register_followup_anchor(
         command_uuid,

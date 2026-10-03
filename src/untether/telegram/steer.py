@@ -191,6 +191,13 @@ async def maybe_steer(
                 except Exception:  # noqa: BLE001 — unknown options: let queue decide
                     logger.warning("steer.options_resolve_failed", exc_info=True)
                     return False
+            from ..budget_gate import daily_gate
+
+            if daily_gate(options) is not None:
+                # #896: past the daily budget nothing new goes into the
+                # session; the queue path refuses it (with Run anyway).
+                logger.info("steer.fallback", chat_id=chat_id, reason="budget")
+                return False
             from ..runner_bridge import (
                 pop_followup_anchor,
                 register_followup_anchor,

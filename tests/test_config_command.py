@@ -3684,6 +3684,49 @@ class TestBudgetSettings:
         assert override is not None
         assert override.budget_auto_cancel is False
 
+    @pytest.mark.anyio
+    async def test_896_stop_at_limit_label_and_round_trip(self, tmp_path):
+        """#896: the toggle is labelled honestly and its state round-trips:
+        on → stored True and shown on, clear → stored None, back to default."""
+        from untether.telegram.chat_prefs import ChatPrefsStore, resolve_prefs_path
+
+        state_path = tmp_path / "state.json"
+        cmd = ConfigCommand()
+        ctx = _make_ctx(
+            args_text="cu:bc_on",
+            text="config:cu:bc_on",
+            config_path=state_path,
+            default_engine="claude",
+        )
+        await cmd.handle(ctx)
+        msg = _last_edit_msg(ctx)
+        assert "Auto-cancel" not in msg.text
+        assert "Stop at limit: on" in msg.text
+        assert (
+            "Stops new runs once the daily budget is reached and ends a session "
+            "after the reply that passes the per-run budget. It can't interrupt "
+            "a reply in progress."
+        ) in msg.text
+        keyboard = msg.extra["reply_markup"]["inline_keyboard"]
+        labels = [b["text"] for row in keyboard for b in row]
+        assert any("Stop at limit: on" in t for t in labels)
+        assert not any("Auto-cancel" in t for t in labels)
+        prefs = ChatPrefsStore(resolve_prefs_path(state_path))
+        override = await prefs.get_engine_override(123, "claude")
+        assert override is not None and override.budget_auto_cancel is True
+
+        ctx = _make_ctx(
+            args_text="cu:bc_clr",
+            text="config:cu:bc_clr",
+            config_path=state_path,
+            default_engine="claude",
+        )
+        await cmd.handle(ctx)
+        msg = _last_edit_msg(ctx)
+        assert "Stop at limit: off" in msg.text
+        override = await prefs.get_engine_override(123, "claude")
+        assert override is None or override.budget_auto_cancel is None
+
 
 # ---------------------------------------------------------------------------
 # Budget toasts
@@ -3701,13 +3744,13 @@ class TestBudgetToasts:
         assert ConfigCommand.early_answer_toast("cu:bg_clr") == "Budget: cleared"
 
     def test_toast_bc_on(self):
-        assert ConfigCommand.early_answer_toast("cu:bc_on") == "Auto-cancel: on"
+        assert ConfigCommand.early_answer_toast("cu:bc_on") == "Stop at limit: on"
 
     def test_toast_bc_off(self):
-        assert ConfigCommand.early_answer_toast("cu:bc_off") == "Auto-cancel: off"
+        assert ConfigCommand.early_answer_toast("cu:bc_off") == "Stop at limit: off"
 
     def test_toast_bc_clr(self):
-        assert ConfigCommand.early_answer_toast("cu:bc_clr") == "Auto-cancel: cleared"
+        assert ConfigCommand.early_answer_toast("cu:bc_clr") == "Stop at limit: cleared"
 
 
 # ── #294: /config triggers (tg) page ────────────────────────────────────

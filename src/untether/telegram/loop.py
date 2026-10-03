@@ -26,6 +26,7 @@ from ..settings import TelegramTransportSettings
 from ..transport import MessageRef, RenderedMessage, SendOptions
 from ..transport_runtime import ResolvedMessage
 from .bridge import CANCEL_CALLBACK_DATA, TelegramBridgeConfig, send_plain
+from .budget_notice import handle_budget_run_callback, is_run_anyway_callback
 from .chat_prefs import ChatPrefsStore, resolve_prefs_path
 from .chat_sessions import ChatSessionStore, resolve_sessions_path
 from .client import poll_incoming
@@ -3509,6 +3510,9 @@ async def run_main_loop(
                             state.running_tasks,
                             scheduler,
                         )
+                    elif is_run_anyway_callback(update.data):
+                        # #896: one-shot "Run anyway" past the daily budget.
+                        tg.start_soon(handle_budget_run_callback, cfg, update)
                     elif update.data:
                         # Route callback to command backend if registered
                         cb_command_id, cb_args_text = parse_callback_data(update.data)
