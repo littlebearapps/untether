@@ -464,6 +464,12 @@ To turn this off and get the pre-v0.35.5 behaviour back (stop at the first answe
 
 Claude Code's auto mode needs a model that supports it. On one that doesn't (for example Haiku via `/model`), Claude Code silently starts in its prompting `default` mode instead. Since v0.35.5 Untether notices, shows this line, logs `claude.permission_mode.mismatch`, and sends each permission request to Telegram rather than approving it unseen ([#751](https://github.com/littlebearapps/untether/issues/751)). Switch to a model that supports auto mode (Opus 4.6+, Sonnet 4.6+, Fable 5), or pick a different mode with `/planmode`.
 
+## A cron or webhook run stopped with a plan, or shows `🔒 unattended … denied`
+
+**Symptoms:** A scheduled or webhook-started Claude run ends with a plan or a short report instead of doing the work, and its final carries a line like `🔒 unattended (cron:<id>) · denied Write ×2 — nobody to approve`.
+
+Since v0.35.5 an unattended run never waits on an approval nobody can tap ([#835](https://github.com/littlebearapps/untether/issues/835)). Anything it would have asked about (a tool its mode asks about, a plan approval, a question) is denied straight away and logged as `permission.unattended_deny`. A cron with no `permission_mode` takes the chat's `/planmode` and then the engine default (`plan`), so it stops at the plan. Set an explicit `permission_mode` (`plan-auto`, `auto` or `bypassPermissions`) on every Claude cron that should act on its own; a webhook follows its chat's `/planmode`. The startup message lists the crons that will hit this (`unattended approvals (auto-denied): …`). To carry on by hand, reply to the run's message: the reply runs in an attended session with normal buttons. See [Webhooks and cron](webhooks-and-cron.md).
+
 ## "🛡️ safeguards stopped a response"
 
 **Symptoms:** A run shows a `🛡️ … safeguards stopped a response · retried once` row (or `switched to <model>` / `not retried`), and the final carries a matching footer line.
@@ -514,9 +520,11 @@ This happens when Claude Code plugins with **Stop hooks** consume the final resp
 
 This is not a security concern — `UNTETHER_SESSION` is a simple signal variable that tells plugins the session is running via Telegram. See the [interference audit](../audits/pitchdocs-context-guard-interference.md) for a detailed case study.
 
-## Cost budget blocking runs
+## Cost budget alerts
 
-**Symptoms:** "Budget exceeded" message, or runs are cancelled mid-stream.
+**Symptoms:** A `🛑 … exceeded … budget` line (or a `🛑 budget` / `⚠️ 73%` suffix on the `💰` cost line) on a final message.
+
+Budgets are checked after a run finishes, so they alert rather than stop runs; `auto_cancel` is accepted but not enforced yet (see [Cost budgets](cost-budgets.md#alert-levels)). A run stopped mid-stream was cancelled by something else (`/cancel`, the stall watchdog, a restart).
 
 1. Check your budget settings:
 
@@ -525,10 +533,10 @@ This is not a security concern — `UNTETHER_SESSION` is a simple signal variabl
     enabled = true
     max_cost_per_run = 2.00      # USD per run
     max_cost_per_day = 20.00     # USD per day
-    auto_cancel = true           # cancels runs exceeding per-run limit
+    warn_at_pct = 70             # early warning threshold
     ```
 
-2. Daily budgets reset at midnight in the server's local time zone
+2. Daily budgets reset at midnight in the server's local time zone (and on restart: the daily total is kept in memory)
 3. To temporarily bypass: set `enabled = false` or increase the limits
 4. Check today's spend with `/health` (`today's API cost`); `/usage` shows Claude subscription usage, not spend
 
@@ -686,7 +694,7 @@ Loop mode (`/config → 🔁 Loop mode`) gates Untether's observation of Claude 
 | Loop ended with `daily_budget_exceeded` | Hit `[cost_budget] max_cost_per_day` | Raise the cap in `/config → 💰 Cost & usage`, or wait for the daily reset |
 | Loop fires happened but each was a "fresh user turn" rather than autonomous | This is by design — Untether re-issues the original prompt at each fire (see [Schedule tasks → Loop mode](schedule-tasks.md#loop-mode)) | N/A — expected behaviour |
 | Loop kept firing after `/cancel` | Stale `active_loops.json` | Restart `untether` (or the dev/staging unit) — the do-not-resume sentinel is loaded at startup and blocks future fires for cancelled sessions |
-| Loop didn't survive a restart | `active_loops.json` is missing or corrupt | Check `journalctl --user -u untether-dev -f` for `loop.restore.read_failed` warnings; the file lives next to your `untether.toml` |
+| Loop didn't survive a restart | `active_loops.json` is missing or corrupt | Check `journalctl --user -u untether -f` for `loop.restore.read_failed` warnings; the file lives next to your `untether.toml` |
 
 ## Related
 

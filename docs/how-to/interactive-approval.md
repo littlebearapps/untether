@@ -159,11 +159,14 @@ Toggle via `/config` → **Approval mode**:
 
 | Mode | CLI flag | Behaviour |
 |------|----------|-----------|
-| **Read-only** (default) | (none) | Write tools blocked — Gemini can only read files |
+| **Read-only** (shown when no mode is set) | `--approval-mode yolo` | **Not actually read-only** — see the warning below |
 | **Edit files** | `--approval-mode auto_edit` | File reads and writes OK, shell commands blocked |
 | **Full access** | `--approval-mode yolo` | All tools approved — full autonomy |
 
 This is also a pre-run policy. Gemini CLI doesn't have interactive mid-run approval.
+
+!!! warning "Read-only runs with full access"
+    With no approval mode set, Untether starts Gemini CLI with `--approval-mode yolo`, so every tool is approved. The **Read-only** button in `/config` only clears the chat's setting, which lands back on that same default; it does not restrict Gemini. Use **Edit files** if you need shell commands blocked. The Gemini engine is deprecated and won't get a read-only mode before it is removed.
 
 Both policies persist per chat via `/config` and can be cleared back to the default. See [Inline settings](inline-settings.md) for the full `/config` menu reference.
 

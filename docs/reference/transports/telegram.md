@@ -199,7 +199,7 @@ Behaviour:
     you still need it.` (or `Dropped N messages … send them again if you still
     need them.`; N counts merged prompts and attached forwards), logged as
     `forward.prompt.dropped` with `reason` and `merged_count`. Sending it first would only start a run for the command
-    to kill, or run it in the session being left. Before 0.35.5rc14
+    to kill, or run it in the session being left. Before v0.35.5
     `/continue` dropped it silently and `/cancel` / `/new` let it run after
     them.
   - Every other command **flushes** the pending prompt first

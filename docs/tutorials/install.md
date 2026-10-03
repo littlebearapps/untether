@@ -53,7 +53,7 @@ npm install -g @anthropic-ai/claude-code
 Untether uses the official Claude Code CLI, so your existing Claude subscription applies. Run `claude` and log in with your Claude account. Untether defaults to subscription billing unless you opt into API billing in config.
 
 !!! note "macOS credentials"
-    On macOS, Claude Code stores OAuth credentials in macOS Keychain rather than a plain-text file. Untether handles both automatically — just make sure you've run `claude login` at least once before starting Untether.
+    On macOS, Claude Code stores OAuth credentials in macOS Keychain rather than a plain-text file. Untether handles both automatically — just make sure you've signed in to Claude Code at least once (run `claude` and follow the login prompt) before starting Untether.
 
 ### OpenCode
 
@@ -321,7 +321,7 @@ Untether supports three workflow modes that control how conversations continue:
 | **Workspace** | Teams, multiple projects | Forum topics, each bound to a project/branch. Independent sessions per topic. |
 | **Handoff** | Terminal-first workflow | Every message is a new run. Resume lines shown for copying to terminal. |
 
-The onboarding wizard configures this automatically based on your setup (private chat = assistant, forum group = workspace). You can change modes later by editing three settings in your config file — see [Choose a workflow mode](../how-to/choose-a-mode.md) for details.
+These are the workflows you picked between in step 7; the wizard only changes your choice if you picked workspace and the group fails the topics check, and you then choose to switch to assistant. You can change modes later by editing three settings in your config file — see [Choose a workflow mode](../how-to/choose-a-mode.md) for details.
 
 ## 11. Save your config
 

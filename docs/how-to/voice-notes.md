@@ -72,13 +72,13 @@ voice_transcription_prompt = "Claude Code, CLAUDE.md, Codex, Trello, happy-gadge
 ## Behaviour
 
 When you send a voice note, Untether transcribes it and runs the result as a normal text message.
-If transcription fails, you’ll get an error message and the run is skipped. In a chat set to [steer](steer-follow-ups.md), a voice note sent while Claude is working is steered into the run like a typed message.
+Untether echoes the transcript back as a `🎙 …` reply before the run starts; set `voice_show_transcription = false` under `[transports.telegram]` to skip the echo. If transcription fails, you’ll get an error message and the run is skipped. In a chat set to [steer](steer-follow-ups.md), a voice note sent while Claude is working is steered into the run like a typed message.
 
 !!! user "You"
     🎤 *(voice note — 0:12)*
 
 !!! untether "Untether"
-    📝 *"Add error handling to the upload function and make sure it retries on timeout"*
+    🎙 Add error handling to the upload function and make sure it retries on timeout
 
     working · claude · 0s
 

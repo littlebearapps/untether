@@ -34,7 +34,7 @@ To find your Telegram user ID, run:
 untether chat-id
 ```
 
-Then send a message — Untether prints the chat ID and your user ID.
+Then send the bot a message in a **private chat** — Untether prints `chat_id = …`, and in a private chat that number is your user ID. Each teammate can do the same to find theirs.
 
 ## Per-sender session isolation
 
@@ -44,7 +44,7 @@ In group chats, each user gets their own independent session. User A's conversat
 
 In group chats, approval buttons (Approve, Deny, Pause & Outline Plan) are validated against `allowed_user_ids`. If a group member who is not in the allowed list taps another user's approval buttons, the press is rejected — they cannot approve or deny tool calls on someone else's behalf.
 
-This also applies to cancel buttons. (When `allow_any_user = true` is set as the dev/demo escape hatch, all group members can interact with any buttons since there's no allowlist to validate against.)
+This also applies to cancel buttons. Approval buttons also only work in the chat they were posted in: a callback for a pending request sent from any other chat is refused ([#388](https://github.com/littlebearapps/untether/issues/388)). (When `allow_any_user = true` is set as the dev/demo escape hatch, all group members can interact with any buttons since there's no allowlist to validate against.)
 
 ## Set listen mode for groups
 

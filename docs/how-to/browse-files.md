@@ -20,12 +20,13 @@ Untether replies with a directory listing rendered as inline keyboard buttons. E
 <img src="../assets/screenshots/browse-directory.jpg" alt="/browse showing project root with directory and file buttons" width="360" loading="lazy" />
 
 !!! untether "Untether"
-    **/ happy-gadgets**
+    📁 /<br>
+    3 dirs · 4 files
 
-    `📁 src/` · `📁 docs/` · `📁 tests/`<br>
-    `📄 pyproject.toml` · `📄 README.md`<br>
-    `📄 CHANGELOG.md` · `📄 .gitignore`<br>
-    `(..)` back
+    `📂 docs/` · `📂 src/`<br>
+    `📂 tests/` · `📄 .gitignore (1k)`<br>
+    `📄 CHANGELOG.md (12k)` · `📄 README.md (4k)`<br>
+    `📄 pyproject.toml (2k)`
 
 ## Navigate directories
 
@@ -36,7 +37,7 @@ Tap a directory button to drill into it. The listing updates in place, showing t
 Tap a file button to see a syntax-highlighted preview. Previews show up to **25 lines** and **2,000 characters** of the file content, which is enough to check config files, review small modules, or confirm file structure.
 
 !!! untether "Untether"
-    **src/main.py**
+    📄 src/main.py
     ```python
     import sys
     from pathlib import Path
@@ -50,7 +51,7 @@ Tap a file button to see a syntax-highlighted preview. Previews show up to **25 
 
 ## Go back
 
-The `(..)` button at the top of every listing navigates to the parent directory. Tap it to move up one level.
+Below the project root, each listing starts with a `📂 ..` button that moves up one level. A file preview has a `📂 Back` button that returns to its directory.
 
 ## Browse a specific path
 

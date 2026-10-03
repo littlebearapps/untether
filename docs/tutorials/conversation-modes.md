@@ -83,6 +83,8 @@ You can manually change these settings in your config file:
     show_resume_line = false   # true or false
     ```
 
+`session_mode` only takes effect after a restart (send `/restart` from Telegram); `show_resume_line` applies straight away when `watch_config = true`.
+
 Or re-run onboarding to pick a different workflow:
 
 ```sh

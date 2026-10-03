@@ -2,9 +2,9 @@
 
 Run tasks on multiple branches in parallel without touching your main checkout. Untether creates isolated git worktrees so you can kick off work on `@feat/auth` and `@fix/memory-leak` at the same time — all from Telegram.
 
-## Enable worktree-based runs for a project
+## Configure worktree-based runs for a project
 
-Add a `worktrees_dir` (and optionally a base branch) to the project:
+Every registered project can run `@branch` tasks out of the box: `worktrees_dir` defaults to `.worktrees` inside the project. An existing local branch is checked out as is, a branch that only exists on `origin` is tracked from there, and a new branch is cut from `worktree_base` (default: the repo's default branch, from `origin/HEAD` or the current branch). Set these keys only to change the location or the base branch:
 
 === "untether config"
 

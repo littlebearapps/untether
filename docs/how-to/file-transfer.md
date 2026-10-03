@@ -60,7 +60,7 @@ If the target file already exists, Untether auto-appends a numeric suffix (`_1`,
 ```
 
 !!! untether "Untether"
-    📄 saved `docs/spec.pdf` (42 KB)
+    saved `docs/spec.pdf` in `happy-gadgets` (42 KB)
 
 !!! note "Path safety"
     Deny globs are checked against the path you give **and** the path it resolves to after following symlinks inside the project, so an in-root symlink can't route an upload into `.git/hooks` or onto `.env` ([#390](https://github.com/littlebearapps/untether/issues/390)). A refused path gets a reply naming the rule, such as ``path denied by rule: `**/.ssh/**` ``, with `(resolves to …)` added when a symlink led there. Paths that leave the project root are refused. If you upload through a symlinked folder, the confirmation shows the real path the file landed at (e.g. `inbox/a.txt` → `data/inbox/a.txt`).
@@ -80,8 +80,7 @@ Directories are zipped automatically.
 !!! note "Path safety"
     The same double check applies to downloads: `/file get cfg.txt` is refused when `cfg.txt` is a symlink to `.env`, and a symlinked directory is zipped with every member checked against its real path. The file (or archive) keeps the name you asked for ([#390](https://github.com/littlebearapps/untether/issues/390)).
 
-!!! untether "Untether"
-    📎 `src/main.py` (1.2 KB)
+Untether replies with the file as a Telegram document (no caption).
 
 <img src="../assets/screenshots/file-get.jpg" alt="/file get response showing fetched file as a document" width="360" loading="lazy" />
 
@@ -148,7 +147,8 @@ Outbox delivery reuses the same security rules as `/file get`:
 
 - **Deny globs** — files matching `deny_globs` (by default `.git/**`, `.env` and `.env.*` files, `.envrc`, keys and certificates, `.ssh/**`, `.netrc`, `.npmrc`, `.pypirc`) are surfaced to the user as a `📎 Outbox skipped` notice rather than silently dropped (#524)
 - **Size limit** — files larger than 50 MB are skipped (and surfaced via the same notice)
-- **Path traversal** — symlinks pointing outside the project root are rejected
+- **Symlinks** — every symlink in the outbox is skipped (reported as `symlink`), wherever it points
+- **Empty files** — zero-byte files are skipped too
 - **File count** — capped at `outbox_max_files` per run (default 10)
 - **Auto-cleanup** — sent files are deleted after delivery by default, preventing sensitive data accumulation
 - **Failed/auto-continued runs** — actual file delivery is still gated on a successful run, but skipped items (directories, deny-globbed files, oversized files) are surfaced even when the run fails or auto-continues, so you always learn what the agent intended to send. Opt out via `outbox_notify_skipped = false`.

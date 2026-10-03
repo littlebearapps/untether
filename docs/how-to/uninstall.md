@@ -38,7 +38,11 @@ This deletes:
 | `untether.toml` | Bot token, chat ID, engine settings, transport config |
 | `*_state.json` | Chat preferences, session resume tokens, topic bindings |
 | `active_progress.json` | Orphan message references (restart recovery) |
+| `active_loops.json` | Pending Claude Code loop iterations (Loop mode) |
 | `stats.json` | Per-engine run counts and usage statistics |
+| `session_costs.json`, `session_quarantine.json` | Per-session cost baselines and quarantined Claude sessions |
+| `triggers_history.json`, `run_once_fired.json` | Last-fired times for crons and webhooks, spent `run_once` crons |
+| `last_update_id.json`, `untether.lock` | Telegram update offset and the single-instance lock |
 
 !!! warning "Bot token"
     `untether.toml` contains your Telegram bot token in plaintext. Deleting the file removes it from disk.

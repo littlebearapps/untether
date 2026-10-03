@@ -105,7 +105,7 @@ Use this when subscription usage stops appearing in the footer or returns stale 
 
 ## Claude Code credentials
 
-The `/usage` command reads your Claude Code OAuth credentials to fetch live data from the Anthropic API. If you see **"No Claude credentials found"**, run `claude login` in your terminal to authenticate.
+The `/usage` command reads your Claude Code OAuth credentials to fetch live data from the Anthropic API. If you see **"No Claude Code credentials found"**, sign in to Claude Code on that machine (run `claude` and follow the login prompt).
 
 Credential storage varies by platform:
 

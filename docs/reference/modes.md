@@ -66,12 +66,10 @@ The `scope` setting controls which chats allow topics:
 | `projects` | Project chats only |
 | `all` | Main chat and all project chats |
 
-### Workspace-only commands
+### Topic commands
 
-- `/ctx show` — display current topic's bound context
-- `/ctx set <project> @<branch>` — bind topic to a project/branch
-- `/ctx clear` — unbind topic context
-- `/topic <project> @<branch>` — create a new forum topic for a project/branch
+- `/topic <project> @<branch>` — create a new forum topic for a project/branch (workspace only)
+- `/ctx`, `/ctx set <project> @<branch>`, `/ctx clear` — inside a topic these show, bind and unbind the **topic's** context; in any other chat (all modes) they act on the chat's context instead
 
 ## Handoff
 
@@ -103,11 +101,10 @@ Since there is no auto-resume, you have three ways to continue a session:
 
 ## Changing modes
 
-Edit `session_mode`, `show_resume_line`, and `topics.enabled` in your `untether.toml` and restart:
+Edit `session_mode`, `show_resume_line`, and `topics.enabled` in your `untether.toml` and restart (`session_mode` and `topics.enabled` are restart-only): send `/restart` from Telegram, or on a systemd install:
 
 ```bash
-systemctl --user restart untether      # staging
-systemctl --user restart untether-dev  # dev
+systemctl --user restart untether
 ```
 
 There is no migration step — the new mode takes effect on restart.
@@ -116,8 +113,8 @@ There is no migration step — the new mode takes effect on restart.
 
 These work identically in all three modes:
 
-- All 6 engine runners (Claude, Codex, OpenCode, Pi; Gemini and AMP deprecated)
-- All commands except `/ctx` and `/topic` (workspace-only)
+- All engine runners (Claude, Codex, OpenCode, Pi; plus the deprecated Gemini and AMP, removed in 0.36.0)
+- All commands except `/topic` (workspace-only); `/ctx` binds the chat instead of a topic outside workspace mode
 - Permission control (approve/deny/discuss, plan mode) — Claude Code only
 - AskUserQuestion with option buttons — Claude Code only
 - Live sessions and steer/queue follow-ups — Claude Code only

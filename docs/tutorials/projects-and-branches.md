@@ -42,7 +42,7 @@ Output:
 saved project 'happy-gadgets' to ~/.untether/untether.toml
 ```
 
-This adds an entry to your config (Untether also fills in defaults like `worktrees_dir`, `default_engine`, and sometimes `worktree_base`):
+This adds an entry to your config. Besides `path`, `untether init` writes `worktrees_dir = ".worktrees"`, `default_engine` (your current global default, so the project keeps it if you change the global one later) and, when it can detect one, `worktree_base`. The minimal equivalent is:
 
 === "untether config"
 
@@ -90,7 +90,7 @@ That `dir:` line tells you which project is active. When you reply, Untether aut
 
 Worktrees let you run tasks on feature branches without touching your main checkout. Instead of `git checkout`, Untether creates a separate directory for each branch.
 
-Add worktree config to your project:
+There's nothing to switch on: `untether init` already set `worktrees_dir`, and it defaults to `.worktrees` anyway. Change these keys only if you want branches somewhere else or cut from a different base:
 
 === "untether config"
 
@@ -228,7 +228,7 @@ Run `untether init <alias>` in the repo first.
 
 **Branch worktree not created**
 
-Make sure the worktrees directory (default `.worktrees`) is writable. If you've customized `worktrees_dir`, verify that path exists or can be created.
+Make sure the worktrees directory (default `.worktrees`) is writable. If you've customised `worktrees_dir`, verify that path exists or can be created.
 
 **Context not carrying forward**
 

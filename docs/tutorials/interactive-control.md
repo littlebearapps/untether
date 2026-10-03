@@ -249,7 +249,7 @@ Check that you're using Claude Code (`/claude` prefix or `/agent set claude`) an
 
 **Buttons appear but nothing happens when I tap them**
 
-Check your internet connection. If the tap doesn't register, try again — Untether answers callbacks immediately so there should be no delay.
+Check your internet connection. If the tap doesn't register, try again — Untether answers callbacks immediately so there should be no delay. A toast saying `Already answered`, `No longer needed` or `This request has expired` means the request was already settled (or Claude Code withdrew it), so the tap was ignored. Buttons also only work in the chat they were posted in.
 
 **Claude Code keeps retrying after I tap "Pause & Outline Plan"**
 

@@ -58,7 +58,7 @@ Webhooks accept HTTP POST requests and turn them into agent runs. Example: trigg
 
 ### Authentication
 
-Every webhook requires explicit auth. Choose one:
+`auth` defaults to `bearer`, and every mode except `none` needs a `secret`. Choose one:
 
 | Mode | Header | Use case |
 |------|--------|----------|
@@ -79,14 +79,19 @@ All webhook prompts are automatically prefixed with an untrusted-payload marker 
 
 ### Test a webhook locally
 
+The `github-push` webhook above uses HMAC and an `event_filter`, so a test request has to sign its body and send the event header (with no `X-GitHub-Event: push` header the server answers `200 filtered` and starts nothing):
+
 ```bash
+BODY='{"ref": "refs/heads/main", "pusher": {"name": "alice"}}'
+SIG="sha256=$(printf '%s' "$BODY" | openssl dgst -sha256 -hmac 'whsec_your_github_secret' | sed 's/^.* //')"
 curl -X POST http://127.0.0.1:9876/hooks/github \
-  -H "Authorization: Bearer my-secret-token" \
+  -H "X-Hub-Signature-256: $SIG" \
+  -H "X-GitHub-Event: push" \
   -H "Content-Type: application/json" \
-  -d '{"ref": "refs/heads/main", "pusher": {"name": "alice"}}'
+  -d "$BODY"
 ```
 
-A `202 Accepted` response means the run was dispatched.
+For a `bearer` webhook, send `-H "Authorization: Bearer <secret>"` instead. A `202 Accepted` response means the run was dispatched.
 
 !!! untether "Untether"
     ⚡ Trigger: webhook:github-push

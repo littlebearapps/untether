@@ -13,12 +13,12 @@ Send `/stats` in any chat:
 Example output:
 
 ```
-Session Stats — Today
+📊 Session Stats — Today
 
-claude: 5 runs, 42 actions, 12m 30s, last 2h ago
-codex: 3 runs, 18 actions, 4m 15s, last 45m ago
+claude: 5 runs, 42 actions, 12m 30s, last 2h ago (1 triggered, 4 manual)
+codex: 3 runs, 18 actions, 4m 15s, last 45m ago (0 triggered, 3 manual)
 
-Total: 8 runs, 60 actions, 16m 45s
+Total: 8 runs, 60 actions, 16m 45s (1 triggered, 7 manual)
 ```
 
 ## Filter by engine
@@ -35,8 +35,8 @@ Specify a period after the engine name (or on its own):
 
 ```
 /stats today         # today only (default)
-/stats week          # this week
-/stats all           # all time (up to 90 days)
+/stats week          # the last 7 days, today included
+/stats all           # everything in stats.json
 /stats claude week   # claude, this week
 ```
 
@@ -51,15 +51,15 @@ Use `/stats auth` to see authentication status for all installed engines:
 Example output:
 
 ```
-Auth Status
+🔑 Auth Status
 
-claude: logged in (oauth)
-codex: logged in using chatgpt
-opencode: 2 provider(s)
-pi: 1 provider(s)
+claude: ✅ <auth method>
+codex: ✅ logged in using chatgpt
+opencode: ✅ 2 provider(s)
+pi: ❌ no credentials
 ```
 
-This checks each engine's credential files or auth status commands without starting a run.
+This checks each engine's credential files or auth status commands without starting a run. Claude shows the `authMethod` its `claude auth status` reports; an engine whose status can't be read shows `❓ status unavailable`. On `/stats`, each engine line ends with a `(N triggered, M manual)` breakdown when either count is non-zero (cron, webhook and `/at` runs count as triggered).
 
 ## How data is collected
 
@@ -70,7 +70,7 @@ Untether automatically records statistics after each run completes:
 - **Duration** — cumulative engine execution time (in milliseconds)
 - **Last run timestamp** — when the engine last completed a run
 
-Data is stored in `stats.json` in the Untether config directory (`~/.untether/` by default). Records older than 90 days are automatically pruned on startup.
+Data is stored in `stats.json` in the Untether config directory (`~/.untether/` by default). Old records are currently kept indefinitely, so `/stats all` covers everything recorded.
 
 ## Background-task telemetry
 

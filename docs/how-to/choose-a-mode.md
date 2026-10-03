@@ -31,7 +31,7 @@ graph TD
 | **Resume line** | Hidden | Hidden | Shown |
 | **Topics** | Off | On | Off |
 | **Best for** | Solo dev, mobile | Teams, multi-project | Terminal workflow |
-| **`/new`** | Resets session | Resets topic session | No effect |
+| **`/new`** | Resets session | Resets topic session | Cancels a running task only (no stored session to reset) |
 
 ## How each mode works
 
@@ -131,10 +131,10 @@ Each mode is defined by three settings in `untether.toml`:
 
 ## Switching modes
 
-To change modes, edit the three settings in your `untether.toml` and restart:
+To change modes, edit the three settings in your `untether.toml` and restart (`session_mode` and `topics.enabled` are restart-only, even with `watch_config = true`): send `/restart` from Telegram, or on a systemd install:
 
 ```bash
-systemctl --user restart untether  # or untether-dev
+systemctl --user restart untether
 ```
 
 **No data is lost** when switching modes. Session state files are preserved — they just won't be used if you switch from chat to stateless mode. Switching back restores them.

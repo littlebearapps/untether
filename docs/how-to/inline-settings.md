@@ -86,7 +86,7 @@ Settings are engine-specific and only appear when relevant:
 
 - **Permission mode** — Claude Code only. Codex and Gemini have their own pre-run policies instead.
 - **Approval policy** — Codex CLI only. Toggle between "full auto" (default, Codex's own sandbox setting) and "safe" (read-only sandbox via `--sandbox read-only`; tests, builds and cache/`/tmp` writes fail too). This is a pre-run policy — not interactive mid-run approval.
-- **Approval mode** — Gemini CLI only. Toggle between "read-only" (default, write tools blocked), "edit files" (file reads/writes OK, shell commands blocked via `--approval-mode auto_edit`), and "full access" (all tools approved via `--approval-mode yolo`). This is a pre-run policy.
+- **Approval mode** — Gemini CLI only (deprecated). Toggle between "read-only", "edit files" (file reads/writes OK, shell commands blocked via `--approval-mode auto_edit`), and "full access" (all tools approved via `--approval-mode yolo`). This is a pre-run policy. Despite its label, "read-only" (also what an unset chat shows) runs Gemini with `--approval-mode yolo`, i.e. full access — see [Interactive approval](interactive-approval.md#gemini-cli-approval-mode).
 - **Ask mode** and **Diff preview** — Claude Code only. Hidden for other engines.
 - **Follow-up** — Claude Code only ([#775](https://github.com/littlebearapps/untether/issues/775)). `queue` (default) or `steer` for messages sent while a run is working; see [steer follow-ups](steer-follow-ups.md). Hidden on the home page for other engines; if you reach the page anyway it says that other engines always queue.
 - **Reasoning** — Claude Code and Codex only. Hidden for OpenCode, Pi, Gemini, and Amp.
@@ -110,8 +110,8 @@ When you switch engines via the Engine & model page, the home page automatically
 | Resume line | off, on | Yes (chat prefs) |
 | Listen | all, mentions | Yes (chat prefs) |
 | Follow-up | queue, steer | Yes (chat prefs) |
-| Budget enabled | off, on | Yes (chat prefs) |
-| Budget auto-cancel | off, on | Yes (chat prefs) |
+| Budget | off, on | Yes (chat prefs) |
+| Auto-cancel | off, on (stored; not enforced yet) | Yes (chat prefs) |
 
 Approval policy appears instead of Permission mode when the engine is Codex CLI. Approval mode appears instead of Permission mode when the engine is Gemini CLI.
 
@@ -123,7 +123,7 @@ The Triggers page shows:
 
 * **State and counts** — `running` / `paused`, plus per-chat cron and webhook totals.
 * **Master pause/resume toggle** — tap **Pause** to suspend all cron firing and webhook dispatch globally without editing config; tap **Resume** to clear it. While paused, webhooks return `503 triggers paused` (with `Retry-After: 60`), `/health` reports `paused: true`, and `/ping` shows `⏸ triggers paused: … (suspended)`. Pause is in-memory only — restart auto-resumes (the safe default).
-* **Per-chat cron list** — each line shows the cron `id`, human-readable schedule via `describe_cron(schedule, timezone)`, project, engine, and last-fired relative time.
+* **Per-chat cron list** — each line shows the cron `id`, human-readable schedule via `describe_cron(schedule, timezone)`, project, engine, the cron's own `model=` / `effort=` when it sets one ([#743](https://github.com/littlebearapps/untether/issues/743)), and last-fired relative time.
 * **Per-chat webhook list** — each line shows the webhook `id`, path, auth scheme, project, engine, and last-fired.
 
 Lists are scoped to the current chat (`crons_for_chat()` / `webhooks_for_chat()` with the bridge `default_chat_id` fallback), capped at 10 entries with a `…and N more (see untether.toml)` overflow marker. The pause/resume controls remain visible even when the chat has no triggers configured. `📡` is Listen only; Triggers always use `⏰`, matching `/ping` and the run footer.
@@ -151,8 +151,8 @@ The Cost & Usage sub-page merges cost display and budget controls into a unified
 
 - **API cost** — per-run cost in the message footer (requires engine cost reporting)
 - **Subscription usage** — 5h/weekly subscription usage in the footer (Claude Code only)
-- **Budget enabled** — turn budget tracking on or off for this chat (overrides global `[cost_budget]` setting)
-- **Budget auto-cancel** — enable or disable automatic run cancellation when a budget is exceeded
+- **Budget** — turn budget tracking on or off for this chat (overrides global `[cost_budget]` setting)
+- **Auto-cancel** — per-chat override of `[cost_budget] auto_cancel`; stored, but budgets are checked after a run finishes, so it doesn't cancel anything yet (see [Cost budgets](cost-budgets.md#alert-levels))
 
 Each toggle uses the `[✓ Label: on] [Label: off] [Clear]` compact pattern (labels distinguish the four toggles). Clear removes the per-chat override and falls back to the global config.
 

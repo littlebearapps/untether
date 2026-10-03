@@ -51,9 +51,9 @@ Topics bind Telegram **forum threads** to a project/branch context. Each topic k
 - `projects`: topics only in project chats (`projects.<alias>.chat_id`)
 - `all`: topics available in both the main chat and project chats
 
-## Create and bind a topic
+## Create a bound topic
 
-Run this inside a forum topic thread:
+Send this anywhere in the forum group:
 
 ```
 /topic <project> @branch
@@ -64,12 +64,12 @@ Examples:
 - In the main chat: `/topic backend @feat/api`
 - In a project chat: `/topic @feat/api` (project is implied)
 
-Untether will bind the topic and rename it to match the context.
+Untether creates a **new** topic named after the context, binds it, and posts the binding as the topic's first message. A branch is required. If a topic for that project and branch already exists, Untether renames it back to the context name and says so instead of creating a second one.
 
 !!! untether "Untether"
-    topic bound: **backend** @feat/api
+    created topic `backend @feat/api`.
 
-    Topic renamed to `backend @feat/api`
+To bind the topic you're already in, use `/ctx set <project> @branch` inside it (below).
 
 <!-- TODO: capture screenshot -->
 <!-- <img src="../assets/screenshots/forum-topic-context.jpg" alt="Forum topic bound to project and branch with renamed title and context footer" width="360" loading="lazy" /> -->

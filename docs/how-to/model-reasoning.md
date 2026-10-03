@@ -4,15 +4,22 @@ Untether lets you override which model the agent uses and its reasoning level, p
 
 ## Check current model
 
-Send `/model` to see what model is active and where the setting comes from:
+Send `/model` to see the override for the current engine and where it comes from:
 
 ```
 /model
 ```
 
 !!! untether "Untether"
-    **Model:** claude-opus-5-5
-    **Source:** global default
+    engine: claude (chat default)
+
+    model: **sonnet** (chat default)
+
+    defaults: topic: none, chat: sonnet
+
+    available engines: codex, claude, opencode, pi
+
+`model: **default** (no override)` means no chat or topic override is set, so the engine uses its own default (see the resolution order below).
 
 ## Set a model override
 
@@ -94,12 +101,15 @@ Use `/agent` to see how all configuration layers resolve for the current scope:
 /agent
 ```
 
-The resolution order is (highest priority first):
+The resolution order for model and reasoning is (highest priority first):
 
-1. **Topic override** — set via `/model set` in a forum topic
-2. **Chat default** — set via `/model set` in a private or group chat
-3. **Project default** — configured in `projects.<alias>.default_model`
-4. **Global default** — configured at the top level of your config
+1. **Cron override** — a `[[triggers.crons]]` entry's own `model` / `reasoning`, for that scheduled run only ([#743](https://github.com/littlebearapps/untether/issues/743); see [Schedule tasks](schedule-tasks.md#pick-a-model-per-cron))
+2. **Topic override** — set via `/model set` or `/reasoning set` in a forum topic
+3. **Chat default** — set via `/model set` or `/reasoning set` in a private or group chat
+4. **Engine config** — `model` under `[engines.claude]`, `[engines.opencode]` or `[engines.pi]` in `untether.toml` (Codex takes its model from its own `~/.codex/config.toml` or `profile`; there is no `untether.toml` default for reasoning)
+5. **CLI default** — whatever the engine CLI picks on its own
+
+There is no per-project model setting; projects only pick a `default_engine`.
 
 !!! tip "Quick check"
     `/agent` shows the effective engine, model, and reasoning for the current context, including which layer each setting comes from.

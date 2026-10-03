@@ -33,7 +33,7 @@ If the steer arrives after Claude's last tool call (it is already writing its an
 
 - **Chat** — send `/steer` with no text, or open `/config` → **↪️ Follow-up** and pick **Steer**. Every plain message you send while Claude is working is steered.
 - **Forum topic** — send `/steer` inside the topic to set it for that topic only.
-- **Everywhere** — set the default in `untether.toml` (hot-reloads, no restart):
+- **Everywhere** — set the default in `untether.toml` (applies without a restart when `watch_config = true`):
 
 ```toml
 [transports.telegram]
