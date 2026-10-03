@@ -637,3 +637,262 @@ async def test_826_stateless_new_scoped_to_topic() -> None:
 
     assert _by_thread(running) == {10: True, 6: False}
     assert replies == ["cancelled run for this chat."]
+
+
+# --- #895: /new after a reply closed the idle live session, not a run ---
+
+IDLE_SID = "s-895"
+
+
+def _live_task(
+    *,
+    idle: bool = True,
+    sid: str = IDLE_SID,
+    thread_id: int | None = None,
+    background: bool = False,
+) -> RunningTask:
+    """A live Claude run: idle = between turns after its result (#776)."""
+    from types import SimpleNamespace
+
+    from untether.model import ResumeToken
+    from untether.runners.claude import ClaudeStreamState, ClaudeTask
+
+    state = ClaudeStreamState()
+    state.live_mode = True
+    state.completed_turns = 1
+    state.turn_open = not idle
+    if background:
+        state.tasks["t1"] = ClaudeTask(task_id="t1", is_backgrounded=True)
+    task = RunningTask(
+        edits=SimpleNamespace(stream=SimpleNamespace(engine_state=state)),  # type: ignore[arg-type]
+        thread_id=thread_id,
+    )
+    task.resume = ResumeToken(engine="claude", value=sid)
+    return task
+
+
+def _one(task: RunningTask, chat_id: int = 123) -> dict[MessageRef, RunningTask]:
+    return {MessageRef(channel_id=chat_id, message_id=42): task}
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    ("chat_type", "chat_id", "expected"),
+    [
+        (
+            "group",
+            -555,
+            "\N{BROOM} closed the idle session and cleared stored sessions "
+            "for you in this chat.",
+        ),
+        (
+            "private",
+            123,
+            "\N{BROOM} closed the idle session and cleared stored sessions "
+            "for this chat.",
+        ),
+    ],
+)
+async def test_895_chat_new_idle_live_session_says_closed(
+    tmp_path: Path, chat_type: str, chat_id: int, expected: str
+) -> None:
+    transport = FakeTransport()
+    cfg = make_cfg(transport)
+    store = ChatSessionStore(tmp_path / "sessions.json")
+    msg = _msg("/new", chat_id=chat_id, chat_type=chat_type)
+    task = _live_task()
+
+    with capture_logs() as logs:
+        await _handle_chat_new_command(
+            cfg,
+            msg,
+            store,
+            session_key=(chat_id, None),
+            running_tasks=_one(task, chat_id),
+        )
+
+    assert task.cancel_requested.is_set()
+    text = transport.send_calls[-1]["message"].text
+    assert text == expected
+    assert "cancelled run" not in text
+    scope = [e for e in logs if e.get("event") == "new.cancel_scope"]
+    assert scope[0]["cancelled"] == 1 and scope[0]["idle"] == 1
+    running_log = [e for e in logs if e.get("event") == "new.cancelled_running"]
+    assert running_log[0]["idle"] == 1
+
+
+@pytest.mark.anyio
+async def test_895_chat_new_idle_without_stored_session_still_replies(
+    tmp_path: Path,
+) -> None:
+    transport = FakeTransport()
+    cfg = make_cfg(transport)
+    store = ChatSessionStore(tmp_path / "sessions.json")
+    msg = _msg("/new", chat_type="private")
+
+    await _handle_chat_new_command(
+        cfg, msg, store, session_key=None, running_tasks=_one(_live_task())
+    )
+
+    text = transport.send_calls[-1]["message"].text
+    assert text.startswith("\N{BROOM} closed the idle session")
+
+
+@pytest.mark.anyio
+async def test_895_topic_new_idle_live_session_says_closed(tmp_path: Path) -> None:
+    transport = FakeTransport()
+    cfg = replace(
+        make_cfg(transport),
+        topics=TelegramTopicsSettings(enabled=True, scope="all"),
+    )
+    store = TopicStateStore(tmp_path / "topics.json")
+    task = _live_task(thread_id=10)
+
+    await _handle_new_command(
+        cfg,
+        _forum_msg(10),
+        store=store,
+        resolved_scope="all",
+        scope_chat_ids=frozenset({FORUM}),
+        running_tasks=_one(task, FORUM),
+    )
+
+    assert task.cancel_requested.is_set()
+    text = transport.send_calls[-1]["message"].text
+    assert text == (
+        "\N{BROOM} closed the idle session and cleared stored sessions for this topic."
+    )
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    "running",
+    [
+        pytest.param(lambda: _one(_live_task(idle=False)), id="turn-in-flight"),
+        pytest.param(lambda: _one(_live_task(background=True)), id="bg-task-holds"),
+        pytest.param(lambda: _one(RunningTask()), id="non-live-run"),
+        pytest.param(
+            lambda: {
+                MessageRef(channel_id=123, message_id=42): _live_task(),
+                MessageRef(channel_id=123, message_id=43): RunningTask(),
+            },
+            id="mixed-idle-and-busy",
+        ),
+    ],
+)
+async def test_895_chat_new_in_flight_keeps_cancelled_run(
+    tmp_path: Path, running
+) -> None:
+    transport = FakeTransport()
+    cfg = make_cfg(transport)
+    store = ChatSessionStore(tmp_path / "sessions.json")
+    msg = _msg("/new", chat_type="private")
+
+    await _handle_chat_new_command(
+        cfg, msg, store, session_key=(msg.chat_id, None), running_tasks=running()
+    )
+
+    text = transport.send_calls[-1]["message"].text
+    assert text == "\N{BROOM} cancelled run and cleared stored sessions for this chat."
+
+
+@pytest.mark.anyio
+async def test_895_queued_followup_is_not_idle(tmp_path: Path) -> None:
+    """A follow-up written into the session whose turn hasn't opened yet is
+    pending work — /new cancels it, so the reply says so."""
+    from untether.runner_bridge import pop_followup_anchor, register_followup_anchor
+
+    transport = FakeTransport()
+    cfg = make_cfg(transport)
+    store = ChatSessionStore(tmp_path / "sessions.json")
+    msg = _msg("/new", chat_type="private")
+    register_followup_anchor(
+        "uuid-895",
+        session_id=IDLE_SID,
+        reply_to=MessageRef(channel_id=123, message_id=50),
+        placeholder=None,
+    )
+    try:
+        await _handle_chat_new_command(
+            cfg,
+            msg,
+            store,
+            session_key=(msg.chat_id, None),
+            running_tasks=_one(_live_task()),
+        )
+    finally:
+        pop_followup_anchor("uuid-895")
+
+    text = transport.send_calls[-1]["message"].text
+    assert "cancelled run" in text
+
+
+@pytest.mark.anyio
+async def test_895_two_idle_sessions_plural(tmp_path: Path) -> None:
+    transport = FakeTransport()
+    cfg = make_cfg(transport)
+    store = ChatSessionStore(tmp_path / "sessions.json")
+    msg = _msg("/new", chat_id=-555, chat_type="group")
+    running = {
+        MessageRef(channel_id=-555, message_id=42): _live_task(sid="a"),
+        MessageRef(channel_id=-555, message_id=43): _live_task(sid="b"),
+    }
+
+    await _handle_chat_new_command(
+        cfg, msg, store, session_key=(-555, None), running_tasks=running
+    )
+
+    text = transport.send_calls[-1]["message"].text
+    assert text.startswith("\N{BROOM} closed the idle sessions and cleared")
+
+
+@pytest.mark.anyio
+async def test_895_stateless_new_idle_live_session() -> None:
+    from untether.telegram.loop import TelegramCommandContext, _dispatch_builtin_command
+
+    transport = FakeTransport()
+    cfg = make_cfg(transport)
+    msg = _msg("/new", chat_type="private")
+    task = _live_task()
+    replies: list[str] = []
+    started: list = []
+
+    async def _reply(*, text: str, **_kwargs) -> None:
+        replies.append(text)
+
+    class _TG:
+        def start_soon(self, func, *args) -> None:
+            started.append((func, args))
+
+    ctx = TelegramCommandContext(
+        cfg=cfg,
+        msg=msg,
+        args_text="",
+        ambient_context=None,
+        topic_store=None,
+        chat_prefs=None,
+        resolved_scope=None,
+        scope_chat_ids=frozenset(),
+        reply=_reply,
+        task_group=_TG(),  # type: ignore[arg-type]
+        running_tasks=_one(task),
+    )
+    assert _dispatch_builtin_command(ctx=ctx, command_id="new") is True
+    func, args = started[0]
+    await func(*args)
+
+    assert task.cancel_requested.is_set()
+    assert replies == ["closed the idle session for this chat."]
+
+
+def test_895_live_alias_refs_count_once() -> None:
+    """A live run sits under its progress ref and each turn's ref (#776)."""
+    from untether.telegram.commands.topics import _cancel_chat_tasks_counted
+
+    task = _live_task()
+    running = {
+        MessageRef(channel_id=123, message_id=42): task,
+        MessageRef(channel_id=123, message_id=44): task,
+    }
+    result = _cancel_chat_tasks_counted(123, running)
+    assert (result.cancelled, result.idle) == (1, 1)

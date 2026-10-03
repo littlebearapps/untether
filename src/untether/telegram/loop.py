@@ -519,16 +519,20 @@ def _dispatch_builtin_command(
         else:
             # Stateless mode: just cancel running tasks and reply
             async def _stateless_new() -> None:
-                from .commands.topics import _cancel_chat_tasks
+                from .commands.topics import (
+                    _cancel_chat_tasks_counted,
+                    _cancelled_label,
+                )
 
                 # #826: a forum topic's /new only cancels that topic's runs.
-                cancelled = _cancel_chat_tasks(
+                cancelled = _cancel_chat_tasks_counted(
                     msg.chat_id,
                     ctx.running_tasks,
                     thread_filter=thread_filter_for(msg),
                     thread_id=msg.thread_id,
                 )
-                label = "cancelled run" if cancelled else "no stored sessions to clear"
+                # #895: an idle post-result live session is "closed", not a run.
+                label = _cancelled_label(cancelled) or "no stored sessions to clear"
                 await reply(text=f"{label} for this chat.")
 
             handler = _stateless_new

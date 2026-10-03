@@ -4497,6 +4497,25 @@ def running_task_is_live_idle(task: Any) -> bool:
     )
 
 
+def running_task_is_idle_after_result(task: Any) -> bool:
+    """#895: a live session that has answered and has nothing left in flight
+    — between turns, no background task holding it open (#801) and no queued
+    follow-up waiting for its turn. Cancelling it only closes the session;
+    the user's answer is already delivered (``handle.cancelled_after_delivery``)."""
+    if not running_task_is_live_idle(task):
+        return False
+    engine_state = task.edits.stream.engine_state
+    tasks = getattr(engine_state, "tasks", None)
+    if isinstance(tasks, dict) and any(
+        getattr(t, "holds_session", False) for t in tasks.values()
+    ):
+        return False
+    resume = getattr(task, "resume", None)
+    return resume is None or all(
+        entry[0] != resume.value for entry in _FOLLOWUP_ANCHORS.values()
+    )
+
+
 async def close_idle_live_sessions(
     running_tasks: Mapping[MessageRef, RunningTask], reason: str
 ) -> int:
