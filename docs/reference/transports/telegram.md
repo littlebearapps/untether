@@ -46,6 +46,20 @@ notes, documents, videos and photos (the largest size), stickers when sent
 with a `/file` command, and inline-keyboard `callback_query` updates. Messages
 from chats outside the allowed set are dropped.
 
+### Reply and quote context
+
+When a message replies to another message, `parse_incoming_update` keeps the
+replied message's text (falling back to its caption) and any selected Telegram
+quote (`message.quote.text`). Before the prompt reaches the runner — a new run,
+a resumed session, a follow-up into a running Claude session or a steer —
+`telegram/reply_context.py` appends it as a `<telegram_reply_context>` block
+(`<selected_quote>` when a quote was selected, otherwise `<replied_message>`).
+The block says it is reference data rather than directives, has resume lines
+stripped, control characters replaced and HTML escaped, and is capped at 4,000
+characters including the wrapper. Replies to a forum topic's root message carry
+no context. See [Chat sessions → Replying to a message or a quote](../../how-to/chat-sessions.md#replying-to-a-message-or-a-quote)
+([#904](https://github.com/littlebearapps/untether/issues/904), community PR [#736](https://github.com/littlebearapps/untether/pull/736)).
+
 ### Voice transcription
 
 If voice transcription is enabled, untether downloads the voice payload from Telegram,
