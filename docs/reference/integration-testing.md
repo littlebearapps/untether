@@ -1215,3 +1215,28 @@ No live scenario: [#889](https://github.com/littlebearapps/untether/issues/889) 
 | R18-893c | As R18-893a, then restart `untether-dev` inside the 15 min window, then hot-add `chat_id` | `⏰ Scheduled: cron:<id>` then the run | `run_once_pending.json` lists the id after the failure; after the restart the first tick logs `triggers.cron.run_once_retry pending_since=…`; then `run_once_completed`, and `run_once_pending.json` is `{"pending": {}}` |
 | R18-891 | Two background Bash commands (`sleep 8`, `sleep 45`); when the first finishes, Claude replies with one short markdown sentence (`**A: 29/40 (Good)** – see \`notes_v2.md\``) | the panel note reads `↳ A: 29/40 (Good) – see notes_v2.md`, with no `**` or backticks | `background_status.folded`, `live_turn.fold_decision decision=fold`, no `background_status.ack_plain_failed` |
 | R18-892 | A background agent `P4` (`sleep 40`); when it finishes, Claude SendMessages the same agent for another leg | the second header reads `🔔 Background task finished — P4: … (continued)`, and the panel's done row shows the sum of both legs | `claude.task.ended` → `claude.task.revived` → `claude.task.ended` (same task) |
+
+## rc19 scenarios (0.35.5rc19)
+
+These run on the dev bot only (`@untether_dev_bot`, in `ut-dev: Claude Code` `-5284581592`), driven from an lba-1 terminal session.
+- Back up `~/.untether-dev/untether.toml` before R19-900 and R19-896, and restore it afterwards.
+- Logs: `journalctl --user -u untether-dev -o cat --since "15 min ago" | grep -E "<pattern>"`.
+
+Two parts have no live scenario:
+- **#900's wake-overtakes-error ordering** needs a background task that outlives an errored result inside the 15 s close grace. It is covered by unit and fake-CLI tests (`test_900_errored_run_final_lands_before_the_wake_final`). For a passive `/monitor` check on nsd/mac: finals should appear in time order after usage-limit errors, with no session cost going down, and `final.error_delivered_early` should be logged.
+- **#897** is gated by unit tests plus a clean restart.
+
+| ID | Steps | Expected Telegram | Log signatures |
+|---|---|---|---|
+| R19-902a | Short prompt → wait for the final → within ~15 s `/at 5m qa-rc19-902 at test` → `/cancel` | one reply: `❌ cancelled 1 pending /at run.`, and the `/at` never fires | `cancel.idle_session_closed idle=1`, `at.cancelled`, `claude.live_session.closed close_reason=cancel` |
+| R19-902b | Short prompt → wait for the final → `/cancel` | `nothing running in this chat — closed the idle session.` | `cancel.idle_session_closed` |
+| R19-902c | `/cancel` while a turn is still running | the usual `cancelled · claude` card (unchanged) | `cancel.requested`, `handle.cancelled` |
+| R19-897 | Restart `untether-dev` with a `stats.json` holding days older than 90 | nothing; `/stats` All Time is unchanged | `session_stats.rolled_up days=N` once, no `session_stats.*` warnings |
+| R19-898 | Prompt → `/health` → restart `untether-dev` → `/health` | the same `today's API cost` both times (not $0.00) | `~/.untether-dev/daily_cost.json` has today's date; `cost_tracker.daily_loaded daily_total=…` |
+| R19-896a | `[cost_budget] enabled = true`, `max_cost_per_day = 0.01`, `auto_cancel = true` (hot-reload) → send a prompt | `🛑 Daily budget reached ($X of $0.01). New runs are paused until midnight.` with a **Run anyway** button, and no run | `cost_budget.run_blocked scope=per_day attended=True` |
+| R19-896b | Tap **Run anyway** | toast `Running once`; the notice gains `▶️ Running once despite the daily budget.` and loses the button; exactly one run, whose footer reads `🛑 Stopped: today's cost $X reached the daily budget $0.01` | `cost_budget.run_anyway`, `cost_budget.run_stopped`, `claude.live_session.closed close_reason=budget_stop` |
+| R19-896c | Swap to `max_cost_per_run = 0.01` → a prompt that starts a 60 s background Bash and replies "started" | the reply's footer reads `🛑 Stopped: run cost $X passed the per-run budget $0.01`, then `⏳ Closing session — 1 background task still running at the cost budget: …`; no wake turn | `cost_budget.run_stopped`, `cost_budget.session_closed closed=True`, `close_reason=budget_stop` |
+| R19-896d | As R19-896c, but send a follow-up while the first turn is still running | the follow-up does not run inside the stopped session (it gets the budget notice, or starts fresh) | no `write_user_message` after `cost_budget.run_stopped` |
+| R19-903 | `/config` → Loop mode → On → Ask mode → Off | Loop stays on (check `telegram_chat_prefs_state.json`: `loop_enabled: true`). Clear both afterwards | `config.ask_questions.set` |
+| R19-900 | `[engines.claude] extra_args = ["--max-budget-usd", "0.60"]` (restart) → a prompt that launches a 40 s background Agent and then reads many files | the `error · claude … error_max_budget_usd` final arrives before the session closes | `final.error_delivered_early`, then `claude.live_session.closed close_reason=error` |
+| R19-904 | Reply to a bot final asking "what error subtype and cost are shown in the message I'm replying to?" (no tools); then reply to a plain bot message asking for an exact quote | the answer quotes text that exists only in the replied message | `subprocess.stdin.payload_sent` payload larger than the preamble plus the prompt |
