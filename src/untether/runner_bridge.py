@@ -7380,8 +7380,15 @@ async def handle_message(
         # error delivery holds any result this gate would act on), so
         # returning here fully suppresses the terminal error message. The
         # retry re-enters handle_message as a normal resumed run — quarantine
-        # divert, session-owner serialisation, RAM guard and per-run budget
-        # checks all apply to it exactly as to a user-initiated run.
+        # divert, session-owner serialisation and the RAM guard apply to it
+        # exactly as to a user-initiated run. Budgets: it skips
+        # ``_run_engine``, so the #896 daily gate does NOT refuse it (like
+        # auto-continue and the empty-resume resend, it salvages a run that
+        # already started). What applies is the read-only guard in
+        # ``_stream_idle_retry_due`` (no retry once the failed run hit a
+        # per-run or daily limit), then the nested run's own post-result
+        # accounting (daily total, alerts) and its "Stop at limit" per-run
+        # stop, counted from the retry's own spend.
         _si_ws = _load_watchdog_settings()
         _si_resume = completed.resume or outcome.resume
         _si_rc = edits.stream.proc_returncode if edits.stream else None
