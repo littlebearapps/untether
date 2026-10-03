@@ -18,10 +18,21 @@ _REFERENCE_NOTICE = (
 )
 
 
+# #904: neutralise bidi controls only — other format characters (ZWJ in emoji
+# sequences, ZWNJ in Persian/Indic text, the soft hyphen) are real content.
+_BIDI_CONTROLS = frozenset(
+    "\u202a\u202b\u202c\u202d\u202e"  # LRE RLE PDF LRO RLO
+    "\u2066\u2067\u2068\u2069"  # LRI RLI FSI PDI
+    "\u200e\u200f\u061c"  # LRM RLM ALM
+)
+
+
 def _normalise_reference(text: str) -> str:
     normalised = text.replace("\r\n", "\n").replace("\r", "\n").strip()
     return "".join(
-        char if char in {"\n", "\t"} or category(char) not in {"Cc", "Cf"} else "�"
+        "�"
+        if char in _BIDI_CONTROLS or (char not in "\n\t" and category(char) == "Cc")
+        else char
         for char in normalised
     )
 
