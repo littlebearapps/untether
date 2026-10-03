@@ -611,6 +611,41 @@ def render_markdown(md: str) -> tuple[str, list[dict[str, Any]]]:
     return text, entities
 
 
+def _bare_link(url: str) -> str:
+    return url.removeprefix("mailto:").split("://", 1)[-1].rstrip("/")
+
+
+def markdown_to_plain(md: str) -> str:
+    """*md* as the text ``render_markdown`` would show, without entities —
+    for a surface sent as plain text (#891: background-panel acks). Emphasis
+    and code marks go; intraword underscores, a lone ``*``, URLs and
+    escaped text stay as written. A link's URL would be lost with its
+    ``text_link`` entity, so it follows its text in brackets."""
+    text, entities = render_markdown(md)
+    links = [
+        e
+        for e in entities
+        if e.get("type") == "text_link" and isinstance(e.get("url"), str)
+    ]
+    if not links:
+        return text
+    units = text.encode("utf-16-le")
+    out: list[bytes] = []
+    pos = 0
+    for e in sorted(links, key=lambda e: e["offset"] + e["length"]):
+        url = e["url"]
+        end = (e["offset"] + e["length"]) * 2
+        if end < pos:
+            continue
+        out.append(units[pos:end])
+        pos = end
+        shown = units[e["offset"] * 2 : end].decode("utf-16-le")
+        if _bare_link(shown) != _bare_link(url):  # not a linkified bare URL
+            out.append(f" ({url})".encode("utf-16-le"))
+    out.append(units[pos:])
+    return b"".join(out).decode("utf-16-le")
+
+
 _LOOPBACK_HOSTS = frozenset({"localhost", "127.0.0.1", "::1", "0.0.0.0"})  # nosec B104
 
 

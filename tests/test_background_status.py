@@ -716,6 +716,49 @@ async def test_fold_puts_the_ack_on_the_task_row_in_full() -> None:
     assert not panel.finalised  # sweep two still running
 
 
+@pytest.mark.parametrize(
+    ("ack", "expected"),
+    [
+        # #891: the panel is plain text — markdown would show as literal marks
+        (
+            "Scores **29/40 (Good)** and **15/20 (Good)**.",
+            "Scores 29/40 (Good) and 15/20 (Good).",
+        ),
+        (
+            "Logged it (`open_questions.md`) and updated `evidence/INDEX.md`.",
+            "Logged it (open_questions.md) and updated evidence/INDEX.md.",
+        ),
+        ("_Done_ — *all* green.", "Done — all green."),
+        # …without touching underscores, URLs or a lone asterisk
+        (
+            "Wrote my_report_v2.md for snake_case_name; 5 * 3 = 15.",
+            "Wrote my_report_v2.md for snake_case_name; 5 * 3 = 15.",
+        ),
+        (
+            "See https://example.com/a_b_c?x=1 for details.",
+            "See https://example.com/a_b_c?x=1 for details.",
+        ),
+        # a markdown link keeps its URL, which plain text can't hide
+        (
+            "Opened [the PR](https://github.com/o/r/pull/7).",
+            "Opened the PR (https://github.com/o/r/pull/7).",
+        ),
+        ("A < B & C > D", "A < B & C > D"),
+    ],
+)
+async def test_fold_strips_markdown_from_the_ack(ack: str, expected: str) -> None:
+    transport = FakeTransport()
+    clock = _Clock()
+    a1, a2 = _agent("a1", "sweep one"), _agent("a2", "sweep two")
+    panel = await _open_panel(transport, clock, a1, a2)
+    a1.status, a1.ended_at = "completed", clock.t + 60
+    assert await panel.fold(ack, task_ids=["a1"])
+    assert await panel.fold(ack, turn=3)  # unattributed note, same treatment
+    lines = transport.edit_calls[-1]["message"].text.splitlines()
+    assert f"   ↳ {expected}" in lines
+    assert lines[-1] == f"💬 {expected}"
+
+
 async def test_fold_without_a_task_is_a_note_then_filed_by_the_restatement() -> None:
     transport = FakeTransport()
     clock = _Clock()

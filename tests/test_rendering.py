@@ -991,3 +991,31 @@ def test_886_continuation_chunk_keeps_numbering() -> None:
         if re.match(r"^\d+\. item", line)
     ]
     assert numbers == list(range(1, 21))
+
+
+@pytest.mark.parametrize(
+    ("md", "expected"),
+    [
+        ("**bold** and `code`", "bold and code"),
+        (
+            "snake_case_name and my_file_v2.py; 5 * 3",
+            "snake_case_name and my_file_v2.py; 5 * 3",
+        ),
+        # a linkified bare URL / domain isn't repeated…
+        (
+            "see example.com or https://e.com/a_b",
+            "see example.com or https://e.com/a_b",
+        ),
+        # …but a link's URL follows its text (UTF-16 offsets past an emoji)
+        ("🎉 [the PR](https://e.com/p/7) is up", "🎉 the PR (https://e.com/p/7) is up"),
+        (
+            "[a](https://a.com) [b](https://b.com)",
+            "a (https://a.com) b (https://b.com)",
+        ),
+    ],
+)
+def test_markdown_to_plain(md: str, expected: str) -> None:
+    """#891: what the rendered markdown reads, for a plain-text surface."""
+    from untether.telegram.render import markdown_to_plain
+
+    assert markdown_to_plain(md) == expected

@@ -150,6 +150,19 @@ def _one_line(text: str) -> str:
     return " ".join(str(text).split())
 
 
+def _ack_plain(text: str) -> str:
+    """#891: a folded ack is the model's markdown, but the status message is
+    plain text — show what the rendered answer would read, not ``**`` and
+    backticks. Best-effort: on any renderer failure the raw text is kept."""
+    from .telegram.render import markdown_to_plain
+
+    try:
+        return markdown_to_plain(text)
+    except Exception:  # noqa: BLE001 — never lose an ack to the renderer
+        logger.warning("background_status.ack_plain_failed", exc_info=True)
+        return text
+
+
 def task_label(task: Any, width: int = DESC_WIDTH) -> str:
     raw = (
         getattr(task, "description", None)
@@ -542,7 +555,7 @@ class BackgroundStatusPanel:
             list(self.notes),
             dict(self._note_turns),
         )
-        ack = _one_line(text)
+        ack = _one_line(_ack_plain(text))
         target = next((tid for tid in task_ids if tid in self.tasks), None)
         if target is not None and already_announced:
             self._claim_turn_notes(target, announced_turns)
