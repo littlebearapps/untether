@@ -911,12 +911,12 @@ The preview is appended to the `warning_text` in the progress message. Only appl
 
 ### Cost tracking and budget
 
-`runner_bridge.py` calls `_check_cost_budget()` after each `CompletedEvent` to compare run cost against configured budgets (`[cost_budget]` in `untether.toml`). Budget alerts are shown in the progress footer. The cost checked is the run's own spend: Claude's `total_cost_usd` is cumulative per session, so the bridge uses the delta against the last total stored in `session_costs.json` (per turn in a live session, [#778](https://github.com/littlebearapps/untether/issues/778)). A single run above `[cost_budget] warn_run_above_usd` (default $20) also logs `cost.run_outlier` even with no budget configured ([#702](https://github.com/littlebearapps/untether/issues/702)).
+`runner_bridge.py` calls `_check_cost_budget()` after each `CompletedEvent` to compare run cost against configured budgets (`[cost_budget]` in `untether.toml`). Budget alerts are shown in the progress footer. The cost checked is the run's own spend: Claude's `total_cost_usd` is cumulative per session, so the bridge uses the delta against the last total stored in `session_costs.json` (per turn in a live session, [#778](https://github.com/littlebearapps/untether/issues/778)). A single run above `[cost_budget] warn_run_above_usd` (default $20) also logs `cost.run_outlier` even with no budget configured ([#702](https://github.com/littlebearapps/untether/issues/702)). With `auto_cancel` effective (**Stop at limit**, [#896](https://github.com/littlebearapps/untether/issues/896)), `budget_gate.py` refuses new runs once the daily total reaches `max_cost_per_day` (attended runs get a one-shot `Run anyway` button), and a reply whose cumulative run spend passes `max_cost_per_run` ends the live session after delivery (`cost_budget.run_stopped`, close reason `budget_stop`) — at the turn boundary, never mid-turn.
 
 `cost_tracker.py` provides:
 - `CostBudget` — per-run and daily budget thresholds with configurable warning percentage
 - `CostAlert` — alert levels: info, warning, critical, exceeded
-- `record_run_cost()` / `get_daily_cost()` — daily accumulation with midnight reset
+- `record_run_cost()` / `get_daily_cost()` — daily accumulation with midnight reset, persisted to `daily_cost.json` beside the config so a restart keeps the day's total (`init_daily_cost()`, [#898](https://github.com/littlebearapps/untether/issues/898))
 
 ### Session export
 
