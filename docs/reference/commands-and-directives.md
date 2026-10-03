@@ -34,7 +34,7 @@ This line is parsed from replies and takes precedence over new directives. For b
 
 | Command | Description |
 |---------|-------------|
-| `/cancel` | Reply to the progress message to stop the current run. Without a reply it stops the single active run (or queued job), else cancels pending `/at` delays and loops — in a forum topic only that topic's, in General only General's ([#826](https://github.com/littlebearapps/untether/issues/826)). Also drops a prompt still waiting in the forward-coalesce window with a `🗑️ Dropped N message(s) …` reply ([#807](https://github.com/littlebearapps/untether/issues/807)). |
+| `/cancel` | Reply to the progress message to stop the current run. Without a reply it stops the single active run (or queued job), else cancels pending `/at` delays and loops — in a forum topic only that topic's, in General only General's ([#826](https://github.com/littlebearapps/untether/issues/826)). A Claude session idling after its answer isn't a run: `/cancel` closes it, still cancels the pending `/at` delays and loops, and always replies ([#902](https://github.com/littlebearapps/untether/issues/902)). Also drops a prompt still waiting in the forward-coalesce window with a `🗑️ Dropped N message(s) …` reply ([#807](https://github.com/littlebearapps/untether/issues/807)). |
 | `/agent` | Show/set the default engine for the current scope. |
 | `/model` | Show/set the model override for the current scope. |
 | `/reasoning` | Show/set the reasoning override for the current scope. |

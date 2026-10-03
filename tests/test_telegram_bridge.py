@@ -1023,6 +1023,315 @@ async def test_826_cancel_fallback_non_forum_group_chat_wide() -> None:
     assert task.cancel_requested.is_set()
 
 
+# --- #902: /cancel during an idle post-result live session ---
+
+
+def _idle_live_task(
+    *,
+    idle: bool = True,
+    sid: str = "s-902",
+    thread_id: int | None = None,
+    background: bool = False,
+) -> RunningTask:
+    """A live Claude run: idle = between turns after its result (#776)."""
+    from types import SimpleNamespace
+
+    from untether.runners.claude import ClaudeStreamState, ClaudeTask
+
+    state = ClaudeStreamState()
+    state.live_mode = True
+    state.completed_turns = 1
+    state.turn_open = not idle
+    if background:
+        state.tasks["t1"] = ClaudeTask(task_id="t1", is_backgrounded=True)
+    task = RunningTask(
+        edits=SimpleNamespace(stream=SimpleNamespace(engine_state=state)),  # type: ignore[arg-type]
+        thread_id=thread_id,
+    )
+    task.resume = ResumeToken(engine="claude", value=sid)
+    return task
+
+
+def _plain_cancel_msg(chat_id: int = 123) -> TelegramIncomingMessage:
+    return TelegramIncomingMessage(
+        transport="telegram",
+        chat_id=chat_id,
+        message_id=10,
+        text="/cancel",
+        reply_to_message_id=None,
+        reply_to_text=None,
+        sender_id=123,
+    )
+
+
+async def _with_at_scheduler(transport: FakeTransport, body) -> None:
+    from untether.telegram import at_scheduler
+
+    async def _noop_run_job(*_args: Any, **_kwargs: Any) -> None:
+        return None
+
+    at_scheduler.uninstall()
+    async with anyio.create_task_group() as tg:
+        at_scheduler.install(tg, _noop_run_job, transport, 1)
+        try:
+            await body(at_scheduler)
+        finally:
+            tg.cancel_scope.cancel()
+            at_scheduler.uninstall()
+
+
+@pytest.mark.anyio
+async def test_902_idle_session_and_pending_at_both_cancelled() -> None:
+    """The rc18 Q15 shape: idle session + a pending /at — one /cancel closes
+    the session, drops the /at and replies once."""
+    transport = FakeTransport()
+    cfg = make_cfg(transport)
+    task = _idle_live_task()
+    running = {MessageRef(channel_id=123, message_id=42): task}
+
+    async def body(at_scheduler) -> None:
+        at_scheduler.schedule_delayed_run(123, None, 300, "later")
+        with capture_logs() as logs:
+            await handle_cancel(cfg, _plain_cancel_msg(), running)
+        assert at_scheduler.pending_for_chat(123) == []
+        closed = [e for e in logs if e.get("event") == "cancel.idle_session_closed"]
+        assert closed and closed[0]["idle"] == 1
+
+    await _with_at_scheduler(transport, body)
+
+    assert task.cancel_requested.is_set()
+    assert [c["message"].text for c in transport.send_calls] == [
+        "\N{CROSS MARK} cancelled 1 pending /at run."
+    ]
+
+
+@pytest.mark.anyio
+async def test_902_idle_session_only_replies() -> None:
+    transport = FakeTransport()
+    cfg = make_cfg(transport)
+    task = _idle_live_task()
+
+    await handle_cancel(
+        cfg, _plain_cancel_msg(), {MessageRef(channel_id=123, message_id=42): task}
+    )
+
+    assert task.cancel_requested.is_set()
+    assert [c["message"].text for c in transport.send_calls] == [
+        "nothing running in this chat \N{EM DASH} closed the idle session."
+    ]
+
+
+@pytest.mark.anyio
+async def test_902_two_idle_sessions_plural() -> None:
+    transport = FakeTransport()
+    cfg = make_cfg(transport)
+    a = _idle_live_task(sid="a")
+    b = _idle_live_task(sid="b")
+    running = {
+        MessageRef(channel_id=123, message_id=42): a,
+        MessageRef(channel_id=123, message_id=43): b,
+    }
+
+    await handle_cancel(cfg, _plain_cancel_msg(), running)
+
+    assert a.cancel_requested.is_set() and b.cancel_requested.is_set()
+    assert transport.send_calls[-1]["message"].text == (
+        "nothing running in this chat \N{EM DASH} closed the idle sessions."
+    )
+
+
+@pytest.mark.anyio
+async def test_902_idle_live_alias_refs_close_once() -> None:
+    """A live run sits under its progress ref and each turn's ref (#776)."""
+    transport = FakeTransport()
+    cfg = make_cfg(transport)
+    task = _idle_live_task()
+    running = {
+        MessageRef(channel_id=123, message_id=42): task,
+        MessageRef(channel_id=123, message_id=44): task,
+    }
+
+    await handle_cancel(cfg, _plain_cancel_msg(), running)
+
+    assert task.cancel_requested.is_set()
+    assert transport.send_calls[-1]["message"].text.endswith("closed the idle session.")
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    "make_task",
+    [
+        pytest.param(lambda: _idle_live_task(idle=False), id="turn-in-flight"),
+        pytest.param(lambda: _idle_live_task(background=True), id="bg-task-holds"),
+    ],
+)
+async def test_902_busy_live_session_unchanged(make_task) -> None:
+    """Real work (an in-flight turn or a background task holding the session)
+    keeps the old behaviour: cancel the run, no reply, /at left alone."""
+    transport = FakeTransport()
+    cfg = make_cfg(transport)
+    task = make_task()
+    running = {MessageRef(channel_id=123, message_id=42): task}
+
+    async def body(at_scheduler) -> None:
+        at_scheduler.schedule_delayed_run(123, None, 300, "later")
+        with capture_logs() as logs:
+            await handle_cancel(cfg, _plain_cancel_msg(), running)
+        assert [p.prompt for p in at_scheduler.pending_for_chat(123)] == ["later"]
+        assert [e for e in logs if e.get("event") == "cancel.requested"]
+        assert not [e for e in logs if e.get("event") == "cancel.idle_session_closed"]
+
+    await _with_at_scheduler(transport, body)
+
+    assert task.cancel_requested.is_set()
+    assert transport.send_calls == []
+
+
+@pytest.mark.anyio
+async def test_902_idle_plus_busy_still_ambiguous() -> None:
+    """Mixed idle + busy keeps the existing ambiguity prompt."""
+    transport = FakeTransport()
+    cfg = make_cfg(transport)
+    idle = _idle_live_task(sid="a")
+    busy = RunningTask()
+    running = {
+        MessageRef(channel_id=123, message_id=42): idle,
+        MessageRef(channel_id=123, message_id=43): busy,
+    }
+
+    await handle_cancel(cfg, _plain_cancel_msg(), running)
+
+    assert not idle.cancel_requested.is_set()
+    assert not busy.cancel_requested.is_set()
+    assert "multiple runs active" in transport.send_calls[-1]["message"].text
+
+
+@pytest.mark.anyio
+async def test_902_idle_close_scoped_to_topic() -> None:
+    """#826: /cancel in topic 10 closes topic 10's idle session and drops only
+    topic 10's /at — topic 6's idle session and /at are untouched."""
+    transport = FakeTransport()
+    cfg = make_cfg(transport)
+    idle_6 = _idle_live_task(sid="six", thread_id=6)
+    idle_10 = _idle_live_task(sid="ten", thread_id=10)
+    running = {
+        MessageRef(channel_id=_FORUM_CHAT, message_id=41): idle_6,
+        MessageRef(channel_id=_FORUM_CHAT, message_id=42): idle_10,
+    }
+
+    async def body(at_scheduler) -> None:
+        at_scheduler.schedule_delayed_run(_FORUM_CHAT, 6, 300, "six")
+        at_scheduler.schedule_delayed_run(_FORUM_CHAT, 10, 300, "ten")
+        await handle_cancel(cfg, _forum_cancel_msg(10), running)
+        remaining = [p.prompt for p in at_scheduler.pending_for_chat(_FORUM_CHAT)]
+        assert remaining == ["six"]
+
+    await _with_at_scheduler(transport, body)
+
+    assert idle_10.cancel_requested.is_set()
+    assert not idle_6.cancel_requested.is_set()
+    assert [c["message"].text for c in transport.send_calls] == [
+        "\N{CROSS MARK} cancelled 1 pending /at run."
+    ]
+
+
+@pytest.mark.anyio
+async def test_902_idle_close_topic_wording() -> None:
+    transport = FakeTransport()
+    cfg = make_cfg(transport)
+    idle_10 = _idle_live_task(thread_id=10)
+
+    await handle_cancel(
+        cfg,
+        _forum_cancel_msg(10),
+        {MessageRef(channel_id=_FORUM_CHAT, message_id=42): idle_10},
+    )
+
+    assert idle_10.cancel_requested.is_set()
+    assert transport.send_calls[-1]["message"].text == (
+        "nothing running in this topic \N{EM DASH} closed the idle session."
+    )
+
+
+@pytest.mark.anyio
+async def test_902_pending_at_and_loops_cancelled_together(monkeypatch) -> None:
+    """A pending /at no longer short-circuits the /loop cancel: one /cancel
+    drops both and says so."""
+    from untether import loop_scheduler
+
+    calls: list[int] = []
+
+    def _fake_loops(chat_id: int, *, thread_filter=None) -> int:
+        calls.append(chat_id)
+        return 2
+
+    monkeypatch.setattr(loop_scheduler, "cancel_pending_for_chat", _fake_loops)
+    transport = FakeTransport()
+    cfg = make_cfg(transport)
+
+    async def body(at_scheduler) -> None:
+        at_scheduler.schedule_delayed_run(123, None, 300, "later")
+        await handle_cancel(cfg, _plain_cancel_msg(), {})
+        assert at_scheduler.pending_for_chat(123) == []
+
+    await _with_at_scheduler(transport, body)
+
+    assert calls == [123]
+    assert [c["message"].text for c in transport.send_calls] == [
+        "\N{CROSS MARK} cancelled 1 pending /at run and 2 active loops."
+    ]
+
+
+@pytest.mark.anyio
+async def test_902_reply_to_idle_session_replies() -> None:
+    """/cancel as a reply to an idle session's message closes it and says so."""
+    transport = FakeTransport()
+    cfg = make_cfg(transport)
+    task = _idle_live_task()
+    msg = TelegramIncomingMessage(
+        transport="telegram",
+        chat_id=123,
+        message_id=10,
+        text="/cancel",
+        reply_to_message_id=42,
+        reply_to_text=None,
+        sender_id=123,
+    )
+
+    with capture_logs() as logs:
+        await handle_cancel(cfg, msg, {MessageRef(channel_id=123, message_id=42): task})
+
+    assert task.cancel_requested.is_set()
+    assert [c["message"].text for c in transport.send_calls] == [
+        "nothing is currently running for that message \N{EM DASH} "
+        "closed the idle session."
+    ]
+    assert [e for e in logs if e.get("event") == "cancel.idle_session_closed"]
+
+
+@pytest.mark.anyio
+async def test_902_callback_cancel_on_idle_session_says_closed() -> None:
+    transport = FakeTransport()
+    cfg = make_cfg(transport)
+    bot = cast(FakeBot, cfg.bot)
+    task = _idle_live_task()
+    query = TelegramCallbackQuery(
+        transport="telegram",
+        chat_id=123,
+        message_id=42,
+        callback_query_id="cb-902",
+        data="untether:cancel",
+        sender_id=123,
+    )
+
+    await handle_callback_cancel(
+        cfg, query, {MessageRef(channel_id=123, message_id=42): task}
+    )
+
+    assert task.cancel_requested.is_set()
+    assert bot.callback_calls[-1]["text"] == "closed the idle session."
+
+
 class _ThreadRecordingRunner(ScriptRunner):
     def __init__(self, *args: Any, **kwargs: Any) -> None:
         super().__init__(*args, **kwargs)
