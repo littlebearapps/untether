@@ -1738,3 +1738,94 @@ async def test_418_export_records_every_live_turn() -> None:
     ):
         assert needle in md
     export_mod._SESSION_HISTORY.clear()
+
+
+# ── #890: repeat usage-limit errors from wake turns coalesce ────────────────
+
+_CAP = "You've hit your session limit · resets 5:30pm (Australia/Melbourne)"
+
+
+def _capped_turn(
+    turn: int,
+    *,
+    reason: str = "task_finished",
+    head: str = _CAP,
+    latched: bool = True,
+) -> list[Emit]:
+    usage: dict = {"num_turns": 1, "total_cost_usd": 45.25}
+    if latched:
+        usage["usage_limit_latched"] = True
+    return [
+        Emit(
+            _turn("started", turn=turn, reason=reason, detail={"tasks": [f"t{turn}"]})
+        ),
+        Emit(
+            _turn(
+                "completed",
+                turn=turn,
+                reason=reason,
+                ok=False,
+                answer="",
+                error=f"{head}\nsession: 681bd6d5 · live turn {turn} · turns: 1",
+                resume=_TOKEN,
+                usage=usage,
+            )
+        ),
+    ]
+
+
+def _cap_messages(transport: FakeTransport, needle: str = "hit your session limit"):
+    return [c for c in transport.send_calls if needle in c["message"].text]
+
+
+async def test_890_repeat_capped_wake_errors_fold_into_the_first() -> None:
+    """#890: once the limit is latched, each later background wake fails at
+    once with the same message — one error final, edited with a counter, not
+    one push per wake."""
+    transport, _ = await _run_with_turn(
+        *_capped_turn(2), *_capped_turn(3), *_capped_turn(4), end_mid_turn=True
+    )
+    sent = _cap_messages(transport)
+    assert len(sent) == 1
+    ref = sent[0]["ref"]
+    edits = [c["message"].text for c in transport.edit_calls if c["ref"] == ref]
+    assert edits, "the first error final was never updated"
+    assert "+1 more background wake-up hit the same limit" in edits[0]
+    assert "+2 more background wake-ups hit the same limit" in edits[-1]
+    # The first error's own text survives the edits.
+    assert "hit your session limit" in edits[-1]
+    assert "Background task finished" in edits[-1]
+
+
+async def test_890_consolidation_off_keeps_one_message_per_wake(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``consolidate_wake_turns = false`` (the #785 kill switch) keeps the
+    rc12 delivery: every capped wake error is its own message."""
+    import untether.runner_bridge as bridge_mod
+    from untether.settings import ProgressSettings
+
+    settings = ProgressSettings(consolidate_wake_turns=False)
+    monkeypatch.setattr(bridge_mod, "_load_progress_settings", lambda: settings)
+    transport, _ = await _run_with_turn(
+        *_capped_turn(2), *_capped_turn(3), end_mid_turn=True
+    )
+    assert len(_cap_messages(transport)) == 2
+
+
+async def test_890_different_or_unlatched_errors_get_their_own_message() -> None:
+    """Only the same latched limit message coalesces: another error, an
+    unlatched error and a user's follow-up all keep their own final."""
+    other = "You've hit your weekly limit · resets 9:00am (Australia/Melbourne)"
+    transport, _ = await _run_with_turn(
+        *_capped_turn(2),
+        *_capped_turn(3, head=other),
+        *_capped_turn(4, latched=False),
+        *_capped_turn(5, reason="followup"),
+        end_mid_turn=True,
+    )
+    assert len(_cap_messages(transport)) == 3
+    assert len(_cap_messages(transport, "weekly limit")) == 1
+    assert not any(
+        "more background wake-up" in c["message"].text for c in transport.edit_calls
+    )

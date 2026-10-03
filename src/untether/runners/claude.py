@@ -2346,14 +2346,14 @@ def _parse_rate_limit_reset_clause(text: str | None) -> tuple[float, str] | None
 
 def _maybe_latch_rate_limit_reset(
     result_text: str | None, *, state: ClaudeStreamState
-) -> None:
+) -> bool:
     """#692: harvest the reset clause from a result error and latch it for
     subsequent `rejected` rate_limit_events that carry no `resetsAt` of
     their own (#790; this run and the next ones in the
-    same process/auth namespace)."""
+    same process/auth namespace). True when the latch was (re-)armed."""
     parsed = _parse_rate_limit_reset_clause(result_text)
     if parsed is None:
-        return
+        return False
     wait_s, display = parsed
     deadline = time.monotonic() + wait_s
     _RATE_LIMIT_RESET_LATCH[_rate_limit_latch_key()] = (deadline, display)
@@ -2366,6 +2366,7 @@ def _maybe_latch_rate_limit_reset(
         resets_display=display,
         source="result_error",
     )
+    return True
 
 
 def _latched_rate_limit_reset() -> tuple[float, str] | None:
@@ -2398,13 +2399,13 @@ def _parse_action_required_cap(text: str | None) -> str | None:
     return m.group("model").strip()
 
 
-def _maybe_latch_action_required(result_text: str | None) -> None:
+def _maybe_latch_action_required(result_text: str | None) -> bool:
     """#701: arm the action-required latch from a result error so subsequent
     `rejected` rate_limit_events without a `resetsAt` render the remedy
-    instead of a countdown (#790)."""
+    instead of a countdown (#790). True when the latch was armed."""
     model = _parse_action_required_cap(result_text)
     if model is None:
-        return
+        return False
     _RATE_LIMIT_ACTION_LATCH[_rate_limit_latch_key()] = (
         time.monotonic() + ACTION_REQUIRED_LATCH_TTL_S,
         model,
@@ -2415,6 +2416,7 @@ def _maybe_latch_action_required(result_text: str | None) -> None:
         ttl_s=ACTION_REQUIRED_LATCH_TTL_S,
         source="result_error",
     )
+    return True
 
 
 def _latched_action_required() -> str | None:
@@ -7732,15 +7734,21 @@ def _translate_claude_event_base(
                 state.prev_result_cost_usd = event.total_cost_usd
             if event.duration_api_ms is not None:
                 state.prev_result_api_ms = event.duration_api_ms
+            usage_limit_latched = False
             if not ok:
                 # #692: the subscription-cap reset time lives only in the
                 # raw result-error text — harvest it for this run's stall
                 # context and for subsequent runs' reset-less rejections.
-                _maybe_latch_rate_limit_reset(event.result, state=state)
                 # #701: the other cap class — no time to harvest, but a
-                # remedy to name.
-                _maybe_latch_action_required(event.result)
+                # remedy to name. (Both always run: no short-circuit.)
+                reset_latched = _maybe_latch_rate_limit_reset(event.result, state=state)
+                action_latched = _maybe_latch_action_required(event.result)
+                usage_limit_latched = reset_latched or action_latched
             usage = _usage_payload(event)
+            if usage_limit_latched:
+                # #890: a usage-limit error — the bridge coalesces repeats of
+                # it from later background wakes into one message.
+                usage["usage_limit_latched"] = True
             # #814: rides on usage (not StartedEvent meta) so it reaches both
             # CompletedEvent and a live turn's TurnEvent — D-12.
             if (safeguard := _finalize_safeguard_turn(state, factory)) is not None:

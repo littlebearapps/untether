@@ -3244,6 +3244,47 @@ def test_889_live_turn_error_without_cost_delta_labels_session_cost() -> None:
     assert "new" not in diag.split(" · ")
 
 
+@pytest.mark.parametrize(
+    ("text", "latched"),
+    [
+        ("You've hit your session limit · resets 5:30pm (Australia/Melbourne)", True),
+        (
+            "You've reached your Fable 5 limit. Run /usage-credits to continue "
+            "or switch models with /model.",
+            True,
+        ),
+        ("API Error: 500 internal server error", False),
+    ],
+)
+def test_890_usage_limit_error_marks_the_turn_usage(
+    monkeypatch, text: str, latched: bool
+) -> None:
+    """#890: a result error that (re-)arms a usage-limit latch says so on the
+    turn's usage, so the bridge can coalesce repeats from later wakes."""
+    from untether.model import TurnEvent
+
+    monkeypatch.setattr(claude_runner, "_RATE_LIMIT_RESET_LATCH", {})
+    monkeypatch.setattr(claude_runner, "_RATE_LIMIT_ACTION_LATCH", {})
+    state = ClaudeStreamState()
+    state.live_mode = True
+    state.factory.started(ResumeToken(engine="claude", value="681bd6d5-aaaa-bbbb"))
+    translate_claude_event(
+        _live_result(cost=1.0, api_ms=1000),
+        title="claude",
+        state=state,
+        factory=state.factory,
+    )
+    events = translate_claude_event(
+        _live_result(cost=1.0, api_ms=1000, is_error=True, text=text),
+        title="claude",
+        state=state,
+        factory=state.factory,
+    )
+    (done,) = [e for e in events if isinstance(e, TurnEvent) and e.phase == "completed"]
+    assert done.ok is False
+    assert (done.usage or {}).get("usage_limit_latched", False) is latched
+
+
 def test_889_first_turn_error_line_unchanged() -> None:
     """#889: the run's own (first) result keeps the original diagnostic line
     even in live mode."""

@@ -4443,7 +4443,9 @@ async def send_result_message(
     replace_ref: MessageRef | None = None,
     delete_tag: str = "final",
     thread_id: ThreadId | None = None,
-) -> None:
+) -> MessageRef | None:
+    """Send (or edit in) a final; returns its message ref (#890), or None
+    when the transport delivered nothing."""
     final_msg, edited = await _send_or_edit_message(
         cfg.transport,
         channel_id=channel_id,
@@ -4455,7 +4457,7 @@ async def send_result_message(
         thread_id=thread_id,
     )
     if final_msg is None:
-        return
+        return None
     if (
         progress_ref is not None
         and (edit_ref is None or not edited)
@@ -4468,6 +4470,7 @@ async def send_result_message(
             tag=delete_tag,
         )
         await cfg.transport.delete(ref=progress_ref)
+    return final_msg
 
 
 def unique_running_tasks(
@@ -6065,6 +6068,31 @@ async def handle_message(
                     await cfg.transport.delete(ref=t_progress_ref)
                 _release_progress(t_progress_ref, reason="folded")
             return
+        # #890: a later wake failing on the same latched usage limit edits
+        # a counter into the first such error instead of pushing its own.
+        capped_head = (
+            _capped_wake_error_head(turn, completed)
+            if turn is not None
+            and run_ok is False
+            and _cost_alert_obj is None
+            and not _outlier_text
+            and safeguard is None
+            and _consolidating()
+            else None
+        )
+        if (
+            turn is not None
+            and capped_head is not None
+            and await _coalesce_capped_wake_error(turn, capped_head)
+        ):
+            delivery["sent"] = True
+            if t_edits is not None:
+                t_edits._finalizing = True
+            if t_progress_ref is not None:
+                with contextlib.suppress(Exception):
+                    await cfg.transport.delete(ref=t_progress_ref)
+                _release_progress(t_progress_ref, reason="capped_repeat")
+            return
         if turn is not None:
             _promote_quiet_breakout(turn)
             t_notify = turn.notify  # a quiet batch's breakout always pushes
@@ -6078,7 +6106,7 @@ async def handle_message(
         if t_edits is not None:
             t_edits._finalizing = True
 
-        await send_result_message(
+        final_ref = await send_result_message(
             cfg,
             channel_id=incoming.channel_id,
             reply_to=t_reply_to,
@@ -6091,6 +6119,19 @@ async def handle_message(
             thread_id=incoming.thread_id,
         )
         delivery["sent"] = True
+        if (
+            capped_head is not None
+            and final_ref is not None
+            and not final_rendered.extra.get("followups")
+        ):
+            # #890: the first error of this limit — later repeats edit it.
+            capped_wake_error.clear()
+            capped_wake_error.update(
+                head=capped_head, ref=final_ref, rendered=final_rendered, repeats=0
+            )
+        elif turn is not None and run_ok is True:
+            # A turn got through: the limit has lifted — start afresh.
+            capped_wake_error.clear()
         if turn is not None and turn.notify and turn.reason in FOLDABLE_REASONS:
             # #785 part 2: this batch of background work has pushed once.
             bg_status.note_breakout()
@@ -6518,6 +6559,53 @@ async def handle_message(
             folded=folded,
         )
         return folded
+
+    # #890: the first wake-turn error final of a latched usage limit (its
+    # head line, message ref, rendered text and how many repeats folded in).
+    capped_wake_error: dict[str, Any] = {}
+
+    def _capped_wake_error_head(ctx: _TurnCtx, completed: CompletedEvent) -> str | None:
+        """#890: the error's first line when this failed turn is a background
+        wake on a latched usage limit (the runner's ``usage_limit_latched``),
+        else None. A user's own follow-up always gets its own reply."""
+        if ctx.reason not in FOLDABLE_REASONS:
+            return None
+        if (completed.usage or {}).get("usage_limit_latched") is not True:
+            return None
+        head = str(completed.error or "").split("\n", 1)[0].strip()
+        return head or None
+
+    async def _coalesce_capped_wake_error(ctx: _TurnCtx, head: str) -> bool:
+        """#890: fold a repeat of the latched limit error into the first one —
+        an edit with a counter, no new message, no push. False (deliver as
+        usual) when there is no first error with the same head, or the edit
+        failed."""
+        if capped_wake_error.get("head") != head:
+            return False
+        repeats = int(capped_wake_error.get("repeats", 0)) + 1
+        word = "wake-up" if repeats == 1 else "wake-ups"
+        rendered = _insert_footer_line(
+            capped_wake_error["rendered"],
+            f"\n+{repeats} more background {word} hit the same limit",
+        )
+        try:
+            edited = await cfg.transport.edit(
+                ref=capped_wake_error["ref"], message=rendered
+            )
+        except Exception:  # noqa: BLE001 — fall back to its own message
+            logger.warning("live_turn.capped_repeat_edit_failed", exc_info=True)
+            edited = None
+        if edited is None:
+            capped_wake_error.clear()
+            return False
+        capped_wake_error["repeats"] = repeats
+        logger.info(
+            "live_turn.capped_repeat_folded",
+            turn=ctx.turn,
+            reason=ctx.reason,
+            repeats=repeats,
+        )
+        return True
 
     def _promote_quiet_breakout(ctx: _TurnCtx) -> None:
         """#785: while consolidating, a wake turn that is delivered as its own
