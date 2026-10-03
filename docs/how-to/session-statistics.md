@@ -70,7 +70,7 @@ Untether automatically records statistics after each run completes:
 - **Duration** — cumulative engine execution time (in milliseconds)
 - **Last run timestamp** — when the engine last completed a run
 
-Data is stored in `stats.json` in the Untether config directory (`~/.untether/` by default). Old records are currently kept indefinitely, so `/stats all` covers everything recorded.
+Data is stored in `stats.json` in the Untether config directory (`~/.untether/` by default), one bucket per engine per day. Day buckets older than 90 days are folded into a single per-engine `archive` total at startup and on the first run of each new day, so the file stays small. `/stats all` still covers everything recorded, while `today` and `week` only read the recent day buckets ([#897](https://github.com/littlebearapps/untether/issues/897)).
 
 ## Background-task telemetry
 

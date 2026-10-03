@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import time
 from dataclasses import dataclass, field
+from datetime import datetime, timedelta
 from pathlib import Path
 
 from .logging import get_logger
@@ -13,7 +14,17 @@ from .utils.json_state import atomic_write_json
 logger = get_logger(__name__)
 
 STATE_FILENAME = "stats.json"
-_PRUNE_DAYS = 90
+# #897: day buckets older than this are folded into the engine's ARCHIVE_KEY
+# bucket, so stats.json stops growing while /stats "All Time" stays true.
+_ROLL_UP_AFTER_DAYS = 90
+# Lives beside the engine's "YYYY-MM-DD" keys: an older build reading the
+# file skips it for today/week (not a date) and still counts it in "all".
+ARCHIVE_KEY = "archive"
+
+
+def _today() -> str:
+    """Host-local date key for day buckets."""
+    return time.strftime("%Y-%m-%d")
 
 
 @dataclass(slots=True)
@@ -37,6 +48,15 @@ class DayBucket:
             self.triggered_count += 1
         else:
             self.manual_count += 1
+
+    def merge(self, other: DayBucket) -> None:
+        """Add ``other``'s totals into this bucket (#897 roll-up)."""
+        self.run_count += other.run_count
+        self.action_count += other.action_count
+        self.duration_ms += other.duration_ms
+        self.last_run_ts = max(self.last_run_ts, other.last_run_ts)
+        self.triggered_count += other.triggered_count
+        self.manual_count += other.manual_count
 
     def to_dict(self) -> dict:
         return {
@@ -75,9 +95,13 @@ class AggregatedStats:
 class SessionStatsStore:
     path: Path
     _data: dict = field(default_factory=dict, repr=False)
+    # #897: local date of the last roll-up — at most one per day.
+    _rolled_up_on: str | None = field(default=None, repr=False)
 
     def __post_init__(self) -> None:
         self._load()
+        if self.roll_up():
+            self._save()
 
     def _load(self) -> None:
         if self.path.exists():
@@ -109,7 +133,9 @@ class SessionStatsStore:
         *,
         triggered: bool = False,
     ) -> None:
-        today = time.strftime("%Y-%m-%d")
+        today = _today()
+        if today != self._rolled_up_on:
+            self.roll_up()  # first run of a new day; saved with the run below
         engines = self._data.setdefault("engines", {})
         engine_days = engines.setdefault(engine, {})
         bucket = DayBucket.from_dict(engine_days.get(today, {}))
@@ -123,7 +149,7 @@ class SessionStatsStore:
         engine: str | None = None,
         period: str = "today",
     ) -> list[AggregatedStats]:
-        today = time.strftime("%Y-%m-%d")
+        today = _today()
         engines_data = self._data.get("engines", {})
 
         target_engines = [engine] if engine else list(engines_data.keys())
@@ -142,12 +168,12 @@ class SessionStatsStore:
             total_manual = 0
 
             for date_str, bucket_data in days.items():
+                if date_str == ARCHIVE_KEY and period in ("today", "week"):
+                    continue  # #897: rolled-up history counts in "all" only
                 if period == "today" and date_str != today:
                     continue
                 if period == "week":
                     # Simple: include last 7 days
-                    from datetime import datetime, timedelta
-
                     try:
                         dt = datetime.strptime(date_str, "%Y-%m-%d")
                         cutoff = datetime.strptime(today, "%Y-%m-%d") - timedelta(
@@ -181,21 +207,41 @@ class SessionStatsStore:
 
         return results
 
-    def prune(self) -> int:
-        """Remove day buckets older than _PRUNE_DAYS. Returns count removed."""
-        from datetime import datetime, timedelta
+    def roll_up(self) -> int:
+        """#897: fold day buckets older than ``_ROLL_UP_AFTER_DAYS`` into each
+        engine's ``ARCHIVE_KEY`` bucket, so "all" totals are unchanged.
 
-        cutoff = datetime.now() - timedelta(days=_PRUNE_DAYS)
-        cutoff_str = cutoff.strftime("%Y-%m-%d")
-        removed = 0
-        for days in self._data.get("engines", {}).values():
-            expired = [d for d in days if d < cutoff_str]
-            for d in expired:
-                del days[d]
-                removed += 1
-        if removed:
-            self._save()
-        return removed
+        Marks today as rolled up and returns how many day buckets were
+        folded. The caller saves (``record_run`` always does; init when > 0).
+        """
+        today = _today()
+        self._rolled_up_on = today
+        cutoff = datetime.strptime(today, "%Y-%m-%d") - timedelta(
+            days=_ROLL_UP_AFTER_DAYS
+        )
+        folded = 0
+        for engine_days in self._data.get("engines", {}).values():
+            if not isinstance(engine_days, dict):
+                continue
+            expired: list[str] = []
+            for key in engine_days:
+                if key == ARCHIVE_KEY:
+                    continue
+                try:
+                    if datetime.strptime(key, "%Y-%m-%d") < cutoff:
+                        expired.append(key)
+                except ValueError:
+                    continue  # not a day bucket — leave it alone
+            if not expired:
+                continue
+            archive = DayBucket.from_dict(engine_days.get(ARCHIVE_KEY, {}))
+            for key in expired:
+                archive.merge(DayBucket.from_dict(engine_days.pop(key)))
+            engine_days[ARCHIVE_KEY] = archive.to_dict()
+            folded += len(expired)
+        if folded:
+            logger.info("session_stats.rolled_up", days=folded, path=str(self.path))
+        return folded
 
 
 # ── Module-level convenience ───────────────────────────────────────────────
@@ -204,7 +250,7 @@ _store: SessionStatsStore | None = None
 
 
 def init_stats(config_path: Path) -> None:
-    """Initialise the module-level stats store."""
+    """Initialise the module-level stats store (rolls up old days, #897)."""
     global _store
     stats_path = config_path.with_name(STATE_FILENAME)
     _store = SessionStatsStore(stats_path)
