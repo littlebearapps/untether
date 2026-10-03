@@ -6267,6 +6267,9 @@ async def handle_message(
             and _cost_alert_obj is None
             and not _outlier_text
             and safeguard is None
+            # #896: the error that ends the session keeps its own final, so
+            # its stop line is seen (a counter edit would drop it).
+            and not acct.budget_stop_text
             and _consolidating()
             else None
         )

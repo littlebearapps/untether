@@ -8,6 +8,7 @@ no further wake turns or follow-ups add spend. A turn is never cut.
 
 from __future__ import annotations
 
+import dataclasses
 from pathlib import Path
 
 import anyio
@@ -520,3 +521,44 @@ def test_stop_at_limit_arms_turn_accounting(cfg_path: Path) -> None:
     assert budget_gate.stop_at_limit_active(None) is False
     _write_config(cfg_path, _PER_RUN)
     assert budget_gate.stop_at_limit_active(None) is True
+
+
+# ---------------------------------------------------------------------------
+# #890 interplay: a coalesced repeat error must not swallow the stop line
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.anyio
+async def test_capped_repeat_that_passes_budget_keeps_stop_line(
+    cfg_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Two background wakes fail on the same latched usage limit; the second
+    takes the run past the per-run budget. It must get its own final with
+    the stop line rather than being folded into the first error's counter."""
+    from tests.test_live_session_bridge import _capped_turn, _run_with_turn
+    from untether.runners import claude as claude_mod
+
+    _write_config(cfg_path, _PER_RUN)
+    closes: list[str] = []
+
+    async def _close(sid, reason, *, notice=False, only_if_idle=False):
+        closes.append(reason)
+        return True
+
+    monkeypatch.setattr(claude_mod, "get_live_session", lambda sid: _FakeLive())
+    monkeypatch.setattr(claude_mod, "close_live_session", _close)
+
+    def _with_cost(steps: list, cost: float) -> list:
+        done = steps[-1].event
+        usage = {**(done.usage or {}), "total_cost_usd": cost}
+        return [steps[0], Emit(dataclasses.replace(done, usage=usage))]
+
+    transport, _ = await _run_with_turn(
+        *_with_cost(_capped_turn(2), 0.60),
+        *_with_cost(_capped_turn(3), 1.20),
+        end_mid_turn=True,
+    )
+    texts = [c["message"].text for c in (*transport.send_calls, *transport.edit_calls)]
+    assert any(STOP_LINE in t for t in texts)
+    assert not any("more background wake-up" in t for t in texts)
+    assert closes == ["budget_stop"]
