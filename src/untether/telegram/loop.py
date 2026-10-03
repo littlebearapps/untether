@@ -928,7 +928,8 @@ class TelegramLoopState:
     seen_message_keys: set[MessageKey]
     seen_messages_order: deque[MessageKey]
     # #894: last-seen ``[triggers] enabled`` (startup, then each reload) so a
-    # reload flipping it on is flagged restart-required exactly once.
+    # reload flipping it on is flagged restart-required exactly once. A
+    # failed startup init resets it to False (nothing is running).
     triggers_enabled: bool = False
     # #894: ``trigger.*.chat_fallback`` findings already logged, so reloads
     # don't repeat the warning.
@@ -2599,6 +2600,10 @@ async def run_main_loop(
                         error=str(exc),
                         error_type=exc.__class__.__name__,
                     )
+                    # #894: nothing is running, so treat triggers as off —
+                    # a reload that fixes the TOML is then flagged
+                    # restart-required like an off→on flip.
+                    state.triggers_enabled = False
 
             def resolve_topic_key(
                 msg: TelegramIncomingMessage,

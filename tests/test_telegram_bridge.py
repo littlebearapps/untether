@@ -5122,6 +5122,33 @@ async def test_894_startup_warns_project_cron_chat_fallback_once(
     assert not [e for e in logs if e["event"] == "config.reload.restart_required"]
 
 
+@pytest.mark.anyio
+async def test_894_reload_fixing_failed_startup_triggers_flags_restart_required(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """[triggers] enabled at startup but invalid → init fails and nothing
+    runs. A reload that fixes the TOML still can't start the scheduler, so it
+    must be flagged restart-required like an off→on flip."""
+    cfg = _894_cfg(
+        tmp_path,
+        trigger_config={"enabled": True, "crons": [{"id": "broken"}]},
+    )
+    with capture_logs() as logs:
+        await _894_run_with_reload(monkeypatch, cfg, _894_TRIGGERS_ON)
+
+    assert [e for e in logs if e["event"] == "triggers.init_failed"]
+    restart = [e for e in logs if e["event"] == "config.reload.restart_required"]
+    assert [e["key"] for e in restart] == ["triggers.enabled"]
+    transport = cast(FakeTransport, cfg.exec_cfg.transport)
+    notices = [
+        c["message"].text
+        for c in transport.send_calls
+        if "triggers.enabled" in c["message"].text
+    ]
+    assert len(notices) == 1
+    assert "Restart required" in notices[0]
+
+
 def test_894_triggers_enable_needs_restart_truth_table() -> None:
     from untether.telegram.loop import _triggers_enable_needs_restart as f
 

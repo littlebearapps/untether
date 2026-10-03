@@ -926,7 +926,7 @@ within seconds, and active runs are not interrupted.
 
 | Change | Why |
 |--------|-----|
-| `triggers.enabled` (off to on) | Webhook server and cron scheduler must be started. The reload logs `config.reload.restart_required key=triggers.enabled` and the Telegram reload notice says **Restart required** ([#894](https://github.com/littlebearapps/untether/issues/894)) |
+| `triggers.enabled` (off to on, or on while a startup `triggers.init_failed` left nothing running) | Webhook server and cron scheduler must be started. The reload logs `config.reload.restart_required key=triggers.enabled` and the Telegram reload notice says **Restart required** ([#894](https://github.com/littlebearapps/untether/issues/894)) |
 | `triggers.server.host` or `port` | aiohttp binds once at startup |
 | `triggers.server.rate_limit` | Rate limiter initialised at startup |
 | `triggers.server.max_body_bytes` | Body limit set when the server app is built |
