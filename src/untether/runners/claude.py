@@ -34,7 +34,7 @@ import anyio
 import msgspec
 
 from ..backends import EngineBackend, EngineConfig
-from ..background_status import format_tokens
+from ..background_status import CONTINUED_SUFFIX, format_tokens
 from ..config import ConfigError
 from ..events import EventFactory
 from ..logging import get_logger
@@ -1469,6 +1469,10 @@ class ClaudeTask:
     # the latest revival, so ``started_at``/``ended_at`` describe the current
     # run only.
     revived_count: int = 0
+    # #892: the active time of the runs before the latest revival (each
+    # ``ended_at - started_at``; the idle gaps between them excluded), so the
+    # status panel shows the task's total time beside its lifetime tokens.
+    prior_active_s: float = 0.0
     # #777: the agent's current step from ``task_progress.description``
     # ("Running <step>") — kept apart from ``description`` (the task's label).
     last_step: str | None = None
@@ -5550,6 +5554,14 @@ def _task_label(task: ClaudeTask) -> str:
     return task.description or task.task_type or "background task"
 
 
+def _finish_label(task: ClaudeTask, label: str | None = None) -> str:
+    """#892: the label a wake turn's header names a finish by — marked
+    ``(continued)`` once the task was revived (#801), so its re-announced
+    finish doesn't read as the same one twice."""
+    label = label or _task_label(task)
+    return f"{label}{CONTINUED_SUFFIX}" if task.revived_count else label
+
+
 def _note_task_end(state: ClaudeStreamState, task: ClaudeTask) -> None:
     """#785: attribute a top-level background task's end to the wake turn it
     belongs to — the open ``unknown`` turn (retro-attributed at completion)
@@ -5567,7 +5579,7 @@ def _note_task_end(state: ClaudeStreamState, task: ClaudeTask) -> None:
             and task.task_id not in state.turn_detail.get("task_ids", [])
             and all(task.task_id != tid for tid, _ in state.turn_ended_tasks)
         ):
-            state.turn_ended_tasks.append((task.task_id, _task_label(task)))
+            state.turn_ended_tasks.append((task.task_id, _finish_label(task)))
             state.turn_ended_at_request[task.task_id] = state.turn_model_requests
         return
     at = state.unattributed_turn_completed_at
@@ -5710,6 +5722,9 @@ def _revive_task(
     the live session closes under the resumed agent."""
     prior_status = task.status
     ended_at = task.ended_at
+    if ended_at is not None:
+        # #892: bank the run that just ended before the clock restarts.
+        task.prior_active_s += max(0.0, ended_at - task.started_at)
     task.status = status
     task.ended_at = None
     task.started_at = time.monotonic()
@@ -7191,7 +7206,10 @@ def translate_claude_event(
                     if task is not None and task.description:
                         # Prefer the registered top-level description (#785).
                         label = task.description
-                    state.turn_notifications.append(label or "background task")
+                    label = label or "background task"
+                    if task is not None:
+                        label = _finish_label(task, label)
+                    state.turn_notifications.append(label)
                     if task is not None:
                         state.turn_notification_ids.append(task.task_id)
                 else:

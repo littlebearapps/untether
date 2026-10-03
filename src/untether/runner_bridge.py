@@ -14,6 +14,7 @@ from typing import Any
 import anyio
 
 from .background_status import (
+    CONTINUED_SUFFIX,
     FOLDABLE_REASONS,
     BackgroundStatusManager,
     count_substantive_actions,
@@ -4743,7 +4744,8 @@ def _turn_title(evt: TurnEvent) -> str | None:
         return f"{base} — {tasks[0][:80]}"
     if evt.reason == "task_finished" and tasks:
         if len(tasks) == 1:
-            return f"{base} — {tasks[0][:80]}"
+            name, continued = _split_continued(tasks[0])
+            return f"{base} — {name[:80]}{continued}"
         # #825: name them (first three, 40 chars each) — a bare count left
         # the user guessing which finished.
         names = " · ".join(_short_label(t) for t in tasks[:_TURN_TITLE_MAX_NAMES])
@@ -4757,11 +4759,23 @@ _TURN_TITLE_MAX_NAMES = 3
 _TURN_TITLE_NAME_CHARS = 40
 
 
+def _split_continued(label: str) -> tuple[str, str]:
+    """#892: a continued task's label and its ``(continued)`` mark, apart —
+    the name is cut to fit, the mark always survives."""
+    if label.endswith(CONTINUED_SUFFIX) and len(label) > len(CONTINUED_SUFFIX):
+        return label[: -len(CONTINUED_SUFFIX)], CONTINUED_SUFFIX
+    return label, ""
+
+
 def _short_label(label: str) -> str:
-    label = " ".join(label.split())
+    label, continued = _split_continued(" ".join(label.split()))
     if len(label) <= _TURN_TITLE_NAME_CHARS:
-        return label
-    return label[: _TURN_TITLE_NAME_CHARS - 1].rstrip() + "\N{HORIZONTAL ELLIPSIS}"
+        return label + continued
+    return (
+        label[: _TURN_TITLE_NAME_CHARS - 1].rstrip()
+        + "\N{HORIZONTAL ELLIPSIS}"
+        + continued
+    )
 
 
 @dataclass(slots=True)

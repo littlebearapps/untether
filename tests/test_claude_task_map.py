@@ -791,6 +791,70 @@ def test_829_revival_stamps_activity() -> None:
     assert state.tasks["a1"].last_progress_at > 0.0
 
 
+def test_892_revived_task_counts_every_leg_but_not_the_idle_gap() -> None:
+    """#892: a continued agent's elapsed time is its total active time — the
+    first leg (~10 min) plus the second (50 s), not the idle gap between them
+    and not just the last leg (the mac ``P4 · 50s · 267k tok`` row)."""
+    from untether.background_status import format_done_row, task_elapsed
+
+    state = ClaudeStreamState()
+    _feed(state, _started_agent("a1", "toolu_a"))
+    task = state.tasks["a1"]
+    task.started_at -= 600.0  # first leg: 10 min
+    _feed(state, _updated("a1", "completed"))
+    assert task.ended_at is not None
+    task.started_at -= 120.0  # …then idle for 2 min before the resume
+    task.ended_at -= 120.0
+    _feed(state, _started_agent("a1", "toolu_a"))  # SendMessage resumes it
+    assert task.revived_count == 1
+    task.started_at -= 50.0  # second leg: 50 s
+    now = time.monotonic()
+    assert 649.0 <= task_elapsed(task, now) < 652.0  # live row: both legs
+    _feed(state, _updated("a1", "completed"))
+    now = time.monotonic()
+    assert 649.0 <= task_elapsed(task, now) < 651.0
+    assert format_done_row(task, now) == "✅ Research the thing · 10m50s"
+    # The current leg's own bounds are unchanged (bash timeouts, #801 grace).
+    assert task.ended_at - task.started_at < 52.0
+
+
+def test_892_continued_task_finish_is_labelled_continued() -> None:
+    """#892: the re-announced finish of a revived agent says it continued,
+    so the second ``🔔 Background task finished`` doesn't read as a repeat —
+    via its notification (idle parent) and via retro-attribution (it ended
+    inside an ``unknown`` wake turn). Its first finish is unmarked."""
+    state = ClaudeStreamState()
+    state.live_mode = True
+    _feed(state, _started_agent("a1", "toolu_a"))
+    _feed(state, _result("agent started"))
+    _feed(state, _snapshot())
+    _feed(state, _updated("a1", "completed"))
+    _feed(state, _notification("a1", "toolu_a", "completed"))
+    events = _feed(state, _init())  # wake turn for the first finish
+    started = [e for e in events if getattr(e, "phase", None) == "started"]
+    assert started[0].detail["tasks"] == ["Research the thing"]
+    _feed(state, _started_agent("a1", "toolu_a"))  # sent back in this turn
+    _feed(state, _result("running again"))
+    _feed(state, _snapshot())
+    _feed(state, _updated("a1", "completed"))
+    _feed(state, _notification("a1", "toolu_a", "completed"))
+    events = _feed(state, _init())
+    started = [e for e in events if getattr(e, "phase", None) == "started"]
+    assert started[0].reason == "task_finished"
+    assert started[0].detail["tasks"] == ["Research the thing (continued)"]
+    # Resumed again; this time it ends inside a turn that opened unnamed.
+    _feed(state, _started_agent("a1", "toolu_a"))
+    _feed(state, _result("once more"))
+    _feed(state, _init())
+    assert state.turn_reason == "unknown"
+    _feed(state, _snapshot())
+    _feed(state, _updated("a1", "completed"))
+    events = _feed(state, _result("it's back"))
+    completed = [e for e in events if getattr(e, "phase", None) == "completed"]
+    assert completed[0].detail.get("retro_attributed") is True
+    assert completed[0].detail["tasks"] == ["Research the thing (continued)"]
+
+
 def test_829_progress_for_an_ended_task_is_not_activity() -> None:
     """A straggler frame for an ended id: no stamp, no re-arm, no revival."""
     state = ClaudeStreamState()

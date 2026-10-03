@@ -42,6 +42,9 @@ DONE_MARK = "\N{WHITE HEAVY CHECK MARK}"
 FAIL_MARK = "\N{CROSS MARK}"
 STOP_MARK = "\N{BLACK SQUARE FOR STOP}\N{VARIATION SELECTOR-16}"
 NOTE_MARK = "\N{SPEECH BALLOON}"
+# #892: appended to a continued (revived, #801) task's label when its next
+# finish is announced, so the second "🔔 … finished" isn't read as a repeat.
+CONTINUED_SUFFIX = " (continued)"
 
 LIVE_STATUSES = frozenset({"running", "pending"})
 _DONE_STATUSES = frozenset({"completed", "ended", "done", "success"})
@@ -173,12 +176,18 @@ def task_label(task: Any, width: int = DESC_WIDTH) -> str:
 
 
 def task_elapsed(task: Any, now: float) -> float:
+    """The task's total active time: its current run plus, for a continued
+    (revived, #801) agent, the runs before it (``prior_active_s``, #892) —
+    never the last leg alone beside lifetime tokens."""
     started = getattr(task, "started_at", None)
     if not isinstance(started, (int, float)):
         return 0.0
     ended = getattr(task, "ended_at", None)
     end = ended if isinstance(ended, (int, float)) else now
-    return max(0.0, end - started)
+    prior = getattr(task, "prior_active_s", 0.0)
+    if isinstance(prior, bool) or not isinstance(prior, (int, float)):
+        prior = 0.0
+    return max(0.0, end - started) + max(0.0, prior)
 
 
 def _usage(task: Any, key: str) -> int | None:

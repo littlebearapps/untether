@@ -680,6 +680,21 @@ async def test_router_followup_turn_anchors_to_its_message() -> None:
             + "x" * 39
             + "\N{HORIZONTAL ELLIPSIS} \N{MIDDLE DOT} job B",
         ),
+        (
+            # #892: a continued agent's mark survives the name cut.
+            "task_finished",
+            {"tasks": ["x" * 60 + " (continued)", "job B"]},
+            "\N{BELL} 2 background tasks finished \N{EM DASH} "
+            + "x" * 39
+            + "\N{HORIZONTAL ELLIPSIS} (continued) \N{MIDDLE DOT} job B",
+        ),
+        (
+            "task_finished",
+            {"tasks": ["y" * 90 + " (continued)"]},
+            "\N{BELL} Background task finished \N{EM DASH} "
+            + "y" * 80
+            + " (continued)",
+        ),
         ("followup", {}, None),
     ],
 )

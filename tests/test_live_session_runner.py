@@ -326,7 +326,9 @@ async def test_resumed_agent_second_finish_is_announced() -> None:
         ("completed", "task_finished"),
     ]
     assert turns[1].answer == "I've sent it back to re-check, it's running now"
-    assert _labels(turns[2]) == ["bg a1"]
+    # #892: the second finish says the agent continued — not a repeat.
+    assert _labels(turns[0]) == ["bg a1"]
+    assert _labels(turns[2]) == ["bg a1 (continued)"]
     assert not turns[2].detail.get("already_announced")
     assert turns[3].answer == "RECHECK DONE"
     revived = [e for e in logs if e["event"] == "claude.task.revived"]
