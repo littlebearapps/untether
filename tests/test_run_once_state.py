@@ -78,6 +78,63 @@ def test_load_filters_non_string_values(tmp_path: Path) -> None:
     assert load_fired_state(path) == {"valid": "2026-04-17T09:00:00"}
 
 
+def test_893_pending_state_round_trip_and_separate_file(tmp_path: Path) -> None:
+    """#893: the pending-retry map has its own sibling file, round-trips, and
+    never touches (or reads) ``run_once_fired.json``."""
+    from untether.triggers.run_once_state import (
+        load_pending_state,
+        resolve_pending_path,
+        save_pending_state,
+    )
+
+    config = tmp_path / "untether.toml"
+    path = resolve_pending_path(config)
+    assert path.name == "run_once_pending.json"
+    assert path.parent == config.parent
+    assert load_pending_state(path) == {}  # missing → nothing pending
+    save_pending_state(path, {"once": "2026-10-03T02:30:00+00:00"})
+    assert load_pending_state(path) == {"once": "2026-10-03T02:30:00+00:00"}
+    assert not resolve_state_path(config).exists()
+    # A fired-state file is not a pending file (and vice versa).
+    assert load_fired_state(path) == {}
+    path.write_text("not json{", encoding="utf-8")
+    assert load_pending_state(path) == {}
+
+
+def test_893_manager_drops_unparseable_and_orphaned_pending(tmp_path: Path) -> None:
+    """#893: on load, a pending entry with a bad timestamp is ignored and one
+    whose cron is no longer in the TOML is pruned from disk."""
+    from untether.triggers.run_once_state import (
+        load_pending_state,
+        resolve_pending_path,
+        save_pending_state,
+    )
+
+    config = tmp_path / "untether.toml"
+    save_pending_state(
+        resolve_pending_path(config),
+        {
+            "kept": "2026-10-03T02:30:00+00:00",
+            "naive": "2026-10-03T02:30:00",
+            "garbled": "yesterday-ish",
+            "gone": "2026-10-03T02:30:00+00:00",
+        },
+    )
+    mgr = TriggerManager(
+        _make_run_once_settings(["kept", "naive", "garbled"]), config_path=config
+    )
+    since = mgr.run_once_pending_since("kept")
+    assert since is not None and since.utcoffset() is not None
+    naive = mgr.run_once_pending_since("naive")
+    assert naive is not None and naive.utcoffset() is not None
+    assert mgr.run_once_pending_since("garbled") is None
+    assert mgr.run_once_pending_since("gone") is None
+    assert sorted(load_pending_state(resolve_pending_path(config))) == [
+        "kept",
+        "naive",
+    ]
+
+
 # ---------------------------------------------------------------------------
 # TriggerManager integration
 # ---------------------------------------------------------------------------

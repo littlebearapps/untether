@@ -41,7 +41,7 @@ This deletes:
 | `active_loops.json` | Pending Claude Code loop iterations (Loop mode) |
 | `stats.json` | Per-engine run counts and usage statistics |
 | `session_costs.json`, `session_quarantine.json` | Per-session cost baselines and quarantined Claude sessions |
-| `triggers_history.json`, `run_once_fired.json` | Last-fired times for crons and webhooks, spent `run_once` crons |
+| `triggers_history.json`, `run_once_fired.json`, `run_once_pending.json` | Last-fired times for crons and webhooks, spent `run_once` crons, `run_once` crons waiting on a send retry |
 | `last_update_id.json`, `untether.lock` | Telegram update offset and the single-instance lock |
 
 !!! warning "Bot token"

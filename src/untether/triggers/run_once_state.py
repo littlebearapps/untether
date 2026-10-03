@@ -21,6 +21,14 @@ The state lives in ``run_once_fired.json`` next to ``untether.toml``. Schema:
 Entries are pruned lazily on config reload — if a cron id no longer appears
 in the TOML, its fired-state entry is dropped so re-adding the same id under
 a new schedule starts fresh.
+
+#893: ``run_once_pending.json`` (same directory) holds one-shots whose
+announce send failed and that are still inside their retry window —
+``{"pending": {"<cron_id>": "<ISO-8601 first failed fire>"}}`` — so a
+restart during the window resumes (or gives up) the retries instead of
+leaving the one-shot to fire on its next schedule match. A separate file
+keeps ``run_once_fired.json`` unchanged; a missing file (every install from
+before #893) means nothing is pending.
 """
 
 from __future__ import annotations
@@ -35,18 +43,28 @@ from ..utils.json_state import atomic_write_json
 logger = get_logger(__name__)
 
 STATE_FILENAME = "run_once_fired.json"
+PENDING_FILENAME = "run_once_pending.json"
 
 __all__ = [
+    "PENDING_FILENAME",
     "STATE_FILENAME",
     "load_fired_state",
+    "load_pending_state",
+    "resolve_pending_path",
     "resolve_state_path",
     "save_fired_state",
+    "save_pending_state",
 ]
 
 
 def resolve_state_path(config_path: Path) -> Path:
     """Return the fired-state file path (sibling of ``untether.toml``)."""
     return config_path.with_name(STATE_FILENAME)
+
+
+def resolve_pending_path(config_path: Path) -> Path:
+    """Return the pending-retry file path (#893, sibling of ``untether.toml``)."""
+    return config_path.with_name(PENDING_FILENAME)
 
 
 def load_fired_state(path: Path) -> dict[str, str]:
@@ -56,6 +74,16 @@ def load_fired_state(path: Path) -> dict[str, str]:
     a run_once cron re-fires, which matches the legacy behaviour and won't
     make things worse.
     """
+    return _load_map(path, "fired")
+
+
+def load_pending_state(path: Path) -> dict[str, str]:
+    """#893: ``{cron_id: iso_first_failed_fire}`` from *path*, or ``{}`` on
+    any error (a missing file is "nothing pending")."""
+    return _load_map(path, "pending")
+
+
+def _load_map(path: Path, key: str) -> dict[str, str]:
     if not path.exists():
         return {}
     try:
@@ -70,21 +98,30 @@ def load_fired_state(path: Path) -> dict[str, str]:
         return {}
     if not isinstance(data, dict):
         return {}
-    fired = data.get("fired")
-    if not isinstance(fired, dict):
+    entries = data.get(key)
+    if not isinstance(entries, dict):
         return {}
     # Defensive copy with key/value type checks.
     return {
         str(k): str(v)
-        for k, v in fired.items()
+        for k, v in entries.items()
         if isinstance(k, str) and isinstance(v, str)
     }
 
 
 def save_fired_state(path: Path, fired: dict[str, str]) -> None:
     """Atomically write the fired set to disk. Swallows errors (logs warning)."""
+    _save_map(path, "fired", fired)
+
+
+def save_pending_state(path: Path, pending: dict[str, str]) -> None:
+    """#893: atomically write the pending-retry map. Swallows errors."""
+    _save_map(path, "pending", pending)
+
+
+def _save_map(path: Path, key: str, entries: dict[str, str]) -> None:
     try:
-        atomic_write_json(path, {"fired": dict(fired)})
+        atomic_write_json(path, {key: dict(entries)})
     except (OSError, ValueError, TypeError) as exc:
         logger.warning(
             "run_once_state.save_failed",

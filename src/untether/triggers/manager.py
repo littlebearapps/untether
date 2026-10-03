@@ -7,14 +7,18 @@ so that subsequent ticks/requests see the new configuration immediately.
 
 from __future__ import annotations
 
+import datetime
 from pathlib import Path
 
 from ..logging import get_logger
 from .run_once_state import (
     iso_now,
     load_fired_state,
+    load_pending_state,
+    resolve_pending_path,
     resolve_state_path,
     save_fired_state,
+    save_pending_state,
 )
 from .settings import CronConfig, TriggersSettings, WebhookConfig
 
@@ -38,6 +42,8 @@ class TriggerManager:
         "_default_timezone",
         "_fired_run_once",
         "_paused",
+        "_pending_run_once",
+        "_run_once_pending_path",
         "_run_once_state_path",
         "_webhooks_by_path",
     )
@@ -68,6 +74,17 @@ class TriggerManager:
             if self._run_once_state_path is not None
             else {}
         )
+        # #893: run_once crons whose announce send failed → UTC time of the
+        # first failed fire, persisted so a restart inside the retry window
+        # resumes the retries (or gives the one-shot up once it has passed).
+        self._run_once_pending_path: Path | None = (
+            resolve_pending_path(config_path) if config_path is not None else None
+        )
+        self._pending_run_once: dict[str, datetime.datetime] = (
+            _parse_pending(load_pending_state(self._run_once_pending_path))
+            if self._run_once_pending_path is not None
+            else {}
+        )
         if settings is not None:
             self.update(settings)
 
@@ -96,6 +113,14 @@ class TriggerManager:
                 "triggers.cron.run_once_state_cleaned",
                 dropped=sorted(stale_fired),
             )
+        # #893: a pending retry only outlives a reload while its one-shot is
+        # still active (removed from the TOML or already fired → forget it).
+        active_ids = {c.id for c in self._crons}
+        stale_pending = set(self._pending_run_once) - active_ids
+        if stale_pending:
+            for cron_id in stale_pending:
+                del self._pending_run_once[cron_id]
+            self._persist_pending_state()
 
         # #382: on a non-loopback bind, drop auth="none" webhooks so a reload
         # can't open an unauthenticated remote-agent-run hole on the live
@@ -260,6 +285,7 @@ class TriggerManager:
                 self._crons = [*self._crons[:i], *self._crons[i + 1 :]]
                 self._fired_run_once[cron_id] = iso_now()
                 self._persist_fired_state()
+                self.clear_run_once_pending(cron_id)
                 return True
         return False
 
@@ -267,6 +293,38 @@ class TriggerManager:
         """Write the fired-once set to disk if a state path is configured."""
         if self._run_once_state_path is not None:
             save_fired_state(self._run_once_state_path, self._fired_run_once)
+
+    # ------------------------------------------------------------------ #
+    # #893: run_once crons pending a retry after a failed announce send
+    # ------------------------------------------------------------------ #
+
+    def run_once_pending_since(self, cron_id: str) -> datetime.datetime | None:
+        """UTC time of the first failed fire of a pending one-shot, else None."""
+        return self._pending_run_once.get(cron_id)
+
+    def mark_run_once_pending(self, cron_id: str, since: datetime.datetime) -> bool:
+        """Record an active one-shot as pending a retry (persisted). False if
+        it is already pending or no longer active (e.g. a reload removed it
+        mid-dispatch)."""
+        if cron_id in self._pending_run_once or cron_id not in {
+            c.id for c in self._crons
+        }:
+            return False
+        self._pending_run_once[cron_id] = since
+        self._persist_pending_state()
+        return True
+
+    def clear_run_once_pending(self, cron_id: str) -> None:
+        """Forget a pending retry (dispatched, given up or removed)."""
+        if self._pending_run_once.pop(cron_id, None) is not None:
+            self._persist_pending_state()
+
+    def _persist_pending_state(self) -> None:
+        if self._run_once_pending_path is not None:
+            save_pending_state(
+                self._run_once_pending_path,
+                {k: v.isoformat() for k, v in self._pending_run_once.items()},
+            )
 
     def fired_run_once_ids(self) -> list[str]:
         """Return a snapshot of cron ids that have already fired (#317)."""
@@ -304,3 +362,18 @@ class TriggerManager:
             webhooks=len(self._webhooks_by_path),
         )
         return True
+
+
+def _parse_pending(raw: dict[str, str]) -> dict[str, datetime.datetime]:
+    """#893: persisted ``{cron_id: iso}`` → aware UTC datetimes (bad entries
+    are skipped; a naive timestamp is taken as UTC)."""
+    pending: dict[str, datetime.datetime] = {}
+    for cron_id, value in raw.items():
+        try:
+            since = datetime.datetime.fromisoformat(value)
+        except ValueError:
+            continue
+        if since.tzinfo is None:
+            since = since.replace(tzinfo=datetime.UTC)
+        pending[cron_id] = since
+    return pending

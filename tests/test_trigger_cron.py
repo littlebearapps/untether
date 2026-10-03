@@ -641,3 +641,186 @@ async def test_893_pending_retry_dropped_when_cron_removed_on_reload(
 
     assert dispatcher.calls == [("once", "default")]
     assert manager.fired_run_once_ids() == []
+
+
+# ── #893 follow-up: pending state survives a restart; pause still retries ──
+
+
+def _pending_on_disk(tmp_path) -> dict[str, str]:
+    from untether.triggers.run_once_state import (
+        load_pending_state,
+        resolve_pending_path,
+    )
+
+    return load_pending_state(resolve_pending_path(tmp_path / "untether.toml"))
+
+
+@pytest.mark.anyio
+async def test_893_pending_run_once_survives_restart_and_retries(monkeypatch, tmp_path):
+    """A restart (e.g. the daily 03:00 reboot) inside the retry window keeps
+    the one-shot pending: the new scheduler retries it on its first tick,
+    outside its schedule — it must not wait for the next match (a year away
+    for a date-pinned one-shot)."""
+    config_path = tmp_path / "untether.toml"
+    before = TriggerManager(_one_shot_settings(), config_path=config_path)
+    await _drive_scheduler(
+        monkeypatch, before, ScriptedDispatcher(results=[False]), _minutes(0)
+    )
+    assert list(_pending_on_disk(tmp_path)) == ["once"]
+
+    # Restart: a fresh manager + scheduler, 5 minutes later (the real
+    # datetime back for the manager's load, as in a new process).
+    monkeypatch.undo()
+    after = TriggerManager(_one_shot_settings(), config_path=config_path)
+    dispatcher = ScriptedDispatcher(results=[True])
+    await _drive_scheduler(monkeypatch, after, dispatcher, _minutes(5))
+
+    assert dispatcher.calls == [("once", ())]
+    assert after.cron_ids() == []
+    assert after.fired_run_once_ids() == ["once"]
+    assert _pending_on_disk(tmp_path) == {}
+
+
+@pytest.mark.anyio
+async def test_893_pending_run_once_past_window_after_restart_is_lost(
+    monkeypatch, tmp_path
+):
+    """Restarting after the window closed gives the one-shot up loudly at
+    once (consumed, ``run_once_lost``) instead of leaving it active."""
+    from structlog.testing import capture_logs
+
+    from untether.triggers import cron as cron_mod
+
+    window_min = int(cron_mod.RUN_ONCE_RETRY_WINDOW_S // 60)
+    config_path = tmp_path / "untether.toml"
+    before = TriggerManager(_one_shot_settings(), config_path=config_path)
+    await _drive_scheduler(
+        monkeypatch, before, ScriptedDispatcher(results=[False]), _minutes(0)
+    )
+
+    monkeypatch.undo()  # restart: a new process with the real datetime
+    after = TriggerManager(_one_shot_settings(), config_path=config_path)
+    dispatcher = ScriptedDispatcher(results=[True])
+    with capture_logs() as logs:
+        await _drive_scheduler(monkeypatch, after, dispatcher, _minutes(window_min + 5))
+
+    assert dispatcher.calls == []
+    assert after.cron_ids() == []
+    assert after.fired_run_once_ids() == ["once"]
+    lost = [e for e in logs if e["event"] == "triggers.cron.run_once_lost"]
+    assert [e["cron_id"] for e in lost] == ["once"]
+    assert _pending_on_disk(tmp_path) == {}
+
+
+@pytest.mark.anyio
+async def test_893_pending_entry_cleared_when_cron_removed(monkeypatch, tmp_path):
+    """A pending one-shot removed from the TOML loses its persisted entry, so
+    re-adding the id later starts fresh."""
+    config_path = tmp_path / "untether.toml"
+    manager = TriggerManager(_one_shot_settings(), config_path=config_path)
+    await _drive_scheduler(
+        monkeypatch, manager, ScriptedDispatcher(results=[False]), _minutes(0)
+    )
+    assert list(_pending_on_disk(tmp_path)) == ["once"]
+
+    manager.update(parse_trigger_config({"enabled": True, "crons": []}))
+    assert _pending_on_disk(tmp_path) == {}
+
+
+def test_893_old_state_files_still_load(tmp_path):
+    """Upgrading from a build without the pending file: the existing
+    ``run_once_fired.json`` loads unchanged and nothing is pending."""
+    import json
+
+    from untether.triggers.run_once_state import STATE_FILENAME
+
+    (tmp_path / STATE_FILENAME).write_text(
+        json.dumps({"fired": {"done": "2026-04-01T09:00:00+00:00"}}),
+        encoding="utf-8",
+    )
+    settings = parse_trigger_config(
+        {
+            "enabled": True,
+            "crons": [
+                {
+                    "id": "done",
+                    "schedule": "0 9 1 4 *",
+                    "prompt": "x",
+                    "run_once": True,
+                },
+                {
+                    "id": "once",
+                    "schedule": "0 9 15 4 *",
+                    "prompt": "y",
+                    "run_once": True,
+                },
+            ],
+        }
+    )
+    manager = TriggerManager(settings, config_path=tmp_path / "untether.toml")
+    assert manager.fired_run_once_ids() == ["done"]
+    assert manager.cron_ids() == ["once"]
+    assert manager.run_once_pending_since("once") is None
+
+
+class _PauseAtTicks(TriggerManager):
+    """A manager whose pause flag is scripted per scheduler tick (the
+    scheduler reads ``is_paused`` exactly once per tick)."""
+
+    def __init__(self, *args: Any, paused_ticks: set[int], **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self.paused_ticks = paused_ticks
+        self.reads = 0
+
+    @property
+    def is_paused(self) -> bool:
+        tick = self.reads
+        self.reads += 1
+        return tick in self.paused_ticks
+
+
+@pytest.mark.anyio
+async def test_893_pause_longer_than_window_still_retries_once(monkeypatch):
+    """A /pause spanning the whole retry window must not abandon the pending
+    one-shot without trying: the first tick after resume retries it, and
+    only a failure there gives it up."""
+    from structlog.testing import capture_logs
+
+    from untether.triggers import cron as cron_mod
+
+    window_min = int(cron_mod.RUN_ONCE_RETRY_WINDOW_S // 60)
+    manager = _PauseAtTicks(_one_shot_settings(), paused_ticks={1, 2})
+    dispatcher = ScriptedDispatcher(results=[False])
+
+    with capture_logs() as logs:
+        await _drive_scheduler(
+            monkeypatch,
+            manager,
+            dispatcher,
+            _minutes(0, 1, window_min, window_min + 1, window_min + 2),
+        )
+
+    # Fire, (paused twice), one retry after resume, then given up.
+    assert dispatcher.calls == [("once", "default"), ("once", ())]
+    lost = [e for e in logs if e["event"] == "triggers.cron.run_once_lost"]
+    assert len(lost) == 1
+    assert manager.fired_run_once_ids() == ["once"]
+
+
+@pytest.mark.anyio
+async def test_893_retry_after_pause_can_still_dispatch(monkeypatch):
+    """The post-resume retry dispatches normally when the send now works."""
+    from untether.triggers import cron as cron_mod
+
+    window_min = int(cron_mod.RUN_ONCE_RETRY_WINDOW_S // 60)
+    manager = _PauseAtTicks(_one_shot_settings(), paused_ticks={1, 2, 3})
+    dispatcher = ScriptedDispatcher(results=[False, True])
+    await _drive_scheduler(
+        monkeypatch,
+        manager,
+        dispatcher,
+        _minutes(0, 1, 5, window_min + 3, window_min + 4),
+    )
+    assert dispatcher.calls == [("once", "default"), ("once", ())]
+    assert manager.cron_ids() == []
+    assert manager.fired_run_once_ids() == ["once"]

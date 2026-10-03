@@ -103,10 +103,13 @@ async def run_cron_scheduler(
     # key would suppress every subsequent day's run because tomorrow's 09:00 looks
     # identical to today's. See #309 CodeRabbit feedback (Critical).
     last_fired: dict[str, tuple[int, int, int, int, int]] = {}
-    # #893: run_once crons whose announce send failed → UTC time of the first
-    # failed fire. In-memory only: after a restart the one-shot is simply
-    # still active (never marked fired) and fires on its next schedule match.
-    pending_run_once: dict[str, datetime.datetime] = {}
+    # #893: the run_once crons whose announce send failed (first failed fire)
+    # live on the manager, persisted next to untether.toml, so a restart in
+    # the retry window resumes them on the first tick — or gives up a one-shot
+    # whose window passed meanwhile. ``owed_retry``: pending one-shots that
+    # sat out a /pause; each gets one attempt after resume even if the window
+    # closed during the pause.
+    owed_retry: set[str] = set()
 
     while True:
         utc_now = datetime.datetime.now(datetime.UTC)
@@ -114,17 +117,17 @@ async def run_cron_scheduler(
         # `run_once` crons that would have fired during the pause are NOT
         # consumed; they fire on the next matching tick after resume.
         if manager.is_paused:
+            owed_retry.update(
+                c.id
+                for c in manager.crons
+                if manager.run_once_pending_since(c.id) is not None
+            )
             await anyio.sleep(60 - utc_now.second + 0.1)
             continue
         # Snapshot the cron list for this tick — safe even if update()
         # replaces manager._crons mid-iteration (new list, old ref valid).
         crons = manager.crons
         default_timezone = manager.default_timezone
-        # #893: forget pending retries for one-shots a reload removed.
-        if pending_run_once:
-            live_ids = {c.id for c in crons}
-            for stale_id in set(pending_run_once) - live_ids:
-                del pending_run_once[stale_id]
         for cron in crons:
             try:
                 local_now = _resolve_now(utc_now, cron.timezone, default_timezone)
@@ -132,17 +135,22 @@ async def run_cron_scheduler(
             except Exception:
                 logger.exception("triggers.cron.match_failed", cron_id=cron.id)
                 continue
-            retry_since = pending_run_once.get(cron.id) if cron.run_once else None
+            retry_since = (
+                manager.run_once_pending_since(cron.id) if cron.run_once else None
+            )
             if retry_since is not None:
                 # #893: a one-shot whose announce send failed earlier. Retry
                 # every tick (whether or not the schedule matches) until the
                 # window closes, then give up loudly.
-                if utc_now - retry_since >= _RUN_ONCE_RETRY_WINDOW:
-                    del pending_run_once[cron.id]
+                if (
+                    utc_now - retry_since >= _RUN_ONCE_RETRY_WINDOW
+                    and cron.id not in owed_retry
+                ):
                     manager.abandon_run_once(
                         cron.id, pending_since=retry_since.isoformat()
                     )
                     continue
+                owed_retry.discard(cron.id)
                 logger.info(
                     "triggers.cron.run_once_retry",
                     cron_id=cron.id,
@@ -172,15 +180,14 @@ async def run_cron_scheduler(
             # A one-shot is NOT consumed — it stays active and is retried on
             # later ticks; recurring crons simply wait for their next match.
             if dispatched is False:
-                if cron.run_once and cron.id not in pending_run_once:
-                    pending_run_once[cron.id] = utc_now
+                if cron.run_once and manager.mark_run_once_pending(cron.id, utc_now):
                     logger.warning(
                         "triggers.cron.run_once_pending",
                         cron_id=cron.id,
                         retry_window_s=RUN_ONCE_RETRY_WINDOW_S,
                     )
                 continue
-            pending_run_once.pop(cron.id, None)
+            manager.clear_run_once_pending(cron.id)
             # #271 Tier 3: record last-fired-at after dispatch returns.
             # `dispatch_cron` only blocks until the notification is
             # queued, not run completion — recording here means the
