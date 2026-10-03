@@ -2387,7 +2387,7 @@ This deletes:
 | `active_loops.json` | Pending Claude Code loop iterations (Loop mode) |
 | `stats.json` | Per-engine run counts and usage statistics |
 | `session_costs.json`, `session_quarantine.json` | Per-session cost baselines and quarantined Claude sessions |
-| `triggers_history.json`, `run_once_fired.json` | Last-fired times for crons and webhooks, spent `run_once` crons |
+| `triggers_history.json`, `run_once_fired.json`, `run_once_pending.json` | Last-fired times for crons and webhooks, spent `run_once` crons, `run_once` crons waiting on a send retry |
 | `last_update_id.json`, `untether.lock` | Telegram update offset and the single-instance lock |
 
 !!! warning "Bot token"
@@ -5514,7 +5514,7 @@ run_once = true
 
 After the cron fires, the `triggers.cron.run_once_completed` log line confirms the removal, and the startup message counts it separately from scheduled crons ([#809](https://github.com/littlebearapps/untether/issues/809)). Fired state is persisted to `run_once_fired.json` (sibling of `untether.toml`), so the cron is skipped across config reloads and process restarts — the TOML entry is kept for history but won't refire. To re-enable a one-shot, change its `id` or remove both the TOML entry and its record in `run_once_fired.json`.
 
-A one-shot only counts as fired once its run is dispatched. If the `⏰ Scheduled:` message can't be posted (a wrong `chat_id`, or a Telegram or network outage), nothing runs and the cron stays pending: Untether retries it once a minute for up to 15 minutes, then gives up and logs `triggers.cron.run_once_lost` at error level ([#893](https://github.com/littlebearapps/untether/issues/893)). A restart during that window leaves the cron active, so it fires again on its next schedule match.
+A one-shot only counts as fired once its run is dispatched. If the `⏰ Scheduled:` message can't be posted (a wrong `chat_id`, or a Telegram or network outage), nothing runs and the cron stays pending: Untether retries it once a minute for up to 15 minutes, then gives up and logs `triggers.cron.run_once_lost` at error level ([#893](https://github.com/littlebearapps/untether/issues/893)). The pending state is saved to `run_once_pending.json` next to `untether.toml`, so a restart during that window carries on retrying on the first minute after startup, and a restart after the window closed gives the cron up straight away. A pause during the window still gets one retry after you resume before the cron is given up.
 
 ## Autonomous crons in plan-mode chats (Claude)
 
@@ -10676,7 +10676,7 @@ Webhook IDs and paths must each be unique across all configured webhooks.
 | `prompt_template` | string\|null | `null` | Template prompt with `{{field}}` substitution (used with fetch data). |
 | `timezone` | string\|null | `null` | IANA timezone name (e.g. `"Australia/Melbourne"`). Overrides `default_timezone`. |
 | `fetch` | object\|null | `null` | Pre-fetch step configuration (see [Data-fetch crons](#data-fetch-crons)). |
-| `run_once` | bool | `false` | Fire once then auto-disable — after the first dispatch, even if its fetch aborted. If the `⏰ Scheduled:` message can't be posted (after the 5 s + 30 s send retries), nothing runs and the one-shot is **not** consumed: it is retried once a minute for up to 15 minutes (`triggers.cron.run_once_pending` / `run_once_retry`), then given up and consumed with an error-level `triggers.cron.run_once_lost` log line ([#893](https://github.com/littlebearapps/untether/issues/893)). The cron stays in the TOML for history, but its fired state persists to `run_once_fired.json` (sibling of `untether.toml`) so it is filtered out on every subsequent config reload and restart until you remove it from the TOML entirely. Removing the cron from the TOML cleans its fired-state entry on the next reload. |
+| `run_once` | bool | `false` | Fire once then auto-disable — after the first dispatch, even if its fetch aborted. If the `⏰ Scheduled:` message can't be posted (after the 5 s + 30 s send retries), nothing runs and the one-shot is **not** consumed: it is retried once a minute for up to 15 minutes (`triggers.cron.run_once_pending` / `run_once_retry`), then given up and consumed with an error-level `triggers.cron.run_once_lost` log line ([#893](https://github.com/littlebearapps/untether/issues/893)). The pending state persists to `run_once_pending.json` (sibling of `untether.toml`): after a restart the retries resume on the first tick, or the one-shot is given up at once if its window has passed. A master pause during the window still allows one retry after resume before it is given up. The cron stays in the TOML for history, but its fired state persists to `run_once_fired.json` (sibling of `untether.toml`) so it is filtered out on every subsequent config reload and restart until you remove it from the TOML entirely. Removing the cron from the TOML cleans its fired-state entry on the next reload. |
 | `permission_mode` | string\|null | `null` | Per-cron permission-mode override, validated for **Claude**: one of `default` (alias `manual`), `plan`, `plan-auto`, `auto`, `acceptEdits`, `dontAsk`, `bypassPermissions`. Wins over the chat's `/planmode` and the engine config default for this cron's run only. Set it on every Claude cron that should act unattended — requests that would wait for a tap are denied ([#835](https://github.com/littlebearapps/untether/issues/835)). See [Cron permission modes](#cron-permission-modes). |
 
 | `model` | string\|null | `null` | ([#743](https://github.com/littlebearapps/untether/issues/743)) Model for this cron's run only (passed as the engine's `--model`). Free-form like `/model set`, but it can't start with `-` or contain whitespace/control characters. Set `engine` too so the name matches. |
@@ -11328,7 +11328,7 @@ Use this for uptime monitoring or reverse proxy health checks.
 
 `TriggerManager` exposes a master pause toggle ([#294](https://github.com/littlebearapps/untether/issues/294)) that gates **both** crons and webhooks at once:
 
-- **Cron loop**: skips its tick while paused. `run_once` crons are not consumed during the pause and fire on the next matching tick after resume.
+- **Cron loop**: skips its tick while paused. `run_once` crons are not consumed during the pause and fire on the next matching tick after resume. A one-shot already pending a send retry gets at least one retry after resume, even if its 15-minute window closed during the pause.
 - **Webhook server**: any configured webhook path returns `503 triggers paused` with `Retry-After: 60` instead of dispatching. The pause check runs before auth, rate-limit and event-filter checks, so even an unauthenticated request to a configured path gets `503`; an unknown path still gets `404`.
 - **`/health`**: surfaces `{"status": "paused", "paused": true}`.
 - **`/ping`**: switches to `⏸ triggers paused: … (suspended)`.
@@ -11442,7 +11442,7 @@ within seconds, and active runs are not interrupted.
 
 | Change | Why |
 |--------|-----|
-| `triggers.enabled` (off to on) | Webhook server and cron scheduler must be started. The reload logs `config.reload.restart_required key=triggers.enabled` and the Telegram reload notice says **Restart required** ([#894](https://github.com/littlebearapps/untether/issues/894)) |
+| `triggers.enabled` (off to on, or on while a startup `triggers.init_failed` left nothing running) | Webhook server and cron scheduler must be started. The reload logs `config.reload.restart_required key=triggers.enabled` and the Telegram reload notice says **Restart required** ([#894](https://github.com/littlebearapps/untether/issues/894)) |
 | `triggers.server.host` or `port` | aiohttp binds once at startup |
 | `triggers.server.rate_limit` | Rate limiter initialised at startup |
 | `triggers.server.max_body_bytes` | Body limit set when the server app is built |
@@ -11480,7 +11480,7 @@ The `triggers.manager.updated` log line lists added/removed crons and webhooks a
 | `src/untether/triggers/ssrf.py` | SSRF protection for outbound HTTP requests. Blocks private/reserved IP ranges, validates URL schemes and DNS resolution. Shared with voice transcription. |
 | `src/untether/triggers/describe.py` | `describe_cron()`: human-friendly schedule text for `/ping` and `/config`. |
 | `src/untether/triggers/history.py` | Last-fired timestamps (`triggers_history.json`). |
-| `src/untether/triggers/run_once_state.py` | Fired `run_once` cron ids (`run_once_fired.json`). |
+| `src/untether/triggers/run_once_state.py` | Fired `run_once` cron ids (`run_once_fired.json`) and one-shots pending a send retry (`run_once_pending.json`). |
 | `src/untether/permission_audit.py` | Config-time Claude permission-mode audit for crons (`auto_semantics_changed`, `unattended_approval_risk`, `permission_mode_invalid`). |
 
 ---
