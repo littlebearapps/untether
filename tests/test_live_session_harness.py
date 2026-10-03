@@ -13,6 +13,7 @@ from typing import Any
 
 import anyio
 import pytest
+from structlog.testing import capture_logs
 
 from tests.telegram_fakes import FakeTransport
 from untether.markdown import MarkdownPresenter
@@ -42,6 +43,9 @@ _ENV = (
     # #684
     "FAKE_CLAUDE_CANCEL_AFTER_S",
     "FAKE_CLAUDE_AFTER_CANCEL_S",
+    # #900
+    "FAKE_CLAUDE_ERROR_TEXT",
+    "FAKE_CLAUDE_WAKE_OK",
 )
 
 
@@ -841,3 +845,106 @@ async def test_819_context_pct_in_progress_and_final_headers(
     # The value rises while the turn runs (the header updates on every
     # progress edit), not only at the final.
     assert any("10% ctx" in h or "30% ctx" in h for h in progress_headers), texts
+
+
+# ── #900: an errored run final is not overtaken by a wake final ──────────────
+
+
+def _first_index(transport: _OrderedTransport, needle: str) -> int:
+    return next(i for i, (_, t, _) in enumerate(transport.log) if needle in t)
+
+
+def _bridge_watchdog(monkeypatch: pytest.MonkeyPatch, **values: Any) -> None:
+    """The bridge's own ``[watchdog]`` read (the #572 retry gate)."""
+    import untether.runner_bridge as bridge_mod
+
+    watchdog = WatchdogSettings.model_construct(
+        **{**WatchdogSettings().model_dump(), **values}
+    )
+    monkeypatch.setattr(bridge_mod, "_load_watchdog_settings", lambda: watchdog)
+
+
+_LIMIT = (
+    "You've hit your session limit · resets 5:30pm (Australia/Melbourne) RUN-FAILED"
+)
+
+
+@pytest.mark.parametrize(
+    ("wake_ok", "error_text"),
+    [(False, None), (True, None), (False, _LIMIT)],
+    ids=["wake-error", "wake-ok", "usage-limit"],
+)
+async def test_900_errored_run_final_lands_before_the_wake_final(
+    monkeypatch: pytest.MonkeyPatch, wake_ok: bool, error_text: str | None
+) -> None:
+    """#900 (mac 2026-10-02): the run's own result is an error (there: the
+    usage limit) while a background agent runs on; the agent's wake turn
+    finishes before the CLI exits. The run's error final must go out first,
+    and exactly once — not be held until the session closes while the wake
+    final overtakes it."""
+    _watchdog(monkeypatch)
+    # The usage-limit text latches a process-wide reset; keep it per test.
+    monkeypatch.setattr(claude_mod, "_RATE_LIMIT_RESET_LATCH", {})
+    if wake_ok:
+        os.environ["FAKE_CLAUDE_WAKE_OK"] = "1"
+    if error_text:
+        os.environ["FAKE_CLAUDE_ERROR_TEXT"] = error_text
+    wake_needle = "WAKE-REPORT" if wake_ok else "WAKE-FAILED"
+    with capture_logs() as logs:
+        transport = await _drive("error_first_agent_wake", wake_s=0.5)
+    run_final = _first_index(transport, "RUN-FAILED")
+    wake_final = _first_index(transport, wake_needle)
+    assert run_final < wake_final, transport.log
+    assert sum("RUN-FAILED" in t for _, t, _ in transport.log) == 1
+    assert sum(wake_needle in t for _, t, _ in transport.log) == 1
+    assert transport.log[run_final][1].startswith("error")
+    early = [r for r in logs if r.get("event") == "final.error_delivered_early"]
+    assert len(early) == 1
+    # Accounted once: the run's result is not delivered (or costed) again
+    # on the post-return path.
+    completed = [
+        r
+        for r in logs
+        if r.get("event") == "runner.completed" and "RUN-FAILED" in str(r.get("error"))
+    ]
+    assert len(completed) == 1
+
+
+async def test_900_stream_idle_retry_still_sees_the_errored_result(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An errored result the #572 Type-A retry acts on keeps today's path:
+    no early error final — the retry notice, then the resumed run's result
+    (here the same stall again, retries exhausted) is the one delivered."""
+    _watchdog(monkeypatch)
+    _bridge_watchdog(monkeypatch, stream_idle_auto_retry=True)
+    # Type A: real output began (num_turns 1, api 400 ms) before the stall.
+    os.environ["FAKE_CLAUDE_ERROR_TEXT"] = (
+        "API Error: Stream idle timeout - partial response received RUN-FAILED"
+    )
+    with capture_logs() as logs:
+        transport = await _drive("error_first", timeout=40)
+    notice = _first_index(transport, "Stream stalled mid-generation")
+    run_finals = [i for i, (_, t, _) in enumerate(transport.log) if "RUN-FAILED" in t]
+    # Only the resumed (second) run's error is ever rendered.
+    assert len(run_finals) == 1 and notice < run_finals[0], transport.log
+    events = [r.get("event") for r in logs]
+    assert events.count("claude.stream_idle.auto_retry") == 1
+    assert events.count("final.error_held_for_recovery") == 1
+    # The first run's result was held for the retry; the retry's own run
+    # (retries exhausted, nothing left to act) delivers early.
+    assert events.count("final.error_delivered_early") == 1
+
+
+async def test_900_non_live_errored_run_final_unchanged(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``live_sessions = false``: no live session, so no early error
+    delivery — the error final rides the post-return path, once."""
+    _watchdog(monkeypatch, live_sessions=False, post_result_idle_timeout=30)
+    with capture_logs() as logs:
+        transport = await _drive("error_first_agent_wake", wake_s=0.3)
+    assert sum("RUN-FAILED" in t for _, t, _ in transport.log) == 1
+    assert not any("WAKE-FAILED" in t for _, t, _ in transport.log)
+    events = [r.get("event") for r in logs]
+    assert "final.error_delivered_early" not in events

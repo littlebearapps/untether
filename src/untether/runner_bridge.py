@@ -636,6 +636,37 @@ def _stream_idle_retry_budget_blocked(usage: dict[str, Any] | None) -> bool:
         return False
 
 
+def _should_stream_idle_retry(
+    *,
+    watchdog: Any,
+    stream_idle_class: str | None,
+    run_ok: bool,
+    cancelled: bool,
+    resume_present: bool,
+    retried_count: int,
+    proc_returncode: int | None,
+    usage: dict[str, Any] | None,
+) -> bool:
+    """#572: whether the bounded Type-A stream-idle auto-retry acts on a
+    failed result. Type-B (cold-start zero-byte stall) never retries.
+
+    #900: shared by the post-return retry gate and the live-session early
+    error delivery, which must hold a result this retry would act on. A
+    still-running process has ``proc_returncode=None`` — not a signal death,
+    so the early check errs towards holding."""
+    if watchdog is None or not getattr(watchdog, "stream_idle_auto_retry", False):
+        return False
+    if stream_idle_class != "type_a" or run_ok is not False:
+        return False
+    if cancelled or not resume_present:
+        return False
+    if retried_count >= getattr(watchdog, "stream_idle_max_retries", 1):
+        return False
+    if _is_signal_death(proc_returncode):
+        return False
+    return not _stream_idle_retry_budget_blocked(usage)
+
+
 _DEFAULT_PREAMBLE = (
     "[Untether] You are running via Untether, a Telegram bridge for coding agents. "
     "The user is interacting through Telegram on a mobile device.\n\n"
@@ -4169,6 +4200,7 @@ async def run_runner_with_cancel(
     channel_id: ChannelId = 0,
     on_completed: Callable[[CompletedEvent, RunOutcome], Awaitable[None]] | None = None,
     turn_router: FollowupTurnRouter | None = None,
+    deliver_error_early: Callable[[CompletedEvent, RunOutcome], bool] | None = None,
 ) -> RunOutcome:
     outcome = RunOutcome()
     start_time = time.monotonic()
@@ -4255,10 +4287,22 @@ async def run_runner_with_cancel(
                             # so auto-continue / error formatting still see
                             # them first. Failures here leave the run
                             # untouched — the post-return path retries.
+                            # #900: an errored result also qualifies when
+                            # ``deliver_error_early`` says no post-return
+                            # recovery would act on it (a live session
+                            # would otherwise hold it until it closes,
+                            # while wake finals overtake it).
                             if (
                                 on_completed is not None
-                                and evt.ok is True
                                 and first_completed
+                                and (
+                                    evt.ok is True
+                                    or (
+                                        evt.ok is False
+                                        and deliver_error_early is not None
+                                        and deliver_error_early(evt, outcome)
+                                    )
+                                )
                             ):
                                 edits.note_final(evt)
                                 _record_export_event(
@@ -6270,10 +6314,105 @@ async def handle_message(
         except Exception:  # noqa: BLE001
             logger.warning("live_session.notice_failed", exc_info=True)
 
+    # ── Post-return recovery gates (#900: shared with the early path) ─────
+    # Each answers "would this recovery act on the run's result?" from the
+    # same inputs whether asked post-return or the moment an errored result
+    # arrives in a live session — so the two paths cannot drift.
+    def _empty_resend_due() -> bool:
+        """#596/#631: the empty-resume auto-resend (armed by _deliver_final
+        for an ok 0-turn result only)."""
+        return empty_resume["pending"] and _empty_resent_count < 1
+
+    def _auto_continue_due(
+        completed: CompletedEvent, run_outcome: RunOutcome, ac: Any
+    ) -> bool:
+        stream = edits.stream
+        resume = completed.resume or run_outcome.resume
+        return bool(ac.enabled) and _should_auto_continue(
+            last_event_type=stream.last_event_type if stream else None,
+            engine=runner.engine,
+            cancelled=run_outcome.cancelled,
+            resume_value=resume.value if resume else None,
+            auto_continued_count=_auto_continued_count,
+            max_retries=ac.max_retries,
+            proc_returncode=stream.proc_returncode if stream else None,
+            saw_result=bool(getattr(stream, "saw_result", False)),
+        )
+
+    def _stream_idle_retry_due(
+        completed: CompletedEvent, run_outcome: RunOutcome, watchdog: Any
+    ) -> bool:
+        stream = edits.stream
+        engine_state = getattr(stream, "engine_state", None) if stream else None
+        return _should_stream_idle_retry(
+            watchdog=watchdog,
+            stream_idle_class=getattr(engine_state, "stream_idle_class", None),
+            run_ok=completed.ok,
+            cancelled=run_outcome.cancelled,
+            resume_present=(completed.resume or run_outcome.resume) is not None,
+            retried_count=_stream_idle_retried_count,
+            proc_returncode=stream.proc_returncode if stream else None,
+            usage=completed.usage,
+        )
+
+    def _deliver_error_early(
+        completed: CompletedEvent, run_outcome: RunOutcome
+    ) -> bool:
+        """#900: deliver an errored first result now instead of post-return.
+
+        A live session's run generator only returns when the session closes
+        — after any background work it is holding for — while each wake
+        final is delivered as it arrives, so a held error final was
+        overtaken (mac 2026-10-02: a wake error 14 s before the run's own).
+        Only a real CLI ``result`` in a live session qualifies, and only
+        when no post-return recovery (empty-resume resend, auto-continue,
+        #572 retry) would act on it; cancels and interrupted turns keep the
+        post-return render. Anything else keeps today's path.
+        """
+        if completed.ok is not False or not _is_live_run():
+            return False
+        stream = edits.stream
+        # A synthesized stream-end error arrives as the stream ends — there
+        # is no hold to cut short.
+        if not getattr(stream, "saw_result", False):
+            return False
+        from .schemas.claude import CLAUDE_ABORTED_TERMINAL_REASONS
+
+        if (completed.usage or {}).get(
+            "terminal_reason"
+        ) in CLAUDE_ABORTED_TERMINAL_REASONS:
+            return False
+        if run_outcome.cancelled or (
+            running_task is not None and running_task.cancel_requested.is_set()
+        ):
+            return False
+        sid = completed.resume or run_outcome.resume
+        if (
+            _empty_resend_due()
+            or _auto_continue_due(
+                completed, run_outcome, _load_auto_continue_settings()
+            )
+            or _stream_idle_retry_due(completed, run_outcome, _load_watchdog_settings())
+        ):
+            logger.info(
+                "final.error_held_for_recovery",
+                session_id=sid.value if sid else None,
+            )
+            return False
+        logger.info(
+            "final.error_delivered_early", session_id=sid.value if sid else None
+        )
+        return True
+
     async def _on_run_completed(
         completed: CompletedEvent, run_outcome: RunOutcome
     ) -> None:
         await _deliver_final(completed, run_outcome)
+        if completed.ok is False:
+            # #900: an early error final. A failed run sends no outbox files
+            # (the post-return path still surfaces skipped ones), and its
+            # live session is already closing — no listener, no status.
+            return
         if not _is_live_run():
             return
         await _deliver_outbox_now(user_ref.message_id)
@@ -6689,6 +6828,7 @@ async def handle_message(
                 channel_id=incoming.channel_id,
                 on_completed=_on_run_completed,
                 turn_router=turn_router,
+                deliver_error_early=_deliver_error_early,
             )
         except Exception as exc:
             error = exc
@@ -6863,7 +7003,7 @@ async def handle_message(
         # same-session resend behaviour. Single-shot via _empty_resent_count;
         # mutually exclusive with auto-continue (that fires only when there was
         # no result at all).
-        if empty_resume["pending"] and _empty_resent_count < 1:
+        if _empty_resend_due():
             release_reason = "auto_resend"
             _er_settings = _load_auto_continue_settings()
             # Fall back to the original resume_token so a completion that omits a
@@ -6948,7 +7088,6 @@ async def handle_message(
         _ac_resume = completed.resume or outcome.resume
         _ac_last_event = edits.stream.last_event_type if edits.stream else None
         _ac_proc_rc = edits.stream.proc_returncode if edits.stream else None
-        _ac_saw_result = bool(getattr(edits.stream, "saw_result", False))
         # #591: a run whose answer was already delivered can never need the
         # auto-continue salvage.
         # #716: this delivery check used to be described as "belt-and-braces"
@@ -6959,19 +7098,10 @@ async def handle_message(
         # `final_delivery["sent"]` was the ONLY thing holding the line. The
         # predicate now discriminates on its own via `saw_result`; this stays
         # as a genuine second gate, not a redundant one.
-        if (
-            ac_settings.enabled
-            and not final_delivery["sent"]
-            and _should_auto_continue(
-                last_event_type=_ac_last_event,
-                engine=runner.engine,
-                cancelled=outcome.cancelled,
-                resume_value=_ac_resume.value if _ac_resume else None,
-                auto_continued_count=_auto_continued_count,
-                max_retries=ac_settings.max_retries,
-                proc_returncode=_ac_proc_rc,
-                saw_result=_ac_saw_result,
-            )
+        # #900: the gate itself is ``_auto_continue_due``, shared with the
+        # live-session early error delivery.
+        if not final_delivery["sent"] and _auto_continue_due(
+            completed, outcome, ac_settings
         ):
             release_reason = "auto_continue"
             # #568: emit the fields a future narrowing decision would need.
@@ -7111,28 +7241,20 @@ async def handle_message(
         # the session instead of surfacing a terminal error with only a "raise
         # the timeout" hint. Type-B (cold-start zero-byte stall) NEVER retries —
         # retrying hammers a down API. Error finals ride the post-return path
-        # (the #591 early delivery is ok=True-only), so returning here fully
-        # suppresses the terminal error message. The retry re-enters
-        # handle_message as a normal resumed run — quarantine divert, session-
-        # owner serialisation, RAM guard and per-run budget checks all apply to
-        # it exactly as to a user-initiated run.
+        # (the #591 early delivery is ok=True-only; #900's live-session early
+        # error delivery holds any result this gate would act on), so
+        # returning here fully suppresses the terminal error message. The
+        # retry re-enters handle_message as a normal resumed run — quarantine
+        # divert, session-owner serialisation, RAM guard and per-run budget
+        # checks all apply to it exactly as to a user-initiated run.
         _si_ws = _load_watchdog_settings()
-        _si_es = getattr(edits.stream, "engine_state", None) if edits.stream else None
-        _si_class = getattr(_si_es, "stream_idle_class", None)
         _si_resume = completed.resume or outcome.resume
         _si_rc = edits.stream.proc_returncode if edits.stream else None
         _si_max = getattr(_si_ws, "stream_idle_max_retries", 1) if _si_ws else 1
         if (
-            _si_ws is not None
-            and getattr(_si_ws, "stream_idle_auto_retry", False)
-            and _si_class == "type_a"
-            and run_ok is False
-            and not outcome.cancelled
-            and not final_delivery["sent"]
+            not final_delivery["sent"]
             and _si_resume is not None
-            and _stream_idle_retried_count < _si_max
-            and not _is_signal_death(_si_rc)
-            and not _stream_idle_retry_budget_blocked(completed.usage)
+            and _stream_idle_retry_due(completed, outcome, _si_ws)
         ):
             release_reason = "stream_idle_retry"
             logger.warning(

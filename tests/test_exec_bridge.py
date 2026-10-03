@@ -2,6 +2,7 @@ import contextlib
 import os
 import sys
 import uuid
+from collections.abc import Callable
 from types import SimpleNamespace
 from typing import Any
 
@@ -10723,3 +10724,235 @@ def test_835_footer_hint_by_mode_and_trigger_kind(monkeypatch) -> None:
 async def test_835_no_footer_without_denials() -> None:
     text = await _run_unattended({}, FakeTransport())
     assert "unattended" not in text
+
+
+# ---------------------------------------------------------------------------
+# #900 — a live session's errored first result is delivered early unless a
+# post-return recovery would act on it
+# ---------------------------------------------------------------------------
+
+_900_ERROR = "API Error: overloaded boom-900"
+
+
+class _LiveErrorThenAnswerRunner(MockRunner):
+    """A live session (``engine_state.live_mode``) whose first result is a
+    real CLI error, after which the generator stays open until ``hang`` is
+    set — the session holding for background work. Later calls (a recovery
+    re-entry) answer at once."""
+
+    def __init__(
+        self,
+        *,
+        hang: anyio.Event,
+        live: bool = True,
+        saw_result: bool = True,
+        stream_idle_class: str | None = None,
+        error: str = _900_ERROR,
+        usage: dict[str, Any] | None = None,
+    ) -> None:
+        super().__init__(events=[], engine=CODEX_ENGINE, resume_value="sess-900")
+        self.calls: list[tuple[str, ResumeToken | None]] = []
+        self.hang = hang
+        self.error = error
+        self.usage = dict(usage or {"num_turns": 2, "duration_api_ms": 800})
+        self.stream = _572_stream(stream_idle_class)
+        self.stream.saw_result = saw_result
+        self.stream.engine_state.live_mode = live
+        # Runs just before the errored result is yielded — no checkpoint in
+        # between, so the bridge sees the result before ``wait_cancel`` runs.
+        self.before_result: Callable[[], None] | None = None
+
+    async def run(self, prompt, resume):
+        from untether.runner import publish_run_stream
+        from untether.runners.mock import _resume_token
+
+        self.calls.append((prompt, resume))
+        publish_run_stream(self.stream, None)
+        token = _resume_token(self.engine, resume.value if resume else "sess-900")
+        async with self.lock_for(token):
+            yield StartedEvent(engine=self.engine, resume=token, title=self.title)
+            if len(self.calls) == 1:
+                if self.before_result is not None:
+                    self.before_result()
+                yield CompletedEvent(
+                    engine=self.engine,
+                    resume=token,
+                    ok=False,
+                    answer="",
+                    error=self.error,
+                    usage=self.usage,
+                )
+                await self.hang.wait()
+            else:
+                yield CompletedEvent(
+                    engine=self.engine, resume=token, ok=True, answer="Recovered 900."
+                )
+
+
+def _900_texts(transport: FakeTransport) -> list[str]:
+    return [c["message"].text for c in (*transport.send_calls, *transport.edit_calls)]
+
+
+async def _900_drive(
+    runner: _LiveErrorThenAnswerRunner,
+    *,
+    resume_token: ResumeToken | None = None,
+    cancel_first: bool = False,
+) -> tuple[FakeTransport, bool, list[dict[str, Any]]]:
+    """Run until the generator holds after the errored result, note whether
+    the error final was already delivered, then release it. ``cancel_first``:
+    /cancel is requested as the result lands (before ``wait_cancel`` runs)."""
+    transport = FakeTransport()
+    cfg = ExecBridgeConfig(
+        transport=transport, presenter=MarkdownPresenter(), final_notify=False
+    )
+    running_tasks: dict = {}
+    if cancel_first:
+
+        def _cancel() -> None:
+            next(iter(running_tasks.values())).cancel_requested.set()
+
+        runner.before_result = _cancel
+    with structlog.testing.capture_logs() as logs:
+        async with anyio.create_task_group() as tg:
+
+            async def _run() -> None:
+                await handle_message(
+                    cfg,
+                    runner=runner,
+                    incoming=IncomingMessage(channel_id=123, message_id=10, text="hi"),
+                    resume_token=resume_token,
+                    running_tasks=running_tasks,
+                )
+
+            tg.start_soon(_run)
+            await anyio.sleep(0.3)
+            early = any("boom-900" in t for t in _900_texts(transport))
+            runner.hang.set()
+    return transport, early, logs
+
+
+@pytest.mark.anyio
+async def test_900_live_error_result_is_delivered_early_and_once() -> None:
+    runner = _LiveErrorThenAnswerRunner(hang=anyio.Event())
+    transport, early, logs = await _900_drive(runner)
+    assert early, "a live session's error final must not wait for the close"
+    assert sum("boom-900" in t for t in _900_texts(transport)) == 1
+    events = [r.get("event") for r in logs]
+    assert events.count("final.error_delivered_early") == 1
+    assert events.count("runner.completed") == 1  # accounted once
+    assert len(runner.calls) == 1
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    ("kwargs", "reason"),
+    [
+        ({"live": False}, "not a live session (live_sessions = false)"),
+        ({"saw_result": False}, "a synthesized stream-end error"),
+        ({"usage": {"terminal_reason": "aborted_streaming"}}, "an interrupted turn"),
+    ],
+)
+async def test_900_error_result_keeps_the_post_return_path(
+    kwargs: dict[str, Any], reason: str
+) -> None:
+    runner = _LiveErrorThenAnswerRunner(hang=anyio.Event(), **kwargs)
+    transport, early, logs = await _900_drive(runner)
+    assert not early, reason
+    events = [r.get("event") for r in logs]
+    assert "final.error_delivered_early" not in events
+    assert events.count("runner.completed") == 1
+
+
+@pytest.mark.anyio
+async def test_900_error_held_for_the_stream_idle_retry(monkeypatch) -> None:
+    """An errored result the #572 Type-A retry would act on is held: the
+    retry still sees it and suppresses the terminal error."""
+    _572_watchdog(monkeypatch, stream_idle_auto_retry=True)
+    runner = _LiveErrorThenAnswerRunner(
+        hang=anyio.Event(),
+        stream_idle_class="type_a",
+        error=_572_STREAM_IDLE_ERROR + " boom-900",
+        usage=dict(_572_USAGE),
+    )
+    transport, early, logs = await _900_drive(
+        runner, resume_token=ResumeToken(engine=CODEX_ENGINE, value="sess-900")
+    )
+    assert not early
+    events = [r.get("event") for r in logs]
+    assert "final.error_held_for_recovery" in events
+    assert "claude.stream_idle.auto_retry" in events
+    texts = _900_texts(transport)
+    assert not any("boom-900" in t for t in texts)
+    assert any("Recovered 900." in t for t in texts)
+    assert len(runner.calls) == 2
+
+
+@pytest.mark.anyio
+async def test_900_error_result_while_cancelling_renders_cancelled() -> None:
+    """A /cancel already requested when the errored result lands keeps the
+    post-return path: a ``cancelled`` render, never an early error final."""
+    runner = _LiveErrorThenAnswerRunner(hang=anyio.Event())
+    transport, early, logs = await _900_drive(runner, cancel_first=True)
+    assert not early
+    assert "final.error_delivered_early" not in [r.get("event") for r in logs]
+    texts = _900_texts(transport)
+    assert not any("boom-900" in t for t in texts)
+    assert any("cancelled" in t for t in texts)
+
+
+@pytest.mark.parametrize(
+    ("overrides", "expected"),
+    [
+        ({}, True),
+        ({"proc_returncode": None}, True),  # still running: errs to "would act"
+        ({"proc_returncode": 143}, False),
+        ({"proc_returncode": -2}, False),
+        ({"stream_idle_class": "type_b"}, False),
+        ({"stream_idle_class": None}, False),
+        ({"run_ok": True}, False),
+        ({"cancelled": True}, False),
+        ({"resume_present": False}, False),
+        ({"retried_count": 1}, False),
+        ({"watchdog": None}, False),
+    ],
+)
+def test_900_should_stream_idle_retry(
+    overrides: dict[str, Any], expected: bool
+) -> None:
+    """#572's gate, factored out (#900) so the post-return retry and the
+    live early-delivery check share it."""
+    from untether.runner_bridge import _should_stream_idle_retry
+    from untether.settings import WatchdogSettings
+
+    kwargs: dict[str, Any] = {
+        "watchdog": WatchdogSettings(stream_idle_auto_retry=True),
+        "stream_idle_class": "type_a",
+        "run_ok": False,
+        "cancelled": False,
+        "resume_present": True,
+        "retried_count": 0,
+        "proc_returncode": 0,
+        "usage": None,
+        **overrides,
+    }
+    assert _should_stream_idle_retry(**kwargs) is expected
+
+
+def test_900_stream_idle_retry_default_off() -> None:
+    from untether.runner_bridge import _should_stream_idle_retry
+    from untether.settings import WatchdogSettings
+
+    assert (
+        _should_stream_idle_retry(
+            watchdog=WatchdogSettings(),
+            stream_idle_class="type_a",
+            run_ok=False,
+            cancelled=False,
+            resume_present=True,
+            retried_count=0,
+            proc_returncode=0,
+            usage=None,
+        )
+        is False
+    )
