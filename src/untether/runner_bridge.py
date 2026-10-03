@@ -1406,21 +1406,46 @@ def _note_budget_run_cost(
     the whole live run's spend. Returns the stop line the first time the
     budget is passed (the session id is then kept in ``state["sid"]`` for
     ``close`` after delivery); ``None`` otherwise. Never raises.
+
+    Synchronous on purpose: when it stops, the live session refuses further
+    input (``stop_live_session_input``) before the caller awaits anything, so
+    a follow-up queued in ``inject_when_idle`` (or a steer) can't be written
+    while the stopping reply is still being sent. Either way the result is
+    then marked accounted, releasing any follow-up waiting on the check.
     """
     cost = (run_usage or {}).get("total_cost_usd")
     if isinstance(cost, (int, float)) and not isinstance(cost, bool) and cost > 0:
         state["run_cost"] += float(cost)
-    if state["sid"] is not None or engine != "claude" or not session_id:
+    if engine != "claude" or not session_id:
         return None
     try:
+        return _decide_budget_stop(state, session_id)
+    finally:
+        with contextlib.suppress(Exception):
+            from .runners.claude import note_turn_accounted
+
+            note_turn_accounted(session_id)
+
+
+def _decide_budget_stop(state: dict[str, Any], session_id: str) -> str | None:
+    if state["sid"] is not None:
+        return None  # already stopped (and input already refused)
+    try:
         from .budget_gate import run_stop, run_stop_text
-        from .runners.claude import get_live_session
+        from .runners.claude import get_live_session, stop_live_session_input
         from .runners.run_options import get_run_options
 
         live = get_live_session(session_id)
         if live is None or getattr(live, "closing", False):
             return None  # the run has already ended: nothing to stop
         stop = run_stop(state["run_cost"], get_run_options())
+        if stop is not None:
+            # Before any await: nothing queued behind this reply may start
+            # another paid turn. A follow-up refused here takes the resume
+            # path — refused there too by the daily gate when the day's
+            # budget is spent; after a per-run stop it starts a fresh run,
+            # which has its own per-run budget.
+            stop_live_session_input(session_id)
     except Exception:  # noqa: BLE001 — a budget check must never break delivery
         logger.warning("cost_budget.stop_check_failed", exc_info=True)
         return None

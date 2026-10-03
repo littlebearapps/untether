@@ -97,7 +97,7 @@ Set `auto_cancel = true` (or turn on **Stop at limit** in `/config` → **💰 C
     Crons, webhooks and loop fires are skipped with a one-line reply to their own announcement instead (no button), for example `🛑 Daily budget reached ($10.20 of $10.00). Skipped cron:daily-review; new runs are paused until midnight.` Both are logged as `cost_budget.run_blocked`.
 - **Per-run budget passed:** when a reply takes the run's total past `max_cost_per_run`, that reply is delivered with a `🛑 Stopped: run cost $2.30 passed the per-run budget $2.00` line, then the session is closed, so no background wake-ups or follow-ups add to it. The run's total counts every turn of a live session, not only the last one. Background tasks still running are stopped and named. The same happens, with `🛑 Stopped: today's cost … reached the daily budget …`, when a reply takes the day's total to `max_cost_per_day`. Logged as `cost_budget.run_stopped`.
 
-Your next message after a per-run stop starts a new run with a fresh per-run total. A session stopped by the daily budget stays paused until midnight unless you tap **Run anyway**.
+Your next message after a per-run stop starts a new run with a fresh per-run total. That includes a message you sent while the stopping reply was still being written: it is never added to the stopped session as another turn. A session stopped by the daily budget stays paused until midnight unless you tap **Run anyway**.
 
 ### Daily reset
 

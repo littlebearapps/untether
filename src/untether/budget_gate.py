@@ -71,6 +71,17 @@ def effective_budget(run_options: Any = None) -> CostBudget | None:
     )
 
 
+def stop_at_limit_active(run_options: Any = None) -> bool:
+    """Whether "Stop at limit" can act for this chat at all (a budget is
+    enabled with ``auto_cancel`` and at least one limit set)."""
+    budget = effective_budget(run_options)
+    return (
+        budget is not None
+        and budget.auto_cancel
+        and (budget.max_cost_per_run is not None or budget.max_cost_per_day is not None)
+    )
+
+
 def daily_gate(run_options: Any = None) -> tuple[float, float] | None:
     """``(today's cost, daily limit)`` when new runs must be refused."""
     budget = effective_budget(run_options)

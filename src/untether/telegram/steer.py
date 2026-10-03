@@ -251,6 +251,12 @@ async def maybe_steer(
                 # new settings (and says so) — nothing to add here.
                 logger.info("steer.fallback", chat_id=chat_id, reason="options_changed")
                 return False
+            if outcome == "result_pending":
+                # #896: the session just went idle and its result hasn't been
+                # budget-checked yet — the queue path waits for that check
+                # and writes it as the next turn (or refuses it at the limit).
+                logger.info("steer.fallback", chat_id=chat_id, reason="result_pending")
+                return False
             reason = "closing" if outcome == "window_closed" else "no_live"
 
     assert reason is not None

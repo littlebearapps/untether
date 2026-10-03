@@ -601,6 +601,19 @@ class LiveSession:
     # pipe nobody will answer. Closing stdin (``closing``) shuts it too.
     steer_closed: bool = False
     steer_closed_reason: str | None = None
+    # #896: "Stop at limit" decided this session must end after the reply
+    # just accounted. Set synchronously by the bridge (before any await), so
+    # a follow-up or steer that would start another paid turn is refused
+    # even while the stopping reply is still being sent and the close is
+    # pending — it falls back to the resume path instead.
+    budget_stopped: bool = False
+    # #896: with "Stop at limit" active the bridge decides at each result
+    # whether the session may take another turn. ``accounting_armed`` makes
+    # a new turn wait until the bridge has accounted the latest result
+    # (``accounted_turns`` caught up with ``completed_turns``), closing the
+    # gap between the CLI going idle and the budget check.
+    accounting_armed: bool = False
+    accounted_turns: int = 0
     listeners: list[Callable[[str, dict[str, Any]], Any]] = field(default_factory=list)
 
     @property
@@ -609,11 +622,19 @@ class LiveSession:
 
     @property
     def accepting_input(self) -> bool:
-        return not self.closing
+        return not self.closing and not self.budget_stopped
 
     @property
     def accepting_steer(self) -> bool:
-        return not self.closing and not self.steer_closed
+        return not self.closing and not self.steer_closed and not self.budget_stopped
+
+    @property
+    def result_unaccounted(self) -> bool:
+        """#896: the latest result hasn't been through the bridge's budget
+        check yet (only tracked when "Stop at limit" is active)."""
+        return (
+            self.accounting_armed and self.accounted_turns < self.state.completed_turns
+        )
 
 
 _LIVE_SESSIONS: dict[str, LiveSession] = {}
@@ -638,6 +659,45 @@ def is_session_accepting(session_id: str) -> bool:
     and not closing — i.e. a follow-up can be written into it (#776)."""
     live = _LIVE_SESSIONS.get(session_id)
     return live is not None and live.accepting_input
+
+
+def stop_live_session_input(session_id: str) -> bool:
+    """#896: refuse any further input into ``session_id`` (synchronous).
+
+    Called when "Stop at limit" decides the session ends after this reply:
+    :func:`inject_when_idle` and :func:`steer_into_session` re-check it under
+    ``LiveSession.lock`` right before writing, so nothing queued behind the
+    reply runs as another paid turn. False when there is no live session."""
+    live = _LIVE_SESSIONS.get(session_id)
+    if live is None:
+        return False
+    live.budget_stopped = True
+    return True
+
+
+def note_turn_accounted(session_id: str) -> None:
+    """#896: the bridge has accounted (and budget-checked) every result the
+    session has produced so far — a waiting follow-up may now be written."""
+    live = _LIVE_SESSIONS.get(session_id)
+    if live is not None:
+        live.accounted_turns = live.state.completed_turns
+
+
+def _turn_accounting_wanted() -> bool:
+    """#896: arm the accounting wait only when "Stop at limit" can act."""
+    try:
+        from ..budget_gate import stop_at_limit_active
+
+        return stop_at_limit_active(get_run_options())
+    except Exception:  # noqa: BLE001 — never block a session on a config error
+        logger.warning("claude.live_session.accounting_arm_failed", exc_info=True)
+        return False
+
+
+# #896: the longest a follow-up waits for the bridge to account a result
+# before it is written anyway (a delivery the bridge never finishes must not
+# hold follow-ups forever).
+_ACCOUNTING_WAIT_S = 30.0
 
 
 def add_live_session_listener(
@@ -1055,11 +1115,29 @@ async def inject_when_idle(
     Writing mid-turn would fold the message into the running turn (probe F5
     — that is #775's *steer*), which is why this waits.
     """
+    unaccounted_since: float | None = None
     while True:
         live = _LIVE_SESSIONS.get(session_id)
         if live is None or not live.accepting_input:
             return False
         if live.idle and not _awaiting_injected(live.state):
+            if live.result_unaccounted:
+                # #896: the bridge hasn't budget-checked the result that just
+                # closed the turn — wait, so a "Stop at limit" decision can
+                # refuse this write (bounded: never hold a follow-up forever).
+                now = time.monotonic()
+                if unaccounted_since is None:
+                    unaccounted_since = now
+                if now - unaccounted_since < _ACCOUNTING_WAIT_S:
+                    await anyio.sleep(poll_s)
+                    continue
+                logger.warning(
+                    "claude.live_session.accounting_wait_expired",
+                    session_id=session_id,
+                    completed_turns=live.state.completed_turns,
+                    accounted_turns=live.accounted_turns,
+                )
+                live.accounted_turns = live.state.completed_turns
             async with live.lock:
                 if not live.accepting_input:
                     return False
@@ -1071,6 +1149,10 @@ async def inject_when_idle(
                     await _write_plan_rearm_if_needed(
                         live, reason="followup", command_uuid=command_uuid
                     )
+                    if not live.accepting_input:
+                        # #896: stopped while the plan re-arm was written.
+                        live.state.unplanned_commands.pop(command_uuid, None)
+                        return False
                     ok = await write_user_message(
                         session_id, text, command_uuid=command_uuid
                     )
@@ -1093,6 +1175,7 @@ SteerOutcome = Literal[
     "window_closed",
     "options_changed",
     "write_failed",
+    "result_pending",
 ]
 
 _UNSET_OPTIONS: Any = object()
@@ -1156,6 +1239,11 @@ async def steer_into_session(
         ):
             return "options_changed"
         state = live.state
+        if live.idle and live.result_unaccounted:
+            # #896: idle, but the bridge hasn't budget-checked the result that
+            # closed the turn — an idle write is a new paid turn, so take the
+            # queue path (which waits for the check) instead.
+            return "result_pending"
         if live.idle and state.plan_rearm_failed:
             # #383: the CLI refused the plan re-arm — never run this turn
             # unplanned; the queue path closes the session and resumes fresh.
@@ -9230,6 +9318,7 @@ class ClaudeRunner(ResumeTokenMixin, JsonlSubprocessRunner):
                             state=state,
                             stdin=session_stdin,
                             pid=pid,
+                            accounting_armed=_turn_accounting_wanted(),
                         )
                         # #812: MCP servers are up by system/init. Always
                         # captured: the close-grace check uses it even with
