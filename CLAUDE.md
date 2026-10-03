@@ -37,7 +37,7 @@ Telegram <-> TelegramPresenter <-> RunnerBridge <-> Runner (claude/codex/opencod
 - **TelegramPresenter** (`src/untether/telegram/bridge.py`) — progress, inline keyboards, answers
 - **Commands** (`src/untether/telegram/commands/`) — command/callback handlers
 - **Schemas** (`src/untether/schemas/`) — msgspec structs for JSONL; **Triggers** (`src/untether/triggers/`) — cron/webhooks
-- Config: `untether.toml` (most sections hot-reload; `bot_token`, `chat_id`, `session_mode`, `topics`, `message_overflow` need a restart)
+- Config: `untether.toml` (with `watch_config = true` most sections hot-reload — off by default; `bot_token`, `chat_id`, `session_mode`, `topics`, `message_overflow` need a restart)
 
 ## Deprecated engines (Gemini CLI, AMP)
 
