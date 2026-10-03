@@ -220,16 +220,46 @@ class TriggerManager:
         #317: also records ``cron_id`` in the persistent fired-state so the
         one-shot doesn't re-fire on the next config reload or restart.
         """
+        if not self._consume_run_once(cron_id):
+            return False
+        logger.info(
+            "triggers.cron.run_once_completed",
+            cron_id=cron_id,
+            remaining_crons=len(self._crons),
+        )
+        return True
+
+    def abandon_run_once(self, cron_id: str, *, pending_since: str) -> bool:
+        """Give up on a ``run_once`` cron that could never be dispatched (#893).
+
+        Called by the scheduler once its retry window has elapsed after a
+        failed announce send. The cron is consumed exactly like a completed
+        one-shot (so it can't surprise-fire on a later schedule match, e.g.
+        the same date next year) but logged at error level as
+        ``triggers.cron.run_once_lost`` so the loss is never silent.
+        """
+        if not self._consume_run_once(cron_id):
+            return False
+        logger.error(
+            "triggers.cron.run_once_lost",
+            cron_id=cron_id,
+            pending_since=pending_since,
+            remaining_crons=len(self._crons),
+            hint=(
+                "The scheduled message could not be posted, so the one-shot "
+                "never ran. Check the cron's chat_id, then give it a new id "
+                "(or remove and re-add it) to schedule it again."
+            ),
+        )
+        return True
+
+    def _consume_run_once(self, cron_id: str) -> bool:
+        """Drop *cron_id* from the active list and persist it as fired."""
         for i, c in enumerate(self._crons):
             if c.id == cron_id:
                 self._crons = [*self._crons[:i], *self._crons[i + 1 :]]
                 self._fired_run_once[cron_id] = iso_now()
                 self._persist_fired_state()
-                logger.info(
-                    "triggers.cron.run_once_completed",
-                    cron_id=cron_id,
-                    remaining_crons=len(self._crons),
-                )
                 return True
         return False
 

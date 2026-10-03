@@ -56,7 +56,21 @@ class TriggerDispatcher:
 
         history.record_fired(webhook.id)
 
-    async def dispatch_cron(self, cron: CronConfig) -> None:
+    async def dispatch_cron(
+        self,
+        cron: CronConfig,
+        *,
+        retry_delays: tuple[float, ...] | None = None,
+    ) -> bool:
+        """Dispatch *cron*; return ``False`` only when nothing ran.
+
+        ``False`` means the announce send failed after its retries, so no run
+        was started and the caller may safely try again (#893: a ``run_once``
+        cron stays pending instead of being consumed). Every other outcome —
+        a started run, or a fetch ``on_failure = "abort"`` that the user was
+        notified about — returns ``True``. ``retry_delays`` overrides
+        :data:`SEND_RETRY_DELAYS` (the scheduler's retry ticks pass ``()``).
+        """
         chat_id = cron.chat_id or self.default_chat_id
         context = RunContext(
             project=cron.project,
@@ -72,7 +86,7 @@ class TriggerDispatcher:
         if cron.fetch is not None:
             prompt = await self._fetch_and_render(cron)
             if prompt is None:
-                return  # fetch failed with on_failure=abort
+                return True  # fetch failed with on_failure=abort (handled)
         elif cron.prompt_template:
             # prompt_template without fetch — render with empty payload.
             from .templating import render_template_fields
@@ -81,7 +95,14 @@ class TriggerDispatcher:
         else:
             prompt = cron.prompt or ""
 
-        await self._dispatch(chat_id, label, prompt, context, engine_override)
+        return await self._dispatch(
+            chat_id,
+            label,
+            prompt,
+            context,
+            engine_override,
+            retry_delays=retry_delays,
+        )
 
     async def _fetch_and_render(self, cron: CronConfig) -> str | None:
         """Execute cron fetch step and build the prompt.
@@ -128,15 +149,23 @@ class TriggerDispatcher:
         prompt: str,
         context: RunContext | None,
         engine_override: str | None,
-    ) -> None:
+        *,
+        retry_delays: tuple[float, ...] | None = None,
+    ) -> bool:
+        """Announce and start the run; ``False`` if the announce never landed.
+
+        ``False`` is returned only before ``run_job`` is scheduled, so a caller
+        retrying on ``False`` can never double-dispatch (#893).
+        """
         # Send a notification message so run_job has a message_id to reply to.
         # Retried on failure per SEND_RETRY_DELAYS before giving up.
+        delays = SEND_RETRY_DELAYS if retry_delays is None else retry_delays
         notify_ref = await self.transport.send(
             channel_id=chat_id,
             message=RenderedMessage(text=label),
             options=SendOptions(notify=False),
         )
-        for delay in SEND_RETRY_DELAYS:
+        for delay in delays:
             if notify_ref is not None:
                 break
             logger.warning("triggers.dispatch.send_retry", label=label, retry_in=delay)
@@ -147,8 +176,8 @@ class TriggerDispatcher:
                 options=SendOptions(notify=False),
             )
         if notify_ref is None:
-            logger.error("triggers.dispatch.send_failed", label=label)
-            return
+            logger.error("triggers.dispatch.send_failed", label=label, chat_id=chat_id)
+            return False
 
         logger.info(
             "triggers.dispatch.starting",
@@ -172,6 +201,7 @@ class TriggerDispatcher:
             engine_override,
             None,  # progress_ref
         )
+        return True
 
     async def dispatch_action(
         self,

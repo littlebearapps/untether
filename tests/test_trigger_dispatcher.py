@@ -561,3 +561,68 @@ async def test_743_dispatch_webhook_has_no_model_override():
     ctx = run_job.calls[0]["context"]
     assert ctx is not None
     assert ctx.model is None and ctx.reasoning is None
+
+
+# ── #893: dispatch_cron reports whether the run was actually dispatched ──
+
+
+@pytest.mark.anyio
+async def test_893_dispatch_cron_returns_true_when_dispatched(monkeypatch):
+    from untether.triggers import dispatcher as dispatcher_mod
+
+    monkeypatch.setattr(dispatcher_mod, "SEND_RETRY_DELAYS", (0.0, 0.0))
+    transport = FlakyTransport(fail_first=1)
+    run_job = RunJobCapture()
+
+    async with anyio.create_task_group() as tg:
+        dispatcher = TriggerDispatcher(
+            run_job=run_job, transport=transport, default_chat_id=100, task_group=tg
+        )
+        result = await dispatcher.dispatch_cron(_make_cron())
+        await anyio.sleep(0.01)
+        tg.cancel_scope.cancel()
+
+    assert result is True
+    assert len(run_job.calls) == 1
+
+
+@pytest.mark.anyio
+async def test_893_dispatch_cron_returns_false_when_send_fails(monkeypatch):
+    from untether.triggers import dispatcher as dispatcher_mod
+
+    monkeypatch.setattr(dispatcher_mod, "SEND_RETRY_DELAYS", (0.0, 0.0))
+    transport = FlakyTransport(fail_first=99)
+    run_job = RunJobCapture()
+
+    async with anyio.create_task_group() as tg:
+        dispatcher = TriggerDispatcher(
+            run_job=run_job, transport=transport, default_chat_id=100, task_group=tg
+        )
+        result = await dispatcher.dispatch_cron(_make_cron())
+        await anyio.sleep(0.01)
+        tg.cancel_scope.cancel()
+
+    assert result is False
+    assert run_job.calls == []
+
+
+@pytest.mark.anyio
+async def test_893_dispatch_cron_retry_delays_override_is_single_attempt(
+    monkeypatch,
+):
+    """``retry_delays=()`` makes exactly one send attempt (scheduler retry tick)."""
+    from untether.triggers import dispatcher as dispatcher_mod
+
+    monkeypatch.setattr(dispatcher_mod, "SEND_RETRY_DELAYS", (0.0, 0.0))
+    transport = FlakyTransport(fail_first=99)
+    run_job = RunJobCapture()
+
+    async with anyio.create_task_group() as tg:
+        dispatcher = TriggerDispatcher(
+            run_job=run_job, transport=transport, default_chat_id=100, task_group=tg
+        )
+        result = await dispatcher.dispatch_cron(_make_cron(), retry_delays=())
+        tg.cancel_scope.cancel()
+
+    assert result is False
+    assert transport.attempts == 1

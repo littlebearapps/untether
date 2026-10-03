@@ -301,6 +301,8 @@ run_once = true
 
 After the cron fires, the `triggers.cron.run_once_completed` log line confirms the removal, and the startup message counts it separately from scheduled crons ([#809](https://github.com/littlebearapps/untether/issues/809)). Fired state is persisted to `run_once_fired.json` (sibling of `untether.toml`), so the cron is skipped across config reloads and process restarts — the TOML entry is kept for history but won't refire. To re-enable a one-shot, change its `id` or remove both the TOML entry and its record in `run_once_fired.json`.
 
+A one-shot only counts as fired once its run is dispatched. If the `⏰ Scheduled:` message can't be posted (a wrong `chat_id`, or a Telegram or network outage), nothing runs and the cron stays pending: Untether retries it once a minute for up to 15 minutes, then gives up and logs `triggers.cron.run_once_lost` at error level ([#893](https://github.com/littlebearapps/untether/issues/893)). A restart during that window leaves the cron active, so it fires again on its next schedule match.
+
 ## Autonomous crons in plan-mode chats (Claude)
 
 A cron normally inherits the chat's permission mode, then the engine default (`plan` unless `[engines.claude] permission_mode` says otherwise). Nobody can approve anything when a cron fires, so an unattended Claude run denies anything that would wait for a tap ([#835](https://github.com/littlebearapps/untether/issues/835)) — a cron that inherits `plan` ends with a plan instead of doing the work. **Give every Claude cron that should act unattended an explicit `permission_mode`.** Set `permission_mode = "auto"` on the cron to override:

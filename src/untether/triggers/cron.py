@@ -13,6 +13,14 @@ from .manager import TriggerManager
 
 logger = get_logger(__name__)
 
+# #893: how long a ``run_once`` cron whose announce send failed keeps being
+# retried (one attempt per minute tick) before it is given up as
+# ``triggers.cron.run_once_lost``. Rides out a Telegram/network outage or a
+# host blip around the fire time, without running a one-shot so late that it
+# would surprise the user. Measured from the first failed fire.
+RUN_ONCE_RETRY_WINDOW_S: float = 15 * 60
+_RUN_ONCE_RETRY_WINDOW = datetime.timedelta(seconds=RUN_ONCE_RETRY_WINDOW_S)
+
 
 def _parse_field(field: str, min_val: int, max_val: int) -> set[int]:
     """Parse a single cron field into a set of matching integers."""
@@ -95,6 +103,10 @@ async def run_cron_scheduler(
     # key would suppress every subsequent day's run because tomorrow's 09:00 looks
     # identical to today's. See #309 CodeRabbit feedback (Critical).
     last_fired: dict[str, tuple[int, int, int, int, int]] = {}
+    # #893: run_once crons whose announce send failed → UTC time of the first
+    # failed fire. In-memory only: after a restart the one-shot is simply
+    # still active (never marked fired) and fires on its next schedule match.
+    pending_run_once: dict[str, datetime.datetime] = {}
 
     while True:
         utc_now = datetime.datetime.now(datetime.UTC)
@@ -108,6 +120,11 @@ async def run_cron_scheduler(
         # replaces manager._crons mid-iteration (new list, old ref valid).
         crons = manager.crons
         default_timezone = manager.default_timezone
+        # #893: forget pending retries for one-shots a reload removed.
+        if pending_run_once:
+            live_ids = {c.id for c in crons}
+            for stale_id in set(pending_run_once) - live_ids:
+                del pending_run_once[stale_id]
         for cron in crons:
             try:
                 local_now = _resolve_now(utc_now, cron.timezone, default_timezone)
@@ -115,7 +132,27 @@ async def run_cron_scheduler(
             except Exception:
                 logger.exception("triggers.cron.match_failed", cron_id=cron.id)
                 continue
-            if matched:
+            retry_since = pending_run_once.get(cron.id) if cron.run_once else None
+            if retry_since is not None:
+                # #893: a one-shot whose announce send failed earlier. Retry
+                # every tick (whether or not the schedule matches) until the
+                # window closes, then give up loudly.
+                if utc_now - retry_since >= _RUN_ONCE_RETRY_WINDOW:
+                    del pending_run_once[cron.id]
+                    manager.abandon_run_once(
+                        cron.id, pending_since=retry_since.isoformat()
+                    )
+                    continue
+                logger.info(
+                    "triggers.cron.run_once_retry",
+                    cron_id=cron.id,
+                    pending_since=retry_since.isoformat(),
+                )
+                # Single attempt: the in-dispatch 5 s + 30 s backoff already
+                # ran on the first fire, and repeating it every tick would
+                # stall the scheduler loop past other crons' minutes.
+                dispatched = await dispatcher.dispatch_cron(cron, retry_delays=())
+            elif matched:
                 key = (
                     local_now.year,
                     local_now.month,
@@ -127,20 +164,36 @@ async def run_cron_scheduler(
                     continue  # already fired this minute
                 last_fired[cron.id] = key
                 logger.info("triggers.cron.firing", cron_id=cron.id)
-                await dispatcher.dispatch_cron(cron)
-                # #271 Tier 3: record last-fired-at after dispatch returns.
-                # `dispatch_cron` only blocks until the notification is
-                # queued, not run completion — recording here means the
-                # `/config:tg` page reflects every dispatched cron, even if
-                # the run later fails.
-                from . import history
+                dispatched = await dispatcher.dispatch_cron(cron)
+            else:
+                continue
+            # #893: ``False`` means the announce send failed and no run was
+            # started (anything else, incl. a legacy ``None``, is a dispatch).
+            # A one-shot is NOT consumed — it stays active and is retried on
+            # later ticks; recurring crons simply wait for their next match.
+            if dispatched is False:
+                if cron.run_once and cron.id not in pending_run_once:
+                    pending_run_once[cron.id] = utc_now
+                    logger.warning(
+                        "triggers.cron.run_once_pending",
+                        cron_id=cron.id,
+                        retry_window_s=RUN_ONCE_RETRY_WINDOW_S,
+                    )
+                continue
+            pending_run_once.pop(cron.id, None)
+            # #271 Tier 3: record last-fired-at after dispatch returns.
+            # `dispatch_cron` only blocks until the notification is
+            # queued, not run completion — recording here means the
+            # `/config:tg` page reflects every dispatched cron, even if
+            # the run later fails.
+            from . import history
 
-                history.record_fired(cron.id)
-                # #288: one-shot crons are removed from the active list
-                # after firing; they stay in the TOML and re-activate on
-                # the next config reload or restart.
-                if cron.run_once:
-                    manager.remove_cron(cron.id)
+            history.record_fired(cron.id)
+            # #288: one-shot crons are removed from the active list
+            # after firing; they stay in the TOML and re-activate on
+            # the next config reload or restart.
+            if cron.run_once:
+                manager.remove_cron(cron.id)
 
         # Sleep until next minute boundary (+ small buffer).
         utc_now = datetime.datetime.now(datetime.UTC)
