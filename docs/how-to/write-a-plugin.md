@@ -98,6 +98,10 @@ class MyCommand:
 BACKEND = MyCommand()
 ```
 
+To reply with a file instead of (or as well as) text, set `attachment`:
+`CommandResult(text="report ready", attachment=CommandAttachment(filename="report.md", content=data))`.
+Telegram sends it as a document with `text` as the caption, and falls back to a plain message if the upload fails or the file is over 10 MB. Attachments work for text commands only; callback results ignore them. See [`CommandAttachment`](../reference/plugin-api.md).
+
 ### Command plugin configuration
 
 Configure under `[plugins.<id>]`:

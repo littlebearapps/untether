@@ -20,14 +20,14 @@ If you’re trying to understand the *why*, use **[Explanation](../explanation/i
 - [Error reference](errors.md)
   - Engine error patterns and the recovery hint Untether shows for each
 
-## Normative behavior
+## Normative behaviour
 
 - [Specification](specification.md)  
   The normative (“MUST/SHOULD/MAY”) contract for:
   - resume tokens + resume lines
   - event model
   - progress/final message semantics
-  - per-thread serialization rules
+  - per-thread serialisation rules
 
 ## Plugins and extension contracts
 

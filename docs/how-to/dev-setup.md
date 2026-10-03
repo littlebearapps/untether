@@ -76,7 +76,7 @@ Always test via the dev bot before merging. Never send test messages to the prod
 uv run pytest                        # tests (Python 3.12+, 80% coverage threshold)
 uv run ruff check src tests          # linting
 uv run ruff format --check src tests # formatting
-uv run ty check .                    # type checking (warnings only, not blocking)
+uv run ty check src tests            # type checking (informational in CI)
 
 # All at once
 just check
@@ -93,21 +93,25 @@ GitHub Actions runs these checks on every push and PR:
 |-----|---------------|
 | format | `ruff format --check --diff` |
 | ruff | `ruff check` with GitHub annotations |
-| ty | Type checking (warnings only — 11 pre-existing warnings) |
+| ty | Type checking (informational, not blocking) |
 | pytest | Tests on Python 3.12, 3.13, 3.14 with 80% coverage |
 | build | `uv build` wheel + sdist validation |
 | lockfile | `uv lock --check` ensures lockfile is in sync |
 | install-test | Clean wheel install + import smoke-test (catches undeclared deps) |
 | pip-audit | Dependency vulnerability scanning |
 | bandit | Python security static analysis |
-| docs | Documentation site build |
+| docs | Documentation site build (zensical) |
+| testpypi-publish | Publishes the rc wheel to TestPyPI on pushes to `dev` |
+| release-validation | `scripts/validate_release.py` changelog/version checks on PRs that bump the version |
+
+CodeQL runs in its own workflow (`codeql.yml`).
 
 ## Test conventions
 
 - **Framework:** pytest + anyio for async tests
 - **Coverage:** 80% threshold enforced in `pyproject.toml`
 - **Patterns:** Stub subprocess runners with fake CLI scripts, mock transport with `FakeTransport` dataclass
-- **Key test files:** `test_claude_control.py` (56 tests), `test_callback_dispatch.py` (28 tests), `test_cost_tracker.py` (56 tests)
+- **Key test files:** `test_claude_control.py`, `test_callback_dispatch.py`, `test_cost_tracker.py` (current counts per file are in the [test catalog](../reference/test-catalog.md))
 
 Run specific test files:
 

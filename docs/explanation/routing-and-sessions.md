@@ -42,9 +42,9 @@ For each message, Untether:
 - attempts to extract a resume token by polling available runners
 - if a resume token is found, routes to the matching runner; otherwise uses the configured default engine
 
-## Serialization (why you don’t get overlapping runs)
+## Serialisation (why you don’t get overlapping runs)
 
-Untether allows parallel runs across **different threads**, but enforces serialization within a thread:
+Untether allows parallel runs across **different threads**, but enforces serialisation within a thread:
 
 - Telegram side: jobs are queued FIFO per thread. Prompts sent within about a second of each other are merged into one job first, and `/cancel`, `/new` and `/continue` drop anything still waiting in that window.
 - Runner side: runners enforce per-resume-token locks (so the same session can’t be resumed concurrently). A `/continue` run locks the real session id it resumes, not a shared placeholder ([#817](https://github.com/littlebearapps/untether/issues/817)).

@@ -25,7 +25,7 @@ flowchart TB
     end
 
     subgraph Bridge["Bridge Layer"]
-        tg_bridge[telegram/bridge.py<br/>run_main_loop]
+        tg_bridge[telegram/loop.py<br/>run_main_loop]
         runner_bridge[runner_bridge.py<br/>handle_message]
     end
 
@@ -169,7 +169,7 @@ classDiagram
 sequenceDiagram
     participant User
     participant Telegram
-    participant Bridge as telegram/bridge.py
+    participant Bridge as telegram/loop.py
     participant Scheduler as ThreadScheduler
     participant RunnerBridge as runner_bridge.py
     participant Runner
@@ -301,7 +301,7 @@ sequenceDiagram
     Note over User,CLI: Resume Conversation
     User->>Bridge: Reply: "now add tests"
     Bridge->>Bridge: extract_resume(reply_text)<br/>→ ResumeToken(claude, abc123)
-    Bridge->>Bridge: parse_ctx_line()<br/>→ project, branch
+    Bridge->>Bridge: parse_context_line()<br/>→ project, branch
     Bridge->>Runner: run("now add tests", token)
     Runner->>CLI: claude --resume abc123 "now add tests"
     CLI-->>Runner: Continues session
@@ -453,7 +453,7 @@ flowchart TD
 | **CLI** | `cli/` | Entry point, config, lock |
 | **Plugins** | `plugins.py`, `engines.py`, `transports.py`, `commands.py`, `api.py` | Entrypoint discovery, plugin loading, public API boundary |
 | **Orchestration** | `router.py`, `scheduler.py`, `config.py` | Engine selection, job queuing, project config |
-| **Bridge** | `telegram/bridge.py`, `runner_bridge.py` | Message handling, execution coordination |
+| **Bridge** | `telegram/loop.py`, `telegram/bridge.py`, `runner_bridge.py` | Message handling, execution coordination |
 | **Runner** | `runner.py`, `runners/*.py`, `schemas/*.py` | Agent CLI subprocess, JSONL parsing, event translation |
 | **Transport** | `transport.py`, `presenter.py`, `telegram/client.py` | Telegram API, message rendering |
 | **Triggers** | `triggers/server.py`, `triggers/cron.py`, `triggers/manager.py`, `triggers/dispatcher.py`, `triggers/actions.py`, `triggers/fetch.py`, `triggers/ssrf.py`, `triggers/auth.py`, `triggers/rate_limit.py`, `triggers/describe.py`, `triggers/history.py`, `triggers/templating.py` | Webhook server (multipart, rate limit, `503 triggers paused`), cron scheduler (timezone, data-fetch, `run_once`), `TriggerManager` for hot-reload + master pause/resume toggle, fire-history persistence for `/stats` triggered/manual breakdown, non-agent actions (`file_write`/`http_forward`/`notify_only`), SSRF protection, HMAC/bearer auth, human-friendly cron description |
