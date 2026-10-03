@@ -306,6 +306,70 @@ class TestRunEngineGate:
         assert "Skipped loop:ut_loop_ab12cd34" in call["message"].text
         assert _buttons(call) == []
 
+    async def test_unattended_skip_notice_once_per_trigger_per_day(
+        self, cfg_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Every /loop fire and cron tick is refused (and logged), but the
+        chat hears about each trigger once a day, not on every fire."""
+        _write_config(cfg_path, _ON)
+        _spend(0.50)
+        runner, transport, exec_cfg, runtime = _engine_kit()
+        loop_ctx = RunContext(trigger_source="loop:ut_loop_ab12cd34")
+        cron_ctx = RunContext(trigger_source="cron:daily")
+        with capture_logs() as logs:
+            for _ in range(3):
+                await _run(exec_cfg, runtime, context=loop_ctx)
+            await _run(exec_cfg, runtime, context=cron_ctx)
+            await _run(exec_cfg, runtime, context=cron_ctx)
+        assert runner.calls == []
+        texts = [c["message"].text for c in transport.send_calls]
+        assert len(texts) == 2
+        assert "Skipped loop:ut_loop_ab12cd34" in texts[0]
+        assert "Skipped cron:daily" in texts[1]
+        blocked = [e for e in logs if e["event"] == "cost_budget.run_blocked"]
+        assert len(blocked) == 5
+        assert [e["notice_sent"] for e in blocked] == [
+            True,
+            False,
+            False,
+            True,
+            False,
+        ]
+        # A new day (the budget's own day boundary) notices again.
+        from untether.telegram import budget_notice
+
+        monkeypatch.setattr(budget_notice, "budget_day", lambda: "2099-01-01")
+        await _run(exec_cfg, runtime, context=loop_ctx)
+        assert len(transport.send_calls) == 3
+
+    async def test_skip_notice_is_per_chat(self, cfg_path: Path) -> None:
+        _write_config(cfg_path, _ON)
+        _spend(0.50)
+        _runner, transport, exec_cfg, runtime = _engine_kit()
+        ctx = RunContext(trigger_source="cron:daily")
+        await _run(exec_cfg, runtime, context=ctx)
+        await _run_engine(
+            exec_cfg=exec_cfg,
+            runtime=runtime,
+            running_tasks={},
+            chat_id=456,
+            user_msg_id=7,
+            text="hello",
+            resume_token=None,
+            context=ctx,
+        )
+        assert [c["channel_id"] for c in transport.send_calls] == [123, 456]
+
+    async def test_attended_refusals_always_notice(self, cfg_path: Path) -> None:
+        """A person's prompt always gets its own message + Run anyway."""
+        _write_config(cfg_path, _ON)
+        _spend(0.50)
+        _runner, transport, exec_cfg, runtime = _engine_kit()
+        await _run(exec_cfg, runtime)
+        await _run(exec_cfg, runtime)
+        assert len(transport.send_calls) == 2
+        assert len(budget_gate._PENDING_RUNS) == 2
+
     async def test_at_run_gets_run_anyway(self, cfg_path: Path) -> None:
         """/at was scheduled by a person in the chat: it gets the button."""
         _write_config(cfg_path, _ON)

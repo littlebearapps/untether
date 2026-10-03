@@ -20,6 +20,7 @@ from ..budget_gate import (
     run_anyway_callback_data,
 )
 from ..context import RunContext, unattended_trigger
+from ..cost_tracker import _today as budget_day
 from ..logging import get_logger
 from ..transport import MessageRef, RenderedMessage, SendOptions, Transport
 
@@ -32,6 +33,70 @@ logger = get_logger(__name__)
 EXPIRED_TOAST = "This button has expired"
 RUNNING_TOAST = "Running once"
 RUNNING_NOTE = "\N{BLACK RIGHT-POINTING TRIANGLE}\N{VARIATION SELECTOR-16} Running once despite the daily budget."
+
+
+# (chat_id, trigger source) → the budget day its skip notice was sent on.
+# Unattended refusals repeat on every /loop fire and cron tick until
+# midnight; the chat hears about each trigger once a day (each refusal is
+# still logged). In-memory: a restart may repeat one notice, which is fine.
+_SKIP_NOTICED: dict[tuple[int, str], str] = {}
+
+
+def _first_skip_today(chat_id: int, source: str) -> bool:
+    """True (and remembered) the first time ``source`` is skipped in
+    ``chat_id`` on the budget's current day (host local, like the total)."""
+    today = budget_day()
+    for key in [k for k, day in _SKIP_NOTICED.items() if day != today]:
+        del _SKIP_NOTICED[key]
+    key = (chat_id, source)
+    if _SKIP_NOTICED.get(key) == today:
+        return False
+    _SKIP_NOTICED[key] = today
+    return True
+
+
+async def skip_unattended_run(
+    transport: Transport,
+    *,
+    chat_id: int,
+    context: RunContext | None,
+    daily: float,
+    limit: float,
+    reply_to_msg_id: int | None = None,
+    thread_id: int | None = None,
+    stage: str = "run",
+) -> None:
+    """Refuse a cron / webhook / loop fire: log it, and tell the chat once a
+    day per trigger (no button — nobody is there to tap it)."""
+    source = _skipped_source(context) or (
+        context.trigger_source if context is not None else None
+    )
+    label = source or "a scheduled run"
+    first = _first_skip_today(chat_id, label)
+    logger.warning(
+        "cost_budget.run_blocked",
+        scope="per_day",
+        chat_id=chat_id,
+        thread_id=thread_id,
+        trigger=source,
+        attended=False,
+        stage=stage,
+        notice_sent=first,
+        daily_cost=round(daily, 4),
+        budget=limit,
+    )
+    if not first:
+        return
+    await _send_notice(
+        transport,
+        chat_id=chat_id,
+        thread_id=thread_id,
+        reply_to_msg_id=reply_to_msg_id,
+        text=daily_block_text(daily, limit, skipped=label),
+        extra={},
+        # A skipped trigger is quiet, like its "Scheduled" announcement.
+        notify=False,
+    )
 
 
 async def refuse_run(
@@ -47,26 +112,38 @@ async def refuse_run(
     rerun: Callable[[], Awaitable[None]],
 ) -> None:
     """Tell the chat a run was refused by the daily budget gate."""
+    if progress_ref is not None:
+        # A resumed prompt already showed "queued"; it isn't going to run.
+        with contextlib.suppress(Exception):
+            await transport.delete(ref=progress_ref)
     source = _skipped_source(context)
+    if source is not None:
+        await skip_unattended_run(
+            transport,
+            chat_id=chat_id,
+            context=context,
+            daily=daily,
+            limit=limit,
+            # Replies to the fire's own announcement.
+            reply_to_msg_id=user_msg_id,
+            thread_id=thread_id,
+        )
+        return
     logger.warning(
         "cost_budget.run_blocked",
         scope="per_day",
         chat_id=chat_id,
         thread_id=thread_id,
-        trigger=source or (context.trigger_source if context else None),
-        attended=source is None,
+        trigger=context.trigger_source if context else None,
+        attended=True,
+        notice_sent=True,
         daily_cost=round(daily, 4),
         budget=limit,
     )
-    if progress_ref is not None:
-        # A resumed prompt already showed "queued"; it isn't going to run.
-        with contextlib.suppress(Exception):
-            await transport.delete(ref=progress_ref)
-    text = daily_block_text(daily, limit, skipped=source)
-    extra: dict[str, object] = {}
-    if source is None:
-        token = register_pending_run(chat_id, rerun, notice=text)
-        extra["reply_markup"] = {
+    text = daily_block_text(daily, limit, skipped=None)
+    token = register_pending_run(chat_id, rerun, notice=text)
+    extra: dict[str, object] = {
+        "reply_markup": {
             "inline_keyboard": [
                 [
                     {
@@ -76,17 +153,38 @@ async def refuse_run(
                 ]
             ]
         }
+    }
+    await _send_notice(
+        transport,
+        chat_id=chat_id,
+        thread_id=thread_id,
+        reply_to_msg_id=user_msg_id,
+        text=text,
+        extra=extra,
+        notify=True,  # a refused prompt pushes
+    )
+
+
+async def _send_notice(
+    transport: Transport,
+    *,
+    chat_id: int,
+    thread_id: int | None,
+    reply_to_msg_id: int | None,
+    text: str,
+    extra: dict[str, object],
+    notify: bool,
+) -> None:
+    reply_to = (
+        MessageRef(channel_id=chat_id, message_id=reply_to_msg_id)
+        if reply_to_msg_id is not None
+        else None
+    )
     try:
         await transport.send(
             channel_id=chat_id,
             message=RenderedMessage(text=text, extra=extra),
-            options=SendOptions(
-                reply_to=MessageRef(channel_id=chat_id, message_id=user_msg_id),
-                # A skipped trigger replies to its own (already pushed)
-                # "Scheduled" announcement; a refused prompt pushes.
-                notify=source is None,
-                thread_id=thread_id,
-            ),
+            options=SendOptions(reply_to=reply_to, notify=notify, thread_id=thread_id),
         )
     except Exception:  # noqa: BLE001 — a failed notice must not crash the worker
         logger.warning("cost_budget.notice_failed", chat_id=chat_id, exc_info=True)
@@ -96,9 +194,9 @@ def _skipped_source(context: RunContext | None) -> str | None:
     """The trigger to name in a skip notice, or None for a person's prompt.
 
     Crons and webhooks (nobody there) and ``/loop`` fires (they repeat on
-    their own) are skipped with a notice and no button — one per fire,
-    replying to the fire's own announcement; a prompt — including an ``/at``
-    run someone scheduled — gets **Run anyway**.
+    their own) are skipped with a notice and no button — once a day per
+    trigger, replying to the fire's own announcement; a prompt — including
+    an ``/at`` run someone scheduled — gets **Run anyway**.
     """
     source = unattended_trigger(context)
     if source is not None:

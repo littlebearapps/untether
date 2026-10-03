@@ -116,6 +116,17 @@ def _clear_request_channel_bindings() -> Iterator[None]:
     _REQUEST_TO_CHANNEL.clear()
 
 
+@pytest.fixture(autouse=True)
+def _clear_budget_skip_notices() -> Iterator[None]:
+    """#896: the once-a-day skip notice per (chat, trigger) is module state;
+    tests reuse chat ids and trigger names across files."""
+    from untether.telegram.budget_notice import _SKIP_NOTICED
+
+    _SKIP_NOTICED.clear()
+    yield
+    _SKIP_NOTICED.clear()
+
+
 # ---------------------------------------------------------------------------
 # #808: host isolation — config file and live network
 # ---------------------------------------------------------------------------

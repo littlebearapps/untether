@@ -2474,6 +2474,45 @@ async def run_main_loop(
                     run_options=run_options,
                 )
 
+            async def trigger_budget_refused(
+                chat_id: int,
+                context: RunContext,
+                engine_override: EngineId | None,
+            ) -> bool:
+                """#896: refuse a cron/webhook before it is announced (or its
+                fetch runs) once the daily budget is spent — same options as
+                ``run_job`` resolves for a trigger, so per-chat budget
+                overrides apply. The dispatcher sees the refusal, so a
+                ``run_once`` cron isn't consumed by a run that never started."""
+                from ..budget_gate import daily_gate
+                from .budget_notice import skip_unattended_run
+
+                engine = engine_override or cfg.runtime.resolve_engine(
+                    engine_override=None, context=context
+                )
+                run_options = await _resolve_engine_run_options(
+                    chat_id,
+                    None,
+                    engine,
+                    chat_prefs=state.chat_prefs,
+                    topic_store=state.topic_store,
+                )
+                run_options = _apply_trigger_overrides(
+                    run_options, context, engine=engine
+                )
+                blocked = daily_gate(run_options)
+                if blocked is None:
+                    return False
+                await skip_unattended_run(
+                    cfg.exec_cfg.transport,
+                    chat_id=chat_id,
+                    context=context,
+                    daily=blocked[0],
+                    limit=blocked[1],
+                    stage="dispatch",
+                )
+                return True
+
             async def run_thread_job(job: ThreadJob) -> None:
                 await run_job(
                     cast(int, job.chat_id),
@@ -2599,6 +2638,7 @@ async def run_main_loop(
                         transport=cfg.exec_cfg.transport,
                         default_chat_id=cfg.chat_id,
                         task_group=tg,
+                        budget_check=trigger_budget_refused,
                     )
                     # Always start the cron scheduler — it idles when the
                     # cron list is empty and picks up new crons on reload.
