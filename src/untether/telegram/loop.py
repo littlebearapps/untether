@@ -1022,6 +1022,23 @@ def _merge_block_reason(existing: _PendingPrompt, new: _PendingPrompt) -> str | 
 _SESSION_CONTROL_COMMANDS = frozenset({"cancel", "new", "continue"})
 
 
+def _reply_targets_running_progress(
+    running_tasks: Mapping[MessageRef, object],
+    chat_id: int,
+    reply_id: int | None,
+) -> bool:
+    """#904: True when the reply is to a still-running task's progress
+    message. Its tool list and elapsed time are not useful reply context —
+    the prompt is routed to that task (or steered into it) anyway."""
+    if reply_id is None:
+        return False
+    from ..runner_bridge import running_task_shows_progress
+
+    ref = MessageRef(channel_id=chat_id, message_id=reply_id)
+    task = running_tasks.get(ref)
+    return task is not None and running_task_shows_progress(task, ref)
+
+
 def _is_prompt_directive(command_id: str, reserved_commands: set[str]) -> bool:
     """True for ``/<engine>`` and ``/<project>`` — prompt directives, not
     commands. They run as prompts and meet the #794 merge rules instead of
@@ -2743,11 +2760,17 @@ async def run_main_loop(
                 chat_id = msg.chat_id
                 user_msg_id = msg.message_id
                 context = resolved.context
+                reply_quote_text = msg.reply_quote_text
                 reply_reference_text = (
                     msg.reply_reference_text
                     if msg.reply_reference_text is not None
                     else msg.reply_to_text
                 )
+                if _reply_targets_running_progress(
+                    state.running_tasks, chat_id, reply_id
+                ):
+                    # #904: no progress render as reply context.
+                    reply_quote_text = reply_reference_text = None
                 engine_resolution = await resolve_engine_defaults(
                     explicit_engine=resolved.engine_override,
                     context=context,
@@ -2759,7 +2782,7 @@ async def run_main_loop(
                     msg=msg,
                     prompt_text=append_reply_context(
                         prompt_text,
-                        selected_quote=msg.reply_quote_text,
+                        selected_quote=reply_quote_text,
                         reply_text=strip_reply_routing_lines(
                             reply_reference_text,
                             is_resume_line=cfg.runtime.is_resume_line,
@@ -2783,7 +2806,7 @@ async def run_main_loop(
                     topic_key=topic_key,
                     engine_for_session=engine_resolution.engine,
                     prompt_text=prompt_text,
-                    reply_quote_text=msg.reply_quote_text,
+                    reply_quote_text=reply_quote_text,
                     reply_reference_text=reply_reference_text,
                 )
                 if resume_decision.handled_by_running_task:
@@ -2791,7 +2814,7 @@ async def run_main_loop(
                 resume_token = resume_decision.resume_token
                 prompt_text = append_reply_context(
                     prompt_text,
-                    selected_quote=msg.reply_quote_text,
+                    selected_quote=reply_quote_text,
                     reply_text=strip_reply_routing_lines(
                         reply_reference_text,
                         is_resume_line=cfg.runtime.is_resume_line,

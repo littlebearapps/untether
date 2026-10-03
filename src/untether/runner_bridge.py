@@ -4593,6 +4593,25 @@ def running_task_is_live_idle(task: Any) -> bool:
     )
 
 
+def running_task_shows_progress(task: Any, ref: MessageRef) -> bool:
+    """#904: True while ``ref`` (a ``running_tasks`` key) still shows the
+    run's progress render rather than a final.
+
+    The run's first progress message is edited into (or replaced by) its
+    final once delivered — ``_finalizing`` — yet a live session keeps it
+    mapped between turns. Per-turn progress messages are unmapped as soon as
+    their turn closes, so while mapped they are progress."""
+    edits = getattr(task, "edits", None)
+    first_ref = getattr(edits, "progress_ref", None)
+    shows_final = (
+        first_ref is not None
+        and first_ref.channel_id == ref.channel_id
+        and first_ref.message_id == ref.message_id
+        and bool(getattr(edits, "_finalizing", False))
+    )
+    return not shows_final
+
+
 def running_task_is_idle_after_result(task: Any) -> bool:
     """#895: a live session that has answered and has nothing left in flight
     — between turns, no background task holding it open (#801) and no queued
