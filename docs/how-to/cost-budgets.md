@@ -87,7 +87,7 @@ With the cost footer on (`[footer] show_api_cost = true`, the default), the aler
 
 ### Daily reset
 
-The daily cost counter resets at midnight (local time, based on the server clock). Each new day starts from zero. The counter is held in memory only, so restarting Untether also resets it.
+The daily cost counter resets at midnight in the host's local time zone (the server clock, not yours), and each new day starts from zero. Since v0.35.5 the day's total is saved to `daily_cost.json` next to `untether.toml` after every run, so restarts, upgrades and daily reboots no longer reset it; a file left over from an earlier day is ignored ([#898](https://github.com/littlebearapps/untether/issues/898)).
 
 ## Check current usage
 

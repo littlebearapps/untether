@@ -73,6 +73,20 @@ def _isolated_session_cost_ledger():
 
 
 @pytest.fixture(autouse=True)
+def _isolated_daily_cost() -> Iterator[None]:
+    """#898: the daily cost total is module state persisted to
+    ``daily_cost.json`` once ``init_daily_cost`` runs (startup, /health).
+    Reset it per test so no test inherits another's total or file path."""
+    import untether.cost_tracker as cost_tracker
+
+    cost_tracker._daily_cost = ("", 0.0)
+    cost_tracker._daily_cost_path = None
+    yield
+    cost_tracker._daily_cost = ("", 0.0)
+    cost_tracker._daily_cost_path = None
+
+
+@pytest.fixture(autouse=True)
 def _clear_cancel_dedup() -> None:
     """#525: ``_RECENT_CANCELS`` is module-level state that persists across
     tests. Without an explicit clear, two tests using the same

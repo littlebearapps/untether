@@ -17,6 +17,7 @@ def _reset_daily():
     import untether.cost_tracker as mod
 
     mod._daily_cost = ("", 0.0)
+    mod._daily_cost_path = None
 
 
 class TestRecordRunCost:
@@ -124,6 +125,128 @@ class TestConcurrentRecord:
             f"lost cost updates under concurrency: "
             f"expected ${expected:.2f}, got ${observed:.2f}"
         )
+
+
+# ---------------------------------------------------------------------------
+# #898: daily total persists across restarts (daily_cost.json)
+# ---------------------------------------------------------------------------
+
+
+class TestDailyCostPersistence:
+    def setup_method(self):
+        _reset_daily()
+
+    def teardown_method(self):
+        _reset_daily()
+
+    @staticmethod
+    def _restart(config_path):
+        """Simulate a process restart: wipe module state, then reload."""
+        import untether.cost_tracker as mod
+
+        _reset_daily()
+        mod.init_daily_cost(config_path)
+
+    def test_path_sits_beside_config(self, tmp_path):
+        from untether.cost_tracker import resolve_daily_cost_path
+
+        cfg = tmp_path / "untether.toml"
+        assert resolve_daily_cost_path(cfg) == tmp_path / "daily_cost.json"
+
+    def test_round_trip_survives_restart(self, tmp_path):
+        import json
+        import time
+
+        from untether.cost_tracker import init_daily_cost
+
+        cfg = tmp_path / "untether.toml"
+        init_daily_cost(cfg)
+        record_run_cost(0.40)
+        record_run_cost(0.35)
+        data = json.loads((tmp_path / "daily_cost.json").read_text())
+        assert data["date"] == time.strftime("%Y-%m-%d")
+        assert data["total_usd"] == 0.75
+
+        self._restart(cfg)
+        assert get_daily_cost() == 0.75
+        record_run_cost(0.25)
+        assert get_daily_cost() == 1.0
+
+    def test_stale_date_ignored(self, tmp_path):
+        import json
+
+        from untether.cost_tracker import init_daily_cost
+
+        cfg = tmp_path / "untether.toml"
+        (tmp_path / "daily_cost.json").write_text(
+            json.dumps({"date": "1999-01-01", "total_usd": 42.0})
+        )
+        init_daily_cost(cfg)
+        assert get_daily_cost() == 0.0
+        record_run_cost(0.10)
+        assert get_daily_cost() == 0.10
+
+    def test_missing_file_is_zero(self, tmp_path):
+        from untether.cost_tracker import init_daily_cost
+
+        init_daily_cost(tmp_path / "untether.toml")
+        assert get_daily_cost() == 0.0
+
+    def test_corrupt_file_is_zero(self, tmp_path):
+        from untether.cost_tracker import init_daily_cost
+
+        (tmp_path / "daily_cost.json").write_text("{not json")
+        init_daily_cost(tmp_path / "untether.toml")
+        assert get_daily_cost() == 0.0
+        record_run_cost(0.20)
+        assert get_daily_cost() == 0.20
+
+    def test_wrong_shape_is_zero(self, tmp_path):
+        import json
+        import time
+
+        from untether.cost_tracker import init_daily_cost
+
+        (tmp_path / "daily_cost.json").write_text(
+            json.dumps({"date": time.strftime("%Y-%m-%d"), "total_usd": "lots"})
+        )
+        init_daily_cost(tmp_path / "untether.toml")
+        assert get_daily_cost() == 0.0
+
+    def test_write_failure_never_breaks_a_run(self, tmp_path, monkeypatch):
+        import untether.cost_tracker as mod
+        from untether.cost_tracker import init_daily_cost
+
+        init_daily_cost(tmp_path / "untether.toml")
+
+        def _boom(*_a, **_k):
+            raise OSError("disk full")
+
+        monkeypatch.setattr(mod, "atomic_write_json", _boom)
+        record_run_cost(0.30)  # must not raise
+        assert get_daily_cost() == 0.30
+
+    def test_concurrent_records_persist_final_total(self, tmp_path):
+        import json
+        from concurrent.futures import ThreadPoolExecutor
+
+        from untether.cost_tracker import init_daily_cost
+
+        cfg = tmp_path / "untether.toml"
+        init_daily_cost(cfg)
+        with ThreadPoolExecutor(max_workers=8) as pool:
+            for f in [pool.submit(record_run_cost, 0.01) for _ in range(100)]:
+                f.result()
+        assert round(get_daily_cost(), 2) == 1.0
+        data = json.loads((tmp_path / "daily_cost.json").read_text())
+        assert round(data["total_usd"], 2) == 1.0
+        self._restart(cfg)
+        assert round(get_daily_cost(), 2) == 1.0
+
+    def test_uninitialised_stays_memory_only(self, tmp_path):
+        record_run_cost(0.50)
+        assert get_daily_cost() == 0.50
+        assert not (tmp_path / "daily_cost.json").exists()
 
 
 # ---------------------------------------------------------------------------

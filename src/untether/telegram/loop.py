@@ -1883,11 +1883,13 @@ async def run_main_loop(
                 "chat_prefs.enabled",
                 state_path=str(resolve_prefs_path(config_path)),
             )
+            from ..cost_tracker import init_daily_cost
             from ..session_stats import init_stats
             from ..triggers.history import init_history
 
             init_stats(config_path)
             init_history(config_path)
+            init_daily_cost(config_path)  # #898
         if cfg.session_mode == "chat":
             if config_path is None:
                 raise ConfigError(
