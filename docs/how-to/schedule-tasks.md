@@ -97,14 +97,28 @@ For more control, use Untether's built-in cron system. Cron triggers fire on a s
     id = "daily-review"
     schedule = "0 9 * * 1-5"
     project = "myapp"
+    chat_id = -1001234567890  # the chat to post in — usually myapp's chat
     engine = "claude"
     prompt = "Review open PRs and summarise their status."
     ```
 
 This runs every weekday at 9:00 AM (server time) in the `myapp` project using
-Claude Code. Add `timezone = "Australia/Melbourne"` to evaluate in a specific
-timezone, or set `default_timezone` in `[triggers]` for all crons. See
+Claude Code, and posts in chat `-1001234567890`. Add
+`timezone = "Australia/Melbourne"` to evaluate in a specific timezone, or set
+`default_timezone` in `[triggers]` for all crons. See
 [Webhooks and cron](webhooks-and-cron.md#timezone) for details.
+
+!!! note "`project` doesn't choose the chat"
+    `project` sets the working directory only. Without `chat_id`, the cron
+    posts to the default `chat_id` from `[transports.telegram]`, not the
+    chat bound to `myapp`. Untether logs `trigger.cron.chat_fallback` when
+    that happens and the two chats differ ([#894](https://github.com/littlebearapps/untether/issues/894)).
+
+!!! tip "Turning triggers on needs one restart"
+    Most trigger edits hot-reload, but switching `[triggers] enabled` from
+    `false` to `true` only takes effect after a restart, because the cron
+    scheduler starts at startup. The Telegram reload notice says
+    **Restart required** when this applies.
 
 Common schedules:
 

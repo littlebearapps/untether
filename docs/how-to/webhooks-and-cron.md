@@ -234,7 +234,7 @@ Action types: `agent_run` (default), `file_write`, `http_forward`, `notify_only`
 Each webhook and cron can specify where the Telegram notification appears:
 
 - Set `chat_id` to post in a specific chat
-- If omitted, uses the default chat from `[transports.telegram]`
+- If omitted, uses the default chat from `[transports.telegram]` — even when `project` is set. A project's bound chat is **not** used, so add `chat_id` to post in the project's chat. Untether logs `trigger.cron.chat_fallback` / `trigger.webhook.chat_fallback` once when a project-only trigger will post to a different chat than the project's ([#894](https://github.com/littlebearapps/untether/issues/894))
 - Set `project` to run in a specific project's working directory
 - Set `engine` to pick the engine. Without it, a trigger with a `project` runs on that project's `default_engine` (since v0.35.5 — it used to fall back to the global default, [#862](https://github.com/littlebearapps/untether/issues/862)), and one without a project uses the global `default_engine`
 

@@ -116,7 +116,7 @@ and no run is started ([#758](https://github.com/littlebearapps/untether/issues/
 | `path` | string | (required) | URL path the server listens on (e.g. `/hooks/slack-alerts`). Must start with `/`, contain only letters, digits, `/`, `_`, `.` and `-`, and not be `/health` (reserved). |
 | `project` | string\|null | `null` | Project alias. Sets the working directory for the run. |
 | `engine` | string\|null | `null` | Engine override (e.g. `"claude"`, `"codex"`). If unset: the `project`'s `default_engine` when a project is set, otherwise the global `default_engine` (before 0.35.5rc16 a project trigger with no `engine` ran on the global default — [#862](https://github.com/littlebearapps/untether/issues/862)). |
-| `chat_id` | int\|null | `null` | Telegram chat to post in. Falls back to the transport's default `chat_id`. |
+| `chat_id` | int\|null | `null` | Telegram chat to post in. Falls back to the transport's default `chat_id` — even when `project` is set; a project's bound chat is not used ([Chat routing](#chat-routing)). |
 | `auth` | string | `"bearer"` | Auth mode: `"bearer"`, `"hmac-sha256"`, `"hmac-sha1"`, or `"none"`. |
 | `secret` | string\|null | `null` | Auth secret. Required when `auth` is not `"none"`. |
 | `prompt_template` | string\|null | (required for `agent_run`) | Prompt template with `{{field.path}}` substitutions. |
@@ -155,7 +155,7 @@ Webhook IDs and paths must each be unique across all configured webhooks.
 | `schedule` | string | (required) | 5-field cron expression (see [Cron expressions](#cron-expressions)). |
 | `project` | string\|null | `null` | Project alias. Sets the working directory for the run. |
 | `engine` | string\|null | `null` | Engine override. If unset: the `project`'s `default_engine` when a project is set, otherwise the global `default_engine` ([#862](https://github.com/littlebearapps/untether/issues/862)). |
-| `chat_id` | int\|null | `null` | Telegram chat to post in. Falls back to the transport's default `chat_id`. |
+| `chat_id` | int\|null | `null` | Telegram chat to post in. Falls back to the transport's default `chat_id` — even when `project` is set; a project's bound chat is not used ([Chat routing](#chat-routing)). |
 | `prompt` | string\|null | (required if no `prompt_template`) | Static prompt sent to the engine. |
 | `prompt_template` | string\|null | `null` | Template prompt with `{{field}}` substitution (used with fetch data). |
 | `timezone` | string\|null | `null` | IANA timezone name (e.g. `"Australia/Melbourne"`). Overrides `default_timezone`. |
@@ -642,6 +642,15 @@ When a `project` is set, the run executes in the project's working directory
 the Telegram notification and engine reply appear, while `project` determines
 the filesystem context.
 
+!!! warning "`project` does not pick the chat"
+    A trigger with `project` but no `chat_id` posts to the transport default
+    `chat_id`, **not** the chat bound to that project in `[projects.*]`. Set
+    `chat_id` explicitly to post in the project's chat. When the project's
+    chat differs from the default chat, Untether logs
+    `trigger.cron.chat_fallback` (or `trigger.webhook.chat_fallback`) once at
+    startup or on the reload that adds the trigger, naming the trigger, the
+    project and both chat ids ([#894](https://github.com/littlebearapps/untether/issues/894)).
+
 ## Security
 
 - **Localhost binding**: The server binds to `127.0.0.1` by default. Use a
@@ -917,7 +926,7 @@ within seconds, and active runs are not interrupted.
 
 | Change | Why |
 |--------|-----|
-| `triggers.enabled` (off to on) | Webhook server and cron scheduler must be started |
+| `triggers.enabled` (off to on) | Webhook server and cron scheduler must be started. The reload logs `config.reload.restart_required key=triggers.enabled` and the Telegram reload notice says **Restart required** ([#894](https://github.com/littlebearapps/untether/issues/894)) |
 | `triggers.server.host` or `port` | aiohttp binds once at startup |
 | `triggers.server.rate_limit` | Rate limiter initialised at startup |
 | `triggers.server.max_body_bytes` | Body limit set when the server app is built |

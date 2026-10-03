@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import re
-from typing import Annotated, Any, Literal
+from collections.abc import Callable
+from typing import Annotated, Any, Literal, NamedTuple
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from pydantic import (
@@ -15,6 +16,10 @@ from pydantic import (
     model_validator,
 )
 from pydantic.types import StrictInt
+
+from ..logging import get_logger
+
+logger = get_logger(__name__)
 
 _SAFE_PATH_RE = re.compile(r"^/[a-zA-Z0-9/_.-]+$")
 
@@ -279,3 +284,81 @@ class TriggersSettings(BaseModel):
 def parse_trigger_config(raw: dict[str, Any]) -> TriggersSettings:
     """Parse and validate a raw trigger config dict into settings."""
     return TriggersSettings.model_validate(raw)
+
+
+class TriggerChatFallback(NamedTuple):
+    """A trigger whose ``project`` is bound to a chat it will NOT post to."""
+
+    kind: Literal["cron", "webhook"]
+    trigger_id: str
+    project: str
+    project_chat_id: int
+
+
+def find_trigger_chat_fallbacks(
+    settings: TriggersSettings,
+    *,
+    default_chat_id: int | None,
+    project_chat_id: Callable[[str], int | None],
+) -> list[TriggerChatFallback]:
+    """Return triggers with a ``project`` but no ``chat_id`` (#894).
+
+    Such a trigger posts to the transport's default ``chat_id``, not the
+    project's bound chat, which surprises anyone who expects ``project =``
+    to route the run. Routing is deliberately unchanged (existing crons may
+    rely on it); this only finds the cases worth a warning: the project has
+    a bound chat and it differs from the default chat.
+    """
+    found: list[TriggerChatFallback] = []
+    triggers: list[tuple[Literal["cron", "webhook"], CronConfig | WebhookConfig]] = [
+        *(("cron", c) for c in settings.crons),
+        *(("webhook", w) for w in settings.webhooks),
+    ]
+    for kind, trigger in triggers:
+        if trigger.project is None or trigger.chat_id is not None:
+            continue
+        bound = project_chat_id(trigger.project)
+        if bound is None or bound == default_chat_id:
+            continue
+        found.append(TriggerChatFallback(kind, trigger.id, trigger.project, bound))
+    return found
+
+
+def warn_trigger_chat_fallbacks(
+    settings: TriggersSettings,
+    *,
+    default_chat_id: int | None,
+    project_chat_id: Callable[[str], int | None],
+    warned: set[TriggerChatFallback],
+) -> list[TriggerChatFallback]:
+    """Log ``trigger.cron.chat_fallback`` / ``trigger.webhook.chat_fallback``
+    once per finding (#894).
+
+    *warned* carries the findings already logged by this process, so a
+    config hot-reload doesn't repeat the warning; a changed finding (new
+    trigger, different project or project chat) is logged again. Returns
+    the newly logged findings.
+    """
+    new: list[TriggerChatFallback] = []
+    for item in find_trigger_chat_fallbacks(
+        settings, default_chat_id=default_chat_id, project_chat_id=project_chat_id
+    ):
+        if item in warned:
+            continue
+        warned.add(item)
+        new.append(item)
+        id_field = "cron_id" if item.kind == "cron" else "webhook_id"
+        logger.warning(
+            f"trigger.{item.kind}.chat_fallback",
+            **{id_field: item.trigger_id},
+            project=item.project,
+            project_chat_id=item.project_chat_id,
+            default_chat_id=default_chat_id,
+            hint=(
+                f"This {item.kind} has project = {item.project!r} but no "
+                "chat_id, so it posts to the transport default chat_id, not "
+                "the project's chat. Add chat_id to send it to the project's "
+                "chat."
+            ),
+        )
+    return new

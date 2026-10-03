@@ -4955,3 +4955,179 @@ def test_822_inline_keyboard_found_logs_tool() -> None:
     assert found
     assert found[0]["tool_name"] == "Write"
     assert found[0]["request_id"] == "r-822"
+
+
+# ── #894: cron setup footguns (restart-required flip, project chat fallback) ──
+
+
+def _894_projects() -> ProjectsConfig:
+    return ProjectsConfig(
+        projects={
+            "myapp": ProjectConfig(
+                alias="myapp",
+                path=Path("/tmp/myapp"),
+                worktrees_dir=Path(".worktrees"),
+                chat_id=-100555,
+            )
+        },
+        default_project=None,
+        chat_map={-100555: "myapp"},
+    )
+
+
+def _894_cfg(
+    tmp_path: Path, *, trigger_config: dict[str, Any] | None
+) -> TelegramBridgeConfig:
+    runner = ScriptRunner([Return(answer="ok")], engine=CODEX_ENGINE)
+    runtime = TransportRuntime(
+        router=_make_router(runner),
+        projects=_894_projects(),
+        config_path=tmp_path / "untether.toml",
+    )
+    return TelegramBridgeConfig(
+        bot=FakeBot(),
+        runtime=runtime,
+        chat_id=123,
+        startup_msg="",
+        exec_cfg=ExecBridgeConfig(
+            transport=FakeTransport(),
+            presenter=MarkdownPresenter(),
+            final_notify=True,
+        ),
+        trigger_config=trigger_config,
+    )
+
+
+async def _894_run_with_reload(
+    monkeypatch: pytest.MonkeyPatch,
+    cfg: TelegramBridgeConfig,
+    toml_after_reload: str,
+) -> None:
+    """Start the loop, rewrite untether.toml, fire one reload, then stop."""
+    from untether.config_watch import ConfigReload
+    from untether.runtime_loader import RuntimeSpec
+    from untether.settings import TelegramTransportSettings, UntetherSettings
+
+    tg_settings = {"bot_token": "tok", "chat_id": 123, "allow_any_user": True}
+    transport_config = TelegramTransportSettings.model_validate(tg_settings)
+    new_settings = UntetherSettings.model_validate(
+        {"transport": "telegram", "transports": {"telegram": tg_settings}}
+    )
+    runner = ScriptRunner([Return(answer="ok")], engine=CODEX_ENGINE)
+    spec = RuntimeSpec(
+        router=_make_router(runner),
+        projects=_894_projects(),
+        allowlist=None,
+        plugin_configs=None,
+    )
+    reload_done = anyio.Event()
+
+    async def fake_watch(*, config_path, runtime, default_engine_override, on_reload):
+        _ = runtime, default_engine_override
+        config_path.write_text(toml_after_reload)
+        await on_reload(
+            ConfigReload(
+                settings=new_settings, runtime_spec=spec, config_path=config_path
+            )
+        )
+        reload_done.set()
+
+    monkeypatch.setattr(telegram_loop, "watch_config_changes", fake_watch)
+    await run_main_loop(
+        cfg,
+        _679_waiting_poller(reload_done),
+        watch_config=True,
+        transport_config=transport_config,
+    )
+
+
+_894_TRIGGERS_ON = """
+[triggers]
+enabled = true
+
+[[triggers.crons]]
+id = "probe"
+schedule = "30 13 * * *"
+prompt = "hi"
+project = "myapp"
+"""
+
+
+@pytest.mark.anyio
+async def test_894_reload_enabling_triggers_flags_restart_required(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Flipping [triggers] enabled false→true by hot-reload can't start the
+    scheduler: say so in the log AND in the Telegram reload notice."""
+    cfg = _894_cfg(tmp_path, trigger_config=None)
+    with capture_logs() as logs:
+        await _894_run_with_reload(monkeypatch, cfg, _894_TRIGGERS_ON)
+
+    restart = [e for e in logs if e["event"] == "config.reload.restart_required"]
+    assert len(restart) == 1
+    assert restart[0]["key"] == "triggers.enabled"
+    assert restart[0]["log_level"] == "warning"
+    transport = cast(FakeTransport, cfg.exec_cfg.transport)
+    texts = [c["message"].text for c in transport.send_calls]
+    notices = [t for t in texts if "triggers.enabled" in t]
+    assert len(notices) == 1
+    assert "Restart required" in notices[0]
+    # The newly enabled project-only cron is also flagged (#894 part 2).
+    fallback = [e for e in logs if e["event"] == "trigger.cron.chat_fallback"]
+    assert [e["cron_id"] for e in fallback] == ["probe"]
+
+
+@pytest.mark.anyio
+async def test_894_reload_without_triggers_flip_is_quiet(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A reload that leaves triggers disabled raises no restart flag/notice."""
+    cfg = _894_cfg(tmp_path, trigger_config=None)
+    with capture_logs() as logs:
+        await _894_run_with_reload(monkeypatch, cfg, "[triggers]\nenabled = false\n")
+
+    assert not [e for e in logs if e["event"] == "config.reload.restart_required"]
+    transport = cast(FakeTransport, cfg.exec_cfg.transport)
+    assert not [
+        c for c in transport.send_calls if "triggers.enabled" in c["message"].text
+    ]
+
+
+@pytest.mark.anyio
+async def test_894_startup_warns_project_cron_chat_fallback_once(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A project-only cron is flagged at startup; an unchanged reload doesn't
+    repeat the warning, and triggers already running need no restart."""
+    trigger_config = {
+        "enabled": True,
+        "crons": [
+            {
+                "id": "probe",
+                "schedule": "30 13 * * *",
+                "prompt": "hi",
+                "project": "myapp",
+            }
+        ],
+    }
+    cfg = _894_cfg(tmp_path, trigger_config=trigger_config)
+    with capture_logs() as logs:
+        await _894_run_with_reload(monkeypatch, cfg, _894_TRIGGERS_ON)
+
+    fallback = [e for e in logs if e["event"] == "trigger.cron.chat_fallback"]
+    assert len(fallback) == 1
+    assert fallback[0]["project"] == "myapp"
+    assert fallback[0]["project_chat_id"] == -100555
+    assert fallback[0]["default_chat_id"] == 123
+    assert not [e for e in logs if e["event"] == "config.reload.restart_required"]
+
+
+def test_894_triggers_enable_needs_restart_truth_table() -> None:
+    from untether.telegram.loop import _triggers_enable_needs_restart as f
+
+    # Only an off→on edge with no running scheduler needs a restart.
+    assert f(previous=False, current=True, running=False) is True
+    assert f(previous=True, current=True, running=False) is False  # already told
+    assert f(previous=False, current=True, running=True) is False  # hot re-enable
+    assert f(previous=True, current=False, running=True) is False  # off is hot
+    assert f(previous=False, current=False, running=False) is False

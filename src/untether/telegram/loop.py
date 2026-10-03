@@ -927,11 +927,32 @@ class TelegramLoopState:
     seen_update_order: deque[int]
     seen_message_keys: set[MessageKey]
     seen_messages_order: deque[MessageKey]
+    # #894: last-seen ``[triggers] enabled`` (startup, then each reload) so a
+    # reload flipping it on is flagged restart-required exactly once.
+    triggers_enabled: bool = False
+    # #894: ``trigger.*.chat_fallback`` findings already logged, so reloads
+    # don't repeat the warning.
+    trigger_chat_fallbacks_warned: set[TriggerChatFallback] = field(default_factory=set)
+
+
+def _triggers_enable_needs_restart(
+    *, previous: bool, current: bool, running: bool
+) -> bool:
+    """#894: whether a reload's ``[triggers] enabled`` value needs a restart.
+
+    The cron scheduler and webhook server only start at startup, so turning
+    ``enabled`` on is a no-op until restart when nothing is running. Only
+    the off→on edge is flagged (not every later reload). Turning it off is
+    hot (``TriggerManager.update`` clears every cron and route), and so is
+    turning it back on while the scheduler from startup is still running.
+    """
+    return current and not previous and not running
 
 
 if TYPE_CHECKING:
     from ..runner_bridge import RunningTasks
     from ..triggers.manager import TriggerManager
+    from ..triggers.settings import TriggerChatFallback
 
 
 _FORWARD_FIELDS = (
@@ -1803,6 +1824,7 @@ async def run_main_loop(
         seen_update_order=deque(),
         seen_message_keys=set(),
         seen_messages_order=deque(),
+        triggers_enabled=bool(cfg.trigger_config and cfg.trigger_config.get("enabled")),
     )
 
     def refresh_topics_scope() -> None:
@@ -2014,6 +2036,42 @@ async def run_main_loop(
                     )
                     state.transport_id = reload.settings.transport
 
+                # #894: read [triggers] once — for the restart check below
+                # (which must land before the reload notice) and for the
+                # trigger hot-reload at the end of this handler.
+                raw_triggers: object = None
+                triggers_read_error: Exception | None = None
+                try:
+                    from ..config import read_config
+
+                    raw_triggers = read_config(reload.config_path).get("triggers")
+                except (ConfigError, ValueError, TypeError, OSError) as exc:
+                    triggers_read_error = exc
+                triggers_enabled_now = isinstance(raw_triggers, dict) and bool(
+                    raw_triggers.get("enabled")
+                )
+                if triggers_read_error is None:
+                    # #894: hot-reload can't start the scheduler/server, so
+                    # flag a false→true flip as restart-required (log + the
+                    # Telegram reload notice) instead of silently doing
+                    # nothing.
+                    if _triggers_enable_needs_restart(
+                        previous=state.triggers_enabled,
+                        current=triggers_enabled_now,
+                        running=trigger_manager is not None,
+                    ):
+                        logger.warning(
+                            "config.reload.restart_required",
+                            key="triggers.enabled",
+                            hint=(
+                                "The cron scheduler and webhook server only "
+                                "start at startup; restart Untether to run "
+                                "the configured triggers."
+                            ),
+                        )
+                        _reload_restart_keys.append("triggers.enabled")
+                    state.triggers_enabled = triggers_enabled_now
+
                 # #547 axis 2 / #548: broadcast the affirmative
                 # "Hot-reloaded — No restart needed." (or, if any
                 # restart-only key was edited, the matching
@@ -2035,22 +2093,33 @@ async def run_main_loop(
                         )
 
                 # --- Hot-reload trigger configuration ---
-                if trigger_manager is not None:
+                if triggers_read_error is not None:
+                    if trigger_manager is not None:
+                        logger.warning(
+                            "config.reload.triggers_failed",
+                            error=str(triggers_read_error),
+                        )
+                elif trigger_manager is not None or triggers_enabled_now:
                     try:
-                        from ..config import read_config
                         from ..triggers.settings import (
                             TriggersSettings,
                             parse_trigger_config,
+                            warn_trigger_chat_fallbacks,
                         )
 
-                        raw_toml = read_config(reload.config_path)
-                        raw_triggers = raw_toml.get("triggers")
-                        if isinstance(raw_triggers, dict) and raw_triggers.get(
-                            "enabled"
-                        ):
+                        if isinstance(raw_triggers, dict) and triggers_enabled_now:
                             new_settings = parse_trigger_config(raw_triggers)
-                            trigger_manager.update(new_settings)
-                        else:
+                            if trigger_manager is not None:
+                                trigger_manager.update(new_settings)
+                            # #894: warn (once) about project-only triggers
+                            # that will post to the default chat.
+                            warn_trigger_chat_fallbacks(
+                                new_settings,
+                                default_chat_id=cfg.chat_id,
+                                project_chat_id=cfg.runtime.project_chat_id,
+                                warned=state.trigger_chat_fallbacks_warned,
+                            )
+                        elif trigger_manager is not None:
                             # Triggers disabled or removed — clear all.
                             trigger_manager.update(TriggersSettings())
                     except (ValueError, TypeError, OSError) as exc:
@@ -2469,10 +2538,21 @@ async def run_main_loop(
                 from ..triggers.dispatcher import TriggerDispatcher
                 from ..triggers.manager import TriggerManager
                 from ..triggers.server import run_webhook_server
-                from ..triggers.settings import parse_trigger_config
+                from ..triggers.settings import (
+                    parse_trigger_config,
+                    warn_trigger_chat_fallbacks,
+                )
 
                 try:
                     trigger_settings = parse_trigger_config(cfg.trigger_config)
+                    # #894: a project-only trigger posts to the default chat,
+                    # not the project's — warn once so it isn't a surprise.
+                    warn_trigger_chat_fallbacks(
+                        trigger_settings,
+                        default_chat_id=cfg.chat_id,
+                        project_chat_id=cfg.runtime.project_chat_id,
+                        warned=state.trigger_chat_fallbacks_warned,
+                    )
                     # #317: pass config_path so the manager can load/save
                     # the run_once fired-state alongside untether.toml.
                     trigger_manager = TriggerManager(
