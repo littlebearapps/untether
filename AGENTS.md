@@ -21,7 +21,7 @@ Telegram <-> TelegramPresenter <-> RunnerBridge <-> Runner (claude/codex/opencod
 - Python 3.12+, anyio for async, msgspec for JSONL, structlog for logging
 - Ruff for linting (`uv run ruff check src/ tests/`), pytest with 80% coverage threshold
 - Australian English in user-facing text (realise, colour, behaviour, licence)
-- Conventional commits: `feat:`, `fix:`, `docs:`, `refactor:`, `test:`
+- Conventional commits: `feat:`, `fix:`, `docs:`, `refactor:`, `test:`, `chore:`
 - Feature branches: `feature/*`, `fix/*`, `docs/*`
 
 ## Runner 3-event contract
@@ -59,7 +59,7 @@ uv run pytest tests/test_*.py -x # specific file
 
 | Command | Description |
 |---------|-------------|
-| `/cancel` | Stop the running agent |
+| `/cancel` | Stop the running agent (an idle live session is closed; pending `/at` runs and loops are dropped too) |
 | `/agent` | Show or set engine for this chat |
 | `/model` | Override the model for an engine |
 | `/planmode` | Set Claude Code permission mode (on/plan-auto/auto/off) |

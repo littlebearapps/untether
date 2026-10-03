@@ -62,7 +62,7 @@ rules the command obeys:
 
 | Level | Target shape | Checks |
 |---|---|---|
-| **QA-0** | docs / command-docs | link/path/consistency checks (mirror the context hooks' concerns) — no code run |
+| **QA-0** | docs / command-docs | link/path/consistency checks (the concerns of the unwired context-drift hooks) — no code run |
 | **QA-1** | small code/config | `uv run pytest tests/test_<area>.py` + import/smoke + `ruff check` |
 | **QA-2** | feature/module exercisable safely | full `uv run pytest` + coverage + local dry-run + structlog inspection |
 | **QA-3** | multi-component / transport / lifecycle / hot-reload / watchdog | **integration tiers via Telegram MCP** + `journalctl` signature review + `ps`/FD/zombie checks |

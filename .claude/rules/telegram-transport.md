@@ -74,7 +74,7 @@ Agents write files to `.untether-outbox/` during a run. On completion, `outbox_d
 
 ## /at command (#288)
 
-`telegram/at_scheduler.py` is a module-level holder for the task group + `run_job` closure; `install()` is called from `run_main_loop` once both are available. `AtCommand.handle` calls `schedule_delayed_run(chat_id, thread_id, delay_s, prompt)` which starts an anyio task that sleeps then dispatches. Pending delays tracked in `_PENDING`; `/cancel` drops them via `cancel_pending_for_chat(chat_id)`. Drain integration via `at_scheduler.active_count()`. No persistence — restart cancels all pending delays (documented in issue body).
+`telegram/at_scheduler.py` is a module-level holder for the task group + `run_job` closure; `install()` is called from `run_main_loop` once both are available. `AtCommand.handle` calls `schedule_delayed_run(chat_id, thread_id, delay_s, prompt)` which starts an anyio task that sleeps then dispatches. Pending delays tracked in `_PENDING`; `/cancel` drops them via `cancel_pending_for_chat(chat_id, thread_filter=…)`. Drain integration via `at_scheduler.active_count()`. No persistence — restart cancels all pending delays (documented in issue body).
 
 ## Markdown rendering (`telegram/render.py`)
 
@@ -95,6 +95,13 @@ A slash command sent while a prompt is pending in the `ForwardCoalescer` window
 - `/<engine>` / `/<project>` directives and `/steer <text>` are prompts — they
   skip the barrier and meet the #794 merge/flush rules.
 
+## Reply and quote context (#736)
+
+The replied-to message (or the user's selected quote, which wins) is appended to the prompt by
+`append_reply_context()` (`telegram/reply_context.py`) **after** directive, engine and resume parsing, as escaped,
+bounded (`REPLY_CONTEXT_MAX_CHARS`) reference data inside `<telegram_reply_context>`. Resume-footer routing lines are
+removed first (`strip_reply_routing_lines`). Never let reply or quote text reach the routing parsers.
+
 ## Plan outline rendering
 
 Plan outlines render as formatted Telegram text via `render_markdown()` + `split_markdown_body()`. Approval buttons (✅/❌/📋) appear on the last outline message. Outline and notification messages are cleaned up on approve/deny via `_OUTLINE_REGISTRY`.
@@ -102,6 +109,11 @@ Plan outlines render as formatted Telegram text via `render_markdown()` + `split
 ## /new command
 
 `/new` cancels the running tasks (and pending `/loop` entries) of the message's thread in forum supergroups and private chats — chat-wide in non-forum groups — via `_cancel_chat_tasks(..., thread_filter=thread_filter_for(msg))` (in `commands/topics.py`; the predicate lives in `telegram/topics.py`, General = no thread = topic id 1) before clearing stored sessions ([#826](https://github.com/littlebearapps/untether/issues/826)). The `/cancel` no-reply fallback uses the same predicate for running tasks, queued jobs, `/at` delays and loops. Scope key = `RunningTask.thread_id` (the originating message's thread), never the echoed `ref.thread_id`. This prevents process leaks from orphaned Claude/engine subprocesses.
+
+An idle Claude live session (answered, no in-flight turn or background task; `running_task_is_idle_after_result`) is
+not a "running" task for wording or ambiguity: `/new` says `closed the idle session` (#895), and `/cancel` closes it
+(`cancel.idle_session_closed`) and **carries on** to drop pending `/at` delays and loops, always replying (#902).
+Never return early from `/cancel` after closing an idle session.
 
 ## After changes
 

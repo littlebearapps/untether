@@ -24,7 +24,7 @@ paths:
 3. Every changelog entry must link to a GitHub issue: `[#N](https://github.com/littlebearapps/untether/issues/N)`
 4. Run `uv lock` to sync the lockfile
 5. **Run integration tests against `@untether_dev_bot`** — see below and `docs/reference/integration-testing.md`
-6. **FAQ touch-up check (`docs/faq/faq.md`)** — scan the new CHANGELOG entries against the help-centre FAQ. If any entry changes engine support, auth/billing model, privacy/data flow, approval semantics, cost budgets, voice transcription config, install/update/uninstall paths, or any other user-facing surface answered by the FAQ, update `docs/faq/faq.md` in the same release branch. The file is gate-protected — Bash `rm`/`mv`/`>` are blocked by `help-faq-protect.sh`, but Edit/Write are encouraged. See [`help-faq.md`](./help-faq.md) for the full update cadence and shape rules. Tracking issue: [#477](https://github.com/littlebearapps/untether/issues/477).
+6. **FAQ touch-up check (`docs/faq/faq.md`)** — scan the new CHANGELOG entries against the help-centre FAQ. If any entry changes engine support, auth/billing model, privacy/data flow, approval semantics, cost budgets, voice transcription config, install/update/uninstall paths, or any other user-facing surface answered by the FAQ, update `docs/faq/faq.md` in the same release branch. Never delete, move or truncate it (`help-faq-protect.sh` is meant to block Bash `rm`/`mv`/`>` but is not wired — Claude Code never loads `.claude/hooks.json`); Edit/Write are encouraged. See [`help-faq.md`](./help-faq.md) for the full update cadence and shape rules. Tracking issue: [#477](https://github.com/littlebearapps/untether/issues/477).
 
 ## Semantic versioning
 

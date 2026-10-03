@@ -32,7 +32,7 @@ All Telegram writes go through `TelegramOutbox` — never call Bot API directly.
 
 ## Commit conventions
 
-- Conventional commits: `feat:`, `fix:`, `docs:`, `refactor:`, `test:`
+- Conventional commits: `feat:`, `fix:`, `docs:`, `refactor:`, `test:`, `chore:`
 - Feature branches: `feature/*`, `fix/*`, `docs/*`
 - Every bug fix references a GitHub issue
 - Update CHANGELOG.md for user-facing changes

@@ -66,7 +66,7 @@ Intentionally NOT built
   /dq-spot-check  — no warehouse / no DQ patterns
   /cost-watch     — cost lives in runtime budget config (cost_tracker.py + [cost_budget]), not a command
   /issue-triage   — covered by A1 + A2
-  /context-health — covered by the context hooks + the context-quality rule
+  /context-health — covered by the context-quality rule (the context-drift hooks in .claude/hooks.json are not wired)
 ```
 
 The delivery model is **three boundaries, not five stages** —
@@ -158,7 +158,7 @@ Not full loops — helpers the loops lean on.
 - **Trigger:** documentation drifted with **no code change** to deliver alongside it.
 - **Driver:** `.claude/commands/docs.md`. The default path is `/pr-dev` (docs are folded in as a completion criterion); `/docs` is the escape hatch.
 - **Output:** minimal edits to CHANGELOG / `docs/faq/faq.md` / `docs/reference/test-catalog.md` / `docs/reference/*`.
-- **Authority:** docs only. No code, no PR (a code branch routes to `/pr-dev`), no master/tag/release. FAQ is gate-protected.
+- **Authority:** docs only. No code, no PR (a code branch routes to `/pr-dev`), no master/tag/release. Never delete or move the FAQ (edit it freely).
 
 ### `/research` + `docs/findings/` — current-truth convention  ·  Status: **available**
 
@@ -182,7 +182,7 @@ Read-only, verdict-returning reviewers under `.claude/agents/`, invoked via the 
 
 | ID | What | Where |
 |---|---|---|
-| A1 | `untether-issue-watcher` daemon — files `auto:error-report` from error-log patterns, host-tagged | 5 hosts (lba-1, nsd, channelo, sl, mac); `contrib/untether-issue-watcher.*` |
+| A1 | `untether-issue-watcher` daemon — files `auto:error-report` from error-log patterns, host-tagged | 5 hosts (lba-1, nsd, channelo, sl, mac); `contrib/untether-issue-watcher.service` / `contrib/com.littlebearapps.untether-issue-watcher.plist` |
 | A2 | `/monitor` cron — files `auto:monitor-audit` (bugs + enhancements) | per-host configs + `untether-fleet` meta-target |
 | A3 | `fleet-rollout.sh` / `fleet-rollback.sh` / `fleet-status.sh` — parallel upgrade/rollback/status, attestation-gated | `scripts/` (operator-run) |
 | A4 | `run-integration-tests.sh` — writes the per-VERSION attestation marker | `scripts/` |

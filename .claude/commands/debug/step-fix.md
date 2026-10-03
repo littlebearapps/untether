@@ -21,8 +21,9 @@ From `.claude/rules/release-discipline.md` and `.claude/rules/dev-workflow.md`:
 - **NEVER restart `untether.service` (staging) to test code changes.** Restart
   `untether-dev.service` instead. Restarting staging during dev is *always*
   wrong (see `dev-workflow.md`).
-- **NEVER edit guard scripts or `.claude/hooks.json`.** `release-guard-protect.sh`
-  blocks these. Only Nathan changes them outside Claude Code.
+- **NEVER edit guard scripts or `.claude/hooks.json`.** Only Nathan changes them
+  outside Claude Code. (They are not wired — Claude Code never loads
+  `.claude/hooks.json` — so nothing will stop you; obey the rule anyway.)
 
 The release pipeline is single-gate: `dev` push → TestPyPI; Nathan
 squash-merges a stable version PR to `master` → auto-tag → release.yml
@@ -54,8 +55,9 @@ Follow the area's rule file:
   callback, ephemeral cleanup).
 - control-channel changes → `control-channel.md` (PTY lifecycle, registry
   cleanup, outline gate, tap claims, plan re-arm).
-- runner, schema and telegram edits trigger a prompt hook in
-  `.claude/hooks.json` that prints the area's contract reminders.
+- `.claude/hooks.json` defines a prompt hook with the area's contract reminders
+  for runner, schema and telegram edits, but it is not wired; read the area rule
+  yourself.
 
 ### 3. Run targeted tests
 
@@ -71,7 +73,7 @@ patterns. Coverage threshold is 80%.
 ### 4. Run full suite + lint + format
 
 ```bash
-uv run pytest               # 2372 tests, ~30 sec
+uv run pytest               # full suite (~5.7k tests; count in docs/reference/test-catalog.md)
 uv run ruff check src/ tests/      # lint
 uv run ruff format src/ tests/   # format — CI checks formatting
 ```
@@ -167,9 +169,9 @@ EOF
 - **Restarting staging from inside an active session.** The 120s drain
   timeout drops your final response. See `feedback_agent_self_restart_pattern`.
   Use `untether-dev.service` and let hot-reload pick up config changes.
-- **Editing `.claude/hooks.json` or guard scripts.** Blocked. Don't try.
-- **Skipping the test step.** Pre-commit hook will fail; `--no-verify` is
-  blocked. Run tests locally first.
+- **Editing `.claude/hooks.json` or guard scripts.** Forbidden. Don't try.
+- **Skipping the test step.** There is no local pre-commit hook, so nothing
+  stops a broken commit until CI. Run tests locally first; never `--no-verify`.
 - **Committing files with secrets.** `secret-warning` hook fires on
   `git add`/`commit`. If it warns, fix the file before continuing — never
   bypass.

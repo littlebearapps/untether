@@ -32,6 +32,11 @@ Live sessions (#776) and empty-resume recovery (#631/#632, Claude only): idle li
 fresh session. **Never retry the same poisoned session.** Clean idle closes (#791) and `stopped_clean` closes (#829 B2) are
 not quarantined. Detail: `docs/reference/runners/claude/runner.md` → "Live sessions".
 
+A live session's errored first result is delivered early (#900, `_deliver_error_early` in `handle_message`) only when no
+post-return recovery would act on it. The early check and the post-return path share the same gate helpers
+(`_empty_resend_due`, `_auto_continue_due`, `_stream_idle_retry_due`): change a recovery condition there, never in one
+path only, or an error final gets delivered and then recovered (or held and never recovered).
+
 ## Event creation
 
 Use `EventFactory` (from `src/untether/events.py`) for all event construction:

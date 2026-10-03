@@ -223,16 +223,17 @@ uv run pytest
 
 ## 2m. Process diagnostics (live or recent)
 
-For stall investigations, check `/proc` snapshots captured by `utils/proc_diag.py`:
+For stall investigations, check the `/proc` snapshot fields (from `utils/proc_diag.py`) that the
+stall watchdog logs on `progress_edits.stall_detected`:
 
 ```bash
-# In journalctl, look for proc_diag JSON blobs
 journalctl --user -u untether-dev --since "${HOURS}h ago" --output=cat \
-  | grep -A 1 'proc_diag' | head -40
+  | grep -E 'progress_edits\.stall_detected|subprocess\.liveness_stall' | head -40
 ```
 
-Key fields: `cpu_active`, `rss_mb`, `tcp_open`, `fds`, `children`,
-`tool_name`. `cpu_active=None` means the diag couldn't read /proc — usually
+Key fields: `process_alive`, `process_state`, `cpu_active`, `tree_active`, `rss_kb`,
+`tcp_established`/`tcp_total`, `fd_count`, `last_event_type`, `recent_events`, `last_action`.
+`cpu_active=None` means the diag couldn't read /proc (or it's the first sample) — usually
 permissions or zombie state.
 
 ## What NOT to gather
