@@ -308,6 +308,10 @@ Behaviour:
 - Stores one resume token per engine per chat (per sender in group chats).
 - Auto-resumes when no explicit resume token is present.
 - Reply resume lines always take precedence and update the stored session for that engine.
+- The replied message's text (or caption), or a selected quote (which wins), is appended to the prompt as escaped,
+  bounded reference data in a `<telegram_reply_context>` block — also when the reply resumes a session. Resume-footer
+  lines are stripped first and the block is added after routing, so it can't change the engine, project or session
+  (#736, [#904](https://github.com/littlebearapps/untether/issues/904)).
 - Reset with `/new`.
 
 State is stored in `telegram_chat_sessions_state.json` alongside the config file.
@@ -476,7 +480,7 @@ Commands:
   project chats.
 - `/ctx` shows the bound context and stored session engines inside topics.
   Outside topics, `/ctx set ...` and `/ctx clear` bind the chat context.
-- `/new` inside a topic cancels that topic's running task (and its pending `/loop` entries) and clears stored resume tokens for that topic. Runs in other topics keep going; `/new` in General only cancels General's runs (General = no thread id = topic id 1). The `/cancel` no-reply fallback is scoped the same way. Non-forum groups stay chat-wide ([#826](https://github.com/littlebearapps/untether/issues/826)).
+- `/new` inside a topic cancels that topic's running task (and its pending `/loop` entries) and clears stored resume tokens for that topic. Runs in other topics keep going; `/new` in General only cancels General's runs (General = no thread id = topic id 1). The `/cancel` no-reply fallback is scoped the same way. Non-forum groups stay chat-wide ([#826](https://github.com/littlebearapps/untether/issues/826)). A `/cancel` that only finds an idle Claude live session closes it, still drops that scope's pending `/at` runs and loops, and always replies ([#902](https://github.com/littlebearapps/untether/issues/902)).
 
 State is stored in `telegram_topics_state.json` alongside the config file.
 Delete it to reset all topic bindings and stored sessions.
