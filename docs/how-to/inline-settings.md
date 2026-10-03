@@ -106,12 +106,12 @@ When you switch engines via the Engine & model page, the home page automatically
 | Diff preview | off, on | Yes (chat prefs) |
 | Engine & model | any configured engine + model | Yes (chat prefs) |
 | Effort / Reasoning | Claude: low, medium, high, xhigh, max; Codex: low, medium, high, xhigh | Yes (chat prefs) |
-| Cost & usage | API cost, subscription usage, budget, auto-cancel | Yes (chat prefs) |
+| Cost & usage | API cost, subscription usage, budget, stop at limit | Yes (chat prefs) |
 | Resume line | off, on | Yes (chat prefs) |
 | Listen | all, mentions | Yes (chat prefs) |
 | Follow-up | queue, steer | Yes (chat prefs) |
 | Budget | off, on | Yes (chat prefs) |
-| Auto-cancel | off, on (stored; not enforced yet) | Yes (chat prefs) |
+| Stop at limit | off, on | Yes (chat prefs) |
 
 Approval policy appears instead of Permission mode when the engine is Codex CLI. Approval mode appears instead of Permission mode when the engine is Gemini CLI.
 
@@ -152,7 +152,7 @@ The Cost & Usage sub-page merges cost display and budget controls into a unified
 - **API cost** — per-run cost in the message footer (requires engine cost reporting)
 - **Subscription usage** — 5h/weekly subscription usage in the footer (Claude Code only)
 - **Budget** — turn budget tracking on or off for this chat (overrides global `[cost_budget]` setting)
-- **Auto-cancel** — per-chat override of `[cost_budget] auto_cancel`; stored, but budgets are checked after a run finishes, so it doesn't cancel anything yet (see [Cost budgets](cost-budgets.md#alert-levels))
+- **Stop at limit** — per-chat override of `[cost_budget] auto_cancel`. Stops new runs once the daily budget is reached and ends a session after the reply that passes the per-run budget. It can't interrupt a reply in progress (see [Cost budgets](cost-budgets.md#stop-at-limit))
 
 Each toggle uses the `[✓ Label: on] [Label: off] [Clear]` compact pattern (labels distinguish the four toggles). Clear removes the per-chat override and falls back to the global config.
 

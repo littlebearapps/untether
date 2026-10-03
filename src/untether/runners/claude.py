@@ -782,7 +782,7 @@ _USER_CLOSE_REASONS = frozenset({"cancel", "new", "drain", "options_changed"})
 # transcript complete, resumable — P0 G7-G9). ``abs_cap`` closes mid-turn and
 # ``error`` follows a failed run: both keep the forced-teardown quarantine.
 _STOPPED_CLEAN_REASONS = frozenset(
-    {"max_hold", "cancel", "new", "drain", "options_changed"}
+    {"max_hold", "cancel", "new", "drain", "options_changed", "budget_stop"}
 )
 
 

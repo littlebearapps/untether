@@ -63,7 +63,7 @@ Autonomous loops consume API credits or your Claude subscription quota. A 24-hou
 - Short conversations: ~$0.01–$0.05 per fire (cache-warm).
 - Long conversations: cache may evict between fires, costing $0.10–$0.50 per fire.
 
-**Set a daily budget BEFORE turning on Loop mode** in `/config → 💰 Cost & usage` (or `[cost_budget].max_cost_per_day` in `untether.toml`). The same daily cost cap applies to loop fires automatically — there is no separate per-loop budget. See [Cost budgets](cost-budgets.md) for setup.
+**Set a daily budget BEFORE turning on Loop mode** in `/config → 💰 Cost & usage` (or `[cost_budget].max_cost_per_day` in `untether.toml`). The same daily cost cap applies to loop fires automatically — there is no separate per-loop budget. With **Stop at limit** on, fires after the cap is reached are refused. See [Cost budgets](cost-budgets.md#stop-at-limit) for setup.
 
 ### Cancelling a loop
 

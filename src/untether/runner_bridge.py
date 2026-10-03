@@ -1388,6 +1388,54 @@ class _CompletionAccounting:
     cost_alert_text: str | None
     cost_alert: object | None
     outlier_text: str | None
+    # #896: "Stop at limit" footer line when this result ends the session.
+    budget_stop_text: str | None = None
+
+
+def _note_budget_run_cost(
+    state: dict[str, Any],
+    run_usage: dict[str, Any] | None,
+    *,
+    engine: str,
+    session_id: str | None,
+) -> str | None:
+    """#896: add a result's spend to the run's cumulative cost and decide
+    whether its live session must end after this reply.
+
+    ``run_usage`` is the #778 per-run / per-turn delta, so the running sum is
+    the whole live run's spend. Returns the stop line the first time the
+    budget is passed (the session id is then kept in ``state["sid"]`` for
+    ``close`` after delivery); ``None`` otherwise. Never raises.
+    """
+    cost = (run_usage or {}).get("total_cost_usd")
+    if isinstance(cost, (int, float)) and not isinstance(cost, bool) and cost > 0:
+        state["run_cost"] += float(cost)
+    if state["sid"] is not None or engine != "claude" or not session_id:
+        return None
+    try:
+        from .budget_gate import run_stop, run_stop_text
+        from .runners.claude import get_live_session
+        from .runners.run_options import get_run_options
+
+        live = get_live_session(session_id)
+        if live is None or getattr(live, "closing", False):
+            return None  # the run has already ended: nothing to stop
+        stop = run_stop(state["run_cost"], get_run_options())
+    except Exception:  # noqa: BLE001 — a budget check must never break delivery
+        logger.warning("cost_budget.stop_check_failed", exc_info=True)
+        return None
+    if stop is None:
+        return None
+    state["sid"] = session_id
+    logger.warning(
+        "cost_budget.run_stopped",
+        scope=stop[0],
+        spent=round(stop[1], 4),
+        budget=stop[2],
+        run_cost=round(state["run_cost"], 4),
+        session_id=session_id,
+    )
+    return run_stop_text(stop)
 
 
 def _format_budget_suffix(alert: object) -> str:
@@ -4736,6 +4784,7 @@ def _live_closing_notice(
         limit = {
             "max_hold": "the background hold limit",
             "abs_cap": "the session time limit",
+            "budget_stop": "the cost budget",  # #896
         }.get(reason, "the session limit")
         why = f"at {limit}"
     return (
@@ -5593,6 +5642,30 @@ async def handle_message(
                 message_id=ref.message_id,
             )
 
+    # #896: this run's cumulative spend (every turn of a live session) and,
+    # once "Stop at limit" fires, the session to close after delivery.
+    budget_stop: dict[str, Any] = {"run_cost": 0.0, "sid": None, "closed": False}
+
+    async def _budget_stop_close() -> None:
+        """#896: end the live session after the reply that passed the budget.
+        Only at idle — a turn already running is never cut; the next turn
+        boundary retries."""
+        sid = budget_stop["sid"]
+        if sid is None or budget_stop["closed"]:
+            return
+        from .budget_gate import BUDGET_STOP_REASON
+        from .runners.claude import close_live_session
+
+        try:
+            closed = await close_live_session(
+                sid, BUDGET_STOP_REASON, notice=True, only_if_idle=True
+            )
+        except Exception:  # noqa: BLE001 — never break delivery
+            logger.warning("cost_budget.session_close_failed", exc_info=True)
+            return
+        budget_stop["closed"] = closed
+        logger.info("cost_budget.session_closed", session_id=sid, closed=closed)
+
     def _account_completion(
         completed: CompletedEvent,
         final_resume: ResumeToken | None,
@@ -5686,6 +5759,12 @@ async def handle_message(
             cost_alert_text=alert_text,
             cost_alert=alert,
             outlier_text=_check_run_cost_outlier(run_usage),
+            budget_stop_text=_note_budget_run_cost(
+                budget_stop,
+                run_usage,
+                engine=runner.engine,
+                session_id=resume_value,
+            ),
         )
         if turn is not None:
             turn.accounting = acct
@@ -6074,6 +6153,10 @@ async def handle_message(
         _outlier_text = acct.outlier_text
         if _outlier_text and _cost_alert_obj is None:
             final_rendered = _insert_footer_line(final_rendered, f"\n{_outlier_text}")
+        if acct.budget_stop_text:  # #896
+            final_rendered = _insert_footer_line(
+                final_rendered, f"\n{acct.budget_stop_text}"
+            )
 
         if safeguard is not None:
             final_rendered = _insert_footer_line(
@@ -6120,6 +6203,7 @@ async def handle_message(
             and not _outlier_text
             # #814: a stopped response always gets its own message.
             and safeguard is None
+            and not acct.budget_stop_text  # #896: the stop line is seen
             and await _fold_wake_turn(turn, completed)
         ):
             delivery["sent"] = True
@@ -6414,6 +6498,7 @@ async def handle_message(
             # live session is already closing — no listener, no status.
             return
         if not _is_live_run():
+            await _budget_stop_close()  # #896
             return
         await _deliver_outbox_now(user_ref.message_id)
         sid = completed.resume or run_outcome.resume
@@ -6423,6 +6508,7 @@ async def handle_message(
             add_live_session_listener(sid.value, _on_live_notice)
         # #777: background work outlives the answer — open its status message.
         await _bg_after_turn()
+        await _budget_stop_close()  # #896
 
     def _new_turn_tracker() -> ProgressTracker:
         tracker = ProgressTracker(engine=runner.engine, clock=clock)
@@ -6554,11 +6640,13 @@ async def handle_message(
             await _deliver_turn_cancelled(ctx)
             await _deliver_outbox_now(ctx.reply_to.message_id)
             await _bg_after_turn()
+            await _budget_stop_close()  # #896
             return
         await _deliver_final(completed, RunOutcome(resume=completed.resume), turn=ctx)
         await _deliver_outbox_now(ctx.reply_to.message_id)
         # #777: a later turn may have launched (more) background work.
         await _bg_after_turn()
+        await _budget_stop_close()  # #896
 
     async def _resolve_unrun_followups() -> None:
         """Follow-ups written into the live session whose turn never started

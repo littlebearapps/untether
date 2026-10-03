@@ -47,7 +47,7 @@ async def refuse_run(
     rerun: Callable[[], Awaitable[None]],
 ) -> None:
     """Tell the chat a run was refused by the daily budget gate."""
-    source = unattended_trigger(context)
+    source = _skipped_source(context)
     logger.warning(
         "cost_budget.run_blocked",
         scope="per_day",
@@ -82,12 +82,31 @@ async def refuse_run(
             message=RenderedMessage(text=text, extra=extra),
             options=SendOptions(
                 reply_to=MessageRef(channel_id=chat_id, message_id=user_msg_id),
-                notify=True,
+                # A skipped trigger replies to its own (already pushed)
+                # "Scheduled" announcement; a refused prompt pushes.
+                notify=source is None,
                 thread_id=thread_id,
             ),
         )
     except Exception:  # noqa: BLE001 — a failed notice must not crash the worker
         logger.warning("cost_budget.notice_failed", chat_id=chat_id, exc_info=True)
+
+
+def _skipped_source(context: RunContext | None) -> str | None:
+    """The trigger to name in a skip notice, or None for a person's prompt.
+
+    Crons and webhooks (nobody there) and ``/loop`` fires (they repeat on
+    their own) are skipped with a notice and no button — one per fire,
+    replying to the fire's own announcement; a prompt — including an ``/at``
+    run someone scheduled — gets **Run anyway**.
+    """
+    source = unattended_trigger(context)
+    if source is not None:
+        return source
+    raw = context.trigger_source if context is not None else None
+    if raw and raw.startswith("loop:"):
+        return raw
+    return None
 
 
 def is_run_anyway_callback(data: str | None) -> bool:

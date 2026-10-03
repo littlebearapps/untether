@@ -524,7 +524,7 @@ This is not a security concern — `UNTETHER_SESSION` is a simple signal variabl
 
 **Symptoms:** A `🛑 … exceeded … budget` line (or a `🛑 budget` / `⚠️ 73%` suffix on the `💰` cost line) on a final message.
 
-Budgets are checked after a run finishes, so they alert rather than stop runs; `auto_cancel` is accepted but not enforced yet (see [Cost budgets](cost-budgets.md#alert-levels)). A run stopped mid-stream was cancelled by something else (`/cancel`, the stall watchdog, a restart).
+Budgets are checked when a result arrives, so on their own they alert rather than stop runs. With `auto_cancel = true` (**Stop at limit**) new runs are refused once the daily budget is reached (`🛑 Daily budget reached …`, with a **Run anyway** button) and a live session ends after the reply that passes the per-run budget (`🛑 Stopped: …`); see [Stop at limit](cost-budgets.md#stop-at-limit). Nothing budget-related cuts a reply mid-stream: a run stopped mid-stream was cancelled by something else (`/cancel`, the stall watchdog, a restart).
 
 1. Check your budget settings:
 
@@ -536,7 +536,7 @@ Budgets are checked after a run finishes, so they alert rather than stop runs; `
     warn_at_pct = 70             # early warning threshold
     ```
 
-2. Daily budgets reset at midnight in the server's local time zone (and on restart: the daily total is kept in memory)
+2. Daily budgets reset at midnight in the server's local time zone. The day's total survives restarts (`daily_cost.json` next to `untether.toml`)
 3. To temporarily bypass: set `enabled = false` or increase the limits
 4. Check today's spend with `/health` (`today's API cost`); `/usage` shows Claude subscription usage, not spend
 
@@ -650,6 +650,9 @@ Look for `handle.worker_failed`, `handle.runner_failed`, or `config.read.toml_er
 | `cost.run_outlier` | WARNING | A single run cost more than `[cost_budget] warn_run_above_usd` (default $20) |
 | `message.dropped` | DEBUG | Message from unrecognised chat silently dropped |
 | `cost_budget.exceeded` | ERROR | Run or daily cost exceeded budget |
+| `cost_budget.run_blocked` | WARNING | Stop at limit refused a new run (`scope=per_day`; `trigger` names a skipped cron/webhook) |
+| `cost_budget.run_anyway` | WARNING | Someone tapped **Run anyway** past the daily budget |
+| `cost_budget.run_stopped` | WARNING | Stop at limit ended a live session after the reply that passed the budget (`scope=per_run` or `per_day`) |
 
 All logs include `session_id` once a session starts, enabling per-session filtering with `grep` or `jq`.
 

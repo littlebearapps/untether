@@ -136,7 +136,7 @@ Partly, by default. Claude Code's `/loop` and `ScheduleWakeup` are session-scope
 
 To enable end-to-end /loop support, turn on **Loop mode** in `/config → 🔁 Loop mode`. When on, Untether observes Claude's schedule registrations and re-fires each iteration when due, spawning a fresh `claude --resume` subprocess per fire.
 
-Be aware: autonomous loops consume API credits or your subscription quota. Set a budget in `/config → 💰 Cost & usage` *before* turning Loop mode on: loop fires count toward the same per-run and daily budgets. Budgets are checked after each run and alert rather than stop the next fire, so the runaway caps in `[loop]` (`max_iterations`, `max_total_duration_hours`, `expiry_days`) are what actually bound a loop. See the [Schedule tasks how-to](https://littlebearapps.com/help/untether/schedule-tasks/#loop-mode) for details.
+Be aware: autonomous loops consume API credits or your subscription quota. Set a budget in `/config → 💰 Cost & usage` *before* turning Loop mode on: loop fires count toward the same per-run and daily budgets. Budgets alert by default; turn on **Stop at limit** (`auto_cancel = true`) and loop fires are refused once the daily budget is reached. Otherwise the runaway caps in `[loop]` (`max_iterations`, `max_total_duration_hours`, `expiry_days`) are what actually bound a loop. See the [Schedule tasks how-to](https://littlebearapps.com/help/untether/schedule-tasks/#loop-mode) for details.
 
 ## Can I schedule runs or trigger them from a webhook?
 

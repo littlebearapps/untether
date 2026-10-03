@@ -376,6 +376,7 @@ _CLOSE_REASONS = {
     "new": "new session started",
     "drain": "Untether restarting",
     "options_changed": "chat settings changed",
+    "budget_stop": "cost budget reached",  # #896
     "idle_no_tasks": "session closed",
 }
 

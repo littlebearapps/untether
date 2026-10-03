@@ -293,6 +293,28 @@ class TestRunEngineGate:
         assert blocked[0]["scope"] == "per_day"
         assert blocked[0]["trigger"] == source
 
+    async def test_loop_fire_skipped_without_button(self, cfg_path: Path) -> None:
+        _write_config(cfg_path, _ON)
+        _spend(0.50)
+        runner, transport, exec_cfg, runtime = _engine_kit()
+        ctx = RunContext(trigger_source="loop:ut_loop_ab12cd34")
+        await _run(exec_cfg, runtime, context=ctx)
+        assert runner.calls == []
+        assert len(transport.send_calls) == 1
+        call = transport.send_calls[0]
+        assert call["options"].notify is False
+        assert "Skipped loop:ut_loop_ab12cd34" in call["message"].text
+        assert _buttons(call) == []
+
+    async def test_at_run_gets_run_anyway(self, cfg_path: Path) -> None:
+        """/at was scheduled by a person in the chat: it gets the button."""
+        _write_config(cfg_path, _ON)
+        _spend(0.50)
+        _runner, transport, exec_cfg, runtime = _engine_kit()
+        await _run(exec_cfg, runtime, context=RunContext(trigger_source="at:abc"))
+        assert transport.send_calls[0]["message"].text == BLOCK_TEXT
+        assert _buttons(transport.send_calls[0])
+
     async def test_queued_placeholder_removed(self, cfg_path: Path) -> None:
         _write_config(cfg_path, _ON)
         _spend(0.50)

@@ -176,7 +176,7 @@ Tests for cost tracking, budget enforcement, and operational commands.
 
 | # | Test | What to send | What to verify | Catches |
 |---|------|-------------|----------------|---------|
-| B1 | **Budget auto-cancel** | Set `[cost_budget] enabled = true`, `max_cost_per_run = 0.01`, `auto_cancel = true` in config, restart, send expensive prompt | Run auto-cancels with budget warning message | Cost tracker, auto-cancel flag |
+| B1 | **Budget Stop at limit** | Set `[cost_budget] enabled = true`, `max_cost_per_day = 0.01`, `auto_cancel = true` (hot-reloads), send two prompts; tap **Run anyway**. Then `max_cost_per_run = 0.01` and a prompt that starts a background task | 2nd prompt refused with `🛑 Daily budget reached …` + **Run anyway**, which runs it once; per-run: first reply carries `🛑 Stopped: run cost …` and the session closes with no wake turn | Daily gate, Run anyway, turn-boundary stop (#896) |
 | B2 | **Daily budget warning** | Set `[cost_budget] enabled = true`, `max_cost_per_day = 0.05`, run several cheap prompts | Warning appears when approaching threshold | Daily accumulation, warn_at_pct |
 | B3 | **/stats** | Run several prompts across engines, then `/stats` | Per-engine run counts, action counts, durations render | Stats aggregation |
 | B4 | **SIGTERM drain** | Start a run, then `kill -TERM $(systemctl --user show -p MainPID --value untether-dev)` from shell | Active run drains, completion message sent, bot exits cleanly | Signal handling, graceful shutdown |
@@ -581,7 +581,7 @@ When detected, note the engine, chat ID, message IDs, and exact behaviour. Creat
 - **Stall tests (S1)** are timing-dependent — thresholds vary by `[watchdog]` config and by context (defaults: 5 min normal, 10 min local tool `tool_timeout`, 15 min MCP tool `mcp_tool_timeout`, 15 min child processes/subagents `subagent_timeout`, approval pending 10 min for the first reminder then 30 min). Check `~/.untether-dev/untether.toml` for current values.
 - **Ask question (C4)** is hard to trigger deterministically — Claude decides when to ask. Try ambiguous prompts.
 - **Forward coalescing (T4)** depends on `forward_coalesce_s` debounce window — send forwards quickly enough to be within the window.
-- **Budget auto-cancel (B1)** depends on how fast the engine reports costs — some engines report at the end, not incrementally.
+- **Budget Stop at limit (B1)** acts only when a reply finishes (Claude reports cost per result); it never cuts a reply mid-turn.
 
 ### Engine-specific
 
