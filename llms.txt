@@ -25,7 +25,7 @@
 - [Interactive approval](https://github.com/littlebearapps/untether/blob/master/docs/how-to/interactive-approval.md): Approve, deny, and discuss tool calls from Telegram
 - [Plan mode](https://github.com/littlebearapps/untether/blob/master/docs/how-to/plan-mode.md): Permission modes (on / plan-auto / auto / off) and plan-outline approval
 - [Model and reasoning](https://github.com/littlebearapps/untether/blob/master/docs/how-to/model-reasoning.md): Per-chat model and effort overrides
-- [Cost budgets](https://github.com/littlebearapps/untether/blob/master/docs/how-to/cost-budgets.md): Per-run and daily budget limits, warnings, and auto-cancel
+- [Cost budgets](https://github.com/littlebearapps/untether/blob/master/docs/how-to/cost-budgets.md): Per-run and daily budget limits, warnings, and Stop at limit
 - [Subscription usage](https://github.com/littlebearapps/untether/blob/master/docs/how-to/subscription-usage.md): Claude subscription quota in /usage and the footer
 - [Inline settings](https://github.com/littlebearapps/untether/blob/master/docs/how-to/inline-settings.md): /config button menu with Cost & Usage page
 - [Session statistics](https://github.com/littlebearapps/untether/blob/master/docs/how-to/session-statistics.md): /stats per-engine run counts, actions, and duration

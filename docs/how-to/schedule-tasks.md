@@ -23,7 +23,7 @@ After scheduling, you'll see a confirmation:
     ⏳ Scheduled: will run in 30m
     Cancel with /cancel.
 
-When the delay expires, the prompt runs as a normal agent session. Use `/cancel` to cancel all pending delays in the current chat.
+When the delay expires, the prompt runs as a normal agent session. Send `/cancel` (not as a reply) to cancel all pending delays in the current chat, or in a forum topic that topic's; it replies with what it dropped (`❌ cancelled 2 pending /at runs.`). If a run is in progress, that `/cancel` stops the run instead, so send a second one to drop the delays. A Claude session that is only idling after its answer doesn't count as a run: `/cancel` closes it and still drops the delays ([#902](https://github.com/littlebearapps/untether/issues/902)).
 
 !!! note "Not persistent"
     Pending `/at` delays are held in memory. They are lost if Untether restarts. For persistent scheduled tasks, use [cron triggers](#cron-triggers) instead.
@@ -48,11 +48,13 @@ Claude Code has a built-in `/loop <interval> <prompt>` command (and a no-interva
 
 ### Runaway-safety caps
 
-The `[loop]` config has caps in case a loop runs longer than expected:
+Every loop has caps in case it runs longer than expected:
 
-- `max_iterations = 20` — cap on iteration count (NOT a cost cap)
-- `max_total_duration_hours = 4` — wall-clock cap (NOT a cost cap)
-- `expiry_days = 7` — auto-expire 7 days after creation (matches upstream)
+- 20 iterations (`max_iterations`) — cap on iteration count (NOT a cost cap)
+- 4 hours (`max_total_duration_hours`) — wall-clock cap (NOT a cost cap)
+- 7 days (`expiry_days`) — auto-expire 7 days after creation (matches upstream)
+
+These values are fixed for now: the matching `[loop]` keys are accepted in `untether.toml` but not applied yet.
 
 These bound loop duration regardless of cost. They are *not* a substitute for setting a budget — see "Cost considerations" below.
 
@@ -63,7 +65,7 @@ Autonomous loops consume API credits or your Claude subscription quota. A 24-hou
 - Short conversations: ~$0.01–$0.05 per fire (cache-warm).
 - Long conversations: cache may evict between fires, costing $0.10–$0.50 per fire.
 
-**Set a daily budget BEFORE turning on Loop mode** in `/config → 💰 Cost & usage` (or `[cost_budget].max_cost_per_day` in `untether.toml`). The same daily cost cap applies to loop fires automatically — there is no separate per-loop budget. See [Cost budgets](cost-budgets.md) for setup.
+**Set a daily budget BEFORE turning on Loop mode** in `/config → 💰 Cost & usage` (or `[cost_budget].max_cost_per_day` in `untether.toml`). The same daily cost cap applies to loop fires automatically — there is no separate per-loop budget. With **Stop at limit** on, fires after the cap is reached are refused. See [Cost budgets](cost-budgets.md#stop-at-limit) for setup.
 
 ### Cancelling a loop
 

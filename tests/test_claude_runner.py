@@ -2,6 +2,7 @@ import contextlib
 import json
 import signal
 import time
+import types
 from datetime import UTC
 from pathlib import Path
 from typing import cast
@@ -5109,6 +5110,49 @@ class TestLoopObservation:
         assert pending[0].prompt == "check the deploy"
         assert pending[0].recurring is True
         assert pending[0].resume_token == "sess-cron-on"
+
+    @pytest.mark.usefixtures("_enable_loop", "_set_chat", "_installed_scheduler")
+    @pytest.mark.parametrize("tool", ["CronCreate", "ScheduleWakeup"])
+    async def test_loop_caps_come_from_config(self, monkeypatch, tool):
+        """[loop] max_iterations / max_total_duration_hours / expiry_days
+        reach the registered entry instead of the hardcoded 20/4/7."""
+        from untether import loop_scheduler
+        from untether import runners as untether_runners
+        from untether.settings import LoopSettings
+
+        settings = types.SimpleNamespace(
+            loop=LoopSettings(
+                enabled=True,
+                max_iterations=5,
+                max_total_duration_hours=2,
+                expiry_days=3,
+            )
+        )
+        monkeypatch.setattr(
+            untether_runners.claude,
+            "load_settings_if_exists",
+            lambda: (settings, Path("untether.toml")),
+        )
+        state = ClaudeStreamState()
+        _seed_state_for_loop_observation(state, session_id="sess-caps")
+        tool_input = (
+            {"cron": "*/5 * * * *", "prompt": "poll", "recurring": True}
+            if tool == "CronCreate"
+            else {"delaySeconds": 3600, "prompt": "check"}
+        )
+        translate_claude_event(
+            _decode_event(_make_tool_use_event(tool, "toolu_caps", tool_input)),
+            title="claude",
+            state=state,
+            factory=state.factory,
+        )
+        pending = loop_scheduler.pending_for_chat(7777)
+        assert len(pending) == 1
+        assert pending[0].max_iterations == 5
+        assert pending[0].max_total_duration_hours == 2
+        assert pending[0].expires_at_wallclock - time.time() == pytest.approx(
+            3 * 86_400, abs=60
+        )
 
     @pytest.mark.usefixtures("_enable_loop", "_set_chat", "_installed_scheduler")
     async def test_cron_create_uses_cron_field_not_cron_expression(self):

@@ -369,7 +369,7 @@ The defenses that the legacy `pypi` environment reviewer was providing are alrea
 - All CI checks must pass before the PR can merge
 - `release.yml` re-validates tag-vs-version match
 - PyPI trusted publishing via OIDC (no static API token to leak)
-- The release-guard hooks block Claude Code from creating tags or pushing master directly
+- Claude Code must never create tags or push master (the local release-guard hooks are not wired; the GitHub ruleset is the gate)
 
 ### Manual override (rare)
 
@@ -381,7 +381,7 @@ git tag vX.Y.Z
 git push origin vX.Y.Z   # triggers release.yml directly
 ```
 
-This path is **Nathan-only**: Claude Code must never create `v*` tags (CLAUDE.md release guard; the release-guard hook also blocks `git tag v*`).
+This path is **Nathan-only**: Claude Code must never create `v*` tags (CLAUDE.md release guard; the local release-guard hook is not wired, so nothing local stops it).
 
 ## Post-release verification
 

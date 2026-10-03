@@ -1272,7 +1272,8 @@ def scenario_ignore_eof_with_task(first: dict) -> None:
 
 def scenario_error_first(first: dict) -> None:
     # The first result is an error (usage limit / API error) — the session
-    # must not be kept live.
+    # must not be kept live. ``FAKE_CLAUDE_ERROR_TEXT`` overrides the error
+    # (#900: a Type-A stall for the #572 retry).
     init()
     emit(
         {
@@ -1282,11 +1283,61 @@ def scenario_error_first(first: dict) -> None:
             "duration_ms": 500,
             "duration_api_ms": 400,
             "num_turns": 1,
-            "result": "API Error: overloaded",
+            "result": os.environ.get("FAKE_CLAUDE_ERROR_TEXT")
+            or "API Error: overloaded",
             "total_cost_usd": 0.001,
         }
     )
     serve_followups()
+
+
+def scenario_error_first_agent_wake(first: dict) -> None:
+    """#900 (mac 2026-10-02): the run's own result is an error while a
+    background agent is still running. Untether closes stdin on the errored
+    result; the agent ignores EOF (#829 G6), finishes, and the CLI runs a
+    wake turn for it before exiting. ``FAKE_CLAUDE_ERROR_TEXT`` sets the
+    run's error (default ``API Error: RUN-FAILED``); ``FAKE_CLAUDE_WAKE_OK``
+    makes the wake turn succeed."""
+    global _cost
+    init()
+    tool_use("Agent", "toolu_ag", {"description": "research", "prompt": "go"})
+    start_bg("a1", "toolu_ag", task_type="local_agent")
+    tool_result("toolu_ag", "Async agent launched successfully.")
+    _cost = round(_cost + 0.5, 6)
+    emit(
+        {
+            "type": "result",
+            "subtype": "error_during_execution",
+            "is_error": True,
+            "duration_ms": 900,
+            "duration_api_ms": 800,
+            "num_turns": 2,
+            "result": os.environ.get("FAKE_CLAUDE_ERROR_TEXT")
+            or "API Error: RUN-FAILED",
+            "total_cost_usd": _cost,
+        }
+    )
+    time.sleep(WAKE_S)  # stdin EOF is ignored while the agent works
+    end_bg("a1")
+    init()
+    if os.environ.get("FAKE_CLAUDE_WAKE_OK"):
+        text("WAKE-REPORT")
+        result("WAKE-REPORT")
+    else:
+        _cost = round(_cost + 0.06, 6)
+        emit(
+            {
+                "type": "result",
+                "subtype": "error_during_execution",
+                "is_error": True,
+                "duration_ms": 300,
+                "duration_api_ms": 200,
+                "num_turns": 1,
+                "result": "API Error: WAKE-FAILED",
+                "total_cost_usd": _cost,
+            }
+        )
+    sys.exit(0)
 
 
 def scenario_safeguard_refusal_retry(first: dict) -> None:
@@ -2474,6 +2525,7 @@ _SCENARIOS = {
     "steer_mid_tool": scenario_steer_mid_tool,
     "steer_post_last_tool": scenario_steer_post_last_tool,
     "error_first": scenario_error_first,
+    "error_first_agent_wake": scenario_error_first_agent_wake,
     "safeguard_refusal_retry": scenario_safeguard_refusal_retry,
     "ignore_eof": scenario_ignore_eof,
     "ignore_eof_with_task": scenario_ignore_eof_with_task,

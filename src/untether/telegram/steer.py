@@ -191,6 +191,13 @@ async def maybe_steer(
                 except Exception:  # noqa: BLE001 — unknown options: let queue decide
                     logger.warning("steer.options_resolve_failed", exc_info=True)
                     return False
+            from ..budget_gate import daily_gate
+
+            if daily_gate(options) is not None:
+                # #896: past the daily budget nothing new goes into the
+                # session; the queue path refuses it (with Run anyway).
+                logger.info("steer.fallback", chat_id=chat_id, reason="budget")
+                return False
             from ..runner_bridge import (
                 pop_followup_anchor,
                 register_followup_anchor,
@@ -243,6 +250,12 @@ async def maybe_steer(
                 # The queue path closes the idle process and resumes with the
                 # new settings (and says so) — nothing to add here.
                 logger.info("steer.fallback", chat_id=chat_id, reason="options_changed")
+                return False
+            if outcome == "result_pending":
+                # #896: the session just went idle and its result hasn't been
+                # budget-checked yet — the queue path waits for that check
+                # and writes it as the next turn (or refuses it at the limit).
+                logger.info("steer.fallback", chat_id=chat_id, reason="result_pending")
                 return False
             reason = "closing" if outcome == "window_closed" else "no_live"
 

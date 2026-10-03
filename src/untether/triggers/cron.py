@@ -8,7 +8,7 @@ from zoneinfo import ZoneInfo
 import anyio
 
 from ..logging import get_logger
-from .dispatcher import TriggerDispatcher
+from .dispatcher import DISPATCH_REFUSED, TriggerDispatcher
 from .manager import TriggerManager
 
 logger = get_logger(__name__)
@@ -174,6 +174,25 @@ async def run_cron_scheduler(
                 logger.info("triggers.cron.firing", cron_id=cron.id)
                 dispatched = await dispatcher.dispatch_cron(cron)
             else:
+                continue
+            if dispatched == DISPATCH_REFUSED:
+                # #896: the daily cost budget refused it before anything ran.
+                # Not recorded as fired, and a one-shot is not consumed: like
+                # a one-shot skipped by /pause, it stays active and fires at
+                # its next schedule match. Not retried every tick (the gate
+                # stays shut until midnight, and a one-shot run that late
+                # would surprise the user) — so any #893 retry is dropped.
+                if cron.run_once:
+                    manager.clear_run_once_pending(cron.id)
+                    logger.warning(
+                        "triggers.cron.run_once_refused",
+                        cron_id=cron.id,
+                        hint=(
+                            "The daily cost budget refused this one-shot; it "
+                            "stays scheduled and fires at its next schedule "
+                            "match."
+                        ),
+                    )
                 continue
             # #893: ``False`` means the announce send failed and no run was
             # started (anything else, incl. a legacy ``None``, is a dispatch).

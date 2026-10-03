@@ -86,7 +86,7 @@ Per-chat permission mode (`/planmode on/plan-auto/auto/off`, or `/config → Per
 
 The **plan-auto** mode was called `auto` before v0.35.5. It was renamed because Claude Code introduced its own `auto` mode, and the two names collided. If you set `permission_mode = "auto"` in `untether.toml` and want the old behaviour, change it to `"plan-auto"`. Untether logs one warning at startup (and again if a config reload changes the list) naming every engine setting and cron that uses `"auto"`. Per-chat settings you made through the buttons are migrated for you.
 
-For non-Claude engines, approval is enforced per-engine pre-run — Codex runs inside its sandbox (`/config` → Approval policy: **safe** = read-only), Gemini uses `--approval-mode` — rather than via mid-run buttons. Full guide: [Interactive approval](https://littlebearapps.com/help/untether/interactive-approval/).
+For non-Claude engines, approval is enforced per-engine pre-run — Codex runs inside its sandbox (`/config` → Approval policy: **safe** = read-only), the deprecated Gemini CLI uses `--approval-mode` — rather than via mid-run buttons. Full guide: [Interactive approval](https://littlebearapps.com/help/untether/interactive-approval/).
 
 ## What happens if my agent crashes or my phone loses signal mid-run?
 
@@ -136,7 +136,7 @@ Partly, by default. Claude Code's `/loop` and `ScheduleWakeup` are session-scope
 
 To enable end-to-end /loop support, turn on **Loop mode** in `/config → 🔁 Loop mode`. When on, Untether observes Claude's schedule registrations and re-fires each iteration when due, spawning a fresh `claude --resume` subprocess per fire.
 
-Be aware: autonomous loops consume API credits or your subscription quota. Set a budget in `/config → 💰 Cost & usage` *before* turning Loop mode on: loop fires count toward the same per-run and daily budgets. Budgets are checked after each run and alert rather than stop the next fire, so the runaway caps in `[loop]` (`max_iterations`, `max_total_duration_hours`, `expiry_days`) are what actually bound a loop. See the [Schedule tasks how-to](https://littlebearapps.com/help/untether/schedule-tasks/#loop-mode) for details.
+Be aware: autonomous loops consume API credits or your subscription quota. Set a budget in `/config → 💰 Cost & usage` *before* turning Loop mode on: loop fires count toward the same per-run and daily budgets. Budgets alert by default; turn on **Stop at limit** (`auto_cancel = true`) and loop fires are refused once the daily budget is reached. Otherwise the runaway caps in `[loop]` (`max_iterations`, `max_total_duration_hours`, `expiry_days`) are what actually bound a loop. See the [Schedule tasks how-to](https://littlebearapps.com/help/untether/schedule-tasks/#loop-mode) for details.
 
 ## Can I schedule runs or trigger them from a webhook?
 
@@ -180,8 +180,7 @@ Configure in `untether.toml`:
 [transports.telegram.files]
 outbox_enabled = true
 outbox_dir = ".untether-outbox"
-outbox_max_files = 20
-outbox_max_file_size_mb = 50
+outbox_max_files = 20   # the per-file cap is fixed at 50 MB
 outbox_cleanup = true
 outbox_notify_skipped = true
 ```

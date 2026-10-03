@@ -135,6 +135,8 @@ Configure via `[auto_continue]` in `untether.toml`:
 | `enabled` | `true` | Enable automatic session resumption. |
 | `max_retries` | `1` | Maximum consecutive retries per run (0–3). |
 
+The other `[auto_continue]` keys (empty-resume recovery and its limits) are listed in the [config reference](../reference/config.md#auto_continue).
+
 See [troubleshooting](troubleshooting.md#claude-code-exits-without-finishing-auto-continue) for details on when this triggers and how to tune it.
 
 ## Run diagnostics
@@ -148,10 +150,12 @@ untether doctor
 This validates:
 
 - Telegram bot token is valid and the bot is reachable
-- Chat ID is correct and the bot can send messages
+- Chat ID is reachable by the bot
 - Topics configuration (if enabled)
 - File transfer settings (enabled, `allowed_user_ids`)
-- Voice transcription setup
+- Voice transcription has an API key
+
+It doesn't check engine CLIs; the startup message lists engines that are `not installed`, `misconfigured` or `failed to load`. `untether doctor` exits with status 1 if any check reports an error.
 
 It doesn't check engine CLIs or deny globs: the startup message lists engines that are missing, misconfigured or failed to load.
 
@@ -196,9 +200,9 @@ When enabled, Untether watches the config file for changes and reloads most sett
 **Hot-reloadable** (applied immediately):
 
 - Trigger system: crons, webhooks, auth, timezones (switching `triggers.enabled` off clears them; switching it on, and the server `host`/`port`/`rate_limit`, need a restart)
-- Telegram bridge: `voice_transcription`, `[files]`, `allowed_user_ids`, `allow_any_user`, `show_resume_line`, timing
+- Telegram bridge: `voice_transcription`, `[files]` (except the outbox settings, which currently need a restart), `allowed_user_ids`, `allow_any_user`, `show_resume_line`, timing
 - `[security]` keys: `env_extra_allow`, `env_extra_prefix_allow` (re-read on next runner spawn)
-- `[progress]` keys: `max_actions`, `verbosity`, `min_render_interval`, `group_chat_rps`, `heartbeat_interval`, `show_background_tasks`, `background_tasks_max_rows`, `consolidate_wake_turns`, `show_context_usage` ([#269](https://github.com/littlebearapps/untether/issues/269), [#481](https://github.com/littlebearapps/untether/issues/481), [#777](https://github.com/littlebearapps/untether/issues/777), [#819](https://github.com/littlebearapps/untether/issues/819)); `verbosity`, `max_actions` and `show_context_usage` also reach the next turn of an open Claude session ([#863](https://github.com/littlebearapps/untether/issues/863))
+- `[progress]` keys: `max_actions`, `verbosity`, `min_render_interval`, `heartbeat_interval`, `show_background_tasks`, `background_tasks_max_rows`, `consolidate_wake_turns`, `show_context_usage` ([#269](https://github.com/littlebearapps/untether/issues/269), [#481](https://github.com/littlebearapps/untether/issues/481), [#777](https://github.com/littlebearapps/untether/issues/777), [#819](https://github.com/littlebearapps/untether/issues/819)); `verbosity`, `max_actions` and `show_context_usage` also reach the next turn of an open Claude session ([#863](https://github.com/littlebearapps/untether/issues/863))
 - `[watchdog]` keys: `tool_timeout`, `mcp_tool_timeout`, `claude_stream_idle_timeout_ms`, `post_result_idle_timeout`, `post_result_idle_enabled`, `bash_grace_seconds` (re-read per run); the live-session keys `post_result_bg_max_hold`, `bg_hold_rearm_on_progress`, `bg_hold_declared_waits` and `rearm_plan_mode` are read when a Claude session starts, so an open session keeps the old value until it closes
 - `followup_mode` (the default for [steer follow-ups](steer-follow-ups.md))
 - Trigger pause/resume: in-memory only, toggled via `/config → ⏰ Triggers` ([#294](https://github.com/littlebearapps/untether/issues/294)) — restart auto-resumes
@@ -211,8 +215,11 @@ Untether re-reads `untether.toml` only when its contents (or the `UNTETHER__*` e
 
 - `bot_token`, `chat_id` (Telegram connectivity)
 - `session_mode` and the whole `[transports.telegram.topics]` table (structural)
-- `triggers.enabled` (off → on), `triggers.server.host` / `port` / `rate_limit`
+- `triggers.enabled` (off → on), `triggers.server.host` / `port` / `rate_limit` / `max_body_bytes`
 - `message_overflow` (message splitting strategy)
+- `[progress] group_chat_rps` (read when the Telegram client starts)
+- the top-level `transport`
+- `watch_config` itself (the watcher starts with the process)
 
 ## Process management
 

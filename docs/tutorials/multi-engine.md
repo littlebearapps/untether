@@ -15,7 +15,7 @@ Different engines have different strengths:
 | **OpenCode** | 75+ providers via Models.dev, local models | Broadest provider support |
 | **Pi** | Multi-provider auth, conversational | Context compaction |
 | **Gemini CLI** ⚠️ | Deprecated — removal in 0.36.0 | 3-tier approval mode (read-only/edit/full), auto Pro/Flash routing, extensions |
-| **AMP** ⚠️ | Deprecated — removal in 0.36.0 | Mode selection (deep/rush/smart), rich permissions |
+| **AMP** ⚠️ | Deprecated — removal in 0.36.0 | Mode selection (deep/free/rush/smart), rich permissions |
 
 Gemini CLI and AMP still load and run, but are no longer supported — don't start new work on them. See [Deprecated engines](https://github.com/littlebearapps/untether#deprecated-engines) in the README.
 

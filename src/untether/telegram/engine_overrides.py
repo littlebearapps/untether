@@ -54,6 +54,17 @@ class EngineOverrides(msgspec.Struct, forbid_unknown_fields=False):
     loop_enabled: bool | None = None
 
 
+def with_override(
+    current: EngineOverrides | None, **changes: object
+) -> EngineOverrides:
+    """Copy *current* (or an empty override) with *changes* applied.
+
+    Setters must use this rather than rebuilding ``EngineOverrides`` field by
+    field: a field left out of a rebuild is silently cleared (#903).
+    """
+    return msgspec.structs.replace(current or EngineOverrides(), **changes)
+
+
 @dataclass(frozen=True, slots=True)
 class OverrideValueResolution:
     value: str | None

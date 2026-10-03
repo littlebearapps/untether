@@ -61,6 +61,33 @@ def test_append_reply_context_replaces_control_and_format_characters() -> None:
     assert "\u202e" not in prompt
 
 
+def _quoted(text: str) -> str:
+    prompt = append_reply_context("change this", selected_quote=text, reply_text=None)
+    return prompt.split("<selected_quote>\n", 1)[1].split("\n</selected_quote>", 1)[0]
+
+
+def test_append_reply_context_keeps_zwj_emoji_and_zwnj_scripts() -> None:
+    """#904: only bidi controls are neutralised; ZWJ (emoji sequences), ZWNJ
+    (Persian/Indic text) and the soft hyphen are legitimate content."""
+    family = "\U0001f468\u200d\U0001f469\u200d\U0001f467\u200d\U0001f466"
+    skin_tone = "\U0001f469\U0001f3fd\u200d\U0001f4bb"
+    persian = "می\u200cخواهم"
+    soft_hyphen = "hyphen\u00adation"
+    for text in (family, skin_tone, persian, soft_hyphen):
+        assert _quoted(text) == text
+    assert _quoted(f"{family} {persian}\n\t{soft_hyphen}") == (
+        f"{family} {persian}\n\t{soft_hyphen}"
+    )
+
+
+def test_append_reply_context_neutralises_every_bidi_control() -> None:
+    bidi = "\u202a\u202b\u202c\u202d\u202e\u2066\u2067\u2068\u2069\u200e\u200f\u061c"
+    quoted = _quoted(f"a{bidi}b")
+    assert quoted == "a" + "�" * len(bidi) + "b"
+    for char in bidi:
+        assert char not in quoted
+
+
 def test_strip_reply_routing_lines_preserves_content_and_removes_footer() -> None:
     def is_resume_line(line: str) -> bool:
         return "codex resume" in line

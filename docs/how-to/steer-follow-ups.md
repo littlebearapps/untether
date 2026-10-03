@@ -40,7 +40,7 @@ If the steer arrives after Claude's last tool call (it is already writing its an
 followup_mode = "steer"
 ```
 
-Send `/queue` (no text) or pick **Queue** in `/config` to switch back. **Clear override** in `/config` returns the chat to the `untether.toml` default.
+Send `/queue` (no text) or pick **Queue** in `/config` to switch back. **Clear override** in `/config` returns the chat to the `untether.toml` default. In a group, only admins can change the default with a bare `/steer` or `/queue`; anyone allowed to use the bot can still send `/steer <text>` or `/queue <text>`.
 
 Voice notes follow the default: a transcribed voice note sent to a steer chat is steered.
 
@@ -58,10 +58,10 @@ The message is queued as normal and Untether tells you why:
 | Reply | Meaning |
 |---|---|
 | `↪️ Steer isn't supported on codex — queued instead.` | The chat's engine isn't Claude Code. |
-| `↪️ No live Claude run to steer — queued instead.` | Nothing is running, or the session has no permission mode (legacy mode can't take input mid-run). |
+| `↪️ No live Claude run to steer — queued instead.` | Nothing is running, the session has no permission mode (legacy mode can't take input mid-run), live sessions are off (`[watchdog] live_sessions = false`), or there is no session to steer into (for example handoff mode with nothing stored). |
 | `↪️ The current run is ending — queued instead.` | The run was cancelled or is shutting down. |
 
-With steer as the chat default you only see these while something is actually running, once per run — a steer chat with nothing running just starts a normal run. An explicit `/steer <text>` always tells you.
+With steer as the chat default you only see these while something is actually running, once per run — a steer chat with nothing running just starts a normal run. An explicit `/steer <text>` tells you too, with two exceptions: while Claude is waiting on a question (`AskUserQuestion`) the text is queued without a note, and if your model or mode changed since the session started, the queued run posts its own notice when it restarts the session with the new settings.
 
 ## Related
 

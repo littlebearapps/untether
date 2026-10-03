@@ -60,7 +60,7 @@ If the target file already exists, Untether auto-appends a numeric suffix (`_1`,
 ```
 
 !!! untether "Untether"
-    saved `docs/spec.pdf` in `happy-gadgets` (42 KB)
+    saved `docs/spec.pdf` in `happy-gadgets` (42 kb)
 
 !!! note "Path safety"
     Deny globs are checked against the path you give **and** the path it resolves to after following symlinks inside the project, so an in-root symlink can't route an upload into `.git/hooks` or onto `.env` ([#390](https://github.com/littlebearapps/untether/issues/390)). A refused path gets a reply naming the rule, such as ``path denied by rule: `**/.ssh/**` ``, with `(resolves to …)` added when a symlink led there. Paths that leave the project root are refused. If you upload through a symlinked folder, the confirmation shows the real path the file landed at (e.g. `inbox/a.txt` → `data/inbox/a.txt`).
@@ -96,7 +96,7 @@ Agents can send files to you automatically — plan docs, generated images, scri
                               └──────────────────┘                └───────────┘
 ```
 
-Every agent session receives a preamble telling it about the outbox. The agent decides which files to share — you receive them as Telegram document messages with `📎 filename (size)` captions, arriving just after the final text response.
+Every new run receives a preamble telling it about the outbox (follow-ups and steers sent into a live Claude session don't repeat it). The agent decides which files to share — you receive them as Telegram document messages with `📎 filename (size)` captions, arriving just after the final text response.
 
 ### Configuration
 
@@ -163,11 +163,11 @@ All engines support outbox delivery — any agent that can write files to disk c
 | Codex CLI | Yes | — |
 | OpenCode | Yes | — |
 | Pi | Yes | — |
-| Gemini CLI (deprecated) | Needs config | Set approval mode to "Full access" via `/config` → Approval mode |
+| Gemini CLI (deprecated) | Yes | Untether runs it with `--approval-mode yolo` unless the chat picks **Edit files**, which can still write files |
 | AMP (deprecated) | Yes | — |
 
 !!! tip "Gemini CLI permissions"
-    Gemini CLI defaults to read-only approval mode. To enable file creation (and outbox delivery), set the approval mode to "Full access" via `/config` → **Approval mode** in the Gemini chat.
+    Untether runs Gemini CLI with `--approval-mode yolo` by default (the **Read-only** choice in `/config` → **Approval mode** lands on the same default), so it can create files for the outbox without any setup. See [Interactive approval → Gemini CLI](interactive-approval.md#gemini-cli-approval-mode).
 
 ### Limitations
 

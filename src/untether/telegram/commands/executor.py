@@ -204,6 +204,7 @@ async def _run_engine(
     show_resume_line: bool = True,
     progress_ref: MessageRef | None = None,
     run_options: EngineRunOptions | None = None,
+    budget_bypass: bool = False,
 ) -> None:
     reply = partial(
         send_plain,
@@ -219,6 +220,49 @@ async def _run_engine(
     if is_shutting_down():
         await reply(text="Untether is restarting — try again shortly.")
         return
+
+    # #896: "Stop at limit" — refuse new runs once today's spend reached the
+    # daily budget. Every run start (prompts, /continue, crons, webhooks,
+    # /at, loop fires, command runs) passes here.
+    if not budget_bypass:
+        from ...budget_gate import daily_gate
+
+        blocked = daily_gate(run_options)
+        if blocked is not None:
+            from ..budget_notice import refuse_run
+
+            rerun = partial(
+                _run_engine,
+                exec_cfg=exec_cfg,
+                runtime=runtime,
+                running_tasks=running_tasks,
+                chat_id=chat_id,
+                user_msg_id=user_msg_id,
+                text=text,
+                resume_token=resume_token,
+                context=context,
+                reply_ref=reply_ref,
+                on_thread_known=on_thread_known,
+                on_resume_failed=on_resume_failed,
+                engine_override=engine_override,
+                thread_id=thread_id,
+                show_resume_line=show_resume_line,
+                progress_ref=None,
+                run_options=run_options,
+                budget_bypass=True,
+            )
+            await refuse_run(
+                exec_cfg.transport,
+                chat_id=chat_id,
+                user_msg_id=user_msg_id,
+                thread_id=thread_id,
+                context=context,
+                progress_ref=progress_ref,
+                daily=blocked[0],
+                limit=blocked[1],
+                rerun=rerun,
+            )
+            return
 
     logger.debug(
         "handle.engine_start",
@@ -476,6 +520,32 @@ class _TelegramCommandExecutor(CommandExecutor):
             else self._on_thread_known
         )
         if mode == "capture":
+            from ...budget_gate import daily_block_text, daily_gate
+
+            blocked = daily_gate(run_options)
+            if blocked is not None:
+                # #896: a captured run has nobody to show a notice or a Run
+                # anyway button to (its transport is private) — hand the
+                # refusal back to the plugin instead.
+                logger.warning(
+                    "cost_budget.run_blocked",
+                    scope="per_day",
+                    chat_id=self._chat_id,
+                    thread_id=self._thread_id,
+                    trigger=(
+                        request.context.trigger_source if request.context else None
+                    ),
+                    mode="capture",
+                    daily_cost=round(blocked[0], 4),
+                    budget=blocked[1],
+                )
+                return RunResult(
+                    engine=engine,
+                    message=RenderedMessage(
+                        text=daily_block_text(*blocked, skipped=None)
+                    ),
+                    refused="daily_budget",
+                )
             capture = _CaptureTransport()
             exec_cfg = ExecBridgeConfig(
                 transport=capture,

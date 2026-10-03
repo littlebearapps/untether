@@ -120,6 +120,7 @@ nav = [
     { "Plugin system" = "explanation/plugin-system.md" },
     { "Module map" = "explanation/module-map.md" },
   ] },
+  { "FAQ" = "faq/faq.md" },
 ]
 
 [project.extra]

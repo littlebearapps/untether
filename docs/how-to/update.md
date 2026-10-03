@@ -40,7 +40,7 @@ systemctl --user restart untether
 
 ## Upgrading to v0.35.5
 
-See the [v0.35.5 changelog entry](https://github.com/littlebearapps/untether/blob/master/CHANGELOG.md#v0355) for the full list. Behaviour changes that may affect operators:
+See the [v0.35.5 changelog entry](https://github.com/littlebearapps/untether/blob/master/CHANGELOG.md#v0355-unreleased) for the full list. Behaviour changes that may affect operators:
 
 - **`auto` permission mode renamed `plan-auto` (breaking).** `/planmode auto` now selects Claude Code's own classifier-gated auto mode. Per-chat settings migrate automatically; if `untether.toml` sets `permission_mode = "auto"` and you want the old behaviour, change it to `"plan-auto"`. See [Plan mode](plan-mode.md). ([#741](https://github.com/littlebearapps/untether/issues/741))
 - **`/planmode off` (Accept edits) now asks before shell commands.** Prompting modes (`acceptEdits`, `default`, `manual`) previously approved every tool silently. Anything the mode doesn't cover now shows Approve / Deny buttons unless your Claude Code settings allow it. Crons and webhooks can't wait for a tap — see the next point. ([#749](https://github.com/littlebearapps/untether/issues/749))
@@ -64,7 +64,7 @@ New in v0.35.5 and worth a look after upgrading: [steering a running Claude run]
 
 ## Upgrading to v0.35.4
 
-See the [v0.35.4 changelog entry](https://github.com/littlebearapps/untether/blob/master/CHANGELOG.md#v0354) for the full list. Behaviour changes that may affect operators:
+See the [v0.35.4 changelog entry](https://github.com/littlebearapps/untether/blob/master/CHANGELOG.md#v0354-2026-07-22) for the full list. Behaviour changes that may affect operators:
 
 - **Voice transcription is now SSRF-validated.** If `voice_transcription_base_url` points at a loopback or private-network endpoint (e.g. a local Whisper server at `http://localhost:8000/v1`), transcription is now **refused** unless you allowlist it — add `voice_transcription_url_allowlist = ["127.0.0.0/8"]` to `[transports.telegram]`. The default public path (`api.openai.com`) is unaffected. ([#381](https://github.com/littlebearapps/untether/issues/381))
 - **Webhooks with `auth = "none"` are refused on non-loopback hosts.** An unauthenticated webhook bound to a public interface is now dropped at startup and on hot-reload (polling, commands, and crons keep running); loopback binds are still allowed. To keep an unauthenticated webhook on a public host, set `[triggers] allow_unauthenticated_webhooks = true`. ([#382](https://github.com/littlebearapps/untether/issues/382))
@@ -72,9 +72,16 @@ See the [v0.35.4 changelog entry](https://github.com/littlebearapps/untether/blo
 - **Empty-resume recovery (Claude).** A resume that returns an empty 0-turn result now auto-recovers on a fresh session instead of silently doing nothing, and post-result force-killed sessions are quarantined proactively. No config needed; opt out via `[auto_continue] empty_resume_fresh = false`. ([#631](https://github.com/littlebearapps/untether/issues/631), [#632](https://github.com/littlebearapps/untether/issues/632))
 - **The Claude plan-mode progressive cooldown was retired.** The upstream `ExitPlanMode` re-issue loop it worked around is fixed (CLI 2.1.215); "Pause & Outline Plan" now holds the session open on a text-based outline gate. No action needed. ([#570](https://github.com/littlebearapps/untether/issues/570))
 
+## Upgrading to v0.35.3
+
+See the [v0.35.3 changelog entry](https://github.com/littlebearapps/untether/blob/master/CHANGELOG.md#v0353-2026-05-20) for the full list. Behaviour changes that may affect operators upgrading from v0.35.2 or earlier:
+
+- **An empty `allowed_user_ids` stops startup (breaking, security).** Untether refuses to start with `ConfigError: [transports.telegram] allowed_user_ids is empty …`. Add your Telegram user ID (see [Security → Restrict access](security.md#restrict-access)), or set `allow_any_user = true` if you really want an open bot. ([#377](https://github.com/littlebearapps/untether/issues/377))
+- **`/trigger` is now `/listen`.** The old name still works as a deprecated alias. ([#297](https://github.com/littlebearapps/untether/issues/297))
+
 ## Upgrading to v0.35.2
 
-See the [v0.35.2 changelog entry](https://github.com/littlebearapps/untether/blob/master/CHANGELOG.md#v0352) for the full change list. Behaviour changes that may affect operators upgrading from v0.35.1 or earlier:
+See the [v0.35.2 changelog entry](https://github.com/littlebearapps/untether/blob/master/CHANGELOG.md#v0352-2026-04-20) for the full change list. Behaviour changes that may affect operators upgrading from v0.35.1 or earlier:
 
 - **Claude/Pi subprocess env is now allowlisted.** Arbitrary process env no longer leaks to agent CLIs. If a plugin or MCP server depends on a specific variable, confirm it's on the allowlist — see [Env allowlist (Claude/Pi)](../reference/env-vars.md#env-allowlist-claudepi). ([#198](https://github.com/littlebearapps/untether/issues/198), [#361](https://github.com/littlebearapps/untether/issues/361))
 - **`CLAUDE_STREAM_IDLE_TIMEOUT_MS` default raised to `300000` (5 min).** The old 60 s default killed long-thinking runs. Set the var explicitly to restore the old value. ([#342](https://github.com/littlebearapps/untether/issues/342))

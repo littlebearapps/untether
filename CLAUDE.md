@@ -15,7 +15,7 @@ cost/usage tracking and many UX fixes. Interactive features are **Claude Code-on
 |---|---|
 | What a feature does / which file owns it | `docs/reference/feature-catalog.md` |
 | What each test file covers (+ counts) | `docs/reference/test-catalog.md` |
-| Engine protocol, event mapping | `docs/reference/runners/<engine>/{runner,stream-json-cheatsheet,untether-events}.md` (Codex: `exec-json-cheatsheet.md`) |
+| Engine protocol, event mapping | `docs/reference/runners/<engine>/{runner,stream-json-cheatsheet,untether-events}.md` (Codex: `exec-json-cheatsheet.md` + `untether-events.md`, no `runner.md`) |
 | Claude permission modes, live sessions, control channel | `docs/reference/runners/claude/runner.md` |
 | Telegram transport | `docs/reference/transports/telegram.md` |
 | Dev/staging instances | `docs/reference/dev-instance.md` |
@@ -37,7 +37,7 @@ Telegram <-> TelegramPresenter <-> RunnerBridge <-> Runner (claude/codex/opencod
 - **TelegramPresenter** (`src/untether/telegram/bridge.py`) — progress, inline keyboards, answers
 - **Commands** (`src/untether/telegram/commands/`) — command/callback handlers
 - **Schemas** (`src/untether/schemas/`) — msgspec structs for JSONL; **Triggers** (`src/untether/triggers/`) — cron/webhooks
-- Config: `untether.toml` (with `watch_config = true` most sections hot-reload — off by default; `bot_token`, `chat_id`, `session_mode`, `topics`, `message_overflow` need a restart)
+- Config: `untether.toml` (with `watch_config = true` most sections hot-reload — off by default; `bot_token`, `chat_id`, `session_mode`, `topics`, `message_overflow` need a restart, as does turning `[triggers] enabled` on)
 
 ## Deprecated engines (Gemini CLI, AMP)
 
@@ -83,8 +83,9 @@ versions to PyPI. Third-party actions are pinned to SHAs.
 - Claude Code **MUST NOT** push to `master`/`main`, merge PRs targeting `master`, create `v*` tags, or run `gh release`.
   Allowed: push feature branches, `gh pr create --base dev`, `gh pr merge <n> --squash` **only when base = `dev`**.
 - Nathan's merge of the `dev`→`master` PR is the single release gate (auto-tag → `release.yml` → PyPI → fleet rollout).
-- Real boundary: GitHub branch ruleset + CODEOWNERS (`* @littlebearapps/core`). Local guard scripts in `.claude/hooks/`
-  are defense-in-depth. **Never edit `.claude/hooks.json` or the guard scripts.**
+- Real boundary: GitHub branch ruleset + CODEOWNERS (`* @littlebearapps/core`). The guard scripts in `.claude/hooks/`
+  are **not wired** (2026-10-03): Claude Code reads hooks only from `settings*.json` / plugins, never `.claude/hooks.json`, so no hook
+  will stop you; obey these rules yourself. **Never edit `.claude/hooks.json` or the guard scripts.**
 - `docs/faq/faq.md` backs the marketing-site FAQPage schema: **never delete or move it**; editing is encouraged.
 
 ## Release workflow (summary — full rules in `.claude/rules/release-discipline.md`)
@@ -103,5 +104,5 @@ daemon) or `auto:monitor-audit` (`/monitor`).
 
 - Python 3.12+, anyio (async), msgspec (JSONL), structlog (logging), ruff, pytest + coverage
 - Runner backends registered via entry points in `pyproject.toml`
-- Australian English in user-facing text; conventional commits (`feat:`, `fix:`, `docs:`, `test:`, `chore:`)
+- Australian English in user-facing text; conventional commits (`feat:`, `fix:`, `docs:`, `refactor:`, `test:`, `chore:`)
 - Every new feature bullet → `docs/reference/feature-catalog.md`; every new/changed test file → `docs/reference/test-catalog.md`

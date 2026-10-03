@@ -2,6 +2,7 @@ After you finish work, commit with a conventional message. Only commit the files
 
 Always run checks before committing:
 ```sh
+uv run ruff format --check src/ tests/
 uv run ruff check src/ tests/
 uv run pytest
 ```
@@ -16,7 +17,7 @@ Always include a "Manual testing" checklist section in PRs.
 - Python 3.12+, anyio for async, msgspec for JSONL parsing, structlog for logging
 - Engines: Claude Code, Codex, OpenCode, Pi (Gemini CLI and Amp deprecated, removal targeted for 0.36.0)
 - Australian English in user-facing text (realise, colour, behaviour, licence)
-- Conventional commits: `feat:`, `fix:`, `docs:`, `refactor:`, `test:`
+- Conventional commits: `feat:`, `fix:`, `docs:`, `refactor:`, `test:`, `chore:`
 - 80% test coverage threshold enforced
 - Runner 3-event contract: StartedEvent -> ActionEvent(s) -> CompletedEvent; Claude live sessions (#776) may add TurnEvent segments after it, never a second CompletedEvent
 - All Telegram writes go through TelegramOutbox (never call Bot API directly)

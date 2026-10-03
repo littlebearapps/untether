@@ -636,6 +636,37 @@ def _stream_idle_retry_budget_blocked(usage: dict[str, Any] | None) -> bool:
         return False
 
 
+def _should_stream_idle_retry(
+    *,
+    watchdog: Any,
+    stream_idle_class: str | None,
+    run_ok: bool,
+    cancelled: bool,
+    resume_present: bool,
+    retried_count: int,
+    proc_returncode: int | None,
+    usage: dict[str, Any] | None,
+) -> bool:
+    """#572: whether the bounded Type-A stream-idle auto-retry acts on a
+    failed result. Type-B (cold-start zero-byte stall) never retries.
+
+    #900: shared by the post-return retry gate and the live-session early
+    error delivery, which must hold a result this retry would act on. A
+    still-running process has ``proc_returncode=None`` — not a signal death,
+    so the early check errs towards holding."""
+    if watchdog is None or not getattr(watchdog, "stream_idle_auto_retry", False):
+        return False
+    if stream_idle_class != "type_a" or run_ok is not False:
+        return False
+    if cancelled or not resume_present:
+        return False
+    if retried_count >= getattr(watchdog, "stream_idle_max_retries", 1):
+        return False
+    if _is_signal_death(proc_returncode):
+        return False
+    return not _stream_idle_retry_budget_blocked(usage)
+
+
 _DEFAULT_PREAMBLE = (
     "[Untether] You are running via Untether, a Telegram bridge for coding agents. "
     "The user is interacting through Telegram on a mobile device.\n\n"
@@ -1357,6 +1388,79 @@ class _CompletionAccounting:
     cost_alert_text: str | None
     cost_alert: object | None
     outlier_text: str | None
+    # #896: "Stop at limit" footer line when this result ends the session.
+    budget_stop_text: str | None = None
+
+
+def _note_budget_run_cost(
+    state: dict[str, Any],
+    run_usage: dict[str, Any] | None,
+    *,
+    engine: str,
+    session_id: str | None,
+) -> str | None:
+    """#896: add a result's spend to the run's cumulative cost and decide
+    whether its live session must end after this reply.
+
+    ``run_usage`` is the #778 per-run / per-turn delta, so the running sum is
+    the whole live run's spend. Returns the stop line the first time the
+    budget is passed (the session id is then kept in ``state["sid"]`` for
+    ``close`` after delivery); ``None`` otherwise. Never raises.
+
+    Synchronous on purpose: when it stops, the live session refuses further
+    input (``stop_live_session_input``) before the caller awaits anything, so
+    a follow-up queued in ``inject_when_idle`` (or a steer) can't be written
+    while the stopping reply is still being sent. Either way the result is
+    then marked accounted, releasing any follow-up waiting on the check.
+    """
+    cost = (run_usage or {}).get("total_cost_usd")
+    if isinstance(cost, (int, float)) and not isinstance(cost, bool) and cost > 0:
+        state["run_cost"] += float(cost)
+    if engine != "claude" or not session_id:
+        return None
+    try:
+        return _decide_budget_stop(state, session_id)
+    finally:
+        with contextlib.suppress(Exception):
+            from .runners.claude import note_turn_accounted
+
+            note_turn_accounted(session_id)
+
+
+def _decide_budget_stop(state: dict[str, Any], session_id: str) -> str | None:
+    if state["sid"] is not None:
+        return None  # already stopped (and input already refused)
+    try:
+        from .budget_gate import run_stop, run_stop_text
+        from .runners.claude import get_live_session, stop_live_session_input
+        from .runners.run_options import get_run_options
+
+        live = get_live_session(session_id)
+        if live is None or getattr(live, "closing", False):
+            return None  # the run has already ended: nothing to stop
+        stop = run_stop(state["run_cost"], get_run_options())
+        if stop is not None:
+            # Before any await: nothing queued behind this reply may start
+            # another paid turn. A follow-up refused here takes the resume
+            # path — refused there too by the daily gate when the day's
+            # budget is spent; after a per-run stop it starts a fresh run,
+            # which has its own per-run budget.
+            stop_live_session_input(session_id)
+    except Exception:  # noqa: BLE001 — a budget check must never break delivery
+        logger.warning("cost_budget.stop_check_failed", exc_info=True)
+        return None
+    if stop is None:
+        return None
+    state["sid"] = session_id
+    logger.warning(
+        "cost_budget.run_stopped",
+        scope=stop[0],
+        spent=round(stop[1], 4),
+        budget=stop[2],
+        run_cost=round(state["run_cost"], 4),
+        session_id=session_id,
+    )
+    return run_stop_text(stop)
 
 
 def _format_budget_suffix(alert: object) -> str:
@@ -4169,6 +4273,7 @@ async def run_runner_with_cancel(
     channel_id: ChannelId = 0,
     on_completed: Callable[[CompletedEvent, RunOutcome], Awaitable[None]] | None = None,
     turn_router: FollowupTurnRouter | None = None,
+    deliver_error_early: Callable[[CompletedEvent, RunOutcome], bool] | None = None,
 ) -> RunOutcome:
     outcome = RunOutcome()
     start_time = time.monotonic()
@@ -4255,10 +4360,22 @@ async def run_runner_with_cancel(
                             # so auto-continue / error formatting still see
                             # them first. Failures here leave the run
                             # untouched — the post-return path retries.
+                            # #900: an errored result also qualifies when
+                            # ``deliver_error_early`` says no post-return
+                            # recovery would act on it (a live session
+                            # would otherwise hold it until it closes,
+                            # while wake finals overtake it).
                             if (
                                 on_completed is not None
-                                and evt.ok is True
                                 and first_completed
+                                and (
+                                    evt.ok is True
+                                    or (
+                                        evt.ok is False
+                                        and deliver_error_early is not None
+                                        and deliver_error_early(evt, outcome)
+                                    )
+                                )
                             ):
                                 edits.note_final(evt)
                                 _record_export_event(
@@ -4501,6 +4618,25 @@ def running_task_is_live_idle(task: Any) -> bool:
     )
 
 
+def running_task_shows_progress(task: Any, ref: MessageRef) -> bool:
+    """#904: True while ``ref`` (a ``running_tasks`` key) still shows the
+    run's progress render rather than a final.
+
+    The run's first progress message is edited into (or replaced by) its
+    final once delivered — ``_finalizing`` — yet a live session keeps it
+    mapped between turns. Per-turn progress messages are unmapped as soon as
+    their turn closes, so while mapped they are progress."""
+    edits = getattr(task, "edits", None)
+    first_ref = getattr(edits, "progress_ref", None)
+    shows_final = (
+        first_ref is not None
+        and first_ref.channel_id == ref.channel_id
+        and first_ref.message_id == ref.message_id
+        and bool(getattr(edits, "_finalizing", False))
+    )
+    return not shows_final
+
+
 def running_task_is_idle_after_result(task: Any) -> bool:
     """#895: a live session that has answered and has nothing left in flight
     — between turns, no background task holding it open (#801) and no queued
@@ -4692,6 +4828,7 @@ def _live_closing_notice(
         limit = {
             "max_hold": "the background hold limit",
             "abs_cap": "the session time limit",
+            "budget_stop": "the cost budget",  # #896
         }.get(reason, "the session limit")
         why = f"at {limit}"
     return (
@@ -5549,6 +5686,30 @@ async def handle_message(
                 message_id=ref.message_id,
             )
 
+    # #896: this run's cumulative spend (every turn of a live session) and,
+    # once "Stop at limit" fires, the session to close after delivery.
+    budget_stop: dict[str, Any] = {"run_cost": 0.0, "sid": None, "closed": False}
+
+    async def _budget_stop_close() -> None:
+        """#896: end the live session after the reply that passed the budget.
+        Only at idle — a turn already running is never cut; the next turn
+        boundary retries."""
+        sid = budget_stop["sid"]
+        if sid is None or budget_stop["closed"]:
+            return
+        from .budget_gate import BUDGET_STOP_REASON
+        from .runners.claude import close_live_session
+
+        try:
+            closed = await close_live_session(
+                sid, BUDGET_STOP_REASON, notice=True, only_if_idle=True
+            )
+        except Exception:  # noqa: BLE001 — never break delivery
+            logger.warning("cost_budget.session_close_failed", exc_info=True)
+            return
+        budget_stop["closed"] = closed
+        logger.info("cost_budget.session_closed", session_id=sid, closed=closed)
+
     def _account_completion(
         completed: CompletedEvent,
         final_resume: ResumeToken | None,
@@ -5642,6 +5803,12 @@ async def handle_message(
             cost_alert_text=alert_text,
             cost_alert=alert,
             outlier_text=_check_run_cost_outlier(run_usage),
+            budget_stop_text=_note_budget_run_cost(
+                budget_stop,
+                run_usage,
+                engine=runner.engine,
+                session_id=resume_value,
+            ),
         )
         if turn is not None:
             turn.accounting = acct
@@ -6030,6 +6197,10 @@ async def handle_message(
         _outlier_text = acct.outlier_text
         if _outlier_text and _cost_alert_obj is None:
             final_rendered = _insert_footer_line(final_rendered, f"\n{_outlier_text}")
+        if acct.budget_stop_text:  # #896
+            final_rendered = _insert_footer_line(
+                final_rendered, f"\n{acct.budget_stop_text}"
+            )
 
         if safeguard is not None:
             final_rendered = _insert_footer_line(
@@ -6076,6 +6247,7 @@ async def handle_message(
             and not _outlier_text
             # #814: a stopped response always gets its own message.
             and safeguard is None
+            and not acct.budget_stop_text  # #896: the stop line is seen
             and await _fold_wake_turn(turn, completed)
         ):
             delivery["sent"] = True
@@ -6095,6 +6267,9 @@ async def handle_message(
             and _cost_alert_obj is None
             and not _outlier_text
             and safeguard is None
+            # #896: the error that ends the session keeps its own final, so
+            # its stop line is seen (a counter edit would drop it).
+            and not acct.budget_stop_text
             and _consolidating()
             else None
         )
@@ -6270,11 +6445,107 @@ async def handle_message(
         except Exception:  # noqa: BLE001
             logger.warning("live_session.notice_failed", exc_info=True)
 
+    # ── Post-return recovery gates (#900: shared with the early path) ─────
+    # Each answers "would this recovery act on the run's result?" from the
+    # same inputs whether asked post-return or the moment an errored result
+    # arrives in a live session — so the two paths cannot drift.
+    def _empty_resend_due() -> bool:
+        """#596/#631: the empty-resume auto-resend (armed by _deliver_final
+        for an ok 0-turn result only)."""
+        return empty_resume["pending"] and _empty_resent_count < 1
+
+    def _auto_continue_due(
+        completed: CompletedEvent, run_outcome: RunOutcome, ac: Any
+    ) -> bool:
+        stream = edits.stream
+        resume = completed.resume or run_outcome.resume
+        return bool(ac.enabled) and _should_auto_continue(
+            last_event_type=stream.last_event_type if stream else None,
+            engine=runner.engine,
+            cancelled=run_outcome.cancelled,
+            resume_value=resume.value if resume else None,
+            auto_continued_count=_auto_continued_count,
+            max_retries=ac.max_retries,
+            proc_returncode=stream.proc_returncode if stream else None,
+            saw_result=bool(getattr(stream, "saw_result", False)),
+        )
+
+    def _stream_idle_retry_due(
+        completed: CompletedEvent, run_outcome: RunOutcome, watchdog: Any
+    ) -> bool:
+        stream = edits.stream
+        engine_state = getattr(stream, "engine_state", None) if stream else None
+        return _should_stream_idle_retry(
+            watchdog=watchdog,
+            stream_idle_class=getattr(engine_state, "stream_idle_class", None),
+            run_ok=completed.ok,
+            cancelled=run_outcome.cancelled,
+            resume_present=(completed.resume or run_outcome.resume) is not None,
+            retried_count=_stream_idle_retried_count,
+            proc_returncode=stream.proc_returncode if stream else None,
+            usage=completed.usage,
+        )
+
+    def _deliver_error_early(
+        completed: CompletedEvent, run_outcome: RunOutcome
+    ) -> bool:
+        """#900: deliver an errored first result now instead of post-return.
+
+        A live session's run generator only returns when the session closes
+        — after any background work it is holding for — while each wake
+        final is delivered as it arrives, so a held error final was
+        overtaken (mac 2026-10-02: a wake error 14 s before the run's own).
+        Only a real CLI ``result`` in a live session qualifies, and only
+        when no post-return recovery (empty-resume resend, auto-continue,
+        #572 retry) would act on it; cancels and interrupted turns keep the
+        post-return render. Anything else keeps today's path.
+        """
+        if completed.ok is not False or not _is_live_run():
+            return False
+        stream = edits.stream
+        # A synthesized stream-end error arrives as the stream ends — there
+        # is no hold to cut short.
+        if not getattr(stream, "saw_result", False):
+            return False
+        from .schemas.claude import CLAUDE_ABORTED_TERMINAL_REASONS
+
+        if (completed.usage or {}).get(
+            "terminal_reason"
+        ) in CLAUDE_ABORTED_TERMINAL_REASONS:
+            return False
+        if run_outcome.cancelled or (
+            running_task is not None and running_task.cancel_requested.is_set()
+        ):
+            return False
+        sid = completed.resume or run_outcome.resume
+        if (
+            _empty_resend_due()
+            or _auto_continue_due(
+                completed, run_outcome, _load_auto_continue_settings()
+            )
+            or _stream_idle_retry_due(completed, run_outcome, _load_watchdog_settings())
+        ):
+            logger.info(
+                "final.error_held_for_recovery",
+                session_id=sid.value if sid else None,
+            )
+            return False
+        logger.info(
+            "final.error_delivered_early", session_id=sid.value if sid else None
+        )
+        return True
+
     async def _on_run_completed(
         completed: CompletedEvent, run_outcome: RunOutcome
     ) -> None:
         await _deliver_final(completed, run_outcome)
+        if completed.ok is False:
+            # #900: an early error final. A failed run sends no outbox files
+            # (the post-return path still surfaces skipped ones), and its
+            # live session is already closing — no listener, no status.
+            return
         if not _is_live_run():
+            await _budget_stop_close()  # #896
             return
         await _deliver_outbox_now(user_ref.message_id)
         sid = completed.resume or run_outcome.resume
@@ -6284,6 +6555,7 @@ async def handle_message(
             add_live_session_listener(sid.value, _on_live_notice)
         # #777: background work outlives the answer — open its status message.
         await _bg_after_turn()
+        await _budget_stop_close()  # #896
 
     def _new_turn_tracker() -> ProgressTracker:
         tracker = ProgressTracker(engine=runner.engine, clock=clock)
@@ -6415,11 +6687,13 @@ async def handle_message(
             await _deliver_turn_cancelled(ctx)
             await _deliver_outbox_now(ctx.reply_to.message_id)
             await _bg_after_turn()
+            await _budget_stop_close()  # #896
             return
         await _deliver_final(completed, RunOutcome(resume=completed.resume), turn=ctx)
         await _deliver_outbox_now(ctx.reply_to.message_id)
         # #777: a later turn may have launched (more) background work.
         await _bg_after_turn()
+        await _budget_stop_close()  # #896
 
     async def _resolve_unrun_followups() -> None:
         """Follow-ups written into the live session whose turn never started
@@ -6689,6 +6963,7 @@ async def handle_message(
                 channel_id=incoming.channel_id,
                 on_completed=_on_run_completed,
                 turn_router=turn_router,
+                deliver_error_early=_deliver_error_early,
             )
         except Exception as exc:
             error = exc
@@ -6863,7 +7138,7 @@ async def handle_message(
         # same-session resend behaviour. Single-shot via _empty_resent_count;
         # mutually exclusive with auto-continue (that fires only when there was
         # no result at all).
-        if empty_resume["pending"] and _empty_resent_count < 1:
+        if _empty_resend_due():
             release_reason = "auto_resend"
             _er_settings = _load_auto_continue_settings()
             # Fall back to the original resume_token so a completion that omits a
@@ -6948,7 +7223,6 @@ async def handle_message(
         _ac_resume = completed.resume or outcome.resume
         _ac_last_event = edits.stream.last_event_type if edits.stream else None
         _ac_proc_rc = edits.stream.proc_returncode if edits.stream else None
-        _ac_saw_result = bool(getattr(edits.stream, "saw_result", False))
         # #591: a run whose answer was already delivered can never need the
         # auto-continue salvage.
         # #716: this delivery check used to be described as "belt-and-braces"
@@ -6959,19 +7233,10 @@ async def handle_message(
         # `final_delivery["sent"]` was the ONLY thing holding the line. The
         # predicate now discriminates on its own via `saw_result`; this stays
         # as a genuine second gate, not a redundant one.
-        if (
-            ac_settings.enabled
-            and not final_delivery["sent"]
-            and _should_auto_continue(
-                last_event_type=_ac_last_event,
-                engine=runner.engine,
-                cancelled=outcome.cancelled,
-                resume_value=_ac_resume.value if _ac_resume else None,
-                auto_continued_count=_auto_continued_count,
-                max_retries=ac_settings.max_retries,
-                proc_returncode=_ac_proc_rc,
-                saw_result=_ac_saw_result,
-            )
+        # #900: the gate itself is ``_auto_continue_due``, shared with the
+        # live-session early error delivery.
+        if not final_delivery["sent"] and _auto_continue_due(
+            completed, outcome, ac_settings
         ):
             release_reason = "auto_continue"
             # #568: emit the fields a future narrowing decision would need.
@@ -7111,28 +7376,27 @@ async def handle_message(
         # the session instead of surfacing a terminal error with only a "raise
         # the timeout" hint. Type-B (cold-start zero-byte stall) NEVER retries —
         # retrying hammers a down API. Error finals ride the post-return path
-        # (the #591 early delivery is ok=True-only), so returning here fully
-        # suppresses the terminal error message. The retry re-enters
-        # handle_message as a normal resumed run — quarantine divert, session-
-        # owner serialisation, RAM guard and per-run budget checks all apply to
-        # it exactly as to a user-initiated run.
+        # (the #591 early delivery is ok=True-only; #900's live-session early
+        # error delivery holds any result this gate would act on), so
+        # returning here fully suppresses the terminal error message. The
+        # retry re-enters handle_message as a normal resumed run — quarantine
+        # divert, session-owner serialisation and the RAM guard apply to it
+        # exactly as to a user-initiated run. Budgets: it skips
+        # ``_run_engine``, so the #896 daily gate does NOT refuse it (like
+        # auto-continue and the empty-resume resend, it salvages a run that
+        # already started). What applies is the read-only guard in
+        # ``_stream_idle_retry_due`` (no retry once the failed run hit a
+        # per-run or daily limit), then the nested run's own post-result
+        # accounting (daily total, alerts) and its "Stop at limit" per-run
+        # stop, counted from the retry's own spend.
         _si_ws = _load_watchdog_settings()
-        _si_es = getattr(edits.stream, "engine_state", None) if edits.stream else None
-        _si_class = getattr(_si_es, "stream_idle_class", None)
         _si_resume = completed.resume or outcome.resume
         _si_rc = edits.stream.proc_returncode if edits.stream else None
         _si_max = getattr(_si_ws, "stream_idle_max_retries", 1) if _si_ws else 1
         if (
-            _si_ws is not None
-            and getattr(_si_ws, "stream_idle_auto_retry", False)
-            and _si_class == "type_a"
-            and run_ok is False
-            and not outcome.cancelled
-            and not final_delivery["sent"]
+            not final_delivery["sent"]
             and _si_resume is not None
-            and _stream_idle_retried_count < _si_max
-            and not _is_signal_death(_si_rc)
-            and not _stream_idle_retry_budget_blocked(completed.usage)
+            and _stream_idle_retry_due(completed, outcome, _si_ws)
         ):
             release_reason = "stream_idle_retry"
             logger.warning(

@@ -11,7 +11,7 @@ When you're away from the terminal, you need confidence that your agent won't go
 | **Auto** | `/planmode auto` | `--permission-mode auto` | Claude Code's own auto mode — a classifier approves routine work and blocks risky actions. No plan phase |
 | **Accept edits** | `/planmode off` | `--permission-mode acceptEdits` | No plan phase; reads, file edits and common filesystem commands run without asking; other tools show Approve / Deny |
 
-**Plan** puts one checkpoint before any change: Claude drafts a plan without editing files, and you approve it (or tap Pause & Outline Plan) before changes start.
+**Plan** puts one checkpoint before any change: Claude drafts a plan without editing files, and you approve it (or tap Pause & Outline Plan) before changes start. On recent Claude Code versions (2.1.285) plan mode no longer blocks a `Write` itself; Untether approves it like any other tool in this mode, so what keeps Claude from editing is its plan-mode instructions. Turn on **Diff preview** in `/config` if you want edits to wait for a tap.
 
 **Plan-auto** keeps the plan phase but approves the plan-to-execution transition for you, so you don't tap a button for every ExitPlanMode.
 

@@ -27,7 +27,7 @@ Running agents remotely means they can rack up costs while you're not watching. 
 | `max_cost_per_run` | (none) | Maximum cost for a single run (USD) |
 | `max_cost_per_day` | (none) | Maximum total cost per day (USD) |
 | `warn_at_pct` | `70` | Show a warning when this percentage of the budget is reached |
-| `auto_cancel` | `false` | Accepted, but not enforced yet: budgets are checked after a run finishes, so they alert rather than stop a run (see below) |
+| `auto_cancel` | `false` | **Stop at limit**: refuse new runs once the daily budget is reached, and end a session after the reply that passes the per-run budget (see [Stop at limit](#stop-at-limit)) |
 | `warn_run_above_usd` | (unset = $20) | Flag any single run that costs more than this, even with `enabled = false`; `0` turns it off |
 | `notify_run_outlier` | `true` | Post the one-line chat notice for an outlier run (the log line is written either way) |
 
@@ -36,12 +36,12 @@ Running agents remotely means they can rack up costs while you're not watching. 
 You can toggle budgets on or off per chat without editing the config file. Open `/config` → **💰 Cost & usage** and use the toggle buttons:
 
 - **Budget** — turn budget tracking on or off for this chat
-- **Auto-cancel** — the per-chat override of `auto_cancel` (stored, but not enforced yet; see [Alert levels](#alert-levels))
+- **Stop at limit** — the per-chat override of `auto_cancel` (see [Stop at limit](#stop-at-limit))
 
 These override the global `[cost_budget]` settings for the specific chat. Clear the override to revert to the global setting. See [Inline settings](inline-settings.md) for the full `/config` menu reference.
 
 !!! warning "Loop mode and budgets"
-    If you turn on Loop mode in `/config → 🔁 Loop mode`, autonomous loop fires count toward the same daily and per-run budget caps as manual runs. There is no separate per-loop budget, and budgets are checked only after each run finishes, so a budget alerts you about loop spend rather than stopping the next fire. The runaway caps in `[loop]` (`max_iterations`, `max_total_duration_hours`, `expiry_days`) are what actually bound a loop. **Set a budget before turning on Loop mode** so you hear about its spend. See [Schedule tasks → Loop mode](schedule-tasks.md#loop-mode) for the full picture. ([#289](https://github.com/littlebearapps/untether/issues/289))
+    If you turn on Loop mode in `/config → 🔁 Loop mode`, autonomous loop fires count toward the same daily and per-run budget caps as manual runs. There is no separate per-loop budget. With **Stop at limit** on, a loop fire after the daily budget is reached is refused like any other run; without it, a budget only alerts you about loop spend. Without it, the runaway caps in `[loop]` (`max_iterations`, `max_total_duration_hours`, `expiry_days`) are what actually bound a loop. **Set a budget before turning on Loop mode** so you hear about its spend. See [Schedule tasks → Loop mode](schedule-tasks.md#loop-mode) for the full picture. ([#289](https://github.com/littlebearapps/untether/issues/289))
 
 ## How it works
 
@@ -76,7 +76,7 @@ It also logs `cost.run_outlier` with the run's shape (turns, cost per turn, dura
 | Warning | ⚠️ | Cost is approaching the budget threshold |
 | Exceeded | 🛑 | Cost has exceeded the budget |
 
-Because the check runs when a run has already finished, a budget alerts you; it does not stop the run or block the next one. `auto_cancel` (and the **Auto-cancel** toggle) is accepted and stored but has no effect yet. The one exception is Claude's automatic retry after a stalled stream: Untether skips that retry when the failed run already hit a per-run or daily limit.
+Because the check runs when a result arrives, an alert on its own doesn't stop anything: turn on [Stop at limit](#stop-at-limit) for that. Claude's automatic retry after a stalled stream is skipped either way when the failed run already hit a per-run or daily limit.
 
 With the cost footer on (`[footer] show_api_cost = true`, the default), the alert is a suffix on the `💰` line, ` ⚠️ 73%` or ` 🛑 budget`. With the footer off, it's a line of its own:
 
@@ -85,9 +85,23 @@ With the cost footer on (`[footer] show_api_cost = true`, the default), the aler
 
 <img src="../assets/screenshots/cost-warning-alert.jpg" alt="Cost warning alert showing budget threshold exceeded" width="360" loading="lazy" />
 
+### Stop at limit
+
+Set `auto_cancel = true` (or turn on **Stop at limit** in `/config` → **💰 Cost & usage**) to make the limits act, not just alert ([#896](https://github.com/littlebearapps/untether/issues/896)). Budgets must be enabled for the chat. Claude reports cost only when a reply finishes, so Untether acts at the two points it safely can; it never interrupts a reply in progress.
+
+- **Daily budget reached:** new runs are refused until midnight: prompts, `/continue`, follow-ups into a live session, `/at`, loop fires, crons and webhooks. In a chat you get a message with a **Run anyway** button, which starts the refused run once (only in that chat):
+
+    !!! untether "Untether"
+        🛑 Daily budget reached ($10.20 of $10.00). New runs are paused until midnight.
+
+    Crons, webhooks and loop fires are skipped with a one-line message instead (no button), for example `🛑 Daily budget reached ($10.20 of $10.00). Skipped cron:daily-review; new runs are paused until midnight.` You get that line once a day per cron, webhook or loop, not on every fire. A refused cron or webhook isn't announced and its fetch step doesn't run, and a `run_once` cron isn't used up: it stays scheduled and fires at its next schedule match (logged as `triggers.cron.run_once_refused`). Every refusal is logged as `cost_budget.run_blocked`, whether or not a message was sent (`notice_sent`). A plugin command that runs an engine with `mode="capture"` gets a refused result (`RunResult.refused = "daily_budget"`) instead of a message.
+- **Per-run budget passed:** when a reply takes the run's total past `max_cost_per_run`, that reply is delivered with a `🛑 Stopped: run cost $2.30 passed the per-run budget $2.00` line, then the session is closed, so no background wake-ups or follow-ups add to it. The run's total counts every turn of a live session, not only the last one. Background tasks still running are stopped and named. The same happens, with `🛑 Stopped: today's cost … reached the daily budget …`, when a reply takes the day's total to `max_cost_per_day`. Logged as `cost_budget.run_stopped`.
+
+Your next message after a per-run stop starts a new run with a fresh per-run total. That includes a message you sent while the stopping reply was still being written: it is never added to the stopped session as another turn. A session stopped by the daily budget stays paused until midnight unless you tap **Run anyway**.
+
 ### Daily reset
 
-The daily cost counter resets at midnight (local time, based on the server clock). Each new day starts from zero. The counter is held in memory only, so restarting Untether also resets it.
+The daily cost counter resets at midnight in the host's local time zone (the server clock, not yours), and each new day starts from zero. Since v0.35.5 the day's total is saved to `daily_cost.json` next to `untether.toml` after every run, so restarts, upgrades and daily reboots no longer reset it; a file left over from an earlier day is ignored ([#898](https://github.com/littlebearapps/untether/issues/898)).
 
 ## Check current usage
 
@@ -156,7 +170,7 @@ For historical run data beyond the current session, use the `/stats` command:
 /stats
 ```
 
-This shows per-engine session statistics (runs, actions, duration) across today, this week, and all time. Pass an engine name to filter (e.g. `/stats claude`). Data is persisted in the config directory and auto-pruned after 90 days.
+This shows per-engine session statistics (runs, actions, duration) across today, this week, and all time. Pass an engine name to filter (e.g. `/stats claude`). Data is saved in the config directory; days older than 90 are folded into an all-time total, so "All time" stays complete.
 
 ## Related
 

@@ -1,6 +1,6 @@
 # Agent preamble
 
-Untether injects a context preamble at the start of every agent prompt, telling the engine it's running via Telegram and requesting structured end-of-task summaries. This works across all engines (Claude Code, Codex, OpenCode, Pi, and the deprecated Gemini CLI and Amp).
+Untether injects a context preamble at the start of the prompt for every new run (including a resumed session), telling the engine it's running via Telegram and requesting structured end-of-task summaries. Follow-ups and steers sent into a Claude session that is still open don't repeat it; the session already has it. This works across all engines (Claude Code, Codex, OpenCode, Pi, and the deprecated Gemini CLI and Amp).
 
 ## What the default preamble does
 
@@ -8,7 +8,7 @@ The built-in preamble tells the agent:
 
 1. **Context** — it's running via Untether on Telegram, and the user is on a mobile device
 2. **Visibility constraints** — only final assistant text is visible; tool calls, thinking blocks, and terminal output are invisible to the user
-3. **Summary format** — every response that completes work should end with a short structured summary (about 500–1,500 characters) including "Completed", "Next Steps", and "Decisions Needed" sections, plus how to send files back through `.untether-outbox/`
+3. **Summary format** — every response that completes work should end with a short structured summary (about 500–1,500 characters) including "Completed", "Next Steps", and "Decisions Needed" sections, plus how to send files back through `.untether-outbox/` (this part is included even when `[transports.telegram.files] enabled = false`; use a custom `text` if you don't want it)
 4. **Config changes** — Untether hot-reloads `untether.toml`, so the agent must not restart the Untether service after editing it (a restart from inside the session drops its own final answer)
 5. **Plan mode** — the `ExitPlanMode` plan should be a 3–5 bullet summary, and the reply after approval a brief summary rather than a re-paste of the plan
 
@@ -48,7 +48,7 @@ Set `text` to your custom string. When `text` is `null` (the default), Untether 
 
 ## Ask mode interaction
 
-When ask mode is enabled (via `/config`), Untether appends a line to the preamble encouraging the agent to use `AskUserQuestion` with structured options. When ask mode is disabled, it appends a line discouraging interactive questions so the agent proceeds with defaults instead.
+Untether appends one more line to the preamble, the built-in one or your own `text`. Unless ask mode is turned off in `/config`, the line encourages the agent to use `AskUserQuestion` with structured options; with ask mode off it tells the agent not to ask and to proceed with defaults instead. The line is added for every engine, although only Claude Code turns those questions into buttons.
 
 ## Hook awareness
 

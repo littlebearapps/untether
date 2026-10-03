@@ -14,7 +14,7 @@ Send `/ctx` to see what project and branch are active for the current scope:
     bound ctx: backend @feat/api-v2<br>
     resolved ctx: backend @feat/api-v2 (source: bound)
 
-`bound ctx` is what `/ctx set` stored for this chat or topic; `resolved ctx` is what the next message will actually use, and `source` says where it came from (`bound`, `default_project`, or `none`). If nothing is bound, `bound ctx` reads `none` and a `note:` line shows how to bind one. Inside a forum topic the reply also shows the topics scope and the topic's stored sessions.
+`bound ctx` is what `/ctx set` stored for this chat or topic; `resolved ctx` is what the next message will actually use, and `source` says where it came from: `bound` (this chat's binding), `ambient` (inside a forum topic, the topic's binding merged with the chat's project), `default_project` (the chat's project or the global `default_project`) or `none`. If you send `/ctx` as a reply to a message with a `dir:` line, it shows `reply_ctx`. If nothing is bound, `bound ctx` reads `none` and a `note:` line shows how to bind one. Inside a forum topic the reply also shows the topics scope and the topic's stored sessions.
 
 ## Bind to a project
 
@@ -34,10 +34,10 @@ Add `@branch` to also bind to a specific git branch:
 /ctx set myproject @feature-branch
 ```
 
-When a branch is specified and worktrees are enabled for the project, Untether creates or reuses a worktree for that branch. The agent runs inside the worktree directory.
+When a branch is specified, Untether creates or reuses a worktree for that branch under the project's `worktrees_dir`, and the agent runs inside it. If the project's main checkout is already on that branch, the agent runs in the project directory instead. See [Worktrees](worktrees.md).
 
 !!! tip "Branch shorthand"
-    In a project chat (or a topic inside one) you can set just the branch: `/ctx set @new-branch`. In any other chat a bare `@branch` uses your `default_project`, and is refused if none is set.
+    Inside a forum topic of a project chat you can set just the branch: `/ctx set @new-branch`, and the chat's project is implied. Outside a topic, a bare `@branch` uses the global `default_project` and is refused (`project is required`) if none is set. In a topic of a chat that isn't bound to a project, a bare `@branch` is always refused; name the project.
 
 ## Clear binding
 
@@ -47,7 +47,7 @@ Remove the context binding to revert to the default:
 /ctx clear
 ```
 
-The chat or topic returns to using the default project (if configured) or the global startup directory.
+The chat or topic falls back to the chat's project (if the chat is a project chat via `projects.<alias>.chat_id`), then the default project (if configured), then the global startup directory.
 
 ## Create a bound topic
 
@@ -68,10 +68,11 @@ When Untether receives a message, it resolves context using the first match from
 
 1. **Topic binding** — set via `/ctx set` or `/topic` inside a forum thread
 2. **Chat binding** — set via `/ctx set` in a private or group chat
-3. **`default_project`** — configured in your `untether.toml`
-4. **Startup directory** — the working directory when Untether started
+3. **Chat's project** — the project whose `projects.<alias>.chat_id` is this chat (see [Route by chat](route-by-chat.md))
+4. **`default_project`** — configured in your `untether.toml`
+5. **Startup directory** — the working directory when Untether started
 
-The first match wins. A topic binding always takes priority over a chat-level binding, which takes priority over the global default. A reply to a message carrying a `dir:` line, or a `/<project>` / `@branch` directive at the start of a message, overrides all of these for that one message (see [Context resolution](../reference/context-resolution.md)).
+The first match wins. A topic binding always takes priority over a chat-level binding, which takes priority over the chat's project and then the global default. A reply to a message carrying a `dir:` line, or a `/<project>` / `@branch` directive at the start of a message, overrides all of these for that one message (see [Context resolution](../reference/context-resolution.md)).
 
 ## Related
 

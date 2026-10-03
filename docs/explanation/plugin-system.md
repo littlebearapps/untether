@@ -54,17 +54,17 @@ Plugin visibility can be restricted via:
 === "untether config"
 
     ```sh
-    untether config set plugins.enabled '["untether-engine-acme", "untether-transport-slack"]'
+    untether config set plugins.enabled '["untether", "untether-engine-acme", "untether-transport-slack"]'
     ```
 
 === "toml"
 
     ```toml
     [plugins]
-    enabled = ["untether-engine-acme", "untether-transport-slack"]
+    enabled = ["untether", "untether-engine-acme", "untether-transport-slack"]
     ```
 
-When set, Untether filters by **distribution name** (package metadata), not by entrypoint name.
+When set, Untether filters by **distribution name** (package metadata), not by entrypoint name. The built-in engines, the Telegram transport and the built-in commands are entry points of the `untether` distribution, so keep `"untether"` in the list or they disappear too (and `default_engine` fails to load).
 This lets you:
 
 - ship multiple entrypoints from one distribution, and

@@ -102,16 +102,16 @@ When you switch engines via the Engine & model page, the home page automatically
 | Approval policy | full auto, safe (read-only sandbox) | Yes (chat prefs) |
 | Approval mode | read-only, edit files, full access | Yes (chat prefs) |
 | Ask mode | off, on | Yes (chat prefs) |
-| Verbose | off, on | Yes (chat prefs) |
+| Verbose | off, on | No (in memory, cleared on restart) |
 | Diff preview | off, on | Yes (chat prefs) |
 | Engine & model | any configured engine + model | Yes (chat prefs) |
 | Effort / Reasoning | Claude: low, medium, high, xhigh, max; Codex: low, medium, high, xhigh | Yes (chat prefs) |
-| Cost & usage | API cost, subscription usage, budget, auto-cancel | Yes (chat prefs) |
+| Cost & usage | API cost, subscription usage, budget, stop at limit | Yes (chat prefs) |
 | Resume line | off, on | Yes (chat prefs) |
 | Listen | all, mentions | Yes (chat prefs) |
 | Follow-up | queue, steer | Yes (chat prefs) |
 | Budget | off, on | Yes (chat prefs) |
-| Auto-cancel | off, on (stored; not enforced yet) | Yes (chat prefs) |
+| Stop at limit | off, on | Yes (chat prefs) |
 
 Approval policy appears instead of Permission mode when the engine is Codex CLI. Approval mode appears instead of Permission mode when the engine is Gemini CLI.
 
@@ -122,7 +122,7 @@ When `[triggers]` is enabled, the home page gains a bottom row with a `⏰ Trigg
 The Triggers page shows:
 
 * **State and counts** — `running` / `paused`, plus per-chat cron and webhook totals.
-* **Master pause/resume toggle** — tap **Pause** to suspend all cron firing and webhook dispatch globally without editing config; tap **Resume** to clear it. While paused, webhooks return `503 triggers paused` (with `Retry-After: 60`), `/health` reports `paused: true`, and `/ping` shows `⏸ triggers paused: … (suspended)`. Pause is in-memory only — restart auto-resumes (the safe default).
+* **Master pause/resume toggle** — tap **Pause** to suspend all cron firing and webhook dispatch globally without editing config; tap **Resume** to clear it. While paused, webhooks return `503 triggers paused` (with `Retry-After: 60`), the webhook server's HTTP `/health` endpoint reports `paused: true`, and `/ping` shows `⏸ triggers paused: … (suspended)`. Pause is in-memory only — restart auto-resumes (the safe default).
 * **Per-chat cron list** — each line shows the cron `id`, human-readable schedule via `describe_cron(schedule, timezone)`, project, engine, the cron's own `model=` / `effort=` when it sets one ([#743](https://github.com/littlebearapps/untether/issues/743)), and last-fired relative time.
 * **Per-chat webhook list** — each line shows the webhook `id`, path, auth scheme, project, engine, and last-fired.
 
@@ -136,12 +136,12 @@ When the active engine is Claude Code, the home page gains a `🔁 Loop mode` bu
 
 The page shows:
 
-* **State** — `Loop mode: on` / `off` for the current chat (per-chat override over the global `[loop] enabled` default).
-* **Cost + quota warning** — explicit reminder before turning ON: every loop fire counts against `[cost_budget]`, and the runaway caps in `[loop]` (`max_iterations`, `max_total_duration_hours`, `expiry_days`) are the safety net.
+* **State** — `Currently: On (global)` / `Off (global)` (no per-chat override, so the `[loop] enabled` default applies) or `On (per-chat)` / `Off (per-chat)`.
+* **Cost + quota warning** — explicit reminder before turning ON: every loop fire counts against `[cost_budget]`, so set a budget first.
 * **💰 Set a budget** — deep-link to the `Cost & Usage` page (`config:cu`) for one-tap budget setup.
-* **Toggle row** — `[On] [Off] [Clear]` with ✓ on the active option.
+* **Buttons** — `[On] [Off]` with ✓ on the active per-chat choice, then `[Clear override] [💰 Set a budget]` and `[← Back]`.
 
-`/cancel` and `/new` both drop pending loop iterations for the current session and write a do-not-resume sentinel so a subsequent `loop_scheduler` resume can't replay them. `/continue` is unaffected (it doesn't trigger loop replay).
+`/cancel` and `/new` both drop pending loop iterations for the current chat (or forum topic) and write a do-not-resume sentinel so a subsequent `loop_scheduler` resume can't replay them. `/continue` is unaffected (it doesn't trigger loop replay).
 
 Loop mode is **Claude-only** (`LOOP_SUPPORTED_ENGINES = frozenset({"claude"})`); the button is hidden for other engines. See [Schedule tasks → Loop mode](schedule-tasks.md#loop-mode) for the full architecture and cost guidance.
 
@@ -152,7 +152,7 @@ The Cost & Usage sub-page merges cost display and budget controls into a unified
 - **API cost** — per-run cost in the message footer (requires engine cost reporting)
 - **Subscription usage** — 5h/weekly subscription usage in the footer (Claude Code only)
 - **Budget** — turn budget tracking on or off for this chat (overrides global `[cost_budget]` setting)
-- **Auto-cancel** — per-chat override of `[cost_budget] auto_cancel`; stored, but budgets are checked after a run finishes, so it doesn't cancel anything yet (see [Cost budgets](cost-budgets.md#alert-levels))
+- **Stop at limit** — per-chat override of `[cost_budget] auto_cancel`. Stops new runs once the daily budget is reached and ends a session after the reply that passes the per-run budget. It can't interrupt a reply in progress (see [Cost budgets](cost-budgets.md#stop-at-limit))
 
 Each toggle uses the `[✓ Label: on] [Label: off] [Clear]` compact pattern (labels distinguish the four toggles). Clear removes the per-chat override and falls back to the global config.
 

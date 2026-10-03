@@ -61,8 +61,10 @@ To continue the same session, **reply** to a message with a resume line:
 !!! untether "Untether"
     done · codex · 8s
 
-    !!! user "You"
-        now add tests
+!!! user "You (replying to it)"
+    now add tests
+
+The agent also sees the message you replied to (or the part you quoted), so you can refer to it directly. See [Chat sessions → Replying to a message or a quote](../how-to/chat-sessions.md#replying-to-a-message-or-a-quote).
 
 ## Changing your settings
 

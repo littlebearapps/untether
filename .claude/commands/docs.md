@@ -23,8 +23,9 @@ Load `.claude/rules/workflow-commands.md` (routing + cross-cutting rules),
   route to `/pr-dev`, which folds docs in), never master/tag/release.
 - **If a code change is in flight → STOP and route to `/pr-dev`.** Do not split
   docs for a code change into a separate PR — that fragments delivery.
-- **FAQ is gate-protected.** `docs/faq/faq.md` accepts Edit/Write/append but
-  blocks `rm`/`mv`/`>` (the `help-faq-protect.sh` hook). Never delete/move it.
+- **FAQ must stay put.** Edit/Write/append `docs/faq/faq.md` freely, but never
+  `rm`/`mv`/`>` it. The `help-faq-protect.sh` hook meant to block that is not
+  wired (Claude Code never loads `.claude/hooks.json`), so the rule is on you.
 - **Confirm-gated + idempotent.** Surface the drafted edits and wait for a tap;
   re-running must not duplicate a CHANGELOG entry or FAQ Q/A.
 
@@ -75,7 +76,7 @@ route to `/pr-dev`. If the drift implies a durable process gap → `/kaizen`.
 
 - No code, no PR (that's `/pr-dev`), no master/tag/release.
 - No splitting docs for an in-flight code change into a separate PR.
-- No deleting/moving `docs/faq/faq.md` (gate-protected).
+- No deleting/moving `docs/faq/faq.md`.
 - No duplicate CHANGELOG entries / FAQ Q/A on a re-run.
 
 `--help` prints the when-to-use table, then stops.

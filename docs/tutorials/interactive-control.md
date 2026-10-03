@@ -5,7 +5,7 @@ This tutorial walks you through Untether's interactive permission system — app
 **What you'll learn:** How to control Claude Code's actions in real time with Telegram buttons, how to request and review a plan before execution, and how to answer agent questions from anywhere.
 
 !!! note "Claude Code only"
-    Interactive approval buttons (Approve / Deny / Pause & Outline Plan) are a Claude Code feature. Other engines run non-interactively. Codex CLI has a pre-run [approval policy](../how-to/inline-settings.md) in `/config` (full auto vs safe = read-only sandbox) and Gemini CLI has a 3-tier [approval mode](../how-to/inline-settings.md) (read-only / edit files / full access), but neither has per-tool interactive buttons.
+    Interactive approval buttons (Approve / Deny / Pause & Outline Plan) are a Claude Code feature. Other engines run non-interactively. Codex CLI has a pre-run [approval policy](../how-to/inline-settings.md) in `/config` (full auto vs safe = read-only sandbox) and the deprecated Gemini CLI has an [approval mode](../how-to/interactive-approval.md#gemini-cli-approval-mode), but neither has per-tool interactive buttons.
 
 ## 1. Understand permission modes
 
@@ -109,10 +109,10 @@ In plan mode, when Claude Code has a plan and tries to exit plan mode (the move 
 Tap it to require Claude Code to write a comprehensive plan as a visible message before doing anything. The plan must include:
 
 1. Every file to be created or modified (full paths)
-2. What changes will be made in each file
-3. The execution order and phases
-4. Key decisions and trade-offs
-5. The expected end result
+2. What specific changes will be made in each file
+3. The execution order and any key decisions or risks
+
+and run to at least 15 lines of visible text. An outline that is too short (under about 200 characters) is rejected and Claude Code is asked again.
 
 The outline renders as **formatted Telegram text** — headings, bold, code blocks, and lists display properly instead of raw markdown:
 
@@ -157,11 +157,12 @@ Sometimes Claude Code needs to ask you something — like which approach to take
 
 <div class="tg-buttons">
 <span class="tg-btn">snake_case</span>
+</div>
+<div class="tg-buttons">
 <span class="tg-btn">camelCase</span>
 </div>
 <div class="tg-buttons">
 <span class="tg-btn">Other (type reply)</span>
-<span class="tg-btn">Deny</span>
 </div>
 
 </div>
@@ -181,7 +182,7 @@ If none of the options fit, tap **Other (type reply)** and type a custom answer 
 
 Untether routes your reply back to Claude Code, which reads it and continues.
 
-You can also tap **Deny** to dismiss the question if it's not relevant.
+There's no Deny button on a question with options: if none of them fit, pick **Other (type reply)** and say so.
 
 !!! tip "Ask mode toggle"
     Control whether Claude Code asks interactive questions via `/config` → **Ask mode**. When off, Claude Code proceeds with reasonable defaults instead of asking.
@@ -245,7 +246,7 @@ Key concepts:
 
 **Approval buttons don't appear**
 
-Check that you're using Claude Code (`/claude` prefix or `/agent set claude`) and that plan mode is on (`/planmode show`). Other engines don't support interactive approval.
+Check that you're using Claude Code (`/claude` prefix or `/agent set claude`) and which permission mode is active (`/planmode show`). In `plan-auto` and `auto` no plan buttons appear by design; tool buttons appear in Accept edits / `default`, or with Diff preview on. Other engines don't support interactive approval.
 
 **Buttons appear but nothing happens when I tap them**
 

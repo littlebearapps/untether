@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Final, Literal
 
 import anyio
 from anyio.abc import TaskGroup
@@ -18,6 +18,15 @@ logger = get_logger(__name__)
 
 # Type alias matching the run_job() closure signature in loop.py.
 RunJobFn = Callable[..., Awaitable[None]]
+
+# #896: ``(chat_id, context, engine_override) -> refused``. True means the
+# daily cost budget's "Stop at limit" refuses the run and the chat has been
+# told (once a day per trigger); nothing is announced or started.
+BudgetCheckFn = Callable[[int, RunContext, str | None], Awaitable[bool]]
+
+# #896: ``dispatch_cron`` result when the daily budget refused the run.
+DISPATCH_REFUSED: Final = "refused"
+type DispatchResult = bool | Literal["refused"]
 
 # Bounded retry schedule (seconds) for the trigger announce send. A transient
 # resolver/network blip at cron-fire time must not cost the whole dispatch —
@@ -36,6 +45,24 @@ class TriggerDispatcher:
     transport: Transport
     default_chat_id: int
     task_group: TaskGroup
+    budget_check: BudgetCheckFn | None = None
+
+    async def _budget_refused(
+        self, chat_id: int, context: RunContext, engine_override: str | None
+    ) -> bool:
+        """#896: ask the daily budget gate before announcing a run. Fails
+        open — ``_run_engine`` still gates every run that starts."""
+        if self.budget_check is None:
+            return False
+        try:
+            return await self.budget_check(chat_id, context, engine_override)
+        except Exception:  # noqa: BLE001 — a broken check must not stop triggers
+            logger.warning(
+                "triggers.dispatch.budget_check_failed",
+                trigger=context.trigger_source,
+                exc_info=True,
+            )
+            return False
 
     async def dispatch_webhook(self, webhook: WebhookConfig, prompt: str) -> None:
         chat_id = webhook.chat_id or self.default_chat_id
@@ -48,6 +75,8 @@ class TriggerDispatcher:
         engine_override = webhook.engine
         label = f"\N{HIGH VOLTAGE SIGN} Trigger: webhook:{webhook.id}"
 
+        if await self._budget_refused(chat_id, context, engine_override):
+            return  # #896: nothing ran, so nothing is recorded as fired
         await self._dispatch(chat_id, label, prompt, context, engine_override)
         # #271 Tier 3: record last-fired-at for the /config:tg page. Recorded
         # after dispatch so a transport-send failure (logged inside _dispatch)
@@ -61,13 +90,16 @@ class TriggerDispatcher:
         cron: CronConfig,
         *,
         retry_delays: tuple[float, ...] | None = None,
-    ) -> bool:
+    ) -> DispatchResult:
         """Dispatch *cron*; return ``False`` only when nothing ran.
 
         ``False`` means the announce send failed after its retries, so no run
         was started and the caller may safely try again (#893: a ``run_once``
-        cron stays pending instead of being consumed). Every other outcome —
-        a started run, or a fetch ``on_failure = "abort"`` that the user was
+        cron stays pending instead of being consumed).
+        :data:`DISPATCH_REFUSED` means the daily cost budget refused it
+        before anything was announced or fetched (#896) — nothing ran, and
+        retrying before midnight is pointless. Every other outcome — a
+        started run, or a fetch ``on_failure = "abort"`` that the user was
         notified about — returns ``True``. ``retry_delays`` overrides
         :data:`SEND_RETRY_DELAYS` (the scheduler's retry ticks pass ``()``).
         """
@@ -81,6 +113,9 @@ class TriggerDispatcher:
         )
         engine_override = cron.engine
         label = f"\N{ALARM CLOCK} Scheduled: cron:{cron.id}"
+
+        if await self._budget_refused(chat_id, context, engine_override):
+            return DISPATCH_REFUSED
 
         # If cron has a fetch step, execute it before rendering the prompt.
         if cron.fetch is not None:

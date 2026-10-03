@@ -111,7 +111,7 @@ CodeQL runs in its own workflow (`codeql.yml`).
 - **Framework:** pytest + anyio for async tests
 - **Coverage:** 80% threshold enforced in `pyproject.toml`
 - **Patterns:** Stub subprocess runners with fake CLI scripts, mock transport with `FakeTransport` dataclass
-- **Key test files:** `test_claude_control.py`, `test_callback_dispatch.py`, `test_cost_tracker.py` (current counts per file are in the [test catalog](../reference/test-catalog.md))
+- **Key test files:** `test_claude_control.py`, `test_callback_dispatch.py`, `test_cost_tracker.py` (current counts per file are in the [test catalogue](../reference/test-catalog.md))
 
 Run specific test files:
 

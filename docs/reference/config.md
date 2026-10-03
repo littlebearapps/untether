@@ -46,10 +46,11 @@ to retry. A symlinked config is followed when the link is re-pointed; if the new
 target lives in a different directory, restart Untether so later in-place edits
 of that file are seen.
 
-Fields listed as **restart-required** trigger a warning in the Telegram chat
-(🔄 prefix) AND a structlog `config.reload.transport_config_changed` record
-when edited. Everything else hot-reloads silently with a matching
-`config.reload.transport_config_hot_reloaded` INFO event.
+Editing a field marked 🔄 (**restart-required**) posts a warning to the project
+chats and admin DMs ("⟳ Setting `chat_id` changed — restart required to take
+effect.") and logs `config.reload.transport_config_changed`. Other Telegram
+transport changes apply without a message and log
+`config.reload.transport_config_hot_reloaded`.
 
 Separately from the watcher, the per-run settings (`[footer]`, `[progress]`,
 `[watchdog]`, `[preamble]`, `[cost_budget]`, `[auto_continue]`, `[security]`, …)
@@ -206,14 +207,14 @@ Legacy config note: top-level `bot_token` / `chat_id` are auto-migrated into `[t
 === "untether config"
 
     ```sh
-    untether config set plugins.enabled '["untether-transport-slack", "untether-engine-acme"]'
+    untether config set plugins.enabled '["untether", "untether-transport-slack", "untether-engine-acme"]'
     ```
 
 === "toml"
 
     ```toml
     [plugins]
-    enabled = ["untether-transport-slack", "untether-engine-acme"]
+    enabled = ["untether", "untether-transport-slack", "untether-engine-acme"]
     ```
 
 - `enabled = []` (default) means “load all installed plugins”.
@@ -310,9 +311,9 @@ Per-chat override: `/verbose on` and `/verbose off` override the config default 
 |-----|------|---------|-------|
 | `enabled` | bool | `false` | Enable cost budget tracking. |
 | `max_cost_per_run` | float\|null (≥ 0) | `null` | Per-run cost limit (USD). |
-| `max_cost_per_day` | float\|null (≥ 0) | `null` | Daily cost limit (USD). |
+| `max_cost_per_day` | float\|null (≥ 0) | `null` | Daily cost limit (USD). The day runs from the host's local midnight; the running total is saved in `daily_cost.json` beside `untether.toml`, so it survives restarts ([#898](https://github.com/littlebearapps/untether/issues/898)). |
 | `warn_at_pct` | int (0–100) | `70` | Warning threshold, as a percentage of the limit. |
-| `auto_cancel` | bool | `false` | Accepted but not enforced yet: budgets are checked after a run finishes, so they alert rather than cancel ([#896](https://github.com/littlebearapps/untether/issues/896)). |
+| `auto_cancel` | bool | `false` | **Stop at limit**: once today's total reaches `max_cost_per_day`, new runs (prompts, follow-ups, crons, webhooks) are refused until local midnight, with a one-shot **Run anyway** button in chats; when a reply takes a live session's run total past `max_cost_per_run`, the reply is delivered and the session is closed. A reply in progress is never interrupted. Needs `enabled` (or the per-chat **Budget** toggle) ([#896](https://github.com/littlebearapps/untether/issues/896)). |
 | `warn_run_above_usd` | float\|null (≥ 0) | `null` (→ `20.00`) | Per-run spend alert that fires **without** `enabled = true`. `0` disables it. For Claude, when background agents were active since the previous reply the alert adds `— includes spend by N background agents since the previous reply` ([#821](https://github.com/littlebearapps/untether/issues/821)). |
 | `notify_run_outlier` | bool | `true` | Show the outlier as a chat line. The `cost.run_outlier` log event fires either way. |
 
@@ -457,7 +458,7 @@ Controls Untether's observation of Claude Code's session-scoped scheduling tools
 | `redundancy_check_interval` | int (≥ 1) | `30` | Seconds the fire path waits before retrying when the originating subprocess is still alive (race-avoidance gate). |
 | `max_iterations` | int (1–10000) | `20` | Runaway-safety cap on iteration count (NOT a cost cap). |
 | `max_total_duration_hours` | int (1–168) | `4` | Runaway-safety cap on wall-clock duration (NOT a cost cap). |
-| `min_interval_seconds` | int (≥ 60) | `60` | Minimum interval between fires (matches upstream cron floor). |
+| `min_interval_seconds` | int (≥ 60) | `60` | Accepted but not enforced yet; the upstream cron floor (60 s) applies. |
 | `expiry_days` | int (1–30) | `7` | Auto-expire loops this many days after creation (the default matches upstream's 7-day session-task expiry). |
 
 **Cost limits are NOT in `[loop]`** — they live in `[cost_budget]` and apply to loop fires automatically. See [Cost budgets](../how-to/cost-budgets.md) for setup.
@@ -622,14 +623,14 @@ message) rather than dropping its other settings.
 === "untether config"
 
     ```sh
-    untether config set opencode.model "claude-sonnet"
+    untether config set opencode.model "anthropic/claude-sonnet-5-5"
     ```
 
 === "toml"
 
     ```toml
     [opencode]
-    model = "claude-sonnet"
+    model = "anthropic/claude-sonnet-5-5"
     ```
 
 ### `gemini`

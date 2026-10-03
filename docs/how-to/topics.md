@@ -86,7 +86,7 @@ Note: Outside topics (private chats or main group chats), `/ctx` binds the chat 
 
 Use `/new` inside the topic to cancel any running task and clear stored sessions for that thread. Only this topic's run (and its `/loop` schedules) is cancelled — other topics keep running. `/new` or `/cancel` in General likewise only touches General's work ([#826](https://github.com/littlebearapps/untether/issues/826)).
 
-`/cancel` without a reply follows the same rule: in a topic it stops that topic's run, or replies "nothing running in this topic." when only other topics are busy.
+`/cancel` without a reply follows the same rule: in a topic it stops that topic's run, or replies "nothing running in this topic." when only other topics are busy. When nothing is running it also drops the topic's pending `/at` runs and loops and says what it dropped (`❌ cancelled 1 pending /at run and 1 active loop.`); a Claude session that is only idling after its answer is closed rather than counted as a run (`nothing running in this topic — closed the idle session.`). It always replies ([#902](https://github.com/littlebearapps/untether/issues/902)). `/new` cancels runs and loops but leaves pending `/at` runs alone.
 
 !!! note "Scheduled runs"
     Cron and webhook runs have no topic: they run in General, so only `/new` or `/cancel` in General cancels them. An `/at` run belongs to the topic it was scheduled from. Claude Code `/loop` schedules belong to the topic whose run created them, and each loop iteration is posted back in that topic.
@@ -117,8 +117,10 @@ Topic bindings and sessions live in:
   - Your `scope` does not include this chat. Update `topics.scope`.
 - **"chat is not a supergroup" / "topics enabled but chat does not have topics"**
   - Convert the group to a supergroup and enable topics.
-- **"bot lacks manage topics permission"**
-  - Promote the bot to admin and grant Manage Topics.
+- **"topics enabled but bot is not an admin"** (startup error)
+  - Promote the bot to admin and grant Manage Topics. An admin without Manage Topics starts, but logs `topics.manage_topics.missing` and can't create topics.
+- **"topics enabled but no project chats are configured"** (startup error)
+  - With `scope = "projects"`, set `projects.<alias>.chat_id` for your forum chats, or use `scope = "main"`.
 
 ## Related
 

@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+import json
 import threading
 import time
 from dataclasses import dataclass
+from pathlib import Path
 
 from .logging import get_logger
+from .utils.json_state import atomic_write_json
 
 logger = get_logger(__name__)
 
@@ -17,6 +20,13 @@ logger = get_logger(__name__)
 # is fine — both async tasks (cooperative) and threaded callers are safe.
 _daily_cost: tuple[str, float] = ("", 0.0)
 _daily_cost_lock = threading.Lock()
+
+# #898: the daily total is persisted beside ``untether.toml`` so a restart
+# (rollout, 03:00 reboot, crash) doesn't reset today's spend to $0. ``None``
+# until ``init_daily_cost`` runs at startup; until then the total is
+# memory-only (tests, path-less embedders).
+DAILY_COST_FILENAME = "daily_cost.json"
+_daily_cost_path: Path | None = None
 
 # #702: fallback threshold for the budget-independent per-run spend signal.
 # Matches the outlier threshold `/monitor` already applies when auditing spend,
@@ -42,7 +52,77 @@ class CostAlert:
 
 
 def _today() -> str:
+    # Host local time: the daily budget resets at the host's local midnight.
     return time.strftime("%Y-%m-%d")
+
+
+def resolve_daily_cost_path(config_path: Path) -> Path:
+    return config_path.with_name(DAILY_COST_FILENAME)
+
+
+def _read_daily_cost_file(path: Path) -> tuple[str, float] | None:
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return None
+    except (OSError, ValueError):
+        logger.warning("cost_tracker.daily_load_failed", path=str(path), exc_info=True)
+        return None
+    if not isinstance(raw, dict):
+        return None
+    date = raw.get("date")
+    total = raw.get("total_usd")
+    if (
+        not isinstance(date, str)
+        or isinstance(total, bool)
+        or not isinstance(total, (int, float))
+        or total < 0
+    ):
+        logger.warning("cost_tracker.daily_load_invalid", path=str(path))
+        return None
+    return date, float(total)
+
+
+def init_daily_cost(config_path: Path) -> None:
+    """Load today's persisted total (#898) and persist future records.
+
+    Called once at startup. A file from an earlier day, a missing file or a
+    corrupt one all start today at $0. Never raises.
+    """
+    global _daily_cost, _daily_cost_path
+    path = resolve_daily_cost_path(config_path)
+    loaded = _read_daily_cost_file(path)
+    today = _today()
+    with _daily_cost_lock:
+        _daily_cost_path = path
+        if loaded is not None and loaded[0] == today:
+            date, total = _daily_cost
+            # Keep anything recorded in-process before init (same day).
+            extra = total if date == today else 0.0
+            _daily_cost = (today, loaded[1] + extra)
+        daily_total = _daily_cost[1] if _daily_cost[0] == today else 0.0
+    logger.info("cost_tracker.daily_loaded", path=str(path), daily_total=daily_total)
+
+
+def ensure_daily_cost_loaded(config_path: Path | None) -> None:
+    """Initialise from ``config_path`` if startup hasn't already."""
+    if _daily_cost_path is None and config_path is not None:
+        init_daily_cost(config_path)
+
+
+def _persist_daily_cost_locked() -> None:
+    # Caller holds ``_daily_cost_lock`` so writes land in record order.
+    if _daily_cost_path is None:
+        return
+    date, total = _daily_cost
+    try:
+        atomic_write_json(_daily_cost_path, {"date": date, "total_usd": total})
+    except Exception:  # noqa: BLE001 — persistence must never break a run
+        logger.warning(
+            "cost_tracker.daily_persist_failed",
+            path=str(_daily_cost_path),
+            exc_info=True,
+        )
 
 
 def record_run_cost(cost: float) -> None:
@@ -53,6 +133,7 @@ def record_run_cost(cost: float) -> None:
         date, total = _daily_cost
         _daily_cost = (today, cost) if date != today else (today, total + cost)
         daily_total = _daily_cost[1]
+        _persist_daily_cost_locked()
     logger.debug(
         "cost_tracker.recorded",
         cost=cost,

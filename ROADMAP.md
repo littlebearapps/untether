@@ -21,9 +21,9 @@ This roadmap reflects the project's direction based on recent development and co
 - **Live Claude sessions** — a Claude session stays open after its reply while background tasks, subagents, `Monitor` or `ScheduleWakeup` keep working; their results arrive as their own messages with a live background-task status, and follow-ups can be queued or steered into the running session (shipped in v0.35.5; [#776](https://github.com/littlebearapps/untether/issues/776), [#777](https://github.com/littlebearapps/untether/issues/777), [#775](https://github.com/littlebearapps/untether/issues/775))
 - **Context-window visibility** — Claude's context use in the status line (`62% ctx`) and 🗜️ compaction rows (shipped in v0.35.5; [#819](https://github.com/littlebearapps/untether/issues/819))
 - **Claude Code's own `auto` mode** — Untether's old plan-auto-approve mode renamed `plan-auto` so Claude Code's classifier-gated `auto` mode is reachable (shipped in v0.35.5; [#741](https://github.com/littlebearapps/untether/issues/741))
-- **Gemini CLI engine** — full integration with Google's Gemini CLI via stream-json (shipped across v0.34.x–v0.35.x; ⚠️ **deprecated in v0.35.5**, removal in v0.36.0 — upstream end-of-life)
-- **Amp engine** — full integration with Sourcegraph's Amp coding agent via stream-json (shipped across v0.34.x–v0.35.x; ⚠️ **deprecated in v0.35.5**, removal in v0.36.0 — integration unmaintained)
-- **Webhook-driven workflows** — trigger agent runs from CI/CD events, GitHub webhooks, or external services (shipped in v0.28.0 as the triggers system with cron and webhook support)
+- **Gemini CLI engine** — full integration with Google's Gemini CLI via stream-json (added in v0.32.0; ⚠️ **deprecated in v0.35.5**, removal in v0.36.0 — upstream end-of-life)
+- **Amp engine** — full integration with Sourcegraph's Amp coding agent via stream-json (added in v0.32.0; ⚠️ **deprecated in v0.35.5**, removal in v0.36.0 — integration unmaintained)
+- **Webhook-driven workflows** — trigger agent runs from CI/CD events, GitHub webhooks, or external services (shipped as the triggers system with cron and webhook support)
 - **Session statistics** — `/stats` command for per-engine run counts, actions, and duration across today/week/all-time (shipped in v0.30.0)
 - **Device re-authentication** — `/auth` command for headless Codex re-auth via Telegram (shipped in v0.30.0)
 

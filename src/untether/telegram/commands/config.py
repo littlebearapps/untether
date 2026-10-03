@@ -75,6 +75,15 @@ def _check(label: str, *, active: bool) -> str:
     return f"✓ {label}" if active else label
 
 
+# #896: the per-chat ``budget_auto_cancel`` toggle (TOML key ``auto_cancel``).
+_STOP_AT_LIMIT = "Stop at limit"
+_STOP_AT_LIMIT_HELP = (
+    "Stops new runs once the daily budget is reached and ends a session after "
+    "the reply that passes the per-run budget. It can't interrupt a reply in "
+    "progress."
+)
+
+
 def _toggle_row(
     label: str,
     *,
@@ -595,7 +604,7 @@ async def _page_planmode(ctx: CommandContext, action: str | None = None) -> None
     from ..chat_prefs import ChatPrefsStore, resolve_prefs_path
     from ..engine_overrides import (
         PERMISSION_MODE_SUPPORTED_ENGINES,
-        EngineOverrides,
+        with_override,
     )
 
     config_path = ctx.config_path
@@ -628,19 +637,8 @@ async def _page_planmode(ctx: CommandContext, action: str | None = None) -> None
     if engine == "codex" and action in _CODEX_PM_MODES:
         current = await prefs.get_engine_override(chat_id, engine)
         mode_value = _CODEX_PM_MODES[action]
-        updated = EngineOverrides(
-            model=current.model if current else None,
-            reasoning=current.reasoning if current else None,
-            permission_mode=mode_value if mode_value != "auto" else None,
-            ask_questions=current.ask_questions if current else None,
-            diff_preview=current.diff_preview if current else None,
-            show_api_cost=current.show_api_cost if current else None,
-            show_subscription_usage=current.show_subscription_usage
-            if current
-            else None,
-            show_resume_line=current.show_resume_line if current else None,
-            budget_enabled=current.budget_enabled if current else None,
-            budget_auto_cancel=current.budget_auto_cancel if current else None,
+        updated = with_override(
+            current, permission_mode=mode_value if mode_value != "auto" else None
         )
         await prefs.set_engine_override(chat_id, engine, updated)
         logger.info("config.approval_policy.set", chat_id=chat_id, mode=action)
@@ -650,20 +648,7 @@ async def _page_planmode(ctx: CommandContext, action: str | None = None) -> None
     # --- Claude plan mode actions ---
     if engine == "claude" and action in _PM_MODES:
         current = await prefs.get_engine_override(chat_id, engine)
-        updated = EngineOverrides(
-            model=current.model if current else None,
-            reasoning=current.reasoning if current else None,
-            permission_mode=_PM_MODES[action],
-            ask_questions=current.ask_questions if current else None,
-            diff_preview=current.diff_preview if current else None,
-            show_api_cost=current.show_api_cost if current else None,
-            show_subscription_usage=current.show_subscription_usage
-            if current
-            else None,
-            show_resume_line=current.show_resume_line if current else None,
-            budget_enabled=current.budget_enabled if current else None,
-            budget_auto_cancel=current.budget_auto_cancel if current else None,
-        )
+        updated = with_override(current, permission_mode=_PM_MODES[action])
         await prefs.set_engine_override(chat_id, engine, updated)
         logger.info("config.planmode.set", chat_id=chat_id, mode=action)
         await _page_home(ctx)
@@ -672,20 +657,7 @@ async def _page_planmode(ctx: CommandContext, action: str | None = None) -> None
     # --- Gemini approval mode actions ---
     if engine == "gemini" and action in _GEMINI_AM_MODES:
         current = await prefs.get_engine_override(chat_id, engine)
-        updated = EngineOverrides(
-            model=current.model if current else None,
-            reasoning=current.reasoning if current else None,
-            permission_mode=_GEMINI_AM_MODES[action],
-            ask_questions=current.ask_questions if current else None,
-            diff_preview=current.diff_preview if current else None,
-            show_api_cost=current.show_api_cost if current else None,
-            show_subscription_usage=current.show_subscription_usage
-            if current
-            else None,
-            show_resume_line=current.show_resume_line if current else None,
-            budget_enabled=current.budget_enabled if current else None,
-            budget_auto_cancel=current.budget_auto_cancel if current else None,
-        )
+        updated = with_override(current, permission_mode=_GEMINI_AM_MODES[action])
         await prefs.set_engine_override(chat_id, engine, updated)
         logger.info("config.approval_mode.set", chat_id=chat_id, mode=action)
         await _page_home(ctx)
@@ -693,20 +665,7 @@ async def _page_planmode(ctx: CommandContext, action: str | None = None) -> None
 
     if engine == "gemini" and action == "ro":
         current = await prefs.get_engine_override(chat_id, engine)
-        updated = EngineOverrides(
-            model=current.model if current else None,
-            reasoning=current.reasoning if current else None,
-            permission_mode=None,
-            ask_questions=current.ask_questions if current else None,
-            diff_preview=current.diff_preview if current else None,
-            show_api_cost=current.show_api_cost if current else None,
-            show_subscription_usage=current.show_subscription_usage
-            if current
-            else None,
-            show_resume_line=current.show_resume_line if current else None,
-            budget_enabled=current.budget_enabled if current else None,
-            budget_auto_cancel=current.budget_auto_cancel if current else None,
-        )
+        updated = with_override(current, permission_mode=None)
         await prefs.set_engine_override(chat_id, engine, updated)
         logger.info("config.approval_mode.set", chat_id=chat_id, mode="ro")
         await _page_home(ctx)
@@ -715,20 +674,7 @@ async def _page_planmode(ctx: CommandContext, action: str | None = None) -> None
     # --- Clear (all engines) ---
     if action == "clr":
         current = await prefs.get_engine_override(chat_id, engine)
-        updated = EngineOverrides(
-            model=current.model if current else None,
-            reasoning=current.reasoning if current else None,
-            permission_mode=None,
-            ask_questions=current.ask_questions if current else None,
-            diff_preview=current.diff_preview if current else None,
-            show_api_cost=current.show_api_cost if current else None,
-            show_subscription_usage=current.show_subscription_usage
-            if current
-            else None,
-            show_resume_line=current.show_resume_line if current else None,
-            budget_enabled=current.budget_enabled if current else None,
-            budget_auto_cancel=current.budget_auto_cancel if current else None,
-        )
+        updated = with_override(current, permission_mode=None)
         await prefs.set_engine_override(chat_id, engine, updated)
         logger.info("config.permission_mode.cleared", chat_id=chat_id, engine=engine)
         await _page_home(ctx)
@@ -886,7 +832,7 @@ async def _page_loop(ctx: CommandContext, action: str | None = None) -> None:
     setting a budget cap.
     """
     from ..chat_prefs import ChatPrefsStore, resolve_prefs_path
-    from ..engine_overrides import LOOP_SUPPORTED_ENGINES, EngineOverrides
+    from ..engine_overrides import LOOP_SUPPORTED_ENGINES, with_override
 
     config_path = ctx.config_path
     if config_path is None:
@@ -924,21 +870,7 @@ async def _page_loop(ctx: CommandContext, action: str | None = None) -> None:
             new_value = False
         else:
             new_value = None
-        updated = EngineOverrides(
-            model=current.model if current else None,
-            reasoning=current.reasoning if current else None,
-            permission_mode=current.permission_mode if current else None,
-            ask_questions=current.ask_questions if current else None,
-            diff_preview=current.diff_preview if current else None,
-            show_api_cost=current.show_api_cost if current else None,
-            show_subscription_usage=current.show_subscription_usage
-            if current
-            else None,
-            show_resume_line=current.show_resume_line if current else None,
-            budget_enabled=current.budget_enabled if current else None,
-            budget_auto_cancel=current.budget_auto_cancel if current else None,
-            loop_enabled=new_value,
-        )
+        updated = with_override(current, loop_enabled=new_value)
         await prefs.set_engine_override(chat_id, engine, updated)
         logger.info("config.loop.set", chat_id=chat_id, value=new_value)
         await _page_home(ctx)
@@ -1074,7 +1006,7 @@ async def _page_verbose(ctx: CommandContext, action: str | None = None) -> None:
 
 async def _page_engine(ctx: CommandContext, action: str | None = None) -> None:
     from ..chat_prefs import ChatPrefsStore, resolve_prefs_path
-    from ..engine_overrides import EngineOverrides
+    from ..engine_overrides import with_override
 
     config_path = ctx.config_path
     if config_path is None:
@@ -1094,18 +1026,7 @@ async def _page_engine(ctx: CommandContext, action: str | None = None) -> None:
         current_engine, _ = await _resolve_effective_engine(ctx)
         current = await prefs.get_engine_override(chat_id, current_engine)
         if current and current.model:
-            updated = EngineOverrides(
-                model=None,
-                reasoning=current.reasoning,
-                permission_mode=current.permission_mode,
-                ask_questions=current.ask_questions,
-                diff_preview=current.diff_preview,
-                show_api_cost=current.show_api_cost,
-                show_subscription_usage=current.show_subscription_usage,
-                show_resume_line=current.show_resume_line,
-                budget_enabled=current.budget_enabled,
-                budget_auto_cancel=current.budget_auto_cancel,
-            )
+            updated = with_override(current, model=None)
             await prefs.set_engine_override(chat_id, current_engine, updated)
             logger.info("config.model.cleared", chat_id=chat_id)
         await _page_engine(ctx)
@@ -1364,7 +1285,7 @@ async def _page_model(ctx: CommandContext, action: str | None = None) -> None:
     The ``clr`` action is still handled here, then redirects to engine page.
     """
     from ..chat_prefs import ChatPrefsStore, resolve_prefs_path
-    from ..engine_overrides import EngineOverrides
+    from ..engine_overrides import with_override
 
     if action == "clr":
         config_path = ctx.config_path
@@ -1373,20 +1294,7 @@ async def _page_model(ctx: CommandContext, action: str | None = None) -> None:
             chat_id = ctx.message.channel_id
             current_engine, _ = await _resolve_effective_engine(ctx)
             current = await prefs.get_engine_override(chat_id, current_engine)
-            updated = EngineOverrides(
-                model=None,
-                reasoning=current.reasoning if current else None,
-                permission_mode=current.permission_mode if current else None,
-                ask_questions=current.ask_questions if current else None,
-                diff_preview=current.diff_preview if current else None,
-                show_api_cost=current.show_api_cost if current else None,
-                show_subscription_usage=current.show_subscription_usage
-                if current
-                else None,
-                show_resume_line=current.show_resume_line if current else None,
-                budget_enabled=current.budget_enabled if current else None,
-                budget_auto_cancel=current.budget_auto_cancel if current else None,
-            )
+            updated = with_override(current, model=None)
             await prefs.set_engine_override(chat_id, current_engine, updated)
             logger.info("config.model.cleared", chat_id=chat_id, engine=current_engine)
         await _page_engine(ctx)
@@ -1433,10 +1341,10 @@ def _effective_reasoning(
 async def _page_reasoning(ctx: CommandContext, action: str | None = None) -> None:
     from ..chat_prefs import ChatPrefsStore, resolve_prefs_path
     from ..engine_overrides import (
-        EngineOverrides,
         allowed_reasoning_levels,
         get_reasoning_label,
         supports_reasoning,
+        with_override,
     )
 
     config_path = ctx.config_path
@@ -1478,20 +1386,7 @@ async def _page_reasoning(ctx: CommandContext, action: str | None = None) -> Non
             await _page_home(ctx)
             return
         current = await prefs.get_engine_override(chat_id, current_engine)
-        updated = EngineOverrides(
-            model=current.model if current else None,
-            reasoning=level,
-            permission_mode=current.permission_mode if current else None,
-            ask_questions=current.ask_questions if current else None,
-            diff_preview=current.diff_preview if current else None,
-            show_api_cost=current.show_api_cost if current else None,
-            show_subscription_usage=current.show_subscription_usage
-            if current
-            else None,
-            show_resume_line=current.show_resume_line if current else None,
-            budget_enabled=current.budget_enabled if current else None,
-            budget_auto_cancel=current.budget_auto_cancel if current else None,
-        )
+        updated = with_override(current, reasoning=level)
         await prefs.set_engine_override(chat_id, current_engine, updated)
         logger.info(
             "config.reasoning.set",
@@ -1503,20 +1398,7 @@ async def _page_reasoning(ctx: CommandContext, action: str | None = None) -> Non
         return
     elif action == "clr":
         current = await prefs.get_engine_override(chat_id, current_engine)
-        updated = EngineOverrides(
-            model=current.model if current else None,
-            reasoning=None,
-            permission_mode=current.permission_mode if current else None,
-            ask_questions=current.ask_questions if current else None,
-            diff_preview=current.diff_preview if current else None,
-            show_api_cost=current.show_api_cost if current else None,
-            show_subscription_usage=current.show_subscription_usage
-            if current
-            else None,
-            show_resume_line=current.show_resume_line if current else None,
-            budget_enabled=current.budget_enabled if current else None,
-            budget_auto_cancel=current.budget_auto_cancel if current else None,
-        )
+        updated = with_override(current, reasoning=None)
         await prefs.set_engine_override(chat_id, current_engine, updated)
         logger.info("config.reasoning.cleared", chat_id=chat_id, engine=current_engine)
         await _page_home(ctx)
@@ -1606,7 +1488,7 @@ async def _page_reasoning(ctx: CommandContext, action: str | None = None) -> Non
 
 async def _page_ask_questions(ctx: CommandContext, action: str | None = None) -> None:
     from ..chat_prefs import ChatPrefsStore, resolve_prefs_path
-    from ..engine_overrides import ASK_QUESTIONS_SUPPORTED_ENGINES, EngineOverrides
+    from ..engine_overrides import ASK_QUESTIONS_SUPPORTED_ENGINES, with_override
 
     config_path = ctx.config_path
     if config_path is None:
@@ -1634,60 +1516,21 @@ async def _page_ask_questions(ctx: CommandContext, action: str | None = None) ->
 
     if action == "on":
         current = await prefs.get_engine_override(chat_id, engine)
-        updated = EngineOverrides(
-            model=current.model if current else None,
-            reasoning=current.reasoning if current else None,
-            permission_mode=current.permission_mode if current else None,
-            ask_questions=True,
-            diff_preview=current.diff_preview if current else None,
-            show_api_cost=current.show_api_cost if current else None,
-            show_subscription_usage=current.show_subscription_usage
-            if current
-            else None,
-            show_resume_line=current.show_resume_line if current else None,
-            budget_enabled=current.budget_enabled if current else None,
-            budget_auto_cancel=current.budget_auto_cancel if current else None,
-        )
+        updated = with_override(current, ask_questions=True)
         await prefs.set_engine_override(chat_id, engine, updated)
         logger.info("config.ask_questions.set", chat_id=chat_id, value=True)
         await _page_home(ctx)
         return
     elif action == "off":
         current = await prefs.get_engine_override(chat_id, engine)
-        updated = EngineOverrides(
-            model=current.model if current else None,
-            reasoning=current.reasoning if current else None,
-            permission_mode=current.permission_mode if current else None,
-            ask_questions=False,
-            diff_preview=current.diff_preview if current else None,
-            show_api_cost=current.show_api_cost if current else None,
-            show_subscription_usage=current.show_subscription_usage
-            if current
-            else None,
-            show_resume_line=current.show_resume_line if current else None,
-            budget_enabled=current.budget_enabled if current else None,
-            budget_auto_cancel=current.budget_auto_cancel if current else None,
-        )
+        updated = with_override(current, ask_questions=False)
         await prefs.set_engine_override(chat_id, engine, updated)
         logger.info("config.ask_questions.set", chat_id=chat_id, value=False)
         await _page_home(ctx)
         return
     elif action == "clr":
         current = await prefs.get_engine_override(chat_id, engine)
-        updated = EngineOverrides(
-            model=current.model if current else None,
-            reasoning=current.reasoning if current else None,
-            permission_mode=current.permission_mode if current else None,
-            ask_questions=None,
-            diff_preview=current.diff_preview if current else None,
-            show_api_cost=current.show_api_cost if current else None,
-            show_subscription_usage=current.show_subscription_usage
-            if current
-            else None,
-            show_resume_line=current.show_resume_line if current else None,
-            budget_enabled=current.budget_enabled if current else None,
-            budget_auto_cancel=current.budget_auto_cancel if current else None,
-        )
+        updated = with_override(current, ask_questions=None)
         await prefs.set_engine_override(chat_id, engine, updated)
         logger.info("config.ask_questions.cleared", chat_id=chat_id)
         await _page_home(ctx)
@@ -1733,7 +1576,7 @@ async def _page_ask_questions(ctx: CommandContext, action: str | None = None) ->
 
 async def _page_diff_preview(ctx: CommandContext, action: str | None = None) -> None:
     from ..chat_prefs import ChatPrefsStore, resolve_prefs_path
-    from ..engine_overrides import DIFF_PREVIEW_SUPPORTED_ENGINES, EngineOverrides
+    from ..engine_overrides import DIFF_PREVIEW_SUPPORTED_ENGINES, with_override
 
     config_path = ctx.config_path
     if config_path is None:
@@ -1761,60 +1604,21 @@ async def _page_diff_preview(ctx: CommandContext, action: str | None = None) -> 
 
     if action == "on":
         current = await prefs.get_engine_override(chat_id, engine)
-        updated = EngineOverrides(
-            model=current.model if current else None,
-            reasoning=current.reasoning if current else None,
-            permission_mode=current.permission_mode if current else None,
-            ask_questions=current.ask_questions if current else None,
-            diff_preview=True,
-            show_api_cost=current.show_api_cost if current else None,
-            show_subscription_usage=current.show_subscription_usage
-            if current
-            else None,
-            show_resume_line=current.show_resume_line if current else None,
-            budget_enabled=current.budget_enabled if current else None,
-            budget_auto_cancel=current.budget_auto_cancel if current else None,
-        )
+        updated = with_override(current, diff_preview=True)
         await prefs.set_engine_override(chat_id, engine, updated)
         logger.info("config.diff_preview.set", chat_id=chat_id, value=True)
         await _page_home(ctx)
         return
     elif action == "off":
         current = await prefs.get_engine_override(chat_id, engine)
-        updated = EngineOverrides(
-            model=current.model if current else None,
-            reasoning=current.reasoning if current else None,
-            permission_mode=current.permission_mode if current else None,
-            ask_questions=current.ask_questions if current else None,
-            diff_preview=False,
-            show_api_cost=current.show_api_cost if current else None,
-            show_subscription_usage=current.show_subscription_usage
-            if current
-            else None,
-            show_resume_line=current.show_resume_line if current else None,
-            budget_enabled=current.budget_enabled if current else None,
-            budget_auto_cancel=current.budget_auto_cancel if current else None,
-        )
+        updated = with_override(current, diff_preview=False)
         await prefs.set_engine_override(chat_id, engine, updated)
         logger.info("config.diff_preview.set", chat_id=chat_id, value=False)
         await _page_home(ctx)
         return
     elif action == "clr":
         current = await prefs.get_engine_override(chat_id, engine)
-        updated = EngineOverrides(
-            model=current.model if current else None,
-            reasoning=current.reasoning if current else None,
-            permission_mode=current.permission_mode if current else None,
-            ask_questions=current.ask_questions if current else None,
-            diff_preview=None,
-            show_api_cost=current.show_api_cost if current else None,
-            show_subscription_usage=current.show_subscription_usage
-            if current
-            else None,
-            show_resume_line=current.show_resume_line if current else None,
-            budget_enabled=current.budget_enabled if current else None,
-            budget_auto_cancel=current.budget_auto_cancel if current else None,
-        )
+        updated = with_override(current, diff_preview=None)
         await prefs.set_engine_override(chat_id, engine, updated)
         logger.info("config.diff_preview.cleared", chat_id=chat_id)
         await _page_home(ctx)
@@ -1868,7 +1672,7 @@ async def _page_cost_usage(ctx: CommandContext, action: str | None = None) -> No
     from ..engine_overrides import (
         API_COST_SUPPORTED_ENGINES,
         SUBSCRIPTION_USAGE_SUPPORTED_ENGINES,
-        EngineOverrides,
+        with_override,
     )
 
     config_path = ctx.config_path
@@ -1924,15 +1728,10 @@ async def _page_cost_usage(ctx: CommandContext, action: str | None = None) -> No
             bc_val = {"on": True, "off": False, "clr": None}[act]
             logger.info("config.budget_auto_cancel.set", chat_id=chat_id, value=bc_val)
 
-        updated = EngineOverrides(
-            model=current.model if current else None,
-            reasoning=current.reasoning if current else None,
-            permission_mode=current.permission_mode if current else None,
-            ask_questions=current.ask_questions if current else None,
-            diff_preview=current.diff_preview if current else None,
+        updated = with_override(
+            current,
             show_api_cost=ac_val,
             show_subscription_usage=su_val,
-            show_resume_line=current.show_resume_line if current else None,
             budget_enabled=bg_val,
             budget_auto_cancel=bc_val,
         )
@@ -2005,12 +1804,14 @@ async def _page_cost_usage(ctx: CommandContext, action: str | None = None) -> No
             if bc is True
             else ("off" if bc is False else ("on" if global_ac else "off"))
         )
-        lines.append(f"  Auto-cancel: {bc_label}")
+        lines.append(f"  {_STOP_AT_LIMIT}: {bc_label}")
     else:
         bg_label = "on" if bg is True else "off"
         bc_label = "on" if bc is True else "off"
         lines.append(f"  Enabled: {bg_label}")
-        lines.append(f"  Auto-cancel: {bc_label}")
+        lines.append(f"  {_STOP_AT_LIMIT}: {bc_label}")
+    # #896: say exactly what the toggle does — and what it can't.
+    lines.append(f"  {_STOP_AT_LIMIT_HELP}")
     lines.append("  Set limits in untether.toml [cost_budget] section.")
     lines.append("")
 
@@ -2061,7 +1862,7 @@ async def _page_cost_usage(ctx: CommandContext, action: str | None = None) -> No
     )
     buttons.append(
         _toggle_row(
-            "Auto-cancel",
+            _STOP_AT_LIMIT,
             current=bc,
             default=budget_default_ac,
             on_data="config:cu:bc_on",
@@ -2083,7 +1884,7 @@ async def _page_cost_usage(ctx: CommandContext, action: str | None = None) -> No
 
 async def _page_resume_line(ctx: CommandContext, action: str | None = None) -> None:
     from ..chat_prefs import ChatPrefsStore, resolve_prefs_path
-    from ..engine_overrides import EngineOverrides
+    from ..engine_overrides import with_override
 
     config_path = ctx.config_path
     if config_path is None:
@@ -2101,20 +1902,7 @@ async def _page_resume_line(ctx: CommandContext, action: str | None = None) -> N
     if action in ("on", "off", "clr"):
         current = await prefs.get_engine_override(chat_id, current_engine)
         new_val = {"on": True, "off": False, "clr": None}[action]
-        updated = EngineOverrides(
-            model=current.model if current else None,
-            reasoning=current.reasoning if current else None,
-            permission_mode=current.permission_mode if current else None,
-            ask_questions=current.ask_questions if current else None,
-            diff_preview=current.diff_preview if current else None,
-            show_api_cost=current.show_api_cost if current else None,
-            show_subscription_usage=current.show_subscription_usage
-            if current
-            else None,
-            show_resume_line=new_val,
-            budget_enabled=current.budget_enabled if current else None,
-            budget_auto_cancel=current.budget_auto_cancel if current else None,
-        )
+        updated = with_override(current, show_resume_line=new_val)
         await prefs.set_engine_override(chat_id, current_engine, updated)
         logger.info("config.resume_line.set", chat_id=chat_id, value=new_val)
         await _page_home(ctx)
@@ -2507,9 +2295,9 @@ class ConfigCommand:
                 "bg_on": "Budget: on",
                 "bg_off": "Budget: off",
                 "bg_clr": "Budget: cleared",
-                "bc_on": "Auto-cancel: on",
-                "bc_off": "Auto-cancel: off",
-                "bc_clr": "Auto-cancel: cleared",
+                "bc_on": f"{_STOP_AT_LIMIT}: on",
+                "bc_off": f"{_STOP_AT_LIMIT}: off",
+                "bc_clr": f"{_STOP_AT_LIMIT}: cleared",
             },
             "rl": {
                 "on": "Resume line: on",

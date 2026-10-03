@@ -824,3 +824,55 @@ async def test_893_retry_after_pause_can_still_dispatch(monkeypatch):
     assert dispatcher.calls == [("once", "default"), ("once", ())]
     assert manager.cron_ids() == []
     assert manager.fired_run_once_ids() == ["once"]
+
+
+# ── #896: a run_once cron refused by the daily budget is not consumed ─────
+
+
+@pytest.mark.anyio
+async def test_896_refused_run_once_stays_scheduled(monkeypatch, tmp_path):
+    """Refused by "Stop at limit" nothing ran: the one-shot is neither
+    consumed nor recorded as fired, and it isn't retried every tick (it
+    fires at its next schedule match, like a one-shot skipped by /pause)."""
+    from structlog.testing import capture_logs
+
+    from untether.triggers import history
+    from untether.triggers.dispatcher import DISPATCH_REFUSED
+
+    history.reset_history()
+    manager = TriggerManager(
+        _one_shot_settings(), config_path=tmp_path / "untether.toml"
+    )
+    dispatcher = ScriptedDispatcher(results=[DISPATCH_REFUSED])  # type: ignore[list-item]
+
+    with capture_logs() as logs:
+        await _drive_scheduler(monkeypatch, manager, dispatcher, _minutes(0, 1, 2))
+
+    assert dispatcher.calls == [("once", "default")]  # no per-tick retries
+    assert manager.cron_ids() == ["once"]
+    assert manager.fired_run_once_ids() == []
+    assert manager.run_once_pending_since("once") is None
+    assert history.get_last_fired("once") is None
+    events = [e["event"] for e in logs]
+    assert "triggers.cron.run_once_refused" in events
+    assert "triggers.cron.run_once_completed" not in events
+    history.reset_history()
+
+
+@pytest.mark.anyio
+async def test_896_refused_pending_retry_is_not_lost(monkeypatch, tmp_path):
+    """A one-shot pending a #893 retry that the budget then refuses drops the
+    retry (no run_once_lost later) and stays scheduled."""
+    from untether.triggers.dispatcher import DISPATCH_REFUSED
+
+    manager = TriggerManager(
+        _one_shot_settings(), config_path=tmp_path / "untether.toml"
+    )
+    dispatcher = ScriptedDispatcher(results=[False, DISPATCH_REFUSED])  # type: ignore[list-item]
+
+    await _drive_scheduler(monkeypatch, manager, dispatcher, _minutes(0, 1, 2, 3))
+
+    assert dispatcher.calls == [("once", "default"), ("once", ())]
+    assert manager.cron_ids() == ["once"]
+    assert manager.fired_run_once_ids() == []
+    assert manager.run_once_pending_since("once") is None
