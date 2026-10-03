@@ -117,6 +117,8 @@ Cron triggers fire on a schedule using standard 5-field cron syntax.
 
 This runs every weekday at 9:00 AM in the server's local time (usually UTC).
 
+The parser supports numbers, `*`, ranges (`1-5`), lists (`1,15`) and steps on `*` or a range (`*/15`, `9-17/2`). It doesn't accept month or day names (`MON`, `JAN`), and a step on a single number (`5/15`) is not expanded. If both day-of-month and day-of-week are restricted, a day must match **both** (standard cron matches either). Schedules aren't validated when the config loads, so check a new one with `/ping` or the `/config` → ⏰ Triggers page, which describe it in words.
+
 ### Timezone
 
 By default, cron schedules use the server's system time. Set `timezone` to
@@ -181,6 +183,7 @@ Crons can pull data from external sources before rendering the prompt:
     schedule = "0 9 * * 1-5"
     engine = "claude"
     project = "my-app"
+    prompt_template = "Open issues:\n{{issues}}\n\nReview and propose labels."
 
     [triggers.crons.fetch]
     type = "http_get"
@@ -188,9 +191,9 @@ Crons can pull data from external sources before rendering the prompt:
     headers = { "Authorization" = "Bearer ghp_your_token_here" }  # literal value — no {{env.NAME}} lookup
     parse_as = "json"
     store_as = "issues"
-
-    prompt_template = "Open issues:\n{{issues}}\n\nReview and propose labels."
     ```
+
+`prompt_template` belongs to the cron itself, so it must come before the `[triggers.crons.fetch]` header. Anything after the header is read as a fetch option, and an unknown key there fails the trigger config.
 
 Header values are used literally — `{{…}}` placeholders in `url`, `headers` and `body` render as empty strings and there is no `{{env.NAME}}` lookup — so keep `untether.toml`'s permissions tight (`chmod 600`).
 
@@ -213,7 +216,7 @@ Webhooks can perform lightweight actions without spawning an agent:
     auth = "bearer"
     secret = "whsec_..."
     action = "file_write"
-    file_path = "~/data/incoming/batch-{{date}}.json"
+    file_path = "~/data/incoming/batch-{{batch_id}}.json"  # {{…}} fields come from the payload
     notify_on_success = true
 
     # Send a Telegram notification
@@ -226,7 +229,7 @@ Webhooks can perform lightweight actions without spawning an agent:
     message_template = "📈 {{ticker}} hit {{price}}"
     ```
 
-Action types: `agent_run` (default), `file_write`, `http_forward`, `notify_only`. A `file_write` path, like a cron `file_read` fetch, is checked against `[transports.telegram.files] deny_globs` at any depth, so a templated path can't land in `.git/hooks` or `~/.ssh` ([#831](https://github.com/littlebearapps/untether/issues/831)). See the
+Action types: `agent_run` (default), `file_write`, `http_forward`, `notify_only`. Template fields come only from the webhook payload; there are no built-in variables such as a date. A `file_write` path, like a cron `file_read` fetch, is checked at any depth against a fixed deny list (`.git/**`, `.env`, `.envrc`, `**/*.pem`, `**/.ssh/**`), so a templated path can't land in `.git/hooks` or `~/.ssh` ([#831](https://github.com/littlebearapps/untether/issues/831)). This list is separate from `[transports.telegram.files] deny_globs`. See the
 [triggers reference](../reference/triggers/triggers.md#non-agent-actions) for details.
 
 ## Chat routing
@@ -283,8 +286,9 @@ The new cron will start firing on the next minute tick. Similarly, new webhooks 
 accessible immediately, and removed webhooks start returning 404.
 
 !!! note
-    Server settings (`host`, `port`, `rate_limit`) and the `enabled` toggle still
-    require a restart. See the [Triggers reference — Hot-reload](../reference/triggers/triggers.md#hot-reload)
+    Server settings (`host`, `port`, `rate_limit`, `max_body_bytes`) still require a
+    restart, and so does turning `enabled` from off to on. Turning `enabled` off applies
+    straight away (crons stop and webhook paths return 404). See the [Triggers reference — Hot-reload](../reference/triggers/triggers.md#hot-reload)
     for the full list.
 
 ## One-shot crons with `run_once`
@@ -301,7 +305,7 @@ run_once = true
 
 After the cron fires, the `triggers.cron.run_once_completed` log line confirms the removal, and the startup message counts it separately from scheduled crons ([#809](https://github.com/littlebearapps/untether/issues/809)). Fired state is persisted to `run_once_fired.json` (sibling of `untether.toml`), so the cron is skipped across config reloads and process restarts — the TOML entry is kept for history but won't refire. To re-enable a one-shot, change its `id` or remove both the TOML entry and its record in `run_once_fired.json`.
 
-A one-shot only counts as fired once its run is dispatched. If the `⏰ Scheduled:` message can't be posted (a wrong `chat_id`, or a Telegram or network outage), nothing runs and the cron stays pending: Untether retries it once a minute for up to 15 minutes, then gives up and logs `triggers.cron.run_once_lost` at error level ([#893](https://github.com/littlebearapps/untether/issues/893)). The pending state is saved to `run_once_pending.json` next to `untether.toml`, so a restart during that window carries on retrying on the first minute after startup, and a restart after the window closed gives the cron up straight away. A pause during the window still gets one retry after you resume before the cron is given up.
+A one-shot only counts as fired once its run is dispatched, or once its fetch step fails with `on_failure = "abort"` (the failure notice is the one fire). If the `⏰ Scheduled:` message can't be posted (a wrong `chat_id`, or a Telegram or network outage), nothing runs and the cron stays pending: Untether retries it once a minute for up to 15 minutes, then gives up and logs `triggers.cron.run_once_lost` at error level ([#893](https://github.com/littlebearapps/untether/issues/893)). The pending state is saved to `run_once_pending.json` next to `untether.toml`, so a restart during that window carries on retrying on the first minute after startup, and a restart after the window closed gives the cron up straight away. A pause during the window still gets one retry after you resume before the cron is given up.
 
 ## Autonomous crons in plan-mode chats (Claude)
 
@@ -326,7 +330,7 @@ permission_mode = "auto"
 !!! note "Webhooks have no `permission_mode`"
     A webhook run always uses its chat's `/planmode`, then the engine default — so a webhook into a `plan` (or `/planmode off`) chat has its approvals denied the same way. Set the chat's mode with `/planmode plan-auto` or `/planmode auto` if the webhook should act on its own; per-webhook overrides are tracked in [#332](https://github.com/littlebearapps/untether/issues/332). Webhooks aren't listed in the startup message.
 
-Precedence (Claude only): cron `permission_mode` > per-chat `/planmode` > engine config default. Every run that actually changes the resolved value logs `trigger.cron.permission_mode_override` for staging observability. Valid values: `default` (alias `manual`), `plan`, `plan-auto`, `auto`, `acceptEdits`, `dontAsk`, `bypassPermissions`. On a Codex cron, `permission_mode = "safe"` runs that cron in Codex's read-only sandbox; any other value logs `codex.permission_mode.unknown` once and runs full auto ([#830](https://github.com/littlebearapps/untether/issues/830)). Gemini (deprecated) passes it through as `--approval-mode`; OpenCode, Pi and AMP ignore the field — full coverage is tracked in [#332](https://github.com/littlebearapps/untether/issues/332). See [Schedule tasks — Autonomous crons](schedule-tasks.md#autonomous-crons) for the everyday framing.
+Precedence (Claude only): cron `permission_mode` > per-chat `/planmode` > engine config default. Every run whose cron value differs from the chat's own setting logs `trigger.cron.permission_mode_override` for staging observability. Valid values: `default` (alias `manual`), `plan`, `plan-auto`, `auto`, `acceptEdits`, `dontAsk`, `bypassPermissions`. On a Codex cron, `permission_mode = "safe"` runs that cron in Codex's read-only sandbox; any other value logs `codex.permission_mode.unknown` once and runs full auto ([#830](https://github.com/littlebearapps/untether/issues/830)). Gemini (deprecated) passes it through as `--approval-mode`; OpenCode, Pi and AMP ignore the field — full coverage is tracked in [#332](https://github.com/littlebearapps/untether/issues/332). See [Schedule tasks — Autonomous crons](schedule-tasks.md#autonomous-crons) for the everyday framing.
 
 ## Per-cron model and effort
 
@@ -363,7 +367,7 @@ Once triggers are configured, `/ping` in the targeted chat shows a summary:
 
 ```
 🏓 pong — up 2d 4h 12m 3s
-⏰ triggers: 1 cron (daily-review, 9:00 AM daily (Melbourne))
+⏰ triggers: 1 cron (daily-review, 9:00 AM Mon–Fri (Melbourne))
 ```
 
 Runs initiated by a trigger show their provenance in the meta footer:

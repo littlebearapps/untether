@@ -8,19 +8,20 @@ Before diving into specific issues, run these two commands:
 
 ```sh
 untether --debug    # start with debug logging → writes debug.log
-untether doctor     # preflight check: token, chat, topics, files, voice, engines
+untether doctor     # preflight check: token, chat, topics, file transfer, voice key
 ```
 
 ```
 $ untether doctor
-✓ bot token valid (@my_untether_bot)
-✓ chat 123456789 reachable
-✓ engine codex found at /usr/local/bin/codex
-✓ engine claude found at /usr/local/bin/claude
-✗ engine opencode not found
-✓ voice transcription configured
-✓ file transfer directory exists
+untether doctor
+- telegram token: ok (@my_untether_bot)
+- chat_id: ok (private (123456789))
+- topics: ok (disabled)
+- file transfer: ok (restricted to 1 user id(s))
+- voice transcription: error (API key not set)
 ```
+
+`untether doctor` exits with status 1 when any check reports `error`. It doesn't check engine CLIs: the startup message lists any that are `not installed`, `misconfigured` or `failed to load`.
 
 <!-- TODO: capture screenshot -->
 <!-- <img src="../assets/screenshots/doctor-output.jpg" alt="untether doctor output showing check results" width="360" loading="lazy" /> -->
@@ -37,7 +38,7 @@ This is the v0.35.3 ([#377](https://github.com/littlebearapps/untether/issues/37
     untether config set transports.telegram.allowed_user_ids "[<your_id>]"
     ```
 
-    Get your ID with `untether chat-id` (sends a message in your chat and prints the IDs).
+    Get your ID with `untether chat-id`: it waits for you to send the bot a message, then prints `chat_id = …`. In a private chat with the bot, that number is your user ID.
 
 - **Dev/demo escape hatch**: opt in to an open bot. Logged at INFO every boot so the deviation stays visible:
 
@@ -88,7 +89,7 @@ npm install -g @sourcegraph/amp
 
 Verify with `which codex` (or `which claude`, etc.). If installed via `npm -g` but not found, check that npm's global bin directory is in your PATH.
 
-Run `untether doctor` to see which engines are detected.
+The startup message lists engines that are `not installed`, `misconfigured` or `failed to load`; `untether doctor` doesn't check engine CLIs.
 
 ## Permission denied or auth errors
 
@@ -135,8 +136,8 @@ does not hit the version gate — `/threads` can list threads normally while
 
 **Symptom:** the progress message sits at `starting · gemini` and never advances.
 Eventually the stall watchdog fires and you get
-`Auto-cancelled: session appears stuck (max_warnings)` — typically after ~10
-minutes.
+`Auto-cancelled: session appears stuck (max_warnings)` — typically after about
+half an hour.
 
 Run standalone, `gemini` prints `IneligibleTierError: This client is no longer
 supported for Gemini Code Assist for individuals` and exits 1. Spawned by
@@ -186,10 +187,6 @@ If OpenCode emits a JSONL event type that Untether doesn't recognise (e.g. a `qu
 
 If you see this warning, check for an Untether update that adds support for the new event type. OpenCode's `run` command auto-denies questions via permission rules, so this should be rare — it most likely indicates an OpenCode protocol change.
 
-## Engine output line cap
-
-Individual engine stdout lines are capped at 10 MB. If an engine emits a single JSONL line exceeding this limit (e.g. a very large base64 image in a tool result), the line is truncated and a warning is logged. This prevents unbounded memory growth from malformed engine output.
-
 ## Stall warnings
 
 **Symptoms:** Telegram shows "⏳ No progress for X min — session may be stuck" or "⏳ MCP tool running: server-name (X min)".
@@ -201,7 +198,8 @@ The stall watchdog monitors engine subprocesses for periods of inactivity (no JS
 | Normal (thinking/generation) | 5 min | Model is generating a response |
 | Local tool running (Bash, Read, etc.) | 10 min | Long test suite or build |
 | MCP tool running | 15 min | External API call (Cloudflare, GitHub, web search) |
-| Pending user approval | 30 min | Waiting for Approve/Deny click |
+| Child processes / subagents running | 15 min (`subagent_timeout`) | `⏳ Waiting for child processes (…)` or `⏳ Child processes idle (…)` |
+| Pending user approval | 10 min, then every 30 min | `⏳ Awaiting your approval (N min) — tap a button above to proceed (no action needed otherwise)` |
 
 **If the warning names an MCP tool** (e.g. "MCP tool running: cloudflare-observability"), the process is likely waiting on a slow external API. This is usually not a real stall — wait for it to complete or `/cancel` if it's taking too long.
 
@@ -219,7 +217,7 @@ The stall watchdog monitors engine subprocesses for periods of inactivity (no JS
 2. If CPU is active and TCP connections exist, the process is likely still working
 3. If CPU is idle and no TCP connections, the process may be truly stuck — use `/cancel`
 
-**Tuning:** All thresholds are configurable via `[watchdog]` in `untether.toml`. Use `tool_timeout` to increase the initial threshold for local tools (default 10 min), and `mcp_tool_timeout` for MCP tools (default 15 min). See the [config reference](../reference/config.md#watchdog).
+**Tuning:** The tool, MCP and child-process thresholds are configurable via `[watchdog]` in `untether.toml` (the 5 min base and the approval reminders are fixed). Use `tool_timeout` to increase the initial threshold for local tools (default 10 min), `mcp_tool_timeout` for MCP tools (default 15 min), and `subagent_timeout` for child processes and subagents (default 15 min). See the [config reference](../reference/config.md#watchdog).
 
 **Expected waits don't warn.** A Claude rate-limit rejection, an API retry back-off and a live session waiting between turns for background work are all silent by design, so no stall warning fires for them (see the next section, and *Messages arrive after the run finished* below). A live session's idle hold is reported separately as `peak_live_idle_seconds` in the `session.summary` log line, not as `peak_idle_seconds` ([#787](https://github.com/littlebearapps/untether/issues/787)).
 
@@ -252,17 +250,17 @@ On detection (default 5 min after `tool_result` arrives with no assistant follow
 
 ## Claude Code exits without finishing (auto-continue)
 
-**Symptoms:** Claude Code exits after receiving tool results without processing them. You see "⚠️ Auto-continuing" in the chat, or the session ends prematurely with no final answer.
+**Symptoms:** Claude Code exits after receiving tool results without processing them. You see `🔁 Auto-resuming session after upstream Claude Code event` in the chat (with ` (attempt N)` on later retries), or the session ends prematurely with no final answer.
 
 This is an upstream Claude Code bug ([#34142](https://github.com/anthropics/claude-code/issues/34142), [#30333](https://github.com/anthropics/claude-code/issues/30333)). Untether detects it automatically and resumes the session.
 
-**How it works:** Normal sessions end with `last_event_type=result`. When Claude Code exits with `last_event_type=user` (tool results sent but never processed), Untether sends a "⚠️ Auto-continuing" notification and resumes the session.
+**How it works:** Normal sessions end with `last_event_type=result`. When Claude Code exits with `last_event_type=user` (tool results sent but never processed), Untether posts the `🔁 Auto-resuming session …` notice and resumes the session.
 
 **If auto-continue keeps firing:**
 
 1. Check if the upstream bug is fixed in a newer Claude Code version: `npm i -g @anthropic-ai/claude-code@latest`
 2. Disable auto-continue if it causes issues: set `enabled = false` in `[auto_continue]`
-3. Increase max retries if a single retry isn't enough: set `max_retries = 2` (max 5)
+3. Increase max retries if a single retry isn't enough: set `max_retries = 2` (max 3)
 
 **Auto-continue is suppressed for signal deaths** (rc=143/SIGTERM, rc=137/SIGKILL) to prevent death spirals under memory pressure. See the [config reference](../reference/config.md#auto_continue).
 
@@ -422,7 +420,7 @@ Since v0.35.5 `/browse` only works in a chat bound to a project (`chat_id` under
 
 1. **Check `watch_config`:** Hot-reload requires `watch_config = true` in the top-level config. Without it, changes only apply on restart.
 2. **Hot-reloadable settings** apply immediately: `voice_transcription`, `[files]`, `allowed_user_ids`, `show_resume_line`, `followup_mode`, trigger crons/webhooks/auth/timezones, plus `[progress]`, `[footer]` and most `[watchdog]` keys on the next run — see the full list in [Operations → Config hot-reload](operations.md#config-hot-reload). Some `[watchdog]` keys (`post_result_bg_max_hold`, `bg_hold_rearm_on_progress`, `bg_hold_declared_waits`, `rearm_plan_mode`) are read when a Claude session starts, so an already-open session keeps the old value until it closes.
-3. **Restart-only settings** require `/restart` or `systemctl restart`: `bot_token`, `chat_id`, `session_mode`, `topics.enabled`, `message_overflow`, `triggers.server.host`/`port`. Editing one of these in a running bot triggers a Telegram 🔄 warning to every project chat plus any `allowed_user_ids` admin DM ([#318](https://github.com/littlebearapps/untether/issues/318)) so you won't silently keep running on the stale value.
+3. **Restart-only settings** require `/restart` or `systemctl restart`: `bot_token`, `chat_id`, `session_mode`, the `[transports.telegram.topics]` table, `message_overflow`, `triggers.enabled` (off to on), `triggers.server.host`/`port`/`rate_limit`/`max_body_bytes`. Editing one of the Telegram keys or `triggers.enabled` in a running bot triggers a Telegram restart-required warning to every project chat plus any `allowed_user_ids` admin DM ([#318](https://github.com/littlebearapps/untether/issues/318)) so you won't silently keep running on the stale value.
 4. Check the log for `config.reload.applied` (success), `config.reload.transport_config_changed restart_required=True` (restart needed), or `config.reload.restart_notify.sent` (Telegram warning broadcast).
 
 ## /at delay not firing
@@ -430,7 +428,7 @@ Since v0.35.5 `/browse` only works in a chat bound to a project (`chat_id` under
 **Symptoms:** You scheduled `/at 30m Check the build` but the prompt never runs.
 
 - Pending `/at` delays are held in memory — they are **lost on restart**. If Untether restarted after you scheduled, the delay was cancelled.
-- Use `/cancel` to see how many pending delays exist. If it says "nothing running", there are no pending delays.
+- `/cancel` (not as a reply, with no run in progress) cancels pending delays and loops together and says how many: `❌ cancelled 1 pending /at run and 2 active loops.` A Claude session that is only idling after its answer is closed on the way. If it replies `nothing running in this chat.` (or `nothing running in this chat — closed the idle session.`), there were none to cancel.
 - Minimum duration: 60 seconds. Maximum: 24 hours. Values outside this range are rejected.
 - Per-chat cap: 20 pending delays. The 21st is rejected with an error message.
 
@@ -544,7 +542,7 @@ Budgets are checked when a result arrives, so on their own they alert rather tha
 
 **Symptoms:** Bot works in private chat but ignores messages in a group.
 
-1. Check **listen mode**: groups default to `mentions` in many setups. Send `/listen` to check, or `/listen all` to respond to everything. (`/trigger` still works as a deprecated alias from v0.35.3 onward.)
+1. Check **listen mode**: the default is `all`, but a chat or topic may have been set to `mentions`. Send `/listen` to check, or `/listen all` to respond to everything. (`/trigger` still works as a deprecated alias from v0.35.3 onward.)
 2. Check **bot privacy mode** in BotFather: send `/setprivacy` to @BotFather and select your bot. Set to "Disable" so the bot can see all messages (not just commands and @mentions).
 3. Check `allowed_user_ids` — group members not in the list are ignored. (As of v0.35.3 the list is required at startup unless `allow_any_user = true` is set — see [security.md](security.md#restrict-access).)
 4. If using topics, make sure the bot has "Manage Topics" permission.
@@ -577,32 +575,31 @@ Include `debug.log` when reporting issues on [GitHub](https://github.com/littleb
 
 ## Using untether doctor
 
-Run `untether doctor` for a comprehensive preflight check:
+Run `untether doctor` for a preflight check of your Telegram setup:
 
 ```sh
 untether doctor
 ```
 
-It validates:
+It checks:
 
-- Telegram bot token (connects and verifies)
-- Chat ID (reachable)
-- Topics configuration (permissions, forum group status)
-- File transfer settings (deny globs, permissions)
-- Voice transcription configuration (API reachability)
-- Engine CLI availability (on PATH)
+- Telegram bot token (connects and fetches the bot's name)
+- Chat ID (the bot can fetch the chat)
+- Topics configuration (supergroup, topics enabled, bot is an admin)
+- File transfer (enabled, and whether it's restricted to `allowed_user_ids`)
+- Voice transcription (an API key is set; the endpoint isn't contacted)
 
 ```
 $ untether doctor
-✓ bot token valid (@my_untether_bot)
-✓ chat 123456789 reachable
-✓ engine codex found at /usr/local/bin/codex
-✓ engine claude found at /usr/local/bin/claude
-✓ engine opencode found at /usr/local/bin/opencode
-✓ voice transcription configured
-✓ file transfer directory exists
-all checks passed
+untether doctor
+- telegram token: ok (@my_untether_bot)
+- chat_id: ok (supergroup (-1001234567890))
+- topics: ok (scope=main)
+- file transfer: ok (restricted to 1 user id(s))
+- voice transcription: ok (OPENAI_API_KEY set)
 ```
+
+There's no summary line: any `error` row makes the command exit with status 1. Engine CLIs aren't checked; the startup message lists engines that are `not installed`, `misconfigured` or `failed to load`.
 
 <!-- TODO: capture screenshot -->
 <!-- <img src="../assets/screenshots/doctor-all-passing.jpg" alt="untether doctor with all checks passing" width="360" loading="lazy" /> -->
@@ -693,10 +690,11 @@ Loop mode (`/config → 🔁 Loop mode`) gates Untether's observation of Claude 
 | Symptom | Likely cause | Fix |
 |---|---|---|
 | `/loop` registered during the turn but no fires happened afterwards | Loop mode toggle is OFF (the default) | `/config → 🔁 Loop mode → 🔁 On` |
-| Loop stopped after N iterations | Hit `[loop] max_iterations` cap | Raise `max_iterations` in `untether.toml`, or restart the loop with a fresh `/loop` |
-| Loop ended with `daily_budget_exceeded` | Hit `[cost_budget] max_cost_per_day` | Raise the cap in `/config → 💰 Cost & usage`, or wait for the daily reset |
+| Loop stopped after 20 iterations | Hit the iteration cap (`max_iterations`) | Restart the loop with a fresh `/loop`. The cap is fixed at 20 for now: `[loop] max_iterations` is accepted in `untether.toml` but not applied yet |
+| Loop stopped after 4 hours, or a week after it was created | Hit the wall-clock cap (`max_total_duration_hours`, 4 h) or the expiry (`expiry_days`, 7) | Restart the loop with a fresh `/loop` |
+| Loop fire refused with `🛑 Daily budget reached` | **Stop at limit** is on and the daily budget is spent | Raise `[cost_budget] max_cost_per_day` in `untether.toml`, or wait for the daily reset |
 | Loop fires happened but each was a "fresh user turn" rather than autonomous | This is by design — Untether re-issues the original prompt at each fire (see [Schedule tasks → Loop mode](schedule-tasks.md#loop-mode)) | N/A — expected behaviour |
-| Loop kept firing after `/cancel` | Stale `active_loops.json` | Restart `untether` (or the dev/staging unit) — the do-not-resume sentinel is loaded at startup and blocks future fires for cancelled sessions |
+| Loop kept firing after `/cancel` | Before v0.35.5 a Claude session idling after its answer, or a pending `/at` run, could stop `/cancel` from reaching the loops ([#902](https://github.com/littlebearapps/untether/issues/902)). A `/cancel` sent while a run is in progress only cancels that run | Upgrade, then send `/cancel` again once nothing is running: it drops `/at` runs and loops together |
 | Loop didn't survive a restart | `active_loops.json` is missing or corrupt | Check `journalctl --user -u untether -f` for `loop.restore.read_failed` warnings; the file lives next to your `untether.toml` |
 
 ## Related

@@ -18,7 +18,7 @@ This page is a high-level map of Untether’s internal modules: what they do and
 | `scheduler.py` | Per-thread FIFO job queueing with serialisation. |
 | `directives.py`, `context.py`, `worktrees.py` | Directive parsing (`/<engine>`, `/<project>`, `@branch`, `dir:` lines), run context types, and branch worktree creation. |
 | `transport_runtime.py` | Facade used by transports and commands to resolve messages and runners without importing internal router/project types. |
-| `cost_tracker.py` | Per-run and daily cost tracking with budget alerts (checked after each run). |
+| `cost_tracker.py` | Per-run and daily cost tracking with budget alerts (checked when a result arrives; the daily gate before a run lives in `budget_gate.py`). |
 | `session_stats.py` | Per-engine run counts, actions and durations behind `/stats`. |
 | `error_hints.py` | Maps engine error text to the actionable hints shown in Telegram. |
 | `shutdown.py` | Graceful shutdown state and drain logic. |

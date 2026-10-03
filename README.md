@@ -171,7 +171,7 @@ These two engines still load and run, but are no longer supported and are **targ
 ⁴ Toggle via `/config` between full auto (default; Codex's own sandbox setting) and safe (`--sandbox read-only`: read-only, edits blocked); pre-run policy, not interactive mid-run approval.
 ⁵ Pi requires `provider = "openai-codex"` in engine config for OAuth subscriptions in headless mode.
 ⁶ AMP requires an explicit thread ID; no "most recent" mode.
-⁷ **Deprecated** — see [Deprecated engines](#deprecated-engines) above. The ticks below describe what the integration does today; they are not a support commitment, and these engines are targeted for removal in 0.36.0.
+⁷ **Deprecated** — see [Deprecated engines](#deprecated-engines) above. The ticks above describe what the integration does today; they are not a support commitment, and these engines are targeted for removal in 0.36.0.
 
 Claude effort levels: `low`, `medium`, `high`, `xhigh`, `max` (`xhigh` requires Claude Code v2.1.114+).
 
@@ -185,7 +185,7 @@ Claude effort levels: `low`, `medium`, `high`, `xhigh`, `max` (`xhigh` requires 
 | `/agent` | Show or set the engine for this chat |
 | `/model` | Override the model for an engine |
 | `/planmode` | Set Claude Code's permission mode (on/plan-auto/auto/off) |
-| `/usage` | Claude: subscription quota (`/usage debug` shows fetch state, OAuth expiry, schema-mismatch counter); Codex and OpenCode: token totals for the chat's last session |
+| `/usage` | Claude: subscription quota (`/usage debug` shows fetch state, OAuth expiry, schema-mismatch counter); other engines: token totals for the chat's last session |
 | `/export` | Export the session transcript as a Markdown or JSON file |
 | `/browse` | Browse project files (needs a project-bound chat or `default_project`) |
 | `/new` | Cancel running tasks and clear stored sessions (in a forum topic, only that topic's) |
@@ -201,7 +201,7 @@ Claude effort levels: `low`, `medium`, `high`, `xhigh`, `max` (`xhigh` requires 
 | `/reasoning` | Set reasoning level override |
 | `/listen` | Set group chat listen mode (`all` / `mentions` / `clear`); `/trigger` still works as a deprecated alias |
 | `/stats` | Per-engine session statistics (today/week/all-time) |
-| `/auth` | Codex device re-authentication |
+| `/auth codex` | Codex device re-authentication |
 | `/at 30m <prompt>` | Schedule a one-shot delayed run (60s–24h; `/cancel` to drop) |
 | `/ping` | Health check / uptime (shows per-chat trigger summary if any) |
 | `/health` | System snapshot: RAM/swap, process diagnostics, trigger counts, today's API cost, uptime |
@@ -222,6 +222,7 @@ default_engine = "codex"
 [transports.telegram]
 bot_token = "123456789:ABC..."
 chat_id = 123456789
+allowed_user_ids = [123456789]  # your Telegram user id (required)
 session_mode = "chat"
 
 [projects.myapp]

@@ -2,7 +2,7 @@
 
 The release pipeline uses two isolated Untether instances on lba-1: **staging** (PyPI/TestPyPI release) and **dev** (local editable source). They use separate Telegram bots, separate configs, and separate state — zero crosstalk.
 
-> **Fleet context:** lba-1 staging is one of **five production-ish hosts** (lba-1, nsd, channelo, sl, mac). Multi-host upgrades use `scripts/fleet-rollout.sh` — see [release-discipline.md → Fleet rollout](../../.claude/rules/release-discipline.md). This page covers the lba-1 staging/dev pair specifically.
+> **Fleet context:** lba-1 staging is one of **five production-ish hosts** (lba-1, nsd, channelo, sl, mac). Multi-host upgrades use `scripts/fleet-rollout.sh` — see [release-discipline.md → Fleet rollout](https://github.com/littlebearapps/untether/blob/dev/.claude/rules/release-discipline.md#fleet-rollout-rc-and-stable). This page covers the lba-1 staging/dev pair specifically.
 
 > **Other lba-1 instances:** three special-purpose services also run on lba-1 — `untether-demo.service` (screenshot demo bot, `~/.untether-demo/`), `untether-dev-hf.service` (handoff/stateless-mode testing, `~/.untether-dev-hf/`) and `untether-dev-ws.service` (workspace-mode testing, `~/.untether-dev-ws/`). All three run the **same editable `.venv` as dev**, so a source change reaches them too when they restart. The release pipeline and integration tests use only staging and dev.
 

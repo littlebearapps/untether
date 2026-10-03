@@ -13,6 +13,7 @@ Dictate coding tasks hands-free — while walking, driving, or away from a keybo
     # local OpenAI-compatible transcription server (optional)
     untether config set transports.telegram.voice_transcription_base_url "http://localhost:8000/v1"
     untether config set transports.telegram.voice_transcription_api_key "local"
+    untether config set transports.telegram.voice_transcription_url_allowlist '["127.0.0.0/8"]'
     untether config set transports.telegram.voice_transcription_language "en"
     ```
 
@@ -32,7 +33,9 @@ Set `OPENAI_API_KEY` in your environment (or `voice_transcription_api_key` in co
 
 To use a local OpenAI-compatible Whisper server, set `voice_transcription_base_url`
 (and `voice_transcription_api_key` if the server expects one). This keeps engine
-requests on their own base URL without relying on `OPENAI_BASE_URL`. If your server
+requests on their own base URL without relying on `OPENAI_BASE_URL`. If
+`voice_transcription_base_url` is unset, the OpenAI client falls back to `OPENAI_BASE_URL`
+when that environment variable is set, and to `api.openai.com` otherwise. If your server
 requires a specific model name, set `voice_transcription_model` (for example,
 `whisper-1`).
 
@@ -44,6 +47,8 @@ requires a specific model name, set `voice_transcription_model` (for example,
     ```
 
     The default public path (`api.openai.com`, i.e. `base_url` unset) skips validation and needs no allowlist.
+
+    A private or loopback **IP literal** (such as `http://127.0.0.1:8000/v1`) without a matching allowlist entry fails at config load (`voice_transcription_base_url is not permitted`, with the entry to add). A **hostname** such as `localhost` can only be checked once it is resolved, so it is refused when a voice note is transcribed.
 
     Since v0.35.5 ([#679](https://github.com/littlebearapps/untether/issues/679)), a refused voice note gets a reply that names the blocked host and the exact entry to add, for example `voice_transcription_url_allowlist = ["127.0.0.0/8"]` for `localhost`. For a private or tailnet host (Tailscale uses `100.64.0.0/10`), the reply suggests that single IP rather than the whole range. The same check runs at startup and after a hot-reload of a voice endpoint key, so a blocked endpoint shows up in the log as `voice.base_url.not_permitted` before anyone sends a voice note. Link-local and cloud-metadata addresses (`169.254.x`) are never suggested.
 

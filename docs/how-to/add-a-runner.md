@@ -622,7 +622,7 @@ one targeted test catches regressions.
     in `stream_end_events(...)`.
 
 - **Unhelpful error reporting**
-  - Include stderr tail in a warning action (Claude Code includes `stderr_tail` in `detail`).
+  - Include a stderr excerpt in a warning action (the base runner appends one via `_stderr_excerpt`).
 
 - **Resume line gets truncated**
   - Ensure `is_resume_line()` matches your `format_resume()` output. Untether tries to preserve

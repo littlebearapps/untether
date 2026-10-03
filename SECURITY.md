@@ -45,7 +45,7 @@ Include:
 - Bot token management — token security is the operator's responsibility
 - Issues requiring physical access to the host machine
 
-## Security improvements in v0.35.5
+## Security improvements in v0.35.5 (upcoming)
 
 v0.35.5 closes several approval, sandbox and file-access gaps. Upgrade notes:
 
@@ -61,7 +61,7 @@ v0.35.5 closes several approval, sandbox and file-access gaps. Upgrade notes:
 - **Log redaction widened** ([#800](https://github.com/littlebearapps/untether/issues/800), [#679](https://github.com/littlebearapps/untether/issues/679)). Process titles are scanned in full, and bearer credentials, JWTs and `api_key=` / `token=` / `secret=` / `password=` values are redacted; `ssrf.*` log lines redact URL userinfo.
 - **Dependency advisories** — `anyio` 4.15.1 (CVE-2026-63374, CVE-2026-64847; [#773](https://github.com/littlebearapps/untether/issues/773)) and `aiohttp` 3.14.3 (`PYSEC-2026-3545`/`3546`/`3547`) in the lockfile.
 
-See [CHANGELOG v0.35.5](https://github.com/littlebearapps/untether/blob/master/CHANGELOG.md#v0355) for the full entry list.
+See [CHANGELOG v0.35.5](https://github.com/littlebearapps/untether/blob/master/CHANGELOG.md#v0355-unreleased) for the full entry list.
 
 ## Security improvements in v0.35.3
 
@@ -80,7 +80,7 @@ v0.35.3 ships a follow-on hardening bundle on top of v0.35.2. Upgrade notes:
 - **Auto-approve scope re-audit** ([#380](https://github.com/littlebearapps/untether/issues/380)) — `ControlRewindFilesRequest` and `ControlMcpMessageRequest` re-verified safe under the upstream Claude Code 2.1.x trust model. Regression-lock tests fail loudly if the auto-approve path starts inspecting payloads. Audit memo at `docs/audits/2026-04-27-380-auto-approve-scope-review.md`.
 - **User-extensible env allowlist** ([#409](https://github.com/littlebearapps/untether/issues/409)) — `[security] env_extra_allow` and `env_extra_prefix_allow` let operators thread credential-manager tokens (1Password, Doppler, Vault, Infisical) into engine subprocesses without forking. `BWS_ACCESS_TOKEN` is now in the built-in defaults.
 
-See [CHANGELOG v0.35.3](https://github.com/littlebearapps/untether/blob/master/CHANGELOG.md#v0353) for the full entry list.
+See [CHANGELOG v0.35.3](https://github.com/littlebearapps/untether/blob/master/CHANGELOG.md#v0353-2026-05-20) for the full entry list.
 
 ## Security improvements in v0.35.2
 
@@ -98,7 +98,7 @@ v0.35.2 ships a security hardening bundle. Upgrade notes:
 - **CI matrix interpolation moved to `env:`** — eliminates a shell-injection vector in the release pipeline. ([#195](https://github.com/littlebearapps/untether/issues/195))
 - **Subprocess sites annotated inline** — global `B603/B607` bandit skips removed; each call site carries its own `# nosec` justification. ([#202](https://github.com/littlebearapps/untether/issues/202))
 
-See [CHANGELOG v0.35.2](https://github.com/littlebearapps/untether/blob/master/CHANGELOG.md#v0352) for the full entry list.
+See [CHANGELOG v0.35.2](https://github.com/littlebearapps/untether/blob/master/CHANGELOG.md#v0352-2026-04-20) for the full entry list.
 
 ## Disclosure policy
 

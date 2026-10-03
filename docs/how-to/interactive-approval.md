@@ -4,14 +4,15 @@ When Claude Code runs in permission mode, Untether shows inline buttons in Teleg
 
 ## When buttons appear
 
-Buttons appear when Claude Code wants to:
+What raises a button depends on the permission mode:
 
-- **Edit or create a file** (Edit, Write, MultiEdit)
-- **Run a shell command** (Bash)
-- **Exit plan mode** (ExitPlanMode)
-- **Ask you a question** (AskUserQuestion)
+- **Plan mode** (`plan`) — when Claude Code wants to **exit plan mode** (ExitPlanMode) or **ask you a question** (AskUserQuestion). Every other tool request that reaches Untether is auto-approved by Untether.
+- **`plan-auto`** — only questions. Untether approves the plan itself.
+- **`auto`, `bypassPermissions`** — only questions; there is no plan step.
+- **`dontAsk`** — nothing: only pre-approved tools run, and anything that would ask (questions included) is denied.
+- **Accept edits** (`/planmode off`) and `default` / `manual` — any action the mode doesn't cover asks for approval, whatever the tool ([#749](https://github.com/littlebearapps/untether/issues/749)).
 
-Other tool calls (Read, Glob, Grep, WebSearch, etc.) are auto-approved in plan mode — they don't change anything, so you won't be interrupted for them. In **Accept edits** (`/planmode off`), any action the mode doesn't cover asks for approval, whatever the tool ([#749](https://github.com/littlebearapps/untether/issues/749)).
+With **Diff preview** turned on in `/config`, Edit, Write and Bash requests in the autonomous modes also wait for a tap so you see the change first (except during the reply that follows a plan you approved).
 
 ## The approval buttons
 
@@ -59,7 +60,7 @@ Long lines are cut at 60 characters, and a `…(N more added)` line says how muc
 
 This lets you make informed approve/deny decisions without leaving Telegram.
 
-You can toggle diff previews on or off via `/config` → **Diff preview**. When OFF, approval messages show the tool name and buttons only — no inline diffs. Useful on slow connections or when you trust the agent enough to skim by tool name alone.
+You can toggle diff previews on or off via `/config` → **Diff preview**. Approval messages include the diff unless you switch it off; when switched off they show the tool name and buttons only — no inline diffs. Switching it on also makes Edit, Write and Bash wait for a tap in the autonomous modes. Useful on slow connections or when you trust the agent enough to skim by tool name alone.
 
 !!! untether "Untether"
     ▸ Permission Request [CanUseTool] - tool: Edit (file_path=src/main.py)
@@ -80,10 +81,9 @@ You can toggle diff previews on or off via `/config` → **Diff preview**. When 
 
 When Claude Code calls `AskUserQuestion`, Untether renders the question with interactive option buttons in Telegram:
 
-- **Option buttons** — tap any option to answer instantly. Claude Code receives your choice and continues.
+- **Option buttons** — one per row, up to four. Tap any option to answer instantly. Claude Code receives your choice and continues.
 - **"Other (type reply)"** — tap this to type a custom answer. Send your reply as a regular message and Untether routes it back to Claude Code.
 - **Multi-question flows** — if Claude Code asks multiple questions, they appear one at a time (e.g. "1 of 3"). Answer each to step through the sequence.
-- **Deny** — tap Deny to dismiss the question. Claude Code proceeds with its default assumptions.
 
 Toggle ask mode on or off via `/config` → Ask mode. When off, questions are auto-denied and Claude Code proceeds with defaults.
 
@@ -96,11 +96,12 @@ Toggle ask mode on or off via `/config` → Ask mode. When off, questions are au
 
 <div class="tg-buttons">
 <span class="tg-btn">pytest</span>
+</div>
+<div class="tg-buttons">
 <span class="tg-btn">unittest</span>
 </div>
 <div class="tg-buttons">
 <span class="tg-btn">Other (type reply)</span>
-<span class="tg-btn">Deny</span>
 </div>
 
 </div>
@@ -125,7 +126,7 @@ Approval-related messages (notifications, button messages) are automatically del
 
 ## Auto-approve configuration
 
-Which tools need approval depends on the permission mode. In plan mode, plan-auto and auto, only `ExitPlanMode` and `AskUserQuestion` reach you; everything else is decided by Claude Code. In Accept edits (and `default`/`manual` set in `untether.toml`), every tool Claude Code would prompt for becomes an Approve / Deny message. Allow rules in your Claude Code settings, or `[engines.claude] allowed_tools`, pre-approve tools in any mode.
+Which tools need approval depends on the permission mode. In plan mode only `ExitPlanMode` and `AskUserQuestion` reach you (in plan-auto and auto, only `AskUserQuestion`); every other request that reaches Untether is auto-approved by Untether, unless Diff preview is on. In Accept edits (and `default`/`manual` set in `untether.toml`), every tool Claude Code would prompt for becomes an Approve / Deny message. Allow rules in your Claude Code settings, or `[engines.claude] allowed_tools`, pre-approve tools in any mode.
 
 To change this behaviour, adjust the permission mode. See [Plan mode](plan-mode.md) for details.
 

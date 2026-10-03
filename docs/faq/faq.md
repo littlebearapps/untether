@@ -86,7 +86,7 @@ Per-chat permission mode (`/planmode on/plan-auto/auto/off`, or `/config → Per
 
 The **plan-auto** mode was called `auto` before v0.35.5. It was renamed because Claude Code introduced its own `auto` mode, and the two names collided. If you set `permission_mode = "auto"` in `untether.toml` and want the old behaviour, change it to `"plan-auto"`. Untether logs one warning at startup (and again if a config reload changes the list) naming every engine setting and cron that uses `"auto"`. Per-chat settings you made through the buttons are migrated for you.
 
-For non-Claude engines, approval is enforced per-engine pre-run — Codex runs inside its sandbox (`/config` → Approval policy: **safe** = read-only), Gemini uses `--approval-mode` — rather than via mid-run buttons. Full guide: [Interactive approval](https://littlebearapps.com/help/untether/interactive-approval/).
+For non-Claude engines, approval is enforced per-engine pre-run — Codex runs inside its sandbox (`/config` → Approval policy: **safe** = read-only), the deprecated Gemini CLI uses `--approval-mode` — rather than via mid-run buttons. Full guide: [Interactive approval](https://littlebearapps.com/help/untether/interactive-approval/).
 
 ## What happens if my agent crashes or my phone loses signal mid-run?
 
@@ -180,8 +180,7 @@ Configure in `untether.toml`:
 [transports.telegram.files]
 outbox_enabled = true
 outbox_dir = ".untether-outbox"
-outbox_max_files = 20
-outbox_max_file_size_mb = 50
+outbox_max_files = 20   # the per-file cap is fixed at 50 MB
 outbox_cleanup = true
 outbox_notify_skipped = true
 ```

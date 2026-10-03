@@ -87,5 +87,5 @@ If you’re an LLM agent contributing to Untether, start here:
 - [Agent entrypoint](agents/index.md)
 - [Repo map](agents/repo-map.md)
 - [Invariants](agents/invariants.md) (runner contract, resume handling, “don’t break this” rules)
-- [Feature catalog](feature-catalog.md) and [test catalog](test-catalog.md) (which file owns a feature; what each test file covers)
+- [Feature catalogue](feature-catalog.md) and [test catalogue](test-catalog.md) (which file owns a feature; what each test file covers)
 - [Dev instance](dev-instance.md) and [integration testing](integration-testing.md) (testing against the dev bot before a release)

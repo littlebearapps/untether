@@ -99,7 +99,7 @@ dependencies = ["untether>=0.35,<0.36"]
 | `bind_run_context` | Bind contextual fields to all log entries |
 | `clear_context` | Clear bound log context |
 | `suppress_logs` | Context manager to suppress info-level logs |
-| `set_run_base_dir` | Set working directory context for path relativization |
+| `set_run_base_dir` | Set working directory context for path relativisation |
 | `reset_run_base_dir` | Reset working directory context |
 | `ThreadJob` | Job dataclass for ThreadScheduler |
 | `ThreadScheduler` | Per-thread message serialisation |

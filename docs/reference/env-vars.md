@@ -43,6 +43,19 @@ changes ([#506](https://github.com/littlebearapps/untether/issues/506)), but the
 service only sees its own environment, so set these in the unit (or a drop-in) and
 restart.
 
+!!! warning "Keep secrets in the config file"
+    Variables starting with `UNTETHER_` are on the environment allowlist that Claude Code
+    and Pi subprocesses inherit, so an `UNTETHER__*` override (a bot token or voice API key
+    included) is visible to those engines. Put secrets in `untether.toml` (mode `600`)
+    rather than in `UNTETHER__*` variables.
+
+## Voice transcription
+
+| Variable | Description |
+|----------|-------------|
+| `OPENAI_API_KEY` | API key for voice transcription when `voice_transcription_api_key` is unset. `untether doctor` checks for it. |
+| `OPENAI_BASE_URL` | Transcription endpoint when `voice_transcription_base_url` is unset (otherwise `api.openai.com`). Not SSRF-checked, unlike the config key. |
+
 ## Engine-specific
 
 | Variable | Description |

@@ -62,7 +62,7 @@ By default, the bot responds to every message (`all` mode). In busy groups, swit
 | `/listen clear` | Reset to the default (`all`) |
 
 !!! note "Renamed from `/trigger` in v0.35.3"
-    The old `/trigger` command was renamed to `/listen` to disambiguate from the webhook/cron triggers system. `/trigger` continues to work as a deprecated alias for one release cycle and shows a one-line deprecation notice — it will be removed in a future version.
+    The old `/trigger` command was renamed to `/listen` to disambiguate from the webhook/cron triggers system. `/trigger` still works as a deprecated alias and shows a one-line deprecation notice — it will be removed in a future version.
 
 !!! tip "What triggers a response in mentions mode"
     In `mentions` mode, the bot responds when any of these conditions are met:
@@ -74,7 +74,7 @@ By default, the bot responds to every message (`all` mode). In busy groups, swit
     All other messages are silently ignored.
 
 !!! note "Per-topic overrides"
-    In forum groups, you can set listen mode per topic. A topic override takes priority over the chat-level default. For example, set `mentions` on general chat but leave coding topics on `all`. See [Topics](topics.md) for details.
+    In forum groups, you can set listen mode per topic. A topic override can only narrow the chat-level setting: setting `mentions` on a topic makes just that topic mentions-only, but a topic can't opt back into `all` while the chat-level mode is `mentions`. To keep coding topics answering every message, leave the chat on `all` and set `mentions` on the topics that should stay quiet. See [Topics](topics.md) for details.
 
 ## Admin-only commands
 
@@ -84,6 +84,7 @@ In group chats, certain commands require admin or creator status:
 - `/reasoning` — change reasoning level
 - `/agent` — change the default engine
 - `/listen` — change listen mode (also accepts the deprecated `/trigger`)
+- bare `/steer` / `/queue` — change the [follow-up mode](steer-follow-ups.md) (`/steer <text>` itself is open to everyone)
 
 In private chats, these commands are always available without restriction.
 

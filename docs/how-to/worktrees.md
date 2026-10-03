@@ -39,6 +39,8 @@ Send a message like:
 
     dir: happy-gadgets @feat/memory-box
 
+If the main checkout is already on the branch you name, the run uses the project directory itself and no worktree is created.
+
 <!-- TODO: capture screenshot -->
 <!-- <img src="../assets/screenshots/worktree-run.jpg" alt="Worktree run with @branch directive and project context in footer" width="360" loading="lazy" /> -->
 
