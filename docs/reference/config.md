@@ -70,7 +70,7 @@ restart.
 
 | Section | Restart-required fields | Hot-reload |
 |---|---|---|
-| `transports.telegram` | `bot_token`, `chat_id`, `session_mode`, `topics`, `message_overflow` | everything else (`voice_*`, `show_resume_line`, `followup_mode`, `forward_coalesce_s`, `media_group_debounce_s`, `allowed_user_ids`, `allow_any_user`, `files.*`) |
+| `transports.telegram` | `bot_token`, `bot_api_base_url`, `bot_api_local_dir`, `chat_id`, `session_mode`, `topics`, `message_overflow` | everything else (`voice_*`, `show_resume_line`, `followup_mode`, `forward_coalesce_s`, `media_group_debounce_s`, `allowed_user_ids`, `allow_any_user`, `files.*`) |
 | `transports.telegram.topics` | whole section (treated as one unit) | — |
 | top-level `transport` | changing transport id | — |
 | `progress` | `group_chat_rps` (read once when the Telegram client starts) | everything else (re-read per run) |
@@ -104,6 +104,8 @@ systemctl --user restart untether-dev    # dev
 | Key | Type | Default | Notes |
 |-----|------|---------|-------|
 | `bot_token` | string | (required) | 🔄 Telegram bot token from @BotFather. Restart-required. |
+| `bot_api_base_url` | string | `"https://api.telegram.org"` | 🔄 Bot API endpoint. HTTPS is required except for loopback HTTP. This endpoint receives the bot token; use only a server you trust. Restart-required. |
+| `bot_api_local_dir` | path\|null | `null` | 🔄 Absolute local Bot API data directory (expands `~`). Required to read absolute cache paths from a loopback Bot API server. Resolved paths must stay within this directory; symlink escapes and non-regular files are refused. Restart-required. |
 | `chat_id` | int | (required) | 🔄 Default chat id. Restart-required. |
 | `allowed_user_ids` | int[] | (required, non-empty) | Allowed sender user ids. **Required for security as of v0.35.3** ([#377](https://github.com/littlebearapps/untether/issues/377)) — set to a non-empty list of Telegram user IDs (your own user id is the typical minimum). An empty list now triggers a hard `ConfigError` at startup unless you opt in to `allow_any_user = true` (see below). |
 | `allow_any_user` | bool | `false` | **Dev/demo escape hatch** ([#377](https://github.com/littlebearapps/untether/issues/377)). Set to `true` to keep the prior insecure-default behaviour where any Telegram user who knows the bot username can send commands. Logged at INFO on every boot (`security.allow_any_user`) so the deviation is visible in `journalctl`. Use only for hackathons, demos, or local dev. |
@@ -142,6 +144,7 @@ When `allowed_user_ids` is set, updates without a sender id (for example, some c
 | `auto_put` | bool | `true` | Auto-save uploads. |
 | `auto_put_mode` | `"upload"`\|`"prompt"` | `"upload"` | Whether uploads also start a run. |
 | `uploads_dir` | string | `"incoming"` | Relative path inside the repo/worktree. |
+| `max_download_bytes` | int (1–2147483648) | `52428800` | Download/outbox size ceiling, in bytes (50 MiB by default). Local cache files are checked before reading into memory. Hot-reloadable. |
 | `allowed_user_ids` | int[] | `[]` | Allowed senders for file transfer; empty allows private chats (group usage requires admin). |
 | `deny_globs` | string[] | see below | Glob denylist for `/file put` / `/file get`, `/browse` and the outbox. `**` matches any number of directories, including none, so `**/*.pem` also denies a root-level `key.pem`, and `**/.env.*` a root-level `.env.example` ([#831](https://github.com/littlebearapps/untether/issues/831)). A bare name such as `.env` matches at any depth. Setting the key **replaces** the whole default list. |
 | `outbox_enabled` | bool | `true` | Enable agent-initiated file delivery via `.untether-outbox/`. Requires `enabled = true`. |
@@ -161,10 +164,10 @@ deny_globs = [
 ]
 ```
 
-File size limits (not configurable):
+File size limits:
 
 - uploads: 20 MiB
-- downloads / outbox: 50 MiB
+- downloads / outbox: 50 MiB by default; configurable with `max_download_bytes` up to 2 GiB. Accepted local files are still buffered in memory, so set the limit for the memory available to Untether.
 
 ## `projects.<alias>`
 

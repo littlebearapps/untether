@@ -37,6 +37,28 @@ async def test_telegram_429_no_retry() -> None:
 
 
 @pytest.mark.anyio
+async def test_custom_bot_api_base_url() -> None:
+    urls: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        urls.append(str(request.url))
+        return httpx.Response(200, json={"ok": True, "result": []}, request=request)
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    try:
+        api = HttpBotClient(
+            "123:abcDEF_ghij",
+            base_url="http://127.0.0.1:8081/",
+            http_client=client,
+        )
+        await api.get_updates(None, timeout_s=0)
+    finally:
+        await client.aclose()
+
+    assert urls == ["http://127.0.0.1:8081/bot123:abcDEF_ghij/getUpdates"]
+
+
+@pytest.mark.anyio
 async def test_no_token_in_logs_on_http_error(
     capsys: pytest.CaptureFixture[str],
 ) -> None:

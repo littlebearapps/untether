@@ -109,13 +109,15 @@ async def test_resolver_order_topic_chat_config_default(tmp_path: Path) -> None:
 
 def test_settings_followup_mode_validated() -> None:
     base = {"bot_token": "t", "chat_id": 1, "allow_any_user": True}
-    assert TelegramTransportSettings(**base).followup_mode == "queue"
+    assert TelegramTransportSettings.model_validate(base).followup_mode == "queue"
     assert (
-        TelegramTransportSettings(**base, followup_mode="steer").followup_mode
+        TelegramTransportSettings.model_validate(
+            {**base, "followup_mode": "steer"}
+        ).followup_mode
         == "steer"
     )
     with pytest.raises(ValueError, match="followup_mode"):
-        TelegramTransportSettings(**base, followup_mode="later")
+        TelegramTransportSettings.model_validate({**base, "followup_mode": "later"})
 
 
 def test_followup_mode_hot_reloads() -> None:

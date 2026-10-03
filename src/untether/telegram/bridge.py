@@ -20,7 +20,7 @@ from ..settings import (
 )
 from ..transport import MessageRef, RenderedMessage, SendOptions, Transport
 from ..transport_runtime import TransportRuntime
-from .client import BotClient
+from .client import BotClient, TelegramClient
 from .client_api import classify_benign_rejection
 from .outbox import SUPERSEDED
 from .render import MAX_BODY_CHARS, prepare_telegram, prepare_telegram_multi
@@ -238,6 +238,8 @@ class TelegramBridgeConfig:
         self.allowed_user_ids = tuple(settings.allowed_user_ids)
         self.allow_any_user = bool(settings.allow_any_user)
         self.files = settings.files
+        if isinstance(self.bot, TelegramClient):
+            self.bot.set_max_download_bytes(settings.files.max_download_bytes)
 
 
 class TelegramTransport:

@@ -3,6 +3,7 @@ from __future__ import annotations
 import itertools
 import time
 from collections.abc import Awaitable, Callable, Hashable
+from pathlib import Path
 from typing import Any
 
 import anyio
@@ -44,6 +45,9 @@ class TelegramClient:
         token: str | None = None,
         *,
         client: BotClient | None = None,
+        base_url: str = "https://api.telegram.org",
+        bot_api_local_dir: Path | None = None,
+        max_download_bytes: int = 50 * 1024 * 1024,
         timeout_s: float = 120,
         http_client: httpx.AsyncClient | None = None,
         clock: Callable[[], float] = time.monotonic,
@@ -60,6 +64,9 @@ class TelegramClient:
                 raise ValueError("Telegram token is empty")
             self._client = HttpBotClient(
                 token,
+                base_url=base_url,
+                bot_api_local_dir=bot_api_local_dir,
+                max_download_bytes=max_download_bytes,
                 timeout_s=timeout_s,
                 http_client=http_client,
             )
@@ -165,6 +172,11 @@ class TelegramClient:
             return await self._client.get_file(file_id)
 
         return await self._call_with_retry_after(execute)
+
+    def set_max_download_bytes(self, max_download_bytes: int) -> None:
+        """Keep the HTTP client's local-read cap in sync with file settings."""
+        if isinstance(self._client, HttpBotClient):
+            self._client.set_max_download_bytes(max_download_bytes)
 
     async def download_file(self, file_path: str) -> bytes | None:
         async def execute() -> bytes | None:

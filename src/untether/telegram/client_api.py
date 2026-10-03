@@ -1,11 +1,15 @@
 from __future__ import annotations
 
 import re
+import stat
 import time
 from collections import deque
 from collections.abc import Callable
+from pathlib import Path
 from typing import Any, Protocol, TypeVar
+from urllib.parse import urlsplit
 
+import anyio
 import httpx
 import msgspec
 
@@ -245,14 +249,25 @@ class HttpBotClient:
         self,
         token: str,
         *,
+        base_url: str = "https://api.telegram.org",
+        bot_api_local_dir: Path | None = None,
+        max_download_bytes: int = 50 * 1024 * 1024,
         timeout_s: float = 30,
         http_client: httpx.AsyncClient | None = None,
         clock: Callable[[], float] = time.monotonic,
     ) -> None:
         if not token:
             raise ValueError("Telegram token is empty")
-        self._base = f"https://api.telegram.org/bot{token}"
-        self._file_base = f"https://api.telegram.org/file/bot{token}"
+        api_base = base_url.rstrip("/")
+        self._bot_api_local_dir = bot_api_local_dir
+        self.set_max_download_bytes(max_download_bytes)
+        self._local_mode = urlsplit(api_base).hostname in {
+            "127.0.0.1",
+            "::1",
+            "localhost",
+        }
+        self._base = f"{api_base}/bot{token}"
+        self._file_base = f"{api_base}/file/bot{token}"
         self._bulk_timeout_s = timeout_s
         self._http_client = http_client or httpx.AsyncClient(
             timeout=httpx.Timeout(
@@ -616,7 +631,58 @@ class HttpBotClient:
         result = await self._post("getFile", {"file_id": file_id})
         return self._decode_result(method="getFile", payload=result, model=File)
 
+    def set_max_download_bytes(self, max_download_bytes: int) -> None:
+        """Update the local-read ceiling when file settings hot-reload."""
+        if max_download_bytes < 1:
+            raise ValueError("max_download_bytes must be positive")
+        self._max_download_bytes = max_download_bytes
+
+    def _read_local_file(self, file_path: str, max_bytes: int) -> bytes | None:
+        """Resolve, confine and size-check a local cache file before reading."""
+        if self._bot_api_local_dir is None:
+            logger.error("telegram.file_path_rejected", reason="local_data_dir_unset")
+            return None
+        try:
+            root = self._bot_api_local_dir.resolve(strict=True)
+            target = Path(file_path).resolve(strict=True)
+            if not root.is_dir() or not target.is_relative_to(root):
+                logger.error(
+                    "telegram.file_path_rejected", reason="outside_local_data_dir"
+                )
+                return None
+            info = target.stat()
+            if not stat.S_ISREG(info.st_mode):
+                logger.error("telegram.file_path_rejected", reason="not_regular_file")
+                return None
+            if info.st_size > max_bytes:
+                logger.error(
+                    "telegram.local_file_too_large",
+                    size=info.st_size,
+                    max_bytes=max_bytes,
+                )
+                return None
+            # A file growing after stat() must not turn this into an unbounded
+            # read. Refuse a changed file rather than returning truncated data.
+            with target.open("rb") as stream:
+                payload = stream.read(info.st_size + 1)
+            if len(payload) > info.st_size:
+                logger.error("telegram.file_path_rejected", reason="local_file_grew")
+                return None
+            return payload
+        except (OSError, ValueError, RuntimeError) as exc:
+            # Cache paths may contain the bot token; never log the path or
+            # exception text, which can embed it.
+            logger.error(
+                "telegram.local_file_read_error",
+                error_type=exc.__class__.__name__,
+            )
+            return None
+
     async def download_file(self, file_path: str) -> bytes | None:
+        if self._local_mode and file_path.startswith("/"):
+            return await anyio.to_thread.run_sync(
+                self._read_local_file, file_path, self._max_download_bytes
+            )
         # #204: reject file_path values that could redirect the request away
         # from api.telegram.org.  Telegram's documented shape is a relative
         # path ("documents/file_123.txt") — any scheme marker or parent-dir

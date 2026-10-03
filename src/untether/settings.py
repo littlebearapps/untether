@@ -10,6 +10,7 @@ from contextvars import ContextVar
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Annotated, Any, ClassVar, Literal
+from urllib.parse import urlsplit
 
 from pydantic import (
     BaseModel,
@@ -58,7 +59,11 @@ class TelegramFilesSettings(BaseModel):
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
 
     max_upload_bytes: ClassVar[int] = 20 * 1024 * 1024
-    max_download_bytes: ClassVar[int] = 50 * 1024 * 1024
+    max_download_bytes: int = Field(
+        default=50 * 1024 * 1024,
+        ge=1,
+        le=2 * 1024 * 1024 * 1024,
+    )
 
     enabled: bool = False
     auto_put: bool = True
@@ -138,6 +143,8 @@ class TelegramTransportSettings(BaseModel):
     RESTART_REQUIRED_FIELDS: ClassVar[frozenset[str]] = frozenset(
         {
             "bot_token",
+            "bot_api_base_url",
+            "bot_api_local_dir",
             "chat_id",
             "session_mode",
             "topics",
@@ -150,6 +157,8 @@ class TelegramTransportSettings(BaseModel):
     # bot_token.get_secret_value() at the transport boundary.  The token is
     # additionally redacted from log URLs by _redact_event_dict (#190).
     bot_token: SecretStr
+    bot_api_base_url: NonEmptyStr = "https://api.telegram.org"
+    bot_api_local_dir: Path | None = None
     chat_id: StrictInt
     allowed_user_ids: list[StrictInt] = Field(default_factory=list)
     # #377: opt-in escape hatch for demos/dev. When the allowlist is
@@ -212,6 +221,42 @@ class TelegramTransportSettings(BaseModel):
         if not token:
             raise ValueError("bot_token must not be empty")
         return SecretStr(token)
+
+    @field_validator("bot_api_local_dir", mode="after")
+    @classmethod
+    def _validate_bot_api_local_dir(cls, value: Path | None) -> Path | None:
+        if value is None:
+            return None
+        path = value.expanduser()
+        if not path.is_absolute():
+            raise ValueError("bot_api_local_dir must be an absolute directory path")
+        return path
+
+    @field_validator("bot_api_base_url", mode="after")
+    @classmethod
+    def _validate_bot_api_base_url(cls, value: str) -> str:
+        """Allow HTTPS Bot API endpoints and loopback-only plain HTTP."""
+        base_url = value.rstrip("/")
+        parsed = urlsplit(base_url)
+        if (
+            not parsed.hostname
+            or parsed.username is not None
+            or parsed.password is not None
+            or parsed.query
+            or parsed.fragment
+        ):
+            raise ValueError("bot_api_base_url must be an absolute API base URL")
+        if parsed.scheme == "https":
+            return base_url
+        if parsed.scheme == "http" and parsed.hostname in {
+            "127.0.0.1",
+            "::1",
+            "localhost",
+        }:
+            return base_url
+        raise ValueError(
+            "bot_api_base_url must use HTTPS, except for a loopback HTTP endpoint"
+        )
 
     @field_validator("voice_transcription_api_key", mode="after")
     @classmethod

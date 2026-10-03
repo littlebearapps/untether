@@ -33,6 +33,39 @@ Notes:
 - If `allowed_user_ids` is empty, private chats are allowed and group usage requires admin privileges.
 - Setting `deny_globs` **replaces** the built-in list. The defaults also cover `.env.*`, `*.key`, `id_rsa`, `id_ed25519`, `.netrc`, `.npmrc` and `.pypirc`; copy the full list from [Security → File transfer deny globs](security.md#file-transfer-deny-globs) and add to it rather than starting from the short example above.
 
+## Local Bot API and larger files
+
+To use a self-hosted Bot API server in local mode, configure its loopback
+endpoint and the absolute data directory visible to Untether:
+
+```toml
+[transports.telegram]
+bot_api_base_url = "http://localhost:8081"
+bot_api_local_dir = "/var/lib/telegram-bot-api"
+
+[transports.telegram.files]
+enabled = true
+max_download_bytes = 104857600 # 100 MiB; default 50 MiB, maximum 2 GiB
+```
+
+The endpoint receives your bot token; use only a server you trust. Endpoint
+and data-directory changes require a restart. The size limit hot-reloads.
+Mount the server's data directory at the same path if Untether runs in a
+separate container.
+
+Absolute cache paths are read only when their resolved location is inside
+`bot_api_local_dir`. Without that setting, absolute paths are refused. Symlinks
+that escape the directory, non-regular files and files exceeding the size limit
+are rejected before reading. The read is bounded even if the file grows after
+the size check; a growing file is refused rather than returned truncated.
+Accepted files are still buffered in memory, so choose a limit that fits your
+host. The public Bot API endpoint and the 50 MiB default remain unchanged.
+
+Keep the Bot API cache and its parent directories writable only by trusted
+local users. These path checks protect against an untrusted `getFile` response;
+they are not a sandbox against a local process that can replace cache entries
+between the path check and the read.
+
 ## Upload a file (`/file put`)
 
 Send a document with a caption:

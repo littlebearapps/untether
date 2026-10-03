@@ -1,5 +1,11 @@
 # changelog
 
+## Unreleased
+
+### features
+
+- **feat(telegram):** support a configurable Bot API endpoint and download ceiling for local Bot API deployments. Absolute cache reads require an explicit `bot_api_local_dir`, are confined to its resolved directory and reject oversized or non-regular files before reading. Endpoint/directory changes require a restart; the download ceiling hot-reloads. The public endpoint and 50 MiB default are unchanged. [#738](https://github.com/littlebearapps/untether/pull/738)
+
 ## v0.35.5 (unreleased)
 
 <!-- Status 2026-10-03: shipped through 0.35.5rc17, on TestPyPI and all 5 hosts (integration-test
