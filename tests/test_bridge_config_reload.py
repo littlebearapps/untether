@@ -243,7 +243,14 @@ class TestNotifyRestartRequired:
     locks in the broader broadcast behaviour so the fix doesn't regress."""
 
     @pytest.mark.anyio
-    async def test_sends_to_allowed_user_ids(self):
+    async def test_sends_to_allowed_user_ids(self, monkeypatch):
+        from untether import service_manager
+
+        monkeypatch.setattr(
+            service_manager,
+            "restart_command",
+            lambda: "systemctl --user restart untether-dev",
+        )
         transport = FakeTransport()
         cfg = make_cfg(transport)
         cfg.allowed_user_ids = (555, 777)
@@ -253,7 +260,24 @@ class TestNotifyRestartRequired:
         for call in transport.send_calls:
             assert "`session_mode`" in call["message"].text
             assert "restart required" in call["message"].text
-            assert "systemctl" in call["message"].text
+            assert "To apply: run `systemctl --user restart untether-dev`" in (
+                call["message"].text
+            )
+
+    @pytest.mark.anyio
+    async def test_restart_notice_generic_when_undetected(self, monkeypatch):
+        """#927: no detectable unit → generic wording, never the default
+        unit name (wrong on multi-instance hosts and on macOS)."""
+        from untether import service_manager
+
+        monkeypatch.setattr(service_manager, "restart_command", lambda: None)
+        transport = FakeTransport()
+        cfg = make_cfg(transport)
+        cfg.allowed_user_ids = (1,)
+        await _notify_restart_required(cfg, ["session_mode"])
+        text = transport.send_calls[0]["message"].text
+        assert "restart Untether's service" in text
+        assert "systemctl" not in text
 
     @pytest.mark.anyio
     async def test_falls_back_to_transport_chat_id_when_no_targets(self):

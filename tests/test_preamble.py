@@ -84,6 +84,15 @@ def test_default_preamble_warns_against_systemctl_restart() -> None:
     assert "chat_id" in _DEFAULT_PREAMBLE
 
 
+def test_preamble_config_path_and_triggers_restart() -> None:
+    """#927: the preamble must not assume the default unit/config path is the
+    running instance, and lists `[triggers] enabled` as restart-only (#894)."""
+    assert "default `~/.untether/untether.toml`" in _DEFAULT_PREAMBLE
+    assert "[triggers] enabled" in _DEFAULT_PREAMBLE
+    assert "launchctl kickstart" in _DEFAULT_PREAMBLE
+    assert "untether-*" in _DEFAULT_PREAMBLE
+
+
 # ───── #508 / #515 — plan-mode preamble clauses ────────────────────────
 
 
